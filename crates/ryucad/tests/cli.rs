@@ -1090,6 +1090,7 @@ fn every_protocol_method_has_a_command() {
         ("feature.move", &["feature", "move"]),
         ("feature.list", &["feature", "list"]),
         ("feature.show", &["feature", "show"]),
+        ("insert.update", &["insert", "update"]),
         ("param.list", &["param", "list"]),
         ("param.set", &["param", "set"]),
         ("param.delete", &["param", "delete"]),
@@ -6670,6 +6671,86 @@ fn mates_from_the_cli() {
 }
 
 #[test]
+fn mate_limits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    p.ok(&[
+        "feature",
+        "edit",
+        "frame",
+        "m1",
+        "--angle-min",
+        "-6deg",
+        "--angle-max",
+        "6deg",
+    ]);
+    p.ok(&[
+        "assembly", "move", "frame", "pin", "--axis", "0,0,1", "--angle", "30deg",
+    ]);
+    let tree = p.ok(&["assembly", "tree", "frame"]);
+    let m1 = &tree["mates"][0];
+    assert_eq!(m1["id"], "m1");
+    let deg = m1["value"]["angle_deg"].as_f64().unwrap();
+    assert!((deg.abs() - 6.0).abs() < 1e-6, "{m1}");
+    assert!(
+        m1["limit"]["angle"] == "min" || m1["limit"]["angle"] == "max",
+        "{m1}"
+    );
+    // Driving past the stop is refused; within it writes.
+    p.fails(
+        &["feature", "edit", "frame", "m1", "--angle", "45deg"],
+        "mate_out_of_limits",
+        1,
+    );
+    p.ok(&["feature", "edit", "frame", "m1", "--angle", "3deg"]);
+    // A bound cleared; then undone.
+    p.ok(&[
+        "feature",
+        "edit",
+        "frame",
+        "m1",
+        "--angle",
+        "",
+        "--angle-max",
+        "",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(p.direct.join("parts/frame/features/m1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["limits"], serde_json::json!({"angle": {"min": "-6 deg"}}));
+    // Undo is the daemon's: the cleared bound comes back there.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(p.daemon.join("parts/frame/features/m1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["limits"]["angle"]["max"], "6 deg", "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["check", "frame"]);
+    assert_eq!(code, 0, "{v}");
+}
+
+#[test]
 fn a_failing_mate_warns_from_the_cli() {
     // Issues #155 and #158: the slot grown into a skim over the plate's
     // whole top takes away the face m1 stands on, in frame, which top
@@ -8563,5 +8644,302 @@ fn colours_in_and_out_from_the_cli() {
             .iter()
             .filter_map(|w| w.as_str())
             .any(|w| w.starts_with("export_metadata_omitted"))
+    );
+}
+
+#[test]
+fn inserts_and_deletes_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    // One ID for both projects, so the two ways write the same records.
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    p.ok(&["part", "create", "pcb"]);
+    p.ok(&[
+        "feature", "add", "pcb", "box", "--id", "board", "--param", "x=40", "--param", "y=30",
+        "--param", "z=1.6",
+    ]);
+    p.ok(&["props", "set", "pcb", "number=100-0001"]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    p.ok(&["release", "propose", "pcb"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "pcb A"]);
+    p.ok(&["part", "create", "enclosure"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "enclosure",
+        "box",
+        "--id",
+        "shell",
+        "--param",
+        "x=44",
+        "--param",
+        "y=34",
+        "--param",
+        "z=10",
+        "--origin",
+        "-2,-2,-2",
+    ]);
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "enclosure",
+        "insert",
+        "--id",
+        "board",
+        "--of",
+        "pcb",
+        "--origin",
+        "0,0,1",
+    ]);
+    assert_eq!(v["feature"]["rev"], json!({"label": "A"}), "{v}");
+    assert_eq!(v["took"]["why"], "newest_official_label");
+    let i = p.ok(&["inspect", "enclosure", "board"]);
+    assert_eq!(i["insert"]["count"], 1, "{i}");
+    // A newer release: check warns, update moves the pin.
+    p.ok(&["feature", "edit", "pcb", "board", "--param", "x=50"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "wider"]);
+    p.ok(&["release", "propose", "pcb"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "pcb B"]);
+    let (_, c) = p.both_from("", &["check", "enclosure"]);
+    assert!(c.to_string().contains("insert_behind"), "{c}");
+    let d = p.ok(&["insert", "update", "enclosure", "board", "--dry-run"]);
+    assert_eq!(d["solids"]["changed"], json!(["board/board"]), "{d}");
+    p.ok(&["insert", "update", "enclosure", "board"]);
+    // The daemon logged it: undo puts A back, and the update moves it again.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["insert", "update", "enclosure", "board"]);
+    assert_eq!(
+        (code, &v["result"]["to"]),
+        (0, &json!({"label": "B"})),
+        "{v}"
+    );
+    p.ok(&[
+        "feature",
+        "add",
+        "enclosure",
+        "delete_body",
+        "--id",
+        "drop-board",
+        "--solid",
+        "board",
+    ]);
+    let model = p.ok(&["inspect", "enclosure"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 1, "{model}");
+    let e = p.fails(
+        &[
+            "feature",
+            "add",
+            "enclosure",
+            "box",
+            "--operation",
+            "join",
+            "--target",
+            "board/board",
+            "--param",
+            "x=1",
+            "--param",
+            "y=1",
+            "--param",
+            "z=1",
+        ],
+        "body_deleted",
+        1,
+    );
+    assert_eq!(e["details"]["by"], "drop-board");
+    // Textconv names the pin.
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .current_dir(&p.direct)
+        .args(["git", "textconv", "parts/enclosure/features/board.json"])
+        .env("RYUCAD_NO_DAEMON", "1")
+        .output()
+        .unwrap();
+    let t = String::from_utf8(out.stdout).unwrap();
+    assert!(t.contains("insert = pcb @ label B"), "{t}");
+}
+
+#[test]
+fn properties_in_and_out_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    // Both projects get one ID, so the two ways answer alike.
+    let id = "0123456789abcdef0123456789abcdef";
+    p.write(
+        "ryucad.json",
+        &format!(
+            "{{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"{id}\"\n}}\n"
+        ),
+    );
+    p.ok(&["pdm", "init"]);
+    p.ok(&[
+        "pdm",
+        "configure",
+        "--property",
+        r#"supplier={"type":"string"}"#,
+        "--property",
+        r#"wall_thickness={"type":"quantity","dim":"length"}"#,
+    ]);
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/properties");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(data.join("vendor.stp"), beside.join("vendor.stp")).unwrap();
+    // In: declared attributes become properties, the material too; the
+    // library is left alone and the command to add it is given.
+    let (code, envelope) = p.both_from("", &["import", "--solid", "../vendor.stp"]);
+    assert_eq!(
+        (code, &envelope["ok"]),
+        (0, &Value::Bool(true)),
+        "{envelope}"
+    );
+    let made = &envelope["result"];
+    let part = made["parts"][0]["part"].as_str().unwrap().to_owned();
+    let warned: Vec<&str> = envelope["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect();
+    assert!(
+        warned
+            .iter()
+            .any(|w| w.starts_with("import_material_unknown:")
+                && w.contains("ryucad materials set 6061-T6")),
+        "{warned:?}"
+    );
+    let shown = p.ok(&["props", "show", &part]);
+    let value = |name: &str| {
+        shown["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == name)
+            .and_then(|x| x.get("value").cloned())
+    };
+    assert_eq!(value("supplier"), Some(json!("ACME Metals")));
+    assert_eq!(value("wall_thickness"), Some(json!("2.5 mm")));
+    assert_eq!(value("material"), Some(json!("6061-T6")));
+    let file: Vec<&str> = shown["file"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert!(file.contains(&"Batch Size"), "{file:?}");
+    // The command the warning gave works.
+    p.ok(&["materials", "set", "6061-T6", "--density", "2700 kg/m^3"]);
+    // Out: the export carries them; --no-properties leaves them out.
+    let export = |out: &str, extra: &[&str]| {
+        let mut args = vec![
+            "export",
+            part.as_str(),
+            "--out",
+            out,
+            "--time-stamp",
+            "2026-11-11T00:00:00",
+        ];
+        args.extend(extra);
+        let (code, v) = p.both_from("", &args);
+        assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");
+        v
+    };
+    export("../out.step", &[]);
+    let written = fs::read_to_string(beside.join("out.step")).unwrap();
+    assert!(written.contains("MATERIAL_DESIGNATION('6061-T6'"));
+    assert!(written.contains("'user defined attributes'"));
+    let v = export("../plain.step", &["--no-properties"]);
+    let plain = fs::read_to_string(beside.join("plain.step")).unwrap();
+    assert!(!plain.contains("MATERIAL_DESIGNATION") && !plain.contains("user defined attributes"));
+    assert!(
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w.as_str())
+            .any(|w| w.starts_with("export_metadata_omitted"))
+    );
+}
+
+/// Design 525: plain `check` leaves interference out and notes where it
+/// went; `check --interference` reports it, with no note.
+#[test]
+fn check_runs_interference_only_when_asked() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
+    ]);
+    // 4 mm from the first: the two shanks, 3 mm in radius, overlap.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--origin", "4,0,0",
+    ]);
+    let codes = |v: &Value| -> Vec<String> {
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let plain = p.ok(&["check"]);
+    assert_eq!(plain["passed"], true, "{plain}");
+    let found = codes(&plain);
+    assert!(!found.iter().any(|c| c == "instances_interfere"), "{plain}");
+    let note = plain["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "interference_not_checked")
+        .unwrap_or_else(|| panic!("{plain}"));
+    assert_eq!(
+        (
+            &note["part"],
+            &note["severity"],
+            &note["details"]["command"]
+        ),
+        (
+            &json!("frame"),
+            &json!("info"),
+            &json!("ryucad interference frame")
+        )
+    );
+    let asked = p.ok(&["check", "--interference"]);
+    assert_eq!(asked["passed"], true, "{asked}");
+    assert!(
+        !codes(&asked)
+            .iter()
+            .any(|c| c == "interference_not_checked"),
+        "{asked}"
+    );
+    let pair = asked["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "instances_interfere")
+        .unwrap_or_else(|| panic!("{asked}"));
+    assert_eq!(
+        (&pair["a"], &pair["b"]),
+        (&json!("frame/b1/shank"), &json!("frame/b2/shank"))
     );
 }

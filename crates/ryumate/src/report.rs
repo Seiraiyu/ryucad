@@ -100,6 +100,9 @@ pub struct Report {
     pub redundant: Vec<Vec<Id>>,
     /// Minimal sets of mates that can't all hold.
     pub conflicting: Vec<Vec<Id>>,
+    /// Each mate's free values at the poses given back (driven or not),
+    /// for the mates whose kind has any, and the stops they rest on.
+    pub values: BTreeMap<Id, crate::limits::MateValues>,
 }
 
 /// Orthonormal vectors spanning `vectors`, by Gram-Schmidt (twice) in
@@ -360,6 +363,12 @@ pub(crate) fn diagnose(asm: &Assembly, staged: bool, iterations: u32, changed: b
     } else {
         State::Under
     };
+    let values = asm
+        .mates
+        .iter()
+        .map(|(id, m)| (*id, crate::limits::reported(&sys, &x, m)))
+        .filter(|(_, v)| v.angle.is_some() || v.distance.is_some())
+        .collect();
     Report {
         converged,
         iterations,
@@ -370,6 +379,7 @@ pub(crate) fn diagnose(asm: &Assembly, staged: bool, iterations: u32, changed: b
         mates,
         redundant: redundant.into_iter().collect(),
         conflicting: conflicting.into_iter().collect(),
+        values,
     }
 }
 

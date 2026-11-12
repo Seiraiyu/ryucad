@@ -467,6 +467,12 @@ fn built(s: &mut Session) -> Result<BTreeMap<Id, Built>> {
                 b.places
                     .insert(fid.clone(), (i.part.clone(), i.rev.clone()));
             }
+            // An insert reads its source as an instance places its part
+            // (design 521).
+            if let Ok(crate::doc::files::Feature::Insert(i)) = f {
+                b.places
+                    .insert(fid.clone(), (i.part.clone(), i.rev.clone()));
+            }
             if let Ok(f) = f {
                 b.inputs.insert(
                     fid.clone(),
@@ -1803,8 +1809,8 @@ pub fn resolve(
     expected: &BTreeMap<String, String>,
 ) -> Result<Value> {
     for (part, rev) in expected {
-        let id = crate::server::part_id(part)?;
-        crate::server::check_revision(session.project().part(&id)?, Some(rev))?;
+        let id = crate::part::part_id(part)?;
+        crate::part::check_revision(session.project().part(&id)?, Some(rev))?;
     }
     let root = session.root().to_path_buf();
     let now = status(session)?;
@@ -1947,7 +1953,7 @@ pub fn resolve(
 pub(crate) mod tests {
     use super::*;
     use crate::git::tests::git;
-    use crate::server::tests::call;
+    use crate::testing::call;
     use std::path::Path;
 
     /// Runs git, which may fail (a merge that stops for conflicts).
@@ -4241,5 +4247,74 @@ pub(crate) mod tests {
             json!({"part": "p", "parameter": "wall"})
         );
         assert_eq!(concerns("ryucad.json", "/default_unit"), json!({}));
+    }
+
+    #[test]
+    fn a_reader_of_an_inserted_solid_is_blamed_on_the_side_that_changed_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::server::init(dir.path(), None).unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        let session = Session::open(dir.path()).unwrap();
+        let mut m = Merging { dir, session };
+        m.call("part.create", json!({"part": "pcb"})).unwrap();
+        for (id, at) in [("board", 0), ("u1", 4)] {
+            m.call(
+                "feature.add",
+                json!({"part": "pcb", "type": "box", "id": id,
+                       "params": {"x": 2, "y": 2, "z": 2},
+                       "placement": {"origin": [at, 0, 0]}}),
+            )
+            .unwrap();
+        }
+        m.call("part.create", json!({"part": "enc"})).unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "enc", "type": "insert", "id": "pcb", "of": "pcb"}),
+        )
+        .unwrap();
+        m.commit("base: enc inserts pcb");
+        // Theirs deletes u1 from the source.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call("feature.delete", json!({"part": "pcb", "id": "u1"}))
+            .unwrap();
+        m.commit("theirs: no u1");
+        // Ours rounds an edge of the inserted u1.
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        let v = m
+            .call("inspect", json!({"part": "enc", "feature": "pcb"}))
+            .unwrap();
+        let body = v["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["solid"] == "pcb/u1")
+            .unwrap();
+        let edge = format!("enc/pcb/u1/{}", body["edges"][0]["name"].as_str().unwrap());
+        m.call(
+            "feature.add",
+            json!({"part": "enc", "type": "fillet", "id": "f",
+                   "groups": [{"radius": "0.2 mm", "edges": [edge]}]}),
+        )
+        .unwrap();
+        m.commit("ours: a fillet on u1");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let b = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["kind"] == "merge_broke")
+            .unwrap_or_else(|| panic!("{v}"));
+        assert_eq!(b["cause"], "theirs", "{v}");
+        assert!(
+            b["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f.as_str().unwrap().starts_with("parts/pcb/")),
+            "{v}"
+        );
     }
 }

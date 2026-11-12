@@ -228,6 +228,7 @@ mod tests {
             get(10),
             Entity::PropertyDefinition {
                 name: "document property".into(),
+                description: "".into(),
                 definition: 1
             }
         );

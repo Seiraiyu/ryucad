@@ -28,8 +28,14 @@ pub fn parse_name(s: &str) -> Option<Name> {
 }
 
 impl Reference {
+    /// `{feature, name}`, or for an inserted solid's entity `{feature:
+    /// <insert>, solid: <source key>, name}` (design 521).
     pub fn to_json(&self) -> Value {
-        json!({"feature": self.feature, "name": self.name.to_string()})
+        match self.feature.rest() {
+            None => json!({"feature": self.feature, "name": self.name.to_string()}),
+            Some(solid) => json!({"feature": self.feature.founder(), "solid": solid,
+                                  "name": self.name.to_string()}),
+        }
     }
 
     /// Reads `{"feature", "name"}`; `at` is its JSON pointer for errors.
@@ -37,6 +43,7 @@ impl Reference {
         let mut o = Obj::new(v, at)?;
         let f = o.take("feature")?;
         let n = o.take("name")?;
+        let s = o.take_opt("solid");
         o.finish()?;
         let f = f
             .as_str()
@@ -49,11 +56,20 @@ impl Reference {
                 "name is a stable name: 32 lowercase hex digits",
             )
         })?;
+        let feature = match s {
+            None => feature,
+            Some(s) => {
+                let rest = super::solid::SolidRef::from_json(&s, &format!("{at}/solid"))?;
+                Id::solid_path(&feature, &rest)
+            }
+        };
         Ok(Reference { feature, name })
     }
 
-    /// Reads the text form `<part>/<feature>/<name>`, which must name
-    /// `part`: a feature refers only within its own part.
+    /// Reads the text form `<part>/<feature>/<name>`, or an inserted
+    /// solid's `<part>/<insert>/<source solid>/<name>` (the last segment is
+    /// always the name), which must name `part`: a feature refers only
+    /// within its own part.
     pub fn parse(s: &str, part: &Id) -> Result<Reference> {
         let bad = |why: &str| {
             Error::new(
@@ -62,16 +78,19 @@ impl Reference {
             )
             .with("reference", s)
         };
-        let mut it = s.split('/');
-        let (Some(p), Some(f), Some(n), None) = (it.next(), it.next(), it.next(), it.next()) else {
+        let segments: Vec<&str> = s.split('/').collect();
+        let [p, key @ .., n] = segments.as_slice() else {
             return Err(bad("expected three parts separated by /"));
         };
-        if p != part.as_str() {
+        if key.is_empty() {
+            return Err(bad("expected three parts separated by /"));
+        }
+        if *p != part.as_str() {
             return Err(bad(&format!(
                 "a feature of part {part} refers only within it"
             )));
         }
-        let feature = Id::parse(f, "feature")?;
+        let feature = Id::solid_key(&key.join("/"), "feature")?;
         let name = parse_name(n).ok_or_else(|| bad("the name is 32 lowercase hex digits"))?;
         Ok(Reference { feature, name })
     }
@@ -101,6 +120,42 @@ mod tests {
         let v = r.to_json();
         assert_eq!(v, json!({"feature": "base", "name": NAME}));
         assert_eq!(Reference::from_json(&v, "/face").unwrap(), r);
+    }
+
+    #[test]
+    fn an_inserted_solids_reference_names_its_solid() {
+        let r = Reference::parse(&format!("p/board/u1/{NAME}"), &id("p")).unwrap();
+        assert_eq!(r.feature.as_str(), "board/u1");
+        assert_eq!(r.text(&id("p")), format!("p/board/u1/{NAME}"));
+        let v = r.to_json();
+        assert_eq!(v, json!({"feature": "board", "solid": "u1", "name": NAME}));
+        assert_eq!(Reference::from_json(&v, "/face").unwrap(), r);
+        // Nested: a/b/c is insert a's solid b/c.
+        let r = Reference::parse(&format!("p/a/b/c/{NAME}"), &id("p")).unwrap();
+        assert_eq!(
+            r.to_json(),
+            json!({"feature": "a", "solid": "b/c", "name": NAME})
+        );
+        // A founder's reference is written as it always was.
+        let r = Reference::parse(&format!("p/base/{NAME}"), &id("p")).unwrap();
+        assert_eq!(r.to_json(), json!({"feature": "base", "name": NAME}));
+        for (v, pointer) in [
+            (
+                json!({"feature": "board", "solid": 3, "name": NAME}),
+                "/face/solid",
+            ),
+            (
+                json!({"feature": "board", "solid": "U1", "name": NAME}),
+                "/face/solid",
+            ),
+            (
+                json!({"feature": "board/u1", "name": NAME}),
+                "/face/feature",
+            ),
+        ] {
+            let e = Reference::from_json(&v, "/face").unwrap_err();
+            assert_eq!(e.details["pointer"], pointer, "{v}");
+        }
     }
 
     #[test]

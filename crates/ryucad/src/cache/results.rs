@@ -128,6 +128,7 @@ impl<'a> Reader<'a> {
             origins: Arc::new(crate::rebuild::Origins::from_raw(origins)?),
             hash: self.str()?.to_owned(),
             reference: false,
+            moved: None,
         })
     }
 
@@ -292,6 +293,7 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
         report: import,
         flat,
         encoded: Default::default(),
+        inserted: None,
     })
 }
 
@@ -313,7 +315,7 @@ pub fn decode_built(bytes: &[u8]) -> Option<Built> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     /// A plate with a hole and a row of three more: a solid, a hole that

@@ -930,7 +930,8 @@ impl Session {
         self.epoch
     }
 
-    /// Each assembly's key for subscribers, for those that build: its
+    /// Each assembly's (and each part inserting another's) key for
+    /// subscribers, for those that build: its
     /// revision, its rebuild's hash and the pins of the labels it places,
     /// all from one rebuild.
     pub(crate) fn assembly_keys(&mut self) -> BTreeMap<Id, String> {
@@ -938,11 +939,7 @@ impl Session {
             .project
             .parts
             .iter()
-            .filter(|(_, p)| {
-                p.file
-                    .as_ref()
-                    .is_ok_and(|f| f.kind == crate::doc::files::PartKind::Assembly)
-            })
+            .filter(|(_, p)| crate::assembly::reads_parts(p))
             .map(|(id, _)| id.clone())
             .collect();
         let mut out = BTreeMap::new();
@@ -953,7 +950,13 @@ impl Session {
                 let pins: Vec<String> = res
                     .features
                     .iter()
-                    .filter_map(|(_, o)| o.as_ref().ok()?.instance()?.model.pin.as_ref())
+                    .filter_map(|(_, o)| {
+                        let o = o.as_ref().ok()?;
+                        match o.instance() {
+                            Some(i) => i.model.pin.as_ref(),
+                            None => o.inserted()?.pin.as_ref(),
+                        }
+                    })
                     .map(|p| format!("{p:?}"))
                     .collect();
                 out.insert(id.clone(), format!("{rev}+{}+{}", res.hash, pins.join(",")));
@@ -1001,9 +1004,25 @@ impl Session {
     /// parts, over this session's results for everything else; kept
     /// nowhere, so the session is as it was.
     pub fn rebuilt_as(&mut self, part: Part) -> Result<PartResult> {
-        let pins = self.pins()?;
         let id = part.id.clone();
         let mut project = self.project.clone();
+        // The labels the part as proposed reads (a new insert's), looked
+        // up beside those the files reach.
+        let extra: Vec<crate::assembly::Node> = part
+            .features
+            .values()
+            .filter_map(|f| crate::assembly::reads_node(f.as_ref().ok()?))
+            .filter(|(_, rev)| *rev != Rev::Working)
+            .collect();
+        let pins = if extra.is_empty() {
+            self.pins()?
+        } else {
+            let mut with = self.project.clone();
+            with.parts.insert(id.clone(), part.clone());
+            crate::assembly::pins_from(&with, extra, |part, rev, within| {
+                crate::release::pinned_rev_within(self, part, rev, within)
+            })
+        };
         project.parts.insert(id.clone(), part);
         let mut store = self.store.clone();
         // Its revision is the files', which the edit hasn't changed.
@@ -1015,10 +1034,15 @@ impl Session {
         Ok(r.result(&id)?.clone())
     }
 
-    /// The model of `part` at `rev`: what an instance of it places.
+    /// The model of `part` at `rev`: what an instance of it places. A
+    /// label no instance or insert places yet is looked up too.
     pub fn model(&mut self, part: &Id, rev: &Rev) -> Result<Arc<Model>> {
+        let extra = match rev {
+            Rev::Working => Vec::new(),
+            rev => vec![(part.clone(), rev.clone())],
+        };
         let mut out = None;
-        self.rebuild(|r| {
+        self.rebuild_with(extra, |r| {
             out = Some(r.model(part, rev));
             Ok(())
         })?;
@@ -1169,7 +1193,7 @@ impl Session {
                 // again (issue #235).
                 let edges = crate::assembly::edges(&self.project, &pins);
                 let c = match &self.cycles {
-                    Some((_, _, c)) if *c.edges() == edges => Arc::clone(c),
+                    Some((_, _, c)) if c.found_over(&edges) => Arc::clone(c),
                     _ => Arc::new(crate::assembly::Cycles::from_edges(edges)),
                 };
                 self.cycles = Some((self.epoch, key, Arc::clone(&c)));
@@ -1234,6 +1258,8 @@ impl Session {
                     p.features.values().any(|f| {
                         matches!(f, Ok(crate::doc::files::Feature::Instance(i))
                             if i.rev != Rev::Working)
+                            || matches!(f, Ok(crate::doc::files::Feature::Insert(i))
+                                if i.rev != Rev::Working)
                     })
                 });
                 self.labels = Some((self.epoch, any));
@@ -2042,7 +2068,7 @@ mod tests {
     use super::*;
     #[test]
     fn a_rescan_takes_in_every_file_at_once() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         // Written behind the session's back, as `git switch` writes.
         let mut other = Session::open(dir.path()).unwrap();
@@ -2167,7 +2193,7 @@ mod tests {
 
     #[test]
     fn cycles_are_found_again_only_when_the_instances_change() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (_dir, mut s) = fresh();
         for p in ["a", "b"] {
             call(&mut s, "part.create", serde_json::json!({"part": p})).unwrap();
@@ -2461,7 +2487,7 @@ mod tests {
 
     #[test]
     fn only_what_a_change_touches_is_rebuilt() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         use serde_json::json;
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
@@ -2566,7 +2592,7 @@ mod tests {
     #[test]
     fn any_revision_rebuilds_from_its_own_files() {
         use crate::git::tests::git;
-        use crate::server::tests::call;
+        use crate::testing::call;
         use serde_json::json;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -2641,7 +2667,7 @@ mod tests {
         assert_eq!(at(&mut s, "HEAD~1").unwrap()["parts"][0]["hash"], hashes[4]);
         let e = at(&mut s, "nowhere").unwrap_err();
         assert_eq!(e.code, Code::RevNotFound);
-        let (outside, mut t) = crate::server::tests::fresh();
+        let (outside, mut t) = crate::testing::fresh();
         let e = call(&mut t, "rebuild", json!({"rev": "HEAD"})).unwrap_err();
         assert_eq!(e.code, Code::NotAGitRepo);
         drop(outside);
@@ -2650,7 +2676,7 @@ mod tests {
     #[test]
     fn another_worktrees_working_files_read_as_a_revision() {
         use crate::git::tests::git;
-        use crate::server::tests::call;
+        use crate::testing::call;
         use serde_json::json;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("main");

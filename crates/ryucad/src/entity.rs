@@ -187,6 +187,26 @@ impl EntityRef {
         }
     }
 
+    /// The reference as a part reads it: `<part>/<a>/<b>/<name>` is the
+    /// entity `<name>` of solid `a/b` (an inserted solid's key), since a
+    /// part has no instances.
+    pub fn in_part(&self) -> EntityRef {
+        if self.path.is_empty() || self.is_occurrence() {
+            return self.clone();
+        }
+        let mut key: Vec<&str> = self.path.iter().map(Id::as_str).collect();
+        key.push(self.feature.as_str());
+        match Id::solid_key(&key.join("/"), "feature") {
+            Ok(feature) => EntityRef {
+                part: self.part.clone(),
+                path: Vec::new(),
+                feature,
+                name: self.name.clone(),
+            },
+            Err(_) => self.clone(),
+        }
+    }
+
     /// What the reference names in the current rebuild, or `not_found` with
     /// how far it resolved. Never a nearest match.
     pub fn resolve(&self, session: &mut Session) -> Result<Target> {
@@ -197,8 +217,15 @@ impl EntityRef {
         let Some(p) = session.project().parts.get(&self.part) else {
             return Err(missing("no such part"));
         };
-        if crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly {
+        if crate::part::part_kind(p) == crate::doc::files::PartKind::Assembly {
             return self.in_assembly().resolve_in_assembly(session);
+        }
+        // An inserted solid's entity: its key is the path and the solid.
+        if !self.path.is_empty() && !self.is_occurrence() {
+            let r = self.in_part();
+            if r.path.is_empty() {
+                return r.resolve(session);
+            }
         }
         // A datum, path or helix of the part, by its ID alone.
         if self.is_occurrence() && self.path == [self.feature.clone()] {
@@ -294,10 +321,25 @@ impl EntityRef {
                 Err(missing("no instance at that path places anything"))
             };
         }
-        let Some(o) = model.occurrences.iter().find(|o| o.path == self.path) else {
+        // The occurrence deepest along the path: the steps after it and the
+        // solid are the key of a solid its part inserted (design 521).
+        let Some(o) = model
+            .occurrences
+            .iter()
+            .filter(|o| !o.path.is_empty() && self.path.starts_with(&o.path))
+            .max_by_key(|o| o.path.len())
+        else {
             return Err(missing("no occurrence at that path"));
         };
-        let Some(solid) = o.solids.iter().find(|s| s.founder == self.feature) else {
+        let key = if o.path.len() == self.path.len() {
+            self.feature.clone()
+        } else {
+            let mut key: Vec<&str> = self.path[o.path.len()..].iter().map(Id::as_str).collect();
+            key.push(self.feature.as_str());
+            Id::solid_key(&key.join("/"), "feature")
+                .map_err(|_| missing("no occurrence at that path"))?
+        };
+        let Some(solid) = o.solids.iter().find(|s| s.founder == key) else {
             return Err(missing("its part shows no such solid").with(
                 "solids",
                 o.solids.iter().map(|s| &s.founder).collect::<Vec<_>>(),
@@ -378,10 +420,21 @@ pub fn parse_all(session: &mut Session, refs: &[String]) -> Result<Vec<EntityRef
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     const NAME: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn a_parts_reference_may_name_an_inserted_solid() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let r = EntityRef::parse(&format!("enc/board/u1/{n}"))
+            .unwrap()
+            .in_part();
+        assert!(r.path.is_empty());
+        assert_eq!(r.feature.as_str(), "board/u1");
+        assert_eq!(r.to_string(), format!("enc/board/u1/{n}"));
+    }
 
     #[test]
     fn parses_and_prints() {
@@ -533,13 +586,12 @@ mod tests {
             );
         }
         // Framing an occurrence frames it where the assembly puts it.
-        let pts =
-            crate::server::model_points(&mut s, &[EntityRef::parse("frame/p1/left").unwrap()])
-                .unwrap();
+        let pts = crate::scene::model_points(&mut s, &[EntityRef::parse("frame/p1/left").unwrap()])
+            .unwrap();
         assert!(pts.iter().all(|p| (p[0] - 0.05).abs() <= 0.0031));
         // A selection takes them.
         let mut live = crate::live::Live::new();
-        let v = crate::server::tests::call_live(
+        let v = crate::testing::call_live(
             &mut s,
             &mut live,
             None,

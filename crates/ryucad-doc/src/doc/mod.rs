@@ -22,6 +22,7 @@ pub mod geometry;
 pub mod hole;
 pub mod hole_standards;
 pub mod import;
+pub mod insert;
 pub mod lock;
 pub mod mate;
 pub mod materials;

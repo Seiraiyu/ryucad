@@ -14,7 +14,7 @@ use crate::doc::files::Manifest;
 use crate::doc::id::{Id, ProjectId};
 use crate::doc::project::{MANIFEST, PDM_CONFIG, properties_path};
 use crate::error::{Code, Error, Result};
-use crate::server::{check_revision, part_id};
+use crate::part::{check_revision, part_id};
 use crate::session::Session;
 use ryupdm::config::{CORE, Config, Decl, Pattern, Scheme, branch_name, property_name};
 use ryupdm::props::{self, Pdm, Properties};
@@ -336,7 +336,9 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
 }
 
 /// `props.get`: every core and declared property, set or not, with its
-/// declaration, value as written and faults; then any set but unknown.
+/// declaration, value as written and faults; then any set but unknown;
+/// and `file`, the attributes its imported STEP files give it that no
+/// declared property takes (design 448, plan 24.C), read-only.
 pub fn get(session: &mut Session, part: &str) -> Result<Value> {
     let id = part_id(part)?;
     let p = session.project().part(&id)?;
@@ -371,9 +373,10 @@ pub fn get(session: &mut Session, part: &str) -> Result<Value> {
                        "faults": faults_of(name)})
             }),
     );
+    let file_props = crate::file_props::of_part(session.project(), &id, Some(&c));
     Ok(
         json!({"part": id, "revision": p.revision, "properties": list, "faults": pp.faults,
-              "state": crate::release::state_of(session, &id)}),
+              "file": file_props, "state": crate::release::state_of(session, &id)}),
     )
 }
 
@@ -438,7 +441,7 @@ pub fn set(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     fn with_parts() -> (tempfile::TempDir, Session) {
         let (dir, mut s) = fresh();

@@ -80,6 +80,21 @@ fuzz_target!(|data: &[u8]| {
                 assert!(n < o.products.definitions[k].children.len());
             }
         }
+        // Materials and attributes (design 448, plan 24.C) read without
+        // panicking; every property instance read is a product's,
+        // retained or failed, and no instance is both retained and failed.
+        let pr = o.properties();
+        for p in pr.products.values() {
+            if let Some(m) = &p.material {
+                assert!(m.density.is_none_or(|d| !d.is_nan()), "{m:?}");
+                assert!(!m.instances.is_empty());
+            }
+            for a in &p.attributes {
+                assert!(a.instances.contains(&a.item));
+            }
+        }
+        let failed: std::collections::BTreeSet<u64> = pr.failed.iter().map(|f| f.0).collect();
+        assert!(pr.retained.iter().all(|r| !failed.contains(r)));
     }
     let p = Products::build(&e);
     for d in &p.definitions {

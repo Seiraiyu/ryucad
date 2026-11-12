@@ -319,9 +319,9 @@ pub fn get(
 ) -> Result<Value> {
     let (commit, s) = session.at(rev)?;
     let unit = s.project().manifest.default_unit;
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = s.project().part(&pid)?.clone();
-    if crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly {
+    if crate::part::part_kind(&p) == crate::doc::files::PartKind::Assembly {
         return Err(Error::new(
             Code::InvalidParam,
             format!("{pid} is an assembly: blends reads a part's solid"),

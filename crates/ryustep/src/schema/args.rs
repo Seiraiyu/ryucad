@@ -48,6 +48,11 @@ impl<'a> Args<'a> {
         self.next();
     }
 
+    /// The next attribute as written: a select's value, typed or not.
+    pub fn param(&mut self) -> &'a Param {
+        self.next()
+    }
+
     pub fn string(&mut self) -> Result<Box<str>, ImportError> {
         match self.next() {
             Param::Str(s) => Ok(s.clone()),

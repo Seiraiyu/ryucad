@@ -52,6 +52,20 @@ pub struct PartProps {
     /// Why the last save failed, other than a conflict.
     pub error: Option<Error>,
     pub saving: bool,
+    /// What the part's imported STEP files say of it that no declared
+    /// property takes (design 448, plan 24.C), read-only.
+    pub file: Vec<FileProp>,
+}
+
+/// A file property (design 448, plan 24.C): an attribute an imported
+/// STEP file gives the part that no declared property takes, read-only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileProp {
+    pub name: String,
+    /// Its value as shown, with its unit (`2.5 mm`).
+    pub value: String,
+    /// Where it is: `imports/x.step #123`.
+    pub source: String,
 }
 
 /// A value as the form shows it: text as written, numbers and booleans
@@ -107,6 +121,26 @@ impl PartProps {
                 }
             })
             .collect();
+        let file = v["file"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|f| {
+                let mut value = shown(&f["value"]);
+                if let Some(u) = f["unit"].as_str() {
+                    value = format!("{value} {u}");
+                }
+                FileProp {
+                    name: f["name"].as_str().unwrap_or_default().to_owned(),
+                    value,
+                    source: format!(
+                        "{} {}",
+                        f["file"].as_str().unwrap_or_default(),
+                        f["step"].as_str().unwrap_or_default()
+                    ),
+                }
+            })
+            .collect();
         PartProps {
             part: v["part"].as_str().unwrap_or_default().to_owned(),
             revision: v["revision"].as_str().unwrap_or_default().to_owned(),
@@ -114,6 +148,7 @@ impl PartProps {
             changed: Vec::new(),
             error: None,
             saving: false,
+            file,
         }
     }
 

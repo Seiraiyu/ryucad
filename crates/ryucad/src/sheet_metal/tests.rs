@@ -1141,7 +1141,7 @@ fn refolds_that_cant_be_made_say_where() {
 /// on its four top edges, 90° and 15 mm, set back 5 mm: a tray. Later
 /// tasks' tests share it.
 pub(crate) fn tray(s: &mut crate::session::Session, part: &str) {
-    use crate::server::tests::call;
+    use crate::testing::call;
     call(s, "part.create", json!({"part": part})).unwrap();
     call(
         s,
@@ -1208,7 +1208,7 @@ pub(crate) fn tray(s: &mut crate::session::Session, part: &str) {
 
 #[test]
 fn the_sheet_report_says_flat_partly_or_folded() {
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     let (_dir, mut s) = fresh();
     tray(&mut s, "p");
     let state = |s: &mut crate::session::Session| -> Value {

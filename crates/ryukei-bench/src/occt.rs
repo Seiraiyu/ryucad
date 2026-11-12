@@ -26,6 +26,18 @@ mod ffi {
         faces_without_mesh: u32,
     }
 
+    /// One row of what XDE read onto a label: `kind` 0 is the label's
+    /// material (`key` its name, `number` its density in XDE's unit,
+    /// `text` the density's name and value type), 1 a string, 2 an
+    /// integer, 3 a real, 4 a byte of the label's `TDataStd_NamedData`.
+    struct XdeProp {
+        label: String,
+        key: String,
+        kind: u32,
+        text: String,
+        number: f64,
+    }
+
     unsafe extern "C++" {
         include!("ryukei-bench/src/occt/shim.h");
 
@@ -71,6 +83,7 @@ mod ffi {
         ) -> Result<UniquePtr<Shape>>;
         fn step_read(path: &str, fix: bool) -> Result<UniquePtr<Shape>>;
         fn xde_colours(path: &str) -> Result<Vec<f64>>;
+        fn xde_properties(path: &str) -> Result<Vec<XdeProp>>;
         fn step_write(s: &Shape, path: &str, ap242: bool) -> Result<()>;
         fn stl_read(path: &str) -> Result<OcctMesh>;
         fn mesh_stl(
@@ -673,11 +686,52 @@ pub struct XdeColour {
 pub fn xde_colours(path: &std::path::Path) -> Result<Vec<XdeColour>, String> {
     let raw = ffi::xde_colours(&path.to_string_lossy()).map_err(|e| e.to_string())?;
     Ok(raw
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|r| XdeColour {
             face: r[0] == 1.0,
             centre: [r[1], r[2], r[3]],
             rgba: (r[4] >= 0.0).then_some([r[4], r[5], r[6], r[7]]),
+        })
+        .collect())
+}
+
+/// What OCCT's XDE reads onto a label: its material, or a named datum.
+#[derive(Clone, Debug, PartialEq)]
+pub enum XdeValue {
+    /// The material's density in XDE's unit (g/cm³), and the density's
+    /// name and value type as XDE holds them.
+    Material {
+        density: f64,
+        density_name: String,
+    },
+    Text(String),
+    Integer(i64),
+    Real(f64),
+    Byte(u8),
+}
+
+/// Every label of a file read by XDE with its material mode on (OCCT
+/// 7.8 has no metadata mode): its name (else its entry), each key and
+/// what XDE holds for it, a material by its name, and each
+/// `TDataStd_NamedData` string, integer, real and byte.
+pub fn xde_properties(path: &std::path::Path) -> Result<Vec<(String, String, XdeValue)>, String> {
+    let raw = ffi::xde_properties(&path.to_string_lossy()).map_err(|e| e.to_string())?;
+    Ok(raw
+        .into_iter()
+        .map(|r| {
+            let v = match r.kind {
+                0 => XdeValue::Material {
+                    density: r.number,
+                    density_name: r.text,
+                },
+                1 => XdeValue::Text(r.text),
+                2 => XdeValue::Integer(r.number as i64),
+                3 => XdeValue::Real(r.number),
+                _ => XdeValue::Byte(r.number as u8),
+            };
+            (r.label, r.key, v)
         })
         .collect())
 }

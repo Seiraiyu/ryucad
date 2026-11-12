@@ -45,6 +45,20 @@ pub struct Built {
     /// sheet, checked only by `check_topology`. Nothing may change it:
     /// [`target`] refuses it to every feature that would.
     pub reference: bool,
+    /// For an inserted solid nothing has acted on, its source's body and
+    /// where the insert moved it: its mesh is the source's moved, never
+    /// made again (design 521). `None` for every other body.
+    pub moved: Option<Arc<Moved>>,
+}
+
+/// Where an inserted body came from: its source's body (as the source's
+/// model shows it), the source feature that showed it (which sizes its
+/// mesh), and the insert's placement.
+#[derive(Clone, Debug)]
+pub struct Moved {
+    pub source: Arc<Built>,
+    pub feature: Arc<Feature>,
+    pub pose: Rigid,
 }
 
 /// Where each entity of a body came from, by name, each distinct origin
@@ -136,6 +150,10 @@ impl serde::Serialize for Origins {
     }
 }
 
+/// A solid's key in its part: its founder's ID, or an inserted solid's
+/// `<insert>/<source key>` (design 521; [`Id::solid_key`]).
+pub type SolidKey = Id;
+
 /// What a body-making feature leaves: the solid it founds, or each solid
 /// it acts on, by founder in the order it names them.
 #[derive(Clone, Debug)]
@@ -157,6 +175,8 @@ pub struct Made {
     /// Its disk cache entry's size, once written or read: what the
     /// memory budget counts it by.
     pub encoded: std::sync::OnceLock<u64>,
+    /// What an insert inserted (design 521).
+    pub inserted: Option<Arc<crate::insert::Inserted>>,
 }
 
 /// What a join, cut or hole applied to its targets: its own body, its
@@ -256,6 +276,7 @@ impl Made {
             report: None,
             flat: None,
             encoded: Default::default(),
+            inserted: None,
         }
     }
 }
@@ -277,6 +298,14 @@ pub enum Output {
 }
 
 impl Output {
+    /// What an insert inserted, if the feature is one that built.
+    pub fn inserted(&self) -> Option<&crate::insert::Inserted> {
+        match self {
+            Output::Solids(m) => m.inserted.as_deref(),
+            _ => None,
+        }
+    }
+
     /// The solids a body-making feature founds or acts on, as it leaves
     /// them; none for a sketch.
     pub fn solids(&self) -> &[(Id, Arc<Built>)] {
@@ -463,27 +492,60 @@ impl PartResult {
     /// The part's solids, not consumed, by founder, as the model shows
     /// them.
     pub fn shown<'a>(&'a self, solids: &'a Solids) -> Vec<Shown<'a>> {
-        solids
-            .tips()
-            .map(|(solid, tip)| {
-                let chain = solids.chain(solid).expect("a solid has a chain");
-                let state = chain.iter().rev().find_map(|f| {
-                    let (_, b) = self.output(f)?.solids().iter().find(|(s, _)| s == solid)?;
-                    Some((f, b))
-                });
-                let error = self
-                    .features
-                    .iter()
-                    .find(|(i, _)| i == tip)
-                    .and_then(|(_, r)| r.as_ref().err());
-                Shown {
-                    solid,
-                    tip,
-                    state,
-                    error,
+        let mut out = Vec::new();
+        for t in solids.shown_in_order() {
+            match t {
+                crate::solid::Tip::Solid(solid, tip) => {
+                    out.push(self.shown_one(solids, solid, tip));
                 }
-            })
-            .collect()
+                crate::solid::Tip::Family(insert) => {
+                    let made = match self.features.iter().find(|(i, _)| i == insert) {
+                        Some((_, Ok(o))) => o.solids(),
+                        Some((_, Err(e))) => {
+                            // Nothing inserted: what acted on it fails
+                            // through it, and the insert shows its error.
+                            out.push(Shown {
+                                solid: insert,
+                                tip: insert,
+                                state: None,
+                                error: Some(e),
+                            });
+                            continue;
+                        }
+                        None => &[],
+                    };
+                    for (key, _) in made {
+                        if solids.is_deleted(key) || solids.consumer(key).is_some() {
+                            continue;
+                        }
+                        let tip = solids.tip(key).expect("a family's key has a chain");
+                        out.push(self.shown_one(solids, key, tip));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// One solid the model shows: `solid` at its tip `tip`, with the
+    /// last state its chain built and the tip's error.
+    fn shown_one<'a>(&'a self, solids: &'a Solids, solid: &'a Id, tip: &'a Id) -> Shown<'a> {
+        let chain = solids.chain(solid).expect("a solid has a chain");
+        let state = chain.iter().rev().find_map(|f| {
+            let (_, b) = self.output(f)?.solids().iter().find(|(s, _)| s == solid)?;
+            Some((f, b))
+        });
+        let error = self
+            .features
+            .iter()
+            .find(|(i, _)| i == tip)
+            .and_then(|(_, r)| r.as_ref().err());
+        Shown {
+            solid,
+            tip,
+            state,
+            error,
+        }
     }
 
     pub fn failed(&self) -> usize {
@@ -499,7 +561,8 @@ impl PartResult {
     }
 
     /// `sketch_stale` for each sketch rebuilt from positions solved in
-    /// memory, `instance_obsolete` for each instance of an obsolete
+    /// memory, each insert's (`insert_source_failed`, `insert_obsolete`),
+    /// `instance_obsolete` for each instance of an obsolete
     /// release, and `assembly_stale` (naming `part`) for an assembly
     /// rebuilt from poses solved in memory.
     pub fn warnings(&self, part: &Id) -> Vec<serde_json::Value> {
@@ -514,6 +577,9 @@ impl PartResult {
                 let Ok(o) = r.as_ref() else {
                     return Vec::new();
                 };
+                if let Some(i) = o.inserted() {
+                    return i.warnings.clone();
+                }
                 if let Some(s) = o.sketch() {
                     return s
                         .stale
@@ -601,6 +667,8 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Fillet(_)
         | Feature::Chamfer(_)
         | Feature::Pattern(_)
+        | Feature::Insert(_)
+        | Feature::DeleteBody(_)
         | Feature::Instance(_)
         | Feature::Mate(_)
         | Feature::InstancePattern(_)
@@ -1097,6 +1165,9 @@ pub fn body_as<'a>(
     if let Some(by) = solids.consumed_by(t, id) {
         return Err(consumed(id, t, by));
     }
+    if let Some(by) = solids.deleted_by(t, id) {
+        return Err(deleted(id, t, by));
+    }
     let Some(view) = solids.view(t, id) else {
         if let Some(Ok(f)) = part.features.get(id) {
             crate::graph::check_order(part, part.order(), id, f)?;
@@ -1104,7 +1175,12 @@ pub fn body_as<'a>(
         return Err(not_a_solid(part, solids, id, need.role, t));
     };
     let out = crate::graph::input(part, id, view, before)?;
-    let built = out.solid(t).expect("a solid's chain holds it");
+    let Some(built) = out.solid(t) else {
+        // A key below an insert its source doesn't show.
+        let insert = t.founder();
+        let keys = out.solids().iter().map(|(k, _)| k).collect();
+        return Err(not_inserted(id, need.role, t, &insert, keys));
+    };
     if built.reference && need.changes {
         // Every role naming one target is `targets`, as `target` names it.
         let role = if need.role == "target" {
@@ -1112,7 +1188,7 @@ pub fn body_as<'a>(
         } else {
             need.role
         };
-        return Err(reference_body(&part.id, id, t, role));
+        return Err(reference_body_from(&part.id, id, t, role, out));
     }
     if let Some(want) = need.want {
         crate::kind::need(id, need.role, t, &built.body, want, need.hint)?;
@@ -1157,6 +1233,17 @@ pub fn reference_body(part: &Id, id: &Id, t: &Id, role: &str) -> Error {
     .with("hint", format!("ryucad import convert {part}/{t}"))
 }
 
+/// [`reference_body`] for solid `t` as `out` (what `id` reads it from)
+/// holds it: an inserted reference is converted in its source part, so
+/// the hint names that part and the source's key (design 521).
+fn reference_body_from(part: &Id, id: &Id, t: &Id, role: &str, out: &Output) -> Error {
+    let e = reference_body(part, id, t, role);
+    match out.inserted().and_then(|i| i.sources.get(t)) {
+        Some((of, key)) => e.with("hint", format!("ryucad import convert {of}/{key}")),
+        None => e,
+    }
+}
+
 /// Refuses a feature (`id`, as the write leaves `p`) that would change a
 /// reference import's body, against the current rebuild `results`.
 pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
@@ -1175,7 +1262,7 @@ pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results
             } else {
                 r.role
             };
-            return Err(reference_body(&p.id, id, r.body, role));
+            return Err(reference_body_from(&p.id, id, r.body, role, out));
         }
     }
     Ok(())
@@ -1193,10 +1280,51 @@ pub fn consumed(id: &Id, t: &Id, by: &Id) -> Error {
     .with("consumed_by", by)
 }
 
+/// `body_deleted`: feature `id` names solid `t`, which `by` before it
+/// deleted.
+pub fn deleted(id: &Id, t: &Id, by: &Id) -> Error {
+    Error::new(
+        Code::BodyDeleted,
+        format!(
+            "{id} names {t}, which {by} before it deleted: name it before {by}, or delete it later"
+        ),
+    )
+    .with("feature", id)
+    .with("solid", t)
+    .with("by", by)
+}
+
+/// `not_found`: `owner` names `t`, a key below insert `insert` that its
+/// source doesn't show; `solids` are the keys it does.
+pub fn not_inserted(owner: &Id, role: &str, t: &Id, insert: &Id, solids: Vec<&Id>) -> Error {
+    Error::new(
+        Code::NotFound,
+        format!(
+            "{owner}: its {role} {t} is no solid of {insert}, whose source shows {}",
+            solids.len()
+        ),
+    )
+    .with("feature", owner)
+    .with("role", role)
+    .with("solid", t)
+    .with("insert", insert)
+    .with("solids", solids)
+}
+
 /// `reference_wrong_kind` for `t`, named in `owner`'s `role` where a
 /// solid goes, which founds none: with `solids`, the solids it acts on,
 /// for the agent to name instead.
 pub fn not_a_solid(part: &Part, solids: &Solids, owner: &Id, role: &str, t: &Id) -> Error {
+    if t.is_path() {
+        let founder = t.founder();
+        return Error::new(
+            Code::NotFound,
+            format!("{owner}: its {role} names no solid {t}: {founder} inserts nothing"),
+        )
+        .with("feature", owner)
+        .with("role", role)
+        .with("solid", t);
+    }
     let ty = part
         .features
         .get(t)
@@ -2320,6 +2448,7 @@ pub(crate) fn finish(
         origins: Arc::new(origins.into()),
         hash,
         reference: false,
+        moved: None,
     })
 }
 
@@ -2349,6 +2478,7 @@ pub(crate) fn finish_reference(
         origins: Arc::new(origins.into()),
         hash,
         reference: true,
+        moved: None,
     })
 }
 
@@ -2676,6 +2806,17 @@ fn rebuild_with(
             });
             (r, None)
         }
+        // Ends the chains it names; makes nothing (design 521).
+        Feature::DeleteBody(d) => (
+            crate::body::delete_body(part, solids, id, d, before).map(solid),
+            None,
+        ),
+        // Its source's model comes from outside the part: see
+        // [`rebuild_part_in`].
+        Feature::Insert(i) => (
+            crate::insert::build_checked(part, id, i, &crate::assembly::Children::new()).map(solid),
+            None,
+        ),
         // Its part's model comes from outside the part: see
         // [`rebuild_part_in`].
         Feature::Instance(i) => {
@@ -2871,7 +3012,7 @@ fn hash_of(
         piece(input.as_str().as_bytes());
         let before_me = matches!((at(input), at(id)), (Some(i), Some(me)) if i < me);
         piece(&[u8::from(before_me)]);
-        match before.get(input) {
+        match before.get(*input) {
             Some(Ok(o)) => piece(o.hash().as_bytes()),
             Some(Err(e)) => piece(
                 serde_json::to_string(&e.code)
@@ -3110,7 +3251,8 @@ pub fn rebuild_part_in(
                 .iter()
                 .filter_map(|id| {
                     let f = part.features[*id].as_ref().ok()?;
-                    let placed = f.instance().is_some() || f.mate().is_some();
+                    let placed =
+                        f.instance().is_some() || f.mate().is_some() || f.insert().is_some();
                     let datum = matches!(f, Feature::Datum(_) | Feature::Path(_));
                     if placed || datum || f.instance_pattern().is_some() || f.sketch().is_some() {
                         return None;
@@ -3144,6 +3286,38 @@ pub fn rebuild_part_in(
                     );
                 }
                 let h = input_hash(part, &solids, &id, f, &built, run);
+                if let Some(ins) = f.insert() {
+                    // What it reads is its source's model, from outside
+                    // the part, as an instance's (design 521): never on
+                    // disk, since it moves bodies the source keeps.
+                    let at = (ins.part.clone(), ins.rev.clone());
+                    let model = children.get(&at).map(|m| {
+                        m.as_ref()
+                            .map(|m| (m.hash.clone(), m.pin.clone()))
+                            .map_err(|e| e.code)
+                    });
+                    let mut k = blake3::Hasher::new();
+                    k.update(h.as_bytes());
+                    k.update(b"ryucad.insert\0");
+                    k.update(format!("{model:?}").as_bytes());
+                    let h = k.finalize();
+                    let (result, new) = match cache.features.get(&id) {
+                        Some((c, r)) if *c == h => (r.clone(), false),
+                        _ => (
+                            crate::insert::build_checked(part, &id, ins, children)
+                                .map(|m| Output::Solids(Arc::new(m))),
+                            true,
+                        ),
+                    };
+                    return Step {
+                        id,
+                        hash: Some(h),
+                        result,
+                        new,
+                        tool: None,
+                        disk: false,
+                    };
+                }
                 if let Some(inst) = f.instance() {
                     // What it reads is its part's model, from outside the
                     // part: the model's hash keys it, and for a label how
@@ -3181,8 +3355,12 @@ pub fn rebuild_part_in(
                 let kept = cache.tools.get(&id);
                 // Sketches, datums, paths and helices take microseconds to
                 // milliseconds from what they read: the disk holds none.
-                let kept_in_memory =
-                    f.sketch().is_some() || matches!(f, Feature::Datum(_) | Feature::Path(_));
+                // A delete makes nothing to keep.
+                let kept_in_memory = f.sketch().is_some()
+                    || matches!(
+                        f,
+                        Feature::Datum(_) | Feature::Path(_) | Feature::DeleteBody(_)
+                    );
                 let on_disk = || match (disk, f) {
                     (Some(d), _) if !kept_in_memory => from_disk(d, &h, &part.id, &id),
                     _ => None,
@@ -3421,6 +3599,34 @@ pub fn successors(
 mod tests {
     use super::*;
     use crate::units::{Quantity, Unit};
+
+    #[test]
+    fn a_key_the_insert_doesnt_hold_is_not_found_and_a_deleted_one_says_by_whom() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, delete_acts, insert_acts, part};
+        let mut p = part(vec![
+            ("board", boxed("9", New, &[])),
+            ("cut", boxed("0", Cut, &["board/u9"])),
+            ("drop", boxed("9", New, &[])),
+            ("late", boxed("0", Cut, &["board/u1"])),
+        ]);
+        insert_acts(&mut p, "board");
+        delete_acts(&mut p, "drop", &["board/u1"]);
+        let solids = Solids::of(&p);
+        // The insert holds u1 only.
+        let b = Arc::new(build_feature(&p.id, &id("x"), &boxed("0", New, &[])).unwrap());
+        let mut before: BTreeMap<Id, Result<Output>> = BTreeMap::new();
+        let made = Made::new(vec![(Id::solid_key("board/u1", "feature").unwrap(), b)]);
+        before.insert(id("board"), Ok(Output::Solids(Arc::new(made))));
+        let k9 = Id::solid_key("board/u9", "feature").unwrap();
+        let e = target_as(&p, &solids, &id("cut"), "targets", &k9, &before).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        assert_eq!(e.details["solids"], json!(["board/u1"]));
+        let k1 = Id::solid_key("board/u1", "feature").unwrap();
+        let e = target_as(&p, &solids, &id("late"), "targets", &k1, &before).unwrap_err();
+        assert_eq!(e.code, Code::BodyDeleted);
+        assert_eq!(e.details["by"], "drop");
+    }
 
     #[test]
     fn a_body_is_asked_for_as_a_solid_a_sheet_or_either() {
@@ -4251,7 +4457,7 @@ mod tests {
     /// `e` of it cutting `b` through all, `both` ways or not, reversed or
     /// not.
     fn hole(z: &str, both: bool, reverse: bool) -> (tempfile::TempDir, crate::session::Session) {
-        use crate::server::tests::call;
+        use crate::testing::call;
         let (dir, mut s, _) = crate::sketch::tests::with_box();
         let placement = json!({"origin": [0, 0, z]});
         call(

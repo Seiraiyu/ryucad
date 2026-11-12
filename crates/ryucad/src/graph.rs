@@ -31,6 +31,7 @@ pub fn inputs(f: &Feature) -> Vec<&Id> {
         .chain(f.geometry_reads())
         .chain(f.connectors().into_iter().map(|(_, c)| &c.root))
         .chain(f.targets())
+        .chain(f.deletes())
         .chain(f.refold().map(|r| &r.unfold));
     for id in named {
         if !out.contains(&id) {
@@ -46,7 +47,10 @@ pub fn inputs(f: &Feature) -> Vec<&Id> {
 pub fn reads<'a>(solids: &'a Solids, id: &Id, f: &'a Feature) -> Vec<&'a Id> {
     let mut out: Vec<&Id> = Vec::new();
     for input in inputs(f) {
-        let read = solids.view(input, id).unwrap_or(input);
+        let read = solids
+            .view(input, id)
+            .or_else(|| solids.founder_of(input))
+            .unwrap_or(input);
         if !out.contains(&read) {
             out.push(read);
         }
@@ -79,7 +83,9 @@ pub fn dependents(part: &Part, id: &Id) -> Vec<Id> {
     part.order()
         .iter()
         .filter(|f| match part.features.get(*f) {
-            Some(Ok(feature)) => inputs(feature).contains(&id),
+            Some(Ok(feature)) => inputs(feature)
+                .iter()
+                .any(|i| i.founder_str() == id.as_str()),
             _ => false,
         })
         .cloned()
@@ -90,13 +96,18 @@ pub fn dependents(part: &Part, id: &Id) -> Vec<Id> {
 /// isn't listed (`not_found`) or isn't listed before it
 /// (`reference_forward`).
 pub fn check_order(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
-    let at = |x: &Id| order.iter().position(|o| o == x);
+    // A solid key below an insert is read through the insert (design 521).
+    let at = |x: &Id| order.iter().position(|o| o.as_str() == x.founder_str());
     for input in inputs(f) {
         match (at(input), at(id)) {
             (None, _) => {
                 return Err(Error::new(
                     Code::NotFound,
-                    format!("{id} reads {input}, which part {} doesn't list", part.id),
+                    format!(
+                        "{id} reads {}, which part {} doesn't list",
+                        input.founder(),
+                        part.id
+                    ),
                 )
                 .with("feature", id)
                 .with("input", input));
@@ -104,7 +115,7 @@ pub fn check_order(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()
             (Some(i), Some(me)) if i >= me => {
                 return Err(Error::new(
                     Code::ReferenceForward,
-                    format!("{id} reads {input}, which would come after it"),
+                    format!("{id} reads {}, which would come after it", input.founder()),
                 )
                 .with("feature", id)
                 .with("input", input));
@@ -138,11 +149,33 @@ pub fn input<'a>(part: &Part, id: &Id, input: &Id, before: &'a dyn Results) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()
+    }
+
+    #[test]
+    fn a_path_key_is_read_through_its_insert() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, insert_acts, part};
+        let mut p = part(vec![
+            ("base", boxed("0", New, &[])),
+            ("board", boxed("9", New, &[])),
+            ("cut", boxed("0", Cut, &["base", "board/u1"])),
+        ]);
+        insert_acts(&mut p, "board");
+        let f = p.features[&id("cut")].as_ref().unwrap();
+        // The order checks the insert; the key is not a listed feature.
+        check_order(&p, p.order(), &id("cut"), f).unwrap();
+        let e = check_order(&p, &[id("cut"), id("base"), id("board")], &id("cut"), f).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceForward);
+        assert_eq!(dependents(&p, &id("board")), [id("cut")]);
+        let solids = Solids::of(&p);
+        assert_eq!(reads(&solids, &id("cut"), f), [&id("base"), &id("board")]);
+        let d = depths(&p);
+        assert_eq!(d[&id("cut")], 1);
     }
 
     #[test]

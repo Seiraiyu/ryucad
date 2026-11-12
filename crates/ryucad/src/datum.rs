@@ -754,7 +754,7 @@ pub fn from_given(
     env: &crate::expr::Env,
 ) -> Result<crate::doc::files::Feature> {
     use crate::doc::datum::constructions;
-    let geom = |t: &str, at: &str| crate::server::geom_json(t, part, at);
+    let geom = |t: &str, at: &str| crate::geometry::geom_json(t, part, at);
     let mut v = current.map_or_else(|| json!({}), Datum::fields);
     let by = match (&f.by, current) {
         (Some(b), _) => b.clone(),
@@ -996,9 +996,9 @@ pub fn report(part: &crate::doc::id::Id, d: &Datum) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::call;
     use crate::session::Session;
     use crate::sketch::tests::{edge_between, face_along, vertex_at, with_box};
+    use crate::testing::call;
     use serde_json::json;
 
     /// The datum `d` of part `p` as rebuild reports it.
