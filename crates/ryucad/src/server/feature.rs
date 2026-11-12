@@ -1,15 +1,11 @@
 //! Requests on features: add, edit, delete, move, list, show, and each type's fields and report.
 
-use crate::doc::files::{Feature, PartKind, Primitive, PrimitiveType};
+use crate::doc::files::{Feature, PartKind, Primitive};
 use crate::doc::id::Id;
 use crate::doc::project::{Part, feature_path};
-use crate::doc::sketch::Sketch;
-use crate::doc::solid::Combine;
 use crate::doc::sweep::{Angle, Extent, RevolveAxis};
 use crate::error::{Code, Error, Result};
-use crate::feature::{
-    apply_placement, check_sweep, check_up_to, new_placement, solids_before, source_is_sheet,
-};
+use crate::feature::{apply_placement, check_sweep, check_up_to};
 use crate::mesh;
 use crate::param;
 use crate::part::{
@@ -39,6 +35,7 @@ use crate::feature::pattern::{PATTERN, pattern_from, pattern_report};
 use crate::feature::planar::planar_from;
 use crate::feature::primitive::{combine_from, primitive_report, radius_param, refuse_sizes};
 use crate::feature::sketch::{SKETCH, sketch_plane, sketch_report};
+use crate::feature::{Place, Write};
 
 /// How a feature appears in output: every quantity as written and in
 /// meters, every reference as `<part>/<feature>/<name>`.
@@ -337,43 +334,11 @@ fn check_resolved(
     }
 }
 
-/// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 28] = [
-    "box",
-    "cylinder",
-    "cone",
-    "sphere",
-    "torus",
-    "sketch",
-    "extrude",
-    "revolve",
-    "sweep",
-    "loft",
-    "planar",
-    "fill",
-    "extract",
-    "sew",
-    "thicken",
-    "boolean",
-    "fillet",
-    "chamfer",
-    "hole",
-    "pattern",
-    "instance",
-    "mate",
-    "instance_pattern",
-    "insert",
-    "delete_body",
-    "plane",
-    "axis",
-    "point",
-];
-
 pub(crate) fn feature_add(
     session: &mut Session,
     part: &str,
     ty: &str,
-    mut given: Given,
+    given: Given,
     id: Option<&str>,
     position: &Position,
     expected: Option<&str>,
@@ -385,8 +350,9 @@ pub(crate) fn feature_add(
     let mut list = order(p)?;
     let env = p.env.clone();
     let at = insert_at(&list, position)?;
+    let kind = crate::feature::kind(ty);
     // A feature its part can't hold is refused before its fields are read.
-    if FEATURE_TYPES.contains(&ty) {
+    if kind.is_some() {
         let fid = match id {
             Some(id) => feature_id(id)?,
             None => {
@@ -398,276 +364,40 @@ pub(crate) fn feature_add(
             return Err(e);
         }
     }
-    // A pattern with no targets acts on its first seed's.
-    if ty == "pattern" && given.fields.targets.is_none() {
-        let seed = given.fields.features.as_ref().and_then(|s| s.first());
-        let theirs = seed
-            .and_then(|s| Id::parse(s, "feature").ok())
-            .and_then(|s| p.features.get(&s).cloned())
-            .and_then(|f| f.ok());
-        match (seed, theirs) {
-            (_, Some(f)) if !f.targets().is_empty() => {
-                given.fields.targets = Some(f.targets().iter().map(|t| t.to_string()).collect());
-            }
-            // Its seed's own fault says what's wrong with it.
-            (Some(seed), Some(f)) => {
-                return Err(Error::new(
-                    Code::ReferenceWrongKind,
-                    format!(
-                        "{}its seed {seed} is a {} that joins or cuts nothing; a pattern repeats joins, cuts and holes",
-                        id.map(|i| format!("pattern {i}: ")).unwrap_or_default(),
-                        f.type_name()
-                    ),
-                )
-                .with("seed", seed)
-                .with("pointer", "/features/0"));
-            }
-            (Some(seed), None)
-                if Id::parse(seed, "feature").is_ok_and(|s| !p.features.contains_key(&s)) =>
-            {
-                return Err(Error::new(
-                    Code::NotFound,
-                    format!("a pattern's seed {seed} isn't a feature of part {pid}"),
-                )
-                .with("seed", seed)
-                .with("pointer", "/features/0"));
-            }
-            _ => {}
-        }
-    }
-    // A mirror whose operation is left out joins its own source (design
-    // 327, question 20); one with no solid copies the part's one solid.
-    // The file names both all the same.
-    if ty == "mirror" && given.fields.solid.is_none() {
-        let before = solids_before(p, &list, at);
-        match before.as_slice() {
-            [one] => given.fields.solid = Some(one.to_string()),
-            _ => {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    format!(
-                        "a mirror names the solid it copies (solid): the part has {} before it",
-                        before.len()
-                    ),
-                )
-                .with("param", "solid")
-                .with("solids", before));
-            }
-        }
-    }
-    // A sheet's copy can't be joined: left out, its operation is new
-    // (design 388).
-    if ty == "mirror" && given.fields.operation.is_none() {
-        let sheet = given
-            .fields
-            .solid
-            .as_deref()
-            .and_then(|x| Id::parse(x, "feature").ok())
-            .is_some_and(|x| source_is_sheet(session, &pid, &list, at, &x));
-        if sheet {
-            given.fields.operation = Some("new".into());
-        } else {
-            given.fields.operation = Some("join".into());
-            if given.fields.targets.is_none() {
-                given.fields.targets = given.fields.solid.clone().map(|s| vec![s]);
-            }
-        }
-    }
-    // An insert may look up its source's newest label: read it before
-    // the part is borrowed for the rest.
-    let mut took = None;
-    let mut inserted = None;
-    if ty == "insert" {
-        given.only(ty, &INSERT)?;
-        let (ins, t) = insert_from(session, None, &given, unit, &env)?;
-        (inserted, took) = (Some(ins), t);
-    }
-    let p = session.project().part(&pid)?;
-    // A join, cut, intersect or hole with no targets acts on the part's
-    // one solid; the file names it all the same.
-    let acts = ty == "hole"
-        || given
-            .fields
-            .operation
-            .as_deref()
-            .is_some_and(|o| o != "new");
-    if acts && given.fields.targets.is_none() {
-        let before = solids_before(p, &list, at);
-        match before.as_slice() {
-            [one] => given.fields.targets = Some(vec![one.to_string()]),
-            _ => {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    format!(
-                        "a {} names the solids it acts on (targets): the part has {} before it",
-                        if ty == "hole" {
-                            "hole"
-                        } else {
-                            given.fields.operation.as_deref().unwrap_or_default()
-                        },
-                        before.len()
-                    ),
-                )
-                .with("param", "targets")
-                .with("solids", before));
-            }
-        }
-    }
-    // A tweak sorts what it was given; with no target it acts on the part's
-    // one solid, else the one its faces name. The file names it all the same.
-    if crate::tweak::TYPES.contains(&ty) {
-        crate::tweak::take_given(ty, &mut given.fields)?;
-        if given.fields.target.is_none() && given.fields.targets.is_none() {
-            let before = solids_before(p, &list, at);
-            given.fields.target = Some(crate::tweak::default_target(
-                ty,
-                &given.fields,
-                &before,
-                &pid,
-            )?);
-        }
-    }
-    // A shell or offset with no target acts on the part's one solid; the
-    // file names it all the same.
-    if matches!(ty, "shell" | "offset" | "split")
-        && given.fields.target.is_none()
-        && given.fields.targets.is_none()
-    {
-        let before = solids_before(p, &list, at);
-        match before.as_slice() {
-            [one] => given.fields.target = Some(one.to_string()),
-            _ => {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    format!(
-                        "a {ty} names the solid it acts on (target): the part has {} before it",
-                        before.len()
-                    ),
-                )
-                .with("param", "target")
-                .with("solids", before));
-            }
-        }
-    }
-    if matches!(ty, "flange" | "unfold" | "refold")
-        && given.fields.target.is_none()
-        && given.fields.targets.is_none()
-    {
-        let before = solids_before(p, &list, at);
-        let sheet: Vec<Id> = before
-            .iter()
-            .filter(|s| crate::sheet_metal::founder(p, s).is_some())
-            .cloned()
-            .collect();
-        match (before.as_slice(), sheet.as_slice()) {
-            ([one], _) | (_, [one]) => given.fields.target = Some(one.to_string()),
-            _ => {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    format!("a {ty} names the solid it acts on (target): the part has {} solids before it, {} of them founded by a base flange", before.len(), sheet.len()),
-                )
-                .with("param", "target")
-                .with("solids", before));
-            }
-        }
-    }
-    let f = match ty {
-        "sketch" => {
-            given.only(ty, &SKETCH)?;
-            Feature::Sketch(Sketch::new(sketch_plane(None, &given, &pid, unit, &env)?))
-        }
-        "extrude" | "revolve" => {
-            given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
-            sweep_from(ty, None, &given, &pid, unit, &env)?
-        }
-        "sweep" => {
-            given.only(ty, &crate::doc::sweep::SWEEP_FIELDS)?;
-            crate::along::from_given(None, &given.fields, p, unit, &env)?
-        }
-        "loft" => {
-            given.only(ty, &crate::doc::sweep::LOFT_FIELDS)?;
-            crate::loft::from_given(None, &given.fields, p, unit, &env)?
-        }
-        "planar" => {
-            given.only(ty, &crate::doc::sweep::PLANAR_FIELDS)?;
-            planar_from(None, &given, &pid)?
-        }
-        "fill" | "extract" | "sew" | "thicken" => {
-            given.only(ty, crate::doc::surface::request_fields(ty))?;
-            crate::surface::from_given(ty, None, &given.fields, &pid, unit, &env)?
-        }
-        "boolean" => {
-            given.only(ty, &BOOLEAN)?;
-            Feature::Boolean(boolean_from(None, &given)?)
-        }
-        "instance" => {
-            given.only(ty, &INSTANCE)?;
-            let deps = session.project().manifest.dependencies.clone();
-            Feature::Instance(instance_from(None, &given, unit, &env, &deps)?)
-        }
-        "insert" => Feature::Insert(Box::new(
-            inserted.take().expect("read before the part was borrowed"),
-        )),
-        "delete_body" => {
-            given.only(ty, &DELETE_BODY)?;
-            Feature::DeleteBody(Box::new(delete_from(&given)?))
-        }
-        "mate" => {
-            given.only(ty, &MATE)?;
-            mate_from(None, &given, (session.project(), &pid), unit, &env)?
-        }
-        "instance_pattern" => {
-            given.only(ty, &INSTANCE_PATTERN)?;
-            instance_pattern_from(None, &given, &pid, unit, &env)?
-        }
-        "fillet" | "chamfer" => {
-            given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
-            blend_from(ty, None, &given, &pid, unit, &env)?
-        }
-        "shell" | "offset" | "mirror" | "split" => {
-            given.only(ty, crate::doc::body::request_fields(ty))?;
-            crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
-        }
-        "move_face" | "replace_face" | "draft" | "delete_face" | "delete_blend"
-        | "resize_blend" => {
-            given.only(ty, crate::tweak::request_fields(ty))?;
-            crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
-        }
-        "base_flange" | "flange" | "unfold" | "refold" => {
-            crate::sheet_metal::take_given(ty, &mut given.fields);
-            given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
-            crate::sheet_metal::from_given(ty, None, &given.fields, &pid, unit, &env)?
-        }
-        "hole" => {
-            given.only(ty, &HOLE)?;
-            hole_from(None, &given, &pid, unit, &env)?
-        }
-        "pattern" => {
-            given.only(ty, &PATTERN)?;
-            pattern_from(None, &given, &pid, unit, &env)?
-        }
-        "import" => return Err(import_not_written_here("add")),
-        "plane" | "axis" | "point" => {
-            given.only(ty, crate::datum::request_fields(ty))?;
-            crate::datum::from_given(ty, None, &given.fields, &pid, unit, &env)?
-        }
-        "path" | "helix" => {
-            given.only(ty, crate::doc::path::request_fields(ty))?;
-            crate::path::from_given(ty, None, &given.fields, &pid, unit, &env)?
-        }
-        _ => {
-            let ty = PrimitiveType::parse(ty)?;
-            radius_param(ty, &mut given)?;
-            refuse_sizes(ty, &given)?;
-            let combine = combine_from(&Combine::NEW, &given)?;
-            Feature::Primitive(Primitive {
-                ty,
-                params: Primitive::params_from_json(ty, &Value::Object(given.params), unit, &env)?,
-                placement: new_placement(given.placement.unwrap_or_default(), unit, &env)?,
-                combine,
-            })
-        }
+    let mut cx = Write {
+        session: &mut *session,
+        part: &pid,
+        unit,
+        env: &env,
+        given,
+        place: Place::New {
+            order: &list,
+            at,
+            id,
+        },
+        read: None,
+        took: None,
     };
+    // Each step in the order it has always had: what the kind fills in
+    // first, the shared target default, what it reads from other fields
+    // and its own target default, then its fields.
+    if let Some(k) = kind {
+        k.before_targets(ty, &mut cx)?;
+    }
+    crate::feature::one_target(kind, ty, &mut cx)?;
+    if let Some(k) = kind {
+        k.take_given(ty, &mut cx.given)?;
+        k.default_target(ty, &mut cx)?;
+    }
+    let Some(k) = kind else {
+        return Err(crate::feature::unknown_type(ty));
+    };
+    k.refuse_others(ty, &cx.given)?;
+    let f = k.from_given(ty, None, &mut cx)?;
+    let took = cx.took.take();
+    // Its borrows of the session and the list end here.
+    drop(cx);
+    let p = session.project().part(&pid)?;
     let fid = match id {
         Some(id) => feature_id(id)?,
         None => {

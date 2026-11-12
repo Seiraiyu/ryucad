@@ -243,6 +243,43 @@ impl Check<'_> {
     }
 }
 
+/// A join, cut or intersect, or a kind that acts whatever its operation
+/// (a hole), with no targets acts on the part's one solid; the file names
+/// it all the same.
+pub(crate) fn one_target(
+    kind: Option<&dyn FeatureKind>,
+    ty: &str,
+    cx: &mut Write<'_>,
+) -> Result<()> {
+    let always = kind.is_some_and(|k| k.acts_without_operation());
+    let f = &cx.given.fields;
+    let acts = always || f.operation.as_deref().is_some_and(|o| o != "new");
+    if !acts || f.targets.is_some() {
+        return Ok(());
+    }
+    let before = cx.solids_before()?;
+    match before.as_slice() {
+        [one] => cx.given.fields.targets = Some(vec![one.to_string()]),
+        _ => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "a {} names the solids it acts on (targets): the part has {} before it",
+                    if always {
+                        ty
+                    } else {
+                        cx.given.fields.operation.as_deref().unwrap_or_default()
+                    },
+                    before.len()
+                ),
+            )
+            .with("param", "targets")
+            .with("solids", before));
+        }
+    }
+    Ok(())
+}
+
 /// Every kind, in the order `feature.types` lists them: `feature.add`'s
 /// first types (primitives to datums), then paths, the whole-body
 /// operations, sheet metal, the tweaks and imports.
