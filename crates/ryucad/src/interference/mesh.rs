@@ -892,4 +892,71 @@ mod tests {
             );
         }
     }
+
+    use ryukei::boolean::{BooleanOp, Tool};
+    use ryukei::name::ToolKey;
+
+    /// 9.C's plate: 60 × 20 × 1.6 mm, drilled with 38 holes of 1 mm on a
+    /// 2.54 mm pitch in two rows of 19, under a 48 × 5 mm footprint at
+    /// (6, 7.5) mm; placed by `g`.
+    pub(crate) fn drilled_plate(g: &Rigid) -> Body {
+        let plate = ryukei::primitive::block(OpKey::from_bytes(b"plate"), 0.06, 0.02, 0.0016, g)
+            .unwrap()
+            .0;
+        let hole = pin(0.0005, 0.004);
+        let mut places = Vec::new();
+        for i in 0..19 {
+            for y in [0.01 - 0.00127, 0.01 + 0.00127] {
+                places.push(g.then_after(&at(0.006 + 0.00127 + i as f64 * 0.00254, y, -0.001)));
+            }
+        }
+        let tools: Vec<Tool> = places
+            .iter()
+            .enumerate()
+            .map(|(k, place)| Tool {
+                key: ToolKey(OpKey::from_bytes(format!("hole{k}").as_bytes()).0),
+                body: &hole,
+                place: *place,
+            })
+            .collect();
+        ryukei::boolean::boolean(
+            OpKey::from_bytes(b"drill"),
+            BooleanOp::Subtract,
+            &plate,
+            &tools,
+        )
+        .unwrap()
+        .0
+    }
+
+    pub(crate) fn header() -> Body {
+        ryukei::primitive::block(
+            OpKey::from_bytes(b"hdr"),
+            0.048,
+            0.005,
+            0.0085,
+            &Rigid::IDENTITY,
+        )
+        .unwrap()
+        .0
+    }
+
+    /// Where the header stands flush on the plate, in the plate's frame.
+    fn on_plate() -> Rigid {
+        at(0.006, 0.0075, 0.0016)
+    }
+
+    #[test]
+    fn a_header_flush_on_a_drilled_plate_is_decided_both_ways() {
+        let plate = Prepared::new(&drilled_plate(&Rigid::IDENTITY)).unwrap();
+        let hdr = Prepared::new(&header()).unwrap();
+        let (v, spent) = judged(&plate, &hdr, &on_plate());
+        println!("plate, header: {spent} pieces");
+        assert_eq!(v, Verdict::Touching);
+        assert!(spent < 1 << 14, "{spent}");
+        let (v, spent) = judged(&hdr, &plate, &on_plate().inverse());
+        println!("header, plate: {spent} pieces");
+        assert_eq!(v, Verdict::Touching);
+        assert!(spent < 1 << 14, "{spent}");
+    }
 }
