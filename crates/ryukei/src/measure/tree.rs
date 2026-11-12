@@ -260,6 +260,49 @@ impl Tree {
         out.sort_unstable();
         out
     }
+
+    /// The tags of the pieces whose own boxes meet the box `lo`–`hi`
+    /// (touching counts), sorted, into `out`, which is cleared first. A
+    /// caller asking many times keeps `out`, so once it has grown nothing
+    /// is allocated: the walk's stack is 64 nodes (see `nearest_point`).
+    pub(crate) fn in_box(&self, lo: Point3, hi: Point3, out: &mut Vec<u32>) {
+        out.clear();
+        if self.is_empty() {
+            return;
+        }
+        let meets = |a: Point3, b: Point3| {
+            a.x <= hi.x && lo.x <= b.x && a.y <= hi.y && lo.y <= b.y && a.z <= hi.z && lo.z <= b.z
+        };
+        let mut stack = [0usize; 64];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let n = &self.nodes[stack[top]];
+            if !meets(n.lo, n.hi) {
+                continue;
+            }
+            match n.kids {
+                Some([a, b]) => {
+                    assert!(top + 2 <= stack.len(), "a box tree deeper than 63");
+                    stack[top] = a;
+                    stack[top + 1] = b;
+                    top += 2;
+                }
+                None => {
+                    for p in &self.pieces[n.range[0]..n.range[1]] {
+                        let pts = p.prim.points();
+                        let (a, b) = pts[1..]
+                            .iter()
+                            .fold((pts[0], pts[0]), |(a, b), q| (a.min(*q), b.max(*q)));
+                        if meets(a, b) {
+                            out.push(p.tag);
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+    }
 }
 
 fn build(pieces: &mut [Piece], start: usize, end: usize, nodes: &mut Vec<Node>) -> usize {

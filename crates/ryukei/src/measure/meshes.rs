@@ -93,6 +93,13 @@ impl MeshTree {
         p.distance(super::prims::point_triangle(p, t))
     }
 
+    /// The triangles whose boxes meet the box `lo`–`hi` (touching counts),
+    /// by index, sorted, into `out` (cleared first; keep it between calls
+    /// and nothing is allocated once it has grown).
+    pub fn in_box(&self, lo: Point3, hi: Point3, out: &mut Vec<u32>) {
+        self.tree.in_box(lo, hi, out)
+    }
+
     /// Every pair `(i, j)` of a triangle of `self` and one of `other`
     /// within `d` of each other, sorted.
     pub fn within(&self, other: &MeshTree, d: f64) -> Vec<(u32, u32)> {
@@ -315,5 +322,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn in_box_matches_brute_force() {
+        let (ball, _) =
+            crate::primitive::sphere(OpKey::from_bytes(b"s"), 0.005, &Rigid::IDENTITY).unwrap();
+        let m = MeshTree::new(mesh_of(&ball));
+        let mut found = Vec::new();
+        let ps = probes(400);
+        for w in ps.chunks(2) {
+            let (lo, hi) = (w[0].min(w[1]), w[0].max(w[1]));
+            m.in_box(lo, hi, &mut found);
+            let brute: Vec<u32> = m
+                .triangles()
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| {
+                    let (a, b) = (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]));
+                    a.x <= hi.x
+                        && lo.x <= b.x
+                        && a.y <= hi.y
+                        && lo.y <= b.y
+                        && a.z <= hi.z
+                        && lo.z <= b.z
+                })
+                .map(|(k, _)| k as u32)
+                .collect();
+            assert_eq!(found, brute, "{lo:?} {hi:?}");
+        }
+        // A flat box on a face's plane still finds that face's triangles.
+        let b = MeshTree::new(mesh_of(&block([0.0; 3], 0.01)));
+        b.in_box(
+            Point3::new(0.002, 0.002, 0.01),
+            Point3::new(0.003, 0.003, 0.01),
+            &mut found,
+        );
+        assert!(!found.is_empty());
+        MeshTree::new(Vec::new()).in_box(lo_hi().0, lo_hi().1, &mut found);
+        assert!(found.is_empty());
+    }
+
+    fn lo_hi() -> (Point3, Point3) {
+        (Point3::ORIGIN, Point3::new(1.0, 1.0, 1.0))
     }
 }
