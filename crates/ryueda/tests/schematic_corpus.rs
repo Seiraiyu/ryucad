@@ -281,6 +281,15 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             coded(found, "sch_topology")
         );
     }
+    // Plan 3.A: each of the front end's op-amp stages drawn round its own
+    // amplifier, the template's supplies on it: its feedback, input,
+    // divider and pull-down within the idiom's reach (a stage drawn off its
+    // amplifier is a failure to fix, not a threshold).
+    assert!(
+        coded(of("frontend"), "sch_idiom_missed").is_empty(),
+        "{:#?}",
+        coded(of("frontend"), "sch_idiom_missed")
+    );
     assert!(
         !coded(of("buck"), "sch_jog").iter().any(|f| f["refs"]
             .as_array()
@@ -425,14 +434,24 @@ const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("breakout", "breakout", 79),
     ("breakout", "sensor", 95),
     ("rp2040", "mitayi", 38),
+    // 25 measured. Plan 3.A's one-part leftover region joining its
+    // neighbour (R7's VSNS region into the converter's) took it from 27:
+    // the Misc title went (2 points), but the packing changed, and J4's
+    // region of one, standing apart, now lines up with no other part
+    // (sch_out_of_line, 2 points; the join's own R7 stands in R8's column).
     ("buck", "buck", 24),
     // Plan 3.A: 94 less 5. The 6 points are design 519's
     // sch_region_untitled on three regions no idiom names (the coxswain
     // took option A, 2026-11-12); titled, it is 100 again
     // (amp_titled_scores_full).
     ("frontend", "amp", 89),
-    ("frontend", "baldiff", 35),
-    ("frontend", "ivconv", 77),
+    // Plan 3.A: measured less 5 (90 and 92 laid out from nothing). Each
+    // stage stands round its amplifier: the divider's top on IN+'s line in
+    // one column with the input resistor, the pull-down and the divider's
+    // bottom hanging from that line, the feedback a stack apart over the
+    // top supply's capacitor (47 and 78 before the template).
+    ("frontend", "baldiff", 85),
+    ("frontend", "ivconv", 87),
     ("ethernet", "eth", 58),
     ("ethernet", "status_led", 92),
 ];
