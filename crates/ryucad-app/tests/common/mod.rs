@@ -46,6 +46,30 @@ fn shared() -> &'static Path {
     })
 }
 
+/// Whether `exe` exists and nothing under `roots` (each a file or a
+/// folder, walked to the bottom) was modified after it. A root that
+/// doesn't exist is skipped.
+pub fn built_after(exe: &Path, roots: &[PathBuf]) -> bool {
+    fn newer(p: &Path, than: std::time::SystemTime) -> bool {
+        let Ok(meta) = std::fs::symlink_metadata(p) else {
+            return false;
+        };
+        if meta.modified().is_ok_and(|t| t > than) {
+            return true;
+        }
+        meta.is_dir()
+            && std::fs::read_dir(p)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| newer(&e.path(), than))
+    }
+    let Ok(at) = std::fs::metadata(exe).and_then(|m| m.modified()) else {
+        return false;
+    };
+    !roots.iter().any(|r| newer(r, at))
+}
+
 /// The `ryucad` binary of this build, built if needed: `cargo test -p
 /// ryucad-app` doesn't build other packages' binaries. With
 /// `RYUCAD_TEST_PREBUILT` set, the one beside the tests is taken as it is.
