@@ -1074,6 +1074,7 @@ pub fn checked_findings(
                 &laid.outcome,
                 &found[*i],
                 &found[*i].fixes[*j],
+                prefs,
             )
             .is_ok()
         })

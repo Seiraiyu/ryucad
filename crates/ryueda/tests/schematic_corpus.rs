@@ -276,13 +276,11 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             coded(found, "sch_bank_not_in_row")
         );
     }
-    // Placement across clusters (work item 4530): at most 25 floating
-    // parts over the corpus from nothing (16 after plan 1.D, 35 before
-    // it, 41 before 1.C wired local circuits). Plan 2.A departs from its
-    // bar of 20: a local group's wire arriving through the label its
-    // target pin is to carry is dropped (that label would have nowhere
-    // to go), and inside regions more such wires arrive so (the RP2040
-    // +4, the buck +1, the Ethernet PHY +4). Plan 2.G lowers it to 10.
+    // Placement across clusters (work item 4530): at most 10 floating
+    // parts over the corpus from nothing, design 348's bar (16 after plan
+    // 1.D, 25 allowed from 2.A to 2.F, 13 on main before plan 2.G: stacks
+    // judged though only labels can draw them, clamps beside a stack's
+    // outputs).
     for (name, found) in &all {
         eprintln!("{name}: {} floating", coded(found, "sch_floating").len());
         for f in coded(found, "sch_floating") {
@@ -293,7 +291,7 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
         .iter()
         .map(|(_, f)| coded(f, "sch_floating").len())
         .sum();
-    assert!(floating <= 25, "{floating} parts float");
+    assert!(floating <= 10, "{floating} parts float");
     // Design 236's quality bar: each circuit's crossings at most 1.5 times
     // its reference's within the cut (the manifest's `crossings`).
     let mut over = Vec::new();
@@ -306,14 +304,7 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
         // 1.5 times the reference's, and at least one crossing allowed
         // where the reference has none (a reference of 0 would make any
         // crossing a failure; design 236's bar is a ratio).
-        let mut bar = (theirs * 3).div_ceil(2).max(1);
-        // Plan 2.E's title band takes 20 mm off every page: the RP2040's
-        // A3 sheet lays out with 3 crossings against a bar of 2. Accepted
-        // by the coxswain for the band alone; the engine is to win it
-        // back (its issue, linked to ryueda 2).
-        if *name == "rp2040" {
-            bar = bar.max(3);
-        }
+        let bar = (theirs * 3).div_ceil(2).max(1);
         eprintln!("{name}: {ours} crossings, the reference {theirs}, bar {bar}");
         if ours > bar {
             over.push(format!(
@@ -322,6 +313,50 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
         }
     }
     assert!(over.is_empty(), "{over:#?}");
+}
+
+/// Design 348's bar: each corpus circuit laid out from nothing, regions
+/// and paper fit included, under 2 s on one thread (the median of three,
+/// each block in process; with `RYUEDA_BARS=1` as it is, else ten times
+/// looser on a shared runner). Plan 2.B measured the RP2040's `mitayi` at
+/// 2.2 to 2.5 s on cox-worker-1 (Intel Xeon E5-2650); plan 2.G at 323 ms
+/// on cox-worker-2 (AMD Ryzen 7 9700X).
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn the_corpus_from_nothing_lays_out_within_its_bar() {
+    use std::time::{Duration, Instant};
+    let bar = if std::env::var("RYUEDA_BARS").is_ok_and(|v| v == "1") {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_secs(20)
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let board = circuit(dir.path(), name);
+        let p = ryueda::project::Project::load(&board).unwrap();
+        let mut times: Vec<Duration> = (0..3)
+            .map(|_| {
+                pool.install(|| {
+                    let t = Instant::now();
+                    for b in p.conn.blocks.values() {
+                        ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::Block)
+                            .unwrap();
+                    }
+                    t.elapsed()
+                })
+            })
+            .collect();
+        times.sort();
+        eprintln!(
+            "{name}: from nothing {:?} (median of 3, one thread)",
+            times[1]
+        );
+        assert!(times[1] < bar, "{name}: {:?}", times[1]);
+    }
 }
 
 /// Design 236's score bars: each block's least sheet score laid out from
@@ -333,16 +368,19 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
 /// first sheet from 36 to 14, the buck from 37 to 29. Plan 2.B's banks
 /// (#429) took Ethernet's PHY sheet from 0 to 51 and the RP2040's first
 /// sheet from 14 to 19, measured on cox-worker-1 (Intel Xeon E5-2650, 8
-/// threads, shared, load 2 to 5) on 2026-11-10.
+/// threads, shared, load 2 to 5) on 2026-11-10. Measured again after plan
+/// 2.G's engine work on cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared,
+/// load 3.8 to 4.3) on 2026-11-11: the RP2040's first sheet 43, the front
+/// end's amp 100 (its clamps no longer float), Ethernet's PHY sheet 63.
 const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("breakout", "breakout", 79),
     ("breakout", "sensor", 95),
-    ("rp2040", "mitayi", 14),
+    ("rp2040", "mitayi", 38),
     ("buck", "buck", 24),
-    ("frontend", "amp", 51),
-    ("frontend", "baldiff", 48),
+    ("frontend", "amp", 95),
+    ("frontend", "baldiff", 42),
     ("frontend", "ivconv", 73),
-    ("ethernet", "eth", 46),
+    ("ethernet", "eth", 58),
     ("ethernet", "status_led", 92),
 ];
 
@@ -2340,4 +2378,194 @@ fn an_annotate_changes_only_designators() {
     }
     let again = ryueda(&board, 1, &["annotate", "--reset", "all"]);
     assert_eq!(again["changes"], serde_json::json!([]), "{again}");
+}
+
+/// A net drawn with labels on a sheet is wired between regions only where
+/// the wire is short (design 348: "a wire where the regions are
+/// neighbours and the channel is free and short, under LOCAL_REACH, else
+/// labels"): every longer run of such a net lies inside one region's
+/// frame. The RP2040's `qspi_ss` ran 155 mm from R2 (region J3 Header-1)
+/// to R1's label (region U3C RP2040), crossing two wires (#718, plan 2.G).
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn the_corpus_from_nothing_wires_labelled_nets_long_only_inside_a_region() {
+    use ryusch::geom::{GRID, Rect};
+    let reach = 16 * GRID;
+    let dir = tempfile::tempdir().unwrap();
+    let mut out = Vec::new();
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let (board, _) = fresh(dir.path(), name);
+        let p = ryueda::project::Project::load(&board).unwrap();
+        for b in p.conn.blocks.values() {
+            let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+            let l = &laid.outcome.layout;
+            for (net, by) in &l.routes {
+                for (sid, runs) in by {
+                    let labelled = l
+                        .labels
+                        .get(net)
+                        .is_some_and(|ls| ls.iter().any(|x| &x.sheet == sid));
+                    if !labelled {
+                        continue;
+                    }
+                    for run in runs {
+                        if ryusch::route::length(run) <= reach {
+                            continue;
+                        }
+                        let span = run
+                            .windows(2)
+                            .map(|w| Rect::new(w[0], w[1]))
+                            .reduce(Rect::union)
+                            .unwrap();
+                        let inside = l
+                            .regions
+                            .values()
+                            .any(|r| &r.sheet == sid && r.frame_on_sheet().contains(&span));
+                        if !inside {
+                            out.push(format!(
+                                "{name}/{}/{sid}: {net} runs {} mm across regions",
+                                b.id,
+                                ryusch::route::length(run) / 1_000_000
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(out.is_empty(), "{out:#?}");
+}
+
+/// #712 (plan 2.G): every template placed in one block, as plan 2.D's
+/// visual drew them: no part's designator or value covers one of its own
+/// pins' lines or the room in front of its end (the regulator's
+/// designator stood on its VOUT pin; plan 2.E's guard keeps it off).
+#[test]
+fn a_templates_designator_stands_off_its_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("t");
+    std::fs::create_dir_all(&board).unwrap();
+    ryueda(&board, 1, &["init"]);
+    for class in ["resistor", "capacitor", "inductor", "diode", "led"] {
+        ryueda(&board, 1, &["symbol", "create", class, "--template", class]);
+    }
+    ryueda(
+        &board,
+        1,
+        &[
+            "symbol",
+            "create",
+            "reg",
+            "--template",
+            "regulator",
+            "--pins",
+            r#"[{"number":"1","name":"VIN","type":"power_in"},{"number":"2","name":"GND","type":"power_in"},{"number":"3","name":"VOUT","type":"power_out"},{"number":"4","name":"EN","type":"input"}]"#,
+        ],
+    );
+    ryueda(
+        &board,
+        1,
+        &[
+            "symbol",
+            "create",
+            "mcu",
+            "--template",
+            "ic",
+            "--pins",
+            r#"[{"number":"1","name":"VDD","type":"power_in"},{"number":"2","name":"IOVDD","type":"power_in"},{"number":"3","name":"GND","type":"power_in"},{"number":"4","name":"AGND","type":"power_in"},{"number":"5","name":"RUN","type":"input"},{"number":"6","name":"TX","type":"output"},{"number":"7","name":"SDA","type":"bidirectional"},{"number":"8","name":"SCL","type":"bidirectional"},{"number":"9","name":"MOSI","type":"bidirectional"},{"number":"10","name":"MISO","type":"bidirectional"},{"number":"11","name":"SCK","type":"bidirectional"},{"number":"12","name":"CS","type":"bidirectional"},{"number":"13","name":"USB_D+","type":"bidirectional"},{"number":"14","name":"USB_D-","type":"bidirectional"}]"#,
+        ],
+    );
+    ryueda(
+        &board,
+        1,
+        &[
+            "symbol",
+            "create",
+            "conn",
+            "--template",
+            "connector",
+            "--pins",
+            r#"[{"number":"1","name":"~","type":"passive"},{"number":"2","name":"~","type":"passive"},{"number":"3","name":"~","type":"passive"},{"number":"4","name":"~","type":"passive"}]"#,
+        ],
+    );
+    for (id, prefix, value) in [
+        ("conn", "J", "Conn_01x04"),
+        ("resistor", "R", "10k"),
+        ("capacitor", "C", "100n"),
+        ("inductor", "L", "10u"),
+        ("diode", "D", "1N4148"),
+        ("led", "D", "red"),
+        ("mcu", "U", "MCU"),
+        ("reg", "U", "AP2112K-3.3"),
+    ] {
+        ryueda(
+            &board,
+            1,
+            &[
+                "libcomp", "create", id, "--id", id, "--symbol", id, "--prefix", prefix, "--value",
+                value,
+            ],
+        );
+    }
+    ryueda(&board, 1, &["block", "create", "Templates", "--id", "top"]);
+    for id in [
+        "conn",
+        "resistor",
+        "capacitor",
+        "inductor",
+        "diode",
+        "led",
+        "mcu",
+        "reg",
+    ] {
+        ryueda(&board, 1, &["component", "add", "top", "--of", id]);
+    }
+    let p = ryueda::project::Project::load(&board).unwrap();
+    let mut over = Vec::new();
+    let mut checked = 0;
+    for b in p.conn.blocks.values() {
+        let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+        let (block, l) = (&laid.built.input, &laid.outcome.layout);
+        for part in &block.parts {
+            let (Some(x), Some(fields)) = (l.placed.get(&part.key), l.text.get(&part.key)) else {
+                continue;
+            };
+            let shape = ryusch::shape::Shape::of(
+                part,
+                ryusch::geom::Place::new(x.at, x.rotation, x.mirror),
+            );
+            for (name, line) in part.lines() {
+                let Some(at) = fields.get(name) else { continue };
+                let b = line.boxed(*at);
+                checked += 1;
+                for (k, pin) in shape.pins.iter().enumerate() {
+                    // Its line (a hard rule already) and the room in front
+                    // of its end, where its wire or label goes.
+                    use ryusch::geom::{GRID, Rect, Side};
+                    let e = pin.end;
+                    let front = match pin.side {
+                        Side::Right => {
+                            Rect::new([e[0], e[1] - GRID], [e[0] + 3 * GRID, e[1] + GRID])
+                        }
+                        Side::Left => {
+                            Rect::new([e[0] - 3 * GRID, e[1] - GRID], [e[0], e[1] + GRID])
+                        }
+                        Side::Up => Rect::new([e[0] - GRID, e[1]], [e[0] + GRID, e[1] + 3 * GRID]),
+                        Side::Down => {
+                            Rect::new([e[0] - GRID, e[1] - 3 * GRID], [e[0] + GRID, e[1]])
+                        }
+                    };
+                    if Rect::new(pin.base, pin.end).grow(1).overlaps(&b) || front.overlaps(&b) {
+                        over.push(format!(
+                            "{}'s {name} over its pin {}",
+                            part.refdes, part.pins[k].number
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Eight parts, a designator and a value each.
+    assert_eq!(checked, 16);
+    assert!(over.is_empty(), "{over:#?}");
 }

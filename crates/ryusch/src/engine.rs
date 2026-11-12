@@ -273,7 +273,9 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
                 }
                 again = attempt(&whole, &r, spread, &BTreeSet::new());
             }
-            if crate::rules::check(&whole, &again.layout).is_empty() {
+            // Judged under the block's own papers: a sheet a `paper`
+            // instruction pins keeps its size there (#665).
+            if crate::rules::check(block, &again.layout).is_empty() {
                 out = again;
             }
         }
@@ -291,13 +293,161 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
             out = attempt(block, &r, 0, &again);
         }
     }
-    // A shift is applied as asked: one that leaves a hard rule broken (a
-    // part over another's room, or off the sheet) is refused, naming it.
-    if let Some(n) = block
-        .moves
-        .iter()
-        .position(|m| matches!(m, Instruction::Shift { .. }))
+    // A `near` whose parts, placed by the pin it names, break a hard rule
+    // (a stage's feedback pulled beside its amplifier's pin, its label
+    // with no room; #664): laid out again without it, it moves nothing,
+    // noted, while it lasts (plan 2.G).
+    let mut left_out: Vec<String> = Vec::new();
+    while left_out.len() < block.instructions.len() {
+        let broken = crate::rules::check(block, &out.layout);
+        let Some(id) = broken.iter().find_map(|v| {
+            block.instructions.iter().find_map(|(id, i)| {
+                (matches!(i, Instruction::Near { .. })
+                    && !left_out.contains(id)
+                    && i.parts()
+                        .iter()
+                        .flat_map(|s| instr::parts_named(block, s))
+                        .any(|p| names_part(&v.refs, &block.parts[p].key)))
+                .then(|| id.clone())
+            })
+        }) else {
+            break;
+        };
+        left_out.push(id);
+        let mut without = block.clone();
+        for id in &left_out {
+            without.instructions.remove(id);
+        }
+        let Ok(r2) = instr::resolve(&without) else {
+            break;
+        };
+        let mut tried = attempt(&without, &r2, 0, &BTreeSet::new());
+        if !crate::rules::check(block, &tried.layout).is_empty() {
+            continue;
+        }
+        tried.layout.instructions = block.instructions.clone();
+        for id in &left_out {
+            tried.notes.push(Note {
+                code: "instruction_unresolved".into(),
+                message: format!(
+                    "{id} can't hold: its parts by that pin would break a hard rule ({}); they stay where the layout puts them while it lasts",
+                    broken.first().map_or("", |v| v.rule)
+                ),
+                details: json!({"instruction": id, "rule": broken.first().map(|v| v.rule)}),
+            });
+        }
+        out = tried;
+        break;
+    }
+    // A `paper` instruction pins its sheet's size: one too small for what
+    // the sheet holds (from nothing, the sheet is packed before its pin
+    // applies) is refused, naming it, rather than drawn past its edge
+    // (#665, plan 2.G).
+    if let Some(v) = crate::rules::check(block, &out.layout)
+        .into_iter()
+        .find(|v| v.rule == "inside")
+        && let Some((id, size)) = block.instructions.iter().find_map(|(id, i)| match i {
+            Instruction::Paper { sheet, size, .. }
+                if *sheet == v.sheet
+                    || out
+                        .layout
+                        .sheets
+                        .get(&v.sheet)
+                        .is_some_and(|x| x.name == *sheet) =>
+            {
+                Some((id.clone(), size.clone()))
+            }
+            _ => None,
+        })
+    {
+        return Err(instr::Refusal {
+            code: "layout_rule",
+            message: format!(
+                "{id} pins sheet {} to {size}, which can't hold what it holds: {}",
+                v.sheet, v.message
+            ),
+            details: json!({"instructions": [id], "rule": "paper"}),
+        });
+    }
+    // Two regions the agent named can't merge: where an instruction puts
+    // parts of both where their frames overlap (an `align` of a part of
+    // each), the instructions can't all hold (#665, plan 2.G).
+    if let Some(v) = crate::rules::check(block, &out.layout)
+        .into_iter()
+        .find(|v| v.rule == "region_overlap")
+        && let [a, b] = v.refs.as_slice()
+        && let (Some(ra), Some(rb)) = (out.layout.regions.get(a), out.layout.regions.get(b))
+        && ra.named
+        && rb.named
+    {
+        let in_region = |r: &crate::layout::Region, p: usize| r.parts.contains(&block.parts[p].key);
+        let joins = |i: &Instruction| {
+            !matches!(
+                i,
+                Instruction::Region { .. } | Instruction::RegionNone { .. }
+            ) && {
+                let ps: Vec<usize> = i
+                    .parts()
+                    .iter()
+                    .flat_map(|s| instr::parts_named(block, s))
+                    .collect();
+                let other: Vec<usize> = match i {
+                    Instruction::Beside { of, .. } => {
+                        instr::parts_named(block, of).into_iter().collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let all: Vec<usize> = ps.into_iter().chain(other).collect();
+                all.iter().any(|p| in_region(ra, *p)) && all.iter().any(|p| in_region(rb, *p))
+            }
+        };
+        let titled = |t: &str| {
+            block.instructions.iter().find_map(|(id, i)| match i {
+                Instruction::Region { title, .. } if title == t => Some(id.clone()),
+                _ => None,
+            })
+        };
+        let named: Vec<String> = block
+            .instructions
+            .iter()
+            .filter(|(_, i)| joins(i))
+            .map(|(id, _)| id.clone())
+            .chain(
+                block
+                    .moves
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| joins(m))
+                    .map(|(n, _)| format!("move {}", n + 1)),
+            )
+            .chain(titled(&ra.title))
+            .chain(titled(&rb.title))
+            .collect();
+        return Err(instr::Refusal {
+            code: "instruction_conflict",
+            message: format!(
+                "{} can't all hold: they put parts of regions {} and {} where their frames overlap",
+                named.join(", "),
+                ra.title,
+                rb.title
+            ),
+            details: json!({"instructions": named}),
+        });
+    }
+    // A move is applied as asked and holds its part where it puts it: one
+    // that leaves a hard rule broken is refused, naming it -- a shift for
+    // any (a part over another's room, or off the sheet), another move
+    // where the rule names a part it moved (a connector turned to face
+    // the sheet's edge, its pins' labels with no room; plan 2.G).
+    if !block.moves.is_empty()
         && let Some(v) = crate::rules::check(block, &out.layout).first()
+        && let Some(n) = block.moves.iter().position(|m| {
+            matches!(m, Instruction::Shift { .. })
+                || m.parts()
+                    .iter()
+                    .flat_map(|s| instr::parts_named(block, s))
+                    .any(|p| names_part(&v.refs, &block.parts[p].key))
+        })
     {
         let id = format!("move {}", n + 1);
         return Err(instr::Refusal {
@@ -309,11 +459,23 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
     Ok(out)
 }
 
+/// Whether a hard rule's refs (a part's key, `label N at KEY/PIN`, `KEY's
+/// value`, `KEY's connector` …) name the part keyed `key`.
+fn names_part(refs: &[String], key: &str) -> bool {
+    refs.iter().any(|r| {
+        r == key
+            || r.starts_with(&format!("{key}'s "))
+            || r.split(' ')
+                .any(|w| w.split_once('/').is_some_and(|(k, _)| k == key))
+    })
+}
+
 /// Parts a released instruction moved, back where they stood before it:
 /// not placed yet, named by no lasting instruction, their sheet still
 /// there and their room there clear of every part placed.
-fn restore(st: &mut State, idioms: &[idiom::Idiom]) {
+fn restore(st: &mut State, idioms: &[idiom::Idiom], prev: Option<&Layout>) {
     let block = st.block;
+
     let named: BTreeSet<usize> = block
         .instructions
         .values()
@@ -351,7 +513,26 @@ fn restore(st: &mut State, idioms: &[idiom::Idiom]) {
             }
             _ => true,
         });
-        if clear && Rect::new([0, 0], st.size(s)).contains(&e) {
+        // Nor on what the previous layout drew of other nets (wires,
+        // labels, buses, notes): its own nets' are drawn again, and text
+        // finds its place round the parts (#666).
+        let kept = drawn(
+            prev.map(|l| {
+                let mut l = l.clone();
+                l.text.clear();
+                for n in block.parts[p].pins.iter().flat_map(|x| x.nets()) {
+                    let key = &block.nets[n].key;
+                    l.routes.remove(key);
+                    l.labels.remove(key);
+                }
+                l
+            })
+            .as_ref(),
+        );
+        let free = kept
+            .get(&at.sheet)
+            .is_none_or(|rs| rs.iter().all(|r| !e.overlaps(r)));
+        if clear && free && Rect::new([0, 0], st.size(s)).contains(&e) {
             st.place[p] = Some((s, place, false));
             // Back in the region of the part its idiom serves, where that
             // is on its sheet.
@@ -408,7 +589,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             unreached_notes.push(Note {
                 code: "network_unresolved".into(),
                 message: format!(
-                    "{} {why}: left where it is (near {} alone, or a region instruction holding it, would move it)",
+                    "{} {why}: left where it is (near {} alone would move it where every hard rule holds there, else it says why; or a region instruction holding it)",
                     crate::lint::who(&block.parts[q]),
                     pin
                 ),
@@ -587,7 +768,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         }
     }
     keep(&mut st, prev, fresh_sheet, &unkeep);
-    restore(&mut st, &idioms);
+    restore(&mut st, &idioms, prev);
     named_regions(&mut st, r);
     pin_papers(&mut st, r);
     // What `relate` may not move: kept parts no relative instruction moves.
@@ -1941,6 +2122,10 @@ fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>, not: &BTreeS
 /// takes parts out of named regions.
 fn named_regions(st: &mut State, r: &instr::Resolved) {
     let block = st.block;
+    // Each instruction's region by ID: two instructions may give one
+    // title, so a title alone doesn't say which (plan 2.G; both took the
+    // second's parts over a previous layout).
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
     for (title, set) in &r.regions {
         let keys: Vec<String> = set
             .iter()
@@ -1950,9 +2135,22 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
         let Some(first) = set.iter().copied().find(|p| st.place[*p].is_some()) else {
             continue;
         };
+        // A named region of this title not yet claimed, one holding some
+        // of these parts first.
+        let mine = |st: &State| -> Option<String> {
+            let open: Vec<&(String, crate::layout::Region)> = st
+                .regions
+                .iter()
+                .filter(|(id, g)| g.named && &g.title == title && !claimed.contains(id))
+                .collect();
+            open.iter()
+                .find(|(_, g)| g.parts.iter().any(|k| keys.contains(k)))
+                .or(open.first())
+                .map(|(id, _)| id.clone())
+        };
         // A region holding only these parts takes the title, keeping its
         // ID (what `region rename` writes).
-        if !st.regions.iter().any(|(_, g)| g.named && &g.title == title)
+        if mine(st).is_none()
             && let Some((_, g)) = st.regions.iter_mut().find(|(_, g)| {
                 !g.named && !g.parts.is_empty() && g.parts.iter().all(|k| keys.contains(k))
             })
@@ -1960,21 +2158,19 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
             g.title = title.clone();
             g.named = true;
         }
-        for (_, g) in st.regions.iter_mut() {
-            if !(g.named && &g.title == title) {
+        let id = mine(st);
+        for (gid, g) in st.regions.iter_mut() {
+            if id.as_deref() != Some(gid.as_str()) {
                 g.parts.retain(|k| !keys.contains(k));
             }
         }
         let (s, place, _) = st.place[first].expect("placed");
         let sid = st.sheets[s].0.clone();
-        match st
-            .regions
-            .iter_mut()
-            .find(|(_, g)| g.named && &g.title == title)
-        {
-            Some((_, g)) => {
+        match id.and_then(|id| st.regions.iter_mut().find(|(g, _)| *g == id)) {
+            Some((gid, g)) => {
                 g.parts = keys;
                 g.parts.sort();
+                claimed.insert(gid.clone());
             }
             None => {
                 let n = st
@@ -1985,8 +2181,10 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
                     .unwrap_or(0);
                 let mut parts = keys;
                 parts.sort();
+                let gid = format!("r{}", n + 1);
+                claimed.insert(gid.clone());
                 st.regions.push((
-                    format!("r{}", n + 1),
+                    gid,
                     crate::layout::Region {
                         sheet: sid,
                         at: place.at,
@@ -3279,6 +3477,45 @@ fn draw(
                 joined.insert(row.pin);
                 joined.extend(row.members.iter().copied());
             }
+            // A port's flag beside its sole pin's part on this sheet is
+            // wired to that pin by a short run, and neither takes a label:
+            // the flag names the net (plan 2.G; a clamp beside a stack).
+            for f in 0..block.parts.len() {
+                if !matches!(block.parts[f].kind, PartKind::Port { .. }) {
+                    continue;
+                }
+                let Some((p, k)) = place::sole_pin(block, f) else {
+                    continue;
+                };
+                if st.place[f].map(|x| x.0) != Some(s)
+                    || st.place[p].map(|x| x.0) != Some(s)
+                    || joined.contains(&(p, k))
+                {
+                    continue;
+                }
+                let Some(n) = block.parts[p].pins[k].net else {
+                    continue;
+                };
+                // Only a net drawn by labels: a wired net routes its flag
+                // with its pins.
+                if styles.get(&n).is_some_and(|st| *st == NetStyle::Wire) && !instead.contains(&n) {
+                    continue;
+                }
+                let end = |(q, j): (usize, usize)| {
+                    let pin = st.shape(q).expect("placed").pins[j];
+                    (pin.end, pin.side)
+                };
+                if let Some((_, runs)) =
+                    route_net(&field, n, &[end((p, k)), end((f, 0))], LOCAL_REACH)
+                    && let [run] = runs.as_slice()
+                    && route::length(run) <= LOCAL_REACH
+                    && field.mark(n, run).is_ok()
+                {
+                    routes.entry(n).or_default().push(run.clone());
+                    joined.insert((p, k));
+                    joined.insert((f, 0));
+                }
+            }
             // Labels, the previous ones where they still fit.
             let mut want_label: Vec<(usize, usize, usize, LabelKind)> = Vec::new();
             for (n, list) in &pins_of {
@@ -3427,10 +3664,18 @@ fn draw(
                             done.extend(group.iter().map(|(n, _)| *n));
                             let ts: Vec<Line> = group.iter().map(|(_, t)| *t).collect();
                             let cands = text::candidates_on(body, &ts, *side);
-                            let at = cands.iter().copied().find(|c| {
+                            let clear = |c: &Point| {
                                 let bs = text::boxes(&ts, *c);
                                 bs.iter().all(|b| field.clear(*b)) && clear_of(&bs)
-                            });
+                            };
+                            // No room on the side asked (a connector at the
+                            // sheet's edge, its value asked past it): where
+                            // phase 1 puts it, on the sheet, and the
+                            // instruction reads as not held (plan 2.G).
+                            let at =
+                                cands.iter().copied().find(clear).or_else(|| {
+                                    text::candidates(body, &ts).into_iter().find(clear)
+                                });
                             let fallback = cands
                                 .first()
                                 .copied()
@@ -4344,6 +4589,7 @@ fn place_labels(
     }
     order.sort();
     let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, _, i)| i).collect();
+    let first_order = order.clone();
     // A label left with no place is tried again first: a neighbour's stub
     // may have taken the place it needs. The fewest left so wins.
     // The fewest (stuck, demoted) so far, and what made them.
@@ -4361,6 +4607,7 @@ fn place_labels(
             want,
             carriers,
             &order,
+            &BTreeSet::new(),
             prev_labels,
             prev_runs,
             sid,
@@ -4384,6 +4631,36 @@ fn place_labels(
                 order.insert(0, i);
             }
             _ => break,
+        }
+    }
+    // Labels still with no place: once more with the stuck labels' parts
+    // labelled along their pins (a connector turned to point its pins
+    // up or down, its labels a step apart; plan 2.G).
+    let along: BTreeSet<usize> = best
+        .as_ref()
+        .map(|b| b.4.iter().copied().collect())
+        .unwrap_or_default();
+    if !along.is_empty() {
+        let mut f = field.clone();
+        let mut l = labels.clone();
+        let mut r = routes.clone();
+        let (stuck, demoted) = place_labels_in(
+            block,
+            st,
+            &mut f,
+            want,
+            carriers,
+            &first_order,
+            &along,
+            prev_labels,
+            prev_runs,
+            sid,
+            &mut l,
+            &mut r,
+        );
+        let count = (stuck.len(), demoted.len());
+        if best.as_ref().is_none_or(|b| count < b.0) {
+            best = Some((count, f, l, r, stuck.iter().map(|i| want[*i].1).collect()));
         }
     }
     let (_, f, l, r, parts) = best.expect("tried once");
@@ -4433,6 +4710,7 @@ fn wire_own(
     side: Side,
     reach: Nm,
     kept: Option<(&Vec<Vec<Point>>, &BTreeSet<Point>)>,
+    held: &dyn Fn(&[Point]) -> bool,
 ) -> bool {
     let tree = own_tree(routes, labels, n, sid);
     let again = kept_run(field, &tree, n, end, reach, kept);
@@ -4454,7 +4732,7 @@ fn wire_own(
             route::run_of(&path)
         }
     };
-    if route::length(&run) > reach || field.mark(n, &run).is_err() {
+    if route::length(&run) > reach || !held(&run) || field.mark(n, &run).is_err() {
         return false;
     }
     routes.entry(n).or_default().push(run);
@@ -4511,6 +4789,42 @@ fn own_tree(routes: &Routes, labels: &Labels, n: usize, sid: &str) -> BTreeSet<r
 type Routes = BTreeMap<usize, Vec<Vec<Point>>>;
 type Labels = BTreeMap<usize, Vec<Label>>;
 
+/// Whether a labelled net's wire `run` on sheet `sid` may be drawn: short
+/// (within `LOCAL_REACH`), or inside one region (its parts' extents grown
+/// by a frame's margin, which the region's frame holds once drawn), or on
+/// a sheet with no regions. Design 348: a wire between regions only where
+/// it is short, else labels; the RP2040's `qspi_ss` ran 155 mm from one
+/// region to another, crossing two wires (#718, plan 2.G).
+fn wire_held(st: &State, sid: &str, run: &[Point]) -> bool {
+    if route::length(run) <= LOCAL_REACH {
+        return true;
+    }
+    let Some(span) = run
+        .windows(2)
+        .map(|w| Rect::new(w[0], w[1]))
+        .reduce(|a, b| a.union(b))
+    else {
+        return true;
+    };
+    let mut any = false;
+    for (_, r) in st.regions.iter().filter(|(_, r)| r.sheet == sid) {
+        let held = r
+            .parts
+            .iter()
+            .filter_map(|k| st.block.part(k))
+            .filter(|p| st.place[*p].is_some_and(|x| st.sheets[x.0].0 == sid))
+            .filter_map(|p| st.shape(p))
+            .map(|sh| sh.extent)
+            .reduce(|a, b| a.union(b));
+        let Some(held) = held else { continue };
+        any = true;
+        if held.grow(crate::region::FRAME).contains(&span) {
+            return true;
+        }
+    }
+    !any
+}
+
 /// [`place_labels`] in one order; the labels left with no place.
 #[allow(clippy::too_many_arguments)]
 fn place_labels_in(
@@ -4520,6 +4834,7 @@ fn place_labels_in(
     want: &[(usize, usize, usize, LabelKind)],
     carriers: &BTreeMap<(usize, usize), (usize, usize)>,
     order: &[usize],
+    along: &BTreeSet<usize>,
     prev_labels: &dyn Fn(usize) -> Vec<Label>,
     prev_runs: &BTreeMap<usize, Vec<Vec<Point>>>,
     sid: &str,
@@ -4528,6 +4843,7 @@ fn place_labels_in(
 ) -> (Vec<usize>, Vec<usize>) {
     let mut stuck = Vec::new();
     let mut demoted = Vec::new();
+    let held = |run: &[Point]| wire_held(st, sid, run);
     // A labelled net's pin the previous layout wired to another of its
     // pins (with no label of its own) keeps that wire while it holds,
     // before any label is placed, so no new label takes its way.
@@ -4564,7 +4880,8 @@ fn place_labels_in(
             end,
             Nm::MAX,
             prev_runs.get(&n).map(|r| (r, &pin_ends)),
-        ) && field.mark(n, &run).is_ok()
+        ) && wire_held(st, sid, &run)
+            && field.mark(n, &run).is_ok()
         {
             routes.entry(n).or_default().push(run);
             done.insert(i);
@@ -4644,10 +4961,32 @@ fn place_labels_in(
             }
         }
     }
+    // Each pin's way out: three steps straight off its end. A label or
+    // its stub keeps off the ways out of pins still to take theirs where
+    // it can (plan 2.G: a detour across a neighbour's row left that pin
+    // nowhere to go).
+    let ways_out: Vec<Rect> = want
+        .iter()
+        .map(|&(_, q, l, _)| {
+            let pin = st.shape(q).expect("placed").pins[l];
+            let d = pin.side.step();
+            Rect::new(
+                [pin.end[0] + d[0], pin.end[1] + d[1]],
+                [pin.end[0] + 3 * d[0], pin.end[1] + 3 * d[1]],
+            )
+            .grow(1)
+        })
+        .collect();
+    let mut pending: BTreeSet<usize> = order
+        .iter()
+        .copied()
+        .filter(|i| !done.contains(i))
+        .collect();
     for &i in order {
         if done.contains(&i) {
             continue;
         }
+        pending.remove(&i);
         let (n, p, k, kind) = want[i];
         let part = &block.parts[p];
         let on = format!("{}/{}", part.key, part.pins[k].number);
@@ -4684,6 +5023,15 @@ fn place_labels_in(
         let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
             fits_as(field, kind, stub, at, side)
         };
+        // Clear of the ways out of the pins still to be labelled.
+        let aside = |stub: &[Point], at: Point, side: Side| -> bool {
+            let intent = label::intent_on(&block.nets[n], kind);
+            let b = label::label_box_with(kind, name, intent, at, side);
+            pending.iter().all(|j| {
+                let w = ways_out[*j];
+                !w.overlaps(&b) && stub.windows(2).all(|s| !Rect::new(s[0], s[1]).overlaps(&w))
+            })
+        };
         // An off-sheet connector with no room for its longer outline is
         // drawn as a net label where one fits (plan 2.C): kept labels
         // keep their places, and the lint says what the sheet lacks.
@@ -4717,7 +5065,14 @@ fn place_labels_in(
                 }
             }
         }
-        let cands = label::candidates(kind, pin.end, pin.side);
+        let mut cands = label::candidates(kind, pin.end, pin.side);
+        // A part whose labels found no room otherwise: its signal labels
+        // along their pins first, side by side as its pins stand.
+        if along.contains(&p) && kind.signal() {
+            let mut first = label::sideways(pin.end, pin.side);
+            first.extend(cands);
+            cands = first;
+        }
         let detours = label::detours(kind, pin.end, pin.side);
         let last = label::sideways(pin.end, pin.side);
         // A rail's pin beside another of its rail's (a part's row of
@@ -4725,7 +5080,7 @@ fn place_labels_in(
         let mut wired = chosen.is_none()
             && !kind.signal()
             && wire_own(
-                field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept,
+                field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept, &held,
             );
         // A pin on a labelled signal net beside the net's own (another
         // pin's wire or label) joins it by a short wire: the net is
@@ -4745,6 +5100,7 @@ fn place_labels_in(
                 pin.side,
                 LOCAL_REACH,
                 kept,
+                &held,
             );
         }
         let (stub, at, side) = chosen
@@ -4754,7 +5110,8 @@ fn place_labels_in(
                 }
                 cands
                     .iter()
-                    .find(|(s, a, side)| fits(field, s, *a, *side))
+                    .find(|(s, a, side)| fits(field, s, *a, *side) && aside(s, *a, *side))
+                    .or_else(|| cands.iter().find(|(s, a, side)| fits(field, s, *a, *side)))
                     .cloned()
             })
             .or_else(|| {
@@ -4764,7 +5121,7 @@ fn place_labels_in(
                 if !wired {
                     let reach = if kind.signal() { Nm::MAX } else { RAIL_REACH };
                     wired = wire_own(
-                        field, routes, labels, n, sid, pin.end, pin.side, reach, kept,
+                        field, routes, labels, n, sid, pin.end, pin.side, reach, kept, &held,
                     );
                 }
                 None
@@ -4776,7 +5133,13 @@ fn place_labels_in(
                 detours
                     .iter()
                     .chain(&last)
-                    .find(|(s, a, side)| fits(field, s, *a, *side))
+                    .find(|(s, a, side)| fits(field, s, *a, *side) && aside(s, *a, *side))
+                    .or_else(|| {
+                        detours
+                            .iter()
+                            .chain(&last)
+                            .find(|(s, a, side)| fits(field, s, *a, *side))
+                    })
                     .cloned()
             })
             .or_else(|| {
@@ -4899,6 +5262,59 @@ mod tests {
             out.layout.placed[&key], first.layout.placed[&key],
             "restored"
         );
+        assert_eq!(crate::rules::check(&back, &out.layout), []);
+    }
+
+    /// #666: a released part goes back only where nothing the previous
+    /// layout drew stands: a wire of another net laid since across its old
+    /// place keeps it from there, and every hard rule holds.
+    #[test]
+    fn a_released_part_stays_off_a_wire_drawn_where_it_stood() {
+        let block = seeded(11, 2);
+        let first = lay(&block);
+        let key = block
+            .parts
+            .iter()
+            .find(|p| p.key.starts_with('r'))
+            .expect("a resistor")
+            .key
+            .clone();
+        let mut b = block.clone();
+        b.previous = Some(first.layout.clone());
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Edge {
+                parts: vec![key.clone()],
+                side: Side::Left,
+            },
+        );
+        let mut moved = lay(&b).layout;
+        // A wire of another net across where the part stood.
+        let was = &first.layout.placed[&key];
+        let p = block.part(&key).expect("part");
+        let e = Shape::of(
+            &block.parts[p],
+            Place::new(was.at, was.rotation, was.mirror),
+        )
+        .extent;
+        let mine: BTreeSet<usize> = block.parts[p].pins.iter().filter_map(|x| x.net).collect();
+        let other = (0..block.nets.len())
+            .find(|n| !mine.contains(n) && block.nets[*n].kind == NetKind::Signal)
+            .expect("another net");
+        let y = (e.min[1] + e.max[1]) / 2 / GRID * GRID;
+        moved
+            .routes
+            .entry(block.nets[other].key.clone())
+            .or_default()
+            .entry(was.sheet.clone())
+            .or_default()
+            .push(vec![[e.min[0] - 2 * GRID, y], [e.max[0] + 2 * GRID, y]]);
+        let mut back = block.clone();
+        back.previous = Some(moved);
+        back.relayout = Relayout::Parts(vec![key.clone()]);
+        back.restore = [(key.clone(), was.clone())].into();
+        let out = lay(&back);
+        assert_ne!(&out.layout.placed[&key], was, "put back on the wire");
         assert_eq!(crate::rules::check(&back, &out.layout), []);
     }
 
@@ -5390,6 +5806,101 @@ mod tests {
             .map(|f| f.details["crossings"].as_u64().unwrap_or(1))
             .sum();
         assert!(crossings <= 3, "{crossings} crossings");
+    }
+
+    /// #666: a bank pulled to three rails gives each rail its own column
+    /// of far ends, every hard rule holding and every row straight.
+    #[test]
+    fn a_bank_of_three_rails_gives_each_rail_its_column() {
+        let mut block = crate::testing::dense_block(false);
+        block
+            .nets
+            .push(crate::testing::net("rail:v5", "5V", NetKind::Supply));
+        let v5 = block.nets.len() - 1;
+        for key in ["r1", "r2", "r7"] {
+            let p = block.part(key).expect("part");
+            let rail = block.parts[p]
+                .pins
+                .iter()
+                .position(|x| x.net == Some(0))
+                .expect("its supply pin");
+            block.parts[p].pins[rail].net = Some(v5);
+        }
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_bank_not_in_row"),
+            "{found:#?}"
+        );
+        let mut columns: BTreeMap<usize, BTreeSet<Nm>> = BTreeMap::new();
+        for i in 0..10 {
+            let key = format!("r{}", i + 1);
+            let p = block.part(&key).expect("part");
+            let x = &out.layout.placed[&key];
+            let r = Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror));
+            let rail = block.parts[p]
+                .pins
+                .iter()
+                .position(|x| x.net.is_some_and(|n| block.nets[n].kind != NetKind::Signal))
+                .expect("a rail pin");
+            columns
+                .entry(block.parts[p].pins[rail].net.expect("rail"))
+                .or_default()
+                .insert(r.pins[rail].end[0]);
+        }
+        assert_eq!(columns.len(), 3, "{columns:?}");
+        for (rail, xs) in &columns {
+            assert_eq!(xs.len(), 1, "rail {rail}: far ends in one column, {xs:?}");
+        }
+        let all: BTreeSet<Nm> = columns.values().flatten().copied().collect();
+        assert_eq!(all.len(), 3, "each rail its own column: {columns:?}");
+    }
+
+    /// #718 (plan 2.G): a net drawn with labels on a sheet is wired
+    /// between regions only where the wire is short; every longer run of
+    /// it lies inside one region's frame. The loose RC's R9 joined in turn
+    /// to each of U1's signal nets (regions far apart), first from nothing
+    /// and then over its own layout.
+    #[test]
+    fn a_labelled_nets_long_wire_stays_inside_a_region() {
+        for net in [2, 3, 6, 9] {
+            let mut block = crate::testing::regions_block();
+            let r9 = block.part("r9").expect("r9");
+            block.parts[r9].pins[0].net = Some(net);
+            let first = lay(&block);
+            let mut again = block.clone();
+            again.previous = Some(first.layout.clone());
+            for out in [first, lay(&again)] {
+                let l = &out.layout;
+                assert_eq!(crate::rules::check(&block, l), [], "net {net}");
+                for (key, by) in &l.routes {
+                    for (sid, runs) in by {
+                        let labelled = l
+                            .labels
+                            .get(key)
+                            .is_some_and(|ls| ls.iter().any(|x| &x.sheet == sid));
+                        for run in runs.iter().filter(|_| labelled) {
+                            if route::length(run) <= LOCAL_REACH {
+                                continue;
+                            }
+                            let span = run
+                                .windows(2)
+                                .map(|w| Rect::new(w[0], w[1]))
+                                .reduce(|a, b| a.union(b))
+                                .expect("a run");
+                            assert!(
+                                l.regions
+                                    .values()
+                                    .any(|r| &r.sheet == sid && r.frame_on_sheet().contains(&span)),
+                                "net {net}: {key} runs {} mm across regions",
+                                route::length(run) / 1_000_000
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Over a previous layout a new pull-up joins its host's region, the
@@ -5900,6 +6411,73 @@ mod tests {
         let (a, c) = (end("r2", 0), end("j1", 2));
         let d = (a[0] - c[0]).abs() + (a[1] - c[1]).abs();
         assert!(d <= 20 * GRID, "R2 is {} steps from J1", d / GRID);
+    }
+
+    /// The front end's balanced outputs (plan 2.G): a port's net meets a
+    /// stack's output pin (labelled, a net a layer) and a clamp's middle
+    /// pin. The flag stands on the clamp's pin, wired, and that pin takes
+    /// no label of its own: the clamp isn't floating.
+    #[test]
+    fn a_clamp_hosts_its_ports_flag_beside_a_stack() {
+        use crate::input::{Flow, PinKind};
+        use crate::testing::{net, port};
+        let nets = vec![
+            net("rail:p", "+5VA", NetKind::Supply),
+            net("rail:n", "-5VA", NetKind::Supply),
+            net("out_l", "OUT_L", NetKind::Signal),
+            net("out_r", "OUT_R", NetKind::Signal),
+        ];
+        // The stack: a block symbol whose pin is OUT_L on its front layer
+        // and OUT_R behind.
+        let stack = crate::shape::stack_symbol(
+            "amp",
+            "Amp",
+            &[("1".into(), "OUT".into(), Flow::Out, vec![Some(2), Some(3)])],
+        );
+        // The clamp: a BAV99, its signal pin 1 (K) on the left.
+        let clamp = crate::testing::ic(
+            "d1",
+            "D1",
+            "BAV99",
+            &[("K", PinKind::Passive, Some(2))],
+            &[
+                ("A1", PinKind::Passive, Some(1)),
+                ("A2", PinKind::Passive, Some(0)),
+            ],
+        );
+        let block = Block {
+            parts: vec![
+                stack,
+                clamp,
+                port("port:l", "OUT_L", Flow::Out, Some(2)),
+                port("port:r", "OUT_R", Flow::Out, Some(3)),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_floating"),
+            "{:#?}",
+            found
+                .iter()
+                .filter(|f| f.code == "sch_floating")
+                .collect::<Vec<_>>()
+        );
+        // No label of its own on the clamp's signal pin.
+        assert!(
+            !out.layout
+                .labels
+                .get("out_l")
+                .into_iter()
+                .flatten()
+                .any(|l| l.on == "d1/1"),
+            "{:?}",
+            out.layout.labels.get("out_l")
+        );
     }
 
     /// An in-port whose net reaches one part's pin stands beside that pin,
