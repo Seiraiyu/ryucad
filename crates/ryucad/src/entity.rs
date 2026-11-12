@@ -197,7 +197,7 @@ impl EntityRef {
         let Some(p) = session.project().parts.get(&self.part) else {
             return Err(missing("no such part"));
         };
-        if crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly {
+        if crate::part::part_kind(p) == crate::doc::files::PartKind::Assembly {
             return self.in_assembly().resolve_in_assembly(session);
         }
         // A datum, path or helix of the part, by its ID alone.
@@ -378,7 +378,7 @@ pub fn parse_all(session: &mut Session, refs: &[String]) -> Result<Vec<EntityRef
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     const NAME: &str = "0123456789abcdef0123456789abcdef";
@@ -533,13 +533,12 @@ mod tests {
             );
         }
         // Framing an occurrence frames it where the assembly puts it.
-        let pts =
-            crate::server::model_points(&mut s, &[EntityRef::parse("frame/p1/left").unwrap()])
-                .unwrap();
+        let pts = crate::scene::model_points(&mut s, &[EntityRef::parse("frame/p1/left").unwrap()])
+            .unwrap();
         assert!(pts.iter().all(|p| (p[0] - 0.05).abs() <= 0.0031));
         // A selection takes them.
         let mut live = crate::live::Live::new();
-        let v = crate::server::tests::call_live(
+        let v = crate::testing::call_live(
             &mut s,
             &mut live,
             None,

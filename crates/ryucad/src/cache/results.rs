@@ -313,7 +313,7 @@ pub fn decode_built(bytes: &[u8]) -> Option<Built> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     /// A plate with a hole and a row of three more: a solid, a hole that

@@ -14,7 +14,7 @@ use crate::doc::files::Manifest;
 use crate::doc::id::{Id, ProjectId};
 use crate::doc::project::{MANIFEST, PDM_CONFIG, properties_path};
 use crate::error::{Code, Error, Result};
-use crate::server::{check_revision, part_id};
+use crate::part::{check_revision, part_id};
 use crate::session::Session;
 use ryupdm::config::{CORE, Config, Decl, Pattern, Scheme, branch_name, property_name};
 use ryupdm::props::{self, Pdm, Properties};
@@ -438,7 +438,7 @@ pub fn set(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     fn with_parts() -> (tempfile::TempDir, Session) {
         let (dir, mut s) = fresh();

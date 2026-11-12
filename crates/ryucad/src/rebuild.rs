@@ -4226,7 +4226,7 @@ mod tests {
     /// `e` of it cutting `b` through all, `both` ways or not, reversed or
     /// not.
     fn hole(z: &str, both: bool, reverse: bool) -> (tempfile::TempDir, crate::session::Session) {
-        use crate::server::tests::call;
+        use crate::testing::call;
         let (dir, mut s, _) = crate::sketch::tests::with_box();
         let placement = json!({"origin": [0, 0, z]});
         call(

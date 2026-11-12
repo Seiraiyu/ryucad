@@ -301,7 +301,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::annotation::AuthorKind;
     use crate::annotation::tests::{comment, plate, put};
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     /// `a` carrying a change that writes `value` to `rel`, over `base`.

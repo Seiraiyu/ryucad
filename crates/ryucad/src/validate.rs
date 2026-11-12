@@ -1803,8 +1803,8 @@ pub fn resolve(
     expected: &BTreeMap<String, String>,
 ) -> Result<Value> {
     for (part, rev) in expected {
-        let id = crate::server::part_id(part)?;
-        crate::server::check_revision(session.project().part(&id)?, Some(rev))?;
+        let id = crate::part::part_id(part)?;
+        crate::part::check_revision(session.project().part(&id)?, Some(rev))?;
     }
     let root = session.root().to_path_buf();
     let now = status(session)?;
@@ -1947,7 +1947,7 @@ pub fn resolve(
 pub(crate) mod tests {
     use super::*;
     use crate::git::tests::git;
-    use crate::server::tests::call;
+    use crate::testing::call;
     use std::path::Path;
 
     /// Runs git, which may fail (a merge that stops for conflicts).

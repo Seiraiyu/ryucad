@@ -2380,7 +2380,7 @@ pub fn feature_faces_get(
 ) -> Result<Value> {
     let (commit, s) = session.at(rev)?;
     let part = crate::entity::EntityRef::parse(face)?.part;
-    if crate::server::part_kind(s.project().part(&part)?) == crate::doc::files::PartKind::Assembly {
+    if crate::part::part_kind(s.project().part(&part)?) == crate::doc::files::PartKind::Assembly {
         return Err(Error::new(
             Code::InvalidParam,
             format!("{face}: feature-faces takes a part's face, not an assembly's"),
@@ -3231,7 +3231,7 @@ mod tests {
         let f = draft_feature(v);
         let mut order = part.order().to_vec();
         order.push(d.clone());
-        let p = crate::server::proposed(&part, &order, &[(&d, &f)]);
+        let p = crate::part::proposed(&part, &order, &[(&d, &f)]);
         let results = s.rebuilt(&pid).unwrap();
         match resolve(&p, &Solids::of(&p), &d, &f, results)?.spec {
             Spec::Draft {
@@ -3321,7 +3321,7 @@ mod tests {
         let f = draft_feature(v);
         let mut order = part.order().to_vec();
         order.push(d.clone());
-        let p = crate::server::proposed(&part, &order, &[(&d, &f)]);
+        let p = crate::part::proposed(&part, &order, &[(&d, &f)]);
         let out = s.rebuilt_as(p).unwrap();
         out.features
             .iter()

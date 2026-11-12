@@ -604,9 +604,9 @@ pub fn run(
     part: &str,
     instances: &[String],
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
-    if crate::server::part_kind(p) != crate::doc::files::PartKind::Assembly {
+    if crate::part::part_kind(p) != crate::doc::files::PartKind::Assembly {
         return Err(Error::new(
             Code::WrongPartKind,
             format!("{pid} is a part, not an assembly"),
@@ -998,7 +998,7 @@ mod tests {
         assert_eq!(v["clear"], 1, "{v}");
         // The frame placed 150 m out: the same pair, through the frame, so
         // the same verdict from the cache.
-        crate::server::tests::call(
+        crate::testing::call(
             &mut s,
             "part.create",
             json!({"part": "site", "kind": "assembly"}),

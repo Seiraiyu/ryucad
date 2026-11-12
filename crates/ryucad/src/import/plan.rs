@@ -750,7 +750,7 @@ pub fn writes(project: &crate::doc::project::Project, planned: &[Planned]) -> Re
     let mut out = Writes::new();
     for pl in planned {
         let mut order = match project.parts.get(&pl.part) {
-            Some(p) if !pl.new => crate::server::order(p)?,
+            Some(p) if !pl.new => crate::part::order(p)?,
             _ => Vec::new(),
         };
         order.retain(|f| !pl.removed.contains(f));

@@ -202,9 +202,9 @@ pub fn run(
     instances: &[String],
     below: Option<&str>,
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
-    if crate::server::part_kind(p) != crate::doc::files::PartKind::Assembly {
+    if crate::part::part_kind(p) != crate::doc::files::PartKind::Assembly {
         return Err(Error::new(
             Code::WrongPartKind,
             format!("{pid} is a part, not an assembly"),
@@ -236,7 +236,7 @@ pub fn run(
 mod tests {
     use crate::assembly::tests::{place_in, project};
     use crate::error::Code;
-    use crate::server::tests::call;
+    use crate::testing::call;
     use serde_json::json;
 
     #[test]

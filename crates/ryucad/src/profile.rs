@@ -1073,8 +1073,8 @@ mod tests {
 
     #[test]
     fn a_face_that_isnt_planar_is_the_wrong_kind() {
-        use crate::server::tests::call;
-        let (_dir, mut s) = crate::server::tests::fresh();
+        use crate::testing::call;
+        let (_dir, mut s) = crate::testing::fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         call(
             &mut s,

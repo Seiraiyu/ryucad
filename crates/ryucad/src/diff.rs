@@ -2180,7 +2180,7 @@ impl Built {
     /// A part's rebuild, with its solids as `part`'s list makes them.
     pub fn of(part: &crate::doc::project::Part, r: &crate::rebuild::PartResult) -> Built {
         let solids = crate::solid::Solids::of(part);
-        let assembly = crate::server::part_kind(part) == crate::doc::files::PartKind::Assembly;
+        let assembly = crate::part::part_kind(part) == crate::doc::files::PartKind::Assembly;
         Built {
             occurrences: match assembly {
                 true => crate::assembly::Model::of_assembly(r).occurrences,
@@ -3503,7 +3503,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_how_a_path_moved() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -3541,7 +3541,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_how_an_unfolds_pattern_moved() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -4788,7 +4788,7 @@ mod tests {
     #[test]
     fn a_models_change_shows_in_the_drawings_views_it_moves() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -4833,7 +4833,7 @@ mod tests {
     #[test]
     fn diff_compares_revisions_and_the_working_files() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         // Outside a repository there is no HEAD to compare with.
@@ -4882,7 +4882,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_what_the_bodies_did() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -4965,7 +4965,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_what_each_solid_did() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -5014,7 +5014,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_what_kind_each_body_is() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -5059,7 +5059,7 @@ mod tests {
     #[test]
     fn a_split_whose_plane_moved_changes_both_its_sides() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -5099,7 +5099,7 @@ mod tests {
     #[test]
     fn a_split_whose_tool_sheet_moved_changes_both_its_sides() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);

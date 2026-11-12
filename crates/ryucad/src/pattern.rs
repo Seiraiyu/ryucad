@@ -308,8 +308,8 @@ mod tests {
     use crate::doc::id::Id;
     use crate::error::Code;
     use crate::rebuild::Built;
-    use crate::server::tests::call;
     use crate::session::Session;
+    use crate::testing::call;
     use crate::units::Unit;
     use core::f64::consts::PI;
     use serde_json::{Value, json};
@@ -328,11 +328,11 @@ mod tests {
         v["type"] = json!(ty);
         let feature = Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap();
         let pid = id("p");
-        let mut list = crate::server::order(s.project().part(&pid).unwrap()).unwrap();
+        let mut list = crate::part::order(s.project().part(&pid).unwrap()).unwrap();
         if !list.contains(&id(f)) {
             list.push(id(f));
         }
-        crate::server::save(s, &pid, &[(&id(f), &feature)], list).unwrap();
+        crate::save::save(s, &pid, &[(&id(f), &feature)], list).unwrap();
     }
 
     /// Solid `solid` as feature `f` left it, or why it failed.
@@ -440,7 +440,7 @@ mod tests {
     /// Part `p`: a cylinder `b` of radius 10 mm, 5 mm tall, about the z
     /// axis, and a sketch `s` on its top with a point `p1` at (6, 0) mm.
     fn disc() -> (tempfile::TempDir, Session) {
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         call(
             &mut s,
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn a_mirror_is_no_patterns_seed() {
-        let (_dir, mut s) = crate::server::tests::fresh();
+        let (_dir, mut s) = crate::testing::fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         for f in [
             json!({"type": "box", "id": "b", "params": {"x": 2, "y": 2, "z": 2}}),

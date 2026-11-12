@@ -987,7 +987,7 @@ fn import_opened(
             };
             let part = match &ask.part {
                 Some(p) => {
-                    let pid = crate::server::part_id(p)?;
+                    let pid = crate::part::part_id(p)?;
                     if project.parts.contains_key(&pid) {
                         return Err(Error::new(
                             Code::DuplicateId,
@@ -1414,13 +1414,13 @@ fn into_plan(
     if groups.is_empty() {
         return Err(body_missing(opened, &ask.path));
     }
-    let pid = crate::server::part_id(into)?;
+    let pid = crate::part::part_id(into)?;
     let p = session.project().part(&pid)?;
-    crate::server::check_revision(p, ask.expected.as_deref())?;
+    crate::part::check_revision(p, ask.expected.as_deref())?;
     // A list that doesn't load (a conflict record, a newer format) would
     // be written over with only the import's features.
-    crate::server::order(p)?;
-    if crate::server::part_kind(p) == PartKind::Assembly {
+    crate::part::order(p)?;
+    if crate::part::part_kind(p) == PartKind::Assembly {
         return Err(Error::new(
             Code::WrongPartKind,
             format!("{pid} is an assembly: imported bodies go into a part"),
@@ -1883,7 +1883,7 @@ pub(crate) mod tests {
     ) -> (tempfile::TempDir, crate::session::Session) {
         use crate::doc::files::{Feature, PartFile};
         use crate::doc::project::{feature_path, part_path, write_atomic, write_json};
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         let root = dir.path();
         let f = ImportFile::new(bytes.to_vec());
         write_atomic(&root.join("imports/f.step"), bytes).unwrap();
@@ -1904,7 +1904,7 @@ pub(crate) mod tests {
 
     /// `p`'s rebuild report, whether or not a feature failed.
     fn rebuild(s: &mut crate::session::Session) -> Value {
-        match crate::server::tests::call(s, "rebuild", json!({"part": "p"})) {
+        match crate::testing::call(s, "rebuild", json!({"part": "p"})) {
             Ok(v) => v["parts"][0].clone(),
             Err(e) => e.details["parts"][0].clone(),
         }
@@ -1919,7 +1919,7 @@ pub(crate) mod tests {
         for mode in [None, Some(Mode::Reference)] {
             let (dir, mut s) = with_import_as(&bytes, Some(("part 2", "part 2")), mode);
             let bounds = |s: &mut crate::session::Session| {
-                let v = crate::server::tests::call(s, "inspect", json!({"part": "p"})).unwrap();
+                let v = crate::testing::call(s, "inspect", json!({"part": "p"})).unwrap();
                 let b = &v["bodies"][0]["bounds"];
                 [0, 1, 2].map(|k| b["min"][k].as_f64().unwrap())
             };
@@ -2042,8 +2042,8 @@ pub(crate) mod tests {
     fn a_surface_model_imports_as_a_sheet() {
         // NIST CTC 04's PMI support geometry, representation #14185: one
         // face, two laminar edges (ryustep's corpus manifest).
-        let (_dir, mut s) = crate::server::tests::fresh();
-        let call = crate::server::tests::call;
+        let (_dir, mut s) = crate::testing::fresh();
+        let call = crate::testing::call;
         let file = format!(
             "{}/../ryustep/tests/corpus/nist_ctc_04_asme1_rd.stp",
             env!("CARGO_MANIFEST_DIR")
@@ -2072,9 +2072,9 @@ pub(crate) mod tests {
             "{}/tests/data/surface_disc.step",
             env!("CARGO_MANIFEST_DIR")
         );
-        let call = crate::server::tests::call;
+        let call = crate::testing::call;
         for (part, solid) in [("r", false), ("s", true)] {
-            let (_dir, mut s) = crate::server::tests::fresh();
+            let (_dir, mut s) = crate::testing::fresh();
             let v = call(
                 &mut s,
                 "import",
@@ -2093,9 +2093,9 @@ pub(crate) mod tests {
 
     #[test]
     fn imports_are_references_unless_asked_for_solids() {
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         let file = occt_path("box_ap214.stp");
-        let call = crate::server::tests::call;
+        let call = crate::testing::call;
         let v = call(&mut s, "import", json!({"path": file, "part": "r"})).unwrap();
         let f = &v["parts"][0]["features"][0];
         assert_eq!(f["ok"], true, "{v}");
@@ -2134,9 +2134,9 @@ pub(crate) mod tests {
 
     #[test]
     fn a_dry_run_says_what_each_mode_would_do() {
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         let file = occt_path("box_ap214.stp");
-        let call = crate::server::tests::call;
+        let call = crate::testing::call;
         let r = call(
             &mut s,
             "import",
@@ -2178,7 +2178,7 @@ pub(crate) mod tests {
     /// The names of the faces of `p`'s one solid, with their plane's
     /// normal's z and origin's z, for those on planes.
     fn faces(s: &mut crate::session::Session) -> Vec<(String, Value)> {
-        let v = crate::server::tests::call(s, "inspect", json!({"part": "p"})).unwrap();
+        let v = crate::testing::call(s, "inspect", json!({"part": "p"})).unwrap();
         v["bodies"][0]["faces"]
             .as_array()
             .unwrap()
@@ -2222,7 +2222,7 @@ pub(crate) mod tests {
         assert_eq!(f["hash"], want);
         // Every face, edge and vertex says which STEP instance it came
         // from.
-        let v = crate::server::tests::call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        let v = crate::testing::call(&mut s, "inspect", json!({"part": "p"})).unwrap();
         for list in ["faces", "edges", "vertices"] {
             for e in v["bodies"][0][list].as_array().unwrap() {
                 assert_eq!(e["origin"]["feature"], "i", "{e}");
@@ -2387,7 +2387,7 @@ pub(crate) mod tests {
         if params.get("solid").is_none() {
             params["solid"] = json!(true);
         }
-        crate::server::tests::call(s, "import", params)
+        crate::testing::call(s, "import", params)
     }
 
     /// Every import answer says what it made of the file (design 448):
@@ -2396,7 +2396,7 @@ pub(crate) mod tests {
     #[test]
     fn an_import_reports_its_transfer() {
         let (_src, path) = outside("box_ap214.stp");
-        let (_dir, mut s) = crate::server::tests::fresh();
+        let (_dir, mut s) = crate::testing::fresh();
         for dry in [true, false] {
             let v = import_call(&mut s, json!({"path": path, "dry_run": dry})).unwrap();
             let t = &v["transfer"];
@@ -2463,7 +2463,7 @@ pub(crate) mod tests {
     #[test]
     fn a_refusal_after_reading_carries_the_transfer_report() {
         let (_src, path) = outside("assembly.stp");
-        let (_dir, mut s) = crate::server::tests::fresh();
+        let (_dir, mut s) = crate::testing::fresh();
         // Adding the file's bodies to a part that doesn't exist.
         let e = import_call(&mut s, json!({"path": path, "into": "nope"})).unwrap_err();
         assert_eq!(e.code, Code::NotFound, "{e:?}");
@@ -2490,7 +2490,7 @@ pub(crate) mod tests {
             "{}/../ryustep/tests/data/external/occt_style.stp",
             env!("CARGO_MANIFEST_DIR")
         );
-        let (_dir, mut s) = crate::server::tests::fresh();
+        let (_dir, mut s) = crate::testing::fresh();
         let e = import_call(&mut s, json!({"path": path})).unwrap_err();
         assert_eq!(e.code, Code::ImportBodyMissing);
         assert_eq!(
@@ -2521,17 +2521,16 @@ pub(crate) mod tests {
     #[test]
     fn a_committed_file_is_reported_again() {
         let (_src, path) = outside("assembly.stp");
-        let (_dir, mut s) = crate::server::tests::fresh();
+        let (_dir, mut s) = crate::testing::fresh();
         let made = import_call(&mut s, json!({"path": path})).unwrap();
         let stored = made["file"]["path"].as_str().unwrap().to_owned();
-        let v =
-            crate::server::tests::call(&mut s, "import.report", json!({"file": stored})).unwrap();
+        let v = crate::testing::call(&mut s, "import.report", json!({"file": stored})).unwrap();
         assert_eq!(v["file"]["path"], stored.as_str());
         assert_eq!(
             v["transfer"]["categories"], made["transfer"]["categories"],
             "the same as the import said"
         );
-        let d = crate::server::tests::call(
+        let d = crate::testing::call(
             &mut s,
             "import.report",
             json!({"file": stored, "detail": true}),
@@ -2547,7 +2546,7 @@ pub(crate) mod tests {
                 .is_some_and(|i| !i.is_empty() && i.len() <= 64),
             "{first}"
         );
-        let e = crate::server::tests::call(
+        let e = crate::testing::call(
             &mut s,
             "import.report",
             json!({"file": "imports/none.step"}),
@@ -2559,7 +2558,7 @@ pub(crate) mod tests {
     #[test]
     fn importing_stores_the_file_and_makes_a_part_of_each_product() {
         let (_src, path) = outside("box_ap214.stp");
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         let root = dir.path();
         let v = import_call(&mut s, json!({"path": path})).unwrap();
         assert_eq!(v["file"]["path"], "imports/box_ap214.step");
@@ -2583,7 +2582,7 @@ pub(crate) mod tests {
             attributes.contains(crate::drivers::IMPORT_LINE),
             "{attributes}"
         );
-        let r = crate::server::tests::call(&mut s, "rebuild", json!({"part": "part-2"})).unwrap();
+        let r = crate::testing::call(&mut s, "rebuild", json!({"part": "part-2"})).unwrap();
         assert_eq!(r["parts"][0]["features"][0]["type"], "import");
         // The same bytes again: stored once, another part.
         let v = import_call(&mut s, json!({"path": path})).unwrap();
@@ -2605,7 +2604,7 @@ pub(crate) mod tests {
     #[test]
     fn a_dry_run_writes_nothing_and_says_how_each_body_heals() {
         let (_src, path) = outside("plate_hole.stp");
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         let root = dir.path();
         let before = crate::session::files(root).unwrap();
         let v = import_call(&mut s, json!({"path": path, "dry_run": true})).unwrap();
@@ -2634,7 +2633,7 @@ pub(crate) mod tests {
     fn a_cancelled_import_writes_nothing_or_finishes() {
         use ryu_session::job::Job;
         let (_src, path) = outside("plate_hole.stp");
-        let (dir, s) = crate::server::tests::fresh();
+        let (dir, s) = crate::testing::fresh();
         let root = dir.path().to_path_buf();
         let before = crate::session::files(&root).unwrap();
         let mut slot = Some(s);
@@ -2666,9 +2665,9 @@ pub(crate) mod tests {
     fn into_adds_one_products_bodies_to_a_part() {
         let (_src, path) = outside("assembly.stp");
         let (_box_src, box_path) = outside("box_ap214.stp");
-        let (_dir, mut s) = crate::server::tests::fresh();
-        crate::server::tests::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
-        crate::server::tests::call(
+        let (_dir, mut s) = crate::testing::fresh();
+        crate::testing::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        crate::testing::call(
             &mut s,
             "feature.add",
             json!({"part": "p", "type": "box", "id": "body", "params": {"x": 1, "y": 1, "z": 1}}),
@@ -2688,8 +2687,7 @@ pub(crate) mod tests {
         );
         // `body` is the box's, so the import's is the next free.
         assert_eq!(part["features"][0]["id"], "body-2", "{v}");
-        let list =
-            crate::server::tests::call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
+        let list = crate::testing::call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
         let ids: Vec<&str> = list["features"]
             .as_array()
             .unwrap()
@@ -2698,7 +2696,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(ids, ["body", "body-2"]);
         // An assembly takes no bodies; neither part and into together.
-        crate::server::tests::call(
+        crate::testing::call(
             &mut s,
             "part.create",
             json!({"part": "a", "kind": "assembly"}),
@@ -2723,9 +2721,9 @@ pub(crate) mod tests {
     #[test]
     fn into_a_part_whose_list_doesnt_load_is_refused_with_its_error() {
         let (_src, path) = outside("box_ap214.stp");
-        let (dir, mut s) = crate::server::tests::fresh();
-        crate::server::tests::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
-        crate::server::tests::call(
+        let (dir, mut s) = crate::testing::fresh();
+        crate::testing::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        crate::testing::call(
             &mut s,
             "feature.add",
             json!({"part": "p", "type": "box", "id": "body", "params": {"x": 1, "y": 1, "z": 1}}),
@@ -2734,7 +2732,7 @@ pub(crate) mod tests {
         let list = crate::doc::project::part_path(dir.path(), &Id::parse("p", "part").unwrap());
         let broken = b"{\"features\": [\"body\"\n";
         std::fs::write(&list, broken).unwrap();
-        let add = crate::server::tests::call(
+        let add = crate::testing::call(
             &mut s,
             "feature.add",
             json!({"part": "p", "type": "box", "id": "other", "params": {"x": 1, "y": 1, "z": 1}}),
@@ -2750,7 +2748,7 @@ pub(crate) mod tests {
     fn a_body_that_cant_be_healed_still_gets_its_part() {
         // OCCT's sheet offset from a spline: ryustep refuses it.
         let (_src, path) = outside("offset_sheet.stp");
-        let (_dir, mut s) = crate::server::tests::fresh();
+        let (_dir, mut s) = crate::testing::fresh();
         let v = import_call(&mut s, json!({"path": path})).unwrap();
         let f = &v["parts"][0]["features"][0];
         assert_eq!(f["ok"], false, "{v}");
@@ -2767,12 +2765,11 @@ pub(crate) mod tests {
     #[test]
     fn a_project_using_pdm_gets_names_and_descriptions() {
         let (_src, path) = outside("box_ap214.stp");
-        let (dir, mut s) = crate::server::tests::fresh();
-        crate::server::tests::call(&mut s, "pdm.init", json!({})).unwrap();
+        let (dir, mut s) = crate::testing::fresh();
+        crate::testing::call(&mut s, "pdm.init", json!({})).unwrap();
         let v = import_call(&mut s, json!({"path": path})).unwrap();
         assert_eq!(v["parts"][0]["properties"], json!({"name": "part 2"}));
-        let props =
-            crate::server::tests::call(&mut s, "props.get", json!({"part": "part-2"})).unwrap();
+        let props = crate::testing::call(&mut s, "props.get", json!({"part": "part-2"})).unwrap();
         let name = props["properties"]
             .as_array()
             .unwrap()
@@ -2787,9 +2784,9 @@ pub(crate) mod tests {
     #[test]
     fn an_import_is_one_change_undone_whole() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (_src, path) = outside("box_ap214.stp");
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         let root = dir.path();
         let before = crate::session::files(root).unwrap();
         let mut live = Live::new();
@@ -2830,7 +2827,7 @@ pub(crate) mod tests {
     #[test]
     fn revisions_read_their_own_imported_bytes_and_diff_them() {
         use crate::git::tests::git;
-        use crate::server::tests::call;
+        use crate::testing::call;
         let (dir, mut s) = with_import(&occt("box_ap214.stp"), Some(("part 2", "part 2")));
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -2888,7 +2885,7 @@ pub(crate) mod tests {
 
     #[test]
     fn check_finds_what_doctor_and_rebuild_find_of_imports() {
-        use crate::server::tests::call;
+        use crate::testing::call;
         let (dir, mut s) = with_import(&occt("box_ap214.stp"), Some(("part 2", "part 2")));
         let root = dir.path();
         crate::drivers::write_attributes(root).unwrap();
@@ -3069,7 +3066,7 @@ pub(crate) mod tests {
     fn an_assembly_file_makes_parts_and_assemblies() {
         // XDE's: a block placed twice and a pin turned a quarter.
         let (_src, path) = outside("assembly.stp");
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         let root = dir.path();
         let v = import_call(&mut s, json!({"path": path})).unwrap();
         let made: Vec<(&str, &str)> = v["parts"]
@@ -3109,7 +3106,7 @@ pub(crate) mod tests {
         let instances = &v["parts"][0]["features"];
         assert_eq!(instances[2]["of"], "pin", "{v}");
         assert_eq!(instances[2]["ok"], true, "{v}");
-        let r = crate::server::tests::call(&mut s, "rebuild", json!({"part": "assembly"})).unwrap();
+        let r = crate::testing::call(&mut s, "rebuild", json!({"part": "assembly"})).unwrap();
         assert_eq!(
             r["parts"][0]["occurrences"].as_array().unwrap().len(),
             3,
@@ -3117,7 +3114,7 @@ pub(crate) mod tests {
         );
         assert_eq!(crate::doctor::diagnose(root), []);
         // Its BOM: the block twice, the pin once.
-        let bom = crate::server::tests::call(&mut s, "bom.get", json!({})).unwrap();
+        let bom = crate::testing::call(&mut s, "bom.get", json!({})).unwrap();
         let rows: Vec<(&Value, &Value)> = bom["tree"]["children"]
             .as_array()
             .unwrap()
@@ -3138,7 +3135,7 @@ pub(crate) mod tests {
 
     #[test]
     fn products_with_bodies_and_children_shared_and_unplaced() {
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         let root = dir.path();
         let src = tempfile::tempdir().unwrap();
         let path = src.path().join("frame.step");
@@ -3211,17 +3208,16 @@ pub(crate) mod tests {
         // The frame's own body is the plate.
         let body = listed(root, "f-1-body");
         assert_eq!(body[0].1["product"], product);
-        let r = crate::server::tests::call(&mut s, "rebuild", json!({})).unwrap();
+        let r = crate::testing::call(&mut s, "rebuild", json!({})).unwrap();
         assert!(r.get("warnings").is_none(), "{r}");
-        let tree =
-            crate::server::tests::call(&mut s, "assembly.tree", json!({"part": "f-1"})).unwrap();
+        let tree = crate::testing::call(&mut s, "assembly.tree", json!({"part": "f-1"})).unwrap();
         assert_eq!(tree["instances"].as_array().unwrap().len(), 3, "{tree}");
     }
 
     #[test]
     fn a_label_places_the_imported_part_as_its_commit_had_the_file() {
         use crate::git::tests::git;
-        use crate::server::tests::call;
+        use crate::testing::call;
         let bytes = occt("box_ap214.stp");
         let (dir, mut s) = with_import(&bytes, Some(("part 2", "part 2")));
         let root = dir.path();
@@ -3272,7 +3268,7 @@ pub(crate) mod tests {
     #[test]
     fn a_label_heals_its_imported_part_under_the_sessions_budget() {
         use crate::git::tests::git;
-        use crate::server::tests::call;
+        use crate::testing::call;
         let bytes = occt("box_ap214.stp");
         let (dir, mut s) = with_import(&bytes, Some(("part 2", "part 2")));
         let root = dir.path();

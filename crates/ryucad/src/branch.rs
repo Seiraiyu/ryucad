@@ -192,8 +192,8 @@ pub fn switch(
 mod tests {
     use crate::error::Code;
     use crate::git::tests::git;
-    use crate::server::tests::{call, fresh};
     use crate::session::Session;
+    use crate::testing::{call, fresh};
     use serde_json::{Value, json};
 
     /// A project in a repository of its own on `main` with a box
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn a_switch_is_logged_once_and_never_undone() {
         use crate::live::{Kind, Live};
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = two_branches();
         let mut live = Live::new();
         let me = live.hello(Kind::Agent, Some("claude-1"), None).unwrap();

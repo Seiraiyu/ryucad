@@ -668,7 +668,7 @@ pub fn locate_at(
     let Some(p) = session.project().parts.get(&part) else {
         return Ok(None);
     };
-    let assembly = crate::server::part_kind(p) == PartKind::Assembly;
+    let assembly = crate::part::part_kind(p) == PartKind::Assembly;
     let rest: Vec<&str> = steps.collect();
     let Some((last, path)) = rest.split_last() else {
         return Ok(None);
@@ -834,8 +834,8 @@ pub(crate) fn normal_to_face_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::call;
     use crate::sketch::tests::{edge_between, face_along, rectangle_ops, vertex_at, with_box};
+    use crate::testing::call;
     use serde_json::json;
 
     fn id(s: &str) -> Id {

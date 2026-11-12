@@ -1347,7 +1347,7 @@ pub fn placed_assemblies(project: &Project, part: &Id) -> Vec<Id> {
             let assembly = project
                 .parts
                 .get(&i.part)
-                .is_some_and(|c| crate::server::part_kind(c) == PartKind::Assembly);
+                .is_some_and(|c| crate::part::part_kind(c) == PartKind::Assembly);
             if assembly {
                 out.push(i.part.clone());
                 walk(project, &i.part, root, out);
@@ -1461,14 +1461,14 @@ pub fn move_pose(
 /// `reference_wrong_kind` for a feature that isn't an instance,
 /// `instance_fixed` for one fixed where it is.
 pub fn movable(p: &Part, iid: &Id) -> Result<Instance> {
-    if crate::server::part_kind(p) != PartKind::Assembly {
+    if crate::part::part_kind(p) != PartKind::Assembly {
         return Err(Error::new(
             Code::WrongPartKind,
             format!("{} is a part; only an assembly's instances move", p.id),
         )
         .with("part", &p.id));
     }
-    let Feature::Instance(inst) = crate::server::feature(p, iid)?.clone() else {
+    let Feature::Instance(inst) = crate::part::feature(p, iid)?.clone() else {
         return Err(
             Error::new(Code::ReferenceWrongKind, format!("{iid} isn't an instance"))
                 .with("feature", iid),
@@ -1495,19 +1495,19 @@ pub fn moved(
     how: Move,
     expected: Option<&str>,
 ) -> Result<serde_json::Value> {
-    let pid = crate::server::part_id(part)?;
-    let iid = crate::server::feature_id(instance)?;
+    let pid = crate::part::part_id(part)?;
+    let iid = crate::part::feature_id(instance)?;
     let unit = session.project().manifest.default_unit;
     let p = session.project().part(&pid)?;
-    crate::server::check_revision(p, expected)?;
+    crate::part::check_revision(p, expected)?;
     let inst = movable(p, &iid)?;
     let env = p.env.clone();
     let pose = move_pose(&inst, how, unit, &env)?;
     let solved = crate::mate::after_moves(session, &pid, &[(iid.clone(), pose)])?;
     let writes = solved.writes(session.project().part(&pid)?);
-    let list = crate::server::order(session.project().part(&pid)?)?;
+    let list = crate::part::order(session.project().part(&pid)?)?;
     let refs: Vec<(&Id, &Feature)> = writes.iter().map(|(id, f)| (id, f)).collect();
-    let revision = crate::server::save(session, &pid, &refs, list)?;
+    let revision = crate::save::save(session, &pid, &refs, list)?;
     let pose = match writes.iter().find(|(id, _)| *id == iid) {
         Some((_, Feature::Instance(i))) => i.pose,
         _ => pose,
@@ -1530,9 +1530,9 @@ pub fn tree(
     path: Option<&str>,
     depth: Option<u32>,
 ) -> Result<serde_json::Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let mut p = session.project().part(&pid)?.clone();
-    if crate::server::part_kind(&p) != PartKind::Assembly {
+    if crate::part::part_kind(&p) != PartKind::Assembly {
         return Err(Error::new(
             Code::WrongPartKind,
             format!("{pid} is a part, not an assembly"),
@@ -1570,7 +1570,7 @@ pub fn tree(
             .part(&placed.part)
             .map_err(|_| not_found())?
             .clone();
-        if crate::server::part_kind(&child) != PartKind::Assembly {
+        if crate::part::part_kind(&child) != PartKind::Assembly {
             return Err(not_found());
         }
         at = at.then_after(&placed.pose);
@@ -1721,8 +1721,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::doc::files::PartFile;
     use crate::doc::project::{feature_path, part_path, write_json};
-    use crate::server::tests::{call, fresh};
     use crate::session::Session;
+    use crate::testing::{call, fresh};
     use serde_json::{Value, json};
     use std::path::Path;
 
@@ -2762,7 +2762,7 @@ pub(crate) mod tests {
     fn subscribers_hear_an_assembly_change_with_its_parts() {
         use crate::live::Live;
         use crate::notify::Topic;
-        use crate::server::tests::{call_live, drain};
+        use crate::testing::{call_live, drain};
         let (dir, s) = project();
         place_in(
             dir.path(),
@@ -2804,7 +2804,7 @@ pub(crate) mod tests {
     fn a_subscription_starts_quiet_and_hears_assemblies_without_occurrences() {
         use crate::live::Live;
         use crate::notify::Topic;
-        use crate::server::tests::{call_live, drain};
+        use crate::testing::{call_live, drain};
         let (dir, s) = project();
         place_in(
             dir.path(),
@@ -3085,7 +3085,7 @@ pub(crate) mod tests {
     #[test]
     fn writes_give_and_take_item_numbers() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (_dir, mut s) = project();
         call(&mut s, "part.create", json!({"part": "nut"})).unwrap();
         call(
@@ -3225,7 +3225,7 @@ pub(crate) mod tests {
     #[test]
     fn instances_move_and_moves_undo() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (_dir, mut s) = project();
         call(
             &mut s,
@@ -3473,7 +3473,7 @@ pub(crate) mod tests {
 
     #[test]
     fn an_assembly_renders_and_is_the_model_when_it_is_the_one_root() {
-        use crate::server::tests::render_pixels;
+        use crate::testing::render_pixels;
         let (dir, s) = project();
         let r = dir.path();
         place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
@@ -3500,7 +3500,7 @@ pub(crate) mod tests {
         assert_ne!(frame, render_pixels(r, open(), plate));
         // Framing the whole model frames the assembly.
         let mut s = open();
-        let pts = crate::server::model_points(&mut s, &[]).unwrap();
+        let pts = crate::scene::model_points(&mut s, &[]).unwrap();
         assert!(
             pts.iter().any(|p| p[2] > 0.02),
             "the bolt stands on the plate"
@@ -3584,7 +3584,7 @@ pub(crate) mod tests {
     #[test]
     fn a_focus_says_what_a_window_shows() {
         use crate::live::{Kind, Live};
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = project();
         place_in(
             dir.path(),
@@ -3729,7 +3729,7 @@ pub(crate) mod tests {
     #[test]
     fn a_compare_render_paints_and_ghosts_an_assemblys_occurrences() {
         use crate::git::tests::git;
-        use crate::server::tests::render_pixels;
+        use crate::testing::render_pixels;
         let (dir, mut s) = project();
         let r = dir.path();
         git(r, &["init", "-q", "-b", "main"]);
