@@ -205,3 +205,20 @@ fn files_with_their_own_geometry_name_no_documents() {
     let o = ryustep::open(&std::fs::read(path).unwrap()).unwrap();
     assert!(o.products.definitions.iter().all(|d| d.external.is_empty()));
 }
+
+/// A document resolved stands for every instance it was read through
+/// (design 448, plan 24.D): the document, its type, the representation
+/// type and references naming it, and its property definitions with
+/// their representations and items. CAx-IF's form uses #100 to #111.
+#[test]
+fn a_document_lists_the_instances_it_is_read_through() {
+    let o = external_fixture("cax_if_style.stp");
+    let d = o
+        .products
+        .definitions
+        .iter()
+        .find(|d| &*d.product_id == "P1")
+        .unwrap();
+    assert_eq!(d.external.len(), 1);
+    assert_eq!(d.external[0].related, (100..=111).collect::<Vec<u64>>());
+}
