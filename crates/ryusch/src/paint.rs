@@ -167,6 +167,13 @@ pub struct Painted {
     pub buses: Vec<BusConnector>,
     /// The keys of every net a pin on the sheet is on.
     pub nets: BTreeSet<String>,
+    /// Who owns each item, beside [`Painted::items`] (design 519's table,
+    /// built in plan 4.B): its layout key (a part's, a net's for its wires
+    /// and junctions, `bus:<id>`, `region:<id>`, `note:<id>`, and
+    /// `label:<net>@<part>/<pin>` for a label), `None` for a layer's
+    /// bounds. SVG and PDF don't read it; ryueda's `schem::ref_path` turns
+    /// a key into a reference path.
+    pub owners: Vec<Option<String>>,
 }
 
 /// How a line is drawn.
@@ -195,6 +202,11 @@ impl Ink {
             dash: false,
         }
     }
+}
+
+/// Gives the items not yet owned, up to `len`, the owner `key`.
+fn own(owners: &mut Vec<Option<String>>, len: usize, key: &str) {
+    owners.resize(len, Some(key.to_owned()));
 }
 
 fn line(items: &mut Vec<Item>, points: Vec<Point>, ink: Ink) {
@@ -427,6 +439,7 @@ fn bus_items(
     layout: &Layout,
     sid: &str,
     items: &mut Vec<Item>,
+    owners: &mut Vec<Option<String>>,
     look: &Look,
 ) -> Vec<BusConnector> {
     let mut connectors = Vec::new();
@@ -526,6 +539,7 @@ fn bus_items(
                 rect: label::drawn_flow(&c.text, c.at, c.side, flow).bounds,
             });
         }
+        own(owners, items.len(), key);
     }
     connectors
 }
@@ -541,6 +555,7 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
 pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Painted {
     let mut out = Painted::default();
     let items = &mut out.items;
+    let mut owners: Vec<Option<String>> = Vec::new();
     // Regions first, under everything: a dashed frame and a titled tab in
     // its title band's top left; an untitled one (plan 3.A) has no tab,
     // its band kept so frames don't move when it gets a title.
@@ -578,6 +593,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
             });
         }
         items.push(Item::End);
+        own(&mut owners, items.len(), &format!("region:{rid}"));
     }
     let mut arms: BTreeMap<(usize, route::Node), u8> = BTreeMap::new();
     for part in &block.parts {
@@ -673,6 +689,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
                 }
             }
         }
+        own(&mut owners, items.len(), &part.key);
     }
     // Wires and junctions.
     for (key, by_sheet) in &layout.routes {
@@ -689,6 +706,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
                 *arms.entry((n, *node)).or_default() += ends;
             }
         }
+        own(&mut owners, items.len(), key);
     }
     for ((n, node), count) in &arms {
         if *count >= 3 {
@@ -703,9 +721,10 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
                 fill: Some(colour),
                 width: LINE,
             });
+            owners.resize(items.len(), block.nets.get(*n).map(|x| x.key.clone()));
         }
     }
-    out.buses = bus_items(block, layout, sid, items, look);
+    out.buses = bus_items(block, layout, sid, items, &mut owners, look);
     for (key, list) in &layout.labels {
         for l in list.iter().filter(|l| l.sheet == sid) {
             let flow = match (l.kind, block.net(key)) {
@@ -723,6 +742,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
                 look,
                 &look.pen(key),
             );
+            own(&mut owners, items.len(), &format!("label:{key}@{}", l.on));
             out.labels.push(Placed {
                 net: key.clone(),
                 on: l.on.clone(),
@@ -763,7 +783,15 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
             look.role(Role::Text),
         ));
         out.items.push(Item::End);
+        own(&mut owners, out.items.len(), &format!("note:{id}"));
     }
+    owners.resize(out.items.len(), None);
+    for (it, o) in out.items.iter().zip(owners.iter_mut()) {
+        if matches!(it, Item::Begin(_) | Item::End) {
+            *o = None;
+        }
+    }
+    out.owners = owners;
     out
 }
 
@@ -833,6 +861,46 @@ mod tests {
         assert!(svg.contains("stroke-dasharray"), "frames are dashed");
     }
     use crate::testing::seeded;
+
+    #[test]
+    fn every_item_has_its_owner_beside_it() {
+        let b = seeded(2, 4);
+        let out = crate::engine::lay_out(&b).unwrap();
+        for sid in out.layout.sheets.keys() {
+            let p = sheet(&b, &out.layout, sid);
+            assert_eq!(p.owners.len(), p.items.len(), "one owner per item");
+            for (it, o) in p.items.iter().zip(&p.owners) {
+                if matches!(it, Item::Begin(_) | Item::End) {
+                    assert_eq!(o, &None, "a layer's bounds belong to no one");
+                }
+            }
+            for (key, x) in &out.layout.placed {
+                if x.sheet == *sid {
+                    assert!(
+                        p.owners.iter().any(|o| o.as_deref() == Some(key.as_str())),
+                        "{key}"
+                    );
+                }
+            }
+            for (net, list) in &out.layout.labels {
+                for l in list.iter().filter(|l| l.sheet == *sid) {
+                    let k = format!("label:{net}@{}", l.on);
+                    assert!(
+                        p.owners.iter().any(|o| o.as_deref() == Some(k.as_str())),
+                        "{k}"
+                    );
+                }
+            }
+            for (net, by) in &out.layout.routes {
+                if by.contains_key(sid) {
+                    assert!(
+                        p.owners.iter().any(|o| o.as_deref() == Some(net.as_str())),
+                        "{net}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_sheet_paints_its_labels_and_says_where_they_are() {
