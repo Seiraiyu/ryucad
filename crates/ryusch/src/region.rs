@@ -228,37 +228,17 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
             None => groups.push((g, BTreeSet::from([p]))),
         }
     }
-    // Pins on each signal net, the whole block's: a group's busiest net.
-    let mut pins_on: BTreeMap<usize, usize> = BTreeMap::new();
-    for part in &block.parts {
-        for pin in &part.pins {
-            for net in pin.nets() {
-                *pins_on.entry(net).or_default() += 1;
-            }
-        }
-    }
     for (_, parts) in groups {
         let mut ordered: Vec<usize> = parts.iter().copied().collect();
         ordered.sort_by(|a, b| block.parts[*a].key.cmp(&block.parts[*b].key));
+        // Its function, else what its idioms do, else untitled (design
+        // 519: never a net's name, never Misc).
         let title = match ordered
             .iter()
             .find(|p| !block.parts[**p].function.is_empty())
         {
             Some(p) => block.parts[*p].function.clone(),
-            None => {
-                let nets: BTreeSet<usize> = parts
-                    .iter()
-                    .flat_map(|p| block.parts[*p].pins.iter().flat_map(|x| x.nets()))
-                    .filter(|n| block.nets[*n].kind == NetKind::Signal)
-                    .collect();
-                nets.into_iter()
-                    .max_by(|a, b| {
-                        pins_on[a]
-                            .cmp(&pins_on[b])
-                            .then_with(|| block.nets[*b].name.cmp(&block.nets[*a].name))
-                    })
-                    .map_or_else(|| "Misc".to_owned(), |n| block.nets[n].name.clone())
-            }
+            None => idiom_title(block, idioms, &parts).unwrap_or_default(),
         };
         push(&mut out, &mut taken, title, Basis::Rest, parts);
     }
@@ -278,8 +258,140 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
             }
         }
     }
+    // A leftover region of one part (design 519) joins the region it
+    // shares most signal nets with, on its sheet, unless an edge holds
+    // it; ties go to the earlier. Repeated until none joins. A connector's,
+    // an IC's or a circuit's region of one part names a function: it stays.
+    let signal = |p: usize| -> BTreeSet<usize> {
+        block.parts[p]
+            .pins
+            .iter()
+            .flat_map(|x| x.nets())
+            .filter(|n| block.nets[*n].kind == NetKind::Signal)
+            .collect()
+    };
+    loop {
+        let lone = out.iter().enumerate().find_map(|(i, g)| {
+            let p = *g.parts.first()?;
+            if g.parts.len() != 1 || g.basis != Basis::Rest || r.edge.contains_key(&p) {
+                return None;
+            }
+            let mine = signal(p);
+            out.iter()
+                .enumerate()
+                .filter(|(j, h)| {
+                    *j != i
+                        && !h.parts.is_empty()
+                        && h.parts.iter().all(|q| r.sheet.get(q) == r.sheet.get(&p))
+                })
+                .map(|(j, h)| {
+                    let shared: usize = h
+                        .parts
+                        .iter()
+                        .map(|q| signal(*q).intersection(&mine).count())
+                        .sum();
+                    (shared, j)
+                })
+                .filter(|(n, _)| *n > 0)
+                .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+                .map(|(_, j)| (i, j, p))
+        });
+        let Some((i, j, p)) = lone else { break };
+        out[j].parts.insert(p);
+        out[i].parts.clear();
+    }
     out.retain(|g| !g.parts.is_empty());
     out
+}
+
+/// The bus a set of net names belongs to, by their tokens: I2C, SPI or
+/// USB, when every name has one of that bus's tokens.
+fn bus_of<'a>(names: impl Iterator<Item = &'a str>) -> Option<&'static str> {
+    const BUSES: [(&str, &[&str]); 3] = [
+        ("I2C", &["SDA", "SCL"]),
+        ("SPI", &["MOSI", "MISO", "SCK", "CS"]),
+        ("USB", &["D+", "D-"]),
+    ];
+    let names: Vec<String> = names.map(str::to_ascii_uppercase).collect();
+    if names.is_empty() {
+        return None;
+    }
+    BUSES.iter().find_map(|(bus, tokens)| {
+        names
+            .iter()
+            .all(|n| n.split(['_', '/']).any(|t| tokens.contains(&t)))
+            .then_some(*bus)
+    })
+}
+
+/// A last group's title from the idioms it holds (design 519): the kind
+/// covering most of its parts, at least half; `None` when none does.
+fn idiom_title(block: &Block, idioms: &[Idiom], parts: &BTreeSet<usize>) -> Option<String> {
+    let mut by_kind: BTreeMap<IdiomKind, Vec<&Idiom>> = BTreeMap::new();
+    for i in idioms
+        .iter()
+        .filter(|i| i.parts.iter().any(|p| parts.contains(p)))
+    {
+        by_kind.entry(i.kind).or_default().push(i);
+    }
+    let covered = |list: &[&Idiom]| -> usize {
+        let mut seen: BTreeSet<usize> = BTreeSet::new();
+        for i in list {
+            seen.extend(i.parts.iter().filter(|p| parts.contains(p)));
+        }
+        seen.len()
+    };
+    let (kind, list) = by_kind
+        .into_iter()
+        .max_by_key(|(k, l)| (covered(l), std::cmp::Reverse(*k)))?;
+    if 2 * covered(&list) < parts.len() {
+        return None;
+    }
+    let anchors: BTreeSet<usize> = list
+        .iter()
+        .filter_map(|i| i.anchor.map(|(a, _)| a))
+        .collect();
+    let anchor = (anchors.len() == 1 && list.iter().all(|i| i.anchor.is_some()))
+        .then(|| block.parts[*anchors.first().expect("one")].refdes.clone());
+    let of = |what: &str, bare: &str| match &anchor {
+        Some(a) => format!("{a} {what}"),
+        None => bare.to_owned(),
+    };
+    Some(match kind {
+        IdiomKind::PullUp | IdiomKind::PullDown => {
+            let what = if kind == IdiomKind::PullUp {
+                "pull-ups"
+            } else {
+                "pull-downs"
+            };
+            let nets: BTreeSet<&str> = list
+                .iter()
+                .flat_map(|i| i.parts.iter())
+                .flat_map(|p| block.parts[*p].pins.iter().flat_map(|x| x.nets()))
+                .filter(|n| block.nets[*n].kind == NetKind::Signal)
+                .map(|n| block.nets[n].name.as_str())
+                .collect();
+            match bus_of(nets.into_iter()) {
+                Some(bus) => format!("{bus} {what}"),
+                None => of(
+                    what,
+                    if kind == IdiomKind::PullUp {
+                        "Pull-ups"
+                    } else {
+                        "Pull-downs"
+                    },
+                ),
+            }
+        }
+        IdiomKind::Decoupling => of("decoupling", "Decoupling"),
+        IdiomKind::Crystal => of("clock", "Clock"),
+        IdiomKind::Divider => "Divider".to_owned(),
+        IdiomKind::LedResistor => "Indicator".to_owned(),
+        IdiomKind::RcFilter | IdiomKind::LcFilter => "Filter".to_owned(),
+        IdiomKind::SeriesTermination => "Series terminations".to_owned(),
+        IdiomKind::Feedback => of("feedback", "Feedback"),
+        IdiomKind::Connector | IdiomKind::Buck | IdiomKind::OpampStage => return None,
+    })
 }
 
 /// Sets each region's frame from what it holds: its parts' extents,
@@ -289,6 +401,19 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
 /// labels drawn) can't both hold: the later unnamed region joins the
 /// earlier, and the frames are worked out again, until none overlap.
 pub fn frames(block: &Block, layout: &mut Layout) {
+    // Parts `region none` keeps out of every named region (plan 3.A: a
+    // join below took them in from nothing, and laid out again they left).
+    let none: BTreeSet<String> = block
+        .instructions
+        .values()
+        .filter(|i| matches!(i, crate::layout::Instruction::RegionNone { .. }))
+        .flat_map(|i| {
+            i.parts()
+                .iter()
+                .flat_map(|s| crate::instr::parts_named(block, s))
+        })
+        .map(|p| block.parts[p].key.clone())
+        .collect();
     loop {
         frames_once(block, layout);
         let ids: Vec<String> = layout.regions.keys().cloned().collect();
@@ -299,13 +424,33 @@ pub fn frames(block: &Block, layout: &mut Layout) {
                 if ra.sheet != rb.sheet || !ra.frame_on_sheet().overlaps(&rb.frame_on_sheet()) {
                     continue;
                 }
-                let (keep, gone) = match (ra.named, rb.named) {
-                    (_, false) => (a, b),
-                    (false, true) => (b, a),
-                    (true, true) => continue,
+                // A region an agent titled by ID (plan 3.A) outranks one
+                // the engine proposed and gives way to one the agent named
+                // by its parts; two of those stay apart.
+                let titled = |id: &str| {
+                    block.instructions.values().any(|i| {
+                        matches!(i, crate::layout::Instruction::Title { region, .. } if region == id)
+                    })
                 };
-                let parts = layout.regions.remove(gone).expect("a region").parts;
+                let rank = |r: &Layout, id: &str| {
+                    if r.regions[id].named {
+                        2
+                    } else if titled(id) {
+                        1
+                    } else {
+                        0
+                    }
+                };
+                let (keep, gone) = match (rank(layout, a), rank(layout, b)) {
+                    (2, 2) => continue,
+                    (x, y) if x >= y => (a, b),
+                    _ => (b, a),
+                };
+                let mut parts = layout.regions.remove(gone).expect("a region").parts;
                 let r = layout.regions.get_mut(keep).expect("a region");
+                if r.named {
+                    parts.retain(|k| !none.contains(k));
+                }
                 r.parts.extend(parts);
                 r.parts.sort();
                 r.parts.dedup();
@@ -416,6 +561,76 @@ fn frames_once(block: &Block, layout: &mut Layout) {
 mod tests {
     use super::*;
 
+    /// Design 519: no region is titled by a net's name or Misc; a group of
+    /// pull-ups on I2C is "I2C pull-ups".
+    #[test]
+    fn regions_are_titled_by_function_or_not_at_all() {
+        for seed in 1..=24 {
+            let block = crate::testing::seeded(seed, 1 + seed as usize % 4);
+            let r = crate::instr::resolve(&block).unwrap();
+            let idioms = crate::idiom::find(&block, &r.idiom);
+            let nets: BTreeSet<&str> = block.nets.iter().map(|n| n.name.as_str()).collect();
+            for g in propose(&block, &idioms, &r) {
+                assert!(
+                    !nets.contains(g.title.as_str()),
+                    "seed {seed}: {:?} is a net's name",
+                    g.title
+                );
+                assert_ne!(g.title, "Misc", "seed {seed}");
+            }
+        }
+    }
+
+    /// Design 519: no leftover region (`Basis::Rest`) holds one part,
+    /// unless an edge holds it or it shares no signal with any other
+    /// region on its sheet. A connector's, an IC's or a circuit's region
+    /// of one part names a function and stays (plan 3.A: joining those
+    /// took the RP2040's first sheet from 43 to 5).
+    #[test]
+    fn a_region_of_one_part_joins_its_neighbour() {
+        for seed in 1..=24 {
+            let block = crate::testing::seeded(seed, 1 + seed as usize % 4);
+            let r = crate::instr::resolve(&block).unwrap();
+            let idioms = crate::idiom::find(&block, &r.idiom);
+            let out = propose(&block, &idioms, &r);
+            let sig = |p: usize| -> BTreeSet<usize> {
+                block.parts[p]
+                    .pins
+                    .iter()
+                    .flat_map(|x| x.nets())
+                    .filter(|n| block.nets[*n].kind == NetKind::Signal)
+                    .collect()
+            };
+            for (i, g) in out.iter().enumerate() {
+                if g.parts.len() != 1 || g.basis != Basis::Rest {
+                    continue;
+                }
+                let p = *g.parts.first().unwrap();
+                if r.edge.contains_key(&p) {
+                    continue;
+                }
+                let shares = out.iter().enumerate().any(|(j, h)| {
+                    j != i
+                        && h.parts.iter().all(|q| r.sheet.get(q) == r.sheet.get(&p))
+                        && h.parts.iter().any(|q| !sig(*q).is_disjoint(&sig(p)))
+                });
+                assert!(
+                    !shares,
+                    "seed {seed}: {} stands alone though it shares a net",
+                    block.parts[p].key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pulls_on_a_bus_are_titled_by_it() {
+        assert_eq!(bus_of(["SDA", "SCL"].into_iter()), Some("I2C"));
+        assert_eq!(bus_of(["N_J2_A5"].into_iter()), None);
+        assert_eq!(bus_of(["USB_D+", "USB_D-"].into_iter()), Some("USB"));
+        assert_eq!(bus_of(std::iter::empty()), None);
+    }
+
     #[test]
     fn regions_are_proposed_from_function_in_order() {
         let block = crate::testing::regions_block();
@@ -440,7 +655,7 @@ mod tests {
                 ("TPS54331 converter", vec!["c2", "l1", "u2"]),
                 ("U1 LAN8710A", vec!["c1", "r1", "u1"]),
                 ("J1", vec!["j1"]),
-                ("F1", vec!["c9", "r9"]),
+                ("", vec!["c9", "r9"]),
             ],
             "topologies, dense ICs, connectors, then connected groups; ports in none"
         );
@@ -485,7 +700,7 @@ mod tests {
             .layout
             .regions
             .iter()
-            .find(|(_, r)| r.title == "F1")
+            .find(|(_, r)| r.parts.iter().any(|k| k == "r9"))
             .map(|(id, _)| id.clone())
             .unwrap();
         let mut moved = block.clone();

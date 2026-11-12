@@ -354,6 +354,21 @@ fn netlists_and_erc_are_bit_exact() {
                 MCU_PINS,
             ],
         );
+        ryueda(
+            &p,
+            1,
+            &[
+                "symbol",
+                "create",
+                "opamp",
+                "--template",
+                "opamp",
+                "--units",
+                "2",
+                "--pins",
+                OPAMP_PINS,
+            ],
+        );
         let mut files: Vec<_> = std::fs::read_dir(p.join("library/symbols"))
             .unwrap()
             .map(|f| f.unwrap().path())
@@ -604,6 +619,17 @@ fn kicad_lint(threads: usize) -> Value {
     let (_dir, root) = kicad_imported(threads);
     ryueda(&root, threads, &["lib", "check"])
 }
+
+/// A dual op-amp, for the `opamp` template's golden (#758).
+const OPAMP_PINS: &str = r#"[
+    {"number": "2", "name": "-", "type": "input", "unit": 1},
+    {"number": "3", "name": "+", "type": "input", "unit": 1},
+    {"number": "1", "name": "~", "type": "output", "unit": 1},
+    {"number": "6", "name": "-", "type": "input", "unit": 2},
+    {"number": "5", "name": "+", "type": "input", "unit": 2},
+    {"number": "7", "name": "~", "type": "output", "unit": 2},
+    {"number": "8", "name": "V+", "type": "power_in"},
+    {"number": "4", "name": "V-", "type": "power_in"}]"#;
 
 /// Task 20's MCU's fourteen named pins, for the `ic` template's golden.
 const MCU_PINS: &str = r#"[

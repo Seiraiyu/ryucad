@@ -372,6 +372,10 @@ pub enum Instruction {
     Region { title: String, parts: Vec<String> },
     /// The parts in no region the agent named: proposed again.
     RegionNone { parts: Vec<String> },
+    /// A region's title, by the region's ID: applied once the layout's
+    /// regions are made, so a region made in the same batch can be titled
+    /// (format 5, plan 3.A).
+    Title { region: String, title: String },
     /// A sheet's paper, pinned: never fitted again.
     Paper {
         sheet: String,
@@ -390,6 +394,9 @@ pub enum Instruction {
     /// (its ID), placed by the engine (format 4).
     Note { on: String, text: String },
 }
+
+/// The longest a region's title may be, in characters (plan 3.A).
+pub const TITLE_MAX: usize = 60;
 
 /// The longest a note may be, in characters.
 pub const NOTE_MAX: usize = 120;
@@ -436,7 +443,10 @@ impl Instruction {
             | Instruction::Region { parts, .. }
             | Instruction::RegionNone { parts }
             | Instruction::Text { parts, .. } => parts,
-            Instruction::Net { .. } | Instruction::Paper { .. } | Instruction::Note { .. } => &[],
+            Instruction::Net { .. }
+            | Instruction::Paper { .. }
+            | Instruction::Note { .. }
+            | Instruction::Title { .. } => &[],
         }
     }
 
@@ -469,7 +479,9 @@ impl Instruction {
             Instruction::Idiom { .. } => "idiom",
             Instruction::Flow { .. } => "flow",
             Instruction::Shift { .. } => "shift",
-            Instruction::Region { .. } | Instruction::RegionNone { .. } => "region",
+            Instruction::Region { .. }
+            | Instruction::RegionNone { .. }
+            | Instruction::Title { .. } => "region",
             Instruction::Paper { .. } => "paper",
             Instruction::Text { .. } => "text",
             Instruction::Note { .. } => "note",
@@ -486,11 +498,19 @@ impl Layout {
             .any(|i| matches!(i, Instruction::Align { parts, .. } if parts.iter().any(|p| p.contains('/'))))
     }
 
-    /// The lowest layout format that holds it: 4 for an off-sheet
-    /// connector, a drawn bus, a note or an instruction format 4 brings
-    /// (plan 2.C); 3 for regions, a sheet's own paper or an instruction
-    /// format 3 brings; 2 for a lasting pin-level `align`; else 1.
+    /// The lowest layout format that holds it: 5 for a region title by
+    /// ID (plan 3.A); 4 for an off-sheet connector, a drawn bus, a note or
+    /// an instruction format 4 brings (plan 2.C); 3 for regions, a sheet's
+    /// own paper or an instruction format 3 brings; 2 for a lasting
+    /// pin-level `align`; else 1.
     pub fn format(&self) -> u64 {
+        if self
+            .instructions
+            .values()
+            .any(|i| matches!(i, Instruction::Title { .. }))
+        {
+            return 5;
+        }
         let four = self
             .labels
             .values()

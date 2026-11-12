@@ -1022,15 +1022,22 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
         }
         let prefs = crate::lint::prefs(p);
         // Every fix tried by a dry run before it is offered.
-        let (findings, checked) = crate::schem::checked_findings(&laid, &prefs);
+        let (findings, checked, withheld) = crate::schem::checked_findings(&laid, &prefs);
         let names = crate::vocab::Names {
             p,
             b,
             built: &laid.built,
         };
-        for (f, ok) in findings.into_iter().zip(checked) {
+        for ((f, ok), held) in findings.into_iter().zip(checked).zip(withheld) {
             let code: Code = serde_json::from_value(json!(f.code)).expect("lint codes are codes");
             let fixes = names.fixes(&f.fixes);
+            let held: Vec<serde_json::Value> = held
+                .iter()
+                .map(|(batch, why)| {
+                    let text = names.fixes(std::slice::from_ref(batch));
+                    json!({"fix": text.first().cloned().unwrap_or_default(), "why": why})
+                })
+                .collect();
             // A rule `lint.json` makes an error fails the check.
             let fault = match f.severity {
                 ryusch::lint::Severity::Error => Fault::error(code, f.message),
@@ -1045,6 +1052,9 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
             }
             if !ok {
                 fault = fault.with("fixes_checked", false);
+            }
+            if !held.is_empty() {
+                fault = fault.with("withheld", held);
             }
             out.push(fault);
         }

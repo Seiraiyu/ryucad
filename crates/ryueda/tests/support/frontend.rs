@@ -18,7 +18,7 @@
 //! +5VA, -5VA and GND; the single-ended amplifier's enable, which only
 //! that sheet reads, goes with it. The connectivity is the reference's,
 //! part for part and pin for pin; the symbols are our own drawings
-//! (`draw`). Generated once from the reference's netlist; edit it as code
+//! (`draw`), the op-amps the standards' template's (#758). Generated once from the reference's netlist; edit it as code
 //! from now on.
 
 #![allow(dead_code)]
@@ -29,50 +29,31 @@ fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// An op amp's power unit: `top` and `bottom` pins on a small box.
-fn power_unit<'a>(
-    unit: u32,
-    top: &[(&'a str, &'a str, &'a str)],
-    bottom: &[(&'a str, &'a str, &'a str)],
-) -> Vec<serde_json::Value> {
-    let w = 2.54 * 2.0 * top.len().max(bottom.len()) as f64;
-    let (p, h, wide) = draw::sides(&[], &[], top, bottom, w);
-    draw::ic_unit(wide, h, &p, unit)
-}
+/// The OPA1612: amplifiers A and B, the supplies common (#758).
+const OPA1612_PINS: &str = r#"[
+    {"number": "2", "name": "-", "type": "input", "unit": 1},
+    {"number": "3", "name": "+", "type": "input", "unit": 1},
+    {"number": "1", "name": "~", "type": "output", "unit": 1},
+    {"number": "6", "name": "-", "type": "input", "unit": 2},
+    {"number": "5", "name": "+", "type": "input", "unit": 2},
+    {"number": "7", "name": "~", "type": "output", "unit": 2},
+    {"number": "8", "name": "V+", "type": "power_in"},
+    {"number": "4", "name": "V-", "type": "power_in"}]"#;
 
-/// The OPA1612: amplifiers A and B, then power.
-fn opa1612() -> String {
-    let mut list = draw::opamp_unit(1, "3", "2", "1", &[]);
-    list.extend(draw::opamp_unit(2, "5", "6", "7", &[]));
-    list.extend(power_unit(
-        3,
-        &[("8", "V+", "power_in")],
-        &[("4", "V-", "power_in")],
-    ));
-    draw::ops(list)
-}
-
-/// The OPA1622: amplifiers A (with the enable) and B, then power.
-fn opa1622() -> String {
-    let mut list = draw::opamp_unit(
-        1,
-        "1",
-        "10",
-        "9",
-        &[("8", "EN", "input", 0.0, 5.08, "up", 2.54)],
-    );
-    list.extend(draw::opamp_unit(2, "5", "6", "7", &[]));
-    list.extend(power_unit(
-        3,
-        &[("2", "V+", "power_in")],
-        &[
-            ("4", "V-", "power_in"),
-            ("11", "V-", "power_in"),
-            ("3", "GND", "power_in"),
-        ],
-    ));
-    draw::ops(list)
-}
+/// The OPA1622: amplifier A with its enable, amplifier B, the supplies
+/// common: V+ on top, both V- and GND along the bottom.
+const OPA1622_PINS: &str = r#"[
+    {"number": "10", "name": "-", "type": "input", "unit": 1},
+    {"number": "1", "name": "+", "type": "input", "unit": 1},
+    {"number": "9", "name": "~", "type": "output", "unit": 1},
+    {"number": "8", "name": "EN", "type": "input", "unit": 1},
+    {"number": "6", "name": "-", "type": "input", "unit": 2},
+    {"number": "5", "name": "+", "type": "input", "unit": 2},
+    {"number": "7", "name": "~", "type": "output", "unit": 2},
+    {"number": "2", "name": "V+", "type": "power_in"},
+    {"number": "4", "name": "V-", "type": "power_in"},
+    {"number": "11", "name": "V-", "type": "power_in"},
+    {"number": "3", "name": "GND", "type": "power_in"}]"#;
 
 /// The library: symbols and library components, by command.
 pub fn library() -> Vec<Vec<String>> {
@@ -80,14 +61,31 @@ pub fn library() -> Vec<Vec<String>> {
         ("R", "r", 1, draw::resistor()),
         ("C", "c", 1, draw::capacitor()),
         ("BAV99", "bav99", 1, draw::diode_pair()),
-        ("OPA1612AxD", "opa1612", 3, opa1612()),
-        ("OPA1622", "opa1622", 3, opa1622()),
     ];
     let mut out = Vec::new();
     for (name, id, units, ops) in &symbols {
         let units = units.to_string();
         out.push(args(&[
             "symbol", "create", name, "--id", id, "--units", &units, "--ops", ops,
+        ]));
+    }
+    // The op-amps from the standards' template (#758).
+    for (name, id, pins) in [
+        ("OPA1612AxD", "opa1612", OPA1612_PINS),
+        ("OPA1622", "opa1622", OPA1622_PINS),
+    ] {
+        out.push(args(&[
+            "symbol",
+            "create",
+            name,
+            "--id",
+            id,
+            "--template",
+            "opamp",
+            "--units",
+            "2",
+            "--pins",
+            pins,
         ]));
     }
     for (id, name, symbol, prefix, value) in LIBCOMPS {
