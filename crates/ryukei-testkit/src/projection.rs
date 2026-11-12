@@ -441,9 +441,11 @@ pub fn grid_direction(k: u8) -> Vector3 {
 /// projection that is the same twice, whose pieces the mesh oracle
 /// doesn't contradict and whose silhouettes are square to the view;
 /// every section is a typed refusal or a body that passes the checker
-/// with caps on the plane. Calls share one [`crate::FUZZ_BUDGET`] and are
-/// cancelled at [`crate::FUZZ_DEADLINE`]. Panics on anything else; the
-/// fuzz target and `tests/fuzz_regressions.rs` both call it.
+/// with caps on the plane. A first byte of `0xc0` or more turns the view
+/// square to the body's first torus face's axis, where it has one. Calls
+/// share one [`crate::FUZZ_BUDGET`] and are cancelled at
+/// [`crate::FUZZ_DEADLINE`]. Panics on anything else; the fuzz target and
+/// `tests/fuzz_regressions.rs` both call it.
 pub fn check_bytes(data: &[u8]) {
     use ryukei::Error;
     use ryukei::check::check;
@@ -456,7 +458,19 @@ pub fn check_bytes(data: &[u8]) {
     let Some((body, _)) = crate::blend_bytes::body(rest) else {
         return;
     };
-    let v = look(grid_direction(*d));
+    // A quarter of the cases square to a torus face's axis, if the body
+    // has one (plan 17.B): the closed form for a torus seen side on.
+    let mut t = grid_direction(*d);
+    if *d >= 0xc0
+        && let Some(z) = body.faces().find_map(|f| {
+            let s = body.surface(body.face(f).unwrap().surface).unwrap();
+            matches!(s, ryukei::geom::Surface::Torus(_)).then(|| s.frame().unwrap().z().get())
+        })
+        && let Some(u) = z.cross(t).normalize()
+    {
+        t = u.get();
+    }
+    let v = look(t);
     crate::fuzz_case(|work| {
         let placed = [Placed {
             body: &body,
