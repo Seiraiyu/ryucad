@@ -3220,6 +3220,125 @@ fn review_against_a_fake_service() {
 }
 
 #[test]
+fn tapped_holes_from_the_cli() {
+    let p = Pair::new();
+    // A 40 × 10 × 5 mm box and a sketch on its top with three points.
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [5, 5]},
+        {"op": "add", "type": "fix", "a": "p1"},
+        {"op": "add", "type": "point", "at": [15, 5]},
+        {"op": "add", "type": "fix", "a": "p2"},
+        {"op": "add", "type": "point", "at": [30, 5]},
+        {"op": "add", "type": "fix", "a": "p3"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--point",
+        "p1",
+        "--spec",
+        "M6x1.0-6H THRU",
+    ]);
+    assert_eq!(h["feature"]["spec"], "M6x1.0-6H THRU");
+    assert_eq!(h["feature"]["sizes"]["drill"]["value"], "5 mm");
+    let h = p.ok(&["feature", "edit", "p", "h", "--class", "5H", "--left-hand"]);
+    assert_eq!(
+        h["feature"]["thread"],
+        json!({"standard": "iso_metric", "size": "M6", "class": "5H", "hand": "left"})
+    );
+    let h = p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "h",
+        "--tap-drill",
+        "engagement:75",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        (&h["dry_run"], &h["feature"]["sizes"]["drill"]["value"]),
+        (&json!(true), &json!("5.2 mm"))
+    );
+    let shown = p.ok(&["feature", "show", "p", "h"]);
+    assert!(
+        shown["feature"]["thread"].get("drill").is_none(),
+        "a dry run writes nothing"
+    );
+    p.fails(
+        &[
+            "feature",
+            "edit",
+            "p",
+            "h",
+            "--spec",
+            "M8 THRU",
+            "--depth",
+            "through_all",
+        ],
+        "usage",
+        2,
+    );
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "k",
+        "--sketch",
+        "s",
+        "--point",
+        "p2",
+        "--thread",
+        "unf:#10",
+        "--depth",
+        "through_all",
+    ]);
+    assert_eq!(h["feature"]["spec"], "#10-32 UNF-2B THRU");
+    let e = p.fails(
+        &["feature", "edit", "p", "k", "--tpi", "24"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["reason"], "pitch_not_standard");
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "f",
+        "--sketch",
+        "s",
+        "--point",
+        "p3",
+        "--diameter",
+        "6",
+        "--fit",
+        "H7",
+        "--depth",
+        "through_all",
+    ]);
+    assert_eq!(h["feature"]["spec"], "DIA 6 H7 THRU");
+}
+
+#[test]
 fn holes_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);

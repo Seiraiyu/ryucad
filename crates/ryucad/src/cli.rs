@@ -1287,7 +1287,9 @@ enum FeatureCmd {
     /// sheets into one body; a thicken (--sheet, or --face repeated;
     /// --front, --back, --face-sides, --operation and --target) of a sheet
     /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
-    /// countersink, --bottom) cut from solids (--target); or a pattern of
+    /// countersink, --bottom; or --spec, --thread with --pitch, --tpi, --class,
+    /// --left-hand, --starts, --thread-depth and --tap-drill, --fastener with
+    /// --fastener-fit, --fit) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
     /// --angle) or mirror (--plane), skipping instances (--skip); or, in an
@@ -1313,6 +1315,9 @@ enum FeatureCmd {
         fields: FieldArgs,
         #[command(flatten)]
         expect: Expect,
+        /// Check and derive the feature, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Change some of a feature's parameters or placement, a sketch's
     /// plane, what an extrude or revolve sweeps and how far, a fillet's or
@@ -1338,6 +1343,9 @@ enum FeatureCmd {
         expressions: Vec<(String, String)>,
         #[command(flatten)]
         expect: Expect,
+        /// Check and derive the feature, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     Delete {
         part: String,
@@ -2921,6 +2929,45 @@ struct FieldArgs {
     /// A hole's bottom: flat (the default), or a drill point's included angle: 118.
     #[arg(long, value_name = "BOTTOM")]
     bottom: Option<String>,
+    /// A hole's spec: "M6x1.0-6H THRU", "1/4-20 UNC-2B .5 DEEP, DRILL .625 DEEP",
+    /// "CBORE ISO4762 M5", "DIA 6 H7 THRU".
+    #[arg(long, value_name = "SPEC")]
+    spec: Option<String>,
+    /// A tapped hole's thread, STANDARD:SIZE: iso_metric:M6, unc:1/4, npt:1/8, bspp:G1/4,
+    /// or a project standard's; "" takes it away.
+    #[arg(long, value_name = "STANDARD:SIZE")]
+    thread: Option<String>,
+    /// A tapped hole's threads per inch, when not the series' own.
+    #[arg(long, value_name = "NUMBER")]
+    tpi: Option<String>,
+    /// A tapped hole's class: 6H, 5G, 2B.
+    #[arg(long = "class", value_name = "CLASS")]
+    thread_class: Option<String>,
+    /// A left-hand thread (--right-hand takes it back).
+    #[arg(long, conflicts_with = "right_hand")]
+    left_hand: bool,
+    #[arg(long)]
+    right_hand: bool,
+    /// A multi-start thread's starts.
+    #[arg(long, value_name = "N")]
+    starts: Option<u32>,
+    /// How deep the thread runs from the mouth: a length, or "full".
+    #[arg(long, value_name = "QUANTITY")]
+    thread_depth: Option<String>,
+    /// The tap drill: table (ryucad's rule, or the project's tap drill), roll-form, or
+    /// engagement:N (percent).
+    #[arg(long, value_name = "table|roll-form|engagement:N")]
+    tap_drill: Option<String>,
+    /// A clearance hole's screw, STANDARD:SIZE from the project's hole_standards.json;
+    /// "" takes it away.
+    #[arg(long, value_name = "STANDARD:SIZE")]
+    fastener: Option<String>,
+    /// The clearance's fit: close, normal or loose.
+    #[arg(long, value_name = "FIT")]
+    fastener_fit: Option<String>,
+    /// The bore's ISO 286 class: H7; "" takes it away.
+    #[arg(long, value_name = "CLASS")]
+    fit: Option<String>,
     /// A join, cut or hole a pattern repeats, or a delete_face's seed: one face of a
     /// hole, boss or pocket, deleted whole. Repeat for several.
     #[arg(long = "seed", value_name = "FEATURE")]
@@ -3101,7 +3148,7 @@ struct FieldArgs {
     /// --radius).
     #[arg(long, value_name = "POINT")]
     start: Option<String>,
-    /// A helix's rise per turn.
+    /// A helix's rise per turn, or a tapped hole's pitch.
     #[arg(long, value_name = "QUANTITY")]
     pitch: Option<String>,
     /// A helix's number of turns.
@@ -3541,17 +3588,16 @@ impl FieldArgs {
             extent.insert("both".into(), json!(b));
         }
         FeatureFields {
-            // A hole's intent fields: Task 27 gives them flags.
-            spec: None,
-            thread: None,
-            fastener: None,
-            fastener_fit: None,
-            fit: None,
-            tpi: None,
-            class: None,
-            starts: None,
-            thread_depth: None,
-            tap_drill: None,
+            spec: self.spec.clone(),
+            thread: self.thread.clone().map(Value::String),
+            fastener: self.fastener.clone().map(Value::String),
+            fastener_fit: self.fastener_fit.clone(),
+            fit: self.fit.clone(),
+            tpi: self.tpi.clone().map(Value::String),
+            class: self.thread_class.clone(),
+            starts: self.starts,
+            thread_depth: self.thread_depth.clone().map(Value::String),
+            tap_drill: self.tap_drill.clone(),
             plane: self.plane.clone(),
             neutral: self.neutral.clone(),
             parting: (!self.parting.is_empty()).then(|| self.parting.clone()),
@@ -3729,7 +3775,14 @@ impl FieldArgs {
             pitch: self.pitch.clone().map(Value::String),
             turns: self.turns.clone().map(Value::String),
             height: self.height.clone().map(Value::String),
-            hand: self.hand.clone(),
+            // A helix's --hand, or a tapped hole's --left-hand/--right-hand.
+            hand: if self.left_hand {
+                Some("left".into())
+            } else if self.right_hand {
+                Some("right".into())
+            } else {
+                self.hand.clone()
+            },
             taper: self.taper.clone().map(Value::String),
             path: self.path.clone(),
             law: self.law.clone(),
@@ -4263,6 +4316,7 @@ fn request(cmd: &Command) -> Option<Request> {
             placement,
             fields,
             expect,
+            dry_run,
         }) => Request::FeatureAdd {
             part: part.clone(),
             ty: ty.clone(),
@@ -4272,7 +4326,7 @@ fn request(cmd: &Command) -> Option<Request> {
             id: id.clone(),
             position: position.to_position(),
             expected_revision: expect.revision.clone(),
-            dry_run: false,
+            dry_run: *dry_run,
         },
         Command::Feature(FeatureCmd::Edit {
             part,
@@ -4283,6 +4337,7 @@ fn request(cmd: &Command) -> Option<Request> {
             fields,
             expressions,
             expect,
+            dry_run,
         }) => {
             let mut params = params.to_map();
             params.extend(unset.iter().map(|k| (k.clone(), Value::Null)));
@@ -4297,7 +4352,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     .map(|(k, v)| (k.clone(), json!(v)))
                     .collect(),
                 expected_revision: expect.revision.clone(),
-                dry_run: false,
+                dry_run: *dry_run,
             }
         }
         Command::Feature(FeatureCmd::Delete { part, id, expect }) => Request::FeatureDelete {
