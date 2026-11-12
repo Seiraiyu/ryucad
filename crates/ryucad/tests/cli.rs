@@ -8656,3 +8656,80 @@ fn properties_in_and_out_from_the_cli() {
             .any(|w| w.starts_with("export_metadata_omitted"))
     );
 }
+
+#[test]
+fn a_sweep_from_the_cli_three_ways() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    let short = p.ok(&[
+        "assembly",
+        "sweep",
+        "frame",
+        "--mate",
+        "m1",
+        "--from",
+        "-3deg",
+        "--to",
+        "3deg",
+        "--steps",
+        "7",
+        "--interference",
+    ]);
+    assert_eq!(short["steps"].as_array().unwrap().len(), 7, "{short}");
+    assert_eq!(short["first_collision"], serde_json::Value::Null, "{short}");
+    let inline = p.ok(&[
+        "assembly",
+        "sweep",
+        "frame",
+        "--drives",
+        r#"[{"mate": "m1", "angle": {"from": "-3 deg", "to": "3 deg"}}]"#,
+        "--steps",
+        "7",
+        "--interference",
+    ]);
+    assert_eq!(inline["steps"], short["steps"]);
+    p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "turn",
+        "--drives",
+        r#"[{"mate": "m1", "angle": {"from": "-3 deg", "to": "3 deg"}}]"#,
+        "--steps",
+        "7",
+    ]);
+    let saved = p.ok(&[
+        "assembly",
+        "sweep",
+        "frame",
+        "turn",
+        "--interference",
+        "--poses",
+    ]);
+    assert_eq!(saved["motion"], "turn");
+    assert!(saved["steps"][3]["poses"]["pin"].is_object(), "{saved}");
+    p.fails(
+        &["assembly", "sweep", "frame", "gone"],
+        "motion_not_found",
+        1,
+    );
+}

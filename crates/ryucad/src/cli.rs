@@ -1232,6 +1232,59 @@ enum AssemblyCmd {
         #[arg(long = "mate", value_name = "JSON", value_parser = json_object)]
         mates: Vec<Value>,
     },
+    /// Sweep a motion, writing nothing: step its drives from start to
+    /// end, each step solved from the last, and report where it is
+    /// blocked, where anything collides that doesn't at rest
+    /// (--interference, the first contact refined), and how close the
+    /// moving parts come (--clearance). A saved motion, one mate's angle
+    /// (a slider's distance) with --mate --from --to, or --drives.
+    Sweep {
+        part: String,
+        /// A saved motion of the assembly.
+        #[arg(conflicts_with_all = ["mate", "drives"], required_unless_present_any = ["mate", "drives"])]
+        motion: Option<String>,
+        /// Drive this mate's angle (a slider's distance) from --from to --to.
+        #[arg(long, requires_all = ["from", "to"], conflicts_with = "drives")]
+        mate: Option<String>,
+        #[arg(
+            long,
+            value_name = "QUANTITY",
+            allow_hyphen_values = true,
+            requires = "mate"
+        )]
+        from: Option<String>,
+        #[arg(
+            long,
+            value_name = "QUANTITY",
+            allow_hyphen_values = true,
+            requires = "mate"
+        )]
+        to: Option<String>,
+        /// Drives, as a motion file writes them.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        drives: Option<Value>,
+        /// Steps from start to end, 2 to 1,000 (11 when left out; a saved
+        /// motion has its own).
+        #[arg(long, conflicts_with = "motion")]
+        steps: Option<u32>,
+        /// Check each step for instances that collide and don't at rest.
+        #[arg(long)]
+        interference: bool,
+        /// Report each step's closest moving pair.
+        #[arg(long)]
+        clearance: bool,
+        /// How far clearance looks (a length; by default a hundredth of
+        /// the assembly's diagonal).
+        #[arg(long, value_name = "LENGTH", requires = "clearance")]
+        below: Option<String>,
+        /// Give each step's moved instances' poses.
+        #[arg(long)]
+        poses: bool,
+        /// Bisections of the first collision and the first stop (10; 0
+        /// for none).
+        #[arg(long, value_name = "N")]
+        refine: Option<u32>,
+    },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
     Tree {
@@ -4314,6 +4367,33 @@ fn request(cmd: &Command) -> Option<Request> {
                 })
                 .collect(),
         },
+        Command::Assembly(AssemblyCmd::Sweep {
+            part,
+            motion,
+            mate,
+            from,
+            to,
+            drives,
+            steps,
+            interference,
+            clearance,
+            below,
+            poses,
+            refine,
+        }) => Request::AssemblySweep {
+            part: part.clone(),
+            motion: motion.clone(),
+            drives: drives.clone(),
+            mate: mate.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            steps: *steps,
+            interference: *interference,
+            clearance: *clearance,
+            below: below.clone(),
+            poses: *poses,
+            refine: *refine,
+        },
         Command::Feature(FeatureCmd::Add {
             part,
             ty,
@@ -5950,6 +6030,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Mass { .. }
             | Command::Feature(FeatureCmd::Edit { .. })
             | Command::Assembly(AssemblyCmd::Tree { .. })
+            | Command::Assembly(AssemblyCmd::Sweep { .. })
             | Command::Interference { .. }
             | Command::Appearance { .. }
             | Command::Render { .. }
