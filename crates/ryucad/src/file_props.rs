@@ -766,7 +766,7 @@ pub(crate) mod tests {
         );
         assert!(!m.instances["supplier"].is_empty());
         assert!(
-            m.instances.get("name").is_none(),
+            !m.instances.contains_key("name"),
             "the product's name is the tree's"
         );
     }
@@ -842,7 +842,7 @@ pub(crate) mod tests {
         ] {
             assert_eq!(got.get(k), Some(&want), "{k}: {got:?}");
         }
-        assert!(got.get("number").is_none(), "never the number");
+        assert!(!got.contains_key("number"), "never the number");
         // The dry run says the same and writes nothing.
         let (_dir, mut s) = declared(&[]);
         let dry = call(
@@ -1170,7 +1170,7 @@ pub(crate) mod tests {
         assert_eq!(file[0]["product"]["id"], "VB-100");
         assert!(file[0]["step"].as_str().unwrap().starts_with('#'));
         // Nothing wrote them: they aren't properties.
-        assert!(values(&mut s, "vb-100").get("rohs").is_none());
+        assert!(!values(&mut s, "vb-100").contains_key("rohs"));
         // A part with no imports has none.
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         let p = call(&mut s, "props.get", json!({"part": "p"})).unwrap();
