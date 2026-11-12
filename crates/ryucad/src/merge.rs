@@ -455,6 +455,15 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             sweep(walk, b, ours, theirs)
         }
         Some(b) if same_type && ty(b).0 == Some(json!("thicken")) => thicken(walk, b, ours, theirs),
+        // A hole's thread is one value (its size and pitch go together),
+        // and so are its fastener, its fit and its tolerance.
+        Some(b) if same_type && ty(b).0 == Some(json!("hole")) => atomic(
+            walk,
+            b,
+            ours,
+            theirs,
+            &["thread", "fastener", "fit", "tolerance"],
+        ),
         Some(b)
             if same_type
                 && matches!(
@@ -660,6 +669,28 @@ fn thicken(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value
     };
     if let Some(f) = from {
         out.insert("from".to_owned(), f);
+    }
+    Value::Object(out)
+}
+
+/// A feature merged per key, but each of `keys` as one value of its own:
+/// changed on both sides, each conflicts once at `/<key>`.
+fn atomic(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value, keys: &[&str]) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, keys);
+    for k in keys {
+        let (kb, ko, kt) = (b.get(*k), o.get(*k), t.get(*k));
+        let v = if ko == kt || kt == kb {
+            ko.cloned()
+        } else if ko == kb {
+            kt.cloned()
+        } else {
+            walk.conflict(&format!("/{k}"), Kind::Value, kb, ko, kt)
+        };
+        if let Some(v) = v {
+            out.insert((*k).to_owned(), v);
+        }
     }
     Value::Object(out)
 }
@@ -2050,6 +2081,40 @@ mod tests {
             &mirror(json!({"targets": ["b"]})),
         );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/targets"]);
+    }
+
+    #[test]
+    fn a_holes_thread_merges_as_one_value() {
+        let base = json!({"format": 23, "kind": "ryucad.feature", "type": "hole", "sketch": "s",
+                          "form": "simple", "thread": {"standard": "iso_metric", "size": "M6"},
+                          "depth": "through_all", "targets": ["b"]});
+        let mut ours = base.clone();
+        ours["thread"] = json!({"standard": "iso_metric", "size": "M8"});
+        let mut theirs = base.clone();
+        theirs["thread"] = json!({"standard": "iso_metric", "size": "M6", "pitch": "0.75 mm"});
+        let m = merge(Some(&base), &ours, &theirs);
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(
+            at,
+            ["/thread"],
+            "M8 with M6's fine pitch would be no thread at all"
+        );
+        // Changed on one side, it is taken whole; other keys merge as before.
+        let mut theirs = base.clone();
+        theirs["depth"] = json!({"blind": "10 mm"});
+        theirs["thread"]["depth"] = json!("8 mm");
+        let mut ours = base.clone();
+        ours["fit"] = json!("H7");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (
+                &m.value["thread"]["depth"],
+                &m.value["fit"],
+                &m.value["depth"]
+            ),
+            (&json!("8 mm"), &json!("H7"), &json!({"blind": "10 mm"}))
+        );
     }
 
     #[test]

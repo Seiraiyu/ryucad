@@ -1030,6 +1030,85 @@ fn normal_class(c: &str) -> String {
     c.to_ascii_uppercase()
 }
 
+/// Textconv's line for a hole's thread, as its file holds it: its
+/// designation, its depth (`full` when none), and its tap drill and
+/// starts when not the default. `None` when it isn't a thread's object.
+pub fn thread_line(t: &Value) -> Option<String> {
+    use ryu_standards::thread::{Pitch, lookup};
+    let standard = t.get("standard")?.as_str()?;
+    let size = t.get("size")?.as_str()?;
+    let built = Standard::parse(standard);
+    let pitch = built.and_then(|b| {
+        let written = t
+            .get("pitch")
+            .and_then(Value::as_str)
+            .and_then(|p| Quantity::parse(p, Unit::Mm).ok())
+            .map(|q| Pitch::Mm((q.meters() * 1e9).round() as i64));
+        let tpi = t
+            .get("tpi")
+            .and_then(|n| {
+                n.as_str()
+                    .map(str::to_owned)
+                    .or(n.as_u64().map(|x| x.to_string()))
+            })
+            .and_then(|n| n.parse::<f64>().ok())
+            .map(|n| {
+                if b.is_pipe() {
+                    Pitch::Tpi10((n * 10.0).round() as u32)
+                } else {
+                    Pitch::Tpi(n.round() as u16)
+                }
+            });
+        lookup(b, size, written.or(tpi), None)
+            .ok()
+            .map(|x| x.pitch.value)
+    });
+    let class = t
+        .get("class")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            built
+                .and_then(|b| lookup(b, size, pitch, None).ok())
+                .and_then(|x| x.class)
+        });
+    let left = t.get("hand").and_then(Value::as_str) == Some("left");
+    let mut line = crate::hole::derive::designation(standard, size, pitch, class.as_deref(), left);
+    line.push_str(", ");
+    line.push_str(t.get("depth").and_then(Value::as_str).unwrap_or("full"));
+    match t.get("drill") {
+        Some(Value::String(s)) if s == "roll_form" => line.push_str(", roll form"),
+        Some(d) => {
+            if let Some(e) = d.get("engagement").and_then(Value::as_u64) {
+                line.push_str(&format!(", engagement {e}%"));
+            }
+        }
+        None => {}
+    }
+    if let Some(n) = t.get("starts").and_then(Value::as_u64) {
+        line.push_str(&format!(", {n} starts"));
+    }
+    Some(line)
+}
+
+/// Textconv's line for a hole's fastener: `HOUSE_CAP M5, close`.
+pub fn fastener_line(f: &Value) -> Option<String> {
+    let standard = f.get("standard")?.as_str()?;
+    let size = f.get("size")?.as_str()?;
+    let fit = f.get("fit").and_then(Value::as_str).unwrap_or("normal");
+    Some(format!("{} {size}, {fit}", standard.to_uppercase()))
+}
+
+/// A hole feature's canonical spec, from its file's JSON in a project of
+/// `unit`; `None` when it isn't a hole or doesn't read alone (one reading
+/// parameters, say).
+pub fn of_json(v: &Value, unit: Unit) -> Option<String> {
+    match crate::doc::files::Feature::from_json(v, unit, &crate::expr::Env::empty()).ok()? {
+        crate::doc::files::Feature::Hole(h) => Some(canonical(&h, unit)),
+        _ => None,
+    }
+}
+
 /// The canonical spec of a hole.
 pub fn canonical(h: &Hole, project: Unit) -> String {
     Spec::of(h, project).text()
