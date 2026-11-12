@@ -281,10 +281,11 @@ fn edit_instance(v: &mut Value, op: u8, arg: u8) {
 }
 
 /// Applies edit `(op, arg)` to a mate: a connector aimed elsewhere or
-/// offset, its form or its angle changed. A connector is one value.
+/// offset, its form, its angle or its angle's limits changed (format 22
+/// with limits). A connector is one value, and so is each range.
 fn edit_mate(v: &mut Value, op: u8, arg: u8) {
     let side = if arg & 1 == 0 { "a" } else { "b" };
-    match op % 4 {
+    match op % 5 {
         0 => {
             v[side]["at"] = match arg % 3 {
                 0 => json!("origin"),
@@ -293,7 +294,16 @@ fn edit_mate(v: &mut Value, op: u8, arg: u8) {
         }
         1 => v[side]["offset"] = json!({"origin": ["0 mm", "0 mm", format!("{} mm", arg % 7)]}),
         2 => v["form"] = json!(["fastened", "revolute", "slider", "ball"][usize::from(arg % 4)]),
-        _ => v["angle"] = json!(format!("{} deg", arg % 90)),
+        3 => v["angle"] = json!(format!("{} deg", arg % 90)),
+        _ => {
+            let n = arg % 90 + 1;
+            v["limits"]["angle"] = if arg & 2 == 0 {
+                json!({"min": format!("-{n} deg"), "max": format!("{n} deg")})
+            } else {
+                json!({"max": format!("{n} deg")})
+            };
+            v["format"] = json!(22);
+        }
     }
 }
 

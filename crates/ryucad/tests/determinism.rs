@@ -5065,6 +5065,53 @@ fn mates_section(golden: &mut Golden) {
     s.str(&r.hash);
 }
 
+/// The mated assembly with its hinge freed and stopped, -10° to 35°, then
+/// turned 40°: settled at its stop. The solve's report, each mate's values
+/// and stops, every occurrence's pose bits, the files as stored, and the
+/// rebuild's hash.
+fn limits_section(golden: &mut Golden) {
+    use ryucad::doc::assembly::Rev;
+    use serde_json::json;
+    let mut s = golden.section("limits");
+    let (dir, mut session) = mated();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(
+        &mut session,
+        "feature.edit",
+        json!({"part": "frame", "id": "m1", "angle": "",
+         "limits": {"angle": {"min": "-10 deg", "max": "35 deg"}}}),
+    );
+    call(
+        &mut session,
+        "assembly.move",
+        json!({"part": "frame", "instance": "pin", "axis": [0, 0, 1], "angle": "40 deg"}),
+    );
+    let frame = Id::parse("frame", "part").unwrap();
+    let r = session.rebuilt(&frame).unwrap().clone();
+    assert_eq!(r.failed(), 0, "{:?}", r.features);
+    let solve = r.solve.as_ref().unwrap();
+    assert!(solve.report.converged && !solve.stale());
+    s.str(&solve.to_json().to_string());
+    s.str(&solve.values_json(ryucad::units::Unit::Mm).to_string());
+    let model = session.model(&frame, &Rev::Working).unwrap();
+    for o in &model.occurrences {
+        s.str(&ryucad::assembly::path_text(&o.path));
+        let p = ryucad::assembly::rigid_pose(&o.pose);
+        for x in p.origin_m.iter().chain(&p.z).chain(&p.x) {
+            s.str(&format!("{:016x}", x.to_bits()));
+        }
+    }
+    for f in ["pin", "cap", "slide", "m1"] {
+        let path = dir.path().join(format!("parts/frame/features/{f}.json"));
+        s.str(&std::fs::read_to_string(path).unwrap());
+    }
+    s.str(&model.hash);
+    s.str(&r.hash);
+}
+
 /// A millimetre part of holes and patterns: a plate drilled at a
 /// sketch's points (a counterbore with a drill point, a countersink
 /// through all, a plain blind hole), a grid of the
@@ -6478,6 +6525,7 @@ sections! {
     boms => boms_section(&mut golden),
     assemblies => assemblies_section(&mut golden),
     mates => mates_section(&mut golden),
+    limits => limits_section(&mut golden),
     interference => interference_section(&mut golden),
     measure => measure_section(&mut golden),
     imports => imports_section(&mut golden),

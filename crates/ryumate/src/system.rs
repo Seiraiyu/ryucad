@@ -315,7 +315,12 @@ impl<'a> System<'a> {
     }
 
     /// Connector `c`'s frame in solver units at `x`: its origin and axes.
-    fn frame<const N: usize>(&self, c: &Connector, bodies: &[Id], x: &[f64]) -> (V<N>, [V<N>; 3]) {
+    pub(crate) fn frame<const N: usize>(
+        &self,
+        c: &Connector,
+        bodies: &[Id],
+        x: &[f64],
+    ) -> (V<N>, [V<N>; 3]) {
         match c.on {
             On::Body(b) => self.on_body(b, &c.frame, bodies, x),
             On::Copy {

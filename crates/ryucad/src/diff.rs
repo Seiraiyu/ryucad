@@ -195,6 +195,24 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                     lines.push(format!("{k} = {}", connector(&c)));
                 }
             }
+            // A mate's stops on one line: `limits = angle -6 deg .. 6 deg,
+            // distance .. 10 mm`.
+            if let Some(Value::Object(l)) = rest.remove("limits") {
+                let range = |r: &Value| {
+                    let lo = r.get("min").map(scalar);
+                    let hi = r.get("max").map(scalar);
+                    [lo, Some("..".to_owned()), hi]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                let parts: Vec<String> = ["angle", "distance"]
+                    .into_iter()
+                    .filter_map(|k| l.get(k).map(|r| format!("{k} {}", range(r))))
+                    .collect();
+                lines.push(format!("limits = {}", parts.join(", ")));
+            }
         }
         // A path's segments one line each, in order: the reference, and
         // whether it grows to its tangent chain.
@@ -2951,6 +2969,27 @@ mod tests {
     }
 
     #[test]
+    fn a_mates_limits_change_by_bound() {
+        let before = json!({"format": 22, "kind": "ryucad.feature", "type": "mate",
+                            "form": "cylindrical",
+                            "a": {"instance": ["base"], "at": "origin"},
+                            "b": {"instance": ["pin"], "at": "origin"},
+                            "limits": {"angle": {"min": "-6 deg", "max": "6 deg"}}});
+        let mut after = before.clone();
+        after["limits"]["angle"]["max"] = json!("8 deg");
+        after["limits"]["distance"] = json!({"max": "5 mm"});
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        assert_eq!(
+            out,
+            [
+                json!({"at": "/limits/angle/max", "from": "6 deg", "to": "8 deg"}),
+                json!({"at": "/limits/distance", "to": {"max": "5 mm"}}),
+            ]
+        );
+    }
+
+    #[test]
     fn a_tweaks_changes_are_by_field() {
         let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
         let before = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
@@ -3506,6 +3545,24 @@ mod tests {
         .unwrap();
         assert_eq!(names_near(&dir.path().join("parts/a")), names);
         assert!(names_near(std::path::Path::new("/")).is_empty());
+    }
+
+    #[test]
+    fn a_mates_limits_are_one_line() {
+        let v = json!({"format": 22, "kind": "ryucad.feature", "type": "mate",
+                       "form": "cylindrical",
+                       "a": {"instance": ["base"], "at": "origin"},
+                       "b": {"instance": ["pin"], "at": "origin"},
+                       "limits": {"angle": {"min": "-6 deg", "max": "6 deg"},
+                                  "distance": {"max": "10 mm"}}});
+        assert_eq!(
+            text(v),
+            "ryucad.feature mate (format 22)\n\
+             a = base : origin\n\
+             b = pin : origin\n\
+             form = cylindrical\n\
+             limits = angle -6 deg .. 6 deg, distance .. 10 mm\n"
+        );
     }
 
     #[test]

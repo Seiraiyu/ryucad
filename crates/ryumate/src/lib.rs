@@ -24,6 +24,7 @@
 //! assembly solves to the same bits on every platform.
 
 mod assembly;
+mod limits;
 mod pose;
 mod report;
 mod rot;
@@ -34,6 +35,7 @@ pub use assembly::{
     AXIS_TOL, Assembly, Body, Connector, Direction, Id, Kind, MAX_LENGTH, Mate, MateError, Motion,
     On, Pattern,
 };
+pub use limits::{Limits, MateValues, Measured, Range, Stop, Values, unwrap_angle, values};
 pub use pose::Pose;
 pub use report::{Axis, BodyReport, BodyState, Freedom, MateState, Report, State};
 pub use solve::{Solved, solve, solve_whole};
