@@ -455,6 +455,9 @@ pub(crate) fn crossings_in(
         let r = sorted(a.1);
         return Some(vec![Meet2::Overlap { ta: r, tb: r }]);
     }
+    if let Some(found) = closed_misses(a, b, tol) {
+        return Some(found);
+    }
     let ca = Chain2::new(a.0, a.1[0], a.1[1]);
     let cb = Chain2::new(b.0, b.1[0], b.1[1]);
     let mut out: Vec<Meet2> = Vec::new();
@@ -613,6 +616,135 @@ fn same_carrier(
         }
     }
     Some(out)
+}
+
+/// A circle's or an ellipse's carrier, for the closed forms (plan 17.C):
+/// its centre, its axes (unit to rounding), and its semi-axes along them.
+struct Conic {
+    c: Vector2,
+    x: Vector2,
+    y: Vector2,
+    ax: f64,
+    ay: f64,
+}
+
+impl Conic {
+    fn of(c: &Curve2) -> Option<Self> {
+        let (f, ax, ay) = match c {
+            Curve2::Circle2(k) => (k.frame(), k.radius(), k.radius()),
+            Curve2::Ellipse2(e) => (e.frame(), e.major(), e.minor()),
+            _ => return None,
+        };
+        Some(Self {
+            c: f.origin().to_vector(),
+            x: f.x(),
+            y: f.y(),
+            ax,
+            ay,
+        })
+    }
+
+    fn big(&self) -> f64 {
+        self.ax.max(self.ay)
+    }
+
+    fn small(&self) -> f64 {
+        self.ax.min(self.ay)
+    }
+
+    /// The rounding a point near `p` may carry into the conic's axes
+    /// (unit within 1e-12, `Frame2::exact`) and into the bounds.
+    fn slack(&self, p: Vector2) -> f64 {
+        4e-12 * ((p - self.c).length() + self.big()) + 2.0 * SLACK_2D
+    }
+
+    /// `Q = ay² X² + ax² Y² − ax² ay²` along `o + t d` over `[t0, t1]`
+    /// (`X`, `Y` along the axes from the centre): a lower and an upper
+    /// bound of it there, rounded outward. `Q` is a quadratic `α t² +
+    /// 2 β t + γ` with `α ≥ 0`, so it is least at an end or at its vertex
+    /// (`γ − β² / α`, below every value it takes), and greatest at an end.
+    fn along(&self, o: Vector2, d: Vector2, [t0, t1]: [f64; 2]) -> (f64, f64) {
+        let i = Interval::point;
+        let (ox, oy) = (i(o.x) - i(self.c.x), i(o.y) - i(self.c.y));
+        let x0 = ox * i(self.x.x) + oy * i(self.x.y);
+        let y0 = ox * i(self.y.x) + oy * i(self.y.y);
+        let dx = i(d.x) * i(self.x.x) + i(d.y) * i(self.x.y);
+        let dy = i(d.x) * i(self.y.x) + i(d.y) * i(self.y.y);
+        let (a2, b2) = (i(self.ax).square(), i(self.ay).square());
+        let alpha = b2 * dx.square() + a2 * dy.square();
+        let beta = b2 * x0 * dx + a2 * y0 * dy;
+        let gamma = b2 * x0.square() + a2 * y0.square() - a2 * b2;
+        let q = |t: Interval| alpha * t.square() + i(2.0) * beta * t + gamma;
+        let (q0, q1) = (q(i(t0)), q(i(t1)));
+        let mut lo = q0.lo().min(q1.lo());
+        // The vertex, where it may lie inside the range; with `α` not
+        // certified positive, no bound below the ends' is known.
+        match (-beta).checked_div(alpha) {
+            Some(at) if at.hi() < t0 || at.lo() > t1 => {}
+            Some(_) => {
+                let least = beta.square().checked_div(alpha).map(|v| gamma - v);
+                lo = least.map_or(f64::NEG_INFINITY, |v| lo.min(v.lo()));
+            }
+            None => lo = f64::NEG_INFINITY,
+        }
+        (lo, q0.hi().max(q1.hi()))
+    }
+}
+
+/// A segment certified farther than `tol` from a conic's whole carrier:
+/// `Q` over the segment beyond the scaled carriers `(1 ± r/b) E`, by its
+/// least and greatest values there.
+fn line_misses(l: &super::Line2, range: [f64; 2], k: &Conic, tol: f64) -> bool {
+    if !(range[0].is_finite() && range[1].is_finite()) {
+        return false;
+    }
+    let (t0, t1) = (range[0].min(range[1]), range[0].max(range[1]));
+    let o = l.origin().to_vector();
+    let reach = tol + k.slack(o + l.dir() * t0).max(k.slack(o + l.dir() * t1));
+    let i = Interval::point;
+    let scale = i(k.ax).square() * i(k.ay).square();
+    let (lo, hi) = k.along(o, l.dir(), [t0, t1]);
+    let out = 1.0 + reach / k.small();
+    let above = (i(out).square() - i(1.0)) * scale;
+    if lo > above.hi() {
+        return true;
+    }
+    let inn = 1.0 - reach / k.small();
+    if inn <= 0.0 {
+        return false;
+    }
+    let below = (i(inn).square() - i(1.0)) * scale;
+    hi < below.lo()
+}
+
+/// Two conics certified farther than `tol` apart: their outer discs
+/// apart, or one inside the other's inner disc by more than `tol`.
+fn conics_apart(a: &Conic, b: &Conic, tol: f64) -> bool {
+    let i = Interval::point;
+    let d = a.c - b.c;
+    let d2 = i(d.x).square() + i(d.y).square();
+    let r = tol + a.slack(b.c).max(b.slack(a.c));
+    let far = i(a.big()) + i(b.big()) + i(r);
+    if d2.lo() > far.square().hi() {
+        return true;
+    }
+    [(a, b), (b, a)].iter().any(|(p, q)| {
+        let room = i(q.small()) - i(r) - i(p.big());
+        room.lo() > 0.0 && d2.hi() < room.square().lo()
+    })
+}
+
+/// Pairs certified apart in closed form (plan 17.C): a segment and a
+/// conic, or two conics. The subdivision finds nothing for them either,
+/// so the answer is the same; `None` for every other pair.
+fn closed_misses(a: (&Curve2, [f64; 2]), b: (&Curve2, [f64; 2]), tol: f64) -> Option<Vec<Meet2>> {
+    let apart = match (a.0, b.0, Conic::of(a.0), Conic::of(b.0)) {
+        (Curve2::Line2(l), _, None, Some(k)) => line_misses(l, a.1, &k, tol),
+        (_, Curve2::Line2(l), Some(k), None) => line_misses(l, b.1, &k, tol),
+        (_, _, Some(x), Some(y)) => conics_apart(&x, &y, tol),
+        _ => false,
+    };
+    apart.then(Vec::new)
 }
 
 /// `A(s) Wb(t) - B(t) Wa(s)`, by component, for two pieces.
@@ -839,14 +971,14 @@ fn clusters(cells: Vec<Cell>, m: &Meter) -> Option<Vec<Vec<Cell>>> {
     // Each component's cells in index order, keyed by its last cell.
     let mut by_root: Vec<Option<usize>> = vec![None; n];
     let mut groups: Vec<(usize, Vec<Cell>)> = Vec::new();
-    for i in 0..n {
+    for (i, &cell) in cells.iter().enumerate() {
         let r = root(&mut up, i);
         let g = *by_root[r].get_or_insert_with(|| {
             groups.push((i, Vec::new()));
             groups.len() - 1
         });
         groups[g].0 = i;
-        groups[g].1.push(cells[i]);
+        groups[g].1.push(cell);
     }
     groups.sort_by_key(|g| g.0);
     Some(groups.into_iter().map(|g| g.1).collect())
@@ -1320,5 +1452,76 @@ mod tests {
             }
         }
         Some(merged)
+    }
+
+    #[test]
+    fn misses_in_closed_form() {
+        let c = circle((0.0, 0.0), 1.0, 0.0, TAU);
+        let tol = LINEAR_RESOLUTION;
+        let miss = |a: &(Curve2, [f64; 2]), b: &(Curve2, [f64; 2])| {
+            closed_misses((&a.0, a.1), (&b.0, b.1), tol)
+        };
+        // A segment a micron beside the circle, one inside it, one touching it.
+        assert_eq!(
+            miss(&line((-2.0, 1.0 + 1e-6), (2.0, 1.0 + 1e-6)), &c),
+            Some(vec![])
+        );
+        assert_eq!(miss(&c, &line((-0.5, 0.0), (0.5, 0.2))), Some(vec![]));
+        assert_eq!(miss(&line((-2.0, 1.0), (2.0, 1.0)), &c), None);
+        // Circles apart, nested, and crossing.
+        assert_eq!(miss(&circle((3.0, 0.0), 0.5, 0.0, TAU), &c), Some(vec![]));
+        assert_eq!(miss(&circle((0.1, 0.0), 0.5, 0.0, TAU), &c), Some(vec![]));
+        assert_eq!(miss(&circle((1.2, 0.0), 0.5, 0.0, TAU), &c), None);
+    }
+
+    /// Seeded segments and ellipses against ellipses: every pair settled
+    /// apart in closed form is one the subdivision finds apart.
+    #[test]
+    fn misses_in_closed_form_are_the_subdivisions() {
+        use crate::geom::Ellipse2;
+        let mut seed = 0x17c5u64;
+        let mut r = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let ellipse = |r: &mut dyn FnMut() -> f64| -> (Curve2, [f64; 2]) {
+            let f = Frame2::new(
+                Point2::new(r() * 4.0 - 2.0, r() * 4.0 - 2.0),
+                Vector2::new(r() - 0.5, r() - 0.5),
+                true,
+            )
+            .unwrap();
+            let a = 0.2 + r();
+            let t0 = r() * 6.0;
+            (
+                Curve2::Ellipse2(Ellipse2::new(f, a, a * (0.2 + 0.8 * r())).unwrap()),
+                [t0, t0 + 0.5 + r() * 5.0],
+            )
+        };
+        let (mut closed, mut all) = (0, 0);
+        for _ in 0..2000 {
+            let a = if r() < 0.5 {
+                line(
+                    (r() * 6.0 - 3.0, r() * 6.0 - 3.0),
+                    (r() * 6.0 - 3.0, r() * 6.0 - 3.0),
+                )
+            } else {
+                ellipse(&mut r)
+            };
+            let b = ellipse(&mut r);
+            all += 1;
+            if let Some(found) = closed_misses((&a.0, a.1), (&b.0, b.1), LINEAR_RESOLUTION) {
+                closed += 1;
+                assert!(found.is_empty());
+                assert_eq!(
+                    crossings_every_pair((&a.0, a.1), (&b.0, b.1), LINEAR_RESOLUTION),
+                    Some(vec![])
+                );
+            }
+        }
+        eprintln!("{closed} of {all} pairs settled apart in closed form");
+        assert!(closed * 10 > all);
     }
 }
