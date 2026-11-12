@@ -555,3 +555,114 @@ fn a_face_with_inner_points_still_reports_inverted_triangles() {
         "{faults:?}"
     );
 }
+
+/// A fold of a face whose every corner lies on an edge: an L-shaped
+/// cap's diagonal flipped across its non-convex quad keeps every edge
+/// used once each way, so only the winding catches it. Such a face is no
+/// sliver, and still reports `Inverted`.
+#[test]
+fn a_folded_cap_with_every_corner_on_an_edge_reports_inverted() {
+    use crate::geom::{Curve2, Line2, Point2};
+    use crate::predicates::{Sign, orient2d};
+    use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    let l = [
+        (0.0, 0.0),
+        (3.0, 0.0),
+        (3.0, 1.0),
+        (1.0, 1.0),
+        (1.0, 2.0),
+        (0.0, 2.0),
+    ];
+    let segments = (0..l.len())
+        .map(|i| {
+            let (p, q) = (l[i], l[(i + 1) % l.len()]);
+            let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+            Segment {
+                key: SegmentKey(10 + i as u128),
+                curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                t0: 0.0,
+                t1: p.distance(q),
+            }
+        })
+        .collect();
+    let p = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .unwrap();
+    let b = extrude(OpKey(1), &p, Vector3::new(0.0, 0.0, 1.0), 0.0, 1.0)
+        .unwrap()
+        .0;
+    let m = tessellate(&b, &MeshParams::new(1e-2, 0.3)).unwrap();
+    assert_eq!(check_mesh(&b, &m), Ok(()));
+    let mut folds = 0;
+    for fm in m.faces.iter().filter(|fm| fm.corners.len() == 6) {
+        let want = if b.face(fm.face).unwrap().sense == Sense::Reversed {
+            Sign::Negative
+        } else {
+            Sign::Positive
+        };
+        let ts: Vec<usize> = fm.triangles.clone().map(|t| t as usize).collect();
+        for (i, &s) in ts.iter().enumerate() {
+            for &t in &ts[i + 1..] {
+                // Triangles (a, b, c) and (b, a, d) across a b become
+                // (c, a, d) and (d, b, c).
+                let Some(([a, bb, c], d)) = (0..3).find_map(|r| {
+                    let x = m.triangles[s];
+                    let x = [x[r], x[(r + 1) % 3], x[(r + 2) % 3]];
+                    let y = m.triangles[t];
+                    (0..3)
+                        .find(|&k| y[k] == x[1] && y[(k + 1) % 3] == x[0])
+                        .map(|k| (x, y[(k + 2) % 3]))
+                }) else {
+                    continue;
+                };
+                let mut f = m.clone();
+                f.triangles[s] = [c, a, d];
+                f.triangles[t] = [d, bb, c];
+                let uv = |k: u32| f.corners[k as usize].uv;
+                let folded = [[c, a, d], [d, bb, c]]
+                    .iter()
+                    .any(|&[x, y, z]| orient2d(uv(x), uv(y), uv(z)) != want);
+                if !folded {
+                    continue;
+                }
+                folds += 1;
+                let faults = check_mesh(&b, &f).unwrap_err();
+                assert!(
+                    faults.iter().any(
+                        |e| matches!(e, MeshCheckFault::Inverted { face, .. } if *face == fm.face)
+                    ),
+                    "{faults:?}"
+                );
+            }
+        }
+    }
+    assert!(folds >= 2, "{folds}");
+}
+
+/// A face range that runs backwards is out of range, not a panic.
+#[test]
+fn a_backward_face_range_is_out_of_range() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let m = tessellate(&b, &MeshParams::new(1e-2, 0.3)).unwrap();
+    let mut c = m.clone();
+    let s = c.faces[1].corners.start;
+    c.faces[1].corners = s..s - 1;
+    assert_eq!(
+        check_mesh(&b, &c),
+        Err(vec![MeshCheckFault::IndexOutOfRange])
+    );
+    let mut t = m.clone();
+    let s = t.faces[1].triangles.start;
+    t.faces[1].triangles = s..s - 1;
+    assert_eq!(
+        check_mesh(&b, &t),
+        Err(vec![MeshCheckFault::IndexOutOfRange])
+    );
+}

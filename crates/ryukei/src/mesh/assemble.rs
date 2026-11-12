@@ -69,8 +69,9 @@ pub(super) fn assemble(
                     Anchor::Sample(e, k) => sample_at[e.index()][k as usize],
                     Anchor::Free => unreachable!("a strip's points lie on its loop"),
                 };
-                // No normal at this point (a NURBS pole): the plane's z, as
-                // nothing better is known on a strip's side.
+                // No normal at this point (a degenerate point such as a
+                // pole): the world's +z, an arbitrary stand-in, as nothing
+                // better is known on a strip's side.
                 let natural = g.surface.normal(uv.x, uv.y).unwrap_or(UnitVector3::Z);
                 let normal = if g.forward { natural } else { -natural };
                 mesh.corners.push(Corner {
