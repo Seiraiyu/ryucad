@@ -15,7 +15,7 @@
 
 use crate::Nm;
 use crate::drill::{self, Drill};
-use crate::thread::{Standard, Thread};
+use crate::thread::{Pitch, Thread};
 
 /// A tap drill: a standard drill, or the computed size when none
 /// qualifies.
@@ -52,72 +52,85 @@ fn root3_at_least(c_num: i128, c_den: i128, x: i128) -> bool {
 
 /// The default rule; none for pipe threads.
 pub fn rule(t: &Thread) -> Option<TapDrill> {
-    let major = i128::from(t.major?.value);
-    let (lo, hi) = t.minor.map(|(a, b)| (a.value, b.value))?;
-    let (pn, pd) = t.pitch.value.nm();
-    let within = |d: &&Drill| lo <= d.nm && d.nm <= hi;
-    match t.standard {
-        Standard::IsoMetric => {
-            let target = (major - pn / pd) as Nm;
-            Some(
-                drill::of(false)
-                    .filter(within)
-                    .find(|d| d.nm >= target)
-                    .map_or_else(|| TapDrill::computed(target), TapDrill::of),
-            )
-        }
-        Standard::Unc | Standard::Unf | Standard::Unef | Standard::Un => {
-            // t = D - 9√3/16 · p, with p = pn/pd. Drill a is nearer than
-            // b (a < b) iff t < m = (a + b)/2 iff 2(D - m) < 9√3·pn/(8 pd)
-            // iff x2 <= 0 or 64 x2² pd² < 243 pn², with x2 = 2D - a - b
-            // (both sides squared; √3 is irrational, so never equal).
-            let nearer_lower = |a: Nm, b: Nm| {
-                let x2 = 2 * major - i128::from(a) - i128::from(b);
-                x2 <= 0 || 64 * x2 * x2 * pd * pd < 243 * pn * pn
-            };
-            let cands: Vec<&Drill> = drill::of(true).filter(within).collect();
-            let Some((&first, rest)) = cands.split_first() else {
-                // No inch drill falls within the limits (fine pitches from
-                // 9/16 in, whose window is narrower than 1/64 in): the
-                // target itself, to 0.0001 in, as H28/2B writes such
-                // drills (`0.5203`).
-                let x = crate::exact::isqrt((243 * pn * pn / (256 * pd * pd)) as u128) as i128;
-                let nm = (crate::exact::round_div(major - x, 2_540) * 2_540) as Nm;
-                return Some(TapDrill {
-                    name: crate::in_decimal(nm).unwrap_or_else(|| crate::mm_decimal(nm)),
-                    nm,
-                    standard: false,
-                });
-            };
-            let mut best = first;
-            for &d in rest {
-                if !nearer_lower(best.nm, d.nm) {
-                    best = d;
-                }
-            }
-            Some(TapDrill::of(best))
-        }
-        _ => None,
+    if t.standard.is_pipe() {
+        return None;
     }
+    let minor = t.minor.map(|(a, b)| (a.value, b.value));
+    rule_for(t.major?.value, t.pitch.value, minor, t.standard.inch())
+}
+
+/// The default rule for a thread of `major` and `pitch` whose tap drill
+/// must lie within `minor` (none: anywhere), so a project standard's
+/// thread takes the same rule: metric threads' D − P at or above, inch
+/// threads' nearest 75% drill.
+pub fn rule_for(major: Nm, pitch: Pitch, minor: Option<(Nm, Nm)>, inch: bool) -> Option<TapDrill> {
+    let major = i128::from(major);
+    let (pn, pd) = pitch.nm();
+    let within = |d: &&Drill| minor.is_none_or(|(lo, hi)| lo <= d.nm && d.nm <= hi);
+    if !inch {
+        let target = (major - pn / pd) as Nm;
+        return Some(
+            drill::of(false)
+                .filter(within)
+                .find(|d| d.nm >= target)
+                .map_or_else(|| TapDrill::computed(target), TapDrill::of),
+        );
+    }
+    // t = D - 9√3/16 · p, with p = pn/pd. Drill a is nearer than b (a <
+    // b) iff t < m = (a + b)/2 iff 2(D - m) < 9√3·pn/(8 pd) iff x2 <= 0
+    // or 64 x2² pd² < 243 pn², with x2 = 2D - a - b (both sides squared;
+    // √3 is irrational, so never equal).
+    let nearer_lower = |a: Nm, b: Nm| {
+        let x2 = 2 * major - i128::from(a) - i128::from(b);
+        x2 <= 0 || 64 * x2 * x2 * pd * pd < 243 * pn * pn
+    };
+    let cands: Vec<&Drill> = drill::of(true).filter(within).collect();
+    let Some((&first, rest)) = cands.split_first() else {
+        // No inch drill falls within the limits (fine pitches from 9/16
+        // in, whose window is narrower than 1/64 in): the target itself,
+        // to 0.0001 in, as H28/2B writes such drills (`0.5203`).
+        let x = crate::exact::isqrt((243 * pn * pn / (256 * pd * pd)) as u128) as i128;
+        let nm = (crate::exact::round_div(major - x, 2_540) * 2_540) as Nm;
+        return Some(TapDrill {
+            name: crate::in_decimal(nm).unwrap_or_else(|| crate::mm_decimal(nm)),
+            nm,
+            standard: false,
+        });
+    };
+    let mut best = first;
+    for &d in rest {
+        if !nearer_lower(best.nm, d.nm) {
+            best = d;
+        }
+    }
+    Some(TapDrill::of(best))
 }
 
 /// The drill for e% engagement (50 to 100).
 pub fn engagement(t: &Thread, percent: u32) -> Option<TapDrill> {
-    let major = i128::from(t.major?.value);
-    let (pn, pd) = t.pitch.value.nm();
+    Some(engagement_for(
+        t.major?.value,
+        t.pitch.value,
+        t.standard.inch(),
+        percent,
+    ))
+}
+
+/// The drill for e% engagement of a thread of `major` and `pitch`.
+pub fn engagement_for(major: Nm, pitch: Pitch, inch: bool, percent: u32) -> TapDrill {
+    let major = i128::from(major);
+    let (pn, pd) = pitch.nm();
     let e = i128::from(percent);
-    let inch = t.standard.inch();
     // d >= D - 5√3/8 · P · e/100  <=>  (5 pn e)√3 >= (D - d) · 800 pd.
     let ok = |d: &&Drill| root3_at_least(5 * pn * e, 800 * pd, major - i128::from(d.nm));
-    let found = drill::of(inch).find(ok);
-    Some(found.map_or_else(
+    drill::of(inch).find(ok).map_or_else(
         || {
             // 5√3/8 · P · e/100 to the nanometre, from below.
             let x = crate::exact::isqrt((75 * pn * pn * e * e / (640_000 * pd * pd)) as u128);
             TapDrill::computed((major - x as i128) as Nm)
         },
         TapDrill::of,
-    ))
+    )
 }
 
 #[cfg(test)]

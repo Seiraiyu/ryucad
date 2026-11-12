@@ -7,10 +7,11 @@
 //! Lengths from tables are exact nanometres until here, and become f64
 //! metres by one division each.
 
-use crate::doc::hole::{Hole, HoleForm};
-use crate::doc::hole_standards::HoleStandards;
+use crate::doc::hole::{Hole, HoleForm, TapDrill, Thread, ThreadDepth};
+use crate::doc::hole_standards::{Diameters, HOLE_STANDARDS, HoleStandards, Kind, ThreadEntry};
 use crate::error::{Code, Error, Result};
 use crate::units::Quantity;
+use ryu_standards::thread::{Pitch, Standard};
 use serde_json::{Map, Value, json};
 
 /// Where a size came from.
@@ -219,35 +220,300 @@ pub type Tables<'a> = Option<&'a std::result::Result<HoleStandards, Error>>;
 
 /// A hole's sizes.
 pub fn derive(h: &Hole, tables: Tables) -> Result<Sizes> {
-    if h.thread.is_some() || h.fastener.is_some() {
-        // Tasks 20 and 21 derive these.
-        let _ = tables;
-        return Err(Error::new(
-            Code::InvalidParam,
-            "threads and fasteners are derived from Task 20 on",
-        ));
-    }
-    let drill = Size::quantity(
-        h.diameter
-            .as_ref()
-            .expect("a plain hole writes its diameter"),
-        Source::Override,
-    );
     let written = |q: &Option<Quantity>| q.as_ref().map(|q| Size::quantity(q, Source::Override));
     let (counterbore, countersink) = match &h.form {
         HoleForm::Simple => (None, None),
         HoleForm::Counterbore { diameter, depth } => (written(diameter).zip(written(depth)), None),
         HoleForm::Countersink { diameter, angle } => (None, written(diameter).zip(written(angle))),
     };
+    let mut thread = None;
+    let (drill, drill_standard) = if let Some(t) = &h.thread {
+        let (sizes, tap) = thread_sizes(h, t, tables)?;
+        let inch = sizes.tpi.is_some();
+        thread = Some(sizes);
+        match (&h.diameter, tap) {
+            (Some(q), _) => (Size::quantity(q, Source::Override), is_standard(q, inch)),
+            (None, Some(d)) => d,
+            (None, None) => unreachable!("thread_sizes refuses a hole with no drill"),
+        }
+    } else if h.fastener.is_some() {
+        // Task 21.
+        return Err(Error::new(
+            Code::InvalidParam,
+            "fasteners are derived from Task 21 on",
+        ));
+    } else {
+        let q = h
+            .diameter
+            .as_ref()
+            .expect("a plain hole writes its diameter");
+        (Size::quantity(q, Source::Override), true)
+    };
     let _ = &h.bore; // Task 21
     Ok(Sizes {
         drill,
-        drill_standard: true,
+        drill_standard,
         counterbore,
         countersink,
-        thread: None,
+        thread,
         fit: None,
     })
+}
+
+/// `needs_project_table`: the values a hole needs that no built-in and
+/// no project entry gives, with the entry to add, each missing value null.
+pub fn needs_table(kind: Kind, standard: &str, size: &str, missing: Vec<String>) -> Error {
+    let mut entry = Map::new();
+    for m in &missing {
+        match m.split_once('.') {
+            Some((a, b)) => {
+                let o = entry.entry(a.to_owned()).or_insert_with(|| json!({}));
+                o[b] = Value::Null;
+            }
+            None => {
+                entry.insert(m.clone(), Value::Null);
+            }
+        }
+    }
+    let skeleton = json!({kind.key(): {standard: {size: entry}}});
+    Error::new(
+        Code::InvalidParam,
+        format!(
+            "{standard} {size} needs {} from {HOLE_STANDARDS}: ryucad doesn't ship it; add the entry given",
+            missing.join(", ")
+        ),
+    )
+    .with("reason", "needs_project_table")
+    .with("standard", standard)
+    .with("size", size)
+    .with("missing", missing)
+    .with("file", HOLE_STANDARDS)
+    .with("entry", skeleton)
+}
+
+/// The project's table when a value is wanted from it: none when the
+/// project has none, its error when it can't be read.
+fn table<'a>(tables: Tables<'a>) -> Result<Option<&'a HoleStandards>> {
+    match tables {
+        None => Ok(None),
+        Some(Ok(t)) => Ok(Some(t)),
+        Some(Err(e)) => Err(e.clone()),
+    }
+}
+
+fn nm(q: &Quantity) -> i64 {
+    (q.si() * 1e9).round() as i64
+}
+
+/// A pitch as a size: millimetres, or 1/tpi inch.
+fn pitch_size(p: Pitch, source: Source) -> Size {
+    match p {
+        Pitch::Mm(n) => Size::nm(n, false, source),
+        Pitch::Tpi(_) | Pitch::Tpi10(_) => {
+            let (num, den) = p.nm();
+            Size {
+                si: num as f64 / den as f64 / 1e9,
+                text: format!("1/{} in", p.text()),
+                angle: false,
+                source,
+            }
+        }
+    }
+}
+
+/// The spec's designation of a thread, without its depth: `M6x1.0-6H`,
+/// `1/4-20 UNC-2B`, `1/8-27 NPT`, `G1/4`, `THREAD HOUSE_ACME T10`.
+pub fn designation(
+    standard: &str,
+    size: &str,
+    pitch: Option<Pitch>,
+    class: Option<&str>,
+    left: bool,
+) -> String {
+    let mut s = match (Standard::parse(standard), pitch) {
+        (Some(Standard::IsoMetric), Some(p)) => format!("{size}x{}", p.text()),
+        (Some(u @ (Standard::Unc | Standard::Unf | Standard::Unef | Standard::Un)), Some(p)) => {
+            format!("{size}-{} {}", p.text(), u.key().to_uppercase())
+        }
+        (Some(f @ (Standard::Npt | Standard::Nptf | Standard::Nps)), Some(p)) => {
+            let word = if f == Standard::Nps {
+                "NPSM".to_owned()
+            } else {
+                f.key().to_uppercase()
+            };
+            format!("{size}-{} {word}", p.text())
+        }
+        (Some(Standard::Bspt | Standard::Bspp), _) => size.to_owned(),
+        _ => format!("THREAD {} {size}", standard.to_uppercase()),
+    };
+    match (Standard::parse(standard), class) {
+        (Some(_), Some(c)) => s.push_str(&format!("-{c}")),
+        (None, Some(c)) => s.push_str(&format!(" CLASS {c}")),
+        _ => {}
+    }
+    if left {
+        s.push_str(if Standard::parse(standard).is_some() {
+            "-LH"
+        } else {
+            " LH"
+        });
+    }
+    s
+}
+
+/// A thread's sizes, and the tap drill its `drill` gives (none when the
+/// hole writes its diameter and nothing else gives one).
+fn thread_sizes(
+    h: &Hole,
+    t: &Thread,
+    tables: Tables,
+) -> Result<(ThreadSizes, Option<(Size, bool)>)> {
+    let built = crate::doc::hole::resolve(t)?;
+    let project = table(tables)?;
+    let entry: Option<&ThreadEntry> = project.and_then(|p| p.thread(&t.standard, &t.size));
+    let inch = match Standard::parse(&t.standard) {
+        Some(s) => s.inch(),
+        None => entry.is_some_and(|e| e.tpi.is_some()),
+    };
+    let std_src = |s: ryu_standards::Source| Source::Standard(s);
+    // What the thread is: from the built-in, else the project's entry.
+    let (major, pitch, class, minor, major_min, taper) = match &built {
+        Some(b) => (
+            b.major.map(|m| Size::nm(m.value, inch, std_src(m.source))),
+            b.pitch.value,
+            b.class.clone(),
+            b.minor.map(|(lo, hi)| {
+                [
+                    Size::nm(lo.value, inch, std_src(lo.source)),
+                    Size::nm(hi.value, inch, std_src(hi.source)),
+                ]
+            }),
+            b.major_min
+                .map(|m| Size::nm(m.value, inch, std_src(m.source))),
+            b.taper,
+        ),
+        None => {
+            let Some(e) = entry else {
+                return Err(needs_table(
+                    Kind::Thread,
+                    &t.standard,
+                    &t.size,
+                    vec!["pitch".into(), "major".into(), "tap_drill".into()],
+                ));
+            };
+            let pitch = match (&e.pitch, &e.tpi) {
+                (Some(p), _) => Pitch::Mm(nm(p)),
+                (None, Some(n)) => Pitch::Tpi10((n.number() * 10.0).round() as u32),
+                (None, None) => unreachable!("a project size has a pitch or tpi"),
+            };
+            let limits = |d: &Option<Diameters>| match d {
+                Some(Diameters::Classes(m)) => t.class.as_ref().and_then(|c| m.get(c)).cloned(),
+                _ => None,
+            };
+            let basic = |d: &Option<Diameters>| match d {
+                Some(Diameters::Basic(q)) => Some(Size::quantity(q, Source::Project)),
+                _ => None,
+            };
+            (
+                basic(&e.major),
+                pitch,
+                t.class.clone(),
+                limits(&e.minor).map(|[a, b]| {
+                    [
+                        Size::quantity(&a, Source::Project),
+                        Size::quantity(&b, Source::Project),
+                    ]
+                }),
+                limits(&e.major).map(|[a, _]| Size::quantity(&a, Source::Project)),
+                None,
+            )
+        }
+    };
+    let pitch_src = built
+        .as_ref()
+        .map_or(Source::Project, |b| std_src(b.pitch.source));
+    let starts = t.starts.unwrap_or(1);
+    // The lead is the pitch times the starts: exact in millimetres, and
+    // `starts/tpi in` for inch threads.
+    let lead = match pitch {
+        Pitch::Mm(n) => Size::nm(n * i64::from(starts), false, pitch_src),
+        p => {
+            let one = pitch_size(p, pitch_src);
+            Size {
+                si: one.si * f64::from(starts),
+                text: format!("{starts}/{} in", p.text()),
+                ..one
+            }
+        }
+    };
+    let depth = match &t.depth {
+        Some(ThreadDepth::Length(q)) => Some(Size::quantity(q, Source::Override)),
+        _ => None,
+    };
+    // The tap drill.
+    let major_nm = major.as_ref().map(Size::to_nm);
+    let minor_nm = minor.as_ref().map(|[a, b]| (a.to_nm(), b.to_nm()));
+    let tap =
+        |d: ryu_standards::tap::TapDrill, src: Source| (Size::nm(d.nm, inch, src), d.standard);
+    let drill = match t.drill {
+        TapDrill::Rule => match entry.and_then(|e| e.tap_drill.as_ref()) {
+            Some(q) => Some((Size::quantity(q, Source::Project), is_standard(q, inch))),
+            None if Standard::parse(&t.standard).is_some_and(Standard::is_pipe) => None,
+            None => major_nm
+                .and_then(|m| ryu_standards::tap::rule_for(m, pitch, minor_nm, inch))
+                .map(|d| tap(d, Source::Rule)),
+        },
+        TapDrill::Engagement(e) => major_nm.map(|m| {
+            tap(
+                ryu_standards::tap::engagement_for(m, pitch, inch, e),
+                Source::Rule,
+            )
+        }),
+        TapDrill::RollForm => entry
+            .and_then(|e| e.roll_form_drill.as_ref())
+            .map(|q| (Size::quantity(q, Source::Project), is_standard(q, inch))),
+    };
+    if drill.is_none() && h.diameter.is_none() {
+        let missing = match t.drill {
+            TapDrill::RollForm => "roll_form_drill",
+            _ => "tap_drill",
+        };
+        return Err(needs_table(
+            Kind::Thread,
+            &t.standard,
+            &t.size,
+            vec![missing.into()],
+        ));
+    }
+    let class_shown = class.as_deref();
+    let sizes = ThreadSizes {
+        standard: t.standard.clone(),
+        size: t.size.clone(),
+        designation: designation(
+            &t.standard,
+            &t.size,
+            built.is_some().then_some(pitch),
+            class_shown,
+            t.left,
+        ),
+        major,
+        pitch: pitch_size(pitch, pitch_src),
+        tpi: (!matches!(pitch, Pitch::Mm(_))).then(|| pitch.text()),
+        lead,
+        class,
+        minor,
+        major_min,
+        left: t.left,
+        starts,
+        depth,
+        taper,
+    };
+    Ok((sizes, drill))
+}
+
+/// Whether a written size is a standard drill of its system.
+fn is_standard(q: &Quantity, inch: bool) -> bool {
+    ryu_standards::drill::standard(nm(q), inch).is_some()
 }
 
 /// A refusal at write time as a rebuild reports it: a project entry
@@ -297,5 +563,117 @@ mod tests {
             s.to_json()["drill"],
             json!({"value": "6.6 mm", "m": 0.0066, "source": "override"})
         );
+    }
+
+    fn tables() -> std::result::Result<HoleStandards, Error> {
+        HoleStandards::from_json(&crate::doc::fixtures::house_standards())
+    }
+
+    #[test]
+    fn m6_is_a_5_mm_drill_by_the_rule() {
+        let h = hole(json!({"thread": {"standard": "iso_metric", "size": "M6"}}));
+        let s = derive(&h, None).unwrap();
+        assert_eq!(
+            (s.drill.text.as_str(), s.drill.source),
+            ("5 mm", Source::Rule)
+        );
+        let t = s.thread.as_ref().unwrap();
+        assert_eq!(t.designation, "M6x1.0-6H");
+        assert_eq!(t.pitch.text, "1 mm");
+        assert_eq!(t.minor.as_ref().unwrap()[1].text, "5.153 mm");
+        assert_eq!(
+            t.major.as_ref().unwrap().source,
+            Source::Standard(ryu_standards::Source::Fact)
+        );
+        assert_eq!(t.depth, None);
+        assert_eq!(
+            s.to_json()["thread"]["limits"]["minor"][0]["value"],
+            "4.917 mm"
+        );
+    }
+
+    #[test]
+    fn a_projects_tap_drill_wins_and_overrides_win_over_it() {
+        let t = tables();
+        let h = hole(json!({"thread": {"standard": "iso_metric", "size": "M6"}}));
+        let s = derive(&h, Some(&t)).unwrap();
+        assert_eq!(
+            (s.drill.text.as_str(), s.drill.source),
+            ("5.1 mm", Source::Project)
+        );
+        let h = hole(
+            json!({"thread": {"standard": "iso_metric", "size": "M6"}, "diameter": "5.05 mm"}),
+        );
+        assert_eq!(derive(&h, Some(&t)).unwrap().drill.source, Source::Override);
+    }
+
+    #[test]
+    fn engagement_and_roll_form() {
+        let t = tables();
+        let h = hole(
+            json!({"thread": {"standard": "iso_metric", "size": "M6", "drill": {"engagement": 75}}}),
+        );
+        assert_eq!(derive(&h, None).unwrap().drill.text, "5.2 mm");
+        let h =
+            hole(json!({"thread": {"standard": "iso_metric", "size": "M6", "drill": "roll_form"}}));
+        assert_eq!(derive(&h, Some(&t)).unwrap().drill.text, "5.55 mm");
+        let h =
+            hole(json!({"thread": {"standard": "iso_metric", "size": "M8", "drill": "roll_form"}}));
+        let e = derive(&h, Some(&t)).unwrap_err();
+        assert_eq!(e.details["reason"], "needs_project_table");
+        assert_eq!(e.details["missing"], json!(["roll_form_drill"]));
+        assert_eq!(
+            e.details["entry"],
+            json!({"threads": {"iso_metric": {"M8": {"roll_form_drill": null}}}})
+        );
+        assert_eq!(e.details["file"], "hole_standards.json");
+    }
+
+    #[test]
+    fn unified_pipe_and_house_threads() {
+        let t = tables();
+        let h = hole(json!({"thread": {"standard": "unc", "size": "1/4"}}));
+        let s = derive(&h, None).unwrap();
+        assert_eq!(s.drill.text, "0.201 in");
+        assert_eq!(s.thread.as_ref().unwrap().designation, "1/4-20 UNC-2B");
+        // A pipe thread's tap drill is the project's, or a refusal.
+        let h = hole(json!({"thread": {"standard": "npt", "size": "1/8"}}));
+        assert_eq!(derive(&h, Some(&t)).unwrap().drill.text, "8.7 mm");
+        let h = hole(json!({"thread": {"standard": "npt", "size": "1/4"}}));
+        assert_eq!(
+            derive(&h, Some(&t)).unwrap_err().details["missing"],
+            json!(["tap_drill"])
+        );
+        // A house thread from the project's own entry.
+        let h = hole(json!({"thread": {"standard": "house_acme", "size": "T10"}}));
+        let s = derive(&h, Some(&t)).unwrap();
+        assert_eq!(s.drill.text, "8 mm");
+        assert_eq!(s.thread.as_ref().unwrap().pitch.source, Source::Project);
+        let h = hole(json!({"thread": {"standard": "house_acme", "size": "T12"}}));
+        assert_eq!(
+            derive(&h, Some(&t)).unwrap_err().details["reason"],
+            "needs_project_table"
+        );
+        // A broken table fails the holes that read it, and only those.
+        let broken: std::result::Result<HoleStandards, Error> =
+            Err(Error::new(Code::InvalidJson, "bad").with("path", "hole_standards.json"));
+        let h = hole(json!({"thread": {"standard": "iso_metric", "size": "M6"}}));
+        assert_eq!(
+            derive(&h, Some(&broken)).unwrap_err().code,
+            Code::InvalidJson
+        );
+        let h = hole(json!({"diameter": "5 mm"}));
+        assert!(derive(&h, Some(&broken)).is_ok());
+    }
+
+    #[test]
+    fn a_left_hand_two_start_thread() {
+        let h = hole(
+            json!({"thread": {"standard": "iso_metric", "size": "M8", "hand": "left", "starts": 2}}),
+        );
+        let t = derive(&h, None).unwrap().thread.unwrap();
+        assert!(t.left);
+        assert_eq!((t.starts, t.lead.text.as_str()), (2, "2.5 mm"));
+        assert_eq!(t.designation, "M8x1.25-6H-LH");
     }
 }
