@@ -25,6 +25,330 @@ pub struct Hole {
     pub bottom: Bottom,
     /// The solids it cuts, by their founders.
     pub targets: Vec<Id>,
+    /// A tapped hole's thread.
+    pub thread: Option<Thread>,
+    /// A clearance hole's screw.
+    pub fastener: Option<Fastener>,
+    /// The bore's tolerance (`fit` or `tolerance` in the file).
+    pub bore: Option<BoreTolerance>,
+}
+
+/// A tapped hole's thread: what it is, never its sizes (`hole::derive`
+/// works those out on every rebuild).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Thread {
+    /// A built-in standard's key (`iso_metric`, `unc`, `npt`, ...) or a
+    /// project standard's.
+    pub standard: String,
+    /// As the standard names it: `M6`, `1/4`, `#10`, `1/8`, `G1/4`.
+    pub size: String,
+    /// A metric pitch, written only when not the size's own.
+    pub pitch: Option<Quantity>,
+    /// Threads per inch, written only when not the series' own.
+    pub tpi: Option<Quantity>,
+    /// Written only when not the standard's default (`6H`, `2B`).
+    pub class: Option<String>,
+    pub left: bool,
+    /// More than one start; written only then.
+    pub starts: Option<u32>,
+    /// From the mouth; none is full depth on a through hole. A blind
+    /// tapped hole must give it.
+    pub depth: Option<ThreadDepth>,
+    pub drill: TapDrill,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThreadDepth {
+    Full,
+    Length(Quantity),
+}
+
+/// How the tap drill is chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TapDrill {
+    /// A project's tap drill for the size, else ryucad's rule.
+    Rule,
+    /// A percent thread engagement, 50 to 100.
+    Engagement(u32),
+    /// The project's roll-form drill.
+    RollForm,
+}
+
+/// A clearance hole for a screw: its sizes come from the project's
+/// fastener table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fastener {
+    pub standard: String,
+    pub size: String,
+    pub fit: FastenerFit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FastenerFit {
+    Close,
+    Normal,
+    Loose,
+}
+
+impl FastenerFit {
+    pub fn key(self) -> &'static str {
+        match self {
+            FastenerFit::Close => "close",
+            FastenerFit::Normal => "normal",
+            FastenerFit::Loose => "loose",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<FastenerFit> {
+        [FastenerFit::Close, FastenerFit::Normal, FastenerFit::Loose]
+            .into_iter()
+            .find(|f| f.key() == s)
+    }
+}
+
+/// The bore's tolerance: an ISO 286 hole class, or deviations as
+/// drawings take them. Geometry is built at nominal.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoreTolerance {
+    Fit(String),
+    Symmetric(Quantity),
+    /// Upper, then lower.
+    Deviation(Quantity, Quantity),
+}
+
+/// A name in a hole's thread or fastener: a standard's key or a size.
+fn name(o: &mut Obj, k: &str, at: &str) -> Result<String> {
+    let v = o.take(k)?;
+    match v.as_str() {
+        Some(s) if !s.is_empty() && !s.contains(char::is_whitespace) => Ok(s.to_owned()),
+        _ => Err(invalid(
+            &format!("{at}/{k}"),
+            &format!("{k} is a name, such as \"M6\""),
+        )),
+    }
+}
+
+impl Thread {
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({"standard": self.standard, "size": self.size});
+        if let Some(q) = &self.pitch {
+            v["pitch"] = json!(q.text());
+        }
+        if let Some(q) = &self.tpi {
+            v["tpi"] = json!(q.text());
+        }
+        if let Some(c) = &self.class {
+            v["class"] = json!(c);
+        }
+        if self.left {
+            v["hand"] = json!("left");
+        }
+        if let Some(n) = self.starts {
+            v["starts"] = json!(n);
+        }
+        match &self.depth {
+            None => {}
+            Some(ThreadDepth::Full) => v["depth"] = json!("full"),
+            Some(ThreadDepth::Length(q)) => v["depth"] = json!(q.text()),
+        }
+        match self.drill {
+            TapDrill::Rule => {}
+            TapDrill::Engagement(e) => v["drill"] = json!({"engagement": e}),
+            TapDrill::RollForm => v["drill"] = json!("roll_form"),
+        }
+        v
+    }
+
+    fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Thread> {
+        let at = "/thread";
+        let mut o = Obj::new(v, at)?;
+        let standard = name(&mut o, "standard", at)?;
+        let size_name = name(&mut o, "size", at)?;
+        let pitch = o
+            .take_opt("pitch")
+            .map(|x| {
+                size(
+                    &x,
+                    Field::Length(default),
+                    env,
+                    "/thread/pitch",
+                    "a thread's pitch",
+                )
+            })
+            .transpose()?;
+        let tpi = o
+            .take_opt("tpi")
+            .map(|x| size(&x, Field::Number, env, "/thread/tpi", "a thread's TPI"))
+            .transpose()?;
+        if pitch.is_some() && tpi.is_some() {
+            return Err(invalid(at, "a thread has a pitch or a tpi, not both"));
+        }
+        let class = match o.take_opt("class") {
+            None => None,
+            Some(Value::String(c)) if !c.is_empty() => Some(c),
+            Some(_) => return Err(invalid("/thread/class", "a class is text, such as \"6H\"")),
+        };
+        let left = match o.take_opt("hand") {
+            None => false,
+            Some(h) if h == "left" => true,
+            Some(_) => {
+                return Err(invalid(
+                    "/thread/hand",
+                    "hand is \"left\", written only for a left-hand thread",
+                ));
+            }
+        };
+        let starts = match o.take_opt("starts") {
+            None => None,
+            Some(n) => match n.as_u64() {
+                Some(n @ 2..=16) => Some(n as u32),
+                _ => {
+                    return Err(invalid(
+                        "/thread/starts",
+                        "starts is a whole number from 2 to 16, written only past 1",
+                    ));
+                }
+            },
+        };
+        let depth = match o.take_opt("depth") {
+            None => None,
+            Some(d) if d == "full" => Some(ThreadDepth::Full),
+            Some(d) => Some(ThreadDepth::Length(size(
+                &d,
+                Field::Length(default),
+                env,
+                "/thread/depth",
+                "a thread's depth",
+            )?)),
+        };
+        let drill = match o.take_opt("drill") {
+            None => TapDrill::Rule,
+            Some(d) if d == "roll_form" => TapDrill::RollForm,
+            Some(d) => match d.get("engagement").and_then(Value::as_u64) {
+                Some(e @ 50..=100) if d.as_object().is_some_and(|m| m.len() == 1) => {
+                    TapDrill::Engagement(e as u32)
+                }
+                _ => {
+                    return Err(invalid(
+                        "/thread/drill",
+                        "a tap drill is {\"engagement\": 50 to 100} or \"roll_form\" (ryucad's rule is written as nothing)",
+                    ));
+                }
+            },
+        };
+        o.finish()?;
+        Ok(Thread {
+            standard,
+            size: size_name,
+            pitch,
+            tpi,
+            class,
+            left,
+            starts,
+            depth,
+            drill,
+        })
+    }
+}
+
+impl Fastener {
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({"standard": self.standard, "size": self.size});
+        if self.fit != FastenerFit::Normal {
+            v["fit"] = json!(self.fit.key());
+        }
+        v
+    }
+
+    fn from_json(v: &Value) -> Result<Fastener> {
+        let at = "/fastener";
+        let mut o = Obj::new(v, at)?;
+        let standard = name(&mut o, "standard", at)?;
+        let size = name(&mut o, "size", at)?;
+        let fit = match o.take_opt("fit") {
+            None => FastenerFit::Normal,
+            Some(f) => f.as_str().and_then(FastenerFit::parse).ok_or_else(|| {
+                invalid(
+                    "/fastener/fit",
+                    "a fastener's fit is close, normal or loose",
+                )
+            })?,
+        };
+        o.finish()?;
+        Ok(Fastener {
+            standard,
+            size,
+            fit,
+        })
+    }
+}
+
+impl BoreTolerance {
+    fn from_json(
+        fit: Option<Value>,
+        tol: Option<Value>,
+        default: Unit,
+        env: &Env,
+    ) -> Result<Option<BoreTolerance>> {
+        match (fit, tol) {
+            (None, None) => Ok(None),
+            (Some(_), Some(_)) => Err(invalid(
+                "/tolerance",
+                "a hole has a fit or a tolerance, not both",
+            )),
+            (Some(Value::String(f)), None) => Ok(Some(BoreTolerance::Fit(f))),
+            (Some(_), None) => Err(invalid(
+                "/fit",
+                "a fit is an ISO 286 hole class, such as \"H7\"",
+            )),
+            (None, Some(t)) => {
+                let len = |x: &Value, at: &str| {
+                    Quantity::from_json_in(x, default, &|n| env.get(n))
+                        .map_err(|e| e.with("pointer", at))
+                };
+                let o = t.as_object().filter(|o| o.len() == 1);
+                match o.and_then(|o| o.iter().next()) {
+                    Some((k, x)) if k == "symmetric" => {
+                        let q = len(x, "/tolerance/symmetric")?;
+                        if q.meters() <= 0.0 {
+                            return Err(invalid(
+                                "/tolerance/symmetric",
+                                "a symmetric tolerance is more than 0",
+                            ));
+                        }
+                        Ok(Some(BoreTolerance::Symmetric(q)))
+                    }
+                    Some((k, Value::Array(a))) if k == "deviation" && a.len() == 2 => {
+                        let (u, l) = (
+                            len(&a[0], "/tolerance/deviation/0")?,
+                            len(&a[1], "/tolerance/deviation/1")?,
+                        );
+                        if u.meters() < l.meters() {
+                            return Err(invalid(
+                                "/tolerance/deviation",
+                                "the upper deviation is the first, and no less than the lower",
+                            ));
+                        }
+                        Ok(Some(BoreTolerance::Deviation(u, l)))
+                    }
+                    _ => Err(invalid(
+                        "/tolerance",
+                        "a tolerance is {symmetric: q} or {deviation: [upper, lower]}",
+                    )),
+                }
+            }
+        }
+    }
+
+    fn write(&self, v: &mut Value) {
+        match self {
+            BoreTolerance::Fit(f) => v["fit"] = json!(f),
+            BoreTolerance::Symmetric(q) => v["tolerance"] = json!({"symmetric": q.text()}),
+            BoreTolerance::Deviation(u, l) => {
+                v["tolerance"] = json!({"deviation": [u.text(), l.text()]});
+            }
+        }
+    }
 }
 
 /// What the hole's mouth is.
@@ -238,7 +562,22 @@ impl Hole {
         if self.bottom != Bottom::Flat {
             v["bottom"] = self.bottom.to_json();
         }
+        if let Some(t) = &self.thread {
+            v["thread"] = t.to_json();
+        }
+        if let Some(f) = &self.fastener {
+            v["fastener"] = f.to_json();
+        }
+        if let Some(b) = &self.bore {
+            b.write(&mut v);
+        }
         v
+    }
+
+    /// Whether it holds anything new with ryucad 28: written at
+    /// `INTENT_FORMAT`, its sizes derived.
+    pub fn has_intent(&self) -> bool {
+        self.thread.is_some() || self.fastener.is_some() || self.bore.is_some()
     }
 
     #[doc(hidden)]
@@ -338,6 +677,23 @@ impl Hole {
                 ),
             ));
         }
+        let thread = o
+            .take_opt("thread")
+            .map(|t| Thread::from_json(&t, default, env))
+            .transpose()?;
+        // Full depth on a through hole is the default: never written.
+        let thread = thread.map(|mut t| {
+            if !matches!(depth, Depth::Blind(_)) && t.depth == Some(ThreadDepth::Full) {
+                t.depth = None;
+            }
+            t
+        });
+        let fastener = o
+            .take_opt("fastener")
+            .map(|f| Fastener::from_json(&f))
+            .transpose()?;
+        let bore =
+            BoreTolerance::from_json(o.take_opt("fit"), o.take_opt("tolerance"), default, env)?;
         let targets = targets_from_json(&o.take("targets")?, "/targets")?;
         let hole = Hole {
             sketch,
@@ -347,6 +703,9 @@ impl Hole {
             depth,
             bottom,
             targets,
+            thread,
+            fastener,
+            bore,
         };
         if let (Depth::Blind(d), Some((mouth, at))) = (&hole.depth, hole.mouth_depth())
             && mouth >= d.meters()
@@ -460,6 +819,29 @@ pub fn expression_strings<'a>(k: &str, field: &'a mut Value) -> Vec<&'a mut Stri
                 out.push(s);
             }
         }
+        ("thread", Value::Object(o)) => {
+            for (k, x) in o.iter_mut() {
+                if let ("pitch" | "tpi" | "depth", Value::String(s)) = (k.as_str(), x)
+                    && s != "full"
+                {
+                    out.push(s);
+                }
+            }
+        }
+        ("tolerance", Value::Object(o)) => {
+            for x in o.values_mut() {
+                match x {
+                    Value::String(s) => out.push(s),
+                    Value::Array(a) => a.iter_mut().for_each(|y| {
+                        if let Value::String(s) = y {
+                            out.push(s);
+                        }
+                    }),
+                    _ => {}
+                }
+            }
+        }
+
         _ => {}
     }
     out
@@ -667,5 +1049,77 @@ mod tests {
                 &json!("bore / 1 mm * 20 deg")
             )
         );
+    }
+
+    fn tapped() -> Value {
+        json!({"format": 3, "kind": "ryucad.feature", "type": "hole", "sketch": "s3",
+               "form": "simple", "diameter": "6.8 mm",
+               "thread": {"standard": "iso_metric", "size": "M8", "pitch": "1 mm",
+                          "class": "5H", "hand": "left", "starts": 2,
+                          "depth": "12 mm", "drill": {"engagement": 70}},
+               "depth": {"blind": "20 mm"}, "bottom": {"drill": "118 deg"},
+               "targets": ["box1"]})
+    }
+
+    #[test]
+    fn intent_fields_round_trip() {
+        let f = read(&tapped()).unwrap();
+        let Feature::Hole(h) = &f else { panic!() };
+        let t = h.thread.as_ref().unwrap();
+        assert_eq!((t.standard.as_str(), t.size.as_str()), ("iso_metric", "M8"));
+        assert_eq!(t.pitch.as_ref().unwrap().meters(), 0.001);
+        assert!(t.left && t.starts == Some(2));
+        assert_eq!(t.drill, TapDrill::Engagement(70));
+        assert_eq!(
+            t.depth,
+            Some(ThreadDepth::Length(
+                Quantity::parse("12 mm", Unit::Mm).unwrap()
+            ))
+        );
+        assert!(h.has_intent());
+        assert_eq!(read(&f.to_json()).unwrap(), f);
+        // A fastener and a fit.
+        let mut v = tapped();
+        let o = v.as_object_mut().unwrap();
+        o.remove("thread");
+        o.insert(
+            "fastener".into(),
+            json!({"standard": "house_cap", "size": "M5", "fit": "close"}),
+        );
+        o.insert("fit".into(), json!("H7"));
+        let f = read(&v).unwrap();
+        let Feature::Hole(h) = &f else { panic!() };
+        assert_eq!(h.fastener.as_ref().unwrap().fit, FastenerFit::Close);
+        assert_eq!(h.bore, Some(BoreTolerance::Fit("H7".into())));
+        assert_eq!(read(&f.to_json()).unwrap(), f);
+        // Defaults go unwritten: a normal fit, the rule's drill, full depth
+        // on a through hole, a right hand, one start.
+        let v = json!({"format": 3, "kind": "ryucad.feature", "type": "hole", "sketch": "s3",
+                       "form": "simple", "diameter": "5 mm", "thread": {"standard": "iso_metric", "size": "M6",
+                       "depth": "full"}, "depth": "through_all", "targets": ["box1"]});
+        let w = read(&v).unwrap().to_json();
+        assert_eq!(w["thread"], json!({"standard": "iso_metric", "size": "M6"}));
+        // A tolerance as drawings take it.
+        let mut v = tapped();
+        v.as_object_mut().unwrap().remove("thread");
+        v["diameter"] = json!("6 mm");
+        v["tolerance"] = json!({"deviation": ["0.02 mm", "0 mm"]});
+        let f = read(&v).unwrap();
+        assert_eq!(read(&f.to_json()).unwrap(), f);
+    }
+
+    #[test]
+    fn intent_sizes_read_parameters() {
+        let mut v = tapped();
+        v["thread"]["depth"] = json!("d * 2");
+        v["thread"]["pitch"] = json!("d / 6");
+        let f = read(&v).unwrap();
+        let names = crate::doc::files::feature_names(&f.to_json());
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), ["d"]);
+        let mut w = f.to_json();
+        assert!(crate::doc::files::rename_in_feature(&mut w, "d", "bore"));
+        assert_eq!(w["thread"]["depth"], "bore * 2");
+        // The size and standard are names, never expressions.
+        assert_eq!(w["thread"]["size"], "M8");
     }
 }

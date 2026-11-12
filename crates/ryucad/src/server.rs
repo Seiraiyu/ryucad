@@ -3521,7 +3521,7 @@ fn hole_from(
     let mut o = crate::doc::files::Obj::new(&v, "")?;
     let h = Hole::from_fields(&mut o, unit, env)?;
     o.finish()?;
-    Ok(Feature::Hole(h))
+    Ok(Feature::Hole(Box::new(h)))
 }
 
 /// An instance: `current`'s fields (none for a new one), with what was

@@ -197,7 +197,7 @@ pub enum Feature {
     Boolean(Boolean),
     Fillet(Fillet),
     Chamfer(Chamfer),
-    Hole(Hole),
+    Hole(Box<Hole>),
     Pattern(Pattern),
     Instance(Instance),
     Mate(Box<Mate>),
@@ -624,8 +624,12 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                     out.push(s);
                 }
             }
-            (k @ ("counterbore" | "countersink" | "depth" | "bottom"), x) => {
+            (k @ ("counterbore" | "countersink" | "depth" | "bottom" | "thread"), x) => {
                 out.extend(super::hole::expression_strings(k, x));
+            }
+            // A hole's tolerance is an object; a fill's or a sew's a string.
+            ("tolerance", x @ Value::Object(_)) => {
+                out.extend(super::hole::expression_strings("tolerance", x));
             }
             (k @ ("spacing" | "spacing2" | "count" | "count2"), x) => {
                 out.extend(super::pattern::expression_strings(k, x));
@@ -1265,7 +1269,7 @@ impl Feature {
             "flange" => Feature::Flange(Box::new(Flange::from_fields(&mut o, default, env)?)),
             "unfold" => Feature::Unfold(Box::new(Unfold::from_fields(&mut o, default, env)?)),
             "refold" => Feature::Refold(Box::new(Refold::from_fields(&mut o)?)),
-            "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
+            "hole" => Feature::Hole(Box::new(Hole::from_fields(&mut o, default, env)?)),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
             "import" => Feature::Import(Import::from_fields(&mut o)?),
