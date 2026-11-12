@@ -327,6 +327,37 @@ pub fn lookup(
     }
 }
 
+/// A standard's built-in size names, in size order (`M1` to `M100`;
+/// `#0` to `1-3/4` in the series; pipe sizes with their prefix).
+pub fn sizes(standard: Standard) -> Vec<&'static str> {
+    match standard {
+        Standard::IsoMetric => iso_metric::SIZES.iter().map(|s| s.name).collect(),
+        Standard::Unc | Standard::Unf | Standard::Unef | Standard::Un => unified::SIZES
+            .iter()
+            .filter(|s| match standard {
+                Standard::Unc => s.unc.is_some(),
+                Standard::Unf => s.unf.is_some(),
+                Standard::Unef => s.unef.is_some(),
+                _ => true,
+            })
+            .map(|s| s.name)
+            .collect(),
+        Standard::Npt | Standard::Nptf | Standard::Nps => {
+            pipe::NATIONAL.iter().map(|s| s.name).collect()
+        }
+        Standard::Bspp => PIPE_NAMES
+            .iter()
+            .copied()
+            .filter(|n| n.starts_with('G'))
+            .collect(),
+        Standard::Bspt => PIPE_NAMES
+            .iter()
+            .copied()
+            .filter(|n| n.starts_with("Rc") || n.starts_with("Rp"))
+            .collect(),
+    }
+}
+
 /// The static name a pipe size is known by, with its prefix (`G1/4`).
 fn table_name(size: &str) -> &'static str {
     // The prefixed names are few: keep them in one static list.

@@ -24,12 +24,14 @@
 //! whole. Formulas with fractional powers are decided by exact integer
 //! comparisons (`exact`).
 
+pub mod drill;
 pub(crate) mod exact;
 pub mod fit;
 pub mod iso_metric;
 pub mod iso_metric_limits;
 pub mod pipe;
 pub mod source;
+pub mod tap;
 pub mod thread;
 pub mod unified;
 
