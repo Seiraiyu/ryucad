@@ -2682,6 +2682,57 @@ mod move_tests {
     use crate::server::tests::call;
     use serde_json::json;
 
+    #[test]
+    fn moves_and_drags_stop_at_a_limit() {
+        let (dir, mut s) = hinged();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1",
+             "limits": {"angle": {"min": "-6 deg", "max": "6 deg"}}}),
+        )
+        .unwrap();
+        let at_stop = |v: &serde_json::Value| {
+            let x = &v["solve"]["values"]["m1"];
+            let deg = x["value"]["angle_deg"].as_f64().unwrap();
+            assert!((deg.abs() - 6.0).abs() < 1e-6, "{x}");
+            assert!(
+                x["limit"]["angle"] == "min" || x["limit"]["angle"] == "max",
+                "{x}"
+            );
+        };
+        let turn = json!([{"instance": "pin", "axis": [0, 0, 1], "angle": "30 deg"}]);
+        // A drag's preview: the held turn can't hold, so it solves free
+        // from there and stops.
+        let drag = call(
+            &mut s,
+            "assembly.solve",
+            json!({"part": "frame", "moves": turn, "component": true}),
+        )
+        .unwrap();
+        assert_eq!(drag["held"], false, "{drag}");
+        at_stop(&drag);
+        let whole = call(
+            &mut s,
+            "assembly.solve",
+            json!({"part": "frame", "moves": turn}),
+        )
+        .unwrap();
+        at_stop(&whole);
+        // The move writes the pin where the stop holds it (undo needs the
+        // daemon, which this session isn't).
+        call(
+            &mut s,
+            "assembly.move",
+            json!({"part": "frame", "instance": "pin", "axis": [0, 0, 1], "angle": "30 deg"}),
+        )
+        .unwrap();
+        let now = call(&mut s, "assembly.solve", json!({"part": "frame"})).unwrap();
+        at_stop(&now);
+        assert_eq!(now["solve"]["stale"], false);
+        let _ = dir;
+    }
+
     /// The hinge, stored where it holds, with a cap fastened 20 mm up the
     /// pin.
     fn hinged_with_cap() -> (tempfile::TempDir, crate::session::Session) {
