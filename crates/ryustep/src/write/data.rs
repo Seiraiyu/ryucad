@@ -129,11 +129,39 @@ fn typed(name: &str, x: Param) -> Param {
     Param::Typed(name.into(), Box::new(x))
 }
 
-/// One attribute's item (Task 8 fills every type in).
-fn item(out: &mut Out, _cx: &Contexts, _schema: Schema, a: &AttributeData) -> u64 {
-    match &a.value {
-        DataValue::Text(t) => out.add("DESCRIPTIVE_REPRESENTATION_ITEM", vec![s(&a.name), s(t)]),
-        _ => out.add("DESCRIPTIVE_REPRESENTATION_ITEM", vec![s(&a.name), s("")]),
+/// One attribute's item: text as a descriptive item; an integer as a
+/// value item's `COUNT_MEASURE`; a number as AP242's real item, AP214's
+/// value item's `RATIO_MEASURE`; a boolean as AP242's boolean item,
+/// AP214's descriptive `true` or `false` (AP214 has no boolean item); a
+/// length or angle as a measure item in the geometric context's unit.
+fn item(out: &mut Out, cx: &Contexts, schema: Schema, a: &AttributeData) -> u64 {
+    let name = s(&a.name);
+    match (&a.value, schema) {
+        (DataValue::Text(t), _) => out.add("DESCRIPTIVE_REPRESENTATION_ITEM", vec![name, s(t)]),
+        (DataValue::Integer(n), _) => out.add(
+            "VALUE_REPRESENTATION_ITEM",
+            vec![name, typed("COUNT_MEASURE", f(*n as f64))],
+        ),
+        (DataValue::Number(x), Schema::Ap214) => out.add(
+            "VALUE_REPRESENTATION_ITEM",
+            vec![name, typed("RATIO_MEASURE", f(*x))],
+        ),
+        (DataValue::Number(x), _) => out.add("REAL_REPRESENTATION_ITEM", vec![name, f(*x)]),
+        (DataValue::Boolean(v), Schema::Ap214) => out.add(
+            "DESCRIPTIVE_REPRESENTATION_ITEM",
+            vec![name, s(if *v { "true" } else { "false" })],
+        ),
+        (DataValue::Boolean(v), _) => {
+            out.add("BOOLEAN_REPRESENTATION_ITEM", vec![name, super::b(*v)])
+        }
+        (DataValue::Length(m), _) => out.add(
+            "MEASURE_REPRESENTATION_ITEM",
+            vec![name, typed("LENGTH_MEASURE", f(m / cx.unit)), r(cx.length)],
+        ),
+        (DataValue::Angle(rad), _) => out.add(
+            "MEASURE_REPRESENTATION_ITEM",
+            vec![name, typed("PLANE_ANGLE_MEASURE", f(*rad)), r(cx.angle)],
+        ),
     }
 }
 

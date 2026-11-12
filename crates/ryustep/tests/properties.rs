@@ -10,8 +10,8 @@ use ryustep::census::{Bucket, Category, Read};
 use ryustep::part21::{self, Record};
 use ryustep::properties::Value;
 use ryustep::{
-    LengthUnit, MaterialData, Paints, PartData, Product, ProductData, WriteModel, WriteOptions,
-    write, write_with_data,
+    AttributeData, DataValue, LengthUnit, MaterialData, Paints, PartData, Product, ProductData,
+    WriteModel, WriteOptions, write, write_with_data,
 };
 
 fn opts(name: &str) -> WriteOptions {
@@ -310,4 +310,72 @@ fn a_material_and_its_density_are_written_after_everything_else() {
     .unwrap()
     .bytes;
     assert_eq!(none, plain);
+}
+
+fn every_type() -> PartData {
+    let a = |name: &str, value| AttributeData {
+        name: name.into(),
+        value,
+    };
+    PartData {
+        products: vec![ProductData {
+            product: 0,
+            material: None,
+            attributes: vec![
+                a("finish", DataValue::Text("anodized".into())),
+                a("batch_size", DataValue::Integer(250)),
+                a("yield", DataValue::Number(0.95)),
+                a("rohs", DataValue::Boolean(true)),
+                a("wall_thickness", DataValue::Length(0.0025)),
+                a("draft", DataValue::Angle(0.5)),
+            ],
+        }],
+    }
+}
+
+#[test]
+fn attributes_are_written_typed_as_the_schema_types_them() {
+    let model = block_model();
+    let read = |schema| {
+        let mut o = opts("p.stp");
+        o.schema = schema;
+        let bytes = write_with_data(&model, &[], &Paints::default(), &every_type(), &o)
+            .unwrap()
+            .bytes;
+        let opened = ryustep::open(&bytes).unwrap();
+        opened.properties().products[&0].attributes.clone()
+    };
+    let got = read(ryustep::schema::Schema::Ap242);
+    let names: Vec<&str> = got.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "finish",
+            "batch_size",
+            "yield",
+            "rohs",
+            "wall_thickness",
+            "draft"
+        ]
+    );
+    assert_eq!(got[0].value, Value::Text("anodized".into()));
+    assert_eq!(got[1].value, Value::Integer(250));
+    assert_eq!(got[2].value, Value::Number(0.95));
+    assert_eq!(got[3].value, Value::Boolean(true));
+    let Value::Measure { value, unit } = &got[4].value else {
+        panic!("{got:?}")
+    };
+    assert_eq!(
+        (*value, unit.name.as_str()),
+        (2.5, "mm"),
+        "in the file's length unit"
+    );
+    let Value::Measure { value, unit } = &got[5].value else {
+        panic!("{got:?}")
+    };
+    assert_eq!((*value, unit.name.as_str()), (0.5, "rad"));
+    // AP214 has no boolean item: the text a CLI reads as one.
+    let old = read(ryustep::schema::Schema::Ap214);
+    assert_eq!(old[3].value, Value::Text("true".into()));
+    assert_eq!(old[2].value, Value::Number(0.95));
 }
