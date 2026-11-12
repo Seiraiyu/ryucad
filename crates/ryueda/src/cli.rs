@@ -397,6 +397,9 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
+    /// Register ryueda with Git: `git install`.
+    #[command(subcommand)]
+    Git(GitCmd),
     #[command(subcommand)]
     Daemon(DaemonCmd),
 }
@@ -1493,6 +1496,17 @@ fn nets(s: &str) -> Vec<String> {
 }
 
 #[derive(Subcommand)]
+enum GitCmd {
+    /// Tell Git to read ryueda's files through ryueda: the textconv entry,
+    /// in this repository's config with merge.renames=false, or with
+    /// --global in yours (the installers do that).
+    Install {
+        #[arg(long)]
+        global: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum DaemonCmd {
     /// Serve the project (the CLI starts this itself).
     Run {
@@ -2508,6 +2522,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
+        | Command::Git(_)
         | Command::Parts(PartsCmd::Login { .. } | PartsCmd::Logout { .. }) => {
             return Ok(None);
         }
@@ -2543,6 +2558,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
+        Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
         // Keys go straight to the user's config folder: never through a
         // daemon, a request or a log.
         Command::Parts(PartsCmd::Login { distributor }) => {

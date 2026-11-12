@@ -170,3 +170,47 @@ fn outside_a_repository_a_revision_is_refused() {
     let (code, v) = ryueda(&board, &run, false, &["netlist", "--rev", "HEAD"]);
     assert_eq!((code, &v["error"]["code"]), (1, &json!("not_a_git_repo")));
 }
+
+#[test]
+fn init_in_a_repository_sets_the_clone_up_and_install_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(top.join("board")).unwrap();
+    git(&top, &["init", "-q"]);
+    let (code, v) = ryueda(&top.join("board"), &run, false, &["init"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["git"]["scope"], "local");
+    let attrs = std::fs::read_to_string(top.join("board/.gitattributes")).unwrap();
+    assert!(
+        attrs.contains("designs/*.json merge=ryueda diff=ryueda text eol=lf"),
+        "{attrs}"
+    );
+    let config = std::fs::read_to_string(top.join(".git/config")).unwrap();
+    assert!(
+        config.contains("' git textconv") && config.contains("renames = false"),
+        "{config}"
+    );
+    assert!(
+        !config.contains("merge-driver"),
+        "no merge driver before plan 4.C"
+    );
+    assert!(
+        !top.join(".git/hooks/pre-merge-commit").exists(),
+        "no hook line before plan 4.C"
+    );
+    let (code, v) = ryueda(&top.join("board"), &run, false, &["git", "install"]);
+    assert_eq!((code, &v["result"]["hooks"]), (0, &json!({})), "{v}");
+    let (code, v) = ryueda(
+        &top.join("board"),
+        &run,
+        false,
+        &["git", "install", "--global"],
+    );
+    assert_eq!((code, &v["result"]["scope"]), (0, &json!("global")), "{v}");
+    let global = std::fs::read_to_string(run.with_file_name("gitconfig")).unwrap();
+    assert!(
+        global.contains("textconv") && !global.contains("renames"),
+        "{global}"
+    );
+}

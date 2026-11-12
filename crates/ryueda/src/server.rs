@@ -43,12 +43,18 @@ pub fn init(root: &Path, unit: Option<Unit>, library: bool) -> Result<Value> {
     };
     let m = Manifest::new(ProjectId::from_bytes(bytes), unit.unwrap_or(Unit::Mm), kind);
     write_atomic(&root.join(MANIFEST), m.to_text())?;
-    Ok(json!({
+    crate::drivers::write_attributes(root)?;
+    let mut out = json!({
         "root": root,
         "project": m.project,
         "project_kind": m.project_kind,
         "default_unit": m.default_unit,
-    }))
+    });
+    // A project made inside a repository sets the clone up as it starts.
+    if ryu_git::drivers::discover(root, false).is_some() {
+        out["git"] = crate::drivers::install(root, true)?;
+    }
+    Ok(out)
 }
 
 /// [`answer`] behind a panic boundary. `slot` holds the session between
@@ -190,7 +196,7 @@ pub fn answer(
 /// A request answered from the working files.
 fn working(
     session: &mut Session,
-    mut live: Option<&mut Live<Eda>>,
+    live: Option<&mut Live<Eda>>,
     me: Option<&str>,
     req: Request,
     job: &ryu_session::job::Job,
@@ -267,7 +273,7 @@ fn working(
             layers.unwrap_or_default(),
         )
         .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes)),
-        req => dispatch(session, live.as_deref_mut(), me, req, job).map(Answer::json),
+        req => dispatch(session, live, me, req, job).map(Answer::json),
     }
 }
 

@@ -228,8 +228,10 @@ fn projects_and_library_projects_from_the_cli() {
     let id = v["result"]["project"].as_str().unwrap().to_owned();
     assert_eq!(id.len(), 32);
     for d in ["board", "passives"] {
-        let m = fs::read(p.direct.join(d).join("ryueda.json")).unwrap();
-        fs::write(p.daemon.join(d).join("ryueda.json"), m).unwrap();
+        for f in ["ryueda.json", ".gitattributes"] {
+            let m = fs::read(p.direct.join(d).join(f)).unwrap();
+            fs::write(p.daemon.join(d).join(f), m).unwrap();
+        }
     }
     assert_ne!(
         p.run_in(&p.daemon, "board", &["info"]).1["result"]["project"],
@@ -535,8 +537,10 @@ impl Pair {
         assert_eq!(p.run_in(&p.direct, "board", &["init"]).0, 0);
         assert_eq!(p.run_in(&p.direct, "passives", &["init", "--library"]).0, 0);
         for d in ["board", "passives"] {
-            let m = fs::read(p.direct.join(d).join("ryueda.json")).unwrap();
-            fs::write(p.daemon.join(d).join("ryueda.json"), m).unwrap();
+            for f in ["ryueda.json", ".gitattributes"] {
+                let m = fs::read(p.direct.join(d).join(f)).unwrap();
+                fs::write(p.daemon.join(d).join(f), m).unwrap();
+            }
         }
         p.ok(&["lib", "add", "passives", "../passives"]);
         p
@@ -1881,7 +1885,6 @@ fn kicad_import_from_the_cli() {
     assert_eq!(
         r["files"],
         json!([
-            "../passives/.gitattributes",
             "../passives/library/components/ryu_test_nand2.json",
             "../passives/library/components/ryu_test_r.json",
             "../passives/library/components/ryu_test_r_10k.json",
@@ -1922,14 +1925,14 @@ fn kicad_import_from_the_cli() {
         .iter()
         .map(|f| f["path"].as_str().unwrap())
         .collect();
-    assert_eq!(paths.len(), 12, "{paths:?}");
+    assert_eq!(paths.len(), 11, "{paths:?}");
     assert!(
         paths.iter().all(|f| f.starts_with("../passives/")),
         "{paths:?}"
     );
     let (code, u) = run(&["undo"]);
     assert_eq!(code, 0, "{u}");
-    assert_eq!(files_under(&passives), ["ryueda.json"]);
+    assert_eq!(files_under(&passives), [".gitattributes", "ryueda.json"]);
     let (code, r) = run(&["redo"]);
     assert_eq!(code, 0, "{r}");
     assert_eq!(files_under(&passives), written);
