@@ -1748,4 +1748,22 @@ mod tests {
             .collect();
         assert_eq!(state, [("body", true), ("low", true), ("high", false)]);
     }
+
+    /// Design 525: interference runs only when asked. An assembly
+    /// imported as references, rebuilt, updated to a new version and
+    /// rebuilt again leaves the session's interference cache empty.
+    #[test]
+    fn import_and_update_never_run_interference() {
+        let (src, path) = outside(&frame_version(1));
+        let (_dir, mut s) = fresh();
+        call(&mut s, "import", json!({"path": path})).unwrap();
+        drop(src);
+        // A part of the second version may fail (its product is gone):
+        // what the rebuild answers doesn't matter here, only that it ran.
+        let _ = call(&mut s, "rebuild", json!({}));
+        assert!(s.interference.is_empty(), "the import ran interference");
+        update(&mut s, &frame_version(2), json!({"solid": false})).unwrap();
+        let _ = call(&mut s, "rebuild", json!({}));
+        assert!(s.interference.is_empty(), "the update ran interference");
+    }
 }

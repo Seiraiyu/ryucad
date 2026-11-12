@@ -5,13 +5,16 @@
 //! finds must heal into a body that checks, and their mild faults back
 //! into the body they were written from.
 
+use ryukei::Error;
 use ryukei::boolean::boolean;
 use ryukei::check::{check, check_intersections};
 use ryukei::heal::{HealOptions, heal};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
+use ryukei::offset::{offset_body_with, shell_with};
 use ryukei_testkit::boolean_bytes::boolean_case;
 use ryukei_testkit::heal_bytes::heal_case;
+use ryukei_testkit::offset_bytes::{Op, offset_case_past};
 use ryukei_testkit::sweep_bytes::sweep;
 
 fn bytes(hex: &str) -> Vec<u8> {
@@ -636,4 +639,60 @@ fn the_edit_targets_first_find_answers() {
     if bars() {
         assert!(s < 60.0, "{s} s");
     }
+}
+
+/// #746's unit: an outward shell past its body's curvature, refused in
+/// about 6 s in release (cox-worker-5) but run for 418 s in the fuzz
+/// build, where it overran `FUZZ_DEADLINE` by about 23 s. Its 1 GB in the
+/// fuzz build is ASan's quarantine (41 MB without the sanitizer, 199 MB
+/// with a 16 MB quarantine: plan 17.B, cox-worker-4); the offset target
+/// runs with `ASAN_OPTIONS=quarantine_size_mb=64`.
+const UNIT_746: &str = concat!(
+    "f3b128d721a9a85c56e881a85cd6aefe355eed202bdeedcc2fdc9bd1650f3e20198ec973",
+    "b33676957d0019ec672007899dfd4376df07b682b06fdf0c4410fb997f165218d3eb164370b5",
+);
+
+/// When #746's cancel is set, in seconds: the point plan 17.B's Task 14
+/// found slowest to stop (0.010 s after it, cox-worker-4, release; every
+/// cancel from 0.5 to 8 s stopped within 0.01 s).
+const CANCEL_AT: f64 = 2.0;
+
+/// #746's unit run under a cancel at `at` seconds: what it returned and
+/// how long it took.
+fn unit_746_cancelled_at(at: f64) -> (Result<(), Error>, f64) {
+    let data = bytes(UNIT_746);
+    let (&first, rest) = data.split_first().unwrap();
+    assert!(first >= 0xf0);
+    let case = offset_case_past(rest).unwrap();
+    let start = std::time::Instant::now();
+    let deadline = std::time::Duration::from_secs_f64(at);
+    let r = ryukei_testkit::fuzz_case_within(deadline, |work| match &case.op {
+        Op::Offset(spec) => work
+            .run(|w| offset_body_with(OpKey(0x0f5), &case.body, spec, w))
+            .map(|_| ()),
+        Op::Shell(spec) => work
+            .run(|w| shell_with(OpKey(0x5e1), &case.body, spec, w))
+            .map(|_| ()),
+    });
+    (r, start.elapsed().as_secs_f64())
+}
+
+/// #746: cancelled at its slowest stage, the unit stops within 0.1 s
+/// with `RYUKEI_BARS=1` on the bar machine, a second otherwise.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn offset_past_curvature_stops_soon_after_its_cancel() {
+    let _t = timed();
+    let (r, secs) = unit_746_cancelled_at(CANCEL_AT);
+    eprintln!("#746: {r:?} in {secs:.3} s, the cancel at {CANCEL_AT} s");
+    assert!(
+        matches!(
+            r,
+            Err(Error::Cancelled | Error::InvalidOffset(_) | Error::BudgetExceeded { .. })
+        ),
+        "{r:?}"
+    );
+    let latency = (secs - CANCEL_AT).max(0.0);
+    let bar = if bars() { 0.1 } else { 1.0 };
+    assert!(latency <= bar, "stopped {latency:.3} s after its cancel");
 }

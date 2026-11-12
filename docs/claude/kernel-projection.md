@@ -67,3 +67,35 @@ The design is document 326 in the Coxswain planning project `ryucad-ryukei`; thi
   - Beating OCCT's `HLRBRep_Algo` (#608).
   - Silhouettes that can't be certified refuse the view (`Uncertain`): race bodies 8, 16, 55, 56 and 89 among the first 200, and 18 views of the pinned corpus (NIST CTC 02, FTC 06, FTC 07, FTC 10 and STC 07, OCCT's `linkrods`).
   - A piece lying behind another in the image is reported once, as ryukei's rule says, never hidden by it.
+
+## Views that certify (decided in phase 17)
+
+The design is document 484 in the Coxswain planning project `ryucad-ryukei`; this is its plan 17.B (phases 3 and 4).
+
+- **Images near cusps** (#643). Where a root of a NURBS image's hodograph along its principal axis can't be resolved over more than `STRETCH` (1e-6, local parameter), `project::folds` halves the bracket until each part is one to one or a point. One to one means some direction makes every Bernstein coefficient of the hodograph positive, rounded outward. A point means within `LINEAR_RESOLUTION` (an `Image::Point`, the rule a whole curve already had). A part that is neither once it is under `STRETCH` refuses `ViewError::Image`, as before. Folds elsewhere are cut as before, so views that drew before are unchanged bit for bit.
+- **A torus square to the view** (`|t_z| ≤ ANGULAR_RESOLUTION`) is in closed form: its two meridian circles in the plane of the axis and the view, and its parallels at `v = ±π/2`, each cut where they cross. Its tolerance is `LINEAR_RESOLUTION + 2 (R + r) √|t_z|`: within the resolution of square, the true contour pinches at the crossings. Tilted further, it is traced; tilts of 1e-9 to 1e-3 certified in 0.55 to 2.3 s (cox-worker-4, AMD Opteron, loaded).
+- **Revolutions** are in closed form: `n · t = h'(v) s cos(u − ψ) − ρ'(v) t_z`, so the contour is `u = ψ ± acos(k)` over the stretches where `G = (h's)² − (ρ't_z)²` is positive. `G w⁴` is a polynomial on each Bézier piece of the profile, and its roots (the folds) are isolated by `Bernstein::roots`. The branches are sampled from the formula at Chebyshev's spacing, 48 to a stretch, then fitted and certified by `fit_contour` as traced ones are. The face is traced as before when a root isn't certified simple (a view along or square to the axis), the profile has a crease inside the face, or a fit can't certify.
+- **What was fixed or recorded.**
+  - The race's isometric views (`race_views_refuse_quickly`, cox-worker-4, loaded at 40 to 60, one thread): 359 of 368 bodies draw, the torus askew (187) and the revolutions 236, 237, 251, 252 and 305 among them.
+    - Ruled NURBS (cubic × linear, hundreds to thousands of columns, not translates) refuse: bodies 8, 55, 89, 109 and 292 in 0.09 to 1.9 s, 197 in 35 s.
+    - Three spline revolutions refuse slowly, after 427 to 1,265 s (16, 56, 229). Their folds certify, but `fit_contour` can't certify the formula's branches, metre-long contours of rational spline rings. It refuses after 11 to 51 s and the tracer refuses after it. Recorded on #608 and #767; `fit_contour` is unchanged here.
+  - The crankcase (#643): its isometric (v4) and the engine's assembly view now draw (1 of 511 and 681 of 68,367 pieces uncertain). Its front, top and right views stay at 656, 1,753 and 133 uncertain.
+    - Of the drawing's unsure rays, 10,064 meet an edge exactly (`point_in_face` gives `OnEdge`) and 2,651 run along edge-on faces. The bosses come in pairs mirrored in a plane holding the view, so a ray from a piece meets its twin's edge exactly.
+    - Skipping hits along edge-on faces settled none, so it isn't kept. A rule for rays crossing a solid exactly at an edge is left to later design (#643).
+  - #746: the offset fuzz target's gigabyte a case is ASan's quarantine (41 to 43 MB without the sanitizer, flat over three runs; 199 MB with a 16 MB quarantine; debug assertions make no difference). The target runs with `ASAN_OPTIONS=quarantine_size_mb=64` (`fuzz.yml`, CLAUDE.md). The cancel stops within 0.01 s in release (cox-worker-4).
+- **Testing.**
+  - Unit tests in `project::{folds, curve, closed}`.
+  - `tests/silhouettes.rs`: a torus from the front, nearly square tori, revolutions in closed form.
+  - `tests/hidden_lines.rs`: the crankcase's boss saddle as a twin, its views against the mesh, a torus from the front, and the ignored `race_views_refuse_quickly`.
+  - `tests/projection_props.rs`'s square and cusp views: square ones hold the tenth bar. Views along a spline edge's tangent stack its pieces in the image (164 of 694 pieces uncertain, #643), so their share is only printed; square views had none of 528 uncertain.
+  - `tests/fuzz_regressions.rs`' `offset_past_curvature_stops_soon_after_its_cancel`.
+  - ryucad's corpus test holds every committed drawing view to drawing and to at most a tenth uncertain (`views_certify`, with `KNOWN_UNCERTAIN` for the crankcase's three views).
+  - The `cusp_images` and `closed_silhouettes` golden sections; no other ryukei section moved.
+  - The `projection` fuzz target views a quarter of its cases square to a torus.
+- **Bars** (cox-worker-2, AMD Ryzen 7 9700X, release, one thread, 2026-11-12, each run started below load 1.5):
+  - The race's refusals (`RYUKEI_BARS=1 race_views_refuse_quickly`): **the ≤ 10 s bar isn't met** (#767). Revolutions 16, 56 and 229 refuse in 153, 187 and 50 s. The ruled NURBS refuse in 0.02 to 5.1 s. 359 bodies drew; the views took 1,219 s in all. The slowest drawn were revolutions: 252 in 175 s, 305 in 139 s.
+  - #746's cancel stops 0.001 s after it (bar 0.1 s).
+  - `cargo bench -p ryukei-bench --bench projection` medians against plan 10.C's (the same machine):
+    - **plates over the bar:** 1 hole 7.84 ms (6.95), 100 holes 364 ms (335), 1,000 holes 6.90 s (6.49). That is 6 to 13 % slower; 17.B changes no code a plate's view runs.
+    - sphere 27.1 ms (27.4), torus askew 320 ms (322), a drilled plate's section 2.69 ms.
+  - The radial engine's crankcase drawing (`ryucad drawing get crankcase main --no-daemon`): 183 s.

@@ -65,6 +65,11 @@ pub struct Model {
     pub occurrences: Vec<Occurrence>,
     pub hash: String,
     pub pin: Option<Pin>,
+    /// A part's failed features, when any failed: what an insert of it
+    /// warns of (`insert_source_failed`). Not in the hash.
+    pub failing: Option<Vec<String>>,
+    /// Whether it is an assembly's model, which nothing inserts.
+    pub assembly: bool,
 }
 
 /// How a release label resolved: at the commit where its record became
@@ -127,6 +132,8 @@ impl Model {
             occurrences,
             hash: h.finalize().to_hex()[..32].to_owned(),
             pin: None,
+            failing: None,
+            assembly: false,
         }
     }
 
@@ -155,7 +162,13 @@ impl Model {
                 _ => None,
             })
             .collect();
-        Model::new(vec![Occurrence {
+        let failing: Vec<String> = result
+            .features
+            .iter()
+            .filter(|(_, r)| r.is_err())
+            .map(|(id, _)| id.to_string())
+            .collect();
+        let mut m = Model::new(vec![Occurrence {
             path: Vec::new(),
             part: part.id.clone(),
             rev: rev.clone(),
@@ -163,7 +176,9 @@ impl Model {
             datums: Arc::new(datums),
             pose: Rigid::IDENTITY,
             within: Vec::new(),
-        }])
+        }]);
+        m.failing = (!failing.is_empty()).then_some(failing);
+        m
     }
 
     /// An assembly's model: the occurrences of each instance that placed
@@ -233,7 +248,7 @@ impl Model {
 }
 
 /// The bits of a pose's rotation and translation, for hashing.
-fn pose_bits(r: &Rigid) -> Vec<u8> {
+pub(crate) fn pose_bits(r: &Rigid) -> Vec<u8> {
     let mut out = Vec::with_capacity(96);
     for row in r.rotation_matrix() {
         for x in row {
@@ -386,10 +401,12 @@ pub fn place(id: &Id, inst: &Instance, children: &Children) -> Result<Placed> {
             if matches!(
                 e.code,
                 Code::AssemblyCycle
+                    | Code::InsertCycle
                     | Code::NotFound
                     | Code::LabelNotFound
                     | Code::LabelNotOfficial
                     | Code::InstanceNotReleased
+                    | Code::InsertNotReleased
             ) =>
         {
             return Err(e.clone().with("feature", id));
@@ -482,46 +499,61 @@ pub fn kind_error_of(part: &Part, id: &Id, ty: &str) -> Option<Error> {
     )
 }
 
-/// What each part at a revision places, by node: a part's listed
-/// instances at `working` and in releases the pins hold. An instance at
-/// `working` inside a release reads nothing (it is
-/// `instance_not_released`). These are the edges cycles are found on.
-pub(crate) fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<Node>> {
-    let instances = |p: &Part, inside_release: bool| -> BTreeSet<Node> {
+/// What each part at a revision reads, by node: a part's listed
+/// instances and inserts at `working` and in releases the pins hold. An
+/// instance or insert at `working` inside a release reads nothing (it is
+/// `instance_not_released` or `insert_not_released`). These are the edges
+/// cycles are found on.
+pub(crate) fn edges(project: &Project, pins: &Pins) -> Edges {
+    // Each part's reads, and which of them are inserts.
+    let reads = |p: &Part, inside_release: bool| -> Vec<(Node, bool)> {
         p.order()
             .iter()
-            .filter_map(|fid| match p.features.get(fid) {
-                Some(Ok(Feature::Instance(i))) if !(inside_release && i.rev == Rev::Working) => {
-                    Some((i.part.clone(), i.rev.clone()))
-                }
-                _ => None,
+            .filter_map(|fid| {
+                let f = p.features.get(fid)?.as_ref().ok()?;
+                reads_node(f).map(|n| (n, matches!(f, Feature::Insert(_))))
             })
+            .filter(|((_, rev), _)| !(inside_release && *rev == Rev::Working))
             .collect()
     };
     let mut out = BTreeMap::new();
+    let mut inserts = BTreeSet::new();
+    let mut add = |from: Node, to: Vec<(Node, bool)>| {
+        if to.is_empty() {
+            return;
+        }
+        for (n, insert) in &to {
+            if *insert {
+                inserts.insert((from.clone(), n.clone()));
+            }
+        }
+        out.insert(from, to.into_iter().map(|(n, _)| n).collect());
+    };
     for (id, p) in &project.parts {
-        // Most parts place nothing.
+        // Most parts read no other part.
         if !p
             .features
             .values()
-            .any(|f| matches!(f, Ok(Feature::Instance(_))))
+            .any(|f| matches!(f, Ok(Feature::Instance(_) | Feature::Insert(_))))
         {
             continue;
         }
-        let to = instances(p, false);
-        if !to.is_empty() {
-            out.insert((id.clone(), Rev::Working), to);
-        }
+        add((id.clone(), Rev::Working), reads(p, false));
     }
     for (node, pinned) in pins {
         if let Ok(pinned) = pinned {
-            let to = instances(&pinned.part, true);
-            if !to.is_empty() {
-                out.insert(node.clone(), to);
-            }
+            add(node.clone(), reads(&pinned.part, true));
         }
     }
-    out
+    Edges { to: out, inserts }
+}
+
+/// What each part at a revision reads, by node ([`edges`]), and which of
+/// those edges are inserts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Edges {
+    pub to: BTreeMap<Node, BTreeSet<Node>>,
+    pub inserts: BTreeSet<(Node, Node)>,
 }
 
 /// The parts at revisions that lie on a cycle of instances: Tarjan's
@@ -530,6 +562,8 @@ pub(crate) fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<N
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Cycles {
     edges: BTreeMap<Node, BTreeSet<Node>>,
+    /// The edges that are inserts: a cycle through one is `insert_cycle`.
+    inserts: BTreeSet<(Node, Node)>,
     component: BTreeMap<Node, usize>,
 }
 
@@ -538,14 +572,15 @@ impl Cycles {
         Cycles::from_edges(edges(project, pins))
     }
 
-    /// The edges these cycles were found over.
-    pub(crate) fn edges(&self) -> &BTreeMap<Node, BTreeSet<Node>> {
-        &self.edges
+    /// Whether these cycles were found over `edges`.
+    pub(crate) fn found_over(&self, edges: &Edges) -> bool {
+        self.edges == edges.to && self.inserts == edges.inserts
     }
 
     /// The cycles over `edges` (see [`edges`]): they depend on nothing
     /// else.
-    pub(crate) fn from_edges(edges: BTreeMap<Node, BTreeSet<Node>>) -> Cycles {
+    pub(crate) fn from_edges(edges: Edges) -> Cycles {
+        let Edges { to: edges, inserts } = edges;
         let mut t = Tarjan {
             edges: &edges,
             index: BTreeMap::new(),
@@ -568,7 +603,11 @@ impl Cycles {
             *sizes.entry(*c).or_default() += 1;
         }
         component.retain(|v, c| sizes[c] > 1 || edges.get(v).is_some_and(|to| to.contains(v)));
-        Cycles { edges, component }
+        Cycles {
+            edges,
+            inserts,
+            component,
+        }
     }
 
     /// Whether an instance of `child` in `assembly` closes a cycle.
@@ -661,22 +700,39 @@ fn node_text((part, rev): &Node) -> String {
     }
 }
 
-/// `assembly_cycle` for an instance of `child` in `assembly`.
+/// `assembly_cycle` for an instance of `child` in `assembly`, or
+/// `insert_cycle` when the cycle runs through an insert.
 pub fn cycle_error(cycles: &Cycles, assembly: &Node, child: &Node) -> Error {
     let mut path = vec![assembly.clone()];
     path.extend(path_back(&cycles.edges, child, assembly));
     let text: Vec<String> = path.iter().map(node_text).collect();
     let (a, c) = (node_text(assembly), node_text(child));
-    Error::new(
-        Code::AssemblyCycle,
-        format!(
-            "{a} places {c}, which places {a} again: {}",
-            text.join(" > ")
-        ),
-    )
-    .with("part", &assembly.0)
-    .with("child", &child.0)
-    .with("path", &text)
+    // A cycle through an insert is an insert's (design 521); one of
+    // instances alone is as it was.
+    let through_insert = path
+        .windows(2)
+        .any(|w| cycles.inserts.contains(&(w[0].clone(), w[1].clone())));
+    let (code, message) = if through_insert {
+        (
+            Code::InsertCycle,
+            format!(
+                "{a} inserts or places {c}, which reaches {a} again: {}",
+                text.join(" > ")
+            ),
+        )
+    } else {
+        (
+            Code::AssemblyCycle,
+            format!(
+                "{a} places {c}, which places {a} again: {}",
+                text.join(" > ")
+            ),
+        )
+    };
+    Error::new(code, message)
+        .with("part", &assembly.0)
+        .with("child", &child.0)
+        .with("path", &text)
 }
 
 /// `instance_not_released` for an instance at `working` inside a part
@@ -686,6 +742,20 @@ fn working_in_release(node: &Node, child: &Id) -> Error {
         Code::InstanceNotReleased,
         format!(
             "{} places {child} as it is now (working), and a release can only place releases",
+            node_text(node)
+        ),
+    )
+    .with("part", &node.0)
+    .with("child", child)
+}
+
+/// `insert_not_released` for an insert at `working` inside a part read
+/// at a release label.
+fn insert_working_in_release(node: &Node, child: &Id) -> Error {
+    Error::new(
+        Code::InsertNotReleased,
+        format!(
+            "{} inserts {child} as it is now (working), and a release can only insert releases",
             node_text(node)
         ),
     )
@@ -821,12 +891,30 @@ impl Store {
     }
 }
 
-/// Whether `id` is a part of `project` that isn't an assembly.
+/// Whether `p` reads other parts' models: an assembly (its instances) or
+/// a part holding an insert (design 521). Such a part is rebuilt after
+/// what it reads, and its rebuild's key holds their models' hashes.
+pub fn reads_parts(p: &Part) -> bool {
+    p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly)
+        || p.features
+            .values()
+            .any(|f| matches!(f, Ok(Feature::Insert(_))))
+}
+
+/// What `f` reads of another part: an instance's or an insert's part and
+/// revision.
+pub(crate) fn reads_node(f: &Feature) -> Option<Node> {
+    match f {
+        Feature::Instance(i) => Some((i.part.clone(), i.rev.clone())),
+        Feature::Insert(i) => Some((i.part.clone(), i.rev.clone())),
+        _ => None,
+    }
+}
+
+/// Whether `id` is a part of `project` that reads no other part: not an
+/// assembly, and inserting nothing.
 pub(crate) fn is_leaf(project: &Project, id: &Id) -> bool {
-    project
-        .parts
-        .get(id)
-        .is_some_and(|p| !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
+    project.parts.get(id).is_some_and(|p| !reads_parts(p))
 }
 
 /// Rebuilds parts and the assemblies over them, a part before every
@@ -945,7 +1033,7 @@ impl<'p> Rebuild<'p> {
         let todo: BTreeMap<&Id, &Part> = parts
             .iter()
             .filter_map(|id| self.project.parts.get(id))
-            .filter(|p| !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
+            .filter(|p| !reads_parts(p))
             .filter(|p| {
                 !self
                     .store
@@ -1098,7 +1186,7 @@ impl<'p> Rebuild<'p> {
     fn children(&mut self, p: &Part, rev: &Rev) -> Result<(String, Children)> {
         let mut key = p.revision.clone();
         let mut children = Children::new();
-        if !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
+        if !reads_parts(p) {
             return Ok((key, children));
         }
         self.store.walked += 1;
@@ -1108,28 +1196,33 @@ impl<'p> Rebuild<'p> {
             let placed: Vec<Id> = p
                 .order()
                 .iter()
-                .filter_map(|fid| match p.features.get(fid) {
-                    Some(Ok(Feature::Instance(i))) if i.rev == Rev::Working => Some(i.part.clone()),
-                    _ => None,
-                })
+                .filter_map(|fid| reads_node(p.features.get(fid)?.as_ref().ok()?))
+                .filter(|(_, r)| *r == Rev::Working)
+                .map(|(part, _)| part)
                 .filter(|id| !self.has_model(id))
                 .collect();
             self.build_parts(&placed)?;
         }
         for fid in p.order() {
-            let Some(Ok(Feature::Instance(i))) = p.features.get(fid) else {
+            let Some(Ok(f)) = p.features.get(fid) else {
                 continue;
             };
-            let at = (i.part.clone(), i.rev.clone());
+            let Some(at) = reads_node(f) else {
+                continue;
+            };
             if children.contains_key(&at) {
                 continue;
             }
-            let m = if *rev != Rev::Working && i.rev == Rev::Working {
-                Err(working_in_release(&node, &i.part))
+            let (i_part, i_rev) = (&at.0, &at.1);
+            let m = if *rev != Rev::Working && *i_rev == Rev::Working {
+                Err(match f {
+                    Feature::Insert(_) => insert_working_in_release(&node, i_part),
+                    _ => working_in_release(&node, i_part),
+                })
             } else if self.cycles.closes(&node, &at) {
                 Err(cycle_error(&self.cycles, &node, &at))
             } else {
-                self.model(&i.part, &i.rev)
+                self.model(i_part, i_rev)
             };
             if let Err(e) = &m
                 && e.code == Code::Cancelled
@@ -1232,7 +1325,9 @@ impl Rebuild<'_> {
 /// The model of `p` at `rev` from its rebuild.
 fn model_of(p: &Part, rev: &Rev, result: &PartResult) -> Model {
     if p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
-        Model::of_assembly(result)
+        let mut m = Model::of_assembly(result);
+        m.assembly = true;
+        m
     } else {
         Model::of_part(p, rev, result)
     }
@@ -1258,12 +1353,9 @@ pub fn pins_from(
     let labels = |p: &Part, within: Option<String>| -> Vec<(Node, Option<String>)> {
         p.order()
             .iter()
-            .filter_map(|fid| match p.features.get(fid) {
-                Some(Ok(Feature::Instance(Instance { part, rev, .. }))) if *rev != Rev::Working => {
-                    Some(((part.clone(), rev.clone()), within.clone()))
-                }
-                _ => None,
-            })
+            .filter_map(|fid| reads_node(p.features.get(fid)?.as_ref().ok()?))
+            .filter(|(_, rev)| *rev != Rev::Working)
+            .map(|n| (n, within.clone()))
             .collect()
     };
     // Each label with the commit of the project's own release whose files
@@ -2057,6 +2149,54 @@ pub(crate) mod tests {
             origin(&m.occurrences[2]),
             [0.060000000000000005, 0.025, 0.005]
         );
+    }
+
+    /// Writes an insert of `of` at `rev` into part `part`, listed last.
+    pub(crate) fn insert_in(root: &Path, part: &str, id_: &str, of: &str, rev: Value) {
+        let f = json!({"format": crate::doc::insert::FORMAT, "kind": "ryucad.feature",
+                       "type": "insert", "part": of, "rev": rev});
+        write_json(&feature_path(root, &id(part), &id(id_)), &f).unwrap();
+        let p = part_path(root, &id(part));
+        let mut list = PartFile::from_json(
+            &crate::doc::canonical::parse(&std::fs::read_to_string(&p).unwrap()).unwrap(),
+        )
+        .unwrap();
+        list.features.push(id(id_));
+        write_json(&p, &list.to_json()).unwrap();
+    }
+
+    #[test]
+    fn inserts_are_edges_and_their_cycles_are_insert_cycles() {
+        let (dir, mut s) = project(); // bolt, plate, frame
+        insert_in(dir.path(), "plate", "b", "bolt", json!("working"));
+        insert_in(dir.path(), "bolt", "p", "plate", json!("working"));
+        s.reload().unwrap();
+        let e = s
+            .rebuilt(&id("plate"))
+            .unwrap()
+            .features
+            .iter()
+            .find(|(f, _)| f.as_str() == "b")
+            .unwrap()
+            .1
+            .clone()
+            .unwrap_err();
+        assert_eq!(e.code, Code::InsertCycle);
+        assert_eq!(e.details["path"], json!(["plate", "bolt", "plate"]));
+        // Asked the other way round, the same.
+        let e = s
+            .rebuilt(&id("bolt"))
+            .unwrap()
+            .features
+            .iter()
+            .find(|(f, _)| f.as_str() == "p")
+            .unwrap()
+            .1
+            .clone()
+            .unwrap_err();
+        assert_eq!(e.code, Code::InsertCycle);
+        assert!(!is_leaf(s.project(), &id("plate")));
+        assert!(reads_parts(s.project().part(&id("plate")).unwrap()));
     }
 
     #[test]

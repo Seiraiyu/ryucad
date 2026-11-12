@@ -59,6 +59,11 @@
 //! volume, box and distance finite, and a pair sharing a volume 0 apart.
 //! Each assembly is swept too, `i1` a quarter turn, from what it cached
 //! and from nothing: the same report, or a typed refusal.
+//! An insert, a delete of bodies, or a feature naming an inserted solid
+//! (`i/…`) is built as feature `f` of a part `fz` after an insert `i` of
+//! a part `src` holding the base (design 521): it must build or give a
+//! structured error, never an internal one, and every body it leaves
+//! must pass the checks as any does.
 //! Any panic is a bug.
 
 #![no_main]
@@ -546,6 +551,96 @@ fn assemble(written: &str, after_instances: bool) {
     }
 }
 
+/// Builds `written` (an insert, a delete of bodies, or a feature naming
+/// `i/…`) as feature `f` of part `fz`, after an insert `i` of part `src`,
+/// the base, at working.
+fn inserted(written: &str) {
+    use ryucad::assembly::{Rebuild, Store};
+    use ryucad::error::{Code, Error};
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut put = |path: &str, v: serde_json::Value| {
+        files.insert(path.to_owned(), canonical::to_string(&v).into_bytes());
+    };
+    put(
+        "ryucad.json",
+        serde_json::json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"}),
+    );
+    put(
+        "parameters.json",
+        serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                           "parameters": {"wall": "3 mm", "gap": "wall / 2"}}),
+    );
+    put(
+        "parts/src/part.json",
+        PartFile::new(base().iter().map(|(i, _)| i.clone()).collect()).to_json(),
+    );
+    for (i, f) in base() {
+        put(&format!("parts/src/features/{i}.json"), f.to_json());
+    }
+    put(
+        "parts/fz/part.json",
+        PartFile::new(vec![id("i"), id("f")]).to_json(),
+    );
+    put(
+        "parts/fz/features/i.json",
+        serde_json::json!({"format": 21, "kind": "ryucad.feature", "type": "insert",
+                           "part": "src", "rev": "working"}),
+    );
+    put("parts/fz/features/f.json", canonical::parse(written).unwrap());
+    let project = ryucad::doc::project::Project::load_from(std::path::Path::new("/fz"), &files)
+        .expect("the project loads");
+    let pins = ryucad::assembly::pins(&project, |part, rev, _within| {
+        Err(Error::new(
+            Code::LabelNotFound,
+            format!("{part} has no {}", rev.text()),
+        ))
+    });
+    let mut r = Rebuild::new(&project, &pins, Store::default());
+    let Ok(result) = r.result(&Id::parse("fz", "part").unwrap()) else {
+        return;
+    };
+    let params = MeshParams {
+        max_triangles: 200_000,
+        ..MeshParams::new(2e-4, 0.5)
+    };
+    for (fid, out) in &result.features {
+        match out {
+            Ok(Output::Solids(m)) => {
+                for (_, b) in m.solids.iter().filter(|(_, b)| !b.reference) {
+                    assert_eq!(check(&b.body), [], "{fid}");
+                    // An inserted solid is the source's, checked there.
+                    if *fid == id("i") {
+                        continue;
+                    }
+                    for fault in check_intersections(&b.body) {
+                        assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
+                    }
+                    match tessellate(&b.body, &params) {
+                        Ok(mesh) => assert_eq!(mesh.faults, []),
+                        Err(ryukei::Error::MeshTooLarge { .. }) => {}
+                        Err(e) => panic!("unexpected {e:?}"),
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => assert_ne!(e.code, Code::Internal, "{fid}: {e:?}"),
+        }
+    }
+}
+
+/// Whether feature JSON `v` names an inserted solid (`i/…`) anywhere.
+fn names_inserted(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::String(s) => s.starts_with("i/"),
+        serde_json::Value::Array(a) => a.iter().any(names_inserted),
+        serde_json::Value::Object(o) => {
+            (o.get("feature").and_then(|f| f.as_str()) == Some("i") && o.contains_key("solid"))
+                || o.values().any(names_inserted)
+        }
+        _ => false,
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
@@ -565,6 +660,10 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(canonical::to_string(&back.to_json()), written);
     if let Feature::Instance(_) = &f {
         assemble(&written, false);
+        return;
+    }
+    if f.inserts() || !f.deletes().is_empty() || names_inserted(&f.to_json()) {
+        inserted(&written);
         return;
     }
     if matches!(f, Feature::Mate(_) | Feature::InstancePattern(_)) {

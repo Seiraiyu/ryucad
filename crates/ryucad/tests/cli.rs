@@ -1090,6 +1090,7 @@ fn every_protocol_method_has_a_command() {
         ("feature.move", &["feature", "move"]),
         ("feature.list", &["feature", "list"]),
         ("feature.show", &["feature", "show"]),
+        ("insert.update", &["insert", "update"]),
         ("param.list", &["param", "list"]),
         ("param.set", &["param", "set"]),
         ("param.delete", &["param", "delete"]),
@@ -8558,6 +8559,126 @@ fn colours_in_and_out_from_the_cli() {
 }
 
 #[test]
+fn inserts_and_deletes_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    // One ID for both projects, so the two ways write the same records.
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    p.ok(&["part", "create", "pcb"]);
+    p.ok(&[
+        "feature", "add", "pcb", "box", "--id", "board", "--param", "x=40", "--param", "y=30",
+        "--param", "z=1.6",
+    ]);
+    p.ok(&["props", "set", "pcb", "number=100-0001"]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    p.ok(&["release", "propose", "pcb"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "pcb A"]);
+    p.ok(&["part", "create", "enclosure"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "enclosure",
+        "box",
+        "--id",
+        "shell",
+        "--param",
+        "x=44",
+        "--param",
+        "y=34",
+        "--param",
+        "z=10",
+        "--origin",
+        "-2,-2,-2",
+    ]);
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "enclosure",
+        "insert",
+        "--id",
+        "board",
+        "--of",
+        "pcb",
+        "--origin",
+        "0,0,1",
+    ]);
+    assert_eq!(v["feature"]["rev"], json!({"label": "A"}), "{v}");
+    assert_eq!(v["took"]["why"], "newest_official_label");
+    let i = p.ok(&["inspect", "enclosure", "board"]);
+    assert_eq!(i["insert"]["count"], 1, "{i}");
+    // A newer release: check warns, update moves the pin.
+    p.ok(&["feature", "edit", "pcb", "board", "--param", "x=50"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "wider"]);
+    p.ok(&["release", "propose", "pcb"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "pcb B"]);
+    let (_, c) = p.both_from("", &["check", "enclosure"]);
+    assert!(c.to_string().contains("insert_behind"), "{c}");
+    let d = p.ok(&["insert", "update", "enclosure", "board", "--dry-run"]);
+    assert_eq!(d["solids"]["changed"], json!(["board/board"]), "{d}");
+    p.ok(&["insert", "update", "enclosure", "board"]);
+    // The daemon logged it: undo puts A back, and the update moves it again.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["insert", "update", "enclosure", "board"]);
+    assert_eq!(
+        (code, &v["result"]["to"]),
+        (0, &json!({"label": "B"})),
+        "{v}"
+    );
+    p.ok(&[
+        "feature",
+        "add",
+        "enclosure",
+        "delete_body",
+        "--id",
+        "drop-board",
+        "--solid",
+        "board",
+    ]);
+    let model = p.ok(&["inspect", "enclosure"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 1, "{model}");
+    let e = p.fails(
+        &[
+            "feature",
+            "add",
+            "enclosure",
+            "box",
+            "--operation",
+            "join",
+            "--target",
+            "board/board",
+            "--param",
+            "x=1",
+            "--param",
+            "y=1",
+            "--param",
+            "z=1",
+        ],
+        "body_deleted",
+        1,
+    );
+    assert_eq!(e["details"]["by"], "drop-board");
+    // Textconv names the pin.
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .current_dir(&p.direct)
+        .args(["git", "textconv", "parts/enclosure/features/board.json"])
+        .env("RYUCAD_NO_DAEMON", "1")
+        .output()
+        .unwrap();
+    let t = String::from_utf8(out.stdout).unwrap();
+    assert!(t.contains("insert = pcb @ label B"), "{t}");
+}
+
+#[test]
 fn properties_in_and_out_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -8731,5 +8852,82 @@ fn a_sweep_from_the_cli_three_ways() {
         &["assembly", "sweep", "frame", "gone"],
         "motion_not_found",
         1,
+    );
+}
+
+/// Design 525: plain `check` leaves interference out and notes where it
+/// went; `check --interference` reports it, with no note.
+#[test]
+fn check_runs_interference_only_when_asked() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
+    ]);
+    // 4 mm from the first: the two shanks, 3 mm in radius, overlap.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--origin", "4,0,0",
+    ]);
+    let codes = |v: &Value| -> Vec<String> {
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let plain = p.ok(&["check"]);
+    assert_eq!(plain["passed"], true, "{plain}");
+    let found = codes(&plain);
+    assert!(!found.iter().any(|c| c == "instances_interfere"), "{plain}");
+    let note = plain["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "interference_not_checked")
+        .unwrap_or_else(|| panic!("{plain}"));
+    assert_eq!(
+        (
+            &note["part"],
+            &note["severity"],
+            &note["details"]["command"]
+        ),
+        (
+            &json!("frame"),
+            &json!("info"),
+            &json!("ryucad interference frame")
+        )
+    );
+    let asked = p.ok(&["check", "--interference"]);
+    assert_eq!(asked["passed"], true, "{asked}");
+    assert!(
+        !codes(&asked)
+            .iter()
+            .any(|c| c == "interference_not_checked"),
+        "{asked}"
+    );
+    let pair = asked["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "instances_interfere")
+        .unwrap_or_else(|| panic!("{asked}"));
+    assert_eq!(
+        (&pair["a"], &pair["b"]),
+        (&json!("frame/b1/shank"), &json!("frame/b2/shank"))
     );
 }

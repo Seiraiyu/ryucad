@@ -2064,6 +2064,135 @@ fn blend_edits_recompute_as_from_nothing() {
     }
 }
 
+/// pcb (a board sized by `w` and a box on it) and enc (a box, an insert of
+/// pcb at working, a cut of the box by the inserted u1, a delete of the
+/// insert's other solids).
+fn inserted() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "pcb"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "pcb", "parameters": {"w": "30 mm"}}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "pcb", "type": "box", "id": "board",
+               "params": {"x": "w", "y": "20 mm", "z": "2 mm"}}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "pcb", "type": "box", "id": "u1",
+               "params": {"x": "4 mm", "y": "4 mm", "z": "4 mm"},
+               "placement": {"origin": ["5 mm", "5 mm", "2 mm"]}}),
+    );
+    must(&mut s, "part.create", json!({"part": "enc"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "enc", "type": "box", "id": "base",
+               "params": {"x": "40 mm", "y": "30 mm", "z": "10 mm"},
+               "placement": {"origin": ["-5 mm", "-5 mm", "-3 mm"]}}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "enc", "type": "insert", "id": "b", "of": "pcb", "rev": "working"}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "enc", "type": "boolean", "id": "cut", "op": "subtract",
+               "target": "base", "tools": ["b/u1"]}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "enc", "type": "delete_body", "id": "d", "solids": ["b/board"]}),
+    );
+    (dir, s)
+}
+
+fn insert_edit(g: &mut Lcg, s: &mut Session) {
+    let (part, method, params) = match g.next_u64() % 5 {
+        0 => (
+            "pcb",
+            "param.set",
+            json!({"parameters": {"w": format!("{} mm", 25 + g.next_u64() % 10)}}),
+        ),
+        1 => (
+            "enc",
+            "feature.edit",
+            json!({"id": "b", "placement": {"origin": ["0 mm", "0 mm",
+                   format!("{} mm", g.next_u64() % 3)]}}),
+        ),
+        2 => (
+            "pcb",
+            "feature.edit",
+            json!({"id": "u1", "placement": {"origin": [
+                format!("{} mm", 4 + g.next_u64() % 4), "5 mm", "2 mm"]}}),
+        ),
+        3 => (
+            "pcb",
+            "feature.edit",
+            json!({"id": "board", "params": {"z": format!("{} mm", 1 + g.next_u64() % 3)}}),
+        ),
+        _ => (
+            "enc",
+            "feature.edit",
+            json!({"id": "base", "params": {"z": format!("{} mm", 8 + g.next_u64() % 4)}}),
+        ),
+    };
+    let mut params = params;
+    params["part"] = json!(part);
+    let _ = call(s, method, params);
+}
+
+/// `part` rebuilt from nothing over the session's files, the parts it
+/// inserts first, in a pool of `threads`.
+fn session_full(s: &Session, part: &Id, threads: usize) -> (String, Vec<String>) {
+    use ryucad::assembly::{Pins, Rebuild, Store};
+    let project = s.project().clone();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| {
+            let pins = Pins::new();
+            let mut r = Rebuild::new(&project, &pins, Store::default());
+            let r = r.result(part).unwrap();
+            (r.hash.clone(), summary(r))
+        })
+}
+
+#[test]
+fn inserts_and_deletes_recompute_as_from_nothing() {
+    for seed in [8, 9] {
+        let (_dir, mut s) = inserted();
+        let mut g = Lcg::new(seed);
+        let enc = Id::parse("enc", "part").unwrap();
+        for step in 0..10 {
+            insert_edit(&mut g, &mut s);
+            let (one, eight) = (session_full(&s, &enc, 1), session_full(&s, &enc, 8));
+            let r = s.rebuilt(&enc).unwrap();
+            assert_eq!(r.failed(), 0, "seed {seed} step {step}: {:?}", r.features);
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(
+                incremental, one,
+                "seed {seed} step {step}: incremental vs 1 thread"
+            );
+            assert_eq!(
+                incremental, eight,
+                "seed {seed} step {step}: incremental vs 8 threads"
+            );
+        }
+    }
+}
+
 /// Issue #630: a countersink edit after a two-distance bevel, at each
 /// size the random edits draw, timed (incremental, then from nothing),
 /// and the two compared.

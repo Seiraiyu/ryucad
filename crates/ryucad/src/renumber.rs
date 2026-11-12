@@ -153,7 +153,9 @@ fn is_reference(v: &Value) -> bool {
     v.as_object().is_some_and(|o| {
         // A path's propagated edge says so beside its reference.
         let grown = usize::from(o.get("propagate").is_some_and(Value::is_boolean));
-        o.len() == 2 + grown
+        // An inserted solid's entity names its solid too (design 521).
+        let solid = usize::from(o.get("solid").is_some_and(Value::is_string));
+        o.len() == 2 + grown + solid
             && o.get("feature").is_some_and(Value::is_string)
             && o.contains_key("name")
     })
@@ -225,11 +227,16 @@ fn transform(
         {
             feature = to.clone();
         }
-        let name = names
-            .get(f)
-            .and_then(|m| m.get(n))
-            .cloned()
-            .unwrap_or_else(|| n.to_owned());
+        // An inserted solid's names are its source's, which renumbering
+        // this part never changes.
+        let name = match node.get("solid") {
+            Some(_) => n.to_owned(),
+            None => names
+                .get(f)
+                .and_then(|m| m.get(n))
+                .cloned()
+                .unwrap_or_else(|| n.to_owned()),
+        };
         let mut new = node.clone();
         new["feature"] = json!(feature);
         new["name"] = json!(name);
@@ -261,32 +268,48 @@ fn transform(
         Rename::Feature { from, to, .. } if matches!(section, Some((_, "sketch"))) => {
             (node.as_str() == Some(from)).then(|| json!(to))
         }
-        Rename::Feature { from, to, .. } => match pointer {
-            // A refold's `unfold` names its unfold as `target` names a
-            // solid's founder; a split's tool body likewise.
-            "/sketch" | "/target" | "/solid" | "/unfold" | "/from/sheet" | "/tool/body" => {
-                (node.as_str() == Some(from)).then(|| json!(to))
+        Rename::Feature { from, to, .. } => {
+            // A solid's key is its founder's ID, or `<insert>/<source key>`:
+            // either follows a renamed founder or insert (design 521).
+            let follow = |s: &str, paths: bool| -> Option<String> {
+                if s == from.as_str() {
+                    Some(to.to_string())
+                } else if paths {
+                    s.strip_prefix(&format!("{from}/"))
+                        .map(|rest| format!("{to}/{rest}"))
+                } else {
+                    None
+                }
+            };
+            match pointer {
+                // A refold's `unfold` names its unfold as `target` names a
+                // solid's founder; a split's tool body likewise.
+                "/sketch" | "/unfold" | "/from/sheet" => {
+                    (node.as_str() == Some(from)).then(|| json!(to))
+                }
+                "/target" | "/solid" | "/tool/body" => {
+                    follow(node.as_str()?, true).map(|s| json!(s))
+                }
+                // The solids an operation or a boolean acts on, the sheets a
+                // sew sews, what a pattern repeats, the instances an
+                // instance pattern copies, and the solids a delete deletes.
+                "/targets" | "/tools" | "/features" | "/instances" | "/sheets" | "/solids" => {
+                    let paths = matches!(pointer, "/targets" | "/tools" | "/solids");
+                    let list: Vec<Value> = node
+                        .as_array()?
+                        .iter()
+                        .map(|x| {
+                            x.as_str()
+                                .and_then(|s| follow(s, paths))
+                                .map_or_else(|| x.clone(), |s| json!(s))
+                        })
+                        .collect();
+                    let new = json!(list);
+                    (new != *node).then_some(new)
+                }
+                _ => None,
             }
-            // The solids an operation or a boolean acts on, the sheets a
-            // sew sews, what a pattern repeats, and the instances an
-            // instance pattern copies.
-            "/targets" | "/tools" | "/features" | "/instances" | "/sheets" => {
-                let list: Vec<Value> = node
-                    .as_array()?
-                    .iter()
-                    .map(|x| {
-                        if x.as_str() == Some(from) {
-                            json!(to)
-                        } else {
-                            x.clone()
-                        }
-                    })
-                    .collect();
-                let new = json!(list);
-                (new != *node).then_some(new)
-            }
-            _ => None,
-        },
+        }
         Rename::Entity {
             sketch, from, to, ..
         } => {
@@ -491,6 +514,9 @@ fn bodies(
 ) -> Option<BTreeMap<(String, String), ryukei::topo::Body>> {
     let project = Project::load_from(root, files).ok()?;
     let p = project.parts.get(&Id::parse(part, "part").ok()?)?;
+    // With no children, an insert fails here, and so does every feature
+    // reading its keys. That is harmless: failed states are left out on
+    // both sides alike, so only the inserted readers' name maps are lost.
     let built = crate::rebuild::rebuild_part(p);
     Some(
         built
@@ -1873,5 +1899,61 @@ mod tests {
             ),
             (&json!("b-1"), &to(2), &json!([to(3)]))
         );
+    }
+
+    #[test]
+    fn an_inserts_keys_and_references_follow_it_when_it_is_renumbered() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let head = |mut v: Value| {
+            v["format"] = json!(21);
+            v["kind"] = json!("ryucad.feature");
+            v
+        };
+        let f = files(&[
+            (
+                "parts/enc/features/cut.json",
+                head(
+                    json!({"type": "boolean", "op": "subtract", "target": "shell",
+                            "tools": ["board/u1"]}),
+                ),
+            ),
+            (
+                "parts/enc/features/del.json",
+                head(json!({"type": "delete_body", "solids": ["board", "board/u2"]})),
+            ),
+            (
+                "parts/enc/features/fil.json",
+                head(json!({"type": "fillet",
+                            "groups": [{"radius": "1 mm",
+                                        "edges": [{"feature": "board", "solid": "u1", "name": n}]}]})),
+            ),
+            (
+                "parts/enc/features/m.json",
+                head(json!({"type": "mirror", "solid": "board/u1", "plane": "xy"})),
+            ),
+        ]);
+        let out = renumbered(
+            &f,
+            &Rename::Feature {
+                part: "enc".into(),
+                from: "board".into(),
+                to: "board-2".into(),
+            },
+            &BTreeMap::new(),
+        );
+        let read = |p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        assert_eq!(
+            read("parts/enc/features/cut.json")["tools"],
+            json!(["board-2/u1"])
+        );
+        assert_eq!(
+            read("parts/enc/features/del.json")["solids"],
+            json!(["board-2", "board-2/u2"])
+        );
+        assert_eq!(
+            read("parts/enc/features/fil.json")["groups"][0]["edges"][0],
+            json!({"feature": "board-2", "solid": "u1", "name": n})
+        );
+        assert_eq!(read("parts/enc/features/m.json")["solid"], "board-2/u1");
     }
 }

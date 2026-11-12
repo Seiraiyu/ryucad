@@ -33,6 +33,7 @@ mod solid;
 mod ss;
 mod ss_exact;
 mod ss_trace;
+pub(crate) use ss_trace::Traced;
 mod winding;
 
 pub(crate) use beside::CELLS as BESIDE_CELLS;

@@ -112,7 +112,8 @@ impl GeomRef {
     }
 
     /// Reads the text form in `part`: an origin word, `<part>/<feature>`,
-    /// `<part>/<founder>/<32 hex>` or `<part>/<sketch>/<entity>`, or a bare
+    /// `<part>/<founder>/<32 hex>` (or an inserted solid's
+    /// `<part>/<insert>/<source solid>/<32 hex>`) or `<part>/<sketch>/<entity>`, or a bare
     /// feature ID, taken in `part`. The origin's words come first, so a
     /// feature named `x` is written `<part>/x`.
     pub fn parse(s: &str, part: &Id) -> Result<GeomRef> {
@@ -129,6 +130,11 @@ impl GeomRef {
             .with("reference", s)
         };
         let parts: Vec<&str> = s.split('/').collect();
+        // An inserted solid's entity: the part, a key of several
+        // segments, a name (design 521).
+        if parts.len() > 3 && parts.last().and_then(|n| parse_name(n)).is_some() {
+            return Reference::parse(s, part).map(GeomRef::Entity);
+        }
         let (p, rest) = match parts.as_slice() {
             [f] => (part.as_str(), vec![*f]),
             [p, rest @ ..] if rest.len() <= 2 => (*p, rest.to_vec()),
@@ -245,6 +251,18 @@ mod tests {
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()
+    }
+
+    #[test]
+    fn a_geometric_reference_reaches_an_inserted_face() {
+        let g = GeomRef::parse(&format!("p/board/u1/{NAME}"), &id("p")).unwrap();
+        let r = g.reference().unwrap();
+        assert_eq!(r.feature.as_str(), "board/u1");
+        assert_eq!(g.text(&id("p")), format!("p/board/u1/{NAME}"));
+        let v = g.to_json();
+        assert_eq!(GeomRef::from_json(&v, "/plane").unwrap(), g);
+        // Three segments after the part that don't end in a name are refused.
+        assert!(GeomRef::parse("p/board/u1/l1", &id("p")).is_err());
     }
 
     #[test]

@@ -81,7 +81,7 @@ ryucad export <part> --out <file.stl|file.3mf> [--chord 0.01mm] [--angle 15deg] 
 ryucad export <part> --out <file.usda> [--no-brep|--no-mesh] [--pipe-tolerance 0.0001mm]  # as USD: omniSolid BrepArrays and meshes, instanced
 cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture   # STL read by OCCT, 3MF by lib3mf; devcontainer only
 cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture   # USD opened by OpenUSD, validated and imported into SMLib by usd-brep; devcontainer only
-cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, tolerant, self_union, codec, eda, kicad, odb, shapes)
+cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, tolerant, self_union, codec, eda, kicad, odb, shapes; run offset with ASAN_OPTIONS=quarantine_size_mb=64, #746)
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
 sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
 cargo run -p ryueda -- <command>                          # the ryueda CLI (`ryueda --help`); run in a ryueda project folder, or with -C <dir>
@@ -196,6 +196,7 @@ What each phase decided is recorded per area under `docs/claude/`. Read the guid
 - `docs/claude/ryucad-internals.md` — ryucad's internals: the CLI in the library, tests that build once, the server split, feature kinds, the session's caches, the app's workspace
 - `docs/claude/ryucad-formats.md` — export formats: the scene, STL, 3MF, USD, and their references
 - `docs/claude/ryucad-reference.md` — geometric references, the resolver, datum planes, axes and points and their uses
+- `docs/claude/ryucad-inserts.md` — inserts and deleted bodies: solid keys, pins and updates, Git and PDM
 - `docs/claude/ryucad-surfaces.md` — sheets in the model, surface sweeps, planar faces
 - `docs/claude/ryucad-annotations.md` — annotations: files, proposed changes and their capture, annotation revisions, apply, the lifecycle, participant modes
 - `docs/claude/ryucad-drawings.md` — drawings: ryu-draw, drawing and template files, views through ryukei's projection, layout, PDF, SVG and PNG

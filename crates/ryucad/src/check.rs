@@ -4,12 +4,15 @@
 //! among them), that no file is left unmerged in Git's index, that every
 //! feature builds, that every body passes ryukei's intersection check and
 //! meshes without faults, that the session's cached results are what a
-//! rebuild from nothing gives, and ryupdm's release checks. CI and hosted
+//! rebuild from nothing gives, and ryupdm's release checks. Interference
+//! runs only when asked (`interference`, design 525): without it, each
+//! assembly checked gets an `interference_not_checked` note. CI and hosted
 //! review run it.
 //!
 //! The report is versioned (`schema`, [`ryupdm::check::SCHEMA`]): each
 //! finding is `{code, severity, source, part?, feature?, label?, message,
-//! details?}` plus what its code adds, `source` being `doctor`, `release`,
+//! details?}` plus what its code adds (`severity` is `error`, `warning` or
+//! `info`, a note: `interference_not_checked`), `source` being `doctor`, `release`,
 //! `bom`, `deps`, `drawing` or absent for ryucad's own. Adding a field or a code is not a new
 //! schema; changing or removing one is. A hosted job can run `ryucad check
 //! --against <base>` and gate on the exit code and the findings.
@@ -24,7 +27,7 @@ use ryu_session::job::Phase;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 14] = [
+pub const CODES: [(&str, &str); 18] = [
     ("feature_failed", "error"),
     ("assembly_unsolved", "error"),
     ("mate_out_of_limits", "error"),
@@ -34,11 +37,15 @@ pub const CODES: [(&str, &str); 14] = [
     ("cache_mismatch", "error"),
     ("unmerged_path", "error"),
     ("instance_obsolete", "warning"),
+    ("insert_behind", "warning"),
+    ("insert_obsolete", "warning"),
+    ("insert_source_failed", "warning"),
     ("instances_interfere", "warning"),
     ("reference_faces_unmeshed", "warning"),
     ("reference_faces_dropped", "warning"),
     ("reference_faces_split", "warning"),
     ("reference_unoriented", "warning"),
+    ("interference_not_checked", "info"),
 ];
 
 fn severity(code: &str) -> &'static str {
@@ -52,6 +59,20 @@ fn severity(code: &str) -> &'static str {
 fn finding(code: &str, part: &Id, feature: &Id, message: String) -> Value {
     json!({"code": code, "severity": severity(code), "part": part, "feature": feature,
            "message": message})
+}
+
+/// The note plain `check` leaves for each assembly it checks (design
+/// 525): interference runs only when asked, and this says how to ask.
+fn interference_not_checked(asm: &Id) -> Value {
+    json!({
+        "code": "interference_not_checked",
+        "severity": severity("interference_not_checked"),
+        "part": asm,
+        "details": {"command": format!("ryucad interference {asm}")},
+        "message": format!(
+            "{asm}: interference isn't checked unless asked: run `ryucad interference {asm}`, or `ryucad check --interference`"
+        ),
+    })
 }
 
 /// `mate_out_of_limits` for each mate of assembly `p` whose driven value
@@ -220,7 +241,9 @@ fn result(r: &Result<Output>) -> Value {
 /// issues). With `against`, the report adds what changed from that
 /// revision to the working files, the model included (a pull request's
 /// check reads as what the branch did); with `results`, official releases
-/// are rebuilt and compared with their records. Fails with
+/// are rebuilt and compared with their records. With `interference`, each
+/// assembly's instances are intersected (`instances_interfere`,
+/// `cannot_check`). Fails with
 /// `check_failed`, the report in its details, when any finding is an
 /// error.
 pub fn run(
@@ -228,6 +251,7 @@ pub fn run(
     part: Option<&str>,
     against: Option<&str>,
     results: bool,
+    interference: bool,
 ) -> Result<Value> {
     // A revision that isn't there fails before anything is built.
     let changes = match against {
@@ -413,6 +437,22 @@ pub fn run(
                 f["rev"] = w["rev"].clone();
                 findings.push(f);
             }
+            // An insert's warnings (design 521): its source failed, or its
+            // label is obsolete.
+            if let Some(code @ ("insert_obsolete" | "insert_source_failed")) = w["code"].as_str()
+                && let Some(fid) = w["feature"]
+                    .as_str()
+                    .and_then(|f| Id::parse(f, "feature").ok())
+            {
+                let message = w["message"].as_str().unwrap_or_default().to_owned();
+                let mut f = finding(code, id, &fid, message);
+                for k in ["of", "rev", "failing"] {
+                    if let Some(x) = w.get(k) {
+                        f[k] = x.clone();
+                    }
+                }
+                findings.push(f);
+            }
             // What a reference's import couldn't lay out or orient.
             if let Some(code) = w["code"].as_str()
                 && code.starts_with("reference_")
@@ -426,9 +466,15 @@ pub fn run(
                 findings.push(f);
             }
         }
-        // Instances that share a volume: a warning, since a press fit is
-        // meant; pairs ryukei can't intersect can't be checked.
-        if crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly
+        // Instances that share a volume, only when asked (design 525): a
+        // warning, since a press fit is meant; pairs ryukei can't
+        // intersect can't be checked.
+        let assembly = crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly;
+        if assembly && !interference {
+            findings.push(interference_not_checked(id));
+        }
+        if assembly
+            && interference
             && let Ok(model) = from_nothing.model(id, &crate::doc::assembly::Rev::Working)
         {
             let mut cache = crate::interference::Cache::default();
@@ -468,6 +514,12 @@ pub fn run(
         let solids = crate::solid::Solids::of(&p);
         for shown in fresh.shown(&solids) {
             if let Some((f, b)) = shown.state {
+                // An inserted solid nothing here acted on is its source's,
+                // checked in the source: a board of hundreds of bodies
+                // isn't checked again in every part inserting it.
+                if shown.solid.is_path() && f.as_str() == shown.solid.founder_str() {
+                    continue;
+                }
                 bodies.push((shown.solid.clone(), f.clone(), b.clone()));
             }
         }
@@ -501,12 +553,13 @@ pub fn run(
         parts.push(json!({"part": id, "hash": fresh.hash, "features": features,
                           "solids": checked}));
     }
-    let errors = findings.iter().filter(|f| f["severity"] == "error").count();
+    let count = |s: &str| findings.iter().filter(|f| f["severity"] == s).count();
+    let (errors, warnings) = (count("error"), count("warning"));
     let mut report = json!({
         "schema": ryupdm::check::SCHEMA,
         "passed": errors == 0,
         "errors": errors,
-        "warnings": findings.len() - errors,
+        "warnings": warnings,
         "findings": findings,
         "parts": parts,
     });
@@ -787,7 +840,39 @@ mod tests {
             [0.03, 0.01, 0.005],
         );
         s.refresh().unwrap();
-        let v = run(&mut s, None, None, false).unwrap();
+        // Unasked, check runs no interference (design 525), and says so
+        // once for the assembly, as a note that counts as no warning.
+        let v = run(&mut s, None, None, false, false).unwrap();
+        let findings = v["findings"].as_array().unwrap();
+        assert!(
+            !findings.iter().any(|f| f["code"] == "instances_interfere"),
+            "{v}"
+        );
+        let notes: Vec<&Value> = findings
+            .iter()
+            .filter(|f| f["code"] == "interference_not_checked")
+            .collect();
+        assert_eq!(notes.len(), 1, "{v}");
+        assert_eq!(
+            (
+                &notes[0]["part"],
+                &notes[0]["severity"],
+                &notes[0]["details"]["command"]
+            ),
+            (
+                &json!("frame"),
+                &json!("info"),
+                &json!("ryucad interference frame")
+            )
+        );
+        let warned = findings
+            .iter()
+            .filter(|f| f["severity"] == "warning")
+            .count();
+        assert_eq!(v["warnings"], json!(warned), "{v}");
+        assert!(v["passed"].as_bool().unwrap(), "{v}");
+        // Asked, it reports each pair that shares a volume.
+        let v = run(&mut s, None, None, false, true).unwrap();
         let found: Vec<&Value> = v["findings"]
             .as_array()
             .unwrap()
@@ -804,14 +889,33 @@ mod tests {
             )
         );
         assert!(v["passed"].as_bool().unwrap(), "{v}");
+        // Asked, there is nothing to note.
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "interference_not_checked"),
+            "{v}"
+        );
         // One part checked alone isn't an assembly's.
-        let v = run(&mut s, Some("bolt"), None, false).unwrap();
+        let v = run(&mut s, Some("bolt"), None, false, true).unwrap();
         assert!(
             !v["findings"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|f| f["code"] == "instances_interfere")
+        );
+        // A part checked alone gets no note: it places nothing.
+        let v = run(&mut s, Some("bolt"), None, false, false).unwrap();
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "interference_not_checked"),
+            "{v}"
         );
     }
 
@@ -1017,5 +1121,30 @@ mod tests {
         // A part's issue is its own: checking `p` alone doesn't report it.
         let p = call(&mut s, "check", json!({"part": "p"})).unwrap();
         assert!(codes(&p).is_empty(), "{p}");
+    }
+
+    #[test]
+    fn check_reports_an_inserts_warnings_and_its_failures() {
+        let (dir, mut s) = crate::insert::tests::boarded();
+        // The source fails: a warning on the inserting part.
+        let f = dir.path().join("parts/pcb/features/u1.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+        v["params"]["x"] = json!("-1 mm");
+        std::fs::write(&f, crate::doc::canonical::to_string(&v)).unwrap();
+        s.reload().unwrap();
+        let r = call(&mut s, "check", json!({"part": "enclosure"})).unwrap();
+        let codes = codes(&r);
+        assert!(
+            codes.iter().any(|c| c == "insert_source_failed pcb"),
+            "{codes:?}"
+        );
+        // The inserted solids aren't checked again in the inserting part.
+        let checked = &r["parts"][0];
+        assert!(
+            checked["solids"]
+                .as_array()
+                .is_none_or(|a| a.iter().all(|x| x["solid"] != "pcb/board")),
+            "{r}"
+        );
     }
 }

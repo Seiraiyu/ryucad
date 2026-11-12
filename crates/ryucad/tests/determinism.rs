@@ -6147,6 +6147,166 @@ fn drawing_annotations_section(golden: &mut Golden) {
     }
 }
 
+/// Builds, in a pool of `threads`, a project through the protocol by
+/// `make`, then each of `parts` from nothing over its files (the parts it
+/// inserts first): each shown solid's key, the feature showing it, its
+/// hash and its body's dump, and the part's hash.
+fn inserted_lines(
+    threads: usize,
+    parts: &[&str],
+    make: impl Fn(&mut ryucad::session::Session) + Sync,
+) -> Vec<String> {
+    use ryucad::assembly::{Pins, Rebuild, Store};
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| {
+            let dir = tempfile::tempdir().unwrap();
+            ryucad::server::init(dir.path(), None).unwrap();
+            let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+            make(&mut session);
+            let project = session.project().clone();
+            let pins = Pins::new();
+            let mut r = Rebuild::new(&project, &pins, Store::default());
+            let mut out = Vec::new();
+            for part in parts {
+                let id = Id::parse(part, "part").unwrap();
+                let result = r.result(&id).unwrap().clone();
+                let p = project.part(&id).unwrap();
+                let solids = ryucad::solid::Solids::of(p);
+                for shown in result.shown(&solids) {
+                    out.push(shown.solid.to_string());
+                    if let Some((f, b)) = shown.state {
+                        out.push(f.to_string());
+                        out.push(b.hash.clone());
+                        out.push(b.body.dump());
+                    }
+                }
+                out.push(result.hash.clone());
+            }
+            out
+        })
+}
+
+/// Calls `method` on `s`, panicking on an error.
+fn must_call(s: &mut ryucad::session::Session, method: &str, params: serde_json::Value) {
+    ryucad::server::handle(
+        s,
+        ryucad::proto::Request::from_rpc(method, Some(params.clone())).unwrap(),
+    )
+    .unwrap_or_else(|e| panic!("{method} {params}: {e:?}"));
+}
+
+/// pcb: a board and a part on it.
+fn pcb(s: &mut ryucad::session::Session) {
+    use serde_json::json;
+    must_call(s, "part.create", json!({"part": "pcb"}));
+    must_call(
+        s,
+        "feature.add",
+        json!({"part": "pcb", "type": "box", "id": "board",
+               "params": {"x": "30 mm", "y": "20 mm", "z": "1.6 mm"}}),
+    );
+    must_call(
+        s,
+        "feature.add",
+        json!({"part": "pcb", "type": "cylinder", "id": "u1",
+               "params": {"radius": "2 mm", "height": "5 mm"},
+               "placement": {"origin": ["8 mm", "6 mm", "1.6 mm"]}}),
+    );
+}
+
+/// Inserts (design 521): a board of two solids inserted twice, once
+/// turned about z off the identity, a boolean taking one inserted solid as
+/// its tool, a fillet on another's rim, and an insert of a part that
+/// inserts; each shown solid's key, its body's dump and the part's hash,
+/// on 1 and 4 threads.
+fn inserts_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("inserts");
+    let make = |s: &mut ryucad::session::Session| {
+        pcb(s);
+        must_call(s, "part.create", json!({"part": "mid"}));
+        must_call(
+            s,
+            "feature.add",
+            json!({"part": "mid", "type": "box", "id": "base",
+                   "params": {"x": "40 mm", "y": "30 mm", "z": "6 mm"},
+                   "placement": {"origin": ["-5 mm", "-5 mm", "-4 mm"]}}),
+        );
+        must_call(
+            s,
+            "feature.add",
+            json!({"part": "mid", "type": "insert", "id": "a", "of": "pcb", "rev": "working"}),
+        );
+        must_call(
+            s,
+            "feature.add",
+            json!({"part": "mid", "type": "insert", "id": "t", "of": "pcb", "rev": "working",
+                   "placement": {"origin": ["60 mm", "3 mm", "1 mm"], "z": [0, 0, 1], "x": [0, 1, 0]}}),
+        );
+        must_call(
+            s,
+            "feature.add",
+            json!({"part": "mid", "type": "boolean", "id": "cut", "op": "subtract",
+                   "target": "base", "tools": ["a/u1"]}),
+        );
+        must_call(s, "part.create", json!({"part": "top"}));
+        must_call(
+            s,
+            "feature.add",
+            json!({"part": "top", "type": "insert", "id": "m", "of": "mid", "rev": "working",
+                   "placement": {"origin": ["0 mm", "0 mm", "20 mm"]}}),
+        );
+    };
+    let one = inserted_lines(1, &["mid", "top"], make);
+    let four = inserted_lines(4, &["mid", "top"], make);
+    assert_eq!(one, four, "1 thread vs 4");
+    for l in &one {
+        s.str(l);
+    }
+}
+
+/// Deletes of bodies: a founder, an inserted solid by key and a whole
+/// insert; the shown keys and the part's hash.
+fn body_deletes_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("body_deletes");
+    let make = |s: &mut ryucad::session::Session| {
+        pcb(s);
+        must_call(s, "part.create", json!({"part": "p"}));
+        for (id, x) in [("a", "0 mm"), ("b", "20 mm")] {
+            must_call(
+                s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": id,
+                       "params": {"x": "5 mm", "y": "5 mm", "z": "5 mm"},
+                       "placement": {"origin": [x, "40 mm", "0 mm"]}}),
+            );
+        }
+        for id in ["i", "j"] {
+            must_call(
+                s,
+                "feature.add",
+                json!({"part": "p", "type": "insert", "id": id, "of": "pcb", "rev": "working"}),
+            );
+        }
+        must_call(
+            s,
+            "feature.add",
+            json!({"part": "p", "type": "delete_body", "id": "d",
+                   "solids": ["b", "i/u1", "j"]}),
+        );
+    };
+    let one = inserted_lines(1, &["p"], make);
+    let four = inserted_lines(4, &["p"], make);
+    assert_eq!(one, four, "1 thread vs 4");
+    for l in &one {
+        s.str(l);
+    }
+}
+
 /// One test per section (`section::<name>`), each checking only its own
 /// line of the golden file, so no one test runs long and they run in
 /// parallel (issue #441); `section::listed` keeps the file to these
@@ -6546,6 +6706,8 @@ sections! {
     tweaks => tweaks_section(&mut golden),
     drafts => drafts_section(&mut golden),
     deletes => deletes_section(&mut golden),
+    inserts => inserts_section(&mut golden),
+    body_deletes => body_deletes_section(&mut golden),
     topology_tweaks => topology_tweaks_section(&mut golden),
     blend_edits => blend_edits_section(&mut golden),
     draft_reports => draft_reports_section(&mut golden),
