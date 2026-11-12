@@ -508,6 +508,8 @@ fn every_protocol_method_has_a_command() {
         ("redo", &["redo"]),
         ("session.hello", &["participants"]),
         ("participant.list", &["participants"]),
+        ("compare.set", &["compare"]),
+        ("compare.get", &["compare"]),
         ("subscribe", &["watch"]),
         ("request.cancel", &["cancel"]),
         ("daemon.status", &["daemon", "status"]),

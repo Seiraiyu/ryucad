@@ -425,6 +425,17 @@ enum Command {
     },
     /// Who is attached to the project's daemon.
     Participants,
+    /// Show a participant the working files against a Git revision (the
+    /// one person attached, else you), or with --off stop; with neither,
+    /// what it compares against now. Through the daemon.
+    Compare {
+        rev: Option<String>,
+        #[arg(long)]
+        off: bool,
+        /// A participant's ID (`participants` lists them).
+        #[arg(long)]
+        participant: Option<String>,
+    },
     /// Undo your latest change, or the entry given.
     Undo { entry: Option<u64> },
     /// Redo your latest undo, or the entry given.
@@ -1760,6 +1771,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             before: *before,
         },
         Command::Participants => Request::ParticipantList {},
+        Command::Compare { rev: None, off: false, participant } => Request::CompareGet {
+            participant: participant.clone(),
+        },
+        Command::Compare { rev, off, participant } => Request::CompareSet {
+            rev: rev.clone(),
+            off: *off,
+            participant: participant.clone(),
+        },
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },
         Command::Footprint(FootprintCmd::Show { footprint }) => Request::FootprintShow {

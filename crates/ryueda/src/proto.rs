@@ -925,6 +925,24 @@ pub enum Request {
     },
     #[serde(rename = "participant.list")]
     ParticipantList {},
+    /// What a participant compares the working files against: `participant`,
+    /// else the one human (an agent shows a person what it did), else the
+    /// caller; `off` stops it.
+    #[serde(rename = "compare.set")]
+    CompareSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// What a participant compares against, and the commit it names now.
+    #[serde(rename = "compare.get")]
+    CompareGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     #[serde(rename = "subscribe")]
     Subscribe {
         #[serde(default)]

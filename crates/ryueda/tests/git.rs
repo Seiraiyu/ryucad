@@ -738,3 +738,50 @@ fn output_compare_pages_only_changed_sheets() {
     assert_eq!((code, &v["result"]["unchanged"]), (0, &json!(true)), "{v}");
     assert!(!board.join("none.pdf").exists());
 }
+
+#[test]
+fn a_compare_is_set_on_a_participant() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = edited_breakout(&top, &run);
+    // No daemon, nobody to show.
+    assert_eq!(
+        ryueda(&board, &run, false, &["compare", "HEAD"]).1["error"]["code"],
+        "no_live_session"
+    );
+    let (code, v) = ryueda(&board, &run, true, &["compare", "HEAD"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["compare"]["rev"], "HEAD");
+    let who = v["result"]["participant"].as_str().unwrap().to_owned();
+    let (_, got) = ryueda(&board, &run, true, &["compare"]);
+    assert_eq!(got["result"]["participant"], json!(who));
+    assert_eq!(
+        got["result"]["compare"]["commit"].as_str().unwrap().len(),
+        40
+    );
+    let (_, list) = ryueda(&board, &run, true, &["participants"]);
+    let me = list["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(who))
+        .cloned()
+        .unwrap();
+    assert_eq!(me["compare"], "HEAD");
+    for (args, code) in [
+        (vec!["compare", "working"], "invalid_param"),
+        (vec!["compare", "nope"], "rev_not_found"),
+        (vec!["compare", "HEAD", "--off"], "usage"),
+    ] {
+        assert_eq!(
+            ryueda(&board, &run, true, &args).1["error"]["code"],
+            code,
+            "{args:?}"
+        );
+    }
+    let (_, off) = ryueda(&board, &run, true, &["compare", "--off"]);
+    assert_eq!(off["result"]["compare"], Value::Null);
+    ryueda(&board, &run, true, &["daemon", "stop"]);
+}

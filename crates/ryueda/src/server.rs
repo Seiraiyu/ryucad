@@ -1183,6 +1183,61 @@ fn dispatch(
         Request::ParticipantList {} => {
             Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
         }
+        Request::CompareGet { participant } => {
+            // Whose compare.set would change: `participant`, else the one
+            // human, else the caller.
+            let target = match live {
+                Some(l) => {
+                    let id = l.compare_target(participant.as_deref(), me)?;
+                    let rev = l.get(&id)?.view.compare.clone();
+                    Some((id, rev))
+                }
+                None => None,
+            };
+            let Some((id, rev)) = target else {
+                return Ok(json!({"participant": null, "compare": null}));
+            };
+            // The commit the revision names now; none if it names none.
+            let compare = rev.map(|rev| {
+                let commit = crate::git::key(session.root(), &rev).ok().map(|(c, _)| c);
+                json!({"rev": rev, "commit": commit})
+            });
+            Ok(json!({"participant": id, "compare": compare}))
+        }
+        Request::CompareSet {
+            rev,
+            off,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("compare.set"))?;
+            let rev = match (rev, off) {
+                (Some(r), false) => Some(r),
+                (None, true) => None,
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give a revision to compare with, or --off, not both",
+                    ));
+                }
+            };
+            if rev.as_deref() == Some("working") {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "a compare is against a Git revision: the working files are what it compares",
+                )
+                .with("rev", "working"));
+            }
+            let id = live.compare_target(participant.as_deref(), me)?;
+            // Refused unless the revision holds the project; read now, it
+            // is ready for the renders asked next.
+            let commit = match &rev {
+                Some(r) => Some(session.at(r)?.0),
+                None => None,
+            };
+            live.get_mut(&id)?.view.compare = rev.clone();
+            let compare = rev.map(|rev| json!({"rev": rev, "commit": commit}));
+            Ok(json!({"participant": id, "compare": compare}))
+        }
         Request::Subscribe { .. } => match live {
             None => Err(live::no_live_session("subscribe")),
             Some(_) => Err(Error::new(Code::Usage, "subscribe needs a connection")),
