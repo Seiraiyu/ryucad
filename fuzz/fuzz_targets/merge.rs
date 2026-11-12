@@ -10,7 +10,8 @@
 //! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation (marks on either side, design 423), `0xf0` a base
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
 //! unfold or refold, `0xed` a face tweak, `0xec` a thicken or a fill (by the
-//! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool, `0xe8` a delete_face or a tweak's topology and blends, `0xe7` a blend edit. Merging must never panic, must give the same bytes twice,
+//! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool, `0xe8` a delete_face or a tweak's topology and blends, `0xe7` a blend edit, `0xe6` an insert or a delete of bodies (by
+//! the parity of the edit bytes). Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -25,7 +26,8 @@
 //! shell's open faces and groups only whole, a loft's sections only
 //! as the whole list, a split's plane and flip only together, and a
 //! base flange's allowance and relief only whole, and a thicken's
-//! source only whole.
+//! source only whole, and an insert's pin and placement each only whole,
+//! a delete's solids only as the whole list.
 
 #![no_main]
 
@@ -1401,6 +1403,57 @@ fn edit_blends(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Edits an insert: its label (or `working`), its placement's origin, its
+/// axes turned, its placement dropped; or a delete of bodies: a solid
+/// added, the first taken out, the list replaced.
+fn edit_insert(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    if o.get("type").and_then(Value::as_str) == Some("delete_body") {
+        let mut list: Vec<Value> = o
+            .get("solids")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        match op % 3 {
+            0 => {
+                let s = json!(format!("d{}", arg % 4));
+                if !list.contains(&s) {
+                    list.push(s);
+                }
+            }
+            1 if list.len() > 1 => {
+                list.remove(0);
+            }
+            _ => list = vec![json!("b")],
+        }
+        o.insert("solids".into(), json!(list));
+        return;
+    }
+    let placement = || json!({"origin": ["0 mm", "0 mm", "1 mm"], "x": [1, 0, 0], "z": [0, 0, 1]});
+    match op % 4 {
+        0 => {
+            let rev = match arg % 3 {
+                0 => json!("working"),
+                1 => json!({"label": "B"}),
+                _ => json!({"label": "A"}),
+            };
+            o.insert("rev".into(), rev);
+        }
+        1 => {
+            let p = o.entry("placement").or_insert_with(placement);
+            p["origin"][2] = json!(format!("{} mm", arg % 9));
+        }
+        2 => {
+            let p = o.entry("placement").or_insert_with(placement);
+            p["z"] = json!([0, 1, 0]);
+            p["x"] = json!([1, 0, 0]);
+        }
+        _ => {
+            o.remove("placement");
+        }
+    }
+}
+
 /// Edits a delete_face: its faces, its seeds, its heal; or makes it a
 /// move_face with topology and blends set and cleared.
 fn edit_direct(v: &mut Value, op: u8, arg: u8) {
@@ -1477,9 +1530,10 @@ fuzz_target!(|data: &[u8]| {
     // tweak (27), `0xec` a thicken or a fill (28), `0xeb` a draft (29),
     // `0xea` a split by a tool (30), `0xe9` a drawing (31), `0xe8` a
     // delete_face or a tweak's topology and blends (32), `0xe7` a blend
-    // edit (33); every other byte
+    // edit (33), `0xe6` an insert or a delete of bodies (34); every other byte
     // picks as it did before them.
     let kind = match mode {
+        0xe6 => 34,
         0xe7 => 33,
         0xe8 => 32,
         0xe9 => 31,
@@ -1583,6 +1637,13 @@ fuzz_target!(|data: &[u8]| {
                          "target": "h", "tool": {"body": "t"}}),
             32 => json!({"format": 20, "kind": "ryucad.feature", "type": "delete_face",
                          "target": "b", "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
+            // An insert when the edits leave no odd byte over, else a
+            // delete of bodies.
+            34 if rest.len() % 2 == 0 => json!({"format": 21, "kind": "ryucad.feature",
+                "type": "insert", "part": "pcb", "rev": {"label": "A"},
+                "placement": {"origin": ["0 mm", "0 mm", "1 mm"], "x": [1, 0, 0], "z": [0, 0, 1]}}),
+            34 => json!({"format": 21, "kind": "ryucad.feature", "type": "delete_body",
+                "solids": ["a", "b/c"]}),
             33 => json!({"format": 20, "kind": "ryucad.feature", "type": "resize_blend",
                          "target": "b", "groups": [{"radius": "3 mm",
                          "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}]}),
@@ -1690,6 +1751,7 @@ fuzz_target!(|data: &[u8]| {
             31 => edit_drawing(v, op, arg),
             32 => edit_direct(v, op, arg),
             33 => edit_blends(v, op, arg),
+            34 => edit_insert(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -1898,6 +1960,26 @@ fuzz_target!(|data: &[u8]| {
         }
         // A split's plane, tool and flip are one value together, never
         // conflicting inside the tool, and a clean merge reads.
+        // An insert's pin and placement, and a delete's solids, are each
+        // one value: a clean merge reads.
+        if kind == 34 {
+            let (merged, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    ["", "/rev", "/project", "/placement", "/solids"].contains(&k.as_str()),
+                    "conflicted inside an insert's or a delete's value at {k}: {v}"
+                );
+            }
+            if outcome == Outcome::Clean {
+                ryucad::doc::files::Feature::from_json(
+                    &v,
+                    ryucad::units::Unit::Mm,
+                    &ryucad::expr::Env::empty(),
+                )
+                .expect("a clean merge of an insert or a delete reads");
+            }
+        }
         if kind == 30 {
             let (merged, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
