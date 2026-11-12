@@ -228,6 +228,152 @@ impl Connector {
     }
 }
 
+/// The feature format that holds a mate's limits (ryucad 26). A mate
+/// without limits stays at format 4.
+pub const LIMITS_FORMAT: u64 = 22;
+
+/// A range a mate's free value stays within: either bound may be
+/// missing, never both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Range {
+    pub min: Option<Quantity>,
+    pub max: Option<Quantity>,
+}
+
+/// A mate's stops on its free angle and distance.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Limits {
+    pub angle: Option<Range>,
+    pub distance: Option<Range>,
+}
+
+impl Range {
+    fn to_json(&self) -> Value {
+        let mut v = json!({});
+        if let Some(q) = &self.min {
+            v["min"] = json!(q.text());
+        }
+        if let Some(q) = &self.max {
+            v["max"] = json!(q.text());
+        }
+        v
+    }
+
+    fn from_json(v: &Value, at: &str, field: Field, env: &Env) -> Result<Range> {
+        let mut o = Obj::new(v, at)?;
+        let lookup = |n: &str| env.get(n);
+        let (min, max) = (o.take_opt("min"), o.take_opt("max"));
+        o.finish()?;
+        let read = |x: Option<Value>, k: &str| -> Result<Option<Quantity>> {
+            x.map(|x| {
+                Quantity::from_json_as(&x, field, &lookup)
+                    .map_err(|e| e.with("pointer", format!("{at}/{k}")))
+            })
+            .transpose()
+        };
+        let (min, max) = (read(min, "min")?, read(max, "max")?);
+        if min.is_none() && max.is_none() {
+            return Err(invalid(at, "a limit has a min, a max or both"));
+        }
+        Ok(Range { min, max })
+    }
+}
+
+impl Limits {
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({});
+        if let Some(r) = &self.angle {
+            v["angle"] = r.to_json();
+        }
+        if let Some(r) = &self.distance {
+            v["distance"] = r.to_json();
+        }
+        v
+    }
+
+    fn from_json(v: &Value, form: Form, default: Unit, env: &Env) -> Result<Limits> {
+        let mut o = Obj::new(v, "/limits")?;
+        let angle = match o.take_opt("angle") {
+            None => None,
+            Some(_) if !form.takes_angle() => {
+                return Err(invalid(
+                    "/limits/angle",
+                    &format!("a {} mate leaves no turn to limit", form.as_str()),
+                ));
+            }
+            Some(x) => Some(Range::from_json(&x, "/limits/angle", Field::Angle, env)?),
+        };
+        let distance = match o.take_opt("distance") {
+            None => None,
+            Some(_) if !form.takes_distance_limit() => {
+                return Err(invalid(
+                    "/limits/distance",
+                    &format!(
+                        "a {} mate leaves no slide to limit (a planar mate's distance is always driven)",
+                        form.as_str()
+                    ),
+                ));
+            }
+            Some(x) => Some(Range::from_json(
+                &x,
+                "/limits/distance",
+                Field::Length(default),
+                env,
+            )?),
+        };
+        o.finish()?;
+        if angle.is_none() && distance.is_none() {
+            return Err(invalid(
+                "/limits",
+                "limits holds an angle, a distance or both",
+            ));
+        }
+        for (k, r, si) in [
+            ("angle", &angle, Quantity::radians as fn(&Quantity) -> f64),
+            (
+                "distance",
+                &distance,
+                Quantity::meters as fn(&Quantity) -> f64,
+            ),
+        ] {
+            let Some(Range {
+                min: Some(lo),
+                max: Some(hi),
+            }) = r
+            else {
+                continue;
+            };
+            if si(lo) > si(hi) {
+                return Err(invalid(
+                    &format!("/limits/{k}"),
+                    &format!("its min {} is past its max {}", lo.text(), hi.text()),
+                ));
+            }
+            if k == "angle" && si(hi) - si(lo) >= core::f64::consts::TAU {
+                return Err(invalid(
+                    "/limits/angle",
+                    "an angle limit spans less than a whole turn (360 deg)",
+                ));
+            }
+        }
+        Ok(Limits { angle, distance })
+    }
+}
+
+/// The expression strings of a mate's `limits`: each bound.
+pub fn limit_strings(v: &mut Value) -> Vec<&mut String> {
+    v.as_object_mut()
+        .into_iter()
+        .flat_map(|o| o.values_mut())
+        .filter_map(Value::as_object_mut)
+        .flat_map(|r| r.values_mut())
+        .filter_map(|x| match x {
+            Value::String(s) => Some(s),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Which of the six kinds a mate is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Form {
@@ -269,6 +415,12 @@ impl Form {
         matches!(self, Form::Revolute | Form::Cylindrical | Form::Planar)
     }
 
+    /// Whether `limits.distance` may stop it: a slide it leaves free (a
+    /// planar mate's distance is always driven).
+    pub fn takes_distance_limit(self) -> bool {
+        matches!(self, Form::Slider | Form::Cylindrical)
+    }
+
     /// Whether `distance` may drive it: along z.
     pub fn takes_distance(self) -> bool {
         matches!(self, Form::Slider | Form::Cylindrical | Form::Planar)
@@ -284,6 +436,8 @@ pub struct Mate {
     pub b: Connector,
     pub angle: Option<Quantity>,
     pub distance: Option<Quantity>,
+    /// Stops on what it leaves free (ryucad 26, format 22).
+    pub limits: Option<Limits>,
 }
 
 impl Mate {
@@ -295,6 +449,9 @@ impl Mate {
         }
         if let Some(d) = &self.distance {
             v["distance"] = json!(d.text());
+        }
+        if let Some(l) = &self.limits {
+            v["limits"] = l.to_json();
         }
         v
     }
@@ -337,12 +494,17 @@ impl Mate {
                     .map_err(|e| e.with("pointer", "/distance"))?,
             ),
         };
+        let limits = match o.take_opt("limits") {
+            None => None,
+            Some(x) => Some(Limits::from_json(&x, form, default, env)?),
+        };
         Ok(Mate {
             form,
             a,
             b,
             angle,
             distance,
+            limits,
         })
     }
 
@@ -692,6 +854,85 @@ mod tests {
                 .into_iter()
                 .collect::<Vec<_>>(),
             ["tilt"]
+        );
+    }
+
+    fn limited() -> Value {
+        let mut v = mate();
+        v.as_object_mut().unwrap().remove("angle");
+        v["format"] = json!(LIMITS_FORMAT);
+        v["limits"] = json!({"angle": {"min": "-6 deg", "max": "tilt"}});
+        v
+    }
+
+    #[test]
+    fn limits_read_and_write_at_their_format() {
+        let v = limited();
+        let f = read(&v).unwrap();
+        let Feature::Mate(m) = &f else {
+            panic!("a mate")
+        };
+        let r = m.limits.as_ref().unwrap().angle.as_ref().unwrap();
+        assert_eq!(r.max.as_ref().unwrap().text(), "tilt");
+        assert!(r.min.as_ref().unwrap().radians() < 0.0);
+        assert_eq!(f.to_json(), v);
+        assert_eq!(f.format(), LIMITS_FORMAT);
+        assert_eq!(feature_format(&v), LIMITS_FORMAT);
+        assert_eq!(
+            crate::doc::files::feature_names(&v)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["tilt"]
+        );
+        // A mate without limits is written as before.
+        assert_eq!(read(&mate()).unwrap().format(), 4);
+        // One-sided, and both values on a cylindrical mate.
+        let mut v = limited();
+        v["form"] = json!("cylindrical");
+        v["limits"] =
+            json!({"angle": {"max": "6 deg"}, "distance": {"min": "0 mm", "max": "10 mm"}});
+        assert_eq!(read(&v).unwrap().to_json(), v);
+    }
+
+    #[test]
+    fn limits_are_checked() {
+        let bad = |edit: &dyn Fn(&mut Value), pointer: &str| {
+            let mut v = limited();
+            edit(&mut v);
+            let e = read(&v).unwrap_err();
+            assert!(
+                e.details["pointer"].as_str().unwrap().starts_with(pointer),
+                "{pointer}: {e:?}"
+            );
+        };
+        bad(&|v| v["limits"] = json!({}), "/limits");
+        bad(&|v| v["limits"] = json!({"angle": {}}), "/limits/angle");
+        bad(
+            &|v| v["limits"] = json!({"distance": {"max": "2 mm"}}),
+            "/limits/distance",
+        );
+        bad(
+            &|v| v["limits"] = json!({"angle": {"min": "10 deg", "max": "5 deg"}}),
+            "/limits/angle",
+        );
+        bad(
+            &|v| v["limits"] = json!({"angle": {"min": "-180 deg", "max": "180 deg"}}),
+            "/limits/angle",
+        );
+        bad(
+            &|v| v["limits"] = json!({"angle": {"min": "2 mm"}}),
+            "/limits/angle/min",
+        );
+        bad(
+            &|v| v["limits"] = json!({"angle": {"low": "1 deg"}}),
+            "/limits/angle",
+        );
+        bad(
+            &|v| {
+                v["form"] = json!("planar");
+                v["limits"] = json!({"distance": {"max": "1 mm"}});
+            },
+            "/limits/distance",
         );
     }
 
