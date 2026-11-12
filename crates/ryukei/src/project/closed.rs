@@ -1,8 +1,11 @@
 //! Silhouettes in closed form: planes, cylinders, cones, spheres, and
 //! tori seen along or square to their axis (design 326, design 484).
 
+use crate::geom::bernstein::{Bernstein, Root};
+use crate::geom::chain3::Chain3;
 use crate::geom::{Circle, Curve, Curve2, Frame, Line, Line2, Point2, Surface, Vector2, Vector3};
 use crate::intersect::Failure;
+use crate::interval::Interval;
 use crate::math;
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
 use crate::work::Meter;
@@ -70,6 +73,97 @@ fn arcs(start: f64, cuts: [f64; 2]) -> Vec<[f64; 2]> {
         .filter(|w| w[1] > w[0])
         .map(|w| [w[0], w[1]])
         .collect()
+}
+
+/// Roots of a revolution's fold polynomial are bracketed this finely
+/// (local parameter).
+const FOLD_WIDTH: f64 = 1e-12;
+
+/// `p · d` with every product and sum rounded outward.
+fn idot(p: Vector3, d: Vector3) -> Interval {
+    let i = Interval::point;
+    i(p.x) * i(d.x) + i(p.y) * i(d.y) + i(p.z) * i(d.z)
+}
+
+/// Where a revolution's contour turns back over `[v0, v1]` of its
+/// profile, seen along unit `t`, and whether it has points between each
+/// two: with `ρ(v)`, `h(v)` the profile's distance from the axis and
+/// height in `frame`, `n · t = h' s cos(u − ψ) − ρ' t_z` (`s² = t_x² +
+/// t_y²`), which has zeros at `v` exactly where `G = (h' s)² − (ρ' t_z)²`
+/// is positive, and they meet where `G` changes sign. `G w⁴` is a
+/// polynomial on each Bézier piece (`w` the piece's weight), its
+/// coefficients and `s²`, `t_z²` rounded outward, its roots isolated by
+/// [`Bernstein::roots`]. The folds are the roots inside the range, and
+/// the signs those of `G` at each stretch's middle. `None` where a root
+/// isn't certified simple (a view along or square to the axis gives
+/// double roots) or a stretch's sign isn't certified: the face is traced.
+#[cfg_attr(not(test), allow(dead_code))]
+fn revolved_folds(
+    profile: &Curve,
+    frame: &Frame,
+    t: Vector3,
+    [v0, v1]: [f64; 2],
+    m: &Meter,
+) -> Result<Option<(Vec<f64>, Vec<bool>)>, Failure> {
+    let i = Interval::point;
+    let (x, y, z) = (frame.x().get(), frame.y().get(), frame.z().get());
+    let (tx, ty, tz) = (idot(t, x), idot(t, y), idot(t, z));
+    let (s2, tz2) = (tx * tx + ty * ty, tz * tz);
+    let o = frame.origin().to_vector();
+    let (ox, oz) = (idot(o, x), idot(o, z));
+    let chain = Chain3::new(profile, v0, v1);
+    let mut gs = Vec::with_capacity(chain.pieces.len());
+    let mut folds = Vec::new();
+    for (k, piece) in chain.pieces.iter().enumerate() {
+        // A piece of the profile's fold polynomial.
+        m.charge(1)?;
+        let w = Bernstein::new(piece.pts.iter().map(|h| i(h.w)).collect());
+        let num = |d: Vector3, od: Interval| {
+            Bernstein::new(
+                piece
+                    .pts
+                    .iter()
+                    .map(|h| (idot(h.p, d) - od) * i(h.w))
+                    .collect(),
+            )
+        };
+        let rate = |n: Bernstein| n.deriv().mul(&w).sub(&n.mul(&w.deriv()));
+        let (rd, hd) = (rate(num(x, ox)), rate(num(z, oz)));
+        let g = hd.mul(&hd).scale(s2).sub(&rd.mul(&rd).scale(tz2));
+        for root in g.roots(FOLD_WIDTH) {
+            let Root::Simple { lo, hi, .. } = root else {
+                return Ok(None);
+            };
+            folds.push(chain.param(k, (lo + hi) / 2.0));
+        }
+        gs.push(g);
+    }
+    folds.sort_by(f64::total_cmp);
+    // A root at a piece's end is found by both pieces.
+    let near = 4.0 * FOLD_WIDTH * (v1 - v0);
+    folds.dedup_by(|a, b| (*a - *b).abs() <= near);
+    folds.retain(|&v| v - v0 > near && v1 - v > near);
+    let mut ends = vec![v0];
+    ends.extend(&folds);
+    ends.push(v1);
+    let mut signs = Vec::with_capacity(ends.len() - 1);
+    for w in ends.windows(2) {
+        let mid = (w[0] + w[1]) / 2.0;
+        let k = chain
+            .pieces
+            .iter()
+            .position(|p| mid <= p.range[1])
+            .unwrap_or(chain.pieces.len() - 1);
+        let g = gs[k].eval(chain.local(k, mid));
+        if g.lo() > 0.0 {
+            signs.push(true);
+        } else if g.hi() < 0.0 {
+            signs.push(false);
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(Some((folds, signs)))
 }
 
 /// The silhouette of `surface` seen along unit `t` over the parameter box
@@ -389,5 +483,57 @@ mod tests {
         // unmetered: a unit test
         let tilted = closed_form(&s, Vector3::new(0.0, -1.0, 1e-9), rect, &Meter::free()).unwrap();
         assert!(tilted.is_none());
+    }
+
+    /// A wavy cubic profile off the axis, in the xz half-plane.
+    fn wavy() -> Curve {
+        use crate::geom::{KnotVector, NurbsCurve, Point3};
+        let kv = KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+        let pts = vec![
+            Point3::new(0.02, 0.0, 0.0),
+            Point3::new(0.03, 0.0, 0.01),
+            Point3::new(0.012, 0.0, 0.025),
+            Point3::new(0.025, 0.0, 0.04),
+        ];
+        Curve::Nurbs(std::sync::Arc::new(NurbsCurve::new(kv, pts, None).unwrap()))
+    }
+
+    /// `G` changes sign at its folds and has the sign sampled between
+    /// them; a view along the axis gives no certified folds.
+    #[test]
+    fn a_revolutions_folds_are_where_its_contour_turns_back() {
+        let p = wavy();
+        let t = Vector3::new(0.3, -1.0, 0.4);
+        let t = t / t.length();
+        // unmetered: a unit test
+        let m = Meter::free();
+        let (folds, signs) = revolved_folds(&p, &Frame::WORLD, t, [0.0, 1.0], &m)
+            .unwrap()
+            .unwrap();
+        assert_eq!(signs.len(), folds.len() + 1);
+        let g = |v: f64| {
+            let d1 = p.eval(v).d1;
+            let (rho, h) = (d1.x, d1.z);
+            (h * h) * (t.x * t.x + t.y * t.y) - (rho * t.z) * (rho * t.z)
+        };
+        let mut ends = vec![0.0];
+        ends.extend(&folds);
+        ends.push(1.0);
+        for (w, &positive) in ends.windows(2).zip(&signs) {
+            for k in 1..8 {
+                let v = w[0] + (w[1] - w[0]) * k as f64 / 8.0;
+                assert_eq!(g(v) > 0.0, positive, "at {v}");
+            }
+        }
+        // Along the axis `G = -(ρ' t_z)²` has double roots: traced.
+        let along = revolved_folds(
+            &p,
+            &Frame::WORLD,
+            Vector3::new(0.0, 0.0, 1.0),
+            [0.0, 1.0],
+            &m,
+        )
+        .unwrap();
+        assert!(along.is_none());
     }
 }
