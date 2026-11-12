@@ -20,10 +20,10 @@ pub struct Ask {
 
 pub fn convert(session: &mut Session, ask: Ask) -> Result<Value> {
     session.job.phase(ryu_session::job::Phase::Heal);
-    let pid = crate::server::part_id(&ask.part)?;
+    let pid = crate::part::part_id(&ask.part)?;
     let part = session.project().part(&pid)?.clone();
-    crate::server::check_revision(&part, ask.expected.as_deref())?;
-    let order = crate::server::order(&part)?;
+    crate::part::check_revision(&part, ask.expected.as_deref())?;
+    let order = crate::part::order(&part)?;
     let to = if ask.reference {
         Mode::Reference
     } else {
@@ -31,7 +31,7 @@ pub fn convert(session: &mut Session, ask: Ask) -> Result<Value> {
     };
     let imports: Vec<(Id, Import)> = match &ask.feature {
         Some(f) => {
-            let fid = crate::server::feature_id(f)?;
+            let fid = crate::part::feature_id(f)?;
             match part.features.get(&fid) {
                 None => {
                     return Err(
@@ -102,9 +102,9 @@ pub fn convert(session: &mut Session, ask: Ask) -> Result<Value> {
         session.job.check()?;
         session.job.writing();
         let writes: Vec<(&Id, &Feature)> = changing.iter().map(|(f, x)| (f, x)).collect();
-        crate::server::save(session, &pid, &writes, order)?;
+        crate::save::save(session, &pid, &writes, order)?;
     }
-    let (mut v, _) = crate::server::part_report(session, &pid, false)?;
+    let (mut v, _) = crate::part::part_report(session, &pid, false)?;
     v["converted"] = json!(converted);
     Ok(v)
 }
@@ -114,7 +114,7 @@ mod tests {
     use crate::doc::import::Mode;
     use crate::error::Code;
     use crate::import::tests::{occt, with_import, with_import_as};
-    use crate::server::tests::call;
+    use crate::testing::call;
     use serde_json::{Value, json};
 
     fn convert(s: &mut crate::session::Session, p: Value) -> crate::error::Result<Value> {
@@ -144,7 +144,7 @@ mod tests {
             .unwrap()
             .revision
             .clone();
-        let call_live = crate::server::tests::call_live;
+        let call_live = crate::testing::call_live;
         let v = call_live(
             &mut s,
             &mut live,

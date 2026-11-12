@@ -1268,8 +1268,8 @@ pub(crate) mod tests {
     use crate::doc::project::{MANIFEST, feature_path, part_path, write_json};
     use crate::error::Code;
     use crate::git::tests::git;
-    use crate::server::tests::call;
     use crate::session::Session;
+    use crate::testing::call;
     use serde_json::json;
     use std::path::Path;
 
@@ -1634,7 +1634,7 @@ pub(crate) mod tests {
     #[test]
     fn the_daemon_fetches_without_its_lock() {
         let (lib_dir, _lib) = library();
-        let (dir, s) = crate::server::tests::fresh();
+        let (dir, s) = crate::testing::fresh();
         let mut slot = Some(s);
         let session = slot.as_mut().unwrap();
         session.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
@@ -1749,7 +1749,7 @@ pub(crate) mod tests {
     #[test]
     fn dependencies_are_added_fetched_and_listed() {
         let (lib_dir, lib) = library();
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         s.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
         let u = url(lib_dir.path());
         let a = call(&mut s, "deps.add", json!({"url": u})).unwrap();

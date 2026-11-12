@@ -149,7 +149,7 @@ pub fn input<'a>(part: &Part, id: &Id, input: &Id, before: &'a dyn Results) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     fn id(s: &str) -> Id {

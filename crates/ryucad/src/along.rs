@@ -577,7 +577,7 @@ pub fn from_given(
     env: &crate::expr::Env,
 ) -> Result<crate::doc::files::Feature> {
     let pid = &part.id;
-    let geom = |t: &str, at: &str| crate::server::geom_json(t, pid, at);
+    let geom = |t: &str, at: &str| crate::geometry::geom_json(t, pid, at);
     let bad = |param: &str, msg: String| Error::new(Code::InvalidParam, msg).with("param", param);
     let mut v = current.map_or_else(|| json!({}), Sweep::fields);
     let o = v.as_object_mut().expect("fields are an object");

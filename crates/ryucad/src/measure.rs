@@ -64,7 +64,7 @@ pub fn locate_at(
     rev: &crate::doc::assembly::Rev,
 ) -> Result<Vec<Located>> {
     let r = EntityRef::parse(reference)?;
-    let assembly = crate::server::part_kind(session.project().part(&r.part)?) == PartKind::Assembly;
+    let assembly = crate::part::part_kind(session.project().part(&r.part)?) == PartKind::Assembly;
     let whole_solid = !assembly && (r.is_occurrence() || !r.path.is_empty());
     // Resolving judges the working files; at another revision the model's
     // own names decide (a sketch entity there reaches no solid).
@@ -774,7 +774,7 @@ mod tests {
     use super::number;
     use crate::assembly::tests::{place_in, project};
     use crate::error::Code;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::{Value, json};
 
     /// A part `p` with a box `b` 1 × 2 × 3 mm, and its faces' names.

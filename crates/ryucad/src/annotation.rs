@@ -395,7 +395,7 @@ pub fn pins_from(session: &mut Session, args: &[crate::proto::PinArg]) -> Result
                 }
             }
             (None, Some(part), Some(p)) => {
-                let id = crate::server::part_id(part)?;
+                let id = crate::part::part_id(part)?;
                 session.project().part(&id)?;
                 Pin::Point {
                     part: id,
@@ -514,13 +514,13 @@ pub fn marks_from(
                 normal: s.normal,
             })
             .collect();
-        let ask = crate::server::RenderAsk::pick(
+        let ask = crate::scene::RenderAsk::pick(
             marks.part.as_str(),
             camera.clone(),
             sections,
             from.hidden.clone(),
         );
-        let scene = crate::server::render_scene(drafted, None, Vec::new(), ask)?;
+        let scene = crate::scene::render_scene(drafted, None, Vec::new(), ask)?;
         let plane = crate::redline::Plane::of(&camera);
         let (w, h) = crate::redline::pick_size(&plane, &camera, &marks.list);
         let picked = crate::render::pick(&scene.g, &camera, w, h)?;
@@ -1023,7 +1023,7 @@ pub fn delete(session: &mut Session, id: &str, expect: Option<&str>, by: By) -> 
 pub(crate) mod tests {
     use super::*;
     use crate::redline::{Anchor, At, Touch};
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     #[test]
@@ -1142,6 +1142,11 @@ pub(crate) mod tests {
                     continue;
                 }
                 if !rel.ends_with(".rs") || FREE.iter().any(|(f, _)| *f == rel) {
+                    continue;
+                }
+                // A test module in a file of its own (`server/tests.rs`)
+                // and the tests' harness are test code throughout.
+                if rel.ends_with("/tests.rs") || rel == "testing.rs" {
                     continue;
                 }
                 let text = std::fs::read_to_string(&p).unwrap();
@@ -1505,7 +1510,7 @@ pub(crate) mod tests {
     fn touches_are_read_from_the_authors_draft() {
         // A person proposes a lid on the plate's top; their mark's end
         // lands on it, which only their draft has.
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (_dir, mut s, view) = drilled();
         let mut live = crate::live::Live::new();
         let h = live

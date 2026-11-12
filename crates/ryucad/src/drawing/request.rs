@@ -50,7 +50,7 @@ fn file_of(session: &Session, part: &Id, drawing: &str) -> Result<(Id, DrawingFi
 pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let parts: Vec<Id> = match part {
         Some(p) => {
-            let id = crate::server::part_id(p)?;
+            let id = crate::part::part_id(p)?;
             session.project().part(&id)?;
             vec![id]
         }
@@ -101,9 +101,9 @@ pub fn create(
     ask: &Create,
     expected: Option<&str>,
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
-    crate::server::check_revision(p, expected)?;
+    crate::part::check_revision(p, expected)?;
     let did = crate::doc::drawing::check_id(drawing)?;
     if p.drawings.contains_key(&did) {
         return Err(Error::new(
@@ -305,9 +305,9 @@ pub fn edit(
     ops: &Value,
     expected: Option<&str>,
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
-    crate::server::check_revision(p, expected)?;
+    crate::part::check_revision(p, expected)?;
     let (did, file) = file_of(session, &pid, drawing)?;
     let mut v = file.to_json();
     let ops = ops.as_array().ok_or_else(|| {
@@ -505,9 +505,9 @@ pub fn delete(
     drawing: &str,
     expected: Option<&str>,
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
-    crate::server::check_revision(p, expected)?;
+    crate::part::check_revision(p, expected)?;
     let did = Id::parse(drawing, "drawing")
         .ok()
         .filter(|d| p.drawings.contains_key(d))
@@ -527,9 +527,9 @@ pub fn rename(
     to: &str,
     expected: Option<&str>,
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
-    crate::server::check_revision(p, expected)?;
+    crate::part::check_revision(p, expected)?;
     let (did, file) = file_of(session, &pid, drawing)?;
     let new = crate::doc::drawing::check_id(to)?;
     if p.drawings.contains_key(&new) {
@@ -557,9 +557,9 @@ pub fn layout(
     dry_run: bool,
     expected: Option<&str>,
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
-    crate::server::check_revision(p, expected)?;
+    crate::part::check_revision(p, expected)?;
     let (did, file) = file_of(session, &pid, drawing)?;
     let mut v = file.to_json();
     for (_, w) in v["views"].as_object_mut().into_iter().flatten() {
@@ -749,7 +749,7 @@ pub fn get(
     sheet: Option<&str>,
     items: bool,
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let (did, file) = file_of(session, &pid, drawing)?;
     let b = build(session, &pid, &did)?;
     let sheets: Vec<Value> = match sheet {
@@ -786,7 +786,7 @@ pub fn describe(
     drawing: &str,
     sheet: Option<&str>,
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let (did, _) = file_of(session, &pid, drawing)?;
     let b = build(session, &pid, &did)?;
     let wanted: Vec<&SheetBuilt> = match sheet {
@@ -891,7 +891,7 @@ pub fn lint(
             "drawing lint names a part and a drawing, or --explain a rule",
         ));
     };
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let (did, _) = file_of(session, &pid, drawing)?;
     let b = build(session, &pid, &did)?;
     if let Some(k) = sheet {
@@ -1007,7 +1007,7 @@ pub fn render(
     format: Option<&str>,
     scale: Option<f32>,
 ) -> Result<Answer> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let (did, _) = file_of(session, &pid, drawing)?;
     let b = build(session, &pid, &did)?;
     let s = b.sheet(sheet)?;
@@ -1051,7 +1051,7 @@ pub fn export(
     out: Option<&str>,
     unit: Option<&str>,
 ) -> Result<Answer> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let format = match (format, out) {
         (Some(f), _) => f.to_owned(),
         (None, Some(o)) => std::path::Path::new(o)
@@ -1160,8 +1160,8 @@ mod tests {
 
     #[test]
     fn an_empty_sheet_writes_no_scale_and_its_first_view_is_fitted() {
-        let (_d, mut s) = crate::server::tests::fresh();
-        let call = crate::server::tests::call;
+        let (_d, mut s) = crate::testing::fresh();
+        let call = crate::testing::call;
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         call(
             &mut s,

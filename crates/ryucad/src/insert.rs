@@ -313,7 +313,7 @@ pub fn update(
     use serde_json::json;
     use std::collections::BTreeSet;
     session.check_project_revision(expected)?;
-    let pid = crate::server::part_id(ask.part)?;
+    let pid = crate::part::part_id(ask.part)?;
     let fid = Id::parse(ask.feature, "feature").map_err(|e| e.with("param", "feature"))?;
     let p = session.project().part(&pid)?.clone();
     let Some(Ok(Feature::Insert(ins))) = p.features.get(&fid) else {
@@ -464,7 +464,7 @@ fn relabel(rev: &Rev, l: String) -> Rev {
 pub(crate) mod tests {
     use super::*;
     use crate::assembly::tests::{id, insert_in};
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     /// pcb (a 10 × 10 × 1.6 mm board and a 2 mm cube on it), enclosure

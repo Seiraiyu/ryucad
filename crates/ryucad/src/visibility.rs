@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 /// part's solids as the model shows them.
 pub fn leaves(session: &mut Session, part: &Id) -> Result<Vec<String>> {
     let p = session.project().part(part)?;
-    if crate::server::part_kind(p) == PartKind::Assembly {
+    if crate::part::part_kind(p) == PartKind::Assembly {
         let model = session.model(part, &Rev::Working)?;
         return Ok(model
             .occurrences
@@ -64,7 +64,7 @@ pub fn reach(session: &mut Session, reference: &str) -> Result<Vec<String>> {
     let Some(rest) = rest else {
         return Ok(all);
     };
-    let assembly = crate::server::part_kind(session.project().part(&part)?) == PartKind::Assembly;
+    let assembly = crate::part::part_kind(session.project().part(&part)?) == PartKind::Assembly;
     let prefix = if assembly {
         let r = EntityRef::parse(reference)?.in_assembly();
         if !r.is_occurrence() {
@@ -164,7 +164,7 @@ pub fn is_hidden(hidden: &BTreeSet<String>, leaf: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     /// Part `bolt` (a shank), part `plate` (a base and a boss), assembly
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn a_participants_window_hides_what_it_is_told() {
         use crate::live::{Kind, Live};
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (_dir, mut s) = project();
         let mut live = Live::new();
         let vis = |s: &mut Session, live: &mut Live, v: serde_json::Value| {
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn renders_leave_out_what_is_hidden() {
         use crate::live::{Kind, Live};
-        use crate::server::tests::render_pixels;
+        use crate::testing::render_pixels;
         let (dir, mut s) = project();
         let r = dir.path();
         let small = json!({"part": "frame", "width": 64, "height": 48});

@@ -238,7 +238,7 @@ pub fn not_found(session: &Session, asm: &Id, id: &str) -> Error {
 /// model as the working files have it.
 pub fn resolve(session: &mut Session, asm: &Id, id: &str) -> Result<Resolved> {
     let part = session.project().part(asm)?;
-    if crate::server::part_kind(part) != PartKind::Assembly {
+    if crate::part::part_kind(part) != PartKind::Assembly {
         return Err(crate::doc::explode::not_an_assembly(asm.as_str()));
     }
     let file = match Id::parse(id, "explode")
@@ -401,9 +401,9 @@ fn entry(session: &mut Session, part: &Id, id: &Id) -> Value {
 pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let parts: Vec<Id> = match part {
         Some(p) => {
-            let id = crate::server::part_id(p)?;
+            let id = crate::part::part_id(p)?;
             let found = session.project().part(&id)?;
-            if crate::server::part_kind(found) != PartKind::Assembly {
+            if crate::part::part_kind(found) != PartKind::Assembly {
                 return Err(crate::doc::explode::not_an_assembly(p));
             }
             vec![id]
@@ -433,12 +433,12 @@ fn path(session: &Session, part: &Id, explode: &Id) -> std::path::PathBuf {
 /// The assembly `part`, refusing a part (`wrong_part_kind`) and a stale
 /// revision.
 fn assembly(session: &Session, part: &str, expected: Option<&str>) -> Result<Id> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
-    if crate::server::part_kind(p) != PartKind::Assembly {
+    if crate::part::part_kind(p) != PartKind::Assembly {
         return Err(crate::doc::explode::not_an_assembly(part));
     }
-    crate::server::check_revision(p, expected)?;
+    crate::part::check_revision(p, expected)?;
     Ok(pid)
 }
 
@@ -581,7 +581,7 @@ pub fn shown_json(session: &mut Session, participant: &str, shown: Option<&Shown
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     /// Part `bolt` (a 4 mm shank 10 mm tall), part `plate` (60 × 30 × 6),
     /// assembly `pair` (two bolts, `left` and `right`) and assembly
@@ -890,7 +890,7 @@ pub(crate) mod tests {
     #[test]
     fn an_explode_changes_nothing_but_what_is_drawn() {
         use crate::live::{Kind, Live};
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = project();
         let read = |s: &mut Session| {
             let built = call(s, "rebuild", json!({"part": "frame"})).unwrap();
@@ -942,7 +942,7 @@ pub(crate) mod tests {
     #[test]
     fn a_participants_window_shows_an_explode() {
         use crate::live::{Kind, Live};
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = project();
         write(
             dir.path(),

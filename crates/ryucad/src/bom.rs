@@ -17,7 +17,7 @@ use crate::doc::files::PartKind;
 use crate::doc::id::{Id, ProjectId};
 use crate::doc::project::Project;
 use crate::error::{Code, Error, Result};
-use crate::server::part_id;
+use crate::part::part_id;
 use crate::session::Session;
 use ryupdm::bom::{self, Row};
 use ryupdm::config::Config;
@@ -344,7 +344,7 @@ pub fn renumber(
 ) -> Result<Value> {
     let id = part_id(part)?;
     let p = session.project().part(&id)?.clone();
-    crate::server::check_revision(&p, expected)?;
+    crate::part::check_revision(&p, expected)?;
     let file = p.file.clone()?;
     if file.kind != PartKind::Assembly {
         return Err(Error::new(
@@ -422,8 +422,8 @@ pub(crate) fn findings(session: &mut Session) -> Result<Vec<Value>> {
 mod tests {
     use crate::git::tests::git;
     use crate::release::tests::released_project;
-    use crate::server::tests::call;
     use crate::session::Session;
+    use crate::testing::call;
     use serde_json::{Value, json};
 
     /// `p` released as A and committed; assembly `asm` places two of

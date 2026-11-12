@@ -1179,7 +1179,7 @@ mod tests {
 
     #[test]
     fn the_set_plans_two_parts_then_the_assembly_placing_them() {
-        let (_dir, s) = crate::server::tests::fresh();
+        let (_dir, s) = crate::testing::fresh();
         let set = PathBuf::from(crate::import::tests::set_path(""));
         let t = tree(&set, "asm.stp", &[]).unwrap();
         let taken = |_: &str| false;

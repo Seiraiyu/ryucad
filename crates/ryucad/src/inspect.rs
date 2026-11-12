@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn bounds_hold_the_body_not_its_surfaces() {
-        use crate::server::tests::call;
+        use crate::testing::call;
         // A half-round notch in the y = 0 face (#97): nothing lies below
         // y = 0, and the bottom is at z = 0 exactly.
         let (_dir, mut s, _) = crate::sketch::tests::with_box();
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn every_entity_a_boolean_leaves_has_an_origin() {
-        use crate::server::tests::call;
+        use crate::testing::call;
         // #86: a boss joined flush with the box's bottom, then a bore cut
         // through both.
         let (_dir, mut s, _) = crate::sketch::tests::with_box();
