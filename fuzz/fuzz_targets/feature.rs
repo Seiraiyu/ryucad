@@ -297,6 +297,8 @@ fn part(f: Feature, reference: bool, placed: bool) -> Part {
         features,
         uses: BTreeMap::new(),
         explode_uses: Default::default(),
+        motions: Default::default(),
+        motion_uses: Default::default(),
         acts: BTreeMap::new(),
         imports: BTreeMap::from([("imports/seeded.step".to_owned(), seeded().clone())]),
         views: BTreeMap::new(),

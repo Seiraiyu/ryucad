@@ -227,6 +227,8 @@ pub(crate) mod tests {
             appearance: None,
             explodes: Default::default(),
             explode_uses: Default::default(),
+            motions: Default::default(),
+            motion_uses: Default::default(),
             drawings: Default::default(),
             revision: String::new(),
         }

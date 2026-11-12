@@ -12,6 +12,7 @@
 //! parts/<part>/views/<view>.json     (optional: named views)
 //! parts/<part>/appearance.json      (optional: colours and opacities)
 //! parts/<asm>/explodes/<explode>.json (optional: exploded views)
+//! parts/<asm>/motions/<motion>.json (optional: motions to sweep)
 //! parts/<part>/drawings/<drawing>.json (optional: 2D drawings)
 //! templates/<template>.json         (optional: drawing templates)
 //! releases/<part>/<label>.json      (ryupdm's release records)
@@ -171,6 +172,13 @@ pub struct Part {
     /// so it is known even for an explode that doesn't load
     /// (`doc::reads`).
     pub explode_uses: BTreeMap<Id, BTreeSet<String>>,
+    /// Its motions, by ID, or why each can't be used (in a part that
+    /// isn't an assembly, `wrong_part_kind`). Nothing a rebuild makes
+    /// reads them.
+    pub motions: BTreeMap<Id, Result<super::motion::MotionFile>>,
+    /// The parameters each motion file names, by ID, read from its
+    /// text (`doc::reads`).
+    pub motion_uses: BTreeMap<Id, BTreeSet<String>>,
     /// Its drawings, by ID, or why each can't be used. Nothing a rebuild
     /// makes reads them.
     pub drawings: BTreeMap<Id, Result<super::drawing::DrawingFile>>,
@@ -178,7 +186,7 @@ pub struct Part {
     /// the listed feature files in order, the hashes of the files their
     /// imports read, ryupdm's properties, the named views, the
     /// appearance, the explodes, the drawings and the project templates
-    /// they name, and the project parameters it reads: it changes
+    /// they name, the motions, and the project parameters it reads: it changes
     /// whenever anything that defines the part does.
     pub revision: String,
 }
@@ -816,6 +824,7 @@ fn load_part(
             "part.json" | "features" => {}
             super::views::VIEWS if kind == Kind::Dir => {}
             super::explode::EXPLODES if kind == Kind::Dir => {}
+            super::motion::MOTIONS if kind == Kind::Dir => {}
             super::drawing::DRAWINGS if kind == Kind::Dir => {}
             super::appearance::APPEARANCE if kind == Kind::File => has_appearance = true,
             PARAMETERS => has_parameters = kind == Kind::File,
@@ -1046,6 +1055,38 @@ fn load_part(
             None => piece(&mut hasher, b"missing"),
         }
     }
+    // Motions, by ID, after the drawings: tagged, so an assembly
+    // without them hashes as before. Like explodes, they change no
+    // geometry, so the release content hash never reads them.
+    let mut motions = BTreeMap::new();
+    let mut motion_uses = BTreeMap::new();
+    let mut tagged = false;
+    let motions_dir = join(&dir, super::motion::MOTIONS);
+    for (name, kind) in src.list(&motions_dir)? {
+        let at = join(&motions_dir, &name);
+        let mid = name
+            .strip_suffix(".json")
+            .and_then(|stem| super::motion::check_id(stem).ok());
+        match mid {
+            Some(mid) if kind == Kind::File => {
+                let motion = read_json(src, &at).and_then(|(bytes, v)| {
+                    motion_uses.insert(mid.clone(), super::motion::names(&v));
+                    if !tagged {
+                        piece(&mut hasher, super::motion::MOTIONS.as_bytes());
+                        tagged = true;
+                    }
+                    piece(&mut hasher, mid.as_str().as_bytes());
+                    piece(&mut hasher, &bytes);
+                    if assembly == Some(false) {
+                        return Err(super::motion::not_an_assembly(id.as_str()));
+                    }
+                    super::motion::MotionFile::from_json(&v, manifest.default_unit, &env)
+                });
+                motions.insert(mid, motion.map_err(|e| e.with("path", &at)));
+            }
+            _ => unknown.push(at),
+        }
+    }
     // The project parameters it reads, and those its own shadow, last:
     // their text, tagged, so a part reading and shadowing none hashes as
     // before. While the project's file can't
@@ -1055,6 +1096,7 @@ fn load_part(
         _ => BTreeSet::new(),
     };
     let mut names: BTreeSet<String> = explode_uses.values().flatten().cloned().collect();
+    names.extend(motion_uses.values().flatten().cloned());
     for fid in file.as_ref().map_or(&[][..], |f| &f.features[..]) {
         names.extend(uses.get(fid).into_iter().flatten().cloned());
     }
@@ -1102,6 +1144,8 @@ fn load_part(
         appearance,
         explodes,
         explode_uses,
+        motions,
+        motion_uses,
         drawings,
         revision,
     })
@@ -1788,6 +1832,74 @@ mod tests {
         // Gone again, the part hashes as it did.
         fs::remove_dir_all(&drawings).unwrap();
         assert_eq!(Project::load(root).unwrap().parts[&p].revision, rev);
+    }
+
+    #[test]
+    fn motions_load_with_their_assembly_and_count_in_its_revision() {
+        use super::super::files::PartKind;
+        let dir = sample();
+        let root = dir.path();
+        let a = id("asm");
+        let mut file = PartFile::new(Vec::new());
+        file.kind = PartKind::Assembly;
+        write_json(&part_path(root, &a), &file.to_json()).unwrap();
+        write_json(
+            &parameters_path(root, &a),
+            &serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                                "parameters": {"swing": "6 deg"}}),
+        )
+        .unwrap();
+        let before = Project::load(root).unwrap();
+        let rev = before.parts[&a].revision.clone();
+        assert!(before.parts[&a].motions.is_empty());
+        let motions = part_dir(root, &a).join("motions");
+        fs::create_dir_all(&motions).unwrap();
+        let twist = serde_json::json!({"format": 1, "kind": "ryucad.motion", "steps": 13,
+            "drives": [{"mate": "hinge", "angle": {"from": "-swing", "to": "swing"}}]});
+        write_json(&motions.join("twist.json"), &twist).unwrap();
+        let mut project = Project::load(root).unwrap();
+        let part = &project.parts[&a];
+        let m = part.motions[&id("twist")].as_ref().unwrap();
+        // Read against the assembly's parameters.
+        let super::super::motion::Drive::Mate { range, .. } = &m.drives[0] else {
+            panic!()
+        };
+        assert!((range.to.radians() - 6f64.to_radians()).abs() < 1e-15);
+        assert_eq!(
+            part.motion_uses[&id("twist")].iter().collect::<Vec<_>>(),
+            ["swing"]
+        );
+        assert_ne!(part.revision, rev);
+        assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+        fs::write(motions.join("broken.json"), "{").unwrap();
+        fs::write(motions.join("notes.txt"), "").unwrap();
+        project
+            .reload(&[
+                "parts/asm/motions/broken.json".into(),
+                "parts/asm/motions/notes.txt".into(),
+            ])
+            .unwrap();
+        let broken = project.parts[&a].motions[&id("broken")]
+            .as_ref()
+            .unwrap_err();
+        assert_eq!(broken.code, Code::InvalidJson);
+        assert_eq!(project.unknown, ["parts/asm/motions/notes.txt"]);
+        // In a part, a motion is the wrong kind of file.
+        let motions_p = part_dir(root, &id("p")).join("motions");
+        fs::create_dir_all(&motions_p).unwrap();
+        write_json(&motions_p.join("twist.json"), &twist).unwrap();
+        let project = Project::load(root).unwrap();
+        let e = project.parts[&id("p")].motions[&id("twist")]
+            .as_ref()
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["path"].as_str()),
+            (Code::WrongPartKind, Some("parts/p/motions/twist.json"))
+        );
+        // Gone again, the assembly hashes as it did.
+        fs::remove_dir_all(&motions).unwrap();
+        let project = Project::load(root).unwrap();
+        assert_eq!(project.parts[&a].revision, rev);
     }
 
     #[test]
