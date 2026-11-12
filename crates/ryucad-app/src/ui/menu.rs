@@ -41,9 +41,17 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened) -> Option<Action> {
                 continue;
             }
             ui.menu_button(cat.title(), |ui| {
-                if let Some(a) = items(ui, o, &shown, cat) {
-                    action = Some(a);
-                }
+                // Down to the window's bottom, then scrolled: View has more
+                // items than a 1000-point window has rows (#728, #734).
+                let room = ui.ctx().content_rect().bottom() - ui.cursor().top() - 16.0;
+                egui::ScrollArea::vertical()
+                    .id_salt(("menu", cat.title()))
+                    .max_height(room.max(120.0))
+                    .show(ui, |ui| {
+                        if let Some(a) = items(ui, o, &shown, cat) {
+                            action = Some(a);
+                        }
+                    });
             });
         }
     });

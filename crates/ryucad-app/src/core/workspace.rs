@@ -1495,9 +1495,14 @@ impl Workspace {
             });
         }
         let e = self.annotations.all.get(self.chosen_annotation.as_ref()?)?;
+        let marks = e.marks.as_ref()?;
+        // Drawn only over the part they were made on (#730), as pins are.
+        if !self.model.shown().contains(&marks.part.as_str()) {
+            return None;
+        }
         Some(ViewMarks {
             plane: e.plane()?,
-            marks: e.marks.as_ref()?.list.clone(),
+            marks: marks.list.clone(),
             colour: ryucad::render::participant(&e.by),
             alpha: if e.is_open() {
                 1.0
@@ -2955,6 +2960,14 @@ impl Workspace {
         self.send(Request::DrawingList { part: None }, Pending::DrawingsAll);
     }
 
+    /// Opens the error card on a refusal a form holds (#750): kept with
+    /// the window's failures, which the card reads, without a toast or the
+    /// status line.
+    pub fn open_card(&mut self, e: Error) {
+        self.errors.push(e);
+        self.card = Some(self.errors.len() - 1);
+    }
+
     /// A drawing's tree row chosen: the Drawings tile opens on it, its
     /// first sheet shown.
     pub fn open_drawing(&mut self, part: &str, drawing: &str) {
@@ -3555,8 +3568,7 @@ impl Workspace {
         self.mode = Default::default();
         self.lost = false;
         self.lost_why = None;
-        self.toasts
-            .note("Connected to the daemon again", false, Instant::now());
+        self.toasts.found(Instant::now());
         // A new session knows nothing of this window's camera: tell it.
         if self.camera_due.is_none() {
             self.camera_due = self.camera_last.clone();
@@ -3699,8 +3711,7 @@ impl Workspace {
                 self.lost = true;
                 self.pending.clear();
                 self.progress.lost();
-                self.toasts
-                    .note("Lost the daemon: reconnecting", true, Instant::now());
+                self.toasts.lost(Instant::now());
                 // Saves that went unanswered can be tried again.
                 if let Some(f) = &mut self.form {
                     f.saving = false;
@@ -4907,6 +4918,9 @@ impl Workspace {
         match method {
             "annotation.changed" => {
                 let me = self.name.clone();
+                // A closed annotation loses its number: the one it had
+                // names it where it has no comment (a suggestion, #744).
+                let before = self.annotations.numbers();
                 let news = self.annotations.changed(params, &me);
                 let numbers = self.annotations.numbers();
                 let tag = |id: &str| {
@@ -4920,7 +4934,7 @@ impl Workspace {
                     self.toasts
                         .annotation(&r.by, r.agent, &text, &r.text, id, now);
                 }
-                for (id, status, note) in &news.closed {
+                for (id, _, note) in &news.closed {
                     let Some(e) = self.annotations.all.get(id) else {
                         continue;
                     };
@@ -4929,15 +4943,7 @@ impl Workspace {
                         .as_ref()
                         .map_or("agent", |r| r.by.as_str())
                         .to_owned();
-                    let what = if status == "done" {
-                        "resolved"
-                    } else {
-                        "rejected"
-                    };
-                    // A closed annotation has no number any more: its
-                    // comment names it.
-                    let short: String = e.comment.chars().take(40).collect();
-                    let text = format!("{what} “{short}”");
+                    let text = crate::core::annotations::closed_text(e, before.get(id).copied());
                     let note = note.clone().unwrap_or_default();
                     self.toasts.annotation(&by, true, &text, &note, id, now);
                 }

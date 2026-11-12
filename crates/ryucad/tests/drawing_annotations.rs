@@ -863,3 +863,64 @@ fn a_hole_called_out_on_one_sheet_is_called_out_on_every_sheet() {
         g["findings"]
     );
 }
+
+#[test]
+fn default_leaders_keep_clear_of_the_views_lines() {
+    // A 60 mm square plate bored ⌀20 through its middle, seen from above:
+    // the diameter's text, 10 mm past the bore at 45°, ran over the
+    // plate's edge, as each gear's bore did (#662).
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b", "params": {"x": 60, "y": 60, "z": 10}}),
+    );
+    let top = face(&mut s, |f| plane(f, [0.0, 0.0, 1.0]));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "sketch", "id": "s", "face": format!("p/b/{top}")}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [
+            {"op": "add", "type": "point", "at": [30, 30]}, {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "hole", "id": "h", "sketch": "s", "diameter": "20 mm",
+               "depth": "through_all", "targets": ["b"]}),
+    );
+    must(
+        &mut s,
+        "drawing.create",
+        json!({"part": "p", "drawing": "d", "name": "Plate"}),
+    );
+    must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [
+            {"op": "set", "id": "s1", "fields": {"scale": "1:1"}},
+            {"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s1", "orient": "top"}}]}),
+    );
+    let wall = face(&mut s, |f| f["surface"]["type"] == "cylinder");
+    add(
+        &mut s,
+        json!({"type": "diameter", "view": "v1", "of": format!("b/{wall}"),
+               "tolerance": {"fit": "H7"}}),
+    )
+    .unwrap();
+    let g = get(&mut s);
+    let over: Vec<&Value> = g["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "dwg_text_overlap" || f["code"] == "dwg_outside")
+        .collect();
+    assert!(over.is_empty(), "{over:?}");
+}

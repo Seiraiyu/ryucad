@@ -680,7 +680,7 @@ fn build_one(
             let mut out = match round {
                 Round::Circle {
                     centre, r_sheet, ..
-                } => leader_dim(ctx, vb, &shown, centre, r_sheet, written),
+                } => leader_dim(ctx, vb, sheet, &shown, centre, r_sheet, written),
                 Round::Side { feet, dir, .. } => linear_dim(
                     ctx,
                     vb,
@@ -716,7 +716,16 @@ fn build_one(
             let r = get("of", of)?;
             let runs = chamfer_text(session, plan, src, &r, units, ctx.standard)?;
             let tip = meet(&r);
-            let mut out = leader_text(ctx, vb, std::slice::from_ref(&runs), tip, written, sz);
+            let mut out = leader_text(
+                ctx,
+                vb,
+                sheet,
+                std::slice::from_ref(&runs),
+                tip,
+                written,
+                None,
+                sz,
+            );
             out.text = plain(&runs);
             out.report = json!({"text": out.text});
             Ok(out)
@@ -736,7 +745,7 @@ fn build_one(
                 l.push(Run::Text(format!(" {s}")));
             }
             let tip = tip.unwrap_or_else(|| meet(&r));
-            let mut out = leader_text(ctx, vb, &lines, tip, written, sz);
+            let mut out = leader_text(ctx, vb, sheet, &lines, tip, written, None, sz);
             out.text = lines.iter().map(|l| plain(l)).collect::<Vec<_>>().join(" ");
             out.report = report;
             out.report["text"] = json!(out.text);
@@ -1443,6 +1452,7 @@ fn angular_dim(
 fn leader_dim(
     ctx: &Context,
     vb: &ViewBuilt,
+    sheet: &SheetBuilt,
     shown: &text::Shown,
     centre: P,
     r: f64,
@@ -1457,31 +1467,32 @@ fn leader_dim(
         ],
     };
     let tip = addp(centre, scale(w, r));
-    let text_at = match written {
-        Some(w) => addp(vb.at, w),
-        None => addp(centre, scale(w, r + 10.0)),
-    };
-    let mut out = leader_text(
+    let first = addp(centre, scale(w, r + 10.0));
+    leader_text(
         ctx,
         vb,
+        sheet,
         std::slice::from_ref(&shown.runs),
         tip,
-        Some(sub(text_at, vb.at)),
+        written,
+        Some(first),
         sz,
-    );
-    out.at_placed = written.is_none();
-    out
+    )
 }
 
-/// Lines of text past a shoulder at `text` (relative to the view's
-/// centre; else 15 mm out and up from `tip`), with a leader to `tip`
+/// Lines of text past a shoulder at `written` (relative to the view's
+/// centre); else at `first`, or 12 mm out and up from `tip`, moved clear
+/// of the sheet's lines where that isn't (#662). A leader goes to `tip`,
 /// ending in an arrow.
+#[allow(clippy::too_many_arguments)]
 fn leader_text(
     ctx: &Context,
     vb: &ViewBuilt,
+    sheet: &SheetBuilt,
     lines: &[Vec<Run>],
     tip: P,
     written: Option<P>,
+    first: Option<P>,
     sz: f64,
 ) -> Out {
     let st = ctx.style;
@@ -1491,18 +1502,41 @@ fn leader_text(
     } else {
         away
     };
-    let t = written.map_or_else(
-        || {
-            addp(
-                tip,
-                [
-                    12.0 * away[0].signum().max(-1.0),
-                    12.0 * if away[1] >= 0.0 { 1.0 } else { -1.0 },
-                ],
-            )
-        },
-        |w| addp(vb.at, w),
-    );
+    let t = match written {
+        Some(w) => addp(vb.at, w),
+        None => {
+            let first = first.unwrap_or_else(|| {
+                addp(
+                    tip,
+                    [
+                        12.0 * away[0].signum().max(-1.0),
+                        12.0 * if away[1] >= 0.0 { 1.0 } else { -1.0 },
+                    ],
+                )
+            });
+            leader_place(sheet, vb, tip, first, |t| laid(st, lines, tip, t, sz))
+        }
+    };
+    let (items, boxes, segs) = laid(st, lines, tip, t, sz);
+    Out {
+        items,
+        at: sub(t, vb.at),
+        at_placed: written.is_none(),
+        lines: segs,
+        boxes,
+        ..Out::default()
+    }
+}
+
+/// A leader from `tip` to a shoulder at `t`, `lines` of text past it: its
+/// items, the text's boxes, and its two segments.
+fn laid(
+    st: ryu_draw::Standard,
+    lines: &[Vec<Run>],
+    tip: P,
+    t: P,
+    sz: f64,
+) -> (Vec<Item>, Vec<[P; 2]>, Vec<[P; 2]>) {
     let right = t[0] >= tip[0];
     let shoulder_end = addp(t, [if right { 3.0 } else { -3.0 }, 0.0]);
     let mut items = vec![stroke(
@@ -1535,14 +1569,56 @@ fn leader_text(
         ));
         boxes.push(text_box(l, at, sz, 0.0, anchor));
     }
-    Out {
-        items,
-        at: sub(t, vb.at),
-        at_placed: written.is_none(),
-        lines: vec![[tip, t], [t, shoulder_end]],
-        boxes,
-        ..Out::default()
+    (items, boxes, vec![[tip, t], [t, shoulder_end]])
+}
+
+/// Where text on a leader from `tip` goes when its annotation says nothing
+/// (#662): `first`, where it always went, when clear; else the nearest
+/// place turned from it by 10° steps to 80° either way and on by 4 mm,
+/// until 20 mm past the view's box, whose text and leader are clear; else
+/// `first`.
+fn leader_place(
+    sheet: &SheetBuilt,
+    vb: &ViewBuilt,
+    tip: P,
+    first: P,
+    lay: impl Fn(P) -> (Vec<Item>, Vec<[P; 2]>, Vec<[P; 2]>),
+) -> P {
+    let room = Clearance::of(sheet);
+    let ok = |t: P| {
+        let (_, boxes, segs) = lay(t);
+        room.clear(&boxes, &segs)
+    };
+    let d0 = sub(first, tip);
+    let start = ryu_math::hypot(d0[0], d0[1]);
+    if start < 1e-9 || ok(first) {
+        return first;
     }
+    let dir = scale(d0, 1.0 / start);
+    let [lo, hi] = vb.bounds;
+    let reach = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]
+        .iter()
+        .map(|q| ryu_math::hypot(q[0] - tip[0], q[1] - tip[1]))
+        .fold(0.0, f64::max)
+        + 20.0;
+    let mut d = start;
+    while d <= reach.max(start) {
+        for k in 0..=16 {
+            // 0, +10°, -10°, +20°, … ±80°.
+            let turn =
+                f64::from((k + 1) / 2) * 10.0f64.to_radians() * if k % 2 == 1 { 1.0 } else { -1.0 };
+            let (s, co) = ryu_math::sin_cos(turn);
+            let t = addp(
+                tip,
+                scale([co * dir[0] - s * dir[1], s * dir[0] + co * dir[1]], d),
+            );
+            if ok(t) {
+                return t;
+            }
+        }
+        d += 4.0;
+    }
+    first
 }
 
 /// The part (and its revision) whose solid `prefix` (`<solid>`, or
@@ -1977,6 +2053,80 @@ fn balloon(
     Ok(out)
 }
 
+/// What a default place keeps clear of, as the lint judges it (#645,
+/// #662): every view's stroked curves, the annotations placed before, and
+/// the drawing area clear of its keep-out boxes.
+struct Clearance<'s> {
+    curves: Vec<([P; 2], [P; 2])>,
+    placed: Vec<&'s Built>,
+    area: [P; 2],
+    keep_out: &'s [[P; 2]],
+}
+
+impl<'s> Clearance<'s> {
+    fn of(sheet: &'s SheetBuilt) -> Clearance<'s> {
+        // Every view's stroked curves on the sheet, as segments with their
+        // boxes: the lint's "view's lines".
+        let curves: Vec<([P; 2], [P; 2])> = sheet
+            .views
+            .iter()
+            .flat_map(|v| sheet.items[v.items.clone()].iter())
+            .filter_map(|it| match it {
+                Item::Path {
+                    path,
+                    stroke: Some(_),
+                    ..
+                } => Some(path.points()),
+                _ => None,
+            })
+            .flat_map(|pts| {
+                pts.windows(2)
+                    .map(|w| {
+                        let lo = [w[0][0].min(w[1][0]), w[0][1].min(w[1][1])];
+                        let hi = [w[0][0].max(w[1][0]), w[0][1].max(w[1][1])];
+                        ([w[0], w[1]], [lo, hi])
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let placed = sheet
+            .annotations
+            .iter()
+            .filter(|a| a.error.is_none())
+            .collect();
+        Clearance {
+            curves,
+            placed,
+            area: sheet.area,
+            keep_out: &sheet.keep_out,
+        }
+    }
+
+    /// Whether `boxes` lie in the area over no curve and no placed text or
+    /// line, and `leaders` cross no placed text.
+    fn clear(&self, boxes: &[[P; 2]], leaders: &[[P; 2]]) -> bool {
+        use super::lint::{grow, hits, inside, overlap};
+        boxes.iter().all(|b| {
+            if !inside(*b, self.area) || self.keep_out.iter().any(|k| overlap(*b, *k)) {
+                return false;
+            }
+            let tb = grow(*b, -0.2);
+            self.curves
+                .iter()
+                // A segment's box first: most are nowhere near.
+                .all(|(l, lb)| !overlap(*lb, tb) || !hits(*l, tb))
+                && self.placed.iter().all(|a| {
+                    a.boxes.iter().all(|x| !overlap(tb, *x))
+                        && a.lines.iter().all(|l| !hits(*l, tb))
+                })
+        }) && leaders.iter().all(|l| {
+            self.placed
+                .iter()
+                .all(|a| a.boxes.iter().all(|x| !hits(*l, *x)))
+        })
+    }
+}
+
 /// Where a balloon of radius `r` on a leader to `tip` goes when its file
 /// says nothing (#645): the nearest place, out from the view's centre
 /// through the tip and turned from that by up to 80° either way, whose
@@ -1985,54 +2135,11 @@ fn balloon(
 /// text, and which stays in the drawing area clear of the title block, as
 /// the lint judges them. Where none does, 18 mm out from the tip.
 fn balloon_place(sheet: &SheetBuilt, vb: &ViewBuilt, tip: P, away: P, r: f64) -> P {
-    use super::lint::{grow, hits, inside, overlap};
     let first = addp(tip, scale(away, 18.0));
-    // Every view's stroked curves on the sheet, as segments with their
-    // boxes: the lint's "view's lines".
-    let curves: Vec<([P; 2], [P; 2])> = sheet
-        .views
-        .iter()
-        .flat_map(|v| sheet.items[v.items.clone()].iter())
-        .filter_map(|it| match it {
-            Item::Path {
-                path,
-                stroke: Some(_),
-                ..
-            } => Some(path.points()),
-            _ => None,
-        })
-        .flat_map(|pts| {
-            pts.windows(2)
-                .map(|w| {
-                    let lo = [w[0][0].min(w[1][0]), w[0][1].min(w[1][1])];
-                    let hi = [w[0][0].max(w[1][0]), w[0][1].max(w[1][1])];
-                    ([w[0], w[1]], [lo, hi])
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let placed: Vec<&Built> = sheet
-        .annotations
-        .iter()
-        .filter(|a| a.error.is_none())
-        .collect();
+    let room = Clearance::of(sheet);
     let clear = |c: P| {
         let b = [[c[0] - r, c[1] - r], [c[0] + r, c[1] + r]];
-        if !inside(b, sheet.area) || sheet.keep_out.iter().any(|k| overlap(b, *k)) {
-            return false;
-        }
-        let tb = grow(b, -0.2);
-        let leader = [addp(c, scale(unit(sub(tip, c)), r)), tip];
-        curves
-            .iter()
-            // A segment's box first: most are nowhere near.
-            .all(|(l, lb)| !overlap(*lb, tb) || !hits(*l, tb))
-            && placed.iter().all(|a| {
-                a.boxes
-                    .iter()
-                    .all(|x| !overlap(tb, *x) && !hits(leader, *x))
-                    && a.lines.iter().all(|l| !hits(*l, tb))
-            })
+        room.clear(&[b], &[[addp(c, scale(unit(sub(tip, c)), r)), tip]])
     };
     // Far enough to leave the view's box by two radii, from the tip.
     let [lo, hi] = vb.bounds;

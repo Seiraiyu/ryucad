@@ -9,7 +9,15 @@ use crate::ui::modes;
 use eframe::egui;
 
 pub fn window(ctx: &egui::Context, ws: &mut Workspace, at: egui::Rect) {
-    let Some(d) = ws.mating.clone() else { return };
+    let given = egui::Id::new("mate-dialog keyboard");
+    let Some(d) = ws.mating.clone() else {
+        ctx.data_mut(|m| m.remove::<bool>(given));
+        return;
+    };
+    // Esc closes it, whatever has the keyboard, once no list of its is
+    // open (#749).
+    let esc = !egui::Popup::is_any_open(ctx)
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     let mut open = true;
     let mut changed = false;
     let mut add = false;
@@ -39,13 +47,23 @@ pub fn window(ctx: &egui::Context, ws: &mut Workspace, at: egui::Rect) {
             if let Some(why) = &d.note {
                 ui.colored_label(ui.visuals().warn_fg_color, why);
             }
-            egui::ComboBox::from_label("Form")
+            let picked = egui::ComboBox::from_label("Form")
                 .selected_text(form.name())
                 .show_ui(ui, |ui| {
                     for f in Form::ALL {
                         ui.selectable_value(&mut form, f, f.name());
                     }
-                });
+                })
+                .response;
+            // Opened, its first control takes the keyboard, so Tab goes on
+            // through it (#749).
+            if !ui
+                .ctx()
+                .data(|m| m.get_temp::<bool>(given).unwrap_or(false))
+            {
+                picked.request_focus();
+                ui.ctx().data_mut(|m| m.insert_temp(given, true));
+            }
             let (takes_angle, takes_distance) = form.takes();
             let field = |ui: &mut egui::Ui, name: &str, text: &mut String| {
                 ui.horizontal(|ui| {
@@ -99,7 +117,7 @@ pub fn window(ctx: &egui::Context, ws: &mut Workspace, at: egui::Rect) {
     }
     if add {
         ws.add_mate();
-    } else if cancel || !open {
+    } else if cancel || esc || !open {
         ws.close_mate();
     } else if changed {
         ws.preview_mate();
