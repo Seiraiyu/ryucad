@@ -47,6 +47,22 @@ pub struct Planned {
     pub props_of: Option<usize>,
 }
 
+/// What one file's plan takes from the other files of an import (design
+/// 448, plan 24.D): empty for a file alone.
+#[derive(Clone, Debug, Default)]
+pub struct Cross {
+    /// Externally defined definitions with the parts their files made:
+    /// placed by their usages like any child, made by nothing here.
+    pub external: BTreeMap<usize, Id>,
+    /// The definitions to make parts of, for a file another file's
+    /// documents name: those its referenced roots reach. Every one when
+    /// `None`.
+    pub scope: Option<std::collections::BTreeSet<usize>>,
+    /// The ID a definition's part starts from, before its product's id
+    /// or name: the referencing product's.
+    pub bases: BTreeMap<usize, Id>,
+}
+
 /// Definition `k`'s product as a feature names it: its id and name, and
 /// its place among definitions with both equal.
 pub fn product_of(opened: &Opened, k: usize) -> ProductRef {
@@ -223,15 +239,23 @@ pub struct Fresh<'a> {
     pub pdm: bool,
     /// The mode new import features take (none: a solid).
     pub mode: Option<crate::doc::import::Mode>,
+    /// What the import's other files give this one (design 448, 24.D).
+    pub cross: Cross,
 }
 
 impl Fresh<'_> {
+    /// [`makes_with`] for this file and the definitions [`Cross::external`]
+    /// gives parts.
+    pub fn makes(&self) -> Vec<bool> {
+        makes_with(self.opened, &self.cross.external.keys().copied().collect())
+    }
+
     /// The parts and assemblies the file makes, each product in
     /// definition order (an assembly before the part of its own bodies),
     /// then the bodies no product reaches.
     pub fn plan(&self) -> Result<Vec<Planned>> {
         let opened = self.opened;
-        let makes = makes(opened);
+        let makes = self.makes();
         let unplaced = bodies(opened, None) > 0;
         let mut roots: Vec<Option<usize>> = opened
             .products
@@ -273,7 +297,14 @@ impl Fresh<'_> {
     ) -> Result<Vec<Planned>> {
         let opened = self.opened;
         let defs = &opened.products.definitions;
-        let makes = makes(opened);
+        let makes = self.makes();
+        // Definitions whose parts come from other files are placed, never made.
+        let mut known = known.clone();
+        for (k, p) in &self.cross.external {
+            known.entry(*k).or_insert_with(|| p.clone());
+        }
+        let known = &known;
+        let in_scope = |k: usize| self.cross.scope.as_ref().is_none_or(|s| s.contains(&k));
         // IDs first: an assembly's instances name its children's parts.
         let mut taken: Vec<String> = Vec::new();
         let mut take = |base: Id, named: bool| -> Id {
@@ -294,7 +325,7 @@ impl Fresh<'_> {
             || id_from(self.stem).unwrap_or_else(|| Id::parse("part", "part").expect("an ID"));
         let mut part_of: Vec<Option<Id>> = vec![None; defs.len()];
         let mut own_of: Vec<Option<Id>> = vec![None; defs.len()];
-        for k in (0..defs.len()).filter(|&k| makes[k]) {
+        for k in (0..defs.len()).filter(|&k| makes[k] && in_scope(k)) {
             if let Some(id) = known.get(&k) {
                 part_of[k] = Some(id.clone());
                 continue;
@@ -302,7 +333,12 @@ impl Fresh<'_> {
             let id = match named(Some(k)) {
                 Some(p) => take(p, true),
                 None => {
-                    let base = id_from(&defs[k].product_id)
+                    let base = self
+                        .cross
+                        .bases
+                        .get(&k)
+                        .cloned()
+                        .or_else(|| id_from(&defs[k].product_id))
                         .or_else(|| id_from(&defs[k].name))
                         .unwrap_or_else(fallback);
                     take(base, false)
@@ -320,7 +356,7 @@ impl Fresh<'_> {
             None => take(fallback(), false),
         });
         let mut out = Vec::new();
-        for k in (0..defs.len()).filter(|&k| makes[k] && !known.contains_key(&k)) {
+        for k in (0..defs.len()).filter(|&k| makes[k] && in_scope(k) && !known.contains_key(&k)) {
             let id = part_of[k].clone().expect("named");
             let product = product_of(opened, k);
             if is_assembly(opened, &makes, k) {
@@ -671,6 +707,7 @@ mod flat_tests {
             taken: &taken,
             pdm: false,
             mode: None,
+            cross: Cross::default(),
         }
         .plan()
         .unwrap();
@@ -867,5 +904,86 @@ mod tests {
             assert_eq!(text.unwrap(), format!("{{\"k\": {k}}}"));
         }
         assert!(!root.join("parts/old").exists(), "emptied, so gone");
+    }
+
+    /// A definition whose shape is another file's (design 448, 24.D) is
+    /// placed by its usages like any child, and made by nothing here.
+    #[test]
+    fn a_definition_given_a_part_from_another_file_is_placed_not_made() {
+        use crate::doc::import::FileRef;
+        let bytes = crate::import::tests::external_assembly(
+            "ASM",
+            &[("BOX", "box.stp", [0.0; 3]), ("PIN", "pin.stp", [50.0, 0.0, 0.0]), ("PIN", "pin.stp", [0.0, 50.0, 0.0])],
+        );
+        let file = crate::doc::project::ImportFile::new(bytes);
+        let opened = crate::import::opened(&file).unwrap();
+        let fr = FileRef { path: "imports/asm.step".into(), blake3: file.blake3.clone() };
+        let defs = &opened.products.definitions;
+        let k = |id: &str| defs.iter().position(|d| &*d.product_id == id).unwrap();
+        let taken = |_: &str| false;
+        let external: BTreeMap<usize, Id> = [
+            (k("BOX"), Id::parse("box", "part").unwrap()),
+            (k("PIN"), Id::parse("pin", "part").unwrap()),
+        ]
+        .into();
+        let fresh = Fresh {
+            opened: &opened,
+            file: &fr,
+            stem: "asm",
+            part: None,
+            taken: &taken,
+            pdm: false,
+            mode: None,
+            cross: Cross { external, ..Default::default() },
+        };
+        let planned = fresh.plan().unwrap();
+        assert_eq!(planned.len(), 1, "only the assembly: its parts are other files'");
+        let a = &planned[0];
+        assert_eq!((a.part.as_str(), a.kind), ("asm", PartKind::Assembly));
+        let placed: Vec<(String, f64, f64)> = a
+            .features
+            .iter()
+            .map(|(_, f)| match f {
+                Feature::Instance(i) => (i.part.to_string(), i.pose.origin_m[0], i.pose.origin_m[1]),
+                _ => panic!("{f:?}"),
+            })
+            .collect();
+        assert_eq!(placed.len(), 3);
+        assert_eq!(placed[0].0, "box");
+        assert!(placed[1].0 == "pin" && (placed[1].1 - 0.05).abs() < 1e-12);
+        assert!(placed[2].0 == "pin" && (placed[2].2 - 0.05).abs() < 1e-12);
+        // Without them, as 24.A left it: nothing to import.
+        let alone = Fresh { cross: Cross::default(), ..fresh };
+        assert_eq!(alone.plan().unwrap_err().code, Code::ImportBodyMissing);
+    }
+
+    /// A referenced file makes only what its referenced roots reach, its
+    /// parts named from `bases`.
+    #[test]
+    fn a_referenced_file_makes_only_its_scope_named_as_referenced() {
+        use crate::doc::import::FileRef;
+        let file = crate::doc::project::ImportFile::new(crate::import::tests::frame_file());
+        let opened = crate::import::opened(&file).unwrap();
+        let fr = FileRef { path: "imports/frame.step".into(), blake3: file.blake3.clone() };
+        let defs = &opened.products.definitions;
+        let pin = defs.iter().position(|d| &*d.product_id == "P-1").unwrap();
+        let taken = |_: &str| false;
+        let fresh = Fresh {
+            opened: &opened,
+            file: &fr,
+            stem: "frame",
+            part: None,
+            taken: &taken,
+            pdm: false,
+            mode: None,
+            cross: Cross {
+                scope: Some([pin].into()),
+                bases: [(pin, Id::parse("dowel", "part").unwrap())].into(),
+                ..Default::default()
+            },
+        };
+        let planned = fresh.make(&BTreeMap::new(), false, &[]).unwrap();
+        let parts: Vec<&str> = planned.iter().map(|p| p.part.as_str()).collect();
+        assert_eq!(parts, ["dowel"]);
     }
 }

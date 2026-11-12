@@ -1040,6 +1040,7 @@ fn import_opened(
                     taken: &taken,
                     pdm: root.join(PDM_CONFIG).is_file(),
                     mode: ask.mode(),
+                    cross: plan::Cross::default(),
                 }
                 .plan()?
             }
@@ -1160,6 +1161,7 @@ fn reimport_opened(
         taken: &taken,
         pdm: root.join(PDM_CONFIG).is_file(),
         mode: ask.mode(),
+        cross: plan::Cross::default(),
     };
     let mut u = update::plan(project, opened, &file_ref, &fresh)?;
     let old_opened = self::opened(&old).ok();
@@ -1315,6 +1317,7 @@ pub fn update_in_place(root: &std::path::Path, path: &str) -> Result<Option<Writ
         // Doctor's repair asks for nothing: new products are references,
         // as an import's are by default.
         mode: Some(crate::doc::import::Mode::Reference),
+        cross: plan::Cross::default(),
     };
     let u = update::plan(&project, &opened, &file_ref, &fresh)?;
     Ok(Some(plan::writes(&project, &u.planned)?))
@@ -1380,6 +1383,7 @@ pub fn misplaced(project: &crate::doc::project::Project) -> Vec<Misplaced> {
             taken: &taken,
             pdm: false,
             mode: None,
+            cross: plan::Cross::default(),
         };
         let Ok(u) = update::plan(project, &opened, &file_ref, &fresh) else {
             continue;

@@ -112,7 +112,7 @@ pub fn plan(
 ) -> Result<Update> {
     let path = file.path.as_str();
     let defs = &opened.products.definitions;
-    let makes = plan::makes(opened);
+    let makes = fresh.makes();
     let (mut features, instances) = made_of(project, path);
     // Flattened parts follow their file apart.
     let flat: BTreeSet<Id> = features
@@ -159,6 +159,12 @@ pub fn plan(
             known.entry(k).or_insert_with(|| p.clone());
             def_of_part.entry(p.clone()).or_insert(k);
         }
+    }
+    // Externally defined definitions place the parts their files made
+    // (design 448, 24.D): an instance of one is that definition's usage.
+    for (&k, p) in &fresh.cross.external {
+        known.entry(k).or_insert_with(|| p.clone());
+        def_of_part.entry(p.clone()).or_insert(k);
     }
     // New products make parts only where the file was imported whole
     // before. A file only ever imported `--into` a part makes none, nor do
