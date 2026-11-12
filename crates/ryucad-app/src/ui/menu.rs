@@ -36,13 +36,54 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened) -> Option<Action> {
     let mut action = None;
     let shown = commands::shown(o, ui.ctx());
     egui::MenuBar::new().ui(ui, |ui| {
+        // Room below the bar, not below the menu's cursor: a menu that
+        // changed size is drawn a frame where it was, so its cursor moves.
+        let room = (ui.ctx().content_rect().bottom() - ui.max_rect().bottom() - 24.0).max(120.0);
         for cat in Category::ALL {
             if command::menu(cat).next().is_none() {
                 continue;
             }
             ui.menu_button(cat.title(), |ui| {
-                if let Some(a) = items(ui, o, &shown, cat) {
-                    action = Some(a);
+                // A menu taller than the window flows into columns: View has
+                // more rows than a 1000-point window (#728, #734). Columns,
+                // not a ScrollArea, since a ScrollArea round a menu's items
+                // and submenus loses their clicks. The one column's size is
+                // measured whenever the menu is drawn in one.
+                let id = egui::Id::unique(("menu size", cat.title()));
+                let list: Vec<_> = command::menu(cat).collect();
+                // Rows a column holds, from the one column's average row.
+                let tall = ui
+                    .data(|d| d.get_temp::<egui::Vec2>(id))
+                    .filter(|one| one.y > room)
+                    .map(|one| {
+                        let row = one.y / list.len().max(1) as f32;
+                        let per = ((room / row).floor() as usize).saturating_sub(1).max(1);
+                        (per, one)
+                    });
+                match tall {
+                    Some((per, one)) => {
+                        ui.horizontal_top(|ui| {
+                            for chunk in list.chunks(per) {
+                                ui.vertical(|ui| {
+                                    // The one column's width: a separator
+                                    // takes all the width it is given.
+                                    ui.set_width(one.x);
+                                    if let Some(a) = items(ui, o, &shown, chunk) {
+                                        action = Some(a);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    None => {
+                        let top = ui.cursor().top();
+                        if let Some(a) = items(ui, o, &shown, &list) {
+                            action = Some(a);
+                        }
+                        let r = ui.min_rect();
+                        let one = egui::vec2(r.width(), r.bottom() - top);
+                        ui.data_mut(|d| d.insert_temp(id, one));
+                    }
                 }
             });
         }
@@ -50,18 +91,18 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened) -> Option<Action> {
     action
 }
 
-/// A category's items. A separator comes before each run of another
+/// A category's items, or one column of them. A separator comes before each run of another
 /// kind of command: the File menu's import and close groups, the View
 /// menu's toggles and compares.
 fn items(
     ui: &mut egui::Ui,
     o: &mut Opened,
     shown: &commands::Shown,
-    cat: Category,
+    list: &[&'static command::Command],
 ) -> Option<Action> {
     let mut action = None;
     let mut group = None;
-    for c in command::menu(cat) {
+    for c in list {
         let g = group_of(c.id);
         if group.is_some_and(|was| was != g) {
             ui.separator();

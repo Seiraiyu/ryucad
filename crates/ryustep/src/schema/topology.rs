@@ -47,8 +47,8 @@ pub enum Brep {
         voids: Vec<Id>,
         faceted: bool,
     },
-    /// `SHELL_BASED_SURFACE_MODEL`: open or closed shells.
-    Shells(Vec<Id>),
+    /// `SHELL_BASED_SURFACE_MODEL`: open or closed shells, with its name.
+    Shells { name: String, shells: Vec<Id> },
     /// `FACE_BASED_SURFACE_MODEL`: connected face sets.
     Faces(Vec<Id>),
 }
@@ -94,7 +94,12 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Enti
         }
         "FACETED_BREP" => one(id, params).map(|outer| solid(label(params), outer, vec![], true)),
         "BREP_WITH_VOIDS" => voids(id, params),
-        "SHELL_BASED_SURFACE_MODEL" => ids(id, params).map(|s| Entity::Brep(Brep::Shells(s))),
+        "SHELL_BASED_SURFACE_MODEL" => ids(id, params).map(|shells| {
+            Entity::Brep(Brep::Shells {
+                name: label(params),
+                shells,
+            })
+        }),
         "FACE_BASED_SURFACE_MODEL" => ids(id, params).map(|s| Entity::Brep(Brep::Faces(s))),
         "CONNECTED_FACE_SET" => ids(id, params).map(|faces| Entity::FaceSet { faces }),
         _ => return None,
@@ -335,7 +340,13 @@ mod tests {
         assert_eq!(get(1), solid("base".into(), 9, vec![], false));
         assert_eq!(get(2), solid("boss".into(), 9, vec![10, 11], false));
         assert_eq!(get(3), solid(String::new(), 9, vec![], true));
-        assert_eq!(get(4), Entity::Brep(Brep::Shells(vec![12, 13])));
+        assert_eq!(
+            get(4),
+            Entity::Brep(Brep::Shells {
+                name: String::new(),
+                shells: vec![12, 13]
+            })
+        );
         let kinds: Vec<String> = (1..=4).map(|k| get(k).kind().to_owned()).collect();
         assert_eq!(
             kinds,

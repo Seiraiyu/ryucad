@@ -523,7 +523,10 @@ fn the_move_tool_previews_and_writes_a_typed_move() {
     }
     assert!(ws.wait_until(WAIT, |w| w.idle() && w.model.preview.is_empty()));
     // A fixed instance has no handles, and says why.
-    assert_eq!(ws.start_move("frame", "b1"), Err("b1 is fixed".to_owned()));
+    assert_eq!(
+        ws.start_move("frame", "b1"),
+        Err("b1 is fixed: free it with --fixed false to move it".to_owned())
+    );
     // Cancelling draws it where it is again.
     ws.start_move("frame", "b2").unwrap();
     ws.mover.as_mut().unwrap().grip = Some(Grip::Ring(2));

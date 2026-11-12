@@ -255,15 +255,9 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
                     mm(DASH[1]),
                 );
             }
-            polyline_wide(
-                out,
-                f,
-                &corners(title_tab),
-                *stroke,
-                Some(*paper),
-                *width,
-                false,
-            );
+            if let Some(tab) = title_tab {
+                polyline_wide(out, f, &corners(tab), *stroke, Some(*paper), *width, false);
+            }
         }
         Item::Text {
             text,

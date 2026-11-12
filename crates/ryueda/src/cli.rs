@@ -260,14 +260,19 @@ enum Command {
         expect: Expect,
     },
     /// Compose a block's schematic: instructions an agent gives, each
-    /// lasting until released ("sheet X... S", "beside X... Y
-    /// left|right|above|below", "near X... P", "align X... row|column",
-    /// "group X...", "edge X... left|right|top|bottom", "orient X...
-    /// 0|90|180|270 [mirror]", "text X... refdes|value|both
-    /// left|right|above|below", "net N wire|label|port", "idiom X...
-    /// KIND|none", "flow X... reversed", "release X..."). Parts by
-    /// designator (U3), unit (U1:2), instance (instance:<id>) or port
-    /// (port:SDA); pins as U3.VDD or U3.4; nets by name or rail:<name>.
+    /// lasting until released: "sheet X... SHEET", "sheet rename SHEET
+    /// NAME", "beside X... Y left|right|above|below", "near X... P",
+    /// "align X... row|column", "group X...", "edge X...
+    /// left|right|top|bottom", "orient X... 0|90|180|270 [mirror]", "text
+    /// X... refdes|value|both left|right|above|below", "net N
+    /// wire|label|port|bus", "note REGION|SHEET TEXT", "idiom X...
+    /// KIND|none", "flow X... reversed", "shift X... up|down|left|right
+    /// STEPS" (a move only), "release X...|ID|net:N", "region TITLE X...",
+    /// "region none X...", "region REGION title TITLE" ("region rename
+    /// REGION TITLE" reads so), "paper SHEET SIZE [landscape|portrait]".
+    /// X is a part by designator (U3), unit (U1:2), instance
+    /// (instance:<id>), port (port:SDA) or region (region:r2 or its
+    /// title); pins as U3.VDD or U3.4; nets by name or rail:<name>.
     Place {
         block: String,
         instructions: Vec<String>,
@@ -502,11 +507,13 @@ enum SymbolCmd {
         class: Option<String>,
         /// Draw it from the standards' template for a class: resistor,
         /// capacitor, inductor, diode, led (whole), ic, regulator,
-        /// connector (a box round --pins); --ops apply after.
+        /// connector (a box round --pins), opamp (a triangle per unit,
+        /// --units 1 to 4, round --pins); --ops apply after.
         #[arg(long)]
         template: Option<String>,
-        /// A box template's pins, as JSON: [{"number": "1", "name":
-        /// "VDD", "type": "power_in"}, ...].
+        /// A box's or op-amp's pins, as JSON: [{"number": "1", "name":
+        /// "VDD", "type": "power_in"}, ...]; an op-amp's amplifier pins
+        /// name their "unit" when there are several, its supplies none.
         #[arg(long, value_parser = pin_specs, default_value = "[]")]
         pins: PinSpecs,
         #[command(flatten)]

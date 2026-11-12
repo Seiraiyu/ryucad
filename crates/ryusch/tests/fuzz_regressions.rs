@@ -131,3 +131,30 @@ fn a_connectors_text_stays_on_its_sheet() {
         9, 120, 110, 249, 118, 232,
     ]);
 }
+
+/// The seeded sweep's input `seed` (its xorshift64, as `seeded_sweep.rs`).
+fn sweep_input(seed: u64) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+    (0..128)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect()
+}
+
+/// Plan 3.A's fixpoint finds, one sweep input per cause: a named region
+/// shed the clusters it took from nothing (20); a `region none` part rode
+/// into a named region by a join and left it laid out again (234); a
+/// named region's parts on two sheets made one region over both, and a
+/// part placed by itself took no title its instruction gave (159); a
+/// bypass capacitor's own rail port became a wire (236); a lasting
+/// `net … wire` drawn by labels was wired laid out again (64).
+#[test]
+fn layouts_laid_out_over_themselves_are_the_same() {
+    for seed in [20, 234, 159, 236, 64] {
+        ryusch::testing::check_fixpoint(&sweep_input(seed));
+    }
+}

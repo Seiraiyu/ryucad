@@ -66,6 +66,15 @@ pub struct Row {
 }
 
 impl Row {
+    /// Where it comes from: `from <url>`, and `, folder <path>` when not
+    /// its root (#752).
+    pub fn source(&self) -> String {
+        match self.path.as_str() {
+            "" => format!("from {}", self.url),
+            p => format!("from {}, folder {p}", self.url),
+        }
+    }
+
     /// Its name, else its ID and what reaches it: `bb (through fasteners)`.
     pub fn title(&self) -> String {
         match &self.name {
@@ -438,6 +447,19 @@ mod tests {
              "latest": "C", "project": "aa", "dependency": "fasteners"},
             {"assembly": "frame", "instance": "own", "part": "plate", "label": "A",
              "latest": "B"}]})
+    }
+
+    #[test]
+    fn a_rows_source_names_its_url_and_folder() {
+        let mut d = Deps::default();
+        d.listed(
+            &json!({"dependencies": [{"name": "fasteners", "project": "aa",
+            "url": "file:///lib", "path": "", "via": [], "fetched": true,
+            "tip": "d2e5f14193ab", "labels": [], "faults": []}]}),
+        );
+        assert_eq!(d.rows[0].source(), "from file:///lib");
+        d.rows[0].path = "parts".into();
+        assert_eq!(d.rows[0].source(), "from file:///lib, folder parts");
     }
 
     #[test]
