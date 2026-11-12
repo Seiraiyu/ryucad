@@ -3,9 +3,11 @@
 //! geometry, product, usage and style instance, so no geometry instance
 //! is renumbered by them. Per product, in product order: its
 //! `MATERIAL_DESIGNATION` over its `PRODUCT_DEFINITION_SHAPE` (a set of
-//! definitions in AP242, one in AP214), OCCT's `material name` property,
-//! and with a density the `density` property, a `POSITIVE_RATIO_MEASURE`
-//! in kg/m³ over one shared `DERIVED_UNIT`; then one `user defined
+//! definitions in AP242, one in AP214), then OCCT's `material name`
+//! property and, with a density, the `density` property (a
+//! `POSITIVE_RATIO_MEASURE` in kg/m³ over one shared `DERIVED_UNIT`),
+//! both over its `PRODUCT_DEFINITION`, where OCCT 7.8's XDE writes and
+//! reads them (it reads no `MATERIAL_DESIGNATION`); then one `user defined
 //! attributes` property over its `PRODUCT_DEFINITION`, its items in the
 //! order given. Every property shares one `REPRESENTATION_CONTEXT`.
 
@@ -195,7 +197,7 @@ pub(crate) fn write(
                 out,
                 ctx,
                 ("material property", "material name"),
-                shape,
+                definition,
                 "material name",
                 |out| {
                     vec![out.add(
@@ -210,7 +212,7 @@ pub(crate) fn write(
                     out,
                     ctx,
                     ("material property", "density"),
-                    shape,
+                    definition,
                     "density",
                     |out| {
                         vec![out.add(
