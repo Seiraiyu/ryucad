@@ -1141,6 +1141,17 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         )
         .with("path", &target));
     };
+    if let Some((part, files)) = update::cross_flattened(session.project(), &target) {
+        return Err(Error::new(
+            Code::Usage,
+            format!(
+                "part {part} is flattened across files ({}): an update can't walk it again yet; delete it and import the assembly again with --flatten",
+                files.join(", ")
+            ),
+        )
+        .with("part", &part)
+        .with("files", files));
+    }
     let source = {
         let p = std::path::Path::new(&ask.path);
         if p.is_absolute() {
@@ -1557,6 +1568,9 @@ pub fn update_in_place(root: &std::path::Path, path: &str) -> Result<Option<Writ
     use crate::doc::import::FileRef;
     use crate::doc::project::{PDM_CONFIG, Project};
     let project = Project::load(root)?;
+    if update::cross_flattened(&project, path).is_some() {
+        return Ok(None);
+    }
     let Some(file) = project.imports.get(path) else {
         return Ok(None);
     };
@@ -3666,6 +3680,22 @@ pub(crate) mod tests {
         let e = import_call(&mut s, json!({"path": two.path().join("asm.stp"), "update": "imports/asm.step"})).unwrap_err();
         assert_eq!(e.code, Code::ImportExternalMissing);
         assert_eq!(crate::session::files(dir.path()).unwrap(), before);
+    }
+
+    /// A part flattened across files can't be walked again by an update
+    /// (design 448 adds no field naming its root file): an update of any
+    /// file it reads is refused naming it, and doctor leaves the file
+    /// alone; a single-file flattened part updates as before.
+    #[test]
+    fn a_part_flattened_across_files_refuses_updates() {
+        let one = version_one();
+        let (dir, mut s) = crate::server::tests::fresh();
+        import_call(&mut s, json!({"path": one.path().join("asm.stp"), "flatten": true, "part": "rig"})).unwrap();
+        let three = folder(&[("box.stp", part_file("BOX", 14.0))]);
+        let e = import_call(&mut s, json!({"path": three.path().join("box.stp"), "update": "imports/box.step"})).unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        assert_eq!(e.details["part"], "rig");
+        assert!(update_in_place(dir.path(), "imports/box.step").unwrap().is_none());
     }
 
     /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of

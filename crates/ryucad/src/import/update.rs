@@ -978,6 +978,64 @@ pub fn file_of(project: &Project, part: &Id) -> Option<String> {
         })
 }
 
+/// A part flattened across files (design 448, 24.D) that reads `path`,
+/// with every file it reads: its placed import features name more than
+/// one file, or one's first usage isn't a usage of a root of its own
+/// file (the root is another file no feature names). An update can't
+/// walk it again.
+pub fn cross_flattened(project: &Project, path: &str) -> Option<(Id, Vec<String>)> {
+    use crate::doc::import::Via;
+    fn from_a_root(o: &Opened, v: &Via) -> bool {
+        o.products.roots.iter().any(|&r| {
+            o.products.definitions[r]
+                .children
+                .iter()
+                .enumerate()
+                .any(|(n, c)| {
+                    *c.id == *v.usage
+                        && plan::product_of(o, c.definition) == v.product
+                        && plan::usage_ordinal(o, r, n) == v.ordinal
+                })
+        })
+    }
+    let mut open: BTreeMap<String, Option<std::sync::Arc<Opened>>> = BTreeMap::new();
+    for (pid, p) in &project.parts {
+        let imports: Vec<&Import> = p
+            .order()
+            .iter()
+            .filter_map(|f| match p.features.get(f) {
+                Some(Ok(Feature::Import(i))) => Some(i),
+                _ => None,
+            })
+            .collect();
+        if !imports.iter().any(|i| i.place.is_some()) || !imports.iter().any(|i| i.file.path == path) {
+            continue;
+        }
+        let mut files: Vec<String> = imports.iter().map(|i| i.file.path.clone()).collect();
+        files.sort();
+        files.dedup();
+        let mut foreign = files.len() > 1;
+        for i in &imports {
+            if foreign {
+                break;
+            }
+            let Some(first) = i.place.as_ref().and_then(|pl| pl.via.first()) else {
+                continue;
+            };
+            let o = open
+                .entry(i.file.path.clone())
+                .or_insert_with(|| project.imports.get(&i.file.path).and_then(|f| super::opened(f).ok()));
+            if let Some(o) = o {
+                foreign = !from_a_root(o, first);
+            }
+        }
+        if foreign {
+            return Some((pid.clone(), files));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::Code;
