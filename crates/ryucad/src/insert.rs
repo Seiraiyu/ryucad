@@ -883,4 +883,13 @@ pub(crate) mod tests {
             "{v}"
         );
     }
+
+    #[test]
+    fn a_part_inserted_at_working_cant_be_deleted() {
+        let (_dir, mut s) = boarded();
+        let e = call(&mut s, "part.delete", json!({"part": "pcb"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents);
+        assert_eq!(e.details["inserted_by"], json!(["enclosure/pcb"]));
+        assert!(e.details.get("instances").is_none());
+    }
 }
