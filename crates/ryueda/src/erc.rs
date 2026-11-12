@@ -1061,23 +1061,27 @@ pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<
     let erc = erc(&p, None)?;
     let schematic = schematic_warnings(&p);
     let symbols = crate::symlint::faults(&p, &crate::lint::prefs(&p));
+    let style = crate::stylelint::faults(&p, &crate::lint::prefs(&p));
     let supply = crate::supply::findings(&p, cats)?;
     let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| f.is_error()).count() as u64
         + symbols.iter().filter(|f| f.is_error()).count() as u64
+        + style.iter().filter(|f| f.is_error()).count() as u64
         + supply_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| !f.is_error()).count() as u64
         + symbols.iter().filter(|f| !f.is_error()).count() as u64
+        + style.iter().filter(|f| !f.is_error()).count() as u64
         + (supply.len() as u64 - supply_errors);
     let report = json!({
         "faults": fault::list(&faults),
         "erc": erc,
         "schematic": fault::list(&schematic),
         "symbols": fault::list(&symbols),
+        "style": fault::list(&style),
         "supply": supply,
         "errors": errors,
         "warnings": warnings,
@@ -1197,6 +1201,7 @@ mod tests {
         for code in ryusch::lint::RULES
             .iter()
             .chain(crate::symlint::RULES.iter())
+            .chain(crate::stylelint::RULES.iter())
             .map(|r| r.code)
         {
             let c: Result<Code, _> = serde_json::from_value(json!(code));

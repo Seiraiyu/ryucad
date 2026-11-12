@@ -69,6 +69,40 @@ with tempfile.TemporaryDirectory() as d:
         check(f"{pid}: votes counted", t[pid]["votes"] == {"first": 2, "second": 1, "same": 0})
     check("tally files written", os.path.exists(os.path.join(out1, "tally.json"))
           and os.path.exists(os.path.join(out1, "tally.md")))
+    # Several sheets a side: a list of images, copied as A-1.png, A-2.png …
+    multi = os.path.join(d, "multi.json")
+    with open(multi, "w") as f:
+        json.dump([{"id": "m", "first": [os.path.join(imgs, "0-ours.png"), os.path.join(imgs, "1-ours.png")],
+                    "second": os.path.join(imgs, "0-ref.png")}], f)
+    out3 = os.path.join(d, "o3")
+    k3 = blind.prepare(out3, 348, multi)["m"]
+    many = "A" if k3["A"] == "first" else "B"
+    one = "B" if many == "A" else "A"
+    check("a list's images numbered", os.path.exists(os.path.join(out3, "m", f"{many}-1.png"))
+          and os.path.exists(os.path.join(out3, "m", f"{many}-2.png")))
+    check("one image stays plain", os.path.exists(os.path.join(out3, "m", f"{one}.png")))
+    check("the prompt names the files", f"{many}-1.png" in open(os.path.join(out3, "m", "prompt.txt")).read())
+    # The target: ours (first) against the reference (second) on pairs
+    # named ref-*: the same or better on two of four, and grouping and
+    # paper within a point.
+    out4 = os.path.join(d, "o4")
+    pairs4 = [{"id": f"ref-{i}", "first": os.path.join(imgs, f"{i % 3}-ours.png"),
+               "second": os.path.join(imgs, f"{i % 3}-ref.png")} for i in range(4)]
+    with open(os.path.join(d, "p4.json"), "w") as f:
+        json.dump(pairs4, f)
+    k4 = blind.prepare(out4, 348, os.path.join(d, "p4.json"))
+    for i, (pid, key) in enumerate(sorted(k4.items())):
+        first = "A" if key["A"] == "first" else "B"
+        second = "B" if first == "A" else "A"
+        better = first if i < 2 else second
+        s_first = {c: 4 for c in blind.CRITERIA}
+        s_second = {c: 4 for c in blind.CRITERIA}
+        for n in range(3):
+            with open(os.path.join(out4, pid, f"judge-{n + 1}.json"), "w") as f:
+                json.dump({"better": better, "scores": {first: s_first, second: s_second}, "why": "x"}, f)
+    blind.tally(out4)
+    t = blind.target(out4)
+    check("the target holds on two of four", t["held"] and t["same_or_better"] == 2)
 
 print("ok" if not failed else f"{failed} failed")
 sys.exit(1 if failed else 0)

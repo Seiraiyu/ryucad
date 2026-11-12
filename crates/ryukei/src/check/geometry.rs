@@ -316,3 +316,93 @@ pub(super) fn orientation(b: &Body, out: &mut Vec<Fault>) {
         }
     }
 }
+
+/// Each solid region with a face `orientation` can't sum exactly (one
+/// not planar with straight edges) whose winding number just outside a
+/// face isn't 0: inside out. Sound only for a body whose faces don't
+/// cross or overlap (an offset's envelope winds -1 round most of its
+/// faces), so [`super::check_intersections`] asks it, last (#692).
+pub(crate) fn curved_orientation(b: &Body) -> Vec<Fault> {
+    let mut out = Vec::new();
+    for (r, region) in b.regions.live() {
+        if region.kind != RegionKind::Solid {
+            continue;
+        }
+        let exact = b
+            .region_shells(r)
+            .all(|s| b.shell_faces(s).all(|f| polygon(b, f).is_some()));
+        if exact {
+            continue;
+        }
+        if curved_winding(b, r).is_some_and(|w| w != 0) {
+            out.push(Fault::NotOutward { region: r });
+        }
+    }
+    out
+}
+
+/// The winding number of `b` just outside a face of region `r`, at a point
+/// inside the face a sixteenth of its parameter box in from its first
+/// fin's middle, to the face's side of the fin. The first of the region's
+/// faces, in shell and face order, that settles it.
+fn curved_winding(b: &Body, r: crate::topo::RegionId) -> Option<i64> {
+    use crate::geom::Point2;
+    use crate::intersect::{Place, face_rect, point_in_face, winding_off};
+    // unmetered: `check` takes no work
+    let m = crate::work::Meter::free();
+    for s in b.region_shells(r) {
+        for f in b.shell_faces(s) {
+            let face = &b.faces[f];
+            let surface = &b.surfaces[face.surface];
+            let Some(l) = b.face_loops(f).next() else {
+                continue;
+            };
+            let Some(fin) = b.loop_fins(l).next() else {
+                continue;
+            };
+            let Some(p) = b.fins[fin].pcurve else {
+                continue;
+            };
+            let c2 = &b.curves2[p.curve];
+            let [t0, t1] = b.edges[b.fins[fin].edge].interval;
+            let (ta, tb) = (t0 + 0.45 * (t1 - t0), t0 + 0.55 * (t1 - t0));
+            let (a, z) = (c2.point(p.param(ta)), c2.point(p.param(tb)));
+            // The fin's direction in the face's parameters: the edge's, or
+            // against it.
+            let (dx, dy) = match b.fins[fin].sense {
+                Sense::Forward => (z.x - a.x, z.y - a.y),
+                Sense::Reversed => (a.x - z.x, a.y - z.y),
+            };
+            let len = crate::math::sqrt(dx * dx + dy * dy);
+            let Some(rect) = face_rect(b, f) else {
+                continue;
+            };
+            if len == 0.0 {
+                continue;
+            }
+            // A point a sixteenth of the face's parameter box off the
+            // fin's middle, on whichever side lies inside the face.
+            let span = (rect[0][1] - rect[0][0]).min(rect[1][1] - rect[1][0]);
+            let step = span / 16.0 / len;
+            let mid = Point2::new((a.x + z.x) / 2.0, (a.y + z.y) / 2.0);
+            let Some(uv) = [1.0, -1.0]
+                .into_iter()
+                .map(|k| Point2::new(mid.x - k * dy * step, mid.y + k * dx * step))
+                .find(|&uv| point_in_face(b, f, uv) == Ok(Place::Inside))
+            else {
+                continue;
+            };
+            let Some(n) = surface.normal(uv.x, uv.y) else {
+                continue;
+            };
+            let n = match face.sense {
+                Sense::Forward => n,
+                Sense::Reversed => -n,
+            };
+            if let Ok(w) = winding_off(b, surface.point(uv.x, uv.y), n, &[f], &m) {
+                return Some(w);
+            }
+        }
+    }
+    None
+}

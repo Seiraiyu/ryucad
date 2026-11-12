@@ -209,12 +209,32 @@ fn vertex(
         let ce = curve_of(geo, rails, e);
         let te = on(ce, x, c.tolerance).ok_or(if faces.len() >= 4 {
             TweakError::VertexSplits { vertex: at }
+        } else if past_its_end(ce, x, c.tolerance) {
+            // The point lies on the edge's line beyond its other end: the
+            // edge would run backwards, so it vanishes (#687: a block's
+            // wall drafted past its neighbour, the top's side edge).
+            TweakError::EdgeVanishes {
+                edge: body.edges[e.edge].name,
+            }
         } else {
             TweakError::Uncertain { at }
         })?;
         put(&mut out, e, te);
     }
     Ok(out)
+}
+
+/// Whether `x` lies on `c`'s line outside the stretch `c` is found over:
+/// a kept straight edge whose vertex would move past its other end.
+fn past_its_end(c: &NewCurve, x: Point3, slack: f64) -> bool {
+    let crate::geom::Curve::Line(_) = &c.curve else {
+        return false;
+    };
+    let o = c.curve.point(c.range[0]);
+    let dir = c.curve.eval(c.range[0]).d1;
+    let t = c.range[0] + (x - o).dot(dir);
+    let reach = crate::offset::vertices::MEET + c.tolerance + slack;
+    c.curve.point(t).distance(x) <= reach && !(c.range[0]..=c.range[1]).contains(&t)
 }
 
 /// The point nearest every plane `(q, n)` (least squares), pulled to the

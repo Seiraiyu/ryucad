@@ -255,6 +255,17 @@ fn refdes(
     c: &crate::conn::Component,
     value: Option<&str>,
 ) -> std::result::Result<Option<String>, Error> {
+    if let Some(r) = c
+        .refdes
+        .as_deref()
+        .filter(|r| crate::conn::refdes_placeholder(r))
+    {
+        return Err(Error::new(
+            Code::RefdesMissing,
+            format!("{r} is a placeholder: `ryueda annotate` numbers it"),
+        )
+        .with("placeholder", r));
+    }
     let mut r = c.refdes.clone();
     let path = &occs[o].path;
     let levels = levels(p, occs, o, c);
@@ -774,6 +785,23 @@ pub(crate) mod tests {
         for (path, v) in extra {
             write_atomic(&board.join(path), crate::canonical::to_string(v)).unwrap();
         }
+        let p = Project::load(&board).unwrap();
+        (dir, p)
+    }
+
+    /// [`project`] with manifest properties `props` (plan 2.E's title
+    /// block).
+    pub fn project_with_properties(props: &[(&str, &str)]) -> (tempfile::TempDir, Project) {
+        let (dir, _) = project(&[]);
+        let board = dir.path().join("board");
+        let mut m = crate::project::Manifest::read(
+            &std::fs::read(board.join(crate::project::MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        for (k, v) in props {
+            m.properties.insert((*k).to_owned(), (*v).to_owned());
+        }
+        write_atomic(&board.join(crate::project::MANIFEST), m.to_text()).unwrap();
         let p = Project::load(&board).unwrap();
         (dir, p)
     }

@@ -43,7 +43,7 @@ fn sheet_key(key: OpKey, face: Name) -> OpKey {
 
 /// `face` run the other way round: under the other sense, its loops
 /// reversed so they still run counterclockwise about its normal.
-fn flipped(face: &mut layout::Face) {
+pub(crate) fn flipped(face: &mut layout::Face) {
     face.sense = match face.sense {
         Sense::Forward => Sense::Reversed,
         Sense::Reversed => Sense::Forward,
@@ -179,10 +179,7 @@ impl WorkBody {
     /// edge on it). Outside faces are never met with each other.
     pub(crate) fn pairs(&self) -> BTreeSet<(FaceId, FaceId)> {
         let b = &self.body;
-        let boxes: BTreeMap<FaceId, Box3> = b
-            .faces()
-            .map(|f| (f, crate::intersect::face_box(b, f)))
-            .collect();
+        let boxes: BTreeMap<FaceId, Box3> = b.faces().map(|f| (f, grown_box(b, f))).collect();
         let mut out = BTreeSet::new();
         let list: Vec<FaceId> = self.working.iter().copied().collect();
         for (i, &a) in list.iter().enumerate() {
@@ -209,6 +206,14 @@ impl WorkBody {
         }
         out
     }
+}
+
+/// Face `f`'s box grown by its tolerance, as `face_face` grows the boxes
+/// it overlaps: a wall tangent to a pocket's corner cylinder lies 3e-17 m
+/// outside the cylinder's box (NIST FTC 08, #653), and unmet, the
+/// cylinder's working face ran on past the wall to its clipped side.
+fn grown_box(b: &Body, f: FaceId) -> Box3 {
+    crate::intersect::face_box(b, f).grow(crate::intersect::max_tolerance((b, f)))
 }
 
 #[cfg(test)]
@@ -294,5 +299,32 @@ mod tests {
         for &(a, c) in &pairs {
             assert!(a < c);
         }
+    }
+
+    #[test]
+    fn a_wall_a_hair_outside_a_cylinders_box_is_met() {
+        // A cylinder of radius 3 mm and a plane 1e-15 m beyond its side,
+        // tangent within the resolution: their boxes are apart, grown by
+        // their tolerances they meet (NIST FTC 08's pocket corner, #653).
+        use crate::geom::{Frame, Plane, Surface, Vector3};
+        let r = 0.003;
+        let (c, _) = crate::primitive::cylinder(K, r, 0.01, &crate::geom::Rigid::IDENTITY).unwrap();
+        let side = c
+            .faces()
+            .find(|&f| matches!(c.surfaces[c.faces[f].surface], Surface::Cylinder(_)))
+            .unwrap();
+        let frame = Frame::new(
+            Point3::new(0.0, -(r + 1e-15), 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let wall = Surface::Plane(Plane::new(frame));
+        let (s, _) = crate::sheet::from_surface(K, &wall, [[-0.01, 0.01], [-0.01, 0.01]]).unwrap();
+        let w = s.faces().next().unwrap();
+        assert!(
+            !crate::intersect::face_box(&c, side).intersects(&crate::intersect::face_box(&s, w))
+        );
+        assert!(grown_box(&c, side).intersects(&grown_box(&s, w)));
     }
 }

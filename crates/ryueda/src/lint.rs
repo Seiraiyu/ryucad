@@ -28,14 +28,17 @@ fn canonical(name: &str) -> &str {
 /// lint's, or the old code `sym_shape` replaced.
 fn rule(name: &str) -> bool {
     let name = canonical(name);
-    ryusch::lint::RULES.iter().any(|r| r.code == name) || crate::symlint::rule(name).is_some()
+    ryusch::lint::RULES.iter().any(|r| r.code == name)
+        || crate::symlint::rule(name).is_some()
+        || crate::stylelint::rule(name).is_some()
 }
 
-/// Every rule: the sheet lint's, then the symbol lint's.
+/// Every rule: the sheet lint's, the symbol lint's, then the look's.
 fn all_rules() -> impl Iterator<Item = &'static ryusch::lint::Rule> {
     ryusch::lint::RULES
         .iter()
         .chain(crate::symlint::RULES.iter())
+        .chain(crate::stylelint::RULES.iter())
 }
 
 /// `lint.json` as plan 2.D reads it: the old resistor code's weight and
@@ -101,7 +104,39 @@ pub fn check(prefs: &Prefs) -> Vec<Fault> {
 /// The project's preferences; the defaults when `lint.json` doesn't read
 /// (a fault of the project).
 pub fn prefs(p: &Project) -> Prefs {
-    p.lint.item.clone().unwrap_or_default()
+    merged(p, p.lint.item.clone().unwrap_or_default())
+}
+
+/// `own` (a project's `lint.json`) over the organisation's style's lint,
+/// a locked weight or severity always the organisation's (plan 2.E).
+fn merged(p: &Project, own: Prefs) -> Prefs {
+    let Some(org) = p
+        .org_style
+        .as_ref()
+        .and_then(|o| o.style.item.as_ref().ok())
+    else {
+        return own;
+    };
+    let mut out = own.clone();
+    for (code, w) in &org.lint.weights {
+        let locked = org
+            .locks
+            .iter()
+            .any(|l| *l == format!("lint.weights.{code}"));
+        if locked || !own.weights.contains_key(code) {
+            out.weights.insert(code.clone(), *w);
+        }
+    }
+    for (code, s) in &org.lint.severity {
+        let locked = org
+            .locks
+            .iter()
+            .any(|l| *l == format!("lint.severity.{code}"));
+        if locked || !own.severity.contains_key(code) {
+            out.severity.insert(code.clone(), *s);
+        }
+    }
+    out
 }
 
 /// Writes `prefs` as `lint.json`, or deletes it when it holds nothing.
@@ -135,6 +170,8 @@ pub fn get(p: &Project, explain: Option<&str>) -> Result<Value> {
         let prefs = prefs(p);
         let weight = if crate::symlint::rule(rule.code).is_some() {
             crate::symlint::weight(&prefs, rule.code).0
+        } else if crate::stylelint::rule(rule.code).is_some() {
+            prefs.weights.get(rule.code).copied().unwrap_or(rule.weight)
         } else {
             prefs.weight(rule.code).0
         };
@@ -152,6 +189,7 @@ pub fn get(p: &Project, explain: Option<&str>) -> Result<Value> {
     }
     Ok(json!({
         "prefs": prefs(p),
+        "own": p.lint.item.clone().unwrap_or_default(),
         "rules": rules(),
         "revision": p.revision,
     }))
@@ -172,7 +210,27 @@ pub fn configure(
     let p = session.project();
     crate::server::check_revision("the project", &p.revision, expected)?;
     p.lint.item.as_ref().map_err(|e| e.clone())?;
-    let mut prefs = prefs(p);
+    // The project's own file: the organisation's layer is applied when
+    // judging, never written into it.
+    let mut prefs = p.lint.item.clone().unwrap_or_default();
+    let layers = crate::cascade::Layers::of(p);
+    let locked = |lock: String| -> Result<()> {
+        if layers.locked(&lock) {
+            return Err(Error::new(
+                Code::StyleLocked,
+                format!("the organisation's style locks {lock}"),
+            )
+            .with("lock", &lock)
+            .with("path", layers.org_path().unwrap_or_default()));
+        }
+        Ok(())
+    };
+    for name in weights.keys() {
+        locked(format!("lint.weights.{}", canonical(name)))?;
+    }
+    for name in severity.keys() {
+        locked(format!("lint.severity.{}", canonical(name)))?;
+    }
     let unknown = |name: &str, what: &str| {
         Error::new(Code::InvalidParam, format!("{name} isn't a lint rule"))
             .with("param", format!("{what}/{name}"))
@@ -247,7 +305,8 @@ pub fn configure(
         }
     }
     if dry_run {
-        return Ok(tried(session.project(), &prefs));
+        let p = session.project();
+        return Ok(tried(p, &merged(p, prefs)));
     }
     save(session, &prefs)?;
     get(session.project(), None)

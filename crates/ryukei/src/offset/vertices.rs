@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 
 /// How far a point found on one new curve may lie from another that
 /// should pass through it, over their tolerances: further is uncertain.
-pub(super) const MEET: f64 = 100.0 * LINEAR_RESOLUTION;
+pub(crate) const MEET: f64 = 100.0 * LINEAR_RESOLUTION;
 
 /// One of the result's faces, before it is built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

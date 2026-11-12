@@ -260,6 +260,7 @@ pub fn stack_symbol(
         refdes: name.to_owned(),
         value: String::new(),
         function: String::new(),
+        text: crate::input::PartText::default(),
         graphics,
         pins,
     }
@@ -312,6 +313,7 @@ pub fn port_symbol(key: &str, name: &str, flow: Flow, net: Option<usize>) -> Par
         refdes: String::new(),
         value: String::new(),
         function: String::new(),
+        text: crate::input::PartText::default(),
         graphics: vec![
             Graphic::Polyline {
                 points: pts,
@@ -355,6 +357,7 @@ mod tests {
             refdes: "R1".into(),
             value: "10k".into(),
             function: String::new(),
+            text: crate::input::PartText::default(),
             graphics: vec![Graphic::Rect {
                 start: [-GRID / 2, GRID * 3 / 2],
                 end: [GRID / 2, -GRID * 3 / 2],

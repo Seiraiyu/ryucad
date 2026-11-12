@@ -11,6 +11,7 @@ use crate::library::{Library, ObjKind};
 use crate::project::{Project, SELF, ref_text};
 use crate::standards::{Class, Standards};
 use crate::symbol::{Pin, PinType, Point, Side, Symbol};
+use ryu_session::rpc::{Answer, Raw as Text};
 use ryusch::geom::Rect;
 use ryusch::lint::{Prefs, Rule, Severity};
 use serde::Serialize;
@@ -428,6 +429,17 @@ fn along(p: &Pin) -> i64 {
 type GroupPin<'a> = (&'a String, &'a Pin, Option<u64>);
 
 fn groups(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
+    groups_in(s, class, cx, None, out)
+}
+
+/// [`groups`] on the units `only` names (`None`: every unit).
+fn groups_in(
+    s: &Symbol,
+    class: Option<Class>,
+    cx: &Context,
+    only: Option<&BTreeSet<u32>>,
+    out: &mut Vec<Raw>,
+) {
     let Some(class) = class else { return };
     let st = cx.standards;
     let rule = st.rule(class);
@@ -435,6 +447,9 @@ fn groups(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
         return;
     }
     for unit in units(s) {
+        if only.is_some_and(|o| !o.contains(&unit)) {
+            continue;
+        }
         let pins = unit_pins(s, unit);
         // Each group's pins whose role has no side of its own.
         let mut by_group: std::collections::BTreeMap<&str, Vec<GroupPin>> = Default::default();
@@ -605,10 +620,18 @@ fn far_grown(r: Rect, side: ryusch::geom::Side, m: i64) -> Rect {
 }
 
 fn margins(s: &Symbol, cx: &Context, out: &mut Vec<Raw>) {
+    margins_in(s, cx, None, out)
+}
+
+/// [`margins`] on the units `only` names (`None`: every unit).
+fn margins_in(s: &Symbol, cx: &Context, only: Option<&BTreeSet<u32>>, out: &mut Vec<Raw>) {
     let st = cx.standards;
     let m = st.body_margin_nm;
     let p = 2 * st.grid_nm;
     for unit in units(s) {
+        if only.is_some_and(|o| !o.contains(&unit)) {
+            continue;
+        }
         let part = crate::schem::unit_part(s, unit, String::new(), "U");
         if !ryusch::paint::draws_names(&part) {
             continue;
@@ -741,12 +764,16 @@ fn error_keys(s: &Symbol) -> Vec<ErrorKey> {
         .collect()
 }
 
-/// Whether `ops` remove the finding `code` on `pins` from `s` and add no
-/// `library_*` error: a fix is offered only so (round 2's ask).
-/// `before` is `s`'s own errors (`error_keys`), worked out once a symbol.
+/// Whether `ops` remove the finding `code` on `pins` from `s`, add no
+/// `library_*` error (round 2's ask) and add no finding of any rule
+/// (#712's review): a fix is offered only so. `before` is `s`'s own
+/// errors (`error_keys`) and `before_found` its findings, each worked out
+/// once a symbol.
+#[allow(clippy::too_many_arguments)]
 fn fixes_it(
     s: &Symbol,
     before: &[ErrorKey],
+    before_found: &[(&'static str, Vec<String>)],
     class: Option<Class>,
     cx: &Context,
     code: &str,
@@ -763,9 +790,68 @@ fn fixes_it(
     if error_keys(&t).iter().any(|k| !before.contains(k)) {
         return false;
     }
-    !found_by(&t, class, cx, code, pins)
+    if found_by(&t, class, cx, code, pins)
         .iter()
         .any(|r| r.code == code && r.pins == pins)
+    {
+        return false;
+    }
+    // Nothing it adds under any rule its edit can touch (#712's review):
+    // every such finding after it was there before, the rules turned off
+    // aside. The whole lint on every trial took a 1,924-pin Virtex-7 from
+    // 2.8 s to 380 s, so the check is scoped to what `ops` change.
+    touched(&t, class, cx, ops)
+        .iter()
+        .filter(|r| cx.prefs.severity(r.code).0 != Severity::Off)
+        .all(|r| {
+            before_found
+                .iter()
+                .any(|(c, p)| *c == r.code && *p == r.pins)
+        })
+}
+
+/// What every rule an edit `ops` can change finds on `s` (the symbol after
+/// it): the per-pin rules on the pins it names, groups and margins on
+/// those pins' units (every unit when it reshapes a graphic shared by
+/// all), the shape when it touches a graphic.
+fn touched(s: &Symbol, class: Option<Class>, cx: &Context, ops: &[Value]) -> Vec<Raw> {
+    let h = home(s);
+    let pins: Vec<String> = ops
+        .iter()
+        .filter_map(|o| o["pin"].as_str().map(str::to_owned))
+        .collect();
+    let mut units: Option<BTreeSet<u32>> = Some(
+        pins.iter()
+            .filter_map(|n| s.pins.get(n))
+            .map(|p| p.unit.unwrap_or(h))
+            .collect(),
+    );
+    let mut graphic = false;
+    for id in ops.iter().filter_map(|o| o["graphic"].as_str()) {
+        graphic = true;
+        let unit = s
+            .graphics
+            .iter()
+            .find(|(k, _)| k.as_str() == id)
+            .and_then(|(_, g)| g.unit());
+        match (unit, units.as_mut()) {
+            (Some(u), Some(set)) => {
+                set.insert(u);
+            }
+            (None, _) => units = None,
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    off_grid(s, Some(&pins), cx, &mut out);
+    sides(s, Some(&pins), class, cx, &mut out);
+    length(s, Some(&pins), class, cx, &mut out);
+    groups_in(s, class, cx, units.as_ref(), &mut out);
+    margins_in(s, cx, units.as_ref(), &mut out);
+    if graphic {
+        shape(s, class, cx, &mut out);
+    }
+    out
 }
 
 /// `s`'s findings as `cx` judges a symbol of `class` (`None`: only the
@@ -779,6 +865,8 @@ pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
     } else {
         Vec::new()
     };
+    let keys: Vec<(&'static str, Vec<String>)> =
+        raw.iter().map(|r| (r.code, r.pins.clone())).collect();
     // Every fix tried on its own copy, in parallel; kept in order.
     let kept: Vec<Vec<bool>> = raw
         .par_iter()
@@ -788,7 +876,7 @@ pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
             }
             r.fixes
                 .iter()
-                .map(|ops| fixes_it(s, &before, class, cx, r.code, &r.pins, ops))
+                .map(|ops| fixes_it(s, &before, &keys, class, cx, r.code, &r.pins, ops))
                 .collect()
         })
         .collect();
@@ -873,11 +961,41 @@ fn shown(f: &Finding, id: &crate::id::Id, lib: &Library) -> Value {
     v
 }
 
+/// What `lib.check` lists besides its counts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// Each symbol's counts by code, not its findings, and the library's
+    /// counts by code (`by_code`).
+    pub summary: bool,
+    /// Only findings of these codes, and only symbols holding one (every
+    /// finding still counts in `errors` and `warnings`).
+    pub codes: Vec<String>,
+}
+
+/// Symbols judged at once: their entries are written as text before the
+/// next are judged, so no more than these are ever held as `Value`s.
+const CHUNK: usize = 256;
+
 /// `lib.check`: a library's symbols (this project's own by default, or
 /// one symbol) judged by the standards that apply to it, each with its
 /// class (given or inferred), score and findings; `check_failed` (the
-/// report in its details) when a finding is an error.
-pub fn library_check(p: &Project, library: Option<&str>, symbol: Option<&str>) -> Result<Value> {
+/// report in its details) when a finding is an error. The report is
+/// written as text as it is made, never held as one `Value` tree (#711:
+/// KiCad's 10,217 symbols made a 161 MB report that peaked at 6.1 GB).
+pub fn library_check(
+    p: &Project,
+    library: Option<&str>,
+    symbol: Option<&str>,
+    listing: &Listing,
+) -> Result<Answer> {
+    for c in &listing.codes {
+        if rule(c).is_none() {
+            return Err(
+                Error::new(Code::InvalidParam, format!("{c} isn't a symbol lint code"))
+                    .with("param", "code"),
+            );
+        }
+    }
     let (alias, only) = match symbol {
         Some(t) => {
             let (a, id) = crate::libcmd::target(t, ObjKind::Symbol)?;
@@ -908,61 +1026,110 @@ pub fn library_check(p: &Project, library: Option<&str>, symbol: Option<&str>) -
         prefs: &prefs,
         from: &from,
     };
-    // Each symbol judged on its own, in parallel; the list in ID order.
     use rayon::prelude::*;
     let picked: Vec<_> = lib
         .symbols
         .iter()
         .filter(|(id, _)| only.as_ref().is_none_or(|o| o == *id))
         .collect();
-    let judged: Vec<(Value, u64, u64)> = picked
-        .par_iter()
-        .map(|(id, l)| {
-            let reference = ref_text(&alias, ObjKind::Symbol, id);
-            let s = match &l.item {
-                Ok(s) => s,
-                Err(e) => return (json!({"reference": reference, "error": e}), 0, 0),
-            };
-            let (class, inferred) = class_of(lib, id, s);
-            let found = lint(s, class, &cx);
-            let errors = found
-                .iter()
-                .filter(|f| f.severity == Severity::Error)
-                .count() as u64;
-            let v = json!({
-                "reference": reference,
-                "path": lib.path(ObjKind::Symbol, id),
-                "class": class,
-                "class_inferred": inferred,
-                "score": score(&found),
-                "findings": found.iter().map(|f| shown(f, id, lib)).collect::<Vec<_>>(),
-            });
-            (v, errors, found.len() as u64 - errors)
-        })
-        .collect();
     let (mut errors, mut warnings) = (0u64, 0u64);
-    let mut list = Vec::with_capacity(judged.len());
-    for (v, e, w) in judged {
-        errors += e;
-        warnings += w;
-        list.push(v);
+    let mut by_code: BTreeMap<&'static str, u64> = BTreeMap::new();
+    // The symbols first, written straight into the answer as they are
+    // judged; the counts after them (a reader takes keys in any order).
+    let mut text = String::from(r#"{"symbols":["#);
+    let mut first = true;
+    for chunk in picked.chunks(CHUNK) {
+        // Each symbol judged on its own, in parallel, and written as text.
+        let judged: Vec<(Option<String>, u64, u64, Vec<&'static str>)> = chunk
+            .par_iter()
+            .map(|(id, l)| {
+                let reference = ref_text(&alias, ObjKind::Symbol, id);
+                let s = match &l.item {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let v = json!({"reference": reference, "error": e});
+                        return (Some(v.to_string()), 0, 0, Vec::new());
+                    }
+                };
+                let (class, inferred) = class_of(lib, id, s);
+                let found = lint(s, class, &cx);
+                let errors = found
+                    .iter()
+                    .filter(|f| f.severity == Severity::Error)
+                    .count() as u64;
+                let codes: Vec<&'static str> = found.iter().map(|f| f.code).collect();
+                let wanted: Vec<&Finding> = found
+                    .iter()
+                    .filter(|f| {
+                        listing.codes.is_empty() || listing.codes.iter().any(|c| c == f.code)
+                    })
+                    .collect();
+                if !listing.codes.is_empty() && wanted.is_empty() {
+                    return (None, errors, found.len() as u64 - errors, codes);
+                }
+                let mut v = json!({
+                    "reference": reference,
+                    "path": lib.path(ObjKind::Symbol, id),
+                    "class": class,
+                    "class_inferred": inferred,
+                    "score": score(&found),
+                });
+                if listing.summary {
+                    let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+                    for f in &wanted {
+                        *counts.entry(f.code).or_default() += 1;
+                    }
+                    v["counts"] = json!(counts);
+                } else {
+                    v["findings"] =
+                        json!(wanted.iter().map(|f| shown(f, id, lib)).collect::<Vec<_>>());
+                }
+                (
+                    Some(v.to_string()),
+                    errors,
+                    found.len() as u64 - errors,
+                    codes,
+                )
+            })
+            .collect();
+        for (entry, e, w, codes) in judged {
+            errors += e;
+            warnings += w;
+            for c in codes {
+                *by_code.entry(c).or_default() += 1;
+            }
+            if let Some(entry) = entry {
+                if !first {
+                    text.push(',');
+                }
+                first = false;
+                text.push_str(&entry);
+            }
+        }
     }
-    let report = json!({
-        "library": alias,
-        "revision": lib.revision,
-        "standards": {"from": from},
-        "symbols": list,
-        "errors": errors,
-        "warnings": warnings,
-    });
+    text.push(']');
+    if listing.summary {
+        text.push_str(&format!(r#","by_code":{}"#, json!(by_code)));
+    }
+    text.push_str(&format!(
+        r#","errors":{errors},"library":{},"revision":{},"standards":{},"warnings":{warnings}}}"#,
+        json!(alias),
+        json!(lib.revision),
+        json!({"from": from}),
+    ));
     if errors > 0 {
-        return Err(Error::new(
-            Code::CheckFailed,
-            format!("the symbol lint found {errors} error(s) and {warnings} warning(s)"),
-        )
-        .with("report", report));
+        return Ok(Answer::raw(Text::Error {
+            code: Code::CheckFailed,
+            message: format!("the symbol lint found {errors} error(s) and {warnings} warning(s)"),
+            details: {
+                // In place: no second copy of the report.
+                text.insert_str(0, r#"{"report":"#);
+                text.push('}');
+                text
+            },
+        }));
     }
-    Ok(report)
+    Ok(Answer::raw(Text::Result(text)))
 }
 
 /// The symbols `check` judges, by library: every symbol of this project's
@@ -1554,6 +1721,49 @@ mod tests {
                 let s = template("T", class, pins, &st).unwrap();
                 let found = lint(&s, Some(class), &cx);
                 assert!(found.is_empty(), "{class:?} {shapes:?}: {found:?}");
+            }
+        }
+    }
+
+    /// A fix that would add a finding of another rule isn't offered
+    /// (#712's review): a pin shorter than the standards' with its end on
+    /// the grid; setting its length keeping its base would put its end
+    /// off the grid.
+    #[test]
+    fn a_fix_that_adds_a_finding_is_not_offered() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "built_in",
+        };
+        let mut s = template("U", Class::Ic, &inputs(4), &st).unwrap();
+        s.pins.get_mut("2").unwrap().length_nm -= 540_000;
+        let found = lint(&s, Some(Class::Ic), &cx);
+        let length = found
+            .iter()
+            .find(|f| f.code == "sym_pin_length")
+            .expect("pin 2 is short");
+        assert!(
+            !found.iter().any(|f| f.code == "sym_pin_off_grid"),
+            "its end is on the grid"
+        );
+        assert_eq!(length.fixes, Vec::<Vec<Value>>::new(), "{:?}", length.fixes);
+        // Every fix still offered anywhere adds nothing.
+        for f in &found {
+            for ops in &f.fixes {
+                let mut t = s.clone();
+                crate::edit::apply(&mut t, ops, crate::units::Unit::Mm).unwrap();
+                let before = codes(&found);
+                for g in lint(&t, Some(Class::Ic), &cx) {
+                    assert!(
+                        before.contains(&(g.code, g.pins.clone())),
+                        "{} adds {}",
+                        f.code,
+                        g.code
+                    );
+                }
             }
         }
     }

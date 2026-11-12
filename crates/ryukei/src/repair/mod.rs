@@ -90,6 +90,14 @@ pub(crate) fn self_union_in(key: OpKey, body: &Body, m: &Meter) -> Result<(Body,
     let (out, journal) = resolve(key, body, &pairs, &select, &|_| false, m)
         .map_err(named)?
         .ok_or(RepairError::Empty)?;
+    // Never an inside-out body, in either build (a debug build's resolve
+    // leaves that to its caller).
+    if crate::check::check(&out)
+        .iter()
+        .any(crate::check::inside_out)
+    {
+        return Err(Error::Topology(TopologyError::Inconsistent));
+    }
     if let Some((at, needed)) = past_cap(&out) {
         return Err(RepairError::ToleranceTooLarge { at, needed }.into());
     }
@@ -125,7 +133,12 @@ pub(crate) fn resolve(
     }
     let (out, journal) = assemble(key, &ops, &[], &table, (&pieces, &kept), m)?;
     if cfg!(debug_assertions) {
-        let faults = crate::check::check(&out);
+        // An inside-out result is its caller's to refuse (#704: the
+        // re-trim's offset past the opposite side); anything else is a bug.
+        let faults: Vec<_> = crate::check::check(&out)
+            .into_iter()
+            .filter(|f| !crate::check::inside_out(f))
+            .collect();
         assert!(faults.is_empty(), "a resolved body is invalid: {faults:?}");
     } else if !crate::check::check_topology(&out).is_empty() {
         return Err(Fail::Inconsistent);
