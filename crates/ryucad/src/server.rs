@@ -1053,7 +1053,8 @@ pub(crate) fn dispatch(
             let (_, session) = session.at(rev.as_deref())?;
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
-            let mut v = feature_report(p, &fid, feature(p, &fid)?);
+            let unit = session.project().manifest.default_unit;
+            let mut v = feature_report(p, unit, &fid, feature(p, &fid)?);
             // The revision it was read at: an edit made from it says so.
             v["revision"] = json!(p.revision);
             Ok(v)
@@ -2559,7 +2560,8 @@ fn no_feature(part: &Part, id: &Id) -> Error {
 
 /// How a feature appears in output: every quantity as written and in
 /// meters, every reference as `<part>/<feature>/<name>`.
-pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
+/// A hole's spec writes bare numbers in `unit`, the project's.
+pub fn feature_report(p: &Part, unit: Unit, id: &Id, f: &Feature) -> Value {
     let part = &p.id;
     let mut v = match f {
         Feature::Primitive(p) => primitive_report(p),
@@ -2628,7 +2630,7 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
             crate::sheet_metal::report(p, f)
         }
-        Feature::Hole(h) => hole_report(part, h),
+        Feature::Hole(h) => hole_report(part, h, unit, p.hole_standards.as_deref()),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
             let mut v = r.fields();
@@ -2688,9 +2690,19 @@ fn blend_report(part: &Id, f: &Feature) -> Value {
 /// A hole as output reports it: its file's fields, every size as written
 /// and in meters (an angle in radians), an up-to target as
 /// `<part>/<feature>/<name>`.
-fn hole_report(part: &Id, h: &crate::doc::hole::Hole) -> Value {
+fn hole_report(
+    part: &Id,
+    h: &crate::doc::hole::Hole,
+    unit: Unit,
+    tables: crate::hole::derive::Tables,
+) -> Value {
     use crate::doc::hole::{Bottom, Depth, HoleForm};
     let mut v = h.fields();
+    v["spec"] = json!(crate::hole::spec::canonical(h, unit));
+    match crate::hole::derive::derive(h, tables) {
+        Ok(s) => v["sizes"] = s.to_json(),
+        Err(e) => v["sizes_error"] = error_json(&e),
+    }
     if let Some(d) = &h.diameter {
         v["diameter"] = d.report();
     }
@@ -2724,6 +2736,17 @@ fn hole_report(part: &Id, h: &crate::doc::hole::Hole) -> Value {
     }
     if let Bottom::Drill(q) = &h.bottom {
         v["bottom"] = json!({"drill": q.report()});
+    }
+    v
+}
+
+/// An error as a report holds it: its code, message and details.
+fn error_json(e: &Error) -> Value {
+    let mut v = json!({"code": e.code, "message": e.message});
+    if let Value::Object(d) = &e.details {
+        for (k, x) in d {
+            v[k] = x.clone();
+        }
     }
     v
 }
@@ -4887,7 +4910,7 @@ fn feature_add(
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let saved = session.project().part(&pid)?;
     let revision = &saved.revision;
-    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
+    let mut v = json!({"feature": feature_report(saved, session.project().manifest.default_unit, &fid, &f), "revision": revision});
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
     }
@@ -5196,7 +5219,7 @@ fn feature_edit(
     warnings.extend(followed);
     let saved = session.project().part(&pid)?;
     let revision = &saved.revision;
-    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
+    let mut v = json!({"feature": feature_report(saved, session.project().manifest.default_unit, &fid, &f), "revision": revision});
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);
     }
@@ -5416,6 +5439,22 @@ pub(crate) fn part_report(
         .collect();
     // A pattern's form (`linear`, `circular` or `mirror`), for the
     // window's icons, whatever it rebuilt to.
+    // Each hole's spec, and its sizes when they derive (ryucad 28).
+    let holes: BTreeMap<Id, (String, Option<Value>)> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            let Ok(Feature::Hole(h)) = f else { return None };
+            let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref()).ok();
+            Some((
+                fid.clone(),
+                (
+                    crate::hole::spec::canonical(h, unit),
+                    sizes.map(|s| s.to_json()),
+                ),
+            ))
+        })
+        .collect();
     let forms: BTreeMap<Id, &'static str> = part
         .features
         .iter()
@@ -5632,6 +5671,12 @@ pub(crate) fn part_report(
             }
             if let Some(form) = forms.get(fid) {
                 v["form"] = json!(form);
+            }
+            if let Some((spec, sizes)) = holes.get(fid) {
+                v["spec"] = json!(spec);
+                if let Some(s) = sizes {
+                    v["sizes"] = s.clone();
+                }
             }
             if let Some((k, x)) = bodied.get(fid) {
                 v[*k] = x.clone();

@@ -343,7 +343,10 @@ pub(crate) mod tests {
     /// part `p`, as a file would hold it.
     pub(crate) fn put(s: &mut Session, h: &str, fields: Value) {
         let mut v = fields;
-        v["format"] = json!(3);
+        // Format 3, or the one the fields give (23 for intent).
+        if v.get("format").is_none() {
+            v["format"] = json!(3);
+        }
         v["kind"] = json!("ryucad.feature");
         v["type"] = json!("hole");
         v["sketch"] = json!("s");
@@ -611,6 +614,67 @@ pub(crate) mod tests {
         assert_eq!(
             segments,
             ["counterbore_floor", "counterbore_wall", "wall", "bottom"].into()
+        );
+    }
+
+    #[test]
+    fn a_tapped_hole_builds_at_its_tap_drill_and_reports_its_spec() {
+        let (dir, mut s) = drilled();
+        put(
+            &mut s,
+            "h",
+            json!({"format": 23, "points": ["p1"], "form": "simple",
+                                "thread": {"standard": "iso_metric", "size": "M6"},
+                                "depth": "through_all"}),
+        );
+        let b = after(&mut s, "h").unwrap();
+        // A Ø5.0 bore through the 5 mm box.
+        near(volume(&b), 1000.0 - PI * 2.5 * 2.5 * 5.0);
+        // `feature.show` gives the report itself.
+        let shown = call(&mut s, "feature.show", json!({"part": "p", "id": "h"})).unwrap();
+        assert_eq!(shown["spec"], "M6x1.0-6H THRU");
+        assert_eq!(shown["sizes"]["drill"]["value"], "5 mm");
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let entry = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "h")
+            .unwrap();
+        assert_eq!(entry["spec"], "M6x1.0-6H THRU");
+        // A table entry the hole reads moves its hash; one it doesn't, not.
+        let hash = entry["hash"].clone();
+        let write = |t: &Value| {
+            std::fs::write(
+                dir.path().join("hole_standards.json"),
+                crate::doc::canonical::to_string(t),
+            )
+            .unwrap()
+        };
+        let mut t = crate::doc::fixtures::house_standards();
+        t["threads"]["iso_metric"]
+            .as_object_mut()
+            .unwrap()
+            .remove("M6");
+        write(&t);
+        s.reload().unwrap();
+        let again = |s: &mut Session| {
+            let r = call(s, "rebuild", json!({"part": "p"})).unwrap();
+            r["parts"][0]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == "h")
+                .unwrap()["hash"]
+                .clone()
+        };
+        assert_eq!(again(&mut s), hash);
+        write(&crate::doc::fixtures::house_standards()); // M6's house tap drill, 5.1 mm
+        s.reload().unwrap();
+        assert_ne!(again(&mut s), hash);
+        near(
+            volume(&after(&mut s, "h").unwrap()),
+            1000.0 - PI * 2.55 * 2.55 * 5.0,
         );
     }
 }

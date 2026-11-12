@@ -2757,6 +2757,9 @@ pub(crate) fn input_hash(
         x.update(crate::doc::canonical::to_string(&s).as_bytes());
         h = x.finalize();
     }
+    // A hole with intent: its derived sizes, so a corrected table rebuilds
+    // exactly the holes it changes. A plain hole hashes as before.
+    h = hole_sizes(part, f, h);
     // A pattern reads its seeds' own bodies and places too.
     if !f.seeds().is_empty() {
         let mut x = blake3::Hasher::new();
@@ -2809,7 +2812,25 @@ fn tool_hash(
             reads.push(read);
         }
     }
-    hash_of(part, id, &v, &reads, before)
+    // A hole's tool is shaped by its sizes.
+    hole_sizes(part, f, hash_of(part, id, &v, &reads, before))
+}
+
+/// `h`, and a hole with intent's derived sizes (or why they don't
+/// derive); a plain hole's `h` unchanged.
+fn hole_sizes(part: &Part, f: &Feature, h: blake3::Hash) -> blake3::Hash {
+    let Feature::Hole(hole) = f else { return h };
+    if !hole.has_intent() {
+        return h;
+    }
+    let mut x = blake3::Hasher::new();
+    x.update(h.as_bytes());
+    x.update(b"ryucad.hole_sizes\0");
+    match crate::hole::derive::derive(hole, part.hole_standards.as_deref()) {
+        Ok(s) => x.update(crate::doc::canonical::to_string(&s.to_json()).as_bytes()),
+        Err(e) => x.update(format!("{:?}", e.code).as_bytes()),
+    };
+    x.finalize()
 }
 
 /// The hash of a feature's versions, JSON, parameters and reads.
