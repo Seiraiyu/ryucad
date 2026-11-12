@@ -231,6 +231,20 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
             }
         }
     });
+    if !p.file.is_empty() {
+        ui.separator();
+        ui.label("From the STEP file");
+        egui::Grid::new("file-properties")
+            .num_columns(2)
+            .show(ui, |ui| {
+                for f in &p.file {
+                    ui.label(&f.name);
+                    ui.label(&f.value).on_hover_text(&f.source);
+                    ui.end_row();
+                }
+            });
+        ui.weak("Read from the imported file. Declare a property in ryupdm.json to keep one with the part.");
+    }
     let (dirty, saving) = (p.dirty(), p.saving);
     let foot = form::foot(
         ui,
