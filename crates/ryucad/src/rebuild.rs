@@ -1272,8 +1272,12 @@ fn build_body(
     // body moved from there to the point.
     let holes = match f {
         Feature::Hole(h) => {
-            let points = sketch_input(part, id, &h.sketch, before)
-                .and_then(|s| Ok((s, crate::hole::points(id, h, s)?)));
+            let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref())
+                .map_err(crate::hole::derive::at_rebuild);
+            let points = sizes.and_then(|sizes| {
+                let s = sketch_input(part, id, &h.sketch, before)?;
+                Ok((s, crate::hole::points(id, h, s)?, sizes))
+            });
             match points {
                 Ok(p) => Some((h, p)),
                 Err(e) => return (Err(e), None),
@@ -1290,8 +1294,8 @@ fn build_body(
             (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
             (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
             (Feature::Thicken(x), _) => crate::surface::thicken(part, solids, id, x, before, run),
-            (_, Some((h, (solved, _)))) => {
-                crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
+            (_, Some((h, (solved, _, sizes)))) => {
+                crate::hole::tool(part, id, h, sizes, solved, &bodies, before).map(|(b, _)| b)
             }
             _ => build_sweep(part, id, f, &bodies, before),
         }
@@ -1312,7 +1316,7 @@ fn build_body(
         Operation::New => unreachable!("a new solid acts on nothing"),
     };
     let places: Vec<(Option<Id>, Rigid)> = match &holes {
-        Some((_, (solved, points))) => {
+        Some((_, (solved, points, _))) => {
             let origin = solved.frame.apply_point(Point3::ORIGIN);
             points
                 .iter()

@@ -11,6 +11,8 @@
 //! nothing and switching its form renames only what its new segments
 //! touch. A point's tool key is `ryucad.tool\0<part>\0<feature>\0<point>`.
 
+pub mod derive;
+
 use crate::doc::files::Feature;
 use crate::doc::hole::{Bottom, Depth, Hole, HoleForm};
 use crate::doc::id::Id;
@@ -21,6 +23,7 @@ use crate::profile::Keys;
 use crate::rebuild::{Built, Results};
 use crate::sketch::Solved;
 use core::f64::consts::TAU;
+use derive::Sizes;
 use ryukei::geom::{Axis, Curve2, Frame, Line2, Point2, Point3, Vector3};
 use ryukei::name::{OpKey, ToolKey};
 use ryukei::sweep::{self, Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
@@ -117,10 +120,12 @@ pub fn points(id: &Id, h: &Hole, solved: &Solved) -> Result<Vec<(Id, Point3)>> {
 
 /// How deep the bore goes from the sketch's plane, in meters: blind,
 /// through all of its targets, or up to its target.
+#[allow(clippy::too_many_arguments)]
 fn depth(
     part: &Part,
     id: &Id,
     h: &Hole,
+    s: &Sizes,
     from: Point3,
     dir: Vector3,
     targets: &[&Built],
@@ -139,7 +144,11 @@ fn depth(
         }
         .length(part, id, before)?,
     };
-    if let Some((mouth, at)) = h.mouth_depth()
+    let at = match h.form {
+        HoleForm::Countersink { .. } => "/countersink",
+        _ => "/counterbore/depth",
+    };
+    if let Some(mouth) = s.mouth_depth()
         && mouth >= d
     {
         return Err(Error::new(
@@ -159,22 +168,22 @@ fn depth(
 /// each with the segment that leaves it: out along the mouth, down the
 /// counterbore or countersink and the bore, across the bottom or down the
 /// drill point to the axis, and up the axis.
-fn corners(h: &Hole, depth: f64) -> Vec<((f64, f64), &'static str)> {
-    let r = h.diameter.meters() / 2.0;
+fn corners(h: &Hole, s: &Sizes, depth: f64) -> Vec<((f64, f64), &'static str)> {
+    let r = s.drill.si / 2.0;
     let mut out = vec![((0.0, 0.0), "top")];
-    match &h.form {
-        HoleForm::Simple => out.push(((r, 0.0), "wall")),
-        HoleForm::Counterbore { diameter, depth } => {
-            let rc = diameter.meters() / 2.0;
+    match (&s.counterbore, &s.countersink) {
+        (Some((diameter, depth)), _) => {
+            let rc = diameter.si / 2.0;
             out.push(((rc, 0.0), "counterbore_wall"));
-            out.push(((rc, depth.meters()), "counterbore_floor"));
-            out.push(((r, depth.meters()), "wall"));
+            out.push(((rc, depth.si), "counterbore_floor"));
+            out.push(((r, depth.si), "wall"));
         }
-        HoleForm::Countersink { diameter, .. } => {
-            let (d, _) = h.mouth_depth().expect("a countersink has a depth");
-            out.push(((diameter.meters() / 2.0, 0.0), "countersink"));
+        (None, Some((diameter, _))) => {
+            let d = s.mouth_depth().expect("a countersink has a depth");
+            out.push(((diameter.si / 2.0, 0.0), "countersink"));
             out.push(((r, d), "wall"));
         }
+        (None, None) => out.push(((r, 0.0), "wall")),
     }
     match &h.bottom {
         Bottom::Flat => {
@@ -193,10 +202,12 @@ fn corners(h: &Hole, depth: f64) -> Vec<((f64, f64), &'static str)> {
 /// The hole's tool: its profile turned all round its axis, at the
 /// sketch's origin, drilling against the sketch's normal; and its frame's
 /// origin, from which each point's tool is placed.
+#[allow(clippy::too_many_arguments)]
 pub fn tool(
     part: &Part,
     id: &Id,
     h: &Hole,
+    s: &Sizes,
     solved: &Solved,
     targets: &[&Built],
     before: &dyn Results,
@@ -205,12 +216,12 @@ pub fn tool(
         Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
     let (origin, down) = (sketch.origin(), -sketch.z().get());
-    let d = depth(part, id, h, origin, down, targets, before)?;
+    let d = depth(part, id, h, s, origin, down, targets, before)?;
     // The profile's plane holds the axis: x across, y down the hole.
     let frame = Frame::new(origin, sketch.y().get(), sketch.x().get()).map_err(|e| {
         Error::new(Code::Internal, "a hole's frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
-    let corners = corners(h, d);
+    let corners = corners(h, s, d);
     let mut keys = Keys::default();
     let segments: Vec<Segment> = corners
         .iter()

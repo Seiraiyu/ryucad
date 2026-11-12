@@ -2691,14 +2691,25 @@ fn blend_report(part: &Id, f: &Feature) -> Value {
 fn hole_report(part: &Id, h: &crate::doc::hole::Hole) -> Value {
     use crate::doc::hole::{Bottom, Depth, HoleForm};
     let mut v = h.fields();
-    v["diameter"] = h.diameter.report();
+    if let Some(d) = &h.diameter {
+        v["diameter"] = d.report();
+    }
+    // Each mouth size as written; a derived one isn't in the file.
+    let mouth = |sizes: &[(&str, &Option<crate::units::Quantity>)]| {
+        Value::Object(
+            sizes
+                .iter()
+                .filter_map(|(k, q)| Some(((*k).to_owned(), q.as_ref()?.report())))
+                .collect(),
+        )
+    };
     match &h.form {
         HoleForm::Simple => {}
         HoleForm::Counterbore { diameter, depth } => {
-            v["counterbore"] = json!({"diameter": diameter.report(), "depth": depth.report()});
+            v["counterbore"] = mouth(&[("diameter", diameter), ("depth", depth)]);
         }
         HoleForm::Countersink { diameter, angle } => {
-            v["countersink"] = json!({"diameter": diameter.report(), "angle": angle.report()});
+            v["countersink"] = mouth(&[("diameter", diameter), ("angle", angle)]);
         }
     }
     match &h.depth {
