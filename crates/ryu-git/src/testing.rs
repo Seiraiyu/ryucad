@@ -14,7 +14,9 @@ impl Layout for Toy {
     const FOLDERS: &'static [&'static str] = &["things"];
     fn project_file(rel: &str) -> bool {
         Self::ROOT_FILES.contains(&rel)
-            || rel.strip_prefix("things/").is_some_and(|f| !f.contains('/'))
+            || rel
+                .strip_prefix("things/")
+                .is_some_and(|f| !f.contains('/'))
     }
 }
 

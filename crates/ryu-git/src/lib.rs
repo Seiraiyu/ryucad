@@ -10,7 +10,7 @@ pub mod repo;
 #[cfg(test)]
 pub(crate) mod testing;
 
-// pub use repo::{MergeState, Repo, Revision, Step, Unmerged, Worktree, merging_projects};
+pub use repo::{MergeState, Repo, Revision, Step, Unmerged, Worktree, merging_projects};
 
 /// Where a product's project files are, as Git sees them.
 pub trait Layout: 'static {
