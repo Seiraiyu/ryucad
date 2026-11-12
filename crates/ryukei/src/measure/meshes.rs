@@ -80,6 +80,12 @@ impl MeshTree {
         one.nearest(&self.tree).map(|n| (n.distance, n.b.0, n.b.1))
     }
 
+    /// [`MeshTree::nearest_to`] without building a tree for `p`: the same
+    /// distance, point and index, bit for bit, and nothing allocated.
+    pub fn nearest_point(&self, p: Point3) -> Option<(f64, Point3, u32)> {
+        self.tree.nearest_point(p)
+    }
+
     /// Every pair `(i, j)` of a triangle of `self` and one of `other`
     /// within `d` of each other, sorted.
     pub fn within(&self, other: &MeshTree, d: f64) -> Vec<(u32, u32)> {
@@ -229,5 +235,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Points round a block, a ball and a sheet of slivers, seeded.
+    fn probes(n: usize) -> Vec<Point3> {
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        (0..n)
+            .map(|_| {
+                Point3::new(
+                    0.03 * next() - 0.01,
+                    0.03 * next() - 0.01,
+                    0.03 * next() - 0.01,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nearest_point_is_nearest_to_bit_for_bit() {
+        let (ball, _) =
+            crate::primitive::sphere(OpKey::from_bytes(b"s"), 0.005, &Rigid::IDENTITY).unwrap();
+        let slivers: Vec<[Point3; 3]> = (0..200)
+            .map(|k| {
+                let x = k as f64 * 1e-4;
+                [
+                    Point3::new(x, 0.0, 0.0),
+                    Point3::new(x + 1e-4, 0.0, 0.0),
+                    Point3::new(x, 0.02, 0.0),
+                ]
+            })
+            .collect();
+        for tris in [mesh_of(&block([0.0; 3], 0.01)), mesh_of(&ball), slivers] {
+            let m = MeshTree::new(tris);
+            for p in probes(500)
+                .into_iter()
+                .chain(m.triangles().iter().map(|t| t[1]))
+            {
+                let (d0, q0, k0) = m.nearest_to(p).unwrap();
+                let (d1, q1, k1) = m.nearest_point(p).unwrap();
+                assert_eq!(d0.to_bits(), d1.to_bits(), "{p:?}");
+                assert_eq!(
+                    [q0.x, q0.y, q0.z].map(f64::to_bits),
+                    [q1.x, q1.y, q1.z].map(f64::to_bits),
+                    "{p:?}"
+                );
+                assert_eq!(k0, k1, "{p:?}");
+            }
+        }
+        assert!(
+            MeshTree::new(Vec::new())
+                .nearest_point(Point3::ORIGIN)
+                .is_none()
+        );
     }
 }

@@ -126,6 +126,55 @@ impl Tree {
         best
     }
 
+    /// The piece nearest `p`: the distance, its nearest point and its tag.
+    /// The same answer, ties included, as [`Tree::nearest`] of a tree
+    /// holding `p` alone against this one, which descends in this order,
+    /// without building that tree or allocating: a node pops, its children
+    /// are pushed farther first (the nearer on a tie of their gaps is the
+    /// second), and a tree of `n` pieces is under `log2(n) + 1` deep, so the
+    /// stack never holds more than 64.
+    pub(crate) fn nearest_point(&self, p: Point3) -> Option<(f64, Point3, u32)> {
+        if self.is_empty() {
+            return None;
+        }
+        let gap = |n: &Node| box_gap([p, p], [n.lo, n.hi]);
+        let mut best: Option<(f64, Point3, u32)> = None;
+        let mut stack = [0usize; 64];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let n = &self.nodes[stack[top]];
+            if best.is_some_and(|b| gap(n) >= b.0) {
+                continue;
+            }
+            match n.kids {
+                None => {
+                    for q in &self.pieces[n.range[0]..n.range[1]] {
+                        let (d, _, y) = between(&Prim::Point(p), &q.prim);
+                        if best.is_none_or(|b| d < b.0) {
+                            best = Some((d, y, q.tag));
+                        }
+                    }
+                }
+                Some([k0, k1]) => {
+                    assert!(top + 2 <= stack.len(), "a box tree deeper than 63");
+                    // `nearest` sorts [k0, k1] farther first, stably, then
+                    // pushes in that order.
+                    let (g0, g1) = (gap(&self.nodes[k0]), gap(&self.nodes[k1]));
+                    let (first, second) = if g1.total_cmp(&g0) == std::cmp::Ordering::Greater {
+                        (k1, k0)
+                    } else {
+                        (k0, k1)
+                    };
+                    stack[top] = first;
+                    stack[top + 1] = second;
+                    top += 2;
+                }
+            }
+        }
+        best
+    }
+
     /// The root's box, `None` for an empty tree.
     pub(crate) fn bounds(&self) -> Option<(Point3, Point3)> {
         self.nodes.first().map(|n| (n.lo, n.hi))
