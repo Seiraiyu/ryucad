@@ -15,6 +15,7 @@ mod derived;
 mod document;
 mod geometry;
 mod product;
+mod property;
 mod representation;
 mod style;
 mod surface;
@@ -28,6 +29,7 @@ pub use bspline::{BSplineCurve, BSplineSurface, Knots};
 pub use curve::Curve;
 pub use derived::{OnSurface, Trim};
 pub use geometry::{Placement, Point};
+pub use property::{ItemValue, ValueForm};
 pub use style::Side;
 pub use surface::Surface;
 pub use topology::{Brep, Edge, Face, Loop};
@@ -295,9 +297,10 @@ pub enum Entity {
         id: Box<str>,
         items: Vec<Id>,
     },
-    /// `PROPERTY_DEFINITION`: its name and what it is of.
+    /// `PROPERTY_DEFINITION`: its name, description and what it is of.
     PropertyDefinition {
         name: Box<str>,
+        description: Box<str>,
         definition: Id,
     },
     /// `PROPERTY_DEFINITION_REPRESENTATION`.
@@ -375,6 +378,35 @@ pub enum Entity {
     HigherUsage {
         upper: Id,
         next: Id,
+    },
+    /// `MATERIAL_DESIGNATION`: a material's name and the characterized
+    /// definitions (product definitions or their shapes) it is of.
+    MaterialDesignation {
+        name: Box<str>,
+        definitions: Vec<Id>,
+    },
+    /// `MEASURE_REPRESENTATION_ITEM`, simple or complex: a named measure
+    /// and its unit (`None` for `$`).
+    MeasureItem {
+        name: Box<str>,
+        value: ItemValue,
+        unit: Option<Id>,
+    },
+    /// A named value: `VALUE_REPRESENTATION_ITEM`, or AP242's
+    /// `INTEGER_`, `REAL_` or `BOOLEAN_REPRESENTATION_ITEM` (`form`).
+    ValueItem {
+        name: Box<str>,
+        value: ItemValue,
+        form: ValueForm,
+    },
+    /// `DERIVED_UNIT`: its elements.
+    DerivedUnit {
+        elements: Vec<Id>,
+    },
+    /// `DERIVED_UNIT_ELEMENT`: a named unit to a power.
+    UnitElement {
+        unit: Id,
+        exponent: f64,
     },
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
@@ -460,6 +492,11 @@ impl Entity {
             Entity::Rendering { .. } => "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
             Entity::Transparent { .. } => "SURFACE_STYLE_TRANSPARENT",
             Entity::HigherUsage { .. } => "SPECIFIED_HIGHER_USAGE_OCCURRENCE",
+            Entity::MaterialDesignation { .. } => "MATERIAL_DESIGNATION",
+            Entity::MeasureItem { .. } => "MEASURE_REPRESENTATION_ITEM",
+            Entity::ValueItem { form, .. } => form.name(),
+            Entity::DerivedUnit { .. } => "DERIVED_UNIT",
+            Entity::UnitElement { .. } => "DERIVED_UNIT_ELEMENT",
             Entity::Other(name) => name,
         }
     }
@@ -633,6 +670,9 @@ fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
     if let Some(s) = style::simple(id, name, params) {
         return s;
     }
+    if let Some(p) = property::simple(id, name, params) {
+        return p;
+    }
     if let Some(p) = product::simple(id, name, params) {
         return p;
     }
@@ -658,6 +698,9 @@ fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
 
 /// A complex instance, by the parts it has.
 fn complex(id: Id, parts: &[Part]) -> Result<Entity, ImportError> {
+    if let Some(p) = property::complex(id, parts) {
+        return p;
+    }
     if let Some(c) = bspline::complex_curve(id, parts) {
         return c.map(|c| Entity::Curve(Curve::BSpline(c)));
     }
@@ -873,5 +916,138 @@ pub(crate) mod tests {
         ] {
             assert_eq!(e.get(0, id).unwrap().kind(), kind);
         }
+    }
+
+    #[test]
+    fn property_items_decode() {
+        let e = entities(
+            "#1=MATERIAL_DESIGNATION('6061-T6',#30);\
+             #2=MATERIAL_DESIGNATION('Steel',(#30,#31));\
+             #3=MEASURE_REPRESENTATION_ITEM('density',POSITIVE_RATIO_MEASURE(2.7),#40);\
+             #4=(MEASURE_REPRESENTATION_ITEM()MEASURE_WITH_UNIT(MASS_MEASURE(0.12),#41)REPRESENTATION_ITEM('Net Mass'));\
+             #5=VALUE_REPRESENTATION_ITEM('Batch Size',COUNT_MEASURE(250.));\
+             #6=VALUE_REPRESENTATION_ITEM('RoHS',BOOLEAN(.T.));\
+             #7=INTEGER_REPRESENTATION_ITEM('Revisions',3);\
+             #8=REAL_REPRESENTATION_ITEM('Yield',0.95);\
+             #9=BOOLEAN_REPRESENTATION_ITEM('Lead Free',.F.);\
+             #10=DERIVED_UNIT((#11,#12));\
+             #11=DERIVED_UNIT_ELEMENT(#41,1.);\
+             #12=DERIVED_UNIT_ELEMENT(#42,-3.);\
+             #13=PROPERTY_DEFINITION('material property','density',#30);\
+             #14=VALUE_REPRESENTATION_ITEM('Broken',$);\
+             #15=(INTEGER_REPRESENTATION_ITEM()INT_LITERAL()LITERAL_NUMBER(7)REPRESENTATION_ITEM('Count'));\
+             #16=MEASURE_REPRESENTATION_ITEM('Thickness',LENGTH_MEASURE(2.5),$);",
+        );
+        assert_eq!(
+            e.get(0, 1),
+            Ok(&Entity::MaterialDesignation {
+                name: "6061-T6".into(),
+                definitions: vec![30]
+            })
+        );
+        assert_eq!(
+            e.get(0, 2),
+            Ok(&Entity::MaterialDesignation {
+                name: "Steel".into(),
+                definitions: vec![30, 31]
+            })
+        );
+        let real = |m: &str, value: f64| ItemValue::Real {
+            measure: m.into(),
+            value,
+        };
+        assert_eq!(
+            e.get(0, 3),
+            Ok(&Entity::MeasureItem {
+                name: "density".into(),
+                value: real("POSITIVE_RATIO_MEASURE", 2.7),
+                unit: Some(40),
+            })
+        );
+        assert_eq!(
+            e.get(0, 4),
+            Ok(&Entity::MeasureItem {
+                name: "Net Mass".into(),
+                value: real("MASS_MEASURE", 0.12),
+                unit: Some(41),
+            })
+        );
+        let item = |name: &str, value, form| Entity::ValueItem {
+            name: name.into(),
+            value,
+            form,
+        };
+        assert_eq!(
+            e.get(0, 5),
+            Ok(&item(
+                "Batch Size",
+                real("COUNT_MEASURE", 250.0),
+                ValueForm::Value
+            ))
+        );
+        assert_eq!(
+            e.get(0, 6),
+            Ok(&item(
+                "RoHS",
+                ItemValue::Logical(Some(true)),
+                ValueForm::Value
+            ))
+        );
+        assert_eq!(
+            e.get(0, 7),
+            Ok(&item(
+                "Revisions",
+                ItemValue::Integer(3),
+                ValueForm::Integer
+            ))
+        );
+        assert_eq!(
+            e.get(0, 8),
+            Ok(&item("Yield", real("", 0.95), ValueForm::Real))
+        );
+        assert_eq!(
+            e.get(0, 9),
+            Ok(&item(
+                "Lead Free",
+                ItemValue::Logical(Some(false)),
+                ValueForm::Boolean
+            ))
+        );
+        assert_eq!(
+            e.get(0, 10),
+            Ok(&Entity::DerivedUnit {
+                elements: vec![11, 12]
+            })
+        );
+        assert_eq!(
+            e.get(0, 12),
+            Ok(&Entity::UnitElement {
+                unit: 42,
+                exponent: -3.0
+            })
+        );
+        assert_eq!(
+            e.get(0, 13),
+            Ok(&Entity::PropertyDefinition {
+                name: "material property".into(),
+                description: "density".into(),
+                definition: 30,
+            })
+        );
+        assert!(e.get(0, 14).is_err(), "$ is no value");
+        assert_eq!(
+            e.get(0, 15),
+            Ok(&item("Count", ItemValue::Integer(7), ValueForm::Integer))
+        );
+        assert_eq!(
+            e.get(0, 16),
+            Ok(&Entity::MeasureItem {
+                name: "Thickness".into(),
+                value: real("LENGTH_MEASURE", 2.5),
+                unit: None
+            })
+        );
+        assert_eq!(e.get(0, 9).unwrap().kind(), "BOOLEAN_REPRESENTATION_ITEM");
+        assert_eq!(e.get(0, 4).unwrap().kind(), "MEASURE_REPRESENTATION_ITEM");
     }
 }
