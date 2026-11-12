@@ -72,9 +72,9 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
     if let Some(c) = &ws.compare {
         match (ws.bom.summary(), &ws.bom.diff_error) {
-            (Some(s), _) => ui.label(format!("Compared with {}: {s}", c.rev)),
+            (Some(s), _) => ui.label(format!("Compared with {}: {s}", c.named())),
             (None, Some(e)) => {
-                ui.colored_label(error, format!("No BOM at {}: {}", c.rev, e.message))
+                ui.colored_label(error, format!("No BOM at {}: {}", c.named(), e.message))
             }
             (None, None) => ui.spinner(),
         };

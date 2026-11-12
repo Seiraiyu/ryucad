@@ -6,7 +6,7 @@ mod common;
 
 use common::{Project, ryucad};
 use ryucad::error::Code;
-use ryucad_app::core::compare::{Change, FaceMark};
+use ryucad_app::core::compare::{Blink, Change, FaceMark, Front};
 use ryucad_app::core::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
@@ -97,6 +97,65 @@ fn an_agent_puts_the_window_into_a_compare() {
 }
 
 #[test]
+fn swapped_the_revision_is_drawn_and_its_ghost_is_the_working_files() {
+    let p = changed();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.len() == 2));
+    p.ok(&["compare", "HEAD"]);
+    assert!(ws.wait_until(WAIT, ghosted));
+    ws.swap_compare();
+    // HEAD's model: the box and the cylinder; the working files' box and
+    // sphere ghosted.
+    assert!(ws.wait_until(WAIT, |ws| {
+        ghosted(ws)
+            && ws.model.meshes.contains_key(&key("boss"))
+            && ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.swapped.as_deref() == Some("HEAD"))
+    }));
+    assert_eq!(ws.model_rev().as_deref(), Some("HEAD"));
+    let c = ws.compare.as_ref().unwrap();
+    assert_eq!(
+        (c.rev.as_str(), c.to.as_deref(), c.named()),
+        ("working", Some("HEAD"), "HEAD")
+    );
+    assert!(c.new_bodies.contains(&key("boss")));
+    let ghosts: Vec<&(String, String)> = c.ghosts.keys().collect();
+    assert_eq!(ghosts, [&key("ball"), &key("base")]);
+    assert!(c.gone_bodies.contains(&key("ball")));
+    // An agent's write lands in the working files: the ghost follows,
+    // and HEAD's model stays.
+    let before = c.wanted[&key("base")].clone();
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=25"]);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ghosted(ws)
+            && ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.wanted.get(&key("base")).is_some_and(|h| *h != before))
+    }));
+    assert!(ws.model.meshes.contains_key(&key("boss")));
+    // HEAD alone: nothing painted, nothing ghosted.
+    ws.compare_only(Front::Rev);
+    assert!(ws.painted().is_none());
+    assert_eq!(ws.model_rev().as_deref(), Some("HEAD"));
+    // B with one side alone: the working files alone.
+    ws.swap_compare();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle() && !ws.model.meshes.contains_key(&key("boss"))
+    }));
+    assert_eq!(ws.model_rev(), None);
+    assert!(ws.painted().is_none());
+    ws.compare_both();
+    assert!(ws.painted().is_some());
+    // Stopping the compare starts the blink again.
+    p.ok(&["compare", "--off"]);
+    assert!(ws.wait_until(WAIT, |ws| ws.compare.is_none()));
+    assert_eq!(ws.blink, Blink::default());
+}
+
+#[test]
 fn a_window_compares_with_any_revision() {
     let p = changed();
     let mut ws = open(&p);
@@ -179,4 +238,27 @@ fn an_assemblys_occurrences_are_painted_and_ghosted_where_they_were() {
     assert_eq!(c.ghost_pose(&k("b1")).origin, [0.0; 3]);
     assert_eq!(c.ghost_pose(&k("b2")).origin, [0.04, 0.0, 0.0]);
     assert_ne!(c.ghosts[&k("b2")].hash, ws.model.meshes[&k("b2")].hash);
+}
+
+#[test]
+fn writes_wait_while_the_revision_is_drawn() {
+    use ryucad_app::core::compare::SWAPPED;
+    use ryucad_app::core::modes::Gate;
+    let p = changed();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.len() == 2));
+    p.ok(&["compare", "HEAD"]);
+    assert!(ws.wait_until(WAIT, ghosted));
+    assert_eq!(ws.control("feature.edit"), Gate::Send);
+    ws.swap_compare();
+    assert_eq!(ws.control("feature.edit"), Gate::Refuse(SWAPPED));
+    assert_eq!(ws.control("annotation.create"), Gate::Refuse(SWAPPED));
+    // A write sent anyway is answered here with the reason, never sent
+    // (the daemon would have said nothing_to_undo).
+    ws.undo(None);
+    let e = ws.errors.last().unwrap();
+    assert_eq!(e.code, Code::ParticipantMode);
+    assert!(e.message.ends_with(SWAPPED), "{}", e.message);
+    ws.swap_compare();
+    assert_eq!(ws.control("feature.edit"), Gate::Send);
 }

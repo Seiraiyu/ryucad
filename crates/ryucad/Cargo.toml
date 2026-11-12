@@ -17,6 +17,7 @@ ctrlc = "3"
 # Random annotation IDs.
 getrandom = "0.3"
 gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
+ryu-git = { path = "../ryu-git" }
 interprocess = "2"
 png = "0.18"
 # An 8×8 bitmap font for labels in renders.

@@ -9,6 +9,9 @@ use crate::project::{MANIFEST, Manifest, Project, resolve};
 use ryu_session::fresh::{Files, Stamps};
 use std::path::{Path, PathBuf};
 
+/// How many revisions a session keeps read, most recently used first.
+pub const REVISIONS: usize = 4;
+
 pub struct Session {
     root: PathBuf,
     project: Project,
@@ -18,6 +21,9 @@ pub struct Session {
     /// This machine's catalogues, opened once and kept while their
     /// indexes stand.
     catalogues: Option<crate::parts::Catalogues>,
+    /// The last [`REVISIONS`] revisions read ([`Session::at`]), by what
+    /// they read, most recently used first.
+    pub(crate) revisions: Vec<(String, std::sync::Arc<Project>)>,
 }
 
 /// `rel` (relative to the project, with `/`) as a path under `root`.
@@ -46,7 +52,26 @@ impl Session {
             stamps,
             prepared: None,
             catalogues: None,
+            revisions: Vec::new(),
         })
+    }
+
+    /// The project as `rev` has it, and the commit it names: one of the
+    /// last [`REVISIONS`] read, kept by what they read (the project's tree
+    /// and its aliases'), else read from Git's objects. Never the disk.
+    pub fn at(&mut self, rev: &str) -> Result<(String, std::sync::Arc<Project>)> {
+        let (commit, key) = crate::git::key(&self.root, rev)?;
+        if let Some(i) = self.revisions.iter().position(|(k, _)| *k == key) {
+            let hit = self.revisions.remove(i);
+            let p = hit.1.clone();
+            self.revisions.insert(0, hit);
+            return Ok((commit, p));
+        }
+        let r = crate::git::revision(&self.root, &commit)?;
+        let p = std::sync::Arc::new(Project::load_from(&self.root, &r.files, &r.aliases)?);
+        self.revisions.insert(0, (key, p.clone()));
+        self.revisions.truncate(REVISIONS);
+        Ok((commit, p))
     }
 
     /// This machine's catalogues as of now: those opened before, unless
@@ -140,6 +165,43 @@ mod tests {
     use super::*;
     use crate::project::ProjectKind;
     use crate::project::tests::{library_in, manifest};
+
+    #[test]
+    fn revisions_are_read_once_and_kept_four_at_a_time() {
+        use crate::git::tests::git;
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        git(dir.path(), &["init", "-q"]);
+        manifest(&board, ProjectKind::Design, &[]);
+        crate::project::tests::design_in(&board);
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "c0"]);
+        for i in 1..=5 {
+            std::fs::write(
+                board.join("rails/x.json"),
+                format!("{{\"kind\": \"x{i}\"}}\n"),
+            )
+            .unwrap();
+            git(dir.path(), &["add", "."]);
+            git(dir.path(), &["commit", "-q", "-m", &format!("c{i}")]);
+        }
+        let mut s = Session::open(&board).unwrap();
+        let (c0, p0) = s.at("HEAD~5").unwrap();
+        let (again, p0b) = s.at(&c0).unwrap();
+        assert_eq!(again, c0);
+        assert!(std::sync::Arc::ptr_eq(&p0, &p0b), "read once");
+        for i in 0..5 {
+            s.at(&format!("HEAD~{i}")).unwrap();
+        }
+        assert_eq!(s.revisions.len(), REVISIONS);
+        let (_, p0c) = s.at(&c0).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&p0, &p0c), "the oldest was dropped");
+        // A revision never touches the working project.
+        assert_eq!(
+            s.project().revision,
+            Project::load(&board).unwrap().revision
+        );
+    }
 
     #[test]
     fn sessions_see_changes_in_aliases_too() {

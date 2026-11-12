@@ -19,9 +19,9 @@
 //! user's global config, which every other repository reads too; `merge
 //! status` still reports a merge that followed a rename.
 
-use crate::error::{Code, Error, Result};
-use serde_json::{Map, Value, json};
-use std::path::{Path, PathBuf};
+use crate::error::{Error, Result};
+use serde_json::Value;
+use std::path::Path;
 
 /// The project's attributes file, beside its manifest; its patterns are
 /// relative to the project folder.
@@ -69,18 +69,6 @@ pub const MERGE_NAME: &str = "merge.ryucad.name";
 /// The config entry Git's merge runs.
 pub const MERGE_DRIVER: &str = "merge.ryucad.driver";
 
-/// The config entry that stops Git's merge following renames, so every
-/// feature file reaches the merge driver as itself.
-pub const RENAMES: &str = "merge.renames";
-
-/// The hooks that run ryucad's merge check: before Git records a merge
-/// commit itself, and before any commit (one that concludes a merge Git
-/// stopped for conflicts runs only this one).
-pub const HOOKS: [&str; 2] = ["pre-merge-commit", "pre-commit"];
-
-/// The line that marks a hook as ryucad's.
-const HOOK_HEADER: &str = "# ryucad: refuse a merge commit while a ryucad project's merge is unresolved (`ryucad git install`)";
-
 /// The line a project needs once it imports STEP files: Git must keep
 /// their bytes exactly (no line endings converted, no line merges, no text
 /// diffs), since import features name them by their hash.
@@ -94,11 +82,7 @@ pub fn missing(text: &str) -> Vec<&'static str> {
 /// The lines of [`LINES`], and with `imports` [`IMPORT_LINE`], that
 /// `text` doesn't have.
 pub fn missing_for(text: &str, imports: bool) -> Vec<&'static str> {
-    LINES
-        .into_iter()
-        .chain(imports.then_some(IMPORT_LINE))
-        .filter(|l| !text.lines().any(|t| t.trim() == *l))
-        .collect()
+    ATTRS.missing(text, imports.then_some(IMPORT_LINE))
 }
 
 /// Whether the project at `root` holds a file under `imports/`.
@@ -115,27 +99,7 @@ pub fn with_lines(text: &str) -> String {
 
 /// [`with_lines`], with [`IMPORT_LINE`] too when `imports`.
 pub fn with_lines_for(text: &str, imports: bool) -> String {
-    let lines = missing_for(text, imports);
-    if lines.is_empty() {
-        return text.to_owned();
-    }
-    let kept: Vec<&str> = text
-        .lines()
-        .filter(|l| !OLD_LINES.contains(&l.trim()))
-        .collect();
-    let mut out = kept.join("\n");
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    if !out.lines().any(|l| l == HEADER) {
-        out.push_str(HEADER);
-        out.push('\n');
-    }
-    for l in lines {
-        out.push_str(l);
-        out.push('\n');
-    }
-    out
+    ATTRS.with_lines(text, imports.then_some(IMPORT_LINE))
 }
 
 /// Writes the project's attributes file with ryucad's lines (and the
@@ -155,226 +119,55 @@ pub fn write_attributes(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The repository holding `here`, if any.
-#[cfg(not(test))]
-fn discover(here: &Path) -> Option<gix::Repository> {
-    gix::discover(here).ok()
-}
+pub use ryu_git::drivers::{HOOKS, Hook, RENAMES, Setup};
 
-/// The repository holding `here`, if any, reading only its own config:
-/// the user's global config (where the installers put the drivers) and
-/// the system's must not decide what tests see.
-#[cfg(test)]
-fn discover(here: &Path) -> Option<gix::Repository> {
-    gix::discover_opts(here, Default::default(), gix::open::Options::isolated()).ok()
-}
+/// ryucad's lines, as ryu-git writes them.
+const ATTRS: ryu_git::drivers::Attributes = ryu_git::drivers::Attributes {
+    header: HEADER,
+    lines: &LINES,
+    old: &OLD_LINES,
+};
 
-/// How Git, as configured for the repository at `root`, is set up for
-/// ryucad; `None` outside a repository.
-pub struct Setup {
-    /// The driver entries Git doesn't have, and [`RENAMES`] where it isn't
-    /// false.
-    pub missing: Vec<&'static str>,
-    /// Each of [`HOOKS`] as it stands.
-    pub hooks: Vec<(&'static str, Hook)>,
-}
+/// What ryucad registers with Git: its diff and merge drivers, and its
+/// line in the clone's shared hook.
+pub const DRIVERS: ryu_git::drivers::Drivers = ryu_git::drivers::Drivers {
+    product: "ryucad",
+    textconv: TEXTCONV,
+    merge: Some((MERGE_NAME, MERGE_DRIVER)),
+    hook: true,
+};
 
-/// The `pre-merge-commit` hook of a clone.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Hook {
-    /// ryucad's, or one that runs ryucad's check.
-    Installed(PathBuf),
-    /// None at all.
-    Missing(PathBuf),
-    /// Someone else's, which doesn't run ryucad's check: it is left alone.
-    Foreign(PathBuf),
-    /// `core.hooksPath` points elsewhere and has no hook that runs the
-    /// check: ryucad doesn't write into a folder others share or commit.
-    HooksPath(PathBuf),
-}
-
-/// Where Git looks for the clone's hooks, and whether that is
-/// `core.hooksPath` rather than the repository's own folder.
-fn hooks_dir(repo: &gix::Repository) -> (PathBuf, bool) {
-    let snapshot = repo.config_snapshot();
-    match snapshot.string("core.hooksPath") {
-        Some(p) => {
-            let p = PathBuf::from(p.to_string());
-            let base = repo.workdir().unwrap_or(repo.git_dir());
-            (if p.is_absolute() { p } else { base.join(p) }, true)
-        }
-        None => (repo.common_dir().join("hooks"), false),
-    }
-}
-
-/// The hook `name` of the repository `repo`.
-fn hook(repo: &gix::Repository, name: &str) -> Hook {
-    let (dir, shared) = hooks_dir(repo);
-    let path = dir.join(name);
-    match std::fs::read_to_string(&path) {
-        Ok(text) if text.lines().any(|l| l == HOOK_HEADER) || text.contains(HOOK_CHECK) => {
-            Hook::Installed(path)
-        }
-        Ok(_) if shared => Hook::HooksPath(path),
-        Ok(_) => Hook::Foreign(path),
-        Err(_) if shared => Hook::HooksPath(path),
-        Err(_) => Hook::Missing(path),
-    }
-}
-
-/// What every hook that runs ryucad's check runs.
-const HOOK_CHECK: &str = "merge status --hook";
-
-/// The repository's setup for ryucad, or `None` outside one.
+/// The repository's setup for ryucad, or `None` outside one. Unit tests
+/// read only the repository's own config: the user's global config (where
+/// the installers put the drivers) and the system's must not decide what
+/// they see.
 pub fn setup(root: &Path) -> Option<Setup> {
-    let repo = discover(root)?;
-    let snapshot = repo.config_snapshot();
-    let mut missing: Vec<&str> = [TEXTCONV, MERGE_DRIVER]
-        .into_iter()
-        .filter(|k| snapshot.string(*k).is_none())
-        .collect();
-    if snapshot.boolean(RENAMES) != Some(false) {
-        missing.push(RENAMES);
-    }
-    let hooks = HOOKS.into_iter().map(|h| (h, hook(&repo, h))).collect();
-    Some(Setup { missing, hooks })
-}
-
-/// This binary, quoted for the shell Git runs commands in, with forward
-/// slashes even on Windows.
-fn exe() -> Result<String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| Error::new(Code::Io, format!("finding the ryucad binary: {e}")))?;
-    let exe = crate::doc::project::plain(exe.canonicalize().unwrap_or(exe));
-    let path = exe
-        .to_string_lossy()
-        .replace('\\', "/")
-        .replace('\'', r"'\''");
-    Ok(format!("'{path}'"))
+    ryu_git::drivers::setup(root, &DRIVERS, cfg!(test))
 }
 
 /// The command Git runs for the diff driver.
 pub fn textconv_command() -> Result<String> {
-    Ok(format!("{} git textconv", exe()?))
+    ryu_git::drivers::textconv_command("ryucad")
 }
 
 /// The command Git runs for the merge driver: base, ours, theirs and the
 /// path.
 pub fn merge_command() -> Result<String> {
-    Ok(format!("{} git merge-driver %O %A %B %P", exe()?))
+    ryu_git::drivers::merge_command("ryucad")
 }
 
 /// The line that runs ryucad's check from a hook.
 pub fn hook_line() -> Result<String> {
-    Ok(format!("{} {HOOK_CHECK} || exit 1", exe()?))
-}
-
-/// ryucad's hook: one check for every project in the repository.
-fn hook_script() -> Result<String> {
-    Ok(format!(
-        "#!/bin/sh\n{HOOK_HEADER}\n{}\n",
-        exe().map(|e| format!("exec {e} {HOOK_CHECK}"))?
-    ))
-}
-
-/// Runs `git config` with `args` in `dir` (any folder for `--global`).
-fn git_config(dir: Option<&Path>, args: &[&str]) -> Result<()> {
-    let mut git = std::process::Command::new("git");
-    if let Some(d) = dir {
-        git.current_dir(d);
-    }
-    let out = git
-        .arg("config")
-        .args(args)
-        .output()
-        .map_err(|e| Error::new(Code::Io, format!("running git: {e}; is Git installed?")))?;
-    if !out.status.success() {
-        return Err(Error::new(
-            Code::Io,
-            format!(
-                "git config failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-/// Writes ryucad's hook at `path`, executable.
-fn write_hook(path: &Path) -> Result<()> {
-    crate::doc::project::write_atomic(path, hook_script()?)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| Error::io(path, &e))?;
-    }
-    Ok(())
+    ryu_git::drivers::hook_line("ryucad")
 }
 
 /// `ryucad git install`: writes the driver entries to the user's global
 /// Git config, or with `local` to the config of the repository at `here`,
-/// with [`RENAMES`] off and the clone's own hooks (except where someone
-/// else's is there, which is left alone and reported with the line to
-/// add).
+/// with [`RENAMES`] off and ryucad's line in the clone's shared hooks
+/// (except where someone else's is there, which is left alone and reported
+/// with the line to add).
 pub fn install(here: &Path, local: bool) -> Result<Value> {
-    let entries = [
-        (TEXTCONV, textconv_command()?),
-        (MERGE_NAME, "ryucad".to_owned()),
-        (MERGE_DRIVER, merge_command()?),
-    ];
-    let mut config = Map::new();
-    if !local {
-        for (k, v) in &entries {
-            git_config(None, &["--global", k, v])?;
-            config.insert((*k).to_owned(), json!(v));
-        }
-        return Ok(json!({"scope": "global", "config": config}));
-    }
-    let repo = discover(here).ok_or_else(|| {
-        Error::new(
-            Code::NotAGitRepo,
-            format!("{} is not in a Git repository", here.display()),
-        )
-        .with("path", here)
-    })?;
-    let dir = repo.workdir().unwrap_or(repo.git_dir()).to_path_buf();
-    // Only what differs is written: a clone already set up takes no lock,
-    // so projects made side by side in one repository don't collide.
-    let snapshot = repo.config_snapshot();
-    for (k, v) in &entries {
-        if snapshot.string(*k).map(|s| s.to_string()) != Some(v.clone()) {
-            git_config(Some(&dir), &["--local", k, v])?;
-        }
-        config.insert((*k).to_owned(), json!(v));
-    }
-    if snapshot.boolean(RENAMES) != Some(false) {
-        git_config(Some(&dir), &["--local", RENAMES, "false"])?;
-    }
-    config.insert(RENAMES.to_owned(), json!("false"));
-    let mut hooks = Map::new();
-    for name in HOOKS {
-        let v = match hook(&repo, name) {
-            Hook::Installed(p) | Hook::Missing(p) => {
-                // Only ours is rewritten: someone's own hook that runs the
-                // check (the line `foreign` asks for) is left as it is.
-                let text = std::fs::read_to_string(&p).ok();
-                let ours = text
-                    .as_deref()
-                    .is_none_or(|t| t.lines().any(|l| l == HOOK_HEADER));
-                if ours && text != Some(hook_script()?) {
-                    write_hook(&p)?;
-                }
-                json!({"path": p, "status": "installed"})
-            }
-            Hook::Foreign(p) => json!({"path": p, "status": "foreign", "line": hook_line()?}),
-            Hook::HooksPath(p) => {
-                json!({"path": p, "status": "hooks_path", "line": hook_line()?})
-            }
-        };
-        hooks.insert(name.to_owned(), v);
-    }
-    Ok(json!({"scope": "local", "config": config, "hooks": hooks}))
+    ryu_git::drivers::install(here, local, &DRIVERS, cfg!(test))
 }
 
 #[cfg(test)]
@@ -516,8 +309,8 @@ mod tests {
             assert!(c.starts_with('\'') && c.ends_with(tail), "{c}");
             assert!(!c.contains('\\'), "{c}");
         }
-        let script = hook_script().unwrap();
-        assert!(script.starts_with("#!/bin/sh\n# ryucad: "), "{script}");
+        let script = ryu_git::drivers::hook_script("ryucad").unwrap();
+        assert!(script.starts_with("#!/bin/sh\n# ryu: "), "{script}");
         assert!(script.ends_with("' merge status --hook\n"), "{script}");
     }
 
@@ -563,7 +356,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first(r), Hook::Installed(path.clone()));
-        write_hook(&path).unwrap();
+        std::fs::write(&path, ryu_git::drivers::hook_script("ryucad").unwrap()).unwrap();
         assert_eq!(first(r), Hook::Installed(path.clone()));
         crate::git::tests::git(r, &["config", MERGE_DRIVER, "x"]);
         assert_eq!(setup(r).unwrap().missing, [TEXTCONV, RENAMES]);
@@ -596,7 +389,7 @@ mod tests {
         let theirs = hooks.join(HOOKS[1]);
         assert_eq!(
             std::fs::read_to_string(theirs).unwrap(),
-            hook_script().unwrap()
+            ryu_git::drivers::hook_script("ryucad").unwrap()
         );
     }
 }

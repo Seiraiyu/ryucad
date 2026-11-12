@@ -20,7 +20,10 @@
 //! [`Journal`], `ryukei.mesh.1` for a mesh); integers are little-endian, counts `u32`, an absent ID
 //! `u32::MAX`. A format change bumps the version, and bytes of another
 //! version are refused, so a cache entry written by another kernel simply
-//! misses. Decoding checks lengths, tags, the geometry's own constructors
+//! misses. The one exception is a mesh's faces drawn as strips, a list
+//! after its faults written only when it isn't empty: a mesh without
+//! strips has the bytes it always had, and a kernel that drew none
+//! refuses one with them (bytes after the end). Decoding checks lengths, tags, the geometry's own constructors
 //! and [`crate::check::check_topology`], and fails with
 //! [`Error::InvalidEncoding`], never a panic, whatever the bytes.
 
@@ -1251,6 +1254,18 @@ pub fn encode_mesh(mesh: &BodyMesh) -> Vec<u8> {
             }
         }
     }
+    // The faces drawn as strips, by their place in `faces`: written only
+    // when there are some, so a mesh without them has the bytes it had
+    // before strips were drawn.
+    let strips: Vec<usize> = (0..mesh.faces.len())
+        .filter(|&i| mesh.faces[i].strip)
+        .collect();
+    if !strips.is_empty() {
+        w.len(strips.len());
+        for i in strips {
+            w.len(i);
+        }
+    }
     w.out
 }
 
@@ -1298,6 +1313,7 @@ pub fn decode_mesh(bytes: &[u8]) -> Result<BodyMesh, Error> {
             face,
             corners,
             triangles: tris,
+            strip: false,
         });
     }
     let mut edges = Vec::new();
@@ -1330,6 +1346,21 @@ pub fn decode_mesh(bytes: &[u8]) -> Result<BodyMesh, Error> {
             _ => return Err(invalid("an unknown mesh fault")),
         };
         faults.push(FaceFault { face, kind });
+    }
+    if !r.bytes.is_empty() {
+        let n = r.count(4)?;
+        if n == 0 {
+            return Err(invalid("an empty list of strips"));
+        }
+        let mut last = None;
+        for _ in 0..n {
+            let i = r.u32()? as usize;
+            if i >= faces.len() || last.is_some_and(|l| i <= l) {
+                return Err(invalid("a strip past the faces or out of order"));
+            }
+            faces[i].strip = true;
+            last = Some(i);
+        }
     }
     r.end()?;
     Ok(BodyMesh {

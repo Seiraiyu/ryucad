@@ -34,7 +34,7 @@ pub fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
         );
         return;
     }
-    let compared = ws.compare.as_ref().map(|c| c.rev.clone());
+    let compared = ws.compare.as_ref().map(|c| c.named().to_owned());
     let mut pick = None;
     egui::ScrollArea::vertical()
         .auto_shrink(false)

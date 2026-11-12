@@ -1769,6 +1769,75 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
 }
 
 #[test]
+fn b_swaps_a_compare_and_writes_wait_for_the_working_files() {
+    use ryucad_app::core::command;
+    use ryucad_app::core::compare::{Blink, SWAPPED};
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=30"]);
+    p.ok(&["feature", "delete", "p", "boss"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.meshes.len() == 1
+    });
+    menu(&mut h, "View", "Compare with HEAD");
+    frames(&mut h, compared);
+    // B over the viewport: HEAD's box and cylinder, the working box
+    // ghosted.
+    let rect = h.state().opened().view.rect;
+    h.event(egui::Event::PointerMoved(rect.center()));
+    h.step();
+    hooked(&mut h, egui::Key::B, egui::Modifiers::NONE);
+    frames(&mut h, |a| {
+        compared(a)
+            && a.opened().ws.model.meshes.len() == 2
+            && a.opened()
+                .ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.swapped.as_deref() == Some("HEAD"))
+    });
+    h.step();
+    h.get_by_label("Showing HEAD · working ghosted");
+    // Undo waits for the working files, and says why.
+    let state = ryucad_app::ui::commands::state(h.state_mut().opened_mut());
+    assert_eq!(command::enabled("edit.undo", &state), Err(SWAPPED));
+    // An agent's write lands; the ghost follows it.
+    let key = ("p".to_owned(), "base".to_owned());
+    let before = h.state().opened().ws.compare.as_ref().unwrap().wanted[&key].clone();
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=25"]);
+    frames(&mut h, |a| {
+        compared(a)
+            && a.opened()
+                .ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.wanted.get(&key).is_some_and(|h| *h != before))
+    });
+    // HEAD alone; B blinks to the working files alone.
+    h.get_by_label("Only HEAD").click();
+    frames(&mut h, |a| a.opened().ws.painted().is_none());
+    h.event(egui::Event::PointerMoved(rect.center()));
+    h.step();
+    hooked(&mut h, egui::Key::B, egui::Modifiers::NONE);
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle() && ws.model_rev().is_none() && ws.model.meshes.len() == 1
+    });
+    shown(&mut h, "Showing only the working files");
+    h.get_by_label("Both").click();
+    frames(&mut h, |a| a.opened().ws.painted().is_some());
+    // Stop comparing ends the blink.
+    h.get_by_label("Stop comparing").click();
+    frames(&mut h, |a| {
+        a.opened().ws.compare.is_none() && a.opened().ws.blink == Blink::default()
+    });
+}
+
+#[test]
 fn a_merge_conflict_is_settled_from_its_panel() {
     let _one = one_at_a_time();
     if !gpu() {
@@ -3812,6 +3881,30 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
             .as_ref()
             .is_some_and(|c| c.rev == format!("worktree:{arm_s}") && c.loaded)
     });
+}
+
+#[test]
+fn a_branch_is_checked_out_from_its_row_and_the_dialog_names_who_is_attached() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    p.git(&["branch", "arm"]);
+    p.ok(&["--as", "claude-1", "status", "reviewing"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    show_tab(&mut h, "branches");
+    frames(&mut h, |a| a.opened().ws.branches.branch_list.is_some());
+    shown(&mut h, "main (checked out)");
+    h.get_by_label("Check out").click();
+    shown(&mut h, "claude-1 is attached and may be writing");
+    h.get_by_label("Switch to arm").click();
+    frames(&mut h, |a| {
+        let b = &a.opened().ws.branches;
+        b.checkout.is_none() && b.current_branch() == Some("arm")
+    });
+    shown(&mut h, "arm (checked out)");
 }
 
 #[test]
@@ -6524,6 +6617,36 @@ fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_i
         .set_mode(ryucad_app::core::modes::Mode::View);
     h.run_steps(2);
     assert!(h.get_by_label("Markup").accesskit_node().is_disabled());
+}
+
+#[test]
+fn file_switch_branch_lists_the_branches_in_the_palette() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    p.git(&["branch", "arm"]);
+    p.git(&["branch", "leg"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "File", "Switch branch…");
+    frames(&mut h, |a| a.opened().ws.branches.branch_list.is_some());
+    h.step();
+    h.get_by_label("Search commands")
+        .set_text_value_accesskit("branch:le");
+    h.step();
+    h.step();
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .branches
+            .checkout
+            .as_ref()
+            .is_some_and(|c| c.branch == "leg")
+    });
+    shown(&mut h, "Switch to leg");
 }
 
 #[test]
