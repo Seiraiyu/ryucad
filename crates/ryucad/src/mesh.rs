@@ -612,7 +612,7 @@ fn moved_mesh(m: &DisplayMesh, pose: &ryukei::geom::Rigid) -> DisplayMesh {
         Err(e) => Err(e.clone()),
     };
     DisplayMesh {
-        params: m.params.clone(),
+        params: m.params,
         mesh,
     }
 }

@@ -49,6 +49,10 @@ fn is_identity(r: &Rigid) -> bool {
     crate::assembly::pose_bits(r) == crate::assembly::pose_bits(&Rigid::IDENTITY)
 }
 
+/// One inserted solid as built: its key, its body, its lineage in this
+/// part's frame, and its source part and key.
+type InsertedSolid = (Id, Arc<Built>, Arc<Lineage>, (Id, Id));
+
 /// Builds insert `id` of `part` from the source's model in `children`.
 pub fn build(part: &Part, id: &Id, ins: &Insert, children: &Children) -> Result<Made> {
     let pose = match &ins.placement {
@@ -78,7 +82,7 @@ pub fn build(part: &Part, id: &Id, ins: &Insert, children: &Children) -> Result<
         return Err(empty(id, &ins.part));
     }
     let identity = is_identity(&pose);
-    let moved: Vec<Result<(Id, Arc<Built>, Arc<Lineage>, (Id, Id))>> = occ
+    let moved: Vec<Result<InsertedSolid>> = occ
         .solids
         .par_iter()
         .map(|s| {

@@ -159,7 +159,7 @@ fn issue_41_an_enclosure_is_modelled_against_an_inserted_board() {
     assert_eq!(solids.len(), 1, "{solids:?}");
     assert_eq!(solids[0]["solid"], "shell");
     let m = must(&mut s, "mass", json!({"of": "enclosure"}));
-    let want = 0.044 * 0.034 * 0.010 - 4.0 * core::f64::consts::PI * 0.0015_f64.powi(2) * 0.010;
+    let want = 0.044 * 0.034 * 0.010 - 4.0 * core::f64::consts::PI * 0.0015 * 0.0015 * 0.010;
     let got = m["volume"]["m3"].as_f64().unwrap();
     assert!((got - want).abs() < 1e-6 * want, "{got} vs {want}");
     // check is clean.
