@@ -1222,6 +1222,7 @@ mod tests {
                 number: i.to_string(),
                 name: format!("IN{i}"),
                 ty: PinType::Input,
+                unit: None,
             })
             .collect()
     }
@@ -1332,21 +1333,25 @@ mod tests {
                 number: "1".into(),
                 name: "VDD".into(),
                 ty: PinType::PowerIn,
+                unit: None,
             },
             PinSpec {
                 number: "2".into(),
                 name: "GND".into(),
                 ty: PinType::PowerIn,
+                unit: None,
             },
             PinSpec {
                 number: "3".into(),
                 name: "EN".into(),
                 ty: PinType::Input,
+                unit: None,
             },
             PinSpec {
                 number: "4".into(),
                 name: "OUT".into(),
                 ty: PinType::Output,
+                unit: None,
             },
         ];
         let mut s = template("U", Class::Ic, &pins, &st).unwrap();
@@ -1385,6 +1390,7 @@ mod tests {
             number: n.into(),
             name: format!("GPIO{i}"),
             ty: PinType::Bidirectional,
+            unit: None,
         };
         let pins = vec![gpio("1", 0), gpio("2", 1), gpio("3", 2), gpio("4", 3)];
         let clean = template("U", Class::Ic, &pins, &st).unwrap();
@@ -1481,16 +1487,19 @@ mod tests {
                 number: "1".into(),
                 name: "RESET_N_LONG_NAME".into(),
                 ty: PinType::Input,
+                unit: None,
             },
             PinSpec {
                 number: "2".into(),
                 name: "IRQ".into(),
                 ty: PinType::Output,
+                unit: None,
             },
             PinSpec {
                 number: "3".into(),
                 name: "VDD".into(),
                 ty: PinType::PowerIn,
+                unit: None,
             },
         ];
         let clean = template("U", Class::Ic, &wide, &st).unwrap();
@@ -1652,6 +1661,7 @@ mod tests {
             number: n.into(),
             name: name.into(),
             ty: PinType::Bidirectional,
+            unit: None,
         };
         let s = template(
             "U",
@@ -1692,12 +1702,36 @@ mod tests {
             number: (*n).into(),
             name: (*name).into(),
             ty: *ty,
+            unit: None,
         })
         .chain((0..30).map(|i| PinSpec {
             number: format!("{}", 15 + i),
             name: format!("GPIO{}", 29 - i),
             ty: PinType::Bidirectional,
+            unit: None,
         }))
+        .collect();
+        // #758: the OPA1622, the worst case: an enable, two V- and GND.
+        let amp: Vec<PinSpec> = [
+            ("10", "IN-", PinType::Input, Some(1)),
+            ("1", "IN+", PinType::Input, Some(1)),
+            ("9", "OUT", PinType::Output, Some(1)),
+            ("8", "EN", PinType::Input, Some(1)),
+            ("6", "-", PinType::Input, Some(2)),
+            ("5", "+", PinType::Input, Some(2)),
+            ("7", "~", PinType::Output, Some(2)),
+            ("2", "V+", PinType::PowerIn, None),
+            ("4", "V-", PinType::PowerIn, None),
+            ("11", "V-", PinType::PowerIn, None),
+            ("3", "GND", PinType::PowerIn, None),
+        ]
+        .iter()
+        .map(|(n, name, ty, unit)| PinSpec {
+            number: (*n).into(),
+            name: (*name).into(),
+            ty: *ty,
+            unit: *unit,
+        })
         .collect();
         let prefs = Prefs::default();
         for shapes in [
@@ -1714,11 +1748,12 @@ mod tests {
                 from: "self",
             };
             for class in crate::template::TEMPLATES {
-                let pins: &[PinSpec] = match class {
-                    Class::Ic | Class::Regulator | Class::Connector => &mcu,
-                    _ => &[],
+                let (pins, units): (&[PinSpec], u32) = match class {
+                    Class::Ic | Class::Regulator | Class::Connector => (&mcu, 1),
+                    Class::Opamp => (&amp, 2),
+                    _ => (&[], 1),
                 };
-                let s = template("T", class, pins, &st).unwrap();
+                let s = crate::template::template_units("T", class, units, pins, &st).unwrap();
                 let found = lint(&s, Some(class), &cx);
                 assert!(found.is_empty(), "{class:?} {shapes:?}: {found:?}");
             }

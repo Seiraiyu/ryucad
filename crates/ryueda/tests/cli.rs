@@ -2207,6 +2207,47 @@ fn symbols_from_templates() {
         (&json!("up"), &json!("down"))
     );
     assert_eq!(u["added"], json!(["g2"]));
+    // #758: the op-amp template, a dual with its supplies on unit 1.
+    let amp = p.ok(&[
+        "symbol",
+        "create",
+        "OPA1612",
+        "--template",
+        "opamp",
+        "--units",
+        "2",
+        "--pins",
+        r#"[{"number": "2", "name": "-", "type": "input", "unit": 1},
+            {"number": "3", "name": "+", "type": "input", "unit": 1},
+            {"number": "1", "name": "~", "type": "output", "unit": 1},
+            {"number": "6", "name": "-", "type": "input", "unit": 2},
+            {"number": "5", "name": "+", "type": "input", "unit": 2},
+            {"number": "7", "name": "~", "type": "output", "unit": 2},
+            {"number": "8", "name": "V+", "type": "power_in"},
+            {"number": "4", "name": "V-", "type": "power_in"}]"#,
+    ]);
+    assert_eq!(
+        (&amp["symbol"]["class"], &amp["symbol"]["units"]),
+        (&json!("opamp"), &json!(2)),
+        "{amp}"
+    );
+    assert_eq!(amp["symbol"]["pins"]["8"]["side"], "up");
+    let lint = p.ok(&["lib", "check", "--symbol", "opa1612"]);
+    let found = &lint["symbols"][0]["findings"];
+    assert_eq!(found, &json!([]), "the op-amp template lints clean: {lint}");
+    p.fails(
+        &[
+            "symbol",
+            "create",
+            "R2",
+            "--template",
+            "resistor",
+            "--units",
+            "2",
+        ],
+        "invalid_param",
+        1,
+    );
     // Refusals.
     p.fails(
         &["symbol", "create", "Q", "--template", "transistor"],

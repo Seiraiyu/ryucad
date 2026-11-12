@@ -66,6 +66,7 @@ fn symbol_lint_64(b: divan::Bencher) {
             number: (i + 1).to_string(),
             name: format!("GPIO{i}"),
             ty: ryueda::symbol::PinType::Bidirectional,
+            unit: None,
         })
         .collect();
     let mut s = template("U", Class::Ic, &pins, &st).unwrap();

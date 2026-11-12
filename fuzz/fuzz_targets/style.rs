@@ -99,6 +99,7 @@ fuzz_target!(|data: &[u8]| {
                 number: (i + 1).to_string(),
                 name: n.clone(),
                 ty: types[i % 4],
+                unit: None,
             }
         })
         .collect();

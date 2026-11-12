@@ -467,11 +467,13 @@ enum SymbolCmd {
         class: Option<String>,
         /// Draw it from the standards' template for a class: resistor,
         /// capacitor, inductor, diode, led (whole), ic, regulator,
-        /// connector (a box round --pins); --ops apply after.
+        /// connector (a box round --pins), opamp (a triangle per unit,
+        /// --units 1 to 4, round --pins); --ops apply after.
         #[arg(long)]
         template: Option<String>,
-        /// A box template's pins, as JSON: [{"number": "1", "name":
-        /// "VDD", "type": "power_in"}, ...].
+        /// A box's or op-amp's pins, as JSON: [{"number": "1", "name":
+        /// "VDD", "type": "power_in"}, ...]; an op-amp's amplifier pins
+        /// name their "unit" when there are several, its supplies none.
         #[arg(long, value_parser = pin_specs, default_value = "[]")]
         pins: PinSpecs,
         #[command(flatten)]
