@@ -40,7 +40,7 @@ use crate::intersect::broad::BoxTree;
 use crate::intersect::coincide::coincident;
 use crate::intersect::{
     BESIDE_CELLS, CONE_PARTS, FaceMeet, Place, face_beside, face_box, face_face_in,
-    face_face_within, face_off_ball, faces_apart, normal_cone, point_in_face, sine_apart,
+    face_face_within, face_off_ball, faces_apart, normal_cones, point_in_face, sine_apart,
 };
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use crate::work::{Meter, Work};
@@ -242,6 +242,22 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
             Err(_) => {
                 if apart_beside_by(body, a, b, &shared, &LADDER[2..], true, m) {
                     return None;
+                }
+            }
+        }
+    }
+    // Faces crossing at an angle along an edge they share are traced first
+    // under [`CROSSING_TRACE_FIRST`] units; past it they are certified
+    // beside the edge and apart, or traced, outside it (#303). A pair the
+    // certificate can't settle is traced in full below, as before.
+    if !tangent && !shared.is_empty() {
+        match m.capped_by(CROSSING_TRACE_FIRST, || {
+            face_face_in((body, a), (body, b), m)
+        }) {
+            Ok(meet) => traced = Some(meet),
+            Err(_) => {
+                if let Some(verdict) = crossing_beside(body, a, b, &shared, m) {
+                    return verdict;
                 }
             }
         }
@@ -521,7 +537,6 @@ fn trace_boxes(body: &Body, a: FaceId, b: FaceId, boxes: Vec<Box3>, m: &Meter) -
 /// certificate is withheld, the search outside fails and the trace
 /// would cut more than [`TRACED_PIECES`] boxes, or the meter halts.
 /// `Some(fault)` is the verdict.
-#[cfg_attr(not(test), allow(dead_code))] // 18.A: wired into `pair` in Task 4
 fn crossing_beside(
     body: &Body,
     a: FaceId,
@@ -577,13 +592,12 @@ fn crossing_beside(
 /// which the faces are certified to meet only along those edges
 /// ([`crossing_beside`]): each edge's range halved (20 times at most)
 /// until its piece's box ([`crate::geom::Curve::piece_bounds`]) is no
-/// wider than `w`, then both faces' cones ([`normal_cone`]) over the box
+/// wider than `w`, then both faces' cones ([`normal_cones`]) over the box
 /// grown by `3 w + 2 tol` (which holds every `x` and the ball of radius `d`
 /// round it for every `p` within `w` of the piece). They must cross at
 /// `sin θ ≥ 4 K (w + tol)`. `None` where a piece fails that, a cone
 /// can't be had, more than [`CROSSING_PIECES`] pieces are needed, or the
 /// meter halts.
-#[cfg_attr(not(test), allow(dead_code))] // 18.A: wired into `pair` in Task 4
 fn crossing_pieces(
     body: &Body,
     a: FaceId,
@@ -593,7 +607,7 @@ fn crossing_pieces(
     tol: f64,
     m: &Meter,
 ) -> Option<Vec<Box3>> {
-    let mut out = Vec::new();
+    let mut boxes = Vec::new();
     for &e in shared {
         let x = &body.edges[e];
         let curve = &body.curves[x.curve];
@@ -606,21 +620,30 @@ fn crossing_pieces(
                 stack.push(([mid, iv[1]], depth + 1));
                 continue;
             }
-            let near = bx.grow(3.0 * w + 2.0 * tol);
-            let cone = |f: FaceId| normal_cone(body, f, &near, CONE_PARTS, m).ok().flatten();
-            let (ca, cb) = (cone(a)?, cone(b)?);
-            let sine = sine_apart(&ca.n, &cb.n);
-            let bend = ca.k.max(cb.k);
-            if !(sine > 0.0 && 4.0 * bend * (w + tol) <= sine) {
-                return None;
-            }
-            out.push(bx.grow(w));
-            if out.len() > CROSSING_PIECES {
+            boxes.push(bx);
+            if boxes.len() > CROSSING_PIECES {
                 return None;
             }
         }
     }
-    Some(out)
+    // Both faces' cones over every piece at once ([`normal_cones`]): one
+    // search a face, not one a piece.
+    let nears: Vec<Box3> = boxes
+        .iter()
+        .map(|bx| bx.grow(3.0 * w + 2.0 * tol))
+        .collect();
+    let parts = CONE_PARTS.saturating_mul(nears.len());
+    let cones = |f: FaceId| normal_cones(body, f, &nears, parts, m).ok();
+    let (ca, cb) = (cones(a)?, cones(b)?);
+    for (ca, cb) in ca.into_iter().zip(cb) {
+        let (ca, cb) = (ca?, cb?);
+        let sine = sine_apart(&ca.n, &cb.n);
+        let bend = ca.k.max(cb.k);
+        if !(sine > 0.0 && 4.0 * bend * (w + tol) <= sine) {
+            return None;
+        }
+    }
+    Some(boxes.into_iter().map(|bx| bx.grow(w)).collect())
 }
 
 /// The edges two faces both use, each once.
@@ -924,12 +947,19 @@ const WITHIN_FIRST: u64 = 1 << 16;
 /// committed body's check reaches it.
 const WITHIN_LAST: u64 = 1 << 18;
 
+/// The units a trace of faces crossing along an edge they share is first
+/// given, before the crossing certificate ([`crossing_beside`]): a pair
+/// settled under it spends and answers as before, and one that isn't
+/// (#303: 1.76M to 2.02M units a pair) is certified beside its edge
+/// instead, or traced again in full.
+const CROSSING_TRACE_FIRST: u64 = 1 << 18;
+
 /// How many times [`crossing_beside`] quarters its strip before it
 /// withholds the certificate.
 const CROSSING_ROUNDS: usize = 3;
 
 /// The most pieces of shared edges [`crossing_pieces`] certifies.
-const CROSSING_PIECES: usize = 1 << 10;
+const CROSSING_PIECES: usize = 1 << 12;
 
 /// The most boxes [`crossing_beside`] cuts out of the region it traces.
 const TRACED_PIECES: usize = 64;
@@ -1078,6 +1108,7 @@ mod tests {
         let trace = crate::work::Scope::Trace.limit();
         const { assert!(TANGENT_TRACE_FIRST < WITHIN_FIRST) };
         const { assert!(WITHIN_FIRST < WITHIN_LAST) };
+        const { assert!(CROSSING_TRACE_FIRST <= WITHIN_LAST) };
         assert!(WITHIN_LAST < trace / 64);
     }
 

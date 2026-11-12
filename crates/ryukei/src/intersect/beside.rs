@@ -321,16 +321,34 @@ fn image_box(j: &JVec<Interval>) -> Box3 {
 /// The cone of one part from its enclosed jets: the unit normal
 /// `n = S_u × S_v / |S_u × S_v|`, and `|κ_n| ≤ ‖II‖_F / λ_min(I)` with
 /// `II = [S_uu·n, S_uv·n; S_uv·n, S_vv·n]` and `I` the first fundamental
-/// form, whose least eigenvalue is `(E + G)/2 - sqrt(((E - G)/2)² + F²)`.
+/// form, whose least eigenvalue is `(E + G)/2 - sqrt(((E - G)/2)² + F²)`
+/// and at least `(EG - F²) / (E + G)`, over the part's parameters scaled
+/// by constants making `|S_u|` and `|S_v|` about one.
 /// Every step is outward-rounded interval arithmetic. `None` where the
 /// normal or `λ_min` can't be bounded away from zero.
 fn cell_cone(j: &JVec<Interval>) -> Option<Cone> {
     let col = |f: &dyn Fn(&Jet<Interval>) -> Interval| -> [Interval; 3] {
         core::array::from_fn(|i| f(&j[i]))
     };
-    let su = col(&|x| x.d[0]);
-    let sv = col(&|x| x.d[1]);
-    let (suu, suv, svv) = (col(&|x| x.h[0]), col(&|x| x.h[1]), col(&|x| x.h[2]));
+    // Normal curvature doesn't depend on the parameterization, so `u` and
+    // `v` are first scaled by constants making `|S_u|` and `|S_v|` about
+    // one: unscaled, `‖II‖_F / λ_min(I)` overweights the mixed term by
+    // `sqrt(E / G)` where they differ by orders of magnitude (a sweep up a
+    // helix: `E` about 1, `G` about 2e-5, a bound 300 times the bend, #698).
+    let scale = |k: usize| {
+        let len2 = (0..3).map(|i| j[i].d[k].mag()).map(|x| x * x).sum::<f64>();
+        let s = 1.0 / crate::math::sqrt(len2);
+        (s.is_finite() && s > 0.0).then_some(Interval::point(s))
+    };
+    let (a, b) = (scale(0)?, scale(1)?);
+    let times = |v: [Interval; 3], k: Interval| v.map(|x| x * k);
+    let su = times(col(&|x| x.d[0]), a);
+    let sv = times(col(&|x| x.d[1]), b);
+    let (suu, suv, svv) = (
+        times(col(&|x| x.h[0]), a * a),
+        times(col(&|x| x.h[1]), a * b),
+        times(col(&|x| x.h[2]), b * b),
+    );
     let n = cross3(&su, &sv);
     let len = dot3(&n, &n).sqrt()?;
     if len.lo() <= 0.0 {
@@ -343,26 +361,26 @@ fn cell_cone(j: &JVec<Interval>) -> Option<Cone> {
     ];
     let (e, f, g) = (dot3(&su, &su), dot3(&su, &sv), dot3(&sv, &sv));
     let half = Interval::point(0.5);
-    let least = half * (e + g) - ((half * (e - g)).square() + f.square()).sqrt()?;
-    if least.lo() <= 0.0 {
+    let closed = half * (e + g) - ((half * (e - g)).square() + f.square()).sqrt()?;
+    // `det I / tr I` is at most the least eigenvalue too, the greater being
+    // at most the trace, and keeps its sign where the closed form cancels.
+    let ratio = dot3(&n, &n).checked_div(e + g)?;
+    let least = closed.lo().max(ratio.lo());
+    if least <= 0.0 {
         return None;
     }
     let (l, mm, nn) = (dot3(&suu, &unit), dot3(&suv, &unit), dot3(&svv, &unit));
     let top = (l.square() + Interval::point(2.0) * mm.square() + nn.square()).sqrt()?;
-    let k = top.hi() / least.lo();
+    let k = top.hi() / least;
     Some(Cone {
         n: unit,
         k: if k == 0.0 { 0.0 } else { k.next_up() },
     })
 }
 
-/// The cone of a face's surface near `near` ([`Cone`]): its parameter
-/// box, breadth first, each part halved across its longer side in model
-/// space until its surface's box is no wider than half of `near`'s; parts
-/// whose box misses `near`, or certified outside the face ([`outside`]),
-/// are left out. `Ok(None)` when no part of the face meets `near`.
-/// `Err(Uncertain)` past `parts` parts or [`CONE_DEPTH`] halvings, or for
-/// a face with a fin that has no pcurve.
+/// The cone of a face's surface near `near` ([`Cone`]): [`normal_cones`]
+/// of the one box.
+#[cfg(test)]
 pub(crate) fn normal_cone(
     body: &Body,
     face: FaceId,
@@ -370,36 +388,70 @@ pub(crate) fn normal_cone(
     parts: usize,
     m: &Meter,
 ) -> Result<Option<Cone>, Failure> {
+    Ok(normal_cones(body, face, core::slice::from_ref(near), parts, m)?[0])
+}
+
+/// The cone of a face's surface near each of `nears` ([`Cone`]), in one
+/// search: its parameter box, breadth first, each part carrying the boxes
+/// of `nears` its surface's box meets, and halved across its longer side
+/// in model space until its surface's box is no wider than half of the
+/// narrowest of them. Then its cone joins each of theirs. Parts whose box
+/// meets none, or certified outside the face ([`outside`]), are left out.
+/// `None` for a box no part of the face meets. `Err(Uncertain)` past
+/// `parts` parts or [`CONE_DEPTH`] halvings, or for a face with a fin
+/// that has no pcurve.
+pub(crate) fn normal_cones(
+    body: &Body,
+    face: FaceId,
+    nears: &[Box3],
+    parts: usize,
+    m: &Meter,
+) -> Result<Vec<Option<Cone>>, Failure> {
     let surface = &body.surfaces[body.faces[face].surface];
     let boundary = boundary_of(body, face).ok_or(Failure::Uncertain)?;
     let periods = surface.periods();
     let sheet = Sheet::of(surface);
-    let fine = (near.max() - near.min()).length() / 2.0;
-    let mut cone: Option<Cone> = None;
+    let fine: Vec<f64> = nears
+        .iter()
+        .map(|n| (n.max() - n.min()).length() / 2.0)
+        .collect();
+    let mut cones: Vec<Option<Cone>> = vec![None; nears.len()];
     let mut budget = parts;
-    let mut queue = VecDeque::from([(parameter_box(body, face), 0u32)]);
-    while let Some((c, depth)) = queue.pop_front() {
+    let all: Vec<usize> = (0..nears.len()).collect();
+    let mut queue = VecDeque::from([(parameter_box(body, face), 0u32, all)]);
+    while let Some((c, depth, near)) = queue.pop_front() {
         budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
         m.charge(sheet.cost())?;
         let j = sheet.jet_box_in(c, m.enclosures());
-        if let Some(j) = &j {
-            let bx = image_box(j);
-            if !bx.intersects(near) || outside(body, face, &boundary, periods, c) {
-                continue;
+        let near = match &j {
+            Some(j) => {
+                let bx = image_box(j);
+                let near: Vec<usize> = near
+                    .into_iter()
+                    .filter(|&i| bx.intersects(&nears[i]))
+                    .collect();
+                if near.is_empty() || outside(body, face, &boundary, periods, c) {
+                    continue;
+                }
+                let finest = near.iter().map(|&i| fine[i]).fold(f64::INFINITY, f64::min);
+                if (bx.max() - bx.min()).length() <= finest
+                    && let Some(here) = cell_cone(j)
+                {
+                    for &i in &near {
+                        cones[i] = Some(match cones[i] {
+                            None => here,
+                            Some(k) => Cone {
+                                n: core::array::from_fn(|x| k.n[x].hull(here.n[x])),
+                                k: k.k.max(here.k),
+                            },
+                        });
+                    }
+                    continue;
+                }
+                near
             }
-            if (bx.max() - bx.min()).length() <= fine
-                && let Some(here) = cell_cone(j)
-            {
-                cone = Some(match cone {
-                    None => here,
-                    Some(k) => Cone {
-                        n: core::array::from_fn(|i| k.n[i].hull(here.n[i])),
-                        k: k.k.max(here.k),
-                    },
-                });
-                continue;
-            }
-        }
+            None => near,
+        };
         if depth == CONE_DEPTH {
             return Err(Failure::Uncertain);
         }
@@ -413,15 +465,15 @@ pub(crate) fn normal_cone(
         };
         if across_u {
             let mid = (u0 + u1) / 2.0;
-            queue.push_back(([[u0, mid], [v0, v1]], depth + 1));
-            queue.push_back(([[mid, u1], [v0, v1]], depth + 1));
+            queue.push_back(([[u0, mid], [v0, v1]], depth + 1, near.clone()));
+            queue.push_back(([[mid, u1], [v0, v1]], depth + 1, near));
         } else {
             let mid = (v0 + v1) / 2.0;
-            queue.push_back(([[u0, u1], [v0, mid]], depth + 1));
-            queue.push_back(([[u0, u1], [mid, v1]], depth + 1));
+            queue.push_back(([[u0, u1], [v0, mid]], depth + 1, near.clone()));
+            queue.push_back(([[u0, u1], [mid, v1]], depth + 1, near));
         }
     }
-    Ok(cone)
+    Ok(cones)
 }
 
 /// A lower bound on `|p × q|` over every `p` in `a` and `q` in `b`: for
@@ -725,6 +777,49 @@ fn run(
     })
 }
 
+/// The most parts [`strip_bound`] halves a parameter box into.
+const STRIP_PARTS: usize = 256;
+
+/// Bounds on `|S_u|` and `|S_v|` over `cell` ([`first_bound`]), for
+/// turning the strip's width into parameters. Where the surface's
+/// enclosure fails over the whole box (a sweep along three turns of a
+/// helix, whose frame can't be enclosed over more than a part of a turn,
+/// #698), the greatest bound over parts of it, each halved along its
+/// longer side, up to [`STRIP_PARTS`] parts: infinite (a strip of no
+/// width) only past that.
+fn strip_bound(surface: &Surface, cell: Cell) -> (f64, f64) {
+    let whole = first_bound(surface, cell);
+    if whole.0.is_finite() && whole.1.is_finite() {
+        return whole;
+    }
+    let (mut lu, mut lv) = (0.0f64, 0.0f64);
+    let mut queue = VecDeque::from([cell]);
+    let mut parts = 1;
+    while let Some(c) = queue.pop_front() {
+        let (bu, bv) = first_bound(surface, c);
+        if bu.is_finite() && bv.is_finite() {
+            lu = lu.max(bu);
+            lv = lv.max(bv);
+            continue;
+        }
+        parts += 1;
+        if parts > STRIP_PARTS {
+            return whole;
+        }
+        let [[u0, u1], [v0, v1]] = c;
+        if u1 - u0 >= v1 - v0 {
+            let m = (u0 + u1) / 2.0;
+            queue.push_back([[u0, m], [v0, v1]]);
+            queue.push_back([[m, u1], [v0, v1]]);
+        } else {
+            let m = (v0 + v1) / 2.0;
+            queue.push_back([[u0, u1], [v0, m]]);
+            queue.push_back([[u0, u1], [m, v1]]);
+        }
+    }
+    (lu, lv)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn signs(
     surface: &Surface,
@@ -744,7 +839,7 @@ fn signs(
         form: Form::Implicit(imp),
         table: m.enclosures(),
     });
-    let (lu, lv) = first_bound(surface, cell);
+    let (lu, lv) = strip_bound(surface, cell);
     let w = [strip / lu, strip / lv];
     let pieces = pieces_of(rails, PIECES, surface.periods(), cell, w);
     // A part near a rail's end, which coverage along it can't reach.

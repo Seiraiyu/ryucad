@@ -38,7 +38,7 @@ mod winding;
 pub(crate) use beside::CELLS as BESIDE_CELLS;
 pub use beside::beside;
 pub(crate) use beside::{
-    CONE_PARTS, face_beside, face_off_ball, faces_apart, normal_cone, section_plane, sine_apart,
+    CONE_PARTS, face_beside, face_off_ball, faces_apart, normal_cones, section_plane, sine_apart,
 };
 pub(crate) use coincide::{coincident, common, covering};
 pub(crate) use contour::fit_contour;
