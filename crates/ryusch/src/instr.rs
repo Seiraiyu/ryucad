@@ -1160,21 +1160,14 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
                 .get(&block.parts[p].key)
                 .is_some_and(|x| x.rotation == *rotation % 360 && x.mirror == *mirror)
         }),
-        Instruction::Beside { of, side, .. } => {
-            let Some(o) = parts_named(block, of).first().copied().and_then(shape) else {
-                return false;
-            };
-            all(&|p| {
-                shape(p).is_some_and(|(s, sh)| {
-                    s == o.0
-                        && match side {
-                            Side::Left => sh.extent.max[0] <= o.1.extent.min[0],
-                            Side::Right => sh.extent.min[0] >= o.1.extent.max[0],
-                            Side::Up => sh.extent.min[1] >= o.1.extent.max[1],
-                            Side::Down => sh.extent.max[1] <= o.1.extent.min[1],
-                        }
-                })
-            })
+        // Judged as the reports judge them (design 519): one test of
+        // holding, so the engine never leaves alone what the report calls
+        // not held.
+        Instruction::Beside { .. } | Instruction::Group { .. } | Instruction::Edge { .. } => {
+            !parts.is_empty() && judge(block, layout, ins).is_ok()
+        }
+        Instruction::Near { to, .. } if parts.len() == 1 || pin_named(block, to).is_none() => {
+            !parts.is_empty() && judge(block, layout, ins).is_ok()
         }
         Instruction::Near { to, .. } => {
             let target = pin_named(block, to)
@@ -1183,47 +1176,30 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
             let Some(t) = target.and_then(shape) else {
                 return false;
             };
-            if parts.len() >= 2 && pin_named(block, to).is_some() {
-                let mut near: Vec<crate::geom::Rect> = vec![t.1.extent];
-                let mut left: Vec<usize> = parts.clone();
-                loop {
-                    let before = left.len();
-                    left.retain(|p| match shape(*p) {
-                        Some((s, sh))
-                            if s == t.0
-                                && near.iter().any(|r| {
-                                    sh.extent.grow(10 * crate::geom::GRID).overlaps(r)
-                                }) =>
-                        {
-                            near.push(sh.extent);
-                            false
-                        }
-                        _ => true,
-                    });
-                    if left.is_empty() || left.len() == before {
-                        break;
+            // A network off a pin: each part near the pin's part or another
+            // part of it that is.
+            let mut near: Vec<crate::geom::Rect> = vec![t.1.extent];
+            let mut left: Vec<usize> = parts.clone();
+            loop {
+                let before = left.len();
+                left.retain(|p| match shape(*p) {
+                    Some((s, sh))
+                        if s == t.0
+                            && near
+                                .iter()
+                                .any(|r| sh.extent.grow(10 * crate::geom::GRID).overlaps(r)) =>
+                    {
+                        near.push(sh.extent);
+                        false
                     }
+                    _ => true,
+                });
+                if left.is_empty() || left.len() == before {
+                    break;
                 }
-                return left.is_empty();
             }
-            all(&|p| {
-                shape(p).is_some_and(|(s, sh)| {
-                    s == t.0 && sh.extent.grow(10 * crate::geom::GRID).overlaps(&t.1.extent)
-                })
-            })
+            left.is_empty()
         }
-        Instruction::Edge { side, .. } => all(&|p| {
-            shape(p).is_some_and(|(sid, sh)| {
-                let near = 16 * crate::geom::GRID;
-                let size = block.area_in(layout, &sid);
-                match side {
-                    Side::Left => sh.extent.min[0] <= near,
-                    Side::Right => sh.extent.max[0] >= size[0] - near,
-                    Side::Up => sh.extent.max[1] >= size[1] - near,
-                    Side::Down => sh.extent.min[1] <= near,
-                }
-            })
-        }),
         Instruction::Align {
             axis,
             parts: subjects,
@@ -1254,18 +1230,6 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
         }
         // A move: done once it is applied.
         Instruction::Shift { .. } => true,
-        Instruction::Group { .. } => {
-            let boxes: Vec<_> = parts.iter().filter_map(|p| shape(*p)).collect();
-            boxes.len() == parts.len()
-                && boxes.windows(2).all(|w| {
-                    w[0].0 == w[1].0
-                        && w[0]
-                            .1
-                            .extent
-                            .grow(8 * crate::geom::GRID)
-                            .overlaps(&w[1].1.extent)
-                })
-        }
         Instruction::Net { net, style } if block.bus(net).is_some() => match style {
             NetStyle::Bus => layout.buses.get(net).is_some_and(|b| !b.is_empty()),
             _ => !layout.buses.contains_key(net),
@@ -1505,6 +1469,48 @@ mod tests {
         assert_eq!(shortfall(&block, &layout, &ins), Some(0));
     }
 
+    /// The engine and the report agree (design 519): what `judge` calls
+    /// not held, `achieved` doesn't call done, for every instruction
+    /// judged by distance.
+    #[test]
+    fn the_engine_and_the_report_agree_on_holding() {
+        let (block, layout, ins) = beside_far();
+        assert!(judge(&block, &layout, &ins).is_err());
+        assert!(
+            !achieved(&block, &layout, &ins),
+            "beside 80 steps away is not done"
+        );
+        for seed in 1..=16 {
+            let b = crate::testing::seeded(seed, 2);
+            let out = crate::engine::lay_out(&b).unwrap();
+            let keys: Vec<String> = b.parts.iter().take(3).map(|p| p.key.clone()).collect();
+            for ins in [
+                Instruction::Group {
+                    parts: keys.clone(),
+                },
+                Instruction::Near {
+                    parts: keys[..1].to_vec(),
+                    to: keys[2].clone(),
+                },
+                Instruction::Edge {
+                    parts: keys[..1].to_vec(),
+                    side: Side::Left,
+                },
+                Instruction::Beside {
+                    parts: keys[..1].to_vec(),
+                    of: keys[1].clone(),
+                    side: Side::Right,
+                },
+            ] {
+                assert_eq!(
+                    achieved(&b, &out.layout, &ins),
+                    judge(&b, &out.layout, &ins).is_ok(),
+                    "seed {seed}: {ins:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn judge_measures_as_the_lint_does() {
         use crate::geom::GRID;
@@ -1523,8 +1529,8 @@ mod tests {
             );
         };
         assert!(
-            achieved(&block, &layout, &beside),
-            "the engine's test: the side"
+            !achieved(&block, &layout, &beside),
+            "the engine's test is the report's (design 519)"
         );
         let why = judge(&block, &layout, &beside).unwrap_err();
         assert!(why.contains("beside means within"), "{why}");

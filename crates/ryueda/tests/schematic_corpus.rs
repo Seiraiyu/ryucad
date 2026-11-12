@@ -857,22 +857,23 @@ fn a_preference_is_tried_without_writing() {
 fn holds_is_what_the_drawing_shows() {
     let dir = tempfile::tempdir().unwrap();
     let (board, _) = fresh(dir.path(), "buck");
-    // R22 stands far from R9 in the buck laid out from nothing, and the
-    // engine doesn't bring it closer: beside doesn't hold, and says why.
-    // (Since 1.D R7 stands beside R8 from nothing, which round 1 named.)
+    // R22 stands far from R9 in the buck laid out from nothing. Round 1
+    // (F1) saw beside held with the parts 175 mm apart, then 2.G reported
+    // it not held while the engine, judging the side alone, moved nothing.
+    // Since plan 3.A the engine judges as the report does: it brings R22
+    // within the reach below R9, and the report says held.
     let out = ryueda(
         &board,
         1,
         &["place", "buck", "--dry-run", "beside R22 R9 below"],
     );
     let ins = &out["instructions"][0];
-    assert_eq!(ins["holds"], false, "{ins}");
-    let why = ins["why"].as_str().unwrap();
-    assert!(
-        why.starts_with("R22 is ") && why.contains(" mm from R9; beside means within 20.3 mm"),
-        "{why}"
+    assert_eq!(
+        (&ins["holds"], &ins["state"]),
+        (&serde_json::json!(true), &serde_json::json!("held")),
+        "{ins}"
     );
-    assert_eq!(ins["unchanged"], true, "{ins}");
+    assert!(ins["why"].is_null(), "{ins}");
     // A move that changes nothing says so: BOOT is wired already.
     let out = ryueda(
         &board,
