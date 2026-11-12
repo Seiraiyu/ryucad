@@ -176,6 +176,67 @@ fn prism_misses(
     })
 }
 
+/// Whether no point of piece `t` can be deep in the closed mesh `inside`
+/// (design 525, the escape certificate): for `t`'s inward normal, then its
+/// outward one, as a unit direction `v`, no triangle of `inside` meets the
+/// prism `t ⊕ [reach/2, far]·v`, where `far` takes all of `t` out past
+/// `inside`'s box grown by `reach`. Then a ray along `v` from a point of
+/// `t` farther than `reach` from the mesh crosses none of it: within
+/// `reach/2·|v|` of its start (under `reach`, though `v`'s rounded length
+/// may pass 1), then inside the prism, then outside the box. So the point
+/// winds zero, and every point of `t` is within `reach` of the mesh or
+/// outside it. A degenerate piece has no normal and no certificate.
+/// `found` is the box query's buffer, kept by the caller.
+#[cfg_attr(not(test), allow(dead_code))]
+fn escapes(
+    inside: &MeshTree,
+    t: &[Point3; 3],
+    reach: f64,
+    margin: f64,
+    found: &mut Vec<u32>,
+) -> bool {
+    let Some((lo, hi)) = inside.bounds() else {
+        return false;
+    };
+    let n = (t[1] - t[0]).cross(t[2] - t[0]);
+    let len = n.length();
+    if !(len > 0.0 && len.is_finite()) {
+        return false;
+    }
+    let grown = Box3::new(lo, hi).grow(reach);
+    let (glo, ghi) = (grown.min(), grown.max());
+    let mid = Point3::new(
+        (glo.x + ghi.x) / 2.0,
+        (glo.y + ghi.y) / 2.0,
+        (glo.z + ghi.z) / 2.0,
+    );
+    let out = t.iter().map(|q| q.distance(mid)).fold(0.0, f64::max);
+    // |q + far·v − mid| ≥ far − out = reach + diagonal: past the grown
+    // box's half diagonal for every point q of t, and for every s ≥ far.
+    let far = reach + (ghi - glo).length() + out;
+    let near = reach / 2.0;
+    for v in [n * (-1.0 / len), n * (1.0 / len)] {
+        let ends = [
+            t[0] + v * near,
+            t[1] + v * near,
+            t[2] + v * near,
+            t[0] + v * far,
+            t[1] + v * far,
+            t[2] + v * far,
+        ];
+        let b = Box3::from_points(ends).expect("six points").grow(margin);
+        inside.in_box(b.min(), b.max(), found);
+        let tris = inside.triangles();
+        if found
+            .iter()
+            .all(|&k| prism_misses(t, v, near, far, &tris[k as usize], margin))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Why a pair's search stopped before it decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Halt {
@@ -641,5 +702,49 @@ mod tests {
         ));
         // Past its far end.
         assert!(prism_misses(&t, v, s0, s1, &moved(&t, 0.0, 0.0, -0.02), mu));
+    }
+
+    #[test]
+    fn a_piece_under_a_flush_block_escapes_and_one_inside_it_does_not() {
+        // A 48 × 5 × 8.5 mm block standing on z = 1.6 mm.
+        let comp = ryukei::primitive::block(
+            OpKey::from_bytes(b"c"),
+            0.048,
+            0.005,
+            0.0085,
+            &at(0.006, 0.0075, 0.0016),
+        )
+        .unwrap()
+        .0;
+        let c = Prepared::new(&comp).unwrap();
+        let reach = 2.0 * c.reach;
+        let margin = 1e-12;
+        let mut found = Vec::new();
+        // A board-wide piece on z = 1.6 mm, its front up (counterclockwise
+        // seen from +z), under the block and past its footprint's edges.
+        let wide = [
+            p(-0.01, -0.01, 0.0016),
+            p(0.07, -0.01, 0.0016),
+            p(-0.01, 0.03, 0.0016),
+        ];
+        assert!(escapes(&c.tree, &wide, reach, margin, &mut found));
+        // The same piece wound the other way still escapes (a sheet's
+        // triangles carry no front: both directions are tried).
+        let back = [wide[0], wide[2], wide[1]];
+        assert!(escapes(&c.tree, &back, reach, margin, &mut found));
+        // Inside the block: its bottom face below, its top above.
+        let inside = [
+            p(0.01, 0.008, 0.005),
+            p(0.02, 0.008, 0.005),
+            p(0.01, 0.012, 0.005),
+        ];
+        assert!(!escapes(&c.tree, &inside, reach, margin, &mut found));
+        // A degenerate piece has no normal and no certificate.
+        let line = [
+            p(0.0, 0.0, 0.0016),
+            p(0.001, 0.0, 0.0016),
+            p(0.002, 0.0, 0.0016),
+        ];
+        assert!(!escapes(&c.tree, &line, reach, margin, &mut found));
     }
 }
