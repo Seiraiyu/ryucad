@@ -184,7 +184,7 @@ pub(crate) fn piece(h: &mut blake3::Hasher, bytes: &[u8]) {
 
 fn unknown(path: &str) -> Fault {
     Fault::warning(
-        Code::InvalidDocument,
+        Code::UnknownFile,
         format!("{path} isn't a file ryueda's designs hold"),
     )
     .with("path", path)
@@ -931,6 +931,20 @@ pub(crate) mod tests {
     use crate::conn::RefdesFormat;
     use serde_json::{Value, json};
 
+    #[test]
+    fn a_file_the_designs_dont_hold_is_unknown() {
+        let mut files: BTreeMap<String, Vec<u8>> = Default::default();
+        files.insert("designs/notes.txt".into(), b"x".to_vec());
+        let conn = load(&files).unwrap();
+        assert!(
+            conn.faults
+                .iter()
+                .any(|f| f.error.code == Code::UnknownFile && !f.is_error()),
+            "{:?}",
+            conn.faults
+        );
+    }
+
     pub fn id(s: &str) -> Id {
         Id::parse(s, "test").unwrap()
     }
@@ -1108,7 +1122,7 @@ pub(crate) mod tests {
         has(Code::NotFound, ch_c, "/overrides/u9");
         has(Code::NotFound, "blocks/top/instances/ch_d.json", "/of");
         has(Code::NotFound, "designs/e.json", "/root");
-        has(Code::InvalidDocument, "blocks/top/notes.txt", "");
+        has(Code::UnknownFile, "blocks/top/notes.txt", "");
         assert!(!found.iter().any(|(_, _, p)| p == "/overrides/u1"));
         assert!(!found.iter().any(|(_, _, p)| p == "/pins/4"));
     }

@@ -8159,26 +8159,28 @@ fn assembly_meshes(
         .with("occurrence", p));
     }
     let mut seen = std::collections::BTreeSet::new();
-    let mut solids: Vec<(String, &crate::assembly::Solid)> = Vec::new();
+    let mut solids: Vec<(String, &Id, &crate::assembly::Solid)> = Vec::new();
     for o in &chosen {
         for s in &o.solids {
             if seen.insert(s.built.hash.clone()) {
                 let path = crate::assembly::path_text(&o.path);
-                solids.push((format!("{path}/{}", s.founder), s));
+                solids.push((format!("{path}/{}", s.founder), &o.part, s));
             }
         }
     }
-    let refs: Vec<&crate::assembly::Solid> = solids.iter().map(|(_, s)| *s).collect();
+    let refs: Vec<&crate::assembly::Solid> = solids.iter().map(|(_, _, s)| *s).collect();
     let made = occurrence_meshes(session, &refs, quality)?;
     let bodies = solids
         .into_iter()
         .zip(made)
-        .map(|((label, s), m)| {
+        .map(|((label, part, s), mesh)| {
+            // A reference's holes are warned of, as a part's are (#676).
+            let warning = mesh::unmeshed_warning(part, &s.founder, &s.built, &mesh);
             let m = mesh::Meshed {
                 body: s.built.body.clone(),
                 hash: s.built.hash.clone(),
-                mesh: m,
-                warning: None,
+                mesh,
+                warning,
             };
             (label, Ok(m))
         })
@@ -8193,6 +8195,22 @@ fn is_assembly(session: &Session, part: &str) -> bool {
         .ok()
         .and_then(|id| session.project().parts.get(&id).map(part_kind))
         == Some(PartKind::Assembly)
+}
+
+/// The warnings bodies' meshes carry (a reference's unmeshed faces), in
+/// body order.
+fn mesh_warnings<K>(bodies: &[(K, Result<mesh::Meshed>)]) -> Vec<Value> {
+    bodies
+        .iter()
+        .filter_map(|(_, m)| m.as_ref().ok()?.warning.clone())
+        .collect()
+}
+
+/// Puts `warnings` into `result` when there are any.
+fn with_warnings(result: &mut Value, warnings: Vec<Value>) {
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
+    }
 }
 
 /// Meshes as bytes: `ryucad.mesh.1`, or `ryucad.mesh.2` when `compact`.
@@ -8215,13 +8233,16 @@ fn mesh_binary(
     if is_assembly(session, part) {
         let (pid, _, quality) = mesh_args(part, None, quality)?;
         let (bodies, occurrences) = assembly_meshes(session, &pid, only, quality)?;
-        let result = json!({"part": pid, "quality": quality.as_str(), "occurrences": occurrences});
+        let mut result =
+            json!({"part": pid, "quality": quality.as_str(), "occurrences": occurrences});
+        with_warnings(&mut result, mesh_warnings(&bodies));
         let (encoding, b) = bytes(&bodies, compact);
         return Ok(Answer::bytes(result, encoding, b));
     }
     let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
     let bodies = meshes(session, &pid, only.as_ref(), quality)?;
-    let result = json!({"part": pid, "quality": quality.as_str()});
+    let mut result = json!({"part": pid, "quality": quality.as_str()});
+    with_warnings(&mut result, mesh_warnings(&bodies));
     let (encoding, b) = bytes(&bodies, compact);
     Ok(Answer::bytes(result, encoding, b))
 }
@@ -8235,6 +8256,7 @@ fn mesh_get(
     if is_assembly(session, part) {
         let (pid, _, quality) = mesh_args(part, None, quality)?;
         let (bodies, occurrences) = assembly_meshes(session, &pid, only, quality)?;
+        let warnings = mesh_warnings(&bodies);
         let bodies: Vec<Value> = bodies
             .into_iter()
             .filter_map(|(label, m)| {
@@ -8245,10 +8267,10 @@ fn mesh_get(
                 Some(v)
             })
             .collect();
-        return Ok(
-            json!({"part": pid, "quality": quality.as_str(), "bodies": bodies,
-                         "occurrences": occurrences}),
-        );
+        let mut v = json!({"part": pid, "quality": quality.as_str(), "bodies": bodies,
+                           "occurrences": occurrences});
+        with_warnings(&mut v, warnings);
+        return Ok(v);
     }
     let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
     let mut warnings = Vec::new();
@@ -8268,9 +8290,7 @@ fn mesh_get(
     // Each body is a solid, by its founder (`feature`, as entity
     // references name it); a reference's holes are warned of.
     let mut v = json!({"part": pid, "quality": quality.as_str(), "bodies": bodies});
-    if !warnings.is_empty() {
-        v["warnings"] = json!(warnings);
-    }
+    with_warnings(&mut v, warnings);
     Ok(v)
 }
 
@@ -8851,6 +8871,73 @@ pub(crate) mod tests {
         /// `session.max_memory`'s quarter (#400's test).
         pub(crate) static RENDER_BUDGET: std::cell::Cell<Option<usize>> =
             const { std::cell::Cell::new(None) };
+    }
+
+    /// #676: a reference's faces that don't mesh are warned of in every
+    /// mesh answer, JSON, binary and compact alike, a part's and an
+    /// assembly's.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "a large file: tests/step.rs reads it in release"
+    )]
+    fn every_mesh_answer_warns_of_a_references_unmeshed_faces() {
+        // #676: NIST FTC 07 kept as a reference has faces that don't mesh;
+        // the JSON answer warned of them, binary and compact (`--out`) didn't.
+        let (_dir, mut s) = fresh();
+        let file = format!(
+            "{}/../ryustep/tests/corpus/nist_ftc_07_asme1_rd.stp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        call(&mut s, "import", json!({"path": file, "part": "f"})).unwrap();
+        let unmeshed = |v: &Value| -> Vec<Value> {
+            v["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|w| w["code"] == "reference_faces_unmeshed")
+                .cloned()
+                .collect()
+        };
+        let want = unmeshed(&call(&mut s, "mesh.get", json!({"part": "f"})).unwrap());
+        assert!(
+            !want.is_empty(),
+            "FTC 07's reference meshes whole now: pick another file"
+        );
+        for transfer in ["binary", "compact"] {
+            let req =
+                Request::from_rpc("mesh.get", Some(json!({"part": "f", "transfer": transfer})))
+                    .unwrap();
+            let a = answer_live(&mut s, None, None, req).unwrap();
+            assert_eq!(unmeshed(&a.result), want, "{transfer}");
+        }
+        // An assembly's occurrence of it warns as the part does, once for
+        // the two instances sharing its body.
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "frame", "kind": "assembly"}),
+        )
+        .unwrap();
+        for id in ["i", "j"] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": id, "of": "f"}),
+            )
+            .unwrap();
+        }
+        let got = unmeshed(&call(&mut s, "mesh.get", json!({"part": "frame"})).unwrap());
+        assert_eq!(got, want, "json");
+        for transfer in ["binary", "compact"] {
+            let req = Request::from_rpc(
+                "mesh.get",
+                Some(json!({"part": "frame", "transfer": transfer})),
+            )
+            .unwrap();
+            let a = answer_live(&mut s, None, None, req).unwrap();
+            assert_eq!(unmeshed(&a.result), want, "assembly, {transfer}");
+        }
     }
 
     /// #400: a render stops once its geometry passes its budget, naming
@@ -12286,6 +12373,8 @@ pub(crate) mod tests {
             "ryucad.json.",
             "ryucad.json ",
             "parts. /p/part.json",
+            // An NTFS stream names the file it's on (#581).
+            "ryucad.json::$DATA",
         ]
         .into_iter()
         .filter(|rel| cfg!(not(windows)) || !rel.starts_with("parts. "))
@@ -12309,6 +12398,79 @@ pub(crate) mod tests {
             call_live(&mut s, &mut live, Some(&h), "export", export(&out)).unwrap();
             assert!(out.exists(), "{}", out.display());
         }
+    }
+
+    #[test]
+    fn an_export_never_writes_over_a_project_file_through_an_alias_the_file_system_resolves() {
+        // #581: APFS folds Unicode case (`ſ` is `s`) and NTFS answers to
+        // 8.3 short names, past the spelled check's ASCII folding. An
+        // `out` the file system resolves to a project file is refused;
+        // one it doesn't is a new file, and the project's is untouched.
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        let project = dir.path().join("ryucad.json");
+        let before = std::fs::read(&project).unwrap();
+        #[allow(unused_mut)]
+        let mut aliases = vec!["ryucad.j\u{17f}on".to_owned()];
+        #[cfg(windows)]
+        {
+            let short = short_name(&project);
+            // CI's Windows runners make 8.3 names on their temp volume;
+            // a volume without them can't alias this way.
+            assert!(
+                short != "ryucad.json" || std::env::var_os("CI").is_none(),
+                "no 8.3 name for {}: the case #581 needs isn't tested",
+                project.display()
+            );
+            aliases.push(short);
+        }
+        for alias in aliases {
+            let out = dir.path().join(&alias);
+            let resolves = out.exists();
+            let r = call(
+                &mut s,
+                "export",
+                json!({"part": "p", "format": "stl", "out": out.to_str().unwrap()}),
+            );
+            if resolves {
+                let e = r.expect_err(&alias);
+                assert_eq!(e.code, Code::InvalidParam, "{alias}: {e:?}");
+                assert_eq!(e.details["param"], "out", "{alias}");
+            } else {
+                r.unwrap();
+            }
+            assert_eq!(
+                std::fs::read(&project).unwrap(),
+                before,
+                "{alias}: ryucad.json unchanged"
+            );
+        }
+    }
+
+    /// The 8.3 short name Windows gives `path`'s file, or its own name
+    /// where the volume makes none.
+    #[cfg(windows)]
+    fn short_name(path: &std::path::Path) -> String {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let long: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `long` is NUL-terminated, and `buf.len()` is the room
+        // `buf` gives the answer.
+        let n = unsafe { GetShortPathNameW(long.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+        assert!(
+            n > 0 && (n as usize) < buf.len(),
+            "GetShortPathNameW: {}",
+            std::io::Error::last_os_error()
+        );
+        let short = std::path::PathBuf::from(String::from_utf16(&buf[..n as usize]).unwrap());
+        short.file_name().unwrap().to_string_lossy().into_owned()
     }
 
     /// Every queued notification of `sub`, as JSON.
@@ -12339,6 +12501,58 @@ pub(crate) mod tests {
         assert_eq!(r, json!({"participants": []}));
         let e = call(&mut s, "app.open", json!({})).unwrap_err();
         assert_eq!(e.code, Code::NoLiveSession);
+    }
+
+    /// #755: a daemon's requests check only the paths file events name;
+    /// none checks every file (107,500 at design 192's benchmark).
+    #[test]
+    fn a_watched_daemon_s_requests_check_only_what_events_name() {
+        let (_dir, s) = fresh();
+        let marks = tempfile::tempdir().unwrap();
+        let mut s = s.with_watch(&marks.path().join("m"));
+        let mut live = Live::new();
+        call_live(&mut s, &mut live, None, "part.create", json!({"part": "p"})).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        let full = |s: &Session| s.watch_status().unwrap()["full_checks"].as_u64().unwrap();
+        let before = full(&s);
+        for _ in 0..20 {
+            call_live(
+                &mut s,
+                &mut live,
+                None,
+                "feature.list",
+                json!({"part": "p"}),
+            )
+            .unwrap();
+            call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        }
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 2}}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.list",
+            json!({"part": "p"}),
+        )
+        .unwrap();
+        let w = s.watch_status().unwrap();
+        assert_eq!(w["watching"], true, "{w}");
+        assert_eq!(full(&s), before, "a request checked every file: {w}");
+        assert!(w["narrowed_checks"].as_u64().unwrap() >= 42, "{w}");
     }
 
     #[test]

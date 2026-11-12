@@ -193,6 +193,7 @@ What each phase decided is recorded per area under `docs/claude/`. Read the guid
 - `docs/claude/ryucad-assemblies.md` — assemblies, mates, scale, interference
 - `docs/claude/ryucad-step.md` — STEP import, re-import and export
 - `docs/claude/ryucad-scale.md` — the benchmark project, file events, the memory budget, the window at scale
+- `docs/claude/ryucad-internals.md` — ryucad's internals: the CLI in the library, tests that build once, the server split, feature kinds, the session's caches, the app's workspace
 - `docs/claude/ryucad-formats.md` — export formats: the scene, STL, 3MF, USD, and their references
 - `docs/claude/ryucad-reference.md` — geometric references, the resolver, datum planes, axes and points and their uses
 - `docs/claude/ryucad-inserts.md` — inserts and deleted bodies: solid keys, pins and updates, Git and PDM
@@ -206,6 +207,7 @@ What each phase decided is recorded per area under `docs/claude/`. Read the guid
 - `docs/claude/ryueda.md` — ryueda projects, library projects, symbols, footprints, models, library components
 - `docs/claude/ryueda-schematic.md` — ryueda schematics: properties and designator formats, the ryusch engine, layout files and their commands
 - `docs/claude/ryueda-parts.md` — ryueda part data: the vocabulary, categories, alternates, library search, the parts cache and identification findings
+- `docs/claude/ryueda-git.md` — ryueda in Git: revisions, attributes and install, textconv, doctor
 
 When a plan records what it decided, it edits or adds only its area's file under `docs/claude/`. It doesn't touch CLAUDE.md, except to add one import line here for a new area, and it never writes project status anywhere in the repo.
 

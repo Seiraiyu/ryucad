@@ -33,11 +33,12 @@ pub const EXTRA_BENDS: usize = 3;
 /// dense.
 pub const DENSITY: i64 = 300;
 
-/// Per mille of a sheet's 10 mm cells holding ink below which
-/// `sch_paper_fit` judges a sheet larger than its series' smallest paper
-/// too empty: under the least of the references' fills, ivconverter's 115
-/// (`measure.py`, plan 2.A's Task 1; the others 164 to 336).
-pub const FILL_MIN: i64 = 100;
+/// Per mille of a sheet's 10 mm cells holding ink below which a sheet is
+/// too empty (`sch_paper_fit`), where a smaller paper or another sheet's
+/// drawing is on offer: the least of the references' fills, ivconverter's
+/// 115 (`measure.py`, plan 2.A's Task 1; the others 164 to 336; design
+/// 519).
+pub const FILL_TARGET: i64 = 115;
 
 /// The cell `fill` counts in, as `measure.py` does: 10 mm.
 pub const CELL: Nm = 10_000_000;
@@ -250,7 +251,7 @@ pub const RULES: &[Rule] = &[
         unit: "a part",
         what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet and none leaves it, or a pin on a net that leaves the sheet carries no label of its own and is wired to none of its region's off-sheet connectors. A stack's pin on a net per layer, which only a label can draw, isn't judged.",
         why: "A part joined to nothing by a wire floats: the reader can't see what it belongs to without matching label names across the sheet.",
-        fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire).",
+        fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire). A fix that would cost more through another rule is withheld, listed under the finding's withheld with why.",
         evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet, so since plan 2.A (design 348) such a label is the net's off-sheet connector and joins its pin; since plan 2.C (design 348) a pin wired to its region's off-sheet connector, not to a local label, is joined.",
     },
     Rule {
@@ -277,7 +278,7 @@ pub const RULES: &[Rule] = &[
         unit: "a part",
         what: "A part's body middle, or a two-pin part's pin axis, lines up with no other part across or down.",
         why: "Parts on common lines read as an ordered drawing; a part off every line looks dropped where it fell.",
-        fix: "Put it in a row or a column with its neighbours (align X Y row|column).",
+        fix: "Put it in a row or a column with its neighbours (align X Y row|column). A fix that would cost more through another rule is withheld, listed under the finding's withheld with why.",
         evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does. In round 2's blind review (plan 1.D, three judges a pair), this rule and the judges' grouping score moved together on the buck and the front end but apart on the breakout (2 to 4 points, +0.3 of 5) and the RP2040 (26 to 28, +2.0): the judges grouped by function, which lines don't show. In round 3's blind review (plan 2.G, three judges a pair), its points rose on the RP2040 (18 to 36) and the front end (2 to 8) where the judges' flow score stayed at 3.0: the sessions' aligned columns cost points no judge took off.",
     },
     Rule {
@@ -320,10 +321,10 @@ pub const RULES: &[Rule] = &[
         code: "sch_paper_fit",
         weight: 5,
         unit: "a sheet",
-        what: "A sheet on paper larger than its drawing needs: a smaller paper of the project's series would hold it, or it fills under 100 per mille of its 10 mm cells on paper larger than the series' smallest.",
+        what: "A sheet on paper larger than its drawing needs, or emptier than the references: a smaller paper of the project's series would hold it, or it fills under the references' 115 per mille of its 10 mm cells where a fix is on offer (paper larger than the series' smallest, or another sheet of the block whose drawing fits beside it).",
         why: "A small drawing on a large sheet prints small and reads as empty; the reader zooms and pans for what one smaller page would show at once.",
-        fix: "Lay the sheet out again so paper fit chooses (layout --relayout BLOCK/SHEET); a paper of your own choosing can be pinned (paper SHEET a4).",
-        evidence: "The references fill 115 to 336 per mille of their drawing area's 10 mm cells and draw on the smallest paper that holds them: the buck, the front end's three sheets on A4, Mitayi-Pico-D1 on A3, the ESP32-PoE on A2 (measure.py, plan 2.A's Task 1). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on paper fit, 3 to 0. In round 3's blind review (plan 2.G, three judges a pair), it found nothing on any sheet, yet the judges still put the reference ahead on paper on all four circuits (a mean lead of 1.9 points): the rule's floor holds, and what the judges fault is empty space inside a fitted sheet.",
+        fix: "Lay the sheet out again so paper fit chooses (layout --relayout BLOCK/SHEET); a paper of your own choosing can be pinned (paper SHEET a4). Where another sheet's drawing fits beside it, bring that sheet's regions over (sheet region:rN ... SHEET, the finding's fix); paper never changes on an edit.",
+        evidence: "The references fill 115 to 336 per mille of their drawing area's 10 mm cells and draw on the smallest paper that holds them: the buck, the front end's three sheets on A4, Mitayi-Pico-D1 on A3, the ESP32-PoE on A2 (measure.py, plan 2.A's Task 1). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on paper fit, 3 to 0. In round 3's blind review (plan 2.G, three judges a pair), it found nothing on any sheet, yet the judges still put the reference ahead on paper on all four circuits (a mean lead of 1.9 points): the rule's floor holds, and what the judges fault is empty space inside a fitted sheet. Report 512 (plan 2.G): the judges' largest remaining complaint was empty space inside fitted sheets, which the rule then didn't judge; design 519 sets the references' least fill as the target.",
     },
     Rule {
         code: "sch_function_split",
@@ -338,9 +339,9 @@ pub const RULES: &[Rule] = &[
         code: "sch_region_untitled",
         weight: 2,
         unit: "a region",
-        what: "A region titled Misc: nothing in it names its function.",
+        what: "A region with no title, or titled Misc (files written before plan 3.A): nothing in it names its function.",
         why: "A region's title is what a reader scans for; Misc says nothing about what the parts do.",
-        fix: "Give it a title (region rename REGION TITLE), or a function property to its main component.",
+        fix: "Give it a title (region REGION title TITLE), or a function property to its main component.",
         evidence: "Design 348: every region is titled by its function. The references title their panels (the ESP32-PoE's ETHERNET, Mitayi-Pico-D1's power and USB blocks). In round 3's blind review (plan 2.G, three judges a pair), the judges named the sessions' titled regions (\"I2C header and pull-ups\", \"Output clamps\") among what read better, and engine titles such as \"Misc\", \"SCL\" and \"N_J2_A5\" among what read worse.",
     },
 ];
@@ -1579,60 +1580,135 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         // Styles the project prefers.
         let mut notes = Vec::new();
         // Paper fit (plan 2.A): a smaller paper would hold the drawing, or
-        // it is too empty for paper larger than the series' smallest.
+        // it is under the references' fill where a fix is on offer: a
+        // smaller paper of the series, or another sheet of the block whose
+        // drawing fits beside this one's (design 519).
         let sheet = &layout.sheets[sid];
         let sheet_fill = fill(block, layout, sid);
         let sheet_extent = extent(block, layout, sid);
-        if !sheet.pinned
-            && let Some(now) = block.paper_of(sheet)
-            && let Some(at) = block.papers.iter().position(|p| p == now)
-            && let Some(drawn) = ink_boxes(block, layout, sid)
+        // A sheet's drawing as paper fit measures it: its ink, each part's
+        // room with labels, and the regions' frames.
+        let drawn_of = |on: &str| -> Option<Rect> {
+            ink_boxes(block, layout, on)
                 .into_iter()
-                // As paper fit measures a drawing: each part's room with
-                // labels, and the regions' frames.
-                .chain(shapes.keys().filter_map(|p| {
-                    let x = layout.placed.get(&block.parts[*p].key)?;
-                    let pl = Place::new(x.at, x.rotation, x.mirror);
-                    Some(crate::cluster::Cluster::single(*p, pl).room_with_labels(block, [0, 0]))
-                }))
+                .chain(
+                    layout
+                        .placed
+                        .iter()
+                        .filter(|(_, x)| x.sheet == on)
+                        .filter_map(|(k, x)| {
+                            let p = block.part(k)?;
+                            let pl = Place::new(x.at, x.rotation, x.mirror);
+                            Some(
+                                crate::cluster::Cluster::single(p, pl)
+                                    .room_with_labels(block, [0, 0]),
+                            )
+                        }),
+                )
                 .chain(
                     layout
                         .regions
                         .values()
-                        .filter(|g| &g.sheet == sid)
+                        .filter(|g| g.sheet == on)
                         .map(|g| g.frame_on_sheet()),
                 )
                 .reduce(Rect::union)
+        };
+        if !sheet.pinned
+            && let Some(now) = block.paper_of(sheet)
+            && let Some(at) = block.papers.iter().position(|p| p == now)
+            && let Some(drawn) = drawn_of(sid)
         {
             let need = 2 * crate::place::MARGIN + 2 * GRID;
             let smaller = block.papers[..at]
                 .iter()
                 .find(|p| drawn.width() + need <= p.area[0] && drawn.height() + need <= p.area[1]);
-            let empty = at > 0 && sheet_fill < FILL_MIN;
-            if smaller.is_some() || empty {
+            let empty = sheet_fill < FILL_TARGET;
+            // Another sheet whose drawing fits beside this one's, side by
+            // side or one above the other, on this sheet's paper.
+            let gather = if empty && at == 0 {
+                let area = now.area;
+                layout.sheets.keys().filter(|o| *o != sid).find_map(|o| {
+                    let d = drawn_of(o)?;
+                    let across = drawn.width() + d.width() + need <= area[0]
+                        && drawn.height().max(d.height()) + need <= area[1];
+                    let down = drawn.height() + d.height() + need <= area[1]
+                        && drawn.width().max(d.width()) + need <= area[0];
+                    (across || down).then(|| o.clone())
+                })
+            } else {
+                None
+            };
+            if smaller.is_some() || (empty && (at > 0 || gather.is_some())) {
                 let to = smaller.unwrap_or(&block.papers[0]);
-                let why = match smaller {
-                    Some(p) => format!("{} would hold it", p.size),
-                    None => format!("it fills {sheet_fill} per mille, under {FILL_MIN}"),
-                };
-                // Its fix is a relayout, which fits the sheet's paper
-                // again (pinning a smaller paper over the kept drawing
-                // wouldn't hold it): text, not an instruction.
-                found.push(f(
-                    "sch_paper_fit",
-                    format!(
-                        "sheet {sid} is on {} though {why} (fill {sheet_fill} per mille): lay it out again (layout --relayout BLOCK/{sid})",
-                        now.size
+                let why = match (smaller, &gather) {
+                    (Some(p), _) => format!("{} would hold it", p.size),
+                    (None, Some(o)) => format!(
+                        "it fills {sheet_fill} per mille, under the references' {FILL_TARGET}, and sheet {o}'s drawing fits beside it"
                     ),
+                    (None, None) => format!("it fills {sheet_fill} per mille, under {FILL_TARGET}"),
+                };
+                let fix = match &gather {
+                    Some(o) if smaller.is_none() => {
+                        let name = &layout.sheets[sid].name;
+                        format!(
+                            "sheet <sheet {o}'s regions and parts> {name} (the finding's fixes)"
+                        )
+                    }
+                    _ => format!("layout --relayout BLOCK/{sid}"),
+                };
+                // A relayout fits the sheet's paper again (pinning a
+                // smaller paper over the kept drawing wouldn't hold it):
+                // text. Gathering is an instruction, tried like any fix.
+                let mut here = f(
+                    "sch_paper_fit",
+                    match &gather {
+                        Some(o) if smaller.is_none() => format!(
+                            "sheet {sid} is on {} though {why}: bring sheet {o}'s regions onto it",
+                            now.size
+                        ),
+                        _ => format!(
+                            "sheet {sid} is on {} though {why} (fill {sheet_fill} per mille): lay it out again (layout --relayout BLOCK/{sid})",
+                            now.size
+                        ),
+                    },
                     vec![sid.clone()],
                     json!({
                         "size": now.size,
                         "smaller": to.size,
                         "fill": sheet_fill,
+                        "target": FILL_TARGET,
                         "extent": sheet_extent,
-                        "fix": format!("layout --relayout BLOCK/{sid}"),
+                        "fix": fix,
                     }),
-                ));
+                );
+                if let (None, Some(o)) = (smaller, &gather) {
+                    let in_region = layout.region_of();
+                    let mut subjects: Vec<String> = layout
+                        .regions
+                        .iter()
+                        .filter(|(_, g)| &g.sheet == o)
+                        .map(|(id, _)| format!("region:{id}"))
+                        .collect();
+                    subjects.extend(
+                        layout
+                            .placed
+                            .iter()
+                            .filter(|(k, x)| {
+                                &x.sheet == o
+                                    && !k.starts_with("port:")
+                                    && !in_region.contains_key(k.as_str())
+                            })
+                            .map(|(k, _)| k.clone()),
+                    );
+                    if !subjects.is_empty() {
+                        here = here.fixed(vec![vec![Instruction::Sheet {
+                            parts: subjects,
+                            sheet: layout.sheets[sid].name.clone(),
+                        }]]);
+                    }
+                }
+                found.push(here);
             }
         }
         // Regions (plan 2.A): one function in one region; every region
@@ -1688,12 +1764,14 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             }
         }
         for (id, g) in layout.regions.iter().filter(|(_, g)| &g.sheet == sid) {
-            if g.title == "Misc" {
+            if g.title.is_empty() || g.title == "Misc" {
                 found.push(f(
                     "sch_region_untitled",
-                    format!("region {id} is titled Misc: give it its function's title"),
+                    format!(
+                        "region {id} has no title: give it its function's (region {id} title TITLE)"
+                    ),
                     vec![id.clone()],
-                    json!({"fix": format!("region rename {id} TITLE")}),
+                    json!({"fix": format!("region {id} title TITLE")}),
                 ));
             }
         }
@@ -2148,15 +2226,17 @@ fn wired_on_row(
 
 /// Lays `fix` out over `out` as a dry run (its instructions added as
 /// lasting ones) and judges it: `Ok` when the engine takes it, every
-/// hard rule holds, the layout changes and `finding` (by code and refs)
-/// is gone under `prefs`, the preferences it was found under; else why
-/// not.
+/// hard rule holds, the layout changes, `finding` (by code and refs) is
+/// gone under `prefs`, the preferences it was found under, and the
+/// block's points (every sheet, every rule, `before` being its findings
+/// as linted) fall (design 519); else why not.
 pub fn try_fix(
     block: &Block,
     out: &crate::engine::Outcome,
     finding: &Finding,
     fix: &[Instruction],
     prefs: &Prefs,
+    before: &[Finding],
 ) -> Result<(), String> {
     let mut b = block.clone();
     b.previous = Some(out.layout.clone());
@@ -2184,6 +2264,33 @@ pub fn try_fix(
     {
         return Err(format!("{} is still there after it", finding.code));
     }
+    // Never a fix that costs: the block's points, by rule, before and
+    // after.
+    let sum = |l: &[Finding]| -> BTreeMap<&'static str, i64> {
+        let mut m = BTreeMap::new();
+        for f in l {
+            *m.entry(f.code).or_insert(0) += f.points;
+        }
+        m
+    };
+    let (was, now) = (sum(before), sum(&after));
+    let (p0, p1): (i64, i64) = (was.values().sum(), now.values().sum());
+    if p1 >= p0 {
+        let moved: Vec<String> = was
+            .keys()
+            .chain(now.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|c| {
+                let d = now.get(c).copied().unwrap_or(0) - was.get(c).copied().unwrap_or(0);
+                (d != 0).then(|| format!("{c} {d:+}"))
+            })
+            .collect();
+        return Err(format!(
+            "it costs more than it saves: the block's points go from {p0} to {p1} ({})",
+            moved.join(", ")
+        ));
+    }
     Ok(())
 }
 
@@ -2204,8 +2311,8 @@ mod tests {
             for fix in &f.fixes {
                 // Whatever the verdict, it is the same twice.
                 assert_eq!(
-                    try_fix(&block, &out, f, fix, &Prefs::default()),
-                    try_fix(&block, &out, f, fix, &Prefs::default())
+                    try_fix(&block, &out, f, fix, &Prefs::default(), &found),
+                    try_fix(&block, &out, f, fix, &Prefs::default(), &found)
                 );
             }
         }
@@ -2215,7 +2322,47 @@ mod tests {
             parts: vec![p.clone(), p],
             axis: crate::layout::Axis::Row,
         }];
-        assert!(try_fix(&block, &out, with_fix[0], &idle, &Prefs::default()).is_err());
+        assert!(try_fix(&block, &out, with_fix[0], &idle, &Prefs::default(), &found).is_err());
+    }
+
+    /// Design 519: a fix offered lowers the block's points (every sheet,
+    /// every rule); one that holds but costs more through another rule is
+    /// refused, saying so.
+    #[test]
+    fn a_fix_offered_lowers_the_blocks_points() {
+        let sum = |l: &[Finding]| l.iter().map(|f| f.points).sum::<i64>();
+        let mut costly = 0;
+        for seed in 1..=24 {
+            let block =
+                crate::testing::with_stage(crate::testing::seeded(seed, 1 + seed as usize % 3));
+            let Ok(out) = crate::engine::lay_out(&block) else {
+                continue;
+            };
+            let (found, _) = lint(&block, &out);
+            for f in found.iter().filter(|f| !f.fixes.is_empty()) {
+                for fix in &f.fixes {
+                    let mut b = block.clone();
+                    b.previous = Some(out.layout.clone());
+                    for ins in fix {
+                        let id = crate::layout::next_id(b.instructions.keys());
+                        b.instructions.insert(id, ins.clone());
+                    }
+                    let after = crate::engine::lay_out(&b).ok().map(|t| lint(&b, &t).0);
+                    match try_fix(&block, &out, f, fix, &Prefs::default(), &found) {
+                        Ok(()) => {
+                            let after = after.expect("taken");
+                            assert!(sum(&after) < sum(&found), "seed {seed}: {fix:?}");
+                        }
+                        Err(why) if why.starts_with("it costs more") => {
+                            costly += 1;
+                            assert!(sum(&after.expect("taken")) >= sum(&found), "{why}");
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        eprintln!("{costly} fixes withheld for their cost");
     }
 
     /// #666: a fix is judged under the preferences its finding was found
@@ -2251,8 +2398,13 @@ mod tests {
                 };
                 if by_hand {
                     // A fix that changes nothing is refused either way.
-                    let r = try_fix(&block, &out, f, fix, &prefs);
-                    assert!(r.is_ok() || r == Err("it changes nothing".into()), "{r:?}");
+                    let r = try_fix(&block, &out, f, fix, &prefs, &found);
+                    assert!(
+                        r.is_ok()
+                            || r == Err("it changes nothing".into())
+                            || r.as_ref().is_err_and(|e| e.starts_with("it costs more")),
+                        "{r:?}"
+                    );
                 }
             }
         }
@@ -2375,6 +2527,59 @@ mod tests {
         );
     }
 
+    /// Design 519: a sheet under the references' fill whose block has
+    /// another sheet that fits beside it is told so, with the instruction
+    /// that brings that sheet's regions over.
+    #[test]
+    fn a_sparse_sheet_is_offered_its_neighbours_regions() {
+        let mut found_one = false;
+        use crate::input::Paper;
+        use crate::layout::Orientation;
+        for seed in 1..=40 {
+            let mut block = crate::testing::seeded(seed, 6);
+            // The A4/A3 series, A3 the project's paper, as layout_props'
+            // even seeds.
+            block.papers = vec![
+                Paper {
+                    size: "a4".into(),
+                    orientation: Orientation::Landscape,
+                    area: [277_000_000, 190_000_000],
+                },
+                Paper {
+                    size: "a3".into(),
+                    orientation: Orientation::Landscape,
+                    area: [400_000_000, 277_000_000],
+                },
+            ];
+            block.sheet = block.papers[1].area;
+            let out = crate::engine::lay_out(&block).unwrap();
+            if out.layout.sheets.len() < 2 {
+                continue;
+            }
+            let (found, _) = lint_with(&block, &out, &Prefs::default());
+            for f in found.iter().filter(|f| f.code == "sch_paper_fit") {
+                let Some(fix) = f.fixes.first() else { continue };
+                found_one = true;
+                let name = &out.layout.sheets[&f.sheet].name;
+                assert!(
+                    matches!(&fix[..], [Instruction::Sheet { sheet, .. }] if sheet == name),
+                    "{f:?}"
+                );
+                assert!(f.details["fill"].as_i64().unwrap() < FILL_TARGET);
+                assert_eq!(f.details["target"], FILL_TARGET);
+                let r = try_fix(&block, &out, f, fix, &Prefs::default(), &found);
+                assert!(
+                    r.is_ok() || r.as_ref().is_err_and(|e| e.starts_with("it costs more")),
+                    "seed {seed}: {r:?}"
+                );
+            }
+        }
+        assert!(
+            found_one,
+            "no seeded block of six ICs has a sparse sheet beside one that fits"
+        );
+    }
+
     #[test]
     fn paper_and_region_rules_teach_fit_and_function() {
         use crate::input::Paper;
@@ -2395,12 +2600,26 @@ mod tests {
         let mut out = crate::engine::lay_out(&block).unwrap();
         let (found, _) = lint(&block, &out);
         assert!(
-            !found.iter().any(|f| matches!(
-                f.code,
-                "sch_paper_fit" | "sch_function_split" | "sch_region_untitled"
-            )),
+            !found
+                .iter()
+                .any(|f| matches!(f.code, "sch_paper_fit" | "sch_function_split")),
             "{found:#?}"
         );
+        // Untitled only where nothing names the function (plan 3.A): C9
+        // and R9 on F1 are no idiom.
+        let untitled: Vec<&Vec<String>> = found
+            .iter()
+            .filter(|f| f.code == "sch_region_untitled")
+            .map(|f| &f.refs)
+            .collect();
+        let bare: Vec<String> = out
+            .layout
+            .regions
+            .iter()
+            .filter(|(_, g)| g.title.is_empty())
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(untitled.len(), bare.len(), "{found:#?}");
         let f = fill(&block, &out.layout, "s1");
         assert!(f > 0 && f <= 1000);
         // On A3 by hand, it would fit A4: sch_paper_fit, fixed by a relayout.
@@ -2441,6 +2660,17 @@ mod tests {
         let (found, _) = lint(&block, &split);
         assert!(found.iter().any(|f| f.code == "sch_function_split"));
         assert!(found.iter().any(|f| f.code == "sch_region_untitled"));
+        // Untitled (plan 3.A): no function or idiom names it.
+        split.layout.regions.get_mut("r9").unwrap().title = String::new();
+        let (found, _) = lint(&block, &split);
+        let f = found
+            .iter()
+            .find(|f| f.code == "sch_region_untitled" && f.refs == ["r9"])
+            .expect("an untitled region is found");
+        assert_eq!(
+            f.message,
+            "region r9 has no title: give it its function's (region r9 title TITLE)"
+        );
     }
 
     /// Every rule says what it means, what a reader loses, how to fix it

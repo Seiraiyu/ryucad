@@ -1076,6 +1076,28 @@ mod tests {
         ));
     }
 
+    /// #699: a pair of NIST FTC 06 (public domain) sharing vertices but no
+    /// edge, one running along the other's surface on edges of its own,
+    /// cut out with its neighbours: certified apart by its own edges under
+    /// the early part limit, as `pair` tries it before any trace. (The
+    /// pair also settles without it, so only a direct call guards it.)
+    #[test]
+    fn ftc_06s_pair_is_apart_by_its_own_edges() {
+        let bytes = include_bytes!("../../tests/data/nist_ftc_06_own_edges.body");
+        let body = crate::codec::decode_body(bytes).unwrap();
+        let named = |x: u128| {
+            body.faces()
+                .find(|&f| body.faces[f].name == crate::name::Name::from_u128(x))
+                .unwrap()
+        };
+        let a = named(0x7b2586879979b26530861000327e987d);
+        let b = named(0xd55555ed5c3e772b47b10456d3f365d8);
+        // unmetered: a test of one pair
+        let m = Meter::free();
+        assert!(apart_by_own_edges(&body, a, b, EARLY_VERTICES, &m));
+        assert!(apart_by_own_edges(&body, b, a, EARLY_VERTICES, &m));
+    }
+
     /// The bottom's edges kept off the top face: certified under no limit,
     /// and stopped at once by a cancel or a spent budget, with no piece
     /// searched past the halt.

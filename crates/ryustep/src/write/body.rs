@@ -33,7 +33,7 @@ use ryukei::topo::Sense;
 use std::collections::BTreeMap;
 
 /// Writes a shape's solids, named `name`, and its sheets as one surface
-/// model; returns their B-rep items and each face's instance, by the
+/// model, named `name` too; returns their B-rep items and each face's instance, by the
 /// shape's face index.
 pub(crate) fn solid_items(
     out: &mut Out,
@@ -119,7 +119,7 @@ impl Writer<'_, '_> {
                 .collect();
             items.push(
                 self.out
-                    .add("SHELL_BASED_SURFACE_MODEL", vec![s(""), refs(shells)]),
+                    .add("SHELL_BASED_SURFACE_MODEL", vec![s(name), refs(shells)]),
             );
         }
         items

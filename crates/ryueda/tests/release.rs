@@ -297,3 +297,34 @@ fn ryucads_release_asks_whether_a_tag_is_latest() {
     assert!(w.contains("sh scripts/latest-release.sh \"$GITHUB_REF_NAME\""));
     assert!(w.contains("--latest=\"$latest\""));
 }
+
+/// The devcontainer's .debs are cached from main, whose caches every tag's
+/// run can restore, under the path and key full.yml restores: a tag's own
+/// save serves only that tag (#677).
+#[test]
+fn the_devcontainers_debs_are_cached_from_main() {
+    let full = workflow("full.yml");
+    let debs = workflow("debs.yml");
+    let key = "key: devcontainer-debs-${{ hashFiles('.devcontainer/debs.txt') }}";
+    let path = "path: .devcontainer/debs/*.deb";
+    assert!(
+        full.contains(key) && full.contains(path),
+        "full.yml no longer restores the .debs under {key}"
+    );
+    assert!(
+        debs.contains(key) && debs.contains(path),
+        "debs.yml saves another path or key than full.yml restores"
+    );
+    assert!(
+        debs.contains("uses: actions/cache/save@"),
+        "debs.yml saves no cache"
+    );
+    assert!(
+        debs.contains("branches: [main]") && debs.contains("workflow_dispatch:"),
+        "debs.yml must run on main, by push and by hand"
+    );
+    assert!(
+        debs.contains("runs-on: ubuntu-latest"),
+        "a cache's version includes its compression: save it on full.yml's runner"
+    );
+}

@@ -97,6 +97,10 @@ pub enum Request {
         /// Only these codes' findings, and the symbols holding them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         codes: Vec<String>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// A symbol called `name`, its ID from the name unless given, with
     /// `units` (1 by default) and a batch of ops applied.
@@ -141,7 +145,13 @@ pub enum Request {
         expected_revision: Option<String>,
     },
     #[serde(rename = "symbol.show")]
-    SymbolShow { symbol: String },
+    SymbolShow {
+        symbol: String,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     #[serde(rename = "symbol.list")]
     SymbolList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,7 +191,13 @@ pub enum Request {
         expected_revision: Option<String>,
     },
     #[serde(rename = "libcomp.show")]
-    LibcompShow { libcomp: String },
+    LibcompShow {
+        libcomp: String,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     #[serde(rename = "libcomp.list")]
     LibcompList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,7 +408,13 @@ pub enum Request {
     },
     /// A block with what it holds, its faults and revision.
     #[serde(rename = "block.show")]
-    BlockShow { block: String },
+    BlockShow {
+        block: String,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     #[serde(rename = "block.list")]
     BlockList {},
     /// A block's folder, refused while instanced or a design's root.
@@ -430,7 +452,13 @@ pub enum Request {
         expected_revision: Option<String>,
     },
     #[serde(rename = "component.show")]
-    ComponentShow { component: String },
+    ComponentShow {
+        component: String,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// A pin (`<block>/<component>/<pin>`) onto a net, `rail:<name>`,
     /// `port:<name>`, or with `new` a new net of the block by that name.
     #[serde(rename = "connect")]
@@ -506,7 +534,13 @@ pub enum Request {
     },
     /// A net with the pins and ports on it.
     #[serde(rename = "net.show")]
-    NetShow { net: String },
+    NetShow {
+        net: String,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// A block placed in another, its ports connected there.
     #[serde(rename = "instance.add")]
     InstanceAdd {
@@ -544,12 +578,20 @@ pub enum Request {
     Netlist {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         design: Option<String>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// ERC over every design, or the one named.
     #[serde(rename = "erc")]
     Erc {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         design: Option<String>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// Accepts a finding with a reason (in `erc.json`), or with `remove`
     /// withdraws a waiver.
@@ -714,6 +756,10 @@ pub enum Request {
         block: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sheet: Option<String>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// A block's canvas (a design's root by default) or one sheet, as SVG
     /// or PNG, its bytes after the answer.
@@ -740,6 +786,10 @@ pub enum Request {
         /// light (the default) or dark (plan 2.E).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         theme: Option<ryusch::style::Theme>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// A design's canvases paged into a PDF, its bytes after the answer:
     /// a page per sheet, a stack's sheets per layer (`all`) or once
@@ -750,6 +800,10 @@ pub enum Request {
         design: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers: Option<crate::output::Layers>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// A design's designators numbered in canvas order (plan 2.F): the
     /// unannotated ones (`unannotated`, by default) or every unlocked one
@@ -795,7 +849,17 @@ pub enum Request {
         /// yet.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         offline: bool,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
+    /// What the project folder needs that no one file says, with repairs.
+    #[serde(rename = "doctor")]
+    Doctor {},
+    /// Applies doctor's repairs by ID, in order, as one change.
+    #[serde(rename = "doctor.repair")]
+    DoctorRepair { repairs: Vec<String> },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -873,11 +937,32 @@ impl Request {
         self.to_value()["params"].take()
     }
 
+    /// The revision a read asks for, unless it is the working files.
+    pub fn rev(&self) -> Option<&str> {
+        let rev = match self {
+            Request::Netlist { rev, .. }
+            | Request::Erc { rev, .. }
+            | Request::Check { rev, .. }
+            | Request::Describe { rev, .. }
+            | Request::Render { rev, .. }
+            | Request::Output { rev, .. }
+            | Request::BlockShow { rev, .. }
+            | Request::ComponentShow { rev, .. }
+            | Request::NetShow { rev, .. }
+            | Request::SymbolShow { rev, .. }
+            | Request::LibcompShow { rev, .. }
+            | Request::LibCheck { rev, .. } => rev.as_deref(),
+            _ => None,
+        };
+        rev.filter(|r| *r != "working")
+    }
+
     /// Whether the request writes the project's files.
     pub fn mutates(&self) -> bool {
         matches!(
             self,
             Request::LibAdd { .. }
+                | Request::DoctorRepair { .. }
                 | Request::ProjectEdit { .. }
                 | Request::SymbolCreate { .. }
                 | Request::SymbolEdit { .. }

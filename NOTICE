@@ -13,7 +13,8 @@ Third-party material kept under its own licence:
   (MIT). See crates/ryucad-app/fonts/LICENSES.md and
   crates/ryueda/fonts/LICENSES.md.
 - Test corpora: NIST's MBE PMI test models (public domain) in
-  crates/ryustep/tests/corpus; boards in crates/ryudfm/tests/corpus and
+  crates/ryustep/tests/corpus, and cuts of them in
+  crates/ryukei/tests/data/nist_*.body; boards in crates/ryudfm/tests/corpus and
   schematic references in crates/ryueda/tests/schematic_corpus, each
   under the licence its manifest and LICENSE file name.
 - Code adapted from other projects says so where it appears, with its

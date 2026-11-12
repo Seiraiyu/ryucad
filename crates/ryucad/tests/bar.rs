@@ -9,9 +9,10 @@
 //! 0.5 m, the holes 0.6 m across a metre apart. Release builds only: in a
 //! debug build it takes minutes.
 
+mod common;
+
+use common::must;
 use ryucad::doc::id::Id;
-use ryucad::proto::Request;
-use ryucad::server::handle;
 use ryucad::session::Session;
 use ryucad::units::Unit;
 use ryukei::boolean::{BooleanOp, Tool, boolean};
@@ -20,11 +21,6 @@ use ryukei::name::{OpKey, ToolKey};
 use ryukei::topo::Body;
 use serde_json::{Value, json};
 use std::time::Instant;
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-        .unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 /// The best of two runs of `f` on one thread, in milliseconds, and what
 /// the last run returned.

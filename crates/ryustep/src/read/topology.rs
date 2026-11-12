@@ -105,7 +105,7 @@ pub(crate) fn shape(g: &Geo, items: &[Id]) -> Result<(Shape, Sources), ImportErr
             // A surface model's shells are sheets: healed as solids'
             // shells unless the caller asks for sheets (see
             // `ryukei::heal::Open`).
-            Entity::Brep(Brep::Shells(list) | Brep::Faces(list)) => {
+            Entity::Brep(Brep::Shells { shells: list, .. } | Brep::Faces(list)) => {
                 for &sh in &list.clone() {
                     let shell = b.shell(sh, false, 0)?;
                     b.s.sheets.push(shell);

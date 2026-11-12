@@ -96,6 +96,10 @@ try {
     Test-Case 'binary installed' (Test-Path $exe) $r
     Test-Case 'the newest ryueda release, not ryucad''s latest or a pre-release' ($r.Out -match 'installing ryueda 0\.1\.0') $r
     Test-Case 'reports the installed version' ($r.Out -match '"ryueda":') $r
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $textconv = & git config -f (Join-Path $r.Home '.gitconfig') diff.ryueda.textconv
+        Test-Case 'registers ryueda''s textconv with Git' ($textconv -match '/\.ryueda/bin/ryueda\.exe'' git textconv$') $r
+    }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     Test-Case 'user PATH gets the bin directory' (($userPath -split ';') -contains (Split-Path $exe)) $r
     Test-Case 'nothing of ryucad''s is touched' (-not (Test-Path (Join-Path $r.Home '.ryucad'))) $r
@@ -109,10 +113,15 @@ try {
     Start-Sleep -Seconds 1
     $r = Invoke-Installer 'fresh' $good $null
     Test-Case 'replacing a running binary succeeds' ($r.Ok -and $r.Out -match '"ryueda":') $r
+    # Again while the first upgrade's moved copy still runs: an upgrade
+    # never stops on it (#725).
+    $r = Invoke-Installer 'fresh' $good $null
+    Test-Case 'upgrading again while an earlier upgrade''s copy runs succeeds' ($r.Ok -and $r.Out -match '"ryueda":') $r
     Stop-Process -Id $running.Id -Force -ErrorAction SilentlyContinue
     $running.WaitForExit()
     $r = Invoke-Installer 'fresh' $good $null
-    Test-Case 'the next install removes ryueda.exe.old' ($r.Ok -and -not (Test-Path "$exe.old")) $r
+    $left = @(Get-ChildItem -Force (Split-Path $exe) | Where-Object { $_.Name -like '*.old' })
+    Test-Case 'the next install removes every moved copy' ($r.Ok -and $left.Count -eq 0) $r
 
     foreach ($v in @('0.0.9', 'v0.0.9', 'ryueda-v0.0.9')) {
         $r = Invoke-Installer "pinned-$v" $good @{ RYUEDA_VERSION = $v }

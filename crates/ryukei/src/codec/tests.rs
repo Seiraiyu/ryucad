@@ -343,6 +343,33 @@ fn meshes_round_trip_and_bad_ones_are_refused() {
         },
     });
     assert_eq!(decode_mesh(&encode_mesh(&m)).unwrap(), m);
+    // Faces drawn as strips: a list after the faults, only when there are
+    // some, so the mesh without them keeps its bytes.
+    let plain = encode_mesh(&m);
+    m.faces[1].strip = true;
+    m.faces[3].strip = true;
+    let bytes = encode_mesh(&m);
+    assert_eq!(bytes[..plain.len()], plain[..]);
+    assert_eq!(bytes.len(), plain.len() + 12);
+    assert_eq!(decode_mesh(&bytes).unwrap(), m);
+    for n in plain.len() + 1..bytes.len() {
+        assert!(decode_mesh(&bytes[..n]).is_err(), "{n}");
+    }
+    let mut out_of_order = plain.clone();
+    for x in [2u32, 3, 1] {
+        out_of_order.extend_from_slice(&x.to_le_bytes());
+    }
+    assert!(decode_mesh(&out_of_order).is_err());
+    let mut past = plain.clone();
+    for x in [1u32, m.faces.len() as u32] {
+        past.extend_from_slice(&x.to_le_bytes());
+    }
+    assert!(decode_mesh(&past).is_err());
+    let mut empty = plain;
+    empty.extend_from_slice(&0u32.to_le_bytes());
+    assert!(decode_mesh(&empty).is_err());
+    m.faces[1].strip = false;
+    m.faces[3].strip = false;
     m.triangles.push([0, 0, m.corners.len() as u32]);
     assert_eq!(
         decode_mesh(&encode_mesh(&m)).unwrap_err(),

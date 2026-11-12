@@ -13,18 +13,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The classes that have a template.
-pub const TEMPLATES: [Class; 8] = [
+pub const TEMPLATES: [Class; 9] = [
     Class::Resistor,
     Class::Capacitor,
     Class::Inductor,
     Class::Diode,
     Class::Led,
+    Class::Opamp,
     Class::Connector,
     Class::Regulator,
     Class::Ic,
 ];
 
-/// A pin a box template places: its number, name and type.
+/// A pin a box or op-amp template places: its number, name and type.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinSpec {
@@ -33,6 +34,10 @@ pub struct PinSpec {
     pub name: String,
     #[serde(rename = "type")]
     pub ty: PinType,
+    /// The unit it belongs to, for a template of several units (an
+    /// op-amp's amplifiers); `None` for a pin every unit has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<u32>,
 }
 
 fn pin(name: &str, at: Point, side: Side, length_nm: i64, ty: PinType) -> Pin {
@@ -199,8 +204,27 @@ fn two_pin(class: Class, st: &Standards) -> Option<Symbol> {
 }
 
 /// A symbol called `name` of `class`, drawn to `st`; `pins` places a
-/// box's pins (two-pin templates draw their own).
+/// box's or an op-amp's pins (two-pin templates draw their own).
 pub fn template(name: &str, class: Class, pins: &[PinSpec], st: &Standards) -> Result<Symbol> {
+    template_units(name, class, 1, pins, st)
+}
+
+/// [`template`] of `units` units: an op-amp's amplifiers (1 to 4); every
+/// other template draws one.
+pub fn template_units(
+    name: &str,
+    class: Class,
+    units: u32,
+    pins: &[PinSpec],
+    st: &Standards,
+) -> Result<Symbol> {
+    if units != 1 && class != Class::Opamp {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("a {} template draws one unit", class.as_str()),
+        )
+        .with("param", "units"));
+    }
     let mut s = match class {
         Class::Resistor | Class::Capacitor | Class::Inductor | Class::Diode | Class::Led => {
             if !pins.is_empty() {
@@ -215,8 +239,17 @@ pub fn template(name: &str, class: Class, pins: &[PinSpec], st: &Standards) -> R
             }
             two_pin(class, st).expect("a two-pin class")
         }
-        Class::Ic | Class::Regulator | Class::Connector => boxed(class, pins, st)?,
-        Class::Opamp | Class::Transistor => {
+        Class::Ic | Class::Regulator | Class::Connector => {
+            if let Some(i) = pins.iter().position(|p| p.unit.is_some()) {
+                return Err(
+                    Error::new(Code::InvalidParam, "a box template draws one unit")
+                        .with("pointer", format!("/pins/{i}/unit")),
+                );
+            }
+            boxed(class, pins, st)?
+        }
+        Class::Opamp => opamp(pins, units, st)?,
+        Class::Transistor => {
             return Err(Error::new(
                 Code::InvalidParam,
                 format!(
@@ -452,6 +485,201 @@ fn boxed(class: Class, pins: &[PinSpec], st: &Standards) -> Result<Symbol> {
     })
 }
 
+/// Whether an op-amp's input is its inverting one (as `ryusch::topology`
+/// reads it).
+fn inverting(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    n.ends_with('-') || n.contains("IN-") || n.contains("INN")
+}
+
+/// Whether an op-amp's input is its non-inverting one.
+fn non_inverting(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    n.ends_with('+') || n.contains("IN+") || n.contains("INP")
+}
+
+/// An op-amp (#758, design 519): each unit a triangle pointing right,
+/// `(-h, h)`, `(h, 0)`, `(-h, -h)`, filled, `h` 6g (8g with three
+/// supplies on the bottom); the inverting input's
+/// base at `(-h, 2g)` above the non-inverting one's at `(-h, -2g)`, up
+/// to two more inputs at `(-h, -4g)` then `(-h, 4g)` (below first, clear
+/// of the way from the inverting input up to a stage's feedback), the output at the
+/// apex; supplies, common to every unit and drawn on the first, from the
+/// slanted edges (positive on the top, up to two; negative and ground on
+/// the bottom, up to three), four steps apart, their ends in one row a pin
+/// length past the triangle's box. The edges fall a grid step every two
+/// across, so each base is on them and each end on the grid.
+fn opamp(pins: &[PinSpec], units: u32, st: &Standards) -> Result<Symbol> {
+    checked(pins)?;
+    if !(1..=4).contains(&units) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("an op-amp template draws 1 to 4 amplifiers, not {units}"),
+        )
+        .with("param", "units"));
+    }
+    let g = st.grid_nm;
+    let len = st.pin_length_nm;
+    // The triangle's half size: 6g, or 8g when three supplies stand on
+    // the bottom edge, so each keeps its name inside, four steps apart.
+    let down = |s: &PinSpec| {
+        let name = s.name.to_ascii_uppercase();
+        st.role(&s.name, s.ty) == Some(crate::standards::Role::Ground)
+            || name.ends_with('-')
+            || name.starts_with('-')
+    };
+    let supply = |s: &PinSpec| matches!(s.ty, PinType::PowerIn | PinType::PowerOut);
+    let h = if pins.iter().filter(|s| supply(s) && down(s)).count() >= 3 {
+        8 * g
+    } else {
+        6 * g
+    };
+    let refuse = |i: usize, why: String| {
+        Error::new(Code::InvalidParam, why).with("pointer", format!("/pins/{i}"))
+    };
+    let mut out = BTreeMap::new();
+    let (mut top, mut bottom): (Vec<String>, Vec<String>) = Default::default();
+    // Per unit: inverting, non-inverting, output, extra inputs so far.
+    let mut seen: BTreeMap<u32, (bool, bool, bool, usize)> = BTreeMap::new();
+    for (i, s) in pins.iter().enumerate() {
+        let power = matches!(s.ty, PinType::PowerIn | PinType::PowerOut);
+        let unit = match (s.unit, power) {
+            (Some(_), true) => {
+                return Err(refuse(
+                    i,
+                    format!(
+                        "supply {} is common to every unit: give it no unit",
+                        s.number
+                    ),
+                ));
+            }
+            (None, true) => None,
+            (None, false) if units == 1 => Some(1),
+            (None, false) => {
+                return Err(refuse(
+                    i,
+                    format!("pin {} needs its unit (1 to {units})", s.number),
+                ));
+            }
+            (Some(u), false) if (1..=units).contains(&u) => Some(u),
+            (Some(u), false) => {
+                return Err(refuse(
+                    i,
+                    format!(
+                        "pin {} is in unit {u}, but the template draws {units}",
+                        s.number
+                    ),
+                ));
+            }
+        };
+        let (at, side) = match unit {
+            None => {
+                let down = down(s);
+                let (list, cap) = if down {
+                    (&mut bottom, 3)
+                } else {
+                    (&mut top, 2)
+                };
+                if list.len() == cap {
+                    return Err(refuse(
+                        i,
+                        format!(
+                            "an op-amp template places at most {cap} supplies on its {} edge",
+                            if down { "bottom" } else { "top" }
+                        ),
+                    ));
+                }
+                list.push(s.number.clone());
+                // Placed once every supply is counted, below.
+                ([0, 0], if down { Side::Down } else { Side::Up })
+            }
+            Some(u) => {
+                let e = seen.entry(u).or_default();
+                match s.ty {
+                    PinType::Output | PinType::TriState if !e.2 => {
+                        e.2 = true;
+                        ([h + len, 0], Side::Right)
+                    }
+                    PinType::Input if inverting(&s.name) && !e.0 => {
+                        e.0 = true;
+                        ([-h - len, 2 * g], Side::Left)
+                    }
+                    PinType::Input if non_inverting(&s.name) && !e.1 => {
+                        e.1 = true;
+                        ([-h - len, -2 * g], Side::Left)
+                    }
+                    PinType::Input if e.3 < 2 => {
+                        e.3 += 1;
+                        let y = if e.3 == 1 { -4 * g } else { 4 * g };
+                        ([-h - len, y], Side::Left)
+                    }
+                    _ => {
+                        return Err(refuse(
+                            i,
+                            format!(
+                                "an op-amp template has no place for pin {} ({}, {:?}) in unit {u}: \
+                                 one inverting and one non-inverting input, one output and two \
+                                 more inputs a unit, supplies with no unit",
+                                s.number, s.name, s.ty
+                            ),
+                        ));
+                    }
+                }
+            }
+        };
+        let name = if s.name.is_empty() { "~" } else { &s.name };
+        let mut p = pin(name, at, side, len, s.ty);
+        p.unit = if units == 1 { None } else { unit };
+        out.insert(s.number.clone(), p);
+    }
+    // The supplies (plan 3.A's departure, #758): bases on the slanted
+    // edge, where it stands at h/2 - x/2, four steps apart (x = -2g alone,
+    // -4g and 0 for two, -6g, -2g and 2g for three), ends in one row a pin length past the triangle's
+    // box, so no wire or label at an end meets the body.
+    for (list, sign) in [(&top, 1), (&bottom, -1)] {
+        for (k, number) in list.iter().enumerate() {
+            // Three on the larger triangle, clear of the output's name by
+            // the apex.
+            let x = match list.len() {
+                1 => -2 * g,
+                2 => -4 * g + 4 * g * k as i64,
+                _ => -6 * g + 4 * g * k as i64,
+            };
+            let edge = h / 2 - x / 2;
+            let p = out.get_mut(number).expect("placed above");
+            p.at = [x, sign * (h + len)];
+            p.length_nm = h + len - edge;
+        }
+    }
+    for u in 1..=units {
+        let e = seen.get(&u).copied().unwrap_or_default();
+        if !(e.0 && e.1 && e.2) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("unit {u} needs an inverting input, a non-inverting input and an output"),
+            )
+            .with("param", "pins"));
+        }
+    }
+    let triangle = |unit| Graphic::Polyline {
+        points: vec![[-h, h], [h, 0], [-h, -h], [-h, h]],
+        fill: Fill::Body,
+        unit,
+    };
+    let graphics = if units == 1 {
+        vec![triangle(None)]
+    } else {
+        (1..=units).map(|u| triangle(Some(u))).collect()
+    };
+    Ok(Symbol {
+        name: String::new(),
+        units,
+        class: Some(Class::Opamp),
+        pins: out,
+        graphics: numbered(graphics),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,6 +734,7 @@ mod tests {
             number: "1".into(),
             name: "A".into(),
             ty: PinType::Passive,
+            unit: None,
         };
         assert_eq!(
             template("R", Class::Resistor, &[pin], &st(Shapes::Ansi))
@@ -551,6 +780,7 @@ mod tests {
             number: number.into(),
             name: name.into(),
             ty,
+            unit: None,
         }
     }
 
@@ -664,6 +894,161 @@ mod tests {
         assert_eq!(
             (e.code, &e.details["pointer"]),
             (Code::DuplicateId, &serde_json::json!("/pins/1/number"))
+        );
+    }
+
+    fn amp(unit: Option<u32>, inv: &str, non: &str, out: &str) -> Vec<PinSpec> {
+        [
+            (inv, "-", PinType::Input),
+            (non, "+", PinType::Input),
+            (out, "~", PinType::Output),
+        ]
+        .iter()
+        .map(|(n, name, ty)| PinSpec {
+            number: (*n).into(),
+            name: (*name).into(),
+            ty: *ty,
+            unit,
+        })
+        .collect()
+    }
+
+    fn supply(number: &str, name: &str) -> PinSpec {
+        PinSpec {
+            number: number.into(),
+            name: name.into(),
+            ty: PinType::PowerIn,
+            unit: None,
+        }
+    }
+
+    /// #758: a triangle pointing right, the inverting input above the
+    /// non-inverting one, the output at the apex, supplies on the slanted
+    /// edges, every pin the standards' length with its end on the grid.
+    #[test]
+    fn an_op_amp_is_a_triangle_with_its_supplies_on_its_edges() {
+        let st = Standards::default();
+        let g = st.grid_nm;
+        let mut pins = amp(None, "2", "3", "1");
+        pins.extend([supply("8", "V+"), supply("4", "V-")]);
+        let s = template_units("OPA", Class::Opamp, 1, &pins, &st).unwrap();
+        assert!(s.check().is_empty(), "{:?}", s.check());
+        assert_eq!((s.units, s.class), (1, Some(Class::Opamp)));
+        let at = |n: &str| (s.pins[n].at, s.pins[n].side);
+        let len = st.pin_length_nm;
+        assert_eq!(at("2"), ([-6 * g - len, 2 * g], Side::Left));
+        assert_eq!(at("3"), ([-6 * g - len, -2 * g], Side::Left));
+        assert_eq!(at("1"), ([6 * g + len, 0], Side::Right));
+        // The supplies end a pin length past the triangle's box, their
+        // bases on its edges (plan 3.A's departure: an end inside the box
+        // left its label on the body).
+        assert_eq!(at("8"), ([-2 * g, 6 * g + len], Side::Up));
+        assert_eq!(at("4"), ([-2 * g, -6 * g - len], Side::Down));
+        assert_eq!(crate::symlint::base(&s.pins["8"]), [-2 * g, 4 * g]);
+        assert_eq!(crate::symlint::base(&s.pins["4"]), [-2 * g, -4 * g]);
+        for (n, p) in &s.pins {
+            assert_eq!((p.at[0] % g, p.at[1] % g), (0, 0));
+            if !["8", "4"].contains(&n.as_str()) {
+                assert_eq!(p.length_nm, len);
+            }
+        }
+        assert_eq!(
+            s.graphics.values().collect::<Vec<_>>(),
+            [&Graphic::Polyline {
+                points: vec![
+                    [-6 * g, 6 * g],
+                    [6 * g, 0],
+                    [-6 * g, -6 * g],
+                    [-6 * g, 6 * g]
+                ],
+                fill: Fill::Body,
+                unit: None,
+            }]
+        );
+    }
+
+    /// A dual is two triangles; its supplies are common pins, drawn on
+    /// unit 1. The OPA1622's enable stands on the left below the inputs,
+    /// its two V- and its GND along the bottom edge.
+    #[test]
+    fn a_dual_op_amp_is_two_units_with_the_supplies_on_the_first() {
+        let st = Standards::default();
+        let g = st.grid_nm;
+        let mut pins = amp(Some(1), "10", "1", "9");
+        pins.push(PinSpec {
+            number: "8".into(),
+            name: "EN".into(),
+            ty: PinType::Input,
+            unit: Some(1),
+        });
+        pins.extend(amp(Some(2), "6", "5", "7"));
+        pins.extend([
+            supply("2", "V+"),
+            supply("4", "V-"),
+            supply("11", "V-"),
+            supply("3", "GND"),
+        ]);
+        let s = template_units("OPA1622", Class::Opamp, 2, &pins, &st).unwrap();
+        assert!(s.check().is_empty(), "{:?}", s.check());
+        assert_eq!(s.units, 2);
+        // Three bottom supplies: the triangle is 8g each way from its
+        // middle.
+        // The enable stands below the non-inverting input, clear of the
+        // way from the inverting one up to the feedback.
+        assert_eq!(s.pins["8"].at, [-8 * g - st.pin_length_nm, -4 * g]);
+        // Four steps apart, ends in one row, bases on the bottom edge.
+        let bottom: Vec<Point> = ["4", "11", "3"].iter().map(|n| s.pins[*n].at).collect();
+        let row = -8 * g - st.pin_length_nm;
+        assert_eq!(bottom, [[-6 * g, row], [-2 * g, row], [2 * g, row]]);
+        let bases: Vec<Point> = ["4", "11", "3"]
+            .iter()
+            .map(|n| crate::symlint::base(&s.pins[*n]))
+            .collect();
+        assert_eq!(bases, [[-6 * g, -7 * g], [-2 * g, -5 * g], [2 * g, -3 * g]]);
+        assert!(
+            ["2", "4", "11", "3"]
+                .iter()
+                .all(|n| s.pins[*n].unit.is_none())
+        );
+        assert_eq!(crate::symlint::home(&s), 1);
+        let triangles: Vec<Option<u32>> = s.graphics.values().map(|x| x.unit()).collect();
+        assert_eq!(triangles, [Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn an_op_amp_template_refuses_what_it_cannot_place() {
+        let st = Standards::default();
+        let refused = |pins: &[PinSpec], units: u32| {
+            template_units("A", Class::Opamp, units, pins, &st)
+                .unwrap_err()
+                .code
+        };
+        // No inverting input.
+        let mut pins = amp(None, "2", "3", "1");
+        pins[0].name = "X".into();
+        pins[0].ty = PinType::Bidirectional;
+        assert_eq!(refused(&pins, 1), Code::InvalidParam);
+        // Unit 2 has no pins.
+        assert_eq!(refused(&amp(Some(1), "2", "3", "1"), 2), Code::InvalidParam);
+        // A supply in a unit.
+        let mut pins = amp(None, "2", "3", "1");
+        pins.push(PinSpec {
+            unit: Some(1),
+            ..supply("8", "V+")
+        });
+        assert_eq!(refused(&pins, 1), Code::InvalidParam);
+        // Three top supplies.
+        let mut pins = amp(None, "2", "3", "1");
+        pins.extend([supply("4", "V+"), supply("5", "VCC"), supply("6", "VDD")]);
+        assert_eq!(refused(&pins, 1), Code::InvalidParam);
+        // Five units.
+        assert_eq!(refused(&amp(None, "2", "3", "1"), 5), Code::InvalidParam);
+        // A unit on a box template's pin.
+        let mut pins = amp(Some(1), "2", "3", "1");
+        pins.truncate(1);
+        assert_eq!(
+            template("U", Class::Ic, &pins, &st).unwrap_err().code,
+            Code::InvalidParam
         );
     }
 }

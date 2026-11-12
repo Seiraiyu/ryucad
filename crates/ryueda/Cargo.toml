@@ -31,6 +31,8 @@ ryu-draw = { path = "../ryu-draw" }
 pdf-writer = "0.15"
 # The PDF's arcs: sines and tangents with the same bits everywhere.
 ryu-math = { path = "../ryu-math" }
+# Git: revisions, attributes and textconv (design 518).
+ryu-git = { path = "../ryu-git" }
 ryu-session = { path = "../ryu-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
