@@ -140,18 +140,32 @@ pub(crate) fn newest_official(
     let config = Config::read(&*session)?;
     let order = |l: &String| ryupdm::bom::rev_order(config.revisions, &Rev::Label(l.clone()));
     if let Some(project) = project {
-        let lock = match &session.project().lock {
-            Some(Ok(l)) => l,
-            _ => return Ok(None),
+        let locked = match &session.project().lock {
+            Some(Ok(l)) => l.projects.get(project).map(|p| {
+                p.labels
+                    .keys()
+                    .filter(|(p, _)| p == part)
+                    .map(|(_, l)| l.clone())
+                    .collect::<Vec<_>>()
+            }),
+            _ => None,
         };
-        let labels = lock.projects.get(project).map(|p| {
-            p.labels
-                .keys()
-                .filter(|(p, _)| p == part)
-                .map(|(_, l)| l.clone())
-                .collect::<Vec<_>>()
-        });
-        return Ok(labels.unwrap_or_default().into_iter().max_by_key(order));
+        if let Some(l) = locked.unwrap_or_default().into_iter().max_by_key(order) {
+            return Ok(Some(l));
+        }
+        // Nothing of it locked yet: its releases as the dependency's
+        // fetched history has them, as `deps update` reads them.
+        let Some(d) = session.project().manifest.dependencies.get(project) else {
+            return Ok(None);
+        };
+        let (url, path) = (d.url.clone(), d.path.clone());
+        let (_, _, list) =
+            ryupdm::deps::parts::parts(session.deps_reader()?, project, &url, &path)?;
+        return Ok(list
+            .into_iter()
+            .find(|r| r.part == *part)
+            .and_then(|r| r.labels.into_iter().find(|l| l.state == "released"))
+            .map(|l| l.label));
     }
     let releases = match history(session) {
         Ok((_, r)) => r,

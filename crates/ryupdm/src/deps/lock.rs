@@ -31,6 +31,15 @@ pub fn wanted(project: &Project) -> BTreeSet<Wanted> {
                 out.insert((project, o.part, label));
             }
         }
+        // Another project's part inserted (design 521) is locked as a
+        // placed one is: never a component, but read at its label.
+        for f in p.features.values() {
+            if let Ok(ryucad_doc::doc::files::Feature::Insert(i)) = f
+                && let Rev::Foreign { project, label } = &i.rev
+            {
+                out.insert((project.clone(), i.part.clone(), label.clone()));
+            }
+        }
     }
     out
 }

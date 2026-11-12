@@ -5989,9 +5989,16 @@ pub(crate) fn part_report(
                     v["consumes"] = json!(tools);
                 }
             }
-            let own: Vec<&Value> = followed
+            // An insert's own (`insert_source_failed`, `insert_obsolete`)
+            // go under it too, as a followed reference's do.
+            let inserted = match b {
+                Ok(o) => o.inserted().map(|i| i.warnings.as_slice()),
+                Err(_) => None,
+            };
+            let own: Vec<&Value> = inserted
+                .unwrap_or_default()
                 .iter()
-                .filter(|w| w["feature"] == fid.as_str())
+                .chain(followed.iter().filter(|w| w["feature"] == fid.as_str()))
                 .collect();
             if !own.is_empty() {
                 v["warnings"] = json!(own);

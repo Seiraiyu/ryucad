@@ -1188,7 +1188,7 @@ pub fn body_as<'a>(
         } else {
             need.role
         };
-        return Err(reference_body(&part.id, id, t, role));
+        return Err(reference_body_from(&part.id, id, t, role, out));
     }
     if let Some(want) = need.want {
         crate::kind::need(id, need.role, t, &built.body, want, need.hint)?;
@@ -1233,6 +1233,17 @@ pub fn reference_body(part: &Id, id: &Id, t: &Id, role: &str) -> Error {
     .with("hint", format!("ryucad import convert {part}/{t}"))
 }
 
+/// [`reference_body`] for solid `t` as `out` (what `id` reads it from)
+/// holds it: an inserted reference is converted in its source part, so
+/// the hint names that part and the source's key (design 521).
+fn reference_body_from(part: &Id, id: &Id, t: &Id, role: &str, out: &Output) -> Error {
+    let e = reference_body(part, id, t, role);
+    match out.inserted().and_then(|i| i.sources.get(t)) {
+        Some((of, key)) => e.with("hint", format!("ryucad import convert {of}/{key}")),
+        None => e,
+    }
+}
+
 /// Refuses a feature (`id`, as the write leaves `p`) that would change a
 /// reference import's body, against the current rebuild `results`.
 pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
@@ -1251,7 +1262,7 @@ pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results
             } else {
                 r.role
             };
-            return Err(reference_body(&p.id, id, r.body, role));
+            return Err(reference_body_from(&p.id, id, r.body, role, out));
         }
     }
     Ok(())

@@ -1004,9 +1004,25 @@ impl Session {
     /// parts, over this session's results for everything else; kept
     /// nowhere, so the session is as it was.
     pub fn rebuilt_as(&mut self, part: Part) -> Result<PartResult> {
-        let pins = self.pins()?;
         let id = part.id.clone();
         let mut project = self.project.clone();
+        // The labels the part as proposed reads (a new insert's), looked
+        // up beside those the files reach.
+        let extra: Vec<crate::assembly::Node> = part
+            .features
+            .values()
+            .filter_map(|f| crate::assembly::reads_node(f.as_ref().ok()?))
+            .filter(|(_, rev)| *rev != Rev::Working)
+            .collect();
+        let pins = if extra.is_empty() {
+            self.pins()?
+        } else {
+            let mut with = self.project.clone();
+            with.parts.insert(id.clone(), part.clone());
+            crate::assembly::pins_from(&with, extra, |part, rev, within| {
+                crate::release::pinned_rev_within(self, part, rev, within)
+            })
+        };
         project.parts.insert(id.clone(), part);
         let mut store = self.store.clone();
         // Its revision is the files', which the edit hasn't changed.
@@ -1018,10 +1034,15 @@ impl Session {
         Ok(r.result(&id)?.clone())
     }
 
-    /// The model of `part` at `rev`: what an instance of it places.
+    /// The model of `part` at `rev`: what an instance of it places. A
+    /// label no instance or insert places yet is looked up too.
     pub fn model(&mut self, part: &Id, rev: &Rev) -> Result<Arc<Model>> {
+        let extra = match rev {
+            Rev::Working => Vec::new(),
+            rev => vec![(part.clone(), rev.clone())],
+        };
         let mut out = None;
-        self.rebuild(|r| {
+        self.rebuild_with(extra, |r| {
             out = Some(r.model(part, rev));
             Ok(())
         })?;
