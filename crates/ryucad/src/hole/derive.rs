@@ -7,7 +7,7 @@
 //! Lengths from tables are exact nanometres until here, and become f64
 //! metres by one division each.
 
-use crate::doc::hole::{Hole, HoleForm, TapDrill, Thread, ThreadDepth};
+use crate::doc::hole::{BoreTolerance, Fastener, Hole, HoleForm, TapDrill, Thread, ThreadDepth};
 use crate::doc::hole_standards::{Diameters, HOLE_STANDARDS, HoleStandards, Kind, ThreadEntry};
 use crate::error::{Code, Error, Result};
 use crate::units::Quantity;
@@ -221,7 +221,7 @@ pub type Tables<'a> = Option<&'a std::result::Result<HoleStandards, Error>>;
 /// A hole's sizes.
 pub fn derive(h: &Hole, tables: Tables) -> Result<Sizes> {
     let written = |q: &Option<Quantity>| q.as_ref().map(|q| Size::quantity(q, Source::Override));
-    let (counterbore, countersink) = match &h.form {
+    let (mut counterbore, mut countersink) = match &h.form {
         HoleForm::Simple => (None, None),
         HoleForm::Counterbore { diameter, depth } => (written(diameter).zip(written(depth)), None),
         HoleForm::Countersink { diameter, angle } => (None, written(diameter).zip(written(angle))),
@@ -236,12 +236,21 @@ pub fn derive(h: &Hole, tables: Tables) -> Result<Sizes> {
             (None, Some(d)) => d,
             (None, None) => unreachable!("thread_sizes refuses a hole with no drill"),
         }
-    } else if h.fastener.is_some() {
-        // Task 21.
-        return Err(Error::new(
-            Code::InvalidParam,
-            "fasteners are derived from Task 21 on",
-        ));
+    } else if let Some(f) = &h.fastener {
+        let (clearance, cb, cs) = fastener_sizes(h, f, tables)?;
+        counterbore = cb;
+        countersink = cs;
+        match (&h.diameter, clearance) {
+            (Some(q), _) => (
+                Size::quantity(q, Source::Override),
+                is_standard(q, false) || is_standard(q, true),
+            ),
+            (None, Some(c)) => {
+                let standard = is_standard_size(&c);
+                (c, standard)
+            }
+            (None, None) => unreachable!("fastener_sizes refuses a hole with no clearance"),
+        }
     } else {
         let q = h
             .diameter
@@ -249,14 +258,14 @@ pub fn derive(h: &Hole, tables: Tables) -> Result<Sizes> {
             .expect("a plain hole writes its diameter");
         (Size::quantity(q, Source::Override), true)
     };
-    let _ = &h.bore; // Task 21
+    let fit = h.bore.as_ref().map(|b| fit_sizes(b, &drill)).transpose()?;
     Ok(Sizes {
         drill,
         drill_standard,
         counterbore,
         countersink,
         thread,
-        fit: None,
+        fit,
     })
 }
 
@@ -511,6 +520,114 @@ fn thread_sizes(
     Ok((sizes, drill))
 }
 
+/// A fastener's clearance, if the hole doesn't write its diameter, and
+/// its counterbore and countersink.
+type FastenerSizes = (Option<Size>, Option<(Size, Size)>, Option<(Size, Size)>);
+
+/// A fastener's clearance and mouth: what the hole writes, else the
+/// project's entry; every value neither gives is named in one refusal.
+fn fastener_sizes(h: &Hole, f: &Fastener, tables: Tables) -> Result<FastenerSizes> {
+    let project = table(tables)?;
+    let e = project.and_then(|p| p.fastener(&f.standard, &f.size));
+    let mut missing: Vec<String> = Vec::new();
+    let mut need = |m: &str| {
+        if !missing.iter().any(|x| x == m) {
+            missing.push(m.to_owned());
+        }
+    };
+    let proj = |q: &Quantity| Size::quantity(q, Source::Project);
+    let over = |q: &Quantity| Size::quantity(q, Source::Override);
+    let clearance = match &h.diameter {
+        Some(_) => None,
+        None => match e.and_then(|e| e.clearance.get(f.fit.key())) {
+            Some(q) => Some(proj(q)),
+            None => {
+                need(&format!("clearance.{}", f.fit.key()));
+                None
+            }
+        },
+    };
+    let mut pair = |written: (&Option<Quantity>, &Option<Quantity>),
+                    from: Option<&(Quantity, Quantity)>,
+                    key: &str| {
+        let a = written
+            .0
+            .as_ref()
+            .map(over)
+            .or_else(|| from.map(|p| proj(&p.0)));
+        let b = written
+            .1
+            .as_ref()
+            .map(over)
+            .or_else(|| from.map(|p| proj(&p.1)));
+        if a.is_none() || b.is_none() {
+            need(key);
+        }
+        a.zip(b)
+    };
+    let (counterbore, countersink) = match &h.form {
+        HoleForm::Simple => (None, None),
+        HoleForm::Counterbore { diameter, depth } => (
+            pair(
+                (diameter, depth),
+                e.and_then(|e| e.counterbore.as_ref()),
+                "counterbore",
+            ),
+            None,
+        ),
+        HoleForm::Countersink { diameter, angle } => (
+            None,
+            pair(
+                (diameter, angle),
+                e.and_then(|e| e.countersink.as_ref()),
+                "countersink",
+            ),
+        ),
+    };
+    if !missing.is_empty() {
+        return Err(needs_table(Kind::Fastener, &f.standard, &f.size, missing));
+    }
+    Ok((clearance, counterbore, countersink))
+}
+
+/// The bore's tolerance at the drill's size.
+fn fit_sizes(bore: &BoreTolerance, drill: &Size) -> Result<FitSizes> {
+    let nominal = drill.to_nm();
+    let size = |n: i64, s| Size::nm(n, false, s);
+    let (class, upper, lower, source) = match bore {
+        BoreTolerance::Fit(c) => {
+            let class = ryu_standards::fit::Class::parse(c).expect("doc::hole checked the class");
+            let um = u64::try_from((nominal + 500) / 1000).unwrap_or(0);
+            let Some((u, l)) = ryu_standards::fit::deviations(&class, um) else {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("ISO 286 doesn't define {c} at {}", drill.text),
+                )
+                .with("reason", "fit_undefined")
+                .with("pointer", "/fit"));
+            };
+            // Tenths of a micrometre to nanometres.
+            (Some(c.clone()), u * 100, l * 100, Source::Fit)
+        }
+        BoreTolerance::Symmetric(q) => (None, nm(q), -nm(q), Source::Override),
+        BoreTolerance::Deviation(u, l) => (None, nm(u), nm(l), Source::Override),
+    };
+    Ok(FitSizes {
+        class,
+        upper: size(upper, source),
+        lower: size(lower, source),
+        limits: [size(nominal + lower, source), size(nominal + upper, source)],
+    })
+}
+
+/// Whether a size is a standard drill of either system.
+fn is_standard_size(s: &Size) -> bool {
+    let nm = s.to_nm();
+    ryu_standards::drill::standard(nm, false)
+        .or(ryu_standards::drill::standard(nm, true))
+        .is_some()
+}
+
 /// Whether a written size is a standard drill of its system.
 fn is_standard(q: &Quantity, inch: bool) -> bool {
     ryu_standards::drill::standard(nm(q), inch).is_some()
@@ -675,5 +792,71 @@ mod tests {
         assert!(t.left);
         assert_eq!((t.starts, t.lead.text.as_str()), (2, "2.5 mm"));
         assert_eq!(t.designation, "M8x1.25-6H-LH");
+    }
+
+    #[test]
+    fn a_fastener_gives_the_clearance_and_its_mouth() {
+        let t = tables();
+        let h = hole(json!({"fastener": {"standard": "house_cap", "size": "M5"},
+                            "form": "counterbore", "counterbore": {}}));
+        let s = derive(&h, Some(&t)).unwrap();
+        assert_eq!(
+            (s.drill.text.as_str(), s.drill.source),
+            ("5.6 mm", Source::Project)
+        );
+        let (d, depth) = s.counterbore.unwrap();
+        assert_eq!((d.text.as_str(), depth.text.as_str()), ("9.7 mm", "5.3 mm"));
+        // An override is reported as one.
+        let h = hole(
+            json!({"fastener": {"standard": "house_cap", "size": "M5", "fit": "close"},
+                            "form": "counterbore", "counterbore": {"depth": "6 mm"}}),
+        );
+        let s = derive(&h, Some(&t)).unwrap();
+        assert_eq!(s.drill.text, "5.4 mm");
+        assert_eq!(s.counterbore.unwrap().1.source, Source::Override);
+        // Everything missing, in one refusal.
+        let h = hole(
+            json!({"fastener": {"standard": "house_flat", "size": "M5", "fit": "loose"},
+                            "form": "counterbore", "counterbore": {}}),
+        );
+        let e = derive(&h, Some(&t)).unwrap_err();
+        assert_eq!(
+            e.details["missing"],
+            json!(["clearance.loose", "counterbore"])
+        );
+        assert_eq!(
+            e.details["entry"],
+            json!({"fasteners": {"house_flat": {"M5": {"clearance": {"loose": null}, "counterbore": null}}}})
+        );
+        // No table at all: the same refusal.
+        let h = hole(json!({"fastener": {"standard": "iso4762", "size": "M5"}}));
+        assert_eq!(
+            derive(&h, None).unwrap_err().details["reason"],
+            "needs_project_table"
+        );
+    }
+
+    #[test]
+    fn a_fit_at_its_nominal() {
+        let h = hole(json!({"diameter": "6 mm", "fit": "H7"}));
+        let f = derive(&h, None).unwrap().fit.unwrap();
+        // ISO 286: H7 from 3 to 6 mm is +12/0 µm; 6 mm is in that step.
+        assert_eq!(
+            (f.upper.text.as_str(), f.lower.text.as_str()),
+            ("0.012 mm", "0 mm")
+        );
+        assert_eq!(
+            (f.limits[0].text.as_str(), f.limits[1].text.as_str()),
+            ("6 mm", "6.012 mm")
+        );
+        assert_eq!(f.upper.source, Source::Fit);
+        let h = hole(json!({"diameter": "6 mm", "tolerance": {"symmetric": "0.01 mm"}}));
+        let f = derive(&h, None).unwrap().fit.unwrap();
+        assert_eq!(f.limits[0].text, "5.99 mm");
+        let h = hole(json!({"diameter": "4000 mm", "fit": "H7"}));
+        assert_eq!(
+            derive(&h, None).unwrap_err().details["reason"],
+            "fit_undefined"
+        );
     }
 }
