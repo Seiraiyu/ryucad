@@ -386,6 +386,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
         crate::doc::files::FEATURE_KIND => json!(crate::doc::files::feature_format(&value)),
         crate::doc::files::PROJECT_KIND => json!(crate::doc::files::manifest_format(&value)),
         crate::doc::files::PART_KIND => json!(crate::doc::files::part_format(&value)),
+        crate::doc::appearance::KIND => json!(crate::doc::appearance::format_of(&value)),
         _ => {
             let f = |v: &Value| v["format"].as_u64().unwrap_or(1);
             json!(f(ours).max(f(theirs)))
@@ -3212,11 +3213,25 @@ mod tests {
         let mine = file(json!({a: {"colour": "#00ffff"}}));
         let (_, o) = bytes(&canonical(&base), &canonical(&mine), &canonical(&other));
         assert_eq!(o, Outcome::Conflicts(1));
-        let newer = json!({"format": 2, "kind": "ryucad.appearance"});
+        let newer = json!({"format": 3, "kind": "ryucad.appearance"});
         assert!(matches!(
             bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
             Outcome::Text(_)
         ));
+        // One side turns the file layer off, the other colours a face:
+        // both stay, at format 2; taken out again, format 1.
+        let off = json!({"faces": {a: {"colour": "#ff0000"}}, "format": 2,
+                         "kind": "ryucad.appearance",
+                         "part": {"colour": "#808080", "file_styles": false}});
+        let (out, o) = bytes(&canonical(&base), &canonical(&off), &canonical(&ours));
+        assert_eq!(o, Outcome::Clean);
+        let merged: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(merged["format"], 2);
+        assert_eq!(merged["part"]["file_styles"], false);
+        assert_eq!(merged["faces"][b]["colour"], "#00ff00");
+        let (out, _) = bytes(&canonical(&off), &canonical(&off), &canonical(&base));
+        let back: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(back["format"], 1, "{back}");
     }
 
     #[test]

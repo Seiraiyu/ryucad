@@ -416,6 +416,7 @@ pub fn answer_live(
             mesh,
             pipe_tolerance,
             skip_failing,
+            appearance,
             solid,
             notes,
             fixed,
@@ -439,6 +440,7 @@ pub fn answer_live(
                 mesh,
                 pipe_tolerance,
                 skip_failing,
+                appearance,
                 solid,
                 notes,
                 fixed,
@@ -1004,6 +1006,7 @@ pub(crate) fn dispatch(
             material,
             opacity,
             unset,
+            file_styles,
             expected_revision,
         } => {
             let change = crate::appearance::Change {
@@ -1011,6 +1014,7 @@ pub(crate) fn dispatch(
                 material,
                 opacity,
                 unset,
+                file_styles,
             };
             crate::appearance::set(session, &entities, &change, expected_revision.as_deref())
         }

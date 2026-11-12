@@ -28,6 +28,7 @@ mod update;
 
 use plan::Planned;
 pub use plan::Writes;
+pub(crate) use plan::{product_of, usage_ordinal};
 pub use update::{products_diff, usage_warnings};
 
 /// The work units one imported body may heal in by default: at least
@@ -579,6 +580,11 @@ pub fn transfer_report(
     let mut read = ryustep::census::Read::default();
     let mut failed = Vec::new();
     let mut parts: Vec<Id> = Vec::new();
+    let (mut bodies, mut made, mut vias) = (
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
+    );
     for (id, p) in &session.project().parts {
         let reads = p.features.values().any(|f| match f {
             Ok(Feature::Import(i)) => i.file.path == path,
@@ -594,6 +600,15 @@ pub fn transfer_report(
         read.product_tree = true;
         let r = session.rebuilt(id)?.clone();
         let p = session.project().part(id)?;
+        for f in p.features.values() {
+            if let Ok(Feature::Instance(inst)) = f
+                && let Some(u) = inst.import.as_ref().filter(|u| u.file == path)
+                && let Some(k) = crate::file_styles::definition_of(&opened, &u.product)
+                && let Some(n) = crate::file_styles::usage_index(&opened, k, u)
+            {
+                made.insert((k, n));
+            }
+        }
         for (fid, f) in &p.features {
             let Ok(Feature::Import(i)) = f else {
                 continue;
@@ -605,6 +620,10 @@ pub fn transfer_report(
                 Some(Ok(_)) => {
                     if let Ok(k) = select(fid, i, &opened) {
                         read.roots.extend(opened.roots(k));
+                        bodies.insert(k);
+                        if let Some(place) = &i.place {
+                            vias.insert(place.via.clone());
+                        }
                     }
                 }
                 Some(Err(e)) => failed.extend(crate::transfer::failed_instances(&json!(e))),
@@ -612,12 +631,16 @@ pub fn transfer_report(
             }
         }
     }
+    let (instances, unplaced) = crate::file_styles::interpreted(&opened, &bodies, &made, &vias);
+    read.instances = instances;
     let t = opened.census.transfer(&read, &failed);
-    Ok(json!({
+    let mut out = json!({
         "file": {"path": path, "blake3": file.blake3, "schema": schema_name(opened.schema)},
         "parts": parts,
         "transfer": crate::transfer::json(&t, path, detail),
-    }))
+    });
+    crate::transfer::with_unplaced(&mut out["transfer"], unplaced);
+    Ok(out)
 }
 
 /// `import_body_missing` for `path`: with `external` (each file the
@@ -1576,15 +1599,26 @@ fn parts_report(
 /// `plan`'s order.
 fn transfer_of(opened: &Opened, path: &str, plan: &[Planned], parts: &[Value]) -> Value {
     use crate::doc::files::Feature;
+    use std::collections::BTreeSet;
     let mut read = ryustep::census::Read {
-        roots: Vec::new(),
         product_tree: !plan.is_empty(),
+        ..Default::default()
     };
     let mut failed = Vec::new();
+    let (mut bodies, mut made, mut vias) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
     for (pl, p) in plan.iter().zip(parts) {
         for (fid, f) in &pl.features {
-            let Feature::Import(i) = f else {
-                continue;
+            let i = match f {
+                Feature::Import(i) => i,
+                Feature::Instance(inst) => {
+                    if let (Some(k), Some(u)) = (pl.definition, &inst.import)
+                        && let Some(n) = crate::file_styles::usage_index(opened, k, u)
+                    {
+                        made.insert((k, n));
+                    }
+                    continue;
+                }
+                _ => continue,
             };
             let Some(row) = p["features"]
                 .as_array()
@@ -1597,13 +1631,21 @@ fn transfer_of(opened: &Opened, path: &str, plan: &[Planned], parts: &[Value]) -
             if row["ok"] == true {
                 if let Ok(k) = select(fid, i, opened) {
                     read.roots.extend(opened.roots(k));
+                    bodies.insert(k);
+                    if let Some(place) = &i.place {
+                        vias.insert(place.via.clone());
+                    }
                 }
             } else {
                 failed.extend(crate::transfer::failed_instances(&row["error"]));
             }
         }
     }
-    crate::transfer::json(&opened.census.transfer(&read, &failed), path, false)
+    let (instances, unplaced) = crate::file_styles::interpreted(opened, &bodies, &made, &vias);
+    read.instances = instances;
+    let mut v = crate::transfer::json(&opened.census.transfer(&read, &failed), path, false);
+    crate::transfer::with_unplaced(&mut v, unplaced);
+    v
 }
 
 /// The answer: the stored file (`head`), the parts, the file's product

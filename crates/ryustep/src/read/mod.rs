@@ -144,11 +144,14 @@ pub struct Opened {
     pub held: Vec<Held>,
     /// For each of `held`, the first that holds the same items in the
     /// same context: the one whose body it is.
-    first: Vec<usize>,
-    entities: Entities,
+    pub(crate) first: Vec<usize>,
+    pub(crate) entities: Entities,
     /// Every instance of the file by category (design 448): what a
     /// transfer report counts.
     pub census: crate::census::Census,
+    /// Its styled items, read the first time they are asked for
+    /// ([`crate::styles`]): a file opened to build bodies never reads them.
+    pub(crate) styles: std::sync::OnceLock<crate::styles::Styles>,
 }
 
 /// Parses and decodes the STEP file `bytes` and reads its product tree,
@@ -215,6 +218,7 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
         first,
         entities,
         census,
+        styles: std::sync::OnceLock::new(),
     })
 }
 

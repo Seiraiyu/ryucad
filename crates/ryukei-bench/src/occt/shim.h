@@ -51,6 +51,7 @@ std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const double> edges,
                                rust::Slice<const double> sizes,
                                rust::Slice<const double> faces);
 std::unique_ptr<Shape> step_read(rust::Str path, bool fix);
+rust::Vec<double> xde_colours(rust::Str path);
 void step_write(const Shape &s, rust::Str path, bool ap242);
 OcctMesh stl_read(rust::Str path);
 rust::Vec<double> mesh_stl(const Shape &s, double chord, double angle,

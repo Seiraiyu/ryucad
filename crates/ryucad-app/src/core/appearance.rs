@@ -9,12 +9,13 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// How one face is drawn: its colour (sRGB; `None` for the theme's) and
-/// opacity.
+/// How one face is drawn: its colour (sRGB; `None` for the theme's),
+/// opacity, and whether an imported STEP file gave either (design 448).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Face {
     pub colour: Option<[f32; 3]>,
     pub opacity: f32,
+    pub file: bool,
 }
 
 impl Default for Face {
@@ -22,6 +23,7 @@ impl Default for Face {
         Face {
             colour: None,
             opacity: 1.0,
+            file: false,
         }
     }
 }
@@ -31,6 +33,7 @@ impl Face {
         Face {
             colour: v["colour"].as_str().and_then(ryucad::appearance::rgb),
             opacity: v["opacity"].as_f64().unwrap_or(1.0) as f32,
+            file: v.get("source").is_some(),
         }
     }
 
@@ -153,6 +156,7 @@ pub fn previewed<'a>(
     let over = |f: Face| Face {
         colour: preview.colour.or(f.colour),
         opacity: preview.opacity.unwrap_or(f.opacity),
+        file: false,
     };
     for (key, face) in covers(target, keys) {
         let now = out.get(&key).map(|l| (**l).clone()).unwrap_or_default();
@@ -218,6 +222,8 @@ pub struct Editor {
     /// The colour as typed, `#rrggbb`.
     pub typed: String,
     pub error: Option<ryucad::error::Error>,
+    /// Whether what it shows came from an imported STEP file.
+    pub from_file: bool,
 }
 
 impl Editor {
@@ -231,6 +237,7 @@ impl Editor {
         let c = now.colour.unwrap_or(theme);
         self.colour = c.map(|x| (x * 255.0).round() as u8);
         self.opacity = now.opacity;
+        self.from_file = now.file;
         self.dragging = None;
         self.typed = self.hex();
         self.error = None;
@@ -246,6 +253,7 @@ impl Editor {
         let c = now.colour.unwrap_or(theme);
         self.colour = c.map(|x| (x * 255.0).round() as u8);
         self.opacity = now.opacity;
+        self.from_file = now.file;
         self.typed = self.hex();
     }
 
@@ -344,7 +352,8 @@ mod tests {
             both[&key("p", "a")].face(NAME),
             Face {
                 colour: Some([1.0, 0.0, 0.0]),
-                opacity: 0.5
+                opacity: 0.5,
+                file: false,
             }
         );
     }
@@ -373,5 +382,23 @@ mod tests {
         );
         e.typed = "#12345".into();
         assert!(!e.take_typed());
+    }
+
+    #[test]
+    fn a_value_from_a_file_is_marked_and_the_window_says_so() {
+        let v = json!({"solids": [
+            {"part": "p", "solid": "i", "colour": "#ff0000", "opacity": 1,
+             "source": {"colour": "file"},
+             "faces": {NAME: {"colour": "#0000ff", "opacity": 1}}},
+        ]});
+        let looks = read(&v);
+        let l = &looks[&key("p", "i")];
+        assert!(l.base.file);
+        assert!(!l.face(NAME).file);
+        let mut e = Editor::default();
+        e.open_on(vec!["p".into()], l.base, [0.5; 3]);
+        assert!(e.from_file);
+        e.open_on(vec!["p".into()], l.face(NAME), [0.5; 3]);
+        assert!(!e.from_file);
     }
 }
