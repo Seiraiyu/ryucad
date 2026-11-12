@@ -1964,6 +1964,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_sheet_reads_back_as_its_founder() {
+        // #675: a sheet's SHELL_BASED_SURFACE_MODEL carries its founder, as
+        // a solid's MANIFOLD_SOLID_BREP does (#412).
+        let (_d, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        add(
+            &mut s,
+            "p",
+            json!({"type": "box", "id": "h", "params": {"x": 5, "y": 5, "z": 5},
+                   "placement": {"origin": [20, 0, 0]}}),
+        );
+        add(
+            &mut s,
+            "p",
+            json!({"type": "sketch", "id": "s", "plane": "xy"}),
+        );
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+        )
+        .unwrap();
+        add(
+            &mut s,
+            "p",
+            json!({"type": "extrude", "id": "w", "sketch": "s", "surface": true,
+                   "extent": {"type": "blind", "length": "20 mm"}}),
+        );
+        let (_, bytes) = exported(&mut s, json!({"part": "p"})).unwrap();
+        let mut names: Vec<String> = opened(&bytes).held.iter().map(|h| h.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, ["h", "w"]);
+        // Imported again, the sheet keeps its ID as the solid does.
+        let (_out, out) = outside(&bytes, "p.step");
+        let (_dir2, mut s2) = fresh();
+        let v = call(&mut s2, "import", json!({"solid": true, "path": out})).unwrap();
+        let mut ids: Vec<&str> = v["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["h", "w"], "{v}");
+    }
+
+    #[test]
     fn a_part_is_one_product_of_the_solids_it_shows() {
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
