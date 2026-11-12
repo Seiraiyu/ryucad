@@ -128,7 +128,10 @@ fn density_of(e: &Entities, item: Id) -> Result<(f64, Vec<Id>), ImportError> {
         return Err(crate::schema::wrong(item, "a density measure with a unit"));
     };
     let v = number(value).ok_or_else(|| malformed(item, 1, "expected a number"))?;
-    let unit = e.measure_unit(item, *u)?;
+    let mut unit = e.measure_unit(item, *u)?;
+    if let Some(occt) = occts_density_unit(e, *u, &unit)? {
+        unit = occt;
+    }
     if (unit.length, unit.angle, unit.mass, unit.other) != (-3, 0, 1, false) {
         return Err(malformed(
             item,
@@ -143,6 +146,54 @@ fn density_of(e: &Entities, item: Id) -> Result<(f64, Vec<Id>), ImportError> {
     let mut instances = vec![item];
     instances.extend(&unit.instances);
     Ok((kg_m3, instances))
+}
+
+/// OCCT's density unit, as its writer (7.8 and before) gives it: a
+/// `DERIVED_UNIT` of a mass unit to the power 3 and a length unit to the
+/// power 2 (`g^3*cm^2` where it means `g*cm^-3`), which OCCT's own reader
+/// takes as mass per volume whatever the exponents say. That form alone,
+/// two elements and nothing else, reads as its mass unit over its length
+/// unit cubed; any other unit is left as it is.
+fn occts_density_unit(
+    e: &Entities,
+    u: Id,
+    unit: &MeasureUnit,
+) -> Result<Option<MeasureUnit>, ImportError> {
+    if (unit.length, unit.angle, unit.mass, unit.other) != (2, 0, 3, false) {
+        return Ok(None);
+    }
+    let Entity::DerivedUnit { elements } = e.get(u, u)? else {
+        return Ok(None);
+    };
+    let [a, b] = elements[..] else {
+        return Ok(None);
+    };
+    let (mut mass, mut length) = (None, None);
+    for el in [a, b] {
+        let Entity::UnitElement { unit: named, .. } = e.get(u, el)? else {
+            return Ok(None);
+        };
+        let n = e.measure_unit(el, *named)?;
+        match (n.length, n.mass) {
+            (0, 1) => mass = Some(n),
+            (1, 0) => length = Some(n),
+            _ => return Ok(None),
+        }
+    }
+    let (Some(m), Some(l)) = (mass, length) else {
+        return Ok(None);
+    };
+    let decimal = m.decimal.zip(l.decimal).map(|(m, l)| m - 3 * l);
+    Ok(Some(MeasureUnit {
+        length: -3,
+        angle: 0,
+        mass: 1,
+        other: false,
+        size: decimal.map_or(m.size / (l.size * l.size * l.size), |d| scaled(1.0, d)),
+        decimal,
+        name: format!("{}*{}^-3", m.name, l.name),
+        instances: unit.instances.clone(),
+    }))
 }
 
 /// Every material and attribute of `e`, whose product tree is `products`.
@@ -474,6 +525,50 @@ mod tests {
         let r = read(&e, &p);
         let m = r.products[&0].material.as_ref().unwrap();
         assert_eq!((m.name.as_str(), m.density), ("Steel", Some(7850.0)));
+    }
+
+    /// OCCT 7.8's writer gives its density unit the exponents 3 (mass)
+    /// and 2 (length); OCCT's reader takes it as mass per volume, and so
+    /// does this (`tests/data/occt/material.stp`).
+    #[test]
+    fn occts_misnumbered_density_unit_is_mass_per_volume() {
+        let (e, p) = product(
+            "#20=PROPERTY_DEFINITION('material property','material name',#6);\
+             #21=PROPERTY_DEFINITION_REPRESENTATION(#20,#22);\
+             #22=REPRESENTATION('material name',(#23),#8);\
+             #23=DESCRIPTIVE_REPRESENTATION_ITEM('Aluminium','6061 alloy');\
+             #24=PROPERTY_DEFINITION('material property','density',#6);\
+             #25=PROPERTY_DEFINITION_REPRESENTATION(#24,#26);\
+             #26=REPRESENTATION('density',(#27),#8);\
+             #27=MEASURE_REPRESENTATION_ITEM('density',POSITIVE_RATIO_MEASURE(2.7),#30);\
+             #30=DERIVED_UNIT((#31,#33));\
+             #31=DERIVED_UNIT_ELEMENT(#32,3.);\
+             #32=(MASS_UNIT()NAMED_UNIT(*)SI_UNIT($,.GRAM.));\
+             #33=DERIVED_UNIT_ELEMENT(#34,2.);\
+             #34=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.CENTI.,.METRE.));",
+        );
+        let pr = read(&e, &p);
+        let m = pr.products[&0].material.as_ref().unwrap();
+        assert_eq!((m.name.as_str(), m.density), ("Aluminium", Some(2700.0)));
+        assert!(pr.failed.is_empty(), "{:?}", pr.failed);
+        // Any other exponents are still not a density.
+        let (e, p) = product(
+            "#20=PROPERTY_DEFINITION('material property','material name',#6);\
+             #21=PROPERTY_DEFINITION_REPRESENTATION(#20,#22);\
+             #22=REPRESENTATION('material name',(#23),#8);\
+             #23=DESCRIPTIVE_REPRESENTATION_ITEM('Aluminium','6061 alloy');\
+             #24=PROPERTY_DEFINITION('material property','density',#6);\
+             #25=PROPERTY_DEFINITION_REPRESENTATION(#24,#26);\
+             #26=REPRESENTATION('density',(#27),#8);\
+             #27=MEASURE_REPRESENTATION_ITEM('density',POSITIVE_RATIO_MEASURE(2.7),#30);\
+             #30=DERIVED_UNIT((#31,#33));\
+             #31=DERIVED_UNIT_ELEMENT(#32,2.);\
+             #32=(MASS_UNIT()NAMED_UNIT(*)SI_UNIT($,.GRAM.));\
+             #33=DERIVED_UNIT_ELEMENT(#34,2.);\
+             #34=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.CENTI.,.METRE.));",
+        );
+        let pr = read(&e, &p);
+        assert_eq!(pr.products[&0].material.as_ref().unwrap().density, None);
     }
 
     #[test]
