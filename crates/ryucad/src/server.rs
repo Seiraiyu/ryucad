@@ -2598,6 +2598,7 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         }
         Feature::Instance(i) => i.fields(),
         Feature::Insert(i) => i.fields(),
+        Feature::DeleteBody(d) => d.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => {
             crate::surface::report(part, f)
@@ -2982,6 +2983,7 @@ const INSTANCE: [&str; 4] = ["of", "rev", "placement", "fixed"];
 /// The fields an insert takes: its source (`of`), the revision it pins
 /// and its placement.
 const INSERT: [&str; 3] = ["of", "rev", "placement"];
+const DELETE_BODY: [&str; 2] = ["solids", "solid"];
 const MATE: [&str; 7] = [
     "form", "a", "b", "a_offset", "b_offset", "angle", "distance",
 ];
@@ -4076,6 +4078,9 @@ fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
         if let Some(Ok(Feature::Boolean(b))) = q.features.get(*w) {
             named.extend(&b.tools);
         }
+        if let Some(Ok(f)) = q.features.get(*w) {
+            named.extend(f.deletes());
+        }
     }
     for id in q.order() {
         let Some(Ok(f)) = q.features.get(id) else {
@@ -4103,6 +4108,48 @@ fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A `delete_body` from what it is given: `solids` (or one `solid`, as
+/// the CLI sends a lone `--solid`), read as its file reads them.
+fn delete_from(given: &Given) -> Result<crate::doc::body::DeleteBody> {
+    let solids: Vec<String> = match (&given.fields.solids, &given.fields.solid) {
+        (Some(s), None) => s.clone(),
+        (None, Some(s)) => vec![s.clone()],
+        (Some(_), Some(_)) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a delete names its solids once: solids, or one solid",
+            )
+            .with("param", "solid"));
+        }
+        (None, None) => Vec::new(),
+    };
+    if solids.is_empty() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a delete names the solids it deletes: solids",
+        )
+        .with("param", "solids"));
+    }
+    let v = json!({"solids": solids});
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let d =
+        crate::doc::body::DeleteBody::from_fields(&mut o).map_err(|e| e.with("param", "solids"))?;
+    o.finish()?;
+    Ok(d)
+}
+
+/// Refuses a `delete_body` its rebuild would refuse, against the part as
+/// the write would leave it: the solids before it as they are now.
+fn check_delete(session: &mut Session, pid: &Id, list: &[Id], id: &Id, f: &Feature) -> Result<()> {
+    let Feature::DeleteBody(d) = f else {
+        return Ok(());
+    };
+    let q = proposed(session.project().part(pid)?, list, &[(id, f)]);
+    let solids = Solids::of(&q);
+    let r = session.rebuilt(pid)?;
+    crate::body::delete_body(&q, &solids, id, d, r).map(|_| ())
 }
 
 /// The part as a write would leave it: `writes` in place, listed as
@@ -4697,7 +4744,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 27] = [
+const FEATURE_TYPES: [&str; 28] = [
     "box",
     "cylinder",
     "cone",
@@ -4722,6 +4769,7 @@ const FEATURE_TYPES: [&str; 27] = [
     "mate",
     "instance_pattern",
     "insert",
+    "delete_body",
     "plane",
     "axis",
     "point",
@@ -4966,6 +5014,10 @@ fn feature_add(
         "insert" => Feature::Insert(Box::new(
             inserted.take().expect("read before the part was borrowed"),
         )),
+        "delete_body" => {
+            given.only(ty, &DELETE_BODY)?;
+            Feature::DeleteBody(Box::new(delete_from(&given)?))
+        }
         "mate" => {
             given.only(ty, &MATE)?;
             mate_from(None, &given, (session.project(), &pid), unit, &env)?
@@ -5047,6 +5099,7 @@ fn feature_add(
     if f.insert().is_some() {
         check_insert(session, &pid, &list, &fid, &f)?;
     }
+    check_delete(session, &pid, &list, &fid, &f)?;
     // What its references follow: a split face or edge (design 447).
     let mut followed = Vec::new();
     if !f.connectors().is_empty() || f.instance_pattern().is_some() {
@@ -5202,6 +5255,14 @@ fn feature_edit(
             Feature::Insert(_) => Feature::Insert(Box::new(
                 inserted.clone().expect("read before the part was borrowed"),
             )),
+            Feature::DeleteBody(d) => {
+                given.only("delete_body", &DELETE_BODY)?;
+                if given.fields.solids.is_none() && given.fields.solid.is_none() {
+                    Feature::DeleteBody(d)
+                } else {
+                    Feature::DeleteBody(Box::new(delete_from(&given)?))
+                }
+            }
             Feature::Mate(m) => {
                 given.only("mate", &MATE)?;
                 mate_from(Some(&m), &given, (session.project(), &pid), unit, &p.env)?
@@ -5333,6 +5394,7 @@ fn feature_edit(
     if f.insert().is_some() && f != old {
         check_insert(session, &pid, &list, &fid, &f)?;
     }
+    check_delete(session, &pid, &list, &fid, &f)?;
     // What its references follow: a split face or edge (design 447).
     let mut followed = Vec::new();
     if (!f.connectors().is_empty() || f.instance_pattern().is_some()) && f != old {
@@ -5730,6 +5792,14 @@ pub(crate) fn part_report(
         .iter()
         .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.insert()?.clone())))
         .collect();
+    let deletes: BTreeMap<Id, crate::doc::body::DeleteBody> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| match f {
+            Ok(Feature::DeleteBody(d)) => Some((fid.clone(), (**d).clone())),
+            _ => None,
+        })
+        .collect();
     // A sweep's profile and path, a loft's sections, a mirror's or
     // split's plane, and a tweak's motion, are resolved again from the rebuild for its report: the part, held apart
     // from the session while it rebuilds.
@@ -5882,6 +5952,9 @@ pub(crate) fn part_report(
                         v[*k][key] = x;
                     }
                 }
+            }
+            if let Some(d) = deletes.get(fid) {
+                v["delete_body"] = crate::body::delete_report(d, r);
             }
             if let Some(i) = inserts.get(fid) {
                 let made = match b {

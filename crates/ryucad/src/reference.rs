@@ -151,6 +151,7 @@ impl Follow {
             | Feature::Boolean(_)
             | Feature::Instance(_)
             | Feature::Insert(_)
+            | Feature::DeleteBody(_)
             | Feature::Mate(_)
             | Feature::InstancePattern(_)
             | Feature::Import(_)

@@ -668,6 +668,7 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Chamfer(_)
         | Feature::Pattern(_)
         | Feature::Insert(_)
+        | Feature::DeleteBody(_)
         | Feature::Instance(_)
         | Feature::Mate(_)
         | Feature::InstancePattern(_)
@@ -2790,6 +2791,11 @@ fn rebuild_with(
             });
             (r, None)
         }
+        // Ends the chains it names; makes nothing (design 521).
+        Feature::DeleteBody(d) => (
+            crate::body::delete_body(part, solids, id, d, before).map(solid),
+            None,
+        ),
         // Its source's model comes from outside the part: see
         // [`rebuild_part_in`].
         Feature::Insert(i) => (
@@ -3313,8 +3319,12 @@ pub fn rebuild_part_in(
                 let kept = cache.tools.get(&id);
                 // Sketches, datums, paths and helices take microseconds to
                 // milliseconds from what they read: the disk holds none.
-                let kept_in_memory =
-                    f.sketch().is_some() || matches!(f, Feature::Datum(_) | Feature::Path(_));
+                // A delete makes nothing to keep.
+                let kept_in_memory = f.sketch().is_some()
+                    || matches!(
+                        f,
+                        Feature::Datum(_) | Feature::Path(_) | Feature::DeleteBody(_)
+                    );
                 let on_disk = || match (disk, f) {
                     (Some(d), _) if !kept_in_memory => from_disk(d, &h, &part.id, &id),
                     _ => None,

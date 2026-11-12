@@ -523,6 +523,11 @@ pub struct FeatureFields {
     /// The solid a mirror copies, by the feature that founded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solid: Option<String>,
+    /// The solids a delete_body takes out of the part's result, by key
+    /// (`<founder>` or `<insert>/<source key>`; an insert's ID for every
+    /// solid it founded), replacing them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solids: Option<Vec<String>>,
     /// Which sides a split keeps: `both` (the default) or `behind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep: Option<String>,

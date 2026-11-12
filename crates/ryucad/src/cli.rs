@@ -1292,7 +1292,8 @@ enum FeatureCmd {
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
     /// --angle) or mirror (--plane), skipping instances (--skip); an insert of
     /// another part's solids (--of <part>, --rev working|label:L, --origin,
-    /// --z, --x); or, in an assembly, an instance (--of, --rev, --origin, --z,
+    /// --z, --x); a delete_body (--solid, repeated) taking solids out of the
+    /// part's result; or, in an assembly, an instance (--of, --rev, --origin, --z,
     /// --x, --fixed), a mate
     /// (--form fastened, revolute, slider, cylindrical, planar or ball, --a, --b,
     /// --a-offset, --b-offset, --angle, --distance) or an instance pattern (--instance,
@@ -3245,9 +3246,11 @@ struct FieldArgs {
     #[arg(skip)]
     with_groups: Vec<(String, Vec<String>)>,
     /// The solid a mirror copies, by the feature that founded it (the part's one solid
-    /// when left out). Left without --operation, its copy joins this solid.
-    #[arg(long, value_name = "SOLID")]
-    solid: Option<String>,
+    /// when left out). Left without --operation, its copy joins this solid. A
+    /// delete_body's solids, repeated: a founder, <insert>/<solid>, or an insert for
+    /// every solid it inserted.
+    #[arg(long = "solid", value_name = "SOLID")]
+    solid: Vec<String>,
     /// Which sides of its plane a split keeps: both (the side in front founds a solid
     /// named by the split, the default) or behind (a trim).
     #[arg(long, value_name = "SIDES")]
@@ -3735,7 +3738,10 @@ impl FieldArgs {
                 list.extend(groups.as_array().into_iter().flatten().cloned());
                 (!list.is_empty()).then_some(Value::Array(list))
             },
-            solid: self.solid.clone(),
+            solid: (self.solid.len() == 1).then(|| self.solid[0].clone()),
+            // Two or more are a delete_body's; one goes as `solid`, which a
+            // delete takes as its one.
+            solids: (self.solid.len() > 1).then(|| self.solid.clone()),
             keep: self.keep.clone(),
             allowance: self
                 .k_factor
@@ -6689,6 +6695,29 @@ mod tests {
                 json!(["0", "0", "board_z"])
             );
             assert_eq!(v["params"]["type"], "insert");
+        });
+    }
+
+    #[test]
+    fn a_delete_takes_solid_repeated() {
+        on_cli_stack(|| {
+            let c = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "enclosure",
+                "delete_body",
+                "--id",
+                "drop-board",
+                "--solid",
+                "board",
+                "--solid",
+                "lid",
+            ])
+            .unwrap();
+            let v = serde_json::to_value(request(&c.command).unwrap()).unwrap();
+            assert_eq!(v["params"]["solids"], json!(["board", "lid"]), "{v}");
+            assert!(v["params"].get("solid").is_none());
         });
     }
 
