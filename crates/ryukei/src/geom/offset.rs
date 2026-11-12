@@ -46,11 +46,11 @@ pub struct Offset {
     base: Surface,
     distance: f64,
     domain: Cell,
-    /// The base's own cells cut to the box: certifying, bounds and
-    /// searches start from them.
     /// How the offset lies against its base's focal surface (design
     /// 484): regular for every offset but the global offset's envelope's.
     turn: Turn,
+    /// The base's own cells cut to the box: certifying, bounds and
+    /// searches start from them.
     cells: Vec<Cell>,
     bounds: Box3,
 }
