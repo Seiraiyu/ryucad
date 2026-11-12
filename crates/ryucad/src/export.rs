@@ -4286,4 +4286,79 @@ pub(crate) mod tests {
                 .any(|w| w["code"] == "export_metadata_omitted" && w["what"] == "properties")
         );
     }
+
+    /// A label's export is its official commit's: its properties and its
+    /// library's density too (design 448, plan 24.C).
+    #[test]
+    fn an_export_at_a_label_writes_the_release_commits_properties() {
+        use crate::git::tests::git;
+        let (dir, mut s) = crate::assembly::tests::project();
+        let r = dir.path();
+        git(r, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "pdm.configure",
+            json!({"properties": {"finish": {"type": "string"}}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "materials.set",
+            json!({"name": "Steel", "density": "7850 kg/m^3"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "bolt", "properties": {"number": "100", "material": "Steel", "finish": "red"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt A"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "bolt", "properties": {"finish": "blue"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "materials.set",
+            json!({"name": "Steel", "density": "8000 kg/m^3"}),
+        )
+        .unwrap();
+        let read = |bytes: &[u8]| {
+            let o = ryustep::open(bytes).unwrap();
+            let k = o
+                .products
+                .definitions
+                .iter()
+                .position(|d| &*d.product_id == "100")
+                .unwrap();
+            let p = o.properties().products[&k].clone();
+            let finish = p
+                .attributes
+                .iter()
+                .find(|a| a.name == "finish")
+                .unwrap()
+                .value
+                .clone();
+            (p.material.unwrap().density, finish)
+        };
+        let opts = |rev: Option<&str>| {
+            let mut v = json!({"part": "bolt", "time_stamp": "2026-11-11T00:00:00"});
+            if let Some(r) = rev {
+                v["rev"] = json!(r);
+            }
+            v
+        };
+        use ryustep::properties::Value as V;
+        let (_, at_label) = exported(&mut s, opts(Some("label:A"))).unwrap();
+        assert_eq!(read(&at_label), (Some(7850.0), V::Text("red".into())));
+        let (_, working) = exported(&mut s, opts(None)).unwrap();
+        assert_eq!(read(&working), (Some(8000.0), V::Text("blue".into())));
+        let (_, again) = exported(&mut s, opts(Some("label:A"))).unwrap();
+        assert_eq!(again, at_label, "what ryupdm's packages need");
+    }
 }
