@@ -99,6 +99,10 @@ enum Command {
     /// participant's window, part of the way through with --fraction.
     #[command(subcommand)]
     Explode(ExplodeCmd),
+    /// An assembly's motions: list, save or delete one. Sweep one with
+    /// `assembly sweep`.
+    #[command(subcommand)]
+    Motion(MotionCmd),
     /// A part's 2D drawings: sheets on a template with a title block, and
     /// views projected with exact hidden lines, written as PDF, SVG and
     /// PNG. Every value a sheet shows comes from the model.
@@ -1933,6 +1937,37 @@ enum ExplodeCmd {
         off: bool,
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MotionCmd {
+    /// The motions of an assembly, or of every assembly: each one's steps
+    /// and drives as written and as they resolve, with each assembly's
+    /// revision.
+    List { part: Option<String> },
+    /// Save a motion of an assembly, replacing one of that name.
+    Save {
+        part: String,
+        motion: String,
+        /// The drives, as the file writes them:
+        /// '[{"mate": "hinge", "angle": {"from": "-6 deg", "to": "6 deg"}}]' or
+        /// '[{"instances": ["p1"], "rotate": {"axis": {"origin": [0, 0, 0],
+        /// "direction": "z"}, "from": "0 deg", "to": "90 deg"}}]'.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        drives: Value,
+        /// Steps from start to end, 2 to 1,000 (11 when left out).
+        #[arg(long)]
+        steps: Option<u32>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a motion.
+    Delete {
+        part: String,
+        motion: String,
+        #[command(flatten)]
+        expect: Expect,
     },
 }
 
@@ -4613,6 +4648,29 @@ fn request(cmd: &Command) -> Option<Request> {
             fraction: *fraction,
             off: *off,
             participant: of.clone(),
+        },
+        Command::Motion(MotionCmd::List { part }) => Request::MotionList { part: part.clone() },
+        Command::Motion(MotionCmd::Save {
+            part,
+            motion,
+            drives,
+            steps,
+            expect,
+        }) => Request::MotionSave {
+            part: part.clone(),
+            motion: motion.clone(),
+            drives: drives.clone(),
+            steps: *steps,
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Motion(MotionCmd::Delete {
+            part,
+            motion,
+            expect,
+        }) => Request::MotionDelete {
+            part: part.clone(),
+            motion: motion.clone(),
+            expected_revision: expect.revision.clone(),
         },
         Command::View(ViewCmd::Save {
             part,

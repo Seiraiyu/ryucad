@@ -6631,6 +6631,36 @@ fn mate_limits_from_the_cli() {
 }
 
 #[test]
+fn motions_save_list_and_delete_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let _ = plate_and_bolt(&p);
+    let v = p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "lift",
+        "--drives",
+        r#"[{"instances": ["pin"], "translate": {"direction": "z", "from": "0 mm", "to": "5 mm"}}]"#,
+        "--steps",
+        "6",
+    ]);
+    assert_eq!(v["motion"], "lift", "{v}");
+    let list = p.ok(&["motion", "list", "frame"]);
+    assert_eq!(list["motions"][0]["steps"], 6, "{list}");
+    p.fails(
+        &["motion", "delete", "frame", "nope"],
+        "motion_not_found",
+        1,
+    );
+    p.ok(&["motion", "delete", "frame", "lift"]);
+    assert_eq!(
+        p.ok(&["motion", "list", "frame"])["motions"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
 fn a_failing_mate_warns_from_the_cli() {
     // Issues #155 and #158: the slot grown into a skim over the plate's
     // whole top takes away the face m1 stands on, in frame, which top
