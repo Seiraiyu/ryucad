@@ -1431,4 +1431,41 @@ mod tests {
             assert_ne!(crossing_beside(&folded, a, b, &shared, &m), Some(None));
         }
     }
+
+    /// #264: NIST CTC 02's AP242 cylinder and cone (public domain), tangent
+    /// at the one vertex they share, cut out with their neighbours. The
+    /// contact is a certified saddle at every radius from 1.4 mm down
+    /// (ryukei 18.A found it so to 1.4 nm): the surfaces cross along two
+    /// curves through the vertex, so design 551's certificate of a definite
+    /// contact can't settle the pair, and it stays `CannotCheck`.
+    #[test]
+    fn ctc_02s_pair_is_a_saddle_tangent_contact() {
+        use crate::intersect::{Tangency, tangency};
+        let bytes = include_bytes!("../../tests/data/nist_ctc_02_tangent_vertex.body");
+        let body = crate::codec::decode_body(bytes).unwrap();
+        let named = |x: u128| {
+            body.faces()
+                .find(|&f| body.faces[f].name == crate::name::Name::from_u128(x))
+                .unwrap()
+        };
+        let a = named(0x03fb1a8c5bb71be1bd31f756f6eb7ec3);
+        let b = named(0xa6571fb65f4e1ff5d03edcaaa985a9bd);
+        let m = Meter::free();
+        let v = shared_vertices(&body, a, b);
+        assert_eq!(v.len(), 1);
+        assert!(shared_edges(&body, a, b).is_empty());
+        let p = body.vertices[v[0]].point;
+        let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
+        let size = {
+            let bx = face_box(&body, a).union(&face_box(&body, b));
+            (bx.max() - bx.min()).length()
+        };
+        // From 1.4 mm (size / 64) down, certified indefinite both ways.
+        for k in 3..9u32 {
+            let radius = size / f64::from(8u32 << k);
+            let found =
+                [(a, b), (b, a)].map(|(x, y)| tangency(surface(x), surface(y), p, radius, &m));
+            assert_eq!(found, [Tangency::Saddle; 2], "radius {radius:e}");
+        }
+    }
 }

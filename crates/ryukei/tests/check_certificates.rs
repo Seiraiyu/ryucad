@@ -47,3 +47,25 @@ fn nurbs_sides_crossing_along_an_isoline_check_in_bounded_work() {
         eprintln!("{deg}°: {} units", w.spent());
     }
 }
+
+/// #264: NIST CTC 02's AP242 cylinder and cone (public domain), tangent
+/// at the one vertex they share, cut out with their neighbours. Their
+/// contact there is a saddle (`ctc_02s_pair_is_a_saddle_tangent_contact`):
+/// the surfaces cross along two curves through the vertex, nearly
+/// tangent, which no trace or certificate settles yet, so the pair is
+/// `CannotCheck`. Pinned so a fix shows.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_saddle_contact_at_ctc_02s_shared_vertex_cannot_be_checked() {
+    let b = body("nist_ctc_02_tangent_vertex.body");
+    assert_eq!(b.faces().count(), 8);
+    let faults = check_intersections(&b);
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert!(
+        matches!(faults[0], ryukei::check::Fault::CannotCheck { .. }),
+        "{faults:?}"
+    );
+}
