@@ -402,6 +402,26 @@ enum Command {
         #[command(flatten)]
         rev: Rev,
     },
+    /// One sheet as the app draws it, for a window or an agent: items
+    /// with their owners' reference paths, boxes and hashes, pins and the
+    /// sheet's findings (a design's root block and its first sheet by
+    /// default).
+    Scene {
+        #[arg(long)]
+        design: Option<String>,
+        #[arg(long)]
+        block: Option<String>,
+        /// A sheet's ID or name.
+        #[arg(long)]
+        sheet: Option<String>,
+        /// Draw that occurrence's designators: an instance path or a
+        /// stack path; the first when left out.
+        #[arg(long)]
+        layer: Option<String>,
+        /// light (the default) or dark.
+        #[arg(long, value_parser = ["light", "dark"])]
+        theme: Option<String>,
+    },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
     Rail(RailCmd),
@@ -2460,6 +2480,22 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                     ));
                 }
             },
+        },
+        Command::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+        } => Request::Scene {
+            design: design.clone(),
+            block: block.clone(),
+            sheet: sheet.clone(),
+            layer: layer.clone(),
+            theme: theme
+                .as_deref()
+                .map(|t| named("theme", t, "light, dark"))
+                .transpose()?,
         },
         Command::Rail(RailCmd::Add {
             name,

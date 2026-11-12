@@ -344,6 +344,90 @@ fn writes_are_logged_and_undone_through_the_daemon() {
 }
 
 #[test]
+fn a_sheet_as_a_scene_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let s = p.ok(&["scene", "--block", "breakout"]);
+    assert_eq!(s["block"], "breakout");
+    let items = s["items"].as_array().unwrap();
+    let owners = s["owners"].as_array().unwrap();
+    // Every item has an owner but the paper's and a layer's bounds.
+    for it in items {
+        if let Some(i) = it["owner"].as_u64() {
+            assert!((i as usize) < owners.len(), "{it}");
+        }
+    }
+    let refs: Vec<&str> = owners.iter().map(|o| o["ref"].as_str().unwrap()).collect();
+    for r in [
+        "breakout/r1",
+        "breakout/u2",
+        "breakout/j1",
+        "breakout/sda",
+        "breakout/instance:s1",
+    ] {
+        assert!(refs.contains(&r), "{r}: {refs:?}");
+    }
+    // Each owner's box holds its lines' points.
+    for (n, o) in owners.iter().enumerate() {
+        let b = &o["box"];
+        let inside = |q: &Value| {
+            (0..2).all(|k| {
+                b[0][k].as_i64().unwrap() <= q[k].as_i64().unwrap()
+                    && q[k].as_i64().unwrap() <= b[1][k].as_i64().unwrap()
+            })
+        };
+        for it in items.iter().filter(|i| i["owner"] == json!(n)) {
+            for q in it["points"].as_array().into_iter().flatten() {
+                assert!(inside(q), "{}: {q} outside {b}", o["ref"]);
+            }
+        }
+    }
+    let pin = s["pins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["ref"] == "breakout/r1/1")
+        .unwrap();
+    assert_eq!(pin["net"], "breakout/sda");
+    // A sheet the block hasn't: its sheets named.
+    let e = p.fails(
+        &["scene", "--block", "breakout", "--sheet", "nope"],
+        "sheet_not_found",
+        1,
+    );
+    assert_eq!(e["details"]["sheets"], s["sheets"]);
+    // A value edited: its component's hash moves, no other owner's.
+    p.ok(&["component", "edit", "breakout/r1", "--value", "10k"]);
+    let after = p.ok(&["scene", "--block", "breakout"]);
+    let hashes = |v: &Value| -> std::collections::BTreeMap<String, String> {
+        v["owners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                (
+                    o["ref"].as_str().unwrap().to_owned(),
+                    o["hash"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let (was, now) = (hashes(&s), hashes(&after));
+    assert_eq!(
+        was.keys().collect::<Vec<_>>(),
+        now.keys().collect::<Vec<_>>()
+    );
+    for (r, h) in &was {
+        if r == "breakout/r1" {
+            assert_ne!(&now[r], h, "{r}");
+        } else {
+            assert_eq!(&now[r], h, "{r} moved with r1's value");
+        }
+    }
+    assert_ne!(after["revision"], s["revision"]);
+}
+
+#[test]
 fn watchers_hear_of_library_changes() {
     let p = Pair::new();
     for (sub, args) in [
@@ -503,6 +587,7 @@ fn every_protocol_method_has_a_command() {
         ("describe", &["describe"]),
         ("render", &["render"]),
         ("output", &["output"]),
+        ("scene", &["scene"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),

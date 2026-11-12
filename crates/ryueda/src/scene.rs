@@ -685,6 +685,29 @@ pub fn scene(p: &Project, ask: &Ask) -> Result<String> {
     Ok(text)
 }
 
+/// `scene` as the session answers it: a scene drawn before from the same
+/// revisions comes from the session's [`SCENES`](crate::session::SCENES),
+/// else it is drawn and kept.
+pub fn answer(session: &mut crate::session::Session, ask: &Ask) -> Result<crate::proto::Answer> {
+    use ryu_session::rpc::Raw;
+    let key = {
+        let p = session.project();
+        let b = crate::schemcmd::blocks(p, ask.design.as_deref(), ask.block.as_deref())?[0];
+        format!("{ask:?}\u{0}{}", revision(&revisions(p, b)))
+    };
+    let text = match session.scene(&key) {
+        Some(t) => t,
+        None => {
+            let t = std::sync::Arc::new(scene(session.project(), ask)?);
+            session.keep_scene(key, t.clone());
+            t
+        }
+    };
+    Ok(crate::proto::Answer::raw(Raw::Result(
+        text.as_ref().clone(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -890,5 +913,37 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.code, Code::SheetNotFound);
         assert_eq!(e.details["sheets"], v["sheets"]);
+    }
+
+    #[test]
+    fn a_session_keeps_scenes_by_what_they_were_drawn_from() {
+        use crate::project::ProjectKind;
+        use crate::project::tests::{design_in, library_in, manifest};
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        library_in(&board);
+        design_in(&board);
+        let mut s = crate::session::Session::open(&board).unwrap();
+        let ask = Ask {
+            block: Some("top".into()),
+            ..Ask::default()
+        };
+        let text = |a: crate::proto::Answer| match a.raw {
+            Some(ryu_session::rpc::Raw::Result(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        let one = text(answer(&mut s, &ask).unwrap());
+        assert_eq!(text(answer(&mut s, &ask).unwrap()), one);
+        assert_eq!(s.scenes.len(), 1, "drawn once");
+        let r1 = board.join("blocks/top/components/r1.json");
+        let mut c: Value = serde_json::from_slice(&std::fs::read(&r1).unwrap()).unwrap();
+        c["value"] = json!("22k");
+        std::fs::write(&r1, crate::canonical::to_string(&c)).unwrap();
+        s.refresh_changes().unwrap();
+        let two = text(answer(&mut s, &ask).unwrap());
+        assert_ne!(two, one);
+        assert_eq!(s.scenes.len(), 2);
+        assert!(two.contains("22k"));
     }
 }

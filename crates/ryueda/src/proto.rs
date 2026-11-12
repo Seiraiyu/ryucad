@@ -815,6 +815,23 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// One sheet as a window draws it (design 519): its items with their
+    /// owners' reference paths, boxes and hashes, the paper, pins and the
+    /// sheet's findings; a design's root block and its first sheet unless
+    /// named. Answered as JSON text.
+    #[serde(rename = "scene")]
+    Scene {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme: Option<ryusch::style::Theme>,
+    },
     /// A design's designators numbered in canvas order (plan 2.F): the
     /// unannotated ones (`unannotated`, by default) or every unlocked one
     /// (`all`), down each column (`down`, by default) or across each row.

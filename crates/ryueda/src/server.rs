@@ -321,6 +321,22 @@ fn working(
             layers.unwrap_or_default(),
         )
         .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes)),
+        Request::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+        } => crate::scene::answer(
+            session,
+            &crate::scene::Ask {
+                design,
+                block,
+                sheet,
+                layer,
+                theme: theme.unwrap_or_default(),
+            },
+        ),
         req => dispatch(session, live, me, req, job).map(Answer::json),
     }
 }
@@ -1151,6 +1167,7 @@ fn dispatch(
         ),
         Request::Render { .. }
         | Request::Output { .. }
+        | Request::Scene { .. }
         | Request::LibCheck { .. }
         | Request::LayoutPlace { .. }
         | Request::Layout { .. } => {
