@@ -2425,6 +2425,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-git"
+version = "0.0.0"
+dependencies = [
+ "gix",
+ "ryu-doc",
+ "ryu-session",
+ "serde_json",
+]
+
+[[package]]
 name = "ryu-math"
 version = "0.0.0"
 dependencies = [
@@ -2443,6 +2453,7 @@ name = "ryu-session"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "inotify",
  "interprocess",
  "libc",
  "notify",
@@ -2471,6 +2482,7 @@ dependencies = [
  "rayon",
  "resvg",
  "ryu-draw",
+ "ryu-git",
  "ryu-math",
  "ryu-session",
  "ryucad-doc",
@@ -2533,6 +2545,7 @@ dependencies = [
  "resvg",
  "ryu-doc",
  "ryu-draw",
+ "ryu-git",
  "ryu-math",
  "ryu-part21",
  "ryu-session",
