@@ -2,6 +2,7 @@
 //! meaningful exit code, as ryucad's is.
 
 use clap::{Args, Parser, Subcommand};
+use ryu_session::live::SelectMode;
 use ryueda::error::{Code, Error, Result};
 use ryueda::project::find_root;
 use ryueda::proto::{Answer, Request, VersionInfo};
@@ -455,6 +456,26 @@ enum Command {
         /// A participant's ID (`participants` lists them).
         #[arg(long)]
         participant: Option<String>,
+    },
+    /// Select by reference path (<block>/<component>, <block>/<net>,
+    /// <block>/<component>/<pin>, <block>/port:<id>…), replacing your
+    /// selection, or with --add or --remove changing it; --clear empties
+    /// it. Through the daemon.
+    Select {
+        refs: Vec<String>,
+        #[arg(long, conflicts_with_all = ["remove", "clear"])]
+        add: bool,
+        #[arg(long, conflicts_with = "clear")]
+        remove: bool,
+        #[arg(long)]
+        clear: bool,
+    },
+    /// What a participant has selected (the one person attached by
+    /// default), each reference with what it names. Through the daemon.
+    Selection {
+        /// A participant's ID (`participants` lists them).
+        #[arg(long)]
+        of: Option<String>,
     },
     /// Undo your latest change, or the entry given.
     Undo { entry: Option<u64> },
@@ -1798,6 +1819,32 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             rev: rev.clone(),
             off: *off,
             participant: participant.clone(),
+        },
+        Command::Select {
+            refs,
+            add,
+            remove,
+            clear,
+        } => {
+            if refs.is_empty() != *clear {
+                return Err(Error::new(
+                    Code::Usage,
+                    "name references to select, or --clear, not both",
+                ));
+            }
+            Request::SelectionSet {
+                refs: refs.clone(),
+                mode: if *add {
+                    SelectMode::Add
+                } else if *remove {
+                    SelectMode::Remove
+                } else {
+                    SelectMode::Replace
+                },
+            }
+        }
+        Command::Selection { of } => Request::SelectionGet {
+            participant: of.clone(),
         },
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },

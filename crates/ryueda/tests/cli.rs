@@ -428,6 +428,46 @@ fn a_sheet_as_a_scene_from_the_cli() {
 }
 
 #[test]
+fn selections_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    // In process there is no session to point in.
+    for args in [vec!["select", "breakout/r1"], vec!["selection"]] {
+        let (code, v) = p.run_in(
+            &p.direct,
+            "board",
+            &[&["--no-daemon"][..], &args[..]].concat(),
+        );
+        assert_eq!(
+            (code, &v["error"]["code"]),
+            (1, &json!("no_live_session")),
+            "{args:?}"
+        );
+    }
+    // One agent points; another reads it by its ID.
+    let (code, v) = run(&["--as", "pointer", "select", "breakout/r1", "breakout/sda"]);
+    assert_eq!(code, 0, "{v}");
+    let who = v["result"]["participant"].as_str().unwrap().to_owned();
+    let (_, got) = run(&["selection", "--of", &who]);
+    assert_eq!(
+        got["result"]["selection"],
+        json!(["breakout/r1", "breakout/sda"])
+    );
+    // Nobody human attached: nobody's.
+    assert_eq!(run(&["selection"]).1["result"]["participant"], Value::Null);
+    let (code, v) = run(&["--as", "pointer", "select", "breakout/r9"]);
+    assert_eq!((code, &v["error"]["code"]), (1, &json!("ref_unresolved")));
+    let (code, v) = run(&["--as", "pointer", "select"]);
+    assert_eq!((code, &v["error"]["code"]), (2, &json!("usage")));
+    assert_eq!(run(&["--as", "pointer", "select", "--clear"]).0, 0);
+    assert_eq!(
+        run(&["selection", "--of", &who]).1["result"]["selection"],
+        json!([])
+    );
+}
+
+#[test]
 fn watchers_hear_of_library_changes() {
     let p = Pair::new();
     for (sub, args) in [
@@ -595,6 +635,8 @@ fn every_protocol_method_has_a_command() {
         ("participant.list", &["participants"]),
         ("compare.set", &["compare"]),
         ("compare.get", &["compare"]),
+        ("selection.get", &["selection"]),
+        ("selection.set", &["select"]),
         ("subscribe", &["watch"]),
         ("request.cancel", &["cancel"]),
         ("daemon.status", &["daemon", "status"]),

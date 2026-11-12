@@ -13,7 +13,7 @@ use crate::source::write_atomic;
 use crate::units::Unit;
 use crate::{Eda, activity, libcmd, partcmd, topcmd};
 use ryu_session::activity::EntryKind;
-use ryu_session::live::{self, Live};
+use ryu_session::live::{self, Live, SelectMode};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -1254,6 +1254,27 @@ fn dispatch(
             live.get_mut(&id)?.view.compare = rev.clone();
             let compare = rev.map(|rev| json!({"rev": rev, "commit": commit}));
             Ok(json!({"participant": id, "compare": compare}))
+        }
+        Request::SelectionGet { participant } => {
+            let live = live.ok_or_else(|| live::no_live_session("selection.get"))?;
+            Ok(match live.target(participant.as_deref())? {
+                Some(p) => json!({
+                    "participant": p.id,
+                    "selection": p.selection,
+                    "objects": crate::refs::objects(session.project(), &p.selection),
+                }),
+                None => json!({"participant": null, "selection": [], "objects": []}),
+            })
+        }
+        Request::SelectionSet { refs, mode } => {
+            let live = live.ok_or_else(|| live::no_live_session("selection.set"))?;
+            // What is taken out may be gone already.
+            if mode != SelectMode::Remove {
+                crate::refs::resolve_all(session.project(), &refs)?;
+            }
+            let id = live.caller(me);
+            let selection = live.select(&id, refs, mode)?.to_vec();
+            Ok(json!({"participant": id, "selection": selection}))
         }
         Request::Subscribe { .. } => match live {
             None => Err(live::no_live_session("subscribe")),

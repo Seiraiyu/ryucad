@@ -960,6 +960,23 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// A participant's selection by reference path, and what each names:
+    /// `participant`, else the one human (an agent asks what the person
+    /// points at). Needs the daemon.
+    #[serde(rename = "selection.get")]
+    SelectionGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// The caller's selection: `refs` replace it, or with `mode` are added
+    /// or taken out; none clears it. Needs the daemon.
+    #[serde(rename = "selection.set")]
+    SelectionSet {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        refs: Vec<String>,
+        #[serde(default)]
+        mode: ryu_session::live::SelectMode,
+    },
     #[serde(rename = "subscribe")]
     Subscribe {
         #[serde(default)]
