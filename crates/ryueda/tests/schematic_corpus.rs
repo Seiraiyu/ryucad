@@ -415,8 +415,12 @@ fn the_corpus_from_nothing_lays_out_within_its_bar() {
 /// end's amp 100 (its clamps no longer float), Ethernet's PHY sheet 63.
 /// Plan 3.A's op-amp template (#758) put the supplies on each amplifier's
 /// first unit: baldiff 47 to 40 (the OPA1622's enable and three supplies
-/// share unit A with its stage), ivconv 78 to 82; Task 15 measures every
-/// block again after the plan.
+/// share unit A with its stage), ivconv 78 to 82. Last measured after plan
+/// 3.A on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads, shared,
+/// load 3 to 4) on 2026-11-12: breakout 84 and 98, RP2040 43, 78 and 98,
+/// buck 25 (one-part regions joined; 24 holds), front end amp 94 (three
+/// untitled regions), baldiff 40, ivconv 82 (its bar rises to 77),
+/// Ethernet 63 and 97.
 const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("breakout", "breakout", 79),
     ("breakout", "sensor", 95),
@@ -428,7 +432,7 @@ const THRESHOLDS: &[(&str, &str, i64)] = &[
     // (amp_titled_scores_full).
     ("frontend", "amp", 89),
     ("frontend", "baldiff", 35),
-    ("frontend", "ivconv", 73),
+    ("frontend", "ivconv", 77),
     ("ethernet", "eth", 58),
     ("ethernet", "status_led", 92),
 ];
