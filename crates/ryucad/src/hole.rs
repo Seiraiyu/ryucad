@@ -677,4 +677,90 @@ pub(crate) mod tests {
             1000.0 - PI * 2.55 * 2.55 * 5.0,
         );
     }
+
+    #[test]
+    fn holes_from_a_spec_and_dry_runs() {
+        let (_dir, mut s) = drilled();
+        let added = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "h",
+            "sketch": "s", "points": ["p1"], "spec": "M6x1.0-6H THRU", "targets": ["b"]}),
+        )
+        .unwrap();
+        let f = &added["feature"];
+        assert_eq!(f["spec"], "M6x1.0-6H THRU");
+        assert_eq!(f["thread"], json!({"standard": "iso_metric", "size": "M6"}));
+        assert_eq!(f["sizes"]["drill"]["value"], "5 mm");
+        assert!(f.get("diameter").is_none());
+        // A field set by the spec and beside it is usage.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "spec": "M8 THRU", "depth": "through_all"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage, "{e}");
+        // A dry run answers and writes nothing.
+        let before = call(&mut s, "feature.show", json!({"part": "p", "id": "h"})).unwrap();
+        let dry = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "spec": "M8x1.25-6H 10 DEEP, DRILL 12 DEEP", "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(dry["dry_run"], true);
+        assert_eq!(dry["feature"]["sizes"]["drill"]["value"], "6.8 mm");
+        assert_eq!(
+            call(&mut s, "feature.show", json!({"part": "p", "id": "h"})).unwrap(),
+            before
+        );
+        // Partial thread fields lay over the current thread.
+        let edited = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "class": "5H"}),
+        )
+        .unwrap();
+        assert_eq!(edited["feature"]["thread"]["class"], "5H");
+        let edited = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "pitch": "0.75 mm"}),
+        )
+        .unwrap();
+        assert_eq!(edited["feature"]["thread"]["pitch"], "0.75 mm");
+        // What a table must give is refused when written, dry run or not.
+        for dry_run in [true, false] {
+            let e = call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "hole", "id": "c",
+                "sketch": "s", "points": ["p2"], "spec": "CBORE HOUSE_CAP M5 THRU",
+                "targets": ["b"], "dry_run": dry_run}),
+            )
+            .unwrap_err();
+            assert_eq!(e.details["reason"], "needs_project_table");
+            assert_eq!(
+                e.details["missing"],
+                json!(["clearance.normal", "counterbore"])
+            );
+        }
+        // "" takes a thread away: the hole needs its diameter again.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "thread": ""}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/diameter");
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "thread": "", "diameter": "5 mm"}),
+        )
+        .unwrap();
+    }
 }

@@ -3541,6 +3541,17 @@ impl FieldArgs {
             extent.insert("both".into(), json!(b));
         }
         FeatureFields {
+            // A hole's intent fields: Task 27 gives them flags.
+            spec: None,
+            thread: None,
+            fastener: None,
+            fastener_fit: None,
+            fit: None,
+            tpi: None,
+            class: None,
+            starts: None,
+            thread_depth: None,
+            tap_drill: None,
             plane: self.plane.clone(),
             neutral: self.neutral.clone(),
             parting: (!self.parting.is_empty()).then(|| self.parting.clone()),
@@ -4261,6 +4272,7 @@ fn request(cmd: &Command) -> Option<Request> {
             id: id.clone(),
             position: position.to_position(),
             expected_revision: expect.revision.clone(),
+            dry_run: false,
         },
         Command::Feature(FeatureCmd::Edit {
             part,
@@ -4285,6 +4297,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     .map(|(k, v)| (k.clone(), json!(v)))
                     .collect(),
                 expected_revision: expect.revision.clone(),
+                dry_run: false,
             }
         }
         Command::Feature(FeatureCmd::Delete { part, id, expect }) => Request::FeatureDelete {
