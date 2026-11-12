@@ -6,7 +6,7 @@
 use ryueda::error::Code;
 use ryueda::footprint::{Drill, Footprint, Model, PadKind, PadShape, Shape};
 use ryueda::id::Id;
-use ryueda::kicad::import::{MODELS_LINE, Options, import};
+use ryueda::kicad::import::{Options, import};
 use ryueda::libcomp::LibComp;
 use ryueda::session::Session;
 use ryueda::symbol::{PinType, Side, Symbol};
@@ -229,7 +229,7 @@ fn kicads_files_import_exactly() {
         assert_eq!(m.blake3, blake3::hash(&bytes).to_hex().to_string());
     }
     let attrs = std::fs::read_to_string(root.join(".gitattributes")).unwrap();
-    assert_eq!(attrs, format!("{MODELS_LINE}\n"));
+    assert_eq!(attrs, ryueda::drivers::with_lines(""));
 
     // The library holds no error: nothing an import writes is one.
     let p = s.project();
@@ -260,7 +260,10 @@ fn a_dry_run_writes_nothing_and_a_change_is_written_in_place() {
     assert_eq!(dry["revision"], json!(before));
     assert!(!dry["files"].as_array().unwrap().is_empty());
     assert!(!root.join("library").exists());
-    assert!(!root.join(".gitattributes").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join(".gitattributes")).unwrap(),
+        ryueda::drivers::with_lines("")
+    );
 
     // A guarded import refuses a stale revision.
     let e = import(&mut s, &everything(), Some("stale")).unwrap_err();

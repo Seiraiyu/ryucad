@@ -4880,6 +4880,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-git"
+version = "0.0.0"
+dependencies = [
+ "gix",
+ "ryu-doc",
+ "ryu-session",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ryu-math"
 version = "0.0.0"
 dependencies = [
@@ -4936,6 +4947,7 @@ dependencies = [
  "rayon",
  "resvg",
  "ryu-draw",
+ "ryu-git",
  "ryu-math",
  "ryu-session",
  "ryucad-doc",
@@ -5034,6 +5046,7 @@ dependencies = [
  "resvg",
  "ryu-doc",
  "ryu-draw",
+ "ryu-git",
  "ryu-math",
  "ryu-part21",
  "ryu-session",

@@ -32,7 +32,7 @@ use std::sync::Arc;
 /// The line that keeps model files byte for byte in Git.
 pub const MODELS_LINE: &str = "library/models/** binary";
 /// Where that line goes, beside the library project's manifest.
-pub const GITATTRIBUTES: &str = ".gitattributes";
+pub const GITATTRIBUTES: &str = crate::project::ATTRIBUTES;
 
 /// What an import is asked to read, every path absolute.
 #[derive(Clone, Debug, Default, PartialEq)]

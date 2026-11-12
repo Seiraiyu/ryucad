@@ -33,6 +33,10 @@ pub const LINT: &str = "lint.json";
 pub const STYLE: &str = crate::style::FILE;
 /// The project's sourcing (design 347), beside the manifest.
 pub const PARTS: &str = "parts.json";
+/// The Git attributes file, beside the manifest.
+pub const ATTRIBUTES: &str = ".gitattributes";
+/// The files at a project's root that it is made of.
+pub const ROOT_FILES: [&str; 6] = [MANIFEST, ATTRIBUTES, ERC, LINT, PARTS, STYLE];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

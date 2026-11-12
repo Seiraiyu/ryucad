@@ -1,0 +1,18 @@
+[package]
+name = "ryu-git"
+description = "Git for every ryu product: repositories read, revisions, merges in progress, and the drivers and shared hook a product registers"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# ryucad's pin and features: the same gix in one build.
+gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
+ryu-doc = { path = "../ryu-doc" }
+# For `fresh::Files`, the type sessions hold files in.
+ryu-session = { path = "../ryu-session" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+tempfile = "3"

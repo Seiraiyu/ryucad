@@ -1055,26 +1055,46 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
 /// `check`: the project loaded from nothing, every fault of every file
 /// it holds or names, and every design's ERC. Fails with `check_failed`
 /// (the report in its details) on any error a waiver doesn't accept.
+///
+/// With the working files, doctor's issues too (those the loader doesn't
+/// already report: `unknown_file` is one of its faults).
 pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<Value> {
     let p = Project::load(root)?;
+    let doctor: Vec<Fault> = crate::doctor::diagnose(root, &p)
+        .iter()
+        .filter(|i| i.code != Code::UnknownFile)
+        .map(crate::doctor::Issue::fault)
+        .collect();
+    check_project(&p, cats, &doctor)
+}
+
+/// `check` of a loaded project, with doctor's issues `doctor`: the working
+/// files' (from [`check`]) or a revision's (none: no folder to doctor).
+pub fn check_project(
+    p: &Project,
+    cats: &crate::parts::Catalogues,
+    doctor: &[Fault],
+) -> Result<Value> {
     let faults = p.faults();
-    let erc = erc(&p, None)?;
-    let schematic = schematic_warnings(&p);
-    let symbols = crate::symlint::faults(&p, &crate::lint::prefs(&p));
-    let style = crate::stylelint::faults(&p, &crate::lint::prefs(&p));
-    let supply = crate::supply::findings(&p, cats)?;
+    let erc = erc(p, None)?;
+    let schematic = schematic_warnings(p);
+    let symbols = crate::symlint::faults(p, &crate::lint::prefs(p));
+    let style = crate::stylelint::faults(p, &crate::lint::prefs(p));
+    let supply = crate::supply::findings(p, cats)?;
     let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| f.is_error()).count() as u64
         + symbols.iter().filter(|f| f.is_error()).count() as u64
         + style.iter().filter(|f| f.is_error()).count() as u64
+        + doctor.iter().filter(|f| f.is_error()).count() as u64
         + supply_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| !f.is_error()).count() as u64
         + symbols.iter().filter(|f| !f.is_error()).count() as u64
         + style.iter().filter(|f| !f.is_error()).count() as u64
+        + doctor.iter().filter(|f| !f.is_error()).count() as u64
         + (supply.len() as u64 - supply_errors);
     let report = json!({
         "faults": fault::list(&faults),
@@ -1083,6 +1103,7 @@ pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<
         "symbols": fault::list(&symbols),
         "style": fault::list(&style),
         "supply": supply,
+        "doctor": fault::list(doctor),
         "errors": errors,
         "warnings": warnings,
     });
