@@ -22,10 +22,23 @@ pub struct Palette {
     focused: bool,
 }
 
+impl Palette {
+    /// A palette opened on `query`: File > Switch branch… opens it on
+    /// [`palette::BRANCHES`].
+    pub fn with_query(query: &str) -> Palette {
+        Palette {
+            query: query.to_owned(),
+            ..Palette::default()
+        }
+    }
+}
+
 /// The palette's rows now.
 enum Rows {
     Commands(Vec<&'static Command>),
     Places(Vec<Place>),
+    /// After `branch:`, the other branches.
+    Branches(Vec<String>),
 }
 
 impl Rows {
@@ -33,11 +46,15 @@ impl Rows {
         match self {
             Rows::Commands(c) => c.len(),
             Rows::Places(p) => p.len(),
+            Rows::Branches(b) => b.len(),
         }
     }
 }
 
 fn rows(o: &Opened, query: &str) -> Rows {
+    if let Some(q) = query.strip_prefix(palette::BRANCHES) {
+        return Rows::Branches(o.ws.branches.matching(q.trim()));
+    }
     match query.strip_prefix('@') {
         Some(q) => {
             let pdm = palette::pdm_names(&o.ws.bom);
@@ -54,6 +71,9 @@ const SHOWN: usize = 12;
 /// closes.
 pub fn show(ctx: &egui::Context, o: &mut Opened) -> Option<Action> {
     let mut p = o.palette.take()?;
+    // Opened this frame: the click that opened it (a menu's, File >
+    // Switch branch…) isn't one outside it.
+    let opening = !p.focused;
     let rows = rows(o, &p.query);
     let (mut go, mut close) = (false, false);
     ctx.input_mut(|i| {
@@ -144,12 +164,26 @@ pub fn show(ctx: &egui::Context, o: &mut Opened) -> Option<Action> {
                             ui.weak("Nothing in the model matches");
                         }
                     }
+                    Rows::Branches(list) => {
+                        for (i, name) in list.iter().enumerate().skip(first).take(SHOWN) {
+                            if ui.selectable_label(i == p.at, name).clicked() {
+                                clicked = Some(i);
+                            }
+                        }
+                        if list.is_empty() {
+                            ui.weak(if o.ws.branches.branch_list.is_some() {
+                                "No other branch matches"
+                            } else {
+                                "Reading the branches…"
+                            });
+                        }
+                    }
                 }
                 ui.separator();
-                ui.weak("↑ ↓ move · Enter run · Esc close · @ finds parts, features, solids and instances");
+                ui.weak("↑ ↓ move · Enter run · Esc close · @ finds parts, features, solids and instances · branch: lists branches");
             });
         });
-    if area.response.clicked_elsewhere() && clicked.is_none() {
+    if !opening && area.response.clicked_elsewhere() && clicked.is_none() {
         close = true;
     }
     let pick = clicked.or(go.then_some(p.at));
@@ -173,6 +207,11 @@ pub fn show(ctx: &egui::Context, o: &mut Opened) -> Option<Action> {
         Rows::Places(list) => {
             let place = list.get(i)?;
             go_to(o, place);
+            None
+        }
+        Rows::Branches(list) => {
+            let branch = list.get(i)?;
+            o.ws.ask_checkout(branch);
             None
         }
     }

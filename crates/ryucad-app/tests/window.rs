@@ -3872,6 +3872,30 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
 }
 
 #[test]
+fn a_branch_is_checked_out_from_its_row_and_the_dialog_names_who_is_attached() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    p.git(&["branch", "arm"]);
+    p.ok(&["--as", "claude-1", "status", "reviewing"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    show_tab(&mut h, "branches");
+    frames(&mut h, |a| a.opened().ws.branches.branch_list.is_some());
+    shown(&mut h, "main (checked out)");
+    h.get_by_label("Check out").click();
+    shown(&mut h, "claude-1 is attached and may be writing");
+    h.get_by_label("Switch to arm").click();
+    frames(&mut h, |a| {
+        let b = &a.opened().ws.branches;
+        b.checkout.is_none() && b.current_branch() == Some("arm")
+    });
+    shown(&mut h, "arm (checked out)");
+}
+
+#[test]
 fn view_show_scrolls_to_every_part() {
     let _one = one_at_a_time();
     if !gpu() {
@@ -6512,4 +6536,34 @@ fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_i
         .set_mode(ryucad_app::core::modes::Mode::View);
     h.run_steps(2);
     assert!(h.get_by_label("Markup").accesskit_node().is_disabled());
+}
+
+#[test]
+fn file_switch_branch_lists_the_branches_in_the_palette() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    p.git(&["branch", "arm"]);
+    p.git(&["branch", "leg"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "File", "Switch branch…");
+    frames(&mut h, |a| a.opened().ws.branches.branch_list.is_some());
+    h.step();
+    h.get_by_label("Search commands")
+        .set_text_value_accesskit("branch:le");
+    h.step();
+    h.step();
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .branches
+            .checkout
+            .as_ref()
+            .is_some_and(|c| c.branch == "leg")
+    });
+    shown(&mut h, "Switch to leg");
 }

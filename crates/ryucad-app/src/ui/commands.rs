@@ -515,6 +515,12 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 None => Some(crate::ui::palette::Palette::default()),
             };
         }
+        "project.switch_branch" => {
+            o.ws.load_branches();
+            o.palette = Some(crate::ui::palette::Palette::with_query(
+                crate::core::palette::BRANCHES,
+            ));
+        }
         "project.settings" => o.dialogs.settings = true,
         "project.doctor" => {
             o.dialogs.doctor = true;

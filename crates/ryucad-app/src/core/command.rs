@@ -378,6 +378,9 @@ pub const COMMANDS: &[Command] = &[
         .keys(&["Mod+O"])
         .in_text(),
     cmd("file.open_recent", "Open recent", File).choices(),
+    // The Branches tab's list in the palette (design 447); a project
+    // command, in the File menu as the design has it.
+    cmd("project.switch_branch", "Switch branch…", File),
     cmd("file.import_step", "Import STEP…", File).icon("file-arrow-down"),
     cmd("file.update_import", "Update import…", File),
     cmd("file.export", "Export…", File).icon("export"),
@@ -1051,6 +1054,20 @@ pub fn toolbar() -> impl Iterator<Item = &'static Command> {
 mod tests {
     use super::*;
     use crate::core::keys::Chord;
+
+    #[test]
+    fn switch_branch_is_in_the_file_menu() {
+        let ids: Vec<&str> = menu(Category::File).map(|c| c.id).collect();
+        assert_eq!(
+            ids[..3],
+            ["file.open", "file.open_recent", "project.switch_branch"]
+        );
+        assert_eq!(
+            get("project.switch_branch").unwrap().title,
+            "Switch branch…"
+        );
+        assert!(enabled("project.switch_branch", &State::default()).is_ok());
+    }
 
     #[test]
     fn swap_and_one_side_need_a_revision_and_say_whether_they_are_on() {
