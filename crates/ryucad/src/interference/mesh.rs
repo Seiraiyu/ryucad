@@ -111,12 +111,6 @@ fn reach(a: &Prepared, b: &Prepared, both: &Box3) -> (f64, f64) {
     (a.reach + b.reach + margin, margin)
 }
 
-/// The distance from `p` to triangle `t`.
-fn to_triangle(p: Point3, t: &[Point3; 3]) -> f64 {
-    let one = MeshTree::new(vec![*t]);
-    one.nearest_to(p).map_or(f64::INFINITY, |(d, _, _)| d)
-}
-
 /// Whether the prism triangle `t` sweeps from `s0·v` to `s1·v` and the
 /// triangle `u` lie apart: some axis among both shapes' face normals (the
 /// caps', the three sides', `u`'s) and the cross products of `u`'s edges
@@ -359,12 +353,11 @@ pub fn deep_point(
             (t[0].z + t[1].z + t[2].z) / 3.0,
         );
         let r = t.iter().map(|p| p.distance(c)).fold(0.0, f64::max);
-        let (d, _, k) = inside.nearest_to(c).expect("a mesh");
+        let (d, _, k) = inside.nearest_point(c).expect("a mesh");
         if d + r <= reach {
             continue;
         }
-        let nearest = &inside.triangles()[k as usize];
-        if t.iter().all(|&p| to_triangle(p, nearest) <= reach) {
+        if t.iter().all(|&p| inside.to_triangle(p, k) <= reach) {
             continue;
         }
         match inside.winding(c) {
@@ -429,13 +422,13 @@ pub fn interior_point(
         if !matches!(own.winding(p), Some(w) if w != 0) {
             continue;
         }
-        if own.nearest_to(p).is_none_or(|(d, _, _)| d <= reach) {
+        if own.nearest_point(p).is_none_or(|(d, _, _)| d <= reach) {
             continue;
         }
         if !matches!(other.winding(p), Some(w) if w != 0) {
             continue;
         }
-        if other.nearest_to(p).is_some_and(|(d, _, _)| d > reach) {
+        if other.nearest_point(p).is_some_and(|(d, _, _)| d > reach) {
             return Ok(Some(p));
         }
     }
