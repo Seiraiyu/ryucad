@@ -8475,9 +8475,9 @@ pub(crate) mod tests {
             const { std::cell::Cell::new(None) };
     }
 
-    /// #400: a render stops once its geometry passes its budget, naming
-    /// how many occurrences it drew; under a budget that holds it, it
-    /// draws as before.
+    /// #676: a reference's faces that don't mesh are warned of in every
+    /// mesh answer, JSON, binary and compact alike, a part's and an
+    /// assembly's.
     #[test]
     #[cfg_attr(
         debug_assertions,
@@ -8513,8 +8513,38 @@ pub(crate) mod tests {
             let a = answer_live(&mut s, None, None, req).unwrap();
             assert_eq!(unmeshed(&a.result), want, "{transfer}");
         }
+        // An assembly's occurrence of it warns as the part does, once for
+        // the two instances sharing its body.
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "frame", "kind": "assembly"}),
+        )
+        .unwrap();
+        for id in ["i", "j"] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": id, "of": "f"}),
+            )
+            .unwrap();
+        }
+        let got = unmeshed(&call(&mut s, "mesh.get", json!({"part": "frame"})).unwrap());
+        assert_eq!(got, want, "json");
+        for transfer in ["binary", "compact"] {
+            let req = Request::from_rpc(
+                "mesh.get",
+                Some(json!({"part": "frame", "transfer": transfer})),
+            )
+            .unwrap();
+            let a = answer_live(&mut s, None, None, req).unwrap();
+            assert_eq!(unmeshed(&a.result), want, "assembly, {transfer}");
+        }
     }
 
+    /// #400: a render stops once its geometry passes its budget, naming
+    /// how many occurrences it drew; under a budget that holds it, it
+    /// draws as before.
     #[test]
     fn a_render_past_its_budget_is_refused_and_one_within_it_draws() {
         let (dir, mut s) = crate::assembly::tests::project();
