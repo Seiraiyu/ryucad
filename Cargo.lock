@@ -5006,6 +5006,7 @@ dependencies = [
  "blake3",
  "rayon",
  "ryu-doc",
+ "ryu-standards",
  "ryukei",
  "ryusketch",
  "serde",
