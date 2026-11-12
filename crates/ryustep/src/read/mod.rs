@@ -152,6 +152,9 @@ pub struct Opened {
     /// Its styled items, read the first time they are asked for
     /// ([`crate::styles`]): a file opened to build bodies never reads them.
     pub(crate) styles: std::sync::OnceLock<crate::styles::Styles>,
+    /// Its materials and attributes, read the first time they are asked
+    /// for ([`crate::properties`], design 448 plan 24.C).
+    pub(crate) properties: std::sync::OnceLock<crate::properties::Properties>,
 }
 
 /// Parses and decodes the STEP file `bytes` and reads its product tree,
@@ -219,6 +222,7 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
         entities,
         census,
         styles: std::sync::OnceLock::new(),
+        properties: std::sync::OnceLock::new(),
     })
 }
 

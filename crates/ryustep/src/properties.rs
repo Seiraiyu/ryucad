@@ -405,6 +405,14 @@ fn attributes(e: &Entities, k: usize, pd: Id, items: Vec<(Id, Id, Id)>, out: &mu
     }
 }
 
+impl crate::Opened {
+    /// Every material and attribute of the file, read once.
+    pub fn properties(&self) -> &Properties {
+        self.properties
+            .get_or_init(|| read(&self.entities, &self.products))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +555,65 @@ mod tests {
         assert_eq!((a[0].property, a[0].item), (20, 23));
         // The point is no value: kept, not read.
         assert_eq!(r.retained, vec![31]);
+    }
+
+    #[test]
+    fn what_isnt_a_parts_is_retained_and_what_doesnt_read_fails() {
+        let (e, p) = product(
+            "#20=PROPERTY_DEFINITION('user defined attributes','',#40);\
+             #21=PROPERTY_DEFINITION_REPRESENTATION(#20,#22);\
+             #22=REPRESENTATION('',(#23),#8);\
+             #23=DESCRIPTIVE_REPRESENTATION_ITEM('Torque','4 N m');\
+             #24=PROPERTY_DEFINITION('user defined attributes','',#6);\
+             #25=PROPERTY_DEFINITION_REPRESENTATION(#24,#26);\
+             #26=REPRESENTATION('',(#27,#28),#8);\
+             #27=VALUE_REPRESENTATION_ITEM('Broken',$);\
+             #28=VALUE_REPRESENTATION_ITEM('Maybe',LOGICAL(.U.));\
+             #29=PROPERTY_DEFINITION('geometric validation property','volume',#7);\
+             #40=SHAPE_ASPECT('hole','',#7,.F.);",
+        );
+        let r = read(&e, &p);
+        assert_eq!(r.retained, vec![20, 21, 22, 23], "a shape aspect's");
+        assert_eq!(
+            r.failed.iter().map(|f| f.0).collect::<Vec<_>>(),
+            vec![27, 28]
+        );
+        assert!(r.products.get(&0).is_none_or(|x| x.attributes.is_empty()));
+        // A validation property is the census's, not read here.
+        assert!(!r.retained.contains(&29));
+    }
+
+    #[test]
+    fn an_occurrences_attributes_are_retained() {
+        let (e, p) = product(
+            "#30=PRODUCT('P2','pin','',(#2));\
+             #31=PRODUCT_DEFINITION_FORMATION('','',#30);\
+             #32=PRODUCT_DEFINITION('design','',#31,#5);\
+             #33=NEXT_ASSEMBLY_USAGE_OCCURRENCE('1','','',#6,#32,$);\
+             #34=PRODUCT_DEFINITION_SHAPE('','',#33);\
+             #35=PROPERTY_DEFINITION('user defined attributes','',#34);\
+             #36=PROPERTY_DEFINITION_REPRESENTATION(#35,#37);\
+             #37=REPRESENTATION('',(#38),#8);\
+             #38=DESCRIPTIVE_REPRESENTATION_ITEM('Torque','4 N m');",
+        );
+        let r = read(&e, &p);
+        assert_eq!(r.retained, vec![35, 36, 37, 38]);
+        assert!(r.products.values().all(|x| x.attributes.is_empty()));
+    }
+
+    #[test]
+    fn an_opened_file_reads_its_properties_once() {
+        let bytes = b"ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));ENDSEC;DATA;\
+            #1=APPLICATION_CONTEXT('');#2=PRODUCT_CONTEXT('',#1,'');\
+            #3=PRODUCT('P1','bracket','',(#2));#4=PRODUCT_DEFINITION_FORMATION('','',#3);\
+            #5=PRODUCT_DEFINITION_CONTEXT('',#1,'');#6=PRODUCT_DEFINITION('design','',#4,#5);\
+            #7=MATERIAL_DESIGNATION('Steel',#6);ENDSEC;END-ISO-10303-21;";
+        let o = crate::open(bytes).unwrap();
+        let first: *const Properties = o.properties();
+        assert!(std::ptr::eq(first, o.properties()));
+        assert_eq!(
+            o.properties().products[&0].material.as_ref().unwrap().name,
+            "Steel"
+        );
     }
 }
