@@ -462,3 +462,84 @@ fn visibility_changes_at_silhouette_ends_and_cusps() {
         assert!(j.wrong.is_empty(), "race {n} {t:?}: {:?}", j.wrong);
     }
 }
+
+/// #643's edge (design 484, plan 17.B): ryucad's radial engine crankcase
+/// in small, its 60 mm case with bosses (22 mm) joined and bored through
+/// along the given angles. Seen from ryucad's isometric corner with all
+/// nine bosses, a boss's saddle with the case is a NURBS whose image
+/// cusps, which was refused `ViewError::Image` (the fifth boss alone
+/// drew).
+fn crankcase_twin(bosses: &[f64]) -> Body {
+    let case = primitive::cylinder(
+        OpKey(0x6430),
+        0.06,
+        0.08,
+        &Rigid::translation(Vector3::new(0.0, 0.0, -0.04)),
+    )
+    .unwrap()
+    .0;
+    let mut body = case;
+    for (k, &deg) in bosses.iter().enumerate() {
+        let (s, c) = ryukei::math::sin_cos(deg.to_radians());
+        let along = Vector3::new(c, s, 0.0);
+        let place = |r: f64| {
+            Rigid::from_frame(
+                &Frame::new(
+                    Point3::new(r * c, r * s, 0.0),
+                    along,
+                    Vector3::new(0.0, 0.0, 1.0),
+                )
+                .unwrap(),
+            )
+        };
+        let boss = primitive::cylinder(OpKey(0x6431), 0.022, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let bore = primitive::cylinder(OpKey(0x6432), 0.015, 0.04, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        body = boolean(
+            OpKey(0x6440 + k as u128),
+            BooleanOp::Unite,
+            &body,
+            &[Tool {
+                key: ToolKey(1),
+                body: &boss,
+                place: place(0.05),
+            }],
+        )
+        .unwrap()
+        .0;
+        body = boolean(
+            OpKey(0x6460 + k as u128),
+            BooleanOp::Subtract,
+            &body,
+            &[Tool {
+                key: ToolKey(1),
+                body: &bore,
+                place: place(0.04),
+            }],
+        )
+        .unwrap()
+        .0;
+    }
+    body
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: booleans of a saddle")]
+fn the_crankcases_boss_saddle_draws_from_the_corner() {
+    let body = crankcase_twin(&[0.0, 40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0]);
+    let v = look(Vector3::new(1.0, -1.0, 1.0));
+    let p = view(&[at(&body)], &v, &ViewOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+    let uncertain = p
+        .pieces
+        .iter()
+        .filter(|q| q.visibility == Visibility::Uncertain)
+        .count();
+    assert!(
+        uncertain * 10 <= p.pieces.len(),
+        "{uncertain} of {}",
+        p.pieces.len()
+    );
+}
