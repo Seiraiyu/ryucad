@@ -413,7 +413,11 @@ const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("breakout", "sensor", 95),
     ("rp2040", "mitayi", 38),
     ("buck", "buck", 24),
-    ("frontend", "amp", 95),
+    // Plan 3.A: 94 less 5. The 6 points are design 519's
+    // sch_region_untitled on three regions no idiom names (the coxswain
+    // took option A, 2026-11-12); titled, it is 100 again
+    // (amp_titled_scores_full).
+    ("frontend", "amp", 89),
     ("frontend", "baldiff", 35),
     ("frontend", "ivconv", 73),
     ("ethernet", "eth", 58),
@@ -464,6 +468,37 @@ fn a_net_asked_for_as_wires_is_wired() {
         .any(|n| n["code"] == "net_style_not_held");
     assert!(wired || noted, "neither wired nor said why: {out}");
     assert!(wired, "{out}");
+}
+
+/// Plan 3.A: the front end's root block scores 100 once its three
+/// untitled regions are titled, so its fall to 94 is design 519's
+/// sch_region_untitled alone, not a worse drawing. Release only.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn amp_titled_scores_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "frontend");
+    let d = ryueda(&board, 1, &["describe", "--block", "amp"]);
+    let sheet = &d["blocks"][0]["sheets"][0];
+    assert_eq!(sheet["score"], 94, "{}", sheet["findings"]);
+    let untitled: Vec<String> = sheet["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|g| g["title"] == "")
+        .map(|g| g["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(untitled.len(), 3, "{sheet}");
+    let titles: Vec<String> = untitled
+        .iter()
+        .map(|id| format!("region {id} title \"Output clamps {id}\""))
+        .collect();
+    let mut args = vec!["place", "amp"];
+    args.extend(titles.iter().map(String::as_str));
+    ryueda(&board, 1, &args);
+    let d = ryueda(&board, 1, &["describe", "--block", "amp"]);
+    let sheet = &d["blocks"][0]["sheets"][0];
+    assert_eq!(sheet["score"], 100, "{}", sheet["findings"]);
 }
 
 /// `v` without its revisions, at any depth.
