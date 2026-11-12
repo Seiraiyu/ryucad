@@ -52,6 +52,7 @@ pub mod supply;
 pub mod symbol;
 pub mod symlint;
 pub mod template;
+pub mod textconv;
 pub mod topcmd;
 pub mod vocab;
 pub mod write;
