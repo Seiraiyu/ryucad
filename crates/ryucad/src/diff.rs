@@ -535,6 +535,26 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // One line per size: its fields, flattened, in key order.
+        Some(crate::doc::hole_standards::KIND) => {
+            for table in ["fasteners", "threads"] {
+                let Some(Value::Object(standards)) = rest.remove(table) else {
+                    continue;
+                };
+                for (std, sizes) in &standards {
+                    let Value::Object(sizes) = sizes else {
+                        continue;
+                    };
+                    for (size, entry) in sizes {
+                        let mut flat = Vec::new();
+                        flatten("", entry, &mut flat);
+                        let fields: Vec<String> =
+                            flat.iter().map(|l| l.replacen(" = ", " ", 1)).collect();
+                        lines.push(format!("{table}.{std}.{size} = {}", fields.join(", ")));
+                    }
+                }
+            }
+        }
         // Each entry on one line: what it sets, in a fixed order.
         Some(crate::doc::appearance::KIND) => {
             if let Some(p) = rest.remove("part") {
@@ -3721,6 +3741,19 @@ mod tests {
              groups.0.face = a/00dd\n\
              groups.0.form = distances\n"
         );
+    }
+
+    #[test]
+    fn hole_standards_are_one_line_per_size() {
+        let t = text(crate::doc::fixtures::house_standards());
+        assert!(
+            t.contains(
+                "fasteners.house_cap.M5 = clearance.close 5.4 mm, clearance.loose 6.1 mm, \
+                 clearance.normal 5.6 mm, counterbore.depth 5.3 mm, counterbore.diameter 9.7 mm\n"
+            ),
+            "{t}"
+        );
+        assert!(t.contains("threads.npt.1/8 = tap_drill 8.7 mm\n"), "{t}");
     }
 
     #[test]

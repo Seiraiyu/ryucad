@@ -1564,7 +1564,8 @@ mod tests {
 
     #[test]
     fn the_hole_standards_are_read_with_the_project() {
-        use super::super::hole_standards::{HOLE_STANDARDS, tests::house};
+        use super::super::fixtures::house_standards as house;
+        use super::super::hole_standards::HOLE_STANDARDS;
         let dir = sample();
         let root = dir.path();
         let mut p = Project::load(root).unwrap();

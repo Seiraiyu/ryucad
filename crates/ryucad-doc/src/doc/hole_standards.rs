@@ -519,30 +519,12 @@ pub fn read(src: &dyn Source) -> Result<Option<(Vec<u8>, Result<HoleStandards>)>
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use serde_json::json;
 
-    /// House values made up for the tests: no standard's or vendor's.
-    pub(crate) fn house() -> Value {
-        json!({
-            "format": 1, "kind": KIND,
-            "threads": {
-                "npt": {"1/8": {"tap_drill": "8.7 mm"}},
-                "iso_metric": {"M6": {"tap_drill": "5.1 mm", "roll_form_drill": "5.55 mm"},
-                               "M6.5": {"pitch": "0.9 mm", "major": "6.5 mm",
-                                        "minor": {"6H": ["5.5 mm", "5.7 mm"]}}},
-                "house_acme": {"T10": {"pitch": "2 mm", "major": "10 mm",
-                                       "minor": "7.9 mm", "tap_drill": "8 mm"}}
-            },
-            "fasteners": {
-                "house_cap": {"M5": {"clearance": {"close": "5.4 mm", "normal": "5.6 mm",
-                                                   "loose": "6.1 mm"},
-                                     "counterbore": {"diameter": "9.7 mm", "depth": "5.3 mm"}}},
-                "house_flat": {"M5": {"clearance": {"normal": "5.6 mm"},
-                                      "countersink": {"diameter": "10.6 mm", "angle": "90 deg"}}}
-            }
-        })
+    fn house() -> Value {
+        crate::doc::fixtures::house_standards()
     }
 
     #[test]

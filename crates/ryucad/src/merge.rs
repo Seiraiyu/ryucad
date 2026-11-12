@@ -320,6 +320,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         PARAMETERS_KIND => Some(FORMAT),
         FEATURE_KIND => Some(FEATURE_FORMAT),
         crate::doc::materials::KIND => Some(crate::doc::materials::FORMAT),
+        crate::doc::hole_standards::KIND => Some(crate::doc::hole_standards::FORMAT),
         crate::doc::views::KIND => Some(crate::doc::views::FORMAT),
         crate::doc::appearance::KIND => Some(crate::doc::appearance::FORMAT),
         crate::doc::lock::KIND => Some(crate::doc::lock::FORMAT),
@@ -1349,7 +1350,8 @@ pub fn text(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, usize) {
 
 /// Whether Git hands `path` (relative to the project) to ryucad's merge
 /// driver, as [`crate::drivers::LINES`] say: the manifest, ryupdm's
-/// settings, the material library, the project's parameters, the lock,
+/// settings, the material library, the hole standards, the project's
+/// parameters, the lock,
 /// JSON under `parts/` and `releases/`, and annotations.
 pub fn driven(path: &str) -> bool {
     matches!(
@@ -1357,6 +1359,7 @@ pub fn driven(path: &str) -> bool {
         crate::doc::project::MANIFEST
             | "ryupdm.json"
             | "materials.json"
+            | "hole_standards.json"
             | "parameters.json"
             | crate::doc::lock::LOCK
     ) || (path.ends_with(".json") && (path.starts_with("parts/") || path.starts_with("releases/")))
@@ -3010,6 +3013,21 @@ mod tests {
             bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
             Outcome::Text(_)
         ));
+    }
+
+    #[test]
+    fn hole_standards_merge_by_size_and_field() {
+        let base = crate::doc::fixtures::house_standards();
+        let mut ours = base.clone();
+        ours["fasteners"]["house_cap"]["M5"]["clearance"]["close"] = json!("5.5 mm");
+        let mut theirs = base.clone();
+        theirs["threads"]["npt"]["1/8"]["tap_drill"] = json!("8.8 mm");
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&theirs));
+        assert_eq!(o, Outcome::Clean);
+        let mut both = ours.clone();
+        both["threads"]["npt"]["1/8"]["tap_drill"] = json!("8.8 mm");
+        assert_eq!(out, canonical(&both));
+        assert!(driven("hole_standards.json"));
     }
 
     #[test]

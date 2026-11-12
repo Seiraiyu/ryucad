@@ -749,6 +749,11 @@ pub fn project_revision_from(read: &dyn Fn(&str) -> Result<Option<Vec<u8>>>) -> 
         piece(crate::doc::drawing_lint::DRAWING_LINT.as_bytes());
         piece(&l);
     }
+    // Only when there is one: other projects' revisions keep their bits.
+    if let Some(t) = read(crate::doc::hole_standards::HOLE_STANDARDS)? {
+        piece(crate::doc::hole_standards::HOLE_STANDARDS.as_bytes());
+        piece(&t);
+    }
     Ok(h.finalize().to_hex()[..32].to_owned())
 }
 
@@ -1104,6 +1109,17 @@ pub(crate) mod tests {
         assert_ne!(project_revision(root).unwrap(), r1);
         std::fs::remove_file(root.join(crate::doc::project::MANIFEST)).unwrap();
         assert_eq!(project_revision(root).unwrap_err().code, Code::Io);
+    }
+
+    #[test]
+    fn the_project_revision_covers_the_hole_standards() {
+        use crate::doc::hole_standards::HOLE_STANDARDS;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(crate::doc::project::MANIFEST), "{}").unwrap();
+        let before = project_revision(root).unwrap();
+        std::fs::write(root.join(HOLE_STANDARDS), "{}").unwrap();
+        assert_ne!(project_revision(root).unwrap(), before);
     }
 
     #[test]
