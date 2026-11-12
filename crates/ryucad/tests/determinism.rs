@@ -6251,6 +6251,87 @@ fn styles_section(golden: &mut Golden) {
     }
 }
 
+/// Materials and properties (design 448, plan 24.C): the vendor's file
+/// imported into a project declaring three of its attributes, with a
+/// library whose density differs; then its next version over it, a
+/// person's edit between; then the part exported. The transfer, the
+/// warnings, the properties, the file properties and the export's bytes,
+/// the same on one thread and four.
+fn properties_section(golden: &mut Golden) {
+    let mut s = golden.section("properties");
+    let data =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/properties");
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+        let mut h = |m: &str, p: serde_json::Value| {
+            let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+            pool.install(|| ryucad::server::handle(&mut session, req))
+                .unwrap()
+        };
+        h(
+            "pdm.configure",
+            serde_json::json!({"properties": {
+                "supplier": {"type": "string"},
+                "batch_size": {"type": "integer"},
+                "wall_thickness": {"type": "quantity", "dim": "length"}
+            }}),
+        );
+        h(
+            "materials.set",
+            serde_json::json!({"name": "6061-T6", "density": "2650 kg/m^3"}),
+        );
+        let mut out = Vec::new();
+        let v = h(
+            "import",
+            serde_json::json!({"path": data.join("vendor.stp"), "solid": true}),
+        );
+        let part = v["parts"][0]["part"].clone();
+        let stored = v["file"]["path"].clone();
+        out.push(ryucad::doc::canonical::to_string(&v["transfer"]));
+        out.push(ryucad::doc::canonical::to_string(&v["warnings"]));
+        let props = |h: &mut dyn FnMut(&str, serde_json::Value) -> serde_json::Value| {
+            let g = h("props.get", serde_json::json!({"part": part}));
+            ryucad::doc::canonical::to_string(&serde_json::json!([g["properties"], g["file"]]))
+        };
+        out.push(props(&mut h));
+        h(
+            "props.set",
+            serde_json::json!({"part": part, "properties": {"wall_thickness": "4 mm"}}),
+        );
+        let u = h(
+            "import",
+            serde_json::json!({"path": data.join("vendor_v2.stp"), "update": stored}),
+        );
+        out.push(ryucad::doc::canonical::to_string(&u["warnings"]));
+        out.push(props(&mut h));
+        drop(h);
+        let params = serde_json::json!({"part": part, "time_stamp": "2026-11-11T00:00:00", "file_name": "v.step"});
+        let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+        let a = pool
+            .install(|| ryucad::server::answer_live(&mut session, None, None, req))
+            .unwrap();
+        out.push(format!(
+            "{:x}",
+            md(
+                ryukei_testkit::unversioned(std::str::from_utf8(&a.binary.unwrap()).unwrap())
+                    .as_bytes()
+            )
+        ));
+        runs.push(out);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for x in &runs[0] {
+        s.str(x);
+    }
+}
+
 /// Every export fixture of the `exports` section, its parts coloured: the
 /// STEP file with its appearance holds every instance the file without it
 /// has, numbered as it numbers them (design 448: geometry never moves).
@@ -6406,6 +6487,7 @@ sections! {
     exports => exports_section(&mut golden),
     transfer => transfer_section(&mut golden),
     styles => styles_section(&mut golden),
+    properties => properties_section(&mut golden),
     formats => formats_section(&mut golden),
     views => views_section(&mut golden),
     appearance => appearance_section(&mut golden),
