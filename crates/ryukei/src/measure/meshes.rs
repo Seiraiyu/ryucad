@@ -86,6 +86,13 @@ impl MeshTree {
         self.tree.nearest_point(p)
     }
 
+    /// The distance from `p` to triangle `k`: what [`MeshTree::nearest_to`]
+    /// gives on a tree of that triangle alone, without the tree.
+    pub fn to_triangle(&self, p: Point3, k: u32) -> f64 {
+        let t = &self.triangles[k as usize];
+        p.distance(super::prims::point_triangle(p, t))
+    }
+
     /// Every pair `(i, j)` of a triangle of `self` and one of `other`
     /// within `d` of each other, sorted.
     pub fn within(&self, other: &MeshTree, d: f64) -> Vec<(u32, u32)> {
@@ -293,5 +300,20 @@ mod tests {
                 .nearest_point(Point3::ORIGIN)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn to_triangle_is_a_one_triangle_tree_bit_for_bit() {
+        let m = MeshTree::new(mesh_of(&block([0.0; 3], 0.01)));
+        for p in probes(300) {
+            for (k, t) in m.triangles().iter().enumerate() {
+                let one = MeshTree::new(vec![*t]).nearest_to(p).unwrap().0;
+                assert_eq!(
+                    m.to_triangle(p, k as u32).to_bits(),
+                    one.to_bits(),
+                    "{p:?} {k}"
+                );
+            }
+        }
     }
 }
