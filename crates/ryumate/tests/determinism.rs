@@ -89,6 +89,7 @@ fn chains(golden: &mut Golden) {
                     },
                     a: on(k - 1, off),
                     b: on(k, Pose::IDENTITY),
+                    limits: ryumate::Limits::NONE,
                 },
             );
         }

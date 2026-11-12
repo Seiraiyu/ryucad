@@ -95,6 +95,7 @@ pub fn pair(kind: Kind, a: Pose, b: Pose, at: Pose) -> Assembly {
             kind,
             a: on(1, a),
             b: on(2, b),
+            limits: ryumate::Limits::NONE,
         },
     );
     asm
@@ -204,6 +205,7 @@ pub fn mechanism(g: &mut Lcg, n: u32, size: f64) -> (Assembly, usize) {
                 kind,
                 a: on(parent, a),
                 b: on(k, b),
+                limits: ryumate::Limits::NONE,
             },
         );
     }

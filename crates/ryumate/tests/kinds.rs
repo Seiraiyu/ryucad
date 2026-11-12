@@ -226,6 +226,7 @@ fn bodies_in_a_chain_follow_each_other() {
             kind: Kind::Fastened,
             a: on(2, a),
             b: on(3, b),
+            limits: ryumate::Limits::NONE,
         },
     );
     let (at, _, r) = solved(&asm);

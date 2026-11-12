@@ -115,7 +115,15 @@ fn assembly(b: &mut Bytes) -> Assembly {
             _ => Kind::Ball,
         };
         let (a, c) = (connector(b), connector(b));
-        mates.push((id, Mate { kind, a, b: c }));
+        mates.push((
+            id,
+            Mate {
+                kind,
+                a,
+                b: c,
+                limits: ryumate::Limits::NONE,
+            },
+        ));
     }
     asm.mates.extend(mates);
     asm

@@ -33,6 +33,7 @@ fn bolts(n: u32) -> Assembly {
                 kind: Kind::Fastened,
                 a: on(0, at),
                 b: on(k, Pose::IDENTITY),
+                limits: ryumate::Limits::NONE,
             },
         );
     }
@@ -65,6 +66,7 @@ fn chain(n: u32) -> Assembly {
                 },
                 a: on(k - 1, off),
                 b: on(k, Pose::IDENTITY),
+                limits: ryumate::Limits::NONE,
             },
         );
     }

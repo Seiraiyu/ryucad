@@ -750,6 +750,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                         kind: kind(m),
                         a: on(a, &body_of, &pattern_of),
                         b: on(b, &body_of, &pattern_of),
+                        limits: ryumate::Limits::NONE,
                     },
                 );
                 solved_mates.push(id.clone());

@@ -48,6 +48,7 @@ fn a_ball_inside_a_revolute_is_redundant_and_two_axes_conflict() {
             kind: Kind::Ball,
             a: on(1, Pose::IDENTITY),
             b: on(2, Pose::IDENTITY),
+            limits: ryumate::Limits::NONE,
         },
     );
     let r = solve(&asm).unwrap().report;
@@ -64,6 +65,7 @@ fn a_ball_inside_a_revolute_is_redundant_and_two_axes_conflict() {
             kind: revolute(),
             a: on(1, about_x),
             b: on(2, about_x),
+            limits: ryumate::Limits::NONE,
         },
     );
     let r = solve(&asm).unwrap().report;
@@ -81,6 +83,7 @@ fn a_ball_inside_a_revolute_is_redundant_and_two_axes_conflict() {
             kind: revolute(),
             a: on(1, off),
             b: on(2, Pose::IDENTITY),
+            limits: ryumate::Limits::NONE,
         },
     );
     let s = solve(&asm).unwrap();
@@ -189,6 +192,7 @@ fn copies_move_with_their_seed() {
                 frame: up,
             },
             b: on(3, Pose::IDENTITY),
+            limits: ryumate::Limits::NONE,
         },
     );
     let s = solve(&asm).unwrap();
@@ -222,6 +226,7 @@ fn copies_move_with_their_seed() {
                 frame: up,
             },
             b: on(3, Pose::IDENTITY),
+            limits: ryumate::Limits::NONE,
         },
     );
     let s = solve(&asm).unwrap();
@@ -289,6 +294,7 @@ fn a_linear_pattern_in_two_directions_places_its_grid() {
                 frame: Pose::IDENTITY,
             },
             b: on(1, Pose::IDENTITY),
+            limits: ryumate::Limits::NONE,
         },
     );
     // Copy [0, 1] on the base: the seed goes 2 cm down y.
@@ -310,6 +316,7 @@ fn two_groups() -> Assembly {
         kind: revolute(),
         a: on(a, at),
         b: on(b, Pose::IDENTITY),
+        limits: ryumate::Limits::NONE,
     };
     asm.bodies.insert(3, free(off(0.101, 0.002)));
     asm.bodies.insert(4, free(off(0.152, 0.001)));
@@ -322,6 +329,7 @@ fn two_groups() -> Assembly {
             kind: Kind::Ball,
             a: on(3, off(0.05, 0.0)),
             b: on(4, Pose::IDENTITY),
+            limits: ryumate::Limits::NONE,
         },
     );
     asm.mates.insert(12, hinge(1, 5, off(-0.1, 0.0)));
@@ -334,6 +342,7 @@ fn two_groups() -> Assembly {
                 frame: Pose::IDENTITY,
             },
             b: on(6, Pose::IDENTITY),
+            limits: ryumate::Limits::NONE,
         },
     );
     asm
