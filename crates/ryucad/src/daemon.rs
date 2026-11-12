@@ -24,13 +24,14 @@ pub const IDLE_VAR: &str = <Cad as ryu_session::Serve>::IDLE_VAR;
 /// The requests that may take long: each takes `progress` and `token`,
 /// reports its progress and stops at its boundaries when cancelled
 /// (design 199).
-pub const LONG: [&str; 22] = [
+pub const LONG: [&str; 23] = [
     "rebuild",
     "check",
     "doctor",
     "import",
     "import.convert",
     "interference",
+    "assembly.sweep",
     "export",
     "merge.status",
     "diff",

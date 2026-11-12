@@ -1240,6 +1240,170 @@ pub fn sweep(
     Ok(answer)
 }
 
+/// The last [`Cache::KEEP`] sweep answers, by a hash of the assembly's
+/// revision, the resolved drives and steps, and the options.
+#[derive(Clone, Debug, Default)]
+pub struct Cache {
+    answers: Vec<(String, std::sync::Arc<Value>)>,
+}
+
+impl Cache {
+    pub const KEEP: usize = 32;
+
+    pub fn get(&self, key: &str) -> Option<std::sync::Arc<Value>> {
+        self.answers
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
+    pub fn put(&mut self, key: String, v: std::sync::Arc<Value>) {
+        self.answers.retain(|(k, _)| *k != key);
+        self.answers.push((key, v));
+        if self.answers.len() > Self::KEEP {
+            self.answers.remove(0);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.answers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.answers.is_empty()
+    }
+}
+
+/// What `assembly.sweep` asks.
+#[derive(Clone, Debug, Default)]
+pub struct SweepAsk {
+    pub part: String,
+    pub motion: Option<String>,
+    pub drives: Option<Value>,
+    pub mate: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub steps: Option<u32>,
+    pub interference: bool,
+    pub clearance: bool,
+    pub below: Option<String>,
+    pub poses: bool,
+    pub refine: Option<u32>,
+}
+
+/// Bisections a sweep may ask for: past 30 a step is narrower than a
+/// double's spacing near 1.
+const MAX_REFINE: u32 = 30;
+
+fn bad(message: &str) -> Error {
+    Error::new(Code::InvalidParam, message)
+}
+
+/// `assembly.sweep`: the motion asked for, swept over the working files'
+/// rebuild with the session's caches; asked again, from the session's
+/// last answers.
+pub fn sweep_request(session: &mut Session, ask: SweepAsk) -> Result<Value> {
+    let pid = assembly(session, &ask.part, None)?;
+    let part = session.project().part(&pid)?.clone();
+    let unit = session.project().manifest.default_unit;
+    let file = match (&ask.motion, &ask.drives, &ask.mate) {
+        (Some(m), None, None) if ask.steps.is_none() => file_of(session, &pid, m)?,
+        (None, Some(d), None) => {
+            let doc = json!({"format": crate::doc::motion::FORMAT, "kind": crate::doc::motion::KIND,
+                             "steps": ask.steps.unwrap_or(crate::doc::motion::STEPS), "drives": d});
+            MotionFile::from_json(&doc, unit, &part.env).map_err(as_param)?
+        }
+        (None, None, Some(m)) => {
+            let (Some(from), Some(to)) = (&ask.from, &ask.to) else {
+                return Err(bad("a mate's sweep goes --from one value --to another"));
+            };
+            let slider = matches!(
+                Id::parse(m, "mate").ok().and_then(|k| part.features.get(&k)),
+                Some(Ok(Feature::Mate(doc))) if doc.form == crate::doc::mate::Form::Slider
+            );
+            let key = if slider { "distance" } else { "angle" };
+            let mut drive = json!({"mate": m});
+            drive[key] = json!({"from": from, "to": to});
+            let doc = json!({"format": crate::doc::motion::FORMAT, "kind": crate::doc::motion::KIND,
+                             "steps": ask.steps.unwrap_or(crate::doc::motion::STEPS), "drives": [drive]});
+            MotionFile::from_json(&doc, unit, &part.env).map_err(as_param)?
+        }
+        _ => {
+            return Err(bad(
+                "sweep a saved motion, inline drives, or one mate: exactly one of motion, drives and mate (steps goes with drives or mate)",
+            ));
+        }
+    };
+    let refine = ask.refine.unwrap_or(10);
+    if refine > MAX_REFINE {
+        return Err(bad(&format!("refine is 0 to {MAX_REFINE} bisections")));
+    }
+    let below = match &ask.below {
+        None => None,
+        Some(b) => {
+            let q =
+                crate::units::Quantity::from_json_in(&json!(b), unit, &|n: &str| part.env.get(n))
+                    .map_err(|e| bad(&e.message))?;
+            if q.meters() < 0.0 {
+                return Err(bad("below is a length of 0 or more"));
+            }
+            Some(q.meters())
+        }
+    };
+    let opts = Options {
+        interference: ask.interference,
+        clearance: ask.clearance,
+        below,
+        poses: ask.poses,
+        refine,
+    };
+    let result = session.rebuilt(&pid)?.clone();
+    let rest = Rest::of(&result);
+    let motion_id = ask
+        .motion
+        .as_deref()
+        .map(|m| Id::parse(m, "motion"))
+        .transpose()?;
+    let resolved = resolve(
+        &pid,
+        &part,
+        &rest,
+        ask.motion.as_deref().unwrap_or("(inline)"),
+        &file,
+    )?;
+    let key = {
+        let mut h = blake3::Hasher::new();
+        h.update(part.revision.as_bytes());
+        h.update(crate::doc::canonical::to_string(&resolved.to_json()).as_bytes());
+        h.update(&(resolved.steps as u64).to_le_bytes());
+        h.update(crate::doc::canonical::to_string(&opts.to_json()).as_bytes());
+        h.update(crate::doc::canonical::to_string(&json!(motion_id)).as_bytes());
+        h.finalize().to_hex().to_string()
+    };
+    if let Some(v) = session.sweeps.get(&key) {
+        return Ok((*v).clone());
+    }
+    let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
+    let job = session.job.clone();
+    let input = Input {
+        asm: &pid,
+        part: &part,
+        result: &result,
+        model: &model,
+        unit,
+    };
+    let caches = Caches {
+        interference: &mut session.interference,
+        clearance: &mut session.clearance,
+    };
+    let mut v = sweep(&input, motion_id.as_ref(), &resolved, &opts, caches, &job)?;
+    v["part"] = json!(pid);
+    v["revision"] = json!(part.revision);
+    v["warnings"] = json!(resolved.warnings);
+    session.sweeps.put(key, std::sync::Arc::new(v.clone()));
+    Ok(v)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1946,5 +2110,121 @@ pub(crate) mod tests {
             v["limits_reached"][0],
             json!({"mate": "m1", "value": "angle", "at": "max", "index": 6})
         );
+    }
+
+    #[test]
+    fn assembly_sweep_answers_saved_and_inline_alike_and_caches() {
+        let (_dir, mut s) = stopped();
+        let drives = json!([{"mate": "m1", "angle": {"from": "-3 deg", "to": "3 deg"}}]);
+        call(
+            &mut s,
+            "motion.save",
+            json!({"part": "frame", "motion": "swing", "drives": drives, "steps": 7}),
+        )
+        .unwrap();
+        let saved = call(
+            &mut s,
+            "assembly.sweep",
+            json!({"part": "frame", "motion": "swing"}),
+        )
+        .unwrap();
+        assert_eq!(saved["motion"], "swing");
+        assert!(saved["revision"].is_string());
+        assert_eq!(saved["steps"].as_array().unwrap().len(), 7);
+        let inline = call(
+            &mut s,
+            "assembly.sweep",
+            json!({"part": "frame", "drives": drives, "steps": 7}),
+        )
+        .unwrap();
+        assert_eq!(inline["motion"], Value::Null);
+        assert_eq!(inline["steps"], saved["steps"]);
+        // The shorthand: a revolute's angle.
+        let short = call(
+            &mut s,
+            "assembly.sweep",
+            json!({"part": "frame", "mate": "m1", "from": "-3 deg", "to": "3 deg", "steps": 7}),
+        )
+        .unwrap();
+        assert_eq!(short["steps"], saved["steps"]);
+        // Asked again: from the session's cache.
+        assert_eq!(s.sweeps.len(), 2);
+        let again = call(
+            &mut s,
+            "assembly.sweep",
+            json!({"part": "frame", "motion": "swing"}),
+        )
+        .unwrap();
+        assert_eq!(again, saved);
+        assert_eq!(s.sweeps.len(), 2);
+        // Refusals.
+        for (p, code) in [
+            (json!({"part": "frame"}), Code::InvalidParam),
+            (
+                json!({"part": "frame", "motion": "swing", "drives": drives}),
+                Code::InvalidParam,
+            ),
+            (
+                json!({"part": "frame", "motion": "nope"}),
+                Code::MotionNotFound,
+            ),
+            (
+                json!({"part": "plate", "drives": drives}),
+                Code::WrongPartKind,
+            ),
+            (
+                json!({"part": "frame", "drives": drives, "refine": 31}),
+                Code::InvalidParam,
+            ),
+            (
+                json!({"part": "frame", "drives": drives, "clearance": true, "below": "-1 mm"}),
+                Code::InvalidParam,
+            ),
+        ] {
+            assert_eq!(
+                call(&mut s, "assembly.sweep", p.clone()).unwrap_err().code,
+                code,
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sweep_of_an_assembly_that_does_not_hold_is_refused() {
+        // `hinged` with a second mate fastening the pin 20 mm from the
+        // hinge's axis: the two can't both hold, so the solve doesn't
+        // converge (a mate whose connector doesn't resolve never reaches
+        // the solver, so `hinged_with_failing_mate` still settles).
+        let (dir, mut s) = crate::mate::tests::hinged();
+        let top = crate::mate::tests::face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+        let foot = crate::mate::tests::face(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+        crate::mate::tests::add_in(
+            dir.path(),
+            "frame",
+            "m2",
+            "mate",
+            json!({"form": "fastened",
+                   "a": {"instance": ["base"], "at": {"feature": "slab", "name": top},
+                         "offset": {"origin": ["40 mm", "10 mm", "0 mm"]}},
+                   "b": {"instance": ["pin"], "at": {"feature": "shank", "name": foot},
+                         "offset": {"flip": true}}}),
+        );
+        s.refresh().unwrap();
+        assert!(
+            !s.rebuilt(&id("frame"))
+                .unwrap()
+                .solve
+                .as_ref()
+                .unwrap()
+                .report
+                .converged
+        );
+        let e = call(
+            &mut s,
+            "assembly.sweep",
+            json!({"part": "frame", "mate": "m1", "from": "0 deg", "to": "1 deg"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::AssemblyUnsolved);
     }
 }

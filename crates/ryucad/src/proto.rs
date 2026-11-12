@@ -1116,6 +1116,39 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mates: Vec<Map<String, Value>>,
     },
+    /// Sweeps a motion of assembly `part`, writing nothing: a saved one
+    /// (`motion`), inline `drives` (as a motion file writes them) with
+    /// `steps`, or one mate's angle (a slider's distance) from `from` to
+    /// `to`. Each step solved from the last; with `interference` what
+    /// collides that doesn't at rest, refined `refine` times (10 by
+    /// default); with `clearance` the closest moving pair within `below`;
+    /// with `poses` each step's moved instances' poses.
+    #[serde(rename = "assembly.sweep")]
+    AssemblySweep {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drives: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mate: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interference: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clearance: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        poses: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refine: Option<u32>,
+    },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.
     /// `path` (instance IDs, `/` between: `m3/s31`) starts the tree at

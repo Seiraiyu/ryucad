@@ -93,6 +93,8 @@ pub struct Session {
     pub blends: crate::blends::Cache,
     /// Distances between placed solids, for `clearance`.
     pub clearance: crate::clearance::Cache,
+    /// The last sweeps' answers (`assembly.sweep`), by what they swept.
+    pub sweeps: crate::motion::Cache,
     /// A revision's session: its files never change, and it never reads
     /// the disk.
     frozen: bool,
@@ -271,6 +273,7 @@ impl Session {
             mass: crate::mass::Cache::default(),
             blends: crate::blends::Cache::default(),
             clearance: crate::clearance::Cache::default(),
+            sweeps: crate::motion::Cache::default(),
             frozen: false,
             revisions: Vec::new(),
             merge_status: None,
@@ -481,6 +484,7 @@ impl Session {
             mass: from.mass.clone(),
             blends: from.blends.clone(),
             clearance: from.clearance.clone(),
+            sweeps: from.sweeps.clone(),
             frozen: true,
             revisions: Vec::new(),
             merge_status: None,
