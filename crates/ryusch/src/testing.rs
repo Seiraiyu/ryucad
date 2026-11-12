@@ -729,6 +729,16 @@ fn built(data: &[u8]) -> (Block, usize) {
         }
         _ => {}
     }
+    // Plan 3.A, from the 115th byte: the first region titled by its ID.
+    if data.get(114).is_some_and(|b| b % 3 == 0) {
+        block.instructions.insert(
+            "t9".into(),
+            Instruction::Title {
+                region: "r1".into(),
+                title: "Agent title".into(),
+            },
+        );
+    }
     (block, b.1)
 }
 

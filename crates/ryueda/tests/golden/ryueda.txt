@@ -16,7 +16,7 @@ parts.supply dd736c99f67f9b57a7a2ed86738a3270
 schematic.breakout.annotate.across e2180ca93ea43f4ec2f19b2b55f8ddfe
 schematic.breakout.annotate.down af396a2e4ef7c57c23e39271babf9396
 schematic.breakout.breakout.dark.svg 5c781598523050624623f7efc63fccbe
-schematic.breakout.breakout.describe cde5089bf130be61dd64e256c635d99f
+schematic.breakout.breakout.describe 1c00a2ecf23262fba616c616fc2b1b90
 schematic.breakout.breakout.explain 48c8716d6565d33a9dadea9c66b50250
 schematic.breakout.breakout.layout 79aa2a98ca69bc79c96ee46f92909cca
 schematic.breakout.breakout.svg bbc02ab4b88542b3b04758cd1cb29aec
@@ -33,7 +33,7 @@ schematic.breakout.styled.pdf 42c84fae91459567bb45e837bede09d8
 schematic.buck.annotate.across c6d322533bb00c2096934d370b54c35d
 schematic.buck.annotate.down 5694bcca26c3250f93a139a551c6c2e7
 schematic.buck.buck.dark.svg 1fb39bc469ef28cab489e9e808ffb289
-schematic.buck.buck.describe 7ff2cc1e428292d8f001167452f346dd
+schematic.buck.buck.describe cc2eb828549f3e72f3c826b80efe19ba
 schematic.buck.buck.explain df83a1118c0e3fa3120d12f80696d444
 schematic.buck.buck.layout 3f47ed120d3751aa9e4e4cb6bb85bacc
 schematic.buck.buck.svg 0e24f6ea0b66506052b9ac4e52811414
@@ -41,7 +41,7 @@ schematic.buck.pdf f56fd639eda44a3ef84e23b799d1e7fe
 schematic.ethernet.annotate.across 3e37c20215db0a0a99935fad9f564914
 schematic.ethernet.annotate.down bd55ae35b3213b051219e3904b4c4b01
 schematic.ethernet.eth.dark.svg c60b67ccb489f386cf377b338bd75d31
-schematic.ethernet.eth.describe 5310e8ce86743477adf0a43d2465a69d
+schematic.ethernet.eth.describe a15f980bf66d6ea4465c486e009097ce
 schematic.ethernet.eth.explain dc9129b090d2a52b9e39402312458e10
 schematic.ethernet.eth.layout cf798e64993376416a5781dce76bc2a5
 schematic.ethernet.eth.svg f7110b7b034fef5844ed2a902008d168
@@ -78,7 +78,7 @@ schematic.frontend.pdf 7c827eb61356b351865305d67df37c97
 schematic.rp2040.annotate.across 36073b870adb5b768ccbe3c413bb8770
 schematic.rp2040.annotate.down f51958bca90ea271d91b14f6afe082f4
 schematic.rp2040.mitayi.dark.svg b18edd7953a6c4f2051330bd28879572
-schematic.rp2040.mitayi.describe c07c393e5bda752490f2414bafbc3d98
+schematic.rp2040.mitayi.describe c0d43894476cd0f2a2bc48f331ae2eca
 schematic.rp2040.mitayi.explain 16cb1458d0f830d4d3405620deb0dcf0
 schematic.rp2040.mitayi.layout 61f2a9573944bb88cb34bcdddd5af113
 schematic.rp2040.mitayi.svg 80f31675d58d62726cff7105d9682c35

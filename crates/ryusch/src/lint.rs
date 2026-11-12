@@ -340,7 +340,7 @@ pub const RULES: &[Rule] = &[
         unit: "a region",
         what: "A region titled Misc: nothing in it names its function.",
         why: "A region's title is what a reader scans for; Misc says nothing about what the parts do.",
-        fix: "Give it a title (region rename REGION TITLE), or a function property to its main component.",
+        fix: "Give it a title (region REGION title TITLE), or a function property to its main component.",
         evidence: "Design 348: every region is titled by its function. The references title their panels (the ESP32-PoE's ETHERNET, Mitayi-Pico-D1's power and USB blocks). In round 3's blind review (plan 2.G, three judges a pair), the judges named the sessions' titled regions (\"I2C header and pull-ups\", \"Output clamps\") among what read better, and engine titles such as \"Misc\", \"SCL\" and \"N_J2_A5\" among what read worse.",
     },
 ];
@@ -1693,7 +1693,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     "sch_region_untitled",
                     format!("region {id} is titled Misc: give it its function's title"),
                     vec![id.clone()],
-                    json!({"fix": format!("region rename {id} TITLE")}),
+                    json!({"fix": format!("region {id} title TITLE")}),
                 ));
             }
         }

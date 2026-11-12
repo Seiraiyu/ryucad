@@ -171,6 +171,8 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
     // Each part's `region` instruction, and `region none`'s.
     let mut region_by: BTreeMap<usize, String> = BTreeMap::new();
     let mut none_by: BTreeMap<usize, String> = BTreeMap::new();
+    // Each region's title by ID, and the instruction giving it (plan 3.A).
+    let mut titled: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut by_paper: BTreeMap<String, String> = BTreeMap::new();
     let all: Vec<(String, &Instruction, bool)> = block
         .instructions
@@ -256,6 +258,34 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
             }
         }
         match ins {
+            Instruction::Title { region, title } => {
+                if title.trim().is_empty()
+                    || title.chars().count() > crate::layout::TITLE_MAX
+                    || title.contains(['\n', '\r'])
+                {
+                    return Err(rule(
+                        &id,
+                        "region_title",
+                        format!(
+                            "a region's title is one line of 1 to {} characters",
+                            crate::layout::TITLE_MAX
+                        ),
+                    ));
+                }
+                match titled.get(region) {
+                    Some((other, t)) if t != title => {
+                        return Err(conflict(
+                            other,
+                            &id,
+                            &format!("region {region} can't have two titles"),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        titled.insert(region.clone(), (id.clone(), title.clone()));
+                    }
+                }
+            }
             Instruction::Note { on, text } => {
                 if text.trim().is_empty()
                     || text.chars().count() > crate::layout::NOTE_MAX
@@ -818,6 +848,11 @@ pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), St
             }
             Ok(())
         }
+        Instruction::Title { region, title } => match layout.regions.get(region) {
+            Some(g) if g.title == *title => Ok(()),
+            Some(g) => Err(format!("region {region} is titled {:?}", g.title)),
+            None => Err(format!("there is no region {region}")),
+        },
         Instruction::Sheet { sheet, .. } => {
             for &p in &parts {
                 let (s, _) = placed(p)?;
@@ -1145,6 +1180,8 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
         .collect();
     let all = |f: &dyn Fn(usize) -> bool| !parts.is_empty() && parts.iter().all(|p| f(*p));
     match ins {
+        // Applied after the parts are placed, by ID.
+        Instruction::Title { .. } => true,
         Instruction::Note { .. } => layout
             .instructions
             .iter()

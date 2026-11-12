@@ -2278,20 +2278,29 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
         // A named region of this title on this sheet not yet claimed, one
         // holding some of these parts first.
         let mine = |st: &State| -> Option<String> {
-            let open: Vec<&(String, crate::layout::Region)> = st
-                .regions
-                .iter()
-                .filter(|(id, g)| {
-                    g.named && &g.title == *title && g.sheet == here && !claimed.contains(id)
-                })
-                .collect();
+            let open: Vec<&(String, crate::layout::Region)> =
+                st.regions
+                    .iter()
+                    .filter(|(id, g)| {
+                        // Or retitled by its ID (plan 3.A): the title it was
+                        // named with is then the instruction's alone.
+                        let retitled = block.instructions.values().any(
+                            |i| matches!(i, Instruction::Title { region, .. } if region == id),
+                        );
+                        g.named
+                            && (&g.title == *title
+                                || (retitled && g.parts.iter().any(|k| keys.contains(k))))
+                            && g.sheet == here
+                            && !claimed.contains(id)
+                    })
+                    .collect();
             open.iter()
                 .find(|(_, g)| g.parts.iter().any(|k| keys.contains(k)))
                 .or(open.first())
                 .map(|(id, _)| id.clone())
         };
         // A region holding only these parts takes the title, keeping its
-        // ID (what `region rename` writes).
+        // ID.
         if mine(st).is_none()
             && let Some((_, g)) = st.regions.iter_mut().find(|(_, g)| {
                 !g.named && !g.parts.is_empty() && g.parts.iter().all(|k| keys.contains(k))
@@ -4014,6 +4023,22 @@ fn draw(
             details: serde_json::json!({"net": block.nets[n].key, "why": why}),
         });
     }
+    // Titles the agent gave (plan 3.A): by ID, once the regions are made.
+    for (id, ins) in &block.instructions {
+        let Instruction::Title { region, title } = ins else {
+            continue;
+        };
+        match layout.regions.get_mut(region) {
+            Some(g) => g.title = title.clone(),
+            None => notes.push(Note {
+                code: "region_unresolved".into(),
+                message: format!(
+                    "{id}: there is no region {region} to title; the instruction is kept"
+                ),
+                details: serde_json::json!({"instruction": id, "region": region}),
+            }),
+        }
+    }
     crate::region::frames(block, &mut layout);
     // Notes last, in what is left (plan 2.C), and the frames again to hold
     // those in regions.
@@ -5444,6 +5469,44 @@ mod tests {
             );
         }
         (b, keys)
+    }
+
+    /// Plan 3.A: a title by region ID holds for a region made in the same
+    /// layout, lasts, and survives frames joining; a gone ID is noted, and
+    /// two titles for one region conflict.
+    #[test]
+    fn a_region_is_titled_by_its_id() {
+        let mut b = seeded(5, 3);
+        let first = lay(&b);
+        let id = first.layout.regions.keys().next().unwrap().clone();
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Title {
+                region: id.clone(),
+                title: "Sensor front end".into(),
+            },
+        );
+        let out = lay(&b);
+        assert_eq!(out.layout.regions[&id].title, "Sensor front end");
+        assert_eq!(out.layout.format(), 5);
+        b.previous = Some(out.layout.clone());
+        assert_eq!(lay(&b).layout.regions[&id].title, "Sensor front end");
+        b.instructions.insert(
+            "i2".into(),
+            Instruction::Title {
+                region: "r99".into(),
+                title: "X".into(),
+            },
+        );
+        assert!(lay(&b).notes.iter().any(|n| n.code == "region_unresolved"));
+        b.instructions.insert(
+            "i3".into(),
+            Instruction::Title {
+                region: id,
+                title: "Other".into(),
+            },
+        );
+        assert_eq!(lay_out(&b).unwrap_err().code, "instruction_conflict");
     }
 
     /// Design 519: an instruction that ends neither held nor pulled moves

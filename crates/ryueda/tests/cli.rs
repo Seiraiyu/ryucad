@@ -2665,6 +2665,40 @@ fn schematics_from_the_cli() {
             .any(|n| n["code"] == "instruction_unresolved"),
         "{dry}"
     );
+    // A region titled by its ID (plan 3.A): lasting, listed, held; a
+    // second title for it conflicts; `region rename` reads as it.
+    let titled = p.ok(&["place", "breakout", "region r1 title \"I2C header\""]);
+    let id = titled["added"][0].as_str().unwrap().to_owned();
+    let list = p.ok(&["place", "breakout", "--list"]);
+    let ins = list["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id.as_str())
+        .unwrap_or_else(|| panic!("{list}"));
+    assert_eq!(ins["text"], "region r1 title \"I2C header\"", "{ins}");
+    assert_eq!(ins["state"], "held", "{ins}");
+    let e = p.fails(
+        &["place", "breakout", "region rename r1 Header"],
+        "instruction_conflict",
+        1,
+    );
+    assert!(e["message"].as_str().unwrap().contains(&id), "{e}");
+    p.ok(&["place", "breakout", &format!("release {id}")]);
+    let renamed = p.ok(&["place", "breakout", "region rename r1 Header"]);
+    let id = renamed["added"][0].as_str().unwrap().to_owned();
+    let list = p.ok(&["place", "breakout", "--list"]);
+    assert!(
+        list["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == id.as_str() && i["text"] == "region r1 title Header"),
+        "{list}"
+    );
+    let d = p.ok(&["describe", "--block", "breakout"]);
+    assert!(d.to_string().contains("\"title\":\"Header\""), "{d}");
+    p.ok(&["place", "breakout", &format!("release {id}")]);
     // Repeating one changes nothing; a conflict is refused with fixes.
     assert_eq!(
         p.ok(&["place", "breakout", "net SDA label"])["added"],
@@ -2863,16 +2897,14 @@ fn regions_from_the_cli() {
         "sensor",
         &format!("region rename {id} \"Sensor core\""),
     ]);
+    // Since plan 3.A a rename is the lasting title instruction, by ID.
     let list = p.ok(&["place", "sensor", "--list"]);
     assert!(
         list["instructions"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|i| i["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("region \"Sensor core\" ")),
+            .any(|i| i["text"] == format!("region {id} title \"Sensor core\"").as_str()),
         "{list}"
     );
     let d = p.ok(&["describe", "--block", "sensor"]);
@@ -2881,7 +2913,7 @@ fn regions_from_the_cli() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|r| r["title"] == "Sensor core" && r["named"] == true),
+            .any(|r| r["id"] == id.as_str() && r["title"] == "Sensor core"),
         "{d}"
     );
     let refused = p.fails(

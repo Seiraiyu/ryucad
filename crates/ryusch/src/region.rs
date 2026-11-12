@@ -312,10 +312,27 @@ pub fn frames(block: &Block, layout: &mut Layout) {
                 if ra.sheet != rb.sheet || !ra.frame_on_sheet().overlaps(&rb.frame_on_sheet()) {
                     continue;
                 }
-                let (keep, gone) = match (ra.named, rb.named) {
-                    (_, false) => (a, b),
-                    (false, true) => (b, a),
-                    (true, true) => continue,
+                // A region an agent titled by ID (plan 3.A) outranks one
+                // the engine proposed and gives way to one the agent named
+                // by its parts; two of those stay apart.
+                let titled = |id: &str| {
+                    block.instructions.values().any(|i| {
+                        matches!(i, crate::layout::Instruction::Title { region, .. } if region == id)
+                    })
+                };
+                let rank = |r: &Layout, id: &str| {
+                    if r.regions[id].named {
+                        2
+                    } else if titled(id) {
+                        1
+                    } else {
+                        0
+                    }
+                };
+                let (keep, gone) = match (rank(layout, a), rank(layout, b)) {
+                    (2, 2) => continue,
+                    (x, y) if x >= y => (a, b),
+                    _ => (b, a),
                 };
                 let mut parts = layout.regions.remove(gone).expect("a region").parts;
                 let r = layout.regions.get_mut(keep).expect("a region");
