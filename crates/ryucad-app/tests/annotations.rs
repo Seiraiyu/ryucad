@@ -498,3 +498,66 @@ fn markup_is_refused_in_view_and_a_refusal_keeps_the_marks() {
             .is_empty()
     );
 }
+
+/// #730: a chosen annotation's view marks are drawn only while the part
+/// they were made on is shown.
+#[test]
+fn a_chosen_annotations_marks_go_when_another_part_is_shown() {
+    let p = Project::new().with_part();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&[
+        "feature", "add", "q", "box", "--id", "b", "--param", "x=5", "--param", "y=5", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "view",
+        "save",
+        "p",
+        "above",
+        "--eye",
+        "10,5,1000",
+        "--target",
+        "10,5,2.5",
+        "--up",
+        "0,1,0",
+        "--ortho",
+        "30 mm",
+    ]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    ws.set_mode(Mode::Annotate);
+    ws.set_focus(Some("p".into()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.annotations.loaded
+        && ws.model.focus.as_deref() == Some("p")));
+    let stroke = r#"{"part": "p", "list": [{"kind": "stroke", "in": "face", "on": "p/base",
+        "points_m": [[0.012, 0.002, 0.005], [0.018, 0.006, 0.005]]}]}"#;
+    let a = p.ok(&[
+        "annotations",
+        "add",
+        "--comment",
+        "here",
+        "--model",
+        "p",
+        "--of",
+        "above",
+        "--marks",
+        stroke,
+        "--arrow",
+        "-5,-3:-3,-1",
+    ]);
+    let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.annotations
+            .all
+            .get(&id)
+            .is_some_and(|e| e.mark_count() == 2)
+    }));
+    ws.choose_annotation(Some(&id));
+    assert!(ws.view_marks().is_some());
+    ws.set_focus(Some("q".into()));
+    assert!(ws.wait_until(WAIT, |ws| ws.model.focus.as_deref() == Some("q")));
+    assert!(ws.view_marks().is_none(), "p's marks drawn over q");
+    ws.set_focus(Some("p".into()));
+    assert!(ws.wait_until(WAIT, |ws| ws.model.focus.as_deref() == Some("p")));
+    assert!(ws.view_marks().is_some());
+}

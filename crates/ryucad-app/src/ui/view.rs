@@ -260,7 +260,14 @@ impl View {
                 _ => true,
             });
         }
-        if !(self.hovered || self.focused) || ctx.text_edit_focused() {
+        // A control has the keyboard (Tab reached it, #749): Tab and the
+        // rest are egui's, to move between controls, wherever the pointer
+        // is. The tree's rows keep the viewport's keys as before.
+        let tree = self.tree_focus;
+        if !(self.hovered || self.focused)
+            || ctx.text_edit_focused()
+            || ctx.memory(|m| m.focused()).is_some_and(|f| Some(f) != tree)
+        {
             return;
         }
         let rect = self.rect;
@@ -714,6 +721,11 @@ impl View {
         // Sketches are few points: all of them.
         if self.sketches {
             out.extend(ws.model.drawn_sketches().flat_map(|(_, d)| d.points()));
+        }
+        // Datums, paths and helices as drawn (#729, #735). A datum plane's
+        // square is sized to the bodies' box, so fitting twice is stable.
+        if self.datums {
+            out.extend(self.picker(ws).marks().iter().flat_map(|m| m.points()));
         }
         out
     }
@@ -1277,7 +1289,11 @@ impl View {
                     let text = egui::RichText::new(format!("#{}", m.number))
                         .strong()
                         .color(ink);
-                    let mut b = egui::Button::new(text).small().corner_radius(9.0);
+                    // On one line: the area keeps last frame's size (#733).
+                    let mut b = egui::Button::new(text)
+                        .small()
+                        .corner_radius(9.0)
+                        .wrap_mode(egui::TextWrapMode::Extend);
                     b = if m.outdated {
                         b.fill(egui::Color32::TRANSPARENT)
                             .stroke(egui::Stroke::new(1.5, colour))
