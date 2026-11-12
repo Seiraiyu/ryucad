@@ -79,6 +79,54 @@ fn idot(p: Vector3, d: Vector3) -> Interval {
     i(p.x) * i(d.x) + i(p.y) * i(d.y) + i(p.z) * i(d.z)
 }
 
+/// True when the image whose hodograph is `(qa, qb) / w²` over a stretch
+/// is one to one there: some direction `d` makes every Bernstein
+/// coefficient of `d · (qa, qb)` positive (rounded outward), so the image
+/// moves strictly along `d`. `d` is the sum of the coefficients' unit
+/// directions (their midpoints'): any `d` that passes proves it.
+#[cfg_attr(not(test), allow(dead_code))]
+fn one_to_one(qa: &Bernstein, qb: &Bernstein) -> bool {
+    let (ca, cb) = (qa.coefficients(), qb.coefficients());
+    let mut d = Vector2::ZERO;
+    for (x, y) in ca.iter().zip(cb) {
+        let v = Vector2::new((x.lo() + x.hi()) / 2.0, (y.lo() + y.hi()) / 2.0);
+        let l = v.length();
+        if l > 0.0 {
+            d = d + v / l;
+        }
+    }
+    if d.length() == 0.0 {
+        return false;
+    }
+    let (dx, dy) = (Interval::point(d.x), Interval::point(d.y));
+    ca.iter()
+        .zip(cb)
+        .all(|(&x, &y)| (dx * x + dy * y).lo() > 0.0)
+}
+
+/// True when the image whose control points are `(na, nb) / w` lies
+/// within [`LINEAR_RESOLUTION`] of a point: the box of the control points
+/// (rounded outward; positive weights keep the curve in their hull) has
+/// a diagonal no longer. The rule `nurbs` applies to a whole curve.
+#[cfg_attr(not(test), allow(dead_code))]
+fn point_like(w: &Bernstein, na: &Bernstein, nb: &Bernstein) -> bool {
+    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for ((x, y), wk) in na
+        .coefficients()
+        .iter()
+        .zip(nb.coefficients())
+        .zip(w.coefficients())
+    {
+        let (Some(px), Some(py)) = (x.checked_div(*wk), y.checked_div(*wk)) else {
+            return false;
+        };
+        lo = [lo[0].min(px.lo()), lo[1].min(py.lo())];
+        hi = [hi[0].max(px.hi()), hi[1].max(py.hi())];
+    }
+    let (dx, dy) = (hi[0] - lo[0], hi[1] - lo[1]);
+    dx * dx + dy * dy <= LINEAR_RESOLUTION * LINEAR_RESOLUTION
+}
+
 /// The folds of `curve` over `(t0, t1)`: parameters where the image's
 /// derivative along `a` vanishes and along `b` isn't certified non-zero.
 fn folds(curve: &Curve, [t0, t1]: [f64; 2], a: Vector3, b: Vector3) -> Result<Vec<f64>, Failure> {
@@ -117,4 +165,43 @@ fn folds(curve: &Curve, [t0, t1]: [f64; 2], a: Vector3, b: Vector3) -> Result<Ve
     out.sort_by(f64::total_cmp);
     out.dedup();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn poly(c: &[f64]) -> Bernstein {
+        Bernstein::from_f64(c)
+    }
+
+    #[test]
+    fn a_hodograph_in_a_half_plane_is_one_to_one() {
+        // Turning through a right angle: every coefficient within 90° of
+        // the diagonal.
+        assert!(one_to_one(&poly(&[1.0, 1.0, 0.0]), &poly(&[0.0, 1.0, 1.0])));
+        // Through a half turn and back: no direction sees every
+        // coefficient ahead.
+        assert!(!one_to_one(
+            &poly(&[1.0, 0.0, -1.0]),
+            &poly(&[0.0, 1.0, 0.0])
+        ));
+        // Through zero (a cusp): no direction either.
+        assert!(!one_to_one(&poly(&[1.0, -1.0]), &poly(&[1.0, -1.0])));
+    }
+
+    #[test]
+    fn a_hull_within_resolution_is_a_point() {
+        let w = poly(&[1.0, 1.0, 1.0]);
+        assert!(point_like(
+            &w,
+            &poly(&[0.0, 3e-9, 0.0]),
+            &poly(&[1.0, 1.0, 1.0 + 2e-9])
+        ));
+        assert!(!point_like(
+            &w,
+            &poly(&[0.0, 3e-8, 0.0]),
+            &poly(&[1.0, 1.0, 1.0])
+        ));
+    }
 }
