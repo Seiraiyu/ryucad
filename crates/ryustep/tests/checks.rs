@@ -298,8 +298,8 @@ fn cp_radial_rims_and_rounds_check() {
         return;
     };
     // Healed as ryucad imports it (part `body`, feature `body`), as
-    // step-hunt found it: under `OpKey(7)` healing refuses the can with
-    // two of its wall's cylinders overlapping, on main as here.
+    // step-hunt found it; it heals alike under `OpKey(7)` (#693,
+    // `cp_radial_heals_alike_under_both_keys`).
     let key = OpKey::from_bytes(b"ryucad.feature\0body\0body");
     let (_, body) = bodies_keyed(&path, key).remove(0);
     let pool = rayon::ThreadPoolBuilder::new()
@@ -315,6 +315,40 @@ fn cp_radial_rims_and_rounds_check() {
         "{:?}",
         t.elapsed()
     );
+}
+
+/// #693: CP_Radial_D12.5mm healed under `OpKey(7)` refused
+/// `FacesOverlap` where ryucad's key healed it. Since ryukei 16.A to 16.C
+/// both heal the can to the same 53 faces, checking clean: the outcome
+/// doesn't hang on the key that names it. (The faces are stored in
+/// another order, some with their surfaces the other way round, so the
+/// surfaces are compared by kind.)
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn cp_radial_heals_alike_under_both_keys() {
+    let _serial = serial();
+    let Some(path) = kicad("Capacitor_THT.3dshapes/CP_Radial_D12.5mm_P5.00mm.step") else {
+        return;
+    };
+    let ryucad = OpKey::from_bytes(b"ryucad.feature\0body\0body");
+    let mut kinds = Vec::new();
+    for key in [OpKey(7), ryucad] {
+        let bodies = bodies_keyed(&path, key);
+        assert_eq!(bodies.len(), 1, "{key:?}");
+        let body = &bodies[0].1;
+        assert_eq!(body.faces().count(), 53, "{key:?}");
+        assert_eq!(named(body, &check_intersections(body)), [], "{key:?}");
+        let mut k: Vec<String> = body
+            .faces()
+            .map(|f| {
+                let s = body.surface(body.face(f).unwrap().surface).unwrap();
+                format!("{s:?}").split('(').next().unwrap().to_owned()
+            })
+            .collect();
+        k.sort();
+        kinds.push(k);
+    }
+    assert_eq!(kinds[0], kinds[1]);
 }
 
 /// #322: KiCad's two CP_Radial_D8.0mm cans. Their top is a ring of
