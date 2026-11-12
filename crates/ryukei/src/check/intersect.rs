@@ -246,22 +246,6 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
             }
         }
     }
-    // Faces crossing at an angle along an edge they share are traced first
-    // under [`CROSSING_TRACE_FIRST`] units; past it they are certified
-    // beside the edge and apart, or traced, outside it (#303). A pair the
-    // certificate can't settle is traced in full below, as before.
-    if !tangent && !shared.is_empty() {
-        match m.capped_by(CROSSING_TRACE_FIRST, || {
-            face_face_in((body, a), (body, b), m)
-        }) {
-            Ok(meet) => traced = Some(meet),
-            Err(_) => {
-                if let Some(verdict) = crossing_beside(body, a, b, &shared, m) {
-                    return verdict;
-                }
-            }
-        }
-    }
     // Faces touching at a vertex they share touch at a corner of both
     // boxes, where the region's sides cut the trace: again with the
     // region reaching an eighth of the smaller face's size past it.
@@ -318,6 +302,13 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
         // pipe cut off at its spine's end), or touching at vertices they
         // share, apart beside them all the same.
         Err(_) if !tangent && !shared.is_empty() && apart_beside(body, a, b, &shared, m) => None,
+        // Else certified to cross only along the edge within a strip and
+        // apart, or traced, outside it (#698: a thread's flat sides along
+        // their helical edge). Only where the pair was `CannotCheck`, so no
+        // verdict that settled before moves, nor what it spent.
+        Err(_) if !tangent && !shared.is_empty() => {
+            crossing_beside(body, a, b, &shared, m).unwrap_or(Some(Fault::CannotCheck { a, b }))
+        }
         Err(_)
             if shared.is_empty()
                 && !vertices_tried
@@ -507,10 +498,12 @@ fn trace_boxes(body: &Body, a: FaceId, b: FaceId, boxes: Vec<Box3>, m: &Meter) -
 }
 
 /// The fault faces crossing at an angle along edges they share make, if
-/// any, certified beside those edges where a trace along them fails
-/// (#303: KiCad's MSOP-8-1EP, where the shared edge is one spline's
-/// isoline and lies in the general trace's face plane, so the face
-/// search recurses along it for 2M units a pair).
+/// any, certified beside those edges where every trace and search apart
+/// has failed (#698: a flat-sided thread's swept sides, crossing at 48°
+/// along their three-turn helical edge). It doesn't settle KiCad's
+/// MSOP-8-1EP (#303): its NURBS faces turn tangent at or beside the
+/// shared edge, bending about 2e6 a metre there, so no strip is
+/// certified.
 ///
 /// **Inside a strip of width `w`** round the edges the faces meet only
 /// along them ([`crossing_pieces`]). Take `p` in both faces within `w`
@@ -947,13 +940,6 @@ const WITHIN_FIRST: u64 = 1 << 16;
 /// committed body's check reaches it.
 const WITHIN_LAST: u64 = 1 << 18;
 
-/// The units a trace of faces crossing along an edge they share is first
-/// given, before the crossing certificate ([`crossing_beside`]): a pair
-/// settled under it spends and answers as before, and one that isn't
-/// (#303: 1.76M to 2.02M units a pair) is certified beside its edge
-/// instead, or traced again in full.
-const CROSSING_TRACE_FIRST: u64 = 1 << 18;
-
 /// How many times [`crossing_beside`] quarters its strip before it
 /// withholds the certificate.
 const CROSSING_ROUNDS: usize = 3;
@@ -1108,7 +1094,6 @@ mod tests {
         let trace = crate::work::Scope::Trace.limit();
         const { assert!(TANGENT_TRACE_FIRST < WITHIN_FIRST) };
         const { assert!(WITHIN_FIRST < WITHIN_LAST) };
-        const { assert!(CROSSING_TRACE_FIRST <= WITHIN_LAST) };
         assert!(WITHIN_LAST < trace / 64);
     }
 
