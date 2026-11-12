@@ -295,6 +295,24 @@ pub enum Code {
     /// An explode's step names an instance path the assembly no longer
     /// places (a warning: the step moves the rest).
     ExplodeUnresolved,
+    /// An assembly has no motion by that ID (`motion.delete`,
+    /// `assembly.sweep` with `motion`); the details name the assembly and
+    /// the motions it has.
+    MotionNotFound,
+    /// A motion's drive names a mate or an instance the assembly doesn't
+    /// have, or a mate whose form has no such value: `motion.save`
+    /// refuses it, and a saved file that comes to it shows it in
+    /// `motion.list`, `doctor` and `check` (a warning there).
+    MotionUnresolved,
+    /// A mate drive's range goes past that mate's own limits (a warning:
+    /// the sweep reports those steps blocked).
+    MotionPastLimit,
+    /// `check`: a saved motion's sweep is blocked at some step (its
+    /// mates can't hold there, or a drive is past a stop).
+    MotionBlocked,
+    /// `check --interference`: a saved motion makes instances collide
+    /// that don't at rest; the first collision, refined.
+    MotionInterferes,
     /// A ryueda library alias whose path holds no library project: no
     /// project there, not a library, or outside the repository.
     LibraryMissing,
@@ -1217,6 +1235,11 @@ mod tests {
         );
         assert_eq!(json!(Code::ExplodeNotFound), json!("explode_not_found"));
         assert_eq!(json!(Code::ExplodeUnresolved), json!("explode_unresolved"));
+        assert_eq!(json!(Code::MotionNotFound), json!("motion_not_found"));
+        assert_eq!(json!(Code::MotionUnresolved), json!("motion_unresolved"));
+        assert_eq!(json!(Code::MotionPastLimit), json!("motion_past_limit"));
+        assert_eq!(json!(Code::MotionBlocked), json!("motion_blocked"));
+        assert_eq!(json!(Code::MotionInterferes), json!("motion_interferes"));
         assert_eq!(json!(Code::LibraryMissing), json!("library_missing"));
         assert_eq!(
             json!(Code::LibraryCourtyardMissing),
@@ -1386,6 +1409,15 @@ mod tests {
         assert_eq!(Code::AppearanceUnresolved.exit_code(), 1);
         assert_eq!(Code::ExplodeNotFound.exit_code(), 1);
         assert_eq!(Code::ExplodeUnresolved.exit_code(), 1);
+        for c in [
+            Code::MotionNotFound,
+            Code::MotionUnresolved,
+            Code::MotionPastLimit,
+            Code::MotionBlocked,
+            Code::MotionInterferes,
+        ] {
+            assert_eq!(c.exit_code(), 1, "{c:?}");
+        }
         assert_eq!(Code::ExportMeshFaults.exit_code(), 1);
         assert_eq!(Code::ExportTooLarge.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);
