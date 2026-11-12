@@ -543,3 +543,25 @@ fn the_crankcases_boss_saddle_draws_from_the_corner() {
         p.pieces.len()
     );
 }
+
+/// A torus from the front (design 484): its view draws, the radial
+/// engine's exhaust ring's case, with at most a tenth of its pieces
+/// uncertain.
+#[test]
+fn a_torus_from_the_front_draws() {
+    let (b, _) = primitive::torus(OpKey(0x6470), 0.03, 0.01, &Rigid::IDENTITY).unwrap();
+    for t in [Vector3::new(0.0, -1.0, 0.0), Vector3::new(1.0, 0.0, 0.0)] {
+        let p = view(&[at(&b)], &look(t), &ViewOptions::default())
+            .unwrap_or_else(|e| panic!("{t:?}: {e:?}"));
+        let uncertain = p
+            .pieces
+            .iter()
+            .filter(|q| q.visibility == Visibility::Uncertain)
+            .count();
+        assert!(
+            uncertain * 10 <= p.pieces.len(),
+            "{uncertain} of {}",
+            p.pieces.len()
+        );
+    }
+}
