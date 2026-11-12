@@ -19,7 +19,7 @@ use ryustep::Opened;
 use ryustep::properties::Value as FileValue;
 use ryustep::schema::MeasureUnit;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// An attribute's name as a property key: trimmed, lower case, spaces
 /// and hyphens read as `_`.
@@ -259,6 +259,48 @@ pub fn library_warning(
     }
 }
 
+/// What an update does with one mapped property.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Judgement {
+    /// Leave the part's value.
+    Keep,
+    /// Write the new file's value.
+    Take,
+    /// The file dropped a value the part holds unedited: it stays, said.
+    Dropped,
+    /// A person changed it and the file changed otherwise: the person's
+    /// stays, said.
+    Conflict,
+}
+
+/// The rule (design 448): `old` is the replaced file's mapped value, `now`
+/// the part's, `new` the new file's.
+pub fn judge(old: Option<&Value>, now: Option<&Value>, new: Option<&Value>) -> Judgement {
+    if new == old {
+        return Judgement::Keep;
+    }
+    if now == old {
+        return if new.is_none() {
+            Judgement::Dropped
+        } else {
+            Judgement::Take
+        };
+    }
+    if now == new {
+        Judgement::Keep
+    } else {
+        Judgement::Conflict
+    }
+}
+
+fn shown(v: Option<&Value>) -> String {
+    match v {
+        None => "nothing".to_owned(),
+        Some(Value::String(s)) => format!("{s:?}"),
+        Some(v) => v.to_string(),
+    }
+}
+
 /// What kind of import a plan is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -286,7 +328,7 @@ pub fn apply(
     project: &Project,
     files: &dyn Source,
     opened: &Opened,
-    _old: Option<&Opened>,
+    old: Option<&Opened>,
     path: &str,
     plan: &mut [Planned],
     mode: Mode,
@@ -329,6 +371,36 @@ pub fn apply(
             for (key, v) in &new.values {
                 if !current.contains_key(key) {
                     merged.insert(key.clone(), v.clone());
+                }
+            }
+        }
+        if mode == Mode::Update {
+            let before = old
+                .and_then(|o| {
+                    let j = source_definition(project, &pl.part, path, o)?;
+                    Some(mapped(o, j, &config, unit, path).values)
+                })
+                .unwrap_or_default();
+            let keys: BTreeSet<&String> = before.keys().chain(new.values.keys()).collect();
+            for key in keys {
+                let (o, n) = (before.get(key), new.values.get(key));
+                match judge(o, current.get(key), n) {
+                    Judgement::Take => {
+                        merged.insert(key.clone(), n.expect("taken values exist").clone());
+                    }
+                    Judgement::Keep => {}
+                    Judgement::Dropped => out.warnings.push(format!(
+                        "import_property_dropped: {}/{key}: {path} no longer gives it; the part keeps {}",
+                        pl.part,
+                        shown(current.get(key))
+                    )),
+                    Judgement::Conflict => out.warnings.push(format!(
+                        "import_property_conflict: {}/{key}: the file had {}, now has {}, and the part holds {}, set since: the part's stays",
+                        pl.part,
+                        shown(o),
+                        shown(n),
+                        shown(current.get(key))
+                    )),
                 }
             }
         }
@@ -884,5 +956,89 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(bucket(&v["transfer"], "properties", "interpreted"), 0);
         assert_eq!(bucket(&v["transfer"], "properties", "failed"), 1);
+    }
+
+    #[test]
+    fn the_three_way_rule() {
+        let (a, b, c) = (json!("a"), json!("b"), json!("c"));
+        use Judgement::*;
+        assert_eq!(
+            judge(Some(&a), Some(&a), Some(&a)),
+            Keep,
+            "the file didn't change"
+        );
+        assert_eq!(
+            judge(Some(&a), Some(&b), Some(&a)),
+            Keep,
+            "a person's, the file unchanged"
+        );
+        assert_eq!(
+            judge(Some(&a), Some(&a), Some(&b)),
+            Take,
+            "unedited: the new value"
+        );
+        assert_eq!(judge(None, None, Some(&b)), Take, "new in the file");
+        assert_eq!(
+            judge(Some(&a), Some(&a), None),
+            Dropped,
+            "gone from the file, kept"
+        );
+        assert_eq!(
+            judge(Some(&a), Some(&c), Some(&b)),
+            Conflict,
+            "both changed"
+        );
+        assert_eq!(
+            judge(Some(&a), Some(&b), Some(&b)),
+            Keep,
+            "both changed alike"
+        );
+        assert_eq!(
+            judge(Some(&a), None, Some(&b)),
+            Conflict,
+            "cleared by a person"
+        );
+        assert_eq!(judge(Some(&a), None, None), Keep, "cleared, and gone");
+    }
+
+    /// The vendor's v1 imported, its stored path; then `before` run.
+    fn updated(before: &dyn Fn(&mut Session)) -> (tempfile::TempDir, Session, Value) {
+        let (dir, mut s) = declared(&[]);
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": vendor_path(false), "solid": true}),
+        )
+        .unwrap();
+        let stored = v["file"]["path"].as_str().unwrap().to_owned();
+        before(&mut s);
+        let u = call(
+            &mut s,
+            "import",
+            json!({"path": vendor_path(true), "update": stored}),
+        )
+        .unwrap();
+        (dir, s, u)
+    }
+
+    #[test]
+    fn an_update_takes_the_files_changes_where_nobody_edited() {
+        let (_dir, mut s, _) = updated(&|s| {
+            call(
+                s,
+                "props.set",
+                json!({"part": "vb-100", "properties": {"yield": 0.9, "wall_thickness": "4 mm"}}),
+            )
+            .unwrap();
+        });
+        let got = values(&mut s, "vb-100");
+        assert_eq!(got["supplier"], "Globex", "unedited, changed in the file");
+        assert_eq!(got["yield"], 0.9, "edited, unchanged in the file");
+        assert_eq!(
+            got["wall_thickness"], "4 mm",
+            "edited and changed: the person's"
+        );
+        assert_eq!(got["batch_size"], 250, "gone from the file: kept");
+        assert_eq!(got["material"], "6061-T6");
     }
 }

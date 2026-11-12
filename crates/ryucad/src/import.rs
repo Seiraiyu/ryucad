@@ -1160,7 +1160,17 @@ fn reimport_opened(
         pdm: root.join(PDM_CONFIG).is_file(),
         mode: ask.mode(),
     };
-    let u = update::plan(project, opened, &file_ref, &fresh)?;
+    let mut u = update::plan(project, opened, &file_ref, &fresh)?;
+    let old_opened = self::opened(&old).ok();
+    let applied = crate::file_props::apply(
+        project,
+        &*session,
+        opened,
+        old_opened.as_deref(),
+        &target,
+        &mut u.planned,
+        crate::file_props::Mode::Update,
+    );
     let mut writes = plan::writes(project, &u.planned)?;
     if old.blake3 != file.blake3 {
         writes.insert(target.clone(), Some(file.bytes.to_vec()));
@@ -1177,6 +1187,7 @@ fn reimport_opened(
             "import_usage_missing: {p}/{f}'s body is gone from {target}, but another feature reads it, so it stays"
         ));
     }
+    warnings.extend(applied.warnings.iter().cloned());
     // What builds now and wouldn't after, from the files as they would be.
     let now = failing(session)?;
     let mut proposed = session.proposed(&writes)?;
@@ -1221,7 +1232,7 @@ fn reimport_opened(
     };
     if ask.dry_run {
         let parts = parts_report(&mut proposed, opened, &u.planned)?;
-        let transfer = transfer_of(opened, &target, &u.planned, &parts, &[]);
+        let transfer = transfer_of(opened, &target, &u.planned, &parts, &applied.instances);
         return Ok(extra(
             answer(head, opened, parts, warnings, true, transfer),
             None,
@@ -1247,7 +1258,7 @@ fn reimport_opened(
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &current)?;
     let parts = parts_report(session, opened, &u.planned)?;
-    let transfer = transfer_of(opened, &target, &u.planned, &parts, &[]);
+    let transfer = transfer_of(opened, &target, &u.planned, &parts, &applied.instances);
     Ok(extra(
         answer(head, opened, parts, warnings, false, transfer),
         Some(assemblies),

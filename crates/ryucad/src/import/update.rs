@@ -515,6 +515,16 @@ pub fn plan(
             (r.clone(), parts)
         })
         .collect();
+    let assemblies: BTreeSet<usize> = planned
+        .values()
+        .filter(|p| p.kind == PartKind::Assembly)
+        .filter_map(|p| p.definition)
+        .collect();
+    for p in planned.values_mut() {
+        p.props_of = p
+            .definition
+            .filter(|k| p.kind == PartKind::Assembly || !assemblies.contains(k));
+    }
     Ok(Update {
         planned: planned.into_values().chain(made).chain(flattened).collect(),
         vanished,
@@ -623,7 +633,20 @@ fn reflatten(
             features,
             removed,
             properties: BTreeMap::new(),
-            props_of: None,
+            props_of: {
+                let makes = plan::makes(opened);
+                let roots: Vec<usize> = opened
+                    .products
+                    .roots
+                    .iter()
+                    .copied()
+                    .filter(|&k| makes[k])
+                    .collect();
+                match roots.as_slice() {
+                    [k] => Some(*k),
+                    _ => None,
+                }
+            },
         },
         kept,
     ))
