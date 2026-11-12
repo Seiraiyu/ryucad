@@ -406,7 +406,8 @@ pub fn cache_text(stats: Option<&serde_json::Value>) -> String {
 /// Tools > Check interference: the pairs of the shown assembly's solids
 /// that share a volume, each with a Show button (the pair's touched
 /// faces, to frame), how many only touch, and those that couldn't be
-/// checked. Returns the faces to frame when Show is pressed.
+/// checked. Stale once the assembly changes, until Check again. Returns
+/// the faces to frame when Show is pressed.
 pub fn interference(
     ctx: &egui::Context,
     ws: &mut Workspace,
@@ -425,6 +426,12 @@ pub fn interference(
             };
             ui.label(format!("Assembly {}", i.part));
             again = ui.button("Check again").clicked();
+            if i.stale {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "The assembly changed since this check.",
+                );
+            }
             ui.separator();
             if !i.loaded {
                 ui.spinner();
@@ -440,7 +447,7 @@ pub fn interference(
             for p in &i.pairs {
                 ui.horizontal(|ui| {
                     ui.label(p.label(&i.part));
-                    if ui.small_button("Show").clicked() {
+                    if !i.stale && ui.small_button("Show").clicked() {
                         show = Some(p.faces.clone());
                     }
                 });

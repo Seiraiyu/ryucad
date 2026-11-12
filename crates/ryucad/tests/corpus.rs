@@ -2,8 +2,8 @@
 //! CLI by the scripts beside them in `tests/corpus`, committed, each
 //! rebuilt and checked from nothing against `tests/corpus/manifest.json`
 //! (per part what builds and what fails with which code, each solid's
-//! hash and counts, each assembly's occurrences and solve, and `check`'s
-//! findings by code); and, when `scripts/fetch-corpus.sh` has fetched
+//! hash and counts, each assembly's occurrences and solve, and `check
+//! --interference`'s findings by code); and, when `scripts/fetch-corpus.sh` has fetched
 //! them, openly licensed STEP assemblies pinned in
 //! `tests/corpus/pinned.txt`, imported into a new project each, which
 //! must build no fewer parts than recorded there (the `slow` ones only
@@ -112,7 +112,9 @@ fn summary(root: &Path) -> Value {
         }
         parts.insert(p["part"].as_str().unwrap().into(), row);
     }
-    let checked = report(call(&mut s, "check", json!({})));
+    // Interference runs only when asked (design 525): the manifest
+    // records it, so the corpus asks.
+    let checked = report(call(&mut s, "check", json!({"interference": true})));
     let mut codes = Map::new();
     for f in checked["findings"].as_array().unwrap() {
         let code = f["code"].as_str().unwrap().to_owned();
