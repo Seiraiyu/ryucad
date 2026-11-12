@@ -217,3 +217,101 @@ fn blends_round_trip() {
         blend(OpKey(9), &case.body, &case.blends).ok().map(|x| x.0)
     });
 }
+
+/// Seeded sweeps with seeded paints (a colour each, an opacity on a
+/// thousandth grid, every third face its own): written and read back,
+/// the same styles as a reader composes them (a face's opacity its own or
+/// its body's); the geometry instances the same as unpainted.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn styles_round_trip() {
+    for seed in 0..64u64 {
+        let Some(body) = sweep(&seeded(seed, 96))
+            .map(|x| x.0)
+            .filter(|b| b.faces().next().is_some())
+        else {
+            continue;
+        };
+        if ryustep::write(
+            &ryustep::WriteModel {
+                products: vec![ryustep::Product {
+                    id: "p".into(),
+                    bodies: vec![body.clone()],
+                    ..Default::default()
+                }],
+            },
+            &Default::default(),
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let paint = |k: u64| ryustep::Paint {
+            colour: [
+                (k * 37 % 256) as u8,
+                (k * 91 % 256) as u8,
+                (k * 13 % 256) as u8,
+            ],
+            opacity: ((k % 1000) + 1) as f64 / 1000.0,
+        };
+        let faces: Vec<_> = body
+            .faces()
+            .map(|f| body.face(f).unwrap().name)
+            .enumerate()
+            .filter(|(i, _)| i.is_multiple_of(3))
+            .map(|(i, n)| (n, paint(seed * 100 + i as u64)))
+            .collect();
+        let model = ryustep::WriteModel {
+            products: vec![ryustep::Product {
+                id: "p".into(),
+                bodies: vec![body],
+                ..Default::default()
+            }],
+        };
+        let paints = ryustep::Paints {
+            bodies: vec![ryustep::BodyPaint {
+                product: 0,
+                body: 0,
+                base: Some(paint(seed)),
+                faces: faces.clone(),
+            }],
+            occurrences: Vec::new(),
+        };
+        let opts = ryustep::WriteOptions::default();
+        let w = ryustep::write_styled(&model, &[], &paints, &opts).unwrap();
+        let plain = ryustep::part21::parse(&ryustep::write(&model, &opts).unwrap()).unwrap();
+        let styled = ryustep::part21::parse(&w.bytes).unwrap();
+        assert_eq!(
+            format!("{:?}", &styled.instances[..plain.instances.len()]),
+            format!("{:?}", plain.instances),
+            "seed {seed}"
+        );
+        let o = ryustep::open(&w.bytes).unwrap();
+        let s = o.body_styles(0);
+        let base = paint(seed);
+        assert_eq!(
+            s.body,
+            Some(ryustep::styles::Style {
+                colour: Some(base.colour),
+                opacity: Some(base.opacity).filter(|o| *o < 1.0),
+            }),
+            "seed {seed}"
+        );
+        // A face's style composes over its body's, field by field: its
+        // opacity is its own or the body's.
+        let want: Vec<_> = faces.iter().map(|(_, p)| (p.colour, p.opacity)).collect();
+        let body_opacity = s.body.and_then(|b| b.opacity);
+        let mut got: Vec<_> = s
+            .faces
+            .values()
+            .map(|f| (f.colour.unwrap(), f.opacity.or(body_opacity).unwrap_or(1.0)))
+            .collect();
+        let mut want = want;
+        got.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        want.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        assert_eq!(got, want, "seed {seed}");
+    }
+}

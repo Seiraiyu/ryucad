@@ -77,12 +77,7 @@ pub fn show(
     if o.ws.lost && id != "viewport" {
         ui.disable();
     }
-    let part = o
-        .view
-        .chosen
-        .as_ref()
-        .map(|k| k.0.clone())
-        .or_else(|| o.ws.model.parts.keys().next().cloned());
+    let part = o.ws.model.followed_part(o.view.chosen.as_ref());
     let scroll = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
         egui::ScrollArea::vertical()
             .id_salt(("tile", ui.scope_id()))
@@ -101,7 +96,12 @@ pub fn show(
         "viewport" => {
             // The compare bar stays above the viewport, inside its tile.
             // Not over a draft: the mode bar says what is drawn.
-            if o.compare_with.is_some() || o.ws.compare.as_ref().is_some_and(|c| c.to.is_none()) {
+            if o.compare_with.is_some()
+                || o.ws
+                    .compare
+                    .as_ref()
+                    .is_some_and(|c| c.to.is_none() || c.swapped.is_some())
+            {
                 panels::compare_bar(ui, &mut o.ws, &mut o.compare_with);
                 ui.separator();
             }

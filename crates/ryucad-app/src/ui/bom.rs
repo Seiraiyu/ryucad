@@ -72,9 +72,9 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
     if let Some(c) = &ws.compare {
         match (ws.bom.summary(), &ws.bom.diff_error) {
-            (Some(s), _) => ui.label(format!("Compared with {}: {s}", c.rev)),
+            (Some(s), _) => ui.label(format!("Compared with {}: {s}", c.named())),
             (None, Some(e)) => {
-                ui.colored_label(error, format!("No BOM at {}: {}", c.rev, e.message))
+                ui.colored_label(error, format!("No BOM at {}: {}", c.named(), e.message))
             }
             (None, None) => ui.spinner(),
         };
@@ -341,10 +341,12 @@ pub fn where_used(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
                 });
             }
         }
-        // No token: nothing to sign in with, so no section.
-        Some(Err(e)) if e.code == ryucad::error::Code::ReviewUnauthenticated => {}
+        // No token: nothing to sign in with, so no section; no service
+        // for the project said plainly (#751).
         Some(Err(e)) => {
-            ui.weak(format!("Organization: {}", e.message));
+            if let Some(line) = crate::core::where_used::org_failure(e) {
+                ui.weak(line);
+            }
         }
         None => {}
     }

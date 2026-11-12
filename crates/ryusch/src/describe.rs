@@ -292,6 +292,7 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
             "area_mm": [mm(area[0]), mm(area[1])],
             "extent": crate::lint::extent(block, layout, sid),
             "fill": crate::lint::fill(block, layout, sid),
+            "fill_target": crate::lint::FILL_TARGET,
         });
         let notes: Vec<Value> = layout
             .notes
@@ -339,13 +340,14 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
         .instructions
         .iter()
         .map(|(id, i)| {
-            let verdict = instr::judge(block, layout, i);
+            let verdict = instr::verdict(block, layout, id, i);
             let mut v = json!({
                 "id": id,
                 "instruction": i,
-                "holds": verdict.is_ok(),
+                "holds": verdict == instr::Verdict::Held,
+                "state": verdict.state(),
             });
-            if let Err(why) = verdict {
+            if let Some(why) = verdict.why() {
                 v["why"] = json!(why);
             }
             v

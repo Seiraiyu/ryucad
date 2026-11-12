@@ -305,3 +305,38 @@ Design 348, phase 8; plan 2.G (doc 500); report 512.
   - `images.sh` renders every sheet before and after, and writes `pairs.json`.
   - The review's seed is 348.
 - **The result.** Every bar of the stage holds, and round 3's sessions improved every circuit (3 – 0 each). Design 348's reference target was not met: ours is the same or better on 1 of 4, with the reference ahead by 1.5 on grouping and 1.9 on paper, down from 3 and 3 in plan 1.D. The verdict is the owner's, in report 512.
+
+## Formatter follow-ups (decided in ryueda phase 3)
+
+The design is document 519 in the Coxswain planning project `ryucad-ryukei`; this is its plan 3.A (phase 1).
+
+- **The op-amp.** The front end's OPA1612 and OPA1622 are the op-amp template's (`docs/claude/ryueda.md`, Templates), with no separate power unit. On a stage amplifier whose supply is on top, ryusch stands that supply's decoupling capacitor inside the stage's feedback loop and lifts the feedback over it (`idiom::CAP_LIFT`), because outside the loop its wire would cross the loop. The owner approved the look in visual 01M771J6GH77WPEASPD1YZAEXT.
+  - **The stage round its amplifier** (the review of 6d913d4a: a stage drawn off its amplifier is a failure to fix, not a threshold). The feedback elements stand in one column, cleared upwards; over the supply's capacitor they stand a stack apart (`idiom::STACK`, 3 steps body to body, the lower one's text beside it), so the outer one stays within `lint::IDIOM_REACH`. A divider on a stage amplifier's sideways pin (a difference amplifier's IN+) hangs its bottom, and the pin's pull-downs, from the pin's own line a slot apart (the widest drop's room and a step), and runs its top on along the line, in one column with the stage's input resistor on IN-'s; standing up, the top crossed IN-'s line. Those drops clear the others' bodies only. Dividers elsewhere stand as before: amp's, in line, cost 4 points.
+- **Held, pulled, not held.** `instr::verdict` reports each lasting instruction's `state` beside `holds`. `pulled` means not held, but its parts stand nearer what it asks than they did before it, by `instr::shortfall` (past the idiom reach, by `judge`'s boxes; for `group` and a network the widest link of the chain). Before means the places `Layout::before` keeps, so the state survives a reload.
+- **One test of holding.** `instr::achieved` asks `judge` for `beside`, `group`, `edge` and `near` to a part, so the engine acts on what the report calls not held.
+- **An instruction that doesn't hold moves nothing.** Over a previous layout, a `beside`, `near`, `group` or `edge` new in the batch (lasting, or a move) that ends neither held nor pulled is laid out without, moves nothing, and is noted `instruction_unresolved` with its why. The blocker the first try met is kept.
+- **A dry run is the commit.** `testing::check_fixpoint`, the seeded sweep's second test, checks that a layout reads back from its file's form as itself and that laid out over itself it changes nothing. It found five causes, all fixed in the engine:
+  - named regions keep the clusters they took;
+  - `region none` parts stay out of named regions (in the fresh path, `regions_follow` and `frames`' joins);
+  - a named region is made per sheet;
+  - a part placed by itself takes its region instruction's title;
+  - a bypass capacitor keeps its own rail port;
+  - a lasting `net … wire` already drawn by labels isn't asked anew.
+
+  `schematic_corpus`'s `a_dry_run_is_the_commit` checks the dry run, the write and the next read through the CLI.
+- **`region <id> title "<text>"`.** A lasting instruction (`Instruction::Title`, layout format 5), applied by ID once the regions are made, so the batch that makes a region can title it. A gone ID gets `region_unresolved` and the instruction is kept. Two titles for one region are `instruction_conflict`. A title is 1 to 60 characters, one line. `region rename R T` reads as it. In `frames`' joins an agent-named region outranks a titled one, which outranks a proposed one. `named_regions` matches a named region that a title retitles. `place --help` lists every form of `vocab::FORMS` (`place_help_lists_every_form`).
+- **Titles by function.** A leftover group with no function is titled by the idiom kind covering at least half its parts (`region::idiom_title`: I2C/SPI/USB pull-ups by the pulled nets' bus through `bus_of`, `<anchor> decoupling`, Divider, Indicator, Filter, …), else it is untitled: never a net's name or Misc. An untitled region is framed with no tab (`Item::Frame`'s `title_tab` is `None`). `sch_region_untitled` judges `""` and `Misc`.
+- **One-part regions.** A leftover (`Basis::Rest`) region of one part joins the region on its sheet it shares the most signal nets with. A connector's, an IC's or a circuit's region of one part stays: joining those took the RP2040's first sheet from 43 to 5.
+- **Fixes that cost.** `lint::try_fix` takes the block's findings and refuses a fix that doesn't lower the block's points (every sheet, every rule). `describe` and ERC list such fixes under the finding's `withheld`, each with why (round 3's `net SCL label`).
+- **The fill target.** `lint::FILL_TARGET` = 115 per mille, the least reference's fill. `sch_paper_fit` judges a sheet under it where a smaller paper of the series is on offer (fix: a relayout), or, on the smallest paper, where another sheet's drawing fits beside it (fix: `sheet <that sheet's regions and parts> <this sheet's name>`, tried like any fix). `describe` gives `fill_target` beside `fill`.
+- **The figures.** Measured on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads, shared, load 3 to 4) on 2026-11-12, laid out from nothing:
+  - breakout 84 and 98, RP2040 43/78/98, buck 25 (was 27), front end amp 94 (was 100), baldiff 90 (was 47; 40 before the stage was drawn round its amplifier), ivconv 92 (was 78), Ethernet 63 and 97;
+  - 7 floating parts (bar 10), crossings within each reference's bar (the front end's 2).
+  - buck's 2 points: the join took R7's VSNS region into the converter's, which swapped `Misc`'s `sch_region_untitled` for r3's ("has no title") at no cost; the whole 2 points are J4's new `sch_out_of_line`, from the changed packing.
+
+  Thresholds: amp 89 (its three untitled regions; titled it scores 100, `amp_titled_scores_full`), baldiff 85, ivconv 87 (each measured less 5).
+- **Limits.**
+  - Titles are by ID, so a relayout from nothing that renumbers regions may title another one (`region_unresolved` when the ID is gone).
+  - One-part regions placed over a previous layout (`new_region`) aren't joined.
+  - A lone sheet on the series' smallest paper isn't judged by the fill target; no corpus sheet gets the gathering finding today.
+  - A divider's top past wider drops than the template's capacitors may stand past `IDIOM_REACH` (the unit test's capacitors put it 20 steps out; the front end's is 15).

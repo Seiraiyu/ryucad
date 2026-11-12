@@ -604,6 +604,12 @@ pub fn appearance(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
             if r.drag_stopped() || (r.changed() && !r.dragged()) {
                 write = Some("opacity");
             }
+            if e.from_file {
+                ui.label("From the STEP file");
+                ui.weak(
+                    "A colour set here is drawn over it; ryucad colour <part> --no-file-styles leaves the file's colours out.",
+                );
+            }
             ui.horizontal(|ui| {
                 if ui.button("Use material colour").clicked() {
                     write = Some("material");

@@ -30,7 +30,8 @@ pub fn state(o: &mut Opened) -> State {
         assembly_shown: o.ws.shown_assembly().is_some(),
         planar_face: o.view.selected_face(&o.ws).is_some(),
         weighable: o.ws.mass_target().is_some(),
-        comparing: o.ws.compare.as_ref().map(|c| c.rev.clone()),
+        comparing: o.ws.compare.as_ref().map(|c| c.named().to_owned()),
+        blink: o.ws.blink.clone(),
         edges: o.view.edges,
         sketches: o.view.sketches,
         datums: o.view.datums,
@@ -49,11 +50,7 @@ pub fn state(o: &mut Opened) -> State {
         annotations: o.view.annotations,
         flat: o.ws.flat_view.is_some(),
         flattenable: o.ws.flat_candidate(o.view.chosen.as_ref()).is_some(),
-        movable: o
-            .ws
-            .myself()
-            .and_then(|m| m.selection.first().cloned())
-            .and_then(|r| movable_of(&o.ws, &r)),
+        movable: move_target(&o.ws, o.view.chosen.as_ref()),
         moving: o.ws.mover.is_some(),
         mating: o.ws.mating.is_some(),
         marking: o.ws.markup.as_ref().map(|m| m.tool),
@@ -71,6 +68,30 @@ pub fn movable_of(
     let rest = reference.strip_prefix(&asm)?.strip_prefix('/')?;
     let instance = rest.split('/').next().filter(|i| !i.is_empty())?;
     Some(ws.model.movable(&(asm.clone(), format!("{instance}/"))))
+}
+
+/// What Move acts on: the first selected entity's instance, else the
+/// instance chosen in the tree, by its row or a whole-body pick (#753).
+pub fn move_target(
+    ws: &crate::core::workspace::Workspace,
+    chosen: Option<&crate::core::model::BodyKey>,
+) -> Option<Result<(String, String), String>> {
+    let selected = ws
+        .myself()
+        .and_then(|m| m.selection.first().cloned())
+        .and_then(|r| movable_of(ws, &r));
+    if selected.is_some() {
+        return selected;
+    }
+    let (part, feature) = chosen?;
+    // A mate's or pattern's row isn't an instance.
+    ws.model
+        .parts
+        .get(part)?
+        .feature(feature)?
+        .instance
+        .as_ref()?;
+    movable_of(ws, &format!("{part}/{feature}"))
 }
 
 /// One choice of a submenu command.
@@ -376,6 +397,9 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "view.compare_head" => o.ws.set_compare(Some("HEAD".to_owned())),
         "view.compare_with" => o.compare_with = Some(String::new()),
         "view.compare_stop" => o.ws.set_compare(None),
+        "view.compare_swap" => o.ws.swap_compare(),
+        "view.compare_only_rev" => o.ws.compare_only(crate::core::compare::Front::Rev),
+        "view.compare_only_working" => o.ws.compare_only(crate::core::compare::Front::Working),
         "measure.tool" => {
             let on = !o.ws.measure.on;
             o.ws.measure.set(on);
@@ -510,6 +534,12 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 Some(_) => None,
                 None => Some(crate::ui::palette::Palette::default()),
             };
+        }
+        "project.switch_branch" => {
+            o.ws.load_branches();
+            o.palette = Some(crate::ui::palette::Palette::with_query(
+                crate::core::palette::BRANCHES,
+            ));
         }
         "project.settings" => o.dialogs.settings = true,
         "project.doctor" => {

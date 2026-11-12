@@ -17,13 +17,14 @@ pub use ryu_part21 as part21;
 pub mod products;
 pub mod read;
 pub mod schema;
+pub mod styles;
 pub mod write;
 
 pub use error::{ImportError, StepError, WriteError};
 pub use read::{Held, Imported, Model, Opened, ReadOptions, Referenced, open, read};
 pub use write::{
-    Approximated, Child, LengthUnit, Passed, Product, WriteModel, WriteOptions, Written, write,
-    write_report, write_with,
+    Approximated, BodyPaint, Child, LengthUnit, OccurrencePaint, Paint, Paints, Passed, Product,
+    WriteModel, WriteOptions, Written, write, write_report, write_styled, write_with,
 };
 
 /// This crate's version, which a released ryucad's cache identity names.

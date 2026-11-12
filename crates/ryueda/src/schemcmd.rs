@@ -350,32 +350,6 @@ pub fn place(
                 }
             }
             Said::RenameSheet { from, to } => renames.push((i, from, to)),
-            Said::RenameRegion { region, title } => {
-                // A lasting `region <title> <its parts now>`, replacing a
-                // region instruction that names only its parts.
-                let parts: Vec<String> = match &b.layout {
-                    Some(Ok(l)) => l.regions.get(&region).map(|r| r.parts.clone()),
-                    _ => None,
-                }
-                .unwrap_or_default();
-                let within: Vec<String> = lasting
-                    .iter()
-                    .filter(|(_, ins)| {
-                        matches!(ins, Instruction::Region { parts: named, .. }
-                            if named.iter().all(|k| parts.contains(k)))
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in within {
-                    lasting.remove(&id);
-                    released.push(id);
-                }
-                let ins = Instruction::Region { title, parts };
-                let id = ryusch::layout::next_id(lasting.keys());
-                lasting.insert(id.clone(), ins);
-                added.push(id.clone());
-                batch.push((id, text.clone()));
-            }
             Said::Do(Instruction::Shift { .. }) => {
                 return Err(
                     Error::new(Code::InvalidParam, "shift is a move: give it with --move")
@@ -402,16 +376,16 @@ pub fn place(
             .read(text)
             .map_err(|e| e.with("move", i).with("text", text.as_str()))?
         {
+            Said::Do(Instruction::Title { .. }) | Said::Release(_) | Said::RenameSheet { .. } => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "release, sheet rename and a region's title are instructions, not moves",
+                )
+                .with("move", i));
+            }
             Said::Do(ins) => {
                 move_list.push(ins);
                 batch.push((format!("move {}", i + 1), text.clone()));
-            }
-            Said::Release(_) | Said::RenameSheet { .. } | Said::RenameRegion { .. } => {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    "release, sheet rename and region rename are instructions, not moves",
-                )
-                .with("move", i));
             }
         }
     }
@@ -661,16 +635,17 @@ fn listing(names: &Names, laid: &Laid) -> Vec<Value> {
         .instructions
         .iter()
         .map(|(id, i)| {
-            let verdict = ryusch::instr::judge(&laid.built.input, &laid.outcome.layout, i);
+            let verdict = ryusch::instr::verdict(&laid.built.input, &laid.outcome.layout, id, i);
             let mut v = json!({
                 "id": id,
                 "text": names.text(i),
-                "holds": verdict.is_ok(),
+                "holds": verdict == ryusch::instr::Verdict::Held,
+                "state": verdict.state(),
             });
-            if let Err(why) = verdict {
+            if let Some(why) = verdict.why() {
                 v["why"] = json!(match blocker(laid, i) {
                     Some(b) => format!("{why}; {b}"),
-                    None => why,
+                    None => why.to_owned(),
                 });
             }
             v
@@ -763,7 +738,7 @@ fn block_description(
     let (_, scores) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
     // Every fix tried by a dry run first: those that don't hold aren't
     // offered.
-    let (findings, checked) = schem::checked_findings(laid, &prefs);
+    let (findings, checked, withheld) = schem::checked_findings(laid, &prefs);
     let mut d = ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
     let unchecked: Vec<(&str, &str, &Vec<String>)> = findings
         .iter()
@@ -797,6 +772,26 @@ fn block_description(
                         f["fixes_checked"] = json!(false);
                     }
                     names.fixes_in(f);
+                    // Fixes withheld for their cost, each with why (plan
+                    // 3.A).
+                    let held: Vec<Value> = findings
+                        .iter()
+                        .zip(&withheld)
+                        .filter(|(x, w)| {
+                            !w.is_empty()
+                                && f["code"] == x.code
+                                && x.sheet == sid
+                                && f["refs"] == json!(x.refs)
+                        })
+                        .flat_map(|(_, w)| w.iter())
+                        .map(|(batch, why)| {
+                            let text = names.fixes(std::slice::from_ref(batch));
+                            json!({"fix": text.first().cloned().unwrap_or_default(), "why": why})
+                        })
+                        .collect();
+                    if !held.is_empty() {
+                        f["withheld"] = json!(held);
+                    }
                 }
             }
         }

@@ -134,10 +134,16 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
                 .striped(true)
                 .show(ui, |ui| {
                     for r in &d.rows {
-                        ui.strong(r.title())
-                            .on_hover_text(format!("{}\n{}", r.project, r.url));
+                        // Where it comes from, said, not only on hover (#752).
+                        ui.vertical(|ui| {
+                            ui.strong(r.title()).on_hover_text(&r.project);
+                            ui.weak(r.source());
+                        });
                         ui.label(r.state());
                         ui.vertical(|ui| {
+                            if r.labels.is_empty() {
+                                ui.weak("no label locked");
+                            }
                             for l in &r.labels {
                                 match &l.outdated {
                                     Some(_) => {

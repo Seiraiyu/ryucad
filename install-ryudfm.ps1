@@ -59,6 +59,24 @@ function Install-Ryudfm {
         if ($token) { return "could not reach ${what}: no such release, or the token cannot read $repo" }
         return "could not reach $what. If the repository is private, set GH_TOKEN or run 'gh auth login' first"
     }
+    # A running .exe can't be overwritten or deleted, but can be renamed. Each
+    # upgrade moves the old one to a name of its own, since an earlier
+    # upgrade's copy may still be running (a window left open) and Move-Item
+    # can't replace a file in use (#725), and deletes whatever earlier
+    # upgrades left that no longer runs; the rest goes next time.
+    function Clear-OldCopy($path) {
+        $leaf = Split-Path -Leaf $path
+        foreach ($f in @(Get-ChildItem -Force -LiteralPath (Split-Path $path) -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Name -like "$leaf*.old" })) {
+            Remove-Item -Force -LiteralPath $f.FullName -ErrorAction SilentlyContinue
+        }
+    }
+    function Move-Aside($path) {
+        if (Test-Path -LiteralPath $path) {
+            $aside = "$path." + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '.old'
+            Move-Item -Force -LiteralPath $path -Destination $aside
+        }
+    }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("ryudfm-install-" + [Guid]::NewGuid())
     New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -132,12 +150,11 @@ function Install-Ryudfm {
         $bin = Join-Path $home_ 'bin'
         New-Item -ItemType Directory -Force -Path $bin | Out-Null
         $exe = Join-Path $bin 'ryudfm.exe'
-        $old = "$exe.old"
         if (Test-Path $exe) { & $exe daemon stop --all *> $null }
-        Remove-Item -Force $old -ErrorAction SilentlyContinue
-        if (Test-Path $exe) { Move-Item -Force $exe $old }
+        Clear-OldCopy $exe
+        Move-Aside $exe
         Copy-Item (Join-Path $tmp "ryudfm-$version-$target\ryudfm.exe") $exe
-        Remove-Item -Force $old -ErrorAction SilentlyContinue
+        Clear-OldCopy $exe
 
         # PATH: the user's, which needs no admin rights, and this session's.
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

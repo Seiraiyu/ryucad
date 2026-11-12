@@ -1,6 +1,7 @@
 //! The validity checker for meshes.
 
 use super::BodyMesh;
+use crate::geom::Point3;
 use crate::predicates::{Sign, orient2d};
 use crate::topo::{Body, EdgeId, FaceId, Sense};
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,9 +29,33 @@ pub enum MeshCheckFault {
     EdgeEnds { edge: EdgeId },
 }
 
+/// The largest height of a sliver, as a fraction of its longest side.
+/// A strip's triangles span its width, below the chord, along segments
+/// many times longer: KiCad's 16 Coilcraft coils' inverted ones reach
+/// 0.0115, the crossing sliver's 0.0138. Only faces the mesher drew as
+/// strips are excused at all; this bound keeps a strip's fold from
+/// passing too.
+const SLIVER: f64 = 1.0 / 32.0;
+
+/// Whether a triangle's height (twice its area over its longest side) is
+/// at most `SLIVER` of its longest side. A guard on what `check_mesh`
+/// excuses, not a classification of geometry, so floats are enough.
+fn sliver([a, b, c]: [Point3; 3]) -> bool {
+    let longest2 = (b - a)
+        .dot(b - a)
+        .max((c - b).dot(c - b))
+        .max((a - c).dot(a - c));
+    let twice_area = (b - a).cross(c - a).length();
+    // height <= SLIVER * longest, i.e. twice_area <= SLIVER * longest².
+    twice_area <= SLIVER * longest2
+}
+
 /// Checks a mesh against the body it was made from: indices in range,
-/// every face's triangles on its own corners, wound with its parameters,
-/// without degenerate triangles, every welded edge used by exactly two
+/// every face's triangles on its own corners, wound with its parameters
+/// (but for a sliver, a triangle whose height is at most `SLIVER` of its
+/// longest side, on a face drawn as a strip, [`super::FaceMesh::strip`]:
+/// one narrower than its segments' sagitta), without degenerate
+/// triangles, every welded edge used by exactly two
 /// triangles in opposite directions (once, on a laminar edge of a sheet),
 /// and edge polylines from vertex to
 /// vertex. A mesh with face faults fails here with the holes they leave.
@@ -41,10 +66,17 @@ pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault
         out.push(MeshCheckFault::IndexOutOfRange);
         return Err(out);
     }
+    // A face drawn as a strip may have slivers inverted in its parameters
+    // where its sides come closer than their segments' sagitta, or cross
+    // (#598). Only those are excused: a fold of any other face (a diagonal
+    // flipped) keeps every edge used once each way, so only this test
+    // catches it, however thin the fold.
     let (mut next_corner, mut next_triangle) = (0, 0);
     for fm in &mesh.faces {
         if fm.corners.start != next_corner
             || fm.triangles.start != next_triangle
+            || fm.corners.start > fm.corners.end
+            || fm.triangles.start > fm.triangles.end
             || fm.corners.end as usize > mesh.corners.len()
             || fm.triangles.end as usize > mesh.triangles.len()
         {
@@ -71,7 +103,12 @@ pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault
             } else {
                 Sign::Positive
             };
-            if orient2d(a.uv, b.uv, c.uv) != want {
+            if orient2d(a.uv, b.uv, c.uv) != want
+                && !(fm.strip
+                    && sliver(
+                        tri.map(|i| mesh.positions[mesh.corners[i as usize].position as usize]),
+                    ))
+            {
                 out.push(MeshCheckFault::Inverted {
                     face: fm.face,
                     triangle: t,

@@ -161,6 +161,25 @@ pub struct Written {
     pub skipped: Vec<String>,
     /// What a STEP export left out, a line each (design 448).
     pub omitted: Vec<String>,
+    /// The answer's warnings in words (a sheet written as its mesh alone),
+    /// but for the failing features `skipped` lists.
+    pub warnings: Vec<String>,
+}
+
+/// An answer's warnings as lines, but `export_skipped`'s: `skipped` says
+/// those.
+fn warnings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|w| w["code"] != "export_skipped")
+        .map(|w| match w {
+            Value::String(s) => s.clone(),
+            w => w["message"]
+                .as_str()
+                .map_or_else(|| w.to_string(), str::to_owned),
+        })
+        .collect()
 }
 
 /// A face the export couldn't write, as a refusal names it: its
@@ -308,6 +327,7 @@ impl Export {
             mesh: usd.then_some(c.mesh),
             pipe_tolerance: None,
             skip_failing: c.skip_failing,
+            appearance: None,
             solid: self.sheet.clone().filter(|s| dxf && !s.is_empty()),
             notes: dxf.then_some(c.notes),
             fixed: None,
@@ -341,6 +361,7 @@ impl Export {
                         .flatten()
                         .filter_map(|o| o["summary"].as_str().map(str::to_owned))
                         .collect(),
+                    warnings: warnings(&v["warnings"]),
                 });
             }
             Err(e) => {
@@ -439,6 +460,21 @@ mod tests {
     use super::*;
     use ryucad::error::Code;
     use serde_json::json;
+
+    #[test]
+    fn an_answers_warnings_are_shown_but_skips_once() {
+        let mut e = Export::new("srft", Choices::default());
+        e.answered(Ok(
+            json!({"out": "/tmp/s.usda", "bytes": 9, "blake3": "ab", "warnings": [
+            {"code": "export_sheet_brep_skipped", "solid": "srft/w",
+             "message": "srft/w is a sheet: written as its mesh alone, with no BrepArray"},
+            {"code": "export_skipped", "part": "srft", "feature": "x", "message": "m"}]}),
+        ));
+        assert_eq!(
+            e.done.unwrap().warnings,
+            ["srft/w is a sheet: written as its mesh alone, with no BrepArray"]
+        );
+    }
 
     #[test]
     fn a_shown_drawing_is_offered_and_exported_by_drawing_export() {
@@ -604,6 +640,7 @@ mod tests {
                 triangles: Some(14),
                 skipped: vec![],
                 omitted: Vec::new(),
+                warnings: vec![],
             })
         );
         // STEP writes no meshes, so no triangles.

@@ -5,6 +5,10 @@
 // paths, so ryupdm can read projects without the rest of ryucad.
 pub use ryucad_doc::{doc, error, expr, units};
 
+// The CLI (`cli.rs`) names this crate `ryucad::…`, as it did while it was
+// the binary's own module; this keeps those paths (ryucad 27.A).
+extern crate self as ryucad;
+
 /// The version of the shape of the JSON that `check`, `diff`, `inspect`,
 /// `release list` and `mesh` give (`"schema"` in each); `bom`, `bom diff`
 /// and `where-used` give ryupdm's ([`ryupdm::bom::SCHEMA`]), by the same
@@ -53,11 +57,13 @@ pub mod bench;
 pub mod blends;
 pub mod body;
 pub mod bom;
+pub mod branch;
 pub mod budget;
 pub mod cache;
 pub mod cancel;
 pub mod check;
 pub mod clearance;
+pub mod cli;
 pub mod client;
 pub mod config;
 pub mod connector;
@@ -74,6 +80,7 @@ pub mod entity;
 pub mod equations;
 pub mod explode;
 pub mod export;
+pub mod file_styles;
 pub mod geometry;
 pub mod git;
 pub mod graph;
@@ -96,6 +103,7 @@ pub mod param;
 pub mod path;
 pub mod pattern;
 pub mod pdm;
+pub mod process;
 pub mod profile;
 pub mod proto;
 pub mod rebuild;

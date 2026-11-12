@@ -128,7 +128,8 @@ pub struct Held {
     pub definition: Option<usize>,
     /// Its B-rep items' instance numbers, ascending.
     pub items: Vec<Id>,
-    /// The name of its first solid item that has one (empty for none):
+    /// The name of its first solid or surface model item that has one
+    /// (empty for none):
     /// ryucad writes each solid's ID there (#412).
     pub name: String,
 }
@@ -144,11 +145,14 @@ pub struct Opened {
     pub held: Vec<Held>,
     /// For each of `held`, the first that holds the same items in the
     /// same context: the one whose body it is.
-    first: Vec<usize>,
-    entities: Entities,
+    pub(crate) first: Vec<usize>,
+    pub(crate) entities: Entities,
     /// Every instance of the file by category (design 448): what a
     /// transfer report counts.
     pub census: crate::census::Census,
+    /// Its styled items, read the first time they are asked for
+    /// ([`crate::styles`]): a file opened to build bodies never reads them.
+    pub(crate) styles: std::sync::OnceLock<crate::styles::Styles>,
 }
 
 /// Parses and decodes the STEP file `bytes` and reads its product tree,
@@ -189,9 +193,10 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
                 .items
                 .iter()
                 .find_map(|&i| match entities.get(i, i) {
-                    Ok(crate::schema::Entity::Brep(crate::schema::Brep::Solid {
-                        name, ..
-                    })) if !name.is_empty() => Some(name.clone()),
+                    Ok(crate::schema::Entity::Brep(
+                        crate::schema::Brep::Solid { name, .. }
+                        | crate::schema::Brep::Shells { name, .. },
+                    )) if !name.is_empty() => Some(name.clone()),
                     _ => None,
                 })
                 .unwrap_or_default();
@@ -215,6 +220,7 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
         first,
         entities,
         census,
+        styles: std::sync::OnceLock::new(),
     })
 }
 

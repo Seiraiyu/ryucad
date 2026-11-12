@@ -59,10 +59,39 @@ pub(super) fn assemble(
             mesh.faults.push(FaceFault { face: f, kind });
             continue;
         }
-        let d = w.domain.as_ref().expect("a domain");
         let g = geoms[f.index()].as_ref().expect("live face");
         let corner_start = mesh.corners.len() as u32;
         let triangle_start = mesh.triangles.len() as u32;
+        if let Some(s) = &w.strip {
+            for &(a, uv) in &s.points {
+                let position = match a {
+                    Anchor::Vertex(x) => vertex_at[x.index()],
+                    Anchor::Sample(e, k) => sample_at[e.index()][k as usize],
+                    Anchor::Free => unreachable!("a strip's points lie on its loop"),
+                };
+                // No normal at this point (a degenerate point such as a
+                // pole): the world's +z, an arbitrary stand-in, as nothing
+                // better is known on a strip's side.
+                let natural = g.surface.normal(uv.x, uv.y).unwrap_or(UnitVector3::Z);
+                let normal = if g.forward { natural } else { -natural };
+                mesh.corners.push(Corner {
+                    position,
+                    uv,
+                    normal,
+                });
+            }
+            // Wound as the loop runs: counterclockwise seen from outside.
+            mesh.triangles
+                .extend(s.triangles.iter().map(|t| t.map(|c| corner_start + c)));
+            mesh.faces.push(FaceMesh {
+                face: f,
+                corners: corner_start..mesh.corners.len() as u32,
+                triangles: triangle_start..mesh.triangles.len() as u32,
+                strip: true,
+            });
+            continue;
+        }
+        let d = w.domain.as_ref().expect("a domain");
         // Free classes get a position the first time they are used.
         let mut free_at: BTreeMap<u32, u32> = BTreeMap::new();
         let mut corner_of: BTreeMap<u32, u32> = BTreeMap::new();
@@ -151,6 +180,7 @@ pub(super) fn assemble(
             face: f,
             corners: corner_start..mesh.corners.len() as u32,
             triangles: triangle_start..mesh.triangles.len() as u32,
+            strip: false,
         });
     }
     mesh

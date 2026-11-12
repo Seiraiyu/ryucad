@@ -1022,15 +1022,22 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
         }
         let prefs = crate::lint::prefs(p);
         // Every fix tried by a dry run before it is offered.
-        let (findings, checked) = crate::schem::checked_findings(&laid, &prefs);
+        let (findings, checked, withheld) = crate::schem::checked_findings(&laid, &prefs);
         let names = crate::vocab::Names {
             p,
             b,
             built: &laid.built,
         };
-        for (f, ok) in findings.into_iter().zip(checked) {
+        for ((f, ok), held) in findings.into_iter().zip(checked).zip(withheld) {
             let code: Code = serde_json::from_value(json!(f.code)).expect("lint codes are codes");
             let fixes = names.fixes(&f.fixes);
+            let held: Vec<serde_json::Value> = held
+                .iter()
+                .map(|(batch, why)| {
+                    let text = names.fixes(std::slice::from_ref(batch));
+                    json!({"fix": text.first().cloned().unwrap_or_default(), "why": why})
+                })
+                .collect();
             // A rule `lint.json` makes an error fails the check.
             let fault = match f.severity {
                 ryusch::lint::Severity::Error => Fault::error(code, f.message),
@@ -1046,6 +1053,9 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
             if !ok {
                 fault = fault.with("fixes_checked", false);
             }
+            if !held.is_empty() {
+                fault = fault.with("withheld", held);
+            }
             out.push(fault);
         }
     }
@@ -1055,26 +1065,46 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
 /// `check`: the project loaded from nothing, every fault of every file
 /// it holds or names, and every design's ERC. Fails with `check_failed`
 /// (the report in its details) on any error a waiver doesn't accept.
+///
+/// With the working files, doctor's issues too (those the loader doesn't
+/// already report: `unknown_file` is one of its faults).
 pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<Value> {
     let p = Project::load(root)?;
+    let doctor: Vec<Fault> = crate::doctor::diagnose(root, &p)
+        .iter()
+        .filter(|i| i.code != Code::UnknownFile)
+        .map(crate::doctor::Issue::fault)
+        .collect();
+    check_project(&p, cats, &doctor)
+}
+
+/// `check` of a loaded project, with doctor's issues `doctor`: the working
+/// files' (from [`check`]) or a revision's (none: no folder to doctor).
+pub fn check_project(
+    p: &Project,
+    cats: &crate::parts::Catalogues,
+    doctor: &[Fault],
+) -> Result<Value> {
     let faults = p.faults();
-    let erc = erc(&p, None)?;
-    let schematic = schematic_warnings(&p);
-    let symbols = crate::symlint::faults(&p, &crate::lint::prefs(&p));
-    let style = crate::stylelint::faults(&p, &crate::lint::prefs(&p));
-    let supply = crate::supply::findings(&p, cats)?;
+    let erc = erc(p, None)?;
+    let schematic = schematic_warnings(p);
+    let symbols = crate::symlint::faults(p, &crate::lint::prefs(p));
+    let style = crate::stylelint::faults(p, &crate::lint::prefs(p));
+    let supply = crate::supply::findings(p, cats)?;
     let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| f.is_error()).count() as u64
         + symbols.iter().filter(|f| f.is_error()).count() as u64
         + style.iter().filter(|f| f.is_error()).count() as u64
+        + doctor.iter().filter(|f| f.is_error()).count() as u64
         + supply_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| !f.is_error()).count() as u64
         + symbols.iter().filter(|f| !f.is_error()).count() as u64
         + style.iter().filter(|f| !f.is_error()).count() as u64
+        + doctor.iter().filter(|f| !f.is_error()).count() as u64
         + (supply.len() as u64 - supply_errors);
     let report = json!({
         "faults": fault::list(&faults),
@@ -1083,6 +1113,7 @@ pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<
         "symbols": fault::list(&symbols),
         "style": fault::list(&style),
         "supply": supply,
+        "doctor": fault::list(doctor),
         "errors": errors,
         "warnings": warnings,
     });

@@ -45,6 +45,22 @@ fn danger(ui: &egui::Ui) -> Color32 {
     ui.visuals().error_fg_color
 }
 
+/// What a line under a field is: a refusal, or a note on how it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Line {
+    Refusal,
+    Info,
+}
+
+impl Line {
+    fn look(self, v: &egui::Visuals) -> (Icon, Color32) {
+        match self {
+            Line::Refusal => (Icon::X_CIRCLE, v.error_fg_color),
+            Line::Info => (Icon::INFO, v.weak_text_color()),
+        }
+    }
+}
+
 /// The rows of one form's grid.
 pub struct Rows<'a> {
     ui: &'a mut egui::Ui,
@@ -62,11 +78,23 @@ impl Rows<'_> {
 
     /// A line under a field: what is wrong with it.
     pub fn note(&mut self, text: &str) {
+        self.line(text, Line::Refusal)
+    }
+
+    /// A line under a field saying how it reads, nothing wrong (#754).
+    pub fn info(&mut self, text: &str) {
+        self.line(text, Line::Info)
+    }
+
+    /// Wrapped within the field's width, never past the tile (#743).
+    fn line(&mut self, text: &str, kind: Line) {
         self.ui.label("");
-        let colour = danger(self.ui);
-        self.ui.horizontal(|ui| {
-            icon::show(ui, Icon::X_CIRCLE, 12.0, colour);
-            ui.label(RichText::new(text).small().color(colour));
+        let (glyph, colour) = kind.look(self.ui.visuals());
+        let width = self.width;
+        self.ui.horizontal_top(|ui| {
+            ui.set_max_width(width);
+            icon::show(ui, glyph, 12.0, colour);
+            ui.add(egui::Label::new(RichText::new(text).small().color(colour)).wrap());
         });
         self.ui.end_row();
     }
@@ -353,9 +381,13 @@ pub fn banner(ui: &mut egui::Ui, what: &str, changed: &[Changed]) -> Option<Bann
     out
 }
 
-/// A refusal no field holds: a card at the form's top.
-pub fn error(ui: &mut egui::Ui, e: &ryucad::error::Error) {
+/// A refusal no field holds: a card at the form's top with its title and
+/// message, Show (the window's error card: facts, entities, code) and
+/// Copy details (the error's JSON). Returns whether Show was pressed
+/// (#750).
+pub fn error(ui: &mut egui::Ui, e: &ryucad::error::Error) -> bool {
     let red = danger(ui);
+    let mut show = false;
     egui::Frame::new()
         .fill(red.gamma_multiply(0.10))
         .stroke(egui::Stroke::new(1.0, red.gamma_multiply(0.6)))
@@ -370,8 +402,18 @@ pub fn error(ui: &mut egui::Ui, e: &ryucad::error::Error) {
                 );
             });
             ui.label(&e.message);
+            ui.horizontal(|ui| {
+                show = ui
+                    .small_button("Show")
+                    .on_hover_text("Open its error card")
+                    .clicked();
+                if ui.small_button("Copy details").clicked() {
+                    ui.ctx().copy_text(crate::core::feedback::Card::of(e).json);
+                }
+            });
         });
     ui.add_space(6.0);
+    show
 }
 
 /// What the foot's buttons asked.
@@ -424,4 +466,63 @@ pub fn foot(
         }
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn a_refusal_no_field_holds_offers_show_and_copy_details() {
+        let e = ryucad::error::Error::new(
+            ryucad::error::Code::InvalidDocument,
+            "a cut names the solids it acts on: targets is required",
+        );
+        let asked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let a = asked.clone();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::ui::fonts::install)
+            .build_ui(move |ui| {
+                if error(ui, &e) {
+                    a.set(true);
+                }
+            });
+        h.run();
+        h.get_by_label("Copy details");
+        h.get_by_label("Show").click();
+        h.run();
+        assert!(asked.get());
+    }
+
+    #[test]
+    fn a_fields_refusal_wraps_within_its_tile() {
+        let why =
+            "x must be greater than zero for a box; its planes would meet and leave no inside";
+        let mut f = Field::new("x", "10 mm".into());
+        f.text = "-5 mm".into();
+        f.error = Some(why.into());
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(260.0, 240.0))
+            .with_context_setup(crate::ui::fonts::install)
+            .build_ui(move |ui| {
+                grid(ui, "t", |rows| {
+                    rows.quantity("x", &mut f);
+                });
+            });
+        h.run();
+        let r = h.get_by_label(why).rect();
+        assert!(r.right() <= 260.0, "{r:?}");
+        assert!(r.height() > 20.0, "wrapped: {r:?}");
+    }
+
+    #[test]
+    fn an_informational_note_isnt_a_refusal() {
+        let v = egui::Visuals::dark();
+        assert_eq!(Line::Refusal.look(&v), (Icon::X_CIRCLE, v.error_fg_color));
+        let (glyph, colour) = Line::Info.look(&v);
+        assert_eq!(glyph, Icon::INFO);
+        assert_ne!(colour, v.error_fg_color);
+    }
 }

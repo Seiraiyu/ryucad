@@ -106,11 +106,12 @@ pub enum Item {
         width: Nm,
     },
     /// A region's frame: a dashed rectangle (unless its pen hides it,
-    /// `frame: false`), and its title's tab, filled with `paper` and
-    /// outlined, drawn under everything on its sheet.
+    /// `frame: false`), and its title's tab (none when it has no title),
+    /// filled with `paper` and outlined, drawn under everything on its
+    /// sheet.
     Frame {
         rect: Rect,
-        title_tab: Rect,
+        title_tab: Option<Rect>,
         stroke: Rgb,
         paper: Rgb,
         width: Nm,
@@ -541,9 +542,10 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
     let mut out = Painted::default();
     let items = &mut out.items;
     // Regions first, under everything: a dashed frame and a titled tab in
-    // its title band's top left. An untitled region isn't drawn.
+    // its title band's top left; an untitled one (plan 3.A) has no tab,
+    // its band kept so frames don't move when it gets a title.
     for (rid, r) in &layout.regions {
-        if r.sheet != sid || r.title.is_empty() {
+        if r.sheet != sid {
             continue;
         }
         let pen = look.pen(&format!("region:{rid}"));
@@ -554,24 +556,27 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
             [rect.min[0] + GRID / 2, base[1] - GRID / 2],
             [base[0] + w + GRID / 2, base[1] + SIZE + GRID / 2],
         );
+        let titled = !r.title.is_empty();
         items.push(Item::Begin(Layer::Frames));
         items.push(Item::Frame {
             rect,
-            title_tab,
+            title_tab: titled.then_some(title_tab),
             stroke: pen.colour.unwrap_or_else(|| look.role(Role::Frame)),
             paper: look.role(Role::Paper),
             width: pen.weight.width(),
             frame: pen.frame,
         });
-        items.push(Item::Text {
-            text: r.title.clone(),
-            at: base,
-            size: SIZE,
-            anchor: Anchor::Start,
-            vertical: false,
-            colour: pen.colour.unwrap_or_else(|| look.role(Role::Text)),
-            bold: true,
-        });
+        if titled {
+            items.push(Item::Text {
+                text: r.title.clone(),
+                at: base,
+                size: SIZE,
+                anchor: Anchor::Start,
+                vertical: false,
+                colour: pen.colour.unwrap_or_else(|| look.role(Role::Text)),
+                bold: true,
+            });
+        }
         items.push(Item::End);
     }
     let mut arms: BTreeMap<(usize, route::Node), u8> = BTreeMap::new();
@@ -779,6 +784,31 @@ mod tests {
         assert_eq!(name_box("VDD", at), name_box_sized("VDD", at, SIZE));
         let big = name_box_sized("VDD", at, 2 * SIZE);
         assert!(big.width() > name_box("VDD", at).width());
+    }
+
+    /// Plan 3.A: an untitled region is framed with no tab and no title.
+    #[test]
+    fn an_untitled_region_has_no_tab() {
+        let block = crate::testing::regions_block();
+        let mut out = crate::engine::lay_out(&block).unwrap();
+        for g in out.layout.regions.values_mut() {
+            g.title = String::new();
+        }
+        let (sid, _) = out.layout.sheets.iter().next().unwrap();
+        let painted = sheet(&block, &out.layout, sid);
+        let frames: Vec<&Item> = painted
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Frame { .. }))
+            .collect();
+        assert_eq!(frames.len(), out.layout.regions.len());
+        assert!(frames.iter().all(|i| matches!(
+            i,
+            Item::Frame {
+                title_tab: None,
+                ..
+            }
+        )));
     }
 
     #[test]

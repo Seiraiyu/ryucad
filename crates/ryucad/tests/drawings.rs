@@ -3,18 +3,11 @@
 //! `flat.get`, an exploded view's parts apart, and names surviving an edit,
 //! through the requests an agent sends.
 
-use ryucad::proto::Request;
-use ryucad::server::handle;
+mod common;
+
+use common::must;
 use ryucad::session::Session;
 use serde_json::{Value, json};
-
-fn call(s: &mut Session, method: &str, params: Value) -> ryucad::error::Result<Value> {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-}
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();

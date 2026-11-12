@@ -4,7 +4,7 @@
 use crate::core::activity::{Activity, LOADED};
 use crate::core::bom::BomTab;
 use crate::core::branches::Branches;
-use crate::core::compare::Compare;
+use crate::core::compare::{Blink, Compare, Front};
 use crate::core::deps::{Deps, Picker, Update};
 use crate::core::edit::{DimForm, Form};
 use crate::core::equations::Equations;
@@ -107,6 +107,10 @@ enum Pending {
     Branches,
     /// A merge preview with the worktree at this path, made from this key.
     Preview(String, String),
+    /// The Branches tab's branches (`branch.list`).
+    BranchList,
+    /// The Check out dialog's `branch.switch`.
+    Switch,
     /// `deps.list` and `deps.outdated`, for the tab and the marks.
     DepsList,
     DepsOutdated,
@@ -502,6 +506,9 @@ pub struct Workspace {
     /// This window's compare with a Git revision, while it is in one: it
     /// follows the window's participant's compare state.
     pub compare: Option<Compare>,
+    /// Which side of the compare is drawn, and whether the other is too:
+    /// the window's own, never the session's (design 447).
+    pub blink: Blink,
     /// How many diffs were asked for, and whether one is on its way; one
     /// asked for meanwhile waits for it (`compare_again`).
     compare_asked: u64,
@@ -702,6 +709,7 @@ impl Workspace {
             org: None,
             org_early: None,
             compare: None,
+            blink: Blink::default(),
             compare_asked: 0,
             compare_waiting: false,
             compare_again: false,
@@ -1062,6 +1070,7 @@ impl Workspace {
             opacity: (field == "opacity")
                 .then_some((f64::from(self.appearance.opacity) * 1000.0).round() / 1000.0),
             unset: Vec::new(),
+            file_styles: None,
             expected_revision: None,
         };
         self.send(req, Pending::AppearanceWritten);
@@ -1266,6 +1275,9 @@ impl Workspace {
     /// `part`, at the middle of its drawn boxes, or says why it can't
     /// move (fixed, a pattern's copy, no freedom left).
     pub fn start_move(&mut self, part: &str, instance: &str) -> Result<(), String> {
+        if self.blink.draws_rev() {
+            return Err(crate::core::compare::SWAPPED.to_owned());
+        }
         let key = (part.to_owned(), format!("{instance}/"));
         self.model.movable(&key)?;
         let middle = self
@@ -1496,9 +1508,14 @@ impl Workspace {
             });
         }
         let e = self.annotations.all.get(self.chosen_annotation.as_ref()?)?;
+        let marks = e.marks.as_ref()?;
+        // Drawn only over the part they were made on (#730), as pins are.
+        if !self.model.shown().contains(&marks.part.as_str()) {
+            return None;
+        }
         Some(ViewMarks {
             plane: e.plane()?,
-            marks: e.marks.as_ref()?.list.clone(),
+            marks: marks.list.clone(),
             colour: ryucad::render::participant(&e.by),
             alpha: if e.is_open() {
                 1.0
@@ -1708,11 +1725,13 @@ impl Workspace {
             .max(Duration::from_millis(100))
     }
 
-    /// Reads the Branches tab's worktrees again (`worktree.list`); their
-    /// previews follow, one at a time.
+    /// Reads the Branches tab's branches (`branch.list`) and worktrees
+    /// (`worktree.list`) again; the worktrees' previews follow, one at a
+    /// time.
     pub fn load_branches(&mut self) {
         self.branches_at = Some(Instant::now());
         self.branches_waiting = true;
+        self.send(Request::BranchList {}, Pending::BranchList);
         self.send(Request::WorktreeList {}, Pending::Branches);
     }
 
@@ -1758,6 +1777,30 @@ impl Workspace {
         if let Err(e) = ryucad::client::open_app(dir, Some(dir), app.as_deref()) {
             self.fail(e);
         }
+    }
+
+    /// Opens the Check out dialog for `branch`, naming every other
+    /// participant attached to this daemon (question 436).
+    pub fn ask_checkout(&mut self, branch: &str) {
+        let me = self.link.participant.clone();
+        let attached = self.people.others(&me).map(|p| p.name.clone()).collect();
+        self.branches.checkout = self.branches.checkout_of(branch, attached);
+    }
+
+    /// Checks out the dialog's branch in this folder (`branch.switch`),
+    /// guarded by the project revision the list was read at; the dialog
+    /// closes when it is done, or says why it was refused.
+    pub fn confirm_checkout(&mut self) {
+        let Some(c) = self.branches.checkout.as_mut().filter(|c| !c.busy) else {
+            return;
+        };
+        c.busy = true;
+        c.refused = None;
+        let req = Request::BranchSwitch {
+            branch: c.branch.clone(),
+            expected_revision: c.expected.clone(),
+        };
+        self.send(req, Pending::Switch);
     }
 
     /// Reads the dependencies and what is outdated again, once at a time:
@@ -2167,22 +2210,29 @@ impl Workspace {
     }
 
     /// Starts, changes or ends the compare to match this window's
-    /// participant.
+    /// participant and its blink.
     fn follow_compare(&mut self) {
-        // While the person's draft is drawn, it is painted against the
-        // agent's model (the working files); else the participant's own
-        // compare. A draft's compare isn't sent to the session.
-        let want = match self.model_rev() {
-            Some(draft) => Some(("working".to_owned(), Some(draft))),
-            None => self
-                .myself()
-                .and_then(|m| m.compare.clone())
-                .map(|r| (r, None)),
+        // The participant's compare, from the revision to the working
+        // files; swapped, from the working files to the revision drawn;
+        // with no compare, the person's draft painted against the agent's
+        // model. Neither of the last two is sent to the session.
+        let compared = self.myself().and_then(|m| m.compare.clone());
+        let want = match (compared, self.model_rev()) {
+            (Some(rev), Some(at)) if self.blink.draws_rev() => {
+                Some(("working".to_owned(), Some(at), Some(rev)))
+            }
+            (Some(rev), _) => Some((rev, None, None)),
+            (None, Some(draft)) => Some(("working".to_owned(), Some(draft), None)),
+            (None, None) => None,
         };
         match (&self.compare, want) {
-            (Some(c), Some((rev, to))) if c.rev == rev && c.to == to => {}
-            (_, Some((rev, to))) => {
-                self.compare = Some(Compare::between(&rev, to));
+            (Some(c), Some((rev, to, swapped)))
+                if c.rev == rev && c.to == to && c.swapped == swapped => {}
+            (_, Some((rev, to, swapped))) => {
+                self.compare = Some(Compare {
+                    swapped,
+                    ..Compare::between(&rev, to)
+                });
                 self.model.generation += 1;
                 self.ask_diff();
                 self.reload_bom();
@@ -2194,6 +2244,37 @@ impl Workspace {
             }
             (None, None) => {}
         }
+    }
+
+    /// Swaps the compare's sides (View > Swap compared sides, `B`).
+    pub fn swap_compare(&mut self) {
+        self.blink.swap();
+        self.blinked();
+    }
+
+    /// Shows one side of the compare alone, or both again when it is.
+    pub fn compare_only(&mut self, front: Front) {
+        self.blink.only(front);
+        self.blinked();
+    }
+
+    /// Shows both sides of the compare again.
+    pub fn compare_both(&mut self) {
+        self.blink.both();
+        self.blinked();
+    }
+
+    /// The blink moved: the picker and the paint are made again, and the
+    /// model and the diff follow the side drawn.
+    fn blinked(&mut self) {
+        self.model.generation += 1;
+        self.follow_draft();
+    }
+
+    /// The compare as the viewport paints and ghosts it: none while one
+    /// side is shown alone.
+    pub fn painted(&self) -> Option<&Compare> {
+        self.compare.as_ref().filter(|_| !self.blink.alone)
     }
 
     /// Asks for the compare's diff, from its revision to the working
@@ -2258,6 +2339,19 @@ impl Workspace {
     /// and whether it is rough (a freehand drag's).
     fn send_with(&mut self, req: Request, why: Pending, proposal: Proposal) {
         use crate::core::modes::{Gate, gate};
+        // While the compared revision is drawn, nothing writes: the model
+        // on screen isn't the files (design 447).
+        if self.blink.draws_rev() && req.needs().is_some() {
+            let method = req.method();
+            let e = Error::new(
+                Code::ParticipantMode,
+                format!("{method}: {}", crate::core::compare::SWAPPED),
+            )
+            .with("showing", &self.blink.of)
+            .with("method", &method);
+            self.answer(why, Err(e));
+            return;
+        }
         match gate(self.mode, &req) {
             Gate::Send => self.send_now(req, why),
             Gate::Propose => {
@@ -2283,8 +2377,12 @@ impl Workspace {
     }
 
     /// What a control that writes by `method` does in the window's mode
-    /// (see `core::modes::control`).
+    /// (see `core::modes::control`); nothing while the compared revision
+    /// is drawn.
     pub fn control(&self, method: &str) -> crate::core::modes::Gate {
+        if self.blink.draws_rev() {
+            return crate::core::modes::Gate::Refuse(crate::core::compare::SWAPPED);
+        }
         crate::core::modes::control(self.mode, method)
     }
 
@@ -2386,8 +2484,13 @@ impl Workspace {
 
     /// The revision the window's model is read at: the draft, unless the
     /// person looks at the agent's model or compares with a revision;
-    /// else the working files.
+    /// the compared revision while it is swapped in front; else the
+    /// working files.
     pub fn model_rev(&self) -> Option<String> {
+        // Swapped: the compared revision, as the participant gave it.
+        if self.blink.draws_rev() {
+            return self.blink.of.clone();
+        }
         let comparing = self.myself().is_some_and(|m| m.compare.is_some());
         self.draft_rev().filter(|_| !self.show_agent && !comparing)
     }
@@ -2408,6 +2511,12 @@ impl Workspace {
     /// agent's model, a compare, or the person's draft (a suggestion made,
     /// applied, closed or gone stale); and follows the compare.
     fn follow_draft(&mut self) {
+        // A compare that changed or ended starts the blink again: both
+        // sides, the working files in front.
+        let compared = self.myself().and_then(|m| m.compare.clone());
+        if self.blink.follow(compared.as_deref()) {
+            self.model.generation += 1;
+        }
         let now = (self.model_rev(), self.annotations.draft(&self.name));
         if now != self.drawn {
             let rev_moved = now.0 != self.drawn.0 || now.0.is_some();
@@ -2957,6 +3066,14 @@ impl Workspace {
         self.send(Request::DrawingList { part: None }, Pending::DrawingsAll);
     }
 
+    /// Opens the error card on a refusal a form holds (#750): kept with
+    /// the window's failures, which the card reads, without a toast or the
+    /// status line.
+    pub fn open_card(&mut self, e: Error) {
+        self.errors.push(e);
+        self.card = Some(self.errors.len() - 1);
+    }
+
     /// A drawing's tree row chosen: the Drawings tile opens on it, its
     /// first sheet shown.
     pub fn open_drawing(&mut self, part: &str, drawing: &str) {
@@ -3230,7 +3347,7 @@ impl Workspace {
             (Some(c), Some(root)) => {
                 let req = Request::BomDiff {
                     part: Some(root.clone()),
-                    from: Some(c.rev.clone()),
+                    from: Some(c.named().to_owned()),
                     to: None,
                 };
                 self.send(req, Pending::BomDiff);
@@ -3557,8 +3674,7 @@ impl Workspace {
         self.mode = Default::default();
         self.lost = false;
         self.lost_why = None;
-        self.toasts
-            .note("Connected to the daemon again", false, Instant::now());
+        self.toasts.found(Instant::now());
         // A new session knows nothing of this window's camera: tell it.
         if self.camera_due.is_none() {
             self.camera_due = self.camera_last.clone();
@@ -3701,8 +3817,7 @@ impl Workspace {
                 self.lost = true;
                 self.pending.clear();
                 self.progress.lost();
-                self.toasts
-                    .note("Lost the daemon: reconnecting", true, Instant::now());
+                self.toasts.lost(Instant::now());
                 // Saves that went unanswered can be tried again.
                 if let Some(f) = &mut self.form {
                     f.saving = false;
@@ -4127,6 +4242,30 @@ impl Workspace {
                     // Said in the tab: outside a repository, there are none.
                     Err(e) => self.branches.error = Some(e),
                 }
+            }
+            (Pending::BranchList, a) => match a {
+                Ok(a) => {
+                    self.branches.branch_list = Some(a.result);
+                    self.branches.branch_error = None;
+                }
+                // Said in the tab: outside a repository, there are none.
+                Err(e) => self.branches.branch_error = Some(e),
+            },
+            (Pending::Switch, a) => {
+                match a {
+                    Ok(_) => self.branches.checkout = None,
+                    Err(e) => {
+                        if let Some(c) = self.branches.checkout.as_mut() {
+                            c.busy = false;
+                            c.refused = Some(e);
+                        }
+                    }
+                }
+                // The head moved, or the list was stale: read both again.
+                // The files' changes come as model.changed and
+                // project.changed, as an outside change's do.
+                self.load_branches();
+                self.reload_history();
             }
             (Pending::DepsList, a) => {
                 match a {
@@ -4909,6 +5048,9 @@ impl Workspace {
         match method {
             "annotation.changed" => {
                 let me = self.name.clone();
+                // A closed annotation loses its number: the one it had
+                // names it where it has no comment (a suggestion, #744).
+                let before = self.annotations.numbers();
                 let news = self.annotations.changed(params, &me);
                 let numbers = self.annotations.numbers();
                 let tag = |id: &str| {
@@ -4922,7 +5064,7 @@ impl Workspace {
                     self.toasts
                         .annotation(&r.by, r.agent, &text, &r.text, id, now);
                 }
-                for (id, status, note) in &news.closed {
+                for (id, _, note) in &news.closed {
                     let Some(e) = self.annotations.all.get(id) else {
                         continue;
                     };
@@ -4931,15 +5073,7 @@ impl Workspace {
                         .as_ref()
                         .map_or("agent", |r| r.by.as_str())
                         .to_owned();
-                    let what = if status == "done" {
-                        "resolved"
-                    } else {
-                        "rejected"
-                    };
-                    // A closed annotation has no number any more: its
-                    // comment names it.
-                    let short: String = e.comment.chars().take(40).collect();
-                    let text = format!("{what} “{short}”");
+                    let text = crate::core::annotations::closed_text(e, before.get(id).copied());
                     let note = note.clone().unwrap_or_default();
                     self.toasts.annotation(&by, true, &text, &note, id, now);
                 }

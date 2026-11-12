@@ -76,6 +76,19 @@ fn a_lost_daemon_is_replaced_and_the_window_catches_up() {
     frames(&mut ws, |ws| {
         !ws.lost && ws.idle() && ws.part("q").is_none()
     });
+    // #732: connected again, the lost daemon's toast is gone.
+    assert!(
+        ws.toasts
+            .shown()
+            .iter()
+            .all(|t| t.text != ryucad_app::core::toast::LOST),
+        "{:?}",
+        ws.toasts
+            .shown()
+            .iter()
+            .map(|t| &t.text)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

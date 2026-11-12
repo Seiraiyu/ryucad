@@ -523,7 +523,11 @@ fn keys(ui: &egui::Ui) -> Vec<Key> {
 pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     let (rows, _) = rows(ws);
     let shown = view.tree.shown(&rows, &|b, q| names(ws, b, q));
+    let narrowed_by =
+        |t: &crate::core::tree::Tree| (t.query.clone(), t.failing, t.changed, t.hidden);
+    let before = narrowed_by(&view.tree);
     search(ui, view, shown.len());
+    let renarrowed = narrowed_by(&view.tree) != before;
     if let Some(n) = &view.tree_note {
         ui.colored_label(ui.visuals().warn_fg_color, n);
     }
@@ -545,92 +549,98 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     let mut acts: Vec<Act> = Vec::new();
     let mut run = None;
     let mut toggled: Vec<(String, bool)> = Vec::new();
-    let scroll = egui::ScrollArea::both()
+    let mut area = egui::ScrollArea::both()
         .id_salt("tree rows")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            // Names are IDs: never broken across lines.
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let focused = ui.memory(|m| m.has_focus(id));
-            for s in &shown {
-                let row = &rows[s.index];
-                let open = narrowing || view.tree.is_open(row);
-                let did = row_ui(ui, ws, view, row, s, open, narrowing, focused);
-                if did.caret || (did.clicked && row.choose.is_none() && row.children && !narrowing)
-                {
-                    toggled.push((row.id.clone(), !view.tree.is_open(row)));
-                }
-                if did.clicked || did.caret {
-                    view.tree.cursor = Some(row.id.clone());
-                    view.tree_take_focus = true;
-                }
-                if did.clicked
-                    && let Some((p, d)) = &row.drawing
-                {
-                    acts.push(Act::Drawing(p.clone(), d.clone()));
-                }
-                if did.clicked
-                    && let Some(k) = &row.choose
-                {
-                    let chosen = view.chosen.as_ref() == Some(k);
-                    // The release's own modifiers, as egui's clicks are
-                    // judged at it.
-                    let command = ui.input(|i| {
-                        i.modifiers.command || i.events.iter().any(|e| {
+        .auto_shrink(false);
+    // A new search or filter starts at the first row (#736).
+    if renarrowed {
+        area = area.vertical_scroll_offset(0.0);
+    }
+    let scroll = area.show(ui, |ui| {
+        // Names are IDs: never broken across lines.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let top = ui.cursor().min.y;
+        let focused = ui.memory(|m| m.has_focus(id));
+        for s in &shown {
+            let row = &rows[s.index];
+            let open = narrowing || view.tree.is_open(row);
+            let did = row_ui(ui, ws, view, row, s, open, narrowing, focused);
+            if did.caret || (did.clicked && row.choose.is_none() && row.children && !narrowing) {
+                toggled.push((row.id.clone(), !view.tree.is_open(row)));
+            }
+            if did.clicked || did.caret {
+                view.tree.cursor = Some(row.id.clone());
+                view.tree_take_focus = true;
+            }
+            if did.clicked
+                && let Some((p, d)) = &row.drawing
+            {
+                acts.push(Act::Drawing(p.clone(), d.clone()));
+            }
+            if did.clicked
+                && let Some(k) = &row.choose
+            {
+                let chosen = view.chosen.as_ref() == Some(k);
+                // The release's own modifiers, as egui's clicks are
+                // judged at it.
+                let command = ui.input(|i| {
+                    i.modifiers.command
+                        || i.events.iter().any(|e| {
                             matches!(e, egui::Event::PointerButton { pressed: false, modifiers, .. }
                                     if modifiers.command)
                         })
-                    });
-                    match (chosen, command) {
-                        (true, true) => acts.push(Act::Choose {
-                            key: (String::new(), String::new()),
-                            gone: false,
-                        }),
-                        (true, false) => {}
-                        (false, _) => acts.push(Act::Choose {
-                            key: k.clone(),
-                            gone: row.gone,
-                        }),
-                    }
-                }
-                if let Some(a) = did.act {
-                    acts.push(a);
-                }
-                if did.run.is_some() {
-                    run = did.run;
-                }
-                if let Some(open) = did.keyed {
-                    view.tree_menu_opening = false;
-                    if !open {
-                        view.tree_menu = None;
-                    }
-                }
-                // A part or subassembly opened by hand loads; one a search
-                // or filter shows doesn't.
-                if let Some(l) = view.tree.loads(row) {
-                    ws.want(l);
+                });
+                match (chosen, command) {
+                    (true, true) => acts.push(Act::Choose {
+                        key: (String::new(), String::new()),
+                        gone: false,
+                    }),
+                    (true, false) => {}
+                    (false, _) => acts.push(Act::Choose {
+                        key: k.clone(),
+                        gone: row.gone,
+                    }),
                 }
             }
-            // The space under the rows: the whole tree's commands.
-            let room = (ui.clip_rect().max.y - ui.cursor().min.y).max(ROW);
-            let (_, r) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), room), Sense::click());
-            r.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::Role::Pane, true, "Space under the tree's rows")
-            });
-            r.context_menu(|ui| {
-                if let Some(ran) = crate::ui::commands::context_menu(
-                    ui,
-                    &view.commands,
-                    crate::core::command::Context::Tree,
-                    None,
-                    None,
-                ) {
-                    run = Some((ran.0, String::new()));
+            if let Some(a) = did.act {
+                acts.push(a);
+            }
+            if did.run.is_some() {
+                run = did.run;
+            }
+            if let Some(open) = did.keyed {
+                view.tree_menu_opening = false;
+                if !open {
+                    view.tree_menu = None;
                 }
-            });
+            }
+            // A part or subassembly opened by hand loads; one a search
+            // or filter shows doesn't.
+            if let Some(l) = view.tree.loads(row) {
+                ws.want(l);
+            }
+        }
+        // The space under the rows: the whole tree's commands. Measured
+        // from the rows, not the screen: from the screen it grew with
+        // the scroll offset, so the offset never clamped (#736).
+        let room = (ui.clip_rect().height() - (ui.cursor().min.y - top)).max(ROW);
+        let (_, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), room), Sense::click());
+        r.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Pane, true, "Space under the tree's rows")
         });
+        r.context_menu(|ui| {
+            if let Some(ran) = crate::ui::commands::context_menu(
+                ui,
+                &view.commands,
+                crate::core::command::Context::Tree,
+                None,
+                None,
+            ) {
+                run = Some((ran.0, String::new()));
+            }
+        });
+    });
     // The rows hold the keyboard: arrows, Enter, Space and the menu key.
     let area = ui.interact(scroll.inner_rect, id, Sense::focusable_noninteractive());
     area.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Tree, true, "Tree rows"));

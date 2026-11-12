@@ -52,6 +52,10 @@ fn occt() {
         "TKXSBase",
         "TKDE",
         "TKDESTEP",
+        "TKLCAF",
+        "TKCAF",
+        "TKCDF",
+        "TKXCAF",
         "TKDESTL",
     ] {
         println!("cargo:rustc-link-lib={lib}");

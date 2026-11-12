@@ -4880,6 +4880,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-git"
+version = "0.0.0"
+dependencies = [
+ "gix",
+ "ryu-doc",
+ "ryu-session",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ryu-math"
 version = "0.0.0"
 dependencies = [
@@ -4900,6 +4911,7 @@ name = "ryu-session"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "inotify",
  "interprocess",
  "libc",
  "notify",
@@ -4936,6 +4948,7 @@ dependencies = [
  "rayon",
  "resvg",
  "ryu-draw",
+ "ryu-git",
  "ryu-math",
  "ryu-session",
  "ryucad-doc",
@@ -4966,6 +4979,7 @@ dependencies = [
  "egui_kittest",
  "egui_tiles",
  "image",
+ "mimalloc",
  "png",
  "pollster 0.4.0",
  "rayon",
@@ -5034,6 +5048,7 @@ dependencies = [
  "resvg",
  "ryu-doc",
  "ryu-draw",
+ "ryu-git",
  "ryu-math",
  "ryu-part21",
  "ryu-session",

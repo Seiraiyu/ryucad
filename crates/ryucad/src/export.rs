@@ -76,6 +76,9 @@ pub struct Product {
 pub struct Solid {
     pub part: Id,
     pub founder: Id,
+    /// Its key in its product's part's looks ([`crate::appearance::looks`]):
+    /// its founder, or for an assembly's own bodies `<instance>/<founder>`.
+    pub key: String,
     pub built: Arc<Built>,
 }
 
@@ -90,6 +93,9 @@ pub struct Child {
     pub place: Rigid,
     pub usage: String,
     pub instance: String,
+    /// The steps it adds to an occurrence's path: the instance's ID, or a
+    /// pattern copy's `<pattern>:<i>` and its seed's.
+    pub steps: Vec<Id>,
 }
 
 /// What `export` asks for: the part, the revision (`working`, a Git
@@ -99,7 +105,8 @@ pub struct Child {
 /// longest edge, STL's `ascii`, and USD's `brep` and `mesh` (both by
 /// default) and the tolerance pipes and sweeps are written within, and
 /// `skip_failing`: write what built, leaving out what a failing feature
-/// would have made, rather than refuse.
+/// would have made, rather than refuse; and STEP's `appearance` (styles,
+/// written unless `false`).
 #[derive(Clone, Debug, Default)]
 pub struct Ask {
     pub part: String,
@@ -118,6 +125,8 @@ pub struct Ask {
     pub mesh: Option<bool>,
     pub pipe_tolerance: Option<String>,
     pub skip_failing: bool,
+    /// STEP: write the appearance as styles (true by default; design 448).
+    pub appearance: Option<bool>,
     /// DXF: the sheet metal solid (the part's one unless named), whether
     /// to write bend notes (true), the side face held still and allowance
     /// overrides, as `flat.get` takes them.
@@ -436,19 +445,37 @@ pub(crate) fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::P
         .with("path", dir));
     }
     let file = path.file_name().expect("checked above");
-    let rel = match (dir.canonicalize(), root.canonicalize()) {
-        (Ok(d), Ok(r)) => d.strip_prefix(&r).ok().map(|p| p.join(file)),
+    let root_c = root.canonicalize().ok();
+    // Judged as spelled (the folder resolved, the name as given) ...
+    let spelled = match (dir.canonicalize(), &root_c) {
+        (Ok(d), Some(r)) => d.strip_prefix(r).ok().map(|p| p.join(file)),
         _ => dir.strip_prefix(root).ok().map(|p| p.join(file)),
+    };
+    // ... and, when `out` already names a file, as the file system
+    // resolves it (#581): an 8.3 short name (`RYUCAD~1.JSO`) or a Unicode
+    // case fold (`ryucad.jſon` on APFS) finds `ryucad.json`, and the
+    // atomic rename would replace that entry. A new name aliases nothing.
+    let resolved = match (path.canonicalize(), &root_c) {
+        (Ok(p), Some(r)) => p.strip_prefix(r).ok().map(std::path::Path::to_path_buf),
+        _ => None,
     };
     // Folded as the file systems that would write it there fold: ASCII
     // case (Windows and macOS find `RYUCAD.JSON` and `Parts/p` the same),
-    // and trailing dots and spaces (Windows drops them from a name). Judged
-    // so on every platform, so one rule holds wherever the daemon runs.
-    let rel = rel.map(|p| {
+    // trailing dots and spaces (Windows drops them from a name), and an
+    // NTFS stream (`ryucad.json::$DATA` is `ryucad.json`: no project file
+    // has a colon in its name). Judged so on every platform, so one rule
+    // holds wherever the daemon runs.
+    let fold = |p: std::path::PathBuf| -> Vec<String> {
         p.components()
-            .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
-            .collect::<Vec<_>>()
-    });
+            .map(|c| {
+                let s = c.as_os_str().to_string_lossy().to_ascii_lowercase();
+                match s.split_once(':') {
+                    Some((name, _)) => name.to_owned(),
+                    None => s,
+                }
+            })
+            .collect()
+    };
     let refused = |parts: &[String]| {
         let folded = parts
             .iter()
@@ -457,7 +484,13 @@ pub(crate) fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::P
             .join("/");
         crate::session::tracked(&folded) || parts.iter().any(|s| s.starts_with('.'))
     };
-    if let Some(rel) = rel.filter(|r| refused(r)).map(|r| r.join("/")) {
+    if let Some(rel) = [spelled, resolved]
+        .into_iter()
+        .flatten()
+        .map(fold)
+        .find(|r| refused(r))
+        .map(|r| r.join("/"))
+    {
         return Err(Error::new(
             Code::InvalidParam,
             format!(
@@ -547,6 +580,7 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
 /// stamps its own) and a development build. STEP's header names
 /// ryustep's version, which this doesn't change.
 pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<Answer> {
+    let appearance = ask.appearance;
     let format = format(&ask)?;
     let options = Options::read(format, &ask, session.project().manifest.default_unit)?;
     let out = ask
@@ -576,6 +610,12 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         ..Walk::default()
     };
     walk.product(s, &part, &rev)?;
+    // The commit whose files give an export's appearance: a label's
+    // official commit (design 448); else the files `s` already reads.
+    let looks_at = match &rev {
+        Rev::Label(_) => walk.pin.as_ref().and_then(|p| p.commit.clone()),
+        _ => None,
+    };
     let failing: Vec<Value> = walk.failing.values().cloned().collect();
     if !failing.is_empty() && !ask.skip_failing {
         return Err(Error::new(
@@ -673,9 +713,25 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 ..WriteOptions::default()
             };
             let (model, passed) = step_parts(&walk)?;
-            let report =
-                ryustep::write_report(&model, &passed, &opts).map_err(|e| walk.unwritable(e))?;
-            let (transfer, omitted) = step_transfer(s, &walk, &report, &model)?;
+            let (paints, unpainted) = if appearance == Some(false) {
+                (ryustep::Paints::default(), None)
+            } else {
+                let sess = match &looks_at {
+                    Some(c) => s.at(Some(c))?.1,
+                    None => &mut *s,
+                };
+                let (p, u) = step_paints(sess, &walk);
+                (p, Some(u))
+            };
+            let report = ryustep::write_styled(&model, &passed, &paints, &opts)
+                .map_err(|e| walk.unwritable(e))?;
+            let off = if appearance == Some(false) {
+                Some(appearance_left_out(s, &walk)?)
+            } else {
+                None
+            };
+            let (transfer, omitted) =
+                step_transfer(s, &walk, &report, &model, unpainted.as_ref(), off)?;
             result["transfer"] = transfer;
             if !omitted.is_empty() {
                 warn(&mut result, omitted);
@@ -1467,7 +1523,12 @@ impl Walk {
                         if own {
                             let (cp, cr) = self.node(s, &placed.part, &placed.rev)?;
                             if !cp.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
-                                mine.extend(solids(&cp, &placed.rev, &cr));
+                                mine.extend(solids(&cp, &placed.rev, &cr).into_iter().map(
+                                    |mut x| {
+                                        x.key = format!("{fid}/{}", x.founder);
+                                        x
+                                    },
+                                ));
                                 continue;
                             }
                         }
@@ -1480,6 +1541,7 @@ impl Walk {
                             place: placed.pose,
                             usage,
                             instance: fid.to_string(),
+                            steps: vec![fid.clone()],
                         });
                     }
                     Ok(Output::Copies(c)) => {
@@ -1491,6 +1553,7 @@ impl Walk {
                                 place: copy.placed.pose,
                                 usage: id.clone(),
                                 instance: id,
+                                steps: vec![Id::copy(fid, copy.index), copy.seed.clone()],
                             });
                         }
                     }
@@ -1578,6 +1641,7 @@ fn solids(p: &Part, rev: &Rev, result: &PartResult) -> Vec<Solid> {
         .flat_map(|o| o.solids)
         .map(|s| Solid {
             part: p.id.clone(),
+            key: s.founder.to_string(),
             founder: s.founder,
             built: s.built,
         })
@@ -1587,7 +1651,7 @@ fn solids(p: &Part, rev: &Rev, result: &PartResult) -> Vec<Solid> {
 /// The product an imported part or assembly came from: the one product
 /// every import feature of a part names, or every imported instance of
 /// an assembly is used in.
-fn imported(p: &Part) -> Option<ProductRef> {
+pub(crate) fn imported(p: &Part) -> Option<ProductRef> {
     let mut named: BTreeSet<Option<ProductRef>> = BTreeSet::new();
     for fid in p.order() {
         match p.features.get(fid) {
@@ -1634,6 +1698,234 @@ fn identity(fallback: &str, p: &Part, props: &Properties) -> (String, String, St
 /// The properties STEP export writes as the product itself.
 const WRITTEN_PROPERTIES: [&str; 3] = ["number", "name", "description"];
 
+/// What an export's styles leave out (design 448), counted for its
+/// transfer report.
+#[derive(Debug, Default, PartialEq)]
+struct Unpainted {
+    /// Faces drawn otherwise only in an assembly: STEP's occurrence
+    /// styles are per body.
+    occurrence_faces: usize,
+    /// Looks with an opacity and no colour: STEP's fill needs a colour.
+    uncoloured: usize,
+    /// Reference solids with a look: passed through as their file has
+    /// them.
+    references: usize,
+    /// Products of another project's parts: their appearance is theirs.
+    foreign: usize,
+}
+
+impl Unpainted {
+    fn count(&self) -> usize {
+        self.occurrence_faces + self.uncoloured + self.references + self.foreign
+    }
+
+    fn summary(&self) -> String {
+        [
+            (
+                self.occurrence_faces,
+                "occurrence face(s) coloured otherwise only in an assembly (STEP styles an occurrence's body)",
+            ),
+            (
+                self.uncoloured,
+                "look(s) with an opacity and no colour (STEP's fill needs a colour)",
+            ),
+            (
+                self.references,
+                "reference solid(s) with a look (written as their file has them)",
+            ),
+            (
+                self.foreign,
+                "product(s) of another project, whose appearance isn't read",
+            ),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, w)| format!("{n} {w}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+    }
+}
+
+/// A look's colour and opacity as STEP's paint; `None` with no colour.
+fn paint(e: &crate::appearance::Effective) -> Option<ryustep::Paint> {
+    let c = e.colour.as_deref()?.strip_prefix('#')?;
+    let byte = |k: usize| u8::from_str_radix(c.get(k..k + 2)?, 16).ok();
+    Some(ryustep::Paint {
+        colour: [byte(0)?, byte(2)?, byte(4)?],
+        opacity: e.opacity,
+    })
+}
+
+/// Whether two looks draw alike, wherever their values came from.
+fn alike(a: &crate::appearance::Effective, b: &crate::appearance::Effective) -> bool {
+    a.colour == b.colour && a.opacity == b.opacity
+}
+
+/// The paints of `walk`'s scene (design 448): each product's healed
+/// bodies' looks as its part draws them (`looks` of that part in `sess`,
+/// the session of the commit the export reads), and each occurrence of
+/// the root whose look differs from its product's as an override; with
+/// what STEP can't carry.
+fn step_paints(sess: &mut Session, walk: &Walk) -> (ryustep::Paints, Unpainted) {
+    use crate::appearance::SolidLook;
+    let scene = &walk.scene;
+    let mut looks: BTreeMap<Id, BTreeMap<String, SolidLook>> = BTreeMap::new();
+    let mut un = Unpainted::default();
+    for p in &scene.products {
+        if matches!(p.rev, Rev::Foreign { .. }) {
+            un.foreign += 1;
+            continue;
+        }
+        if !looks.contains_key(&p.part) {
+            // A part the commit doesn't build has no look to write.
+            let l = crate::appearance::looks(sess, &p.part).unwrap_or_default();
+            looks.insert(p.part.clone(), l);
+        }
+    }
+    let plain = SolidLook::default();
+    let mut out = ryustep::Paints::default();
+    for (k, p) in scene.products.iter().enumerate() {
+        let foreign = matches!(p.rev, Rev::Foreign { .. });
+        let mut body = 0;
+        for sol in &p.solids {
+            let l = look_in(&looks, &plain, scene, k, sol);
+            if sol.built.reference {
+                if !l.is_plain() {
+                    un.references += 1;
+                }
+                continue;
+            }
+            let j = body;
+            body += 1;
+            if foreign {
+                continue;
+            }
+            let base = paint(&l.base);
+            if base.is_none() && l.base.opacity < 1.0 {
+                un.uncoloured += 1;
+            }
+            let mut faces = Vec::new();
+            for (name, e) in &l.faces {
+                match (crate::doc::reference::parse_name(name), paint(e)) {
+                    (Some(n), Some(pt)) => faces.push((n, pt)),
+                    _ => un.uncoloured += 1,
+                }
+            }
+            if base.is_some() || !faces.is_empty() {
+                out.bodies.push(ryustep::BodyPaint {
+                    product: k,
+                    body: j,
+                    base,
+                    faces,
+                });
+            }
+        }
+    }
+    occurrence_paints(scene, &looks, &mut out, &mut un);
+    (out, un)
+}
+
+/// Solid `sol` of product `k`'s look as its part draws it; `plain` for
+/// none.
+fn look_in<'a>(
+    looks: &'a BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>>,
+    plain: &'a crate::appearance::SolidLook,
+    scene: &Scene,
+    k: usize,
+    sol: &Solid,
+) -> &'a crate::appearance::SolidLook {
+    looks
+        .get(&scene.products[k].part)
+        .and_then(|m| m.get(&sol.key))
+        .unwrap_or(plain)
+}
+
+/// Each occurrence of the scene's root whose solid is drawn otherwise
+/// than its product draws it (the root's looks, by
+/// `<path>/<key>`): an override on that body in its usages; each face
+/// drawn otherwise than a reader composes it (the product's face style,
+/// else the occurrence's) is omitted.
+fn occurrence_paints(
+    scene: &Scene,
+    looks: &BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>>,
+    out: &mut ryustep::Paints,
+    un: &mut Unpainted,
+) {
+    let Some(root_looks) = scene.products.first().and_then(|r| looks.get(&r.part)) else {
+        return;
+    };
+    let plain = crate::appearance::SolidLook::default();
+    // Each product to walk, the usages that reach it, and its path's steps.
+    type Walking = (usize, Vec<(usize, usize)>, Vec<Id>);
+    let mut stack: Vec<Walking> = vec![(0, Vec::new(), Vec::new())];
+    while let Some((k, path, steps)) = stack.pop() {
+        for (n, c) in scene.products[k].children.iter().enumerate() {
+            let mut path = path.clone();
+            path.push((k, n));
+            let mut steps = steps.clone();
+            steps.extend(c.steps.iter().cloned());
+            let child = &scene.products[c.product];
+            let foreign = matches!(child.rev, Rev::Foreign { .. });
+            let mut body = 0;
+            for sol in &child.solids {
+                if sol.built.reference {
+                    continue;
+                }
+                let j = body;
+                body += 1;
+                let key = format!("{}/{}", crate::assembly::path_text(&steps), sol.key);
+                let Some(actual) = root_looks.get(&key) else {
+                    continue;
+                };
+                let written = if foreign {
+                    &plain
+                } else {
+                    look_in(looks, &plain, scene, c.product, sol)
+                };
+                let over = !alike(&actual.base, &written.base);
+                if over {
+                    match paint(&actual.base) {
+                        Some(pt) => out.occurrences.push(ryustep::OccurrencePaint {
+                            path: path.clone(),
+                            body: j,
+                            paint: pt,
+                        }),
+                        None => un.uncoloured += 1,
+                    }
+                }
+                let names: BTreeSet<&String> =
+                    actual.faces.keys().chain(written.faces.keys()).collect();
+                for name in names {
+                    let under = if over { &actual.base } else { &written.base };
+                    let reader = written.faces.get(name).unwrap_or(under);
+                    if !alike(actual.face(name), reader) {
+                        un.occurrence_faces += 1;
+                    }
+                }
+            }
+            stack.push((c.product, path, steps));
+        }
+    }
+    out.occurrences
+        .sort_by(|a, b| (&a.path, a.body).cmp(&(&b.path, b.body)));
+}
+
+/// How many solids of the parts an export with `appearance: false`
+/// writes have a look: what it leaves out.
+fn appearance_left_out(s: &mut Session, walk: &Walk) -> Result<usize> {
+    let mut seen = BTreeSet::new();
+    let mut n = 0;
+    for p in &walk.scene.products {
+        if matches!(p.rev, Rev::Foreign { .. }) || !seen.insert(p.part.clone()) {
+            continue;
+        }
+        n += crate::appearance::looks(s, &p.part)
+            .map(|l| l.values().filter(|x| !x.is_plain()).count())
+            .unwrap_or(0);
+    }
+    Ok(n)
+}
+
 /// What a STEP export wrote and left out (design 448): `written`, the
 /// writer's instances by category (at most eight names each, the
 /// largest first); `omitted`, what the written parts hold that STEP
@@ -1644,6 +1936,8 @@ fn step_transfer(
     walk: &Walk,
     w: &ryustep::Written,
     model: &WriteModel,
+    unpainted: Option<&Unpainted>,
+    off: Option<usize>,
 ) -> Result<(Value, Vec<Value>)> {
     use crate::doc::files::Feature;
     use crate::transfer::SUMMARY_NAMES;
@@ -1684,7 +1978,7 @@ fn step_transfer(
         })
         .collect();
     let mut seen: BTreeSet<(Id, Rev)> = BTreeSet::new();
-    let (mut features, mut sketches, mut datums, mut appearance) = (0usize, 0usize, 0usize, 0usize);
+    let (mut features, mut sketches, mut datums) = (0usize, 0usize, 0usize);
     let mut properties: BTreeSet<(Id, String)> = BTreeSet::new();
     for p in &walk.scene.products {
         if !seen.insert((p.part.clone(), p.rev.clone())) {
@@ -1699,12 +1993,6 @@ fn step_transfer(
                     _ => {}
                 }
             }
-        }
-        if p.rev == Rev::Working {
-            appearance += crate::appearance::looks(s, &p.part)?
-                .values()
-                .filter(|l| !l.is_plain())
-                .count();
         }
         let props = properties_of(s, &p.part, &p.rev, walk.pin.as_ref());
         for (k, v) in &props.values {
@@ -1736,11 +2024,6 @@ fn step_transfer(
             "open annotation(s) on the parts, not written",
         ),
         (
-            "appearance",
-            appearance,
-            "solid(s) with a colour or opacity, not written to STEP yet",
-        ),
-        (
             "properties",
             properties.len(),
             "part propert(ies) beyond number, name and description, not written to STEP yet",
@@ -1749,6 +2032,13 @@ fn step_transfer(
         if n > 0 {
             omitted.push(json!({"what": what, "count": n, "summary": format!("{n} {words}")}));
         }
+    }
+    if let Some(u) = unpainted.filter(|u| u.count() > 0) {
+        omitted.push(json!({"what": "appearance", "count": u.count(), "summary": u.summary()}));
+    }
+    if let Some(n) = off.filter(|n| *n > 0) {
+        omitted.push(json!({"what": "appearance", "count": n,
+            "summary": format!("{n} solid(s) with a colour or opacity, not written (appearance: false)")}));
     }
     let warnings: Vec<Value> = omitted
         .iter()
@@ -1855,8 +2145,8 @@ pub(crate) mod tests {
     }
 
     /// A STEP export says what it wrote by category, what it left out
-    /// (always the history; a colour, warned) and what it approximated;
-    /// none of it changes a byte (design 448).
+    /// (always the history; the appearance when asked not to write it)
+    /// and what it approximated (design 448).
     #[test]
     fn a_step_export_reports_what_it_wrote_and_left_out() {
         let (_dir, mut s) = fresh();
@@ -1892,16 +2182,32 @@ pub(crate) mod tests {
             json!({"entities": ["p"], "colour": "#ff0000"}),
         )
         .unwrap();
-        let (coloured, after) = exported(&mut s, opts).unwrap();
-        assert_eq!(after, before, "the bytes don't change");
-        let what: Vec<&str> = coloured["transfer"]["omitted"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|o| o["what"].as_str().unwrap())
-            .collect();
-        assert_eq!(what, ["history", "appearance"]);
-        let w = coloured["warnings"].as_array().unwrap();
+        // Written now: the bytes grow by the styles, the geometry's stay.
+        let (coloured, after) = exported(&mut s, opts.clone()).unwrap();
+        assert_ne!(after, before);
+        let plain_file = ryustep::part21::parse(&before).unwrap();
+        let styled = ryustep::part21::parse(&after).unwrap();
+        assert_eq!(
+            format!("{:?}", &styled.instances[..plain_file.instances.len()]),
+            format!("{:?}", plain_file.instances)
+        );
+        let what = |v: &Value| -> Vec<String> {
+            v["transfer"]["omitted"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["what"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(what(&coloured), ["history"]);
+        assert!(coloured.get("warnings").is_none(), "{coloured}");
+        // Asked to leave it out: the plain bytes, the omission said.
+        let mut off = opts;
+        off["appearance"] = json!(false);
+        let (left_out, bytes) = exported(&mut s, off).unwrap();
+        assert_eq!(bytes, before, "the bytes don't change");
+        assert_eq!(what(&left_out), ["history", "appearance"]);
+        let w = left_out["warnings"].as_array().unwrap();
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(
             (&w[0]["code"], &w[0]["what"]),
@@ -2070,6 +2376,7 @@ pub(crate) mod tests {
         // A solid's faults stay `export_mesh_faults`.
         let solid = Solid {
             part: p.clone(),
+            key: "i".into(),
             founder: Id::parse("i", "feature").unwrap(),
             built: Arc::new(crate::rebuild::Built {
                 reference: false,
@@ -2131,6 +2438,56 @@ pub(crate) mod tests {
         assert_eq!(utc(951_782_400), "2000-02-29T00:00:00");
         assert_eq!(utc(1_761_573_470), "2025-10-27T13:57:50");
         assert_eq!(utc(-1), "1969-12-31T23:59:59");
+    }
+
+    #[test]
+    fn a_sheet_reads_back_as_its_founder() {
+        // #675: a sheet's SHELL_BASED_SURFACE_MODEL carries its founder, as
+        // a solid's MANIFOLD_SOLID_BREP does (#412).
+        let (_d, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        add(
+            &mut s,
+            "p",
+            json!({"type": "box", "id": "h", "params": {"x": 5, "y": 5, "z": 5},
+                   "placement": {"origin": [20, 0, 0]}}),
+        );
+        add(
+            &mut s,
+            "p",
+            json!({"type": "sketch", "id": "s", "plane": "xy"}),
+        );
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+        )
+        .unwrap();
+        add(
+            &mut s,
+            "p",
+            json!({"type": "extrude", "id": "w", "sketch": "s", "surface": true,
+                   "extent": {"type": "blind", "length": "20 mm"}}),
+        );
+        let (_, bytes) = exported(&mut s, json!({"part": "p"})).unwrap();
+        let mut names: Vec<String> = opened(&bytes).held.iter().map(|h| h.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, ["h", "w"]);
+        // Imported again, the sheet keeps its ID as the solid does.
+        let (_out, out) = outside(&bytes, "p.step");
+        let (_dir2, mut s2) = fresh();
+        let v = call(&mut s2, "import", json!({"solid": true, "path": out})).unwrap();
+        let mut ids: Vec<&str> = v["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["h", "w"], "{v}");
     }
 
     #[test]
@@ -3354,6 +3711,118 @@ pub(crate) mod tests {
         out
     }
 
+    /// [`frame`], painted as ryucad paints: the plate red with one face
+    /// blue, the pin translucent, the sub-assembly's second pin green in
+    /// that occurrence.
+    fn painted_frame() -> Vec<u8> {
+        use ryukei::geom::{Rigid, Vector3};
+        use ryukei::name::OpKey;
+        use ryukei::primitive;
+        let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+        let k = OpKey(1);
+        let plate = primitive::block(k, 0.1, 0.1, 0.01, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let face = plate
+            .faces()
+            .map(|f| plate.face(f).unwrap().name)
+            .min()
+            .unwrap();
+        let product = |id: &str, name: &str, bodies, children| ryustep::Product {
+            id: id.into(),
+            name: name.into(),
+            bodies,
+            names: vec!["body".into()],
+            children,
+            ..Default::default()
+        };
+        let child = |product, place| ryustep::Child {
+            product,
+            place,
+            id: "1".into(),
+        };
+        let model = ryustep::WriteModel {
+            products: vec![
+                product(
+                    "F-1",
+                    "Frame",
+                    vec![plate],
+                    vec![child(1, at(0.0, 0.0, 0.01)), child(2, at(0.05, 0.05, 0.01))],
+                ),
+                product(
+                    "S-1",
+                    "Sub",
+                    vec![],
+                    vec![child(2, at(0.01, 0.0, 0.0)), child(2, at(0.02, 0.0, 0.0))],
+                ),
+                product("P-1", "Pin", vec![pin], vec![]),
+            ],
+        };
+        let p = |c: [u8; 3], o: f64| ryustep::Paint {
+            colour: c,
+            opacity: o,
+        };
+        let paints = ryustep::Paints {
+            bodies: vec![
+                ryustep::BodyPaint {
+                    product: 0,
+                    body: 0,
+                    base: Some(p([255, 0, 0], 1.0)),
+                    faces: vec![(face, p([0, 0, 255], 1.0))],
+                },
+                ryustep::BodyPaint {
+                    product: 2,
+                    body: 0,
+                    base: Some(p([0, 0, 255], 0.5)),
+                    faces: Vec::new(),
+                },
+            ],
+            occurrences: vec![ryustep::OccurrencePaint {
+                path: vec![(0, 0), (1, 1)],
+                body: 0,
+                paint: p([0, 255, 0], 1.0),
+            }],
+        };
+        let opts = ryustep::WriteOptions {
+            unit: ryustep::LengthUnit::Meter,
+            file_name: "frame.step".into(),
+            time_stamp: "2026-10-27T00:00:00".into(),
+            ..Default::default()
+        };
+        ryustep::write_styled(&model, &[], &paints, &opts)
+            .unwrap()
+            .bytes
+    }
+
+    /// A painted file imported and exported with its header is the file,
+    /// byte for byte: its styles came in as the file layer and went out
+    /// as the same styles (design 448's fixpoint).
+    #[test]
+    fn a_painted_file_exports_as_it_came() {
+        let original = painted_frame();
+        let (_src, path) = outside(&original, "frame.step");
+        let (_dir, mut s) = fresh();
+        call(&mut s, "import", json!({"solid": true, "path": path})).unwrap();
+        let params = json!({"part": "f-1", "unit": "m", "time_stamp": "2026-10-27T00:00:00",
+                            "file_name": "frame.step"});
+        let (_, bytes) = exported(&mut s, params).unwrap();
+        if bytes != original {
+            let (a, b) = (
+                String::from_utf8_lossy(&original).into_owned(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            );
+            let first = a.lines().zip(b.lines()).position(|(x, y)| x != y);
+            panic!(
+                "differs from line {first:?}:\n{}\n---\n{}",
+                a.lines().nth(first.unwrap_or(0)).unwrap_or(""),
+                b.lines().nth(first.unwrap_or(0)).unwrap_or("")
+            );
+        }
+    }
+
     #[test]
     fn an_imported_file_exports_as_it_came() {
         let original = frame();
@@ -3436,5 +3905,186 @@ pub(crate) mod tests {
         let e = walk.unwritable(WriteError::NotRepresentable { face });
         assert_eq!(e.code, Code::ExportUnrepresentable);
         assert_eq!(e.details["entity"], format!("bolt/shank/{face}"));
+    }
+
+    /// A part's looks are written as styles: the part's colour on each
+    /// body, a face's own, a solid's opacity (design 448).
+    #[test]
+    fn a_parts_looks_are_written_as_styles() {
+        let (_dir, mut s) = crate::appearance::tests::project();
+        let set = |s: &mut Session, e: &str, v: Value| {
+            let mut v = v;
+            v["entities"] = json!([e]);
+            call(s, "appearance.set", v).unwrap();
+        };
+        set(&mut s, "plate", json!({"colour": "#d03030"}));
+        set(&mut s, "plate/boss", json!({"opacity": 0.5}));
+        let top = crate::appearance::tests::face_names(&mut s, "plate", "base")[0].clone();
+        set(
+            &mut s,
+            &format!("plate/base/{top}"),
+            json!({"colour": "#2050c0"}),
+        );
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "plate", "time_stamp": "2026-11-11T00:00:00"}),
+        )
+        .unwrap();
+        let o = ryustep::open(&bytes).unwrap();
+        let held = |n: &str| o.held.iter().position(|h| h.name == n).unwrap();
+        let base = o.body_styles(held("base"));
+        assert_eq!(base.body.unwrap().colour, Some([0xd0, 0x30, 0x30]));
+        assert_eq!(base.faces.len(), 1);
+        assert_eq!(
+            base.faces.values().next().unwrap().colour,
+            Some([0x20, 0x50, 0xc0])
+        );
+        let boss = o.body_styles(held("boss")).body.unwrap();
+        assert_eq!(
+            (boss.colour, boss.opacity),
+            (Some([0xd0, 0x30, 0x30]), Some(0.5))
+        );
+        let written: Vec<&str> = v["transfer"]["written"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["category"].as_str().unwrap())
+            .collect();
+        assert!(written.contains(&"appearance"), "{written:?}");
+        assert!(v.get("warnings").is_none(), "{v}");
+    }
+
+    /// An occurrence drawn otherwise than its part is an override in its
+    /// usages; a face drawn otherwise only in an assembly is omitted.
+    #[test]
+    fn occurrences_drawn_otherwise_are_overrides() {
+        let (_dir, mut s) = crate::appearance::tests::project();
+        let set = |s: &mut Session, e: &str, v: Value| {
+            let mut v = v;
+            v["entities"] = json!([e]);
+            call(s, "appearance.set", v).unwrap();
+        };
+        set(&mut s, "bolt", json!({"colour": "#101010"}));
+        set(
+            &mut s,
+            "pair/left",
+            json!({"colour": "#202020", "opacity": 0.5}),
+        );
+        set(&mut s, "frame/p1", json!({"colour": "#303030"}));
+        set(&mut s, "frame/p2/right/shank", json!({"opacity": 0.25}));
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "frame", "time_stamp": "2026-11-11T00:00:00"}),
+        )
+        .unwrap();
+        let o = ryustep::open(&bytes).unwrap();
+        let defs = &o.products.definitions;
+        let bolt = o
+            .held
+            .iter()
+            .position(|h| h.definition.is_some_and(|d| &*defs[d].product_id == "bolt"))
+            .unwrap();
+        assert_eq!(o.body_styles(bolt).body.unwrap().colour, Some([0x10; 3]));
+        // Each occurrence by its usages' ids, outermost first.
+        // Each occurrence style's usage ids, colour and opacity.
+        type Got = (Vec<String>, Option<[u8; 3]>, Option<f64>);
+        let mut got: Vec<Got> = o
+            .occurrence_styles()
+            .iter()
+            .map(|x| {
+                let ids = x
+                    .path
+                    .iter()
+                    .map(|&(k, n)| defs[k].children[n].id.to_string())
+                    .collect();
+                (ids, x.style.colour, x.style.opacity)
+            })
+            .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            [
+                (vec!["p1".into(), "left".into()], Some([0x30; 3]), Some(0.5)),
+                (vec!["p1".into(), "right".into()], Some([0x30; 3]), None),
+                (vec!["p2".into(), "left".into()], Some([0x20; 3]), Some(0.5)),
+                (
+                    vec!["p2".into(), "right".into()],
+                    Some([0x10; 3]),
+                    Some(0.25)
+                ),
+            ]
+        );
+        assert!(v.get("warnings").is_none(), "{v}");
+        // A face of the bolt coloured in the bolt: in an occurrence drawn
+        // otherwise, that face can't be said per occurrence.
+        let face = crate::appearance::tests::face_names(&mut s, "bolt", "shank")[0].clone();
+        set(
+            &mut s,
+            &format!("bolt/shank/{face}"),
+            json!({"colour": "#0000ff"}),
+        );
+        let (v, _) = exported(&mut s, json!({"part": "frame"})).unwrap();
+        let omitted = v["transfer"]["omitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["what"] == "appearance")
+            .cloned()
+            .unwrap_or_else(|| panic!("{v}"));
+        assert_eq!(omitted["count"], 4, "{omitted}");
+        let w = v["warnings"].as_array().unwrap();
+        assert!(
+            w.iter()
+                .any(|w| w["code"] == "export_metadata_omitted" && w["what"] == "appearance")
+        );
+    }
+
+    /// A label's export is its official commit's: its appearance too,
+    /// whatever the working files say now (design 448, question 438).
+    #[test]
+    fn an_export_at_a_label_writes_the_release_commits_appearance() {
+        use crate::git::tests::git;
+        let (dir, mut s) = crate::assembly::tests::project();
+        let r = dir.path();
+        git(r, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "bolt", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": ["bolt"], "colour": "#ff0000"}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt A, red"]);
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": ["bolt"], "colour": "#0000ff"}),
+        )
+        .unwrap();
+        let colour = |bytes: &[u8]| {
+            let o = ryustep::open(bytes).unwrap();
+            o.body_styles(0).body.and_then(|x| x.colour)
+        };
+        let opts = |rev: Option<&str>| {
+            let mut v = json!({"part": "bolt", "time_stamp": "2026-11-11T00:00:00"});
+            if let Some(r) = rev {
+                v["rev"] = json!(r);
+            }
+            v
+        };
+        let (_, at_label) = exported(&mut s, opts(Some("label:A"))).unwrap();
+        assert_eq!(colour(&at_label), Some([255, 0, 0]));
+        let (_, working) = exported(&mut s, opts(None)).unwrap();
+        assert_eq!(colour(&working), Some([0, 0, 255]));
+        // Twice at the label, the same bytes: what ryupdm's packages need.
+        let (_, again) = exported(&mut s, opts(Some("label:A"))).unwrap();
+        assert_eq!(again, at_label);
     }
 }

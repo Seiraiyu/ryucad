@@ -253,7 +253,7 @@ pub fn load(src: &dyn Source, alias: &str, base: &str) -> Result<Library> {
 
 fn unknown(path: &str) -> Fault {
     Fault::warning(
-        Code::InvalidDocument,
+        Code::UnknownFile,
         format!("{path} isn't a file ryueda's library holds"),
     )
     .with("path", path)
@@ -376,6 +376,20 @@ pub(crate) mod tests {
     use crate::footprint::tests::r0402;
     use crate::libcomp::tests::r_100k;
     use crate::symbol::tests::resistor;
+
+    #[test]
+    fn a_file_the_library_doesnt_hold_is_unknown() {
+        let mut files: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+        files.insert("library/notes.txt".into(), b"x".to_vec());
+        let lib = load(&files, "self", "").unwrap();
+        assert!(
+            lib.faults
+                .iter()
+                .any(|f| f.error.code == Code::UnknownFile && !f.is_error()),
+            "{:?}",
+            lib.faults
+        );
+    }
 
     /// A library's files, as a project holds them.
     pub fn files(step: &[u8]) -> BTreeMap<String, Vec<u8>> {

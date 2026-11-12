@@ -5,20 +5,13 @@
 //! datum following its face when the box is resized, renaming nothing of
 //! its sketch's; and the refusals.
 
+mod common;
+
+use common::{call, must};
 use core::f64::consts::PI;
 use ryucad::doc::id::Id;
-use ryucad::proto::Request;
-use ryucad::server::handle;
 use ryucad::session::Session;
 use serde_json::{Value, json};
-
-fn call(s: &mut Session, method: &str, params: Value) -> ryucad::error::Result<Value> {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-}
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 fn add(s: &mut Session, f: Value) -> Value {
     let mut f = f;

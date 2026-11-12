@@ -109,6 +109,81 @@ pub fn deviation(b: &Body, m: &BodyMesh, n: u32, every: usize) -> f64 {
     worst
 }
 
+/// The twin of a Coilcraft SQ coil's wire end (#598): one plane face
+/// whose loop runs down a half circle of radius `r` about the origin in
+/// z = 0, from (0, r) through (r, 0) to (0, -r), and back up an ellipse
+/// through the same two points, its major axis `a` along the diagonal
+/// y = x. The ellipse lies outside the circle above the x-axis and
+/// inside below it, crossing it at (r, 0): a figure-eight sliver at most
+/// about `a - r` wide, whose sides cross, as the coils' do.
+pub fn crossing_sliver(r: f64, a: f64) -> ryukei::heal::Shape {
+    use ryukei::geom::{Circle, Curve, Ellipse, Frame, Plane};
+    use ryukei::heal::{Edge, Face, Loop, Shape, Shell, Use, Vertex};
+    let z = Vector3::new(0.0, 0.0, 1.0);
+    let o = Point3::new(0.0, 0.0, 0.0);
+    let circle = Frame::new(o, z, Vector3::new(1.0, 0.0, 0.0)).expect("a frame");
+    let diagonal = Frame::new(o, z, Vector3::new(1.0, 1.0, 0.0)).expect("a frame");
+    // Through (0, ±r): r² / 2a² + r² / 2b² = 1.
+    let b = r * a / ryukei::math::sqrt(2.0 * a * a - r * r);
+    // (0, r) lies at 45° in the diagonal frame: (a cos s, b sin s) with
+    // tan s = a / b, and (0, -r) half a turn on.
+    let s0 = ryukei::math::atan2(a, b);
+    let vertex = |y: f64| Vertex {
+        point: Point3::new(0.0, y, 0.0),
+        tolerance: 0.0,
+        seam: false,
+    };
+    let half = core::f64::consts::FRAC_PI_2;
+    Shape {
+        surfaces: vec![Surface::Plane(Plane::new(circle))],
+        curves: vec![
+            Curve::Circle(Circle::new(circle, r).expect("a circle")),
+            Curve::Ellipse(Ellipse::new(diagonal, a, b).expect("an ellipse")),
+        ],
+        curves2: Vec::new(),
+        vertices: vec![vertex(r), vertex(-r)],
+        edges: vec![
+            Edge {
+                curve: 0,
+                interval: [-half, half],
+                start: 1,
+                end: 0,
+                tolerance: 0.0,
+            },
+            Edge {
+                curve: 1,
+                interval: [s0 - core::f64::consts::PI, s0],
+                start: 1,
+                end: 0,
+                tolerance: 0.0,
+            },
+        ],
+        faces: vec![Face {
+            surface: 0,
+            sense: Sense::Forward,
+            loops: vec![Loop::Edges(vec![
+                Use {
+                    edge: 0,
+                    sense: Sense::Reversed,
+                    pcurve: None,
+                },
+                Use {
+                    edge: 1,
+                    sense: Sense::Forward,
+                    pcurve: None,
+                },
+            ])],
+            tolerance: 0.0,
+        }],
+        shells: vec![Shell {
+            faces: vec![0],
+            closed: false,
+        }],
+        solids: Vec::new(),
+        sheets: vec![0],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

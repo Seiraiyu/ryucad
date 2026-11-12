@@ -169,6 +169,29 @@ fn x11_work_area() -> Option<[u32; 4]> {
 pub const NO_ADAPTER: &str = "No graphics adapter can draw this window. Install your GPU's drivers \
 (or Mesa's lavapipe on Linux), or see the model headless with `ryucad render`.";
 
+/// The message when the window's event loop can't reach a display (#740):
+/// no graphics adapter is at fault.
+pub const NO_DISPLAY: &str = "No display could be opened for the window. On Linux, run it in a \
+desktop session: WAYLAND_DISPLAY (Wayland) or DISPLAY (X11, with XAUTHORITY naming its cookie) \
+must name a running display. Or see the model headless with `ryucad render`.";
+
+/// The dialog's title and words when the window can't run, from eframe's
+/// error: an event loop that can't start found no display (winit's
+/// `EventLoopError`); anything else is the adapter's, unless it says so.
+pub fn cant_run(error: &str) -> (&'static str, String) {
+    let (title, advice) = if error.starts_with("winit EventLoopError") {
+        ("ryucad can't open its window", NO_DISPLAY)
+    } else {
+        ("ryucad can't draw its window", NO_ADAPTER)
+    };
+    let message = if error.contains(advice) {
+        error.to_owned()
+    } else {
+        format!("{error}\n\n{advice}")
+    };
+    (title, message)
+}
+
 /// What the scene needs of an adapter beyond the downlevel defaults: a
 /// plain view of its sRGB texture, for egui to sample. OpenGL often lacks
 /// it, so an adapter without it is passed over, never chosen to crash.
@@ -523,6 +546,18 @@ mod raise_tests {
 #[cfg(test)]
 mod pick_tests {
     use super::*;
+
+    #[test]
+    fn a_display_that_wont_open_isnt_blamed_on_the_adapter() {
+        let x = "winit EventLoopError: os error at …/linux/mod.rs:788: Failed to open connection to X server";
+        let (title, m) = cant_run(x);
+        assert_eq!(title, "ryucad can't open its window");
+        assert!(m.contains("WAYLAND_DISPLAY") && !m.contains("GPU"), "{m}");
+        let (title, m) = cant_run("wgpu error: no adapter");
+        assert_eq!(title, "ryucad can't draw its window");
+        assert!(m.ends_with(NO_ADAPTER));
+        assert_eq!(cant_run(NO_ADAPTER).1, NO_ADAPTER, "said once");
+    }
 
     fn c(software: bool, gl: bool, usable: bool) -> Candidate {
         Candidate {

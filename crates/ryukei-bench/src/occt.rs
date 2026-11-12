@@ -70,6 +70,7 @@ mod ffi {
             faces: &[f64],
         ) -> Result<UniquePtr<Shape>>;
         fn step_read(path: &str, fix: bool) -> Result<UniquePtr<Shape>>;
+        fn xde_colours(path: &str) -> Result<Vec<f64>>;
         fn step_write(s: &Shape, path: &str, ap242: bool) -> Result<()>;
         fn stl_read(path: &str) -> Result<OcctMesh>;
         fn mesh_stl(
@@ -655,4 +656,28 @@ impl Solid {
             seconds: r[6],
         })
     }
+}
+
+/// A solid or a face as OCCT's XDE reads a STEP file with its colours:
+/// its centroid (millimetres) and its surface colour (sRGB and alpha in
+/// `[0, 1]`), if XDE gives it one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct XdeColour {
+    pub face: bool,
+    pub centre: [f64; 3],
+    pub rgba: Option<[f64; 4]>,
+}
+
+/// Every solid of a file's free shapes, each followed by its faces, as
+/// XDE reads them with colour mode on.
+pub fn xde_colours(path: &std::path::Path) -> Result<Vec<XdeColour>, String> {
+    let raw = ffi::xde_colours(&path.to_string_lossy()).map_err(|e| e.to_string())?;
+    Ok(raw
+        .chunks_exact(8)
+        .map(|r| XdeColour {
+            face: r[0] == 1.0,
+            centre: [r[1], r[2], r[3]],
+            rgba: (r[4] >= 0.0).then_some([r[4], r[5], r[6], r[7]]),
+        })
+        .collect())
 }

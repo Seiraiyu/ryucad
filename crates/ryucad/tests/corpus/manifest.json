@@ -5,12 +5,10 @@
         "codes": {
           "drawing_view_uncertain": 4,
           "dwg_hole_uncalled": 3,
-          "dwg_outside": 1,
-          "dwg_text_overlap": 4,
           "instances_interfere": 2
         },
         "errors": 0,
-        "warnings": 14
+        "warnings": 9
       },
       "drawings": {
         "gearbox/main": {
@@ -50,12 +48,10 @@
           "annotations": {
             "d1": "12X ⌀5.00 ↧14.00"
           },
-          "findings": {
-            "dwg_outside": 1
-          },
-          "pdf": "4a26b1d738791943744f627a2a7fea75064a43d11458ed3d45e707bcb1fec528",
+          "findings": {},
+          "pdf": "ac259ef7b14c8da8dbbd2345353bab1ae1213b6327eb7d09dcb337678fbbd95a",
           "scores": {
-            "s1": 95
+            "s1": 100
           },
           "views": {
             "v1": {
@@ -125,12 +121,11 @@
             "d1": "⌀20.00 H7 (+0.021/0)"
           },
           "findings": {
-            "drawing_view_uncertain": 1,
-            "dwg_text_overlap": 1
+            "drawing_view_uncertain": 1
           },
-          "pdf": "9b495f9a06d41f9eef558a4bde4d20e2c31a824b1747b752fea4d2f1d00bc97f",
+          "pdf": "8d9342f5913e66d5bbd9da8db38bbed2b707218f31b6c0a41db170c505702e90",
           "scores": {
-            "s1": 97
+            "s1": 100
           },
           "views": {
             "v1": {
@@ -180,12 +175,11 @@
             "d1": "⌀24.00 H7 (+0.021/0)"
           },
           "findings": {
-            "drawing_view_uncertain": 1,
-            "dwg_text_overlap": 1
+            "drawing_view_uncertain": 1
           },
-          "pdf": "b70d33ab13aa9b36c696d562504cb098f7226ccae644eb00e87eec0d4e2222ad",
+          "pdf": "527257bcd8c4aa3f0044928d1adf5b480c484d596e77d19cb1b09dd77039a390",
           "scores": {
-            "s1": 97
+            "s1": 100
           },
           "views": {
             "v1": {
@@ -234,12 +228,10 @@
           "annotations": {
             "d1": "⌀24.00 H7 (+0.021/0)"
           },
-          "findings": {
-            "dwg_text_overlap": 1
-          },
-          "pdf": "742824ecc4afa061ff52dd149eea846c6af6bb900b6a4d330096405e698e075a",
+          "findings": {},
+          "pdf": "b4f562bc546c9b082ec1ba2c985b14676d4ec1e4e1a43236c7d7338875bcd409",
           "scores": {
-            "s1": 97
+            "s1": 100
           },
           "views": {
             "v1": {
@@ -289,12 +281,11 @@
             "d1": "⌀30.00 H7 (+0.021/0)"
           },
           "findings": {
-            "drawing_view_uncertain": 1,
-            "dwg_text_overlap": 1
+            "drawing_view_uncertain": 1
           },
-          "pdf": "cfacbb3678712a52a735cfc1285ec7ab42e71726ab5b9deceec27cb6965d55d8",
+          "pdf": "31cd3b9da65bbaecadabd296101735db77ab324bb786812e64905e00feddb706",
           "scores": {
-            "s1": 97
+            "s1": 100
           },
           "views": {
             "v1": {

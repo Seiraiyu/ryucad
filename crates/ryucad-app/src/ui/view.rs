@@ -260,7 +260,14 @@ impl View {
                 _ => true,
             });
         }
-        if !(self.hovered || self.focused) || ctx.text_edit_focused() {
+        // A control has the keyboard (Tab reached it, #749): Tab and the
+        // rest are egui's, to move between controls, wherever the pointer
+        // is. The tree's rows keep the viewport's keys as before.
+        let tree = self.tree_focus;
+        if !(self.hovered || self.focused)
+            || ctx.text_edit_focused()
+            || ctx.memory(|m| m.focused()).is_some_and(|f| Some(f) != tree)
+        {
             return;
         }
         let rect = self.rect;
@@ -528,7 +535,7 @@ impl View {
             self.picker = Some(
                 Picker::of(&ws.model, self.sketches)
                     .with_datums(&ws.model, self.datums)
-                    .with_compare(ws.compare.as_ref())
+                    .with_compare(ws.painted())
                     .with_sections(&ws.sections.planes),
             );
             self.picked_at = wanted;
@@ -715,6 +722,11 @@ impl View {
         if self.sketches {
             out.extend(ws.model.drawn_sketches().flat_map(|(_, d)| d.points()));
         }
+        // Datums, paths and helices as drawn (#729, #735). A datum plane's
+        // square is sized to the bodies' box, so fitting twice is stable.
+        if self.datums {
+            out.extend(self.picker(ws).marks().iter().flat_map(|m| m.points()));
+        }
         out
     }
 
@@ -900,7 +912,7 @@ impl View {
         }
         // A compare's new and changed faces, over the chosen feature so
         // choosing one still shows what changed in it.
-        if let Some(c) = &ws.compare {
+        if let Some(c) = ws.painted() {
             for key in &c.new_bodies {
                 let new = linear(style::NEW);
                 faces.extend((0..picker.faces(key)).map(|i| (key.clone(), i, new)));
@@ -1277,7 +1289,11 @@ impl View {
                     let text = egui::RichText::new(format!("#{}", m.number))
                         .strong()
                         .color(ink);
-                    let mut b = egui::Button::new(text).small().corner_radius(9.0);
+                    // On one line: the area keeps last frame's size (#733).
+                    let mut b = egui::Button::new(text)
+                        .small()
+                        .corner_radius(9.0)
+                        .wrap_mode(egui::TextWrapMode::Extend);
                     b = if m.outdated {
                         b.fill(egui::Color32::TRANSPARENT)
                             .stroke(egui::Stroke::new(1.5, colour))
@@ -1868,6 +1884,11 @@ impl View {
             if self.nav.key(id) {
                 self.moved(ws);
             }
+        }
+        // B swaps a compare's sides (design 447): `take_keys` took it
+        // over the viewport.
+        if tabs.contains(&"view.compare_swap") {
+            ws.swap_compare();
         }
         self.hovered = response.hovered();
         if response.hovered() && !ui.ctx().text_edit_focused() {
@@ -2791,7 +2812,7 @@ impl View {
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
         scene.set_looks(&ws.model.looks);
         scene.sync_drawn(&rs.device, drawn, reference);
-        scene.sync_ghosts(&rs.device, ws.compare.as_ref());
+        scene.sync_ghosts(&rs.device, ws.painted());
         let size = [f64::from(px[0]), f64::from(px[1])];
         let mut overlay = if self.sketches {
             crate::core::sketch::overlay(

@@ -70,6 +70,15 @@ impl Activity {
                 "{}: local release tags",
                 e["method"].as_str().unwrap_or("release.sync")
             ),
+            // A branch switch: the files Git changed; never undone.
+            Some("switch") => {
+                let from = e["params"]["from"].as_str().unwrap_or("a detached head");
+                let to = e["params"]["to"].as_str().unwrap_or("?");
+                match touched(e) {
+                    t if t.is_empty() => format!("switch {from} → {to}"),
+                    t => format!("switch {from} → {to}: {t}"),
+                }
+            }
             _ => {
                 let method = e["method"].as_str().unwrap_or_default();
                 match touched(e) {
@@ -115,6 +124,24 @@ fn touched(e: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_switch_says_from_where_to_where_and_is_never_undone() {
+        let mut a = Activity::default();
+        a.reset(&json!([
+            {"seq": 1, "kind": "switch", "method": "branch.switch", "undone_by": null,
+             "params": {"from": "main", "to": "arm"},
+             "files": [{"path": "parts/p/features/b.json", "change": "modified"}]},
+            {"seq": 2, "kind": "switch", "method": "branch.switch", "undone_by": null,
+             "params": {"from": null, "to": "main"}, "files": []},
+        ]));
+        let d: Vec<String> = a.entries.iter().map(|e| a.describe(e)).collect();
+        assert_eq!(
+            d,
+            ["switch main → arm: p/b", "switch a detached head → main"]
+        );
+        assert!(!can_undo(&a.entries[0]));
+    }
 
     #[test]
     fn undos_mark_what_they_undid() {

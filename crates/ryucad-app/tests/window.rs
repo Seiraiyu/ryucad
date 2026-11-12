@@ -92,6 +92,37 @@ fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
             break;
         }
     }
+    // A menu taller than the window flows into columns from its second
+    // frame (#728): every item is then inside the window, clicked once it
+    // is at rest. (The menu's own node has no rect to judge by.)
+    let screen = h.ctx.content_rect();
+    let rect = |h: &Harness<'static, App>| {
+        h.get_all_by_role(egui::accesskit::Role::Menu)
+            .last()
+            .unwrap()
+            .get_by(named)
+            .rect()
+    };
+    for _ in 0..10 {
+        if screen.contains_rect(rect(h)) {
+            break;
+        }
+        h.step();
+    }
+    // A menu that changed size settles over a frame: click it at rest.
+    let mut row = rect(h);
+    for _ in 0..10 {
+        h.step();
+        let now = rect(h);
+        if now == row {
+            break;
+        }
+        row = now;
+    }
+    assert!(
+        screen.contains_rect(row),
+        "{item} is outside the window: {row:?}"
+    );
     h.get_all_by_role(egui::accesskit::Role::Menu)
         .last()
         .unwrap()
@@ -1769,6 +1800,75 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
 }
 
 #[test]
+fn b_swaps_a_compare_and_writes_wait_for_the_working_files() {
+    use ryucad_app::core::command;
+    use ryucad_app::core::compare::{Blink, SWAPPED};
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=30"]);
+    p.ok(&["feature", "delete", "p", "boss"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.meshes.len() == 1
+    });
+    menu(&mut h, "View", "Compare with HEAD");
+    frames(&mut h, compared);
+    // B over the viewport: HEAD's box and cylinder, the working box
+    // ghosted.
+    let rect = h.state().opened().view.rect;
+    h.event(egui::Event::PointerMoved(rect.center()));
+    h.step();
+    hooked(&mut h, egui::Key::B, egui::Modifiers::NONE);
+    frames(&mut h, |a| {
+        compared(a)
+            && a.opened().ws.model.meshes.len() == 2
+            && a.opened()
+                .ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.swapped.as_deref() == Some("HEAD"))
+    });
+    h.step();
+    h.get_by_label("Showing HEAD · working ghosted");
+    // Undo waits for the working files, and says why.
+    let state = ryucad_app::ui::commands::state(h.state_mut().opened_mut());
+    assert_eq!(command::enabled("edit.undo", &state), Err(SWAPPED));
+    // An agent's write lands; the ghost follows it.
+    let key = ("p".to_owned(), "base".to_owned());
+    let before = h.state().opened().ws.compare.as_ref().unwrap().wanted[&key].clone();
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=25"]);
+    frames(&mut h, |a| {
+        compared(a)
+            && a.opened()
+                .ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.wanted.get(&key).is_some_and(|h| *h != before))
+    });
+    // HEAD alone; B blinks to the working files alone.
+    h.get_by_label("Only HEAD").click();
+    frames(&mut h, |a| a.opened().ws.painted().is_none());
+    h.event(egui::Event::PointerMoved(rect.center()));
+    h.step();
+    hooked(&mut h, egui::Key::B, egui::Modifiers::NONE);
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle() && ws.model_rev().is_none() && ws.model.meshes.len() == 1
+    });
+    shown(&mut h, "Showing only the working files");
+    h.get_by_label("Both").click();
+    frames(&mut h, |a| a.opened().ws.painted().is_some());
+    // Stop comparing ends the blink.
+    h.get_by_label("Stop comparing").click();
+    frames(&mut h, |a| {
+        a.opened().ws.compare.is_none() && a.opened().ws.blink == Blink::default()
+    });
+}
+
+#[test]
 fn a_merge_conflict_is_settled_from_its_panel() {
     let _one = one_at_a_time();
     if !gpu() {
@@ -2097,6 +2197,8 @@ fn an_assembly_lists_its_instances_and_offers_what_to_show() {
     // View > Show offers the project's model and each part.
     h.get_by_label("View").click();
     shown(&mut h, "Show");
+    // View flows into columns from its second frame (#728).
+    h.run_steps(3);
     h.get_by_label("Show").click();
     shown(&mut h, "The project's model");
     h.get_by_label("frame (assembly)");
@@ -2879,6 +2981,54 @@ fn a_dragged_ring_previews_and_esc_drops_the_value_then_the_tool() {
     assert_eq!(x, serde_json::json!([1, 0, 0]));
 }
 
+/// #753, #731: Move acts on an instance chosen by its row or a whole-body
+/// pick, and a fixed one says why it can't before Move is tried.
+#[test]
+fn move_works_on_an_instance_chosen_by_its_row_or_a_whole_body_pick() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    let chosen =
+        |a: &App, i: &str| a.opened().view.chosen == Some(("frame".to_owned(), i.to_owned()));
+    h.get_by_label("b1 (bolt @ working, fixed)").click();
+    frames(&mut h, |a| chosen(a, "b1"));
+    h.run_steps(2);
+    assert!(h.get_by_label("Move").accesskit_node().is_disabled());
+    h.get_by_label_contains("Can't move: b1 is fixed");
+    h.get_by(|n| {
+        n.label()
+            .is_some_and(|l| l.starts_with("b2 (bolt @ working"))
+    })
+    .click();
+    frames(&mut h, |a| chosen(a, "b2"));
+    h.run_steps(2);
+    assert!(h.state().opened().ws.myself().unwrap().selection.is_empty());
+    assert!(!h.get_by_label("Move").accesskit_node().is_disabled());
+    h.get_by_label("Move").click();
+    waited(&mut h, "the Move tool on b2", |a| {
+        a.opened()
+            .ws
+            .mover
+            .as_ref()
+            .is_some_and(|m| m.instance == "b2")
+    });
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| a.opened().ws.mover.is_none());
+    h.state_mut().opened_mut().view.filter.bodies = true;
+    h.run_steps(2);
+    let at = over_body(&mut h, "b2/shank");
+    click(&h, at);
+    frames(&mut h, |a| chosen(a, "b2"));
+    h.run_steps(2);
+    assert!(!h.get_by_label("Move").accesskit_node().is_disabled());
+}
+
 #[test]
 fn a_fixed_instance_shows_no_handles_and_says_why() {
     use egui_kittest::kittest::NodeT;
@@ -2899,6 +3049,8 @@ fn a_fixed_instance_shows_no_handles_and_says_why() {
     h.get_by_label("Move").click();
     h.run_steps(2);
     assert!(h.state().opened().ws.mover.is_none());
+    h.run_steps(2);
+    h.get_by_label_contains("b1 is fixed: free it with --fixed false");
 }
 
 #[test]
@@ -3037,9 +3189,13 @@ fn a_free_instance_is_dragged_and_written_once() {
     }
     press(&h, fixed + egui::vec2(40.0, 0.0), false);
     h.step();
-    assert_eq!(
-        h.state().opened().ws.drag_note.as_deref(),
-        Some("b1 is fixed")
+    assert!(
+        h.state()
+            .opened()
+            .ws
+            .drag_note
+            .as_deref()
+            .is_some_and(|n| n.starts_with("b1 is fixed"))
     );
     // The free one follows the pointer, previewed by solves, and one move
     // is written when it is let go.
@@ -3815,6 +3971,30 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
 }
 
 #[test]
+fn a_branch_is_checked_out_from_its_row_and_the_dialog_names_who_is_attached() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    p.git(&["branch", "arm"]);
+    p.ok(&["--as", "claude-1", "status", "reviewing"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    show_tab(&mut h, "branches");
+    frames(&mut h, |a| a.opened().ws.branches.branch_list.is_some());
+    shown(&mut h, "main (checked out)");
+    h.get_by_label("Check out").click();
+    shown(&mut h, "claude-1 is attached and may be writing");
+    h.get_by_label("Switch to arm").click();
+    frames(&mut h, |a| {
+        let b = &a.opened().ws.branches;
+        b.checkout.is_none() && b.current_branch() == Some("arm")
+    });
+    shown(&mut h, "arm (checked out)");
+}
+
+#[test]
 fn view_show_scrolls_to_every_part() {
     let _one = one_at_a_time();
     if !gpu() {
@@ -4173,6 +4353,62 @@ fn tab_close_buttons_name_their_tabs() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// #729, #735: Zoom to fit frames a part's helix, not only its solids.
+#[test]
+fn zoom_to_fit_frames_paths_and_helices() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&[
+        "feature", "add", "p", "helix", "--id", "h", "--axis", "z", "--radius", "60mm", "--pitch",
+        "10mm", "--turns", "6",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a) && a.opened().ws.model.paths.len() == 1
+    });
+    {
+        let o = h.state_mut().opened_mut();
+        o.view.fit(&mut o.ws, None);
+    }
+    frames(&mut h, |a| !a.opened().view.nav.moving());
+    h.step();
+    let rect = h.state().opened().view.rect;
+    let points = h.state().opened().ws.model.paths[&("p".to_owned(), "h".to_owned())]
+        .points
+        .clone();
+    for q in points {
+        let at = on_screen(&h, q);
+        assert!(
+            rect.expand(1.0).contains(at),
+            "{q:?} drawn at {at:?}, outside the view {rect:?}"
+        );
+    }
+}
+
+/// #728, #734: the View menu fits in a short window, in columns, and
+/// its last items are reached.
+#[test]
+fn the_view_menu_reaches_its_last_items() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::shell;
+    let p = Project::new().with_part();
+    let mut h = sized(&p, 700.0);
+    frames(&mut h, loaded);
+    // Reset layout is among View's last items, below a 700-point window
+    // in one column: `menu` asserts it is inside the window (#728).
+    shell::close(&mut h.state_mut().opened_mut().tiles, "history");
+    h.run_steps(2);
+    assert!(!shell::is_open(&h.state().opened().tiles, "history"));
+    menu(&mut h, "View", "Reset layout");
+    frames(&mut h, |a| shell::is_open(&a.opened().tiles, "history"));
 }
 
 #[test]
@@ -5145,6 +5381,7 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
             .is_some_and(|r| r.fetched)
     });
     shown(&mut h, "fasteners");
+    shown(&mut h, &format!("from {url}"));
     // Project > Place from dependency…: the dependency, its part, Place.
     menu(&mut h, "Project", "Place from dependency…");
     shown(&mut h, "Place in frame");
@@ -6048,6 +6285,277 @@ fn a_datums_row_hides_it_and_its_form_edits_its_distance() {
     assert_eq!(shown["distance"]["value"], "4 mm");
 }
 
+/// #749: Tab reaches an annotation's row with the pointer over the
+/// viewport, and the row is named for a screen reader.
+#[test]
+fn tab_reaches_an_annotations_row_with_the_pointer_over_the_viewport() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let face = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    p.ok(&["annotations", "add", &face, "--comment", "Round this"]);
+    let mut h = viewing(&p);
+    frames(&mut h, |a| {
+        loaded(a) && a.opened().ws.annotations.all.len() == 1
+    });
+    show_tab(&mut h, "annotations");
+    let e = h
+        .state()
+        .opened()
+        .ws
+        .annotations
+        .all
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let row = e.spoken(Some(1));
+    shown(&mut h, &row);
+    let view = h.state().opened().view.rect;
+    h.event(egui::Event::PointerMoved(view.center()));
+    h.run_steps(2);
+    for _ in 0..12 {
+        if h.state().opened().focus.tile == Some("annotations") {
+            break;
+        }
+        h.key_press(egui::Key::F6);
+        h.step();
+    }
+    assert_eq!(h.state().opened().focus.tile, Some("annotations"));
+    let mut reached = false;
+    for _ in 0..8 {
+        tab(&mut h, egui::Modifiers::NONE);
+        h.run_steps(1);
+        if h.get_by_label(&row).is_focused() {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "Tab never reached {row}");
+    hooked(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
+    frames(&mut h, |a| {
+        a.opened().ws.chosen_annotation.as_deref() == Some(e.id.as_str())
+    });
+}
+
+/// #749: the Mate dialog takes the keyboard, Tab moves through it, and
+/// Esc closes it with nothing selected.
+#[test]
+fn the_mate_dialog_takes_the_keyboard_and_esc_closes_it_with_nothing_selected() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (p, _, _) = common::plate_and_bolt();
+    let mut h = window(&p);
+    waited(&mut h, "the frame drawn", |a| {
+        a.opened().ws.idle() && a.opened().ws.model.middles("frame").len() == 2
+    });
+    h.step();
+    menu(&mut h, "Edit", "Mate…");
+    shown(&mut h, "Mate");
+    let view = h.state().opened().view.rect;
+    h.event(egui::Event::PointerMoved(view.center()));
+    h.run_steps(2);
+    let form = |h: &Harness<'static, App>| {
+        h.get_by(|n| {
+            n.role() == egui::accesskit::Role::ComboBox && n.label().as_deref() == Some("Form")
+        })
+        .is_focused()
+    };
+    assert!(form(&h), "the dialog's Form has the keyboard");
+    tab(&mut h, egui::Modifiers::NONE);
+    h.run_steps(2);
+    assert!(!form(&h), "Tab moved on through the dialog");
+    assert!(
+        hidden(h.state()).is_empty(),
+        "Tab hid nothing under the pointer"
+    );
+    hooked(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    waited(&mut h, "closed", |a| a.opened().ws.mating.is_none());
+}
+
+/// #742: the Markup bar wraps inside a narrow viewport.
+#[test]
+fn the_markup_bar_fits_a_narrow_viewport() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    h.set_size(egui::vec2(1000.0, 1000.0));
+    frames(&mut h, loaded);
+    h.step();
+    h.get_by_label("Markup").click();
+    waited(&mut h, "the bar", |a| a.opened().ws.markup.is_some());
+    shown(&mut h, "Pen on faces");
+    h.run_steps(3);
+    let view = h.state().opened().view.rect;
+    assert!(view.width() < 720.0, "{view:?}");
+    let mut labels: Vec<String> = ryucad_app::core::markup::Tool::ALL
+        .iter()
+        .map(|t| {
+            ryucad_app::core::command::get(t.command())
+                .unwrap()
+                .title
+                .to_owned()
+        })
+        .collect();
+    labels.extend(["Undo mark", "Clear", "Comment", "Post", "Cancel"].map(String::from));
+    for l in &labels {
+        let over: Vec<egui::Rect> = h
+            .query_all_by_label(l)
+            .map(|n| n.rect())
+            .filter(|r| r.intersects(view))
+            .collect();
+        assert!(!over.is_empty(), "{l} isn't over the viewport");
+        for r in over {
+            assert!(
+                view.expand(1.0).contains_rect(r),
+                "{l} at {r:?} past {view:?}"
+            );
+        }
+    }
+}
+
+/// #737: going to a feature of a part that isn't shown shows its part.
+#[test]
+fn the_palette_shows_the_part_of_a_feature_it_goes_to() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    for (part, at) in [("near", "0,0,0"), ("far", "1000,0,0")] {
+        p.ok(&["part", "create", part]);
+        p.ok(&[
+            "feature", "add", part, "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=10", "--origin", at,
+        ]);
+    }
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    p.ok(&["focus", "far"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("far")
+    });
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.get_by_label("Search commands").click();
+    h.run_steps(2);
+    h.get_by_label("Search commands").type_text("@near/b");
+    h.run_steps(2);
+    h.get_by_label("near/b (box)");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("near")
+    });
+    assert_eq!(
+        h.state().opened().view.chosen,
+        Some(("near".to_owned(), "b".to_owned()))
+    );
+}
+
+/// #736: a search after scrolling the tree down shows its rows.
+#[test]
+fn a_search_after_scrolling_the_tree_shows_its_rows() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    for i in 0..50 {
+        let (id, at) = (format!("q{i:02}"), format!("0mm,0mm,{i}mm"));
+        p.ok(&[
+            "feature",
+            "add",
+            "p",
+            "point",
+            "--id",
+            &id,
+            "--by",
+            "coordinates",
+            "--coordinates",
+            &at,
+        ]);
+    }
+    let mut h = sized(&p, 600.0);
+    frames(&mut h, |a| {
+        loaded(a)
+            && a.opened().ws.model.parts["p"]
+                .feature("q49")
+                .is_some_and(|f| f.datum.is_some())
+    });
+    h.run_steps(2);
+    let tree = h.state().opened().focus.rect("tree").unwrap();
+    h.event(egui::Event::PointerMoved(tree.center()));
+    for _ in 0..60 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -1.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.step();
+    }
+    h.run_steps(2);
+    assert!(
+        h.query_by_label("q00 (point)")
+            .is_none_or(|n| n.rect().max.y <= tree.min.y),
+        "the tree didn't scroll"
+    );
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    h.step();
+    h.get_by_label("Find in tree").type_text("q01");
+    h.run_steps(3);
+    let row = h.get_by_label("q01 (point)").rect();
+    // Inside the tree top to bottom: a search starts at its first row.
+    assert!(
+        row.top() >= tree.top() && row.bottom() <= tree.bottom(),
+        "q01's row {row:?} outside the tree {tree:?}"
+    );
+}
+
+/// #733: the Annotations tile's rows wrap inside it.
+#[test]
+fn the_annotations_tiles_rows_stay_inside_it() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use egui::accesskit::Role;
+    use ryucad_app::ui::shell;
+    let p = Project::new().with_part();
+    let face = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    let made = p.ok(&["annotations", "add", &face, "--comment", "Round this"]);
+    let id = made["annotation"]["id"].as_str().unwrap().to_owned();
+    p.ok(&["annotations", "reply", &id, "Which edge?"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Tools", "Annotations");
+    frames(&mut h, |a| a.opened().ws.annotations.loaded);
+    h.run_steps(3);
+    let tiles = &h.state().opened().tiles;
+    let tile = tiles
+        .tiles
+        .rect(shell::find(tiles, "annotations").unwrap())
+        .unwrap();
+    let reply = h.get_by_role_and_label(Role::Button, "Reply").rect();
+    assert!(
+        reply.right() <= tile.right() + 0.5,
+        "Reply at {reply:?}, the tile {tile:?}"
+    );
+    let mine = h.get_by_label("Mine").rect();
+    assert!(
+        mine.right() <= tile.right() + 0.5,
+        "Mine at {mine:?}, the tile {tile:?}"
+    );
+}
+
 #[test]
 fn the_annotations_tile_lists_an_agents_reply() {
     let _one = one_at_a_time();
@@ -6099,6 +6607,14 @@ fn a_pins_marker_is_drawn_and_chooses_its_annotation() {
     frames(&mut h, |a| {
         a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
     });
+    h.run_steps(3);
+    let tags: Vec<egui::Rect> = h.query_all_by_label("#1").map(|n| n.rect()).collect();
+    let marker = *tags.last().unwrap();
+    assert!(
+        marker.height() < 1.5 * tags[0].height().max(16.0),
+        "the marker wraps: {marker:?}, the tile's tag {:?}",
+        tags[0]
+    );
     // Preferences turn them off; the tile the click opened still lists
     // it by its number.
     h.run_steps(2);
@@ -6524,4 +7040,59 @@ fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_i
         .set_mode(ryucad_app::core::modes::Mode::View);
     h.run_steps(2);
     assert!(h.get_by_label("Markup").accesskit_node().is_disabled());
+}
+
+#[test]
+fn file_switch_branch_lists_the_branches_in_the_palette() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    p.git(&["branch", "arm"]);
+    p.git(&["branch", "leg"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "File", "Switch branch…");
+    frames(&mut h, |a| a.opened().ws.branches.branch_list.is_some());
+    h.step();
+    h.get_by_label("Search commands")
+        .set_text_value_accesskit("branch:le");
+    h.step();
+    h.step();
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .branches
+            .checkout
+            .as_ref()
+            .is_some_and(|c| c.branch == "leg")
+    });
+    shown(&mut h, "Switch to leg");
+}
+
+#[test]
+fn tools_appearance_says_a_colour_came_from_the_step_file() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    let painted = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../ryustep/tests/data/styles/painted.stp"
+    );
+    p.ok(&["import", "--solid", painted]);
+    let mut h = window(&p);
+    // The painted block is the project's one solid (`loaded` waits for
+    // the two of `with_part`'s).
+    frames(&mut h, |app| match &app.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.meshes.len() == 1,
+        _ => false,
+    });
+    menu(&mut h, "Tools", "Appearance");
+    shown(&mut h, "Colour what");
+    shown(&mut h, "From the STEP file");
+    assert!(h.state().opened().ws.appearance.from_file);
 }

@@ -54,6 +54,7 @@ sheets c32f4532c06b8006
 shells 3da0924f14a654af
 silhouettes 8aa9e6fba4a59e79
 spline_blends 5a80af3564cc9dfc
+strips 51328ad7c17832e0
 sweep_offsets 3ca41faf3f1ebc3c
 sweeps e23bcbd13d362231
 sweeps_along a5396638500cc5f3

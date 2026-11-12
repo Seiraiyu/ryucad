@@ -17,6 +17,7 @@ ctrlc = "3"
 # Random annotation IDs.
 getrandom = "0.3"
 gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
+ryu-git = { path = "../ryu-git" }
 interprocess = "2"
 png = "0.18"
 # An 8×8 bitmap font for labels in renders.
@@ -107,6 +108,10 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 widestring = "1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
+
+# The export tests ask Windows for a file's 8.3 short name (#581).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 # musl's allocator is slow under multithreaded allocation, and rebuild runs
 # features in parallel; glibc builds use it too, so they measure what ships.

@@ -88,11 +88,13 @@ pub fn compare_bar(ui: &mut egui::Ui, ws: &mut Workspace, typed: &mut Option<Str
             return;
         }
         let Some(c) = &ws.compare else { return };
-        let commit = c
-            .commit
-            .as_deref()
-            .map_or(String::new(), |c| format!(" ({})", &c[..c.len().min(10)]));
-        ui.label(format!("Comparing with {}{commit}", c.rev));
+        let blink = ws.blink.clone();
+        let named = c.named().to_owned();
+        let commit = match (&c.swapped, c.commit.as_deref()) {
+            (None, Some(c)) => format!(" ({})", &c[..c.len().min(10)]),
+            _ => String::new(),
+        };
+        ui.label(blink.says(&named, &commit));
         ui.separator();
         match &c.error {
             Some(e) => {
@@ -114,8 +116,45 @@ pub fn compare_bar(ui: &mut egui::Ui, ws: &mut Workspace, typed: &mut Option<Str
             }
         }
         ui.separator();
+        // Both sides, one alone, and the swap (B): the window's own view,
+        // for a compare with a revision (not a draft's).
+        use crate::core::compare::Front;
+        let mut act: Option<u8> = None;
+        if blink.of.is_some() {
+            let only = |f: Front| blink.alone && blink.front == f;
+            if ui.selectable_label(!blink.alone, "Both").clicked() {
+                act = Some(0);
+            }
+            if ui
+                .selectable_label(only(Front::Rev), format!("Only {named}"))
+                .clicked()
+            {
+                act = Some(1);
+            }
+            if ui
+                .selectable_label(only(Front::Working), "Only working")
+                .clicked()
+            {
+                act = Some(2);
+            }
+            if ui
+                .button("Swap")
+                .on_hover_text("Swap compared sides (B)")
+                .clicked()
+            {
+                act = Some(3);
+            }
+            ui.separator();
+        }
         if ui.button("Stop comparing").clicked() {
             ws.set_compare(None);
+        }
+        match act {
+            Some(0) => ws.compare_both(),
+            Some(1) => ws.compare_only(Front::Rev),
+            Some(2) => ws.compare_only(Front::Working),
+            Some(3) => ws.swap_compare(),
+            _ => {}
         }
     });
 }
@@ -185,7 +224,13 @@ pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, view: &crate::ui::view::Vie
             if let Some(m) = &ws.merge {
                 ui.colored_label(ui.visuals().warn_fg_color, m.summary());
             }
-            if let Some(n) = &ws.drag_note {
+            // What can't move, said before a drag or Move is tried (#731).
+            let unmovable = (ws.mode != crate::core::modes::Mode::View && ws.mover.is_none())
+                .then(|| crate::ui::commands::move_target(ws, view.chosen.as_ref()))
+                .flatten()
+                .and_then(Result::err)
+                .map(|why| format!("Can't move: {why}"));
+            if let Some(n) = ws.drag_note.clone().or(unmovable) {
                 ui.colored_label(ui.visuals().warn_fg_color, n);
             }
         });

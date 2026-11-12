@@ -143,6 +143,9 @@ fn outcome(ui: &mut egui::Ui, e: &Export, ws: &Workspace) -> Option<Vec<String>>
             .map(|t| format!(", {t} triangles"))
             .unwrap_or_default();
         ui.label(format!("Wrote {} bytes{triangles} to {}", w.bytes, w.out));
+        for warning in &w.warnings {
+            ui.colored_label(ui.visuals().warn_fg_color, warning);
+        }
         if !w.skipped.is_empty() {
             ui.label("Left out, as failing:");
             for f in &w.skipped {

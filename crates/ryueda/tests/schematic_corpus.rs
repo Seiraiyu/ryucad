@@ -183,6 +183,38 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
                     .map(|s| (&s.sheet, s.score))
                     .collect::<Vec<_>>()
             );
+            // Plan 3.A: a region of one part with no title (one no
+            // function, connector or IC names) shares no signal net with
+            // another region on its sheet: else it would have joined it.
+            let input = &laid.built.input;
+            let signal = |k: &str| -> BTreeSet<usize> {
+                input.part(k).map_or_else(BTreeSet::new, |p| {
+                    input.parts[p]
+                        .pins
+                        .iter()
+                        .flat_map(|x| x.nets())
+                        .filter(|n| input.nets[*n].kind == ryusch::input::NetKind::Signal)
+                        .collect()
+                })
+            };
+            let regions = &laid.outcome.layout.regions;
+            eprintln!("regions {name}/{}: {}", b.id, regions.len());
+            for (id, g) in regions {
+                if g.parts.len() != 1 || !g.title.is_empty() || g.named {
+                    continue;
+                }
+                let mine = signal(&g.parts[0]);
+                let shares = regions.iter().any(|(j, h)| {
+                    j != id
+                        && h.sheet == g.sheet
+                        && h.parts.iter().any(|k| !signal(k).is_disjoint(&mine))
+                });
+                assert!(
+                    !shares,
+                    "{name}/{}: region {id} ({}) stands alone though it shares a net",
+                    b.id, g.parts[0]
+                );
+            }
             // Plan 2.A: each sheet's paper, extent and fill.
             let l = &laid.outcome.layout;
             for (sid, sh) in &l.sheets {
@@ -249,6 +281,15 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             coded(found, "sch_topology")
         );
     }
+    // Plan 3.A: each of the front end's op-amp stages drawn round its own
+    // amplifier, the template's supplies on it: its feedback, input,
+    // divider and pull-down within the idiom's reach (a stage drawn off its
+    // amplifier is a failure to fix, not a threshold).
+    assert!(
+        coded(of("frontend"), "sch_idiom_missed").is_empty(),
+        "{:#?}",
+        coded(of("frontend"), "sch_idiom_missed")
+    );
     assert!(
         !coded(of("buck"), "sch_jog").iter().any(|f| f["refs"]
             .as_array()
@@ -257,14 +298,23 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             .any(|r| r == "buck_en")),
         "BUCK-EN jogs"
     );
-    // Plan 2.A: every sheet on its fitted paper, and every function in one
-    // region.
+    // Plan 2.A: every function in one region. Plan 3.A: from nothing every
+    // sheet is on its fitted paper, so a sch_paper_fit is only the fill
+    // target's gathering, and carries a fix that holds.
     for (name, found) in &all {
-        for code in ["sch_paper_fit", "sch_function_split"] {
+        assert!(
+            coded(found, "sch_function_split").is_empty(),
+            "{name}: {:#?}",
+            coded(found, "sch_function_split")
+        );
+        for f in coded(found, "sch_paper_fit") {
+            eprintln!(
+                "paper fit {name}/{}: {} (fill {})",
+                f["block"], f["message"], f["details"]["fill"]
+            );
             assert!(
-                coded(found, code).is_empty(),
-                "{name}: {:#?}",
-                coded(found, code)
+                f["fixes"].as_array().is_some_and(|x| !x.is_empty()) && f["fixes_checked"] != false,
+                "{name}: {f}"
             );
         }
     }
@@ -372,14 +422,35 @@ fn the_corpus_from_nothing_lays_out_within_its_bar() {
 /// 2.G's engine work on cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared,
 /// load 3.8 to 4.3) on 2026-11-11: the RP2040's first sheet 43, the front
 /// end's amp 100 (its clamps no longer float), Ethernet's PHY sheet 63.
+/// Plan 3.A's op-amp template (#758) put the supplies on each amplifier's
+/// first unit: baldiff 47 to 40 (the OPA1622's enable and three supplies
+/// share unit A with its stage), ivconv 78 to 82. Last measured after plan
+/// 3.A on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads, shared,
+/// load 3 to 4) on 2026-11-12: breakout 84 and 98, RP2040 43, 78 and 98,
+/// buck 25 (one-part regions joined; 24 holds), front end amp 94 (three
+/// untitled regions), baldiff 40, ivconv 82 (its bar rises to 77),
+/// Ethernet 63 and 97.
 const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("breakout", "breakout", 79),
     ("breakout", "sensor", 95),
     ("rp2040", "mitayi", 38),
+    // 25 measured, 27 on main. Plan 3.A's one-part leftover region
+    // joining its neighbour (R7's VSNS region into the converter's) swapped
+    // Misc's sch_region_untitled for r3's ("has no title"), at no cost; the
+    // whole 2 points are J4's new sch_out_of_line, from the changed packing.
     ("buck", "buck", 24),
-    ("frontend", "amp", 95),
-    ("frontend", "baldiff", 42),
-    ("frontend", "ivconv", 73),
+    // Plan 3.A: 94 less 5. The 6 points are design 519's
+    // sch_region_untitled on three regions no idiom names (the coxswain
+    // took option A, 2026-11-12); titled, it is 100 again
+    // (amp_titled_scores_full).
+    ("frontend", "amp", 89),
+    // Plan 3.A: measured less 5 (90 and 92 laid out from nothing). Each
+    // stage stands round its amplifier: the divider's top on IN+'s line in
+    // one column with the input resistor, the pull-down and the divider's
+    // bottom hanging from that line, the feedback a stack apart over the
+    // top supply's capacitor (47 and 78 before the template).
+    ("frontend", "baldiff", 85),
+    ("frontend", "ivconv", 87),
     ("ethernet", "eth", 58),
     ("ethernet", "status_led", 92),
 ];
@@ -428,6 +499,142 @@ fn a_net_asked_for_as_wires_is_wired() {
         .any(|n| n["code"] == "net_style_not_held");
     assert!(wired || noted, "neither wired nor said why: {out}");
     assert!(wired, "{out}");
+}
+
+/// Plan 3.A: the front end's root block scores 100 once its three
+/// untitled regions are titled, so its fall to 94 is design 519's
+/// sch_region_untitled alone, not a worse drawing. Release only.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn amp_titled_scores_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "frontend");
+    let d = ryueda(&board, 1, &["describe", "--block", "amp"]);
+    let sheet = &d["blocks"][0]["sheets"][0];
+    assert_eq!(sheet["score"], 94, "{}", sheet["findings"]);
+    let untitled: Vec<String> = sheet["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|g| g["title"] == "")
+        .map(|g| g["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(untitled.len(), 3, "{sheet}");
+    let titles: Vec<String> = untitled
+        .iter()
+        .map(|id| format!("region {id} title \"Output clamps {id}\""))
+        .collect();
+    let mut args = vec!["place", "amp"];
+    args.extend(titles.iter().map(String::as_str));
+    ryueda(&board, 1, &args);
+    let d = ryueda(&board, 1, &["describe", "--block", "amp"]);
+    let sheet = &d["blocks"][0]["sheets"][0];
+    assert_eq!(sheet["score"], 100, "{}", sheet["findings"]);
+}
+
+/// `v` without its revisions, at any depth.
+fn without_revisions(mut v: Value) -> Value {
+    fn strip(v: &mut Value) {
+        match v {
+            Value::Object(o) => {
+                o.remove("revision");
+                o.values_mut().for_each(strip);
+            }
+            Value::Array(a) => a.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut v);
+    v
+}
+
+/// Design 519: a dry run is the commit. On every circuit laid out from
+/// nothing, the first fix of up to three findings in each block is sent
+/// dry, then for real, then the block described: the three descriptions
+/// are one (their revisions aside). Release only.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn a_dry_run_is_the_commit() {
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (board, found) = fresh(dir.path(), name);
+        let mut tried = 0;
+        for f in found
+            .iter()
+            .filter(|f| f["fixes"].as_array().is_some_and(|x| !x.is_empty()))
+            .take(3)
+        {
+            let block = f["block"].as_str().unwrap();
+            let fix: Vec<String> = f["fixes"][0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap().to_owned())
+                .collect();
+            let mut args: Vec<&str> = vec!["place", block];
+            args.extend(fix.iter().map(String::as_str));
+            let dry_args = [&args[..], &["--dry-run"]].concat();
+            let dry = ryueda_envelope(&board, &dry_args);
+            // A fix an earlier one made stale is refused alike both ways.
+            if dry["ok"] != true {
+                let done = ryueda_envelope(&board, &args);
+                assert_eq!(
+                    done["error"]["code"], dry["error"]["code"],
+                    "{name}/{block}: {fix:?}"
+                );
+                continue;
+            }
+            let dry = without_revisions(dry["result"]["description"].clone());
+            let done = without_revisions(ryueda(&board, 1, &args)["description"].clone());
+            let read = without_revisions(ryueda(&board, 1, &["describe", "--block", block]));
+            assert_eq!(dry, done, "{name}/{block}: {fix:?} dry vs commit");
+            assert_eq!(
+                done, read,
+                "{name}/{block}: {fix:?} commit vs the next read"
+            );
+            tried += 1;
+        }
+        // And a batch as round 3's sessions sent: a lasting region over a
+        // block's first two parts, with a move shifting the first.
+        let d = ryueda(&board, 1, &["describe"]);
+        let b = &d["blocks"][0];
+        let block = b["block_id"].as_str().unwrap().to_owned();
+        let parts: Vec<String> = b["sheets"][0]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["refdes"].as_str().filter(|r| !r.is_empty()))
+            .take(2)
+            .map(str::to_owned)
+            .collect();
+        let region = format!("region Grouped {}", parts.join(" "));
+        let shift = format!("shift {} right 2", parts[0]);
+        let args = [
+            "place",
+            block.as_str(),
+            region.as_str(),
+            "--move",
+            shift.as_str(),
+        ];
+        let dry = ryueda_envelope(&board, &[&args[..], &["--dry-run"]].concat());
+        if dry["ok"] == true {
+            let dry = without_revisions(dry["result"]["description"].clone());
+            let done = without_revisions(ryueda(&board, 1, &args)["description"].clone());
+            let read = without_revisions(ryueda(&board, 1, &["describe", "--block", &block]));
+            assert_eq!(dry, done, "{name}/{block}: {args:?} dry vs commit");
+            assert_eq!(
+                done, read,
+                "{name}/{block}: {args:?} commit vs the next read"
+            );
+            tried += 1;
+        } else {
+            eprintln!(
+                "{name}/{block}: {args:?} refused: {}",
+                dry["error"]["message"]
+            );
+        }
+        eprintln!("{name}: {tried} batches dry, done and read alike");
+    }
 }
 
 /// `ryueda` in `dir` as `ryueda` does, its whole envelope, whether or not
@@ -607,6 +814,38 @@ fn a_layout_dry_run_renders() {
     assert_eq!(v["error"]["code"], "invalid_param", "{v}");
 }
 
+/// #758: the front end's amplifiers are the op-amp template's, a
+/// triangle per amplifier with the supplies on the first, and its
+/// library lints clean.
+#[test]
+fn the_front_ends_op_amps_are_the_template() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "frontend");
+    for id in ["opa1612", "opa1622"] {
+        let text =
+            std::fs::read_to_string(board.join(format!("library/symbols/{id}.json"))).unwrap();
+        let s: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            (&s["units"], &s["class"]),
+            (&serde_json::json!(2), &serde_json::json!("opamp")),
+            "{id}: {s}"
+        );
+        let triangles = s["graphics"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|g| g["type"] == "polyline" && g["points"].as_array().unwrap().len() == 4)
+            .count();
+        assert_eq!(triangles, 2, "{id}");
+        let check = ryueda(&board, 1, &["lib", "check", "--symbol", id]);
+        assert_eq!(
+            check["symbols"][0]["findings"],
+            serde_json::json!([]),
+            "{id}: {check}"
+        );
+    }
+}
+
 /// A move brings only the idioms anchored on the part it moves: moving one
 /// op-amp unit beside the other moves no part of the other unit's stage
 /// (round 1, F5: any move of U11:2 scattered baldiff).
@@ -636,6 +875,25 @@ fn a_move_brings_only_its_own_idioms() {
             );
         }
     }
+    // And the port flag standing on its output's line (in its row): since
+    // plan 3.A the move is judged by the reach, so U11:2 does move, and
+    // its own port goes with it.
+    for sheet in d["blocks"][0]["sheets"].as_array().unwrap() {
+        for part in sheet["parts"].as_array().unwrap() {
+            if part["part"] == "u11:2" {
+                for k in part["row"].as_array().into_iter().flatten() {
+                    if k.as_str().unwrap().starts_with("port:") {
+                        mine.push(k.as_str().unwrap().to_owned());
+                    }
+                }
+            }
+        }
+    }
+    assert_ne!(
+        layout_of(&board, "baldiff")["placed"]["u11:2"],
+        before["u11:2"],
+        "U11:2 moved beside U11:1"
+    );
     for (k, x) in before.as_object().unwrap() {
         if mine.contains(k) {
             continue;
@@ -761,6 +1019,23 @@ fn the_corpus_from_nothing_findings_carry_fixes() {
             // so every one checked works.
             if f["fixes_checked"] != false {
                 assert!(gone, "{name}: {texts:?} left {f}: {v}");
+                // Plan 3.A: and it lowers the block's points, every sheet
+                // and every rule.
+                let points = |d: &Value| -> i64 {
+                    d["blocks"][0]["sheets"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .flat_map(|s| s["findings"].as_array().unwrap().iter())
+                        .map(|g| g["points"].as_i64().unwrap())
+                        .sum()
+                };
+                let before = points(&ryueda(&board, 1, &["describe", "--block", block]));
+                let after = points(&v["result"]["description"]);
+                assert!(
+                    after < before,
+                    "{name}/{block}: fix {texts:?} costs: {before} -> {after} points"
+                );
             }
         }
     }
@@ -821,22 +1096,23 @@ fn a_preference_is_tried_without_writing() {
 fn holds_is_what_the_drawing_shows() {
     let dir = tempfile::tempdir().unwrap();
     let (board, _) = fresh(dir.path(), "buck");
-    // R22 stands far from R9 in the buck laid out from nothing, and the
-    // engine doesn't bring it closer: beside doesn't hold, and says why.
-    // (Since 1.D R7 stands beside R8 from nothing, which round 1 named.)
+    // R22 stands far from R9 in the buck laid out from nothing. Round 1
+    // (F1) saw beside held with the parts 175 mm apart, then 2.G reported
+    // it not held while the engine, judging the side alone, moved nothing.
+    // Since plan 3.A the engine judges as the report does: it brings R22
+    // within the reach below R9, and the report says held.
     let out = ryueda(
         &board,
         1,
         &["place", "buck", "--dry-run", "beside R22 R9 below"],
     );
     let ins = &out["instructions"][0];
-    assert_eq!(ins["holds"], false, "{ins}");
-    let why = ins["why"].as_str().unwrap();
-    assert!(
-        why.starts_with("R22 is ") && why.contains(" mm from R9; beside means within 20.3 mm"),
-        "{why}"
+    assert_eq!(
+        (&ins["holds"], &ins["state"]),
+        (&serde_json::json!(true), &serde_json::json!("held")),
+        "{ins}"
     );
-    assert_eq!(ins["unchanged"], true, "{ins}");
+    assert!(ins["why"].is_null(), "{ins}");
     // A move that changes nothing says so: BOOT is wired already.
     let out = ryueda(
         &board,

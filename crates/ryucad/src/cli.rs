@@ -187,6 +187,10 @@ enum Command {
         /// that didn't heal), listing what was left out, rather than refuse.
         #[arg(long)]
         skip_failing: bool,
+        /// STEP: write no colours or transparency (by default the
+        /// appearance renders show is written as STEP styles).
+        #[arg(long)]
+        no_appearance: bool,
         /// DXF: the sheet metal solid (the part's one unless named).
         #[arg(long)]
         solid: Option<String>,
@@ -388,6 +392,7 @@ enum Command {
     /// Colour a part (<part>), its solids (<part>/<solid>) and faces
     /// (<part>/<solid>/<name>), or an assembly's occurrences
     /// (<assembly>/<instance>/…) and their solids: in Git, all in one part.
+    /// An assembly alone takes only --no-file-styles and --file-styles.
     Colour {
         #[arg(value_name = "REF", required = true)]
         refs: Vec<String>,
@@ -406,6 +411,13 @@ enum Command {
         /// Take the opacity out likewise.
         #[arg(long, conflicts_with_all = ["opacity", "clear"])]
         no_opacity: bool,
+        /// Draw the part without the colours its imported STEP files give
+        /// it (appearance.json's file_styles: false).
+        #[arg(long, conflicts_with_all = ["file_styles", "clear"])]
+        no_file_styles: bool,
+        /// Draw them again.
+        #[arg(long, conflicts_with = "clear")]
+        file_styles: bool,
         /// Take every entry named out, whether or not the model still has
         /// what it names.
         #[arg(long)]
@@ -777,6 +789,25 @@ enum Command {
     /// folder with its own daemon, all sharing this machine's cache.
     #[command(subcommand)]
     Worktree(WorktreeCmd),
+    /// The repository's branches: local ones, and remote-tracking ones
+    /// with no local branch of their name, with their upstream, how far
+    /// they are ahead of and behind this worktree's head, and the
+    /// worktree each is checked out in. Read-only.
+    #[command(subcommand)]
+    Branch(BranchCmd),
+    /// Check out another branch in this project's folder (`git switch`;
+    /// a remote's branch gets a local one tracking it): refused while
+    /// project files differ from HEAD (commit or stash them in Git first:
+    /// ryucad never commits) or a merge is in progress. Everyone attached
+    /// sees the files change; the activity log records the switch, which
+    /// undo can't take back.
+    Switch {
+        branch: String,
+        /// Fail with `conflict` unless the project is still at this
+        /// revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
     History {
@@ -919,6 +950,12 @@ enum WorktreeCmd {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum BranchCmd {
+    /// Every branch, the one checked out here marked `current`.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -3354,9 +3391,31 @@ fn fill_sides(args: &[String]) -> Result<Vec<Value>> {
             i += step;
             continue;
         }
-        if a == "--tangent" {
+        // --tangent [<BOOL>] or --tangent=<BOOL>: a fill side's after its
+        // --edge, a face tweak's (clap reads it) when no --edge is given
+        // (#674).
+        let tangent = if a == "--tangent" {
+            match args.get(i + 1).map(String::as_str) {
+                Some(v @ ("true" | "false")) => Some((v == "true", 2)),
+                _ => Some((true, 1)),
+            }
+        } else {
+            a.strip_prefix("--tangent=").map(|v| (v == "true", 1))
+        };
+        if let Some((on, step)) = tangent {
+            let edge_later = || {
+                args[i + step..]
+                    .iter()
+                    .take_while(|x| *x != "--")
+                    .any(|x| x == "--edge" || x.starts_with("--edge="))
+            };
             match out.last_mut() {
-                Some(last) if last.get("edge").is_some() => last["tangent"] = json!(true),
+                Some(last) if last.get("edge").is_some() => {
+                    if on {
+                        last["tangent"] = json!(true);
+                    }
+                }
+                None if !edge_later() => {}
                 _ => {
                     return Err(Error::new(
                         Code::Usage,
@@ -3364,10 +3423,26 @@ fn fill_sides(args: &[String]) -> Result<Vec<Value>> {
                     ));
                 }
             }
+            i += step;
+            continue;
         }
         i += 1;
     }
     Ok(out)
+}
+
+/// The passes over a feature write's command line as written, which clap
+/// can't make: grown edges, a loft's loops, a fill's sides, --with groups.
+fn read_in_order(args: &[String], fields: &mut FieldArgs) -> Result<()> {
+    fields.grown = grown(args)?;
+    fields.section_loops = section_loops(args)?;
+    fields.fill_sides = fill_sides(args)?;
+    // A fill's --tangent is its sides', not a face tweak's.
+    if !fields.fill_sides.is_empty() {
+        fields.tangent = None;
+    }
+    fields.with_groups = with_groups(args)?;
+    Ok(())
 }
 
 fn section_loops(args: &[String]) -> Result<Vec<Vec<String>>> {
@@ -4804,6 +4879,7 @@ fn request(cmd: &Command) -> Option<Request> {
             no_mesh,
             pipe_tolerance,
             skip_failing,
+            no_appearance,
             solid,
             no_notes,
             fixed,
@@ -4833,6 +4909,7 @@ fn request(cmd: &Command) -> Option<Request> {
             mesh: no_mesh.then_some(false),
             pipe_tolerance: pipe_tolerance.clone(),
             skip_failing: *skip_failing,
+            appearance: no_appearance.then_some(false),
             solid: solid.clone(),
             notes: no_notes.then_some(false),
             fixed: fixed.clone(),
@@ -4949,6 +5026,8 @@ fn request(cmd: &Command) -> Option<Request> {
             opacity,
             no_colour,
             no_opacity,
+            no_file_styles,
+            file_styles,
             clear: false,
             expect,
         } => Request::AppearanceSet {
@@ -4961,6 +5040,13 @@ fn request(cmd: &Command) -> Option<Request> {
                 .filter(|(on, _)| *on)
                 .map(|(_, f)| f.to_owned())
                 .collect(),
+            file_styles: if *no_file_styles {
+                Some(false)
+            } else if *file_styles {
+                Some(true)
+            } else {
+                None
+            },
             expected_revision: expect.revision.clone(),
         },
         Command::Equations { part, all, rev } => Request::EquationsList {
@@ -5326,6 +5412,11 @@ fn request(cmd: &Command) -> Option<Request> {
             },
         },
         Command::Worktree(WorktreeCmd::List) => Request::WorktreeList {},
+        Command::Branch(BranchCmd::List) => Request::BranchList {},
+        Command::Switch { branch, expect } => Request::BranchSwitch {
+            branch: branch.clone(),
+            expected_revision: expect.clone(),
+        },
         Command::Merge(MergeCmd::Resolve {
             conflict,
             ours,
@@ -6374,27 +6465,9 @@ pub fn main() -> ExitCode {
     };
     if let Command::Feature(FeatureCmd::Add { fields, .. } | FeatureCmd::Edit { fields, .. }) =
         &mut cli.command
+        && let Err(e) = read_in_order(&args, fields)
     {
-        match grown(&args) {
-            Ok(g) => fields.grown = g,
-            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
-        }
-        match section_loops(&args) {
-            Ok(l) => fields.section_loops = l,
-            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
-        }
-        match fill_sides(&args) {
-            Ok(s) => fields.fill_sides = s,
-            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
-        }
-        // A fill's --tangent is its sides', not a face tweak's.
-        if !fields.fill_sides.is_empty() {
-            fields.tangent = None;
-        }
-        match with_groups(&args) {
-            Ok(w) => fields.with_groups = w,
-            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
-        }
+        return finish(Err(e), Vec::new(), cli.pretty);
     }
     // Git reads a textconv's output as the file's text, not JSON.
     if let Command::Git(GitCmd::Textconv { file }) = &cli.command {
@@ -6593,7 +6666,7 @@ mod tests {
     /// build's clap parses in frames past a test thread's 2 MiB.
     fn on_cli_stack(f: impl FnOnce() + Send + 'static) {
         std::thread::Builder::new()
-            .stack_size(crate::STACK)
+            .stack_size(crate::process::STACK)
             .spawn(f)
             .expect("a thread")
             .join()
@@ -6762,6 +6835,57 @@ mod tests {
             .map(str::to_owned)
             .collect();
         assert_eq!(fill_sides(&early).unwrap_err().code, Code::Usage);
+        // #674: --tangent takes a value, after an --edge as on a face tweak.
+        let valued: Vec<String> = [
+            "--edge",
+            "a",
+            "--tangent",
+            "false",
+            "--edge",
+            "b",
+            "--tangent=true",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            fill_sides(&valued).unwrap(),
+            vec![json!({"edge": "a"}), json!({"edge": "b", "tangent": true})]
+        );
+        let tweak: Vec<String> = ["--face", "p/b/a", "--tangent", "true"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert!(fill_sides(&tweak).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_face_tweaks_tangent_takes_a_value() {
+        on_cli_stack(|| {
+            // #674: `--tangent true|false` on a draft or a move is the
+            // tweak's, not a fill side's.
+            for (v, want) in [("true", Some(true)), ("false", Some(false))] {
+                let f = sent(&["ryucad", "feature", "edit", "p", "d", "--tangent", v])
+                    .unwrap_or_else(|e| panic!("--tangent {v}: {e:?}"));
+                assert_eq!(f.tangent, want, "--tangent {v}");
+            }
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--neutral",
+                "xy",
+                "--angle",
+                "2deg",
+                "--face",
+                "p/b/a",
+                "--tangent",
+            ])
+            .unwrap();
+            assert_eq!(f.tangent, Some(true));
+        });
     }
 
     #[test]
@@ -6871,7 +6995,7 @@ mod tests {
         if let Command::Feature(FeatureCmd::Add { fields, .. } | FeatureCmd::Edit { fields, .. }) =
             &mut cli.command
         {
-            fields.with_groups = with_groups(&args)?;
+            read_in_order(&args, fields)?;
         }
         match request(&cli.command) {
             Some(Request::FeatureAdd { fields, .. } | Request::FeatureEdit { fields, .. }) => {
