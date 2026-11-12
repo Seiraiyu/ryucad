@@ -80,6 +80,7 @@ pub mod entity;
 pub mod equations;
 pub mod explode;
 pub mod export;
+pub mod feature;
 pub mod file_props;
 pub mod file_styles;
 pub mod geometry;
