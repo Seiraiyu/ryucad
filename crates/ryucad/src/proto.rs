@@ -333,6 +333,11 @@ pub struct FeatureFields {
     /// move_face's: along its direction, or (offset) positive outwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance: Option<Value>,
+    /// A mate's stops: `{angle: {min, max}, distance: {min, max}}`, any
+    /// part, laid over what it has; a bound `""` clears it, a value `""`
+    /// clears its range. Each bound is an expression (an angle, a length).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Value>,
     /// The instances an instance pattern copies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instances: Option<Vec<String>>,
@@ -1104,7 +1109,8 @@ pub enum Request {
         rev: Option<String>,
         /// Mates to solve with, as `feature.add` of a mate takes their
         /// fields (`form`, `a`, `b`, `a_offset`, `b_offset`, `angle`,
-        /// `distance`), added to the assembly in memory and never written.
+        /// `distance`, `limits`), added to the assembly in memory and
+        /// never written.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mates: Vec<Map<String, Value>>,
     },

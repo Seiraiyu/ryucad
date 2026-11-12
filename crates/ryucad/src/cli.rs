@@ -3644,6 +3644,7 @@ impl FieldArgs {
             a_offset: self.a_offset.clone(),
             b_offset: self.b_offset.clone(),
             distance: self.distance.clone().map(Value::String),
+            limits: None,
             instances: (!self.instances.is_empty()).then(|| self.instances.clone()),
             point: None,
             by: self.by.clone(),

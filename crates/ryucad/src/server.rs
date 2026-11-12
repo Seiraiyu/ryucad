@@ -2977,8 +2977,8 @@ const REVOLVE: [&str; 8] = [
 ];
 const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
 const INSTANCE: [&str; 4] = ["of", "rev", "placement", "fixed"];
-const MATE: [&str; 7] = [
-    "form", "a", "b", "a_offset", "b_offset", "angle", "distance",
+const MATE: [&str; 8] = [
+    "form", "a", "b", "a_offset", "b_offset", "angle", "distance", "limits",
 ];
 const INSTANCE_PATTERN: [&str; 13] = [
     "form",
@@ -3146,6 +3146,17 @@ fn mate_from(
             if !form.takes_distance() {
                 o.remove("distance");
             }
+            if let Some(Value::Object(l)) = o.get_mut("limits") {
+                if !form.takes_angle() {
+                    l.remove("angle");
+                }
+                if !form.takes_distance_limit() {
+                    l.remove("distance");
+                }
+                if l.is_empty() {
+                    o.remove("limits");
+                }
+            }
         }
         (None, None) => {
             return Err(Error::new(
@@ -3196,6 +3207,53 @@ fn mate_from(
                 o.insert(k.into(), x.clone());
             }
             None => {}
+        }
+    }
+    if let Some(given) = &f.limits {
+        let bad = |what: &str| {
+            Error::new(Code::InvalidParam, format!("limits: {what}")).with("param", "limits")
+        };
+        let Some(given) = given.as_object() else {
+            return Err(bad("an object of angle and distance ranges"));
+        };
+        let mut cur = match o.remove("limits") {
+            Some(Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        for (value, r) in given {
+            if !matches!(value.as_str(), "angle" | "distance") {
+                return Err(bad(&format!(
+                    "{value:?} isn't a mate's value: angle or distance"
+                )));
+            }
+            match r {
+                Value::String(s) if s.is_empty() => {
+                    cur.remove(value);
+                }
+                Value::Object(bounds) => {
+                    let mut range = match cur.remove(value) {
+                        Some(Value::Object(m)) => m,
+                        _ => serde_json::Map::new(),
+                    };
+                    for (b, x) in bounds {
+                        if !matches!(b.as_str(), "min" | "max") {
+                            return Err(bad(&format!("a range has min and max, not {b:?}")));
+                        }
+                        if x.as_str() == Some("") {
+                            range.remove(b);
+                        } else {
+                            range.insert(b.clone(), x.clone());
+                        }
+                    }
+                    if !range.is_empty() {
+                        cur.insert(value.clone(), Value::Object(range));
+                    }
+                }
+                _ => return Err(bad("a range is {min, max}, or \"\" to clear it")),
+            }
+        }
+        if !cur.is_empty() {
+            o.insert("limits".into(), Value::Object(cur));
         }
     }
     let mut o = crate::doc::files::Obj::new(&v, "")?;
@@ -5592,7 +5650,7 @@ pub(crate) fn part_report(
                 }
                 Ok(crate::rebuild::Output::Mate(m)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": m.hash,
-                           "mate": m.to_json()})
+                           "mate": m.to_json(unit)})
                 }
                 Ok(crate::rebuild::Output::Copies(c)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": c.hash,

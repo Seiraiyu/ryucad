@@ -247,6 +247,12 @@ pub struct Limits {
     pub distance: Option<Range>,
 }
 
+/// `invalid_param` at the JSON pointer `at`: a limit the mate can't
+/// take, which a write is refused for as a parameter.
+fn bad_limit(at: &str, msg: &str) -> Error {
+    Error::new(Code::InvalidParam, msg).with("pointer", at)
+}
+
 impl Range {
     fn to_json(&self) -> Value {
         let mut v = json!({});
@@ -273,7 +279,7 @@ impl Range {
         };
         let (min, max) = (read(min, "min")?, read(max, "max")?);
         if min.is_none() && max.is_none() {
-            return Err(invalid(at, "a limit has a min, a max or both"));
+            return Err(bad_limit(at, "a limit has a min, a max or both"));
         }
         Ok(Range { min, max })
     }
@@ -296,7 +302,7 @@ impl Limits {
         let angle = match o.take_opt("angle") {
             None => None,
             Some(_) if !form.takes_angle() => {
-                return Err(invalid(
+                return Err(bad_limit(
                     "/limits/angle",
                     &format!("a {} mate leaves no turn to limit", form.as_str()),
                 ));
@@ -306,7 +312,7 @@ impl Limits {
         let distance = match o.take_opt("distance") {
             None => None,
             Some(_) if !form.takes_distance_limit() => {
-                return Err(invalid(
+                return Err(bad_limit(
                     "/limits/distance",
                     &format!(
                         "a {} mate leaves no slide to limit (a planar mate's distance is always driven)",
@@ -323,7 +329,7 @@ impl Limits {
         };
         o.finish()?;
         if angle.is_none() && distance.is_none() {
-            return Err(invalid(
+            return Err(bad_limit(
                 "/limits",
                 "limits holds an angle, a distance or both",
             ));
@@ -344,13 +350,13 @@ impl Limits {
                 continue;
             };
             if si(lo) > si(hi) {
-                return Err(invalid(
+                return Err(bad_limit(
                     &format!("/limits/{k}"),
                     &format!("its min {} is past its max {}", lo.text(), hi.text()),
                 ));
             }
             if k == "angle" && si(hi) - si(lo) >= core::f64::consts::TAU {
-                return Err(invalid(
+                return Err(bad_limit(
                     "/limits/angle",
                     "an angle limit spans less than a whole turn (360 deg)",
                 ));

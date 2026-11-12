@@ -61,11 +61,15 @@ pub struct Copies {
 impl Mated {
     /// How a rebuild report gives it: its state and both connectors'
     /// frames in the assembly, as poses.
-    pub fn to_json(&self) -> Value {
-        json!({
+    pub fn to_json(&self, unit: crate::units::Unit) -> Value {
+        let mut v = json!({
             "state": mate_state(self.state),
             "frames": {"a": doc_pose(&self.a).to_json(), "b": doc_pose(&self.b).to_json()},
-        })
+        });
+        if let Some(m) = &self.values {
+            put_values(&mut v, m, unit);
+        }
+        v
     }
 }
 
@@ -114,6 +118,19 @@ impl Solve {
             ryumate::State::Well => "well",
             ryumate::State::Over => "over",
         }
+    }
+
+    /// Each mate's values and stops by its ID, as `assembly.solve` gives
+    /// them (never part of [`Solve::to_json`], whose bytes the golden
+    /// hashes).
+    pub fn values_json(&self, unit: crate::units::Unit) -> Value {
+        let mut out = serde_json::Map::new();
+        for (m, vals) in &self.report.values {
+            let mut v = json!({});
+            put_values(&mut v, vals, unit);
+            out.insert(self.mates[*m as usize].to_string(), v);
+        }
+        Value::Object(out)
     }
 
     fn mate_ids(&self, sets: &[Vec<u32>]) -> Vec<Vec<&Id>> {
@@ -263,8 +280,47 @@ pub fn failing_warnings(
 /// mate of `p` (rebuilt as `r`) that failed before the solve, which the
 /// solve never saw, listed as `failing`, and every failing mate's error
 /// under `errors` (issue #155).
-fn solve_json(s: &Solve, p: &Part, r: &crate::rebuild::PartResult) -> Value {
+/// A mate's measured values as reports give them, `{angle_deg,
+/// distance}` (the distance as a quantity in `unit`), and the stops they
+/// rest on, `{angle: "min" | "max", distance: …}` (empty when none).
+pub fn values_json(m: &ryumate::MateValues, unit: crate::units::Unit) -> (Value, Value) {
+    let stop = |s: ryumate::Stop| match s {
+        ryumate::Stop::Min => "min",
+        ryumate::Stop::Max => "max",
+    };
+    let (mut value, mut limit) = (json!({}), json!({}));
+    if let Some(a) = m.angle {
+        value["angle_deg"] = json!(a.value * (180.0 / core::f64::consts::PI));
+        if let Some(s) = a.at {
+            limit["angle"] = json!(stop(s));
+        }
+    }
+    if let Some(d) = m.distance {
+        value["distance"] = json!(format!("{} {}", d.value / unit.factor(), unit.as_str()));
+        if let Some(s) = d.at {
+            limit["distance"] = json!(stop(s));
+        }
+    }
+    (value, limit)
+}
+
+/// `value` and, when it rests on a stop, `limit` written into `v`.
+fn put_values(v: &mut Value, m: &ryumate::MateValues, unit: crate::units::Unit) {
+    let (value, limit) = values_json(m, unit);
+    v["value"] = value;
+    if limit.as_object().is_some_and(|o| !o.is_empty()) {
+        v["limit"] = limit;
+    }
+}
+
+fn solve_json(
+    s: &Solve,
+    p: &Part,
+    r: &crate::rebuild::PartResult,
+    unit: crate::units::Unit,
+) -> Value {
     let mut v = s.to_json();
+    v["values"] = s.values_json(unit);
     let failing = failing(p, r);
     if failing.is_empty() {
         return v;
@@ -710,6 +766,10 @@ pub fn check(
     }
     if let Some(m) = f.mate() {
         mate_values(id, m)?;
+        limit_values(id, m)?;
+        if let Some(e) = out_of_limits(id, m) {
+            return Err(e);
+        }
     }
     if let Some(x) = f.instance_pattern() {
         pattern_values(id, x)?;
@@ -1419,7 +1479,7 @@ pub fn solve_request(
         v["held"] = json!(solved.held);
     }
     if let Some(s) = &solved.result.solve {
-        v["solve"] = solve_json(s, &p, &solved.result);
+        v["solve"] = solve_json(s, &p, &solved.result, unit);
     }
     Ok(v)
 }
@@ -1520,7 +1580,7 @@ fn component_request(
         "held": held,
         "component": true,
         "instances": instances,
-        "solve": solve_json(&sub, p, &r),
+        "solve": solve_json(&sub, p, &r, session.project().manifest.default_unit),
     })))
 }
 
@@ -2316,6 +2376,132 @@ mod protocol_tests {
     use crate::error::Code;
     use crate::server::tests::call;
     use serde_json::json;
+
+    #[test]
+    fn limits_are_written_edited_and_cleared() {
+        let (dir, mut s) = super::tests::hinged();
+        let read = |dir: &std::path::Path| {
+            crate::doc::canonical::parse(
+                &std::fs::read_to_string(crate::doc::project::feature_path(
+                    dir,
+                    &crate::assembly::tests::id("frame"),
+                    &crate::assembly::tests::id("m1"),
+                ))
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1",
+             "limits": {"angle": {"min": "-6 deg", "max": "6 deg"}}}),
+        )
+        .unwrap();
+        let v = read(dir.path());
+        assert_eq!(v["format"], crate::doc::mate::LIMITS_FORMAT);
+        assert_eq!(
+            v["limits"],
+            json!({"angle": {"min": "-6 deg", "max": "6 deg"}})
+        );
+        // One bound changed, one cleared.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1",
+             "limits": {"angle": {"max": "8 deg", "min": ""}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            read(dir.path())["limits"],
+            json!({"angle": {"max": "8 deg"}})
+        );
+        // A driven angle past the stop is refused, naming it.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": "20 deg"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::MateOutOfLimits);
+        assert_eq!(e.details["limit"], "max");
+        // Within, it writes.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": "5 deg"}),
+        )
+        .unwrap();
+        // A ball takes no angle limit: the form change drops it.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "form": "ball"}),
+        )
+        .unwrap();
+        let v = read(dir.path());
+        assert!(v.get("limits").is_none(), "{v}");
+        assert_eq!(v["format"], 4);
+        // A limit the form doesn't have is refused with its pointer.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "form": "revolute",
+             "limits": {"distance": {"max": "1 mm"}}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.details["pointer"], "/limits/distance");
+        // Clearing the last range removes limits.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "form": "revolute",
+             "limits": {"angle": {"min": "-1 deg"}}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "limits": {"angle": ""}}),
+        )
+        .unwrap();
+        assert!(read(dir.path()).get("limits").is_none());
+    }
+
+    #[test]
+    fn reports_give_each_mates_value_and_stop() {
+        let (_dir, mut s) = super::tests::hinged();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1",
+                   "limits": {"angle": {"min": "-6 deg", "max": "6 deg"}}}),
+        )
+        .unwrap();
+        let solved = call(&mut s, "assembly.solve", json!({"part": "frame"})).unwrap();
+        let v = &solved["solve"]["values"]["m1"];
+        let deg = v["value"]["angle_deg"].as_f64().unwrap();
+        assert!(deg.abs() <= 6.0 + 1e-9, "{v}");
+        let tree = call(&mut s, "assembly.tree", json!({"part": "frame"})).unwrap();
+        let m1 = tree["mates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "m1")
+            .unwrap();
+        assert_eq!(m1["form"], "revolute");
+        assert_eq!(m1["state"], "well");
+        assert_eq!(m1["value"], v["value"]);
+        let built = call(&mut s, "rebuild", json!({"part": "frame"})).unwrap();
+        let f = built["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "m1")
+            .unwrap();
+        assert_eq!(f["mate"]["value"], v["value"]);
+    }
 
     #[test]
     fn mates_and_patterns_are_added_and_edited_through_the_protocol() {
