@@ -51,6 +51,36 @@ fuzz_target!(|data: &[u8]| {
         .flat_map(|l| l.buckets.iter().map(|b| b.count))
         .sum();
     assert_eq!(total, t.instances);
+    // Styles (design 448, plan 24.B) read without panicking, and every
+    // styled item is assigned, retained or failed exactly once.
+    if let Ok(o) = ryustep::open(data) {
+        let st = o.styles();
+        let mut seen: Vec<u64> = st
+            .assigned
+            .iter()
+            .map(|a| a.instance)
+            .chain(st.retained.iter().copied())
+            .chain(st.failed.iter().map(|f| f.0))
+            .collect();
+        let n = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), n, "a styled item read twice");
+        for a in &st.assigned {
+            assert!(!a.style.is_empty());
+            if let Some(o) = a.style.opacity {
+                assert!((ryustep::styles::MIN_OPACITY..=1.0).contains(&o));
+            }
+        }
+        for k in 0..o.held.len() {
+            let _ = o.body_styles(k);
+        }
+        for x in o.occurrence_styles() {
+            for &(k, n) in &x.path {
+                assert!(n < o.products.definitions[k].children.len());
+            }
+        }
+    }
     let p = Products::build(&e);
     for d in &p.definitions {
         for s in &d.shapes {

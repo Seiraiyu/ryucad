@@ -176,7 +176,41 @@ fn seeded() -> &'static ryucad::doc::project::ImportFile {
             time_stamp: "2026-10-27T00:00:00".into(),
             ..Default::default()
         };
-        let bytes = ryustep::write(&ryustep::WriteModel { products }, &opts).unwrap();
+        let model = ryustep::WriteModel { products };
+        // Each body a colour, every third face its own (plan 24.B): the
+        // file layer is read wherever an import is.
+        let paints = ryustep::Paints {
+            bodies: model
+                .products
+                .iter()
+                .enumerate()
+                .map(|(k, p)| ryustep::BodyPaint {
+                    product: k,
+                    body: 0,
+                    base: Some(ryustep::Paint {
+                        colour: [(k * 40) as u8, 128, 255 - (k * 30) as u8],
+                        opacity: if k % 2 == 0 { 1.0 } else { 0.5 },
+                    }),
+                    faces: p.bodies[0]
+                        .faces()
+                        .step_by(3)
+                        .map(|f| {
+                            (
+                                p.bodies[0].face(f).unwrap().name,
+                                ryustep::Paint {
+                                    colour: [255, 0, (k * 20) as u8],
+                                    opacity: 1.0,
+                                },
+                            )
+                        })
+                        .collect(),
+                })
+                .collect(),
+            occurrences: Vec::new(),
+        };
+        let bytes = ryustep::write_styled(&model, &[], &paints, &opts)
+            .unwrap()
+            .bytes;
         ryucad::doc::project::ImportFile::new(bytes)
     })
 }
@@ -238,6 +272,7 @@ fn part(f: Feature, reference: bool, placed: bool) -> Part {
         project_reads: Default::default(),
         features,
         uses: BTreeMap::new(),
+        explode_uses: BTreeMap::new(),
         acts: BTreeMap::new(),
         imports: BTreeMap::from([("imports/seeded.step".to_owned(), seeded().clone())]),
         views: BTreeMap::new(),
@@ -438,6 +473,11 @@ fuzz_target!(|data: &[u8]| {
         .any(|r| r.changes && r.body.as_str() == "m");
     let part = part(f, reference, placed);
     let r = rebuild_part(&part);
+    // The file layer reads wherever an import is (plan 24.B).
+    let layer = ryucad::file_styles::of_part(&part, &r);
+    for k in layer.faces.keys() {
+        assert!(k.split_once('/').is_some_and(|(_, n)| n.len() == 32), "{k}");
+    }
     let me = id("f");
     if reference {
         if let Some(Output::Solids(m)) = r.output(&id("m")) {
