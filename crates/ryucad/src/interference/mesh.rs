@@ -173,10 +173,10 @@ fn prism_misses(
 
 /// Whether no point of piece `t` can be deep in the closed mesh `inside`
 /// (design 525, the escape certificate): for some unit direction `v`, no
-/// triangle of `inside` meets the prism `t ⊕ [reach/2, far]·v`, where
+/// triangle of `inside` meets the prism `t ⊕ [0.9·reach, far]·v`, where
 /// `far` takes all of `t` out past `inside`'s box grown by `reach`. Then a
 /// ray along `v` from a point of `t` farther than `reach` from the mesh
-/// crosses none of it: within `reach/2·|v|` of its start (under `reach`,
+/// crosses none of it: within `0.9·reach·|v|` of its start (under `reach`,
 /// though `v`'s rounded length may pass 1), then inside the prism, then
 /// outside the box. So the point winds zero, and every point of `t` is
 /// within `reach` of the mesh or outside it. The directions tried are
@@ -216,7 +216,7 @@ fn escapes(
     // |q + far·v − mid| ≥ far − out = reach + diagonal: past the grown
     // box's half diagonal for every point q of t, and for every s ≥ far.
     let far = reach + (ghi - glo).length() + out;
-    let near = reach / 2.0;
+    let near = 0.9 * reach;
     let n = n * (1.0 / len);
     let u = &inside.triangles()[nearest as usize];
     let m = (u[1] - u[0]).cross(u[2] - u[0]);
@@ -1189,5 +1189,25 @@ mod tests {
                 "{gap}"
             );
         }
+    }
+
+    #[test]
+    fn a_header_sunk_less_than_the_reach_is_decided_in_few_pieces() {
+        // The header's top 0.7 of the reach into the plate's bottom: an
+        // overlap no deeper than the reach, so touching, and the pieces
+        // crossing either surface escape past it (the prism starts at
+        // 0.9 of the reach, not half).
+        let plate = Prepared::new(&drilled_plate(&Rigid::IDENTITY)).unwrap();
+        let hdr = Prepared::new(&header()).unwrap();
+        let rho = plate.reach + hdr.reach;
+        let rel = at(0.006, 0.0075, -0.0085 + 0.7 * rho);
+        let (v, spent) = judged(&plate, &hdr, &rel);
+        println!("plate, sunk header: {spent} pieces");
+        assert_eq!(v, Verdict::Touching);
+        assert!(spent < 1 << 15, "{spent}");
+        let (v, spent) = judged(&hdr, &plate, &rel.inverse());
+        println!("sunk header, plate: {spent} pieces");
+        assert_eq!(v, Verdict::Touching);
+        assert!(spent < 1 << 15, "{spent}");
     }
 }
