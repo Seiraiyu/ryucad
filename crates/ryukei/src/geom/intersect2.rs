@@ -732,25 +732,59 @@ fn point(p: &Piece2, s: f64) -> Vector2 {
 /// A cell of a pair of pieces' parameter square.
 type Cell = ([f64; 2], [f64; 2]);
 
-/// Cells grouped by touching; `None` once `m` is cancelled.
+/// Cells grouped by touching (closed sides and corners); `None` once `m`
+/// is cancelled. A sweep over the cells by their least `s` joins each to
+/// the earlier ones still reaching it (a union-find), so the groups are
+/// the touch graph's components. They come out ordered by their
+/// last cell, as the earlier scan, which moved each new cell's group to
+/// the end, left them (plan 17.C: the same groups in the same order,
+/// without the quadratic scan, #608).
 fn clusters(cells: Vec<Cell>, m: &Meter) -> Option<Vec<Vec<Cell>>> {
-    let mut groups: Vec<Vec<Cell>> = Vec::new();
-    for c in cells {
-        // Grouping is quadratic in the cells (up to `MEET_CELLS`), so a
-        // cancel is polled per cell (#485).
-        m.poll().ok()?;
-        let touch =
-            |d: &Cell| c.0[0] <= d.0[1] && d.0[0] <= c.0[1] && c.1[0] <= d.1[1] && d.1[0] <= c.1[1];
-        let hits: Vec<usize> = (0..groups.len())
-            .filter(|&g| groups[g].iter().any(touch))
-            .collect();
-        let mut merged = vec![c];
-        for &g in hits.iter().rev() {
-            merged.extend(groups.remove(g));
+    fn root(up: &mut [usize], mut x: usize) -> usize {
+        while up[x] != x {
+            up[x] = up[up[x]];
+            x = up[x];
         }
-        groups.push(merged);
+        x
     }
-    Some(groups)
+    let n = cells.len();
+    let mut up: Vec<usize> = (0..n).collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| cells[a].0[0].total_cmp(&cells[b].0[0]).then(a.cmp(&b)));
+    let mut active: Vec<usize> = Vec::new();
+    for &i in &order {
+        // Grouping is a sweep over up to `MEET_CELLS` cells; a cancel is
+        // polled per cell (#485).
+        m.poll().ok()?;
+        let c = cells[i];
+        // Sorted by least `s`, an earlier cell touches `c` along `s` while
+        // it reaches `c`'s least `s`; past it, it touches no later cell.
+        active.retain(|&k| cells[k].0[1] >= c.0[0]);
+        for &k in &active {
+            let d = cells[k];
+            if c.1[0] <= d.1[1] && d.1[0] <= c.1[1] {
+                let (x, y) = (root(&mut up, i), root(&mut up, k));
+                if x != y {
+                    up[x.max(y)] = x.min(y);
+                }
+            }
+        }
+        active.push(i);
+    }
+    // Each component's cells in index order, keyed by its last cell.
+    let mut by_root: Vec<Option<usize>> = vec![None; n];
+    let mut groups: Vec<(usize, Vec<Cell>)> = Vec::new();
+    for i in 0..n {
+        let r = root(&mut up, i);
+        let g = *by_root[r].get_or_insert_with(|| {
+            groups.push((i, Vec::new()));
+            groups.len() - 1
+        });
+        groups[g].0 = i;
+        groups[g].1.push(cells[i]);
+    }
+    groups.sort_by_key(|g| g.0);
+    Some(groups.into_iter().map(|g| g.1).collect())
 }
 
 #[cfg(test)]
@@ -1050,5 +1084,71 @@ mod tests {
             }
         }
         assert_eq!(uncertain, 0);
+    }
+
+    /// The grouping before plan 17.C, kept as the test's reference.
+    fn clusters_by_scan(cells: Vec<Cell>) -> Vec<Vec<Cell>> {
+        let mut groups: Vec<Vec<Cell>> = Vec::new();
+        for c in cells {
+            let touch = |d: &Cell| {
+                c.0[0] <= d.0[1] && d.0[0] <= c.0[1] && c.1[0] <= d.1[1] && d.1[0] <= c.1[1]
+            };
+            let hits: Vec<usize> = (0..groups.len())
+                .filter(|&g| groups[g].iter().any(touch))
+                .collect();
+            let mut merged = vec![c];
+            for &g in hits.iter().rev() {
+                merged.extend(groups.remove(g));
+            }
+            groups.push(merged);
+        }
+        groups
+    }
+
+    /// Seeded cells of a subdivision (quadtree cells of a few depths,
+    /// some touching at sides or corners): the sweep gives the scan's
+    /// groups, in its order, each with the same cells.
+    #[test]
+    fn clusters_by_sweep_are_the_scans() {
+        let mut seed = 0x17c3u64;
+        let mut r = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as usize
+        };
+        for _ in 0..200 {
+            let n = 1 + r() % 300;
+            let cells: Vec<Cell> = (0..n)
+                .map(|_| {
+                    let depth = 3 + r() % 4;
+                    let k = (1usize << depth) as f64;
+                    let (i, j) = ((r() % (1 << depth)) as f64, (r() % (1 << depth)) as f64);
+                    ([i / k, (i + 1.0) / k], [j / k, (j + 1.0) / k])
+                })
+                .collect();
+            let want = clusters_by_scan(cells.clone());
+            // unmetered: a unit test
+            let got = clusters(cells, &Meter::free()).unwrap();
+            assert_eq!(got.len(), want.len());
+            for (g, w) in got.iter().zip(&want) {
+                let key = |v: &Vec<Cell>| {
+                    let mut k: Vec<[u64; 4]> = v
+                        .iter()
+                        .map(|c| {
+                            [
+                                c.0[0].to_bits(),
+                                c.0[1].to_bits(),
+                                c.1[0].to_bits(),
+                                c.1[1].to_bits(),
+                            ]
+                        })
+                        .collect();
+                    k.sort_unstable();
+                    k
+                };
+                assert_eq!(key(g), key(w));
+            }
+        }
     }
 }
