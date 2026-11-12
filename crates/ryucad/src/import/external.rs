@@ -583,4 +583,105 @@ mod tests {
         assert!(!is_step(Some("CATIA V5")));
         assert!(!is_step(Some("SLDPRT")));
     }
+
+    #[test]
+    fn every_missing_document_is_named_at_once() {
+        let d = folder(&[
+            ("asm.stp", external_assembly("ASM", &[
+                ("BOX", "box.stp", [0.0; 3]),
+                ("SUB", "sub.stp", [10.0, 0.0, 0.0]),
+                ("NUT", "nut.stp", [20.0, 0.0, 0.0]),
+            ])),
+            ("sub.stp", external_assembly("SUB", &[("PIN", "pin.stp", [0.0; 3])])),
+        ]);
+        let e = tree(d.path(), "asm.stp", &[d.path().join("lib")]).err().unwrap();
+        assert_eq!(e.code, Code::ImportExternalMissing);
+        let m = e.details["missing"].as_array().unwrap();
+        let files: Vec<(&str, &str)> = m
+            .iter()
+            .map(|x| (x["file"].as_str().unwrap(), x["reason"].as_str().unwrap()))
+            .collect();
+        assert_eq!(files, [("box.stp", "not_found"), ("pin.stp", "not_found"), ("nut.stp", "not_found")]);
+        assert_eq!(m[0]["products"], json!(["BOX"]));
+        assert_eq!(m[0]["referenced_by"], "asm.stp");
+        assert!(m[1]["referenced_by"].as_str().unwrap().ends_with("sub.stp"));
+        assert_eq!(m[0]["searched"].as_array().unwrap().len(), 2, "its folder and lib");
+        for f in ["box.stp", "pin.stp", "nut.stp"] {
+            assert!(e.message.contains(f), "{}", e.message);
+        }
+    }
+
+    #[test]
+    fn a_file_with_two_roots_needs_the_product_named() {
+        let block = |x: f64| {
+            ryukei::primitive::block(ryukei::name::OpKey(1), x, 0.01, 0.01, &ryukei::geom::Rigid::IDENTITY)
+                .unwrap()
+                .0
+        };
+        let roots = crate::import::tests::written(vec![
+            ryustep::Product { id: "A".into(), name: "A".into(), bodies: vec![block(0.01)], ..Default::default() },
+            ryustep::Product { id: "B".into(), name: "B".into(), bodies: vec![block(0.02)], ..Default::default() },
+        ]);
+        let d = folder(&[
+            ("x.stp", external_assembly("ASM", &[("X", "two.stp", [0.0; 3])])),
+            ("b.stp", external_assembly("ASM", &[("B", "two.stp", [0.0; 3])])),
+            ("two.stp", roots),
+        ]);
+        let e = tree(d.path(), "x.stp", &[]).err().unwrap();
+        assert_eq!(e.code, Code::ImportExternalAmbiguous);
+        assert_eq!(e.details["roots"], json!([{"id": "A", "name": "A"}, {"id": "B", "name": "B"}]));
+        assert_eq!(e.details["product"]["id"], "X");
+        // Named by id, it is that root.
+        let t = tree(d.path(), "b.stp", &[]).unwrap();
+        let (j, r) = *t.nodes[0].links.values().next().unwrap();
+        assert_eq!(&*t.nodes[j].opened.products.definitions[r].product_id, "B");
+    }
+
+    #[test]
+    fn files_naming_each_other_are_a_cycle() {
+        let d = folder(&[
+            ("a.stp", external_assembly("A", &[("B", "b.stp", [0.0; 3])])),
+            ("b.stp", external_assembly("B", &[("A", "a.stp", [0.0; 3])])),
+        ]);
+        let e = tree(d.path(), "a.stp", &[]).err().unwrap();
+        assert_eq!(e.code, Code::AssemblyCycle);
+        assert_eq!(e.details["files"].as_array().unwrap().len(), 3, "{}", e.details);
+    }
+
+    #[test]
+    fn more_than_32_files_deep_is_refused() {
+        let mut files: Vec<(String, Vec<u8>)> = (0..=MAX_DEPTH + 1)
+            .map(|n| {
+                (
+                    format!("f{n}.stp"),
+                    external_assembly(&format!("A{n}"), &[(&format!("A{}", n + 1), &format!("f{}.stp", n + 1), [0.0; 3])]),
+                )
+            })
+            .collect();
+        files.push((format!("f{}.stp", MAX_DEPTH + 2), part_file("END", 1.0)));
+        let refs: Vec<(&str, Vec<u8>)> = files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
+        let d = folder(&refs);
+        let e = tree(d.path(), "f0.stp", &[]).err().unwrap();
+        assert_eq!((e.code, &e.details["param"]), (Code::InvalidParam, &json!("external")));
+    }
+
+    #[test]
+    fn a_document_of_another_format_is_missing_for_its_format() {
+        let text = String::from_utf8(external_assembly("ASM", &[("BOX", "box.sldprt", [0.0; 3])])).unwrap();
+        // The document's format, as CAx-IF writes it.
+        let text = text.replace(
+            "ENDSEC;\nEND-ISO-10303-21;",
+            "#900=REPRESENTATION_CONTEXT('','document parameters');\n\
+             #901=PROPERTY_DEFINITION('document property','',#206);\n\
+             #902=PROPERTY_DEFINITION_REPRESENTATION(#901,#903);\n\
+             #903=REPRESENTATION('document format',(#904),#900);\n\
+             #904=DESCRIPTIVE_REPRESENTATION_ITEM('data format','SLDPRT');\n\
+             ENDSEC;\nEND-ISO-10303-21;",
+        );
+        let d = folder(&[("asm.stp", text.into_bytes()), ("box.sldprt", b"binary".to_vec())]);
+        let e = tree(d.path(), "asm.stp", &[]).err().unwrap();
+        assert_eq!(e.code, Code::ImportExternalMissing);
+        assert_eq!(e.details["missing"][0]["reason"], "format");
+        assert_eq!(e.details["missing"][0]["format"], "SLDPRT");
+    }
 }
