@@ -118,6 +118,28 @@ fn every_kind_of_geometry_round_trips_bit_for_bit() {
     round_trip(&every_kind());
 }
 
+/// Offsets past their focal surfaces (design 484), turned and inverted,
+/// shared and alone: tag 13, rebuilt with their way.
+#[test]
+fn offsets_past_their_focal_surface_round_trip() {
+    use crate::geom::offset::tests::{ball, tube};
+    let mut b = tetrahedron();
+    let turned = Arc::new(
+        crate::geom::Offset::inverted_new(tube(), -0.75, [[0.0, 1.0], [-0.5, 0.5]]).unwrap(),
+    );
+    assert!(turned.turned());
+    b.add_surface(Surface::Offset(turned.clone()));
+    b.add_surface(Surface::Offset(turned));
+    let (n, band) = ball();
+    let inverted = crate::geom::Offset::inverted_new(n, -2.0, band).unwrap();
+    assert!(inverted.passes_focal() && !inverted.turned());
+    b.add_surface(Surface::Offset(Arc::new(inverted)));
+    // The dump writes each offset's way, so decoding kept it.
+    let dump = round_trip(&b).dump();
+    assert_eq!(dump.matches(" turned ").count(), 2);
+    assert_eq!(dump.matches(" inverted ").count(), 1);
+}
+
 #[test]
 fn shared_geometry_stays_shared() {
     let b = every_kind();

@@ -389,3 +389,86 @@ fn global_offsets_keep_names_across_distances() {
         .count();
     assert!(deleted >= 20, "{deleted}");
 }
+
+/// #421: a ring whose rounded corners are revolutions of splines, shrunk
+/// past their radius. Their offsets pass their focal surfaces whole and
+/// are kept turned, as the analytic twin's tori are; what is left is the
+/// sharp ring of the inset rectangle (Pappus), as the twin's is.
+#[test]
+fn a_spline_ring_shrunk_past_its_corners_is_its_analytic_twin() {
+    use ryukei_testkit::rings::{Ring, ring};
+    let r = Ring {
+        inner: 1.0,
+        width: 0.6,
+        height: 0.4,
+        radius: 0.1,
+    };
+    for spline in [false, true] {
+        let (o, _) = offset_body(OFF, &ring(K, &r, spline).unwrap(), &by(-0.15)).unwrap();
+        assert_eq!(o.counts().faces, 4, "spline {spline}");
+        near(volume(&o, 2e-4), r.shrunk_volume(0.15), 1e-4);
+    }
+}
+
+/// #421: an elliptic cylinder with its rims filleted, whose fillets are
+/// pipes about the ellipses, shrunk past the fillets' radius: the pipes'
+/// offsets pass their spines and are kept inverted, and what is left is
+/// the inset elliptic cylinder, sharp: the ellipse's area less its
+/// perimeter times the distance plus `π d²`, by the height less twice
+/// the distance.
+#[test]
+fn an_elliptic_tube_rounded_at_its_rims_shrunk_past_them() {
+    use ryukei::geom::{Curve, Curve2, Ellipse2, Frame, Frame2, Surface, Vector2};
+    let (a, b, h, r, d) = (1.0, 0.6, 1.0, 0.1, 0.15);
+    let f = Frame2::new(Point2::ORIGIN, Vector2::new(1.0, 0.0), true).unwrap();
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![Segment {
+                key: SegmentKey(1),
+                curve: Curve2::Ellipse2(Ellipse2::new(f, a, b).unwrap()),
+                t0: 0.0,
+                t1: 2.0 * PI,
+            }],
+        }],
+    })
+    .unwrap();
+    let (tube, _) = extrude(K, &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, h).unwrap();
+    let rims: Vec<ryukei::blend::EdgeBlend> = tube
+        .edges()
+        .filter(|&e| {
+            matches!(
+                tube.curve(tube.edge(e).unwrap().curve),
+                Some(Curve::Ellipse(_))
+            )
+        })
+        .map(|e| ryukei::blend::EdgeBlend {
+            edge: tube.edge(e).unwrap().name,
+            kind: ryukei::blend::BlendKind::Fillet { radius: r },
+        })
+        .collect();
+    assert_eq!(rims.len(), 2);
+    let (rounded, _) = ryukei::blend::blend(OpKey(0xc7), &tube, &rims).unwrap();
+    let pipes = rounded
+        .faces()
+        .filter(|&f| {
+            matches!(
+                rounded.surface(rounded.face(f).unwrap().surface),
+                Some(Surface::Pipe(_))
+            )
+        })
+        .count();
+    assert_eq!(pipes, 2);
+    let (o, _) = offset_body(OFF, &rounded, &by(-d)).unwrap();
+    assert_eq!(o.counts().faces, 3);
+    // The perimeter by fine chords.
+    let n = 200_000;
+    let at = |i: usize| {
+        let t = 2.0 * PI * i as f64 / n as f64;
+        Point2::new(a * ryukei::math::cos(t), b * ryukei::math::sin(t))
+    };
+    let perimeter: f64 = (0..n).map(|i| at(i).distance(at(i + 1))).sum();
+    let want = (PI * a * b - perimeter * d + PI * d * d) * (h - 2.0 * d);
+    near(volume(&o, 2e-4), want, 2e-4);
+}

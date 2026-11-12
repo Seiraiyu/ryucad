@@ -23,8 +23,26 @@ pub struct OffsetCase {
     pub op: Op,
 }
 
+/// The distances tried, as shares of a body's least side.
+const GRID: [f64; 5] = [0.01, 0.03, 0.1, 0.2, 0.4];
+
+/// Distances past most bodies' curvature (plan 17.A, #421): a blend's
+/// radius, a spline's bump, a sweep's turn, and on to shrinking bodies
+/// away.
+const PAST: [f64; 3] = [0.3, 0.6, 1.2];
+
 /// An offset or a shell from bytes, or `None` when they give no body.
 pub fn offset_case(data: &[u8]) -> Option<OffsetCase> {
+    case_with(data, &GRID)
+}
+
+/// [`offset_case`] at distances past most bodies' curvature, where faces
+/// pass their focal surfaces whole or in part.
+pub fn offset_case_past(data: &[u8]) -> Option<OffsetCase> {
+    case_with(data, &PAST)
+}
+
+fn case_with(data: &[u8], grid: &[f64]) -> Option<OffsetCase> {
     let (&how, rest) = data.split_first()?;
     let (body, rest) = if how % 2 == 1 {
         // A blended body: its fillets' and chamfers' faces offset too.
@@ -43,7 +61,7 @@ pub fn offset_case(data: &[u8]) -> Option<OffsetCase> {
         let d = bx.max() - bx.min();
         d.x.min(d.y).min(d.z).max(0.1)
     };
-    let d = size * [0.01, 0.03, 0.1, 0.2, 0.4][b.pick(5)];
+    let d = size * grid[b.pick(grid.len())];
     let mut faces: Vec<Name> = body
         .faces()
         .map(|f| body.face(f).expect("a face").name)

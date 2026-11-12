@@ -1063,6 +1063,19 @@ fn spline_box(body: &Body, face: FaceId) -> Option<Box3> {
     let surface = &body.surfaces[body.faces[face].surface];
     let rect = face_rect(body, face)?;
     let b = super::cells::enclosure(surface, rect)?;
+    // An offset's face lies within its base face's box grown by `|d|`
+    // (`O = S + d N`, `|N| = 1`): a bound by definition, which caps any
+    // enclosure still loose (design 484, #599).
+    let b = match surface {
+        Surface::Offset(o) => match super::cells::enclosure(o.base(), rect) {
+            Some(base) => crate::geom::offset::clip(
+                &b,
+                &base.grow(o.distance().abs() * (1.0 + 1e-12) + 1e-15),
+            ),
+            None => b,
+        },
+        _ => b,
+    };
     let reach = edges((body, face))
         .iter()
         .map(|&e| body.edges[e].tolerance.get())

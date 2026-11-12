@@ -149,9 +149,16 @@ pub(crate) fn surface(s: &Surface) -> String {
                 bits(w.scale())
             )
         }
+        // A regular offset's dump is as it always was: the way is written
+        // only for one past its base's focal surface (design 484).
         Surface::Offset(o) => format!(
-            "offset d={} over={} base=({})",
+            "offset d={}{} over={} base=({})",
             bits(o.distance()),
+            match o.turn() {
+                crate::geom::offset::Turn::Regular => "",
+                crate::geom::offset::Turn::Inverted => " inverted",
+                crate::geom::offset::Turn::Turned => " turned",
+            },
             floats(&[
                 o.domain()[0][0],
                 o.domain()[0][1],

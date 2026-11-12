@@ -408,8 +408,11 @@ impl Writer<'_, '_> {
                     1.0
                 };
                 let d = sign * o.distance() / self.cx.unit;
+                // Past its basis's focal surface (design 484), the offset
+                // intersects itself in STEP's sense: `.T.`.
+                let crosses = if o.passes_focal() { "T" } else { "F" };
                 self.out
-                    .add("OFFSET_SURFACE", vec![s(""), r(base), f(d), e("F")])
+                    .add("OFFSET_SURFACE", vec![s(""), r(base), f(d), e(crosses)])
             }
             _ => unreachable!("pipes and sweeps are NURBS by now"),
         }

@@ -542,3 +542,49 @@ const SEED_3_UNITS: u64 = 1 << 20;
 /// 350 it makes (plan 15.C's review); before the fix each of its 5,261
 /// sections, and each sample its fits took, was projected again.
 const SEED_3_PROJECTIONS: u64 = 1024;
+
+/// #599: `tweak_props`' seed 4 (`Lcg::new(0x9c)`), a closed revolution's
+/// one face offset by 0.115. Its offset face lies within its base face's
+/// box grown by the distance (the box was 24.7 against the base's 7.26),
+/// and it meshes from a chord of 2.4 (a third of its size, where it once
+/// stalled) down to a thousandth of its size under the default triangle
+/// cap (where the estimate once refused 82 million).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "seconds in release, minutes in a debug build"
+)]
+fn a_closed_revolutions_offset_is_boxed_and_meshed() {
+    use ryukei::intersect::face_box;
+    use ryukei::tweak::offset_faces;
+    use ryukei_testkit::Lcg;
+    use ryukei_testkit::tweak_bytes::{Op, tweak_case};
+    let mut rng = Lcg::new(0x9c);
+    let mut bytes = Vec::new();
+    for _ in 0..=4 {
+        bytes = (0..96).map(|_| (rng.next_u64() >> 56) as u8).collect();
+    }
+    let case = tweak_case(&bytes).unwrap();
+    let Op::Offset(spec) = &case.op else {
+        panic!("seed 4 is an offset")
+    };
+    let d = spec.faces[0].1;
+    let (o, _) = offset_faces(OpKey(0x9c04), &case.body, spec).unwrap();
+    let diagonal = |b: ryukei::geom::Box3| (b.max() - b.min()).length();
+    let base: Vec<_> = case.body.faces().collect();
+    let made: Vec<_> = o.faces().collect();
+    assert_eq!((base.len(), made.len()), (1, 1));
+    let (was, is) = (
+        diagonal(face_box(&case.body, base[0])),
+        diagonal(face_box(&o, made[0])),
+    );
+    assert!(
+        is <= was + 2.0 * 3f64.sqrt() * d.abs() + 1e-9,
+        "{is} against {was}"
+    );
+    for chord in [2.4, 0.24, is * 1e-3] {
+        let m = tessellate(&o, &MeshParams::new(chord, 0.2)).unwrap();
+        assert_eq!(m.faults, [], "chord {chord}");
+        check_mesh(&o, &m).unwrap();
+    }
+}

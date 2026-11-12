@@ -1,5 +1,5 @@
-//! Offsets and shells from bytes ([`ryukei_testkit::offset_bytes`]). Every
-//! result must be a typed refusal ([`Error::InvalidOffset`], or for a
+//! Offsets and shells from bytes ([`ryukei_testkit::offset_bytes`]), now
+//! and then past their bodies' curvature. Every result must be a typed refusal ([`Error::InvalidOffset`], or for a
 //! shell the boolean's [`Error::InvalidBoolean`]), or a body that passes
 //! the checker, doesn't cross or overlap itself, and meshes with no
 //! faults. The operation, its checks and its mesh share one
@@ -15,10 +15,16 @@ use ryukei::check::{Fault, check, check_intersections_with};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate_with};
 use ryukei::name::OpKey;
 use ryukei::offset::{offset_body_with, shell_with};
-use ryukei_testkit::offset_bytes::{Op, offset_case};
+use ryukei_testkit::offset_bytes::{Op, offset_case, offset_case_past};
 
 fuzz_target!(|data: &[u8]| {
-    let Some(case) = offset_case(data) else {
+    // A sixteenth of the inputs at distances past their bodies' curvature
+    // (plan 17.A); the rest as they always were.
+    let case = match data.split_first() {
+        Some((&t, rest)) if t >= 0xf0 => offset_case_past(rest),
+        _ => offset_case(data),
+    };
+    let Some(case) = case else {
         return;
     };
     ryukei_testkit::fuzz_case(|work| {
