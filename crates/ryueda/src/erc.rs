@@ -1056,13 +1056,18 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
 /// it holds or names, and every design's ERC. Fails with `check_failed`
 /// (the report in its details) on any error a waiver doesn't accept.
 pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<Value> {
-    let p = Project::load(root)?;
+    check_project(&Project::load(root)?, cats)
+}
+
+/// `check` of a loaded project: the working files' (from [`check`]) or a
+/// revision's.
+pub fn check_project(p: &Project, cats: &crate::parts::Catalogues) -> Result<Value> {
     let faults = p.faults();
-    let erc = erc(&p, None)?;
-    let schematic = schematic_warnings(&p);
-    let symbols = crate::symlint::faults(&p, &crate::lint::prefs(&p));
-    let style = crate::stylelint::faults(&p, &crate::lint::prefs(&p));
-    let supply = crate::supply::findings(&p, cats)?;
+    let erc = erc(p, None)?;
+    let schematic = schematic_warnings(p);
+    let symbols = crate::symlint::faults(p, &crate::lint::prefs(p));
+    let style = crate::stylelint::faults(p, &crate::lint::prefs(p));
+    let supply = crate::supply::findings(p, cats)?;
     let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)

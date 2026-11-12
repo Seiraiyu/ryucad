@@ -154,7 +154,48 @@ pub fn answer(
             .map(|l| format!("{}/", l.base)),
         _ => None,
     };
-    let result = match req {
+    let result = match req.rev().map(str::to_owned) {
+        Some(rev) => match session.at(&rev) {
+            Ok((commit, p)) => read_at(session, &p, req)
+                .map(|a| with_commit(a, &commit))
+                .map_err(|e| e.with("commit", &commit)),
+            Err(e) => Err(e),
+        },
+        None => working(session, live.as_deref_mut(), me, req, job),
+    };
+    if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
+    {
+        // Only this project's own files: an alias's library project comes
+        // into view when it is named, and undoing that must never delete
+        // it. Only an import into a library project writes another
+        // project's files, and its entry keeps those.
+        let files: Vec<_> = ryu_session::activity::diff(&files_before, &session.files())
+            .into_iter()
+            .filter(|f| {
+                !f.path.starts_with("../") || into.as_deref().is_some_and(|i| f.path.starts_with(i))
+            })
+            .collect();
+        if !files.is_empty() {
+            let who = l.caller(me);
+            ryu_session::activity::record(l, EntryKind::Change, &who, &method, params, None, files);
+        }
+    }
+    if let (Some(l), Some(before)) = (live, before) {
+        l.announce(&before);
+        publish(l, session);
+    }
+    result
+}
+
+/// A request answered from the working files.
+fn working(
+    session: &mut Session,
+    mut live: Option<&mut Live<Eda>>,
+    me: Option<&str>,
+    req: Request,
+    job: &ryu_session::job::Job,
+) -> Result<Answer> {
+    match req {
         Request::Render {
             design,
             block,
@@ -164,6 +205,7 @@ pub fn answer(
             scale,
             fit,
             theme,
+            ..
         } => crate::schemcmd::render(
             session.project(),
             design.as_deref(),
@@ -212,42 +254,110 @@ pub fn answer(
             symbol,
             summary,
             codes,
+            ..
         } => crate::symlint::library_check(
             session.project(),
             library.as_deref(),
             symbol.as_deref(),
             &crate::symlint::Listing { summary, codes },
         ),
-        Request::Output { design, layers } => crate::output::output(
+        Request::Output { design, layers, .. } => crate::output::output(
             session.project(),
             design.as_deref(),
             layers.unwrap_or_default(),
         )
         .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes)),
         req => dispatch(session, live.as_deref_mut(), me, req, job).map(Answer::json),
-    };
-    if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
-    {
-        // Only this project's own files: an alias's library project comes
-        // into view when it is named, and undoing that must never delete
-        // it. Only an import into a library project writes another
-        // project's files, and its entry keeps those.
-        let files: Vec<_> = ryu_session::activity::diff(&files_before, &session.files())
-            .into_iter()
-            .filter(|f| {
-                !f.path.starts_with("../") || into.as_deref().is_some_and(|i| f.path.starts_with(i))
-            })
-            .collect();
-        if !files.is_empty() {
-            let who = l.caller(me);
-            ryu_session::activity::record(l, EntryKind::Change, &who, &method, params, None, files);
+    }
+}
+
+/// A read request answered from `p`, a revision's project.
+fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
+    match req {
+        Request::Netlist { design, .. } => {
+            crate::netlist::netlist(p, design.as_deref()).map(Answer::json)
         }
+        Request::Erc { design, .. } => crate::erc::erc(p, design.as_deref()).map(Answer::json),
+        Request::Check { .. } => {
+            let cats = session.catalogues()?;
+            crate::erc::check_project(p, &cats).map(Answer::json)
+        }
+        Request::Describe {
+            design,
+            block,
+            sheet,
+            ..
+        } => crate::schemcmd::describe(p, design.as_deref(), block.as_deref(), sheet.as_deref())
+            .map(Answer::json),
+        Request::Render {
+            design,
+            block,
+            sheet,
+            layer,
+            format,
+            scale,
+            fit,
+            theme,
+            ..
+        } => crate::schemcmd::render(
+            p,
+            design.as_deref(),
+            block.as_deref(),
+            sheet.as_deref(),
+            layer.as_deref(),
+            format.unwrap_or(crate::schemcmd::Format::Svg),
+            scale,
+            fit,
+            theme.unwrap_or_default(),
+        ),
+        Request::Output { design, layers, .. } => {
+            crate::output::output(p, design.as_deref(), layers.unwrap_or_default())
+                .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes))
+        }
+        Request::BlockShow { block, .. } => topcmd::block_show(p, &block).map(Answer::json),
+        Request::ComponentShow { component, .. } => {
+            partcmd::component_show(p, &component).map(Answer::json)
+        }
+        Request::NetShow { net, .. } => partcmd::net_show(p, &net).map(Answer::json),
+        Request::SymbolShow { symbol, .. } => libcmd::symbol_show(p, &symbol).map(Answer::json),
+        Request::LibcompShow { libcomp, .. } => libcmd::libcomp_show(p, &libcomp).map(Answer::json),
+        Request::LibCheck {
+            library,
+            symbol,
+            summary,
+            codes,
+            ..
+        } => crate::symlint::library_check(
+            p,
+            library.as_deref(),
+            symbol.as_deref(),
+            &crate::symlint::Listing { summary, codes },
+        ),
+        other => Err(Error::new(
+            Code::InvalidParam,
+            format!("{} doesn't read a revision", other.method()),
+        )
+        .with("param", "rev")),
     }
-    if let (Some(l), Some(before)) = (live, before) {
-        l.announce(&before);
-        publish(l, session);
+}
+
+/// `a` naming the commit it was read at: a `commit` member in its result
+/// (a raw result's text gains it as its first member).
+fn with_commit(mut a: Answer, commit: &str) -> Answer {
+    if let Some(o) = a.result.as_object_mut() {
+        o.insert("commit".into(), json!(commit));
     }
-    result
+    if let Some(ryu_session::rpc::Raw::Result(text)) = &mut a.raw
+        && let Some(rest) = text.strip_prefix('{')
+    {
+        let sep = if rest.trim_start().starts_with('}') {
+            ""
+        } else {
+            ","
+        };
+        *text = format!("{{\"commit\":{}{sep}{rest}", json!(commit));
+    }
+    a
 }
 
 fn dispatch(
@@ -319,7 +429,7 @@ fn dispatch(
             &ops,
             expected_revision.as_deref(),
         ),
-        Request::SymbolShow { symbol } => libcmd::symbol_show(session.project(), &symbol),
+        Request::SymbolShow { symbol, .. } => libcmd::symbol_show(session.project(), &symbol),
         Request::SymbolList { library } => {
             libcmd::symbol_list(session.project(), library.as_deref())
         }
@@ -394,7 +504,7 @@ fn dispatch(
                 &cats,
             )
         }
-        Request::LibcompShow { libcomp } => libcmd::libcomp_show(session.project(), &libcomp),
+        Request::LibcompShow { libcomp, .. } => libcmd::libcomp_show(session.project(), &libcomp),
         Request::LibcompList { library } => {
             libcmd::libcomp_list(session.project(), library.as_deref())
         }
@@ -626,7 +736,7 @@ fn dispatch(
             },
             expected_revision.as_deref(),
         ),
-        Request::BlockShow { block } => topcmd::block_show(session.project(), &block),
+        Request::BlockShow { block, .. } => topcmd::block_show(session.project(), &block),
         Request::BlockList {} => Ok(topcmd::block_list(session.project())),
         Request::BlockDelete {
             block,
@@ -653,7 +763,7 @@ fn dispatch(
             component,
             expected_revision,
         } => partcmd::component_delete(session, &component, expected_revision.as_deref()),
-        Request::ComponentShow { component } => {
+        Request::ComponentShow { component, .. } => {
             partcmd::component_show(session.project(), &component)
         }
         Request::Connect {
@@ -727,7 +837,7 @@ fn dispatch(
             net,
             expected_revision,
         } => partcmd::net_delete(session, &net, expected_revision.as_deref()),
-        Request::NetShow { net } => partcmd::net_show(session.project(), &net),
+        Request::NetShow { net, .. } => partcmd::net_show(session.project(), &net),
         Request::InstanceAdd {
             block,
             of,
@@ -754,10 +864,10 @@ fn dispatch(
             expected_revision,
         } => partcmd::instance_delete(session, &instance, expected_revision.as_deref()),
         Request::InstanceShow { instance } => partcmd::instance_show(session.project(), &instance),
-        Request::Netlist { design } => {
+        Request::Netlist { design, .. } => {
             crate::netlist::netlist(session.project(), design.as_deref())
         }
-        Request::Erc { design } => crate::erc::erc(session.project(), design.as_deref()),
+        Request::Erc { design, .. } => crate::erc::erc(session.project(), design.as_deref()),
         Request::ErcWaive {
             finding,
             reason,
@@ -880,6 +990,7 @@ fn dispatch(
             design,
             block,
             sheet,
+            ..
         } => crate::schemcmd::describe(
             session.project(),
             design.as_deref(),

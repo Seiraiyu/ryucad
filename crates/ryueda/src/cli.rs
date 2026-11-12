@@ -45,6 +45,15 @@ struct Expect {
     expect: Option<String>,
 }
 
+/// The revision a read reads.
+#[derive(Args)]
+struct Rev {
+    /// Read the project as this Git revision has it (HEAD, main~2, a
+    /// hash); `working`, the files on disk, by default.
+    #[arg(long = "rev", value_name = "REV")]
+    rev: Option<String>,
+}
+
 // Parsed once per run; the size difference costs nothing.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
@@ -127,6 +136,8 @@ enum Command {
     Netlist {
         /// By ID or name; the project's one design when left out.
         design: Option<String>,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// ERC: every design's findings, or one design's; `erc waive` and
     /// `erc configure` write erc.json.
@@ -134,6 +145,8 @@ enum Command {
     Erc {
         /// By ID or name; every design when left out.
         design: Option<String>,
+        #[command(flatten)]
+        rev: Rev,
         #[command(subcommand)]
         action: Option<ErcCmd>,
     },
@@ -208,6 +221,8 @@ enum Command {
         /// Stay off the network (check never fetches).
         #[arg(long)]
         offline: bool,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// Lay out a design's schematics (the project's one design, or
     /// --design), or one --block, over their layout files, writing those
@@ -295,6 +310,8 @@ enum Command {
         block: Option<String>,
         #[arg(long)]
         sheet: Option<String>,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// Draw a block's canvas (a design's root by default) or one sheet,
     /// as SVG or PNG, into --out.
@@ -323,6 +340,8 @@ enum Command {
         theme: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// Page a design's canvases into a PDF (--out): a page per sheet at
     /// the project's paper, bookmarks, links and searchable text.
@@ -335,6 +354,8 @@ enum Command {
         layers: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
@@ -442,6 +463,8 @@ enum LibCmd {
         /// symbols holding one; repeat for more.
         #[arg(long = "code", value_name = "CODE")]
         codes: Vec<String>,
+        #[command(flatten)]
+        rev: Rev,
     },
 }
 
@@ -496,7 +519,11 @@ enum SymbolCmd {
         expect: Expect,
     },
     /// A symbol (<id>, or lib/<alias>/symbol/<id>) with its faults.
-    Show { symbol: String },
+    Show {
+        symbol: String,
+        #[command(flatten)]
+        rev: Rev,
+    },
     /// A library's symbols (this project's by default).
     List {
         #[arg(long)]
@@ -814,7 +841,11 @@ enum LibcompCmd {
     },
     /// A library component (<id>, or lib/<alias>/libcomp/<id>) with its
     /// faults.
-    Show { libcomp: String },
+    Show {
+        libcomp: String,
+        #[command(flatten)]
+        rev: Rev,
+    },
     /// A library's components (this project's by default).
     List {
         #[arg(long)]
@@ -911,6 +942,8 @@ enum BlockCmd {
     /// A block with what it holds, its faults and its revision.
     Show {
         block: String,
+        #[command(flatten)]
+        rev: Rev,
     },
     List,
     /// Delete a block no instance places and no design is rooted on.
@@ -1097,7 +1130,11 @@ enum ComponentCmd {
         expect: Expect,
     },
     /// A component with its connections and faults.
-    Show { component: String },
+    Show {
+        component: String,
+        #[command(flatten)]
+        rev: Rev,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1150,7 +1187,11 @@ enum NetCmd {
         expect: Expect,
     },
     /// A net with the pins on it.
-    Show { net: String },
+    Show {
+        net: String,
+        #[command(flatten)]
+        rev: Rev,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1588,11 +1629,13 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             symbol,
             summary,
             codes,
+            rev,
         }) => Request::LibCheck {
             library: library.clone(),
             symbol: symbol.clone(),
             summary: *summary,
             codes: codes.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Symbol(SymbolCmd::Create {
             name,
@@ -1628,8 +1671,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             class: class.clone(),
             expected_revision: expect.expect.clone(),
         },
-        Command::Symbol(SymbolCmd::Show { symbol }) => Request::SymbolShow {
+        Command::Symbol(SymbolCmd::Show { symbol, rev }) => Request::SymbolShow {
             symbol: symbol.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Symbol(SymbolCmd::List { library }) => Request::SymbolList {
             library: library.clone(),
@@ -1671,8 +1715,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             fields: fields.fields()?,
             expected_revision: expect.expect.clone(),
         },
-        Command::Libcomp(LibcompCmd::Show { libcomp }) => Request::LibcompShow {
+        Command::Libcomp(LibcompCmd::Show { libcomp, rev }) => Request::LibcompShow {
             libcomp: libcomp.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Libcomp(LibcompCmd::List { library }) => Request::LibcompList {
             library: library.clone(),
@@ -1858,8 +1903,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 expected_revision: expect.expect.clone(),
             }
         }
-        Command::Block(BlockCmd::Show { block }) => Request::BlockShow {
+        Command::Block(BlockCmd::Show { block, rev }) => Request::BlockShow {
             block: block.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Block(BlockCmd::List) => Request::BlockList {},
         Command::Block(BlockCmd::Delete { block, expect }) => Request::BlockDelete {
@@ -1892,8 +1938,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 expected_revision: expect.expect.clone(),
             }
         }
-        Command::Component(ComponentCmd::Show { component }) => Request::ComponentShow {
+        Command::Component(ComponentCmd::Show { component, rev }) => Request::ComponentShow {
             component: component.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Connect {
             pin,
@@ -1965,7 +2012,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             net: net.clone(),
             expected_revision: expect.expect.clone(),
         },
-        Command::Net(NetCmd::Show { net }) => Request::NetShow { net: net.clone() },
+        Command::Net(NetCmd::Show { net, rev }) => Request::NetShow {
+            net: net.clone(),
+            rev: rev.rev.clone(),
+        },
         Command::Instance(InstanceCmd::Add {
             block,
             of,
@@ -2009,8 +2059,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Instance(InstanceCmd::Show { instance }) => Request::InstanceShow {
             instance: instance.clone(),
         },
-        Command::Netlist { design } => Request::Netlist {
+        Command::Netlist { design, rev } => Request::Netlist {
             design: design.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Lint {
             action: None,
@@ -2139,9 +2190,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         },
         Command::Erc {
             design,
+            rev,
             action: None,
         } => Request::Erc {
             design: design.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Erc {
             action:
@@ -2174,7 +2227,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .collect(),
             expected_revision: expect.expect.clone(),
         },
-        Command::Check { offline } => Request::Check { offline: *offline },
+        Command::Check { offline, rev } => Request::Check {
+            offline: *offline,
+            rev: rev.rev.clone(),
+        },
         Command::Layout {
             design,
             block,
@@ -2239,10 +2295,12 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             design,
             block,
             sheet,
+            rev,
         } => Request::Describe {
             design: design.clone(),
             block: block.clone(),
             sheet: sheet.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Render {
             design,
@@ -2254,6 +2312,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             fit,
             theme,
             out,
+            rev,
         } => {
             let format = picture_format(format.as_deref(), out)?;
             Request::Render {
@@ -2268,14 +2327,17 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                     .as_deref()
                     .map(|t| named("theme", t, "light, dark"))
                     .transpose()?,
+                rev: rev.rev.clone(),
             }
         }
         Command::Output {
             design,
             layers,
             out: _,
+            rev,
         } => Request::Output {
             design: design.clone(),
+            rev: rev.rev.clone(),
             layers: match layers.as_deref() {
                 None => None,
                 Some("all") => Some(ryueda::output::Layers::All),
