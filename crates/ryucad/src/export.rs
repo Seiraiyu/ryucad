@@ -2028,7 +2028,7 @@ fn step_transfer(
     w: &ryustep::Written,
     model: &WriteModel,
     unpainted: Option<&Unpainted>,
-    _unwritten: Option<&Unwritten>,
+    unwritten: Option<&Unwritten>,
     off: Option<usize>,
 ) -> Result<(Value, Vec<Value>)> {
     use crate::doc::files::Feature;
@@ -2115,14 +2115,31 @@ fn step_transfer(
             annotations,
             "open annotation(s) on the parts, not written",
         ),
-        (
-            "properties",
-            properties.len(),
-            "part propert(ies) beyond number, name and description, not written to STEP yet",
-        ),
     ] {
         if n > 0 {
             omitted.push(json!({"what": what, "count": n, "summary": format!("{n} {words}")}));
+        }
+    }
+    match unwritten {
+        // properties: false — every property it would have written.
+        None if !properties.is_empty() => omitted.push(json!({
+            "what": "properties",
+            "count": properties.len(),
+            "summary": format!(
+                "{} part propert(ies) and material(s), not written (properties: false)",
+                properties.len()
+            ),
+        })),
+        None => {}
+        Some(u) => {
+            if u.values > 0 {
+                omitted.push(json!({"what": "properties", "count": u.values,
+                    "summary": format!("{} propert(ies) whose values STEP can't hold (neither text, number nor boolean), not written", u.values)}));
+            }
+            if u.foreign_densities > 0 {
+                omitted.push(json!({"what": "properties", "count": u.foreign_densities,
+                    "summary": format!("{} material(s) of another project's parts, written without their density", u.foreign_densities)}));
+            }
         }
     }
     if let Some(u) = unpainted.filter(|u| u.count() > 0) {
@@ -4216,6 +4233,57 @@ pub(crate) mod tests {
                 .iter()
                 .all(|o| o["what"] != "properties"),
             "{v}"
+        );
+    }
+
+    #[test]
+    fn properties_false_writes_none_and_says_so() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        add(
+            &mut s,
+            "p",
+            json!({"type": "box", "id": "a", "params": {"x": 10, "y": 10, "z": 10}}),
+        );
+        let opts = json!({"part": "p", "time_stamp": "2026-11-11T00:00:00", "file_name": "p.step"});
+        let (_, before) = exported(&mut s, opts.clone()).unwrap();
+        call(
+            &mut s,
+            "pdm.configure",
+            json!({"properties": {"finish": {"type": "string"}}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"finish": "red", "material": "Steel"}}),
+        )
+        .unwrap();
+        let (with, after) = exported(&mut s, opts.clone()).unwrap();
+        assert_ne!(after, before);
+        assert!(with.get("warnings").is_none(), "{with}");
+        let mut off = opts;
+        off["properties"] = json!(false);
+        let (left_out, bytes) = exported(&mut s, off).unwrap();
+        assert_eq!(bytes, before, "the plain bytes");
+        let omitted: Vec<&Value> = left_out["transfer"]["omitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["what"] == "properties")
+            .collect();
+        assert_eq!(omitted.len(), 1, "{left_out}");
+        assert_eq!(omitted[0]["count"], 2, "finish and material");
+        assert!(
+            omitted[0]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("properties: false")
+        );
+        let w = left_out["warnings"].as_array().unwrap();
+        assert!(
+            w.iter()
+                .any(|w| w["code"] == "export_metadata_omitted" && w["what"] == "properties")
         );
     }
 }
