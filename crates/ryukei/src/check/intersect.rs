@@ -246,24 +246,6 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
             }
         }
     }
-    // Faces crossing at an edge they share are traced first under
-    // [`SHARED_TRACE_FIRST`] units, then tried apart beside it under the
-    // ladder's smaller limits: where one face's edge is an isoline of its
-    // surface the edge lies in the trace's face plane, whose search
-    // recurses all along it before the trace settles (KiCad's MSOP-8-1EP:
-    // four NURBS pairs, 1.8M to 2M units each, then apart beside in under
-    // 1,300, #303). Either settles the pair as before; one neither settles
-    // is traced in full, as before.
-    if !tangent && !shared.is_empty() {
-        match m.capped_by(SHARED_TRACE_FIRST, || face_face_in((body, a), (body, b), m)) {
-            Ok(meet) => traced = Some(meet),
-            Err(_) => {
-                if apart_beside_by(body, a, b, &shared, &LADDER[..2], true, m) {
-                    return None;
-                }
-            }
-        }
-    }
     // Faces touching at a vertex they share touch at a corner of both
     // boxes, where the region's sides cut the trace: again with the
     // region reaching an eighth of the smaller face's size past it.
@@ -784,11 +766,6 @@ const EARLY_VERTICES: usize = 1 << 9;
 /// The units a trace of faces tangent along an edge they share is first
 /// given, between the beside ladder's smaller limits and its largest.
 const TANGENT_TRACE_FIRST: u64 = 1 << 14;
-
-/// The units a trace of faces crossing at an edge they share is first
-/// given, before they are tried apart beside it: the wider trace's first
-/// try ([`WITHIN_FIRST`]).
-const SHARED_TRACE_FIRST: u64 = WITHIN_FIRST;
 
 /// The units the wider trace of faces sharing vertices but no edge is
 /// first given, before the search apart outside the vertices' balls: that
