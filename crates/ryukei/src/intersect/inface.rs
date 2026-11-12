@@ -17,9 +17,10 @@
 //! [`Failure::Uncertain`].
 
 use super::Failure;
+use super::broad::BoxTree;
 use crate::geom::bernstein::{Bernstein, Root};
 use crate::geom::chain2::Chain2;
-use crate::geom::{Curve, Curve2, Line2, Point2, Point3, Vector2};
+use crate::geom::{Box3, Curve, Curve2, Line2, Point2, Point3, Vector2};
 use crate::interval::Interval;
 use crate::topo::{Body, EdgeId, FaceId, Sense, VertexId};
 
@@ -57,6 +58,28 @@ pub(crate) fn point_in_face_near(
     if let Some(on) = on_boundary(body, face, p, slack) {
         return Ok(on);
     }
+    let Some(l) = loops(body, face)? else {
+        // Only lone vertices, or no loops at all: the whole surface.
+        return Ok(Place::Inside);
+    };
+    l.locate(uv, &targets(&l.chains), None)
+}
+
+/// A face's loops as `point_in_face` reads them (plan 17.C split them
+/// out so [`FaceIndex`] can keep them).
+struct Loops {
+    /// The pcurves' chains, then a tolerant loop's gaps.
+    chains: Vec<Chain2>,
+    joints: Vec<Chain2>,
+    periods: [Option<f64>; 2],
+    left_is_inside: bool,
+}
+
+/// The face's loops, read as `point_in_face` always read them; `None`
+/// when no loop has a fin (only lone vertices, or no loops).
+fn loops(body: &Body, face: FaceId) -> Result<Option<Loops>, Failure> {
+    let f = body.face(face).ok_or(Failure::Uncertain)?;
+    let surface = body.surface(f.surface).ok_or(Failure::Uncertain)?;
     let (pu, pv) = surface.periods();
     let mut chains = Vec::new();
     let mut gaps = Vec::new();
@@ -85,28 +108,164 @@ pub(crate) fn point_in_face_near(
         }
     }
     if chains.is_empty() {
-        // Only lone vertices, or no loops at all: the whole surface.
-        return Ok(Place::Inside);
+        return Ok(None);
     }
     // After the pcurves, so a face whose loops close takes the rays it
     // always took.
     chains.extend(gaps);
-    let left_is_inside = f.sense == Sense::Forward;
-    let ray = Rays {
-        chains: &chains,
-        joints: &joints,
+    Ok(Some(Loops {
+        chains,
+        joints,
         periods: [pu, pv],
-    };
-    for target in targets(&chains) {
-        if let Some(left) = ray.first_crossing(uv, target) {
-            return Ok(if left == left_is_inside {
-                Place::Inside
-            } else {
-                Place::Outside
-            });
+        left_is_inside: f.sense == Sense::Forward,
+    }))
+}
+
+impl Loops {
+    /// Where `uv`, off the boundary, lies: the first ray aimed at
+    /// `targets` that settles. `tree` (over the chains' boxes) only skips
+    /// chains a ray can't reach.
+    fn locate(
+        &self,
+        uv: Point2,
+        targets: &[Point2],
+        tree: Option<&BoxTree>,
+    ) -> Result<Place, Failure> {
+        let ray = Rays {
+            chains: &self.chains,
+            joints: &self.joints,
+            periods: self.periods,
+            tree,
+        };
+        for &target in targets {
+            if let Some(left) = ray.first_crossing(uv, target) {
+                return Ok(if left == self.left_is_inside {
+                    Place::Inside
+                } else {
+                    Place::Outside
+                });
+            }
+        }
+        Err(Failure::Uncertain)
+    }
+}
+
+/// A face's boundary prepared once for many points (plan 17.C, #608: a
+/// view's rays placed hits in a plate's top face by rebuilding its 1,000
+/// loops each time). [`FaceIndex::place`] answers as
+/// [`point_in_face_near`] does, from the same tests in the same order,
+/// skipping only edges and chains whose boxes can't reach the point or
+/// the ray.
+pub(crate) struct FaceIndex {
+    face: FaceId,
+    /// The vertices `on_boundary` tries, in its order: point, tolerance.
+    vertices: Vec<(VertexId, Point3, f64)>,
+    /// The edges it tries, in its order, and a tree over their boxes.
+    edges: Vec<EdgeId>,
+    edge_tree: BoxTree,
+    loops: Result<Option<Loops>, Failure>,
+    targets: Vec<Point2>,
+    /// The chains' boxes in the parameter plane (`z` = 0).
+    chain_tree: BoxTree,
+}
+
+impl FaceIndex {
+    pub(crate) fn new(body: &Body, face: FaceId) -> Self {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        for l in body.face_loops(face) {
+            if let Some(v) = body.loops[l].vertex {
+                let vx = &body.vertices[v];
+                vertices.push((v, vx.point, vx.tolerance.get()));
+            }
+            for fin in body.loop_fins(l) {
+                let e = body.fins[fin].edge;
+                let edge = &body.edges[e];
+                for v in [edge.start, edge.end] {
+                    let vx = &body.vertices[v];
+                    vertices.push((v, vx.point, vx.tolerance.get()));
+                }
+                edges.push(e);
+            }
+        }
+        let edge_tree = BoxTree::new(
+            edges
+                .iter()
+                .enumerate()
+                .map(|(k, &e)| {
+                    let edge = &body.edges[e];
+                    let bx = body.curves[edge.curve].bounds(edge.interval);
+                    let scale = 1.0
+                        + bx.max()
+                            .to_vector()
+                            .length()
+                            .max(bx.min().to_vector().length());
+                    (bx.grow(edge.tolerance.get() + 1e-9 * scale), k)
+                })
+                .collect(),
+        );
+        let loops = loops(body, face);
+        let (targets, chain_tree) = match &loops {
+            Ok(Some(l)) => (
+                targets(&l.chains),
+                BoxTree::new(
+                    l.chains
+                        .iter()
+                        .enumerate()
+                        .map(|(k, c)| {
+                            (
+                                Box3::new(
+                                    Point3::new(c.lo.x, c.lo.y, 0.0),
+                                    Point3::new(c.hi.x, c.hi.y, 0.0),
+                                ),
+                                k,
+                            )
+                        })
+                        .collect(),
+                ),
+            ),
+            _ => (Vec::new(), BoxTree::new(Vec::new())),
+        };
+        Self {
+            face,
+            vertices,
+            edges,
+            edge_tree,
+            loops,
+            targets,
+            chain_tree,
         }
     }
-    Err(Failure::Uncertain)
+
+    /// Where the point at `uv` lies against the face, as
+    /// [`point_in_face_near`] says with the same `slack`.
+    pub(crate) fn place(&self, body: &Body, uv: Point2, slack: f64) -> Result<Place, Failure> {
+        let f = body.face(self.face).ok_or(Failure::Uncertain)?;
+        let surface = body.surface(f.surface).ok_or(Failure::Uncertain)?;
+        let p = surface.point(uv.x, uv.y);
+        if let Some(&(v, _, _)) = self
+            .vertices
+            .iter()
+            .find(|(_, q, tol)| q.distance(p) <= tol + slack)
+        {
+            return Ok(Place::OnVertex(v));
+        }
+        let probe = BoxTree::new(vec![(Box3::from_point(p).grow(slack), 0)]);
+        for (k, _) in self.edge_tree.pairs_with(&probe) {
+            let e = self.edges[k];
+            let edge = &body.edges[e];
+            if edge_distance(&body.curves[edge.curve], edge.interval, p)
+                <= edge.tolerance.get() + slack
+            {
+                return Ok(Place::OnEdge(e));
+            }
+        }
+        match &self.loops {
+            Ok(Some(l)) => l.locate(uv, &self.targets, Some(&self.chain_tree)),
+            Ok(None) => Ok(Place::Inside),
+            Err(e) => Err(*e),
+        }
+    }
 }
 
 /// The vertex or edge of the face within its tolerance (plus `slack`) of
@@ -237,6 +396,9 @@ struct Rays<'a> {
     /// a ray along its bottom edge read a point outside as inside).
     joints: &'a [Chain2],
     periods: [Option<f64>; 2],
+    /// A tree over the chains' boxes: on a face with no period, only the
+    /// chains whose box meets the ray's are read (plan 17.C).
+    tree: Option<&'a BoxTree>,
 }
 
 impl Rays<'_> {
@@ -278,7 +440,21 @@ impl Rays<'_> {
         // left unsettled lies in reach.
         let mut hits: Vec<(Interval, bool)> = Vec::new();
         let mut unsettled: Vec<Interval> = Vec::new();
-        for c in self.chains {
+        let picked: Vec<usize> = match self.tree {
+            Some(t) if self.periods == [None, None] => {
+                let g = 2.0 * near;
+                let probe = BoxTree::new(vec![(
+                    Box3::new(
+                        Point3::new(lo.x - g, lo.y - g, 0.0),
+                        Point3::new(hi.x + g, hi.y + g, 0.0),
+                    ),
+                    0,
+                )]);
+                t.pairs_with(&probe).into_iter().map(|(k, _)| k).collect()
+            }
+            _ => (0..self.chains.len()).collect(),
+        };
+        for c in picked.iter().map(|&k| &self.chains[k]) {
             for (du, dv) in self.shifts(c, lo, hi) {
                 let off = Vector2::new(du, dv);
                 // A ray through a joint between pcurves settles nothing
@@ -611,6 +787,7 @@ mod tests {
             chains: &chains,
             joints: &[],
             periods: [Some(2.0 * PI), None],
+            tree: None,
         };
         let from = Point2::new(PI, -2e-4);
         assert_eq!(rays.first_crossing(from, Point2::new(PI, 0.0)), None);
@@ -646,6 +823,7 @@ mod tests {
             chains: &chains,
             joints: &[],
             periods: [None, None],
+            tree: None,
         };
         // Through the gap, it meets the bottom from above: read inside.
         assert_eq!(open.first_crossing(from, target), Some(true));
@@ -655,6 +833,7 @@ mod tests {
             chains: &chains,
             joints: &joints,
             periods: [None, None],
+            tree: None,
         };
         assert_eq!(rays.first_crossing(from, target), None);
         // Aimed at the right side's middle, it crosses it from outside.
@@ -662,5 +841,86 @@ mod tests {
             rays.first_crossing(from, Point2::new(2.0, 0.5)),
             Some(false)
         );
+    }
+
+    /// `FaceIndex` against `point_in_face_near` (plan 17.C): every face
+    /// of a plate drilled with 100 bores (its top face has 101 loops), at
+    /// seeded points of its parameter box and on and a hair off its
+    /// edges, with no slack and with some: the same `Place` every time.
+    #[test]
+    fn a_face_index_places_as_point_in_face() {
+        use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+        use crate::geom::{Rigid, Vector3};
+        use crate::name::OpKey;
+        use crate::primitive;
+        let block = primitive::block(OpKey(1), 10.0, 10.0, 0.5, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let rod = primitive::cylinder(OpKey(2), 0.3, 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let places: Vec<Rigid> = (0..100)
+            .map(|k| {
+                Rigid::translation(Vector3::new(
+                    (k % 10) as f64 + 0.5,
+                    (k / 10) as f64 + 0.5,
+                    -0.25,
+                ))
+            })
+            .collect();
+        let tools: Vec<Tool> = places
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Tool {
+                key: ToolKey(i as u128 + 1),
+                body: &rod,
+                place: *p,
+            })
+            .collect();
+        let plate = boolean(OpKey(3), BooleanOp::Subtract, &block, &tools)
+            .unwrap()
+            .0;
+        let mut seed = 0x17c6u64;
+        let mut r = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut tried = 0;
+        for f in plate.faces() {
+            let index = FaceIndex::new(&plate, f);
+            let rect = crate::intersect::face_rect(&plate, f).unwrap();
+            let surface = &plate.surfaces[plate.faces[f].surface];
+            let mut uvs: Vec<Point2> = (0..200)
+                .map(|_| {
+                    Point2::new(
+                        rect[0][0] + (rect[0][1] - rect[0][0]) * r(),
+                        rect[1][0] + (rect[1][1] - rect[1][0]) * r(),
+                    )
+                })
+                .collect();
+            for l in plate.face_loops(f) {
+                for fin in plate.loop_fins(l) {
+                    let e = &plate.edges[plate.fins[fin].edge];
+                    let c = &plate.curves[e.curve];
+                    let t = e.interval[0] + (e.interval[1] - e.interval[0]) * r();
+                    let (u, v) = surface.project(c.point(t)).param;
+                    uvs.push(Point2::new(u, v));
+                    uvs.push(Point2::new(u + 1e-9, v - 1e-9));
+                }
+            }
+            for uv in uvs {
+                for slack in [0.0, 1e-7] {
+                    tried += 1;
+                    assert_eq!(
+                        index.place(&plate, uv, slack),
+                        point_in_face_near(&plate, f, uv, slack),
+                        "face {f:?} at {uv:?}, slack {slack}"
+                    );
+                }
+            }
+        }
+        assert!(tried > 1000, "{tried}");
     }
 }
