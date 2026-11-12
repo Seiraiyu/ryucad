@@ -738,7 +738,7 @@ fn block_description(
     let (_, scores) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
     // Every fix tried by a dry run first: those that don't hold aren't
     // offered.
-    let (findings, checked) = schem::checked_findings(laid, &prefs);
+    let (findings, checked, withheld) = schem::checked_findings(laid, &prefs);
     let mut d = ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
     let unchecked: Vec<(&str, &str, &Vec<String>)> = findings
         .iter()
@@ -772,6 +772,26 @@ fn block_description(
                         f["fixes_checked"] = json!(false);
                     }
                     names.fixes_in(f);
+                    // Fixes withheld for their cost, each with why (plan
+                    // 3.A).
+                    let held: Vec<Value> = findings
+                        .iter()
+                        .zip(&withheld)
+                        .filter(|(x, w)| {
+                            !w.is_empty()
+                                && f["code"] == x.code
+                                && x.sheet == sid
+                                && f["refs"] == json!(x.refs)
+                        })
+                        .flat_map(|(_, w)| w.iter())
+                        .map(|(batch, why)| {
+                            let text = names.fixes(std::slice::from_ref(batch));
+                            json!({"fix": text.first().cloned().unwrap_or_default(), "why": why})
+                        })
+                        .collect();
+                    if !held.is_empty() {
+                        f["withheld"] = json!(held);
+                    }
                 }
             }
         }

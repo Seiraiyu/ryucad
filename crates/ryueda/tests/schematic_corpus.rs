@@ -988,6 +988,23 @@ fn the_corpus_from_nothing_findings_carry_fixes() {
             // so every one checked works.
             if f["fixes_checked"] != false {
                 assert!(gone, "{name}: {texts:?} left {f}: {v}");
+                // Plan 3.A: and it lowers the block's points, every sheet
+                // and every rule.
+                let points = |d: &Value| -> i64 {
+                    d["blocks"][0]["sheets"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .flat_map(|s| s["findings"].as_array().unwrap().iter())
+                        .map(|g| g["points"].as_i64().unwrap())
+                        .sum()
+                };
+                let before = points(&ryueda(&board, 1, &["describe", "--block", block]));
+                let after = points(&v["result"]["description"]);
+                assert!(
+                    after < before,
+                    "{name}/{block}: fix {texts:?} costs: {before} -> {after} points"
+                );
             }
         }
     }

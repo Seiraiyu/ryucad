@@ -16,7 +16,7 @@ parts.supply dd736c99f67f9b57a7a2ed86738a3270
 schematic.breakout.annotate.across e2180ca93ea43f4ec2f19b2b55f8ddfe
 schematic.breakout.annotate.down af396a2e4ef7c57c23e39271babf9396
 schematic.breakout.breakout.dark.svg d89fdb704c6ccc3317683981d3967648
-schematic.breakout.breakout.describe 8c19e7dbd45d231198e292f19b6174bb
+schematic.breakout.breakout.describe 36a8c63e2497297702a274375aeea589
 schematic.breakout.breakout.explain 48c8716d6565d33a9dadea9c66b50250
 schematic.breakout.breakout.layout ceb86c11bc236b70940d1a342d64921b
 schematic.breakout.breakout.svg 1c4c931aebc4ecb1b111a843932efac1
@@ -33,7 +33,7 @@ schematic.breakout.styled.pdf bcb11aad4122b71101640f6d582ccfb2
 schematic.buck.annotate.across 93884a291a74412f9a0f9c9d746c9687
 schematic.buck.annotate.down c139f3ce925ed89e8d6f5f9721dd5d01
 schematic.buck.buck.dark.svg 1cfcee30459220f67cdb7712e9de314b
-schematic.buck.buck.describe 0e770ff760f3adf2b5afd1b6776814cb
+schematic.buck.buck.describe 16f6be8b25c4bf3c471d47b9dbe9c023
 schematic.buck.buck.explain df83a1118c0e3fa3120d12f80696d444
 schematic.buck.buck.layout 8d8a1347deee1ba6511d091071bea834
 schematic.buck.buck.svg cbd3f14cd00a0ea3ed01dd6757f895be
@@ -63,12 +63,12 @@ schematic.frontend.annotate.down 7fadb50d75c47a23cd362f8fd370dfd2
 schematic.frontend.baldiff.bd_l.svg 2bee01ed226e168eacd2eb4d0d00b447
 schematic.frontend.baldiff.bd_r.svg 80edc4a4b69999fcb45f89ea75d0a265
 schematic.frontend.baldiff.dark.svg 069f9b2038613fc39f4079d7499dfb03
-schematic.frontend.baldiff.describe fbe779761a667eff94442c95d1cd3a27
+schematic.frontend.baldiff.describe 87bfa15f05a596ccfc3f50d7d7b3f4bf
 schematic.frontend.baldiff.explain 3b685f4298ce65a8408429d9b3f7d214
 schematic.frontend.baldiff.layout 45b13b51d71a75ea5d8cd6e7334cd244
 schematic.frontend.baldiff.svg 2bee01ed226e168eacd2eb4d0d00b447
 schematic.frontend.ivconv.dark.svg 085d7e73ba329d05bd61018dc4702e18
-schematic.frontend.ivconv.describe 4264bbce3613a3419c8c7b34f2c63a87
+schematic.frontend.ivconv.describe cd76194d3e4b866b149ae5e9ab2ce66f
 schematic.frontend.ivconv.explain 6c6d3d0d62650617f23e23d95f4b2a64
 schematic.frontend.ivconv.iv_l.svg f7eeca5b29d3f65f213f8250e2d7d8a5
 schematic.frontend.ivconv.iv_r.svg 868b57a4c8b7b627a87722c8ef5c6727
@@ -78,7 +78,7 @@ schematic.frontend.pdf 02c4df16ad9421584c6d5240d15dd99d
 schematic.rp2040.annotate.across 36073b870adb5b768ccbe3c413bb8770
 schematic.rp2040.annotate.down f51958bca90ea271d91b14f6afe082f4
 schematic.rp2040.mitayi.dark.svg 02d47ce37dde5e77370060cef694496c
-schematic.rp2040.mitayi.describe 1a68e18c6dde847989ad5a094abad0c6
+schematic.rp2040.mitayi.describe 699e92c4917cac5ace52556dbb9f0366
 schematic.rp2040.mitayi.explain 16cb1458d0f830d4d3405620deb0dcf0
 schematic.rp2040.mitayi.layout ee0308138d0608c3c79012cb95120b0a
 schematic.rp2040.mitayi.svg 95f834e451b72c7e5b09f0414a0ff084

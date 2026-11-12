@@ -1042,15 +1042,21 @@ pub fn fill_notes(
 /// most points first): each is a layout of the block.
 pub const FIX_CHECKS: usize = 24;
 
+/// A fix withheld for its cost (plan 3.A): the batch, and why.
+pub type Withheld = (Vec<ryusch::layout::Instruction>, String);
+
 /// `laid`'s lint with every fix tried first (`ryusch::lint::try_fix`), in
-/// parallel: a fix that doesn't hold is dropped; findings past
-/// `FIX_CHECKS` fixes say `fixes_checked: false` and keep theirs.
+/// parallel: a fix that doesn't hold is dropped; one that holds but costs
+/// the block points is dropped and listed, per finding, as withheld;
+/// findings past `FIX_CHECKS` fixes say `fixes_checked: false` and keep
+/// theirs.
 pub fn checked_findings(
     laid: &Laid,
     prefs: &ryusch::lint::Prefs,
-) -> (Vec<ryusch::lint::Finding>, Vec<bool>) {
+) -> (Vec<ryusch::lint::Finding>, Vec<bool>, Vec<Vec<Withheld>>) {
     use rayon::prelude::*;
     let (mut found, _) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, prefs);
+    let before = found.clone();
     let mut order: Vec<usize> = (0..found.len())
         .filter(|i| !found[*i].fixes.is_empty())
         .collect();
@@ -1067,7 +1073,7 @@ pub fn checked_findings(
         budget -= n;
         asks.extend((0..n).map(|j| (i, j)));
     }
-    let verdicts: Vec<bool> = asks
+    let verdicts: Vec<Result<(), String>> = asks
         .par_iter()
         .map(|(i, j)| {
             ryusch::lint::try_fix(
@@ -1076,19 +1082,25 @@ pub fn checked_findings(
                 &found[*i],
                 &found[*i].fixes[*j],
                 prefs,
+                &before,
             )
-            .is_ok()
         })
         .collect();
+    let mut withheld: Vec<Vec<Withheld>> = vec![Vec::new(); found.len()];
     let mut keep: std::collections::BTreeMap<usize, Vec<bool>> = Default::default();
-    for ((i, _), ok) in asks.iter().zip(verdicts) {
-        keep.entry(*i).or_default().push(ok);
+    for ((i, j), v) in asks.iter().zip(verdicts) {
+        if let Err(why) = &v
+            && why.starts_with("it costs more")
+        {
+            withheld[*i].push((found[*i].fixes[*j].clone(), why.clone()));
+        }
+        keep.entry(*i).or_default().push(v.is_ok());
     }
     for (i, oks) in keep {
         let mut it = oks.into_iter();
         found[i].fixes.retain(|_| it.next().unwrap_or(false));
     }
-    (found, checked)
+    (found, checked, withheld)
 }
 
 /// ryusch's refusal as ryueda's error.

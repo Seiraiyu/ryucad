@@ -250,7 +250,7 @@ pub const RULES: &[Rule] = &[
         unit: "a part",
         what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet and none leaves it, or a pin on a net that leaves the sheet carries no label of its own and is wired to none of its region's off-sheet connectors. A stack's pin on a net per layer, which only a label can draw, isn't judged.",
         why: "A part joined to nothing by a wire floats: the reader can't see what it belongs to without matching label names across the sheet.",
-        fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire).",
+        fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire). A fix that would cost more through another rule is withheld, listed under the finding's withheld with why.",
         evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet, so since plan 2.A (design 348) such a label is the net's off-sheet connector and joins its pin; since plan 2.C (design 348) a pin wired to its region's off-sheet connector, not to a local label, is joined.",
     },
     Rule {
@@ -277,7 +277,7 @@ pub const RULES: &[Rule] = &[
         unit: "a part",
         what: "A part's body middle, or a two-pin part's pin axis, lines up with no other part across or down.",
         why: "Parts on common lines read as an ordered drawing; a part off every line looks dropped where it fell.",
-        fix: "Put it in a row or a column with its neighbours (align X Y row|column).",
+        fix: "Put it in a row or a column with its neighbours (align X Y row|column). A fix that would cost more through another rule is withheld, listed under the finding's withheld with why.",
         evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does. In round 2's blind review (plan 1.D, three judges a pair), this rule and the judges' grouping score moved together on the buck and the front end but apart on the breakout (2 to 4 points, +0.3 of 5) and the RP2040 (26 to 28, +2.0): the judges grouped by function, which lines don't show. In round 3's blind review (plan 2.G, three judges a pair), its points rose on the RP2040 (18 to 36) and the front end (2 to 8) where the judges' flow score stayed at 3.0: the sessions' aligned columns cost points no judge took off.",
     },
     Rule {
@@ -2150,15 +2150,17 @@ fn wired_on_row(
 
 /// Lays `fix` out over `out` as a dry run (its instructions added as
 /// lasting ones) and judges it: `Ok` when the engine takes it, every
-/// hard rule holds, the layout changes and `finding` (by code and refs)
-/// is gone under `prefs`, the preferences it was found under; else why
-/// not.
+/// hard rule holds, the layout changes, `finding` (by code and refs) is
+/// gone under `prefs`, the preferences it was found under, and the
+/// block's points (every sheet, every rule, `before` being its findings
+/// as linted) fall (design 519); else why not.
 pub fn try_fix(
     block: &Block,
     out: &crate::engine::Outcome,
     finding: &Finding,
     fix: &[Instruction],
     prefs: &Prefs,
+    before: &[Finding],
 ) -> Result<(), String> {
     let mut b = block.clone();
     b.previous = Some(out.layout.clone());
@@ -2186,6 +2188,33 @@ pub fn try_fix(
     {
         return Err(format!("{} is still there after it", finding.code));
     }
+    // Never a fix that costs: the block's points, by rule, before and
+    // after.
+    let sum = |l: &[Finding]| -> BTreeMap<&'static str, i64> {
+        let mut m = BTreeMap::new();
+        for f in l {
+            *m.entry(f.code).or_insert(0) += f.points;
+        }
+        m
+    };
+    let (was, now) = (sum(before), sum(&after));
+    let (p0, p1): (i64, i64) = (was.values().sum(), now.values().sum());
+    if p1 >= p0 {
+        let moved: Vec<String> = was
+            .keys()
+            .chain(now.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|c| {
+                let d = now.get(c).copied().unwrap_or(0) - was.get(c).copied().unwrap_or(0);
+                (d != 0).then(|| format!("{c} {d:+}"))
+            })
+            .collect();
+        return Err(format!(
+            "it costs more than it saves: the block's points go from {p0} to {p1} ({})",
+            moved.join(", ")
+        ));
+    }
     Ok(())
 }
 
@@ -2206,8 +2235,8 @@ mod tests {
             for fix in &f.fixes {
                 // Whatever the verdict, it is the same twice.
                 assert_eq!(
-                    try_fix(&block, &out, f, fix, &Prefs::default()),
-                    try_fix(&block, &out, f, fix, &Prefs::default())
+                    try_fix(&block, &out, f, fix, &Prefs::default(), &found),
+                    try_fix(&block, &out, f, fix, &Prefs::default(), &found)
                 );
             }
         }
@@ -2217,7 +2246,47 @@ mod tests {
             parts: vec![p.clone(), p],
             axis: crate::layout::Axis::Row,
         }];
-        assert!(try_fix(&block, &out, with_fix[0], &idle, &Prefs::default()).is_err());
+        assert!(try_fix(&block, &out, with_fix[0], &idle, &Prefs::default(), &found).is_err());
+    }
+
+    /// Design 519: a fix offered lowers the block's points (every sheet,
+    /// every rule); one that holds but costs more through another rule is
+    /// refused, saying so.
+    #[test]
+    fn a_fix_offered_lowers_the_blocks_points() {
+        let sum = |l: &[Finding]| l.iter().map(|f| f.points).sum::<i64>();
+        let mut costly = 0;
+        for seed in 1..=24 {
+            let block =
+                crate::testing::with_stage(crate::testing::seeded(seed, 1 + seed as usize % 3));
+            let Ok(out) = crate::engine::lay_out(&block) else {
+                continue;
+            };
+            let (found, _) = lint(&block, &out);
+            for f in found.iter().filter(|f| !f.fixes.is_empty()) {
+                for fix in &f.fixes {
+                    let mut b = block.clone();
+                    b.previous = Some(out.layout.clone());
+                    for ins in fix {
+                        let id = crate::layout::next_id(b.instructions.keys());
+                        b.instructions.insert(id, ins.clone());
+                    }
+                    let after = crate::engine::lay_out(&b).ok().map(|t| lint(&b, &t).0);
+                    match try_fix(&block, &out, f, fix, &Prefs::default(), &found) {
+                        Ok(()) => {
+                            let after = after.expect("taken");
+                            assert!(sum(&after) < sum(&found), "seed {seed}: {fix:?}");
+                        }
+                        Err(why) if why.starts_with("it costs more") => {
+                            costly += 1;
+                            assert!(sum(&after.expect("taken")) >= sum(&found), "{why}");
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        eprintln!("{costly} fixes withheld for their cost");
     }
 
     /// #666: a fix is judged under the preferences its finding was found
@@ -2253,8 +2322,13 @@ mod tests {
                 };
                 if by_hand {
                     // A fix that changes nothing is refused either way.
-                    let r = try_fix(&block, &out, f, fix, &prefs);
-                    assert!(r.is_ok() || r == Err("it changes nothing".into()), "{r:?}");
+                    let r = try_fix(&block, &out, f, fix, &prefs, &found);
+                    assert!(
+                        r.is_ok()
+                            || r == Err("it changes nothing".into())
+                            || r.as_ref().is_err_and(|e| e.starts_with("it costs more")),
+                        "{r:?}"
+                    );
                 }
             }
         }
