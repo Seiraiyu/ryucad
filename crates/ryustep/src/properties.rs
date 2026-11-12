@@ -711,4 +711,21 @@ mod tests {
             "Steel"
         );
     }
+
+    #[test]
+    fn a_measure_whose_derived_unit_overflows_fails_the_item_alone() {
+        let refs = vec!["#41"; 16].join(",");
+        let (e, p) = product(&format!(
+            "#20=PROPERTY_DEFINITION('user defined attributes','',#6);\
+             #21=PROPERTY_DEFINITION_REPRESENTATION(#20,#22);\
+             #22=REPRESENTATION('',(#23,#24),#8);\
+             #23=MEASURE_REPRESENTATION_ITEM('w',LENGTH_MEASURE(1.),#42);\
+             #24=DESCRIPTIVE_REPRESENTATION_ITEM('Supplier','ACME');\
+             #41=DERIVED_UNIT_ELEMENT(#10,8.);\
+             #42=DERIVED_UNIT(({refs}));"
+        ));
+        let r = read(&e, &p);
+        assert_eq!(r.failed.iter().map(|f| f.0).collect::<Vec<_>>(), vec![23]);
+        assert_eq!(r.products[&0].attributes.len(), 1, "the rest still reads");
+    }
 }

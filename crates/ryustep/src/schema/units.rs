@@ -225,7 +225,7 @@ pub fn scaled(value: f64, exp10: i32) -> f64 {
     let s = format!("{value:e}");
     let (mantissa, exponent) = s.split_once('e').expect("LowerExp writes an exponent");
     let exponent: i32 = exponent.parse().expect("an integer exponent");
-    format!("{mantissa}e{}", exponent + exp10)
+    format!("{mantissa}e{}", exponent.saturating_add(exp10))
         .parse()
         .unwrap_or(value)
 }
@@ -337,6 +337,9 @@ impl Entities {
                     instances: vec![unit],
                 };
                 let mut names = Vec::new();
+                // Powers summed wide: a file may repeat elements without
+                // bound, and only a sum that fits an `i8` is a unit.
+                let (mut length, mut angle, mut mass) = (0i32, 0i32, 0i32);
                 for &el in elements {
                     let Entity::UnitElement {
                         unit: named,
@@ -357,9 +360,9 @@ impl Entities {
                     }
                     let p = *exponent as i32;
                     let u = self.named_measure_unit(el, *named)?;
-                    out.length += u.length * p as i8;
-                    out.angle += u.angle * p as i8;
-                    out.mass += u.mass * p as i8;
+                    length = length.saturating_add(i32::from(u.length) * p);
+                    angle = angle.saturating_add(i32::from(u.angle) * p);
+                    mass = mass.saturating_add(i32::from(u.mass) * p);
                     out.other |= u.other;
                     for _ in 0..p.unsigned_abs() {
                         out.size = if p > 0 {
@@ -368,7 +371,10 @@ impl Entities {
                             out.size / u.size
                         };
                     }
-                    out.decimal = out.decimal.zip(u.decimal).map(|(a, b)| a + b * p);
+                    out.decimal = out
+                        .decimal
+                        .zip(u.decimal)
+                        .and_then(|(a, b)| a.checked_add(b.checked_mul(p)?));
                     names.push(if p == 1 {
                         u.name
                     } else {
@@ -377,6 +383,14 @@ impl Entities {
                     out.instances.push(el);
                     out.instances.extend(u.instances);
                 }
+                let power = |x: i32| {
+                    i8::try_from(x).map_err(|_| ImportError::Malformed {
+                        instance: unit,
+                        attribute: 0,
+                        what: "a derived unit's powers must be from -128 to 127",
+                    })
+                };
+                (out.length, out.angle, out.mass) = (power(length)?, power(angle)?, power(mass)?);
                 if let Some(d) = out.decimal {
                     out.size = scaled(1.0, d);
                 }
@@ -659,5 +673,32 @@ mod tests {
         assert_eq!(e.unit_factor(0, 9).unwrap(), (Quantity::Mass, 1.0));
         // Lengths keep their bits.
         assert_eq!(e.unit_factor(0, 6).unwrap(), (Quantity::Length, 1e-3));
+    }
+
+    /// A `DERIVED_UNIT` repeating an element until its powers pass an
+    /// `i8` is refused as malformed, never a panic or a wrapped power
+    /// (24.C's review).
+    #[test]
+    fn a_derived_units_powers_that_overflow_are_refused() {
+        let refs = |n: usize| vec!["#2"; n].join(",");
+        let e = crate::schema::tests::entities(&format!(
+            "#1=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));\
+             #2=DERIVED_UNIT_ELEMENT(#1,8.);\
+             #3=DERIVED_UNIT(({}));\
+             #4=DERIVED_UNIT(({}));",
+            refs(16),
+            refs(15)
+        ));
+        assert!(
+            matches!(
+                e.measure_unit(0, 3),
+                Err(ImportError::Malformed { instance: 3, .. })
+            ),
+            "{:?}",
+            e.measure_unit(0, 3)
+        );
+        let fits = e.measure_unit(0, 4).unwrap();
+        assert_eq!((fits.length, fits.decimal), (120, Some(-360)));
+        assert_eq!(scaled(2.5, i32::MAX), f64::INFINITY);
     }
 }
