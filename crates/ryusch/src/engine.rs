@@ -1187,6 +1187,17 @@ fn regions_follow(
             .filter(|k| block.part(k).is_some_and(|x| x == p || moved.contains(&x)))
             .cloned()
             .collect();
+        // A part `region none` keeps out joins no named region (plan 3.A:
+        // it did here, and left it when laid out again): it stays in its
+        // own.
+        let going: Vec<String> = if st.regions[to].1.named {
+            going
+                .into_iter()
+                .filter(|k| block.part(k).is_none_or(|x| !r.no_region.contains(&x)))
+                .collect()
+        } else {
+            going
+        };
         st.regions[from].1.parts.retain(|k| !going.contains(k));
         let dest = &mut st.regions[to].1;
         dest.parts.extend(going);
@@ -1886,7 +1897,14 @@ fn pack_regions(
                 frame: Rect::new([0, 0], [0, 0]),
                 title,
                 named,
-                parts: parts.iter().map(|p| block.parts[*p].key.clone()).collect(),
+                // A named region takes its parts' clusters, but never a
+                // part `region none` keeps out (as `named_regions` drops
+                // it over a previous layout; plan 3.A).
+                parts: parts
+                    .iter()
+                    .filter(|p| !(named && r.no_region.contains(*p)))
+                    .map(|p| block.parts[*p].key.clone())
+                    .collect(),
             },
         ));
     }
@@ -2226,7 +2244,28 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
     // title, so a title alone doesn't say which (plan 2.G; both took the
     // second's parts over a previous layout).
     let mut claimed: BTreeSet<String> = BTreeSet::new();
+    // An instruction's parts on several sheets make a region on each, as
+    // a layout from nothing does (plan 3.A).
+    let mut asked: Vec<(&String, Vec<usize>)> = Vec::new();
     for (title, set) in &r.regions {
+        let mut sheets: Vec<usize> = Vec::new();
+        for p in set {
+            if let Some((s, _, _)) = st.place[*p]
+                && !sheets.contains(&s)
+            {
+                sheets.push(s);
+            }
+        }
+        for s in sheets {
+            let on: Vec<usize> = set
+                .iter()
+                .copied()
+                .filter(|p| st.place[*p].is_some_and(|x| x.0 == s))
+                .collect();
+            asked.push((title, on));
+        }
+    }
+    for (title, set) in &asked {
         let keys: Vec<String> = set
             .iter()
             .filter(|p| st.place[**p].is_some())
@@ -2235,13 +2274,16 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
         let Some(first) = set.iter().copied().find(|p| st.place[*p].is_some()) else {
             continue;
         };
-        // A named region of this title not yet claimed, one holding some
-        // of these parts first.
+        let here = st.sheets[st.place[first].expect("placed").0].0.clone();
+        // A named region of this title on this sheet not yet claimed, one
+        // holding some of these parts first.
         let mine = |st: &State| -> Option<String> {
             let open: Vec<&(String, crate::layout::Region)> = st
                 .regions
                 .iter()
-                .filter(|(id, g)| g.named && &g.title == title && !claimed.contains(id))
+                .filter(|(id, g)| {
+                    g.named && &g.title == *title && g.sheet == here && !claimed.contains(id)
+                })
                 .collect();
             open.iter()
                 .find(|(_, g)| g.parts.iter().any(|k| keys.contains(k)))
@@ -2255,7 +2297,7 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
                 !g.named && !g.parts.is_empty() && g.parts.iter().all(|k| keys.contains(k))
             })
         {
-            g.title = title.clone();
+            g.title = (*title).clone();
             g.named = true;
         }
         let id = mine(st);
@@ -2268,7 +2310,27 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
         let sid = st.sheets[s].0.clone();
         match id.and_then(|id| st.regions.iter_mut().find(|(g, _)| *g == id)) {
             Some((gid, g)) => {
+                // What it held besides the parts an instruction of this
+                // title named (the clusters it took with them, as a
+                // layout from nothing does) stays in it (plan 3.A: a
+                // layout laid out over itself is the same).
+                let was_named: BTreeSet<String> = block
+                    .previous
+                    .iter()
+                    .flat_map(|l| l.instructions.values())
+                    .filter(|i| matches!(i, Instruction::Region { title: t, .. } if t == *title))
+                    .flat_map(|i| i.parts().iter().flat_map(|s| instr::parts_named(block, s)))
+                    .map(|p| block.parts[p].key.clone())
+                    .collect();
+                let kept: Vec<String> = g
+                    .parts
+                    .iter()
+                    .filter(|k| !was_named.contains(*k) && !keys.contains(*k))
+                    .filter(|k| block.part(k).is_some_and(|p| st.place[p].is_some()))
+                    .cloned()
+                    .collect();
                 g.parts = keys;
+                g.parts.extend(kept);
                 g.parts.sort();
                 claimed.insert(gid.clone());
             }
@@ -2289,7 +2351,7 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
                         sheet: sid,
                         at: place.at,
                         frame: Rect::new([0, 0], [0, 0]),
-                        title: title.clone(),
+                        title: (*title).clone(),
                         named: true,
                         parts,
                     },
@@ -2921,10 +2983,32 @@ fn new_region(st: &mut State, placed: &[usize]) {
         return;
     };
     let part = &block.parts[first];
-    let title = if part.function.is_empty() {
-        format!("{} {}", part.refdes, part.value).trim().to_owned()
-    } else {
-        part.function.clone()
+    // Parts a `region` instruction names all take its title, named, as
+    // `named_regions` gives them when the layout is laid out again (plan
+    // 3.A).
+    let asked = block.instructions.values().find_map(|i| match i {
+        Instruction::Region {
+            title,
+            parts: subjects,
+        } => {
+            let named: BTreeSet<usize> = subjects
+                .iter()
+                .flat_map(|s| instr::parts_named(block, s))
+                .collect();
+            parts
+                .iter()
+                .all(|p| named.contains(p))
+                .then(|| title.clone())
+        }
+        _ => None,
+    });
+    let named = asked.is_some();
+    let title = match asked {
+        Some(t) => t,
+        None if part.function.is_empty() => {
+            format!("{} {}", part.refdes, part.value).trim().to_owned()
+        }
+        None => part.function.clone(),
     };
     let n = st
         .regions
@@ -2952,7 +3036,7 @@ fn new_region(st: &mut State, placed: &[usize]) {
             at: place.at,
             frame,
             title,
-            named: false,
+            named,
             parts: keys,
         },
     ));
@@ -3236,8 +3320,21 @@ fn draw(
         // instruction or a move asks for its wires. A pin it wired to the
         // net's own (a short local wire, no label of its own) isn't
         // counted while that wire still ends on it.
+        // An ask for wires the previous layout already had (and drew by
+        // labels all the same) isn't asked anew: laid out over itself, a
+        // layout is the same (plan 3.A). A move asks anew.
+        let asked_before = |n: usize| {
+            let wire = |i: &Instruction| matches!(i, Instruction::Net { net, style: NetStyle::Wire } if block.net(net) == Some(n));
+            prev.is_some_and(|l| l.instructions.values().any(wire))
+                && !block
+                    .moves
+                    .iter()
+                    .any(|m| matches!(m, Instruction::Net { net, .. } if block.net(net) == Some(n)))
+        };
         for (n, list) in &pins_of {
-            if styles[n] != NetStyle::Wire || asked.get(n) == Some(&NetStyle::Wire) {
+            if styles[n] != NetStyle::Wire
+                || (asked.get(n) == Some(&NetStyle::Wire) && !asked_before(*n))
+            {
                 continue;
             }
             let had: BTreeSet<String> = prev_labels(*n)
@@ -3407,6 +3504,21 @@ fn draw(
                     continue;
                 };
                 if sa != s || sc != s || joined.contains(&b.cap) {
+                    continue;
+                }
+                // A capacitor the previous layout gave a port of its own
+                // keeps it: a wire searched anew where none could run
+                // then would draw a layout laid out over itself otherwise
+                // (plan 3.A).
+                let cap_on = format!(
+                    "{}/{}",
+                    block.parts[b.cap.0].key, block.parts[b.cap.0].pins[b.cap.1].number
+                );
+                let own_port = prev.is_some()
+                    && prev_labels(b.net)
+                        .iter()
+                        .any(|l| l.on == cap_on && l.kind == LabelKind::Power);
+                if search && own_port {
                     continue;
                 }
                 let end = |(p, k): (usize, usize)| {

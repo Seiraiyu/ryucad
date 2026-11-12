@@ -56,3 +56,28 @@ fn four_hundred_seeded_inputs_keep_every_hard_rule() {
         failed.join("\n")
     );
 }
+
+/// Design 519's dry run is the commit, over the same 400 inputs: each
+/// layout reads back from its file's form as itself, and laid out over
+/// itself with nothing new asked it changes nothing (plan 3.A).
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn four_hundred_seeded_layouts_are_their_own_fixpoints() {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let failed: Vec<String> = (0..400)
+        .filter_map(|seed| {
+            let data = input(seed);
+            std::panic::catch_unwind(|| ryusch::testing::check_fixpoint(&data))
+                .err()
+                .map(|e| format!("seed {seed}: {}", why(&*e)))
+        })
+        .collect();
+    std::panic::set_hook(hook);
+    assert!(
+        failed.is_empty(),
+        "{} of 400:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+}

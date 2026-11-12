@@ -289,6 +289,19 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
 /// labels drawn) can't both hold: the later unnamed region joins the
 /// earlier, and the frames are worked out again, until none overlap.
 pub fn frames(block: &Block, layout: &mut Layout) {
+    // Parts `region none` keeps out of every named region (plan 3.A: a
+    // join below took them in from nothing, and laid out again they left).
+    let none: BTreeSet<String> = block
+        .instructions
+        .values()
+        .filter(|i| matches!(i, crate::layout::Instruction::RegionNone { .. }))
+        .flat_map(|i| {
+            i.parts()
+                .iter()
+                .flat_map(|s| crate::instr::parts_named(block, s))
+        })
+        .map(|p| block.parts[p].key.clone())
+        .collect();
     loop {
         frames_once(block, layout);
         let ids: Vec<String> = layout.regions.keys().cloned().collect();
@@ -304,8 +317,11 @@ pub fn frames(block: &Block, layout: &mut Layout) {
                     (false, true) => (b, a),
                     (true, true) => continue,
                 };
-                let parts = layout.regions.remove(gone).expect("a region").parts;
+                let mut parts = layout.regions.remove(gone).expect("a region").parts;
                 let r = layout.regions.get_mut(keep).expect("a region");
+                if r.named {
+                    parts.retain(|k| !none.contains(k));
+                }
                 r.parts.extend(parts);
                 r.parts.sort();
                 r.parts.dedup();

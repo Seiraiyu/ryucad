@@ -505,15 +505,18 @@ impl Bytes<'_> {
     }
 }
 
-/// The `schematic` fuzz target's case, from its bytes: a seeded block
-/// (its size and seed from the bytes) and a batch of instructions and
-/// moves over its parts and nets, laid out. Panics unless the result is
-/// a typed refusal or a layout keeping every hard rule, the same bytes
-/// lay out to the same bits twice, and laid out again over its own layout
-/// after one part's value changes, every other part keeps its place and
-/// text. `tests/fuzz_regressions.rs` replays what it found.
-pub fn check_bytes(data: &[u8]) {
+/// The block `check_bytes` lays out from `data` (plan 3.A split it out
+/// for `check_fixpoint`): the seeded block, its instructions and moves,
+/// regions and papers, stage asks, a bus or a note.
+pub fn block_of(data: &[u8]) -> Block {
+    built(data).0
+}
+
+/// [`block_of`], with where its first cursor stopped (`check_bytes` reads
+/// on from there).
+fn built(data: &[u8]) -> (Block, usize) {
     use crate::layout::{Axis, IdiomChoice, IdiomKind, Instruction, NetStyle};
+
     const SIDES: [Side; 4] = [Side::Left, Side::Right, Side::Up, Side::Down];
 
     let mut b = Bytes(data, 0);
@@ -726,6 +729,19 @@ pub fn check_bytes(data: &[u8]) {
         }
         _ => {}
     }
+    (block, b.1)
+}
+
+/// The `schematic` fuzz target's case, from its bytes: a seeded block
+/// (its size and seed from the bytes) and a batch of instructions and
+/// moves over its parts and nets, laid out. Panics unless the result is
+/// a typed refusal or a layout keeping every hard rule, the same bytes
+/// lay out to the same bits twice, and laid out again over its own layout
+/// after one part's value changes, every other part keeps its place and
+/// text. `tests/fuzz_regressions.rs` replays what it found.
+pub fn check_bytes(data: &[u8]) {
+    let (block, at) = built(data);
+    let mut b = Bytes(data, at);
     let out = match crate::engine::lay_out(&block) {
         Ok(o) => o,
         Err(r) => {
@@ -755,6 +771,42 @@ pub fn check_bytes(data: &[u8]) {
                 "{k}'s text moved"
             );
         }
+    }
+}
+
+/// What a write and the next read see (design 519, plan 3.A): the block
+/// from `data` laid out from nothing, then again over that with its moves
+/// done; each layout reads back from the file's form (relative, through
+/// JSON) as itself, and laid out over itself with nothing new asked it is
+/// the same. A refused block is skipped (`check_bytes` judges refusals).
+pub fn check_fixpoint(data: &[u8]) {
+    let mut block = block_of(data);
+    let Ok(first) = crate::engine::lay_out(&block) else {
+        return;
+    };
+    let mut layouts = vec![first.layout];
+    // A second batch over it: the moves again (a dry run's moves, the
+    // write's held parts).
+    if !block.moves.is_empty() {
+        block.previous = Some(layouts[0].clone());
+        if let Ok(o) = crate::engine::lay_out(&block) {
+            layouts.push(o.layout);
+        }
+    }
+    for (n, l) in layouts.iter().enumerate() {
+        let file = serde_json::to_value(l.relative()).expect("a layout serializes");
+        let read: crate::layout::Layout = serde_json::from_value(file).expect("and reads back");
+        assert_eq!(
+            &read.absolute(),
+            l,
+            "layout {n}: the file's form reads back otherwise"
+        );
+        let mut again = block.clone();
+        again.previous = Some(l.clone());
+        again.moves.clear();
+        again.relayout = crate::input::Relayout::None;
+        let o = crate::engine::lay_out(&again).expect("a layout laid out over itself is taken");
+        assert_eq!(&o.layout, l, "layout {n}: laid out over itself it moved");
     }
 }
 
