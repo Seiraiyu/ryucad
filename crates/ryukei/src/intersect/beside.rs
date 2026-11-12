@@ -284,7 +284,6 @@ pub(crate) fn face_off_ball(
 /// certificate (#303) bounds the angle two faces cross at, and how fast
 /// either bends away from its tangent plane, from these.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // 18.A: used from Task 3
 pub(crate) struct Cone {
     /// Holds `S_u × S_v / |S_u × S_v|` at every such point.
     pub(crate) n: [Interval; 3],
@@ -294,19 +293,15 @@ pub(crate) struct Cone {
 }
 
 /// The most parts [`normal_cone`] examines.
-#[allow(dead_code)] // 18.A: used from Task 3
 pub(crate) const CONE_PARTS: usize = 1 << 10;
 
 /// The deepest [`normal_cone`] halves a part.
-#[allow(dead_code)] // 18.A: used from Task 3
 const CONE_DEPTH: u32 = 24;
 
-#[allow(dead_code)] // 18.A: used from Task 3
 fn dot3(a: &[Interval; 3], b: &[Interval; 3]) -> Interval {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-#[allow(dead_code)] // 18.A: used from Task 3
 fn cross3(a: &[Interval; 3], b: &[Interval; 3]) -> [Interval; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
@@ -316,7 +311,6 @@ fn cross3(a: &[Interval; 3], b: &[Interval; 3]) -> [Interval; 3] {
 }
 
 /// The box a part's point enclosure spans in model space.
-#[allow(dead_code)] // 18.A: used from Task 3
 fn image_box(j: &JVec<Interval>) -> Box3 {
     Box3::new(
         Point3::new(j[0].v.lo(), j[1].v.lo(), j[2].v.lo()),
@@ -330,7 +324,6 @@ fn image_box(j: &JVec<Interval>) -> Box3 {
 /// form, whose least eigenvalue is `(E + G)/2 - sqrt(((E - G)/2)² + F²)`.
 /// Every step is outward-rounded interval arithmetic. `None` where the
 /// normal or `λ_min` can't be bounded away from zero.
-#[allow(dead_code)] // 18.A: used from Task 3
 fn cell_cone(j: &JVec<Interval>) -> Option<Cone> {
     let col = |f: &dyn Fn(&Jet<Interval>) -> Interval| -> [Interval; 3] {
         core::array::from_fn(|i| f(&j[i]))
@@ -370,7 +363,6 @@ fn cell_cone(j: &JVec<Interval>) -> Option<Cone> {
 /// are left out. `Ok(None)` when no part of the face meets `near`.
 /// `Err(Uncertain)` past `parts` parts or [`CONE_DEPTH`] halvings, or for
 /// a face with a fin that has no pcurve.
-#[allow(dead_code)] // 18.A: used from Task 3
 pub(crate) fn normal_cone(
     body: &Body,
     face: FaceId,
@@ -436,7 +428,6 @@ pub(crate) fn normal_cone(
 /// unit vectors, the sine of the least angle between lines along them.
 /// Each component of the enclosed cross product is at least its least
 /// magnitude, zero where it may vanish.
-#[allow(dead_code)] // 18.A: used from Task 3
 pub(crate) fn sine_apart(a: &[Interval; 3], b: &[Interval; 3]) -> f64 {
     let least = |x: Interval| {
         if x.lo() > 0.0 {
