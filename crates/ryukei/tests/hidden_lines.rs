@@ -11,6 +11,7 @@ use ryukei::project::{
 };
 use ryukei::topo::Body;
 use ryukei::{Error, ViewError, primitive, sheet};
+use ryukei_testkit::projection::{Oracle, judge, placed_bodies, size};
 
 fn look(t: Vector3) -> View {
     let up = if t.cross(Vector3::new(0.0, 0.0, 1.0)).length() > 0.1 {
@@ -630,4 +631,38 @@ fn race_views_refuse_quickly() {
     });
     eprintln!("race bodies iso, one thread: {drawn} drawn, {total:.1} s in all");
     assert!(slow.is_empty(), "refusals past {bar} s: {slow:?}");
+}
+
+/// The crankcase twin with all nine bosses from the drawing's front, top
+/// and right (design 484): no piece the mesh contradicts. Design 484's
+/// bar, at most a tenth of the pieces uncertain, isn't met (#643): the
+/// bosses come in pairs mirrored in the plane of the view and the axis
+/// (40° and 320°, …), so a ray from a piece meets its twin's edge exactly
+/// and `point_in_face` puts the hit on that edge (`OnEdge`); every ray of
+/// those pieces is unsure. Plan 17.B's count on cox-worker-4: 656 of
+/// 1,571 pieces uncertain from the front, 1,701 of 2,023 from the top,
+/// 131 of 1,163 from the right, as many as the crankcase's own views.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: booleans of saddles")]
+fn the_crankcase_twins_views_agree_with_the_mesh() {
+    let body = crankcase_twin(&[0.0, 40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0]);
+    for (t, up) in [
+        (Vector3::new(0.0, -1.0, 0.0), Vector3::new(0.0, 0.0, 1.0)),
+        (Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 1.0, 0.0)),
+        (Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0)),
+    ] {
+        let v = View::new(t, up).unwrap();
+        let placed = [at(&body)];
+        let p = view(&placed, &v, &ViewOptions::default()).unwrap();
+        let uncertain = p
+            .pieces
+            .iter()
+            .filter(|q| q.visibility == Visibility::Uncertain)
+            .count();
+        eprintln!("{t:?}: {uncertain} of {} pieces uncertain", p.pieces.len());
+        let bodies = placed_bodies(&placed);
+        let o = Oracle::new(&bodies, &v, size(&bodies) * 1e-3).unwrap();
+        let j = judge(&p, &bodies, &o);
+        assert!(j.wrong.is_empty(), "{t:?}: {:?}", j.wrong);
+    }
 }
