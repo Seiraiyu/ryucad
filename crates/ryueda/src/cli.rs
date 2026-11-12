@@ -245,14 +245,19 @@ enum Command {
         expect: Expect,
     },
     /// Compose a block's schematic: instructions an agent gives, each
-    /// lasting until released ("sheet X... S", "beside X... Y
-    /// left|right|above|below", "near X... P", "align X... row|column",
-    /// "group X...", "edge X... left|right|top|bottom", "orient X...
-    /// 0|90|180|270 [mirror]", "text X... refdes|value|both
-    /// left|right|above|below", "net N wire|label|port", "idiom X...
-    /// KIND|none", "flow X... reversed", "release X..."). Parts by
-    /// designator (U3), unit (U1:2), instance (instance:<id>) or port
-    /// (port:SDA); pins as U3.VDD or U3.4; nets by name or rail:<name>.
+    /// lasting until released: "sheet X... SHEET", "sheet rename SHEET
+    /// NAME", "beside X... Y left|right|above|below", "near X... P",
+    /// "align X... row|column", "group X...", "edge X...
+    /// left|right|top|bottom", "orient X... 0|90|180|270 [mirror]", "text
+    /// X... refdes|value|both left|right|above|below", "net N
+    /// wire|label|port|bus", "note REGION|SHEET TEXT", "idiom X...
+    /// KIND|none", "flow X... reversed", "shift X... up|down|left|right
+    /// STEPS" (a move only), "release X...|ID|net:N", "region TITLE X...",
+    /// "region none X...", "region REGION title TITLE" ("region rename
+    /// REGION TITLE" reads so), "paper SHEET SIZE [landscape|portrait]".
+    /// X is a part by designator (U3), unit (U1:2), instance
+    /// (instance:<id>), port (port:SDA) or region (region:r2 or its
+    /// title); pins as U3.VDD or U3.4; nets by name or rail:<name>.
     Place {
         block: String,
         instructions: Vec<String>,

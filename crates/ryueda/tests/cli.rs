@@ -3973,3 +3973,27 @@ fn annotate_from_the_cli() {
     let (_, d) = run(&["annotate", "--reset", "all", "--dry-run"]);
     assert_eq!(d["result"]["changes"], a["result"]["changes"]);
 }
+
+/// Every instruction form the vocabulary reads is in `place --help`
+/// (round 3: three sessions never found `region`; plan 3.A).
+#[test]
+fn place_help_lists_every_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ryueda(&dir.path().join("run"))
+        .args(["place", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(out.stdout).unwrap();
+    let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    for form in ryueda::vocab::FORMS {
+        for alt in form.split(" | ") {
+            let head: String = alt
+                .split(' ')
+                .take_while(|w| !w.starts_with('('))
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(flat.contains(&head), "place --help lacks {head:?} ({form})");
+        }
+    }
+}
