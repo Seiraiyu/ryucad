@@ -739,6 +739,61 @@ fn output_compare_pages_only_changed_sheets() {
     assert!(!board.join("none.pdf").exists());
 }
 
+/// Three levels, breakout over sensor over a leaf, where only the leaf
+/// changed: its sheets are the only pages, and the outline still reaches
+/// them through the unchanged blocks above (which open the leaf's first
+/// page).
+#[test]
+fn output_compare_bookmarks_a_leaf_under_unchanged_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    for args in [
+        vec!["block", "create", "Decoupling", "--id", "leaf"],
+        vec!["component", "add", "leaf", "--of", "c_100n", "--id", "c9"],
+        vec!["connect", "leaf/c9/1", "rail:3V3"],
+        vec!["connect", "leaf/c9/2", "rail:GND"],
+        vec!["instance", "add", "sensor", "--of", "leaf", "--id", "d1"],
+        vec!["layout"],
+    ] {
+        let (code, v) = ryueda(&board, &run, false, &args);
+        assert_eq!(code, 0, "{args:?}: {v}");
+    }
+    git(&top, &["add", "."]);
+    git(&top, &["commit", "-q", "-m", "three levels"]);
+    let (code, v) = ryueda(
+        &board,
+        &run,
+        false,
+        &["component", "edit", "leaf/c9", "--value", "1u"],
+    );
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = ryueda(
+        &board,
+        &run,
+        false,
+        &["output", "--compare", "HEAD", "--out", "c.pdf"],
+    );
+    assert_eq!(code, 0, "{v}");
+    let pages = v["result"]["pages"].as_array().unwrap();
+    assert!(!pages.is_empty());
+    assert!(pages.iter().all(|p| p["block"] == "leaf"), "{pages:?}");
+    let pdf = String::from_utf8_lossy(&std::fs::read(board.join("c.pdf")).unwrap()).into_owned();
+    for want in [
+        "/Title (Breakout)",
+        "/Title (Sensor (s1))",
+        "/Title (Decoupling (d1))",
+    ] {
+        assert!(pdf.contains(want), "{want} in the outline");
+    }
+    for p in pages {
+        let want = format!("/Title ({})", p["name"].as_str().unwrap());
+        assert!(pdf.contains(&want), "{want} in the outline");
+    }
+}
+
 #[test]
 fn a_compare_is_set_on_a_participant() {
     let dir = tempfile::tempdir().unwrap();

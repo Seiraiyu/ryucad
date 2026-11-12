@@ -129,8 +129,12 @@ mod tests {
             (e.code, &e.details["path"]),
             (Code::MergeConflict, &json!("t.json"))
         );
-        // A member that happens to be called so in a nested object is not one.
+        // A file without the member reads, and a member that happens to
+        // be called so in a nested object is not one.
         let ok = br#"{"format": 1, "kind": "ryueda.t", "name": "x"}"#;
         assert!(read::<T>(ok, "t.json", "ryueda.t", 1).is_ok());
+        let nested = br#"{"format": 1, "kind": "ryueda.t",
+            "name": {"conflicts": {"/a": {"kind": "value"}}}}"#;
+        assert!(read::<Value>(nested, "t.json", "ryueda.t", 1).is_ok());
     }
 }

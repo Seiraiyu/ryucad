@@ -534,12 +534,17 @@ fn output_pages(
             links,
         });
     }
-    // Bookmarks: each node its sheets, its children under it.
+    // Bookmarks: each node its sheets, its children under it. A node
+    // with no pages of its own (it couldn't be laid out, or a compare
+    // found nothing changed there) still holds its descendants' marks,
+    // opening the first of their pages; one with none below it either
+    // has nothing to open and is left out.
     fn marks(
         i: usize,
         nodes: &[Node],
         first: &[usize],
         sheets: &[(usize, String, usize)],
+        paged: &[bool],
         title: &dyn Fn(usize) -> String,
     ) -> Mark {
         let mut children: Vec<Mark> = sheets
@@ -552,10 +557,8 @@ fn output_pages(
             })
             .collect();
         for (j, n) in nodes.iter().enumerate() {
-            // A block that couldn't be laid out has no pages to open.
-            let paged = sheets.iter().any(|(n, _, _)| *n == j);
-            if paged && n.parent.as_ref().is_some_and(|(up, _)| *up == i) {
-                children.push(marks(j, nodes, first, sheets, title));
+            if paged[j] && n.parent.as_ref().is_some_and(|(up, _)| *up == i) {
+                children.push(marks(j, nodes, first, sheets, paged, title));
             }
         }
         Mark {
@@ -569,6 +572,21 @@ fn output_pages(
         .enumerate()
         .map(|(pg, s)| (s.node, s.name.clone(), pg))
         .collect();
+    // Whether a node or any node under it has a page. Nodes come in page
+    // order, each after its parent, so one pass from the end carries
+    // every subtree up; and a page-less node's first page (`first_page`,
+    // the next page after it) is then its first descendant's.
+    let mut paged: Vec<bool> = vec![false; nodes.len()];
+    for s in &sheets {
+        paged[s.node] = true;
+    }
+    for j in (0..nodes.len()).rev() {
+        if paged[j]
+            && let Some((up, _)) = &nodes[j].parent
+        {
+            paged[*up] = true;
+        }
+    }
     let title = |i: usize| {
         let n = &nodes[i];
         let name = p
@@ -586,7 +604,7 @@ fn output_pages(
     let tree = if sheets.is_empty() {
         Vec::new()
     } else {
-        vec![marks(0, &nodes, &first_page, &sheet_marks, &title)]
+        vec![marks(0, &nodes, &first_page, &sheet_marks, &paged, &title)]
     };
     let mut v = json!({
         "design": d,
