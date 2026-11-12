@@ -286,7 +286,7 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
         Request::Erc { design, .. } => crate::erc::erc(p, design.as_deref()).map(Answer::json),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
-            crate::erc::check_project(p, &cats).map(Answer::json)
+            crate::erc::check_project(p, &cats, &[]).map(Answer::json)
         }
         Request::Describe {
             design,

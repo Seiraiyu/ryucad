@@ -338,3 +338,39 @@ fn doctor_repairs_are_logged_and_undone() {
     assert_eq!((code, &v["error"]["code"]), (1, &json!("repair_conflict")));
     ryueda(&board, &run, true, &["daemon", "stop"]);
 }
+
+#[test]
+fn check_reports_doctor_and_a_revision_has_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    std::fs::create_dir_all(board.join("library/models")).unwrap();
+    std::fs::write(board.join("library/models/old.step"), "ISO-10303-21;\n").unwrap();
+    let (_, v) = ryueda(&board, &run, false, &["check"]);
+    let report = if v["ok"] == true {
+        &v["result"]
+    } else {
+        &v["error"]["details"]["report"]
+    };
+    let doctor: Vec<&str> = report["doctor"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{v}"))
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(doctor.contains(&"model_orphaned"), "{report}");
+    assert!(
+        !doctor.contains(&"unknown_file"),
+        "the loader's faults report those"
+    );
+    // At a revision there is no folder to doctor.
+    let (_, v) = ryueda(&board, &run, false, &["check", "--rev", "HEAD"]);
+    let report = if v["ok"] == true {
+        &v["result"]
+    } else {
+        &v["error"]["details"]["report"]
+    };
+    assert_eq!(report["doctor"], json!([]), "{report}");
+}
