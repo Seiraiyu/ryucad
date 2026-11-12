@@ -326,8 +326,83 @@ pub fn read(e: &Entities, products: &Products) -> Properties {
     out
 }
 
-/// Reads property `pd`'s items as product `k`'s attributes (Task 4).
-fn attributes(_e: &Entities, _k: usize, _pd: Id, _items: Vec<(Id, Id, Id)>, _out: &mut Properties) {
+/// One item as a value, with the instances read; `Ok(None)` for an item
+/// that isn't a value (a point, a placement): kept, not read.
+fn attribute(e: &Entities, item: Id) -> Result<Option<(String, Value, Vec<Id>)>, ImportError> {
+    Ok(Some(match e.get(item, item)? {
+        Entity::Descriptive { name, description } => (
+            name.to_string(),
+            Value::Text(description.to_string()),
+            vec![item],
+        ),
+        Entity::ValueItem { name, value, .. } => {
+            (name.to_string(), plain(item, value)?, vec![item])
+        }
+        Entity::MeasureItem { name, value, unit } => {
+            let x = number(value).ok_or_else(|| malformed(item, 1, "expected a number"))?;
+            match unit {
+                None => (name.to_string(), Value::Number(x), vec![item]),
+                Some(u) => {
+                    let unit = e.measure_unit(item, *u)?;
+                    let mut instances = vec![item];
+                    instances.extend(&unit.instances);
+                    (
+                        name.to_string(),
+                        Value::Measure { value: x, unit },
+                        instances,
+                    )
+                }
+            }
+        }
+        _ => return Ok(None),
+    }))
+}
+
+/// A value item's value: a whole count or integer measure an integer,
+/// any other real a number, a logical a boolean, a string text.
+fn plain(item: Id, v: &ItemValue) -> Result<Value, ImportError> {
+    Ok(match v {
+        ItemValue::Integer(n) => Value::Integer(*n),
+        ItemValue::Real { measure, value }
+            if matches!(&**measure, "COUNT_MEASURE" | "INTEGER")
+                && value.trunc() == *value
+                && value.abs() <= 9_007_199_254_740_992.0 =>
+        {
+            Value::Integer(*value as i64)
+        }
+        ItemValue::Real { value, .. } => Value::Number(*value),
+        ItemValue::Logical(Some(b)) => Value::Boolean(*b),
+        ItemValue::Logical(None) => {
+            return Err(malformed(item, 1, "an unknown logical is no value"));
+        }
+        ItemValue::Text(s) => Value::Text(s.to_string()),
+    })
+}
+
+/// Reads property `pd`'s items as product `k`'s attributes.
+fn attributes(e: &Entities, k: usize, pd: Id, items: Vec<(Id, Id, Id)>, out: &mut Properties) {
+    for (pdr, rep, it) in items {
+        match attribute(e, it) {
+            Ok(Some((name, value, mut instances))) => {
+                instances.extend([pd, pdr, rep]);
+                instances.sort_unstable();
+                instances.dedup();
+                out.products
+                    .entry(k)
+                    .or_default()
+                    .attributes
+                    .push(Attribute {
+                        name,
+                        value,
+                        property: pd,
+                        item: it,
+                        instances,
+                    });
+            }
+            Ok(None) => out.retained.push(it),
+            Err(err) => out.failed.push((it, err)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -426,5 +501,51 @@ mod tests {
         let m = r.products[&0].material.as_ref().unwrap();
         assert_eq!((m.name.as_str(), m.density), ("A", None));
         assert_eq!(r.failed.iter().map(|f| f.0).collect::<Vec<_>>(), vec![24]);
+    }
+
+    #[test]
+    fn every_item_type_reads_as_its_value() {
+        let (e, p) = product(
+            "#20=PROPERTY_DEFINITION('user defined attributes','',#6);\
+             #21=PROPERTY_DEFINITION_REPRESENTATION(#20,#22);\
+             #22=REPRESENTATION('',(#23,#24,#25,#26,#27,#28,#29,#30,#31),#8);\
+             #23=DESCRIPTIVE_REPRESENTATION_ITEM('Supplier','ACME Metals');\
+             #24=VALUE_REPRESENTATION_ITEM('Batch Size',COUNT_MEASURE(250.));\
+             #25=VALUE_REPRESENTATION_ITEM('Yield',RATIO_MEASURE(0.95));\
+             #26=VALUE_REPRESENTATION_ITEM('RoHS',BOOLEAN(.T.));\
+             #27=MEASURE_REPRESENTATION_ITEM('Wall-Thickness',LENGTH_MEASURE(2.5),#32);\
+             #28=(MEASURE_REPRESENTATION_ITEM()MEASURE_WITH_UNIT(MASS_MEASURE(0.12),#33)REPRESENTATION_ITEM('Net Mass'));\
+             #29=INTEGER_REPRESENTATION_ITEM('Revision Count',3);\
+             #30=MEASURE_REPRESENTATION_ITEM('Plain',LENGTH_MEASURE(4.),$);\
+             #31=CARTESIAN_POINT('',(0.,0.,0.));\
+             #32=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));\
+             #33=(MASS_UNIT()NAMED_UNIT(*)SI_UNIT(.KILO.,.GRAM.));",
+        );
+        let r = read(&e, &p);
+        let a = &r.products[&0].attributes;
+        let got: Vec<(&str, &Value)> = a.iter().map(|x| (x.name.as_str(), &x.value)).collect();
+        assert_eq!(got.len(), 8, "{got:?}");
+        assert_eq!(got[0], ("Supplier", &Value::Text("ACME Metals".into())));
+        assert_eq!(got[1], ("Batch Size", &Value::Integer(250)));
+        assert_eq!(got[2], ("Yield", &Value::Number(0.95)));
+        assert_eq!(got[3], ("RoHS", &Value::Boolean(true)));
+        let Value::Measure { value, unit } = got[4].1 else {
+            panic!("{got:?}")
+        };
+        assert_eq!((*value, unit.name.as_str(), unit.length), (2.5, "mm", 1));
+        let Value::Measure { value, unit } = got[5].1 else {
+            panic!("{got:?}")
+        };
+        assert_eq!((*value, unit.name.as_str(), unit.mass), (0.12, "kg", 1));
+        assert_eq!(got[6], ("Revision Count", &Value::Integer(3)));
+        assert_eq!(got[7], ("Plain", &Value::Number(4.0)));
+        assert_eq!(
+            a[4].instances,
+            vec![20, 21, 22, 27, 32],
+            "the property's, the item's, its unit's"
+        );
+        assert_eq!((a[0].property, a[0].item), (20, 23));
+        // The point is no value: kept, not read.
+        assert_eq!(r.retained, vec![31]);
     }
 }
