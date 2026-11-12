@@ -115,6 +115,7 @@ pub mod render;
 pub mod renumber;
 pub mod review;
 pub mod save;
+pub mod scene;
 pub mod section;
 pub mod server;
 pub mod session;
