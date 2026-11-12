@@ -87,6 +87,9 @@ pub struct FaceMesh {
     pub face: FaceId,
     pub corners: Range<u32>,
     pub triangles: Range<u32>,
+    /// Drawn as a strip between its sides ([`strip`]), not from a domain:
+    /// [`check_mesh`] excuses this face's inverted slivers, and no other's.
+    pub strip: bool,
 }
 
 /// The positions along an edge, from its start vertex to its end, and

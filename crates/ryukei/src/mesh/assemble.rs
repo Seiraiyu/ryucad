@@ -87,6 +87,7 @@ pub(super) fn assemble(
                 face: f,
                 corners: corner_start..mesh.corners.len() as u32,
                 triangles: triangle_start..mesh.triangles.len() as u32,
+                strip: true,
             });
             continue;
         }
@@ -179,6 +180,7 @@ pub(super) fn assemble(
             face: f,
             corners: corner_start..mesh.corners.len() as u32,
             triangles: triangle_start..mesh.triangles.len() as u32,
+            strip: false,
         });
     }
     mesh

@@ -644,6 +644,164 @@ fn a_folded_cap_with_every_corner_on_an_edge_reports_inverted() {
     assert!(folds >= 2, "{folds}");
 }
 
+/// A thin fold of a face drawn from its domain: a cap with a large hole,
+/// meshed so fine that each of the hole's segments turns under 7°, with
+/// the diagonal flipped between three consecutive samples of the hole
+/// and a point across the cap. The triangle on those three samples lies
+/// in the hole, inverted, every edge still used once each way, and its
+/// height is under 1/32 of its longest side (about a quarter of the
+/// angle a segment turns), so only knowing which faces are strips keeps
+/// it reported.
+#[test]
+fn a_folded_cap_with_a_large_hole_reports_inverted() {
+    use crate::geom::{Circle2, Curve2, Frame2, Line2, Point2, Vector2};
+    use crate::predicates::{Sign, orient2d};
+    use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    use std::collections::BTreeMap;
+    let s = 1.1;
+    let square = [(-s, -s), (s, -s), (s, s), (-s, s)];
+    let outer = (0..4)
+        .map(|i| {
+            let (p, q) = (square[i], square[(i + 1) % 4]);
+            let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+            Segment {
+                key: SegmentKey(10 + i as u128),
+                curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                t0: 0.0,
+                t1: p.distance(q),
+            }
+        })
+        .collect();
+    let f = Frame2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0), true).unwrap();
+    let hole = Segment {
+        key: SegmentKey(20),
+        curve: Curve2::Circle2(Circle2::new(f, 1.0).unwrap()),
+        t0: 0.0,
+        t1: 2.0 * PI,
+    };
+    let p = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![
+            Loop {
+                key: LoopKey(1),
+                segments: outer,
+            },
+            Loop {
+                key: LoopKey(2),
+                segments: vec![hole],
+            },
+        ],
+    })
+    .unwrap();
+    let b = extrude(OpKey(1), &p, Vector3::new(0.0, 0.0, 1.0), 0.0, 1.0)
+        .unwrap()
+        .0;
+    // A segment turning θ = √(8 chord / r) ≈ 0.089 rad, about 5°.
+    let m = tessellate(&b, &MeshParams::new(1e-3, 0.3)).unwrap();
+    assert_eq!(m.faults, []);
+    assert_eq!(check_mesh(&b, &m), Ok(()));
+    // Consecutive samples of the hole's edge, by position.
+    let next: BTreeMap<(u32, u32), u32> = m
+        .edges
+        .iter()
+        .filter(|p| {
+            let e = b.edge(p.edge).unwrap();
+            matches!(b.curve(e.curve), Some(crate::geom::Curve::Circle(_)))
+        })
+        .flat_map(|p| p.positions.windows(3).map(|w| ((w[0], w[1]), w[2])))
+        .collect();
+    assert!(!next.is_empty());
+    let on_edges: std::collections::BTreeSet<u32> = m
+        .edges
+        .iter()
+        .flat_map(|p| p.positions.iter().copied())
+        .collect();
+    let mut folds = 0;
+    for fm in m.faces.iter().filter(|fm| !fm.strip) {
+        let want = if b.face(fm.face).unwrap().sense == Sense::Reversed {
+            Sign::Negative
+        } else {
+            Sign::Positive
+        };
+        let pos = |k: u32| m.corners[k as usize].position;
+        // Each directed corner edge's triangle.
+        let mut by_edge: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+        for t in fm.triangles.clone() {
+            let x = m.triangles[t as usize];
+            for r in 0..3 {
+                by_edge.insert((x[r], x[(r + 1) % 3]), t as usize);
+            }
+        }
+        for t in fm.triangles.clone() {
+            let t = t as usize;
+            let x = m.triangles[t];
+            for r in 0..3 {
+                // Triangles (a, b, d) and (b, a, c) across a b become
+                // (a, c, d)... only the one on three consecutive samples
+                // of the hole is wanted: (c, b, a) with c, b, a
+                // consecutive, or the same the other way.
+                let (a, bb, d) = (x[r], x[(r + 1) % 3], x[(r + 2) % 3]);
+                let Some(&u) = by_edge.get(&(bb, a)) else {
+                    continue;
+                };
+                let y = m.triangles[u];
+                let k = (0..3).find(|&k| y[k] == bb).unwrap();
+                let c = y[(k + 2) % 3];
+                // The new triangles: (d, a, c) and (c, bb, d).
+                let thin = [[d, a, c], [c, bb, d]].into_iter().find(|&[x0, x1, x2]| {
+                    let [p0, p1, p2] = [x0, x1, x2].map(pos);
+                    let consecutive = |p, q, r| next.get(&(p, q)) == Some(&r);
+                    (consecutive(p0, p1, p2)
+                        || consecutive(p1, p2, p0)
+                        || consecutive(p2, p0, p1)
+                        || consecutive(p2, p1, p0)
+                        || consecutive(p0, p2, p1)
+                        || consecutive(p1, p0, p2))
+                        && orient2d(
+                            m.corners[x0 as usize].uv,
+                            m.corners[x1 as usize].uv,
+                            m.corners[x2 as usize].uv,
+                        ) != want
+                });
+                let Some(thin) = thin else {
+                    continue;
+                };
+                // The fold the old excuse let through: a sliver on a face
+                // whose every corner lies on an edge.
+                let [p0, p1, p2] = thin.map(|k| m.positions[pos(k) as usize]);
+                let longest2 = (p1 - p0)
+                    .dot(p1 - p0)
+                    .max((p2 - p1).dot(p2 - p1))
+                    .max((p0 - p2).dot(p0 - p2));
+                let ratio = (p1 - p0).cross(p2 - p0).length() / longest2;
+                assert!(ratio <= 1.0 / 32.0, "{ratio}");
+                let all_on_edges = m.corners[fm.corners.start as usize..fm.corners.end as usize]
+                    .iter()
+                    .all(|c| on_edges.contains(&c.position));
+                assert!(all_on_edges);
+                let mut f = m.clone();
+                f.triangles[t] = [d, a, c];
+                f.triangles[u] = [c, bb, d];
+                let faults = check_mesh(&b, &f).unwrap_err();
+                assert!(
+                    faults.iter().any(
+                        |e| matches!(e, MeshCheckFault::Inverted { face, .. } if *face == fm.face)
+                    ),
+                    "{faults:?}"
+                );
+                assert!(
+                    !faults
+                        .iter()
+                        .any(|e| !matches!(e, MeshCheckFault::Inverted { .. })),
+                    "only the winding catches a fold: {faults:?}"
+                );
+                folds += 1;
+            }
+        }
+    }
+    assert!(folds >= 2, "{folds}");
+}
+
 /// A face range that runs backwards is out of range, not a panic.
 #[test]
 fn a_backward_face_range_is_out_of_range() {
