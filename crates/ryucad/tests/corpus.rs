@@ -442,3 +442,31 @@ fn the_scripts_make_the_committed_projects() {
         }
     }
 }
+
+/// Every committed project's feature files, written by older builds, write
+/// back byte for byte: a file without inserts or deletes keeps its format
+/// and its bytes (ryucad 25).
+#[test]
+fn every_committed_feature_file_writes_back_byte_for_byte() {
+    let mut seen = 0;
+    for e in std::fs::read_dir(corpus()).unwrap().flatten() {
+        let root = e.path();
+        if !root.join("ryucad.json").is_file() {
+            continue;
+        }
+        let project = ryucad::doc::project::Project::load(&root).unwrap();
+        for (p, part) in &project.parts {
+            for (f, feature) in &part.features {
+                let Ok(feature) = feature else { continue };
+                let path = root.join(format!("parts/{p}/features/{f}.json"));
+                let bytes = std::fs::read(&path).unwrap();
+                let out = canonical::to_string(&feature.to_json());
+                let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+                let out = out.strip_suffix('\n').unwrap_or(&out);
+                assert_eq!(out.as_bytes(), bytes, "{}", path.display());
+                seen += 1;
+            }
+        }
+    }
+    assert!(seen > 0);
+}

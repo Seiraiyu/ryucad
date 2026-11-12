@@ -363,8 +363,11 @@ impl<'a> Reader<'a> {
         })?;
         let own = self.project.manifest.project.clone();
         for f in p.features.values_mut() {
-            if let Ok(Feature::Instance(i)) = f {
-                i.rev = i.rev.seen_from(project, own.as_ref());
+            match f {
+                Ok(Feature::Instance(i)) => i.rev = i.rev.seen_from(project, own.as_ref()),
+                // Its own project's part it inserts is another's from here.
+                Ok(Feature::Insert(i)) => i.rev = i.rev.seen_from(project, own.as_ref()),
+                _ => {}
             }
         }
         let node = Arc::new(Node {

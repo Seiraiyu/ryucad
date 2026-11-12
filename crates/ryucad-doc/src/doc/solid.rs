@@ -8,6 +8,31 @@ use super::id::Id;
 use crate::error::Result;
 use serde_json::{Value, json};
 
+/// A field naming a solid: its key, a founder's ID (written as before)
+/// or an inserted solid's `<insert>/<source key>` (design 521). Every
+/// field that names a solid reads it here: `targets`, `target`, `tools`,
+/// a mirror's `solid`, a split's `target` and `tool.body`, the tweak
+/// family's `target`, `delete_body`'s `solids`.
+pub struct SolidRef;
+
+impl SolidRef {
+    /// Reads key `s`; `at` is its JSON pointer for errors.
+    pub fn parse(s: &str, at: &str) -> Result<Id> {
+        Id::solid_key(s, "feature").map_err(|e| e.with("pointer", at))
+    }
+
+    /// Reads a key from a JSON string at `at`.
+    pub fn from_json(v: &Value, at: &str) -> Result<Id> {
+        let s = v.as_str().ok_or_else(|| {
+            invalid(
+                at,
+                "expected a solid: its feature's ID, or <insert>/<solid>",
+            )
+        })?;
+        SolidRef::parse(s, at)
+    }
+}
+
 /// A body-making feature's operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Operation {
@@ -147,11 +172,7 @@ impl Boolean {
             .as_str()
             .and_then(BooleanOp::parse)
             .ok_or_else(|| invalid("/op", "op is one of unite, subtract, intersect"))?;
-        let target = o.take("target")?;
-        let target = target
-            .as_str()
-            .ok_or_else(|| invalid("/target", "target is a solid's feature ID"))?;
-        let target = Id::parse(target, "feature").map_err(|e| e.with("pointer", "/target"))?;
+        let target = SolidRef::from_json(&o.take("target")?, "/target")?;
         let tools = targets_from_json(&o.take("tools")?, "/tools")?;
         if let Some(i) = tools.iter().position(|t| *t == target) {
             return Err(invalid(
@@ -178,10 +199,7 @@ pub(crate) fn targets_from_json(v: &Value, at: &str) -> Result<Vec<Id>> {
     let mut out: Vec<Id> = Vec::with_capacity(a.len());
     for (i, x) in a.iter().enumerate() {
         let here = format!("{at}/{i}");
-        let s = x
-            .as_str()
-            .ok_or_else(|| invalid(&here, "expected a feature's ID"))?;
-        let id = Id::parse(s, "feature").map_err(|e| e.with("pointer", &here))?;
+        let id = SolidRef::from_json(x, &here)?;
         if out.contains(&id) {
             return Err(invalid(&here, &format!("{id} is named twice")));
         }
@@ -200,6 +218,36 @@ mod tests {
         let c = Combine::from_fields(&mut o)?;
         o.finish()?;
         Ok(c)
+    }
+
+    #[test]
+    fn solid_fields_take_keys_and_write_founders_as_before() {
+        // A path key reads and writes as written.
+        let c = read(json!({"operation": "cut", "targets": ["board/u1", "a"]})).unwrap();
+        assert_eq!(
+            c.targets.iter().map(Id::as_str).collect::<Vec<_>>(),
+            ["board/u1", "a"]
+        );
+        let mut v = json!({});
+        c.write(&mut v);
+        assert_eq!(v, json!({"operation": "cut", "targets": ["board/u1", "a"]}));
+        // A bad segment is refused at its pointer.
+        let e = read(json!({"operation": "cut", "targets": ["a", "board/U1"]})).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidId, Some("/targets/1"))
+        );
+        // A boolean's target and tools take keys.
+        let v = json!({"op": "subtract", "target": "base", "tools": ["board/u1", "board/u2"]});
+        let mut o = Obj::new(&v, "").unwrap();
+        let b = Boolean::from_fields(&mut o).unwrap();
+        o.finish().unwrap();
+        assert_eq!(b.fields(), v);
+        assert_eq!(SolidRef::parse("a/b/c", "/x").unwrap().as_str(), "a/b/c");
+        assert_eq!(
+            SolidRef::from_json(&json!(3), "/x").unwrap_err().details["pointer"],
+            "/x"
+        );
     }
 
     #[test]
