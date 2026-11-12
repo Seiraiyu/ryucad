@@ -9,7 +9,7 @@ use crate::ui::modes;
 use eframe::egui;
 
 pub fn window(ctx: &egui::Context, ws: &mut Workspace, at: egui::Rect) {
-    let given = egui::Id::new("mate-dialog keyboard");
+    let given = egui::Id::unique("mate-dialog keyboard");
     let Some(d) = ws.mating.clone() else {
         ctx.data_mut(|m| m.remove::<bool>(given));
         return;

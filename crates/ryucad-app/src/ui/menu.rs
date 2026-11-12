@@ -46,6 +46,12 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened) -> Option<Action> {
                 let room = ui.ctx().content_rect().bottom() - ui.cursor().top() - 16.0;
                 egui::ScrollArea::vertical()
                     .id_salt(("menu", cat.title()))
+                    // Never by dragging: a press on an item is its click.
+                    .scroll_source(egui::scroll_area::ScrollSource {
+                        scroll_bar: true,
+                        mouse_wheel: true,
+                        ..egui::scroll_area::ScrollSource::NONE
+                    })
                     .max_height(room.max(120.0))
                     .show(ui, |ui| {
                         if let Some(a) = items(ui, o, &shown, cat) {

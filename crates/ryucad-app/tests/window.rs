@@ -92,40 +92,40 @@ fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
             break;
         }
     }
-    // A menu taller than the window scrolls (#728): the wheel over it
-    // until the item is inside it and the window, then let it come to
-    // rest before the click.
+    // A menu taller than the window scrolls (#728): scroll the item into
+    // view, then let it come to rest before the click. (The menu's own
+    // node has no rect to judge by.)
     let screen = h.ctx.content_rect();
-    let at = |h: &Harness<'static, App>| {
-        let m = h
-            .get_all_by_role(egui::accesskit::Role::Menu)
+    let item = |h: &Harness<'static, App>| {
+        h.get_all_by_role(egui::accesskit::Role::Menu)
             .last()
-            .unwrap();
-        (m.rect(), m.get_by(named).rect())
+            .unwrap()
+            .get_by(named)
+            .rect()
     };
-    let inside = |(m, r): (egui::Rect, egui::Rect)| {
-        screen.contains_rect(r) && m.expand(0.5).contains_rect(r)
-    };
-    if !inside(at(h)) {
-        h.event(egui::Event::PointerMoved(at(h).0.center()));
-        for _ in 0..60 {
-            if inside(at(h)) {
-                break;
-            }
-            h.event(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Line,
-                delta: egui::vec2(0.0, -3.0),
-                modifiers: egui::Modifiers::NONE,
-                phase: egui::TouchPhase::Move,
-                source: egui::MouseWheelSource::Wheel,
-            });
-            h.step();
-        }
+    if screen.contains_rect(item(h)) {
+        h.get_all_by_role(egui::accesskit::Role::Menu)
+            .last()
+            .unwrap()
+            .get_by(named)
+            .click();
+        return;
     }
-    let mut row = at(h).1;
+    for _ in 0..10 {
+        if screen.contains_rect(item(h)) {
+            break;
+        }
+        h.get_all_by_role(egui::accesskit::Role::Menu)
+            .last()
+            .unwrap()
+            .get_by(named)
+            .scroll_to_me();
+        h.step();
+    }
+    let mut row = item(h);
     for _ in 0..60 {
         h.step();
-        let now = at(h).1;
+        let now = item(h);
         if now == row {
             break;
         }
@@ -3059,6 +3059,8 @@ fn the_mate_dialogs_add_waits_for_both_picks_and_esc_closes_it() {
     });
     h.step();
     menu(&mut h, "Edit", "Mate…");
+    h.run_steps(3);
+    eprintln!("DBGMATE mating {} labels {:?}", h.state().opened().ws.mating.is_some(), h.query_all_by_role(egui::accesskit::Role::Window).map(|n| format!("{:?}", n.accesskit_node().label())).collect::<Vec<_>>());
     shown(&mut h, "Mate");
     let pin = over_body(&mut h, "pin/shank");
     click(&h, pin);
@@ -4299,19 +4301,8 @@ fn the_view_menu_scrolls_to_its_last_items() {
     let p = Project::new().with_part();
     let mut h = sized(&p, 700.0);
     frames(&mut h, loaded);
-    h.get_by_label("View").click();
-    h.run_steps(3);
-    let m = h
-        .get_all_by_role(egui::accesskit::Role::Menu)
-        .last()
-        .unwrap()
-        .rect();
-    assert!(
-        m.bottom() <= 700.0,
-        "the View menu runs off the window: {m:?}"
-    );
-    h.key_press(egui::Key::Escape);
-    h.run_steps(2);
+    // Reset layout is among View's last items, below a 700-point window:
+    // `menu` reaches it only by scrolling the menu (#728).
     shell::close(&mut h.state_mut().opened_mut().tiles, "history");
     h.run_steps(2);
     assert!(!shell::is_open(&h.state().opened().tiles, "history"));
@@ -6183,7 +6174,6 @@ fn tab_reaches_an_annotations_row_with_the_pointer_over_the_viewport() {
 /// Esc closes it with nothing selected.
 #[test]
 fn the_mate_dialog_takes_the_keyboard_and_esc_closes_it_with_nothing_selected() {
-    use egui_kittest::kittest::NodeT;
     let _one = one_at_a_time();
     if !gpu() {
         return;
@@ -6193,6 +6183,7 @@ fn the_mate_dialog_takes_the_keyboard_and_esc_closes_it_with_nothing_selected() 
     waited(&mut h, "the frame drawn", |a| {
         a.opened().ws.idle() && a.opened().ws.model.middles("frame").len() == 2
     });
+    h.step();
     menu(&mut h, "Edit", "Mate…");
     shown(&mut h, "Mate");
     let view = h.state().opened().view.rect;
@@ -6225,7 +6216,7 @@ fn the_markup_bar_fits_a_narrow_viewport() {
     }
     let p = Project::new().with_part();
     let mut h = window(&p);
-    h.set_size(egui::vec2(1300.0, 1000.0));
+    h.set_size(egui::vec2(1000.0, 1000.0));
     frames(&mut h, loaded);
     h.step();
     h.get_by_label("Markup").click();

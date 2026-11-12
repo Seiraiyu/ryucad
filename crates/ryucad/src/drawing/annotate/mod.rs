@@ -1459,25 +1459,37 @@ fn leader_dim(
     written: Option<P>,
 ) -> Out {
     let sz = size(ctx.standard);
-    let w = match written {
-        Some(w) => unit(sub(addp(vb.at, w), centre)),
-        None => [
-            std::f64::consts::FRAC_1_SQRT_2,
-            std::f64::consts::FRAC_1_SQRT_2,
-        ],
+    let lines = std::slice::from_ref(&shown.runs);
+    // The leader runs from the centre towards the text, so a written place
+    // decides the tip too: each candidate is laid with the tip it will
+    // have once its place is written back (#662).
+    let tip_for = |t: P| addp(centre, scale(unit(sub(t, centre)), r));
+    let t = match written {
+        Some(w) => addp(vb.at, w),
+        None => {
+            let w = [
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ];
+            let tip = addp(centre, scale(w, r));
+            let first = addp(centre, scale(w, r + 10.0));
+            leader_place(sheet, vb, tip, first, |t| {
+                laid(ctx.style, lines, tip_for(t), t, sz)
+            })
+        }
     };
-    let tip = addp(centre, scale(w, r));
-    let first = addp(centre, scale(w, r + 10.0));
-    leader_text(
+    let mut out = leader_text(
         ctx,
         vb,
         sheet,
-        std::slice::from_ref(&shown.runs),
-        tip,
-        written,
-        Some(first),
+        lines,
+        tip_for(t),
+        Some(sub(t, vb.at)),
+        None,
         sz,
-    )
+    );
+    out.at_placed = written.is_none();
+    out
 }
 
 /// Lines of text past a shoulder at `written` (relative to the view's

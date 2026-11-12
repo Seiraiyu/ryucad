@@ -308,7 +308,24 @@ fn the_benchmark_project_measured() {
     }
     bars.judge("a daemon over the warm cache", warm, 10.0, "s");
     run.ok(&["rebuild", "root"]);
+    let watch = |run: &Run| -> Value {
+        let (_, st) = run.ok(&["daemon", "status"]);
+        st["result"]["session"]["watch"].clone()
+    };
+    let before = watch(&run);
     let held = held_ms(&run.root, &nothing(&spec));
+    let after = watch(&run);
+    // #755: a daemon without file events, or one whose requests each
+    // check every file, measures the folder, not the request.
+    let full =
+        after["full_checks"].as_u64().unwrap_or(0) - before["full_checks"].as_u64().unwrap_or(0);
+    say(&format!(
+        "the daemon's watch: {after} ({full} full check(s) over five requests)"
+    ));
+    assert!(
+        after["watching"] == true && full <= 1,
+        "#755: requests checked every file (an inotify limit? `sysctl fs.inotify`): {after}"
+    );
     say(&format!(
         "a request that builds nothing (one part's features): {held:.1} ms on an open \
          connection; every part listed: {:.1} ms on an open connection, {:.0} ms through the CLI",

@@ -472,11 +472,13 @@ mod tests {
         );
         let asked = std::rc::Rc::new(std::cell::Cell::new(false));
         let a = asked.clone();
-        let mut h = Harness::new_ui(move |ui| {
-            if error(ui, &e) {
-                a.set(true);
-            }
-        });
+        let mut h = Harness::builder()
+            .with_context_setup(crate::ui::fonts::install)
+            .build_ui(move |ui| {
+                if error(ui, &e) {
+                    a.set(true);
+                }
+            });
         h.run();
         h.get_by_label("Copy details");
         h.get_by_label("Show").click();
@@ -493,6 +495,7 @@ mod tests {
         f.error = Some(why.into());
         let mut h = Harness::builder()
             .with_size(egui::vec2(260.0, 240.0))
+            .with_context_setup(crate::ui::fonts::install)
             .build_ui(move |ui| {
                 grid(ui, "t", |rows| {
                     rows.quantity("x", &mut f);

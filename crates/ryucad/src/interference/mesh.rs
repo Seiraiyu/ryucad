@@ -114,50 +114,6 @@ fn to_triangle(p: Point3, t: &[Point3; 3]) -> f64 {
     one.nearest_to(p).map_or(f64::INFINITY, |(d, _, _)| d)
 }
 
-/// Whether the mesh about the piece `t` (radius `r` about its middle,
-/// `d` from `inside`'s mesh) is one plane, `nearest`'s, that every
-/// point of `t` lies within `reach` of: some triangle lies within
-/// `r + reach` of the middle (`d`), every triangle of `inside` within
-/// `r + reach` of `t` lies on that plane (its corners within `slack` of
-/// it, at most a 64th of `reach`), and every corner of `t` lies within
-/// `reach - slack` of it. A closed mesh's surface inside the ball of
-/// radius `r + reach` about the middle is then the whole disc the plane
-/// cuts from it (one side inside, the other out: a valid solid's
-/// boundary can't end there), and each point of `t` lies within `reach`
-/// of its foot on the plane, which is in that disc: no point of `t` is
-/// deep. So a part seated flush on a face whose triangles don't line up
-/// with its own (a component on a PCB's top, triangulated round its
-/// holes) ends at once, not quartered along every edge (#726).
-fn flush_on_one_plane(
-    inside: &MeshTree,
-    nearest: &[Point3; 3],
-    t: &[Point3; 3],
-    r: f64,
-    d: f64,
-    reach: f64,
-) -> bool {
-    if d > r + reach {
-        return false;
-    }
-    let n = (nearest[1] - nearest[0]).cross(nearest[2] - nearest[0]);
-    let len = n.length();
-    if !(len > 0.0 && len.is_finite()) {
-        return false;
-    }
-    let off = |p: Point3| ((p - nearest[0]).dot(n) / len).abs();
-    let limit = reach / 64.0;
-    let mut slack: f64 = 0.0;
-    for (_, j) in MeshTree::new(vec![*t]).within(inside, r + reach) {
-        for &v in &inside.triangles()[j as usize] {
-            slack = slack.max(off(v));
-        }
-        if slack > limit {
-            return false;
-        }
-    }
-    t.iter().all(|&p| off(p) + slack <= reach)
-}
-
 /// A search for a deep point that ran past [`BUDGET`] pieces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OverBudget;
@@ -169,9 +125,6 @@ pub struct OverBudget;
 /// - where its corners all lie within `reach` of the triangle of
 ///   `inside` nearest its middle (the distance to a triangle is convex,
 ///   so every point of it does: flush faces end at once);
-/// - where every triangle of `inside` near it lies on one plane that all
-///   its corners lie within `reach` of ([`flush_on_one_plane`]: a part
-///   seated flush on a face triangulated round holes, #726);
 /// - where a ball round its middle holding it misses `inside`'s mesh
 ///   and the middle winds zero (the piece is wholly outside);
 /// - once it is an eighth of `reach` across (what it may still hold lies
@@ -212,9 +165,6 @@ pub fn deep_point(
         }
         let nearest = &inside.triangles()[k as usize];
         if t.iter().all(|&p| to_triangle(p, nearest) <= reach) {
-            continue;
-        }
-        if flush_on_one_plane(inside, nearest, &t, r, d, reach) {
             continue;
         }
         match inside.winding(c) {
@@ -388,55 +338,6 @@ mod tests {
         ryukei::primitive::cylinder(OpKey::from_bytes(b"p"), r, h, &Rigid::IDENTITY)
             .unwrap()
             .0
-    }
-
-    /// #726: a header's block seated flush on a plate drilled under it
-    /// (a PCB's top, triangulated round 38 holes) only touches, and is
-    /// decided well within the budget.
-    #[test]
-    fn a_block_flush_on_a_drilled_plate_is_decided_within_budget() {
-        use ryukei::boolean::{BooleanOp, Tool, boolean};
-        use ryukei::name::ToolKey;
-        let plate = ryukei::primitive::block(
-            OpKey::from_bytes(b"pl"),
-            0.06,
-            0.02,
-            0.0016,
-            &Rigid::IDENTITY,
-        )
-        .unwrap()
-        .0;
-        let drill = pin(0.0005, 0.004);
-        let tools: Vec<Tool> = (0..38u32)
-            .map(|i| Tool {
-                key: ToolKey(u128::from(i) + 1),
-                body: &drill,
-                place: at(
-                    0.006 + 0.00254 * f64::from(i / 2),
-                    0.00873 + 0.00254 * f64::from(i % 2),
-                    -0.001,
-                ),
-            })
-            .collect();
-        let (drilled, _) =
-            boolean(OpKey::from_bytes(b"d"), BooleanOp::Subtract, &plate, &tools).unwrap();
-        let header = ryukei::primitive::block(
-            OpKey::from_bytes(b"h"),
-            0.048,
-            0.005,
-            0.0085,
-            &Rigid::IDENTITY,
-        )
-        .unwrap()
-        .0;
-        let (a, b) = (
-            Prepared::new(&drilled).unwrap(),
-            Prepared::new(&header).unwrap(),
-        );
-        let mut spent = 0;
-        let v = verdict(&a, &b, &at(0.0054, 0.0075, 0.0016), &mut spent);
-        assert_eq!(v, Some(Verdict::Touching), "{spent} pieces");
-        assert!(spent < BUDGET / 16, "{spent} pieces");
     }
 
     #[test]

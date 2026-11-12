@@ -11918,6 +11918,58 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::NoLiveSession);
     }
 
+    /// #755: a daemon's requests check only the paths file events name;
+    /// none checks every file (107,500 at design 192's benchmark).
+    #[test]
+    fn a_watched_daemon_s_requests_check_only_what_events_name() {
+        let (_dir, s) = fresh();
+        let marks = tempfile::tempdir().unwrap();
+        let mut s = s.with_watch(&marks.path().join("m"));
+        let mut live = Live::new();
+        call_live(&mut s, &mut live, None, "part.create", json!({"part": "p"})).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        let full = |s: &Session| s.watch_status().unwrap()["full_checks"].as_u64().unwrap();
+        let before = full(&s);
+        for _ in 0..20 {
+            call_live(
+                &mut s,
+                &mut live,
+                None,
+                "feature.list",
+                json!({"part": "p"}),
+            )
+            .unwrap();
+            call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        }
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 2}}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.list",
+            json!({"part": "p"}),
+        )
+        .unwrap();
+        let w = s.watch_status().unwrap();
+        assert_eq!(w["watching"], true, "{w}");
+        assert_eq!(full(&s), before, "a request checked every file: {w}");
+        assert!(w["narrowed_checks"].as_u64().unwrap() >= 42, "{w}");
+    }
+
     #[test]
     fn hello_registers_a_participant() {
         let (_dir, mut s) = fresh();
