@@ -19,7 +19,8 @@
 
 use super::bernstein2::{Bernstein2, krawczyk};
 use super::chain2::{Chain2, Piece2};
-use super::{Curve2, Vector2};
+use super::{Box3, Curve2, Point3, Vector2};
+use crate::intersect::broad::BoxTree;
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::work::Meter;
@@ -316,6 +317,80 @@ const OVERLAP: f64 = 100.0;
 /// The most cells one pair of pieces may be cut into.
 const MEET_CELLS: usize = 1 << 16;
 
+/// Past this many pairs of pieces, the pairs whose hulls come close are
+/// found by a box tree rather than all against all.
+const TREE_PAIRS: usize = 64;
+
+/// The pairs `(i, j)` of `a`'s and `b`'s pieces whose hulls come within
+/// `tol` of each other along `x` and `y`, in increasing `(i, j)`. Many
+/// pieces (a traced silhouette's image) go through a box tree whose
+/// boxes are grown by `tol` and the slack, so every pair the gap test
+/// keeps is a candidate; the gap test decides, as it always did.
+fn piece_pairs(a: &Chain2, b: &Chain2, tol: f64) -> Vec<(usize, usize)> {
+    let ha: Vec<(Vector2, Vector2)> = a.pieces.iter().map(Piece2::hull).collect();
+    let hb: Vec<(Vector2, Vector2)> = b.pieces.iter().map(Piece2::hull).collect();
+    let near = |i: usize, j: usize| {
+        let ((alo, ahi), (blo, bhi)) = (ha[i], hb[j]);
+        let gap = (blo.x - ahi.x)
+            .max(alo.x - bhi.x)
+            .max(blo.y - ahi.y)
+            .max(alo.y - bhi.y);
+        gap <= tol
+    };
+    if ha.len() * hb.len() <= TREE_PAIRS {
+        let mut out = Vec::new();
+        for i in 0..ha.len() {
+            for j in 0..hb.len() {
+                if near(i, j) {
+                    out.push((i, j));
+                }
+            }
+        }
+        return out;
+    }
+    let grow = tol + SLACK_2D;
+    let tree = |h: &[(Vector2, Vector2)]| {
+        BoxTree::new(
+            h.iter()
+                .enumerate()
+                .map(|(k, &(lo, hi))| {
+                    (
+                        Box3::new(
+                            Point3::new(lo.x - grow, lo.y - grow, 0.0),
+                            Point3::new(hi.x + grow, hi.y + grow, 0.0),
+                        ),
+                        k,
+                    )
+                })
+                .collect(),
+        )
+    };
+    tree(&ha)
+        .pairs_with(&tree(&hb))
+        .into_iter()
+        .filter(|&(i, j)| near(i, j))
+        .collect()
+}
+
+/// True when the control points of `a` and `b` are farther apart than
+/// `tol` and the rounding slack along the chord of either piece or its
+/// normal: each piece lies in its points' hull, so no point of one is
+/// within `tol` of the other and the pair meets nowhere (the fat line of
+/// Bézier clipping; `separated` with the caller's tolerance).
+fn apart_by(a: &Piece2, b: &Piece2, tol: f64) -> bool {
+    let reach = tol + 2.0 * SLACK_2D;
+    [a, b].iter().any(|p| {
+        let chord = p.pts[p.pts.len() - 1].p - p.pts[0].p;
+        let len = chord.length();
+        if len == 0.0 {
+            return false;
+        }
+        let t = chord / len;
+        let n = Vector2::new(-t.y, t.x);
+        gap_along(t, a, b) > reach || gap_along(n, a, b) > reach
+    })
+}
+
 /// Every place two curves, each over a range of its parameter (`t1 < t0`
 /// runs it backwards), meet, by their parameters; points within
 /// [`OVERLAP`] tolerances of each other are one. Curves on one line,
@@ -383,38 +458,28 @@ pub(crate) fn crossings_in(
     let ca = Chain2::new(a.0, a.1[0], a.1[1]);
     let cb = Chain2::new(b.0, b.1[0], b.1[1]);
     let mut out: Vec<Meet2> = Vec::new();
-    // Each piece's hull once: spline pcurves of thousands of pieces
-    // compare every pair.
-    let hulls_b: Vec<_> = cb.pieces.iter().map(|pb| pb.hull()).collect();
-    for (i, pa) in ca.pieces.iter().enumerate() {
-        let (alo, ahi) = pa.hull();
-        for (j, pb) in cb.pieces.iter().enumerate() {
-            m.poll().ok()?;
-            let (blo, bhi) = hulls_b[j];
-            let gap = (blo.x - ahi.x)
-                .max(alo.x - bhi.x)
-                .max(blo.y - ahi.y)
-                .max(alo.y - bhi.y);
-            if gap > tol {
-                continue;
-            }
-            let system = System::new(pa, pb, tol);
-            let mut cells = Vec::new();
-            let mut budget = MEET_CELLS;
-            system.solve(
-                [0.0, 1.0],
-                [0.0, 1.0],
-                0,
-                &mut out,
-                &mut cells,
-                &mut budget,
-                (&ca, i),
-                (&cb, j),
-                m,
-            )?;
-            for cluster in clusters(cells, m)? {
-                out.push(system.cluster(&cluster, tol, (&ca, i), (&cb, j))?);
-            }
+    for (i, j) in piece_pairs(&ca, &cb, tol) {
+        m.poll().ok()?;
+        let (pa, pb) = (&ca.pieces[i], &cb.pieces[j]);
+        if apart_by(pa, pb, tol) {
+            continue;
+        }
+        let system = System::new(pa, pb, tol);
+        let mut cells = Vec::new();
+        let mut budget = MEET_CELLS;
+        system.solve(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            0,
+            &mut out,
+            &mut cells,
+            &mut budget,
+            (&ca, i),
+            (&cb, j),
+            m,
+        )?;
+        for cluster in clusters(cells, m)? {
+            out.push(system.cluster(&cluster, tol, (&ca, i), (&cb, j))?);
         }
     }
     // Pieces meeting at a joint find the same point twice; and points
@@ -1150,5 +1215,110 @@ mod tests {
                 assert_eq!(key(g), key(w));
             }
         }
+    }
+
+    /// The crossings of long spline images (thousands of pieces, as the
+    /// race's traced silhouettes have) against lines, circles and other
+    /// splines: identical to meeting every pair of pieces, as before
+    /// plan 17.C.
+    #[test]
+    fn pruned_pairs_meet_as_every_pair_did() {
+        use crate::geom::{KnotVector, NurbsCurve2};
+        use std::sync::Arc;
+        let mut seed = 0x17c4u64;
+        let mut r = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let wavy = |r: &mut dyn FnMut() -> f64, n: usize| -> (Curve2, [f64; 2]) {
+            let knots: Vec<f64> = (0..=n - 3).map(|k| k as f64).collect();
+            let mut mults = vec![1; knots.len()];
+            mults[0] = 4;
+            *mults.last_mut().unwrap() = 4;
+            let k = KnotVector::clamped(3, &knots, &mults).unwrap();
+            let y0 = r() * 2.0 - 1.0;
+            let pts = (0..n)
+                .map(|i| {
+                    Point2::new(
+                        i as f64 * 0.01,
+                        y0 + 0.3 * crate::math::sin(i as f64 * 0.05),
+                    )
+                })
+                .collect();
+            let c = NurbsCurve2::new(k, pts, None).unwrap();
+            let d = c.domain();
+            (Curve2::Nurbs2(Arc::new(c)), d)
+        };
+        for _ in 0..6 {
+            let a = wavy(&mut r, 600);
+            let others = [
+                wavy(&mut r, 400),
+                line((r() * 6.0, -2.0), (r() * 6.0, 2.0)),
+                circle((r() * 6.0, 0.0), 0.5 + r(), 0.0, TAU),
+            ];
+            for b in &others {
+                // unmetered: a unit test
+                let m = Meter::free();
+                let got = crossings_in((&a.0, a.1), (&b.0, b.1), LINEAR_RESOLUTION, &m);
+                let want = crossings_every_pair((&a.0, a.1), (&b.0, b.1), LINEAR_RESOLUTION);
+                assert_eq!(got, want);
+            }
+        }
+    }
+
+    /// `crossings_in` as it was before plan 17.C: every pair of pieces,
+    /// no fat line.
+    fn crossings_every_pair(
+        a: (&Curve2, [f64; 2]),
+        b: (&Curve2, [f64; 2]),
+        tol: f64,
+    ) -> Option<Vec<Meet2>> {
+        let m = Meter::free();
+        let ca = Chain2::new(a.0, a.1[0], a.1[1]);
+        let cb = Chain2::new(b.0, b.1[0], b.1[1]);
+        let mut out = Vec::new();
+        for (i, pa) in ca.pieces.iter().enumerate() {
+            let (alo, ahi) = pa.hull();
+            for (j, pb) in cb.pieces.iter().enumerate() {
+                let (blo, bhi) = pb.hull();
+                let gap = (blo.x - ahi.x)
+                    .max(alo.x - bhi.x)
+                    .max(blo.y - ahi.y)
+                    .max(alo.y - bhi.y);
+                if gap > tol {
+                    continue;
+                }
+                let system = System::new(pa, pb, tol);
+                let mut cells = Vec::new();
+                let mut budget = MEET_CELLS;
+                system.solve(
+                    [0.0, 1.0],
+                    [0.0, 1.0],
+                    0,
+                    &mut out,
+                    &mut cells,
+                    &mut budget,
+                    (&ca, i),
+                    (&cb, j),
+                    &m,
+                )?;
+                for cluster in clusters(cells, &m)? {
+                    out.push(system.cluster(&cluster, tol, (&ca, i), (&cb, j))?);
+                }
+            }
+        }
+        let mut merged: Vec<Meet2> = Vec::new();
+        for x in out {
+            let dup = match x {
+                Meet2::Point { at, .. } => merged.iter().any(|n| matches!(n, Meet2::Point { at: q, .. } if (*q - at).length() <= OVERLAP * tol)),
+                Meet2::Overlap { .. } => false,
+            };
+            if !dup {
+                merged.push(x);
+            }
+        }
+        Some(merged)
     }
 }
