@@ -2066,6 +2066,9 @@ fn blend_edits_recompute_as_from_nothing() {
             let incremental = (r.hash.clone(), summary(r));
             assert_eq!(incremental, one, "seed {seed}, step {step}");
             assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
 
 /// Issue #630: a countersink edit after a two-distance bevel, at each
 /// size the random edits draw, timed (incremental, then from nothing),
