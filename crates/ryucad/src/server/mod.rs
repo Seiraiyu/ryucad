@@ -39,6 +39,10 @@ use std::path::Path;
 // Old paths, kept while ryucad 27 runs beside other stages (design 541,
 // "Paths kept"); 27.F removes the ones nothing uses.
 #[allow(unused_imports)]
+pub(crate) use crate::budget::{mesh_budget, render_budget};
+#[allow(unused_imports)]
+pub(crate) use crate::geometry::{geom_json, normal_to_face, normal_to_face_at};
+#[allow(unused_imports)]
 pub use crate::part::connector_text;
 #[allow(unused_imports)]
 pub(crate) use crate::part::{
@@ -2203,15 +2207,6 @@ fn mesh_pending(
     session.meshes.pending(&refs, quality)
 }
 
-/// The display mesh cache's budget in bytes.
-pub(crate) fn mesh_budget() -> usize {
-    config::user("display.mesh_cache_mib")
-        .as_u64()
-        .unwrap_or(256) as usize
-        * 1024
-        * 1024
-}
-
 fn guarded<T>(
     slot: &mut Option<Session>,
     root: &Path,
@@ -3912,14 +3907,6 @@ fn planar_from(current: Option<Value>, given: &Given, part: &Id) -> Result<Featu
     let p = crate::doc::sweep::Planar::from_fields(&mut o)?;
     o.finish()?;
     Ok(Feature::Planar(Box::new(p)))
-}
-
-/// A geometric reference given as text in `part`, as a file holds it;
-/// `at` is its pointer for errors.
-pub(crate) fn geom_json(t: &str, part: &Id, at: &str) -> Result<Value> {
-    Ok(crate::doc::geometry::GeomRef::parse(t, part)
-        .map_err(|e| e.with("pointer", at))?
-        .to_json())
 }
 
 /// Refuses a sweep or a hole that names what isn't there: its sketch must
@@ -5797,111 +5784,6 @@ fn framed(
     })
 }
 
-/// The direction (towards the eye) and up of a view normal to the face
-/// `reference` names (`<part>/<solid>/<name>`, or an occurrence's face,
-/// placed by its pose): along a planar face's outward normal or a
-/// revolved face's axis, its longest straight edge level.
-pub(crate) fn normal_to_face(
-    session: &mut Session,
-    reference: &str,
-) -> Result<([f64; 3], [f64; 3])> {
-    normal_to_face_at(session, reference, &crate::doc::assembly::Rev::Working)
-}
-
-/// [`normal_to_face`] with the face read in the model `rev` gives.
-pub(crate) fn normal_to_face_at(
-    session: &mut Session,
-    reference: &str,
-    rev: &crate::doc::assembly::Rev,
-) -> Result<([f64; 3], [f64; 3])> {
-    use ryukei::geom::{Curve, Surface};
-    use ryukei::measure::Entity;
-    // A datum plane: along its normal, its x level; a datum axis: along it.
-    if let Some(d) = crate::geometry::locate_at(session, reference, rev)? {
-        let a = |v: ryukei::geom::Vector3| [v.x, v.y, v.z];
-        return match d.geom {
-            crate::geometry::Geom::Plane(p) => Ok(crate::view::normal_to(
-                a(p.frame.z().get()),
-                Some(a(p.frame.x().get())),
-            )),
-            crate::geometry::Geom::Axis(l) => Ok(crate::view::normal_to(a(l.dir.get()), None)),
-            _ => Err(Error::new(
-                Code::InvalidParam,
-                format!("{reference} is a datum point: look normal to a datum plane or along a datum axis"),
-            )
-            .with("entity", reference)),
-        };
-    }
-    let located = crate::measure::locate_at(session, reference, rev)?;
-    let not_a_face = || {
-        Error::new(
-            Code::InvalidParam,
-            format!(
-                "{reference} isn't a face: look normal to a planar face or a face of revolution"
-            ),
-        )
-        .with("entity", reference)
-    };
-    let [l] = located.as_slice() else {
-        return Err(not_a_face());
-    };
-    let Entity::Face(f) = l.entity else {
-        return Err(not_a_face());
-    };
-    let body = &l.built.body;
-    let face = body.face(f).ok_or_else(not_a_face)?;
-    let surface = body.surface(face.surface).ok_or_else(not_a_face)?;
-    let axis = match surface {
-        Surface::Plane(p) => {
-            let z = p.frame().z().get().to_array();
-            match face.sense {
-                ryukei::topo::Sense::Forward => z,
-                ryukei::topo::Sense::Reversed => z.map(|x| -x),
-            }
-        }
-        Surface::Cylinder(_) | Surface::Cone(_) | Surface::Torus(_) => {
-            surface.frame().expect("analytic").z().get().to_array()
-        }
-        Surface::Revolution(r) => r.frame().z().get().to_array(),
-        _ => {
-            return Err(Error::new(
-                Code::InvalidParam,
-                format!("{reference} is neither planar nor a face of revolution: no direction is normal to it"),
-            )
-            .with("entity", reference));
-        }
-    };
-    // The longest straight edge, the first of equals in loop order.
-    let mut edge: Option<([f64; 3], f64)> = None;
-    for lp in body.face_loops(f) {
-        for fin in body.loop_fins(lp) {
-            let Some(e) = body.fin(fin).and_then(|x| body.edge(x.edge)) else {
-                continue;
-            };
-            if !matches!(body.curve(e.curve), Some(Curve::Line(_))) {
-                continue;
-            }
-            let (Some(a), Some(b)) = (body.vertex(e.start), body.vertex(e.end)) else {
-                continue;
-            };
-            let d = (b.point - a.point).to_array();
-            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            if edge.is_none_or(|(_, best)| len > best) {
-                edge = Some((d, len));
-            }
-        }
-    }
-    let placed = |v: [f64; 3]| {
-        l.pose
-            .apply_vector(ryukei::geom::Vector3::new(v[0], v[1], v[2]))
-            .to_array()
-    };
-    Ok(crate::view::normal_to(
-        placed(axis),
-        edge.map(|(d, _)| placed(d)),
-    ))
-}
-
 /// What a pick pass for `me`'s marks leaves out: their participant's
 /// hidden set, when the request came from one.
 fn pick_from(live: Option<&Live>, me: Option<&str>) -> crate::annotation::PickFrom {
@@ -6181,21 +6063,6 @@ fn render_parts(session: &Session, part: Option<&str>) -> Result<Vec<Id>> {
         }
         None => crate::assembly::shown_parts(session.project()),
     })
-}
-
-/// A render's share of the session's memory budget: a quarter of
-/// `session.max_memory`, at least 64 MiB (#400). A render of a large
-/// assembly copies each occurrence's placed mesh into its geometry, so it
-/// must stop before it holds more than the session may.
-pub(crate) fn render_budget() -> usize {
-    #[cfg(test)]
-    if let Some(b) = crate::testing::RENDER_BUDGET.with(|b| b.get()) {
-        return b;
-    }
-    let max = config::user("session.max_memory")
-        .as_u64()
-        .unwrap_or_else(crate::budget::default_max);
-    usize::try_from(max / 4).unwrap_or(usize::MAX).max(64 << 20)
 }
 
 /// `render_too_large` for a render of `part` whose geometry passed

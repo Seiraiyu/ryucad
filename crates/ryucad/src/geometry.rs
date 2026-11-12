@@ -35,8 +35,10 @@ use crate::doc::project::Part;
 use crate::doc::sketch::Geometry;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::{Output, Results};
+use crate::session::Session;
 use ryukei::geom::{Axis, Circle, Curve, Frame, Point3, Surface, Vector3};
 use ryukei::topo::{EntityId, Sense};
+use serde_json::Value;
 
 /// A plane as a use takes it: a point on it and its unit normal as its
 /// source gives them (a face's surface origin and outward normal, bit for
@@ -714,6 +716,119 @@ pub fn locate_at(
         datum,
         geom: made.geom.transformed(&o.pose),
     }))
+}
+
+/// A geometric reference given as text in `part`, as a file holds it;
+/// `at` is its pointer for errors.
+pub(crate) fn geom_json(t: &str, part: &Id, at: &str) -> Result<Value> {
+    Ok(crate::doc::geometry::GeomRef::parse(t, part)
+        .map_err(|e| e.with("pointer", at))?
+        .to_json())
+}
+
+/// The direction (towards the eye) and up of a view normal to the face
+/// `reference` names (`<part>/<solid>/<name>`, or an occurrence's face,
+/// placed by its pose): along a planar face's outward normal or a
+/// revolved face's axis, its longest straight edge level.
+pub(crate) fn normal_to_face(
+    session: &mut Session,
+    reference: &str,
+) -> Result<([f64; 3], [f64; 3])> {
+    normal_to_face_at(session, reference, &crate::doc::assembly::Rev::Working)
+}
+
+/// [`normal_to_face`] with the face read in the model `rev` gives.
+pub(crate) fn normal_to_face_at(
+    session: &mut Session,
+    reference: &str,
+    rev: &crate::doc::assembly::Rev,
+) -> Result<([f64; 3], [f64; 3])> {
+    use ryukei::geom::{Curve, Surface};
+    use ryukei::measure::Entity;
+    // A datum plane: along its normal, its x level; a datum axis: along it.
+    if let Some(d) = crate::geometry::locate_at(session, reference, rev)? {
+        let a = |v: ryukei::geom::Vector3| [v.x, v.y, v.z];
+        return match d.geom {
+            crate::geometry::Geom::Plane(p) => Ok(crate::view::normal_to(
+                a(p.frame.z().get()),
+                Some(a(p.frame.x().get())),
+            )),
+            crate::geometry::Geom::Axis(l) => Ok(crate::view::normal_to(a(l.dir.get()), None)),
+            _ => Err(Error::new(
+                Code::InvalidParam,
+                format!("{reference} is a datum point: look normal to a datum plane or along a datum axis"),
+            )
+            .with("entity", reference)),
+        };
+    }
+    let located = crate::measure::locate_at(session, reference, rev)?;
+    let not_a_face = || {
+        Error::new(
+            Code::InvalidParam,
+            format!(
+                "{reference} isn't a face: look normal to a planar face or a face of revolution"
+            ),
+        )
+        .with("entity", reference)
+    };
+    let [l] = located.as_slice() else {
+        return Err(not_a_face());
+    };
+    let Entity::Face(f) = l.entity else {
+        return Err(not_a_face());
+    };
+    let body = &l.built.body;
+    let face = body.face(f).ok_or_else(not_a_face)?;
+    let surface = body.surface(face.surface).ok_or_else(not_a_face)?;
+    let axis = match surface {
+        Surface::Plane(p) => {
+            let z = p.frame().z().get().to_array();
+            match face.sense {
+                ryukei::topo::Sense::Forward => z,
+                ryukei::topo::Sense::Reversed => z.map(|x| -x),
+            }
+        }
+        Surface::Cylinder(_) | Surface::Cone(_) | Surface::Torus(_) => {
+            surface.frame().expect("analytic").z().get().to_array()
+        }
+        Surface::Revolution(r) => r.frame().z().get().to_array(),
+        _ => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{reference} is neither planar nor a face of revolution: no direction is normal to it"),
+            )
+            .with("entity", reference));
+        }
+    };
+    // The longest straight edge, the first of equals in loop order.
+    let mut edge: Option<([f64; 3], f64)> = None;
+    for lp in body.face_loops(f) {
+        for fin in body.loop_fins(lp) {
+            let Some(e) = body.fin(fin).and_then(|x| body.edge(x.edge)) else {
+                continue;
+            };
+            if !matches!(body.curve(e.curve), Some(Curve::Line(_))) {
+                continue;
+            }
+            let (Some(a), Some(b)) = (body.vertex(e.start), body.vertex(e.end)) else {
+                continue;
+            };
+            let d = (b.point - a.point).to_array();
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if edge.is_none_or(|(_, best)| len > best) {
+                edge = Some((d, len));
+            }
+        }
+    }
+    let placed = |v: [f64; 3]| {
+        l.pose
+            .apply_vector(ryukei::geom::Vector3::new(v[0], v[1], v[2]))
+            .to_array()
+    };
+    Ok(crate::view::normal_to(
+        placed(axis),
+        edge.map(|(d, _)| placed(d)),
+    ))
 }
 
 #[cfg(test)]
