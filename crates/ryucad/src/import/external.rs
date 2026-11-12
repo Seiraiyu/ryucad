@@ -594,6 +594,11 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// `--flatten` across files (Task 13).
+    pub fn flatten(&mut self) -> Result<()> {
+        Err(Error::new(Code::Usage, "flatten across files comes in Task 13"))
+    }
+
     /// Where node `j`'s bytes are kept: where the project holds them
     /// already, else `imports/<stem>.step` free in the project and this
     /// import.

@@ -859,6 +859,10 @@ pub struct Ask {
     /// Make one part of every body of the file, placed where its
     /// assemblies put it (#499).
     pub flatten: bool,
+    /// Folders to look in for the files an assembly's parts are kept in,
+    /// after the folder of the file naming each (design 448, 24.D):
+    /// absolute, or relative to the project's root.
+    pub search: Vec<String>,
 }
 
 impl Ask {
@@ -915,6 +919,22 @@ pub fn free(base: &Id, taken: impl Fn(&str) -> bool) -> Id {
         .expect("some n is free")
 }
 
+/// `--search` folders as the daemon reads them: absolute, or relative to
+/// the project's root.
+fn search_dirs(root: &std::path::Path, search: &[String]) -> Vec<std::path::PathBuf> {
+    search
+        .iter()
+        .map(|s| {
+            let p = std::path::Path::new(s);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                root.join(p)
+            }
+        })
+        .collect()
+}
+
 /// `import`: plans every file change and, unless `dry_run`, makes them.
 pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
     // Its rebuilds heal the file's bodies.
@@ -934,6 +954,14 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     let bytes = std::fs::read(&source).map_err(|e| Error::io(&source, &e))?;
     let file = ImportFile::new(bytes);
     let opened = opened(&file).map_err(|e| unreadable(&ask.path, &e))?;
+    // Every file the parts are in, found before anything is written.
+    let search = search_dirs(&root, &ask.search);
+    let tree = external::resolve(&source, file.clone(), opened.clone(), &search, &ask.path)
+        .map_err(|e| refused(e, &opened, &ask.path))?;
+    if tree.nodes.len() > 1 {
+        return import_tree(session, &ask, root, &tree, None)
+            .map_err(|e| refused(e, &opened, &ask.path));
+    }
     import_opened(session, &ask, root, source, file, &opened)
         .map_err(|e| refused(e, &opened, &ask.path))
 }
@@ -1266,6 +1294,239 @@ fn reimport_opened(
         answer(head, opened, parts, warnings, false, transfer),
         Some(assemblies),
     ))
+}
+
+/// The parts every group plans as a session rebuilds them, the first
+/// file's transfer report, and each other file's line in `external`:
+/// `{path, blake3, reused | from, source, documents, stored, transfer}`.
+fn tree_report(
+    s: &mut crate::session::Session,
+    tree: &external::Tree,
+    groups: &[external::Group],
+    interpreted: &[Vec<u64>],
+) -> Result<(Vec<Value>, Value, Vec<Value>)> {
+    let mut parts = Vec::new();
+    let mut all: Vec<Planned> = Vec::new();
+    for g in groups {
+        parts.extend(parts_report(s, &tree.nodes[g.node].opened, &g.planned)?);
+        all.extend(g.planned.iter().cloned());
+    }
+    let mut root = Value::Null;
+    let mut listed = Vec::new();
+    for g in groups {
+        let node = &tree.nodes[g.node];
+        let t = transfer_of(&node.opened, &g.path, &all, &parts, &interpreted[g.node]);
+        if g.node == 0 {
+            root = t;
+            continue;
+        }
+        let mut v = json!({
+            "path": g.path,
+            "blake3": node.file.blake3,
+            "source": node.source.display().to_string(),
+            "documents": node.documents,
+            "stored": external::names(&all, &g.path),
+            "transfer": t,
+        });
+        match &g.from {
+            Some(f) => v["from"] = json!(f),
+            None => v["reused"] = json!(g.reused),
+        }
+        listed.push(v);
+    }
+    Ok((parts, root, listed))
+}
+
+/// [`import`] and [`reimport`] of a file whose products' shapes are in
+/// other files (design 448, plan 24.D, #443): every file of `tree`
+/// planned as an import of its own, leaves first
+/// ([`external::Planner`]), and written as one change. `update` is the
+/// stored file an update replaces.
+fn import_tree(
+    session: &mut crate::session::Session,
+    ask: &Ask,
+    root: std::path::PathBuf,
+    tree: &external::Tree,
+    update: Option<&str>,
+) -> Result<Value> {
+    use crate::doc::project::PDM_CONFIG;
+    if ask.into.is_some() || ask.product.is_some() {
+        return Err(Error::new(
+            Code::Usage,
+            "into and product take one product's bodies from one file, and this file's products are in other files: import the file holding the product --into the part",
+        ));
+    }
+    if update.is_none() {
+        crate::config::check_project_revision(&root, ask.expected.as_deref())?;
+    }
+    let (groups, writes, warnings, interpreted, kept, vanished) = {
+        let project = session.project();
+        let part = match (&ask.part, update) {
+            (Some(p), None) => {
+                let pid = crate::server::part_id(p)?;
+                if project.parts.contains_key(&pid) {
+                    return Err(Error::new(Code::DuplicateId, format!("part {pid} already exists"))
+                        .with("part", &pid));
+                }
+                crate::pdm::check_not_retired(&root, &pid)?;
+                Some(pid)
+            }
+            _ => None,
+        };
+        let taken = |s: &str| {
+            Id::parse(s, "part").is_ok_and(|id| {
+                project.parts.contains_key(&id) || crate::pdm::check_not_retired(&root, &id).is_err()
+            })
+        };
+        let mut planner = external::Planner::new(
+            project,
+            tree,
+            ask.mode(),
+            root.join(PDM_CONFIG).is_file(),
+            part,
+            &taken,
+        );
+        if ask.flatten {
+            planner.flatten()?;
+        } else {
+            planner.visit(0, update.map(str::to_owned))?;
+        }
+        let mut groups = std::mem::take(&mut planner.groups);
+        groups.sort_by_key(|g| g.node);
+        let mut warnings = Vec::new();
+        let mut interpreted: Vec<Vec<u64>> =
+            tree.nodes.iter().map(|n| n.interpreted.clone()).collect();
+        let (mut kept, mut vanished) = (Vec::new(), Vec::new());
+        for g in &mut groups {
+            let node = &tree.nodes[g.node];
+            let old = g
+                .from
+                .as_ref()
+                .and_then(|_| project.imports.get(&g.path))
+                .and_then(|f| opened(f).ok());
+            let applied = crate::file_props::apply(
+                project,
+                &*session,
+                &node.opened,
+                old.as_deref(),
+                &g.path,
+                &mut g.planned,
+                if g.from.is_some() {
+                    crate::file_props::Mode::Update
+                } else {
+                    crate::file_props::Mode::Fresh
+                },
+            );
+            warnings.extend(mapped_warnings(&node.opened, &g.path));
+            if let Some(u) = &g.update {
+                warnings.extend(u.warnings.iter().cloned());
+                for (a, i) in &u.kept {
+                    warnings.push(format!(
+                        "import_usage_missing: {a}/{i}'s usage is gone from {}, but a mate or pattern reads it, so it stays",
+                        g.path
+                    ));
+                    kept.push(json!({"part": a, "instance": i}));
+                }
+                for (p, f) in &u.kept_bodies {
+                    warnings.push(format!(
+                        "import_usage_missing: {p}/{f}'s body is gone from {}, but another feature reads it, so it stays",
+                        g.path
+                    ));
+                    kept.push(json!({"part": p, "feature": f}));
+                }
+                for (r, parts) in &u.vanished {
+                    vanished.push(json!({"file": g.path, "product": product_json(r), "parts": parts}));
+                }
+            }
+            warnings.extend(applied.warnings.iter().cloned());
+            interpreted[g.node].extend(applied.instances.iter().copied());
+        }
+        let all = external::merge(groups.iter().flat_map(|g| g.planned.iter().cloned()).collect());
+        let mut writes = plan::writes(project, &all)?;
+        for g in &groups {
+            let node = &tree.nodes[g.node];
+            if g.writes_bytes(&all, &node.file.blake3) {
+                writes.insert(g.path.clone(), Some(node.file.bytes.to_vec()));
+            }
+        }
+        (groups, writes, warnings, interpreted, kept, vanished)
+    };
+    let opened0 = &tree.nodes[0].opened;
+    let g0 = &groups[0];
+    let all: Vec<Planned> = groups.iter().flat_map(|g| g.planned.iter().cloned()).collect();
+    let mut head = json!({"path": g0.path, "blake3": tree.nodes[0].file.blake3,
+                          "schema": schema_name(opened0.schema)});
+    match &g0.from {
+        Some(f) => head["from"] = json!(f),
+        None => head["reused"] = json!(g0.reused),
+    }
+    if !external::names(&all, &g0.path) {
+        head["stored"] = json!(false);
+    }
+    // What builds now and wouldn't after, for an update.
+    let newly: Vec<Value> = match update {
+        Some(_) => {
+            let now = failing(session)?;
+            let mut proposed = session.proposed(&writes)?;
+            let after = failing(&mut proposed)?;
+            after
+                .into_iter()
+                .filter(|(k, _)| !now.contains_key(k))
+                .map(|((part, feature), e)| json!({"part": part, "feature": feature, "error": e}))
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    let extra = |mut v: Value, listed: Vec<Value>, assemblies: Option<Vec<Value>>| {
+        v["external"] = json!(listed);
+        if update.is_some() {
+            v["update"] = json!(true);
+        }
+        if !vanished.is_empty() {
+            v["vanished"] = json!(vanished);
+        }
+        if !kept.is_empty() {
+            v["kept"] = json!(kept);
+        }
+        if !newly.is_empty() {
+            v["failing"] = json!(newly);
+        }
+        if let Some(a) = assemblies.filter(|a| !a.is_empty()) {
+            v["assemblies"] = json!(a);
+        }
+        v
+    };
+    if ask.dry_run {
+        let mut s = session.proposed(&writes)?;
+        let (parts, transfer, listed) = tree_report(&mut s, tree, &groups, &interpreted)?;
+        return Ok(extra(answer(head, opened0, parts, warnings, true, transfer), listed, None));
+    }
+    // Assemblies kept current until now stay so (an update).
+    let mut current = Vec::new();
+    if update.is_some() {
+        for pl in all.iter().filter(|pl| !pl.new) {
+            for a in crate::mate::current(session, &pl.part)? {
+                if !current.contains(&a) {
+                    current.push(a);
+                }
+            }
+        }
+    }
+    // A cancel stops it up to here; once a file is written it finishes.
+    session.job.check()?;
+    session.job.writing();
+    if all.iter().any(|pl| !pl.properties.is_empty()) {
+        crate::pdm::ensure_id(session)?;
+    }
+    plan::apply(&root, &writes)?;
+    crate::drivers::write_attributes(&root)?;
+    session.reload()?;
+    let assemblies = match update {
+        Some(_) => Some(crate::mate::keep_current(session, &current)?),
+        None => None,
+    };
+    let (parts, transfer, listed) = tree_report(session, tree, &groups, &interpreted)?;
+    Ok(extra(answer(head, opened0, parts, warnings, false, transfer), listed, assemblies))
 }
 
 /// A refusal once the file is read gains the file's transfer report,
@@ -1656,9 +1917,10 @@ fn transfer_of(
     for (pl, p) in plan.iter().zip(parts) {
         for (fid, f) in &pl.features {
             let i = match f {
-                Feature::Import(i) => i,
+                Feature::Import(i) if i.file.path == path => i,
                 Feature::Instance(inst) => {
                     if let (Some(k), Some(u)) = (pl.definition, &inst.import)
+                        && u.file == path
                         && let Some(n) = crate::file_styles::usage_index(opened, k, u)
                     {
                         made.insert((k, n));
@@ -3150,6 +3412,79 @@ pub(crate) mod tests {
             mode: None,
             place: None,
         }
+    }
+
+    /// The committed set (design 448, 24.D): the assembly and both part
+    /// files stored; a part per file (named as the assembly names them),
+    /// the pin one part placed twice; the answer lists the other files,
+    /// each with its own report; the documents are interpreted.
+    #[test]
+    fn an_assembly_of_part_files_imports_as_an_assembly_over_their_parts() {
+        let (dir, mut s) = crate::server::tests::fresh();
+        let v = import_call(&mut s, json!({"path": set_path("asm.stp")})).unwrap();
+        assert_eq!(v["file"]["path"], "imports/asm.step");
+        let parts: Vec<(&str, &str)> = v["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p["part"].as_str().unwrap(), p["kind"].as_str().unwrap()))
+            .collect();
+        assert_eq!(parts, [("asm", "assembly"), ("box", "part"), ("pin", "part")]);
+        let asm = &v["parts"][0]["features"];
+        let of: Vec<&str> = asm.as_array().unwrap().iter().map(|f| f["of"].as_str().unwrap()).collect();
+        assert_eq!(of, ["box", "pin", "pin"]);
+        let ext: Vec<(&str, &Value)> = v["external"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| (x["path"].as_str().unwrap(), &x["documents"]))
+            .collect();
+        assert_eq!(
+            ext,
+            [("imports/box.step", &json!(["box.stp"])), ("imports/cylinder.step", &json!(["cylinder.stp"]))]
+        );
+        for x in v["external"].as_array().unwrap() {
+            assert_eq!(x["stored"], true);
+            assert_eq!(x["reused"], false);
+            assert!(x["transfer"]["categories"].is_array());
+        }
+        let refs = v["transfer"]["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["category"] == "external_references")
+            .unwrap();
+        // #100 to #107 and #110 to #117: every one, nothing retained.
+        assert_eq!(refs["interpreted"]["count"], 16, "{refs}");
+        assert_eq!(refs["retained"]["count"], 0, "{refs}");
+        for f in ["asm", "box", "cylinder"] {
+            assert!(dir.path().join(format!("imports/{f}.step")).is_file(), "{f}");
+        }
+        // Every part builds, and the assembly places the pin twice.
+        let r = crate::server::tests::call(&mut s, "rebuild", json!({"part": "asm"})).unwrap();
+        assert!(r.get("warnings").is_none_or(|w| w.as_array().unwrap().is_empty()), "{r}");
+        let m = s.model(&Id::parse("asm", "part").unwrap(), &crate::doc::assembly::Rev::Working).unwrap();
+        assert_eq!(m.occurrences.len(), 3);
+    }
+
+    #[test]
+    fn a_dry_run_across_files_writes_nothing() {
+        let (dir, mut s) = crate::server::tests::fresh();
+        let before = crate::session::files(dir.path()).unwrap();
+        let v = import_call(&mut s, json!({"path": set_path("asm.stp"), "dry_run": true})).unwrap();
+        assert_eq!(v["dry_run"], true);
+        assert_eq!(v["external"].as_array().unwrap().len(), 2);
+        assert_eq!(crate::session::files(dir.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn the_same_set_again_reuses_the_files_and_makes_parts_anew() {
+        let (_dir, mut s) = crate::server::tests::fresh();
+        import_call(&mut s, json!({"path": set_path("asm.stp")})).unwrap();
+        let v = import_call(&mut s, json!({"path": set_path("asm.stp")})).unwrap();
+        assert_eq!(v["file"]["reused"], true);
+        assert!(v["external"].as_array().unwrap().iter().all(|x| x["reused"] == true));
+        assert_eq!(v["parts"][0]["part"], "asm-2");
     }
 
     /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of

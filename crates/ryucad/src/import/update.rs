@@ -697,9 +697,14 @@ pub fn usage_warnings(project: &Project, part: &Id) -> Vec<Value> {
             owned_product(project, &i.part, &u.file).and_then(|r| usages.products.get(r).copied());
         let found = k.is_some_and(|k| match &u.usage {
             None => usages.bodies[k] > 0,
-            Some(id) => {
-                child.is_some_and(|c| usages.usages[k].contains(&(id.clone(), c, u.ordinal)))
-            }
+            Some(id) => match child {
+                Some(c) => usages.usages[k].contains(&(id.clone(), c, u.ordinal)),
+                // A part made from another file (design 448, 24.D): a usage
+                // of an externally defined child with this id and ordinal.
+                None => usages.usages[k]
+                    .iter()
+                    .any(|(i, c, o)| i == id && *o == u.ordinal && usages.external[*c]),
+            },
         });
         if !found {
             let usage = u.usage.as_deref().unwrap_or("its own bodies");
@@ -724,6 +729,8 @@ struct Usages {
     products: BTreeMap<ProductRef, usize>,
     bodies: Vec<usize>,
     usages: Vec<std::collections::BTreeSet<(String, usize, u32)>>,
+    /// Whether each definition's shape is in another file.
+    external: Vec<bool>,
 }
 
 impl Usages {
@@ -769,6 +776,7 @@ impl Usages {
             products,
             bodies,
             usages,
+            external: defs.iter().map(|d| d.externally_defined()).collect(),
         }
     }
 }

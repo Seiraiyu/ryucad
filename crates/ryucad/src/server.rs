@@ -1101,6 +1101,7 @@ pub(crate) fn dispatch(
                 update,
                 solid,
                 flatten,
+                search: Vec::new(),
             },
         ),
         Request::ImportReport { file, detail } => {
