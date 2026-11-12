@@ -2793,31 +2793,31 @@ pub(crate) mod tests {
         assert!(e.details.get("transfer").is_none());
     }
 
-    /// An assembly whose parts are in other files (OCCT's form, #443's
-    /// interim, design 448) is refused `import_body_missing` naming each
-    /// file and the products naming it, and the report counts the
-    /// documents retained.
+    /// An assembly whose part files aren't there (OCCT's form, design
+    /// 448) is refused `import_external_missing`, naming each file, the
+    /// products naming it and where it was looked for, before anything
+    /// is written; the report counts the documents retained.
     #[test]
-    fn an_assembly_of_external_parts_names_its_files() {
+    fn an_assembly_of_missing_part_files_names_every_file() {
         let path = format!(
             "{}/../ryustep/tests/data/external/occt_style.stp",
             env!("CARGO_MANIFEST_DIR")
         );
-        let (_dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::server::tests::fresh();
+        let before = crate::session::files(dir.path()).unwrap();
         let e = import_call(&mut s, json!({"path": path})).unwrap_err();
-        assert_eq!(e.code, Code::ImportBodyMissing);
+        assert_eq!(e.code, Code::ImportExternalMissing);
+        let files: Vec<(&str, &Value, &str)> = e.details["missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["file"].as_str().unwrap(), &m["products"], m["reason"].as_str().unwrap()))
+            .collect();
         assert_eq!(
-            e.details["external"],
-            json!([
-                {"file": "bracket.stp", "products": ["P1"], "format": "STEP AP214"},
-                {"file": "parts/plate.stp", "products": ["P2"], "format": "STEP AP214"},
-            ])
+            files,
+            [("bracket.stp", &json!(["P1"]), "not_found"), ("parts/plate.stp", &json!(["P2"]), "not_found")]
         );
-        assert!(
-            e.message.contains("bracket.stp") && e.message.contains("parts/plate.stp"),
-            "{}",
-            e.message
-        );
+        assert!(e.message.contains("bracket.stp") && e.message.contains("parts/plate.stp"), "{}", e.message);
         let docs = e.details["transfer"]["categories"]
             .as_array()
             .unwrap()
@@ -2826,6 +2826,59 @@ pub(crate) mod tests {
             .unwrap()
             .clone();
         assert!(docs["retained"]["count"].as_u64().unwrap() > 0, "{docs}");
+        assert_eq!(crate::session::files(dir.path()).unwrap(), before, "nothing written");
+    }
+
+    /// An assembly of a sub-assembly file of part files: an assembly per
+    /// assembly file, the sub-assembly's instance naming its own file.
+    #[test]
+    fn a_nested_external_assembly_imports_file_by_file() {
+        let d = folder(&[
+            ("top.stp", external_assembly("TOP", &[("SUB", "sub/sub.stp", [0.0; 3]), ("SUB", "sub/sub.stp", [0.0, 40.0, 0.0])])),
+            ("sub/sub.stp", external_assembly("SUB", &[("PIN", "pin.stp", [5.0, 0.0, 0.0])])),
+            ("sub/pin.stp", part_file("PIN", 2.0)),
+        ]);
+        let (_dir, mut s) = crate::server::tests::fresh();
+        let v = import_call(&mut s, json!({"path": d.path().join("top.stp")})).unwrap();
+        let parts: Vec<(&str, &str)> = v["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p["part"].as_str().unwrap(), p["kind"].as_str().unwrap()))
+            .collect();
+        assert_eq!(parts, [("top", "assembly"), ("sub", "assembly"), ("pin", "part")]);
+        let m = s.model(&Id::parse("top", "part").unwrap(), &crate::doc::assembly::Rev::Working).unwrap();
+        let pins = m.occurrences.iter().filter(|o| o.path.len() == 2).count();
+        assert_eq!(pins, 2, "one pin in each sub-assembly");
+        let sub = listed(_dir.path(), "sub");
+        assert!(sub.iter().all(|(_, f)| f["import"]["file"] == "imports/sub.step"), "{sub:?}");
+    }
+
+    /// --part names the first file's root; into and product don't take
+    /// a file whose products are elsewhere.
+    #[test]
+    fn part_names_the_assembly_and_into_is_refused() {
+        let (_dir, mut s) = crate::server::tests::fresh();
+        let v = import_call(&mut s, json!({"path": set_path("asm.stp"), "part": "rig"})).unwrap();
+        assert_eq!(v["parts"][0]["part"], "rig");
+        crate::server::tests::call(&mut s, "part.create", json!({"part": "holder"})).unwrap();
+        let e = import_call(&mut s, json!({"path": set_path("asm.stp"), "into": "holder"})).unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+    }
+
+    /// Two part files of one stem in different folders are stored under
+    /// two names.
+    #[test]
+    fn files_of_one_stem_are_stored_apart() {
+        let d = folder(&[
+            ("asm.stp", external_assembly("ASM", &[("A", "a/part.stp", [0.0; 3]), ("B", "b/part.stp", [20.0, 0.0, 0.0])])),
+            ("a/part.stp", part_file("A", 2.0)),
+            ("b/part.stp", part_file("B", 3.0)),
+        ]);
+        let (_dir, mut s) = crate::server::tests::fresh();
+        let v = import_call(&mut s, json!({"path": d.path().join("asm.stp")})).unwrap();
+        let paths: Vec<&str> = v["external"].as_array().unwrap().iter().map(|x| x["path"].as_str().unwrap()).collect();
+        assert_eq!(paths, ["imports/part.step", "imports/part-2.step"]);
     }
 
     /// `import.report` reads a committed file again: what the project's
