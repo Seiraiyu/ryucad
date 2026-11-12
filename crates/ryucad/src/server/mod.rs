@@ -41,10 +41,13 @@ pub(crate) use crate::scene::{
     render_noting, render_scene, sketches,
 };
 
+mod annotation;
 mod assembly;
 mod cache;
 mod feature;
+mod git;
 mod part;
+mod pdm;
 mod route;
 mod session;
 mod view;

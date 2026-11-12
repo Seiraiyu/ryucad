@@ -140,3 +140,25 @@ fn local_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::
     }
     v
 }
+
+/// `cache.clear`.
+pub(crate) fn cache_clear(session: &mut Session) -> Result<Value> {
+    let disk = session.disk().map(|d| d.as_ref());
+    let removed = disk.map(crate::cache::Disk::clear).unwrap_or_default();
+    Ok(cache_stats(disk, Some(removed)))
+}
+
+/// `cache.login`.
+pub(crate) fn cache_login_request(session: &mut Session, token: String) -> Result<Value> {
+    crate::cache::token::store(Some(token.trim()))?;
+    cache_login(session.disk().map(|d| d.as_ref()))
+}
+
+/// `cache.logout`.
+pub(crate) fn cache_logout(session: &mut Session) -> Result<Value> {
+    crate::cache::token::store(None)?;
+    let mut v = cache_login(session.disk().map(|d| d.as_ref()))?;
+    // So a token the variable still sends isn't read as one saved.
+    v["removed"] = json!(true);
+    Ok(v)
+}

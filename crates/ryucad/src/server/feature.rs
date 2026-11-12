@@ -12,6 +12,8 @@ use crate::entity::EntityRef;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::geometry::geom_json;
+use crate::mesh;
+use crate::param;
 use crate::part::{
     check_revision, connector_text, feature, feature_id, insert_at, no_feature, order, part_id,
     part_kind, proposed, reference_texts,
@@ -2666,4 +2668,133 @@ pub(crate) fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
         })
         .collect();
     Ok(json!({"part": p.id, "features": features, "orphans": p.orphans(), "revision": p.revision}))
+}
+
+/// `param.list`.
+pub(crate) fn param_list(
+    session: &mut Session,
+    part: Option<String>,
+    scope: Option<crate::param::Scope>,
+    rev: Option<String>,
+) -> Result<Value> {
+    let (_, session) = session.at(rev.as_deref())?;
+    match param::Target::of(part, scope)? {
+        param::Target::Part(p) => param::list(session, &p),
+        param::Target::Project => param::list_project(session),
+    }
+}
+
+/// `param.set`.
+pub(crate) fn param_set(
+    session: &mut Session,
+    part: Option<String>,
+    scope: Option<crate::param::Scope>,
+    parameters: Map<String, Value>,
+    expected_revision: Option<String>,
+) -> Result<Value> {
+    match param::Target::of(part, scope)? {
+        param::Target::Part(p) => param::set(session, &p, parameters, expected_revision.as_deref()),
+        param::Target::Project => {
+            param::set_project(session, parameters, expected_revision.as_deref())
+        }
+    }
+}
+
+/// `param.delete`.
+pub(crate) fn param_delete(
+    session: &mut Session,
+    part: Option<String>,
+    scope: Option<crate::param::Scope>,
+    name: String,
+    expected_revision: Option<String>,
+) -> Result<Value> {
+    match param::Target::of(part, scope)? {
+        param::Target::Part(p) => param::delete(session, &p, &name, expected_revision.as_deref()),
+        param::Target::Project => {
+            param::delete_project(session, &name, expected_revision.as_deref())
+        }
+    }
+}
+
+/// `param.rename`.
+pub(crate) fn param_rename(
+    session: &mut Session,
+    part: Option<String>,
+    scope: Option<crate::param::Scope>,
+    from: String,
+    to: String,
+    expected_revision: Option<String>,
+) -> Result<Value> {
+    match param::Target::of(part, scope)? {
+        param::Target::Part(p) => {
+            param::rename(session, &p, &from, &to, expected_revision.as_deref())
+        }
+        param::Target::Project => {
+            param::rename_project(session, &from, &to, expected_revision.as_deref())
+        }
+    }
+}
+
+/// `sketch.get`.
+pub(crate) fn sketch_get(
+    session: &mut Session,
+    part: String,
+    sketch: String,
+    quality: Option<String>,
+    rev: Option<String>,
+) -> Result<Value> {
+    let (_, session) = session.at(rev.as_deref())?;
+    let quality = match quality {
+        Some(q) => mesh::Quality::parse(&q)?,
+        None => mesh::Quality::preferred(),
+    };
+    crate::sketch::get(session, &part, &sketch, quality)
+}
+
+/// `path.get`.
+pub(crate) fn path_get(
+    session: &mut Session,
+    part: String,
+    path: String,
+    quality: Option<String>,
+    rev: Option<String>,
+) -> Result<Value> {
+    let (_, session) = session.at(rev.as_deref())?;
+    let quality = match quality {
+        Some(q) => mesh::Quality::parse(&q)?,
+        None => mesh::Quality::preferred(),
+    };
+    crate::path::get(session, &part, &path, quality)
+}
+
+/// `sweep.get`.
+pub(crate) fn sweep_get(
+    session: &mut Session,
+    part: String,
+    feature: String,
+    quality: Option<String>,
+    rev: Option<String>,
+) -> Result<Value> {
+    let (_, session) = session.at(rev.as_deref())?;
+    let quality = match quality {
+        Some(q) => mesh::Quality::parse(&q)?,
+        None => mesh::Quality::preferred(),
+    };
+    crate::sweep_view::get(session, &part, &feature, quality)
+}
+
+/// `feature.show`.
+pub(crate) fn feature_show(
+    session: &mut Session,
+    part: String,
+    id: String,
+    rev: Option<String>,
+) -> Result<Value> {
+    let (_, session) = session.at(rev.as_deref())?;
+    let (part, fid) = (part_id(&part)?, feature_id(&id)?);
+    let p = session.project().part(&part)?;
+    let mut v = feature_report(p, &fid, feature(p, &fid)?);
+    // The revision it was read at: an edit made from it says so.
+    v["revision"] = json!(p.revision);
+    Ok(v)
 }

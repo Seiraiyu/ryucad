@@ -1,30 +1,17 @@
 //! The router: one `match` over every request, each arm a call of its
 //! handler (ryucad 27.B).
 
-use super::assembly::solve_at;
-use super::cache::{cache_login, cache_stats, cache_warm};
+use super::cache::{cache_stats, cache_warm};
 use super::feature::{
-    Given, feature_add, feature_delete, feature_edit, feature_list, feature_move, feature_report,
+    Given, feature_add, feature_delete, feature_edit, feature_list, feature_move,
 };
 use super::part::{check_format, part_create, part_delete, part_list, project_info};
-use super::session::participant_name;
-use super::view::{Look, flat_alone, framed, inspect, mesh_flat_json, mesh_get, pick_from, wanted};
+use super::{annotation, assembly, cache, feature, git, pdm, session, view};
 use super::{noted, versioned};
-use crate::activity::{self};
-use crate::config;
-use crate::diff::diff;
-use crate::doc::id::Id;
-use crate::doc::project::MANIFEST;
-use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
-use crate::live::{self, CadLive, Live, SelectMode};
-use crate::mesh;
-use crate::notify::Topic;
-use crate::param;
-use crate::part::{feature, feature_id, part_id};
+use crate::live::Live;
 use crate::proto::Request;
 use crate::session::Session;
-use crate::view::{Camera, StandardView};
 use serde_json::{Value, json};
 
 pub(crate) fn dispatch(
@@ -129,10 +116,7 @@ pub(crate) fn dispatch(
             },
             expected_revision.as_deref(),
         ),
-        Request::PropsGet { part, rev } => {
-            let (_, session) = session.at(rev.as_deref())?;
-            crate::pdm::get(session, &part)
-        }
+        Request::PropsGet { part, rev } => pdm::props_get(session, part, rev),
         Request::BomGet {
             part,
             rev,
@@ -193,85 +177,38 @@ pub(crate) fn dispatch(
             note,
             expected_revision,
             dry_run,
-        } => {
-            let who = participant_name(live, me);
-            crate::release::propose(
-                session,
-                &who,
-                &part,
-                note,
-                expected_revision.as_deref(),
-                dry_run,
-            )
-        }
+        } => pdm::release_propose(session, live, me, part, note, expected_revision, dry_run),
         Request::ReleaseObsolete {
             part,
             label,
             note,
             expected_revision,
-        } => {
-            let who = participant_name(live, me);
-            crate::release::obsolete(
-                session,
-                &who,
-                &part,
-                &label,
-                note,
-                expected_revision.as_deref(),
-            )
-        }
+        } => pdm::release_obsolete(session, live, me, part, label, note, expected_revision),
         Request::PropsSet {
             part,
             properties,
             expected_revision,
         } => crate::pdm::set(session, &part, properties, expected_revision.as_deref()),
-        Request::ParamList { part, scope, rev } => {
-            let (_, session) = session.at(rev.as_deref())?;
-            match param::Target::of(part, scope)? {
-                param::Target::Part(p) => param::list(session, &p),
-                param::Target::Project => param::list_project(session),
-            }
-        }
+        Request::ParamList { part, scope, rev } => feature::param_list(session, part, scope, rev),
         Request::ParamSet {
             part,
             scope,
             parameters,
             expected_revision,
-        } => match param::Target::of(part, scope)? {
-            param::Target::Part(p) => {
-                param::set(session, &p, parameters, expected_revision.as_deref())
-            }
-            param::Target::Project => {
-                param::set_project(session, parameters, expected_revision.as_deref())
-            }
-        },
+        } => feature::param_set(session, part, scope, parameters, expected_revision),
         Request::ParamDelete {
             part,
             scope,
             name,
             expected_revision,
-        } => match param::Target::of(part, scope)? {
-            param::Target::Part(p) => {
-                param::delete(session, &p, &name, expected_revision.as_deref())
-            }
-            param::Target::Project => {
-                param::delete_project(session, &name, expected_revision.as_deref())
-            }
-        },
+        } => feature::param_delete(session, part, scope, name, expected_revision),
         Request::ParamRename {
             part,
             scope,
             from,
             to,
             expected_revision,
-        } => match param::Target::of(part, scope)? {
-            param::Target::Part(p) => {
-                param::rename(session, &p, &from, &to, expected_revision.as_deref())
-            }
-            param::Target::Project => {
-                param::rename_project(session, &from, &to, expected_revision.as_deref())
-            }
-        },
+        } => feature::param_rename(session, part, scope, from, to, expected_revision),
         Request::SketchEdit {
             part,
             sketch,
@@ -286,40 +223,19 @@ pub(crate) fn dispatch(
             sketch,
             quality,
             rev,
-        } => {
-            let (_, session) = session.at(rev.as_deref())?;
-            let quality = match quality {
-                Some(q) => mesh::Quality::parse(&q)?,
-                None => mesh::Quality::preferred(),
-            };
-            crate::sketch::get(session, &part, &sketch, quality)
-        }
+        } => feature::sketch_get(session, part, sketch, quality, rev),
         Request::PathGet {
             part,
             path,
             quality,
             rev,
-        } => {
-            let (_, session) = session.at(rev.as_deref())?;
-            let quality = match quality {
-                Some(q) => mesh::Quality::parse(&q)?,
-                None => mesh::Quality::preferred(),
-            };
-            crate::path::get(session, &part, &path, quality)
-        }
+        } => feature::path_get(session, part, path, quality, rev),
         Request::SweepGet {
             part,
             feature,
             quality,
             rev,
-        } => {
-            let (_, session) = session.at(rev.as_deref())?;
-            let quality = match quality {
-                Some(q) => mesh::Quality::parse(&q)?,
-                None => mesh::Quality::preferred(),
-            };
-            crate::sweep_view::get(session, &part, &feature, quality)
-        }
+        } => feature::sweep_get(session, part, feature, quality, rev),
         Request::AssemblyMove {
             part,
             instance,
@@ -459,22 +375,7 @@ pub(crate) fn dispatch(
             part,
             participant,
             rev,
-        } => {
-            // A participant's appearance is of what its window shows.
-            let part = part.or_else(|| {
-                let l = live.as_deref()?;
-                Some(
-                    l.get(participant.as_deref()?)
-                        .ok()?
-                        .view
-                        .focus
-                        .as_ref()?
-                        .to_string(),
-                )
-            });
-            let (commit, s) = session.at(rev.as_deref())?;
-            noted(crate::appearance::get(s, part.as_deref()), commit)
-        }
+        } => view::appearance_get(session, live, part, participant, rev),
         Request::AppearanceSet {
             entities,
             colour,
@@ -483,16 +384,16 @@ pub(crate) fn dispatch(
             unset,
             file_styles,
             expected_revision,
-        } => {
-            let change = crate::appearance::Change {
-                colour,
-                material,
-                opacity,
-                unset,
-                file_styles,
-            };
-            crate::appearance::set(session, &entities, &change, expected_revision.as_deref())
-        }
+        } => view::appearance_set(
+            session,
+            entities,
+            colour,
+            material,
+            opacity,
+            unset,
+            file_styles,
+            expected_revision,
+        ),
         Request::AppearanceClear {
             entities,
             expected_revision,
@@ -503,33 +404,8 @@ pub(crate) fn dispatch(
             component,
             rev,
             mates,
-        } => {
-            let moves = moves
-                .into_iter()
-                .map(|m| {
-                    (
-                        m.instance,
-                        crate::assembly::Move {
-                            placement: m.placement,
-                            translate: m.translate,
-                            axis: m.axis,
-                            angle: m.angle,
-                            about: m.about,
-                        },
-                    )
-                })
-                .collect();
-            solve_at(session, &part, moves, component, rev.as_deref(), mates)
-        }
-        Request::FeatureShow { part, id, rev } => {
-            let (_, session) = session.at(rev.as_deref())?;
-            let (part, fid) = (part_id(&part)?, feature_id(&id)?);
-            let p = session.project().part(&part)?;
-            let mut v = feature_report(p, &fid, feature(p, &fid)?);
-            // The revision it was read at: an edit made from it says so.
-            v["revision"] = json!(p.revision);
-            Ok(v)
-        }
+        } => assembly::assembly_solve(session, part, moves, component, rev, mates),
+        Request::FeatureShow { part, id, rev } => feature::feature_show(session, part, id, rev),
         Request::MergeStatus {} => crate::validate::status(session),
         Request::MergePreview { rev } => crate::validate::preview(session, &rev),
         Request::WorktreeList {} => crate::worktree::list(session, live.as_deref()),
@@ -597,13 +473,7 @@ pub(crate) fn dispatch(
             feature,
             entity,
             rev,
-        } => {
-            let (commit, s) = session.at(rev.as_deref())?;
-            versioned(noted(
-                inspect(s, &part, feature.as_deref(), entity.as_deref()),
-                commit,
-            ))
-        }
+        } => view::inspect_request(session, part, feature, entity, rev),
         Request::CheckFormat {} => check_format(session),
         Request::Check {
             part,
@@ -617,128 +487,30 @@ pub(crate) fn dispatch(
             model,
             positions,
             all,
-        } => {
-            let opts = crate::diff::Options {
-                part,
-                positions,
-                all,
-            };
-            versioned(diff(
-                session,
-                from.as_deref().unwrap_or("HEAD"),
-                to.as_deref().unwrap_or("working"),
-                model,
-                &opts,
-            ))
-        }
+        } => git::diff_request(session, from, to, part, model, positions, all),
         Request::SessionHello {
             kind,
             name,
             participant,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("session.hello"))?;
-            let id = live.hello(kind, name.as_deref(), participant.as_deref())?;
-            Ok(json!({"participant": id, "session": live.list()}))
-        }
+        } => session::session_hello(live, kind, name, participant),
         // With no daemon, nobody is attached.
         Request::ParticipantList {} => {
             Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
         }
         // A daemon's connection answers this itself: it needs the socket.
-        Request::Subscribe { .. } => match live {
-            None => Err(live::no_live_session("subscribe")),
-            Some(_) => Err(Error::new(Code::Usage, "subscribe needs a connection")),
-        },
-        Request::SelectionGet { participant } => {
-            let target = match &live {
-                Some(l) => l.target(participant.as_deref())?,
-                None => None,
-            };
-            Ok(match target {
-                Some(p) => json!({"participant": p.id, "selection": p.selection}),
-                None => json!({"participant": null, "selection": []}),
-            })
-        }
+        Request::Subscribe { .. } => session::subscribe(live),
+        Request::SelectionGet { participant } => view::selection_get(live, participant),
         Request::SelectionSet { entities, mode } => {
-            let live = live.ok_or_else(|| live::no_live_session("selection.set"))?;
-            // What is being removed may no longer exist.
-            let refs = match mode {
-                SelectMode::Remove => entities
-                    .iter()
-                    .map(|s| EntityRef::parse(s))
-                    .collect::<Result<Vec<_>>>()?,
-                _ => entity::parse_all(session, &entities)?,
-            };
-            let id = live.caller(me);
-            let selection = live.select(&id, refs, mode)?;
-            Ok(json!({"participant": id, "selection": selection}))
+            view::selection_set(session, live, me, entities, mode)
         }
-        Request::CameraGet { participant } => {
-            let target = match &live {
-                Some(l) => l.target(participant.as_deref())?,
-                None => None,
-            };
-            Ok(match target {
-                Some(p) => json!({"participant": p.id, "camera": p.view.camera}),
-                None => json!({"participant": null, "camera": null}),
-            })
-        }
+        Request::CameraGet { participant } => view::camera_get(live, participant),
         Request::CameraSet {
             camera,
             view,
             fit,
             normal_to,
             part,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("camera.set"))?;
-            let id = live.caller(me);
-            // A named view restores the planes and the explode it saved,
-            // as well as its camera.
-            let mut restore = None;
-            let camera: Camera = match camera {
-                Some(_) if view.is_some() || !fit.is_empty() || normal_to.is_some() => {
-                    return Err(Error::new(
-                        Code::Usage,
-                        "give a camera, or a view and/or entities to fit, not both",
-                    ));
-                }
-                Some(c) => c.resolve(session.project().manifest.default_unit)?,
-                None if view.is_some() && normal_to.is_some() => {
-                    return Err(Error::new(
-                        Code::Usage,
-                        "give a view or a face to look normal to, not both",
-                    ));
-                }
-                None => {
-                    let me = live.get(&id)?;
-                    let (current, focus) = (me.view.camera.clone(), me.view.focus.clone());
-                    if let Some(v) = view.as_deref().filter(|v| StandardView::named(v).is_none()) {
-                        let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
-                        restore = Some(crate::views::named_saved(session, at.as_ref(), v)?);
-                    }
-                    framed(
-                        session,
-                        current.as_ref(),
-                        Look {
-                            view: view.as_deref(),
-                            normal_to: normal_to.as_deref(),
-                            part: part.as_deref(),
-                            focus: focus.as_ref(),
-                        },
-                        &fit,
-                    )?
-                }
-            };
-            live.get_mut(&id)?.view.camera = Some(camera.clone());
-            if let Some(saved) = restore {
-                live.set_sections(&id, saved.sections)?;
-                live.set_explode(&id, saved.explode)?;
-            }
-            let v = &live.get(&id)?.view;
-            Ok(
-                json!({"participant": id, "camera": camera, "sections": v.sections, "explode": v.explode}),
-            )
-        }
+        } => view::camera_set(session, live, me, camera, view, fit, normal_to, part),
         Request::ViewList { part } => crate::views::list(session, part.as_deref()),
         Request::ViewSave {
             part,
@@ -746,38 +518,16 @@ pub(crate) fn dispatch(
             camera,
             participant,
             expected_revision,
-        } => {
-            // A participant's camera comes with its planes and explode.
-            let (camera, sections, explode) = match camera {
-                Some(c) => (
-                    c.resolve(session.project().manifest.default_unit)?,
-                    Vec::new(),
-                    None,
-                ),
-                None => {
-                    let live = live.ok_or_else(|| live::no_live_session("view.save"))?;
-                    let who = live.compare_target(participant.as_deref(), me)?;
-                    let v = &live.get(&who)?.view;
-                    let camera = v.camera.clone().ok_or_else(|| {
-                        Error::new(
-                            Code::InvalidParam,
-                            format!("participant {who} has no camera to save"),
-                        )
-                        .with("participant", &who)
-                    })?;
-                    (camera, v.sections.clone(), v.explode.clone())
-                }
-            };
-            crate::views::save(
-                session,
-                &part,
-                &view,
-                &camera,
-                &sections,
-                explode.as_ref(),
-                expected_revision.as_deref(),
-            )
-        }
+        } => view::view_save(
+            session,
+            live,
+            me,
+            part,
+            view,
+            camera,
+            participant,
+            expected_revision,
+        ),
         Request::ViewDelete {
             part,
             view,
@@ -789,125 +539,24 @@ pub(crate) fn dispatch(
             to,
             expected_revision,
         } => crate::views::rename(session, &part, &from, &to, expected_revision.as_deref()),
-        Request::CompareGet { participant } => {
-            let target = match &live {
-                Some(l) => l.target(participant.as_deref())?,
-                None => None,
-            };
-            let Some(p) = target else {
-                return Ok(json!({"participant": null, "compare": null}));
-            };
-            let (id, rev) = (p.id.clone(), p.view.compare.clone());
-            // The commit the revision names now; none if it no longer
-            // names one.
-            let compare = rev.map(|rev| {
-                if crate::session::worktree_path(&rev).is_some() {
-                    return json!({"rev": rev, "commit": null});
-                }
-                let commit = crate::git::repo(session.root())
-                    .and_then(|r| r.locate(&rev))
-                    .ok()
-                    .map(|(c, _)| c);
-                json!({"rev": rev, "commit": commit})
-            });
-            Ok(json!({"participant": id, "compare": compare}))
-        }
+        Request::CompareGet { participant } => git::compare_get(session, live, participant),
         Request::CompareSet {
             rev,
             off,
             participant,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("compare.set"))?;
-            let rev = match (rev, off) {
-                (Some(r), false) => Some(r),
-                (None, true) => None,
-                _ => {
-                    return Err(Error::new(
-                        Code::Usage,
-                        "give a revision to compare with, or off, not both",
-                    ));
-                }
-            };
-            if rev.as_deref() == Some("working") {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    "a compare is against a Git revision: the working files are what it compares",
-                )
-                .with("rev", "working"));
-            }
-            let id = live.compare_target(participant.as_deref(), me)?;
-            // Another worktree is named by its project folder, however the
-            // caller named it.
-            let rev = match rev.as_deref().map(|r| session.worktree_files(r)) {
-                Some(found) => match found? {
-                    Some((w, ..)) => {
-                        Some(format!("{}{}", crate::session::WORKTREE, w.root.display()))
-                    }
-                    None => rev,
-                },
-                None => None,
-            };
-            // Refused unless the revision has the project; it is then
-            // ready for the diff and meshes the window asks for next.
-            let commit = match &rev {
-                Some(r) => session.at(Some(r))?.0,
-                None => None,
-            };
-            live.set_compare(&id, rev.clone())?;
-            let compare = rev.map(|rev| json!({"rev": rev, "commit": commit}));
-            Ok(json!({"participant": id, "compare": compare}))
-        }
+        } => git::compare_set(session, live, me, rev, off, participant),
         Request::ViewFocus {
             part,
             project,
             participant,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("view.focus"))?;
-            let part = match (part, project) {
-                (Some(p), false) => {
-                    let id = part_id(&p)?;
-                    session.project().part(&id)?;
-                    Some(Some(id))
-                }
-                (None, true) => Some(None),
-                (None, false) => None,
-                (Some(_), true) => {
-                    return Err(Error::new(
-                        Code::Usage,
-                        "give a part to show, or project, not both",
-                    ));
-                }
-            };
-            let id = live.compare_target(participant.as_deref(), me)?;
-            if let Some(focus) = part {
-                live.set_focus(&id, focus)?;
-            }
-            let focus = live.get(&id)?.view.focus.clone();
-            let shows = match &focus {
-                Some(p) => vec![p.clone()],
-                None => crate::assembly::shown_parts(session.project()),
-            };
-            Ok(json!({"participant": id, "focus": focus, "shows": shows}))
-        }
+        } => view::view_focus(session, live, me, part, project, participant),
         Request::VisibilitySet {
             hide,
             show,
             isolate,
             all,
             participant,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("visibility.set"))?;
-            let id = live.compare_target(participant.as_deref(), me)?;
-            let change = crate::visibility::Change {
-                all,
-                isolate,
-                show,
-                hide,
-            };
-            let hidden = crate::visibility::apply(session, &live.get(&id)?.view.hidden, &change)?;
-            live.set_hidden(&id, hidden)?;
-            Ok(json!({"participant": id, "hidden": live.get(&id)?.view.hidden}))
-        }
+        } => view::visibility_set(session, live, me, hide, show, isolate, all, participant),
         Request::DrawingList { part } => crate::drawing::request::list(session, part.as_deref()),
         Request::DrawingCreate {
             part,
@@ -1036,21 +685,13 @@ pub(crate) fn dispatch(
             &steps,
             expected_revision.as_deref(),
         ),
-        Request::ParticipantMode { mode } => {
-            let live = live.ok_or_else(|| live::no_live_session("participant.mode"))?;
-            let id = live.caller(me);
-            live.set_mode(&id, mode)?;
-            Ok(json!({"participant": id, "mode": mode}))
-        }
+        Request::ParticipantMode { mode } => session::participant_mode(live, me, mode),
         Request::AnnotationApply {
             id,
             keep_open,
             expect,
             author,
-        } => {
-            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
-            crate::annotation::propose::apply(session, &id, keep_open, expect.as_deref(), &by)
-        }
+        } => annotation::annotation_apply(session, live, me, id, keep_open, expect, author),
         Request::AnnotationCreate {
             pins,
             comment,
@@ -1059,55 +700,9 @@ pub(crate) fn dispatch(
             marks,
             view: named,
             author,
-        } => {
-            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
-            let unit = session.project().manifest.default_unit;
-            let view = match (camera, with_view, named) {
-                (Some(c), false, None) => Some(c.resolve(unit)?.to_view_file()),
-                (None, false, Some(v)) => {
-                    let part = marks
-                        .as_ref()
-                        .map(|m| m.part.clone())
-                        .or_else(|| {
-                            pins.first().and_then(|p| {
-                                let r = p.reference.clone().or(p.part.clone())?;
-                                Some(r.split('/').next().unwrap_or_default().to_owned())
-                            })
-                        })
-                        .ok_or_else(|| {
-                            Error::new(
-                                Code::Usage,
-                                "a named view is of the marks' part: give marks or a pin",
-                            )
-                        })?;
-                    Some(crate::views::view_file(session, &part_id(&part)?, &v)?)
-                }
-                (None, true, None) => {
-                    let l = live
-                        .as_deref()
-                        .ok_or_else(|| live::no_live_session("annotation.create --view"))?;
-                    let camera = me
-                        .and_then(|m| l.get(m).ok())
-                        .and_then(|p| p.view.camera.clone())
-                        .ok_or_else(|| {
-                            Error::new(
-                                Code::InvalidParam,
-                                "your participant has no camera to keep (camera.set first)",
-                            )
-                        })?;
-                    Some(camera.to_view_file())
-                }
-                (None, false, None) => None,
-                _ => {
-                    return Err(Error::new(
-                        Code::Usage,
-                        "give one of camera, --view and --of",
-                    ));
-                }
-            };
-            let from = pick_from(live.as_deref(), me);
-            crate::annotation::create(session, by, &pins, &comment, view, marks.as_ref(), &from)
-        }
+        } => annotation::annotation_create(
+            session, live, me, pins, comment, camera, with_view, marks, named, author,
+        ),
         Request::AnnotationList {
             status,
             part,
@@ -1120,32 +715,22 @@ pub(crate) fn dispatch(
             text,
             expect,
             author,
-        } => {
-            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
-            crate::annotation::reply(session, &id, &text, expect.as_deref(), by)
-        }
+        } => annotation::annotation_reply(session, live, me, id, text, expect, author),
         Request::AnnotationClaim { id, expect, author } => {
-            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
-            crate::annotation::claim(session, &id, expect.as_deref(), by)
+            annotation::annotation_claim(session, live, me, id, expect, author)
         }
         Request::AnnotationResolve {
             id,
             note,
             expect,
             author,
-        } => {
-            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
-            crate::annotation::close(session, &id, None, note.as_deref(), expect.as_deref(), by)
-        }
+        } => annotation::annotation_resolve(session, live, me, id, note, expect, author),
         Request::AnnotationReject {
             id,
             reason,
             expect,
             author,
-        } => {
-            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
-            crate::annotation::close(session, &id, Some(&reason), None, expect.as_deref(), by)
-        }
+        } => annotation::annotation_reject(session, live, me, id, reason, expect, author),
         Request::AnnotationReopen { id, expect, .. } => {
             crate::annotation::reopen(session, &id, expect.as_deref())
         }
@@ -1157,30 +742,11 @@ pub(crate) fn dispatch(
             no_marks,
             expect,
             author,
-        } => {
-            if no_marks && marks.is_some() {
-                return Err(Error::new(
-                    Code::Usage,
-                    "--no-marks takes them away: give no marks with it",
-                ));
-            }
-            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
-            let from = pick_from(live.as_deref(), me);
-            crate::annotation::edit(
-                session,
-                &id,
-                comment.as_deref(),
-                pins.as_deref(),
-                marks.as_ref(),
-                no_marks,
-                &from,
-                expect.as_deref(),
-                by,
-            )
-        }
+        } => annotation::annotation_edit(
+            session, live, me, id, comment, pins, marks, no_marks, expect, author,
+        ),
         Request::AnnotationDelete { id, expect, author } => {
-            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
-            crate::annotation::delete(session, &id, expect.as_deref(), by)
+            annotation::annotation_delete(session, live, me, id, expect, author)
         }
         Request::AnnotationPropose {
             request,
@@ -1189,131 +755,38 @@ pub(crate) fn dispatch(
             rough,
             author,
         } => {
-            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
-            crate::annotation::propose::propose(
-                session,
-                live,
-                me,
-                crate::annotation::propose::Ask {
-                    request,
-                    comment,
-                    pins,
-                    rough,
-                    by,
-                },
-            )
+            annotation::annotation_propose(session, live, me, request, comment, pins, rough, author)
         }
         Request::ExplodeDelete {
             part,
             explode,
             expected_revision,
-        } => {
-            let v = crate::explode::delete(session, &part, &explode, expected_revision.as_deref())?;
-            // No window goes on showing it.
-            if let Some(l) = live {
-                let showing: Vec<String> = l
-                    .participants()
-                    .filter(|p| {
-                        p.view.explode.as_ref().is_some_and(|e| {
-                            e.part.as_str() == v["part"] && e.explode.as_str() == v["explode"]
-                        })
-                    })
-                    .map(|p| p.id.clone())
-                    .collect();
-                for id in showing {
-                    l.set_explode(&id, None)?;
-                }
-            }
-            Ok(v)
-        }
+        } => assembly::explode_delete(session, live, part, explode, expected_revision),
         Request::ExplodeShow {
             part,
             explode,
             fraction,
             off,
             participant,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("explode.show"))?;
-            let id = live.compare_target(participant.as_deref(), me)?;
-            let (now, focus) = {
-                let v = &live.get(&id)?.view;
-                (v.explode.clone(), v.focus.clone())
-            };
-            let ask = crate::explode::ShowAsk {
-                part,
-                explode,
-                fraction,
-                off,
-            };
-            let shown = crate::explode::show(session, now.as_ref(), focus.as_ref(), &ask)?;
-            live.set_explode(&id, shown.clone())?;
-            Ok(crate::explode::shown_json(session, &id, shown.as_ref()))
-        }
+        } => assembly::explode_show(session, live, me, part, explode, fraction, off, participant),
         // Where `section.set` would cut: `participant`, else the one
         // human, else the caller.
-        Request::SectionGet { participant } => match live {
-            Some(l) => {
-                let id = l.view_target(participant.as_deref(), me)?;
-                Ok(json!({"participant": id, "sections": l.get(&id)?.view.sections}))
-            }
-            None => Ok(json!({"participant": null, "sections": []})),
-        },
+        Request::SectionGet { participant } => view::section_get(live, me, participant),
         Request::SectionSet {
             planes,
             add,
             off,
             participant,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("section.set"))?;
-            if off && (add || !planes.is_empty()) {
-                return Err(Error::new(
-                    Code::Usage,
-                    "give planes to cut with, or off, not both",
-                ));
-            }
-            if !off && planes.is_empty() {
-                return Err(Error::new(
-                    Code::Usage,
-                    "give a plane to cut with, or off to cut with none",
-                ));
-            }
-            let id = live.compare_target(participant.as_deref(), me)?;
-            let new = crate::section::resolve_all(session, &planes, "/planes")?;
-            let sections = crate::section::apply(&live.get(&id)?.view.sections, new, add)?;
-            live.set_sections(&id, sections)?;
-            Ok(json!({"participant": id, "sections": live.get(&id)?.view.sections}))
-        }
+        } => view::section_set(session, live, me, planes, add, off, participant),
         Request::HighlightSet {
             entities,
             style,
             label,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("highlight.set"))?;
-            let refs = entity::parse_all(session, &entities)?;
-            let id = live.caller(me);
-            let highlights = live.highlight(&id, style, label, refs)?;
-            Ok(json!({"participant": id, "highlights": highlights}))
-        }
-        Request::HighlightClear { style } => {
-            let live = live.ok_or_else(|| live::no_live_session("highlight.clear"))?;
-            let id = live.caller(me);
-            let highlights = live.clear_highlights(&id, style)?;
-            Ok(json!({"participant": id, "highlights": highlights}))
-        }
-        Request::ActivityLog { limit, before } => {
-            let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
-            Ok(json!({ "entries": entries }))
-        }
-        Request::Undo { entry } => {
-            let live = live.ok_or_else(|| live::no_live_session("undo"))?;
-            let who = live.caller(me);
-            activity::undo(live, session, &who, entry, false)
-        }
-        Request::Redo { entry } => {
-            let live = live.ok_or_else(|| live::no_live_session("redo"))?;
-            let who = live.caller(me);
-            activity::undo(live, session, &who, entry, true)
-        }
+        } => view::highlight_set(session, live, me, entities, style, label),
+        Request::HighlightClear { style } => view::highlight_clear(live, me, style),
+        Request::ActivityLog { limit, before } => session::activity_log(live, limit, before),
+        Request::Undo { entry } => session::undo(session, live, me, entry),
+        Request::Redo { entry } => session::redo(session, live, me, entry),
         Request::MeshGet {
             part,
             feature,
@@ -1322,10 +795,7 @@ pub(crate) fn dispatch(
             transfer: _,
             rev,
             flat: Some(solid),
-        } => {
-            flat_alone(feature.as_deref(), &features, quality.as_deref())?;
-            versioned(mesh_flat_json(session, &part, &solid, rev.as_deref()))
-        }
+        } => view::mesh_get_flat(session, part, feature, features, quality, rev, solid),
         Request::MeshGet {
             part,
             feature,
@@ -1334,14 +804,7 @@ pub(crate) fn dispatch(
             transfer: _,
             rev,
             flat: None,
-        } => {
-            let (commit, s) = session.at(rev.as_deref())?;
-            let only = wanted(feature.as_deref(), &features);
-            versioned(noted(
-                mesh_get(s, &part, only.as_ref(), quality.as_deref()),
-                commit,
-            ))
-        }
+        } => view::mesh_get_request(session, part, feature, features, quality, rev),
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
@@ -1354,131 +817,26 @@ pub(crate) fn dispatch(
             "drawings render and export with bytes",
         )),
         // The session is current: doctor reuses its rebuilds (#125).
-        Request::Doctor {} => {
-            let root = session.root().to_owned();
-            crate::doctor::report_in(&mut crate::doctor::Builds::live(&root, session))
-        }
+        Request::Doctor {} => session::doctor(session),
         Request::DoctorRepair { repairs, params } => {
-            let params = crate::doctor::Params::from_json(&params)?;
-            let r = crate::doctor::repair_with(
-                session.root(),
-                &repairs,
-                &params,
-                session.deps_cache.clone(),
-            )?;
-            session.reload()?;
-            Ok(r)
+            session::doctor_repair(session, repairs, params)
         }
-        Request::HistoryLog { part, limit } => {
-            let part = part.as_deref().map(part_id).transpose()?;
-            if let Some(p) = &part {
-                session.project().part(p)?;
-            }
-            let files = session.snapshot();
-            crate::git::history(
-                session.root(),
-                &files,
-                part.as_ref().map(Id::as_str),
-                limit.unwrap_or(50),
-            )
-        }
+        Request::HistoryLog { part, limit } => session::history_log(session, part, limit),
         Request::CacheStats {} => Ok(cache_stats(session.disk().map(|d| d.as_ref()), None)),
-        Request::CacheClear {} => {
-            let disk = session.disk().map(|d| d.as_ref());
-            let removed = disk.map(crate::cache::Disk::clear).unwrap_or_default();
-            Ok(cache_stats(disk, Some(removed)))
-        }
-        Request::CacheLogin { token } => {
-            crate::cache::token::store(Some(token.trim()))?;
-            cache_login(session.disk().map(|d| d.as_ref()))
-        }
-        Request::CacheLogout {} => {
-            crate::cache::token::store(None)?;
-            let mut v = cache_login(session.disk().map(|d| d.as_ref()))?;
-            // So a token the variable still sends isn't read as one saved.
-            v["removed"] = json!(true);
-            Ok(v)
-        }
+        Request::CacheClear {} => cache::cache_clear(session),
+        Request::CacheLogin { token } => cache::cache_login_request(session, token),
+        Request::CacheLogout {} => cache::cache_logout(session),
         Request::CacheWarm { part } => cache_warm(session, part.as_deref()),
-        Request::ConfigGet { key, scope } => {
-            let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
-            let mut v = config::get(&session.project().manifest, key.as_deref(), scope)?;
-            v["project_revision"] = json!(session.project_revision()?);
-            Ok(v)
-        }
+        Request::ConfigGet { key, scope } => session::config_get(session, key, scope),
         Request::ConfigSet {
             key,
             value,
             scope,
             expected_revision,
-        } => {
-            let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
-            let v = match config::validate(&key, &value, scope)? {
-                config::Scope::Project => {
-                    session.check_project_revision(expected_revision.as_deref())?;
-                    // The rest of the manifest (the project's ID) stays.
-                    let m = config::set_project(&session.project().manifest, &key, &value);
-                    session.write_json(&session.root().join(MANIFEST), &m.to_json())?;
-                    session.reload()?;
-                    let mut v = config::get(&m, Some(&key), None)?;
-                    v["project_revision"] = json!(session.project_revision()?);
-                    v
-                }
-                config::Scope::User => config::set_user(&key, value)?,
-            };
-            if key == "cache.max_bytes"
-                && let Some(d) = session.disk()
-            {
-                d.set_max_bytes(
-                    v["value"]
-                        .as_u64()
-                        .unwrap_or(crate::cache::DEFAULT_MAX_BYTES),
-                );
-                d.trim_in_background();
-            }
-            // A daemon's cache takes the shared cache as it is now set.
-            if key.starts_with("cache.remote")
-                && let Some(d) = session.disk()
-            {
-                d.set_remote(crate::cache::remote_preference(&d.identity()));
-            }
-            if let Some(live) = live {
-                if key == "daemon.poll_ms" {
-                    live.poll_ms = v["value"].as_u64().unwrap_or(250);
-                }
-                let note = json!({"key": key, "scope": v["scope"], "value": v["value"],
-                                  "default": v["default"]});
-                live.hub.send(Topic::Project, "config.changed", &note);
-            }
-            Ok(v)
-        }
-        Request::AppOpen { participant } => {
-            let live = live.ok_or_else(|| live::no_live_session("app.open"))?;
-            let asked: Vec<String> = match participant {
-                Some(id) => {
-                    let p = live.get(&id)?;
-                    if p.kind != live::Kind::Human {
-                        return Err(Error::new(
-                            Code::InvalidParam,
-                            format!("participant {id} is not an app window"),
-                        )
-                        .with("participant", id));
-                    }
-                    vec![id]
-                }
-                None => live.humans().map(|p| p.id.clone()).collect(),
-            };
-            for id in &asked {
-                live.hub.send_to(id, "app.open", &json!({}));
-            }
-            Ok(json!({ "asked": asked }))
-        }
+        } => session::config_set(session, live, key, value, scope, expected_revision),
+        Request::AppOpen { participant } => session::app_open(live, participant),
         Request::ActivitySet { status, entities } => {
-            let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
-            let refs = entity::parse_all(session, &entities)?;
-            let id = live.caller(me);
-            live.set_status(&id, &status, refs)?;
-            Ok(json!({"participant": id, "status": live.get(&id)?.status}))
+            session::activity_set(session, live, me, status, entities)
         }
     }
 }

@@ -1,17 +1,23 @@
 //! Requests that look at the model: meshes, inspect, framing a camera, flat patterns.
 
+use super::{noted, versioned};
 use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
 use crate::geometry::normal_to_face;
+use crate::live;
+use crate::live::CadLive;
 use crate::live::Live;
+use crate::live::SelectMode;
+use crate::live::Style;
 use crate::mesh;
 use crate::part::{feature, feature_id, part_id, part_kind};
 use crate::proto::Answer;
 use crate::scene::{flat_meshed, meshes, model_points, occurrence_meshes};
 use crate::session::Session;
 use crate::solid::Solids;
+use crate::view::CameraArg;
 use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -747,4 +753,381 @@ pub(crate) fn inspect(
         v[x.type_name()] = crate::surface::report(&pid, x);
     }
     Ok(v)
+}
+
+/// `appearance.get`.
+pub(crate) fn appearance_get(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    part: Option<String>,
+    participant: Option<String>,
+    rev: Option<String>,
+) -> Result<Value> {
+    // A participant's appearance is of what its window shows.
+    let part = part.or_else(|| {
+        let l = live.as_deref()?;
+        Some(
+            l.get(participant.as_deref()?)
+                .ok()?
+                .view
+                .focus
+                .as_ref()?
+                .to_string(),
+        )
+    });
+    let (commit, s) = session.at(rev.as_deref())?;
+    noted(crate::appearance::get(s, part.as_deref()), commit)
+}
+
+/// `appearance.set`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn appearance_set(
+    session: &mut Session,
+    entities: Vec<String>,
+    colour: Option<String>,
+    material: bool,
+    opacity: Option<f64>,
+    unset: Vec<String>,
+    file_styles: Option<bool>,
+    expected_revision: Option<String>,
+) -> Result<Value> {
+    let change = crate::appearance::Change {
+        colour,
+        material,
+        opacity,
+        unset,
+        file_styles,
+    };
+    crate::appearance::set(session, &entities, &change, expected_revision.as_deref())
+}
+
+/// `inspect`.
+pub(crate) fn inspect_request(
+    session: &mut Session,
+    part: String,
+    feature: Option<String>,
+    entity: Option<String>,
+    rev: Option<String>,
+) -> Result<Value> {
+    let (commit, s) = session.at(rev.as_deref())?;
+    versioned(noted(
+        inspect(s, &part, feature.as_deref(), entity.as_deref()),
+        commit,
+    ))
+}
+
+/// `selection.get`.
+pub(crate) fn selection_get(live: Option<&mut Live>, participant: Option<String>) -> Result<Value> {
+    let target = match &live {
+        Some(l) => l.target(participant.as_deref())?,
+        None => None,
+    };
+    Ok(match target {
+        Some(p) => json!({"participant": p.id, "selection": p.selection}),
+        None => json!({"participant": null, "selection": []}),
+    })
+}
+
+/// `selection.set`.
+pub(crate) fn selection_set(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    entities: Vec<String>,
+    mode: SelectMode,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("selection.set"))?;
+    // What is being removed may no longer exist.
+    let refs = match mode {
+        SelectMode::Remove => entities
+            .iter()
+            .map(|s| EntityRef::parse(s))
+            .collect::<Result<Vec<_>>>()?,
+        _ => entity::parse_all(session, &entities)?,
+    };
+    let id = live.caller(me);
+    let selection = live.select(&id, refs, mode)?;
+    Ok(json!({"participant": id, "selection": selection}))
+}
+
+/// `camera.get`.
+pub(crate) fn camera_get(live: Option<&mut Live>, participant: Option<String>) -> Result<Value> {
+    let target = match &live {
+        Some(l) => l.target(participant.as_deref())?,
+        None => None,
+    };
+    Ok(match target {
+        Some(p) => json!({"participant": p.id, "camera": p.view.camera}),
+        None => json!({"participant": null, "camera": null}),
+    })
+}
+
+/// `camera.set`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn camera_set(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    camera: Option<CameraArg>,
+    view: Option<String>,
+    fit: Vec<String>,
+    normal_to: Option<String>,
+    part: Option<String>,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("camera.set"))?;
+    let id = live.caller(me);
+    // A named view restores the planes and the explode it saved,
+    // as well as its camera.
+    let mut restore = None;
+    let camera: Camera = match camera {
+        Some(_) if view.is_some() || !fit.is_empty() || normal_to.is_some() => {
+            return Err(Error::new(
+                Code::Usage,
+                "give a camera, or a view and/or entities to fit, not both",
+            ));
+        }
+        Some(c) => c.resolve(session.project().manifest.default_unit)?,
+        None if view.is_some() && normal_to.is_some() => {
+            return Err(Error::new(
+                Code::Usage,
+                "give a view or a face to look normal to, not both",
+            ));
+        }
+        None => {
+            let me = live.get(&id)?;
+            let (current, focus) = (me.view.camera.clone(), me.view.focus.clone());
+            if let Some(v) = view.as_deref().filter(|v| StandardView::named(v).is_none()) {
+                let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
+                restore = Some(crate::views::named_saved(session, at.as_ref(), v)?);
+            }
+            framed(
+                session,
+                current.as_ref(),
+                Look {
+                    view: view.as_deref(),
+                    normal_to: normal_to.as_deref(),
+                    part: part.as_deref(),
+                    focus: focus.as_ref(),
+                },
+                &fit,
+            )?
+        }
+    };
+    live.get_mut(&id)?.view.camera = Some(camera.clone());
+    if let Some(saved) = restore {
+        live.set_sections(&id, saved.sections)?;
+        live.set_explode(&id, saved.explode)?;
+    }
+    let v = &live.get(&id)?.view;
+    Ok(json!({"participant": id, "camera": camera, "sections": v.sections, "explode": v.explode}))
+}
+
+/// `view.save`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn view_save(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    part: String,
+    view: String,
+    camera: Option<CameraArg>,
+    participant: Option<String>,
+    expected_revision: Option<String>,
+) -> Result<Value> {
+    // A participant's camera comes with its planes and explode.
+    let (camera, sections, explode) = match camera {
+        Some(c) => (
+            c.resolve(session.project().manifest.default_unit)?,
+            Vec::new(),
+            None,
+        ),
+        None => {
+            let live = live.ok_or_else(|| live::no_live_session("view.save"))?;
+            let who = live.compare_target(participant.as_deref(), me)?;
+            let v = &live.get(&who)?.view;
+            let camera = v.camera.clone().ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    format!("participant {who} has no camera to save"),
+                )
+                .with("participant", &who)
+            })?;
+            (camera, v.sections.clone(), v.explode.clone())
+        }
+    };
+    crate::views::save(
+        session,
+        &part,
+        &view,
+        &camera,
+        &sections,
+        explode.as_ref(),
+        expected_revision.as_deref(),
+    )
+}
+
+/// `view.focus`.
+pub(crate) fn view_focus(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    part: Option<String>,
+    project: bool,
+    participant: Option<String>,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("view.focus"))?;
+    let part = match (part, project) {
+        (Some(p), false) => {
+            let id = part_id(&p)?;
+            session.project().part(&id)?;
+            Some(Some(id))
+        }
+        (None, true) => Some(None),
+        (None, false) => None,
+        (Some(_), true) => {
+            return Err(Error::new(
+                Code::Usage,
+                "give a part to show, or project, not both",
+            ));
+        }
+    };
+    let id = live.compare_target(participant.as_deref(), me)?;
+    if let Some(focus) = part {
+        live.set_focus(&id, focus)?;
+    }
+    let focus = live.get(&id)?.view.focus.clone();
+    let shows = match &focus {
+        Some(p) => vec![p.clone()],
+        None => crate::assembly::shown_parts(session.project()),
+    };
+    Ok(json!({"participant": id, "focus": focus, "shows": shows}))
+}
+
+/// `visibility.set`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn visibility_set(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    hide: Vec<String>,
+    show: Vec<String>,
+    isolate: Vec<String>,
+    all: bool,
+    participant: Option<String>,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("visibility.set"))?;
+    let id = live.compare_target(participant.as_deref(), me)?;
+    let change = crate::visibility::Change {
+        all,
+        isolate,
+        show,
+        hide,
+    };
+    let hidden = crate::visibility::apply(session, &live.get(&id)?.view.hidden, &change)?;
+    live.set_hidden(&id, hidden)?;
+    Ok(json!({"participant": id, "hidden": live.get(&id)?.view.hidden}))
+}
+
+/// `section.get`.
+pub(crate) fn section_get(
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    participant: Option<String>,
+) -> Result<Value> {
+    match live {
+        Some(l) => {
+            let id = l.view_target(participant.as_deref(), me)?;
+            Ok(json!({"participant": id, "sections": l.get(&id)?.view.sections}))
+        }
+        None => Ok(json!({"participant": null, "sections": []})),
+    }
+}
+
+/// `section.set`.
+pub(crate) fn section_set(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    planes: Vec<crate::section::PlaneArg>,
+    add: bool,
+    off: bool,
+    participant: Option<String>,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("section.set"))?;
+    if off && (add || !planes.is_empty()) {
+        return Err(Error::new(
+            Code::Usage,
+            "give planes to cut with, or off, not both",
+        ));
+    }
+    if !off && planes.is_empty() {
+        return Err(Error::new(
+            Code::Usage,
+            "give a plane to cut with, or off to cut with none",
+        ));
+    }
+    let id = live.compare_target(participant.as_deref(), me)?;
+    let new = crate::section::resolve_all(session, &planes, "/planes")?;
+    let sections = crate::section::apply(&live.get(&id)?.view.sections, new, add)?;
+    live.set_sections(&id, sections)?;
+    Ok(json!({"participant": id, "sections": live.get(&id)?.view.sections}))
+}
+
+/// `highlight.set`.
+pub(crate) fn highlight_set(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    entities: Vec<String>,
+    style: Style,
+    label: Option<String>,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("highlight.set"))?;
+    let refs = entity::parse_all(session, &entities)?;
+    let id = live.caller(me);
+    let highlights = live.highlight(&id, style, label, refs)?;
+    Ok(json!({"participant": id, "highlights": highlights}))
+}
+
+/// `highlight.clear`.
+pub(crate) fn highlight_clear(
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    style: Option<Style>,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("highlight.clear"))?;
+    let id = live.caller(me);
+    let highlights = live.clear_highlights(&id, style)?;
+    Ok(json!({"participant": id, "highlights": highlights}))
+}
+
+/// `mesh.get` with `flat`: a sheet metal solid's flat pattern.
+pub(crate) fn mesh_get_flat(
+    session: &mut Session,
+    part: String,
+    feature: Option<String>,
+    features: Vec<String>,
+    quality: Option<String>,
+    rev: Option<String>,
+    solid: String,
+) -> Result<Value> {
+    flat_alone(feature.as_deref(), &features, quality.as_deref())?;
+    versioned(mesh_flat_json(session, &part, &solid, rev.as_deref()))
+}
+
+/// `mesh.get`: a part's or an assembly's display meshes.
+pub(crate) fn mesh_get_request(
+    session: &mut Session,
+    part: String,
+    feature: Option<String>,
+    features: Vec<String>,
+    quality: Option<String>,
+    rev: Option<String>,
+) -> Result<Value> {
+    let (commit, s) = session.at(rev.as_deref())?;
+    let only = wanted(feature.as_deref(), &features);
+    versioned(noted(
+        mesh_get(s, &part, only.as_ref(), quality.as_deref()),
+        commit,
+    ))
 }
