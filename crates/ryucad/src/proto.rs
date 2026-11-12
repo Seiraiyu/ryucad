@@ -1508,6 +1508,9 @@ pub enum Request {
         /// STEP: `false` writes no styles (design 448).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         appearance: Option<bool>,
+        /// STEP: `false` writes no materials or properties (design 448).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        properties: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         solid: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

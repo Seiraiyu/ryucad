@@ -127,6 +127,9 @@ pub struct Ask {
     pub skip_failing: bool,
     /// STEP: write the appearance as styles (true by default; design 448).
     pub appearance: Option<bool>,
+    /// STEP: write materials and properties (true by default; design 448,
+    /// plan 24.C).
+    pub properties: Option<bool>,
     /// DXF: the sheet metal solid (the part's one unless named), whether
     /// to write bend notes (true), the side face held still and allowance
     /// overrides, as `flat.get` takes them.
@@ -557,6 +560,7 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
 /// ryustep's version, which this doesn't change.
 pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<Answer> {
     let appearance = ask.appearance;
+    let properties = ask.properties;
     let format = format(&ask)?;
     let options = Options::read(format, &ask, session.project().manifest.default_unit)?;
     let out = ask
@@ -689,25 +693,41 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 ..WriteOptions::default()
             };
             let (model, passed) = step_parts(&walk)?;
-            let (paints, unpainted) = if appearance == Some(false) {
-                (ryustep::Paints::default(), None)
-            } else {
+            let (paints, unpainted, data, unwritten) = {
                 let sess = match &looks_at {
                     Some(c) => s.at(Some(c))?.1,
                     None => &mut *s,
                 };
-                let (p, u) = step_paints(sess, &walk);
-                (p, Some(u))
+                let (paints, unpainted) = if appearance == Some(false) {
+                    (ryustep::Paints::default(), None)
+                } else {
+                    let (p, u) = step_paints(sess, &walk);
+                    (p, Some(u))
+                };
+                let (data, unwritten) = if properties == Some(false) {
+                    (ryustep::PartData::default(), None)
+                } else {
+                    let (d, u) = step_data(sess, &walk);
+                    (d, Some(u))
+                };
+                (paints, unpainted, data, unwritten)
             };
-            let report = ryustep::write_styled(&model, &passed, &paints, &opts)
+            let report = ryustep::write_with_data(&model, &passed, &paints, &data, &opts)
                 .map_err(|e| walk.unwritable(e))?;
             let off = if appearance == Some(false) {
                 Some(appearance_left_out(s, &walk)?)
             } else {
                 None
             };
-            let (transfer, omitted) =
-                step_transfer(s, &walk, &report, &model, unpainted.as_ref(), off)?;
+            let (transfer, omitted) = step_transfer(
+                s,
+                &walk,
+                &report,
+                &model,
+                unpainted.as_ref(),
+                unwritten.as_ref(),
+                off,
+            )?;
             result["transfer"] = transfer;
             if !omitted.is_empty() {
                 warn(&mut result, omitted);
@@ -1801,6 +1821,101 @@ fn step_paints(sess: &mut Session, walk: &Walk) -> (ryustep::Paints, Unpainted) 
     (out, un)
 }
 
+/// What an export's materials and properties leave out (design 448,
+/// plan 24.C), counted for its transfer report.
+#[derive(Debug, Default, PartialEq)]
+struct Unwritten {
+    /// Values STEP can't hold: neither text, number nor boolean.
+    values: usize,
+    /// Materials of another project's parts, written without a density:
+    /// their library is theirs.
+    foreign_densities: usize,
+}
+
+/// A declared quantity's text as a length or an angle in SI; any other
+/// dimension, or text that doesn't read, as the text.
+fn quantity_value(text: &str, dim: crate::units::Dim, unit: units::Unit) -> ryustep::DataValue {
+    use crate::units::Dim;
+    use ryustep::DataValue;
+    let si = crate::units::Quantity::parse(text, unit)
+        .ok()
+        .filter(|q| q.dim() == dim)
+        .map(|q| q.si())
+        .or_else(|| {
+            crate::expr::Expr::parse(text)
+                .and_then(|e| e.eval(&crate::expr::no_parameters))
+                .ok()
+                .filter(|v| v.dim == dim)
+                .map(|v| v.x)
+        });
+    match si {
+        Some(x) if dim == Dim::LENGTH => DataValue::Length(x),
+        Some(x) if dim == Dim::ANGLE => DataValue::Angle(x),
+        _ => DataValue::Text(text.to_owned()),
+    }
+}
+
+/// Each product's material, with its library's density, and its set
+/// properties but those STEP's product carries, from the files `sess`
+/// reads (the export's, or a label's official commit's).
+fn step_data(sess: &mut Session, walk: &Walk) -> (ryustep::PartData, Unwritten) {
+    use ryupdm::config::Type;
+    use ryustep::{AttributeData, DataValue, MaterialData, ProductData};
+    let unit = sess.project().manifest.default_unit;
+    let config = ryupdm::config::Config::read(&sess.files()).unwrap_or_default();
+    let lib = crate::materials::library(sess).unwrap_or_default();
+    let mut out = ryustep::PartData::default();
+    let mut u = Unwritten::default();
+    for (k, p) in walk.scene.products.iter().enumerate() {
+        let props = properties_of(sess, &p.part, &p.rev, walk.pin.as_ref().filter(|_| k == 0));
+        let foreign = matches!(p.rev, Rev::Foreign { .. });
+        let material = props
+            .values
+            .get("material")
+            .and_then(Value::as_str)
+            .map(|name| MaterialData {
+                name: name.to_owned(),
+                density: (!foreign)
+                    .then(|| lib.materials.get(name).map(|m| m.density.si()))
+                    .flatten(),
+            });
+        if foreign && material.is_some() {
+            u.foreign_densities += 1;
+        }
+        let mut attributes = Vec::new();
+        for (key, v) in &props.values {
+            if WRITTEN_PROPERTIES.contains(&key.as_str()) || key == "material" || v.is_null() {
+                continue;
+            }
+            let value = match (config.decl(key).map(|d| d.ty), v) {
+                (Some(Type::Quantity(dim)), Value::String(t)) => quantity_value(t, dim, unit),
+                (_, Value::String(t)) => DataValue::Text(t.clone()),
+                (_, Value::Bool(b)) => DataValue::Boolean(*b),
+                (_, Value::Number(n)) => match n.as_i64() {
+                    Some(i) => DataValue::Integer(i),
+                    None => DataValue::Number(n.as_f64().unwrap_or_default()),
+                },
+                _ => {
+                    u.values += 1;
+                    continue;
+                }
+            };
+            attributes.push(AttributeData {
+                name: key.clone(),
+                value,
+            });
+        }
+        if material.is_some() || !attributes.is_empty() {
+            out.products.push(ProductData {
+                product: k,
+                material,
+                attributes,
+            });
+        }
+    }
+    (out, u)
+}
+
 /// Solid `sol` of product `k`'s look as its part draws it; `plain` for
 /// none.
 fn look_in<'a>(
@@ -1913,6 +2028,7 @@ fn step_transfer(
     w: &ryustep::Written,
     model: &WriteModel,
     unpainted: Option<&Unpainted>,
+    _unwritten: Option<&Unwritten>,
     off: Option<usize>,
 ) -> Result<(Value, Vec<Value>)> {
     use crate::doc::files::Feature;
@@ -4012,5 +4128,94 @@ pub(crate) mod tests {
         // Twice at the label, the same bytes: what ryupdm's packages need.
         let (_, again) = exported(&mut s, opts(Some("label:A"))).unwrap();
         assert_eq!(again, at_label);
+    }
+
+    /// A part's material (with the library's density) and its set
+    /// properties go out as STEP's material and user-defined attributes
+    /// (design 448, plan 24.C).
+    #[test]
+    fn a_parts_material_and_properties_are_exported() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        add(
+            &mut s,
+            "p",
+            json!({"type": "box", "id": "a", "params": {"x": 10, "y": 10, "z": 10}}),
+        );
+        call(
+            &mut s,
+            "pdm.configure",
+            json!({"properties": {
+                "finish": {"type": "string"},
+                "count": {"type": "integer"},
+                "wall": {"type": "quantity", "dim": "length"},
+                "rohs": {"type": "boolean"}
+            }}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "materials.set",
+            json!({"name": "Steel", "density": "7.85 g/cm^3"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": "100", "material": "Steel", "finish": "red",
+                                                "count": 4, "wall": "2 mm", "rohs": true}}),
+        )
+        .unwrap();
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "p", "unit": "mm", "time_stamp": "2026-11-11T00:00:00"}),
+        )
+        .unwrap();
+        let o = ryustep::open(&bytes).unwrap();
+        let k = o
+            .products
+            .definitions
+            .iter()
+            .position(|d| &*d.product_id == "100")
+            .unwrap();
+        let p = &o.properties().products[&k];
+        let m = p.material.as_ref().unwrap();
+        assert_eq!((m.name.as_str(), m.density), ("Steel", Some(7850.0)));
+        let got: Vec<(&str, &ryustep::properties::Value)> = p
+            .attributes
+            .iter()
+            .map(|a| (a.name.as_str(), &a.value))
+            .collect();
+        use ryustep::properties::Value as V;
+        assert_eq!(got[0], ("count", &V::Integer(4)));
+        assert_eq!(got[1], ("finish", &V::Text("red".into())));
+        assert_eq!(got[2], ("rohs", &V::Boolean(true)));
+        let V::Measure { value, unit } = got[3].1 else {
+            panic!("{got:?}")
+        };
+        assert_eq!((got[3].0, *value, unit.name.as_str()), ("wall", 2.0, "mm"));
+        assert_eq!(
+            got.len(),
+            4,
+            "number is the product's id, never an attribute"
+        );
+        let written: Vec<&str> = v["transfer"]["written"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["category"].as_str().unwrap())
+            .collect();
+        assert!(
+            written.contains(&"materials") && written.contains(&"properties"),
+            "{written:?}"
+        );
+        assert!(
+            v["transfer"]["omitted"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|o| o["what"] != "properties"),
+            "{v}"
+        );
     }
 }

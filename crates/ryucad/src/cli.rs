@@ -4847,6 +4847,7 @@ fn request(cmd: &Command) -> Option<Request> {
             pipe_tolerance: pipe_tolerance.clone(),
             skip_failing: *skip_failing,
             appearance: no_appearance.then_some(false),
+            properties: None,
             solid: solid.clone(),
             notes: no_notes.then_some(false),
             fixed: fixed.clone(),
