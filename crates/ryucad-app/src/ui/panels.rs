@@ -185,7 +185,13 @@ pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, view: &crate::ui::view::Vie
             if let Some(m) = &ws.merge {
                 ui.colored_label(ui.visuals().warn_fg_color, m.summary());
             }
-            if let Some(n) = &ws.drag_note {
+            // What can't move, said before a drag or Move is tried (#731).
+            let unmovable = (ws.mode != crate::core::modes::Mode::View && ws.mover.is_none())
+                .then(|| crate::ui::commands::move_target(ws, view.chosen.as_ref()))
+                .flatten()
+                .and_then(Result::err)
+                .map(|why| format!("Can't move: {why}"));
+            if let Some(n) = ws.drag_note.clone().or(unmovable) {
                 ui.colored_label(ui.visuals().warn_fg_color, n);
             }
         });

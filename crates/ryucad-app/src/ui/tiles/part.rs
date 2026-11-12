@@ -150,12 +150,9 @@ pub fn sheet_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) -> bool
 }
 
 /// The part the Part section shows: the chosen feature's part, else the
-/// first.
+/// one shown, else the first (#741).
 pub fn section_part(ws: &Workspace, view: &View) -> Option<String> {
-    view.chosen
-        .as_ref()
-        .map(|k| k.0.clone())
-        .or_else(|| ws.model.parts.keys().next().cloned())
+    ws.model.followed_part(view.chosen.as_ref())
 }
 
 /// The Part section: the chosen feature's part (or the first part), its

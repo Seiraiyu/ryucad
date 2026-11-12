@@ -120,6 +120,8 @@ pub struct Place {
     /// The part, and the feature (`None` for a part itself).
     pub part: String,
     pub feature: Option<String>,
+    /// A drawing of `part`, opened in the Drawings tile.
+    pub drawing: Option<String>,
 }
 
 /// Each part's PDM number and name, as far as the window knows them: the
@@ -138,10 +140,16 @@ pub fn pdm_names(bom: &crate::core::bom::BomTab) -> BTreeMap<String, String> {
     out
 }
 
-/// The model's parts, features, solids and instances matching `query`
-/// (the text after `@`), best first: by id, type, and a part's PDM number
-/// and name (`pdm`, from [`pdm_names`]).
-pub fn places(query: &str, model: &Model, pdm: &BTreeMap<String, String>) -> Vec<Place> {
+/// The model's parts, features, solids, instances and drawings
+/// (`drawings`, each part's `(id, name, failed)`) matching `query` (the
+/// text after `@`), best first: by id, type, and a part's PDM number and
+/// name (`pdm`, from [`pdm_names`]).
+pub fn places(
+    query: &str,
+    model: &Model,
+    pdm: &BTreeMap<String, String>,
+    drawings: &BTreeMap<String, Vec<(String, String, bool)>>,
+) -> Vec<Place> {
     let mut found: Vec<(i32, Place)> = Vec::new();
     for p in model.parts.values() {
         let kind = if p.assembly { "assembly" } else { "part" };
@@ -157,6 +165,7 @@ pub fn places(query: &str, model: &Model, pdm: &BTreeMap<String, String>) -> Vec
                     label,
                     part: p.id.clone(),
                     feature: None,
+                    drawing: None,
                 },
             ));
         }
@@ -173,6 +182,28 @@ pub fn places(query: &str, model: &Model, pdm: &BTreeMap<String, String>) -> Vec
                         label: format!("{}/{} ({what})", p.id, f.id),
                         part: p.id.clone(),
                         feature: Some(f.id.clone()),
+                        drawing: None,
+                    },
+                ));
+            }
+        }
+    }
+    // Every part's drawings, by ID and name (#748).
+    for (part, list) in drawings {
+        for (id, name, _) in list {
+            if let Some(s) = score(query, &format!("{part}/{id} drawing {name}")) {
+                let label = if name.is_empty() {
+                    format!("{part}/{id} (drawing)")
+                } else {
+                    format!("{part}/{id} (drawing, {name})")
+                };
+                found.push((
+                    s,
+                    Place {
+                        label,
+                        part: part.clone(),
+                        feature: None,
+                        drawing: Some(id.clone()),
                     },
                 ));
             }
@@ -188,6 +219,29 @@ mod tests {
 
     /// Issue #519: Zoom to fit was listed twice, `view.fit` and the tree
     /// rows' hidden `view.fit_row` of the same title.
+    #[test]
+    fn at_finds_drawings_by_id_and_name() {
+        let m = Model::default();
+        let drawn = BTreeMap::from([(
+            "dw-plate".to_owned(),
+            vec![
+                ("d".to_owned(), "Plate".to_owned(), false),
+                ("big".to_owned(), String::new(), false),
+            ],
+        )]);
+        let found = places("dw-plate/d", &m, &BTreeMap::new(), &drawn);
+        assert_eq!(found[0].label, "dw-plate/d (drawing, Plate)");
+        assert_eq!(
+            (found[0].part.as_str(), found[0].drawing.as_deref()),
+            ("dw-plate", Some("d"))
+        );
+        assert!(
+            places("plate", &m, &BTreeMap::new(), &drawn)
+                .iter()
+                .any(|p| p.drawing.as_deref() == Some("d"))
+        );
+    }
+
     #[test]
     fn a_rows_copy_of_a_listed_command_is_listed_once() {
         let found: Vec<&str> = commands("fit", &[])
@@ -252,7 +306,7 @@ mod tests {
         );
         let pdm = BTreeMap::from([("bracket".to_owned(), "BRK-100 Bracket".to_owned())]);
         let labels = |q: &str| {
-            places(q, &m, &pdm)
+            places(q, &m, &pdm, &BTreeMap::new())
                 .into_iter()
                 .map(|p| p.label)
                 .collect::<Vec<_>>()
@@ -261,7 +315,7 @@ mod tests {
         assert_eq!(labels("brk")[0], "bracket (part, BRK-100 Bracket)");
         assert!(labels("assembly").contains(&"frame (assembly)".to_owned()));
         assert_eq!(labels("pin")[0], "frame/pin (instance of bracket)");
-        let first = &places("e1", &m, &pdm)[0];
+        let first = &places("e1", &m, &pdm, &BTreeMap::new())[0];
         assert_eq!(
             (first.part.as_str(), first.feature.as_deref()),
             ("bracket", Some("e1"))

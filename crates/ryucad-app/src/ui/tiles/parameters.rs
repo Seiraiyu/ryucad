@@ -12,11 +12,7 @@ use eframe::egui;
 /// row to add one. Apply (or Enter) sends `param.set` against the revision
 /// they were read at; Revert (or Esc) puts back what was read.
 pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
-    let part = view
-        .chosen
-        .as_ref()
-        .map(|k| k.0.clone())
-        .or_else(|| ws.model.parts.keys().next().cloned());
+    let part = ws.model.followed_part(view.chosen.as_ref());
     ws.show_params(part.as_deref());
     let gate = ws.control("param.set");
     let Some(p) = &mut ws.params else {

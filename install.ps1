@@ -54,6 +54,24 @@ function Install-Ryucad {
         if ($token) { return "could not reach ${what}: no such release, or the token cannot read $repo" }
         return "could not reach $what. If the repository is private, set GH_TOKEN or run 'gh auth login' first"
     }
+    # A running .exe can't be overwritten or deleted, but can be renamed. Each
+    # upgrade moves the old one to a name of its own, since an earlier
+    # upgrade's copy may still be running (a window left open) and Move-Item
+    # can't replace a file in use (#725), and deletes whatever earlier
+    # upgrades left that no longer runs; the rest goes next time.
+    function Clear-OldCopy($path) {
+        $leaf = Split-Path -Leaf $path
+        foreach ($f in @(Get-ChildItem -Force -LiteralPath (Split-Path $path) -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Name -like "$leaf*.old" })) {
+            Remove-Item -Force -LiteralPath $f.FullName -ErrorAction SilentlyContinue
+        }
+    }
+    function Move-Aside($path) {
+        if (Test-Path -LiteralPath $path) {
+            $aside = "$path." + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '.old'
+            Move-Item -Force -LiteralPath $path -Destination $aside
+        }
+    }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("ryucad-install-" + [Guid]::NewGuid())
     New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -117,12 +135,11 @@ function Install-Ryucad {
         $bin = Join-Path $home_ 'bin'
         New-Item -ItemType Directory -Force -Path $bin | Out-Null
         $exe = Join-Path $bin 'ryucad.exe'
-        $old = "$exe.old"
         if (Test-Path $exe) { & $exe daemon stop --all *> $null }
-        Remove-Item -Force $old -ErrorAction SilentlyContinue
-        if (Test-Path $exe) { Move-Item -Force $exe $old }
+        Clear-OldCopy $exe
+        Move-Aside $exe
         Copy-Item (Join-Path $tmp "ryucad-$version-$target\ryucad.exe") $exe
-        Remove-Item -Force $old -ErrorAction SilentlyContinue
+        Clear-OldCopy $exe
         # git diff reads ryucad's files through ryucad: its driver, in the
         # user's Git config.
         if (Get-Command git -ErrorAction SilentlyContinue) {
@@ -139,11 +156,10 @@ function Install-Ryucad {
             Write-Host 'ryucad-install: RYUCAD_NO_APP=1: the desktop app is not installed'
         } elseif (Test-Path $appSrc) {
             $app = Join-Path $bin 'ryucad-app.exe'
-            $appOld = "$app.old"
-            Remove-Item -Force $appOld -ErrorAction SilentlyContinue
-            if (Test-Path $app) { Move-Item -Force $app $appOld }
+            Clear-OldCopy $app
+            Move-Aside $app
             Copy-Item $appSrc $app
-            Remove-Item -Force $appOld -ErrorAction SilentlyContinue
+            Clear-OldCopy $app
             foreach ($key in @('HKCU:\Software\Classes\Directory\shell\ryucad',
                                'HKCU:\Software\Classes\Directory\Background\shell\ryucad')) {
                 New-Item -Path "$key\command" -Force | Out-Null

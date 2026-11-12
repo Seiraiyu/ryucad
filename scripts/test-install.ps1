@@ -104,16 +104,29 @@ try {
     $count = @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -eq (Split-Path $exe) }).Count
     Test-Case 'reinstall adds no second PATH entry' ($r.Ok -and $count -eq 1) $r
 
-    # Replacing a running binary: a long-running stand-in holds ryucad.exe.
-    Copy-Item (Join-Path $env:SystemRoot 'System32\PING.EXE') $exe -Force
-    $running = Start-Process -FilePath $exe -ArgumentList '-n', '60', '127.0.0.1' -WindowStyle Hidden -PassThru
+    # Replacing running binaries: long-running stand-ins hold ryucad.exe and
+    # the app, as an agent's `watch` and a window left open do.
+    $ping = Join-Path $env:SystemRoot 'System32\PING.EXE'
+    Copy-Item $ping $exe -Force
+    Copy-Item $ping $app -Force
+    $running = @($exe, $app | ForEach-Object {
+        Start-Process -FilePath $_ -ArgumentList '-n', '60', '127.0.0.1' -WindowStyle Hidden -PassThru
+    })
     Start-Sleep -Seconds 1
     $r = Invoke-Installer 'fresh' $good $null
     Test-Case 'replacing a running binary succeeds' ($r.Ok -and $r.Out -match '"ryucad":') $r
-    Stop-Process -Id $running.Id -Force -ErrorAction SilentlyContinue
-    $running.WaitForExit()
+    # Again while the first upgrade's moved copies still run: an upgrade
+    # never stops halfway on them (#725).
     $r = Invoke-Installer 'fresh' $good $null
-    Test-Case 'the next install removes ryucad.exe.old' ($r.Ok -and -not (Test-Path "$exe.old")) $r
+    Test-Case 'upgrading again while an earlier upgrade''s copies run succeeds' ($r.Ok -and $r.Out -match '"ryucad":') $r
+    Test-Case 'that upgrade replaces the app too' ((Get-FileHash $app).Hash -eq (Get-FileHash $Binary).Hash) $r
+    foreach ($p in $running) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        $p.WaitForExit()
+    }
+    $r = Invoke-Installer 'fresh' $good $null
+    $left = @(Get-ChildItem -Force (Split-Path $exe) | Where-Object { $_.Name -like '*.old' })
+    Test-Case 'the next install removes every moved copy' ($r.Ok -and $left.Count -eq 0) $r
 
     foreach ($k in $menuKeys) { Remove-Item -Recurse -Force $k -ErrorAction SilentlyContinue }
     $r = Invoke-Installer 'noapp' $good @{ RYUCAD_NO_APP = '1' }

@@ -10,6 +10,14 @@ use eframe::egui;
 /// Some of a list, each a checkbox, in the order picked.
 pub(crate) fn picks(ui: &mut egui::Ui, p: &mut Picks) {
     ui.label(format!("{}: {}", p.name, p.chosen.join(", ")));
+    if p.options.is_empty() {
+        // Nothing to offer: say so, not a bare label (#750).
+        ui.weak(format!(
+            "Nothing to choose as {}: the part has no other solid",
+            p.name
+        ));
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         for o in p.options.clone() {
             let mut on = p.chosen.contains(&o);
@@ -545,11 +553,11 @@ pub(crate) fn flange(ui: &mut egui::Ui, f: &mut crate::core::edit::FlangeForm) -
         rows.choice(&name, &mut f.position);
         rows.quantity("radius", &mut f.radius);
         if inherits.0 && !f.radius.dirty() {
-            rows.note("the base flange's radius: change it to give the flange its own");
+            rows.info("the base flange's radius: change it to give the flange its own");
         }
         relief(rows, &mut f.relief);
         if inherits.1 && !f.relief.dirty() {
-            rows.note("the base flange's relief: change it to give the flange its own");
+            rows.info("the base flange's relief: change it to give the flange its own");
         }
         rows.quantity("setback", &mut f.setback);
     });
@@ -590,7 +598,7 @@ pub(crate) fn unfold(ui: &mut egui::Ui, u: &mut crate::core::edit::UnfoldForm) -
         }
         allowance(rows, &mut u.allowance);
         if inherited && !u.allowance.dirty() {
-            rows.note("the base flange's allowance: change it to give the unfold its own");
+            rows.info("the base flange's allowance: change it to give the unfold its own");
         }
     });
     if u.only.options.is_empty() {
@@ -799,9 +807,8 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         Some(Banner::KeepMine) => form.keep_mine(),
         None => {}
     }
-    if let Some(e) = &form.error {
-        form::error(ui, e);
-    }
+    // Its Show opens the window's error card (#750).
+    let card = form.error.as_ref().filter(|e| form::error(ui, e)).cloned();
     let mut keys = form::grid(ui, "params", |rows| fields(rows, form));
     for k in [
         form.blend.as_mut().map(|b| blend(ui, b)),
@@ -860,6 +867,9 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         if let Some(reference) = import(ui, &i, built.as_ref(), &gate) {
             ws.convert_import(&key.0, &key.1, reference);
         }
+        if let Some(e) = card {
+            ws.open_card(e);
+        }
         names(ui, ws, &key);
         return;
     }
@@ -896,6 +906,9 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     let key = (form.part.clone(), form.feature.clone());
     if (foot.apply || keys.apply) && dirty && !saving {
         ws.save_form();
+    }
+    if let Some(e) = card {
+        ws.open_card(e);
     }
     names(ui, ws, &key);
 }
@@ -998,4 +1011,19 @@ pub(crate) fn names(ui: &mut egui::Ui, ws: &Workspace, key: &(String, String)) {
                 }
             });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn targets_with_nothing_to_offer_say_so() {
+        let mut p = Picks::new("targets", Vec::new());
+        let mut h = Harness::new_ui(move |ui| picks(ui, &mut p));
+        h.run();
+        h.get_by_label("Nothing to choose as targets: the part has no other solid");
+    }
 }
