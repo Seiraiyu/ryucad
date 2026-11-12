@@ -480,22 +480,53 @@ pub const MAX_FLAT: usize = 10_000;
 /// each of `place`'s usages places, in order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Walked {
+    /// The file the body is in: an index into [`Files`]; 0 for a file
+    /// alone.
+    pub file: usize,
     pub definition: Option<usize>,
     pub body: usize,
     pub place: Option<crate::doc::import::Place>,
     pub steps: Vec<usize>,
 }
 
-/// Every body of every occurrence of every product of the file, placed
-/// where its assemblies put it (#499): roots in the file's order, at each
-/// definition its own bodies, then its usages in order, depth first; the
-/// bodies no product reaches last. More than [`MAX_FLAT`] is
-/// `invalid_param`; a placement that can't be read `import_failed`.
+/// The files a flattened walk crosses (design 448, plan 24.D): each
+/// file's opened bytes and stored path, and where its externally
+/// defined definitions' shapes are (`external::Node::links`). The first
+/// is the file imported.
+pub struct Files<'a> {
+    pub opened: Vec<&'a Opened>,
+    pub paths: Vec<&'a str>,
+    pub links: Vec<&'a BTreeMap<usize, (usize, usize)>>,
+}
+
+static NO_LINKS: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+
+/// [`walk_files`] of a file alone.
 pub fn walk(opened: &Opened, path: &str) -> Result<Vec<Walked>> {
+    walk_files(&Files {
+        opened: vec![opened],
+        paths: vec![path],
+        links: vec![&NO_LINKS],
+    })
+}
+
+/// Every body of every occurrence of every product of the first file,
+/// placed where its assemblies put it (#499): roots in the file's order,
+/// at each definition its own bodies, then its usages in order, depth
+/// first; a definition whose shape is another file's walked there, at
+/// its usage's place (24.D); the first file's bodies no product reaches
+/// last. More than [`MAX_FLAT`] is `invalid_param`; a placement that
+/// can't be read `import_failed`.
+pub fn walk_files(files: &Files) -> Result<Vec<Walked>> {
     use crate::doc::import::{Place, Via};
     use ryukei::geom::Rigid;
-    let defs = &opened.products.definitions;
-    let makes = makes(opened);
+    let path = files.paths[0];
+    let makes: Vec<Vec<bool>> = files
+        .opened
+        .iter()
+        .zip(&files.links)
+        .map(|(o, l)| makes_with(o, &l.keys().copied().collect()))
+        .collect();
     let too_many = || {
         Error::new(
             Code::InvalidParam,
@@ -506,24 +537,33 @@ pub fn walk(opened: &Opened, path: &str) -> Result<Vec<Walked>> {
         .with("param", "flatten")
     };
     let mut out = Vec::new();
-    // (definition, its placement in the root's frame, the usages to it,
-    // the definitions they place)
-    let mut stack: Vec<(usize, Rigid, Vec<Via>, Vec<usize>)> = opened
+    // (file, definition, its placement in the root's frame, the usages
+    // to it, the definitions they place)
+    type Item = (usize, usize, Rigid, Vec<Via>, Vec<usize>);
+    let mut stack: Vec<Item> = files.opened[0]
         .products
         .roots
         .iter()
         .rev()
         .copied()
-        .filter(|&k| makes[k])
-        .map(|k| (k, Rigid::IDENTITY, Vec::new(), Vec::new()))
+        .filter(|&k| makes[0][k])
+        .map(|k| (0, k, Rigid::IDENTITY, Vec::new(), Vec::new()))
         .collect();
-    while let Some((k, world, via, steps)) = stack.pop() {
+    while let Some((f, k, world, via, steps)) = stack.pop() {
+        // A definition whose shape is another file's: walked there.
+        if let Some(&(j, r)) = files.links[f].get(&k) {
+            stack.push((j, r, world, via, steps));
+            continue;
+        }
+        let opened = files.opened[f];
+        let defs = &opened.products.definitions;
         let place = (!via.is_empty()).then(|| Place {
             pose: crate::assembly::rigid_pose(&world).snapped(),
             via: via.clone(),
         });
         for body in 0..bodies(opened, Some(k)) {
             out.push(Walked {
+                file: f,
                 definition: Some(k),
                 body,
                 place: place.clone(),
@@ -535,10 +575,10 @@ pub fn walk(opened: &Opened, path: &str) -> Result<Vec<Walked>> {
         }
         // Children pushed last first, so the first usage pops first.
         for (n, c) in defs[k].children.iter().enumerate().rev() {
-            if !makes[c.definition] {
+            if !makes[f][c.definition] {
                 continue;
             }
-            let r = crate::assembly::pose_rigid(&pose(opened, path, k, n)?)?;
+            let r = crate::assembly::pose_rigid(&pose(opened, files.paths[f], k, n)?)?;
             let mut v = via.clone();
             v.push(Via {
                 usage: c.id.to_string(),
@@ -547,11 +587,12 @@ pub fn walk(opened: &Opened, path: &str) -> Result<Vec<Walked>> {
             });
             let mut d = steps.clone();
             d.push(c.definition);
-            stack.push((c.definition, world.then_after(&r), v, d));
+            stack.push((f, c.definition, world.then_after(&r), v, d));
         }
     }
-    for body in 0..bodies(opened, None) {
+    for body in 0..bodies(files.opened[0], None) {
         out.push(Walked {
+            file: 0,
             definition: None,
             body,
             place: None,
@@ -786,6 +827,29 @@ mod flat_tests {
             .map(|&k| under(opened, k))
             .sum::<usize>()
             + bodies(opened, None)
+    }
+    /// A walk crosses into another file at a definition whose shape is
+    /// there, keeping the usages from the root (design 448, 24.D).
+    #[test]
+    fn a_walk_crosses_into_the_files_holding_the_shapes() {
+        let set = std::path::PathBuf::from(crate::import::tests::set_path(""));
+        let source = set.join("asm.stp");
+        let file = crate::doc::project::ImportFile::new(std::fs::read(&source).unwrap());
+        let opened = crate::import::opened(&file).unwrap();
+        let t = crate::import::external::resolve(&source, file, opened, &[], "asm.stp").unwrap();
+        let files = Files {
+            opened: t.nodes.iter().map(|n| &*n.opened).collect(),
+            paths: vec!["imports/asm.step", "imports/box.step", "imports/cylinder.step"],
+            links: t.nodes.iter().map(|n| &n.links).collect(),
+        };
+        let w = walk_files(&files).unwrap();
+        let seen: Vec<(usize, Vec<String>)> = w
+            .iter()
+            .map(|w| (w.file, w.place.as_ref().unwrap().via.iter().map(|v| v.usage.clone()).collect()))
+            .collect();
+        assert_eq!(seen, [(1, vec!["1".into()]), (2, vec!["2".into()]), (2, vec!["3".into()])]);
+        let x = w[1].place.as_ref().unwrap().pose.origin_m[0];
+        assert!((x - 0.05).abs() < 1e-12);
     }
 }
 
