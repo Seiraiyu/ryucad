@@ -2,11 +2,16 @@
 //! diameters.
 //!
 //! Sources:
-//! - Nominal sizes and their coarse and fine pitches are facts: the
-//!   standard series as FED-STD-H28/21 (public domain) lists them.
+//! - Nominal sizes and their coarse and fine pitches are facts. Every
+//!   combination FED-STD-H28/21B (28 November 1984, public domain) lists
+//!   in Table XXI.1, its standard fastener series, is here, checked by
+//!   `tests/h28_21.rs`. That table is printed for the MJ profile, whose
+//!   sizes and pitches are the M profile's. Sizes above M64 have only the
+//!   pitches it prints. H28/21B's Table XXI.2 (fine-pitch screw threads
+//!   such as M15×1, M25×1.5) is not built in: a project's table adds them.
 //! - Basic diameters are formulas: ISO 68-1 and ISO 724's basic profile,
 //!   H = √3/2 · P, so D1 = D − 2 · 5H/8 = D − 5√3/8 · P. The result is
-//!   rounded to the micrometre, as H28/21 prints it.
+//!   rounded to the micrometre.
 //!
 //! Tolerances and limits are in `iso_metric_limits` (`internal_limits`).
 
@@ -25,9 +30,8 @@ const fn mm(whole: i64, thousandths: i64) -> Nm {
     whole * 1_000_000 + thousandths * 1_000
 }
 
-/// Every size, by major diameter. Reconcile with H28/21's table of
-/// standard series before committing: a size or pitch it lists that this
-/// lacks is added, since all of them are facts.
+/// Every size, by major diameter: ISO's coarse and fine series to M64,
+/// and H28/21B Table XXI.1's sizes above it.
 pub const SIZES: &[Size] = &[
     Size {
         name: "M1",
@@ -209,6 +213,26 @@ pub const SIZES: &[Size] = &[
         major: mm(64, 0),
         pitches: &[mm(6, 0), mm(4, 0), mm(3, 0), mm(2, 0), mm(1, 500)],
     },
+    Size {
+        name: "M72",
+        major: mm(72, 0),
+        pitches: &[mm(6, 0), mm(2, 0)],
+    },
+    Size {
+        name: "M80",
+        major: mm(80, 0),
+        pitches: &[mm(6, 0), mm(2, 0)],
+    },
+    Size {
+        name: "M90",
+        major: mm(90, 0),
+        pitches: &[mm(6, 0), mm(2, 0)],
+    },
+    Size {
+        name: "M100",
+        major: mm(100, 0),
+        pitches: &[mm(6, 0), mm(2, 0)],
+    },
 ];
 
 /// The size named exactly so (`M6`, `M1.6`).
@@ -242,7 +266,7 @@ mod tests {
         );
         assert_eq!(size("M6.5"), None);
         assert_eq!(SIZES.first().unwrap().name, "M1");
-        assert_eq!(SIZES.last().unwrap().name, "M64");
+        assert_eq!(SIZES.last().unwrap().name, "M100");
         // In order of size, each once, coarse pitch first and largest.
         for w in SIZES.windows(2) {
             assert!(w[0].major < w[1].major, "{}", w[1].name);
@@ -254,7 +278,7 @@ mod tests {
 
     #[test]
     fn basic_minor_diameters_by_iso_724() {
-        // D1 = D - 5√3/8 P, to the micrometre H28/21 prints.
+        // D1 = D - 5√3/8 P, to the micrometre.
         for (name, pitch, d1) in [
             ("M6", 1_000_000, 4_917_000),
             ("M8", 1_250_000, 6_647_000),

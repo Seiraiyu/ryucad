@@ -6,9 +6,18 @@
 //!   below 1 mm, 230 P^0.7 from 1 mm; grades 4, 5, 7 and 8 by 0.63,
 //!   0.8, 1.25 and 1.6; EI(G) = 15 + 11 P µm). The rounding is ISO 3's
 //!   R40, then whole micrometres.
-//! - Every limit is checked against FED-STD-H28/21's printed limits
-//!   (public domain; `tests/h28_21.rs`). Where H28/21 prints otherwise,
-//!   `PRINTED` holds its value, citing its table.
+//! - No printed table is the arbiter. The public-domain FED-STD-H28/21B
+//!   prints no limits of size (it refers to ASME B1.13M's tables), and
+//!   nothing is copied from ISO's or ASME's paid tables (the owner's
+//!   ruling, design 533). The formulas are checked by hand at M6×1, M8×1.25
+//!   and M10×1.5 (the tests below).
+//! - Where the formulas are known to round otherwise than ISO 965-1's own
+//!   printed T_D1 table: at P = 0.5 mm and P = 2.5 mm (every grade), the
+//!   nearest-R40 rounding of the formula falls one R40 step below the
+//!   printed tolerance, so the maximum minor diameter of those pitches
+//!   (M3, M20, M22 coarse) is that much smaller here: tighter, never
+//!   looser. Pitches below 0.35 mm were not compared. A project that needs
+//!   the printed values sets the hole's `tolerance` or its own table.
 //!
 //! External classes arrive with ryucad 28.B's external cosmetic threads.
 
@@ -128,7 +137,7 @@ pub struct Limits {
     pub major_min: Valued<Nm>,
 }
 
-/// Which printed limit a correction replaces.
+/// Which printed limit a correction replaces (`unified::PRINTED`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Which {
     MinorMin,
@@ -136,35 +145,18 @@ pub enum Which {
     MajorMin,
 }
 
-/// H28/21's printed values where the formulas round otherwise: size,
-/// pitch, class, which limit, the printed value, and the table. Empty
-/// until Task 6's oracle names one.
-pub const PRINTED: &[(&str, Nm, &str, Which, Nm, &str)] = &[];
-
 /// The limits of `size` at `pitch` in `class`.
 pub fn internal_limits(size: &Size, pitch: Nm, class: Class) -> Limits {
     let formula = Source::Formula("ISO 965-1");
     let e = ei(class.position, pitch).value;
     let d1 = basic_minor(size.major, pitch).value;
-    let mut out = Limits {
+    Limits {
         minor: (
             Valued::new(d1 + e, formula),
             Valued::new(d1 + e + td1(class.grade, pitch).value, formula),
         ),
         major_min: Valued::new(size.major + e, formula),
-    };
-    let text = class.text();
-    for &(name, p, c, which, value, table) in PRINTED {
-        if (name, p, c) == (size.name, pitch, text.as_str()) {
-            let v = Valued::new(value, Source::Public(table));
-            match which {
-                Which::MinorMin => out.minor.0 = v,
-                Which::MinorMax => out.minor.1 = v,
-                Which::MajorMin => out.major_min = v,
-            }
-        }
     }
-    out
 }
 
 #[cfg(test)]
@@ -179,7 +171,7 @@ mod tests {
 
     #[test]
     fn tolerances_by_the_formulas() {
-        // ISO 965-1 prints T_D1 at P = 1 mm as 150, 190, 236, 300, 375.
+        // The formulas at P = 1 mm, worked by hand: 150, 190, 236, 300, 375.
         let got: Vec<Nm> = [4, 5, 6, 7, 8].map(|g| td1(g, 1_000_000).value).to_vec();
         assert_eq!(got, [150_000, 190_000, 236_000, 300_000, 375_000]);
         assert_eq!(td1(6, 1_250_000).value, 265_000);
@@ -194,7 +186,7 @@ mod tests {
 
     #[test]
     fn m6_6h_as_the_issue_has_it() {
-        // H28/21: M6×1-6H minor 4.917 to 5.153, major at least 6.000.
+        // M6×1-6H by hand: minor 4.917 to 5.153, major at least 6.000.
         assert_eq!(
             limits("M6", 1_000_000, "6H"),
             (4_917_000, 5_153_000, 6_000_000)
