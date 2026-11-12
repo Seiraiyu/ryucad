@@ -289,14 +289,23 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             .any(|r| r == "buck_en")),
         "BUCK-EN jogs"
     );
-    // Plan 2.A: every sheet on its fitted paper, and every function in one
-    // region.
+    // Plan 2.A: every function in one region. Plan 3.A: from nothing every
+    // sheet is on its fitted paper, so a sch_paper_fit is only the fill
+    // target's gathering, and carries a fix that holds.
     for (name, found) in &all {
-        for code in ["sch_paper_fit", "sch_function_split"] {
+        assert!(
+            coded(found, "sch_function_split").is_empty(),
+            "{name}: {:#?}",
+            coded(found, "sch_function_split")
+        );
+        for f in coded(found, "sch_paper_fit") {
+            eprintln!(
+                "paper fit {name}/{}: {} (fill {})",
+                f["block"], f["message"], f["details"]["fill"]
+            );
             assert!(
-                coded(found, code).is_empty(),
-                "{name}: {:#?}",
-                coded(found, code)
+                f["fixes"].as_array().is_some_and(|x| !x.is_empty()) && f["fixes_checked"] != false,
+                "{name}: {f}"
             );
         }
     }
