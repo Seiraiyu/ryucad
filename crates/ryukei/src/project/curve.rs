@@ -491,4 +491,69 @@ mod tests {
             }
         }
     }
+
+    /// Each piece's image moves strictly along some direction at 65
+    /// samples, so it is one to one: every step's direction lies in one
+    /// open half-plane, the largest gap between their angles more than a
+    /// half turn (a piece may be a point).
+    fn each_one_to_one(curve: &Curve, view: &View, pieces: &[ImageCurve]) {
+        for p in pieces {
+            if let Image::Point(_) = p.image {
+                continue;
+            }
+            let at = |i: usize| {
+                view.image(curve.point(p.range[0] + (p.range[1] - p.range[0]) * i as f64 / 64.0))
+            };
+            let mut angles: Vec<f64> = (0..64)
+                .map(|i| at(i + 1) - at(i))
+                .filter(|d| d.length() > 1e-15)
+                .map(|d| math::atan2(d.y, d.x))
+                .collect();
+            if angles.len() < 2 {
+                continue;
+            }
+            angles.sort_by(f64::total_cmp);
+            let mut gap = angles[0] + TAU - angles[angles.len() - 1];
+            for w in angles.windows(2) {
+                gap = gap.max(w[1] - w[0]);
+            }
+            assert!(gap > PI, "{p:?} turns back: steps span {}", TAU - gap);
+        }
+    }
+
+    /// A cubic whose tangent at its middle runs along the view: its image
+    /// cusps there (design 484, #643). Seen along that tangent and tilted
+    /// off it by 1e-12 to 1e-3 rad, the image is cut into one-to-one
+    /// pieces, a piece about the cusp perhaps a point, and never refused.
+    #[test]
+    fn a_spline_seen_along_its_tangent_is_cut_at_its_cusp() {
+        use crate::geom::{KnotVector, NurbsCurve};
+        let kv = KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.01, 0.02, 0.005),
+            Point3::new(0.02, 0.01, 0.02),
+            Point3::new(0.03, 0.04, 0.01),
+        ];
+        let c = Curve::Nurbs(std::sync::Arc::new(NurbsCurve::new(kv, pts, None).unwrap()));
+        let tangent = c.tangent(0.5).unwrap().get();
+        let side = tangent
+            .cross(Vector3::new(0.0, 0.0, 1.0))
+            .normalize()
+            .unwrap()
+            .get();
+        let up = Vector3::new(0.0, 0.0, 1.0);
+        let lift = tangent.cross(side);
+        for (axis, tilt) in [side, lift]
+            .into_iter()
+            .flat_map(|a| [0.0, 1e-12, 1e-9, 2e-8, 5e-8, 1e-7, 1e-6, 1e-5, 1e-3].map(|t| (a, t)))
+        {
+            let v = View::new(tangent + axis * tilt, up).unwrap();
+            let p = project_curve(&c, [0.0, 1.0], &v)
+                .unwrap_or_else(|e| panic!("tilted {tilt}: {e:?}"));
+            eprintln!("tilted {tilt}: {} pieces", p.len());
+            follows(&c, [0.0, 1.0], &v, &p);
+            each_one_to_one(&c, &v, &p);
+        }
+    }
 }

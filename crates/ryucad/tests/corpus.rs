@@ -175,6 +175,39 @@ fn drawings(s: &mut Session) -> Value {
     Value::Object(out)
 }
 
+/// Views of the committed drawings past design 484's bar, each with its
+/// issue: the crankcase's, whose rays meet mirrored bosses' edges exactly
+/// (plan 17.B's tally).
+const KNOWN_UNCERTAIN: &[(&str, &str)] = &[
+    ("radial-engine/crankcase/main/v1", "#643"),
+    ("radial-engine/crankcase/main/v2", "#643"),
+    ("radial-engine/crankcase/main/v3", "#643"),
+];
+
+/// Every view of every committed drawing draws, with at most a tenth of
+/// its pieces uncertain (design 484, plan 17.B), unless it is in
+/// [`KNOWN_UNCERTAIN`].
+fn views_certify(now: &Value) {
+    for (project, p) in now["projects"].as_object().unwrap() {
+        for (drawing, d) in p["drawings"].as_object().unwrap() {
+            for (id, v) in d["views"].as_object().unwrap() {
+                let key = format!("{project}/{drawing}/{id}");
+                if KNOWN_UNCERTAIN.iter().any(|(k, _)| *k == key) {
+                    continue;
+                }
+                assert!(v["failed"].is_null(), "{key}: {}", v["failed"]);
+                let n = |k: &str| v["pieces"][k].as_u64().unwrap_or(0);
+                let all = n("visible") + n("hidden") + n("uncertain");
+                assert!(
+                    n("uncertain") * 10 <= all,
+                    "{key}: {} of {all} uncertain",
+                    n("uncertain")
+                );
+            }
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
 fn the_committed_projects_build_as_the_manifest_says() {
@@ -184,6 +217,7 @@ fn the_committed_projects_build_as_the_manifest_says() {
         now.insert(name.into(), summary(&corpus().join(name)));
     }
     let now = json!({"projects": now});
+    views_certify(&now);
     if std::env::var_os("UPDATE_MANIFEST").is_some() {
         std::fs::write(&path, canonical::to_string(&now)).unwrap();
         return;
