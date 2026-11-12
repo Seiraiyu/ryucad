@@ -57,8 +57,6 @@ fn mechanisms(golden: &mut Golden) {
     }
 }
 
-/// Chains of 19 links on driven revolutes, each started up to a radian
-/// and 3 mm off.
 /// Mechanisms with stops a few hundredths either side of where they were
 /// built, jostled past them: poses, the report, and each mate's values
 /// and stops.
@@ -82,6 +80,8 @@ fn limits(golden: &mut Golden) {
     }
 }
 
+/// Chains of 19 links on driven revolutes, each started up to a radian
+/// and 3 mm off.
 fn chains(golden: &mut Golden) {
     let mut s = golden.section("chains");
     let mut g = Lcg::new(0x6368_6169);

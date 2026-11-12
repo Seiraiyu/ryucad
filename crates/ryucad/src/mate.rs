@@ -276,10 +276,6 @@ pub fn failing_warnings(
     out
 }
 
-/// What `assembly.solve` gives as `solve`: [`Solve::to_json`], with each
-/// mate of `p` (rebuilt as `r`) that failed before the solve, which the
-/// solve never saw, listed as `failing`, and every failing mate's error
-/// under `errors` (issue #155).
 /// A mate's measured values as reports give them, `{angle_deg,
 /// distance}` (the distance as a quantity in `unit`), and the stops they
 /// rest on, `{angle: "min" | "max", distance: …}` (empty when none).
@@ -313,6 +309,10 @@ fn put_values(v: &mut Value, m: &ryumate::MateValues, unit: crate::units::Unit) 
     }
 }
 
+/// What `assembly.solve` gives as `solve`: [`Solve::to_json`], with each
+/// mate of `p` (rebuilt as `r`) that failed before the solve, which the
+/// solve never saw, listed as `failing`, and every failing mate's error
+/// under `errors` (issue #155).
 fn solve_json(
     s: &Solve,
     p: &Part,
