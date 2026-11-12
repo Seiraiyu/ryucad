@@ -193,6 +193,7 @@ What each phase decided is recorded per area under `docs/claude/`. Read the guid
 - `docs/claude/ryucad-assemblies.md` — assemblies, mates, scale, interference
 - `docs/claude/ryucad-step.md` — STEP import, re-import and export
 - `docs/claude/ryucad-scale.md` — the benchmark project, file events, the memory budget, the window at scale
+- `docs/claude/ryucad-internals.md` — ryucad's internals: the CLI in the library, tests that build once, the server split, feature kinds, the session's caches, the app's workspace
 - `docs/claude/ryucad-formats.md` — export formats: the scene, STL, 3MF, USD, and their references
 - `docs/claude/ryucad-reference.md` — geometric references, the resolver, datum planes, axes and points and their uses
 - `docs/claude/ryucad-surfaces.md` — sheets in the model, surface sweeps, planar faces

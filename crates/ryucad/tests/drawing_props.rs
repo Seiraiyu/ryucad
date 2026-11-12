@@ -9,18 +9,15 @@
 //! 256 seeds in 9 s in a debug build (cox-worker-3: Intel Core Ultra 5
 //! 250K Plus, 18 threads, load 5), so it runs with every test.
 
-use ryucad::proto::Request;
-use ryucad::server::handle;
+mod common;
+
+use common::call;
 use ryucad::session::Session;
 use serde_json::{Value, json};
 use std::path::Path;
 
 /// How many seeds are judged.
 const SEEDS: u64 = 256;
-
-fn call(s: &mut Session, method: &str, params: Value) -> ryucad::error::Result<Value> {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-}
 
 fn must(s: &mut Session, method: &str, params: Value) -> Value {
     call(s, method, params).unwrap_or_else(|e| panic!("{method} {e}"))

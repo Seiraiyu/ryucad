@@ -5,18 +5,12 @@
 //! entity a later feature takes away, balloons against item numbers, and
 //! the lint.
 
+mod common;
+
+use common::{call, must};
 use ryucad::proto::Request;
-use ryucad::server::handle;
 use ryucad::session::Session;
 use serde_json::{Value, json};
-
-fn call(s: &mut Session, method: &str, params: Value) -> ryucad::error::Result<Value> {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-}
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 /// Part `p`: a plate `b` 40 × 30 × 10 mm (from the origin) drilled by
 /// hole `h`, ⌀6 through all at (10, 15) and (30, 15), from a sketch `s` on

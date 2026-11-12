@@ -6666,7 +6666,7 @@ mod tests {
     /// build's clap parses in frames past a test thread's 2 MiB.
     fn on_cli_stack(f: impl FnOnce() + Send + 'static) {
         std::thread::Builder::new()
-            .stack_size(crate::STACK)
+            .stack_size(crate::process::STACK)
             .spawn(f)
             .expect("a thread")
             .join()

@@ -87,6 +87,8 @@ jobs:
           - name: ubuntu-latest (window tests)
             os: ubuntu-latest
             tests: -p ryucad-app --test window
+            # Its tests find ryucad-test beside them (#555).
+            example: 1
           - name: ubuntu-24.04-arm
             os: ubuntu-24.04-arm
             tests: --workspace --lib --bins --test determinism
@@ -106,7 +108,7 @@ jobs:
             os: windows-latest
             tests: --workspace --lib --bins --test determinism --partition hash:3/3
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -129,6 +131,11 @@ jobs:
       - if: matrix.os == 'ubuntu-latest'
         name: a software graphics adapter (lavapipe) for ryucad-app's tests
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      # The window tests take ryucad-test, built here with their own
+      # profile and features, instead of building ryucad again in each
+      # test's process (#555, crates/ryucad-app/tests/common/mod.rs).
+      - if: matrix.example == 1
+        run: cargo build --profile ci -p ryucad-app --example ryucad-test
       # The ci profile (Cargo.toml): optimized a little, no debug info.
       - run: cargo nextest run --cargo-profile ci --profile ci ${{ matrix.tests }}
         env:

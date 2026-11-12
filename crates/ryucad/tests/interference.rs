@@ -3,19 +3,12 @@
 //! and one that fits, a bolt laid along x, instances in subassemblies and
 //! a pattern's copies, and the same report on one thread and eight.
 
+mod common;
+
+use common::must;
 use core::f64::consts::PI;
-use ryucad::proto::Request;
-use ryucad::server::handle;
 use ryucad::session::Session;
 use serde_json::{Value, json};
-
-fn call(s: &mut Session, method: &str, params: Value) -> ryucad::error::Result<Value> {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-}
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 /// A project in millimetres with parts `ball` (radius 10 mm), `pin`
 /// (radius 3 mm, 20 mm long) and `plate` (40 × 30 × 5 mm with a hole of
