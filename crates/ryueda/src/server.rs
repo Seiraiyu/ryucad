@@ -211,6 +211,34 @@ fn working(
             scale,
             fit,
             theme,
+            compare: Some(rev),
+            ..
+        } => {
+            let (commit, then) = session.at(&rev)?;
+            crate::compare::render(
+                session.project(),
+                &then,
+                &rev,
+                &commit,
+                design.as_deref(),
+                block.as_deref(),
+                sheet.as_deref(),
+                layer.as_deref(),
+                format.unwrap_or(crate::schemcmd::Format::Svg),
+                scale,
+                fit,
+                theme.unwrap_or_default(),
+            )
+        }
+        Request::Render {
+            design,
+            block,
+            sheet,
+            layer,
+            format,
+            scale,
+            fit,
+            theme,
             ..
         } => crate::schemcmd::render(
             session.project(),
@@ -302,6 +330,13 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             ..
         } => crate::schemcmd::describe(p, design.as_deref(), block.as_deref(), sheet.as_deref())
             .map(Answer::json),
+        Request::Render {
+            compare: Some(_), ..
+        } => Err(Error::new(
+            Code::InvalidParam,
+            "--compare draws the working files against a revision; leave out --rev",
+        )
+        .with("param", "compare")),
         Request::Render {
             design,
             block,

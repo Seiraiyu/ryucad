@@ -786,6 +786,11 @@ pub enum Request {
         /// light (the default) or dark (plan 2.E).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         theme: Option<ryusch::style::Theme>,
+        /// Draw the working sheet marked against this Git revision: new
+        /// and changed items in the diff colours, gone ones ghosted, moved
+        /// parts with a leader, each item keyed by `data-ref` (SVG).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
         #[serde(default, skip_serializing_if = "Option::is_none")]

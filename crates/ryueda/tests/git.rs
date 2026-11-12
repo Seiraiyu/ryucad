@@ -605,3 +605,96 @@ fn an_unfinished_merge_fails_check() {
         .unwrap();
     assert!(doctor.iter().any(|f| f["code"] == "unmerged_path"), "{v}");
 }
+
+#[test]
+fn render_compare_paints_what_changed() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &[
+                "render",
+                "--block",
+                "breakout",
+                "--compare",
+                "HEAD",
+                "--out",
+                "c.svg",
+            ],
+        );
+        assert_eq!(code, 0, "{v}");
+        assert_eq!(v["result"]["compare"]["rev"], "HEAD");
+        assert_eq!(v["result"]["compare"]["commit"].as_str().unwrap().len(), 40);
+        let svg = std::fs::read_to_string(board.join("c.svg")).unwrap();
+        for want in [
+            "data-ref=\"breakout/r3\"",
+            "data-ref=\"breakout/c3\"",
+            "#1a7f37",
+            "#9a6700",
+            "#cf222e",
+            "stroke-dasharray",
+            "Against HEAD:",
+        ] {
+            assert!(svg.contains(want), "{want}");
+        }
+        let (code, _) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &[
+                "render",
+                "--block",
+                "breakout",
+                "--compare",
+                "HEAD",
+                "--out",
+                "c.png",
+            ],
+        );
+        assert_eq!(code, 0);
+        assert!(
+            std::fs::read(board.join("c.png"))
+                .unwrap()
+                .starts_with(b"\x89PNG")
+        );
+        // A plain render has no references.
+        ryueda(
+            &board,
+            &run,
+            daemon,
+            &["render", "--block", "breakout", "--out", "p.svg"],
+        );
+        assert!(
+            !std::fs::read_to_string(board.join("p.svg"))
+                .unwrap()
+                .contains("data-ref")
+        );
+        assert_eq!(
+            ryueda(
+                &board,
+                &run,
+                daemon,
+                &[
+                    "render",
+                    "--rev",
+                    "HEAD",
+                    "--compare",
+                    "HEAD",
+                    "--out",
+                    "x.svg"
+                ]
+            )
+            .1["error"]["code"],
+            "invalid_param"
+        );
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}

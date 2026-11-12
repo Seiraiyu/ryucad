@@ -12,6 +12,7 @@ pub mod activity;
 pub mod annotate;
 pub mod cascade;
 pub mod client;
+pub mod compare;
 pub mod conn;
 pub mod coord;
 pub mod daemon;
