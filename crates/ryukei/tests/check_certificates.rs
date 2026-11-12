@@ -25,3 +25,25 @@ fn a_saddle_tangency_at_a_shared_vertex_checks() {
     assert_eq!(b.faces().count(), 8);
     assert_eq!(check_intersections(&b), []);
 }
+
+/// #303's shape: a prism whose every face and edge is a NURBS over the
+/// face's own parameters, so the edge where its long sides cross (at 90°
+/// and at 10°) is an isoline of both splines, as on KiCad's MSOP-8-1EP.
+/// Its check settles within a budget a trace recursing along the isoline
+/// would exhaust.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn nurbs_sides_crossing_along_an_isoline_check_in_bounded_work() {
+    use ryukei::work::Work;
+    for deg in [90.0f64, 10.0] {
+        let b = ryukei_testkit::nurbs::isoline_wedge(deg * core::f64::consts::PI / 180.0);
+        assert_eq!(ryukei::check::check(&b), [], "{deg}°");
+        let w = Work::unlimited().with_budget(1 << 21);
+        let faults = ryukei::check::check_intersections_with(&b, &w);
+        assert_eq!(faults, Ok(vec![]), "{deg}°: {} units", w.spent());
+        eprintln!("{deg}°: {} units", w.spent());
+    }
+}
