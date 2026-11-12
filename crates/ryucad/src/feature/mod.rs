@@ -2,6 +2,21 @@
 //! feature type a request names, one module per kind, registered in
 //! `KINDS`. The file formats stay in `ryucad-doc`, which ryupdm reads.
 
+pub(crate) mod blend;
+pub(crate) mod boolean;
+pub(crate) mod delete_body;
+pub(crate) mod extrude;
+pub(crate) mod hole;
+pub(crate) mod import;
+pub(crate) mod insert;
+pub(crate) mod instance;
+pub(crate) mod instance_pattern;
+pub(crate) mod mate;
+pub(crate) mod pattern;
+pub(crate) mod planar;
+pub(crate) mod primitive;
+pub(crate) mod sketch;
+
 use crate::doc::files::{Feature, Placement, number};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
