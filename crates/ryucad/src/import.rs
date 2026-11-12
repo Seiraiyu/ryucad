@@ -2977,6 +2977,165 @@ pub(crate) mod tests {
         ryustep::write(&ryustep::WriteModel { products }, &opts).unwrap()
     }
 
+    /// The context, units and origin every external-assembly file below
+    /// shares: `#1` to `#13`.
+    const EXTERNAL_HEAD: &str = "#1=APPLICATION_CONTEXT('automotive design');
+#2=APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#1);
+#3=PRODUCT_CONTEXT('',#1,'mechanical');
+#4=PRODUCT_DEFINITION_CONTEXT('part definition',#1,'design');
+#5=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#9))GLOBAL_UNIT_ASSIGNED_CONTEXT((#6,#7,#8))REPRESENTATION_CONTEXT('',''));
+#6=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));
+#7=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));
+#8=(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT());
+#9=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),#6,'distance_accuracy_value','');
+#10=CARTESIAN_POINT('',(0.,0.,0.));
+#11=DIRECTION('',(0.,0.,1.));
+#12=DIRECTION('',(1.,0.,0.));
+#13=AXIS2_PLACEMENT_3D('',#10,#11,#12);
+";
+
+    /// An assembly file (AP242, millimetres) whose root `root` places
+    /// products kept in other files, in CAx-IF's form (design 448): each
+    /// of `uses` is `(product id, its file, where it goes in mm)`, its
+    /// usage numbered from 1; a product named twice is one definition
+    /// placed twice. A product's name is its id.
+    pub(crate) fn external_assembly(root: &str, uses: &[(&str, &str, [f64; 3])]) -> Vec<u8> {
+        use std::fmt::Write as _;
+        let mut products: Vec<(&str, &str)> = Vec::new();
+        for &(id, file, _) in uses {
+            if !products.iter().any(|(p, _)| *p == id) {
+                products.push((id, file));
+            }
+        }
+        let mut s = String::from(
+            "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('ryucad test: external references'),'2;1');\n\
+             FILE_NAME('asm.stp','2026-11-12T00:00:00',(''),(''),'ryucad tests','','');\n\
+             FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF { 1 0 10303 442 1 1 4 }'));\n\
+             ENDSEC;\nDATA;\n",
+        );
+        s.push_str(EXTERNAL_HEAD);
+        let targets: Vec<String> = (0..uses.len())
+            .map(|j| format!("#{}", 1001 + 10 * j))
+            .collect();
+        writeln!(s, "#20=PRODUCT('{root}','{root}','',(#3));").unwrap();
+        s.push_str("#21=PRODUCT_DEFINITION_FORMATION('','',#20);\n");
+        s.push_str("#22=PRODUCT_DEFINITION('design','',#21,#4);\n");
+        s.push_str("#23=PRODUCT_DEFINITION_SHAPE('','',#22);\n");
+        writeln!(s, "#24=SHAPE_REPRESENTATION('',(#13,{}),#5);", targets.join(",")).unwrap();
+        s.push_str("#25=SHAPE_DEFINITION_REPRESENTATION(#23,#24);\n");
+        for (i, (id, file)) in products.iter().enumerate() {
+            let b = 200 + 20 * i;
+            writeln!(s, "#{b}=PRODUCT('{id}','{id}','',(#3));").unwrap();
+            writeln!(s, "#{}=PRODUCT_DEFINITION_FORMATION('','',#{b});", b + 1).unwrap();
+            writeln!(s, "#{}=PRODUCT_DEFINITION('design','',#{},#4);", b + 2, b + 1).unwrap();
+            writeln!(s, "#{}=PRODUCT_DEFINITION_SHAPE('','',#{});", b + 3, b + 2).unwrap();
+            writeln!(s, "#{}=SHAPE_REPRESENTATION('',(#13),#5);", b + 4).unwrap();
+            writeln!(s, "#{}=SHAPE_DEFINITION_REPRESENTATION(#{},#{});", b + 5, b + 3, b + 4).unwrap();
+            writeln!(s, "#{}=DOCUMENT_FILE('{file}','',$,#{},'',$);", b + 6, b + 7).unwrap();
+            writeln!(s, "#{}=DOCUMENT_TYPE('');", b + 7).unwrap();
+            writeln!(s, "#{}=DOCUMENT_REPRESENTATION_TYPE('digital',#{});", b + 8, b + 6).unwrap();
+            writeln!(s, "#{}=APPLIED_DOCUMENT_REFERENCE(#{},'',(#{}));", b + 9, b + 6, b + 2).unwrap();
+        }
+        for (j, &(id, _, at)) in uses.iter().enumerate() {
+            let u = 1000 + 10 * j;
+            let i = products.iter().position(|(p, _)| *p == id).unwrap();
+            let (pd, rep) = (200 + 20 * i + 2, 200 + 20 * i + 4);
+            writeln!(s, "#{u}=CARTESIAN_POINT('',({:?},{:?},{:?}));", at[0], at[1], at[2]).unwrap();
+            writeln!(s, "#{}=AXIS2_PLACEMENT_3D('',#{u},#11,#12);", u + 1).unwrap();
+            writeln!(
+                s,
+                "#{}=NEXT_ASSEMBLY_USAGE_OCCURRENCE('{}','','',#22,#{pd},$);",
+                u + 2,
+                j + 1
+            )
+            .unwrap();
+            writeln!(s, "#{}=PRODUCT_DEFINITION_SHAPE('','',#{});", u + 3, u + 2).unwrap();
+            writeln!(s, "#{}=ITEM_DEFINED_TRANSFORMATION('','',#13,#{});", u + 4, u + 1).unwrap();
+            writeln!(
+                s,
+                "#{}=(REPRESENTATION_RELATIONSHIP('','',#{rep},#24)REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{})SHAPE_REPRESENTATION_RELATIONSHIP());",
+                u + 5,
+                u + 4
+            )
+            .unwrap();
+            writeln!(s, "#{}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{},#{});", u + 6, u + 5, u + 3).unwrap();
+        }
+        s.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
+        s.into_bytes()
+    }
+
+    /// A STEP file ryustep writes (meters) of one product `id` (its name
+    /// too) holding one block `x_mm` long, 10 mm wide and high.
+    pub(crate) fn part_file(id: &str, x_mm: f64) -> Vec<u8> {
+        use ryukei::geom::Rigid;
+        let block = ryukei::primitive::block(
+            ryukei::name::OpKey(1),
+            x_mm / 1000.0,
+            0.01,
+            0.01,
+            &Rigid::IDENTITY,
+        )
+        .unwrap()
+        .0;
+        written(vec![ryustep::Product {
+            id: id.into(),
+            name: id.into(),
+            bodies: vec![block],
+            ..Default::default()
+        }])
+    }
+
+    /// `files` written under a new folder, each `(path relative to it,
+    /// bytes)`, folders made as needed.
+    pub(crate) fn folder(files: &[(&str, Vec<u8>)]) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        for (p, b) in files {
+            let path = d.path().join(p);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b).unwrap();
+        }
+        d
+    }
+
+    /// The committed set: `asm.stp` placing `BOX` (`box.stp`, OCCT's
+    /// box) at the origin and `PIN` (`parts/cylinder.stp`, OCCT's
+    /// cylinder) at 50 mm along x and along y.
+    pub(crate) fn set_path(name: &str) -> String {
+        format!(
+            "{}/../ryustep/tests/data/external/set/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    /// The helpers' and the committed set's assemblies read as 24.A reads
+    /// external references: each placed product externally defined, with
+    /// its file.
+    #[test]
+    fn external_assembly_files_name_their_parts() {
+        let docs = |bytes: Vec<u8>| -> Vec<(String, String, bool)> {
+            let o = ryustep::open(&bytes).unwrap();
+            o.products
+                .definitions
+                .iter()
+                .filter(|d| !d.external.is_empty())
+                .map(|d| (d.product_id.to_string(), d.external[0].name.clone(), d.externally_defined()))
+                .collect()
+        };
+        let made = external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3]), ("PIN", "pin.stp", [50.0, 0.0, 0.0])]);
+        assert_eq!(
+            docs(made),
+            [("BOX".into(), "box.stp".into(), true), ("PIN".into(), "pin.stp".into(), true)]
+        );
+        let set = std::fs::read(set_path("asm.stp")).unwrap();
+        assert_eq!(
+            docs(set),
+            [("BOX".into(), "box.stp".into(), true), ("PIN".into(), "cylinder.stp".into(), true)]
+        );
+        let p = ryustep::open(&part_file("BOX", 10.0)).unwrap();
+        assert_eq!(p.products.roots.len(), 1);
+        assert_eq!(p.held.len(), 1);
+    }
+
     /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of
     /// two pins (`P-1`) and one pin more; and a loose block (`L-1`) no
     /// product uses: two roots. Every usage of the sub-assembly's and the
