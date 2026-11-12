@@ -512,6 +512,72 @@ pub fn held(
     out
 }
 
+/// Part `part`'s file properties: each attribute of the products its
+/// committed files make it of (its import features without a place, its
+/// imported instances' own product, a flattened part's one root) whose
+/// name folds to no custom property `config` declares, as `props.get`
+/// lists them. Read from the bytes each time; nothing writes them.
+pub fn of_part(project: &Project, part: &Id, config: Option<&Config>) -> Vec<Value> {
+    let Some(p) = project.parts.get(part) else {
+        return Vec::new();
+    };
+    let mut paths: BTreeSet<String> = BTreeSet::new();
+    for fid in p.order() {
+        match p.features.get(fid) {
+            Some(Ok(Feature::Import(i))) => {
+                paths.insert(i.file.path.clone());
+            }
+            Some(Ok(Feature::Instance(i))) => {
+                if let Some(u) = &i.import {
+                    paths.insert(u.file.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for path in paths {
+        let Some(file) = project.imports.get(&path) else {
+            continue;
+        };
+        let Ok(opened) = crate::import::opened(file) else {
+            continue;
+        };
+        let Some(k) = source_definition(project, part, &path, &opened) else {
+            continue;
+        };
+        let r = crate::import::plan::product_of(&opened, k);
+        let Some(pp) = opened.properties().products.get(&k) else {
+            continue;
+        };
+        for a in &pp.attributes {
+            if config.is_some_and(|c| c.properties.contains_key(&fold(&a.name))) {
+                continue;
+            }
+            let mut v = json!({
+                "name": a.name,
+                "file": path,
+                "product": {"id": r.id, "name": r.name, "ordinal": r.ordinal},
+                "step": format!("#{}", a.item),
+            });
+            let (ty, value) = match &a.value {
+                FileValue::Text(t) => ("string", json!(t)),
+                FileValue::Integer(n) => ("integer", json!(n)),
+                FileValue::Number(x) => ("number", json!(x)),
+                FileValue::Boolean(b) => ("boolean", json!(b)),
+                FileValue::Measure { value, unit } => {
+                    v["unit"] = json!(unit.name);
+                    ("quantity", json!(value))
+                }
+            };
+            v["type"] = json!(ty);
+            v["value"] = value;
+            out.push(v);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1076,5 +1142,38 @@ pub(crate) mod tests {
         );
         let lib = one("import_material_conflict:");
         assert!(lib.contains("2710 kg/m^3"), "{lib}");
+    }
+
+    #[test]
+    fn what_isnt_declared_is_a_file_property() {
+        let (_dir, mut s) = declared(&["rohs", "net_mass"]);
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": vendor_path(false), "solid": true}),
+        )
+        .unwrap();
+        let stored = v["file"]["path"].as_str().unwrap().to_owned();
+        let got = call(&mut s, "props.get", json!({"part": "vb-100"})).unwrap();
+        let file = got["file"].as_array().unwrap();
+        let names: Vec<&str> = file.iter().map(|f| f["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["RoHS", "Net Mass"], "{got}");
+        assert_eq!(
+            (&file[0]["type"], &file[0]["value"]),
+            (&json!("boolean"), &json!(true))
+        );
+        assert_eq!(
+            (&file[1]["type"], &file[1]["value"], &file[1]["unit"]),
+            (&json!("quantity"), &json!(0.12), &json!("kg"))
+        );
+        assert_eq!(file[0]["file"], stored.as_str());
+        assert_eq!(file[0]["product"]["id"], "VB-100");
+        assert!(file[0]["step"].as_str().unwrap().starts_with('#'));
+        // Nothing wrote them: they aren't properties.
+        assert!(values(&mut s, "vb-100").get("rohs").is_none());
+        // A part with no imports has none.
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let p = call(&mut s, "props.get", json!({"part": "p"})).unwrap();
+        assert_eq!(p["file"], json!([]));
     }
 }
