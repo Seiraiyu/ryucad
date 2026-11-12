@@ -100,6 +100,13 @@ impl MeshTree {
         self.tree.in_box(lo, hi, out)
     }
 
+    /// Whether some triangle of `self` and one of `other` lie within `d`
+    /// of each other: what `nearest(other)`'s distance `<= d` answers,
+    /// stopped at the first pair found.
+    pub fn any_within(&self, other: &MeshTree, d: f64) -> bool {
+        self.tree.any_within(&other.tree, d)
+    }
+
     /// Every pair `(i, j)` of a triangle of `self` and one of `other`
     /// within `d` of each other, sorted.
     pub fn within(&self, other: &MeshTree, d: f64) -> Vec<(u32, u32)> {
@@ -365,5 +372,32 @@ mod tests {
 
     fn lo_hi() -> (Point3, Point3) {
         (Point3::ORIGIN, Point3::new(1.0, 1.0, 1.0))
+    }
+
+    #[test]
+    fn any_within_answers_what_nearest_does() {
+        let (ball, _) =
+            crate::primitive::sphere(OpKey::from_bytes(b"s"), 0.005, &Rigid::IDENTITY).unwrap();
+        let ball = mesh_of(&ball);
+        let cube = mesh_of(&block([0.0; 3], 0.01));
+        let moved = |t: &[[Point3; 3]], o: Point3| -> Vec<[Point3; 3]> {
+            t.iter()
+                .map(|t| t.map(|q| Point3::new(q.x + o.x, q.y + o.y, q.z + o.z)))
+                .collect()
+        };
+        let a = MeshTree::new(cube.clone());
+        let mut checked = 0;
+        for o in probes(60) {
+            for other in [&ball, &cube] {
+                let b = MeshTree::new(moved(other, o));
+                let m = a.nearest(&b).unwrap().distance;
+                for d in [0.0, m * (1.0 - 1e-9), m, m * (1.0 + 1e-9), 1e-4, 1.0] {
+                    assert_eq!(a.any_within(&b, d), m <= d, "{o:?} {d} {m}");
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 720);
+        assert!(!MeshTree::new(Vec::new()).any_within(&a, 1.0));
     }
 }

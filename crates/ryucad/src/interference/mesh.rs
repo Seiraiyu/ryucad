@@ -455,10 +455,9 @@ pub fn verdict(
         return Ok(Verdict::Clear);
     };
     let (reach, margin) = reach(a, b, &ba.union(&bb));
-    let nearest = a
-        .tree
-        .nearest(&bp.tree)
-        .map_or(f64::INFINITY, |n| n.distance);
+    // Whether the meshes come within the reach: all the verdict asks of
+    // their nearest pair, so the search stops at the first pair found.
+    let near = a.tree.any_within(&bp.tree, reach);
     let mut deep = None;
     if a.closed {
         deep = deep_point(&a.tree, bp.tree.triangles(), reach, margin, search)?;
@@ -466,7 +465,7 @@ pub fn verdict(
     if deep.is_none() && bp.closed {
         deep = deep_point(&bp.tree, a.tree.triangles(), reach, margin, search)?;
     }
-    if deep.is_none() && a.closed && bp.closed && nearest <= reach {
+    if deep.is_none() && a.closed && bp.closed && near {
         deep = interior_point(&a.tree, &bp.tree, reach, search)?;
         if deep.is_none() {
             deep = interior_point(&bp.tree, &a.tree, reach, search)?;
@@ -494,7 +493,7 @@ pub fn verdict(
             faces_b: faces_b.into_iter().collect(),
         });
     }
-    Ok(if nearest <= reach {
+    Ok(if near {
         Verdict::Touching
     } else {
         Verdict::Clear
