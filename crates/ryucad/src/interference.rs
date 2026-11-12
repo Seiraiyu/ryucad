@@ -236,7 +236,8 @@ fn thin(points: &[Point3], normals: &[[f64; 3]]) -> bool {
 /// [`mesh::verdict`] of two prepared meshes, `None` past its budget: how
 /// a pair with a reference side is judged, public for tests.
 pub fn mesh_verdict(a: &Prepared, b: &Prepared, rel: &Rigid) -> Option<Verdict> {
-    mesh::verdict(a, b, rel, &mut 0)
+    let job = Job::default();
+    mesh::verdict(a, b, rel, &mut mesh::Search::new(&job)).ok()
 }
 
 /// [`verdict`] for a request's `job`: a cancel stops the kernel inside the
@@ -480,9 +481,17 @@ pub fn find_for(
                 let get = |b: &Built| prepared[&(b as *const Built as usize)].clone();
                 match (get(x.built), get(y.built)) {
                     (Ok(ma), Ok(mb)) => {
-                        mesh::verdict(&ma, &mb, &rel, &mut 0).unwrap_or(Verdict::CannotCheck {
-                            kernel: "mesh search past its budget".to_owned(),
-                        })
+                        let mut search = mesh::Search::new(job);
+                        match mesh::verdict(&ma, &mb, &rel, &mut search) {
+                            Ok(v) => v,
+                            Err(mesh::Halt::OverBudget) => Verdict::CannotCheck {
+                                kernel: "mesh search past its budget".to_owned(),
+                            },
+                            Err(mesh::Halt::Cancelled) => {
+                                return Err(crate::work::stopped(&ryukei::Error::Cancelled, job)
+                                    .expect("a cancel is stopped"));
+                            }
+                        }
                     }
                     (Err(e), _) | (_, Err(e)) => Verdict::CannotCheck { kernel: e },
                 }

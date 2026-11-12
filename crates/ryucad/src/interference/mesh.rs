@@ -6,6 +6,7 @@
 //! pair's reach, and nothing is claimed past it.
 
 use crate::interference::Verdict;
+use ryu_session::job::Job;
 use ryukei::geom::{Box3, Point3, Rigid};
 use ryukei::measure::MeshTree;
 use ryukei::name::Name;
@@ -114,9 +115,55 @@ fn to_triangle(p: Point3, t: &[Point3; 3]) -> f64 {
     one.nearest_to(p).map_or(f64::INFINITY, |(d, _, _)| d)
 }
 
-/// A search for a deep point that ran past [`BUDGET`] pieces.
+/// Why a pair's search stopped before it decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OverBudget;
+pub enum Halt {
+    /// Past its budget: the pair is unchecked.
+    OverBudget,
+    /// The request was cancelled: the pair answers `cancelled`.
+    Cancelled,
+}
+
+/// Pieces between looks at the request's cancel.
+pub const CANCEL_EVERY: u64 = 4096;
+
+/// A pair's search: the pieces it has visited, how many it may, and the
+/// request whose cancel stops it, looked at on the first piece and every
+/// [`CANCEL_EVERY`] after.
+pub struct Search<'j> {
+    pub spent: u64,
+    budget: u64,
+    job: &'j Job,
+}
+
+impl<'j> Search<'j> {
+    /// [`BUDGET`] pieces, stopped by `job`'s cancel.
+    pub fn new(job: &'j Job) -> Self {
+        Search {
+            spent: 0,
+            budget: BUDGET,
+            job,
+        }
+    }
+
+    /// Another budget (tests).
+    pub fn with_budget(mut self, budget: u64) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// One piece more.
+    fn charge(&mut self) -> Result<(), Halt> {
+        self.spent += 1;
+        if self.spent > self.budget {
+            return Err(Halt::OverBudget);
+        }
+        if self.spent % CANCEL_EVERY == 1 && self.job.is_cancelled() {
+            return Err(Halt::Cancelled);
+        }
+        Ok(())
+    }
+}
 
 /// A point of a triangle of `tris` (those whose boxes come within `reach`
 /// of `inside`'s box) whose winding in `inside` isn't zero and that lies
@@ -131,14 +178,14 @@ pub struct OverBudget;
 ///   within about the reach of the mesh: not deep).
 ///
 /// A piece wholly inside (its ball misses the mesh, its middle winds) is
-/// deep when its middle lies farther than `reach`. [`OverBudget`] past
-/// [`BUDGET`] pieces, counted in `spent`.
+/// deep when its middle lies farther than `reach`. [`Halt::OverBudget`]
+/// past the search's budget, [`Halt::Cancelled`] on a cancel.
 pub fn deep_point(
     inside: &MeshTree,
     tris: &[[Point3; 3]],
     reach: f64,
-    spent: &mut u64,
-) -> Result<Option<Point3>, OverBudget> {
+    search: &mut Search,
+) -> Result<Option<Point3>, Halt> {
     let Some((lo, hi)) = inside.bounds() else {
         return Ok(None);
     };
@@ -149,10 +196,7 @@ pub fn deep_point(
         .copied()
         .collect();
     while let Some(t) = stack.pop() {
-        *spent += 1;
-        if *spent > BUDGET {
-            return Err(OverBudget);
-        }
+        search.charge()?;
         let c = Point3::new(
             (t[0].x + t[1].x + t[2].x) / 3.0,
             (t[0].y + t[1].y + t[2].y) / 3.0,
@@ -193,13 +237,14 @@ pub fn deep_point(
 /// two closed sides whose surfaces coincide, or nearly (a part placed twice
 /// at one pose, which no surface point of either certifies), interfere.
 /// Only points inside `other`'s box grown by `reach` are judged; each
-/// costs a piece of [`BUDGET`], counted in `spent`.
+/// costs a piece of the search's budget: [`Halt::OverBudget`] past it,
+/// [`Halt::Cancelled`] on a cancel.
 pub fn interior_point(
     own: &MeshTree,
     other: &MeshTree,
     reach: f64,
-    spent: &mut u64,
-) -> Result<Option<Point3>, OverBudget> {
+    search: &mut Search,
+) -> Result<Option<Point3>, Halt> {
     let Some((lo, hi)) = other.bounds() else {
         return Ok(None);
     };
@@ -221,10 +266,7 @@ pub fn interior_point(
         if !near.intersects(&Box3::from_point(p)) {
             continue;
         }
-        *spent += 1;
-        if *spent > BUDGET {
-            return Err(OverBudget);
-        }
+        search.charge()?;
         if !matches!(own.winding(p), Some(w) if w != 0) {
             continue;
         }
@@ -241,12 +283,17 @@ pub fn interior_point(
     Ok(None)
 }
 
-/// `a` against `b` placed at `rel` in `a`'s frame, on their meshes;
-/// `spent` counts the search's pieces. `None` past [`BUDGET`].
-pub fn verdict(a: &Prepared, b: &Prepared, rel: &Rigid, spent: &mut u64) -> Option<Verdict> {
+/// `a` against `b` placed at `rel` in `a`'s frame, on their meshes, under
+/// `search`'s budget and cancel.
+pub fn verdict(
+    a: &Prepared,
+    b: &Prepared,
+    rel: &Rigid,
+    search: &mut Search,
+) -> Result<Verdict, Halt> {
     let bp = b.placed(rel);
     let (Some(ba), Some(bb)) = (a.bounds(), bp.bounds()) else {
-        return Some(Verdict::Clear);
+        return Ok(Verdict::Clear);
     };
     let reach = reach(a, b, &ba.union(&bb));
     let nearest = a
@@ -255,15 +302,15 @@ pub fn verdict(a: &Prepared, b: &Prepared, rel: &Rigid, spent: &mut u64) -> Opti
         .map_or(f64::INFINITY, |n| n.distance);
     let mut deep = None;
     if a.closed {
-        deep = deep_point(&a.tree, bp.tree.triangles(), reach, spent).ok()?;
+        deep = deep_point(&a.tree, bp.tree.triangles(), reach, search)?;
     }
     if deep.is_none() && bp.closed {
-        deep = deep_point(&bp.tree, a.tree.triangles(), reach, spent).ok()?;
+        deep = deep_point(&bp.tree, a.tree.triangles(), reach, search)?;
     }
     if deep.is_none() && a.closed && bp.closed && nearest <= reach {
-        deep = interior_point(&a.tree, &bp.tree, reach, spent).ok()?;
+        deep = interior_point(&a.tree, &bp.tree, reach, search)?;
         if deep.is_none() {
-            deep = interior_point(&bp.tree, &a.tree, reach, spent).ok()?;
+            deep = interior_point(&bp.tree, &a.tree, reach, search)?;
         }
     }
     if deep.is_some() {
@@ -280,7 +327,7 @@ pub fn verdict(a: &Prepared, b: &Prepared, rel: &Rigid, spent: &mut u64) -> Opti
             }
         }
         let (lo, hi) = (ba.min().max(bb.min()), ba.max().min(bb.max()));
-        return Some(Verdict::Approximate {
+        return Ok(Verdict::Approximate {
             min: [lo.x, lo.y, lo.z],
             max: [hi.x, hi.y, hi.z],
             open: !a.closed || !b.closed,
@@ -288,7 +335,7 @@ pub fn verdict(a: &Prepared, b: &Prepared, rel: &Rigid, spent: &mut u64) -> Opti
             faces_b: faces_b.into_iter().collect(),
         });
     }
-    Some(if nearest <= reach {
+    Ok(if nearest <= reach {
         Verdict::Touching
     } else {
         Verdict::Clear
@@ -300,6 +347,7 @@ mod tests {
     use super::*;
     use ryukei::geom::Rigid;
     use ryukei::name::OpKey;
+    use std::sync::{Arc, atomic::AtomicBool};
 
     pub(crate) fn block(side: f64) -> Body {
         ryukei::primitive::block(OpKey::from_bytes(b"b"), side, side, side, &Rigid::IDENTITY)
@@ -330,6 +378,35 @@ mod tests {
         assert!(!p.closed);
         assert_eq!(p.tree.triangles().len(), 2);
     }
+    /// `verdict` with no cancel and the whole budget, and what it spent.
+    fn judged(a: &Prepared, b: &Prepared, rel: &Rigid) -> (Verdict, u64) {
+        let job = Job::default();
+        let mut s = Search::new(&job);
+        let v = verdict(a, b, rel, &mut s).unwrap();
+        (v, s.spent)
+    }
+
+    fn judge(a: &Prepared, b: &Prepared, rel: &Rigid) -> Verdict {
+        judged(a, b, rel).0
+    }
+
+    #[test]
+    fn a_cancelled_search_stops_and_a_spent_one_is_over_budget() {
+        let a = Prepared::new(&block(0.01)).unwrap();
+        let b = Prepared::new(&block(0.01)).unwrap();
+        let overlapping = at(0.005, 0.002, 0.0);
+        let job = Job::new("t", "p", "interference", Arc::new(AtomicBool::new(true)));
+        let mut s = Search::new(&job);
+        assert_eq!(verdict(&a, &b, &overlapping, &mut s), Err(Halt::Cancelled));
+        assert_eq!(s.spent, 1, "the first piece looks");
+        let none = Job::default();
+        let mut s = Search::new(&none).with_budget(1);
+        assert_eq!(
+            verdict(&a, &b, &at(0.01, 0.0, 0.0), &mut s),
+            Err(Halt::OverBudget)
+        );
+        assert_eq!(s.spent, 2);
+    }
     fn at(x: f64, y: f64, z: f64) -> Rigid {
         Rigid::translation(ryukei::geom::Vector3::new(x, y, z))
     }
@@ -344,15 +421,9 @@ mod tests {
     fn blocks_apart_touching_and_overlapping() {
         let a = Prepared::new(&block(0.01)).unwrap();
         let b = Prepared::new(&block(0.01)).unwrap();
-        assert_eq!(
-            verdict(&a, &b, &at(0.011, 0.0, 0.0), &mut 0).unwrap(),
-            Verdict::Clear
-        );
-        assert_eq!(
-            verdict(&a, &b, &at(0.01, 0.0, 0.0), &mut 0).unwrap(),
-            Verdict::Touching
-        );
-        let v = verdict(&a, &b, &at(0.005, 0.002, 0.0), &mut 0).unwrap();
+        assert_eq!(judge(&a, &b, &at(0.011, 0.0, 0.0)), Verdict::Clear);
+        assert_eq!(judge(&a, &b, &at(0.01, 0.0, 0.0)), Verdict::Touching);
+        let v = judge(&a, &b, &at(0.005, 0.002, 0.0));
         let Verdict::Approximate {
             min,
             max,
@@ -375,17 +446,14 @@ mod tests {
         let a = Prepared::new(&block(0.01)).unwrap();
         let b = Prepared::new(&block(0.01)).unwrap();
         for rel in [Rigid::IDENTITY, at(1e-6, 0.0, 0.0), at(0.0, -1e-6, 1e-6)] {
-            let v = verdict(&a, &b, &rel, &mut 0).unwrap();
+            let v = judge(&a, &b, &rel);
             assert!(
                 matches!(v, Verdict::Approximate { open: false, .. }),
                 "{rel:?}: {v:?}"
             );
         }
         // A block standing on another, flush, still only touches.
-        assert_eq!(
-            verdict(&a, &b, &at(0.0, 0.0, 0.01), &mut 0).unwrap(),
-            Verdict::Touching
-        );
+        assert_eq!(judge(&a, &b, &at(0.0, 0.0, 0.01)), Verdict::Touching);
     }
 
     #[test]
@@ -403,7 +471,7 @@ mod tests {
         .0;
         let a = Prepared::new(&plate).unwrap();
         let b = Prepared::new(&pin(0.003, 0.02)).unwrap();
-        let v = verdict(&a, &b, &at(0.02, 0.02, -0.0075), &mut 0).unwrap();
+        let v = judge(&a, &b, &at(0.02, 0.02, -0.0075));
         assert!(
             matches!(v, Verdict::Approximate { open: false, .. }),
             "{v:?}"
@@ -414,7 +482,7 @@ mod tests {
     fn one_inside_another_interferes_and_a_sheet_through_a_block_is_open() {
         let a = Prepared::new(&block(0.01)).unwrap();
         let small = Prepared::new(&block(0.002)).unwrap();
-        let v = verdict(&a, &small, &at(0.004, 0.004, 0.004), &mut 0).unwrap();
+        let v = judge(&a, &small, &at(0.004, 0.004, 0.004));
         assert!(matches!(v, Verdict::Approximate { .. }), "{v:?}");
         let b = block(0.01);
         let top = b.faces().next().unwrap();
@@ -425,13 +493,13 @@ mod tests {
         // The square sheet moved to lie across the block's middle.
         let box3 = s.bounds().unwrap();
         let mid = 0.005 - box3.min().z;
-        let v = verdict(&a, &s, &at(0.002, 0.002, mid), &mut 0).unwrap();
+        let v = judge(&a, &s, &at(0.002, 0.002, mid));
         assert!(
             matches!(v, Verdict::Approximate { open: true, .. }),
             "{v:?}"
         );
         // Two sheets crossing only touch.
-        let v = verdict(&s, &s, &at(0.002, 0.002, 0.0), &mut 0).unwrap();
+        let v = judge(&s, &s, &at(0.002, 0.002, 0.0));
         assert!(matches!(v, Verdict::Touching | Verdict::Clear), "{v:?}");
     }
 }
