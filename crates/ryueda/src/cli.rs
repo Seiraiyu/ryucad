@@ -561,6 +561,15 @@ enum ViewCmd {
         #[arg(long, value_name = "NM", requires = "centre")]
         zoom: Option<i64>,
     },
+    /// Show a reference to a participant (every person attached by
+    /// default): their windows open its sheet, select it and frame it.
+    Show {
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// A participant's ID (`participants` lists them).
+        #[arg(long = "for", value_name = "PARTICIPANT")]
+        participant: Option<String>,
+    },
 }
 
 /// `X,Y` in nanometres.
@@ -1964,6 +1973,17 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 }),
                 _ => None,
             },
+        },
+        Command::View {
+            cmd:
+                Some(ViewCmd::Show {
+                    reference,
+                    participant,
+                }),
+            ..
+        } => Request::ViewShow {
+            reference: reference.clone(),
+            participant: participant.clone(),
         },
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },

@@ -279,3 +279,80 @@ fn a_window_says_where_it_looks() {
         Code::NotFound
     );
 }
+
+#[test]
+fn an_agent_shows_the_person_what_it_means() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Here::open(&breakout(dir.path()));
+    // Nobody attached: refused only if it names or draws nothing.
+    let v = h
+        .ask(None, "view.show", json!({"ref": "sensor/c1"}))
+        .unwrap();
+    assert_eq!(v["shown"], json!([]));
+    let dana = h.human("Dana");
+    h.ask(Some(&dana), "view.set", json!({"block": "breakout"}))
+        .unwrap();
+    let v = h
+        .ask(None, "view.show", json!({"ref": "sensor/c1"}))
+        .unwrap();
+    assert_eq!(v["shown"], json!([dana]));
+    let agent = h
+        .live
+        .participants()
+        .find(|x| x.name == "agent")
+        .unwrap()
+        .id
+        .clone();
+    let seen = h.live.get(&dana).unwrap().clone();
+    assert_eq!(seen.selection, vec!["sensor/c1".to_owned()]);
+    assert_eq!(seen.view.block.as_deref(), Some("sensor"));
+    assert_eq!(seen.view.shown_by.as_deref(), Some(agent.as_str()));
+    // The camera frames c1's box as the scene gives it.
+    let s = h
+        .ask(
+            Some(&dana),
+            "scene",
+            json!({"block": "sensor", "sheet": seen.view.sheet}),
+        )
+        .unwrap();
+    let c1 = s["owners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["ref"] == "sensor/c1")
+        .unwrap();
+    let b = |i: usize, k: usize| c1["box"][i][k].as_i64().unwrap();
+    let boxed = ryusch::geom::Rect::new([b(0, 0), b(0, 1)], [b(1, 0), b(1, 1)]);
+    assert_eq!(seen.view.camera, Some(ryueda::view::Camera::framing(boxed)));
+    assert_eq!(v["box"], c1["box"]);
+    // A pin: framed round where wires meet it.
+    h.ask(None, "view.show", json!({"ref": "breakout/r1/1"}))
+        .unwrap();
+    assert_eq!(
+        h.live.get(&dana).unwrap().selection,
+        vec!["breakout/r1/1".to_owned()]
+    );
+    // A net, found by its wires or labels.
+    let v = h
+        .ask(None, "view.show", json!({"ref": "breakout/sda"}))
+        .unwrap();
+    assert_eq!(v["block"], "breakout");
+    // One participant only: nobody else moves.
+    let erin = h.human("Erin");
+    let v = h
+        .ask(
+            None,
+            "view.show",
+            json!({"ref": "breakout/u2", "participant": erin}),
+        )
+        .unwrap();
+    assert_eq!(v["shown"], json!([erin]));
+    assert_eq!(
+        h.live.get(&dana).unwrap().selection,
+        vec!["breakout/sda".to_owned()]
+    );
+    let e = h
+        .ask(None, "view.show", json!({"ref": "breakout/u9"}))
+        .unwrap_err();
+    assert_eq!(e.code, Code::RefUnresolved);
+}

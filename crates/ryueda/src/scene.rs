@@ -747,6 +747,109 @@ pub fn place(
     })
 }
 
+/// Where a reference is drawn: the view that shows it, its box there,
+/// and the camera that frames that.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub shown: Shown,
+    pub boxed: Rect,
+    pub camera: crate::view::Camera,
+}
+
+/// Where `reference` (resolved as `r`) is drawn for a participant whose
+/// view is `now`: the sheet `now` shows (its layer kept) when it draws it,
+/// else the first in canvas order that does. A net, rail or port is found
+/// by its wires, junctions, flags and labels; a pin by where wires meet
+/// it, a grid step round; an instance of a stack by the stack's front
+/// symbol. Drawn on no sheet is `invalid_param` (`reason: not_drawn`).
+pub fn locate(
+    p: &Project,
+    r: &crate::refs::Resolved,
+    reference: &str,
+    now: &crate::view::View,
+) -> Result<Found> {
+    use crate::refs::Kind;
+    let b = crate::write::block(p, &r.block)?;
+    let here = now.block.as_deref() == Some(r.block.as_str());
+    let layer = if here { now.layer.clone() } else { None };
+    let mut laid = schem::lay(p, b, None, &[], ryusch::input::Relayout::None)?;
+    let (_, chosen) = crate::schemcmd::show_layer(p, b, &mut laid, layer.as_deref())?;
+    let layout = &laid.outcome.layout;
+    let mut order = ryusch::canvas::order(layout);
+    if let Some(i) = now
+        .sheet
+        .as_ref()
+        .filter(|_| here)
+        .and_then(|s| order.iter().position(|x| x == s))
+    {
+        let s = order.remove(i);
+        order.insert(0, s);
+    }
+    // What draws it, by reference path.
+    let target = match r.kind {
+        Kind::Instance => {
+            let iid = reference.rsplit_once("instance:").map_or("", |(_, i)| i);
+            let front = laid
+                .built
+                .stacks
+                .iter()
+                .find(|(_, list)| list.iter().any(|m| m.as_str() == iid))
+                .map_or_else(|| iid.to_owned(), |(f, _)| f.to_string());
+            format!("{}/instance:{front}", r.block)
+        }
+        _ => r.owner.clone(),
+    };
+    let labels = format!("{}/label:", r.block);
+    let a_net = matches!(r.kind, Kind::Net | Kind::Rail | Kind::Port);
+    // Painted as `scene` paints in the light theme: the same pens, so the
+    // same boxes (colours move no box).
+    let looks = crate::schemcmd::looks(p, b, &laid.built, layout, Theme::Light);
+    for sid in order {
+        let boxed = if r.kind == Kind::Pin {
+            pins(&b.id, &laid, &sid, &BTreeMap::new())
+                .into_iter()
+                .find(|x| x.reference == reference)
+                .map(|x| Rect::new(x.at, x.at).grow(ryusch::geom::GRID))
+        } else {
+            let look = looks.get(&sid).cloned().unwrap_or_default();
+            let painted = ryusch::paint::sheet_in(&laid.built.input, layout, &sid, &look);
+            let mut boxed: Option<Rect> = None;
+            for (it, key) in painted.items.iter().zip(&painted.owners) {
+                let Some(key) = key else { continue };
+                let o = schem::ref_path(&b.id, key);
+                let its_label = a_net
+                    && o.strip_prefix(&labels)
+                        .and_then(|rest| rest.rsplit_once('@'))
+                        .is_some_and(|(net, _)| format!("{}/{net}", r.block) == target);
+                if (o == target || its_label)
+                    && let Some(x) = item_box(it)
+                {
+                    boxed = Some(boxed.map_or(x, |y| y.union(x)));
+                }
+            }
+            boxed
+        };
+        if let Some(boxed) = boxed {
+            return Ok(Found {
+                shown: Shown {
+                    design: chosen.as_ref().map(|l| l.design.to_string()),
+                    block: r.block.clone(),
+                    sheet: sid,
+                    layer,
+                },
+                camera: crate::view::Camera::framing(boxed),
+                boxed,
+            });
+        }
+    }
+    Err(Error::new(
+        Code::InvalidParam,
+        format!("{reference} is drawn on no sheet of block {}", r.block),
+    )
+    .with("ref", reference)
+    .with("reason", "not_drawn"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

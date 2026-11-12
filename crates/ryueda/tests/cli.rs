@@ -522,6 +522,66 @@ fn status_from_the_cli() {
 }
 
 #[test]
+fn views_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    for args in [
+        vec!["view"],
+        vec!["view", "show", "breakout/r1"],
+        vec!["view", "set", "--block", "breakout"],
+    ] {
+        let (code, v) = p.run_in(
+            &p.direct,
+            "board",
+            &[&["--no-daemon"][..], &args[..]].concat(),
+        );
+        assert_eq!(
+            (code, &v["error"]["code"]),
+            (1, &json!("no_live_session")),
+            "{args:?}"
+        );
+    }
+    // An agent's own view, set as a window sets one.
+    let (code, v) = run(&[
+        "--as",
+        "looker",
+        "view",
+        "set",
+        "--block",
+        "breakout",
+        "--centre",
+        "1000,2000",
+        "--zoom",
+        "20000",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    let who = v["result"]["participant"].as_str().unwrap().to_owned();
+    let (_, got) = run(&["view", "--of", &who]);
+    assert_eq!(
+        got["result"]["view"]["camera"],
+        json!({"centre_nm": [1000, 2000], "zoom_nm_per_pt": 20000})
+    );
+    assert_eq!(
+        run(&["view", "set", "--centre", "1,2"]).1["error"]["code"],
+        "usage"
+    );
+    // Shown to that agent.
+    let (code, v) = run(&["view", "show", "breakout/u2", "--for", &who]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["shown"], json!([who]));
+    let (_, got) = run(&["view", "--of", &who]);
+    assert_ne!(
+        got["result"]["view"]["camera"]["centre_nm"],
+        json!([1000, 2000])
+    );
+    assert_eq!(
+        run(&["view", "show", "breakout/nope"]).1["error"]["code"],
+        "ref_unresolved"
+    );
+}
+
+#[test]
 fn watchers_hear_of_library_changes() {
     let p = Pair::new();
     for (sub, args) in [
@@ -696,6 +756,7 @@ fn every_protocol_method_has_a_command() {
         ("activity.set", &["status"]),
         ("view.get", &["view"]),
         ("view.set", &["view", "set"]),
+        ("view.show", &["view", "show"]),
         ("subscribe", &["watch"]),
         ("request.cancel", &["cancel"]),
         ("daemon.status", &["daemon", "status"]),

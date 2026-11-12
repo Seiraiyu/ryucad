@@ -1348,6 +1348,45 @@ fn dispatch(
             v.shown_by = Some(id.clone());
             Ok(json!({"participant": id, "view": crate::view::to_json(v)}))
         }
+        Request::ViewShow {
+            reference,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.show"))?;
+            let p = session.project();
+            let r = crate::refs::resolve(p, &reference)?;
+            let by = live.caller(me);
+            let who: Vec<String> = match &participant {
+                Some(id) => vec![live.get(id)?.id.clone()],
+                None => live.humans().map(|h| h.id.clone()).collect(),
+            };
+            // Where it is for no one in particular: the answer's, and a
+            // refusal before anyone's view moves if it is drawn nowhere.
+            let at = crate::scene::locate(p, &r, &reference, &crate::view::View::default())?;
+            for id in &who {
+                let now = live.get(id)?.view.clone();
+                let found = match now.block.as_deref() == Some(r.block.as_str()) {
+                    true => crate::scene::locate(p, &r, &reference, &now)?,
+                    false => at.clone(),
+                };
+                live.select(id, vec![reference.clone()], SelectMode::Replace)?;
+                let v = &mut live.get_mut(id)?.view;
+                v.design = found.shown.design;
+                v.block = Some(found.shown.block);
+                v.sheet = Some(found.shown.sheet);
+                v.layer = found.shown.layer;
+                v.camera = Some(found.camera);
+                v.shown_by = Some(by.clone());
+            }
+            Ok(json!({
+                "ref": reference,
+                "shown": who,
+                "block": at.shown.block,
+                "sheet": at.shown.sheet,
+                "box": [at.boxed.min, at.boxed.max],
+                "camera": at.camera,
+            }))
+        }
         Request::Subscribe { .. } => match live {
             None => Err(live::no_live_session("subscribe")),
             Some(_) => Err(Error::new(Code::Usage, "subscribe needs a connection")),

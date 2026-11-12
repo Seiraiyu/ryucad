@@ -1027,6 +1027,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         camera: Option<crate::view::Camera>,
     },
+    /// Shows a reference to `participant`, else to every person attached:
+    /// their views move to its sheet and frame it, and their selection
+    /// becomes it. Needs the daemon.
+    #[serde(rename = "view.show")]
+    ViewShow {
+        #[serde(rename = "ref")]
+        reference: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     #[serde(rename = "subscribe")]
     Subscribe {
         #[serde(default)]
