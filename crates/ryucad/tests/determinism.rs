@@ -6299,6 +6299,68 @@ fn styles_move_no_geometry_instance() {
     }
 }
 
+/// Every export fixture of the `exports` section, its parts given a
+/// material and a property: the STEP file with them holds every instance
+/// the file without them has, numbered as it numbers them (design 448,
+/// plan 24.C: geometry never moves).
+#[test]
+fn properties_move_no_geometry_instance() {
+    type Fixture = fn() -> (tempfile::TempDir, ryucad::session::Session);
+    let fixtures: [(Fixture, &str); 3] = [(assembled, "frame"), (blended, "bl"), (swept, "sw")];
+    let call = |session: &mut ryucad::session::Session, method: &str, params: serde_json::Value| {
+        let req = ryucad::proto::Request::from_rpc(method, Some(params)).unwrap();
+        ryucad::server::handle(session, req).unwrap();
+    };
+    for (make, part) in fixtures {
+        let (_dir, mut session) = make();
+        call(
+            &mut session,
+            "pdm.configure",
+            serde_json::json!({"properties": {"finish": {"type": "string"}}}),
+        );
+        call(
+            &mut session,
+            "materials.set",
+            serde_json::json!({"name": "Steel", "density": "7850 kg/m^3"}),
+        );
+        let parts: Vec<String> = session
+            .project()
+            .parts
+            .iter()
+            .filter(|(_, p)| {
+                !p.file
+                    .as_ref()
+                    .is_ok_and(|f| f.kind == ryucad::doc::files::PartKind::Assembly)
+            })
+            .map(|(id, _)| id.to_string())
+            .collect();
+        for p in &parts {
+            call(
+                &mut session,
+                "props.set",
+                serde_json::json!({"part": p, "properties": {"material": "Steel", "finish": "red"}}),
+            );
+        }
+        let export = |session: &mut ryucad::session::Session, properties: bool| {
+            let params = serde_json::json!({"part": part, "time_stamp": "2026-10-27T00:00:00",
+                                            "file_name": "x.step", "properties": properties});
+            let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+            ryucad::server::answer_live(session, None, None, req)
+                .unwrap()
+                .binary
+                .unwrap()
+        };
+        let plain = ryustep::part21::parse(&export(&mut session, false)).unwrap();
+        let with = ryustep::part21::parse(&export(&mut session, true)).unwrap();
+        assert!(with.instances.len() > plain.instances.len(), "{part}");
+        assert_eq!(
+            format!("{:?}", &with.instances[..plain.instances.len()]),
+            format!("{:?}", plain.instances),
+            "{part}"
+        );
+    }
+}
+
 sections! {
     golden;
     units => units_section(&mut golden),

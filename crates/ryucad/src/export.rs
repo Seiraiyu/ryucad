@@ -3773,7 +3773,8 @@ pub(crate) mod tests {
     /// [`frame`], painted as ryucad paints: the plate red with one face
     /// blue, the pin translucent, the sub-assembly's second pin green in
     /// that occurrence.
-    fn painted_frame() -> Vec<u8> {
+    /// `painted_frame`'s model, and the plate's face it paints.
+    fn painted_frame_model() -> (ryustep::WriteModel, ryukei::name::Name) {
         use ryukei::geom::{Rigid, Vector3};
         use ryukei::name::OpKey;
         use ryukei::primitive;
@@ -3820,6 +3821,11 @@ pub(crate) mod tests {
                 product("P-1", "Pin", vec![pin], vec![]),
             ],
         };
+        (model, face)
+    }
+
+    fn painted_frame() -> Vec<u8> {
+        let (model, face) = painted_frame_model();
         let p = |c: [u8; 3], o: f64| ryustep::Paint {
             colour: c,
             opacity: o,
@@ -3868,18 +3874,21 @@ pub(crate) mod tests {
         let params = json!({"part": "f-1", "unit": "m", "time_stamp": "2026-10-27T00:00:00",
                             "file_name": "frame.step"});
         let (_, bytes) = exported(&mut s, params).unwrap();
-        if bytes != original {
-            let (a, b) = (
-                String::from_utf8_lossy(&original).into_owned(),
-                String::from_utf8_lossy(&bytes).into_owned(),
-            );
-            let first = a.lines().zip(b.lines()).position(|(x, y)| x != y);
-            panic!(
-                "differs from line {first:?}:\n{}\n---\n{}",
-                a.lines().nth(first.unwrap_or(0)).unwrap_or(""),
-                b.lines().nth(first.unwrap_or(0)).unwrap_or("")
-            );
-        }
+        assert!(bytes == original, "{}", first_difference(&original, &bytes));
+    }
+
+    /// Where two files' text first differs, line by line.
+    fn first_difference(original: &[u8], bytes: &[u8]) -> String {
+        let (a, b) = (
+            String::from_utf8_lossy(original).into_owned(),
+            String::from_utf8_lossy(bytes).into_owned(),
+        );
+        let first = a.lines().zip(b.lines()).position(|(x, y)| x != y);
+        format!(
+            "differs from line {first:?}:\n{}\n---\n{}",
+            a.lines().nth(first.unwrap_or(0)).unwrap_or(""),
+            b.lines().nth(first.unwrap_or(0)).unwrap_or("")
+        )
     }
 
     #[test]
@@ -4360,5 +4369,69 @@ pub(crate) mod tests {
         assert_eq!(read(&working), (Some(8000.0), V::Text("blue".into())));
         let (_, again) = exported(&mut s, opts(Some("label:A"))).unwrap();
         assert_eq!(again, at_label, "what ryupdm's packages need");
+    }
+
+    /// `painted_frame`'s model with a material and two attributes on its
+    /// root, as ryucad writes them: what an import maps and an export
+    /// writes again.
+    fn attributed_frame() -> Vec<u8> {
+        // The same model `painted_frame` writes (factor its model into a
+        // `painted_frame_model()` both call), without paints.
+        let (model, _) = painted_frame_model();
+        let data = ryustep::PartData {
+            products: vec![ryustep::ProductData {
+                product: 0,
+                material: Some(ryustep::MaterialData {
+                    name: "Steel".into(),
+                    density: Some(7850.0),
+                }),
+                attributes: vec![
+                    ryustep::AttributeData {
+                        name: "count".into(),
+                        value: ryustep::DataValue::Integer(4),
+                    },
+                    ryustep::AttributeData {
+                        name: "finish".into(),
+                        value: ryustep::DataValue::Text("red".into()),
+                    },
+                ],
+            }],
+        };
+        let opts = ryustep::WriteOptions {
+            unit: ryustep::LengthUnit::Meter,
+            file_name: "frame.step".into(),
+            time_stamp: "2026-10-27T00:00:00".into(),
+            ..Default::default()
+        };
+        ryustep::write_with_data(&model, &[], &ryustep::Paints::default(), &data, &opts)
+            .unwrap()
+            .bytes
+    }
+
+    /// A file with a material and attributes imported into a project
+    /// declaring them, and exported with its header, is the file, byte
+    /// for byte (design 448's fixpoint, with metadata).
+    #[test]
+    fn an_attributed_file_exports_as_it_came() {
+        let original = attributed_frame();
+        let (_src, path) = outside(&original, "frame.step");
+        let (_dir, mut s) = fresh();
+        call(
+            &mut s,
+            "pdm.configure",
+            json!({"properties": {"finish": {"type": "string"}, "count": {"type": "integer"}}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "materials.set",
+            json!({"name": "Steel", "density": "7850 kg/m^3"}),
+        )
+        .unwrap();
+        call(&mut s, "import", json!({"solid": true, "path": path})).unwrap();
+        let params = json!({"part": "f-1", "unit": "m", "time_stamp": "2026-10-27T00:00:00",
+                            "file_name": "frame.step"});
+        let (_, bytes) = exported(&mut s, params).unwrap();
+        assert!(bytes == original, "{}", first_difference(&original, &bytes));
     }
 }
