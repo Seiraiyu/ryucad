@@ -1578,7 +1578,10 @@ pub fn update_in_place(root: &std::path::Path, path: &str) -> Result<Option<Writ
         // Doctor's repair asks for nothing: new products are references,
         // as an import's are by default.
         mode: Some(crate::doc::import::Mode::Reference),
-        cross: plan::Cross::default(),
+        cross: plan::Cross {
+            external: update::external_parts(&project, path, &opened, &opened),
+            ..Default::default()
+        },
     };
     let u = update::plan(&project, &opened, &file_ref, &fresh)?;
     Ok(Some(plan::writes(&project, &u.planned)?))
@@ -1644,7 +1647,10 @@ pub fn misplaced(project: &crate::doc::project::Project) -> Vec<Misplaced> {
             taken: &taken,
             pdm: false,
             mode: None,
-            cross: plan::Cross::default(),
+            cross: plan::Cross {
+                external: update::external_parts(project, path, &opened, &opened),
+                ..Default::default()
+            },
         };
         let Ok(u) = update::plan(project, &opened, &file_ref, &fresh) else {
             continue;
@@ -3538,6 +3544,26 @@ pub(crate) mod tests {
         assert_eq!(v["file"]["reused"], true);
         assert!(v["external"].as_array().unwrap().iter().all(|x| x["reused"] == true));
         assert_eq!(v["parts"][0]["part"], "asm-2");
+    }
+
+    /// Instances of parts made from other files are their usages: a
+    /// rebuild warns nothing, doctor finds nothing misplaced, and its
+    /// in-place repair of the assembly file deletes nothing.
+    #[test]
+    #[ignore = "passes once Task 14 lands"]
+    fn instances_of_external_parts_are_their_usages() {
+        let (dir, mut s) = crate::server::tests::fresh();
+        import_call(&mut s, json!({"path": set_path("asm.stp")})).unwrap();
+        let asm = Id::parse("asm", "part").unwrap();
+        assert_eq!(update::usage_warnings(s.project(), &asm), Vec::<Value>::new());
+        assert!(misplaced(s.project()).is_empty());
+        let w = update_in_place(dir.path(), "imports/asm.step").unwrap().unwrap();
+        assert!(w.values().all(Option::is_some), "{:?}", w.keys().collect::<Vec<_>>());
+        assert!(
+            !w.keys().any(|k| k.starts_with("parts/asm/features/")),
+            "the instances stay as they are: {:?}",
+            w.keys().collect::<Vec<_>>()
+        );
     }
 
     /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of
