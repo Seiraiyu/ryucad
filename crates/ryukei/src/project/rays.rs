@@ -6,11 +6,12 @@ use super::{Image, ImageCurve, View};
 use crate::geom::{Box3, Curve, Line, Point2, Point3};
 use crate::intersect::broad::BoxTree;
 use crate::intersect::{
-    CurveHit, Place, curve_surface_in, face_box, face_tolerance, point_in_face,
+    CurveHit, FaceIndex, Failure, Place, curve_surface_in, face_box, face_tolerance,
 };
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId};
 use crate::work::{Meter, Scope};
+use std::sync::OnceLock;
 
 /// How far past the nearest face a ray runs.
 const PAST: f64 = 1e-6;
@@ -23,6 +24,10 @@ pub(super) struct Scene<'a> {
     tree: BoxTree,
     /// The largest depth any face reaches.
     far: f64,
+    /// Each face's boundary, prepared on its first ray and shared by every
+    /// ray of the view on any thread (plan 17.C): the same places
+    /// `point_in_face` gives.
+    indexes: Vec<OnceLock<FaceIndex>>,
 }
 
 /// What a ray from a point of a piece must know of the piece.
@@ -72,13 +77,24 @@ impl<'a> Scene<'a> {
                 faces.push((b, f));
             }
         }
+        let n = faces.len();
         Self {
             view,
             bodies,
             faces,
             tree: BoxTree::new(boxes),
             far,
+            indexes: (0..n).map(|_| OnceLock::new()).collect(),
         }
+    }
+
+    /// Where `uv` lies against the `i`th face.
+    fn place(&self, i: usize, uv: Point2) -> Result<Place, Failure> {
+        let (b, f) = self.faces[i];
+        let body = self.bodies[b];
+        self.indexes[i]
+            .get_or_init(|| FaceIndex::new(body, f))
+            .place(body, uv, 0.0)
     }
 
     /// The faces whose image box holds `p`'s image and reaches in front
@@ -145,7 +161,7 @@ impl<'a> Scene<'a> {
                             continue;
                         }
                         let (u, v) = surface.project(point).param;
-                        match point_in_face(body, f, Point2::new(u, v)) {
+                        match self.place(i, Point2::new(u, v)) {
                             Ok(Place::Outside) => {}
                             Ok(Place::Inside) if before != after => n += 1,
                             Ok(_) if ray.lenient => {}
