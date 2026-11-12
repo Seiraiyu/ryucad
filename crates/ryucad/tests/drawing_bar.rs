@@ -8,10 +8,11 @@
 //!
 //! `RYUCAD_BARS=1 cargo test -p ryucad --release --test drawing_bar -- --nocapture`
 
+mod common;
+
+use common::must;
 use ryucad::cache::Disk;
 use ryucad::doc::id::Id;
-use ryucad::proto::Request;
-use ryucad::server::handle;
 use ryucad::session::Session;
 use ryucad::units::Unit;
 use ryukei::geom::{Rigid, Vector3};
@@ -20,11 +21,6 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-        .unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 /// How much looser than recorded the bars are: ten times without
 /// `RYUCAD_BARS`.

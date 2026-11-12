@@ -3,29 +3,13 @@
 //! one edge, a boss's foot filled. Every result passes the kernel's
 //! checks, and `ryucad check` finds nothing wrong.
 
+mod common;
+
+use common::{call, must, project};
 use core::f64::consts::PI;
 use ryucad::doc::id::Id;
-use ryucad::proto::Request;
-use ryucad::server::handle;
 use ryucad::session::Session;
 use serde_json::{Value, json};
-
-fn call(s: &mut Session, method: &str, params: Value) -> ryucad::error::Result<Value> {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-}
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
-}
-
-/// A project with part `p`, in millimetres.
-fn project() -> (tempfile::TempDir, Session) {
-    let dir = tempfile::tempdir().unwrap();
-    ryucad::server::init(dir.path(), None).unwrap();
-    let mut s = Session::open(dir.path()).unwrap();
-    must(&mut s, "part.create", json!({"part": "p"}));
-    (dir, s)
-}
 
 fn add(s: &mut Session, f: Value) -> Value {
     let mut f = f;

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Project, ryucad};
+use common::{Project, ryucad_beside_app};
 use serde_json::Value;
 use std::process::Command;
 
@@ -13,7 +13,7 @@ fn the_smoke_run_loads_the_model_and_draws_it() {
     }
     let p = Project::new().with_part();
     // The app finds `ryucad` beside itself, as installed.
-    ryucad();
+    ryucad_beside_app();
     let out = Command::new(env!("CARGO_BIN_EXE_ryucad-app"))
         .arg("--smoke")
         .arg(&p.root)
