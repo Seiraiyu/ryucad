@@ -143,3 +143,120 @@ pub(crate) fn drain(sub: &crate::notify::Subscriber) -> Vec<(String, Value)> {
         ));
     }
 }
+
+/// What code outside `server/` may name of `crate::server`: the request
+/// lifecycle's entry points. The daemon, the CLI, a worktree's requests
+/// and the requests annotations and redlines replay run through them, and
+/// unit tests start projects with `init` and `handle`. Everything else
+/// `server` used to lend lives in `part`, `save`, `geometry`, `budget`,
+/// `scene`, `diff` and `testing` (design 541, "The server split").
+const SERVER_ENTRY: &[&str] = &[
+    "answer_live",
+    "dispatch",
+    "handle",
+    "handle_job",
+    "handle_job_raw",
+    "handle_live",
+    "handle_safely",
+    "init",
+    "mode_refusal",
+    "prepare",
+    "prepare_job",
+    "publish",
+    "settle",
+    "tick",
+];
+
+/// The names `code` takes from the server module: after `crate::server::`
+/// or `ryucad::server::`, and after a bare `server::` (a module imported
+/// as `server`), but not another crate's `…::server::`. Comment lines
+/// don't count.
+fn server_names(code: &str) -> Vec<String> {
+    let code = code
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(i) = code[at..].find("server::") {
+        let start = at + i;
+        at = start + "server::".len();
+        let before = &code[..start];
+        let ours = before.ends_with("crate::") || before.ends_with("ryucad::");
+        if (before.ends_with("::") && !ours) || before.ends_with(word) {
+            continue;
+        }
+        let rest = &code[at..];
+        let names: Vec<&str> = match rest.strip_prefix('{') {
+            Some(group) => group[..group.find('}').unwrap_or(group.len())]
+                .split(',')
+                .map(|n| n.split("::").next().unwrap_or("").split(" as ").next().unwrap_or(""))
+                .map(str::trim)
+                .collect(),
+            None => vec![&rest[..rest.find(|c: char| !word(c)).unwrap_or(rest.len())]],
+        };
+        out.extend(
+            names
+                .into_iter()
+                .filter(|n| !n.is_empty() && *n != "self")
+                .map(str::to_owned),
+        );
+    }
+    out
+}
+
+fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            rust_files(&p, out);
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+#[test]
+fn the_scan_reads_paths_groups_and_bare_imports() {
+    // Spliced, so this file's own text names nothing.
+    let s = "server";
+    let code = format!(
+        "use crate::{s}::{{handle, part_id as id}};\n\
+         let x = crate::{s}::tests::call;\n\
+         // crate::{s}::save\n\
+         use ryu_session::{s}::Serve;\n\
+         use ryucad::{{daemon, {s}}};\n\
+         {s}::init(p);\n\
+         let a = ryucad::{s}::meshes;\n"
+    );
+    assert_eq!(server_names(&code), ["handle", "part_id", "tests", "init", "meshes"]);
+}
+
+/// Design 541: the dependency points one way. Nothing outside `server/`
+/// names more of it than its entry points; a helper it used to hold is
+/// named at its new home (`crate::part::part_id`, `crate::save::save`,
+/// `crate::scene::render_scene`, `crate::testing::call`, …).
+#[test]
+fn nothing_outside_the_server_names_more_than_its_entry_points() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    files.sort();
+    let mut found = Vec::new();
+    for f in files.iter().filter(|f| !f.starts_with(src.join("server"))) {
+        let text = std::fs::read_to_string(f).unwrap();
+        for n in server_names(&text) {
+            if !SERVER_ENTRY.contains(&n.as_str()) {
+                let at = f.strip_prefix(&src).unwrap().display();
+                found.push(format!("{at}: server::{n}"));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "outside server/, name these at their homes (crate::part, save, geometry, budget, \
+         scene, diff; the tests' harness is crate::testing): {found:#?}"
+    );
+}
