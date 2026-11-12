@@ -248,7 +248,7 @@ pub const RULES: &[Rule] = &[
         code: "sch_floating",
         weight: FLOATING,
         unit: "a part",
-        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet and none leaves it, or a pin on a net that leaves the sheet carries no label of its own and is wired to none of its region's off-sheet connectors.",
+        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet and none leaves it, or a pin on a net that leaves the sheet carries no label of its own and is wired to none of its region's off-sheet connectors. A stack's pin on a net per layer, which only a label can draw, isn't judged.",
         why: "A part joined to nothing by a wire floats: the reader can't see what it belongs to without matching label names across the sheet.",
         fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire).",
         evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet, so since plan 2.A (design 348) such a label is the net's off-sheet connector and joins its pin; since plan 2.C (design 348) a pin wired to its region's off-sheet connector, not to a local label, is joined.",
@@ -260,7 +260,7 @@ pub const RULES: &[Rule] = &[
         what: "Four or more members of a bus run between the same two parts' sides on a sheet but are drawn as separate labels or wires.",
         why: "A bus drawn as one bundle reads as one interface; drawn member by member it reads as unrelated signals and costs a label or a wire each.",
         fix: "Ask for the bus (net BUS bus); if it can't be drawn, the note bus_not_drawn says why.",
-        evidence: "Design 348's grammar (figure 5): a bus of four members or more between two regions or parts is drawn as a bus wire with entries, as KiCad's buses and the hand-drawn references' data buses are. A drafting convention; no round has judged it yet.",
+        evidence: "Design 348's grammar (figure 5): a bus of four members or more between two regions or parts is drawn as a bus wire with entries, as KiCad's buses and the hand-drawn references' data buses are. A drafting convention; no round has judged it yet. In round 3's blind review (plan 2.G, three judges a pair), no session's sheets drew a bus, so the rule had nothing to judge.",
     },
     Rule {
         code: "sch_off_sheet_local",
@@ -269,7 +269,7 @@ pub const RULES: &[Rule] = &[
         what: "An off-sheet connector on a net with no pin on another sheet, or a net that continues on another sheet drawn in some region of this one by local labels alone.",
         why: "The connector's outline is the reader's sign that a net leaves the sheet: on a net that stays it sends them looking for a page that isn't there, and where it is missing they take a net that continues for one that doesn't.",
         fix: "Lay the sheet out again (layout --relayout B/S), or ask for the net's wires where it stays (net N wire).",
-        evidence: "Design 348's grammar (figure 3) and the owner's comment #11 on 1.B's renders: a net that leaves its sheet is drawn with a connector distinct from a local label. IEEE 315 and IEC 60617 both draw off-sheet connectors apart from net names. A drafting convention; no round has judged it yet.",
+        evidence: "Design 348's grammar (figure 3) and the owner's comment #11 on 1.B's renders: a net that leaves its sheet is drawn with a connector distinct from a local label. IEEE 315 and IEC 60617 both draw off-sheet connectors apart from net names. A drafting convention. In round 3's blind review (plan 2.G, three judges a pair), the judges' labels-against-wires score rose on all five circuits from nothing to the sessions' last sheets (mean 2.4 to 3.4 of 5) while the points of this rule and the label and floating rules fell on all five (72 to 24 in all).",
     },
     Rule {
         code: "sch_out_of_line",
@@ -278,7 +278,7 @@ pub const RULES: &[Rule] = &[
         what: "A part's body middle, or a two-pin part's pin axis, lines up with no other part across or down.",
         why: "Parts on common lines read as an ordered drawing; a part off every line looks dropped where it fell.",
         fix: "Put it in a row or a column with its neighbours (align X Y row|column).",
-        evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does. In round 2's blind review (plan 1.D, three judges a pair), this rule and the judges' grouping score moved together on the buck and the front end but apart on the breakout (2 to 4 points, +0.3 of 5) and the RP2040 (26 to 28, +2.0): the judges grouped by function, which lines don't show.",
+        evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does. In round 2's blind review (plan 1.D, three judges a pair), this rule and the judges' grouping score moved together on the buck and the front end but apart on the breakout (2 to 4 points, +0.3 of 5) and the RP2040 (26 to 28, +2.0): the judges grouped by function, which lines don't show. In round 3's blind review (plan 2.G, three judges a pair), its points rose on the RP2040 (18 to 36) and the front end (2 to 8) where the judges' flow score stayed at 3.0: the sessions' aligned columns cost points no judge took off.",
     },
     Rule {
         code: "sch_bank_not_in_row",
@@ -323,7 +323,7 @@ pub const RULES: &[Rule] = &[
         what: "A sheet on paper larger than its drawing needs: a smaller paper of the project's series would hold it, or it fills under 100 per mille of its 10 mm cells on paper larger than the series' smallest.",
         why: "A small drawing on a large sheet prints small and reads as empty; the reader zooms and pans for what one smaller page would show at once.",
         fix: "Lay the sheet out again so paper fit chooses (layout --relayout BLOCK/SHEET); a paper of your own choosing can be pinned (paper SHEET a4).",
-        evidence: "The references fill 115 to 336 per mille of their drawing area's 10 mm cells and draw on the smallest paper that holds them: the buck, the front end's three sheets on A4, Mitayi-Pico-D1 on A3, the ESP32-PoE on A2 (measure.py, plan 2.A's Task 1). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on paper fit, 3 to 0.",
+        evidence: "The references fill 115 to 336 per mille of their drawing area's 10 mm cells and draw on the smallest paper that holds them: the buck, the front end's three sheets on A4, Mitayi-Pico-D1 on A3, the ESP32-PoE on A2 (measure.py, plan 2.A's Task 1). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on paper fit, 3 to 0. In round 3's blind review (plan 2.G, three judges a pair), it found nothing on any sheet, yet the judges still put the reference ahead on paper on all four circuits (a mean lead of 1.9 points): the rule's floor holds, and what the judges fault is empty space inside a fitted sheet.",
     },
     Rule {
         code: "sch_function_split",
@@ -332,7 +332,7 @@ pub const RULES: &[Rule] = &[
         what: "One function's parts (a recognised circuit, a dense IC with its satellites and guests, a connector and its breakout) are in more than one region, or some in none.",
         why: "A reader finds a function by its titled region; split, its parts read as two functions, or one is missing from where the title says it is.",
         fix: "Name its region with all of them (region TITLE X...), as the finding's fix says.",
-        evidence: "Design 348's regions: the references group each function on its own part of the sheet (Mitayi-Pico-D1's USB, regulator and RP2040 corners; the ESP32-PoE's Ethernet panel). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on grouping by function, 3 to 0.",
+        evidence: "Design 348's regions: the references group each function on its own part of the sheet (Mitayi-Pico-D1's USB, regulator and RP2040 corners; the ESP32-PoE's Ethernet panel). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on grouping by function, 3 to 0. In round 3's blind review (plan 2.G, three judges a pair), the judges' grouping score rose on all five circuits from nothing to the sessions' last sheets (2.3 to 3.7 of 5) as this rule's and sch_region_untitled's points fell to none on all five, and the reference's lead on grouping fell from 3 points to 1.5.",
     },
     Rule {
         code: "sch_region_untitled",
@@ -341,7 +341,7 @@ pub const RULES: &[Rule] = &[
         what: "A region titled Misc: nothing in it names its function.",
         why: "A region's title is what a reader scans for; Misc says nothing about what the parts do.",
         fix: "Give it a title (region rename REGION TITLE), or a function property to its main component.",
-        evidence: "Design 348: every region is titled by its function. The references title their panels (the ESP32-PoE's ETHERNET, Mitayi-Pico-D1's power and USB blocks).",
+        evidence: "Design 348: every region is titled by its function. The references title their panels (the ESP32-PoE's ETHERNET, Mitayi-Pico-D1's power and USB blocks). In round 3's blind review (plan 2.G, three judges a pair), the judges named the sessions' titled regions (\"I2C header and pull-ups\", \"Output clamps\") among what read better, and engine titles such as \"Misc\", \"SCL\" and \"N_J2_A5\" among what read worse.",
     },
 ];
 
@@ -939,7 +939,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             let mut nearest: Option<(Nm, String)> = None;
             for (k, pin) in part.pins.iter().enumerate() {
                 let Some(n) = pin.drawn_net() else { continue };
-                if block.nets[n].kind != NetKind::Signal {
+                // A stack's pin on a net per layer is labelled, never
+                // wired: one wire can't carry several nets (plan 2.G).
+                if block.nets[n].kind != NetKind::Signal || pin.stacked() {
                     continue;
                 }
                 signals += 1;
@@ -2147,12 +2149,14 @@ fn wired_on_row(
 /// Lays `fix` out over `out` as a dry run (its instructions added as
 /// lasting ones) and judges it: `Ok` when the engine takes it, every
 /// hard rule holds, the layout changes and `finding` (by code and refs)
-/// is gone; else why not.
+/// is gone under `prefs`, the preferences it was found under; else why
+/// not.
 pub fn try_fix(
     block: &Block,
     out: &crate::engine::Outcome,
     finding: &Finding,
     fix: &[Instruction],
+    prefs: &Prefs,
 ) -> Result<(), String> {
     let mut b = block.clone();
     b.previous = Some(out.layout.clone());
@@ -2173,7 +2177,7 @@ pub fn try_fix(
     {
         return Err("it changes nothing".into());
     }
-    let (after, _) = lint(&b, &tried);
+    let (after, _) = lint_with(&b, &tried, prefs);
     if after
         .iter()
         .any(|f| f.code == finding.code && f.refs == finding.refs)
@@ -2199,7 +2203,10 @@ mod tests {
         for f in &with_fix {
             for fix in &f.fixes {
                 // Whatever the verdict, it is the same twice.
-                assert_eq!(try_fix(&block, &out, f, fix), try_fix(&block, &out, f, fix));
+                assert_eq!(
+                    try_fix(&block, &out, f, fix, &Prefs::default()),
+                    try_fix(&block, &out, f, fix, &Prefs::default())
+                );
             }
         }
         // Lining a part up with itself changes nothing: dropped.
@@ -2208,7 +2215,47 @@ mod tests {
             parts: vec![p.clone(), p],
             axis: crate::layout::Axis::Row,
         }];
-        assert!(try_fix(&block, &out, with_fix[0], &idle).is_err());
+        assert!(try_fix(&block, &out, with_fix[0], &idle, &Prefs::default()).is_err());
+    }
+
+    /// #666: a fix is judged under the preferences its finding was found
+    /// under. With local nets preferred as labels, `sch_floating` isn't
+    /// judged, so a fix offered for another rule can't be refused for a
+    /// floating finding the project doesn't count.
+    #[test]
+    fn fixes_are_judged_under_the_projects_preferences() {
+        let block = crate::testing::with_stage(crate::testing::seeded(5, 2));
+        let out = crate::engine::lay_out(&block).unwrap();
+        let mut prefs = Prefs::default();
+        prefs.prefer.local_nets = LocalNets::Labels;
+        let (found, _) = lint_with(&block, &out, &prefs);
+        for f in found.iter().filter(|f| !f.fixes.is_empty()) {
+            for fix in &f.fixes {
+                // The same verdict as judging by hand under `prefs`.
+                let by_hand = {
+                    let mut b = block.clone();
+                    b.previous = Some(out.layout.clone());
+                    b.moves.clear();
+                    b.relayout = crate::input::Relayout::None;
+                    for ins in fix {
+                        let id = crate::layout::next_id(b.instructions.keys());
+                        b.instructions.insert(id, ins.clone());
+                    }
+                    crate::engine::lay_out(&b).ok().is_some_and(|t| {
+                        crate::rules::check(&b, &t.layout).is_empty()
+                            && !lint_with(&b, &t, &prefs)
+                                .0
+                                .iter()
+                                .any(|g| g.code == f.code && g.refs == f.refs)
+                    })
+                };
+                if by_hand {
+                    // A fix that changes nothing is refused either way.
+                    let r = try_fix(&block, &out, f, fix, &prefs);
+                    assert!(r.is_ok() || r == Err("it changes nothing".into()), "{r:?}");
+                }
+            }
+        }
     }
 
     /// A pull wired on its pin's row is the pin's however far out along it
@@ -2450,6 +2497,50 @@ mod tests {
         let wires = vec![vec![a, b], vec![c, [6 * g, 0]]];
         assert!(wired_to_another(&wires, n(a), &[n(a), n(b)]));
         assert!(wired_to_another(&wires, n(c), &[n(a), n(c)]));
+    }
+
+    /// A stack's pin carrying a net per layer can only be labelled (one
+    /// wire can't carry several nets): a part whose every signal pin is
+    /// such a pin isn't judged floating (plan 2.G; the front end's IV
+    /// converter and the Ethernet circuit's status LEDs).
+    #[test]
+    fn a_stacked_pin_is_not_judged_floating() {
+        let mut b = seeded(1, 2);
+        let mut out = crate::engine::lay_out(&b).unwrap();
+        let wired: Vec<String> = out
+            .layout
+            .routes
+            .keys()
+            .filter(|k| b.net(k).is_some_and(|n| b.nets[n].kind == NetKind::Signal))
+            .cloned()
+            .collect();
+        for key in &wired {
+            out.layout.routes.remove(key);
+        }
+        let first = lint(&b, &out)
+            .0
+            .into_iter()
+            .find(|f| f.code == "sch_floating")
+            .expect("a part floats")
+            .refs[0]
+            .clone();
+        let p = b.part(&first).unwrap();
+        let signals: Vec<usize> = (0..b.nets.len())
+            .filter(|n| b.nets[*n].kind == NetKind::Signal)
+            .collect();
+        for pin in &mut b.parts[p].pins {
+            if let Some(n) = pin.net {
+                let other = *signals.iter().find(|m| **m != n).unwrap();
+                pin.layers = vec![Some(other)];
+            }
+        }
+        assert!(
+            !lint(&b, &out)
+                .0
+                .iter()
+                .any(|f| f.code == "sch_floating" && f.refs[0] == first),
+            "{first} is judged though every pin is a stack's"
+        );
     }
 
     #[test]

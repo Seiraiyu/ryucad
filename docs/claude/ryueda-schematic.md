@@ -275,3 +275,33 @@ The design is document 348 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Placeholders.** A designator's letters and `?` (`R?`, `conn::refdes_placeholder`) is a valid component `refdes` (component format 2, which older readers refuse) and `component add|edit --refdes`; it has no designator in the netlist, so ERC's `refdes_missing` says why (`R? is a placeholder: ryueda annotate numbers it`, `details.error.details.placeholder`). `conn::numbered` splits a numbered designator (`R5_A`: `R`, 5, `_A`), and is `None` for a placeholder, `TP_GND` and `R0`.
 - **Testing.** Unit tests (reading order, placeholders, `numbered`); `tests/cli.rs` `annotate_from_the_cli` (both ways: ID order unlaid, canvas order laid out, placeholders, locks, `annotate_conflict`, `refdes_duplicate`, the guard, undo through the daemon); `tests/schematic_corpus.rs` `an_annotate_changes_only_designators` (the front end's two stacks: placements, wires, labels, sheets and regions' origins, titles and parts unchanged, only renumbered parts' text may move, frames follow their text; no designator twice; a second annotate changes nothing); `schematic.<circuit>.annotate.down|across` in `tests/golden/ryueda.txt` (dry runs, alike on one thread and eight, hashed without their `revision`: it hashes the manifest's project ID, which `init` draws at random, so it differs every run); `tests/bar.rs` `annotating_ten_thousand_occurrences_is_within_its_bar` (design 348's 1 s): 1.6 ms in debug, 0.29 ms in release, on cox-worker-5 (Intel Core Ultra 7 265KF, 8 cores, 16 GB, shared with another session's build, load about 4).
 - **Limits.** A component's units order by the first; a layout file stale against its connectivity orders by what it last drew; merges' refdes clashes taking `annotate --reset unannotated` as their repair are stage 4's.
+
+## Agent round 3 and the verdict (decided in ryueda phase 2)
+
+Design 348, phase 8; plan 2.G (doc 500); report 512.
+
+- **Stacked pins.** A stack's pin on a net per layer (`Pin::stacked`) isn't judged by `sch_floating` and meets no port flag (`place::sole_pin` skips it): only a label can draw it.
+- **A clamp beside a stack.** When a port's sole pin on a labelled net is on its sheet, the flag is wired to it by a run of at most `LOCAL_REACH` and neither takes a label (the front end's BAV99 clamps beside the balanced amps' outputs).
+- **Long wires of labelled nets.** A run longer than `LOCAL_REACH` of a net that has labels on its sheet lies inside one region: its parts' extents grown by `region::FRAME`, or anywhere on a sheet with no regions (`engine::wire_held`, in `wire_own` and the kept-run pass). Otherwise the pin takes a detour label (#718).
+- **The corpus's bars.** At most 10 floating from nothing (8 after 2.G). Crossings stay within 1.5 times each reference's with no exception. Thresholds were re-measured less 5. Each circuit lays out from nothing in under 2 s on one thread (`the_corpus_from_nothing_lays_out_within_its_bar`, ten times looser without `RYUEDA_BARS=1`).
+- **The seeded sweep.** `crates/ryusch/tests/seeded_sweep.rs`: 400 fixed inputs of 128 bytes through `check_bytes`, release, its own `full.yml` step, about 35 s. It found 18 failures on main, all fixed:
+  - Labels stuck on a part turned a quarter: `place_labels` tries once more with the stuck parts' signal labels along their pins.
+  - Labels keep off the ways out (three steps) of pins still to be labelled where they can.
+  - A move whose part a broken hard rule names is refused (`layout_rule`, as a shift already was).
+  - A `paper` pin too small for its sheet is refused (`layout_rule`). The fallback onto the project's paper is judged under the block's own papers.
+  - An instruction joining parts of two named regions whose frames then overlap is refused (`instruction_conflict`).
+  - A `near` whose parts would break a hard rule is laid out without it: it moves nothing, noted `instruction_unresolved`, while it lasts (#664). The `network_unresolved` remedy says so.
+  - An asked text side with no room falls back to phase 1's places on the sheet.
+  - Named regions are matched to `region` instructions by ID, not title (two of one title both took the second's parts).
+- **#666.**
+  - `lint::try_fix` judges under the preferences its finding was found under.
+  - `restore` puts a part back only where the previous layout drew nothing of other nets (wires, labels, buses, notes), its own nets and text aside.
+  - `place_bank` gives every rail past the nearest a column of its own.
+- **#712.** It couldn't be reproduced on 2.D's template block, even with 2.E's pin-front guard off. Text over a part's own pin line was already a hard rule (`overlap`), so no new rule was added; `a_templates_designator_stands_off_its_pins` guards it.
+- **Round 3's kit** (`scripts/schematic-round/`):
+  - The wrapper knows 2.A to 2.F's valued flags.
+  - `blind.py` takes a list of images a side (`A-1.png`, …) and `blind.py target` computes design 348's target.
+  - `references.sh` exports the references with `kicad-cli` in the devcontainer image, crops two, and strips the sheet symbols' `File:` text.
+  - `images.sh` renders every sheet before and after, and writes `pairs.json`.
+  - The review's seed is 348.
+- **The result.** Every bar of the stage holds, and round 3's sessions improved every circuit (3 – 0 each). Design 348's reference target was not met: ours is the same or better on 1 of 4, with the reference ahead by 1.5 on grouping and 1.9 on paper, down from 3 and 3 in plan 1.D. The verdict is the owner's, in report 512.

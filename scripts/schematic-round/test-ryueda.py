@@ -42,6 +42,12 @@ CASES = [
     (["place", "b", "--move", "shift R1 up 2"], "lasting", "both", True),
     # A way of looking the round doesn't have is refused outright.
     (["describe", "--block", "b"], "lasting", "pictures", True),
+    # Round 3: flags plan 2.A to 2.F added take a value, so it isn't read
+    # as an instruction.
+    (["place", "b", "--sheet", "s1", "--move", "shift R1 up 1"], "moves", "both", False),
+    (["place", "b", "--dry-run", "--render", "d.png", "--sheet", "s2"], "moves", "both", False),
+    (["render", "--block", "b", "--theme", "dark", "--out", "x.png"], "lasting", "both", False),
+    (["annotate", "--order", "across", "--reset", "all"], "lasting", "both", False),
 ]
 
 failed = 0
