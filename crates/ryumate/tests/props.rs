@@ -102,4 +102,28 @@ proptest! {
             prop_assert_eq!(&two.report.conflicting, &vec![vec![1, 100]]);
         }
     }
+
+    #[test]
+    fn limited_mechanisms_stay_within_their_stops(seed in any::<u64>(), n in 2u32..12, size in 0.001f64..20.0) {
+        let mut g = Lcg::new(seed);
+        let (mut asm, dof) = mechanism(&mut g, n, size);
+        limit(&mut asm, &mut g, size, 0.03);
+        jostle(&mut asm, &mut g, 0.05, size * 0.01);
+        let s = solve(&asm).unwrap();
+        // A tree's stops can always hold: each pins its child alone.
+        prop_assert!(s.report.converged, "{:?}", s.report);
+        prop_assert_eq!(s.report.dof, dof);
+        for (id, m) in &asm.mates {
+            let Some(v) = s.report.values.get(id) else { continue };
+            if let (Some(r), Some(a)) = (m.limits.angle, v.angle) {
+                prop_assert!(r.past(a.value, 1e-9).is_none(), "{id}: {a:?} {r:?}");
+            }
+            if let (Some(r), Some(d)) = (m.limits.distance, v.distance) {
+                prop_assert!(r.past(d.value, 1e-9 * size.max(1.0)).is_none(), "{id}: {d:?} {r:?}");
+            }
+        }
+        let again = solve(&asm).unwrap();
+        prop_assert_eq!(&again.poses, &s.poses);
+        prop_assert_eq!(&again.report, &s.report);
+    }
 }
