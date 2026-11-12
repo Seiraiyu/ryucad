@@ -537,3 +537,71 @@ fn check_against_a_revision_says_what_changed_electrically() {
         }
     }
 }
+
+#[test]
+fn an_unfinished_merge_fails_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    // A conflict record, as 4.C's driver will leave one.
+    let r1 = board.join("blocks/breakout/components/r1.json");
+    let mut c: Value = serde_json::from_str(&std::fs::read_to_string(&r1).unwrap()).unwrap();
+    c["conflicts"] =
+        json!({"/value": {"kind": "value", "base": "4k7", "ours": "10k", "theirs": "2k2"}});
+    std::fs::write(&r1, serde_json::to_string_pretty(&c).unwrap() + "\n").unwrap();
+    let (code, v) = ryueda(&board, &run, false, &["check"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("check_failed")),
+        "{v}"
+    );
+    let report = &v["error"]["details"]["report"];
+    assert!(
+        report["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "merge_conflict"),
+        "{report}"
+    );
+    let (_, d) = ryueda(&board, &run, false, &["doctor"]);
+    assert!(
+        d["result"]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["code"] == "merge_conflict"),
+        "{d}"
+    );
+    git(&top, &["checkout", "--", "."]);
+    // A path Git left unmerged (a text merge, no driver yet).
+    git(&top, &["checkout", "-q", "-b", "theirs"]);
+    let (_, _) = ryueda(
+        &board,
+        &run,
+        false,
+        &["component", "edit", "breakout/r1", "--value", "2k2"],
+    );
+    git(&top, &["commit", "-qam", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (_, _) = ryueda(
+        &board,
+        &run,
+        false,
+        &["component", "edit", "breakout/r1", "--value", "10k"],
+    );
+    git(&top, &["commit", "-qam", "ours"]);
+    let out = git_command(&top)
+        .args(["merge", "-q", "theirs"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the merge stops");
+    let (code, v) = ryueda(&board, &run, false, &["check"]);
+    assert_eq!(code, 1, "{v}");
+    let doctor = v["error"]["details"]["report"]["doctor"]
+        .as_array()
+        .unwrap();
+    assert!(doctor.iter().any(|f| f["code"] == "unmerged_path"), "{v}");
+}

@@ -1072,7 +1072,7 @@ pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<
     let p = Project::load(root)?;
     let doctor: Vec<Fault> = crate::doctor::diagnose(root, &p)
         .iter()
-        .filter(|i| i.code != Code::UnknownFile)
+        .filter(|i| !matches!(i.code, Code::UnknownFile | Code::MergeConflict))
         .map(crate::doctor::Issue::fault)
         .collect();
     check_project(&p, cats, &doctor)

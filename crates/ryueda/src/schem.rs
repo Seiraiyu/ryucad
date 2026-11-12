@@ -46,7 +46,7 @@ pub fn read_layout(bytes: &[u8], path: &str) -> Result<Layout> {
     doc::read::<Layout>(bytes, path, LAYOUT_KIND, LAYOUT_FORMAT)
         .map(|l| l.absolute())
         .map_err(|e| {
-            let code = if e.code == Code::FormatTooNew {
+            let code = if matches!(e.code, Code::FormatTooNew | Code::MergeConflict) {
                 e.code
             } else {
                 Code::LayoutInvalid

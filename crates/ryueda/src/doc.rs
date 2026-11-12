@@ -7,6 +7,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
+/// The member under which a file a merge couldn't settle lists its
+/// conflicts by JSON pointer (design 518; ryucad's record). No file kind
+/// has it otherwise.
+pub const CONFLICTS: &str = "conflicts";
+
 /// Reads the file at `path` (relative to the project) as a `kind` of at
 /// most format `newest`.
 pub fn read<T: DeserializeOwned>(bytes: &[u8], path: &str, kind: &str, newest: u64) -> Result<T> {
@@ -25,6 +30,13 @@ pub fn from_value<T: DeserializeOwned>(v: Value, path: &str, kind: &str, newest:
     let Value::Object(mut o) = v else {
         return Err(invalid("a file is a JSON object".into()));
     };
+    if matches!(o.get(CONFLICTS), Some(Value::Object(_))) {
+        return Err(Error::new(
+            Code::MergeConflict,
+            format!("{path} has unresolved merge conflicts: a merge is unfinished; settle them, then commit"),
+        )
+        .with("path", path));
+    }
     match o.remove("kind") {
         Some(Value::String(k)) if k == kind => {}
         k => {
@@ -106,5 +118,19 @@ mod tests {
             read::<T>(b"{", "t.json", "ryueda.t", 1).unwrap_err().code,
             Code::InvalidJson
         );
+    }
+
+    #[test]
+    fn a_conflict_record_is_an_unfinished_merge() {
+        let text = br#"{"format": 1, "kind": "ryueda.t", "name": "x",
+            "conflicts": {"/name": {"kind": "value", "base": "a", "ours": "x", "theirs": "y"}}}"#;
+        let e = read::<T>(text, "t.json", "ryueda.t", 1).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["path"]),
+            (Code::MergeConflict, &json!("t.json"))
+        );
+        // A member that happens to be called so in a nested object is not one.
+        let ok = br#"{"format": 1, "kind": "ryueda.t", "name": "x"}"#;
+        assert!(read::<T>(ok, "t.json", "ryueda.t", 1).is_ok());
     }
 }
