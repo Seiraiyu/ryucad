@@ -3856,6 +3856,27 @@ fn the_look_is_linted() {
     );
 }
 
+/// The diff roles cascade and lint like any other (plan 4.B): a pale
+/// `diff_added` is found by the look's lint.
+#[test]
+fn the_diff_roles_are_linted() {
+    let p = Pair::with_placed_resistor();
+    assert_eq!(
+        p.ok(&["style"])["builtin"]["palette"]["diff_changed"]["light"],
+        "#9a6700"
+    );
+    p.ok(&["style", "palette", "set", "diff_added", "#f0f0f0/#202326"]);
+    let s = p.ok(&["style"]);
+    assert!(
+        s["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "sch_contrast" && f.to_string().contains("diff_added")),
+        "{s}"
+    );
+}
+
 #[test]
 fn annotate_from_the_cli() {
     let p = Pair::breakout();
