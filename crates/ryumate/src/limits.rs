@@ -154,6 +154,45 @@ pub fn values(asm: &Assembly) -> Result<BTreeMap<Id, Values>, MateError> {
         .collect())
 }
 
+/// A value as the report gives it: measured at the solved poses (an
+/// angle unwrapped about its range when it is limited) and the stop it
+/// rests on, within the tolerance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measured {
+    pub value: f64,
+    pub at: Option<Stop>,
+}
+
+/// A mate's values in the report.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MateValues {
+    pub angle: Option<Measured>,
+    pub distance: Option<Measured>,
+}
+
+/// Mate `m`'s values as the report gives them.
+pub(crate) fn reported(sys: &System, x: &[f64], m: &Mate) -> MateValues {
+    let v = measure(sys, x, m);
+    let angle = v.angle.map(|a| match m.limits.angle {
+        Some(r) => {
+            let a = unwrap_angle(a, &r);
+            Measured {
+                value: a,
+                at: r.at(a, ryusketch::ANGLE_TOL),
+            }
+        }
+        None => Measured { value: a, at: None },
+    });
+    let distance = v.distance.map(|d| Measured {
+        value: d,
+        at: m
+            .limits
+            .distance
+            .and_then(|r| r.at(d, ryusketch::SOLVE_TOL)),
+    });
+    MateValues { angle, distance }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

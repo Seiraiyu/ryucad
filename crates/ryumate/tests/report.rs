@@ -5,8 +5,8 @@ mod common;
 
 use common::*;
 use ryumate::{
-    Assembly, BodyState, Connector, Direction, Kind, Mate, MateError, MateState, Motion, On,
-    Pattern, Pose, State, solve, solve_whole,
+    Assembly, BodyState, Connector, Direction, Kind, Limits, Mate, MateError, MateState, Motion,
+    On, Pattern, Pose, Range, State, solve, solve_whole,
 };
 
 fn revolute() -> Kind {
@@ -418,4 +418,214 @@ fn a_mates_values_are_read_at_the_poses() {
         Pose::IDENTITY,
     );
     assert!(!ryumate::values(&f).unwrap().contains_key(&10));
+}
+
+fn limited(
+    mut asm: ryumate::Assembly,
+    angle: Option<Range>,
+    distance: Option<Range>,
+) -> ryumate::Assembly {
+    asm.mates.get_mut(&10).unwrap().limits = Limits { angle, distance };
+    asm
+}
+
+fn angle_of(asm: &ryumate::Assembly, s: &ryumate::Solved) -> f64 {
+    ryumate::values(&s.assembly(asm)).unwrap()[&10]
+        .angle
+        .unwrap()
+}
+
+#[test]
+fn a_stored_pose_past_a_stop_is_pulled_back_to_it() {
+    let r = Some(Range {
+        min: Some(-0.1),
+        max: Some(0.1),
+    });
+    let asm = limited(turned_hinge(0.3), r, None);
+    let s = ryumate::solve(&asm).unwrap();
+    assert!(s.report.converged, "{:?}", s.report);
+    assert!(s.report.changed);
+    assert!((angle_of(&asm, &s) - 0.1).abs() <= 1e-11);
+    // Still one turn free the other way: a limit is no row.
+    assert_eq!(s.report.bodies[&2].freedom.dof, 1);
+    assert_eq!(s.report.mates[&10], MateState::Well);
+    // At the stop it holds: the same bits again.
+    let again = ryumate::solve(&s.assembly(&asm)).unwrap();
+    assert!(!again.report.changed);
+    assert_eq!(again.poses, s.poses);
+}
+
+#[test]
+fn within_its_limits_nothing_changes_to_the_bit() {
+    let r = Some(Range {
+        min: Some(-0.1),
+        max: Some(0.1),
+    });
+    for at in [0.05, -0.0999] {
+        let plain = ryumate::solve(&turned_hinge(at)).unwrap();
+        let s = ryumate::solve(&limited(turned_hinge(at), r, None)).unwrap();
+        assert_eq!(s.poses, plain.poses);
+        assert_eq!(s.report.iterations, plain.report.iterations);
+    }
+}
+
+#[test]
+fn ranges_across_the_cut_and_one_sided_stops() {
+    let deg = |d: f64| d * (core::f64::consts::PI / 180.0);
+    let range = Range {
+        min: Some(deg(170.0)),
+        max: Some(deg(190.0)),
+    };
+    let across = Some(range);
+    let asm = limited(turned_hinge(deg(-175.0)), across, None);
+    assert!(!ryumate::solve(&asm).unwrap().report.changed);
+    let asm = limited(turned_hinge(deg(-160.0)), across, None);
+    let s = ryumate::solve(&asm).unwrap();
+    let a = ryumate::unwrap_angle(angle_of(&asm, &s), &range);
+    assert!((a - deg(190.0)).abs() <= 1e-11, "{a}");
+    let min_only = Some(Range {
+        min: Some(-0.1),
+        max: None,
+    });
+    let asm = limited(turned_hinge(-0.3), min_only, None);
+    let s = ryumate::solve(&asm).unwrap();
+    assert!((angle_of(&asm, &s) + 0.1).abs() <= 1e-11);
+    assert!(
+        !ryumate::solve(&limited(turned_hinge(2.0), min_only, None))
+            .unwrap()
+            .report
+            .changed
+    );
+}
+
+#[test]
+fn a_slider_stops_at_its_distance() {
+    let s = common::pair(
+        Kind::Slider { distance: None },
+        Pose::IDENTITY,
+        Pose::IDENTITY,
+        common::moved([0.0, 0.0, 0.05]),
+    );
+    let asm = limited(
+        s,
+        None,
+        Some(Range {
+            min: Some(0.0),
+            max: Some(0.02),
+        }),
+    );
+    let solved = ryumate::solve(&asm).unwrap();
+    assert!(solved.report.converged);
+    let d = ryumate::values(&solved.assembly(&asm)).unwrap()[&10]
+        .distance
+        .unwrap();
+    assert!((d - 0.02).abs() <= 1e-10, "{d}");
+}
+
+#[test]
+fn a_chain_of_stops_ends_within_as_many_rounds() {
+    let mut asm = ryumate::Assembly::default();
+    asm.bodies.insert(0, common::fixed(Pose::IDENTITY));
+    let r = Some(Range {
+        min: Some(-0.05),
+        max: Some(0.05),
+    });
+    let off = common::moved([0.01, 0.0, 0.0]);
+    let mut place = Pose::IDENTITY;
+    for k in 1..=3u32 {
+        place = place
+            .then_after(&off)
+            .then_after(&common::turned([0.0, 0.0, 1.0], 0.3, [0.0; 3]));
+        asm.bodies.insert(k, common::free(place));
+        asm.mates.insert(
+            k,
+            Mate {
+                kind: Kind::Revolute { angle: None },
+                a: common::on(k - 1, off),
+                b: common::on(k, Pose::IDENTITY),
+                limits: Limits {
+                    angle: r,
+                    distance: None,
+                },
+            },
+        );
+    }
+    let s = ryumate::solve(&asm).unwrap();
+    assert!(s.report.converged, "{:?}", s.report);
+    let v = ryumate::values(&s.assembly(&asm)).unwrap();
+    for k in 1..=3 {
+        assert!(
+            (v[&k].angle.unwrap() - 0.05).abs() <= 1e-11,
+            "{k}: {:?}",
+            v[&k]
+        );
+    }
+}
+
+#[test]
+fn a_stop_that_cant_hold_conflicts_by_name() {
+    // The arm is also fastened to a fixed body 0.5 rad round: within ±0.1
+    // the hinge can't hold beside it.
+    let mut asm = limited(
+        turned_hinge(0.5),
+        Some(Range {
+            min: Some(-0.1),
+            max: Some(0.1),
+        }),
+        None,
+    );
+    asm.bodies.insert(
+        3,
+        common::fixed(common::turned([0.0, 0.0, 1.0], 0.5, [0.0; 3])),
+    );
+    asm.mates.insert(
+        11,
+        Mate {
+            kind: Kind::Fastened,
+            a: common::on(3, Pose::IDENTITY),
+            b: common::on(2, Pose::IDENTITY),
+            limits: Limits::NONE,
+        },
+    );
+    let s = ryumate::solve(&asm).unwrap();
+    assert!(!s.report.converged);
+    assert!(
+        s.report
+            .conflicting
+            .iter()
+            .any(|c| c.contains(&10) && c.contains(&11)),
+        "{:?}",
+        s.report
+    );
+}
+
+#[test]
+fn a_driven_value_is_never_stopped_by_ryumate() {
+    let mut asm = limited(
+        turned_hinge(0.0),
+        Some(Range {
+            min: Some(-0.1),
+            max: Some(0.1),
+        }),
+        None,
+    );
+    asm.mates.get_mut(&10).unwrap().kind = Kind::Revolute { angle: Some(0.5) };
+    let s = ryumate::solve(&asm).unwrap();
+    assert!((angle_of(&asm, &s) - 0.5).abs() <= 1e-11);
+}
+
+#[test]
+fn the_report_gives_each_mates_values_and_stops() {
+    let r = Some(Range {
+        min: Some(-0.1),
+        max: Some(0.1),
+    });
+    let s = ryumate::solve(&limited(turned_hinge(0.3), r, None)).unwrap();
+    let v = s.report.values[&10].angle.unwrap();
+    assert!((v.value - 0.1).abs() <= 1e-11);
+    assert_eq!(v.at, Some(ryumate::Stop::Max));
+    let free = ryumate::solve(&turned_hinge(0.3)).unwrap();
+    let v = free.report.values[&10].angle.unwrap();
+    assert!((v.value - 0.3).abs() < 1e-15);
+    assert_eq!(v.at, None);
 }
