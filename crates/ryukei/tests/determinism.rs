@@ -3680,6 +3680,76 @@ sections! {
     retrim => retrim_section,
     delete_faces => delete_faces_section,
     blend_recognition => blend_recognition_section,
+    inverted_offsets => inverted_offsets_section,
+}
+
+/// Offsets past their focal surfaces (design 484, plan 17.A): a spline
+/// tube offset past its axis (turned) through `Surface::offset_through`,
+/// its points and normals; and an elliptic tube with its rims filleted
+/// (pipes) shrunk globally past the fillets, whose pipes invert.
+fn inverted_offsets_section(golden: &mut Golden) {
+    use core::f64::consts::PI;
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::offset::{OffsetSpec, offset_body};
+    let mut s = golden.section("inverted_offsets");
+    let tube = Surface::Cylinder(Cylinder::new(Frame::WORLD, 0.7).unwrap());
+    let (tube, _) = tube.to_nurbs([[0.0, PI], [-0.5, 0.5]]).unwrap();
+    let base = Surface::Nurbs(std::sync::Arc::new(tube));
+    let Some(Ok(made)) = base.offset_through(-0.8) else {
+        panic!("an offset past its axis")
+    };
+    let Surface::Offset(o) = &made else {
+        panic!("an offset")
+    };
+    s.u64(u64::from(o.turned()));
+    let [ru, rv] = o.domain();
+    for i in 1..8 {
+        for k in 1..8 {
+            let u = ru[0] + (ru[1] - ru[0]) * f64::from(i) / 8.0;
+            let v = rv[0] + (rv[1] - rv[0]) * f64::from(k) / 8.0;
+            let p = made.point(u, v);
+            let n = made.normal(u, v).unwrap().get();
+            for x in [p.x, p.y, p.z, n.x, n.y, n.z] {
+                s.f64(x);
+            }
+        }
+    }
+    let key = OpKey(0x696e_7631);
+    let f = Frame2::new(Point2::ORIGIN, Vector2::new(1.0, 0.0), true).unwrap();
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![Segment {
+                key: SegmentKey(1),
+                curve: Curve2::Ellipse2(Ellipse2::new(f, 1.0, 0.6).unwrap()),
+                t0: 0.0,
+                t1: 2.0 * PI,
+            }],
+        }],
+    })
+    .unwrap();
+    let (tube, _) = extrude(key, &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, 1.0).unwrap();
+    let rims: Vec<EdgeBlend> = tube
+        .edges()
+        .filter(|&e| {
+            matches!(
+                tube.curve(tube.edge(e).unwrap().curve),
+                Some(Curve::Ellipse(_))
+            )
+        })
+        .map(|e| EdgeBlend {
+            edge: tube.edge(e).unwrap().name,
+            kind: BlendKind::Fillet { radius: 0.1 },
+        })
+        .collect();
+    let (rounded, _) = blend(OpKey(0x696e_7632), &tube, &rims).unwrap();
+    let spec = OffsetSpec {
+        distance: -0.15,
+        faces: Vec::new(),
+    };
+    let (o, j) = offset_body(OpKey(0x696e_7633), &rounded, &spec).unwrap();
+    hash_body(&mut s, &o, &j);
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one

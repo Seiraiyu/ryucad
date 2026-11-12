@@ -308,3 +308,84 @@ fn the_census_adds_at_most_five_percent_to_reading() {
         "{counted:.2} s against {plain:.2} s"
     );
 }
+
+/// Reading styles (design 448, plan 24.B) adds at most 5% to opening the
+/// race's file painted: each body a colour, every tenth face its own, a
+/// tenth of the bodies translucent. `Opened::styles` and every body's
+/// `body_styles`, against `ryustep::open`, the best of five each.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn styles_add_at_most_five_percent_to_opening() {
+    let bytes = painted_race();
+    let time = |f: &dyn Fn()| {
+        let t = Instant::now();
+        f();
+        t.elapsed().as_secs_f64()
+    };
+    let (mut open, mut styled) = (f64::INFINITY, f64::INFINITY);
+    for _ in 0..5 {
+        open = open.min(time(&|| {
+            std::hint::black_box(ryustep::open(&bytes).unwrap());
+        }));
+        let o = ryustep::open(&bytes).unwrap();
+        styled = styled.min(time(&|| {
+            std::hint::black_box(o.styles());
+            for k in 0..o.held.len() {
+                std::hint::black_box(o.body_styles(k));
+            }
+        }));
+    }
+    let o = ryustep::open(&bytes).unwrap();
+    eprintln!(
+        "styles: {} styled items; open {open:.2} s, styles {styled:.3} s ({:+.1}%)",
+        o.styles().assigned.len(),
+        styled / open * 100.0
+    );
+    assert!(!o.styles().assigned.is_empty());
+    assert!(
+        styled <= open * 0.05 * slack(),
+        "{styled:.3} s against {open:.2} s"
+    );
+}
+
+/// The race's bodies painted (see above), kept in the target folder after
+/// the first run.
+fn painted_race() -> Vec<u8> {
+    let kept = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("step-bar-painted.step");
+    if let Ok(b) = std::fs::read(&kept) {
+        return b;
+    }
+    let plain = ryustep::read(&race(), &read_options()).unwrap();
+    let bodies: Vec<ryukei::topo::Body> = plain
+        .bodies
+        .iter()
+        .filter_map(|b| b.result.as_ref().ok().map(|(body, _, _)| body.clone()))
+        .collect();
+    let m = model(bodies);
+    let mut paints = ryustep::Paints::default();
+    for (k, p) in m.products.iter().enumerate() {
+        for (j, b) in p.bodies.iter().enumerate() {
+            let paint = |x: usize| ryustep::Paint {
+                colour: [(x * 37 % 256) as u8, (x * 91 % 256) as u8, 64],
+                opacity: if x.is_multiple_of(10) { 0.5 } else { 1.0 },
+            };
+            let faces = b
+                .faces()
+                .enumerate()
+                .filter(|(i, _)| i.is_multiple_of(10))
+                .map(|(i, f)| (b.face(f).unwrap().name, paint(k + i)))
+                .collect();
+            paints.bodies.push(ryustep::BodyPaint {
+                product: k,
+                body: j,
+                base: Some(paint(k)),
+                faces,
+            });
+        }
+    }
+    let bytes = ryustep::write_styled(&m, &[], &paints, &write_options())
+        .unwrap()
+        .bytes;
+    std::fs::write(&kept, &bytes).unwrap();
+    bytes
+}

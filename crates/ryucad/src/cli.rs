@@ -187,6 +187,10 @@ enum Command {
         /// that didn't heal), listing what was left out, rather than refuse.
         #[arg(long)]
         skip_failing: bool,
+        /// STEP: write no colours or transparency (by default the
+        /// appearance renders show is written as STEP styles).
+        #[arg(long)]
+        no_appearance: bool,
         /// DXF: the sheet metal solid (the part's one unless named).
         #[arg(long)]
         solid: Option<String>,
@@ -388,6 +392,7 @@ enum Command {
     /// Colour a part (<part>), its solids (<part>/<solid>) and faces
     /// (<part>/<solid>/<name>), or an assembly's occurrences
     /// (<assembly>/<instance>/…) and their solids: in Git, all in one part.
+    /// An assembly alone takes only --no-file-styles and --file-styles.
     Colour {
         #[arg(value_name = "REF", required = true)]
         refs: Vec<String>,
@@ -406,6 +411,13 @@ enum Command {
         /// Take the opacity out likewise.
         #[arg(long, conflicts_with_all = ["opacity", "clear"])]
         no_opacity: bool,
+        /// Draw the part without the colours its imported STEP files give
+        /// it (appearance.json's file_styles: false).
+        #[arg(long, conflicts_with_all = ["file_styles", "clear"])]
+        no_file_styles: bool,
+        /// Draw them again.
+        #[arg(long, conflicts_with = "clear")]
+        file_styles: bool,
         /// Take every entry named out, whether or not the model still has
         /// what it names.
         #[arg(long)]
@@ -777,6 +789,25 @@ enum Command {
     /// folder with its own daemon, all sharing this machine's cache.
     #[command(subcommand)]
     Worktree(WorktreeCmd),
+    /// The repository's branches: local ones, and remote-tracking ones
+    /// with no local branch of their name, with their upstream, how far
+    /// they are ahead of and behind this worktree's head, and the
+    /// worktree each is checked out in. Read-only.
+    #[command(subcommand)]
+    Branch(BranchCmd),
+    /// Check out another branch in this project's folder (`git switch`;
+    /// a remote's branch gets a local one tracking it): refused while
+    /// project files differ from HEAD (commit or stash them in Git first:
+    /// ryucad never commits) or a merge is in progress. Everyone attached
+    /// sees the files change; the activity log records the switch, which
+    /// undo can't take back.
+    Switch {
+        branch: String,
+        /// Fail with `conflict` unless the project is still at this
+        /// revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
     History {
@@ -919,6 +950,12 @@ enum WorktreeCmd {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum BranchCmd {
+    /// Every branch, the one checked out here marked `current`.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -4804,6 +4841,7 @@ fn request(cmd: &Command) -> Option<Request> {
             no_mesh,
             pipe_tolerance,
             skip_failing,
+            no_appearance,
             solid,
             no_notes,
             fixed,
@@ -4833,6 +4871,7 @@ fn request(cmd: &Command) -> Option<Request> {
             mesh: no_mesh.then_some(false),
             pipe_tolerance: pipe_tolerance.clone(),
             skip_failing: *skip_failing,
+            appearance: no_appearance.then_some(false),
             solid: solid.clone(),
             notes: no_notes.then_some(false),
             fixed: fixed.clone(),
@@ -4949,6 +4988,8 @@ fn request(cmd: &Command) -> Option<Request> {
             opacity,
             no_colour,
             no_opacity,
+            no_file_styles,
+            file_styles,
             clear: false,
             expect,
         } => Request::AppearanceSet {
@@ -4961,6 +5002,13 @@ fn request(cmd: &Command) -> Option<Request> {
                 .filter(|(on, _)| *on)
                 .map(|(_, f)| f.to_owned())
                 .collect(),
+            file_styles: if *no_file_styles {
+                Some(false)
+            } else if *file_styles {
+                Some(true)
+            } else {
+                None
+            },
             expected_revision: expect.revision.clone(),
         },
         Command::Equations { part, all, rev } => Request::EquationsList {
@@ -5326,6 +5374,11 @@ fn request(cmd: &Command) -> Option<Request> {
             },
         },
         Command::Worktree(WorktreeCmd::List) => Request::WorktreeList {},
+        Command::Branch(BranchCmd::List) => Request::BranchList {},
+        Command::Switch { branch, expect } => Request::BranchSwitch {
+            branch: branch.clone(),
+            expected_revision: expect.clone(),
+        },
         Command::Merge(MergeCmd::Resolve {
             conflict,
             ours,

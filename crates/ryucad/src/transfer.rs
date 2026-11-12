@@ -92,3 +92,27 @@ pub fn failed_instances(error: &Value) -> Vec<Failed> {
         })
         .collect()
 }
+
+/// How many unplaced occurrence styles a report lists.
+pub const UNPLACED: usize = 64;
+
+/// Adds the occurrence styles no instance stands for (design 448) to
+/// `report`'s appearance category ([`json`]'s shape): they stay in the
+/// committed bytes, counted `retained`, each with its styled item and the
+/// usages its path names; at most [`UNPLACED`], with `unplaced_more`.
+pub fn with_unplaced(report: &mut Value, unplaced: Vec<Value>) {
+    if unplaced.is_empty() {
+        return;
+    }
+    let Some(c) = report["categories"]
+        .as_array_mut()
+        .and_then(|cs| cs.iter_mut().find(|c| c["category"] == "appearance"))
+    else {
+        return;
+    };
+    let more = unplaced.len().saturating_sub(UNPLACED);
+    c["unplaced"] = Value::Array(unplaced.into_iter().take(UNPLACED).collect());
+    if more > 0 {
+        c["unplaced_more"] = json!(more);
+    }
+}

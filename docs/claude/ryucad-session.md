@@ -43,6 +43,12 @@ The design is document 198 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Renders.** `render` draws each face in its appearance unless `appearance: false` (`--no-appearance`), the fixed theme; highlights and a compare's paint replace a face's colour and draw it opaque. Translucent faces are kept per sample in front of the model and blended back to front by depth, ties in the order given (`render::Geometry::translucent`), exactly and on any number of threads; an edge bounding only translucent faces is drawn among them, as opaque as its most opaque face, just in front of it. Opaque lines bring the depth they stop at forward. Existing renders keep their pixels (no golden hash moved).
 - **Testing.** `doc::appearance`, `project.rs`, `appearance.rs` (resolution, set and clear, assemblies, materials, unresolved entries with `removed_by`, renders), `render.rs` (translucent order and threads), `doctor.rs` unit tests; `tests/cli.rs`'s `appearance_from_the_cli` both ways, with undo; the `appearance` section of `tests/golden/rebuild.txt` (`appearance.get` of a coloured part and of an assembly over it, and renders in colour, translucent, in the theme, and of the assembly).
 
+## The file layer (decided in ryucad phase 24)
+
+- Resolution interleaves an imported file's styles one step under each level of entries: an assembly's occurrence entries, the files' occurrence styles; the face entry, the file's face style; the solid entry, the file's body style; the part entry; the material; the viewer (design 448, the owner's answer to question 437).
+- `appearance.json` format 2 adds `part.file_styles: false`, written only when set (`ryucad colour <part> --no-file-styles`, `--file-styles` to undo); an assembly's file may hold it and nothing else in `part`. Merges write the lowest format that holds the result.
+- `appearance.get` marks only the values a file gave (`"source": {"colour": "file"}`), so entry-only answers and goldens didn't move; the app's Appearance window says "From the STEP file". A file face style on a face the model lost is `appearance_unresolved` with `source: file`, never an error.
+
 ## Section planes (decided in ryucad phase 10)
 
 The design is document 198 in the Coxswain planning project `ryucad-ryukei`; this is its phase 6, plan 10.D.

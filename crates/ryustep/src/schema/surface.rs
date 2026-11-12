@@ -39,7 +39,11 @@ pub enum Surface {
     /// `SURFACE_OF_REVOLUTION`: `curve` turned about an `AXIS1_PLACEMENT`.
     Revolution { curve: Id, axis: Id },
     /// `OFFSET_SURFACE`: `basis` moved `distance` along its normal.
-    Offset { basis: Id, distance: f64 },
+    Offset {
+        basis: Id,
+        distance: f64,
+        crosses: bool,
+    },
     /// `RECTANGULAR_TRIMMED_SURFACE`: `basis` over `u` by `v`, each the
     /// same way as the basis's parameter if its sense is true.
     RectangularTrimmed {

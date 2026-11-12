@@ -199,8 +199,14 @@ fn offset_surface(id: Id, params: &[Param]) -> Result<Surface, ImportError> {
     a.skip();
     let basis = a.id()?;
     let distance = a.real()?;
-    a.skip();
-    Ok(Surface::Offset { basis, distance })
+    // Files write `.F.` or `.U.` for most offsets, and some `$`: only a
+    // `.T.` marks one past its basis's focal surface (design 484).
+    let crosses = a.logical().ok().flatten() == Some(true);
+    Ok(Surface::Offset {
+        basis,
+        distance,
+        crosses,
+    })
 }
 
 /// `RECTANGULAR_TRIMMED_SURFACE(name, basis_surface, u1, u2, v1, v2,
@@ -303,7 +309,9 @@ mod tests {
         let e = entities(
             "#1=SURFACE_OF_LINEAR_EXTRUSION('',#9,#10);#2=SURFACE_OF_REVOLUTION('',#9,#11);\
              #3=OFFSET_SURFACE('',#12,1.,.F.);\
-             #4=RECTANGULAR_TRIMMED_SURFACE('',#12,0.,6.5,-1.,1.,.T.,.F.);",
+             #4=RECTANGULAR_TRIMMED_SURFACE('',#12,0.,6.5,-1.,1.,.T.,.F.);\
+             #5=OFFSET_SURFACE('',#12,-2.,.T.);#6=OFFSET_SURFACE('',#12,1.,.U.);\
+             #7=OFFSET_SURFACE('',#12,1.,$);",
         );
         assert_eq!(
             e.surface(0, 1),
@@ -320,9 +328,26 @@ mod tests {
             e.surface(0, 3),
             Ok(&Surface::Offset {
                 basis: 12,
-                distance: 1.0
+                distance: 1.0,
+                crosses: false
             })
         );
+        // Only `.T.` marks an offset past its basis's focal surface; `.U.`
+        // and `$` read as `.F.` does (design 484).
+        assert_eq!(
+            e.surface(0, 5),
+            Ok(&Surface::Offset {
+                basis: 12,
+                distance: -2.0,
+                crosses: true
+            })
+        );
+        for k in [6, 7] {
+            assert!(matches!(
+                e.surface(0, k),
+                Ok(&Surface::Offset { crosses: false, .. })
+            ));
+        }
         assert_eq!(
             e.surface(0, 4),
             Ok(&Surface::RectangularTrimmed {

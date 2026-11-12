@@ -630,6 +630,30 @@ impl Surface {
         })
     }
 
+    /// [`Surface::offset`], but a NURBS, an extrusion, a revolution, a
+    /// sweep, an offset or a bent surface whose offset passes its focal
+    /// surface over its whole domain gives that offset (design 484): its
+    /// base's parameters, its normal turned where one principal factor is
+    /// negative ([`Offset::turned`]). STEP writes such an offset with
+    /// `self_intersect` true, and reads it back here. A regular offset is
+    /// [`Surface::offset`]'s; one that folds in part still fails
+    /// `Degenerate`.
+    pub fn offset_through(&self, d: f64) -> Option<Result<Self, Error>> {
+        match self {
+            Self::Nurbs(_)
+            | Self::Extrusion(_)
+            | Self::Revolution(_)
+            | Self::Sweep(_)
+            | Self::Offset(_)
+            | Self::Bent(_) => Some(
+                Offset::new(self.clone(), d, self.domain())
+                    .or_else(|_| Offset::inverted_new(self.clone(), d, self.domain()))
+                    .map(|o| Self::Offset(Arc::new(o))),
+            ),
+            _ => self.offset(d),
+        }
+    }
+
     /// The surface moved by a rigid transform. Parameters are unchanged.
     pub fn transformed(&self, r: &Rigid) -> Self {
         let mut out = self.clone();

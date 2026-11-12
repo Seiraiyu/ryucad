@@ -20,6 +20,13 @@ const MAX_CELLS: usize = 1 << 14;
 /// How many times [`Offset::jet_box`] halves a part of a box.
 const ENCLOSE_DEPTH: u32 = 6;
 
+/// The most a part's bounds may let the normal turn across it, in
+/// radians, before [`Offset::derivative_bound`] halves it.
+const BOUND_TURN: f64 = 1.0;
+
+/// How many times [`Offset::derivative_bound`] halves a part.
+const BOUND_DEPTH: u32 = 2;
+
 /// A box of parameters.
 type Cell = [[f64; 2]; 2];
 
@@ -39,6 +46,9 @@ pub struct Offset {
     base: Surface,
     distance: f64,
     domain: Cell,
+    /// How the offset lies against its base's focal surface (design
+    /// 484): regular for every offset but the global offset's envelope's.
+    turn: Turn,
     /// The base's own cells cut to the box: certifying, bounds and
     /// searches start from them.
     cells: Vec<Cell>,
@@ -47,8 +57,31 @@ pub struct Offset {
 
 impl PartialEq for Offset {
     fn eq(&self, o: &Self) -> bool {
-        (&self.base, self.distance, self.domain) == (&o.base, o.distance, o.domain)
+        (&self.base, self.distance, self.domain, self.turn)
+            == (&o.base, o.distance, o.domain, o.turn)
     }
+}
+
+/// How an offset lies against its base's focal surface over a cell, by
+/// the signs of the principal factors `1 - d κ₁` and `1 - d κ₂`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Turn {
+    /// Both positive: regular, its normal its base's.
+    Regular,
+    /// Both negative: past the focal surface of both curvatures, like a
+    /// sphere past its centre; its normal still its base's.
+    Inverted,
+    /// One negative: like a cylinder past its axis; its normal turned.
+    Turned,
+}
+
+/// What [`turn_over`] finds over a cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Over {
+    /// One sign over the whole cell, certified.
+    Is(Turn),
+    /// Rounding can't tell: halve the cell.
+    Unsure,
 }
 
 /// The parts of `[c0, c1]`, moved by whole periods where the direction
@@ -68,6 +101,23 @@ pub(super) fn cut([c0, c1]: [f64; 2], [a, b]: [f64; 2], period: Option<f64>) -> 
         .map(|k| [(c0 + k).max(a), (c1 + k).min(b)])
         .filter(|r| r[0] < r[1] || (a == b && r[0] == r[1]))
         .collect()
+}
+
+/// Whether [`cut`] gives anything for `[c0, c1]` against `[a, b]`: the
+/// same shifts and the same test, without building the parts.
+fn meets([c0, c1]: [f64; 2], [a, b]: [f64; 2], period: Option<f64>) -> bool {
+    let hit = |k: f64| {
+        let (lo, hi) = ((c0 + k).max(a), (c1 + k).min(b));
+        lo < hi || (a == b && lo == hi)
+    };
+    match period {
+        Some(p) => {
+            let lo = ((a - c1) / p).floor() as i64;
+            let hi = ((b - c0) / p).ceil() as i64;
+            (lo..=hi).any(|k| hit(k as f64 * p))
+        }
+        None => hit(0.0),
+    }
 }
 
 /// The offset's point as jets from its base's derivatives up to third
@@ -107,27 +157,38 @@ fn icross(a: IVec3, b: IVec3) -> IVec3 {
     ]
 }
 
-/// Whether the offset by `distance` is regular over a cell, from the
-/// base's derivative enclosures there: `Some(true)` where certified,
-/// `Some(false)` where certified to fold or turn inside out somewhere,
-/// `None` where rounding can't tell.
+/// How the offset by `distance` lies over a cell, from the base's
+/// derivative enclosures there.
 ///
 /// With `κ₁`, `κ₂` the principal curvatures against the natural normal
 /// (`N_u = -A S_u`, `A` the shape operator), `O_u × O_v = (1 - d κ₁)(1 -
-/// d κ₂) (S_u × S_v)`: the offset is regular, its normal its base's,
-/// exactly when both factors are positive, that is when their product and
-/// their sum are. From the fundamental forms (`E`, `F`, `G`; `L'`, `M'`,
-/// `N'` against `W = S_u × S_v`, unnormalized; `a = |W|²`), with `T = E
-/// N' - 2 F M' + G L'`: the product times `a²` is `a² - d T √a + d² (L'
-/// N' - M'²)`, and the sum times `a √a` is `2 a √a - d T`.
-fn regular_over(d: &[IVec3; 10], distance: f64) -> Option<bool> {
+/// d κ₂) (S_u × S_v)`. Regular, both factors positive, is decided as it
+/// always was, so a regular offset's cells and bounds keep their bits:
+/// from the fundamental forms (`E`, `F`, `G`; `L'`, `M'`, `N'` against
+/// `W = S_u × S_v`, unnormalized; `a = |W|²`), with `T = E N' - 2 F
+/// M' + G L'`, the product of the factors times `a²` is `a² - d T √a +
+/// d² (L' N' - M'²)` and their sum times `a √a` is `2 a √a - d T`,
+/// both positive beyond a margin far above the rounding of the moved
+/// control points.
+///
+/// Past the focal surface that expanded product cancels: its terms grow
+/// with `d²` while it doesn't. The factors are the eigenvalues of `I⁻¹
+/// (I - d II)` (`I`, `II` the forms' matrices, `II` against the unit
+/// normal), so by Sylvester's law of inertia, `I` being positive
+/// definite, their signs are those of the symmetric `M = √a I - d II'`'s
+/// eigenvalues: `det M < 0` is one negative (turned), `det M > 0` with
+/// `M₁₁ < 0` both (inverted). Each entry of `M` is one difference, so it
+/// certifies where the expanded form can't.
+fn turn_over(d: &[IVec3; 10], distance: f64) -> Over {
     let (su, sv) = (d[1], d[2]);
     let w = icross(su, sv);
     let a = idot(w, w);
     if a.lo() <= 0.0 {
-        return None;
+        return Over::Unsure;
     }
-    let root = a.sqrt()?;
+    let Some(root) = a.sqrt() else {
+        return Over::Unsure;
+    };
     let (e, f, g) = (idot(su, su), idot(su, sv), idot(sv, sv));
     let (l, m, n) = (idot(d[3], w), idot(d[4], w), idot(d[5], w));
     let k = Interval::point(distance);
@@ -137,11 +198,19 @@ fn regular_over(d: &[IVec3; 10], distance: f64) -> Option<bool> {
     // A margin far above the rounding of the moved control points.
     let scale = a.hi() * a.hi();
     if product.lo() > 1e-9 * scale && sum.lo() > 1e-9 * a.hi() * root.hi() {
-        Some(true)
-    } else if product.hi() < 0.0 || sum.hi() < 0.0 {
-        Some(false)
+        return Over::Is(Turn::Regular);
+    }
+    let (m11, m12, m22) = (root * e - k * l, root * f - k * m, root * g - k * n);
+    let size = |x: Interval| x.lo().abs().max(x.hi().abs());
+    let det = m11 * m22 - m12 * m12;
+    let det_margin = 1e-9 * (size(m11) * size(m22) + size(m12) * size(m12));
+    let m11_margin = 1e-9 * (size(root * e) + size(k * l));
+    if det.hi() < -det_margin {
+        Over::Is(Turn::Turned)
+    } else if det.lo() > det_margin && m11.hi() < -m11_margin {
+        Over::Is(Turn::Inverted)
     } else {
-        None
+        Over::Unsure
     }
 }
 
@@ -163,6 +232,22 @@ impl Offset {
     /// principal curvatures, so the offset never folds or turns inside
     /// out.
     pub fn new(base: Surface, distance: f64, domain: Cell) -> Result<Self, Error> {
+        Self::build(base, distance, domain, false)
+    }
+
+    /// [`Offset::new`], but also where the offset passes its base's focal
+    /// surface over the whole box (design 484): both principal factors
+    /// negative, or one, of one sign over every cell. Its parameters are
+    /// still its base's; where one factor is negative it is
+    /// [`Offset::turned`]. A box where the signs change folds in part,
+    /// and fails `Degenerate` as in [`Offset::new`].
+    pub(crate) fn inverted_new(base: Surface, distance: f64, domain: Cell) -> Result<Self, Error> {
+        Self::build(base, distance, domain, true)
+    }
+
+    /// [`Offset::new`] (`any` false: regular only) or
+    /// [`Offset::inverted_new`] (`any` true).
+    fn build(base: Surface, distance: f64, domain: Cell, any: bool) -> Result<Self, Error> {
         if !distance.is_finite() || domain.iter().flatten().any(|x| x.is_nan()) {
             return Err(Error::NonFinite);
         }
@@ -173,7 +258,19 @@ impl Offset {
                     domain[k][1].min(o.domain[k][1]),
                 ]
             });
-            return Self::new(o.base.clone(), o.distance + distance, cut);
+            // Along a turned offset's normal is against its base's.
+            let sum = if o.turned() {
+                o.distance - distance
+            } else {
+                o.distance + distance
+            };
+            let out = Self::build(o.base.clone(), sum, cut, true)?;
+            // Regular against the first offset is the first's own turn
+            // against the base: the factors multiply.
+            if !any && out.turn() != o.turn() {
+                return Err(Error::Degenerate);
+            }
+            return Ok(out);
         }
         if !matches!(
             base,
@@ -232,10 +329,23 @@ impl Offset {
             base,
             distance,
             domain,
+            turn: Turn::Regular,
             cells,
             bounds: crate::tol::size_box(),
         };
-        s.bounds = s.certify()?;
+        let (bounds, turn) = s.certify(any)?;
+        if !any && turn != Turn::Regular {
+            return Err(Error::Degenerate);
+        }
+        s.turn = turn;
+        // The cells' enclosures, each cut to its base's grown by `|d|`
+        // ([`Offset::jet_box`]); the certificate's where one can't be had.
+        let b = match s.cells_box() {
+            Some(b) => b.grow(1e-12 * (1.0 + b.max().to_vector().length())),
+            None => bounds,
+        };
+        // Within its base's box grown by `|d|`, by definition (#599).
+        s.bounds = clip(&b, &s.base.bounds().grow(distance.abs() * (1.0 + 1e-12)));
         Ok(s)
     }
 
@@ -247,6 +357,25 @@ impl Offset {
         self.distance
     }
 
+    /// Whether the offset's natural normal is its base's turned over: it
+    /// passed the focal surface of one principal curvature (design 484).
+    /// Only the global offset's envelope makes such offsets.
+    pub fn turned(&self) -> bool {
+        self.turn == Turn::Turned
+    }
+
+    /// How the offset lies against its base's focal surface, one way over
+    /// its whole box, as certified.
+    pub(crate) fn turn(&self) -> Turn {
+        self.turn
+    }
+
+    /// Whether the offset passes its base's focal surface (inverted or
+    /// turned): only [`Offset::inverted_new`] makes these.
+    pub fn passes_focal(&self) -> bool {
+        self.turn != Turn::Regular
+    }
+
     /// The box of the base's parameters the offset is over.
     pub fn domain(&self) -> Cell {
         self.domain
@@ -256,32 +385,33 @@ impl Offset {
         &self.cells
     }
 
-    /// Certifies the offset regular over its box and returns the box its
-    /// cells' enclosures fill.
-    fn certify(&self) -> Result<Box3, Error> {
+    /// Certifies the offset one way over its box, regular, inverted or
+    /// turned ([`Turn`]), and returns the box its cells' enclosures fill
+    /// with that way. A cell whose way differs from another's folds:
+    /// `Degenerate`; so is any way but regular unless `any`.
+    fn certify(&self, any: bool) -> Result<(Box3, Turn), Error> {
         let sheet = Sheet::of(&self.base);
         let mut stack: Vec<(Cell, u32)> = self.cells.iter().map(|&c| (c, 0)).collect();
         let mut seen = 0usize;
         let mut bounds: Option<Box3> = None;
+        let mut way: Option<Turn> = None;
         while let Some((cell, depth)) = stack.pop() {
             seen += 1;
             if seen > MAX_CELLS {
                 return Err(Error::Degenerate);
             }
             let d = sheet.jet3_box(cell);
-            match self
-                .local_box(cell)
-                .and_then(|d| regular_over(&d, self.distance))
-            {
-                Some(true) => {
-                    if let Some(q) = d.and_then(|d| offset_jets(d, self.distance)) {
-                        let b = point_box(&q);
-                        bounds = Some(bounds.map_or(b, |o| o.union(&b)));
-                        continue;
-                    }
+            if let Some(Over::Is(t)) = self.local_box(cell).map(|d| turn_over(&d, self.distance)) {
+                // A fold, or (for [`Offset::new`]) not regular.
+                if way.is_some_and(|w| w != t) || (!any && t != Turn::Regular) {
+                    return Err(Error::Degenerate);
                 }
-                Some(false) => return Err(Error::Degenerate),
-                None => {}
+                if let Some(q) = d.and_then(|d| offset_jets(d, self.distance)) {
+                    way = Some(t);
+                    let b = point_box(&q);
+                    bounds = Some(bounds.map_or(b, |o| o.union(&b)));
+                    continue;
+                }
             }
             if depth == MAX_DEPTH {
                 return Err(Error::Degenerate);
@@ -307,7 +437,8 @@ impl Offset {
             stack.push((b, depth + 1));
         }
         let b = bounds.ok_or(Error::Degenerate)?;
-        Ok(b.grow(1e-12 * (1.0 + b.max().to_vector().length())))
+        let way = way.ok_or(Error::Degenerate)?;
+        Ok((b.grow(1e-12 * (1.0 + b.max().to_vector().length())), way))
     }
 
     /// The direction along which the base's fundamental forms don't
@@ -350,6 +481,16 @@ impl Offset {
         Sheet::of(&moved).jet3_box(cell)
     }
 
+    /// The hull of the point's enclosures over every cell.
+    fn cells_box(&self) -> Option<Box3> {
+        let mut out: Option<Box3> = None;
+        for &c in &self.cells {
+            let b = point_box(&self.jet_box(c)?);
+            out = Some(out.map_or(b, |o| o.union(&b)));
+        }
+        out
+    }
+
     /// The point's jets at `(u, v)`.
     pub(crate) fn jets_at(&self, u: f64, v: f64) -> JVec<f64> {
         let d = Sheet::of(&self.base)
@@ -358,21 +499,54 @@ impl Offset {
         offset_jets(d, self.distance).expect("a certified offset has a normal")
     }
 
-    /// Enclosures of the point's jets over a box of parameters: over the
-    /// box at once, else the hull of those over its parts in the offset's
-    /// cells, each halved up to [`ENCLOSE_DEPTH`] times where the base's
+    /// Enclosures of the point's jets over a box of parameters: the hull
+    /// of those over its parts in the offset's cells ([`Offset::parts`]),
+    /// each point's cut to its base's grown by `|d|`, where `O = S + d N`
+    /// with `|N| = 1` lies however loosely the unit normal's interval came
+    /// out (design 484, #599). Where the box meets no cell, over it at
+    /// once. `None` where a part has no certified normal.
+    pub(crate) fn jet_box(&self, rect: Cell) -> Option<JVec<Interval>> {
+        let parts = self.parts(rect)?;
+        if parts.is_empty() {
+            return self.jets_over(rect);
+        }
+        let mut out: Option<JVec<Interval>> = None;
+        for (_, q) in parts {
+            out = Some(match out {
+                None => q,
+                Some(o) => core::array::from_fn(|k| Jet {
+                    v: o[k].v.hull(q[k].v),
+                    d: core::array::from_fn(|i| o[k].d[i].hull(q[k].d[i])),
+                    h: core::array::from_fn(|i| o[k].h[i].hull(q[k].h[i])),
+                }),
+            });
+        }
+        out
+    }
+
+    /// The point's jets over a box, from the base's third-order
+    /// enclosures there, the point cut to the base's grown by `|d|`.
+    fn jets_over(&self, c: Cell) -> Option<JVec<Interval>> {
+        let d = Sheet::of(&self.base).jet3_box(c)?;
+        let q = offset_jets(d, self.distance)?;
+        Some(within_reach(q, d[0], self.distance))
+    }
+
+    /// The point's jets over the parts of a box in the offset's cells,
+    /// each part halved up to [`ENCLOSE_DEPTH`] times where the base's
     /// normal can't be certified over it whole. `None` where a part still
     /// has no certified normal.
-    pub(crate) fn jet_box(&self, [ru, rv]: Cell) -> Option<JVec<Interval>> {
-        let sheet = Sheet::of(&self.base);
-        let at = |c: Cell| offset_jets(sheet.jet3_box(c)?, self.distance);
-        if let Some(q) = at([ru, rv]) {
-            return Some(q);
-        }
+    fn parts(&self, [ru, rv]: Cell) -> Option<Vec<(Cell, JVec<Interval>)>> {
         let (pu, pv) = self.base.periods();
-        let mut out: Option<JVec<Interval>> = None;
+        let mut out = Vec::new();
         let mut stack: Vec<(Cell, u32)> = Vec::new();
+        // A trace asks for many small boxes, each against every cell:
+        // [`meets`] skips a cell [`cut`] would give nothing for, before it
+        // allocates (plan 17.A's bars: `global_offset_props`' seed 3).
         for c in &self.cells {
+            if !meets(c[0], ru, pu) || !meets(c[1], rv, pv) {
+                continue;
+            }
             for u in cut(c[0], ru, pu) {
                 for v in cut(c[1], rv, pv) {
                     stack.push(([u, v], 0));
@@ -380,7 +554,7 @@ impl Offset {
             }
         }
         while let Some((c, depth)) = stack.pop() {
-            let Some(q) = at(c) else {
+            let Some(q) = self.jets_over(c) else {
                 if depth == ENCLOSE_DEPTH {
                     return None;
                 }
@@ -393,16 +567,9 @@ impl Offset {
                 stack.push((b, depth + 1));
                 continue;
             };
-            out = Some(match out {
-                None => q,
-                Some(o) => core::array::from_fn(|k| Jet {
-                    v: o[k].v.hull(q[k].v),
-                    d: core::array::from_fn(|i| o[k].d[i].hull(q[k].d[i])),
-                    h: core::array::from_fn(|i| o[k].h[i].hull(q[k].h[i])),
-                }),
-            });
+            out.push((c, q));
         }
-        out
+        Some(out)
     }
 
     pub(crate) fn point(&self, u: f64, v: f64) -> Point3 {
@@ -423,9 +590,11 @@ impl Offset {
         }
     }
 
-    /// The base's normal, which is the offset's (see [`Offset::new`]).
+    /// The base's normal, which is the offset's (see [`Offset::new`]),
+    /// turned over where the offset is [`Offset::turned`].
     pub(crate) fn normal(&self, u: f64, v: f64) -> Option<UnitVector3> {
-        self.base.normal(u, v)
+        let n = self.base.normal(u, v)?;
+        Some(if self.turned() { -n } else { n })
     }
 
     /// The base's periods in the directions the box covers whole.
@@ -465,6 +634,7 @@ impl Offset {
             base: self.base.transformed(r),
             distance: self.distance,
             domain: self.domain,
+            turn: self.turn,
             cells: self.cells.clone(),
             bounds: moved_box(&self.bounds, |p| r.apply_point(p)),
         }
@@ -494,6 +664,7 @@ impl Offset {
                 base,
                 distance,
                 domain: map(self.domain),
+                turn: self.turn,
                 cells,
                 bounds: moved_box(&self.bounds, |p| m.apply_point(p)),
             },
@@ -503,8 +674,18 @@ impl Offset {
 
     /// Bounds over a parameter box, the worst of those from the
     /// enclosures over its parts in the offset's cells (see
-    /// [`super::bound2::from_jets`]).
-    pub(crate) fn derivative_bound(&self, [ru, rv]: Cell) -> SurfaceBound {
+    /// [`super::bound2::from_jets`]), a part halved where they let the
+    /// normal turn across it by more than [`BOUND_TURN`].
+    pub(crate) fn derivative_bound(&self, rect: Cell) -> SurfaceBound {
+        let Some(parts) = self.parts(rect) else {
+            return super::bound2::INFINITE_BOUND;
+        };
+        if parts.is_empty() {
+            return match self.jet_box(rect) {
+                Some(q) => super::bound2::from_jets(&q),
+                None => super::bound2::INFINITE_BOUND,
+            };
+        }
         let mut out = SurfaceBound {
             duu: 0.0,
             duv: 0.0,
@@ -512,32 +693,70 @@ impl Offset {
             turn_u: 0.0,
             turn_v: 0.0,
         };
-        let (pu, pv) = self.base.periods();
-        let mut any = false;
-        for c in &self.cells {
-            for u in cut(c[0], ru, pu) {
-                for v in cut(c[1], rv, pv) {
-                    let Some(q) = self.jet_box([u, v]) else {
-                        return super::bound2::INFINITE_BOUND;
-                    };
-                    any = true;
-                    let b = super::bound2::from_jets(&q);
-                    out.duu = out.duu.max(b.duu);
-                    out.duv = out.duv.max(b.duv);
-                    out.dvv = out.dvv.max(b.dvv);
-                    out.turn_u = out.turn_u.max(b.turn_u);
-                    out.turn_v = out.turn_v.max(b.turn_v);
+        let mut stack: Vec<(Cell, JVec<Interval>, u32)> =
+            parts.into_iter().map(|(c, q)| (c, q, 0)).collect();
+        while let Some((c, q, depth)) = stack.pop() {
+            let b = super::bound2::from_jets(&q);
+            // The unit normal's interval over a long part bounds its turn
+            // loosely: halve a part across which it may turn more than
+            // [`BOUND_TURN`], up to [`BOUND_DEPTH`] times.
+            let span = [c[0][1] - c[0][0], c[1][1] - c[1][0]];
+            let turns = [b.turn_u * span[0], b.turn_v * span[1]];
+            let loose = |t: f64| t.partial_cmp(&BOUND_TURN).is_none_or(|o| o.is_gt());
+            if depth < BOUND_DEPTH && turns.iter().any(|&t| loose(t)) {
+                // The direction it turns more along, or where neither
+                // turn is bounded, the longer in model space.
+                let reach = |k: usize| {
+                    let speed: f64 = (0..3).map(|c| q[c].d[k].mag() * q[c].d[k].mag()).sum();
+                    span[k] * crate::math::sqrt(speed)
+                };
+                let k = if turns[0].is_finite() || turns[1].is_finite() {
+                    usize::from(turns[1].partial_cmp(&turns[0]).is_none_or(|o| o.is_gt()))
+                } else {
+                    usize::from(reach(1) > reach(0))
+                };
+                let m = (c[k][0] + c[k][1]) / 2.0;
+                let (mut lo, mut hi) = (c, c);
+                lo[k][1] = m;
+                hi[k][0] = m;
+                if let (Some(a), Some(z)) = (self.jets_over(lo), self.jets_over(hi)) {
+                    stack.push((lo, a, depth + 1));
+                    stack.push((hi, z, depth + 1));
+                    continue;
                 }
             }
+            out.duu = out.duu.max(b.duu);
+            out.duv = out.duv.max(b.duv);
+            out.dvv = out.dvv.max(b.dvv);
+            out.turn_u = out.turn_u.max(b.turn_u);
+            out.turn_v = out.turn_v.max(b.turn_v);
         }
-        if any {
-            out
-        } else {
-            match self.jet_box([ru, rv]) {
-                Some(q) => super::bound2::from_jets(&q),
-                None => super::bound2::INFINITE_BOUND,
-            }
+        out
+    }
+}
+
+/// The point's enclosure `q` cut to its base point's `p` grown by `|d|`
+/// each way: `O = S + d N` with `|N| = 1` lies there, however loosely the
+/// unit normal's interval came out (design 484, #599).
+fn within_reach(mut q: JVec<Interval>, p: IVec3, d: f64) -> JVec<Interval> {
+    let reach = Interval::new(-d.abs(), d.abs()).expect("ordered");
+    for k in 0..3 {
+        let r = p[k] + reach;
+        let (lo, hi) = (q[k].v.lo().max(r.lo()), q[k].v.hi().min(r.hi()));
+        if let Some(v) = Interval::new(lo, hi) {
+            q[k].v = v;
         }
+    }
+    q
+}
+
+/// `b` cut to `by`, or `b` where they don't meet.
+pub(crate) fn clip(b: &Box3, by: &Box3) -> Box3 {
+    let (lo, hi) = (b.min().max(by.min()), b.max().min(by.max()));
+    if lo.x <= hi.x && lo.y <= hi.y && lo.z <= hi.z {
+        Box3::new(lo, hi)
+    } else {
+        *b
     }
 }
 

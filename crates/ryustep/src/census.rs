@@ -554,12 +554,15 @@ impl Census {
 use std::collections::BTreeMap;
 
 /// What a caller read from a file: the instances it followed (each
-/// body's representation, context and items: [`crate::Opened::roots`])
-/// and whether it read the product tree.
+/// body's representation, context and items: [`crate::Opened::roots`]),
+/// whether it read the product tree, and the instances it interpreted
+/// besides (the styles that became appearance, design 448 plan 24.B):
+/// those are interpreted whatever their category.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Read {
     pub roots: Vec<u64>,
     pub product_tree: bool,
+    pub instances: Vec<u64>,
 }
 
 /// An instance a refusal names, with the refusal's code.
@@ -636,9 +639,9 @@ pub struct Transfer {
 /// How many instance numbers a name keeps.
 pub const FIRST: usize = 64;
 
-/// What 24.A interprets: bodies and the product tree. Later plans add
-/// appearance (24.B), properties and materials (24.C) and external
-/// references (24.D).
+/// What a body or the product tree interprets by category. Styles
+/// (24.B), properties and materials (24.C) are interpreted instance by
+/// instance, through [`Read::instances`].
 pub const INTERPRETED: [Category; 4] = [
     Category::Geometry,
     Category::Topology,
@@ -678,6 +681,11 @@ impl Census {
                 code_of.entry(k).or_insert(&f.code);
             }
         }
+        let exact: std::collections::BTreeSet<usize> = read
+            .instances
+            .iter()
+            .filter_map(|&i| self.index(i))
+            .collect();
         type Tally = BTreeMap<u32, (u64, Vec<u64>)>;
         let mut tally: BTreeMap<(Category, Bucket), Tally> = BTreeMap::new();
         let mut codes: BTreeMap<Category, BTreeMap<&str, u64>> = BTreeMap::new();
@@ -686,9 +694,10 @@ impl Census {
             let b = if let Some(code) = code_of.get(&k) {
                 *codes.entry(c).or_default().entry(code).or_default() += 1;
                 Bucket::Failed
-            } else if INTERPRETED.contains(&c)
-                && (reached[k]
-                    || (read.product_tree && c == Category::ProductStructure && anchored[k]))
+            } else if exact.contains(&k)
+                || (INTERPRETED.contains(&c)
+                    && (reached[k]
+                        || (read.product_tree && c == Category::ProductStructure && anchored[k])))
             {
                 Bucket::Interpreted
             } else if !anchored[k] {
@@ -1146,6 +1155,10 @@ const TABLE: &[(&str, Category)] = &[
     ("SI_UNIT", Category::Units),
     ("SOLID_ANGLE_MEASURE_WITH_UNIT", Category::Units),
     ("SOLID_ANGLE_UNIT", Category::Units),
+    (
+        "SPECIFIED_HIGHER_USAGE_OCCURRENCE",
+        Category::ProductStructure,
+    ),
     ("SPHERICAL_PAIR", Category::Kinematics),
     ("SPHERICAL_SURFACE", Category::Geometry),
     ("STRAIGHTNESS_TOLERANCE", Category::Pmi),
@@ -1393,6 +1406,21 @@ mod tests {
             "PROPERTY_DEFINITION",
             "PROPERTY_DEFINITION_REPRESENTATION",
             "DESCRIPTIVE_REPRESENTATION_ITEM",
+            "STYLED_ITEM",
+            "OVER_RIDING_STYLED_ITEM",
+            "CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM",
+            "PRESENTATION_STYLE_ASSIGNMENT",
+            "PRESENTATION_STYLE_BY_CONTEXT",
+            "SURFACE_STYLE_USAGE",
+            "SURFACE_SIDE_STYLE",
+            "SURFACE_STYLE_FILL_AREA",
+            "FILL_AREA_STYLE",
+            "FILL_AREA_STYLE_COLOUR",
+            "COLOUR_RGB",
+            "DRAUGHTING_PRE_DEFINED_COLOUR",
+            "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
+            "SURFACE_STYLE_TRANSPARENT",
+            "SPECIFIED_HIGHER_USAGE_OCCURRENCE",
         ] {
             assert_ne!(category_of(n), Unknown, "{n}");
         }
@@ -1527,6 +1555,7 @@ mod tests {
             &Read {
                 roots: vec![9],
                 product_tree: true,
+                instances: Vec::new(),
             },
             &[Failed {
                 instance: 12,
@@ -1587,5 +1616,43 @@ mod tests {
         assert_eq!(u.names[0].count, 100);
         assert_eq!(u.names[0].first, (1..=64).collect::<Vec<u64>>());
         assert_eq!(u.names[1].name, "DIRECTION");
+    }
+
+    #[test]
+    fn exact_instances_are_interpreted_whatever_their_category() {
+        let f = parse(
+            b"ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));ENDSEC;DATA;\
+              #1=COLOUR_RGB('',1.,0.,0.);#2=FILL_AREA_STYLE_COLOUR('',#1);\
+              #3=CURVE_STYLE('',$,$,#1);#4=STYLED_ITEM('',(#2),#5);\
+              #5=CARTESIAN_POINT('',(0.,0.,0.));\
+              ENDSEC;END-ISO-10303-21;",
+        )
+        .unwrap();
+        let c = Census::of(&f);
+        let read = Read {
+            instances: vec![1, 2, 4],
+            ..Read::default()
+        };
+        let t = c.transfer(&read, &[]);
+        let appearance = t
+            .lines
+            .iter()
+            .find(|l| l.category == Category::Appearance)
+            .unwrap();
+        assert_eq!(appearance.buckets[Bucket::Interpreted as usize].count, 3);
+        assert_eq!(appearance.buckets[Bucket::Retained as usize].count, 1);
+        // A failure still comes first.
+        let failed = [Failed {
+            instance: 4,
+            code: "x".into(),
+        }];
+        let t = c.transfer(&read, &failed);
+        let appearance = t
+            .lines
+            .iter()
+            .find(|l| l.category == Category::Appearance)
+            .unwrap();
+        assert_eq!(appearance.buckets[Bucket::Failed as usize].count, 1);
+        assert_eq!(appearance.buckets[Bucket::Interpreted as usize].count, 2);
     }
 }

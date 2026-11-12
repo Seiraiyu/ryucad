@@ -868,6 +868,40 @@ fn global_offsets_against_occt_and_smlib() {
         reference_volume(&r[0]),
         1e-6,
     );
+    // The spline ring shrunk past its corners (plan 17.A, #421): ryukei's
+    // turned spline faces against both kernels and Pappus.
+    use ryukei_testkit::rings::{Ring, ring};
+    let r = Ring {
+        inner: 1.0,
+        width: 0.6,
+        height: 0.4,
+        radius: 0.1,
+    };
+    let spline = ring(OpKey(5), &r, true).unwrap();
+    let d = -0.15;
+    let (shrunk, _) = offset_body(
+        OpKey(6),
+        &spline,
+        &OffsetSpec {
+            distance: d,
+            faces: vec![],
+        },
+    )
+    .unwrap();
+    let os = to_occt(dir.path(), "ring", &spline);
+    let file = to_usd(dir.path(), "ring", &spline);
+    let r2 = smlib(
+        dir.path(),
+        &[json!({"kind": "offset", "file": file, "distance": d})],
+    );
+    judge(
+        "spline ring shrunk by 0.15 past its corners",
+        measured(&shrunk),
+        Some(r.shrunk_volume(0.15)),
+        os.offset(d * 1e3).map(|x| x.volume() * 1e-9),
+        reference_volume(&r2[0]),
+        1e-6,
+    );
 }
 
 /// The shell race (design 299): a plate with 100 filleted holes shelled

@@ -142,8 +142,8 @@ fn new_folder(here: &Path, path: &Path) -> Result<PathBuf> {
 }
 
 /// Runs `git` in `dir`; its standard output, or `git_failed`'s error with
-/// what Git said.
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
+/// what Git said. `branch.switch` runs `git switch` through it too.
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = std::process::Command::new("git")
         .args(args)
         .current_dir(dir)

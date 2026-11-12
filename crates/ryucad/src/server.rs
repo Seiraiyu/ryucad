@@ -123,6 +123,9 @@ pub fn answer_live(
         }
     }
     let mutates = req.mutates();
+    // A branch switch changes files the way an outside change does: the
+    // selections are pruned after it.
+    let switches = matches!(req, Request::BranchSwitch { .. });
     // A daemon keeps what its writes change, for the log and for undo;
     // undo and redo log themselves.
     let (method, params) = (req.method(), req.params());
@@ -416,6 +419,7 @@ pub fn answer_live(
             mesh,
             pipe_tolerance,
             skip_failing,
+            appearance,
             solid,
             notes,
             fixed,
@@ -439,6 +443,7 @@ pub fn answer_live(
                 mesh,
                 pipe_tolerance,
                 skip_failing,
+                appearance,
                 solid,
                 notes,
                 fixed,
@@ -539,7 +544,7 @@ pub fn answer_live(
     }
     if let (Some(l), Some(before)) = (live, before) {
         // Entities that no longer exist drop out of every selection.
-        if changed || mutates {
+        if changed || mutates || switches {
             l.prune(|r| r.resolve(session).is_ok());
         }
         l.announce(&before);
@@ -1004,6 +1009,7 @@ pub(crate) fn dispatch(
             material,
             opacity,
             unset,
+            file_styles,
             expected_revision,
         } => {
             let change = crate::appearance::Change {
@@ -1011,6 +1017,7 @@ pub(crate) fn dispatch(
                 material,
                 opacity,
                 unset,
+                file_styles,
             };
             crate::appearance::set(session, &entities, &change, expected_revision.as_deref())
         }
@@ -1054,6 +1061,11 @@ pub(crate) fn dispatch(
         Request::MergeStatus {} => crate::validate::status(session),
         Request::MergePreview { rev } => crate::validate::preview(session, &rev),
         Request::WorktreeList {} => crate::worktree::list(session, live.as_deref()),
+        Request::BranchList {} => crate::branch::list(session),
+        Request::BranchSwitch {
+            branch,
+            expected_revision,
+        } => crate::branch::switch(session, live, me, &branch, expected_revision.as_deref()),
         Request::MergeResolve {
             resolutions,
             expected_revisions,
