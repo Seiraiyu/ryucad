@@ -82,7 +82,7 @@ pub struct TemplateFile {
 }
 
 /// The files at the project's root that a session tracks.
-pub const ROOT_FILES: [&str; 7] = [
+pub const ROOT_FILES: [&str; 8] = [
     MANIFEST,
     ATTRIBUTES,
     PDM_CONFIG,
@@ -90,6 +90,7 @@ pub const ROOT_FILES: [&str; 7] = [
     super::lock::LOCK,
     PARAMETERS,
     super::drawing_lint::DRAWING_LINT,
+    super::hole_standards::HOLE_STANDARDS,
 ];
 
 /// The tag of the piece of a part's revision holding the project
@@ -130,6 +131,12 @@ pub struct Project {
     /// The root `parameters.json` as read: a part reading a project
     /// parameter while it can't be read hashes it.
     parameters_bytes: Option<Vec<u8>>,
+    /// `hole_standards.json`, if the project has one, or why it can't be
+    /// used: the house standards and gap entries holes read.
+    pub hole_standards: Option<Arc<Result<super::hole_standards::HoleStandards>>>,
+    /// Its bytes as read: a part reading it while it can't be read hashes
+    /// them.
+    hole_standards_bytes: Option<Arc<[u8]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +149,8 @@ pub struct Part {
     /// The parameters' values, which the features were evaluated with:
     /// the part's own, and the project's around them.
     pub env: Env,
+    /// The project's hole standards, shared, as the part was loaded with.
+    pub hole_standards: Option<Arc<Result<super::hole_standards::HoleStandards>>>,
     /// The project parameters it reads (its features, its own parameters
     /// and its explodes name them, and what those read in turn), by name.
     pub project_reads: BTreeSet<String>,
@@ -528,6 +537,8 @@ impl Project {
                     file: self.parameters.clone(),
                     env: self.env.clone(),
                     bytes: self.parameters_bytes.clone(),
+                    standards: self.hole_standards.clone(),
+                    standards_bytes: self.hole_standards_bytes.clone(),
                 };
                 let part = load_part(
                     src,
@@ -589,11 +600,18 @@ struct Scope {
     file: Option<Result<ParametersFile>>,
     env: Env,
     bytes: Option<Vec<u8>>,
+    /// The project's hole standards (`hole_standards.json`), read with it.
+    standards: Option<Arc<Result<super::hole_standards::HoleStandards>>>,
+    standards_bytes: Option<Arc<[u8]>>,
 }
 
 /// The root `parameters.json`, if the project has one: a file that can't
 /// be read fails every name a part reads from it, naming the file.
 fn load_scope(src: &dyn Source) -> Result<Scope> {
+    let (standards, standards_bytes) = match super::hole_standards::read(src)? {
+        Some((bytes, parsed)) => (Some(Arc::new(parsed)), Some(Arc::from(bytes))),
+        None => (None, None),
+    };
     let Some(bytes) = src
         .read(PARAMETERS)
         .map_err(|e| e.with("path", PARAMETERS))?
@@ -602,6 +620,8 @@ fn load_scope(src: &dyn Source) -> Result<Scope> {
             file: None,
             env: Env::empty(),
             bytes: None,
+            standards,
+            standards_bytes,
         });
     };
     let file = read_json(src, PARAMETERS)
@@ -614,6 +634,8 @@ fn load_scope(src: &dyn Source) -> Result<Scope> {
         file: Some(file),
         env,
         bytes: Some(bytes),
+        standards,
+        standards_bytes,
     })
 }
 
@@ -778,6 +800,8 @@ impl Begun {
             manifest_bytes: self.manifest_bytes,
             lock_bytes: self.lock_bytes,
             parameters_bytes: self.scope.bytes,
+            hole_standards: self.scope.standards,
+            hole_standards_bytes: self.scope.standards_bytes,
         })
     }
 }
@@ -1093,6 +1117,7 @@ fn load_part(
         file,
         parameters,
         env,
+        hole_standards: scope.standards.clone(),
         project_reads,
         features,
         uses,
@@ -1535,6 +1560,32 @@ mod tests {
             project.reload(&[path.into()]).unwrap();
             same(&project);
         }
+    }
+
+    #[test]
+    fn the_hole_standards_are_read_with_the_project() {
+        use super::super::hole_standards::{HOLE_STANDARDS, tests::house};
+        let dir = sample();
+        let root = dir.path();
+        let mut p = Project::load(root).unwrap();
+        assert!(p.hole_standards.is_none());
+        fs::write(
+            root.join(HOLE_STANDARDS),
+            super::super::canonical::to_string(&house()),
+        )
+        .unwrap();
+        p.reload(&[HOLE_STANDARDS.to_owned()]).unwrap();
+        let t = p.hole_standards.as_deref().unwrap().as_ref().unwrap();
+        assert!(t.fastener("house_cap", "M5").is_some());
+        assert!(!p.parts.is_empty());
+        for part in p.parts.values() {
+            assert!(part.hole_standards.is_some());
+        }
+        // A table that doesn't read fails no load: only what reads it.
+        fs::write(root.join(HOLE_STANDARDS), "{").unwrap();
+        p.reload(&[HOLE_STANDARDS.to_owned()]).unwrap();
+        assert!(p.hole_standards.as_deref().unwrap().is_err());
+        assert!(ROOT_FILES.contains(&"hole_standards.json"));
     }
 
     #[test]

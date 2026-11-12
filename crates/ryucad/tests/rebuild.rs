@@ -31,6 +31,7 @@ fn part(features: Vec<(&str, Feature)>) -> Part {
         parameters: None,
         env: ryucad::expr::Env::empty(),
         project_reads: Default::default(),
+        hole_standards: None,
         uses: Default::default(),
         acts: Default::default(),
         imports: Default::default(),

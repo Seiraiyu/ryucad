@@ -519,7 +519,7 @@ pub fn read(src: &dyn Source) -> Result<Option<(Vec<u8>, Result<HoleStandards>)>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
