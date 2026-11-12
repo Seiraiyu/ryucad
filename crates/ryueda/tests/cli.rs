@@ -468,6 +468,40 @@ fn selections_from_the_cli() {
 }
 
 #[test]
+fn highlights_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    let (code, v) = p.run_in(
+        &p.direct,
+        "board",
+        &["--no-daemon", "highlight", "breakout/r1"],
+    );
+    assert_eq!((code, &v["error"]["code"]), (1, &json!("no_live_session")));
+    let (code, v) = run(&[
+        "highlight",
+        "breakout/r1",
+        "--style",
+        "changed",
+        "--label",
+        "just edited",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["highlights"][0]["style"], "changed");
+    assert_eq!(
+        run(&["highlight", "breakout/r1", "--style", "loud"]).1["error"]["code"],
+        "usage"
+    );
+    assert_eq!(run(&["highlight"]).1["error"]["code"], "usage");
+    assert_eq!(
+        run(&["highlight", "breakout/r1", "--clear"]).1["error"]["code"],
+        "usage"
+    );
+    let (_, v) = run(&["highlight", "--clear"]);
+    assert_eq!(v["result"]["highlights"], json!([]));
+}
+
+#[test]
 fn watchers_hear_of_library_changes() {
     let p = Pair::new();
     for (sub, args) in [
@@ -637,6 +671,8 @@ fn every_protocol_method_has_a_command() {
         ("compare.get", &["compare"]),
         ("selection.get", &["selection"]),
         ("selection.set", &["select"]),
+        ("highlight.set", &["highlight"]),
+        ("highlight.clear", &["highlight"]),
         ("subscribe", &["watch"]),
         ("request.cancel", &["cancel"]),
         ("daemon.status", &["daemon", "status"]),

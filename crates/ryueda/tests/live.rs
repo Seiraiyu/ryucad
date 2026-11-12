@@ -149,3 +149,48 @@ fn an_agent_reads_what_the_person_points_at() {
         json!([])
     );
 }
+
+#[test]
+fn an_agents_highlights_are_everyones_to_see() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Here::open(&breakout(dir.path()));
+    let dana = h.human("Dana");
+    h.ask(
+        None,
+        "highlight.set",
+        json!({"refs": ["breakout/r1", "breakout/r2"], "style": "pending", "label": "pull-ups"}),
+    )
+    .unwrap();
+    let v = h
+        .ask(None, "highlight.set", json!({"refs": ["breakout/sda"]}))
+        .unwrap();
+    assert_eq!(v["highlights"].as_array().unwrap().len(), 2, "{v}");
+    // Every participant's JSON, the person's window's included, shows them.
+    let list = h.ask(Some(&dana), "participant.list", json!({})).unwrap();
+    let agent = list["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "agent")
+        .unwrap();
+    assert_eq!(
+        agent["highlights"][0],
+        json!({"style": "pending", "label": "pull-ups", "entities": ["breakout/r1", "breakout/r2"]})
+    );
+    assert_eq!(agent["highlights"][1]["style"], "note");
+    let e = h
+        .ask(None, "highlight.set", json!({"refs": ["breakout/nope"]}))
+        .unwrap_err();
+    assert_eq!(e.code, Code::RefUnresolved);
+    let v = h
+        .ask(None, "highlight.clear", json!({"style": "pending"}))
+        .unwrap();
+    assert_eq!(
+        v["highlights"],
+        json!([{"style": "note", "label": null, "entities": ["breakout/sda"]}])
+    );
+    assert_eq!(
+        h.ask(None, "highlight.clear", json!({})).unwrap()["highlights"],
+        json!([])
+    );
+}

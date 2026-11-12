@@ -477,6 +477,19 @@ enum Command {
         #[arg(long)]
         of: Option<String>,
     },
+    /// Highlight references in every window watching, in your colour:
+    /// pending (about to change), changed, or note (the default), under a
+    /// --label; --clear takes yours away (only --style's, if given).
+    /// Through the daemon.
+    Highlight {
+        refs: Vec<String>,
+        #[arg(long)]
+        style: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long, conflicts_with = "label")]
+        clear: bool,
+    },
     /// Undo your latest change, or the entry given.
     Undo { entry: Option<u64> },
     /// Redo your latest undo, or the entry given.
@@ -1846,6 +1859,31 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Selection { of } => Request::SelectionGet {
             participant: of.clone(),
         },
+        Command::Highlight {
+            refs,
+            style,
+            label,
+            clear,
+        } => {
+            let style = style
+                .as_deref()
+                .map(|s| named("style", s, "pending, changed, note"))
+                .transpose()?;
+            match (*clear, refs.is_empty()) {
+                (true, true) => Request::HighlightClear { style },
+                (false, false) => Request::HighlightSet {
+                    refs: refs.clone(),
+                    style: style.unwrap_or_default(),
+                    label: label.clone(),
+                },
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "name references to highlight, or --clear, not both",
+                    ));
+                }
+            }
+        }
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },
         Command::Footprint(FootprintCmd::Show { footprint }) => Request::FootprintShow {

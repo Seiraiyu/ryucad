@@ -977,6 +977,23 @@ pub enum Request {
         #[serde(default)]
         mode: ryu_session::live::SelectMode,
     },
+    /// Paints references in every window, in the caller's colour and
+    /// `style` (`pending`, `changed`, `note`), replacing its highlight of
+    /// the same style and label. Needs the daemon.
+    #[serde(rename = "highlight.set")]
+    HighlightSet {
+        refs: Vec<String>,
+        #[serde(default)]
+        style: ryu_session::live::Style,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Takes away the caller's highlights of `style`, or all of them.
+    #[serde(rename = "highlight.clear")]
+    HighlightClear {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<ryu_session::live::Style>,
+    },
     #[serde(rename = "subscribe")]
     Subscribe {
         #[serde(default)]

@@ -1276,6 +1276,19 @@ fn dispatch(
             let selection = live.select(&id, refs, mode)?.to_vec();
             Ok(json!({"participant": id, "selection": selection}))
         }
+        Request::HighlightSet { refs, style, label } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.set"))?;
+            crate::refs::resolve_all(session.project(), &refs)?;
+            let id = live.caller(me);
+            let highlights = live.highlight(&id, style, label, refs)?.to_vec();
+            Ok(json!({"participant": id, "highlights": highlights}))
+        }
+        Request::HighlightClear { style } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.clear"))?;
+            let id = live.caller(me);
+            let highlights = live.clear_highlights(&id, style)?.to_vec();
+            Ok(json!({"participant": id, "highlights": highlights}))
+        }
         Request::Subscribe { .. } => match live {
             None => Err(live::no_live_session("subscribe")),
             Some(_) => Err(Error::new(Code::Usage, "subscribe needs a connection")),
