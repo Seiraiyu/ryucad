@@ -20,6 +20,7 @@ use crate::error::{Code, Error, Result};
 use crate::rebuild::{Output, PartResult};
 use crate::session::Session;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 pub use ryu_session::job::Job;
 
@@ -485,6 +486,242 @@ pub fn delete(
     Ok(json!({"part": pid, "motion": mid, "revision": revision}))
 }
 
+/// The fraction of step `k` of `n`: `k / (n - 1)`, and exactly 1 at the
+/// last.
+pub fn t_of(k: usize, n: usize) -> f64 {
+    if k + 1 >= n {
+        1.0
+    } else {
+        k as f64 / (n - 1) as f64
+    }
+}
+
+/// `from + (to - from) t`, and exactly `to` at 1.
+pub fn lerp(from: f64, to: f64, t: f64) -> f64 {
+    if t == 1.0 { to } else { from + (to - from) * t }
+}
+
+/// The rotation by `angle` about unit `axis` (Rodrigues), rows as
+/// [`ryumate::Pose`] holds them.
+pub(crate) fn turn(axis: [f64; 3], angle: f64) -> [[f64; 3]; 3] {
+    let (s, c) = (ryukei::math::sin(angle), ryukei::math::cos(angle));
+    let [x, y, z] = axis;
+    let k = 1.0 - c;
+    [
+        [c + x * x * k, x * y * k - z * s, x * z * k + y * s],
+        [y * x * k + z * s, c + y * y * k, y * z * k - x * s],
+        [z * x * k - y * s, z * y * k + x * s, c + z * z * k],
+    ]
+}
+
+/// Where a move drive's rigid motion is at `t`, in the assembly's frame:
+/// turned about its axis, then slid.
+fn motion_at(rotate: Option<&Turn>, translate: Option<&Slide>, t: f64) -> ryumate::Pose {
+    let mut m = ryumate::Pose::IDENTITY;
+    if let Some(r) = rotate {
+        let rot = turn(r.axis, lerp(r.from, r.to, t));
+        let o = r.origin;
+        let ro = [0, 1, 2].map(|i| rot[i][0] * o[0] + rot[i][1] * o[1] + rot[i][2] * o[2]);
+        m = ryumate::Pose {
+            rotation: rot,
+            origin: [0, 1, 2].map(|i| o[i] - ro[i]),
+        };
+    }
+    if let Some(s) = translate {
+        let d = lerp(s.from, s.to, t);
+        m.origin = [0, 1, 2].map(|i| m.origin[i] + s.direction[i] * d);
+    }
+    m
+}
+
+/// Sets a mate kind's `driven` value to `v`.
+fn set_value(kind: &mut ryumate::Kind, driven: Driven, v: f64) {
+    use ryumate::Kind;
+    match (kind, driven) {
+        (Kind::Revolute { angle }, Driven::Angle)
+        | (Kind::Cylindrical { angle, .. }, Driven::Angle)
+        | (Kind::Planar { angle, .. }, Driven::Angle) => *angle = Some(v),
+        (Kind::Slider { distance }, Driven::Distance)
+        | (Kind::Cylindrical { distance, .. }, Driven::Distance) => *distance = Some(v),
+        (Kind::Planar { distance, .. }, Driven::Distance) => *distance = v,
+        (k, d) => unreachable!("resolve checked the form: {k:?} has no {d:?}"),
+    }
+}
+
+/// The body a connector is on (a copy's seed).
+fn body_on(on: &ryumate::On) -> u32 {
+    match *on {
+        ryumate::On::Body(b) => b,
+        ryumate::On::Copy { seed, .. } => seed,
+    }
+}
+
+/// Places every drive at `t` in `a`: each mate drive's value set, each
+/// move drive's bodies moved from rest and held. The bodies to solve
+/// from (the free ends of driven mates, the moved bodies), or the first
+/// mate drive commanded past its own stop.
+fn place(
+    a: &mut ryumate::Assembly,
+    rest: &ryumate::Assembly,
+    drives: &[Drive],
+    t: f64,
+) -> std::result::Result<Vec<u32>, (u32, ryumate::Stop)> {
+    let mut roots = Vec::new();
+    for d in drives {
+        match d {
+            Drive::Mate {
+                index,
+                driven,
+                from,
+                to,
+                ..
+            } => {
+                let v = lerp(*from, *to, t);
+                let m = a.mates.get_mut(index).expect("a resolved mate");
+                if let Some(stop) = past(&m.limits, *driven, v) {
+                    return Err((*index, stop));
+                }
+                set_value(&mut m.kind, *driven, v);
+                let ends = [body_on(&m.a.on), body_on(&m.b.on)];
+                let free: Vec<u32> = ends
+                    .iter()
+                    .copied()
+                    .filter(|b| !a.bodies[b].fixed)
+                    .collect();
+                roots.extend(if free.is_empty() { ends.to_vec() } else { free });
+            }
+            Drive::Move {
+                bodies,
+                rotate,
+                translate,
+                ..
+            } => {
+                let m = motion_at(rotate.as_ref(), translate.as_ref(), t);
+                for b in bodies {
+                    let body = a.bodies.get_mut(b).expect("a resolved body");
+                    body.pose = m.then_after(&rest.bodies[b].pose);
+                    body.fixed = true;
+                    roots.push(*b);
+                }
+            }
+        }
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    Ok(roots)
+}
+
+/// One step of a sweep.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub t: f64,
+    pub holds: bool,
+    /// Every body whose pose differs from rest, where this step puts it
+    /// (empty when it doesn't hold).
+    pub moved: BTreeMap<u32, ryumate::Pose>,
+    /// The values of the mates the step solved, with their stops.
+    pub values: BTreeMap<u32, ryumate::MateValues>,
+    /// Where it doesn't hold: the conflicting sets of mates.
+    pub conflicting: Vec<Vec<u32>>,
+    /// A mate drive commanded past its own stop.
+    pub past: Option<(u32, ryumate::Stop)>,
+    /// The solver's refusal, if it refused (a blocked step, not an error).
+    pub refused: Option<String>,
+}
+
+impl Step {
+    fn blocked(t: f64) -> Step {
+        Step {
+            t,
+            holds: false,
+            moved: BTreeMap::new(),
+            values: BTreeMap::new(),
+            conflicting: Vec::new(),
+            past: None,
+            refused: None,
+        }
+    }
+}
+
+/// Step `t` solved from `start` (the last held step's poses): the step,
+/// and when it holds, the poses the next step starts from.
+pub fn solve_at(
+    start: &ryumate::Assembly,
+    rest: &ryumate::Assembly,
+    drives: &[Drive],
+    t: f64,
+) -> Result<(Step, Option<ryumate::Assembly>)> {
+    let mut a = start.clone();
+    let roots = match place(&mut a, rest, drives, t) {
+        Ok(r) => r,
+        Err(past) => {
+            let mut s = Step::blocked(t);
+            s.past = Some(past);
+            return Ok((s, None));
+        }
+    };
+    let solved = match ryumate::solve(&a.component(&roots)) {
+        Ok(s) => s,
+        Err(e) => {
+            let mut s = Step::blocked(t);
+            s.refused = Some(e.to_string());
+            return Ok((s, None));
+        }
+    };
+    if !solved.report.converged {
+        let mut s = Step::blocked(t);
+        s.conflicting = solved.report.conflicting.clone();
+        return Ok((s, None));
+    }
+    // The next step starts from these poses, with the mates and holds
+    // as they were.
+    let mut next = start.clone();
+    for (k, b) in &a.bodies {
+        next.bodies.get_mut(k).expect("a body").pose = b.pose;
+    }
+    for (k, p) in &solved.poses {
+        next.bodies.get_mut(k).expect("a body").pose = *p;
+    }
+    let moved = next
+        .bodies
+        .iter()
+        .filter(|(k, b)| rest.bodies[*k].pose != b.pose)
+        .map(|(k, b)| (*k, b.pose))
+        .collect();
+    let step = Step {
+        t,
+        holds: true,
+        moved,
+        values: solved.report.values.clone(),
+        conflicting: Vec::new(),
+        past: None,
+        refused: None,
+    };
+    Ok((step, Some(next)))
+}
+
+/// Every step at `ts`, one after another, each from the last that held:
+/// so the result doesn't depend on threads, and a linkage keeps its
+/// branch. Cancellable between steps.
+pub fn steps(
+    rest: &ryumate::Assembly,
+    drives: &[Drive],
+    ts: &[f64],
+    job: &Job,
+) -> Result<Vec<Step>> {
+    let mut current = rest.clone();
+    let mut out = Vec::with_capacity(ts.len());
+    for &t in ts {
+        job.check()?;
+        let (step, next) = solve_at(&current, rest, drives, t)?;
+        if let Some(next) = next {
+            current = next;
+        }
+        out.push(step);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -739,5 +976,169 @@ pub(crate) mod tests {
         assert!(rest.patterns.is_empty() && rest.mates.is_empty());
         assert_eq!(rest.asm.bodies.len(), 2);
         assert_eq!(rest.asm.bodies[&0].pose.origin, [-0.008, 0.0, 0.0]);
+    }
+
+    fn at(origin: [f64; 3], angle: f64) -> ryumate::Pose {
+        ryumate::Pose {
+            rotation: turn([0.0, 0.0, 1.0], angle),
+            origin,
+        }
+    }
+
+    fn on(b: u32, origin: [f64; 3]) -> ryumate::Connector {
+        ryumate::Connector {
+            on: ryumate::On::Body(b),
+            frame: ryumate::Pose {
+                origin,
+                ..ryumate::Pose::IDENTITY
+            },
+        }
+    }
+
+    fn joint(kind: ryumate::Kind, a: ryumate::Connector, b: ryumate::Connector) -> ryumate::Mate {
+        ryumate::Mate {
+            kind,
+            a,
+            b,
+            limits: ryumate::Limits::NONE,
+        }
+    }
+
+    /// A crank-rocker in the xy plane, settled with its elbow up: ground
+    /// (fixed); a crank of 1 turning about the origin (mate 0, driven);
+    /// a coupler of 2.5 and a rocker of 2 standing on the ground at
+    /// (3, 0). Ball joints at the coupler's ends keep it from being
+    /// overconstrained (the coupler may spin about its own line, nothing
+    /// else).
+    fn four_bar() -> ryumate::Assembly {
+        let mut a = ryumate::Assembly::default();
+        let body = |pose, fixed| ryumate::Body { pose, fixed };
+        a.bodies.insert(0, body(ryumate::Pose::IDENTITY, true));
+        a.bodies.insert(1, body(ryumate::Pose::IDENTITY, false));
+        a.bodies.insert(2, body(at([1.0, 0.0, 0.0], 0.8957), false));
+        a.bodies.insert(3, body(at([3.0, 0.0, 0.0], 1.7913), false));
+        a.mates.insert(
+            0,
+            joint(
+                ryumate::Kind::Revolute { angle: Some(0.0) },
+                on(0, [0.0; 3]),
+                on(1, [0.0; 3]),
+            ),
+        );
+        a.mates.insert(
+            1,
+            joint(ryumate::Kind::Ball, on(1, [1.0, 0.0, 0.0]), on(2, [0.0; 3])),
+        );
+        a.mates.insert(
+            2,
+            joint(
+                ryumate::Kind::Revolute { angle: None },
+                on(0, [3.0, 0.0, 0.0]),
+                on(3, [0.0; 3]),
+            ),
+        );
+        a.mates.insert(
+            3,
+            joint(
+                ryumate::Kind::Ball,
+                on(2, [2.5, 0.0, 0.0]),
+                on(3, [2.0, 0.0, 0.0]),
+            ),
+        );
+        let solved = ryumate::solve(&a).unwrap();
+        assert!(solved.report.converged);
+        solved.assembly(&a)
+    }
+
+    #[test]
+    fn fractions_end_exactly_at_the_end() {
+        assert_eq!(
+            (0..3).map(|k| t_of(k, 3)).collect::<Vec<_>>(),
+            [0.0, 0.5, 1.0]
+        );
+        assert_eq!(t_of(12, 13), 1.0);
+        assert_eq!(lerp(-0.1, 0.3, 1.0), 0.3);
+        assert_eq!(lerp(-0.1, 0.3, 0.0), -0.1);
+    }
+
+    #[test]
+    fn a_four_bar_stays_on_its_branch_through_a_whole_turn() {
+        let rest = four_bar();
+        let drives = [Drive::Mate {
+            mate: id("crank"),
+            index: 0,
+            driven: Driven::Angle,
+            from: 0.0,
+            to: 2.0 * core::f64::consts::PI,
+        }];
+        let ts: Vec<f64> = (0..37).map(|k| t_of(k, 37)).collect();
+        let steps = steps(&rest, &drives, &ts, &Job::default()).unwrap();
+        for (k, s) in steps.iter().enumerate() {
+            assert!(s.holds, "step {k}: {s:?}");
+            let rocker = s.moved.get(&3).copied().unwrap_or(rest.bodies[&3].pose);
+            let tip = rocker.apply([2.0, 0.0, 0.0]);
+            assert!(
+                tip[1] > 0.5,
+                "step {k}: the rocker's tip {tip:?} flipped below"
+            );
+        }
+        // The same bits again.
+        assert_eq!(
+            steps,
+            super::steps(&rest, &drives, &ts, &Job::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn steps_past_a_stop_are_blocked_and_the_stop_is_reached() {
+        let (_dir, mut s) = stopped();
+        let f = file(
+            &s,
+            "frame",
+            json!([{"mate": "m1", "angle": {"from": "0 deg", "to": "10 deg"}}]),
+            11,
+        );
+        let r = resolved(&mut s, "frame", &f).unwrap();
+        let result = s.rebuilt(&id("frame")).unwrap().clone();
+        let rest = Rest::of(&result);
+        let ts: Vec<f64> = (0..11).map(|k| t_of(k, 11)).collect();
+        let steps = steps(&rest.asm, &r.drives, &ts, &Job::default()).unwrap();
+        let held: Vec<bool> = steps.iter().map(|s| s.holds).collect();
+        assert_eq!(
+            held,
+            [
+                true, true, true, true, true, true, true, false, false, false, false
+            ]
+        );
+        assert_eq!(steps[7].past, Some((0, ryumate::Stop::Max)));
+        let m1 = steps[6].values[&0].angle.unwrap();
+        assert_eq!(m1.at, Some(ryumate::Stop::Max), "{m1:?}");
+    }
+
+    #[test]
+    fn a_held_move_carries_its_group_rigidly() {
+        let (_dir, mut s) = crate::explode::tests::project();
+        let f = file(
+            &s,
+            "frame",
+            json!([{"instances": ["p1", "p2"], "rotate":
+                {"axis": {"origin": ["0 mm", "0 mm", "0 mm"], "direction": "z"},
+                 "from": "0 deg", "to": "90 deg"}}]),
+            3,
+        );
+        let r = resolved(&mut s, "frame", &f).unwrap();
+        let result = s.rebuilt(&id("frame")).unwrap().clone();
+        let rest = Rest::of(&result);
+        let steps = steps(&rest.asm, &r.drives, &[0.0, 0.5, 1.0], &Job::default()).unwrap();
+        assert!(steps.iter().all(|s| s.holds));
+        // p1 was at (15, 15, 6) mm: a quarter turn about z puts it at
+        // (-15, 15, 6) mm.
+        let p1 = rest.body(&id("p1")).unwrap();
+        let o = steps[2].moved[&p1].origin;
+        assert!(
+            (o[0] + 0.015).abs() < 1e-15 && (o[1] - 0.015).abs() < 1e-15,
+            "{o:?}"
+        );
+        assert!(steps[0].moved.is_empty(), "{:?}", steps[0].moved);
     }
 }
