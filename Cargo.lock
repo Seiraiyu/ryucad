@@ -4979,6 +4979,7 @@ dependencies = [
  "egui_kittest",
  "egui_tiles",
  "image",
+ "mimalloc",
  "png",
  "pollster 0.4.0",
  "rayon",
