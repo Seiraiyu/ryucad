@@ -188,6 +188,10 @@ pub struct Cache {
     /// While a request notes what it adds ([`Cache::note`]): the keys it
     /// added and their bytes.
     noted: Option<(Vec<(String, Key)>, usize)>,
+    /// The entries that are another's mesh moved (an inserted body's,
+    /// design 521): evicted before any mesh the kernel made, since moving
+    /// the source's again costs a transform, and making it a mesh.
+    derived: std::collections::BTreeSet<(String, Key)>,
 }
 
 impl Cache {
@@ -253,11 +257,14 @@ impl Cache {
                 let Some(m) = &b.moved else {
                     return true;
                 };
+                self.clock += 1;
                 match self
                     .entries
-                    .get(&(m.source.hash.clone(), Key::Display(quality)))
+                    .get_mut(&(m.source.hash.clone(), Key::Display(quality)))
                 {
-                    Some((_, source)) => {
+                    // The source is used: it outlives what is moved from it.
+                    Some((used, source)) => {
+                        *used = self.clock;
                         moved.push((b.hash.clone(), Arc::new(moved_mesh(source, &m.pose))));
                         false
                     }
@@ -267,6 +274,7 @@ impl Cache {
             .collect();
         for (hash, m) in moved {
             self.add(&hash, Key::Display(quality), &m);
+            self.derived.insert((hash, Key::Display(quality)));
         }
         let disk = self.disk.as_deref();
         prefetch(disk, missing.iter().map(|(f, b)| disk_key(f, b, quality)));
@@ -447,14 +455,16 @@ impl Cache {
     /// Drops the least recently used meshes until the cache fits `budget`,
     /// keeping at least one.
     fn evict(&mut self, budget: usize) {
+        // Moved meshes first, oldest first; then the kernel's, oldest first.
         while self.bytes > budget && self.entries.len() > 1 {
             let oldest = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (used, _))| *used)
+                .min_by_key(|(k, (used, _))| (!self.derived.contains(*k), *used))
                 .map(|(k, _)| k.clone())
                 .expect("not empty");
             let (_, gone) = self.entries.remove(&oldest).expect("present");
+            self.derived.remove(&oldest);
             self.bytes -= gone.bytes();
         }
     }
@@ -483,6 +493,7 @@ impl Cache {
         if forget {
             for k in keys {
                 if let Some((_, gone)) = self.entries.remove(&k) {
+                    self.derived.remove(&k);
                     self.bytes -= gone.bytes();
                 }
             }
@@ -1312,6 +1323,48 @@ mod tests {
         let (a, z) = (source.mesh.as_ref().unwrap(), moved.mesh.as_ref().unwrap());
         assert_eq!(a.triangles, z.triangles);
         assert_eq!(z.positions[0], m.pose.apply_point(a.positions[0]));
+    }
+
+    #[test]
+    fn a_moved_mesh_is_evicted_before_its_source() {
+        let (_dir, mut s) = crate::insert::tests::boarded();
+        let id = crate::assembly::tests::id;
+        let src = s
+            .rebuilt(&id("pcb"))
+            .unwrap()
+            .output(&id("board"))
+            .unwrap()
+            .solids()[0]
+            .1
+            .clone();
+        let ins = s.project().part(&id("enclosure")).unwrap().features[&id("pcb")]
+            .as_ref()
+            .unwrap()
+            .clone();
+        let at = |s: &mut crate::session::Session, z: &str| {
+            crate::server::tests::call(
+                s,
+                "feature.edit",
+                serde_json::json!({"part": "enclosure", "id": "pcb",
+                "placement": {"origin": ["0 mm", "0 mm", z]}}),
+            )
+            .unwrap();
+            let r = s.rebuilt(&id("enclosure")).unwrap().clone();
+            r.output(&id("pcb")).unwrap().solids()[0].1.clone()
+        };
+        let (one, two) = (at(&mut s, "5 mm"), at(&mut s, "6 mm"));
+        let feature = one.moved.as_ref().unwrap().feature.clone();
+        let mut cache = Cache::with_disk(None);
+        let source = cache.get(&feature, &src, Quality::Normal, usize::MAX);
+        // A budget for the source alone: the moved mesh goes, the source stays.
+        let budget = source.bytes();
+        cache.get(&ins, &one, Quality::Normal, budget);
+        assert!(cache.has(&src.hash, Quality::Normal));
+        assert!(!cache.has(&one.hash, Quality::Normal));
+        // So a placement moved again meshes nothing.
+        let before = kernel_meshes();
+        cache.get(&ins, &two, Quality::Normal, budget);
+        assert_eq!(kernel_meshes(), before, "the source was meshed again");
     }
 
     #[test]
