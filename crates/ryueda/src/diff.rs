@@ -205,6 +205,16 @@ pub fn diff(from: &Side, to: &Side, opts: &Options) -> Result<Value> {
     out.insert("to".into(), to.to_json());
     root(from.files, to.files, opts.all, &mut out);
     out.insert("blocks".into(), json!(blocks(from, to, opts)));
+    out.insert(
+        "library".into(),
+        library(
+            from.files,
+            to.files,
+            &libraries(from, to),
+            opts.library,
+            opts.all,
+        ),
+    );
     if opts.netlist {
         out.insert("netlist".into(), json!(netlist(from, to, opts)?));
     }
@@ -695,6 +705,166 @@ fn netlist(from: &Side, to: &Side, opts: &Options) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// A library file's object-valued members (`pins`, `graphics`, `pads`,
+/// `keepouts`, a library component's `footprints` when an object), each
+/// member by key; the rest by pointer.
+fn by_member(a: Option<&Value>, b: Option<&Value>) -> (Map<String, Value>, Vec<Value>) {
+    let empty = Map::new();
+    let (x, y) = (
+        a.and_then(Value::as_object).unwrap_or(&empty),
+        b.and_then(Value::as_object).unwrap_or(&empty),
+    );
+    let mut members = Map::new();
+    let mut rest = Vec::new();
+    let keys: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+    for k in keys {
+        let (p, q) = (x.get(k), y.get(k));
+        let objects = |v: Option<&Value>| {
+            v.is_none_or(|v| {
+                v.as_object()
+                    .is_some_and(|o| o.values().all(Value::is_object))
+            })
+        };
+        if ["pins", "graphics", "pads", "keepouts"].contains(&k.as_str())
+            && objects(p)
+            && objects(q)
+        {
+            let (mp, mq) = (
+                p.and_then(Value::as_object).cloned().unwrap_or_default(),
+                q.and_then(Value::as_object).cloned().unwrap_or_default(),
+            );
+            let ids: BTreeSet<&String> = mp.keys().chain(mq.keys()).collect();
+            let list: Vec<Value> = ids
+                .into_iter()
+                .filter_map(|id| {
+                    let (u, v) = (mp.get(id), mq.get(id));
+                    let st = status(u.is_some(), v.is_some(), u != v);
+                    if st == "same" {
+                        return None;
+                    }
+                    let mut e = json!({"id": id, "status": st});
+                    if st == "changed" {
+                        let mut c = Vec::new();
+                        changes("", u, v, &mut c);
+                        e["changes"] = json!(c);
+                    }
+                    Some(e)
+                })
+                .collect();
+            if !list.is_empty() {
+                members.insert(k.clone(), json!(list));
+            }
+        } else {
+            changes(&format!("/{}", escape(k)), p, q, &mut rest);
+        }
+    }
+    (members, rest)
+}
+
+/// The libraries on either side, `(alias, base)`: `self` (base `""`) and
+/// each alias that reads on either side (base `../<path>`).
+fn libraries(from: &Side, to: &Side) -> Vec<(String, String)> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for s in [from, to] {
+        for (alias, l) in &s.project.libraries {
+            if let Ok(l) = l {
+                out.entry(alias.clone()).or_insert_with(|| l.base.clone());
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// `library` for each of `libs`: by kind (`symbols`, `footprints`,
+/// `components`, `standards`, `models`) the counts of added, removed and
+/// changed, or with `members` each object (`lib/<alias>/<kind>/<id>`) by
+/// member and models by BLAKE3.
+fn library(from: &Files, to: &Files, libs: &[(String, String)], members: bool, all: bool) -> Value {
+    let mut out = Map::new();
+    for (alias, base) in libs {
+        let dir = |sub: &str| {
+            let lib = if base.is_empty() {
+                crate::library::DIR.to_owned()
+            } else {
+                format!("{base}/{}", crate::library::DIR)
+            };
+            if sub.is_empty() {
+                lib
+            } else {
+                format!("{lib}/{sub}")
+            }
+        };
+        let mut one = Map::new();
+        for (key, folder, kind) in [
+            ("symbols", crate::library::SYMBOLS, "symbol"),
+            ("footprints", crate::library::FOOTPRINTS, "footprint"),
+            ("components", crate::library::COMPONENTS, "libcomp"),
+        ] {
+            let d = dir(folder);
+            let list: Vec<Value> = ids_in(from, to, &d)
+                .into_iter()
+                .filter_map(|id| {
+                    let path = format!("{d}/{id}.json");
+                    let mut e = file(from, to, &path);
+                    if e["status"] == "same" && !all {
+                        return None;
+                    }
+                    e["id"] = json!(id);
+                    e["ref"] = json!(format!("lib/{alias}/{kind}/{id}"));
+                    if e["status"] == "changed" {
+                        let (m, rest) =
+                            by_member(json_at(from, &path).as_ref(), json_at(to, &path).as_ref());
+                        e["members"] = Value::Object(m);
+                        e["changes"] = json!(rest);
+                    }
+                    Some(e)
+                })
+                .collect();
+            one.insert(
+                key.into(),
+                if members { json!(list) } else { counts(&list) },
+            );
+        }
+        let std = file(from, to, &dir(crate::standards::FILE));
+        one.insert("standards".into(), std);
+        let md = dir(crate::library::MODELS);
+        let prefix = format!("{md}/");
+        let names: BTreeSet<&str> = from
+            .keys()
+            .chain(to.keys())
+            .filter_map(|p| p.strip_prefix(&prefix))
+            .collect();
+        let hash = |f: &Files, n: &str| {
+            f.get(&format!("{md}/{n}"))
+                .map(|b| blake3::hash(b).to_hex().to_string())
+        };
+        let models: Vec<Value> = names
+            .into_iter()
+            .filter_map(|n| {
+                let (a, b) = (hash(from, n), hash(to, n));
+                let st = status(a.is_some(), b.is_some(), a != b);
+                (st != "same" || all).then(|| json!({"file": n, "status": st, "from": a, "to": b}))
+            })
+            .collect();
+        one.insert(
+            "models".into(),
+            if members {
+                json!(models)
+            } else {
+                counts(&models)
+            },
+        );
+        out.insert(alias.clone(), Value::Object(one));
+    }
+    Value::Object(out)
+}
+
+/// A list's counts by status.
+fn counts(list: &[Value]) -> Value {
+    let n = |s: &str| list.iter().filter(|e| e["status"] == s).count();
+    json!({"added": n("added"), "removed": n("removed"), "changed": n("changed")})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,6 +1130,59 @@ mod tests {
                 .unwrap()
                 .get("netlist")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn the_library_diffs_by_member_and_models_by_hash() {
+        let sym =
+            |pins: &str| format!(r#"{{"format": 1, "kind": "ryueda.symbol", "pins": {pins}}}"#);
+        let a = files(&[
+            (
+                "library/symbols/r.json",
+                sym(r#"{"1": {"name": "A"}, "2": {"name": "B"}}"#).as_str(),
+            ),
+            ("library/models/r.step", "one"),
+        ]);
+        let b = files(&[
+            (
+                "library/symbols/r.json",
+                sym(r#"{"1": {"name": "A"}, "2": {"name": "K"}, "3": {"name": "C"}}"#).as_str(),
+            ),
+            ("library/models/r.step", "two"),
+            (
+                "library/components/r_10k.json",
+                r#"{"format": 2, "kind": "ryueda.libcomp", "prefix": "R"}"#,
+            ),
+        ]);
+        let v = library(&a, &b, &[("self".into(), String::new())], true, false);
+        let s = &v["self"]["symbols"][0];
+        assert_eq!(
+            (&s["id"], &s["ref"], &s["status"]),
+            (&json!("r"), &json!("lib/self/symbol/r"), &json!("changed"))
+        );
+        assert_eq!(
+            s["members"]["pins"],
+            json!([
+                {"id": "2", "status": "changed", "changes": [{"at": "/name", "from": "B", "to": "K"}]},
+                {"id": "3", "status": "added"},
+            ])
+        );
+        assert_eq!(v["self"]["components"][0]["status"], "added");
+        let m = &v["self"]["models"][0];
+        assert_eq!(
+            (&m["file"], &m["status"]),
+            (&json!("r.step"), &json!("changed"))
+        );
+        assert_eq!(m["from"], json!(blake3::hash(b"one").to_hex().to_string()));
+        let counts = library(&a, &b, &[("self".into(), String::new())], false, false);
+        assert_eq!(
+            counts["self"]["symbols"],
+            json!({"added": 0, "removed": 0, "changed": 1})
+        );
+        assert_eq!(
+            counts["self"]["models"],
+            json!({"added": 0, "removed": 0, "changed": 1})
         );
     }
 }
