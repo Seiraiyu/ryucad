@@ -108,7 +108,7 @@ pub type Pins = BTreeMap<Node, Result<Arc<Pinned>>>;
 pub type Node = (Id, Rev);
 
 impl Model {
-    fn new(occurrences: Vec<Occurrence>) -> Model {
+    pub(crate) fn new(occurrences: Vec<Occurrence>) -> Model {
         let mut h = blake3::Hasher::new();
         for o in &occurrences {
             let path: Vec<&str> = o.path.iter().map(Id::as_str).collect();

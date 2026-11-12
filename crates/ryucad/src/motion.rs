@@ -36,6 +36,8 @@ pub struct Rest {
     pub instances: Vec<Id>,
     /// The mate each of ryumate's mates is, by its index.
     pub mates: Vec<Id>,
+    /// The instance pattern each of ryumate's patterns is, by its index.
+    pub patterns: Vec<Id>,
     pub asm: ryumate::Assembly,
     /// Whether its mates hold (true with none).
     pub holds: bool,
@@ -47,6 +49,7 @@ impl Rest {
             return Rest {
                 instances: s.instances.clone(),
                 mates: s.mates.clone(),
+                patterns: s.patterns.clone(),
                 asm: s.asm.clone(),
                 holds: s.report.converged,
             };
@@ -68,6 +71,7 @@ impl Rest {
         Rest {
             instances,
             mates: Vec::new(),
+            patterns: Vec::new(),
             asm,
             holds: true,
         }
@@ -716,5 +720,24 @@ pub(crate) mod tests {
         // The parameter is read, so not unused.
         let list = call(&mut s, "param.list", json!({"part": "frame"})).unwrap();
         assert_ne!(list["parameters"]["reach"]["unused"], true, "{list}");
+    }
+
+    #[test]
+    fn rest_names_bodies_mates_and_patterns() {
+        // `frame` has a pattern and no mates, so the rebuild settles it;
+        // `pair` has neither, so its rest is its instances as placed.
+        let (_dir, mut s) = crate::explode::tests::project();
+        let r = s.rebuilt(&id("frame")).unwrap().clone();
+        let rest = Rest::of(&r);
+        assert_eq!(rest.patterns, [id("row")]);
+        assert!(rest.instances.contains(&id("pin")), "{:?}", rest.instances);
+        assert!(rest.holds);
+        let r = s.rebuilt(&id("pair")).unwrap().clone();
+        assert!(r.solve.is_none());
+        let rest = Rest::of(&r);
+        assert_eq!(rest.instances, [id("left"), id("right")]);
+        assert!(rest.patterns.is_empty() && rest.mates.is_empty());
+        assert_eq!(rest.asm.bodies.len(), 2);
+        assert_eq!(rest.asm.bodies[&0].pose.origin, [-0.008, 0.0, 0.0]);
     }
 }

@@ -99,6 +99,9 @@ pub struct Solve {
     pub instances: Vec<Id>,
     /// The mate each of ryumate's mates is, by its index.
     pub mates: Vec<Id>,
+    /// The instance pattern each of ryumate's patterns is, by its index
+    /// (what a sweep needs to move a seed's copies). Not in `to_json`.
+    pub patterns: Vec<Id>,
     /// The instances solved off their stored poses.
     pub moved: Vec<Id>,
     /// What was solved, with each body where the rebuild placed it: what
@@ -1144,6 +1147,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
         report: solved.report,
         instances,
         mates: solved_mates,
+        patterns: pattern_ids.clone(),
         moved,
         asm: at,
     }))
@@ -1535,6 +1539,7 @@ fn component_request(
         report: solved.report.clone(),
         instances: s.instances.clone(),
         mates: s.mates.clone(),
+        patterns: s.patterns.clone(),
         moved: Vec::new(),
         asm: asm.component(&roots),
     };
