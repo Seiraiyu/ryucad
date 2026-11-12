@@ -163,6 +163,7 @@ fn is_reference(v: &Value) -> bool {
             && match o.len() {
                 1 => true,
                 2 => o.contains_key("name") || o.contains_key("entity"),
+                3 => o.contains_key("name") && o.contains_key("solid"),
                 _ => false,
             }
     })
@@ -1444,6 +1445,12 @@ pub fn files_merged(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_inserted_solids_reference_merges_as_one_value() {
+        let r = |n: &str| serde_json::json!({"feature": "board", "solid": "u1", "name": n});
+        assert!(super::is_reference(&r(&"0".repeat(32))));
+    }
+
     #[test]
     fn marks_are_one_value() {
         let marked = |x: f64| {
