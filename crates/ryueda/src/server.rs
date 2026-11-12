@@ -931,6 +931,28 @@ fn dispatch(
             severity,
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
+        Request::Diff {
+            from,
+            to,
+            design,
+            block,
+            netlist,
+            layout,
+            library,
+            all,
+        } => crate::diff::between(
+            session,
+            from.as_deref().unwrap_or("HEAD"),
+            to.as_deref().unwrap_or("working"),
+            &crate::diff::Options {
+                design,
+                block,
+                netlist,
+                layout,
+                library,
+                all,
+            },
+        ),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
             crate::erc::check(session.root(), &cats)

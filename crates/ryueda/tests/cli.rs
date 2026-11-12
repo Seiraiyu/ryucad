@@ -494,6 +494,7 @@ fn every_protocol_method_has_a_command() {
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
+        ("diff", &["diff"]),
         ("doctor", &["doctor"]),
         ("doctor.repair", &["doctor"]),
         ("layout", &["layout"]),

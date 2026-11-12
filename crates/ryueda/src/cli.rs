@@ -224,6 +224,34 @@ enum Command {
         #[command(flatten)]
         rev: Rev,
     },
+    /// What changed between two revisions, as values (HEAD and the
+    /// working files by default): files by JSON pointer, each block's
+    /// components, nets, instances, ports and buses by reference path,
+    /// layouts and the library counted (--layout, --library for each
+    /// key), and with --netlist each design flattened and compared.
+    Diff {
+        /// The older revision (HEAD by default; `working` is the files on disk).
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// The newer revision (`working` by default).
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
+        /// Only this design's netlist.
+        #[arg(long)]
+        design: Option<String>,
+        /// Only this block.
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long)]
+        netlist: bool,
+        #[arg(long)]
+        layout: bool,
+        #[arg(long)]
+        library: bool,
+        /// List what is the same too.
+        #[arg(long)]
+        all: bool,
+    },
     /// Lay out a design's schematics (the project's one design, or
     /// --design), or one --block, over their layout files, writing those
     /// that change.
@@ -2263,6 +2291,16 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Check { offline, rev } => Request::Check {
             offline: *offline,
             rev: rev.rev.clone(),
+        },
+        Command::Diff { from, to, design, block, netlist, layout, library, all } => Request::Diff {
+            from: from.clone(),
+            to: to.clone(),
+            design: design.clone(),
+            block: block.clone(),
+            netlist: *netlist,
+            layout: *layout,
+            library: *library,
+            all: *all,
         },
         Command::Layout {
             design,

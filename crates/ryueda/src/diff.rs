@@ -865,6 +865,66 @@ fn counts(list: &[Value]) -> Value {
     json!({"added": n("added"), "removed": n("removed"), "changed": n("changed")})
 }
 
+/// One side as read: the working files, or a revision's.
+enum Read {
+    Working,
+    At {
+        commit: String,
+        project: std::sync::Arc<Project>,
+        files: Files,
+    },
+}
+
+impl Read {
+    fn of(session: &mut crate::session::Session, rev: &str) -> Result<Read> {
+        if rev == "working" {
+            return Ok(Read::Working);
+        }
+        let (commit, project) = session.at(rev)?;
+        let (_, files) = session.files_at(&commit)?;
+        Ok(Read::At {
+            commit,
+            project,
+            files,
+        })
+    }
+
+    fn side<'a>(&'a self, rev: &'a str, files: &'a Files, project: &'a Project) -> Side<'a> {
+        match self {
+            Read::Working => Side {
+                rev,
+                commit: None,
+                files,
+                project,
+            },
+            Read::At {
+                commit,
+                project,
+                files,
+            } => Side {
+                rev,
+                commit: Some(commit.as_str()),
+                files,
+                project,
+            },
+        }
+    }
+}
+
+/// `diff` between revisions `from` and `to` of the session's project
+/// (`working` for the files on disk).
+pub fn between(
+    session: &mut crate::session::Session,
+    from: &str,
+    to: &str,
+    opts: &Options,
+) -> Result<Value> {
+    let (a, b) = (Read::of(session, from)?, Read::of(session, to)?);
+    let files = session.snapshot();
+    let p = session.project();
+    diff(&a.side(from, &files, p), &b.side(to, &files, p), opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

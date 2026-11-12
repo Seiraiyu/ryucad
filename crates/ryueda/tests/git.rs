@@ -374,3 +374,126 @@ fn check_reports_doctor_and_a_revision_has_none() {
     };
     assert_eq!(report["doctor"], json!([]), "{report}");
 }
+
+/// The breakout, laid out and committed, then edited: R1's value, a new
+/// R3 on SDA, C3 deleted, SCL renamed and J1 moved.
+fn edited_breakout(top: &Path, run: &Path) -> PathBuf {
+    let board = breakout_in_git(top, run);
+    assert_eq!(ryueda(&board, run, false, &["layout"]).0, 0);
+    git(top, &["add", "."]);
+    git(top, &["commit", "-q", "-m", "laid out"]);
+    for args in [
+        vec!["component", "edit", "breakout/r1", "--value", "10k"],
+        vec![
+            "component",
+            "add",
+            "breakout",
+            "--of",
+            "r_4k7",
+            "--id",
+            "r3",
+        ],
+        vec!["connect", "breakout/r3/1", "SDA"],
+        vec!["connect", "breakout/r3/2", "rail:3V3"],
+        vec!["component", "delete", "breakout/c3"],
+        vec!["net", "rename", "breakout/scl", "I2C_SCL"],
+        vec!["place", "breakout", "--move", "shift J1 right 4"],
+    ] {
+        let (code, v) = ryueda(&board, run, false, &args);
+        assert_eq!(code, 0, "{args:?}: {v}");
+    }
+    board
+}
+
+#[test]
+fn diff_says_what_changed_both_ways() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(&board, &run, daemon, &["diff"]);
+        assert_eq!(code, 0, "{v}");
+        let r = &v["result"];
+        assert_eq!(r["from"]["rev"], "HEAD");
+        assert_eq!(r["from"]["commit"].as_str().unwrap().len(), 40);
+        assert_eq!(r["to"], json!({"rev": "working", "commit": null}));
+        let b = r["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["block"] == "breakout")
+            .unwrap();
+        let comp = |id: &str| {
+            b["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == id)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(comp("r1")["status"], "changed");
+        assert_eq!(
+            (comp("r3")["status"].clone(), comp("r3")["ref"].clone()),
+            (json!("added"), json!("breakout/r3"))
+        );
+        assert_eq!(comp("c3")["status"], "removed");
+        let scl = b["nets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "scl")
+            .unwrap();
+        assert_eq!(scl["name"], "I2C_SCL");
+        assert_eq!(b["layout"]["status"], "changed");
+        assert!(
+            b["layout"]["counts"]["moved"].as_u64().unwrap() >= 1,
+            "{}",
+            b["layout"]
+        );
+        assert!(
+            b["layout"].get("changes").is_none(),
+            "counts only without --layout"
+        );
+        let (_, l) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["diff", "--layout", "--block", "breakout"],
+        );
+        let changes = l["result"]["blocks"][0]["layout"]["changes"]
+            .as_array()
+            .unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c["change"] == "moved" && c["ref"] == "breakout/j1"),
+            "{changes:?}"
+        );
+        let (_, n) = ryueda(&board, &run, daemon, &["diff", "--netlist"]);
+        let nets = n["result"]["netlist"][0]["nets"].as_array().unwrap();
+        assert!(
+            nets.iter().any(|x| x["renamed"]["to"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("I2C_SCL"))),
+            "{nets:?}"
+        );
+        // Nothing between a revision and itself; a revision it lacks.
+        let (_, same) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["diff", "--from", "HEAD", "--to", "HEAD"],
+        );
+        assert_eq!(same["result"]["blocks"], json!([]));
+        assert_eq!(
+            ryueda(&board, &run, daemon, &["diff", "--from", "nope"]).1["error"]["code"],
+            "rev_not_found"
+        );
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}

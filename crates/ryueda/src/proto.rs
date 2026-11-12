@@ -840,6 +840,30 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// What changed between two revisions (`HEAD` and the working files
+    /// by default), as values: the root files, each block by object and
+    /// reference path, its layout's counts (by key with `layout`), the
+    /// library's counts (by member with `library`), and with `netlist`
+    /// each design flattened and compared.
+    #[serde(rename = "diff")]
+    Diff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        netlist: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        layout: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        library: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+    },
     /// The project loaded from nothing: every file's faults and every
     /// design's ERC; `check_failed` on any error.
     #[serde(rename = "check")]

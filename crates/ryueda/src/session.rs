@@ -74,6 +74,13 @@ impl Session {
         Ok((commit, p))
     }
 
+    /// The files `rev` holds, as a session holds them, and its commit:
+    /// what `diff` compares. Never the disk.
+    pub fn files_at(&self, rev: &str) -> Result<(String, Files)> {
+        let r = crate::git::revision(&self.root, rev)?;
+        Ok((r.commit, r.files))
+    }
+
     /// This machine's catalogues as of now: those opened before, unless
     /// synced again since.
     pub fn catalogues(&mut self) -> Result<crate::parts::Catalogues> {
