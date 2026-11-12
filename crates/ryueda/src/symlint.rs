@@ -262,7 +262,7 @@ fn length(
     }
     let want = cx.standards.pin_length_nm;
     for (n, p) in scoped(s, only) {
-        if p.length_nm == want {
+        if p.length_nm == want || reaching_supply(s, class, p, want) {
             continue;
         }
         let (b, d) = (base(p), dir(p.side));
@@ -283,6 +283,25 @@ fn length(
             json!({"op": "move", "pin": n, "at": at}),
         ]);
         out.push(r);
+    }
+}
+
+/// An op-amp's supply that runs from the triangle's slanted edge to the
+/// standard length past its body's box (plan 3.A, #758): the supplies end
+/// in one row outside the box, as KiCad's op-amps' do, so it is longer
+/// than the standard where the edge is lower.
+fn reaching_supply(s: &Symbol, class: Class, p: &Pin, want: i64) -> bool {
+    if class != Class::Opamp
+        || !matches!(p.ty, PinType::PowerIn | PinType::PowerOut)
+        || p.length_nm < want
+    {
+        return false;
+    }
+    let b = body(s, p.unit.unwrap_or_else(|| home(s)));
+    match p.side {
+        Side::Up => p.at[1] == b.max[1] + want,
+        Side::Down => p.at[1] == b.min[1] - want,
+        _ => false,
     }
 }
 
@@ -1674,6 +1693,44 @@ mod tests {
             lint(&s, Some(Class::Ic), &cx)
                 .iter()
                 .all(|f| f.fixes.iter().all(|o| !o.is_empty()))
+        );
+    }
+
+    /// Plan 3.A: an op-amp's supply may run from the triangle's edge to a
+    /// pin length past its box; one that stops elsewhere is judged.
+    #[test]
+    fn an_op_amps_supply_reaches_past_its_box() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "self",
+        };
+        let pins: Vec<PinSpec> = [
+            ("2", "-", PinType::Input),
+            ("3", "+", PinType::Input),
+            ("1", "~", PinType::Output),
+            ("8", "V+", PinType::PowerIn),
+            ("4", "V-", PinType::PowerIn),
+        ]
+        .iter()
+        .map(|(n, name, ty)| PinSpec {
+            number: (*n).into(),
+            name: (*name).into(),
+            ty: *ty,
+            unit: None,
+        })
+        .collect();
+        let mut s = template("A", Class::Opamp, &pins, &st).unwrap();
+        assert!(s.pins["8"].length_nm > st.pin_length_nm);
+        assert!(lint(&s, Some(Class::Opamp), &cx).is_empty());
+        let p = s.pins.get_mut("8").unwrap();
+        p.length_nm += st.grid_nm;
+        p.at[1] += st.grid_nm;
+        assert_eq!(
+            codes(&lint(&s, Some(Class::Opamp), &cx)),
+            [("sym_pin_length", vec!["8".to_owned()])]
         );
     }
 

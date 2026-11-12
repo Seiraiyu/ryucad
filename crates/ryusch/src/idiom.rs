@@ -942,6 +942,10 @@ fn signal_on_top(block: &Block, p: usize, k: usize, want: Side) -> (u16, bool) {
 }
 
 /// The place putting pin `k` of part `p`, turned so, at `at`.
+/// How far above a stage amplifier's top supply its capacitor's top end
+/// stands, in grid steps: the capacitor and its ground under it (plan 3.A).
+const CAP_LIFT: Nm = 7;
+
 fn put(block: &Block, p: usize, (rot, mirror): (u16, bool), k: usize, at: Point) -> Place {
     let place = Place::new([0, 0], rot, mirror);
     let e = Shape::of(&block.parts[p], place).pins[k].end;
@@ -1233,6 +1237,11 @@ pub fn clusters(
             continue;
         }
         let ground = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Ground);
+        let staged = |a: usize| {
+            idioms
+                .iter()
+                .any(|x| x.kind == IdiomKind::OpampStage && x.anchor.map(|(p, _)| p) == Some(a))
+        };
         match idiom.anchor {
             Some((a, k)) if of.contains_key(&a) => {
                 let ci = of[&a];
@@ -1371,12 +1380,26 @@ pub fn clusters(
                             let j = *n;
                             *n += 1;
                             clear = Side::Right;
-                            let x = snap(body.max[0]) + (3 + 3 * j) * GRID;
-                            let y = match side {
-                                Side::Up => pin.end[1] + GRID,
-                                _ => pin.end[1] - 3 * GRID,
-                            };
-                            [x, y]
+                            // A supply on top of an op-amp stage's own
+                            // amplifier (plan 3.A: the template's supplies
+                            // are on the amplifier) is inside the stage's
+                            // feedback loop: its capacitor stands there too,
+                            // beside the pin above its end, under the
+                            // feedback the stage lifts over it; outside, its
+                            // wire would cross the loop.
+                            if side == Side::Up && staged(a) {
+                                [
+                                    pin.end[0] + (4 + 3 * j) * GRID,
+                                    pin.end[1] + CAP_LIFT * GRID,
+                                ]
+                            } else {
+                                let x = snap(body.max[0]) + (3 + 3 * j) * GRID;
+                                let y = match side {
+                                    Side::Up => pin.end[1] + GRID,
+                                    _ => pin.end[1] - 3 * GRID,
+                                };
+                                [x, y]
+                            }
                         };
                         adds.push((c, put(block, c, turn_for(block, c, top, Side::Up), top, at)));
                     }
@@ -1639,6 +1662,14 @@ pub fn clusters(
                             .and_then(|o| pins[o].net);
                         let inn = pins[k].net;
                         let mid = snap((body.min[0] + body.max[0]) / 2);
+                        // Over the capacitors of the supplies on top.
+                        let lift = if (0..shape.pins.len()).any(|kk| {
+                            shape.pins[kk].side == Side::Up && served_caps.contains_key(&(a, kk))
+                        }) {
+                            CAP_LIFT + 2
+                        } else {
+                            0
+                        };
                         let mut row = 0;
                         for &q in &idiom.parts {
                             if ends(block, q).contains(&on) {
@@ -1649,7 +1680,7 @@ pub fn clusters(
                                 let dx = if side == Side::Right { 3 } else { -3 };
                                 let at = [
                                     mid + dx * GRID,
-                                    snap(shape.extent.max[1]) + (4 + 4 * row) * GRID,
+                                    snap(shape.extent.max[1]) + (4 + lift + 4 * row) * GRID,
                                 ];
                                 row += 1;
                                 adds.push((q, put(block, q, turn_for(block, q, qi, side), qi, at)));

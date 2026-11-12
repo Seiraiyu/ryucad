@@ -499,13 +499,16 @@ fn non_inverting(name: &str) -> bool {
 }
 
 /// An op-amp (#758, design 519): each unit a triangle pointing right,
-/// `(-6g, 6g)`, `(6g, 0)`, `(-6g, -6g)`, filled; the inverting input's
-/// base at `(-6g, 2g)` above the non-inverting one's at `(-6g, -2g)`, up
-/// to two more inputs at `(-6g, 4g)` and `(-6g, -4g)`, the output at the
-/// apex; supplies, common to every unit and drawn on the first, along the
-/// slanted edges: positive on the top at x = -2g and 0, negative and
-/// ground on the bottom at x = -2g, 0 and 2g. The edges fall a grid step
-/// every two across, so each base is on them and each end on the grid.
+/// `(-h, h)`, `(h, 0)`, `(-h, -h)`, filled, `h` 6g (8g with three
+/// supplies on the bottom); the inverting input's
+/// base at `(-h, 2g)` above the non-inverting one's at `(-h, -2g)`, up
+/// to two more inputs at `(-h, -4g)` then `(-h, 4g)` (below first, clear
+/// of the way from the inverting input up to a stage's feedback), the output at the
+/// apex; supplies, common to every unit and drawn on the first, from the
+/// slanted edges (positive on the top, up to two; negative and ground on
+/// the bottom, up to three), four steps apart, their ends in one row a pin
+/// length past the triangle's box. The edges fall a grid step every two
+/// across, so each base is on them and each end on the grid.
 fn opamp(pins: &[PinSpec], units: u32, st: &Standards) -> Result<Symbol> {
     checked(pins)?;
     if !(1..=4).contains(&units) {
@@ -517,11 +520,25 @@ fn opamp(pins: &[PinSpec], units: u32, st: &Standards) -> Result<Symbol> {
     }
     let g = st.grid_nm;
     let len = st.pin_length_nm;
+    // The triangle's half size: 6g, or 8g when three supplies stand on
+    // the bottom edge, so each keeps its name inside, four steps apart.
+    let down = |s: &PinSpec| {
+        let name = s.name.to_ascii_uppercase();
+        st.role(&s.name, s.ty) == Some(crate::standards::Role::Ground)
+            || name.ends_with('-')
+            || name.starts_with('-')
+    };
+    let supply = |s: &PinSpec| matches!(s.ty, PinType::PowerIn | PinType::PowerOut);
+    let h = if pins.iter().filter(|s| supply(s) && down(s)).count() >= 3 {
+        8 * g
+    } else {
+        6 * g
+    };
     let refuse = |i: usize, why: String| {
         Error::new(Code::InvalidParam, why).with("pointer", format!("/pins/{i}"))
     };
     let mut out = BTreeMap::new();
-    let (mut top, mut bottom) = (0i64, 0i64);
+    let (mut top, mut bottom): (Vec<String>, Vec<String>) = Default::default();
     // Per unit: inverting, non-inverting, output, extra inputs so far.
     let mut seen: BTreeMap<u32, (bool, bool, bool, usize)> = BTreeMap::new();
     for (i, s) in pins.iter().enumerate() {
@@ -557,16 +574,13 @@ fn opamp(pins: &[PinSpec], units: u32, st: &Standards) -> Result<Symbol> {
         };
         let (at, side) = match unit {
             None => {
-                let name = s.name.to_ascii_uppercase();
-                let down = st.role(&s.name, s.ty) == Some(crate::standards::Role::Ground)
-                    || name.ends_with('-')
-                    || name.starts_with('-');
-                let (k, cap) = if down {
+                let down = down(s);
+                let (list, cap) = if down {
                     (&mut bottom, 3)
                 } else {
                     (&mut top, 2)
                 };
-                if *k == cap {
+                if list.len() == cap {
                     return Err(refuse(
                         i,
                         format!(
@@ -575,36 +589,29 @@ fn opamp(pins: &[PinSpec], units: u32, st: &Standards) -> Result<Symbol> {
                         ),
                     ));
                 }
-                // Along the edge from x = -2g, a grid step down it every
-                // two across.
-                let x = -2 * g + 2 * g * *k;
-                let edge = 4 * g - g * *k;
-                *k += 1;
-                if down {
-                    ([x, -edge - len], Side::Down)
-                } else {
-                    ([x, edge + len], Side::Up)
-                }
+                list.push(s.number.clone());
+                // Placed once every supply is counted, below.
+                ([0, 0], if down { Side::Down } else { Side::Up })
             }
             Some(u) => {
                 let e = seen.entry(u).or_default();
                 match s.ty {
                     PinType::Output | PinType::TriState if !e.2 => {
                         e.2 = true;
-                        ([6 * g + len, 0], Side::Right)
+                        ([h + len, 0], Side::Right)
                     }
                     PinType::Input if inverting(&s.name) && !e.0 => {
                         e.0 = true;
-                        ([-6 * g - len, 2 * g], Side::Left)
+                        ([-h - len, 2 * g], Side::Left)
                     }
                     PinType::Input if non_inverting(&s.name) && !e.1 => {
                         e.1 = true;
-                        ([-6 * g - len, -2 * g], Side::Left)
+                        ([-h - len, -2 * g], Side::Left)
                     }
                     PinType::Input if e.3 < 2 => {
                         e.3 += 1;
-                        let y = if e.3 == 1 { 4 * g } else { -4 * g };
-                        ([-6 * g - len, y], Side::Left)
+                        let y = if e.3 == 1 { -4 * g } else { 4 * g };
+                        ([-h - len, y], Side::Left)
                     }
                     _ => {
                         return Err(refuse(
@@ -625,6 +632,25 @@ fn opamp(pins: &[PinSpec], units: u32, st: &Standards) -> Result<Symbol> {
         p.unit = if units == 1 { None } else { unit };
         out.insert(s.number.clone(), p);
     }
+    // The supplies (plan 3.A's departure, #758): bases on the slanted
+    // edge, where it stands at h/2 - x/2, four steps apart (x = -2g alone,
+    // -4g and 0 for two, -6g, -2g and 2g for three), ends in one row a pin length past the triangle's
+    // box, so no wire or label at an end meets the body.
+    for (list, sign) in [(&top, 1), (&bottom, -1)] {
+        for (k, number) in list.iter().enumerate() {
+            // Three on the larger triangle, clear of the output's name by
+            // the apex.
+            let x = match list.len() {
+                1 => -2 * g,
+                2 => -4 * g + 4 * g * k as i64,
+                _ => -6 * g + 4 * g * k as i64,
+            };
+            let edge = h / 2 - x / 2;
+            let p = out.get_mut(number).expect("placed above");
+            p.at = [x, sign * (h + len)];
+            p.length_nm = h + len - edge;
+        }
+    }
     for u in 1..=units {
         let e = seen.get(&u).copied().unwrap_or_default();
         if !(e.0 && e.1 && e.2) {
@@ -636,12 +662,7 @@ fn opamp(pins: &[PinSpec], units: u32, st: &Standards) -> Result<Symbol> {
         }
     }
     let triangle = |unit| Graphic::Polyline {
-        points: vec![
-            [-6 * g, 6 * g],
-            [6 * g, 0],
-            [-6 * g, -6 * g],
-            [-6 * g, 6 * g],
-        ],
+        points: vec![[-h, h], [h, 0], [-h, -h], [-h, h]],
         fill: Fill::Body,
         unit,
     };
@@ -918,10 +939,18 @@ mod tests {
         assert_eq!(at("2"), ([-6 * g - len, 2 * g], Side::Left));
         assert_eq!(at("3"), ([-6 * g - len, -2 * g], Side::Left));
         assert_eq!(at("1"), ([6 * g + len, 0], Side::Right));
-        assert_eq!(at("8"), ([-2 * g, 4 * g + len], Side::Up));
-        assert_eq!(at("4"), ([-2 * g, -4 * g - len], Side::Down));
-        for p in s.pins.values() {
-            assert_eq!((p.at[0] % g, p.at[1] % g, p.length_nm), (0, 0, len));
+        // The supplies end a pin length past the triangle's box, their
+        // bases on its edges (plan 3.A's departure: an end inside the box
+        // left its label on the body).
+        assert_eq!(at("8"), ([-2 * g, 6 * g + len], Side::Up));
+        assert_eq!(at("4"), ([-2 * g, -6 * g - len], Side::Down));
+        assert_eq!(crate::symlint::base(&s.pins["8"]), [-2 * g, 4 * g]);
+        assert_eq!(crate::symlint::base(&s.pins["4"]), [-2 * g, -4 * g]);
+        for (n, p) in &s.pins {
+            assert_eq!((p.at[0] % g, p.at[1] % g), (0, 0));
+            if !["8", "4"].contains(&n.as_str()) {
+                assert_eq!(p.length_nm, len);
+            }
         }
         assert_eq!(
             s.graphics.values().collect::<Vec<_>>(),
@@ -939,7 +968,7 @@ mod tests {
     }
 
     /// A dual is two triangles; its supplies are common pins, drawn on
-    /// unit 1. The OPA1622's enable stands on the left above the inputs,
+    /// unit 1. The OPA1622's enable stands on the left below the inputs,
     /// its two V- and its GND along the bottom edge.
     #[test]
     fn a_dual_op_amp_is_two_units_with_the_supplies_on_the_first() {
@@ -962,9 +991,20 @@ mod tests {
         let s = template_units("OPA1622", Class::Opamp, 2, &pins, &st).unwrap();
         assert!(s.check().is_empty(), "{:?}", s.check());
         assert_eq!(s.units, 2);
-        assert_eq!(s.pins["8"].at, [-6 * g - st.pin_length_nm, 4 * g]);
-        let bottom: Vec<i64> = ["4", "11", "3"].iter().map(|n| s.pins[*n].at[0]).collect();
-        assert_eq!(bottom, [-2 * g, 0, 2 * g]);
+        // Three bottom supplies: the triangle is 8g each way from its
+        // middle.
+        // The enable stands below the non-inverting input, clear of the
+        // way from the inverting one up to the feedback.
+        assert_eq!(s.pins["8"].at, [-8 * g - st.pin_length_nm, -4 * g]);
+        // Four steps apart, ends in one row, bases on the bottom edge.
+        let bottom: Vec<Point> = ["4", "11", "3"].iter().map(|n| s.pins[*n].at).collect();
+        let row = -8 * g - st.pin_length_nm;
+        assert_eq!(bottom, [[-6 * g, row], [-2 * g, row], [2 * g, row]]);
+        let bases: Vec<Point> = ["4", "11", "3"]
+            .iter()
+            .map(|n| crate::symlint::base(&s.pins[*n]))
+            .collect();
+        assert_eq!(bases, [[-6 * g, -7 * g], [-2 * g, -5 * g], [2 * g, -3 * g]]);
         assert!(
             ["2", "4", "11", "3"]
                 .iter()

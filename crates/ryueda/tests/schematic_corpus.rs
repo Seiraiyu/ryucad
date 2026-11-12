@@ -372,13 +372,17 @@ fn the_corpus_from_nothing_lays_out_within_its_bar() {
 /// 2.G's engine work on cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared,
 /// load 3.8 to 4.3) on 2026-11-11: the RP2040's first sheet 43, the front
 /// end's amp 100 (its clamps no longer float), Ethernet's PHY sheet 63.
+/// Plan 3.A's op-amp template (#758) put the supplies on each amplifier's
+/// first unit: baldiff 47 to 40 (the OPA1622's enable and three supplies
+/// share unit A with its stage), ivconv 78 to 82; Task 15 measures every
+/// block again after the plan.
 const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("breakout", "breakout", 79),
     ("breakout", "sensor", 95),
     ("rp2040", "mitayi", 38),
     ("buck", "buck", 24),
     ("frontend", "amp", 95),
-    ("frontend", "baldiff", 42),
+    ("frontend", "baldiff", 35),
     ("frontend", "ivconv", 73),
     ("ethernet", "eth", 58),
     ("ethernet", "status_led", 92),
@@ -605,6 +609,38 @@ fn a_layout_dry_run_renders() {
     // A picture is of one block: a design's layout with --render is refused.
     let v = ryueda_envelope(&board, &["layout", "--dry-run", "--render", "x.svg"]);
     assert_eq!(v["error"]["code"], "invalid_param", "{v}");
+}
+
+/// #758: the front end's amplifiers are the op-amp template's, a
+/// triangle per amplifier with the supplies on the first, and its
+/// library lints clean.
+#[test]
+fn the_front_ends_op_amps_are_the_template() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "frontend");
+    for id in ["opa1612", "opa1622"] {
+        let text =
+            std::fs::read_to_string(board.join(format!("library/symbols/{id}.json"))).unwrap();
+        let s: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            (&s["units"], &s["class"]),
+            (&serde_json::json!(2), &serde_json::json!("opamp")),
+            "{id}: {s}"
+        );
+        let triangles = s["graphics"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|g| g["type"] == "polyline" && g["points"].as_array().unwrap().len() == 4)
+            .count();
+        assert_eq!(triangles, 2, "{id}");
+        let check = ryueda(&board, 1, &["lib", "check", "--symbol", id]);
+        assert_eq!(
+            check["symbols"][0]["findings"],
+            serde_json::json!([]),
+            "{id}: {check}"
+        );
+    }
 }
 
 /// A move brings only the idioms anchored on the part it moves: moving one

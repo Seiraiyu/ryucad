@@ -395,33 +395,6 @@ pub fn diode_pair() -> String {
     ])
 }
 
-/// An op amp's amplifier as a unit of its symbol: a triangle with `+`
-/// above `-` on its left, its output on the right, and `extra` pins as
-/// given (an enable on top).
-pub fn opamp_unit(unit: u32, plus: &str, minus: &str, out: &str, extra: &[PinDef]) -> Vec<Value> {
-    let mut list = vec![in_unit(
-        line(
-            &[(-5.08, 5.08), (5.08, 0.0), (-5.08, -5.08), (-5.08, 5.08)],
-            "body",
-        ),
-        unit,
-    )];
-    list.push(in_unit(
-        pin(&(plus, "+", "input", -7.62, 2.54, "left", 2.54)),
-        unit,
-    ));
-    list.push(in_unit(
-        pin(&(minus, "-", "input", -7.62, -2.54, "left", 2.54)),
-        unit,
-    ));
-    list.push(in_unit(
-        pin(&(out, "~", "output", 7.62, 0.0, "right", 2.54)),
-        unit,
-    ));
-    list.extend(extra.iter().map(|p| in_unit(pin(p), unit)));
-    list
-}
-
 /// A resistor array of `n` resistors, each a unit standing up: unit `k`
 /// between pin `k` on top and pin `2n + 1 - k` below.
 pub fn resistor_array(n: u32) -> String {
