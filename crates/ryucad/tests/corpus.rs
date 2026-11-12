@@ -175,6 +175,39 @@ fn drawings(s: &mut Session) -> Value {
     Value::Object(out)
 }
 
+/// Views of the committed drawings past design 484's bar, each with its
+/// issue: the crankcase's, whose rays meet mirrored bosses' edges exactly
+/// (plan 17.B's tally).
+const KNOWN_UNCERTAIN: &[(&str, &str)] = &[
+    ("radial-engine/crankcase/main/v1", "#643"),
+    ("radial-engine/crankcase/main/v2", "#643"),
+    ("radial-engine/crankcase/main/v3", "#643"),
+];
+
+/// Every view of every committed drawing draws, with at most a tenth of
+/// its pieces uncertain (design 484, plan 17.B), unless it is in
+/// [`KNOWN_UNCERTAIN`].
+fn views_certify(now: &Value) {
+    for (project, p) in now["projects"].as_object().unwrap() {
+        for (drawing, d) in p["drawings"].as_object().unwrap() {
+            for (id, v) in d["views"].as_object().unwrap() {
+                let key = format!("{project}/{drawing}/{id}");
+                if KNOWN_UNCERTAIN.iter().any(|(k, _)| *k == key) {
+                    continue;
+                }
+                assert!(v["failed"].is_null(), "{key}: {}", v["failed"]);
+                let n = |k: &str| v["pieces"][k].as_u64().unwrap_or(0);
+                let all = n("visible") + n("hidden") + n("uncertain");
+                assert!(
+                    n("uncertain") * 10 <= all,
+                    "{key}: {} of {all} uncertain",
+                    n("uncertain")
+                );
+            }
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
 fn the_committed_projects_build_as_the_manifest_says() {
@@ -184,6 +217,7 @@ fn the_committed_projects_build_as_the_manifest_says() {
         now.insert(name.into(), summary(&corpus().join(name)));
     }
     let now = json!({"projects": now});
+    views_certify(&now);
     if std::env::var_os("UPDATE_MANIFEST").is_some() {
         std::fs::write(&path, canonical::to_string(&now)).unwrap();
         return;
@@ -441,4 +475,32 @@ fn the_scripts_make_the_committed_projects() {
             assert!(got[path] == *bytes, "{name}/{}", path.display());
         }
     }
+}
+
+/// Every committed project's feature files, written by older builds, write
+/// back byte for byte: a file without inserts or deletes keeps its format
+/// and its bytes (ryucad 25).
+#[test]
+fn every_committed_feature_file_writes_back_byte_for_byte() {
+    let mut seen = 0;
+    for e in std::fs::read_dir(corpus()).unwrap().flatten() {
+        let root = e.path();
+        if !root.join("ryucad.json").is_file() {
+            continue;
+        }
+        let project = ryucad::doc::project::Project::load(&root).unwrap();
+        for (p, part) in &project.parts {
+            for (f, feature) in &part.features {
+                let Ok(feature) = feature else { continue };
+                let path = root.join(format!("parts/{p}/features/{f}.json"));
+                let bytes = std::fs::read(&path).unwrap();
+                let out = canonical::to_string(&feature.to_json());
+                let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+                let out = out.strip_suffix('\n').unwrap_or(&out);
+                assert_eq!(out.as_bytes(), bytes, "{}", path.display());
+                seen += 1;
+            }
+        }
+    }
+    assert!(seen > 0);
 }

@@ -519,9 +519,11 @@ pub(crate) fn keep_lock(session: &mut Session) -> Result<bool> {
     // every write (issue #235). An instance at another project's label
     // is what `wanted` finds, so with none there is nothing wanted.
     let foreign = session.project().parts.values().any(|p| {
-        p.features
-            .values()
-            .any(|f| matches!(f, Ok(Feature::Instance(i)) if matches!(i.rev, Rev::Foreign { .. })))
+        p.features.values().any(|f| match f {
+            Ok(Feature::Instance(i)) => matches!(i.rev, Rev::Foreign { .. }),
+            Ok(Feature::Insert(i)) => matches!(i.rev, Rev::Foreign { .. }),
+            _ => false,
+        })
     });
     let none = session.project().lock.is_none()
         && (!foreign || ryupdm::deps::lock::wanted(session.project()).is_empty());

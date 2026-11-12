@@ -528,6 +528,11 @@ pub struct FeatureFields {
     /// The solid a mirror copies, by the feature that founded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solid: Option<String>,
+    /// The solids a delete_body takes out of the part's result, by key
+    /// (`<founder>` or `<insert>/<source key>`; an insert's ID for every
+    /// solid it founded), replacing them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solids: Option<Vec<String>>,
     /// Which sides a split keeps: `both` (the default) or `behind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep: Option<String>,
@@ -1281,6 +1286,21 @@ pub enum Request {
         to: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         offline: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Moves an insert's pin (design 521): to `working`, `label:L` (or
+    /// `L`), or the source's newest official label (`newest`, the
+    /// default); answers what moving it changes, and with `dry_run`
+    /// writes nothing.
+    #[serde(rename = "insert.update")]
+    InsertUpdate {
+        part: String,
+        feature: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dry_run: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2401,6 +2421,7 @@ impl Request {
                 | Request::AppearanceClear { .. }
                 | Request::DepsAdd { .. }
                 | Request::DepsUpdate { dry_run: false, .. }
+                | Request::InsertUpdate { dry_run: false, .. }
                 | Request::DepsRemove { .. }
                 | Request::ViewSave { .. }
                 | Request::ViewDelete { .. }

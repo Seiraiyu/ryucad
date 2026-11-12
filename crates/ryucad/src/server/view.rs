@@ -638,9 +638,17 @@ pub(crate) fn inspect(
                 }
             }
         }
-        // The model: each solid as it shows.
+        // The model: each solid as it shows. An inserted solid nothing
+        // acted on is counted under its insert instead (`inserts`), so a
+        // board of hundreds is one line; asked for an entity, every
+        // solid counts.
         None => {
             for shown in result.shown(&solids) {
+                let untouched =
+                    shown.solid.is_path() && shown.tip.as_str() == shown.solid.founder_str();
+                if untouched && entity.is_none() {
+                    continue;
+                }
                 if let Some((f, b)) = shown.state {
                     put(f, shown.solid, b);
                 }
@@ -690,6 +698,30 @@ pub(crate) fn inspect(
         );
     }
     let mut v = json!({"part": pid, "bodies": bodies});
+    // Each insert: what it inserted, by count for the model, whole for
+    // the insert asked for (design 521).
+    let inserts: Vec<Value> = features
+        .iter()
+        .filter_map(|(id, f)| Some((id, f.insert()?)))
+        .filter(|(id, _)| only.as_ref().is_none_or(|o| o == *id))
+        .map(|(id, i)| {
+            let made = match result.output(id) {
+                Some(crate::rebuild::Output::Solids(m)) => Some(&**m),
+                _ => None,
+            };
+            if only.is_some() {
+                return crate::insert::report(i, made);
+            }
+            let r = crate::insert::report(i, None);
+            json!({"feature": id, "of": r["of"], "rev": r["rev"],
+                   "solids": made.map_or(0, |m| m.solids.len())})
+        })
+        .collect();
+    match (&only, inserts.as_slice()) {
+        (Some(_), [one]) => v["insert"] = one.clone(),
+        (None, [_, ..]) => v["inserts"] = json!(inserts),
+        _ => {}
+    }
     if let (Some(p), Some(f)) = (&held, &only)
         && let Some(Ok(Feature::Sweep(w))) = p.features.get(f)
         && let Some(d) = crate::along::described(p, f, w, result)

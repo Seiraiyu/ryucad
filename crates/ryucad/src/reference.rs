@@ -12,7 +12,7 @@ use crate::doc::reference::Reference;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::{Built, Results};
 use crate::solid::Solids;
-use ryukei::geom::{Curve, Point3, Surface, Vector3};
+use ryukei::geom::{Curve, Point3, Rigid, Surface, Vector3};
 use ryukei::name::{Event, Name};
 use ryukei::topo::{Body, EntityId, Sense};
 use std::collections::BTreeMap;
@@ -150,6 +150,8 @@ impl Follow {
             Feature::Primitive(_)
             | Feature::Boolean(_)
             | Feature::Instance(_)
+            | Feature::Insert(_)
+            | Feature::DeleteBody(_)
             | Feature::Mate(_)
             | Feature::InstancePattern(_)
             | Feature::Import(_)
@@ -162,6 +164,38 @@ impl Follow {
     /// is never wrong.
     pub fn of(f: &Feature, role: &str) -> Follow {
         Follow::classify(f, role).unwrap_or(Follow::One)
+    }
+}
+
+impl Lineage {
+    /// The lineage with every carrier moved by `pose`: what an inserted
+    /// solid's names lay on, in the inserting part's frame.
+    pub fn moved(&self, pose: &Rigid) -> Lineage {
+        Lineage {
+            events: self.events.clone(),
+            carriers: self
+                .carriers
+                .iter()
+                .map(|(n, c)| {
+                    let c = match c {
+                        Carrier::Face(s, sense) => Carrier::Face(s.transformed(pose), *sense),
+                        Carrier::Edge(c) => Carrier::Edge(c.transformed(pose)),
+                        Carrier::Vertex(p) => Carrier::Vertex(pose.apply_point(*p)),
+                    };
+                    (*n, c)
+                })
+                .collect(),
+        }
+    }
+
+    /// `self` followed by `later`: an inserted solid's source lineage,
+    /// then what this part's chain did.
+    pub fn then(mut self, later: Lineage) -> Lineage {
+        self.events.extend(later.events);
+        for (n, c) in later.carriers {
+            self.carriers.entry(n).or_insert(c);
+        }
+        self
     }
 }
 
@@ -271,14 +305,21 @@ impl Lineage {
             .iter()
             .position(|f| f == last)
             .map_or(chain.len(), |i| i + 1);
-        Lineage::of_chain(
-            chain[..end]
-                .iter()
-                .filter_map(|f| match results.result(f)? {
-                    Ok(o) => Some((f, o.solid(solid)?)),
-                    Err(_) => None,
-                }),
-        )
+        // An inserted solid starts from its source's lineage, moved into
+        // this part's frame (design 521).
+        let start = results
+            .result(&chain[0])
+            .and_then(|r| r.as_ref().ok())
+            .and_then(crate::rebuild::Output::inserted)
+            .and_then(|i| i.lineage.get(solid))
+            .map(|l| (**l).clone())
+            .unwrap_or_default();
+        start.then(Lineage::of_chain(chain[..end].iter().filter_map(
+            |f| match results.result(f)? {
+                Ok(o) => Some((f, o.solid(solid)?)),
+                Err(_) => None,
+            },
+        )))
     }
 
     /// Whether it records nothing: no name of its chain was retired.
@@ -390,7 +431,8 @@ fn lookup<'a>(
             .with("role", role)
             .with("reference", &text)
     };
-    let at = |x: &Id| order.iter().position(|o| o == x);
+    // A solid key below an insert is listed as the insert (design 521).
+    let at = |x: &Id| order.iter().position(|o| o.as_str() == x.founder_str());
     match (at(&r.feature), at(owner)) {
         (None, _) => {
             return Err(fail(
@@ -418,8 +460,19 @@ fn lookup<'a>(
         .with("solid", &r.feature)
         .with("consumed_by", by));
     }
+    if let Some(by) = solids.deleted_by(&r.feature, owner) {
+        return Err(fail(
+            Code::BodyDeleted,
+            format!("names {}, which {by} deleted", r.feature),
+        )
+        .with("solid", &r.feature)
+        .with("by", by));
+    }
     // The feature whose result holds the solid as `owner` sees it.
-    let read = solids.view(&r.feature, owner).unwrap_or(&r.feature);
+    let read = solids
+        .view(&r.feature, owner)
+        .or_else(|| solids.founder_of(&r.feature))
+        .unwrap_or(&r.feature);
     match results.result(read) {
         None => Err(fail(
             Code::NotFound,
@@ -440,6 +493,14 @@ fn lookup<'a>(
         )),
         Some(Ok(o)) => {
             let Some(b) = o.solid(&r.feature) else {
+                if r.feature.is_path() && solids.founder_of(&r.feature).is_some() {
+                    let keys = o.solids().iter().map(|(k, _)| k).collect();
+                    let insert = r.feature.founder();
+                    return Err(crate::rebuild::not_inserted(
+                        owner, role, &r.feature, &insert, keys,
+                    )
+                    .with("reference", &text));
+                }
                 return Err(
                     crate::rebuild::not_a_solid(part, &solids, owner, role, &r.feature)
                         .with("reference", &text),

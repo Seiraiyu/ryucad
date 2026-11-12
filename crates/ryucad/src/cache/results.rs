@@ -128,6 +128,7 @@ impl<'a> Reader<'a> {
             origins: Arc::new(crate::rebuild::Origins::from_raw(origins)?),
             hash: self.str()?.to_owned(),
             reference: false,
+            moved: None,
         })
     }
 
@@ -292,6 +293,7 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
         report: import,
         flat,
         encoded: Default::default(),
+        inserted: None,
     })
 }
 

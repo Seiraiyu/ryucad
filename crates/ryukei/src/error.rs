@@ -942,7 +942,8 @@ pub enum ViewError {
     /// a certificate.
     Uncertain { at: Name },
     /// An edge whose image couldn't be certified: a spline stretch running
-    /// along the view that is neither a point nor a fold.
+    /// along the view that, halved to a millionth of a piece, is neither
+    /// a point nor one to one.
     Image { at: Name },
 }
 

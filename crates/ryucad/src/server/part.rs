@@ -58,7 +58,8 @@ pub(crate) fn part_delete(
     // An assembly placing the part as it is would have nothing to place;
     // a release it places is read from history.
     let placed = &id;
-    let users: Vec<String> = session
+    // So would a part inserting it at working (design 521).
+    let users: Vec<(bool, String)> = session
         .project()
         .parts
         .iter()
@@ -69,19 +70,34 @@ pub(crate) fn part_delete(
                     Some(Ok(Feature::Instance(i)))
                         if i.part == *placed && i.rev == Rev::Working =>
                     {
-                        Some(format!("{a}/{fid}"))
+                        Some((false, format!("{a}/{fid}")))
+                    }
+                    Some(Ok(Feature::Insert(i))) if i.part == *placed && i.rev == Rev::Working => {
+                        Some((true, format!("{a}/{fid}")))
                     }
                     _ => None,
                 })
         })
         .collect();
     if !users.is_empty() {
-        return Err(Error::new(
-            Code::HasDependents,
-            format!("assemblies place {id}: {}", users.join(", ")),
-        )
-        .with("part", &id)
-        .with("instances", users));
+        let (inserts, instances): (Vec<_>, Vec<_>) = users.into_iter().partition(|(i, _)| *i);
+        let instances: Vec<String> = instances.into_iter().map(|(_, u)| u).collect();
+        let inserts: Vec<String> = inserts.into_iter().map(|(_, u)| u).collect();
+        let mut said = Vec::new();
+        if !instances.is_empty() {
+            said.push(format!("assemblies place {id}: {}", instances.join(", ")));
+        }
+        if !inserts.is_empty() {
+            said.push(format!("parts insert {id}: {}", inserts.join(", ")));
+        }
+        let mut e = Error::new(Code::HasDependents, said.join("; ")).with("part", &id);
+        if !instances.is_empty() {
+            e = e.with("instances", instances);
+        }
+        if !inserts.is_empty() {
+            e = e.with("inserted_by", inserts);
+        }
+        return Err(e);
     }
     let dir = part_dir(session.root(), &id);
     let mine = format!("parts/{id}/");

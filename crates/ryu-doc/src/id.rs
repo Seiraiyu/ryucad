@@ -91,6 +91,50 @@ impl Id {
             .ok()
             .and_then(|(id, c)| Some((id, c?)))
     }
+
+    /// The key of solid `rest` of the part an insert `insert` reads:
+    /// `<insert>/<rest>` (design 521). Not an ID a file may name a
+    /// feature by: [`Id::parse`] refuses `/`, and [`Id::solid_key`] reads
+    /// one.
+    pub fn solid_path(insert: &Id, rest: &Id) -> Id {
+        Id(format!("{}/{}", insert.0, rest.0))
+    }
+
+    /// Reads a solid's key: a founder's ID, or an inserted solid's
+    /// `<insert>/<source key>`, every segment an ID. A key without `/` is
+    /// exactly what [`Id::parse`] reads, so files naming solids by their
+    /// founders read and write as before.
+    pub fn solid_key(s: &str, what: &str) -> Result<Id> {
+        if !s.contains('/') {
+            return Id::parse(s, what);
+        }
+        for segment in s.split('/') {
+            Id::parse(segment, what).map_err(|e| e.with("id", s))?;
+        }
+        Ok(Id(s.to_owned()))
+    }
+
+    /// Whether it is an inserted solid's key.
+    pub fn is_path(&self) -> bool {
+        self.0.contains('/')
+    }
+
+    /// The feature of its part a solid's key names first: the founder,
+    /// or the insert that founded it. Itself for any other ID.
+    pub fn founder_str(&self) -> &str {
+        self.0.split_once('/').map_or(&self.0, |(f, _)| f)
+    }
+
+    /// [`Id::founder_str`] as an ID.
+    pub fn founder(&self) -> Id {
+        Id(self.founder_str().to_owned())
+    }
+
+    /// The source's key below the insert: `b/c` of `a/b/c`; `None` for a
+    /// founder's key.
+    pub fn rest(&self) -> Option<Id> {
+        self.0.split_once('/').map(|(_, r)| Id(r.to_owned()))
+    }
 }
 
 impl fmt::Display for Id {
@@ -101,6 +145,14 @@ impl fmt::Display for Id {
 
 impl AsRef<str> for Id {
     fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// An ID orders, compares and hashes as its text, so maps keyed by IDs
+/// answer `&str` lookups (a solid key's founder, `Id::founder_str`).
+impl core::borrow::Borrow<str> for Id {
+    fn borrow(&self) -> &str {
         &self.0
     }
 }
@@ -308,5 +360,47 @@ mod tests {
             "box-3"
         );
         assert_eq!(Id::generate("torus", |_| false).as_str(), "torus-1");
+    }
+}
+
+#[cfg(test)]
+mod solid_key_tests {
+    use super::*;
+
+    fn id(s: &str) -> Id {
+        Id::parse(s, "feature").unwrap()
+    }
+
+    #[test]
+    fn a_solid_key_is_a_founder_or_an_inserts_path() {
+        // A founder's key is its ID, as it always was.
+        let k = Id::solid_key("board", "feature").unwrap();
+        assert_eq!(k, id("board"));
+        assert!(!k.is_path());
+        assert_eq!(k.founder_str(), "board");
+        assert_eq!(k.rest(), None);
+        // An inserted solid's: the insert, then the source's own key.
+        let k = Id::solid_key("board/u1", "feature").unwrap();
+        assert!(k.is_path());
+        assert_eq!(k.founder_str(), "board");
+        assert_eq!(k.founder(), id("board"));
+        assert_eq!(k.rest().unwrap().as_str(), "u1");
+        assert_eq!(Id::solid_path(&id("board"), &id("u1")), k);
+        // Nested inserts: a/b/c is insert a's solid b/c.
+        let k = Id::solid_key("a/b/c", "feature").unwrap();
+        assert_eq!(k.rest().unwrap().as_str(), "b/c");
+        assert_eq!(Id::solid_path(&id("a"), &k.rest().unwrap()), k);
+        // Every segment is an ID; Id::parse still refuses a path.
+        for bad in ["", "/", "a/", "/a", "a//b", "a/B", "a/con", "A"] {
+            let e = Id::solid_key(bad, "feature").unwrap_err();
+            assert_eq!(e.code, Code::InvalidId, "{bad:?}");
+        }
+        assert_eq!(
+            Id::parse("a/b", "feature").unwrap_err().code,
+            Code::InvalidId
+        );
+        // A key borrows as its text, so maps keyed by Id answer &str.
+        let m: std::collections::BTreeSet<Id> = [id("board")].into();
+        assert!(m.contains("board"));
     }
 }

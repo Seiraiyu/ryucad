@@ -67,6 +67,8 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Instance(i) => i.fields(),
+        Feature::Insert(i) => i.fields(),
+        Feature::DeleteBody(d) => d.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => {
             crate::surface::report(part, f)
@@ -369,6 +371,12 @@ const REVOLVE: [&str; 8] = [
 const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
 
 const INSTANCE: [&str; 4] = ["of", "rev", "placement", "fixed"];
+
+/// The fields an insert takes: its source (`of`), the revision it pins
+/// and its placement.
+const INSERT: [&str; 3] = ["of", "rev", "placement"];
+
+const DELETE_BODY: [&str; 2] = ["solids", "solid"];
 
 const MATE: [&str; 8] = [
     "form", "a", "b", "a_offset", "b_offset", "angle", "distance", "limits",
@@ -1072,6 +1080,176 @@ fn instance_from(
     })
 }
 
+/// An insert from a request: `of` (a part, or `<dependency>:<part>`),
+/// `rev` (`working`, a label; left out: as `current` has it, or for a
+/// new insert the source's newest official label, else `working`) and
+/// `placement`. Answers the insert and, for a new one with no `rev`,
+/// which it took and why (design 521, question 624).
+fn insert_from(
+    session: &mut Session,
+    current: Option<&crate::doc::insert::Insert>,
+    given: &Given,
+    unit: Unit,
+    env: &Env,
+) -> Result<(crate::doc::insert::Insert, Option<Value>)> {
+    let deps = session.project().manifest.dependencies.clone();
+    let f = &given.fields;
+    let (part, project) = match (f.of.as_deref(), current) {
+        (Some(of), _) => match of.split_once(':') {
+            Some((dep, part)) => {
+                let (id, _) =
+                    crate::doc::deps::find(&deps, dep).map_err(|e| e.with("param", "of"))?;
+                let id = id.clone();
+                (
+                    Id::parse(part, "part").map_err(|e| e.with("param", "of"))?,
+                    Some(id),
+                )
+            }
+            None => (
+                Id::parse(of, "part").map_err(|e| e.with("param", "of"))?,
+                None,
+            ),
+        },
+        (None, Some(c)) => (c.part.clone(), c.rev.project().cloned()),
+        (None, None) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "an insert names the part it inserts (of)",
+            )
+            .with("param", "of"));
+        }
+    };
+    let mut took = None;
+    let rev = match (f.rev.as_deref(), current) {
+        (Some("working"), _) => Rev::Working,
+        (Some(l), _) => {
+            Rev::Label(crate::doc::assembly::label_text(l).map_err(|e| e.with("param", "rev"))?)
+        }
+        (None, Some(c)) if c.part == part => match &c.rev {
+            Rev::Foreign { label, .. } => Rev::Label(label.clone()),
+            r => r.clone(),
+        },
+        (None, _) => match crate::release::newest_official(session, &part, project.as_ref())? {
+            Some(l) => {
+                took = Some(json!({"rev": {"label": l}, "why": "newest_official_label"}));
+                Rev::Label(l)
+            }
+            None => {
+                took = Some(json!({"rev": "working", "why": "no_official_label"}));
+                Rev::Working
+            }
+        },
+    };
+    let rev = match (project, rev) {
+        (Some(project), Rev::Label(label)) => Rev::Foreign { project, label },
+        (Some(project), _) => {
+            return Err(Error::new(
+                Code::InstanceForeignWorking,
+                format!(
+                    "{part} is another project's ({project}): insert one of its official release labels (rev)"
+                ),
+            )
+            .with("param", "rev")
+            .with("project", &project)
+            .with("part", &part));
+        }
+        (None, r) => r,
+    };
+    let placement = match (&given.placement, current) {
+        (Some(arg), Some(c)) => {
+            let mut p = c
+                .placement
+                .clone()
+                .unwrap_or_else(|| Placement::identity(unit));
+            apply_placement(&mut p, arg.clone(), unit, env)?;
+            Some(p)
+        }
+        (Some(arg), None) => Some(new_placement(arg.clone(), unit, env)?),
+        (None, Some(c)) => c.placement.clone(),
+        (None, None) => None,
+    };
+    // Refuse a placement that could never build, before it is written.
+    if let Some(p) = &placement {
+        rebuild::placement(p)?;
+    }
+    let placement = placement.filter(|p| !p.is_identity());
+    Ok((
+        crate::doc::insert::Insert {
+            part,
+            rev,
+            placement,
+        },
+        took,
+    ))
+}
+
+/// Refuses insert `id` of part `pid`, listed in `list`, that can't build:
+/// a part that isn't there (`not_found`), an assembly (`wrong_part_kind`,
+/// question 625), a cycle through inserts and instances
+/// (`insert_cycle`), a label that doesn't resolve now
+/// (`label_not_found`, `label_not_official`), a source that shows no
+/// solid (`insert_source_empty`).
+fn check_insert(session: &mut Session, pid: &Id, list: &[Id], id: &Id, f: &Feature) -> Result<()> {
+    let ins = f.insert().expect("an insert");
+    if let Rev::Foreign { .. } = &ins.rev {
+        // The lock the write would need, from what was fetched, as a
+        // foreign instance's.
+        let mut project = session.project().clone();
+        let q = proposed(project.part(pid)?, list, &[(id, f)]);
+        project.parts.insert(pid.clone(), q);
+        crate::deps::relock_keeping(session, &project).map_err(|e| e.with("feature", id))?;
+        return Ok(());
+    }
+    let Some(src) = session.project().parts.get(&ins.part) else {
+        return Err(Error::new(
+            Code::NotFound,
+            format!(
+                "{id} inserts {}, which isn't a part of the project",
+                ins.part
+            ),
+        )
+        .with("feature", id)
+        .with("part", &ins.part)
+        .with("param", "of"));
+    };
+    if part_kind(src) == PartKind::Assembly {
+        return Err(crate::insert::assembly_error(id, &ins.part));
+    }
+    match &ins.rev {
+        Rev::Working => {
+            let mut project = session.project().clone();
+            let q = proposed(project.part(pid)?, list, &[(id, f)]);
+            project.parts.insert(pid.clone(), q);
+            let cycles = crate::assembly::Cycles::of(&project, &crate::assembly::Pins::new());
+            let (a, c) = (
+                (pid.clone(), Rev::Working),
+                (ins.part.clone(), Rev::Working),
+            );
+            if cycles.closes(&a, &c) {
+                return Err(crate::assembly::cycle_error(&cycles, &a, &c).with("feature", id));
+            }
+        }
+        Rev::Label(l) => {
+            crate::release::pinned(session, &ins.part, l).map_err(|e| e.with("feature", id))?;
+        }
+        Rev::Foreign { .. } => unreachable!("judged above"),
+    }
+    let model = session.model(&ins.part, &ins.rev)?;
+    if model
+        .occurrences
+        .first()
+        .is_none_or(|o| o.solids.is_empty())
+    {
+        return Err(Error::new(
+            Code::InsertSourceEmpty,
+            format!("{id} inserts {}, which shows no solid", ins.part),
+        )
+        .with("feature", id)
+        .with("part", &ins.part));
+    }
+    Ok(())
+}
+
 /// Refuses instance `id` of assembly `pid`, listed in `list`, if its part
 /// doesn't exist (`not_found`), if placing it would make the assembly
 /// place itself (`assembly_cycle`), or if its label doesn't resolve now
@@ -1345,13 +1523,19 @@ fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
         if let Some(Ok(Feature::Boolean(b))) = q.features.get(*w) {
             named.extend(&b.tools);
         }
+        if let Some(Ok(f)) = q.features.get(*w) {
+            named.extend(f.deletes());
+        }
     }
     for id in q.order() {
         let Some(Ok(f)) = q.features.get(id) else {
             continue;
         };
         let targets = f.targets();
-        let concerned = written.contains(&id) || targets.iter().any(|t| named.contains(t));
+        let concerned = written.contains(&id)
+            || targets.iter().any(|t| {
+                named.contains(t) || written.iter().any(|w| w.as_str() == t.founder_str())
+            });
         if targets.is_empty() || !concerned {
             continue;
         }
@@ -1360,12 +1544,57 @@ fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
             if let Some(by) = solids.consumed_by(t, id) {
                 return Err(rebuild::consumed(id, t, by));
             }
+            if let Some(by) = solids.deleted_by(t, id) {
+                return Err(rebuild::deleted(id, t, by));
+            }
             if !solids.is_solid(t) {
                 return Err(rebuild::not_a_solid(q, &solids, id, "targets", t));
             }
         }
     }
     Ok(())
+}
+
+/// A `delete_body` from what it is given: `solids` (or one `solid`, as
+/// the CLI sends a lone `--solid`), read as its file reads them.
+fn delete_from(given: &Given) -> Result<crate::doc::body::DeleteBody> {
+    let solids: Vec<String> = match (&given.fields.solids, &given.fields.solid) {
+        (Some(s), None) => s.clone(),
+        (None, Some(s)) => vec![s.clone()],
+        (Some(_), Some(_)) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a delete names its solids once: solids, or one solid",
+            )
+            .with("param", "solid"));
+        }
+        (None, None) => Vec::new(),
+    };
+    if solids.is_empty() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a delete names the solids it deletes: solids",
+        )
+        .with("param", "solids"));
+    }
+    let v = json!({"solids": solids});
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let d =
+        crate::doc::body::DeleteBody::from_fields(&mut o).map_err(|e| e.with("param", "solids"))?;
+    o.finish()?;
+    Ok(d)
+}
+
+/// Refuses a `delete_body` its rebuild would refuse, against the part as
+/// the write would leave it: the solids before it as they are now.
+fn check_delete(session: &mut Session, pid: &Id, list: &[Id], id: &Id, f: &Feature) -> Result<()> {
+    let Feature::DeleteBody(d) = f else {
+        return Ok(());
+    };
+    let q = proposed(session.project().part(pid)?, list, &[(id, f)]);
+    let solids = Solids::of(&q);
+    let r = session.rebuilt(pid)?;
+    crate::body::delete_body(&q, &solids, id, d, r).map(|_| ())
 }
 
 /// `invalid_param` for `feature.add` or `feature.edit` of an import:
@@ -1917,7 +2146,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 26] = [
+const FEATURE_TYPES: [&str; 28] = [
     "box",
     "cylinder",
     "cone",
@@ -1941,6 +2170,8 @@ const FEATURE_TYPES: [&str; 26] = [
     "instance",
     "mate",
     "instance_pattern",
+    "insert",
+    "delete_body",
     "plane",
     "axis",
     "point",
@@ -2049,6 +2280,15 @@ pub(crate) fn feature_add(
                 given.fields.targets = given.fields.solid.clone().map(|s| vec![s]);
             }
         }
+    }
+    // An insert may look up its source's newest label: read it before
+    // the part is borrowed for the rest.
+    let mut took = None;
+    let mut inserted = None;
+    if ty == "insert" {
+        given.only(ty, &INSERT)?;
+        let (ins, t) = insert_from(session, None, &given, unit, &env)?;
+        (inserted, took) = (Some(ins), t);
     }
     let p = session.project().part(&pid)?;
     // A join, cut, intersect or hole with no targets acts on the part's
@@ -2173,6 +2413,13 @@ pub(crate) fn feature_add(
             let deps = session.project().manifest.dependencies.clone();
             Feature::Instance(instance_from(None, &given, unit, &env, &deps)?)
         }
+        "insert" => Feature::Insert(Box::new(
+            inserted.take().expect("read before the part was borrowed"),
+        )),
+        "delete_body" => {
+            given.only(ty, &DELETE_BODY)?;
+            Feature::DeleteBody(Box::new(delete_from(&given)?))
+        }
         "mate" => {
             given.only(ty, &MATE)?;
             mate_from(None, &given, (session.project(), &pid), unit, &env)?
@@ -2251,6 +2498,10 @@ pub(crate) fn feature_add(
     if f.instance().is_some() {
         check_instance(session, &pid, &list, &fid, &f)?;
     }
+    if f.insert().is_some() {
+        check_insert(session, &pid, &list, &fid, &f)?;
+    }
+    check_delete(session, &pid, &list, &fid, &f)?;
     // What its references follow: a split face or edge (design 447).
     let mut followed = Vec::new();
     if !f.connectors().is_empty() || f.instance_pattern().is_some() {
@@ -2283,6 +2534,9 @@ pub(crate) fn feature_add(
     }
     if !followed.is_empty() {
         v["warnings"] = json!(followed);
+    }
+    if let Some(t) = took {
+        v["took"] = t;
     }
     Ok(v)
 }
@@ -2343,6 +2597,19 @@ pub(crate) fn feature_edit(
 ) -> Result<Value> {
     let (pid, fid) = (part_id(part)?, feature_id(id)?);
     let unit = session.project().manifest.default_unit;
+    // An insert's edit may look up its source's newest label: read it
+    // before the part is borrowed for the rest.
+    let inserted = {
+        let p = session.project().part(&pid)?;
+        match feature(p, &fid)?.insert() {
+            Some(i) if expressions.is_empty() => {
+                let (i, env) = (i.clone(), p.env.clone());
+                given.only("insert", &INSERT)?;
+                Some(insert_from(session, Some(&i), &given, unit, &env)?.0)
+            }
+            _ => None,
+        }
+    };
     let p = session.project().part(&pid)?;
     check_revision(p, expected)?;
     let list = order(p)?;
@@ -2386,6 +2653,17 @@ pub(crate) fn feature_edit(
                 given.only("instance", &INSTANCE)?;
                 let deps = session.project().manifest.dependencies.clone();
                 Feature::Instance(instance_from(Some(&i), &given, unit, &p.env, &deps)?)
+            }
+            Feature::Insert(_) => Feature::Insert(Box::new(
+                inserted.clone().expect("read before the part was borrowed"),
+            )),
+            Feature::DeleteBody(d) => {
+                given.only("delete_body", &DELETE_BODY)?;
+                if given.fields.solids.is_none() && given.fields.solid.is_none() {
+                    Feature::DeleteBody(d)
+                } else {
+                    Feature::DeleteBody(Box::new(delete_from(&given)?))
+                }
             }
             Feature::Mate(m) => {
                 given.only("mate", &MATE)?;
@@ -2515,6 +2793,10 @@ pub(crate) fn feature_edit(
     if f.instance().is_some() && f != old {
         check_instance(session, &pid, &list, &fid, &f)?;
     }
+    if f.insert().is_some() && f != old {
+        check_insert(session, &pid, &list, &fid, &f)?;
+    }
+    check_delete(session, &pid, &list, &fid, &f)?;
     // What its references follow: a split face or edge (design 447).
     let mut followed = Vec::new();
     if (!f.connectors().is_empty() || f.instance_pattern().is_some()) && f != old {
@@ -2673,7 +2955,10 @@ pub(crate) fn feature_move(
     // solids not yet consumed.
     for f in &list {
         if let Some(Ok(feature)) = p.features.get(f)
-            && (*f == fid || crate::graph::inputs(feature).contains(&&fid))
+            && (*f == fid
+                || crate::graph::inputs(feature)
+                    .iter()
+                    .any(|i| i.founder_str() == fid.as_str()))
         {
             crate::graph::check_order(p, &list, f, feature)?;
         }
@@ -2703,6 +2988,11 @@ pub(crate) fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
         .map(|id| match feature(p, id) {
             Ok(f) => {
                 let mut v = json!({"id": id, "type": f.type_name(), "ok": true});
+                if let Some(i) = f.insert() {
+                    let r = crate::insert::report(i, None);
+                    v["of"] = r["of"].clone();
+                    v["rev"] = r["rev"].clone();
+                }
                 if let Some(Err(e)) = built.get(id) {
                     v["ok"] = json!(false);
                     v["error"] = json!(e);
@@ -2710,7 +3000,14 @@ pub(crate) fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
                         v["blocked"] = json!(true);
                     }
                 }
-                let uses = crate::graph::inputs(f);
+                // A solid key below an insert is used through the insert.
+                let mut uses: Vec<Id> = Vec::new();
+                for i in crate::graph::inputs(f) {
+                    let i = i.founder();
+                    if !uses.contains(&i) {
+                        uses.push(i);
+                    }
+                }
                 if !uses.is_empty() {
                     v["uses"] = json!(uses);
                 }

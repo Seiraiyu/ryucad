@@ -163,6 +163,7 @@ fn is_reference(v: &Value) -> bool {
             && match o.len() {
                 1 => true,
                 2 => o.contains_key("name") || o.contains_key("entity"),
+                3 => o.contains_key("name") && o.contains_key("solid"),
                 _ => false,
             }
     })
@@ -425,6 +426,11 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         }
         Some(b) if same_type && ty(b).0 == Some(json!("split")) => {
             paired(walk, b, ours, theirs, &["plane", "tool", "flip"], true)
+        }
+        // An insert's pin and its placement are one value each (design
+        // 521); a delete's solids are one value, an array.
+        Some(b) if same_type && ty(b).0 == Some(json!("insert")) => {
+            insert_feature(walk, b, ours, theirs)
         }
         Some(b) if same_type && ty(b).0 == Some(json!("import")) => {
             import_feature(walk, b, ours, theirs)
@@ -750,6 +756,29 @@ fn instance(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Valu
     };
     if let Some(pose) = pose.or(o.get("pose")) {
         out.insert("pose".to_owned(), pose.clone());
+    }
+    Value::Object(out)
+}
+
+/// An insert: per key, but its pin (`rev`) is one value and its
+/// placement is one value, as a primitive's placement moves whole and an
+/// instance's `rev` is one (design 521).
+fn insert_feature(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, &["rev", "placement"]);
+    for k in ["rev", "placement"] {
+        let (vb, vo, vt) = (b.get(k), o.get(k), t.get(k));
+        let v = if vo == vt || vt == vb {
+            vo.cloned()
+        } else if vo == vb {
+            vt.cloned()
+        } else {
+            walk.conflict(&format!("/{k}"), Kind::Value, vb, vo, vt)
+        };
+        if let Some(v) = v {
+            out.insert(k.to_owned(), v);
+        }
     }
     Value::Object(out)
 }
@@ -1453,6 +1482,12 @@ pub fn files_merged(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_inserted_solids_reference_merges_as_one_value() {
+        let r = |n: &str| serde_json::json!({"feature": "board", "solid": "u1", "name": n});
+        assert!(super::is_reference(&r(&"0".repeat(32))));
+    }
+
     #[test]
     fn marks_are_one_value() {
         let marked = |x: f64| {
@@ -3522,5 +3557,45 @@ mod tests {
         assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
         assert_eq!(m.value["groups"][0]["radius"], "4 mm");
         assert_eq!(m.value["tolerance"], "0.001 mm");
+    }
+
+    #[test]
+    fn an_inserts_pin_and_placement_are_one_value_each_and_a_deletes_solids_one() {
+        let ins = |rev: Value, z: &str| {
+            json!({"format": 21, "kind": "ryucad.feature", "type": "insert",
+            "part": "pcb", "rev": rev,
+            "placement": {"origin": ["0 mm", "0 mm", z], "x": [1, 0, 0], "z": [0, 0, 1]}})
+        };
+        let base = ins(json!({"label": "A"}), "1 mm");
+        // One side moves the pin, the other the placement: both kept.
+        let m = merge(
+            Some(&base),
+            &ins(json!({"label": "B"}), "1 mm"),
+            &ins(json!({"label": "A"}), "2 mm"),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["rev"], json!({"label": "B"}));
+        assert_eq!(m.value["placement"]["origin"][2], "2 mm");
+        // Both move the pin differently: one conflict at /rev.
+        let m = merge(
+            Some(&base),
+            &ins(json!({"label": "B"}), "1 mm"),
+            &ins(json!("working"), "1 mm"),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/rev"]);
+        // Both move the placement differently: one conflict at /placement.
+        let m = merge(
+            Some(&base),
+            &ins(json!({"label": "A"}), "2 mm"),
+            &ins(json!({"label": "A"}), "3 mm"),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/placement"]);
+        let del = |s: Value| json!({"format": 21, "kind": "ryucad.feature", "type": "delete_body", "solids": s});
+        let m = merge(
+            Some(&del(json!(["a"]))),
+            &del(json!(["a", "b"])),
+            &del(json!(["a", "c"])),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/solids"]);
     }
 }

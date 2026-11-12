@@ -199,8 +199,14 @@ pub(crate) fn part_report(
         .features
         .iter()
         .filter_map(|(fid, f)| {
-            let ins = crate::graph::inputs(f.as_ref().ok()?);
-            (!ins.is_empty()).then(|| (fid.clone(), ins.into_iter().cloned().collect()))
+            let mut ins: Vec<Id> = Vec::new();
+            for i in crate::graph::inputs(f.as_ref().ok()?) {
+                let i = i.founder();
+                if !ins.contains(&i) {
+                    ins.push(i);
+                }
+            }
+            (!ins.is_empty()).then(|| (fid.clone(), ins))
         })
         .collect();
     // What each feature does to solids, and the bodies it consumes (a
@@ -308,6 +314,21 @@ pub(crate) fn part_report(
         .iter()
         .filter_map(|(fid, f)| match f.as_ref().ok()? {
             Feature::Import(i) => Some((fid.clone(), crate::import::written(i))),
+            _ => None,
+        })
+        .collect();
+    // An insert's source, pin and solids (design 521): shown whether it
+    // built or not.
+    let inserts: BTreeMap<Id, crate::doc::insert::Insert> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.insert()?.clone())))
+        .collect();
+    let deletes: BTreeMap<Id, crate::doc::body::DeleteBody> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| match f {
+            Ok(Feature::DeleteBody(d)) => Some((fid.clone(), (**d).clone())),
             _ => None,
         })
         .collect();
@@ -464,6 +485,16 @@ pub(crate) fn part_report(
                     }
                 }
             }
+            if let Some(d) = deletes.get(fid) {
+                v["delete_body"] = crate::body::delete_report(d, r);
+            }
+            if let Some(i) = inserts.get(fid) {
+                let made = match b {
+                    Ok(crate::rebuild::Output::Solids(m)) => Some(&**m),
+                    _ => None,
+                };
+                v["insert"] = crate::insert::report(i, made);
+            }
             if let Some(Value::Object(m)) = imports.get(fid) {
                 if !v["import"].is_object() {
                     v["import"] = json!({});
@@ -490,9 +521,16 @@ pub(crate) fn part_report(
                     v["consumes"] = json!(tools);
                 }
             }
-            let own: Vec<&Value> = followed
+            // An insert's own (`insert_source_failed`, `insert_obsolete`)
+            // go under it too, as a followed reference's do.
+            let inserted = match b {
+                Ok(o) => o.inserted().map(|i| i.warnings.as_slice()),
+                Err(_) => None,
+            };
+            let own: Vec<&Value> = inserted
+                .unwrap_or_default()
                 .iter()
-                .filter(|w| w["feature"] == fid.as_str())
+                .chain(followed.iter().filter(|w| w["feature"] == fid.as_str()))
                 .collect();
             if !own.is_empty() {
                 v["warnings"] = json!(own);
