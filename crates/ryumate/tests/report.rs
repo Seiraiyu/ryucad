@@ -706,3 +706,46 @@ fn places_are_checked() {
     }
     assert!(matches!(asm.validate(), Err(MateError::BadGeometry { .. })));
 }
+
+#[test]
+fn copies_follow_their_places_and_the_body_that_carries_them() {
+    let wanted = [(20, 2, [1, 0]), (20, 2, [2, 0]), (20, 2, [3, 0])];
+    let p = ryumate::copy_poses(&screws_on_a_lid(Pose::IDENTITY), &wanted);
+    assert!(same(p[0].origin, [0.03, 0.0, 0.0], 1e-15));
+    assert!(same(p[1].origin, [0.01, 0.03, 0.0], 1e-15));
+    // A quarter turn about the lid's z takes the seed at x 10 mm to y
+    // 10 mm, and its x axis to y.
+    assert!(same(p[2].origin, [0.0, 0.01, 0.0], 1e-15));
+    assert!(same(p[2].axis(0), [0.0, 1.0, 0.0], 1e-15));
+    // The lid turned and moved: each copy is lid ∘ place ∘ lid⁻¹ ∘ seed.
+    let lid = turned([0.0, 0.0, 1.0], 0.7, [0.1, -0.02, 0.03]);
+    let asm = screws_on_a_lid(lid);
+    let p = ryumate::copy_poses(&asm, &wanted);
+    let seed = asm.bodies[&2].pose;
+    let Motion::Places { places, .. } = &asm.patterns[&20].motion else {
+        unreachable!()
+    };
+    for (k, place) in places.iter().enumerate() {
+        let want = lid
+            .then_after(place)
+            .then_after(&lid.inverse())
+            .then_after(&seed);
+        assert!(same(p[k].origin, want.origin, 1e-15), "{k}");
+        for a in 0..3 {
+            assert!(same(p[k].axis(a), want.axis(a), 1e-15), "{k} {a}");
+        }
+    }
+}
+
+#[test]
+fn a_mate_to_a_copy_at_a_place_moves_its_seed() {
+    let mut asm = screws_on_a_lid(Pose::IDENTITY);
+    asm.bodies.get_mut(&1).unwrap().fixed = true;
+    asm.bodies.insert(3, fixed(moved([0.05, 0.01, 0.0])));
+    asm.mates.insert(10, fastened_to([1, 0], 3));
+    let s = solve(&asm).unwrap();
+    assert!(s.report.converged, "{:?}", s.report);
+    // Copy 1 is the seed 20 mm along x: the seed sits 20 mm short of the nut.
+    assert!(same(s.poses[&2].origin, [0.03, 0.01, 0.0], 1e-12));
+    assert_eq!(s.report.bodies[&2].state, BodyState::Well);
+}
