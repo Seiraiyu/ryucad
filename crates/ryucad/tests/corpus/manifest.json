@@ -3,12 +3,12 @@
     "gearbox": {
       "check": {
         "codes": {
-          "drawing_view_uncertain": 4,
+          "drawing_view_uncertain": 3,
           "dwg_hole_uncalled": 3,
           "instances_interfere": 2
         },
         "errors": 0,
-        "warnings": 9
+        "warnings": 8
       },
       "drawings": {
         "gearbox/main": {
@@ -24,10 +24,9 @@
             "t1": "BOM of gearbox, 8 rows"
           },
           "findings": {
-            "drawing_view_uncertain": 1,
             "dwg_hole_uncalled": 3
           },
-          "pdf": "db81075398389e6ad9709b5a9ad401ec4d7505293a15a223d4c2f299c7fcb708",
+          "pdf": "7b9c02ca50315a41d9033c2c1600b3f94e2113f7e1557f52a5a5d39d30bf9fb9",
           "scores": {
             "s1": 91
           },
@@ -36,8 +35,8 @@
               "failed": null,
               "pieces": {
                 "hidden": 0,
-                "uncertain": 2,
-                "visible": 1612
+                "uncertain": 0,
+                "visible": 1117
               },
               "scale": "1:1",
               "type": "base"
