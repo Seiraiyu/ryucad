@@ -27,7 +27,10 @@ pub struct Products {
     /// The definitions no usage places, as indices into `definitions`.
     pub roots: Vec<usize>,
     /// Representations holding B-rep or mapped items that no definition's
-    /// shape reaches (a file without products, say).
+    /// shape reaches (a file without products, say). A representation of
+    /// a property's shape (a `SHAPE_ASPECT`'s, as validation properties
+    /// on a sub-shape are written) isn't one, nor one holding only solids
+    /// a definition's shape already holds (#809).
     pub unplaced: Vec<Shape>,
     /// What couldn't be read: definitions, then usages, in instance order,
     /// then usages that closed a cycle, then unplaced representations.
@@ -224,7 +227,17 @@ impl Products {
         }
         p.roots = (0..p.definitions.len()).filter(|&k| !placed[k]).collect();
         let mut faults = std::mem::take(&mut p.faults);
-        p.unplaced = unplaced(e, &p, &s.representations, &mut faults);
+        // A shape definition representation whose definition isn't a
+        // product definition shape describes a property's shape (a
+        // SHAPE_ASPECT's: validation properties on a sub-shape), never
+        // geometry of its own (#809).
+        let aspects: BTreeSet<Id> = s
+            .shape_reps
+            .iter()
+            .filter(|(shape, _)| !s.shape_of.contains_key(shape))
+            .map(|&(_, rep)| rep)
+            .collect();
+        p.unplaced = unplaced(e, &p, &s.representations, &aspects, &mut faults);
         p.faults = faults;
         p
     }
@@ -466,14 +479,18 @@ fn transform(
 }
 
 /// Representations with B-rep or mapped items that no definition's shape
-/// reaches, directly or through mapped items.
+/// reaches, directly or through mapped items; not a property's shape
+/// (`aspects`), nor one whose items are all solids a reached one holds
+/// (#809: the same solid would be read twice, at the origin).
 fn unplaced(
     e: &Entities,
     p: &Products,
     representations: &[Id],
+    aspects: &BTreeSet<Id>,
     faults: &mut Vec<ImportError>,
 ) -> Vec<Shape> {
     let mut reached = BTreeSet::new();
+    let mut owned: BTreeSet<Id> = BTreeSet::new();
     let mut stack: Vec<Id> = p
         .definitions
         .iter()
@@ -487,14 +504,16 @@ fn unplaced(
         // Its faults were reported with the definition that reached it.
         if let Ok(Some(sh)) = shape(e, r, r, &mut Vec::new()) {
             stack.extend(sh.mapped.iter().map(|m| m.representation));
+            owned.extend(sh.breps);
         }
     }
     let mut out = Vec::new();
     for &r in representations {
-        if reached.contains(&r) {
+        if reached.contains(&r) || aspects.contains(&r) {
             continue;
         }
         match shape(e, r, r, faults) {
+            Ok(Some(sh)) if sh.mapped.is_empty() && sh.breps.iter().all(|b| owned.contains(b)) => {}
             Ok(Some(sh)) => out.push(sh),
             Ok(None) => {}
             Err(f) => faults.push(f),
@@ -690,6 +709,31 @@ mod tests {
         // #124 is reached through the mapped item; #126 by nothing.
         let unplaced: Vec<Id> = p.unplaced.iter().map(|s| s.representation).collect();
         assert_eq!(unplaced, [126]);
+    }
+
+    /// #809: validation properties on a sub-shape, as Open CASCADE
+    /// writes them: a `SHAPE_ASPECT` of the part's shape, whose own
+    /// representation holds the part's solid again (and here one more).
+    /// Neither it nor a loose representation repeating an owned solid is
+    /// unplaced; one holding a solid of its own still is.
+    #[test]
+    fn a_shape_aspects_representation_is_not_loose_geometry() {
+        let data = format!(
+            "{}#150=SHAPE_DEFINITION_REPRESENTATION(#151,#153);\
+             #151=PROPERTY_DEFINITION('shape with specific properties','properties for subshape',#152);\
+             #152=SHAPE_ASPECT('','',#103,.F.);\
+             #153=SHAPE_REPRESENTATION('',(#111,#154),#9);#154=MANIFOLD_SOLID_BREP('',#7);\
+             #160=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#8,#111),#9);\
+             #170=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#111,#171),#9);\
+             #171=MANIFOLD_SOLID_BREP('',#7);",
+            part(100, 110, 111),
+        );
+        let p = Products::build(&entities(&data));
+        assert_eq!(p.faults, []);
+        assert_eq!(p.roots, [0]);
+        assert_eq!(p.definitions[0].shapes.len(), 1);
+        let unplaced: Vec<Id> = p.unplaced.iter().map(|s| s.representation).collect();
+        assert_eq!(unplaced, [170]);
     }
 
     #[test]

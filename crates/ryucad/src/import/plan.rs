@@ -604,6 +604,64 @@ pub fn flat_feature(
 mod flat_tests {
     use super::*;
 
+    /// #809: a box written with validation properties on a sub-shape (a
+    /// `SHAPE_ASPECT` whose own representation holds the box's solid
+    /// again, as Open CASCADE writes them) imports as the box alone: one
+    /// part per product, one body flattened, no loose copy at the origin.
+    #[test]
+    fn a_shape_aspects_solid_is_not_imported_again() {
+        let text = String::from_utf8(crate::import::tests::occt("box_ap214.stp")).unwrap();
+        // Before the data section's end (the last ENDSEC).
+        let end = text.rfind("ENDSEC;").unwrap();
+        let with = format!(
+            "{}#360 = SHAPE_DEFINITION_REPRESENTATION(#361,#363);\n\
+             #361 = PROPERTY_DEFINITION('shape with specific properties',\
+             'properties for subshape',#362);\n\
+             #362 = SHAPE_ASPECT('','',#4,.F.);\n\
+             #363 = SHAPE_REPRESENTATION('',(#15),#345);\n{}",
+            &text[..end],
+            &text[end..]
+        );
+        let file = crate::doc::project::ImportFile::new(with.into_bytes());
+        let opened = crate::import::opened(&file).unwrap();
+        assert_eq!(opened.products.unplaced, []);
+        let fr = FileRef {
+            path: "imports/box.step".into(),
+            blake3: file.blake3.clone(),
+        };
+        let taken = |_: &str| false;
+        let fresh = Fresh {
+            opened: &opened,
+            file: &fr,
+            stem: "box",
+            part: None,
+            taken: &taken,
+            pdm: false,
+            mode: None,
+        }
+        .plan()
+        .unwrap();
+        assert_eq!(
+            fresh.len(),
+            1,
+            "{:?}",
+            fresh.iter().map(|p| &p.part).collect::<Vec<_>>()
+        );
+        assert_eq!(fresh[0].features.len(), 1);
+        let flat = Flat {
+            opened: &opened,
+            file: &fr,
+            stem: "box",
+            part: None,
+            taken: &taken,
+            pdm: false,
+            mode: None,
+        }
+        .plan()
+        .unwrap();
+        assert_eq!(flat.features.len(), 1);
+    }
+
     #[test]
     fn a_frame_file_flattens_to_one_part_placed_as_its_usages_put_it() {
         let bytes = crate::import::tests::frame_file();
