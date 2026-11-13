@@ -140,8 +140,8 @@ fn imported_bodies_check_clean() {
         .into_iter()
         .chain(files("tests/corpus"))
         .collect();
-    // The OCCT files' 15 bodies and the corpus files' 10.
-    check_clean(&all, 25);
+    // The OCCT files' 19 bodies and the corpus files' 10.
+    check_clean(&all, 29);
 }
 
 /// Faces tangent along a shared edge are certified apart on whichever
