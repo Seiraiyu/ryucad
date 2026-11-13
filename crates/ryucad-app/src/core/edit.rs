@@ -345,15 +345,66 @@ pub struct HoleForm {
     /// An up-to depth's target.
     pub target: Option<String>,
     pub points: Picks,
+    /// The hole's canonical spec, when the rebuild reported one.
+    pub spec: Option<String>,
+    /// Every size the hole is built from, read-only: label, value and
+    /// source (`rule`, `formula`, `override`, a standard, …).
+    pub derived: Vec<(String, String, String)>,
+}
+
+/// A hole's sizes as the rebuild worked them out (`feature.show`'s
+/// `sizes`), in the order the panel lists them.
+fn derived_sizes(s: &Value) -> Vec<(String, String, String)> {
+    let one = |x: &Value| (text(&x["value"]), text(&x["source"]));
+    let mut out = Vec::new();
+    let mut push = |label: &str, x: &Value| {
+        if x.is_object() {
+            let (v, src) = one(x);
+            out.push((label.to_owned(), v, src));
+        } else if let Some([lo, hi]) = x.as_array().map(Vec::as_slice) {
+            // Limits: least and greatest, the greatest open when null.
+            let (a, src) = one(lo);
+            let b = if hi.is_null() {
+                String::new()
+            } else {
+                text(&hi["value"])
+            };
+            out.push((
+                label.to_owned(),
+                format!("{a} – {b}").trim_end().to_owned(),
+                src,
+            ));
+        }
+    };
+    push("drill", &s["drill"]);
+    for (group, keys) in [
+        ("counterbore", ["diameter", "depth"]),
+        ("countersink", ["diameter", "angle"]),
+    ] {
+        for k in keys {
+            push(&format!("{group} {k}"), &s[group][k]);
+        }
+    }
+    push("major", &s["thread"]["major"]);
+    push("pitch", &s["thread"]["pitch"]);
+    push("minor", &s["thread"]["limits"]["minor"]);
+    push("fit", &s["fit"]["limits"]);
+    out
 }
 
 impl HoleForm {
     /// From a `feature.show` of a hole.
     fn from_show(v: &Value) -> HoleForm {
-        let mut sizes = vec![(
-            "diameter".to_owned(),
-            Field::new("diameter", text(&v["diameter"])),
-        )];
+        // A thread or fastener derives the drill: its diameter is an edit
+        // only when written (an override).
+        let intent = !v["thread"].is_null() || !v["fastener"].is_null();
+        let mut sizes = Vec::new();
+        if !intent || !v["diameter"].is_null() {
+            sizes.push((
+                "diameter".to_owned(),
+                Field::new("diameter", text(&v["diameter"])),
+            ));
+        }
         for (group, keys) in [
             ("counterbore", ["diameter", "depth"]),
             ("countersink", ["diameter", "angle"]),
@@ -393,6 +444,8 @@ impl HoleForm {
             length: Field::new("depth", length),
             target: v["depth"]["up_to"]["target"].as_str().map(str::to_owned),
             points: Picks::new("points", points),
+            spec: v["spec"].as_str().map(str::to_owned),
+            derived: derived_sizes(&v["sizes"]),
         }
     }
 
@@ -2187,6 +2240,43 @@ impl DimForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_holes_derived_sizes_show_read_only() {
+        let show = json!({"id": "h", "type": "hole", "form": "simple",
+            "spec": "M6x1.0-6H THRU", "thread": {"standard": "iso_metric", "size": "M6"},
+            "sizes": {"drill": {"value": "5 mm", "m": 0.005, "source": "rule"},
+                      "thread": {"designation": "M6x1.0-6H",
+                                 "pitch": {"value": "1 mm", "m": 0.001, "source": "iso_261"},
+                                 "limits": {"minor": [{"value": "4.917 mm", "source": "formula"},
+                                                      {"value": "5.153 mm", "source": "formula"}]}}},
+            "depth": "through_all", "points": ["p1"]});
+        let f = HoleForm::from_show(&show);
+        assert_eq!(f.spec.as_deref(), Some("M6x1.0-6H THRU"));
+        assert_eq!(f.derived[0], ("drill".into(), "5 mm".into(), "rule".into()));
+        assert!(
+            f.derived
+                .iter()
+                .any(|(l, v, _)| l == "pitch" && v == "1 mm")
+        );
+        assert!(
+            f.derived
+                .iter()
+                .any(|(l, v, s)| l == "minor" && v == "4.917 mm – 5.153 mm" && s == "formula")
+        );
+        assert!(
+            f.sizes.iter().all(|(k, _)| k != "diameter"),
+            "a derived drill isn't an edit"
+        );
+        // A hole without intent edits its diameter as before.
+        let plain = json!({"id": "c", "type": "hole", "form": "simple", "diameter": "6 mm",
+                           "spec": "DIA 6 THRU",
+                           "sizes": {"drill": {"value": "6 mm", "m": 0.006, "source": "override"}},
+                           "depth": "through_all", "points": ["p1"]});
+        let f = HoleForm::from_show(&plain);
+        assert_eq!(f.sizes[0].0, "diameter");
+        assert_eq!(f.derived[0].2, "override");
+    }
 
     #[test]
     fn a_shells_thickness_direction_open_faces_and_groups_are_edited() {

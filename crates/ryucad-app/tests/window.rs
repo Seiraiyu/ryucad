@@ -5423,7 +5423,7 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
     let text = {
         let ws = &h.state().opened().ws;
         let f = &ws.part("frame").unwrap().features[0];
-        ryucad_app::core::tree::row_text(f, 0)
+        ryucad_app::core::tree::row_text(f, 0, 0)
     };
     assert!(text.contains("fasteners:p @ label A"), "{text}");
     shown(&mut h, &text);

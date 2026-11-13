@@ -59,6 +59,8 @@ pub struct Feature {
     /// reads it: a draft's neutral plane, pull, parting edges and angles,
     /// a move's line.
     pub tweak: Option<crate::core::tweaks::TweakInfo>,
+    /// A hole's canonical spec (`M6x1.0-6H THRU`), from its report.
+    pub spec: Option<String>,
 }
 
 impl Feature {
@@ -474,6 +476,7 @@ impl Part {
                         body: crate::core::bodies::BodyInfo::from_report(f),
                         sheet: crate::core::sheet::SheetInfo::from_report(f),
                         tweak: crate::core::tweaks::TweakInfo::from_report(f),
+                        spec: f["spec"].as_str().map(str::to_owned),
                     })
                     .collect()
             })
@@ -2154,7 +2157,7 @@ mod tests {
         m.apply_part(&v);
         let b2 = &m.parts["frame"].features[1];
         assert_eq!(b2.instance.as_ref().unwrap().rev, "label B obsolete");
-        let row = crate::ui::tiles::tree::row_text(b2, 0);
+        let row = crate::ui::tiles::tree::row_text(b2, 0, 0);
         assert!(row.contains("bolt @ label B obsolete"), "{row}");
     }
 
