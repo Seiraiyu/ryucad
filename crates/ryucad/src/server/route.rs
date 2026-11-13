@@ -42,6 +42,7 @@ pub(crate) fn dispatch(
             id,
             position,
             expected_revision,
+            dry_run,
         } => feature_add(
             session,
             &part,
@@ -54,6 +55,7 @@ pub(crate) fn dispatch(
             id.as_deref(),
             &position,
             expected_revision.as_deref(),
+            dry_run,
         ),
         Request::FeatureEdit {
             part,
@@ -63,6 +65,7 @@ pub(crate) fn dispatch(
             fields,
             expressions,
             expected_revision,
+            dry_run,
         } => feature_edit(
             session,
             &part,
@@ -74,6 +77,7 @@ pub(crate) fn dispatch(
             },
             &expressions,
             expected_revision.as_deref(),
+            dry_run,
         ),
         Request::FeatureDelete {
             part,
@@ -260,6 +264,35 @@ pub(crate) fn dispatch(
         ),
         Request::AssemblyTree { part, path, depth } => {
             crate::assembly::tree(session, &part, path.as_deref(), depth)
+        }
+        Request::HolesList {
+            part,
+            solid,
+            csv,
+            group,
+            reference,
+            rev,
+        } => crate::holes::request(
+            session,
+            &part,
+            solid.as_deref(),
+            csv,
+            group,
+            reference.as_deref(),
+            rev.as_deref(),
+        ),
+        Request::StandardsList {
+            table,
+            standard,
+            size,
+        } => crate::standards::list(
+            session.project().hole_standards.as_deref(),
+            &table,
+            standard.as_deref(),
+            size.as_deref(),
+        ),
+        Request::HoleDerive { spec, fields, part } => {
+            crate::hole::derive::request(session, spec.as_deref(), fields.as_ref(), part.as_deref())
         }
         Request::Interference { part, instances } => {
             crate::interference::run(session, &part, &instances)

@@ -233,6 +233,7 @@ impl Session {
         self.store.pinned.clear();
         self.store.models.clear();
         self.store.summaries.clear();
+        self.store.holes.clear();
         self.revisions.clear();
     }
 
@@ -469,6 +470,7 @@ impl Session {
                 budget: Default::default(),
                 verified: Default::default(),
                 walked: 0,
+                holes: BTreeMap::new(),
             },
             pinned_parts: from.pinned_parts.clone(),
             deps_cache: from.deps_cache.clone(),

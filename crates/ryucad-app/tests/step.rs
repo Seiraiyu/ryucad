@@ -64,6 +64,7 @@ fn a_file_is_planned_imported_updated_and_exported() {
     assert_eq!(
         ryucad_app::ui::tiles::tree::row_text(
             ws.part("part-2").unwrap().feature("body").unwrap(),
+            0,
             0
         ),
         "body (import: box_ap214.step / part 2)"
