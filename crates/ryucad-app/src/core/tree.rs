@@ -239,10 +239,16 @@ pub fn row_text(f: &Feature, faults: usize, holes: usize) -> String {
                 spec.to_owned()
             }
         }
-        // An instance pattern how many copies it places.
-        (Some(t), _, None) if t == "instance_pattern" && f.error.is_none() => {
-            format!("{t}, {} copies", f.copies.len())
-        }
+        // An instance pattern how many copies it places; a following one
+        // its driver too.
+        (Some(t), _, None) if t == "instance_pattern" && f.error.is_none() => match &f.driver {
+            Some(d) => format!(
+                "{}: {d}, {} copies",
+                f.form.as_deref().unwrap_or("feature"),
+                f.copies.len()
+            ),
+            None => format!("{t}, {} copies", f.copies.len()),
+        },
         // A new sew or thicken founds its body as any feature does.
         (Some(t), Some(op), None) if op != "new" => format!("{t}, {op}"),
         (Some(t), _, None) => t.clone(),
@@ -1777,6 +1783,7 @@ mod tests {
             copies: Vec::new(),
             import: None,
             form: None,
+            driver: None,
             datum: None,
             body: None,
             sheet: None,
@@ -1981,6 +1988,35 @@ mod tests {
         let shown = texts(&rows, &Tree::default());
         assert!(shown.contains(&"  n.step (3 bodies, flattened, reference)".to_owned()));
         assert!(!shown.iter().any(|t| t.contains("U1 (")), "{shown:?}");
+    }
+
+    #[test]
+    fn a_following_pattern_names_its_driver() {
+        let mut m = Model::default();
+        m.apply_part(
+            &json!({"part": "pack", "revision": "r", "kind": "assembly", "features": [
+            {"id": "s0", "type": "instance", "ok": true, "hash": "1",
+             "instance": {"part": "screw", "rev": "working"}},
+            {"id": "screws", "type": "instance_pattern", "ok": true, "hash": "2",
+             "form": "feature", "driver": "lid/hole-pattern",
+             "copies": [{"copy": "screws:p2", "seed": "s0"}, {"copy": "screws:p5", "seed": "s0"}]}],
+            "occurrences": [{"path": "s0", "part": "screw", "solids": {"shank": "1"}},
+                            {"path": "screws:p2/s0", "part": "screw", "solids": {"shank": "1"}},
+                            {"path": "screws:p5/s0", "part": "screw", "solids": {"shank": "1"}}]}),
+        );
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let made = rows(&source(&m, &states, &pdm));
+        let shown = texts(&made, &Tree::default());
+        assert!(
+            shown.contains(&"  screws (feature: lid/hole-pattern, 2 copies)".to_owned()),
+            "{shown:?}"
+        );
+        assert!(shown.contains(&"    screws:p5/s0".to_owned()), "{shown:?}");
+        // A linear or circular pattern reads as it did.
+        assert!(
+            texts(&rows(&source(&model(), &states, &pdm)), &Tree::default())
+                .contains(&"  ring (instance_pattern, 1 copies)".to_owned())
+        );
     }
 
     #[test]
