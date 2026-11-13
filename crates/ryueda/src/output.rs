@@ -446,39 +446,16 @@ fn output_pages(
     for (pg, s) in sheets.iter().enumerate() {
         let node = &nodes[s.node];
         let b = p.conn.block(&node.block)?;
-        let block_name = b
-            .block
-            .item
-            .as_ref()
-            .map_or(node.block.to_string(), |x| x.name.clone());
-        let lv = schem::levels(
+        let title = title_block(
             p,
+            &style_layers,
             b,
-            BTreeMap::from([
-                ("design", design_name.clone()),
-                ("block", block_name.clone()),
-                ("sheet", s.name.clone()),
-                ("sheets", s.count.to_string()),
-            ]),
+            &design_name,
+            &node.layer,
+            &s.name,
+            s.count,
+            format!("{}/{}", pg + 1, sheets.len()),
         );
-        let fill = |f: crate::style::TitleField| {
-            crate::props::Template::parse(&style_layers.title_field(f))
-                .and_then(|t| t.render(&|n| Some(lv.get(n).unwrap_or_default())))
-                .unwrap_or_default()
-        };
-        let mut design_block = format!("{design_name} · {block_name}");
-        if !node.layer.is_empty() {
-            design_block.push_str(&format!(" · layer {}", node.layer));
-        }
-        let title = crate::pdf::TitleBlock {
-            title: fill(crate::style::TitleField::Title),
-            number: fill(crate::style::TitleField::Number),
-            organisation: fill(crate::style::TitleField::Organisation),
-            design_block,
-            revision: fill(crate::style::TitleField::Revision),
-            date: fill(crate::style::TitleField::Date),
-            sheet: format!("{}/{}", pg + 1, sheets.len()),
-        };
         let paint = &painted[pg];
         let mut items = paint.items.clone();
         let mut links = Vec::new();
@@ -626,6 +603,56 @@ fn output_pages(
         v["failed"] = json!(list);
     }
     Ok((v, design_name, pages, tree))
+}
+
+/// What a sheet's title block says (plan 2.E): the style's title fields
+/// filled from block `b`'s levels (with `design`, `block`, `sheet` and
+/// `sheets` built in), `<design> · <block>` with the layer, and `sheet`
+/// (`n/m`). The PDF's pages and `scene` (plan 3.B) fill theirs so.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn title_block(
+    p: &Project,
+    style: &crate::cascade::Layers,
+    b: &crate::design::BlockFiles,
+    design_name: &str,
+    layer: &str,
+    sheet_name: &str,
+    count: usize,
+    sheet: String,
+) -> crate::pdf::TitleBlock {
+    let block_name = b
+        .block
+        .item
+        .as_ref()
+        .map_or(b.id.to_string(), |x| x.name.clone());
+    let lv = schem::levels(
+        p,
+        b,
+        BTreeMap::from([
+            ("design", design_name.to_owned()),
+            ("block", block_name.clone()),
+            ("sheet", sheet_name.to_owned()),
+            ("sheets", count.to_string()),
+        ]),
+    );
+    let fill = |f: crate::style::TitleField| {
+        crate::props::Template::parse(&style.title_field(f))
+            .and_then(|t| t.render(&|n| Some(lv.get(n).unwrap_or_default())))
+            .unwrap_or_default()
+    };
+    let mut design_block = format!("{design_name} · {block_name}");
+    if !layer.is_empty() {
+        design_block.push_str(&format!(" · layer {layer}"));
+    }
+    crate::pdf::TitleBlock {
+        title: fill(crate::style::TitleField::Title),
+        number: fill(crate::style::TitleField::Number),
+        organisation: fill(crate::style::TitleField::Organisation),
+        design_block,
+        revision: fill(crate::style::TitleField::Revision),
+        date: fill(crate::style::TitleField::Date),
+        sheet,
+    }
 }
 
 /// The layout key of what a pin's connection names.

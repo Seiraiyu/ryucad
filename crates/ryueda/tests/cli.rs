@@ -344,6 +344,244 @@ fn writes_are_logged_and_undone_through_the_daemon() {
 }
 
 #[test]
+fn a_sheet_as_a_scene_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let s = p.ok(&["scene", "--block", "breakout"]);
+    assert_eq!(s["block"], "breakout");
+    let items = s["items"].as_array().unwrap();
+    let owners = s["owners"].as_array().unwrap();
+    // Every item has an owner but the paper's and a layer's bounds.
+    for it in items {
+        if let Some(i) = it["owner"].as_u64() {
+            assert!((i as usize) < owners.len(), "{it}");
+        }
+    }
+    let refs: Vec<&str> = owners.iter().map(|o| o["ref"].as_str().unwrap()).collect();
+    for r in [
+        "breakout/r1",
+        "breakout/u2",
+        "breakout/j1",
+        "breakout/sda",
+        "breakout/instance:s1",
+    ] {
+        assert!(refs.contains(&r), "{r}: {refs:?}");
+    }
+    // Each owner's box holds its lines' points.
+    for (n, o) in owners.iter().enumerate() {
+        let b = &o["box"];
+        let inside = |q: &Value| {
+            (0..2).all(|k| {
+                b[0][k].as_i64().unwrap() <= q[k].as_i64().unwrap()
+                    && q[k].as_i64().unwrap() <= b[1][k].as_i64().unwrap()
+            })
+        };
+        for it in items.iter().filter(|i| i["owner"] == json!(n)) {
+            for q in it["points"].as_array().into_iter().flatten() {
+                assert!(inside(q), "{}: {q} outside {b}", o["ref"]);
+            }
+        }
+    }
+    let pin = s["pins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["ref"] == "breakout/r1/1")
+        .unwrap();
+    assert_eq!(pin["net"], "breakout/sda");
+    // A sheet the block hasn't: its sheets named.
+    let e = p.fails(
+        &["scene", "--block", "breakout", "--sheet", "nope"],
+        "sheet_not_found",
+        1,
+    );
+    assert_eq!(e["details"]["sheets"], s["sheets"]);
+    // A value edited: its component's hash moves, no other owner's.
+    p.ok(&["component", "edit", "breakout/r1", "--value", "10k"]);
+    let after = p.ok(&["scene", "--block", "breakout"]);
+    let hashes = |v: &Value| -> std::collections::BTreeMap<String, String> {
+        v["owners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                (
+                    o["ref"].as_str().unwrap().to_owned(),
+                    o["hash"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let (was, now) = (hashes(&s), hashes(&after));
+    assert_eq!(
+        was.keys().collect::<Vec<_>>(),
+        now.keys().collect::<Vec<_>>()
+    );
+    for (r, h) in &was {
+        if r == "breakout/r1" {
+            assert_ne!(&now[r], h, "{r}");
+        } else {
+            assert_eq!(&now[r], h, "{r} moved with r1's value");
+        }
+    }
+    assert_ne!(after["revision"], s["revision"]);
+}
+
+#[test]
+fn selections_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    // In process there is no session to point in.
+    for args in [vec!["select", "breakout/r1"], vec!["selection"]] {
+        let (code, v) = p.run_in(
+            &p.direct,
+            "board",
+            &[&["--no-daemon"][..], &args[..]].concat(),
+        );
+        assert_eq!(
+            (code, &v["error"]["code"]),
+            (1, &json!("no_live_session")),
+            "{args:?}"
+        );
+    }
+    // One agent points; another reads it by its ID.
+    let (code, v) = run(&["--as", "pointer", "select", "breakout/r1", "breakout/sda"]);
+    assert_eq!(code, 0, "{v}");
+    let who = v["result"]["participant"].as_str().unwrap().to_owned();
+    let (_, got) = run(&["selection", "--of", &who]);
+    assert_eq!(
+        got["result"]["selection"],
+        json!(["breakout/r1", "breakout/sda"])
+    );
+    // Nobody human attached: nobody's.
+    assert_eq!(run(&["selection"]).1["result"]["participant"], Value::Null);
+    let (code, v) = run(&["--as", "pointer", "select", "breakout/r9"]);
+    assert_eq!((code, &v["error"]["code"]), (1, &json!("ref_unresolved")));
+    let (code, v) = run(&["--as", "pointer", "select"]);
+    assert_eq!((code, &v["error"]["code"]), (2, &json!("usage")));
+    assert_eq!(run(&["--as", "pointer", "select", "--clear"]).0, 0);
+    assert_eq!(
+        run(&["selection", "--of", &who]).1["result"]["selection"],
+        json!([])
+    );
+}
+
+#[test]
+fn highlights_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    let (code, v) = p.run_in(
+        &p.direct,
+        "board",
+        &["--no-daemon", "highlight", "breakout/r1"],
+    );
+    assert_eq!((code, &v["error"]["code"]), (1, &json!("no_live_session")));
+    let (code, v) = run(&[
+        "highlight",
+        "breakout/r1",
+        "--style",
+        "changed",
+        "--label",
+        "just edited",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["highlights"][0]["style"], "changed");
+    assert_eq!(
+        run(&["highlight", "breakout/r1", "--style", "loud"]).1["error"]["code"],
+        "usage"
+    );
+    assert_eq!(run(&["highlight"]).1["error"]["code"], "usage");
+    assert_eq!(
+        run(&["highlight", "breakout/r1", "--clear"]).1["error"]["code"],
+        "usage"
+    );
+    let (_, v) = run(&["highlight", "--clear"]);
+    assert_eq!(v["result"]["highlights"], json!([]));
+}
+
+#[test]
+fn status_from_the_cli() {
+    let p = Pair::breakout();
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    let (code, v) = p.run_in(&p.direct, "board", &["--no-daemon", "status", "routing"]);
+    assert_eq!((code, &v["error"]["code"]), (1, &json!("no_live_session")));
+    let (code, v) = run(&["status", "placing the regulator", "--ref", "breakout/u2"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, list) = run(&["participants"]);
+    let me = list["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "agent")
+        .unwrap()
+        .clone();
+    assert_eq!(me["status"]["text"], "placing the regulator");
+    assert_eq!(run(&["status", ""]).1["result"]["status"], Value::Null);
+}
+
+#[test]
+fn views_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    for args in [
+        vec!["view"],
+        vec!["view", "show", "breakout/r1"],
+        vec!["view", "set", "--block", "breakout"],
+    ] {
+        let (code, v) = p.run_in(
+            &p.direct,
+            "board",
+            &[&["--no-daemon"][..], &args[..]].concat(),
+        );
+        assert_eq!(
+            (code, &v["error"]["code"]),
+            (1, &json!("no_live_session")),
+            "{args:?}"
+        );
+    }
+    // An agent's own view, set as a window sets one.
+    let (code, v) = run(&[
+        "--as",
+        "looker",
+        "view",
+        "set",
+        "--block",
+        "breakout",
+        "--centre",
+        "1000,2000",
+        "--zoom",
+        "20000",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    let who = v["result"]["participant"].as_str().unwrap().to_owned();
+    let (_, got) = run(&["view", "--of", &who]);
+    assert_eq!(
+        got["result"]["view"]["camera"],
+        json!({"centre_nm": [1000, 2000], "zoom_nm_per_pt": 20000})
+    );
+    assert_eq!(
+        run(&["view", "set", "--centre", "1,2"]).1["error"]["code"],
+        "usage"
+    );
+    // Shown to that agent.
+    let (code, v) = run(&["view", "show", "breakout/u2", "--for", &who]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["shown"], json!([who]));
+    let (_, got) = run(&["view", "--of", &who]);
+    assert_ne!(
+        got["result"]["view"]["camera"]["centre_nm"],
+        json!([1000, 2000])
+    );
+    assert_eq!(
+        run(&["view", "show", "breakout/nope"]).1["error"]["code"],
+        "ref_unresolved"
+    );
+}
+
+#[test]
 fn watchers_hear_of_library_changes() {
     let p = Pair::new();
     for (sub, args) in [
@@ -410,6 +648,67 @@ fn protocol_methods() -> Vec<String> {
         .filter_map(|l| l.strip_prefix("    #[serde(rename = \""))
         .map(|s| s[..s.find('"').unwrap()].to_owned())
         .collect()
+}
+
+#[test]
+fn watchers_hear_of_pointing() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let board = p.daemon.join("board");
+    let mut watch = ryueda(&p.run);
+    watch.current_dir(&board).args([
+        "--as",
+        "watcher",
+        "watch",
+        "--topic",
+        "participants",
+        "--timeout",
+        "20",
+    ]);
+    let waiting = std::thread::spawn(move || watch.output().unwrap());
+    let attached = || {
+        let (_, v) = p.run_in(&p.daemon, "board", &["participants"]);
+        v["result"]["participants"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|x| x["name"] == "watcher"))
+    };
+    for _ in 0..200 {
+        if attached() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Nothing says when the watcher has subscribed: point and clear
+    // until it has heard one change.
+    let mut on = false;
+    while !waiting.is_finished() {
+        let args: &[&str] = if on {
+            &["--as", "pointer", "select", "--clear"]
+        } else {
+            &["--as", "pointer", "select", "breakout/r1"]
+        };
+        assert_eq!(p.run_in(&p.daemon, "board", args).0, 0, "{args:?}");
+        on = !on;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let (code, v) = parse(waiting.join().unwrap(), &p.daemon);
+    assert_eq!(code, 0, "{v}");
+    let note = &v["result"]["notifications"][0];
+    assert_eq!(note["method"], "participant.changed", "{v}");
+    let who = &note["params"]["participant"];
+    for k in [
+        "selection",
+        "highlights",
+        "status",
+        "design",
+        "block",
+        "sheet",
+        "layer",
+        "camera",
+        "shown_by",
+    ] {
+        assert!(who.get(k).is_some(), "{k}: {who}");
+    }
 }
 
 /// Parity: nothing an agent can't do. Every protocol method has a CLI
@@ -503,6 +802,7 @@ fn every_protocol_method_has_a_command() {
         ("describe", &["describe"]),
         ("render", &["render"]),
         ("output", &["output"]),
+        ("scene", &["scene"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -510,6 +810,14 @@ fn every_protocol_method_has_a_command() {
         ("participant.list", &["participants"]),
         ("compare.set", &["compare"]),
         ("compare.get", &["compare"]),
+        ("selection.get", &["selection"]),
+        ("selection.set", &["select"]),
+        ("highlight.set", &["highlight"]),
+        ("highlight.clear", &["highlight"]),
+        ("activity.set", &["status"]),
+        ("view.get", &["view"]),
+        ("view.set", &["view", "set"]),
+        ("view.show", &["view", "show"]),
         ("subscribe", &["watch"]),
         ("request.cancel", &["cancel"]),
         ("daemon.status", &["daemon", "status"]),
