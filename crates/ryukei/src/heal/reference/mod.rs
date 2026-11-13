@@ -333,7 +333,7 @@ fn tolerate(s: &mut Shape, cap: f64, m: &Meter) {
             .iter()
             .map(|&k| {
                 let surface = &shape.surfaces[shape.faces[k].surface];
-                worst(&at, |t| surface.distance(curve.point(t)))
+                worst(&at, false, |t| surface.distance(curve.point(t)))
             })
             .fold(0.0, f64::max)
     });
@@ -367,18 +367,18 @@ fn tolerate(s: &mut Shape, cap: f64, m: &Meter) {
 
 /// Golden-section steps a sampled gap's largest sample is refined by:
 /// its bracket shrinks to under 1% of the samples' spacing either side.
-/// A gap under a hundredth of resolution at every sample isn't refined.
 const REFINE: usize = 10;
 
-/// The parameters an edge's gap is sampled at: [`SAMPLES`] intervals,
-/// and the middle of each knot span of a spline edge that no sample falls
-/// inside. A file's spline edge can stray from its faces inside one short
-/// span only (#795: 6.5e-7 m off within the last of 16 spans, a sixtieth
-/// of the edge, where the 33 even samples find 3.5e-9 m), which the
-/// mesher's samples, closer there, see.
-fn params(curve: &Curve, [t0, t1]: [f64; 2]) -> Vec<f64> {
-    let mut at: Vec<f64> = (0..=SAMPLES)
-        .map(|i| t0 + (t1 - t0) * i as f64 / SAMPLES as f64)
+/// The parameters an edge's gap is sampled at, ascending, each marked
+/// when it is a span's middle: [`SAMPLES`] intervals, and the middle of
+/// each knot span of a spline edge that no sample falls inside. A file's
+/// spline edge can stray from its faces inside one short span only (#795:
+/// 6.5e-7 m off within the last of 16 spans, a sixtieth of the edge, where
+/// the 33 even samples find 3.5e-9 m), which the mesher's samples, closer
+/// there, see.
+fn params(curve: &Curve, [t0, t1]: [f64; 2]) -> Vec<(f64, bool)> {
+    let mut at: Vec<(f64, bool)> = (0..=SAMPLES)
+        .map(|i| (t0 + (t1 - t0) * i as f64 / SAMPLES as f64, false))
         .collect();
     if let Curve::Nurbs(n) = curve {
         let step = (t1 - t0) / SAMPLES as f64;
@@ -386,22 +386,27 @@ fn params(curve: &Curve, [t0, t1]: [f64; 2]) -> Vec<f64> {
             let (a, b) = (w[0].max(t0), w[1].min(t1));
             // A span inside the interval and between two samples.
             let next = t0 + (((a - t0) / step).floor() + 1.0) * step;
-            if b > a && next >= b {
-                at.push(0.5 * (a + b));
+            // (a span from one sample to the next has none inside, for
+            // all its ends' rounding)
+            if b > a && next >= b - 1e-9 * step {
+                at.push((0.5 * (a + b), true));
             }
         }
-        at.sort_by(f64::total_cmp);
+        at.sort_by(|x, y| x.0.total_cmp(&y.0));
     }
     at
 }
 
-/// The largest of `gap` at the sorted parameters `at`, refined by a
-/// golden-section search between the largest sample's neighbours: the
+/// The largest of `gap` at the parameters `at`. Where it is at a span's
+/// middle (a stray the even samples miss), it is refined by a
+/// golden-section search between that sample's neighbours: there the
 /// sampled maximum of a narrow stray is short of the true one by more
-/// than [`UNSAMPLED`] covers (#795's spikes, a third of their peak at the
-/// nearest sample).
-fn worst(at: &[f64], gap: impl Fn(f64) -> f64) -> f64 {
-    let gaps: Vec<f64> = at.iter().map(|&t| gap(t)).collect();
+/// than [`UNSAMPLED`] covers (#795's, a third of its peak at the nearest
+/// even sample). Elsewhere it is the sampled maximum, as before, unless
+/// `always` (a pcurve's gap, which takes no projection, is refined
+/// wherever its maximum lies).
+fn worst(at: &[(f64, bool)], always: bool, gap: impl Fn(f64) -> f64) -> f64 {
+    let gaps: Vec<f64> = at.iter().map(|&(t, _)| gap(t)).collect();
     let Some((i, &most)) = gaps
         .iter()
         .enumerate()
@@ -409,12 +414,10 @@ fn worst(at: &[f64], gap: impl Fn(f64) -> f64) -> f64 {
     else {
         return 0.0;
     };
-    // An edge on its face at every sample (an exact one, mostly) has no
-    // stray worth the projections a search costs.
-    if most < 1e-2 * LINEAR_RESOLUTION {
+    if !(always || at[i].1) {
         return most;
     }
-    let (mut a, mut b) = (at[i.saturating_sub(1)], at[(i + 1).min(at.len() - 1)]);
+    let (mut a, mut b) = (at[i.saturating_sub(1)].0, at[(i + 1).min(at.len() - 1)].0);
     let mut best = most;
     const PHI: f64 = 0.618_033_988_749_894_8;
     let (mut c, mut d) = (b - PHI * (b - a), a + PHI * (b - a));
@@ -438,10 +441,13 @@ fn worst(at: &[f64], gap: impl Fn(f64) -> f64) -> f64 {
     best.max(gc).max(gd)
 }
 
-/// Every edge's tolerance grown to cover how far its pcurves' images lie
-/// from it, as the mesher samples an edge on a face through its pcurve
-/// (#797: a file's pcurve on a spline face accepted at the samples, up to
-/// 1.2 times the projected gap off between them); held to `cap`.
+/// Every edge's tolerance grown where one of its pcurves' images lies
+/// farther from it than the tolerance, as the mesher samples an edge on a
+/// face through its pcurve (#797: a file's pcurve on a spline face
+/// accepted at its 17 samples, up to 1.2 times the projected gap off
+/// between them, 8% past the tolerance at its peak); grown as
+/// [`tolerate`] grows a gap, held to `cap`. An edge whose pcurves lie
+/// within its tolerance keeps it.
 fn tolerate_pcurves(s: &mut Shape, pcurves: &MaybePcurves, cap: f64, m: &Meter) {
     let mut grown = vec![0.0_f64; s.edges.len()];
     for (k, f) in s.faces.iter().enumerate() {
@@ -455,8 +461,7 @@ fn tolerate_pcurves(s: &mut Shape, pcurves: &MaybePcurves, cap: f64, m: &Meter) 
                 let _ = m.charge(1);
                 let e = &s.edges[u.edge];
                 let curve = &s.curves[e.curve];
-                let at = params(curve, e.interval);
-                let gap = worst(&at, |t| {
+                let gap = worst(&params(curve, e.interval), true, |t| {
                     let uv = c2.point(map[0] + map[1] * t);
                     surface.point(uv.x, uv.y).distance(curve.point(t))
                 });
@@ -466,7 +471,9 @@ fn tolerate_pcurves(s: &mut Shape, pcurves: &MaybePcurves, cap: f64, m: &Meter) 
     }
     let cover = |gap: f64| (gap * 1.0001 + 1e-12).min(cap);
     for (e, gap) in s.edges.iter_mut().zip(grown) {
-        e.tolerance = e.tolerance.max(cover(gap * UNSAMPLED));
+        if gap > e.tolerance {
+            e.tolerance = e.tolerance.max(cover(gap * UNSAMPLED));
+        }
     }
 }
 
