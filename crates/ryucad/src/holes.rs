@@ -50,6 +50,25 @@ pub struct Row {
     pub depth: (f64, f64, Option<f64>),
     /// Whether it is a left-hand thread (kept through mirrors).
     pub left: bool,
+    /// The features that placed it, outermost first, `/`-joined: a
+    /// hole's or a pattern's ID, prefixed by each mirror it came through
+    /// (`m2/m/h`). Faces are found by it.
+    pub(crate) by: String,
+    /// Where its material is measured (`hole::check`): the solid as the
+    /// feature that placed it saw it, and its place. A mirror's copy
+    /// keeps its source's.
+    pub material: Option<Material>,
+}
+
+/// A hole's solid as the feature that placed it saw it, and the place,
+/// for measuring the material along its axis.
+#[derive(Clone, Debug)]
+pub struct Material {
+    pub solid: Id,
+    /// The feature whose result holds that body.
+    pub view: Id,
+    pub position: Point3,
+    pub axis: Vector3,
 }
 
 /// A hole that no face of its solid's tip is left of.
@@ -101,25 +120,81 @@ fn key_of(o: &Value) -> Option<(Key, String)> {
 
 type Faces = BTreeMap<Key, BTreeMap<String, Vec<String>>>;
 
-/// Faces of `b` by the hole they belong to and their segment; a mirror's
-/// copy's through `source`, the body it copied, by name.
-fn faces_by_key(b: &Built, source: Option<(&Id, &Built)>) -> Faces {
+/// The body a mirror (by its ID) copied, and the mirrors that body's own
+/// chain holds, so a chain of mirrors is followed to the hole.
+struct Source<'a> {
+    body: &'a Built,
+    inner: BTreeMap<String, Source<'a>>,
+}
+
+/// Each mirror of `chain` (founding the solid or joined into it) and the
+/// body it copied: its solid as the mirror saw it.
+fn sources_of<'a>(at: &At<'a>, chain: &[Id], depth: usize) -> BTreeMap<String, Source<'a>> {
+    let mut out = BTreeMap::new();
+    if depth >= 64 {
+        return out;
+    }
+    for fid in chain {
+        let Some(Ok(Feature::Mirror(m))) = at.p.features.get(fid) else {
+            continue;
+        };
+        let Some(view) = at.solids.view(&m.solid, fid) else {
+            continue;
+        };
+        let Some(Ok(o)) = at.result.result(view) else {
+            continue;
+        };
+        let Some(body) = o.solid(&m.solid) else {
+            continue;
+        };
+        let upto = upto(at.solids, &m.solid, view);
+        out.insert(
+            fid.to_string(),
+            Source {
+                body,
+                inner: sources_of(at, upto, depth + 1),
+            },
+        );
+    }
+    out
+}
+
+/// `solid`'s chain up to and including `view`.
+fn upto<'a>(solids: &'a Solids, solid: &Id, view: &Id) -> &'a [Id] {
+    let chain = solids.chain(solid).unwrap_or_default();
+    chain
+        .iter()
+        .position(|f| f == view)
+        .map_or(&[][..], |i| &chain[..=i])
+}
+
+/// The hole a face's origin belongs to, and its segment: a mirror's copy
+/// (`{feature: m, mirror_of: n}`) through the face `n` of the body `m`
+/// copied, as far as a chain of mirrors goes.
+fn key_through(o: &Value, sources: &BTreeMap<String, Source>) -> Option<(Key, String)> {
+    match (
+        o.get("mirror_of").and_then(Value::as_str),
+        o.get("feature").and_then(Value::as_str),
+    ) {
+        (Some(n), Some(m)) => {
+            let src = sources.get(m)?;
+            let (mut k, segment) = key_through(src.body.origins.get(n)?, &src.inner)?;
+            k.by = format!("{m}/{}", k.by);
+            Some((k, segment))
+        }
+        _ => key_of(o),
+    }
+}
+
+/// Faces of `b` by the hole they belong to and their segment.
+fn faces_by_key(b: &Built, sources: &BTreeMap<String, Source>) -> Faces {
     let mut out: Faces = BTreeMap::new();
     for f in b.body.faces() {
         let name = b.body.face(f).expect("a face of the body").name.to_string();
         let Some(o) = b.origins.get(&name) else {
             continue;
         };
-        let found = match (o.get("mirror_of").and_then(Value::as_str), source) {
-            (Some(n), Some((mirror, src))) => {
-                src.origins.get(n).and_then(key_of).map(|(mut k, s)| {
-                    k.by = format!("{mirror}/{}", k.by);
-                    (k, s)
-                })
-            }
-            _ => key_of(o),
-        };
-        if let Some((k, segment)) = found {
+        if let Some((k, segment)) = key_through(o, sources) {
             out.entry(k)
                 .or_default()
                 .entry(segment)
@@ -185,9 +260,9 @@ struct At<'a> {
 }
 
 /// The holes of `solid` with `chain` the features it has had so far and
-/// `b` its body after them, and those gone: its own features' places,
-/// then, for a mirror's copy, its source's holes as they were when it
-/// copied them (the source's chain up to the mirror's view), reflected.
+/// `b` its body after them, and those gone: each feature's places in the
+/// chain's order, a mirror's (founding the solid or joined into it) its
+/// source's holes as they were when it copied them, reflected.
 fn rows_at(
     at: &At,
     solid: &Id,
@@ -196,78 +271,43 @@ fn rows_at(
     depth: usize,
 ) -> Result<(Vec<Row>, Vec<Gone>)> {
     let At {
-        p,
-        result,
-        solids,
-        unit,
+        p, result, unit, ..
     } = *at;
+    let sources = sources_of(at, chain, depth);
+    let faces = faces_by_key(b, &sources);
     let mut rows: Vec<Row> = Vec::new();
     let mut gone = Vec::new();
-    // A mirror founding this solid copies its source as the source was
-    // just before it: the view's body.
-    let mirror = match p.features.get(solid) {
-        Some(Ok(Feature::Mirror(m))) => solids.view(&m.solid, solid).and_then(|view| {
-            let o = result.result(view)?.as_ref().ok()?;
-            Some((m, view, o.solid(&m.solid)?))
-        }),
-        _ => None,
-    };
-    let source = mirror.map(|(_, _, src)| (solid, src));
-    let faces = faces_by_key(b, source);
     for (k, fid) in chain.iter().enumerate() {
         let Some(Ok(f)) = p.features.get(fid) else {
             continue;
         };
-        for mut row in places(p, fid, f, result, unit)? {
+        let placed = match f {
+            Feature::Mirror(m) if depth < 64 => mirrored(at, fid, m, depth)?,
+            _ => places(p, fid, f, result, unit)?,
+        };
+        for mut row in placed {
             row.solid = solid.clone();
+            if row.mirror.is_none()
+                && let Some(view) = k.checked_sub(1).map(|i| &chain[i])
+            {
+                row.material = Some(Material {
+                    solid: solid.clone(),
+                    view: view.clone(),
+                    position: row.position,
+                    axis: row.axis,
+                });
+            }
             let key = row_key(&row);
             match faces.get(&key) {
                 Some(segments) => {
                     row.faces = segments.clone();
-                    measure(b, &mut row);
+                    if row.mirror.is_none() {
+                        measure(b, &mut row);
+                    }
                     rows.push(row);
                 }
                 None => gone.push(Gone {
-                    removed_by: removed_by(result, &chain[k + 1..], solid, &key, source),
-                    reference: row.reference,
-                    feature: row.feature,
-                    solid: solid.clone(),
-                }),
-            }
-        }
-    }
-    // A mirror's copy: every hole its source had at the view, reflected.
-    // A chain of mirrors is followed as far as a chain of solids can go.
-    if let Some((m, view, src)) = mirror
-        && depth < 64
-    {
-        let plane = crate::pattern::mirror_plane(p, solid, &m.plane, result)?;
-        let src_chain = solids.chain(&m.solid).unwrap_or_default();
-        let upto = src_chain
-            .iter()
-            .position(|f| f == view)
-            .map_or(&[][..], |i| &src_chain[..=i]);
-        let (src_rows, _) = rows_at(at, &m.solid, upto, src, depth + 1)?;
-        for r in src_rows {
-            let mut row = r.clone();
-            let tail = r
-                .reference
-                .split_once('/')
-                .map_or(r.reference.as_str(), |x| x.1);
-            row.reference = format!("{}/{solid}/{tail}", p.id);
-            row.mirror = Some(solid.clone());
-            row.solid = solid.clone();
-            row.position = reflect_point(&plane, r.position);
-            row.axis = reflect_vector(&plane, r.axis);
-            let mut key = row_key(&r);
-            key.by = format!("{solid}/{}", key.by);
-            match faces.get(&key) {
-                Some(segments) => {
-                    row.faces = segments.clone();
-                    rows.push(row);
-                }
-                None => gone.push(Gone {
-                    removed_by: removed_by(result, &chain[1..], solid, &key, source),
+                    removed_by: removed_by(result, &chain[k + 1..], solid, &key, &sources),
                     reference: row.reference,
                     feature: row.feature,
                     solid: solid.clone(),
@@ -276,6 +316,45 @@ fn rows_at(
         }
     }
     Ok((rows, gone))
+}
+
+/// A mirror's copies of its source's holes, as they were when it copied
+/// them (its solid's chain up to the mirror's view), reflected; their
+/// faces are found through [`Source`].
+fn mirrored(at: &At, fid: &Id, m: &crate::doc::body::Mirror, depth: usize) -> Result<Vec<Row>> {
+    let At {
+        p, result, solids, ..
+    } = *at;
+    let Some(view) = solids.view(&m.solid, fid) else {
+        return Ok(Vec::new());
+    };
+    let Some(Ok(o)) = result.result(view) else {
+        return Ok(Vec::new());
+    };
+    let Some(src) = o.solid(&m.solid) else {
+        return Ok(Vec::new());
+    };
+    let plane = crate::pattern::mirror_plane(p, fid, &m.plane, result)?;
+    let (src_rows, _) = rows_at(at, &m.solid, upto(solids, &m.solid, view), src, depth + 1)?;
+    Ok(src_rows
+        .into_iter()
+        .map(|r| {
+            let tail = r
+                .reference
+                .split_once('/')
+                .map_or(r.reference.as_str(), |x| x.1)
+                .to_owned();
+            Row {
+                reference: format!("{}/{fid}/{tail}", p.id),
+                mirror: Some(fid.clone()),
+                by: format!("{fid}/{}", r.by),
+                position: reflect_point(&plane, r.position),
+                axis: reflect_vector(&plane, r.axis),
+                faces: BTreeMap::new(),
+                ..r
+            }
+        })
+        .collect())
 }
 
 impl Row {
@@ -537,33 +616,28 @@ pub fn request(
 }
 
 fn row_key(r: &Row) -> Key {
-    match &r.pattern {
-        Some((pid, inst)) => Key {
-            by: pid.to_string(),
-            hole: r.feature.to_string(),
-            point: r.place.to_string(),
-            instance: inst.to_string(),
-        },
-        None => Key {
-            by: r.feature.to_string(),
-            hole: r.feature.to_string(),
-            point: r.place.to_string(),
-            instance: String::new(),
-        },
+    let instance = r
+        .pattern
+        .as_ref()
+        .map(|(_, i)| i.to_string())
+        .unwrap_or_default();
+    Key {
+        by: r.by.clone(),
+        hole: r.feature.to_string(),
+        point: r.place.to_string(),
+        instance,
     }
 }
 
-/// The first of `later` (features on `solid` after the hole's) whose
-/// result has none of the hole's faces.
 /// The first of `later` whose body of `solid` no longer has the hole
-/// `key`; a mirror's copies are found through `source`, the body it
-/// copied, as [`faces_by_key`] finds them.
+/// `key`; a mirror's copies are found through `sources`, the bodies the
+/// mirrors copied, as [`faces_by_key`] finds them.
 fn removed_by(
     result: &PartResult,
     later: &[Id],
     solid: &Id,
     key: &Key,
-    source: Option<(&Id, &Built)>,
+    sources: &BTreeMap<String, Source>,
 ) -> Option<Id> {
     later
         .iter()
@@ -572,7 +646,7 @@ fn removed_by(
                 return false;
             };
             out.solid(solid)
-                .is_some_and(|b| !faces_by_key(b, source).contains_key(key))
+                .is_some_and(|b| !faces_by_key(b, sources).contains_key(key))
         })
         .cloned()
 }
@@ -652,6 +726,7 @@ fn places(
                         let mut r = s.clone();
                         r.reference = format!("{}/{fid}/{seed}/{}/{tail}", p.id, s.place);
                         r.pattern = Some((fid.clone(), instance.clone()));
+                        r.by = fid.to_string();
                         match m {
                             Motion::Rigid(t) => {
                                 r.position = t.apply_point(s.position);
@@ -719,6 +794,8 @@ fn own(
             faces: BTreeMap::new(),
             depth: (shoulder, tip, thread),
             left: h.thread.as_ref().is_some_and(|t| t.left),
+            by: fid.to_string(),
+            material: None,
         })
         .collect())
 }
@@ -933,5 +1010,61 @@ mod tests {
             .find(|g| g.reference == "p/m/h/p1")
             .unwrap();
         assert_eq!(g.removed_by.as_ref().map(Id::as_str), Some("mc"));
+    }
+
+    #[test]
+    fn a_mirror_joined_into_its_own_solid_lists_its_holes() {
+        // #808: box b (x 0 to 20 mm) with h at p1 (10, 5) and p2 (4, 5),
+        // mirrored in the yz plane and joined into b (a mirror's default).
+        let (_dir, mut s) = drilled();
+        tapped(&mut s);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "mirror", "id": "m", "solid": "b", "plane": "yz"}),
+        )
+        .unwrap();
+        let holes = list(&mut s, &id("p"), None).unwrap();
+        let refs: Vec<&str> = holes.rows.iter().map(|r| r.reference.as_str()).collect();
+        assert_eq!(refs, ["p/h/p1", "p/h/p2", "p/m/h/p1", "p/m/h/p2"]);
+        let r = &holes.rows[2];
+        assert!((r.position - Point3::new(-0.010, 0.005, 0.005)).length() < 1e-12);
+        assert_eq!(r.mirror.as_ref().map(Id::as_str), Some("m"));
+        assert_eq!(r.solid.as_str(), "b");
+        assert_eq!(
+            r.faces.keys().collect::<Vec<_>>(),
+            ["drill_wall", "tip", "wall"]
+        );
+        assert!(holes.gone.is_empty(), "{:?}", holes.gone);
+        // A mirror of the mirrored solid: its rows follow both mirrors.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "mirror", "id": "m2", "solid": "b", "plane": "zx"}),
+        )
+        .unwrap();
+        let holes = list(&mut s, &id("p"), None).unwrap();
+        assert_eq!(holes.rows.len(), 8);
+        let deep = holes
+            .by_ref("p/m2/m/h/p1")
+            .expect("a mirror of a mirror's hole");
+        assert!((deep.position - Point3::new(-0.010, -0.005, 0.005)).length() < 1e-12);
+        assert!(!deep.faces.is_empty());
+        // A cut through a mirrored hole: listed as gone, with its cut.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "cut", "operation": "cut",
+                   "targets": ["b"], "params": {"x": 4, "y": 4, "z": 10},
+                   "placement": {"origin": [-12, 3, 0]}}),
+        )
+        .unwrap();
+        let holes = list(&mut s, &id("p"), None).unwrap();
+        let gone = holes
+            .gone
+            .iter()
+            .find(|g| g.reference == "p/m/h/p1")
+            .unwrap();
+        assert_eq!(gone.removed_by.as_ref().map(Id::as_str), Some("cut"));
     }
 }
