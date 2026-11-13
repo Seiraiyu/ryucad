@@ -13,6 +13,7 @@ use crate::holes::{Holes, Row};
 use crate::rebuild::Results;
 use crate::session::Session;
 use rayon::prelude::*;
+use ryukei::geom::Point3;
 use serde_json::{Value, json};
 
 /// Every code and its severity, in the order findings come out.
@@ -388,9 +389,168 @@ fn cannot(r: &Row, check: &str, why: &str) -> Finding {
     }
 }
 
+/// The least distance between segments `a` and `b`, in closed form.
+pub(crate) fn segment_distance(a: (Point3, Point3), b: (Point3, Point3)) -> f64 {
+    let (d1, d2) = (a.1 - a.0, b.1 - b.0);
+    let r = a.0 - b.0;
+    let (aa, ee, f) = (d1.dot(d1), d2.dot(d2), d2.dot(r));
+    let eps = 1e-30;
+    let (s, t) = if aa <= eps && ee <= eps {
+        (0.0, 0.0)
+    } else if aa <= eps {
+        (0.0, (f / ee).clamp(0.0, 1.0))
+    } else {
+        let c = d1.dot(r);
+        if ee <= eps {
+            ((-c / aa).clamp(0.0, 1.0), 0.0)
+        } else {
+            let bb = d1.dot(d2);
+            let den = aa * ee - bb * bb;
+            let mut s = if den > eps {
+                ((bb * f - c * ee) / den).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let mut t = (bb * s + f) / ee;
+            if t < 0.0 {
+                t = 0.0;
+                s = (-c / aa).clamp(0.0, 1.0);
+            } else if t > 1.0 {
+                t = 1.0;
+                s = ((bb - c) / aa).clamp(0.0, 1.0);
+            }
+            (s, t)
+        }
+    };
+    ((a.0 + d1 * s) - (b.0 + d2 * t)).length()
+}
+
+/// A row's bore as a segment and its radius: from the mouth to the tip.
+fn bore(r: &Row) -> Option<((Point3, Point3), f64)> {
+    let tip = r.depth.1;
+    tip.is_finite().then(|| {
+        (
+            (r.position, r.position + r.axis * tip),
+            r.sizes.drill.si / 2.0,
+        )
+    })
+}
+
+/// Whether two rows' faces share an edge in the tip: the bores meet there.
+fn touch(b: &crate::rebuild::Built, x: &Row, y: &Row) -> bool {
+    let names = |r: &Row| -> std::collections::BTreeSet<String> {
+        r.faces.values().flatten().cloned().collect()
+    };
+    let (nx, ny) = (names(x), names(y));
+    b.body.edges().any(|e| {
+        let faces: Vec<String> = crate::holes::edge_face_names(&b.body, e);
+        faces.iter().any(|f| nx.contains(f)) && faces.iter().any(|f| ny.contains(f))
+    })
+}
+
+fn breakouts(cx: &Ctx, rows: &[&Row]) -> Vec<Finding> {
+    let part = &cx.session_part.id;
+    let Some(first) = rows.first() else {
+        return Vec::new();
+    };
+    let Some(tip) = crate::solid::Solids::of(cx.session_part)
+        .tip(&first.solid)
+        .cloned()
+    else {
+        return Vec::new();
+    };
+    let Some(Ok(o)) = cx.result.result(&tip) else {
+        return Vec::new();
+    };
+    let Some(body) = o.solid(&first.solid) else {
+        return Vec::new();
+    };
+    // Sweep along x of each bore's box.
+    let mut items: Vec<(f64, f64, usize, (Point3, Point3), f64)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let (s, rad) = bore(r)?;
+            Some((s.0.x.min(s.1.x) - rad, s.0.x.max(s.1.x) + rad, i, s, rad))
+        })
+        .collect();
+    items.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for (k, a) in items.iter().enumerate() {
+        for b in &items[k + 1..] {
+            if b.0 > a.1 {
+                break;
+            }
+            // Coaxial re-drills of one place are not breakouts.
+            let (u, v) = (a.3.1 - a.3.0, b.3.1 - b.3.0);
+            let off = (b.3.0 - a.3.0).cross(u).length() / u.length().max(1e-300);
+            if u.cross(v).length() <= 1e-12 * u.length() * v.length()
+                && off <= ryukei::tol::LINEAR_RESOLUTION
+            {
+                continue;
+            }
+            if segment_distance(a.3, b.3) < a.4 + b.4 - ryukei::tol::LINEAR_RESOLUTION {
+                pairs.push((a.2.min(b.2), a.2.max(b.2)));
+            }
+        }
+    }
+    pairs.sort();
+    pairs
+        .into_iter()
+        .filter(|(i, j)| touch(body, rows[*i], rows[*j]))
+        .map(|(i, j)| {
+            let (x, y) = (rows[i], rows[j]);
+            Finding {
+                code: "hole_breakout",
+                holes: vec![x.reference.clone(), y.reference.clone()],
+                message: format!("{} and {} meet inside the material", x.reference, y.reference),
+                details: json!({"distance_m": segment_distance(bore(x).unwrap().0, bore(y).unwrap().0),
+                                "radii_m": [bore(x).unwrap().1, bore(y).unwrap().1]}),
+                fixes: part_fix(cx, part, x, y).into_iter().collect(),
+            }
+        })
+        .collect()
+}
+
+/// A blind one of the pair (the later first) made shallower, so its bore
+/// stops a tenth of the smaller diameter clear of the other's: found by
+/// halving on the closed form, floored to 0.01 mm.
+fn part_fix(cx: &Ctx, part: &Id, x: &Row, y: &Row) -> Option<Value> {
+    for (me, other) in [(y, x), (x, y)] {
+        let Some(h) = hole_of(cx, me) else { continue };
+        let crate::doc::hole::Depth::Blind(_) = h.depth else {
+            continue;
+        };
+        let (os, orad) = bore(other)?;
+        let rad = me.sizes.drill.si / 2.0;
+        let clear = orad + rad + 0.1 * (2.0 * rad).min(2.0 * orad);
+        let point = me.depth.1 - me.depth.0;
+        let apart = |d: f64| {
+            segment_distance((me.position, me.position + me.axis * (d + point)), os) >= clear
+        };
+        let (mut lo, mut hi) = (me.sizes.thread_start(), me.depth.0);
+        if !apart(lo) {
+            continue;
+        }
+        for _ in 0..60 {
+            let mid = (lo + hi) / 2.0;
+            if apart(mid) { lo = mid } else { hi = mid }
+        }
+        // The halving's lower end lies under the boundary by a rounding:
+        // a nanometre's grace keeps 15.6 from flooring to 15.59.
+        return Some(edit(
+            part,
+            &me.feature,
+            json!({"depth": {"blind": mm_floor(lo + 1e-9)}}),
+        ));
+    }
+    None
+}
+
 fn solid_findings(cx: &Ctx, rows: &[&Row]) -> Result<Vec<Finding>> {
     let mut out: Vec<Finding> = Vec::new();
     let part = &cx.session_part.id;
+    out.extend(breakouts(cx, rows));
     out.extend(tap_drills(part, rows));
     out.extend(engagement(part, rows, cx.opts.min_engagement));
     out.extend(breaks_through(cx, rows));
@@ -660,6 +820,100 @@ pub(crate) mod tests {
                 .iter()
                 .any(|x| x["code"] == "hole_thread_past_material"
                     || x["code"] == "hole_breaks_through"),
+            "{v}"
+        );
+    }
+
+    #[test]
+    fn segment_distances_in_closed_form() {
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        // Crossing at right angles, 1 apart.
+        assert!(
+            (segment_distance(
+                (p(0., 0., 0.), p(2., 0., 0.)),
+                (p(1., -1., 1.), p(1., 1., 1.))
+            ) - 1.0)
+                .abs()
+                < 1e-15
+        );
+        // Parallel, overlapping, 3 apart.
+        assert!(
+            (segment_distance(
+                (p(0., 0., 0.), p(0., 0., 5.)),
+                (p(3., 0., 1.), p(3., 0., 9.))
+            ) - 3.0)
+                .abs()
+                < 1e-15
+        );
+        // Ends nearest.
+        assert!(
+            (segment_distance(
+                (p(0., 0., 0.), p(1., 0., 0.)),
+                (p(2., 0., 0.), p(3., 0., 0.))
+            ) - 1.0)
+                .abs()
+                < 1e-15
+        );
+    }
+
+    #[test]
+    fn bores_that_meet_and_the_depth_that_parts_them() {
+        let (_dir, mut s) = drilled();
+        plate(&mut s);
+        // A vertical Ø4 hole 10 mm deep at (20, 20), and a Ø4 hole from
+        // the plate's side along -x at z = 6 mm, 25 mm deep: they meet.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "v",
+            "sketch": "t", "spec": "DIA 4 10 DEEP", "targets": ["pl"]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "side",
+            "placement": {"origin": [140, 0, 0], "x": [0, 1, 0], "z": [1, 0, 0]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "side", "ops": [
+            {"op": "add", "type": "point", "at": [20, 6]},
+            {"op": "add", "type": "fix", "a": "p1"}]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "x",
+            "sketch": "side", "spec": "DIA 4 25 DEEP", "targets": ["pl"]}),
+        )
+        .unwrap();
+        let v = call(&mut s, "holes.check", json!({"part": "p", "solid": "pl"})).unwrap();
+        let b = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["code"] == "hole_breakout")
+            .unwrap()
+            .clone();
+        assert_eq!(b["holes"], json!(["p/v/p1", "p/x/p1"]));
+        // The fix: x stops a tenth of 4 mm clear of v's bore: 20 - 2 - 2 - 0.4.
+        assert_eq!(b["fixes"][0]["params"]["id"], "x");
+        assert_eq!(
+            b["fixes"][0]["params"]["depth"],
+            json!({"blind": "15.6 mm"})
+        );
+        call(&mut s, "feature.edit", b["fixes"][0]["params"].clone()).unwrap();
+        let v = call(&mut s, "holes.check", json!({"part": "p", "solid": "pl"})).unwrap();
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "hole_breakout"),
             "{v}"
         );
     }

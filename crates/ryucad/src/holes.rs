@@ -709,6 +709,16 @@ fn reflect_vector(plane: &Plane, v: Vector3) -> Vector3 {
     Mirror::in_plane_of(plane.frame()).apply_vector(v)
 }
 
+/// The names of the faces on either side of edge `e`, through its fins.
+pub(crate) fn edge_face_names(body: &ryukei::topo::Body, e: ryukei::topo::EdgeId) -> Vec<String> {
+    body.edge_fins(e)
+        .filter_map(|f| body.fin(f))
+        .filter_map(|f| body.loop_(f.loop_))
+        .filter_map(|l| body.face(l.face))
+        .map(|f| f.name.to_string())
+        .collect()
+}
+
 /// A through or up-to hole's depths, from its faces: the deepest of its
 /// walls' vertices along its axis.
 fn measure(b: &Built, row: &mut Row) {
