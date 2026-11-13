@@ -167,6 +167,13 @@ pub struct Painted {
     pub buses: Vec<BusConnector>,
     /// The keys of every net a pin on the sheet is on.
     pub nets: BTreeSet<String>,
+    /// Who owns each item, beside [`Painted::items`] (design 519's table,
+    /// built in plan 4.B): its layout key (a part's, a net's for its wires
+    /// and junctions, `bus:<id>`, `region:<id>`, `note:<id>`, and
+    /// `label:<net>@<part>/<pin>` for a label), `None` for a layer's
+    /// bounds. SVG and PDF don't read it; ryueda's `schem::ref_path` turns
+    /// a key into a reference path.
+    pub owners: Vec<Option<String>>,
 }
 
 /// How a line is drawn.
@@ -195,6 +202,11 @@ impl Ink {
             dash: false,
         }
     }
+}
+
+/// Gives the items not yet owned, up to `len`, the owner `key`.
+fn own(owners: &mut Vec<Option<String>>, len: usize, key: &str) {
+    owners.resize(len, Some(key.to_owned()));
 }
 
 fn line(items: &mut Vec<Item>, points: Vec<Point>, ink: Ink) {
@@ -427,6 +439,7 @@ fn bus_items(
     layout: &Layout,
     sid: &str,
     items: &mut Vec<Item>,
+    owners: &mut Vec<Option<String>>,
     look: &Look,
 ) -> Vec<BusConnector> {
     let mut connectors = Vec::new();
@@ -526,8 +539,143 @@ fn bus_items(
                 rect: label::drawn_flow(&c.text, c.at, c.side, flow).bounds,
             });
         }
+        own(owners, items.len(), key);
     }
     connectors
+}
+
+/// How a compare paints one owner (plan 4.B).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    Added,
+    Changed,
+    /// Its place alone changed on the sheet: from the revision's origin
+    /// to the working one's.
+    Moved {
+        from: Point,
+        to: Point,
+    },
+}
+
+/// What a compare paints on one sheet: each owner's mark, the revision's
+/// owners drawn ghosted, and a line of counts at its foot.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    pub marks: BTreeMap<String, Mark>,
+    pub ghosts: BTreeSet<String>,
+    pub strip: String,
+}
+
+impl Marks {
+    pub fn is_empty(&self) -> bool {
+        self.marks.is_empty() && self.ghosts.is_empty()
+    }
+}
+
+/// `it` in colour `c`: its lines and text; a fill that was its line's
+/// colour (an arrow's) too, a body's fill kept.
+fn recolour(it: &Item, c: Rgb) -> Item {
+    let mut it = it.clone();
+    match &mut it {
+        Item::Polyline { stroke, fill, .. } => {
+            if *fill == Some(*stroke) {
+                *fill = Some(c);
+            }
+            *stroke = c;
+        }
+        Item::Circle { stroke, fill, .. } => match stroke {
+            Some(s) => *s = c,
+            None => *fill = Some(c),
+        },
+        Item::Arc { stroke, .. }
+        | Item::Bezier { stroke, .. }
+        | Item::Bus { stroke, .. }
+        | Item::Frame { stroke, .. } => *stroke = c,
+        Item::Text { colour, .. } => *colour = c,
+        Item::Begin(_) | Item::End => {}
+    }
+    it
+}
+
+/// `it` as a ghost: recoloured, its lines dashed and its outlines unfilled.
+fn ghost(it: &Item, c: Rgb) -> Item {
+    let mut it = recolour(it, c);
+    match &mut it {
+        Item::Polyline { fill, dash, .. } => {
+            *fill = None;
+            *dash = true;
+        }
+        Item::Circle {
+            stroke: Some(_),
+            fill,
+            ..
+        } => *fill = None,
+        _ => {}
+    }
+    it
+}
+
+/// The working sheet `now` marked against the revision's `then` (plan
+/// 4.B): the revision's ghosted owners first, dashed in `diff_removed`;
+/// then `now`'s items, a marked owner's in `diff_added` or
+/// `diff_changed`; a moved part's leader from where it stood; and the
+/// strip under the sheet. Owners carry through, so SVG can key them.
+pub fn compare(now: &Painted, then: Option<&Painted>, marks: &Marks, look: &Look) -> Painted {
+    let mut out = Painted {
+        items: Vec::new(),
+        owners: Vec::new(),
+        ..now.clone()
+    };
+    let removed = look.role(Role::DiffRemoved);
+    if let Some(then) = then {
+        for (it, o) in then.items.iter().zip(&then.owners) {
+            if let Some(k) = o
+                && marks.ghosts.contains(k)
+                && !matches!(it, Item::Begin(_) | Item::End)
+            {
+                out.items.push(ghost(it, removed));
+                out.owners.push(Some(k.clone()));
+            }
+        }
+    }
+    for (it, o) in now.items.iter().zip(&now.owners) {
+        let colour = o
+            .as_ref()
+            .and_then(|k| marks.marks.get(k))
+            .map(|m| match m {
+                Mark::Added => look.role(Role::DiffAdded),
+                _ => look.role(Role::DiffChanged),
+            });
+        out.items
+            .push(colour.map_or_else(|| it.clone(), |c| recolour(it, c)));
+        out.owners.push(o.clone());
+    }
+    for (k, m) in &marks.marks {
+        if let Mark::Moved { from, to } = m
+            && from != to
+        {
+            out.items.push(Item::Polyline {
+                points: vec![*from, *to],
+                stroke: look.role(Role::DiffChanged),
+                fill: None,
+                width: LINE / 2,
+                dash: true,
+            });
+            out.owners.push(Some(k.clone()));
+        }
+    }
+    if !marks.strip.is_empty() {
+        out.items.push(text_item(
+            &marks.strip,
+            [0, -2 * GRID],
+            SIZE,
+            Anchor::Start,
+            false,
+            look.role(Role::Text),
+        ));
+        out.owners.push(None);
+    }
+    out
 }
 
 /// [`sheet_in`] in the built-in light look.
@@ -541,6 +689,7 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
 pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Painted {
     let mut out = Painted::default();
     let items = &mut out.items;
+    let mut owners: Vec<Option<String>> = Vec::new();
     // Regions first, under everything: a dashed frame and a titled tab in
     // its title band's top left; an untitled one (plan 3.A) has no tab,
     // its band kept so frames don't move when it gets a title.
@@ -578,6 +727,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
             });
         }
         items.push(Item::End);
+        own(&mut owners, items.len(), &format!("region:{rid}"));
     }
     let mut arms: BTreeMap<(usize, route::Node), u8> = BTreeMap::new();
     for part in &block.parts {
@@ -673,6 +823,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
                 }
             }
         }
+        own(&mut owners, items.len(), &part.key);
     }
     // Wires and junctions.
     for (key, by_sheet) in &layout.routes {
@@ -689,6 +840,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
                 *arms.entry((n, *node)).or_default() += ends;
             }
         }
+        own(&mut owners, items.len(), key);
     }
     for ((n, node), count) in &arms {
         if *count >= 3 {
@@ -703,9 +855,10 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
                 fill: Some(colour),
                 width: LINE,
             });
+            owners.resize(items.len(), block.nets.get(*n).map(|x| x.key.clone()));
         }
     }
-    out.buses = bus_items(block, layout, sid, items, look);
+    out.buses = bus_items(block, layout, sid, items, &mut owners, look);
     for (key, list) in &layout.labels {
         for l in list.iter().filter(|l| l.sheet == sid) {
             let flow = match (l.kind, block.net(key)) {
@@ -723,6 +876,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
                 look,
                 &look.pen(key),
             );
+            own(&mut owners, items.len(), &format!("label:{key}@{}", l.on));
             out.labels.push(Placed {
                 net: key.clone(),
                 on: l.on.clone(),
@@ -763,7 +917,15 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
             look.role(Role::Text),
         ));
         out.items.push(Item::End);
+        own(&mut owners, out.items.len(), &format!("note:{id}"));
     }
+    owners.resize(out.items.len(), None);
+    for (it, o) in out.items.iter().zip(owners.iter_mut()) {
+        if matches!(it, Item::Begin(_) | Item::End) {
+            *o = None;
+        }
+    }
+    out.owners = owners;
     out
 }
 
@@ -833,6 +995,126 @@ mod tests {
         assert!(svg.contains("stroke-dasharray"), "frames are dashed");
     }
     use crate::testing::seeded;
+
+    #[test]
+    fn a_compare_recolours_ghosts_and_leads() {
+        use crate::style::{Look, Role};
+        let b = seeded(2, 4);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let sid = out.layout.sheets.keys().next().unwrap().clone();
+        let p = sheet(&b, &out.layout, &sid);
+        let look = Look::default();
+        let mut keys = out
+            .layout
+            .placed
+            .iter()
+            .filter(|(_, x)| x.sheet == sid)
+            .map(|(k, _)| k.clone());
+        let (new, gone, moved) = (
+            keys.next().unwrap(),
+            keys.next().unwrap(),
+            keys.next().unwrap(),
+        );
+        let at = out.layout.placed[&moved].at;
+        let marks = Marks {
+            marks: BTreeMap::from([
+                (new.clone(), Mark::Added),
+                (
+                    moved.clone(),
+                    Mark::Moved {
+                        from: [at[0] - GRID, at[1]],
+                        to: at,
+                    },
+                ),
+            ]),
+            ghosts: BTreeSet::from([gone.clone()]),
+            strip: "Against HEAD: 1 added, 0 changed, 1 moved, 1 removed".into(),
+        };
+        let c = compare(&p, Some(&p), &marks, &look);
+        assert_eq!(c.items.len(), c.owners.len());
+        let first = c
+            .owners
+            .iter()
+            .position(|o| o.as_deref() == Some(gone.as_str()))
+            .unwrap();
+        assert_eq!(first, 0, "ghosts first, under everything");
+        let ghosts = c
+            .items
+            .iter()
+            .zip(&c.owners)
+            .take_while(|(_, o)| o.as_deref() == Some(gone.as_str()));
+        for (it, _) in ghosts {
+            if let Item::Polyline {
+                stroke, dash, fill, ..
+            } = it
+            {
+                assert_eq!(
+                    (*stroke, *dash, *fill),
+                    (look.role(Role::DiffRemoved), true, None)
+                );
+            }
+        }
+        for (it, o) in c.items.iter().zip(&c.owners) {
+            if o.as_deref() == Some(new.as_str())
+                && let Item::Polyline { stroke, .. } = it
+            {
+                assert_eq!(*stroke, look.role(Role::DiffAdded));
+            }
+        }
+        assert!(c.items.iter().zip(&c.owners).any(|(it, o)| o.as_deref() == Some(moved.as_str())
+            && matches!(it, Item::Polyline { dash: true, points, .. } if points.len() == 2)), "a leader");
+        assert!(
+            c.items
+                .iter()
+                .any(|i| matches!(i, Item::Text { text, .. } if text.starts_with("Against HEAD")))
+        );
+        // Nothing marked: the sheet as it was.
+        let none = compare(&p, None, &Marks::default(), &look);
+        assert_eq!(
+            (none.items, none.owners),
+            (p.items.clone(), p.owners.clone())
+        );
+    }
+
+    #[test]
+    fn every_item_has_its_owner_beside_it() {
+        let b = seeded(2, 4);
+        let out = crate::engine::lay_out(&b).unwrap();
+        for sid in out.layout.sheets.keys() {
+            let p = sheet(&b, &out.layout, sid);
+            assert_eq!(p.owners.len(), p.items.len(), "one owner per item");
+            for (it, o) in p.items.iter().zip(&p.owners) {
+                if matches!(it, Item::Begin(_) | Item::End) {
+                    assert_eq!(o, &None, "a layer's bounds belong to no one");
+                }
+            }
+            for (key, x) in &out.layout.placed {
+                if x.sheet == *sid {
+                    assert!(
+                        p.owners.iter().any(|o| o.as_deref() == Some(key.as_str())),
+                        "{key}"
+                    );
+                }
+            }
+            for (net, list) in &out.layout.labels {
+                for l in list.iter().filter(|l| l.sheet == *sid) {
+                    let k = format!("label:{net}@{}", l.on);
+                    assert!(
+                        p.owners.iter().any(|o| o.as_deref() == Some(k.as_str())),
+                        "{k}"
+                    );
+                }
+            }
+            for (net, by) in &out.layout.routes {
+                if by.contains_key(sid) {
+                    assert!(
+                        p.owners.iter().any(|o| o.as_deref() == Some(net.as_str())),
+                        "{net}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_sheet_paints_its_labels_and_says_where_they_are() {

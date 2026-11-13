@@ -786,6 +786,11 @@ pub enum Request {
         /// light (the default) or dark (plan 2.E).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         theme: Option<ryusch::style::Theme>,
+        /// Draw the working sheet marked against this Git revision: new
+        /// and changed items in the diff colours, gone ones ghosted, moved
+        /// parts with a leader, each item keyed by `data-ref` (SVG).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -800,6 +805,11 @@ pub enum Request {
         design: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers: Option<crate::output::Layers>,
+        /// Page only the sheets that changed since this Git revision, each
+        /// marked as `render`'s compare marks it; none changed answers
+        /// `unchanged` with no bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -840,6 +850,30 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// What changed between two revisions (`HEAD` and the working files
+    /// by default), as values: the root files, each block by object and
+    /// reference path, its layout's counts (by key with `layout`), the
+    /// library's counts (by member with `library`), and with `netlist`
+    /// each design flattened and compared.
+    #[serde(rename = "diff")]
+    Diff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        netlist: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        layout: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        library: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+    },
     /// The project loaded from nothing: every file's faults and every
     /// design's ERC; `check_failed` on any error.
     #[serde(rename = "check")]
@@ -849,6 +883,10 @@ pub enum Request {
         /// yet.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         offline: bool,
+        /// Add `diff --netlist` from this revision to the working files
+        /// (`against` in the report).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        against: Option<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -887,6 +925,24 @@ pub enum Request {
     },
     #[serde(rename = "participant.list")]
     ParticipantList {},
+    /// What a participant compares the working files against: `participant`,
+    /// else the one human (an agent shows a person what it did), else the
+    /// caller; `off` stops it.
+    #[serde(rename = "compare.set")]
+    CompareSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// What a participant compares against, and the commit it names now.
+    #[serde(rename = "compare.get")]
+    CompareGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     #[serde(rename = "subscribe")]
     Subscribe {
         #[serde(default)]

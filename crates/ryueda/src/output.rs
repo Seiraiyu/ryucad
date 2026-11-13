@@ -200,10 +200,35 @@ fn page_zone(p: usize, zone: &Option<String>) -> String {
     }
 }
 
+/// What `output --compare` marks against: the revision's project and the
+/// revision as given.
+pub struct Against<'a> {
+    pub project: &'a Project,
+    pub rev: &'a str,
+}
+
 /// `output`: design `design`'s PDF and what it holds.
 pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Value, Vec<u8>)> {
-    let (v, design_name, pages, tree) = output_pages(p, design, layers)?;
+    let (v, design_name, pages, tree) = output_pages(p, design, layers, None)?;
     Ok((v, pdf::write(&design_name, &pages, &tree)))
+}
+
+/// `output --compare`: only the sheets that changed since `then`, each
+/// marked as `render --compare` marks it; no file when none did.
+pub fn compare(
+    p: &Project,
+    then: &Project,
+    rev: &str,
+    design: Option<&str>,
+    layers: Layers,
+) -> Result<(Value, Option<Vec<u8>>)> {
+    let (mut v, name, pages, tree) =
+        output_pages(p, design, layers, Some(&Against { project: then, rev }))?;
+    if pages.is_empty() {
+        v["unchanged"] = json!(true);
+        return Ok((v, None));
+    }
+    Ok((v, Some(pdf::write(&name, &pages, &tree))))
 }
 
 /// What [`output`] pages: its listing, the design's name, each page and
@@ -212,6 +237,7 @@ fn output_pages(
     p: &Project,
     design: Option<&str>,
     layers: Layers,
+    compare: Option<&Against>,
 ) -> Result<(Value, String, Vec<Page>, Vec<Mark>)> {
     let d = netlist::one_design(p, design)?;
     let root = netlist::design_root(p, &d)?;
@@ -222,6 +248,29 @@ fn output_pages(
     if let Some(e) = failed.get(&root) {
         return Err(e.clone());
     }
+    // A compare's marks, by block, and each block's revision laid out
+    // (plan 4.B).
+    let mut compared: BTreeMap<Id, (Option<Laid>, BTreeMap<String, ryusch::paint::Marks>)> =
+        BTreeMap::new();
+    if let Some(c) = compare {
+        for node in &nodes {
+            let Some(l) = laid.get(&node.block) else {
+                continue;
+            };
+            if compared.contains_key(&node.block) {
+                continue;
+            }
+            let then = crate::compare::laid_then(c.project, &node.block, None);
+            let m = crate::compare::marks(p, l, c.project, then.as_ref(), &node.block, c.rev);
+            compared.insert(node.block.clone(), (then, m));
+        }
+    }
+    let changed = |block: &Id, sheet: &str| {
+        compared
+            .get(block)
+            .and_then(|(_, m)| m.get(sheet))
+            .is_some_and(|m| !m.is_empty())
+    };
     let flat = netlist::flatten(p, &d).ok();
     // Each node's net keys to flattened nets, through its components' pins.
     let mut flat_of: Vec<BTreeMap<String, usize>> = vec![BTreeMap::new(); nodes.len()];
@@ -272,7 +321,10 @@ fn output_pages(
             continue;
         };
         let order = ryusch::canvas::order(&l.outcome.layout);
-        for s in &order {
+        for s in order
+            .iter()
+            .filter(|s| compare.is_none() || changed(&node.block, s))
+        {
             sheets.push(Sheet {
                 node: i,
                 sheet: s.clone(),
@@ -327,7 +379,35 @@ fn output_pages(
             .get(&s.sheet)
             .cloned()
             .unwrap_or_default();
-        let paint = ryusch::paint::sheet_in(&built.input, &l.outcome.layout, &s.sheet, &look);
+        let mut paint = ryusch::paint::sheet_in(&built.input, &l.outcome.layout, &s.sheet, &look);
+        if let Some(c) = compare
+            && let Some((then, m)) = compared.get(&node.block)
+            && let Some(marks) = m.get(&s.sheet)
+        {
+            let was = then
+                .as_ref()
+                .filter(|t| t.outcome.layout.sheets.contains_key(&s.sheet))
+                .map(|t| {
+                    let tlook = c
+                        .project
+                        .conn
+                        .blocks
+                        .get(&node.block)
+                        .map(|tb| {
+                            crate::schemcmd::looks(
+                                c.project,
+                                tb,
+                                &t.built,
+                                &t.outcome.layout,
+                                ryusch::style::Theme::Light,
+                            )
+                        })
+                        .and_then(|m| m.get(&s.sheet).cloned())
+                        .unwrap_or_default();
+                    ryusch::paint::sheet_in(&t.built.input, &t.outcome.layout, &s.sheet, &tlook)
+                });
+            paint = ryusch::paint::compare(&paint, was.as_ref(), marks, &look);
+        }
         // Every flattened net a pin on the page is on (plan 2.C): a
         // connector's or a port's cross-reference names the pages its net
         // is drawn on.
@@ -402,32 +482,37 @@ fn output_pages(
         let paint = &painted[pg];
         let mut items = paint.items.clone();
         let mut links = Vec::new();
-        // A block symbol links to its block's first page.
-        for (key, body) in &paint.blocks {
-            let Some(iid) = key.strip_prefix("instance:") else {
-                continue;
-            };
-            if let Some(child) = nodes.iter().position(|n| {
-                laid.contains_key(&n.block)
-                    && n.parent
-                        .as_ref()
-                        .is_some_and(|(up, front)| *up == s.node && front.as_str() == iid)
-            }) && first_page[child] < sheets.len()
-            {
-                links.push(Link {
-                    rect: *body,
-                    to: first_page[child],
-                });
+        // A compare leaves pages out: its links and cross-references
+        // would point at the wrong ones.
+        if compare.is_none() {
+            // A block symbol links to its block's first page.
+            for (key, body) in &paint.blocks {
+                let Some(iid) = key.strip_prefix("instance:") else {
+                    continue;
+                };
+                if let Some(child) = nodes.iter().position(|n| {
+                    laid.contains_key(&n.block)
+                        && n.parent
+                            .as_ref()
+                            .is_some_and(|(up, front)| *up == s.node && front.as_str() == iid)
+                }) && first_page[child] < sheets.len()
+                {
+                    links.push(Link {
+                        rect: *body,
+                        to: first_page[child],
+                    });
+                }
             }
-        }
-        for (rect, others) in cross_references(paint, &flat_of[s.node], &net_pages, &net_zones, pg)
-        {
-            xref_items(
-                [rect.min[0], rect.min[1] - MIN_SIZE],
-                &others,
-                &mut items,
-                &mut links,
-            );
+            for (rect, others) in
+                cross_references(paint, &flat_of[s.node], &net_pages, &net_zones, pg)
+            {
+                xref_items(
+                    [rect.min[0], rect.min[1] - MIN_SIZE],
+                    &others,
+                    &mut items,
+                    &mut links,
+                );
+            }
         }
         listing.push(json!({
             "page": pg + 1,
@@ -449,12 +534,17 @@ fn output_pages(
             links,
         });
     }
-    // Bookmarks: each node its sheets, its children under it.
+    // Bookmarks: each node its sheets, its children under it. A node
+    // with no pages of its own (it couldn't be laid out, or a compare
+    // found nothing changed there) still holds its descendants' marks,
+    // opening the first of their pages; one with none below it either
+    // has nothing to open and is left out.
     fn marks(
         i: usize,
         nodes: &[Node],
         first: &[usize],
         sheets: &[(usize, String, usize)],
+        paged: &[bool],
         title: &dyn Fn(usize) -> String,
     ) -> Mark {
         let mut children: Vec<Mark> = sheets
@@ -467,10 +557,8 @@ fn output_pages(
             })
             .collect();
         for (j, n) in nodes.iter().enumerate() {
-            // A block that couldn't be laid out has no pages to open.
-            let paged = sheets.iter().any(|(n, _, _)| *n == j);
-            if paged && n.parent.as_ref().is_some_and(|(up, _)| *up == i) {
-                children.push(marks(j, nodes, first, sheets, title));
+            if paged[j] && n.parent.as_ref().is_some_and(|(up, _)| *up == i) {
+                children.push(marks(j, nodes, first, sheets, paged, title));
             }
         }
         Mark {
@@ -484,6 +572,21 @@ fn output_pages(
         .enumerate()
         .map(|(pg, s)| (s.node, s.name.clone(), pg))
         .collect();
+    // Whether a node or any node under it has a page. Nodes come in page
+    // order, each after its parent, so one pass from the end carries
+    // every subtree up; and a page-less node's first page (`first_page`,
+    // the next page after it) is then its first descendant's.
+    let mut paged: Vec<bool> = vec![false; nodes.len()];
+    for s in &sheets {
+        paged[s.node] = true;
+    }
+    for j in (0..nodes.len()).rev() {
+        if paged[j]
+            && let Some((up, _)) = &nodes[j].parent
+        {
+            paged[*up] = true;
+        }
+    }
     let title = |i: usize| {
         let n = &nodes[i];
         let name = p
@@ -501,7 +604,7 @@ fn output_pages(
     let tree = if sheets.is_empty() {
         Vec::new()
     } else {
-        vec![marks(0, &nodes, &first_page, &sheet_marks, &title)]
+        vec![marks(0, &nodes, &first_page, &sheet_marks, &paged, &title)]
     };
     let mut v = json!({
         "design": d,
@@ -625,7 +728,7 @@ mod tests {
     fn the_title_block_reads_the_style_and_the_properties() {
         let (_dir, p) =
             crate::netlist::tests::project_with_properties(&[("doc_number", "SB-1"), ("rev", "C")]);
-        let (_, _, pages, _) = output_pages(&p, None, Layers::All).unwrap();
+        let (_, _, pages, _) = output_pages(&p, None, Layers::All, None).unwrap();
         let t = &pages[0].title;
         assert_eq!((t.number.as_str(), t.revision.as_str()), ("SB-1", "C"));
         assert_eq!(t.date, "", "no date property: empty, never a time stamp");
@@ -771,7 +874,7 @@ mod tests {
         .unwrap();
         session.reload().unwrap();
         let p = session.project();
-        let (v, _, pages, _) = output_pages(p, None, Layers::All).unwrap();
+        let (v, _, pages, _) = output_pages(p, None, Layers::All, None).unwrap();
         let listing: Vec<(&str, &str)> = v["pages"]
             .as_array()
             .unwrap()

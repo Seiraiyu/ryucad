@@ -46,7 +46,7 @@ pub fn read_layout(bytes: &[u8], path: &str) -> Result<Layout> {
     doc::read::<Layout>(bytes, path, LAYOUT_KIND, LAYOUT_FORMAT)
         .map(|l| l.absolute())
         .map_err(|e| {
-            let code = if e.code == Code::FormatTooNew {
+            let code = if matches!(e.code, Code::FormatTooNew | Code::MergeConflict) {
                 e.code
             } else {
                 Code::LayoutInvalid
@@ -59,6 +59,37 @@ pub fn read_layout(bytes: &[u8], path: &str) -> Result<Layout> {
 /// each region's parts placed relative to its origin.
 pub fn layout_text(l: &Layout) -> String {
     doc::to_string(&l.relative(), LAYOUT_KIND, l.format())
+}
+
+/// What a part's layout key names: its component for a unit
+/// (`<component>:<n>`), else the key itself.
+pub(crate) fn part_of(key: &str) -> &str {
+    const KEEP: [&str; 6] = ["instance:", "port:", "rail:", "bus:", "region:", "note:"];
+    if KEEP.iter().any(|p| key.starts_with(p)) {
+        return key;
+    }
+    match key.split_once(':') {
+        Some((c, u)) if !u.is_empty() && u.bytes().all(|b| b.is_ascii_digit()) => c,
+        _ => key,
+    }
+}
+
+/// The reference path of what layout key `key` draws in block `block`
+/// (designs 518 and 519): `<block>/<component>` for a component's part (a
+/// unit's too), `<block>/instance:<id>`, `<block>/port:<id>`,
+/// `<block>/<net>`, `<block>/rail:<id>`, `<block>/bus:<id>`,
+/// `<block>/region:<id>`, `<block>/note:<id>`, and a label
+/// (`label:<net>@<part>/<pin>`, `ryusch::paint`'s owner) as
+/// `<block>/label:<net>@<component>/<pin>`. Diff entries, compare renders'
+/// `data-ref` and stage 3's scene all name things so.
+pub fn ref_path(block: &Id, key: &str) -> String {
+    if let Some(rest) = key.strip_prefix("label:")
+        && let Some((net, on)) = rest.rsplit_once('@')
+    {
+        let (part, pin) = on.rsplit_once('/').unwrap_or((on, ""));
+        return format!("{block}/label:{net}@{}/{pin}", part_of(part));
+    }
+    format!("{block}/{}", part_of(key))
 }
 
 fn pin_kind(t: PinType) -> PinKind {
@@ -1127,6 +1158,26 @@ pub fn alias(c: &crate::conn::Component) -> &str {
 mod tests {
     use super::*;
     use crate::netlist::tests::project;
+
+    #[test]
+    fn layout_keys_have_reference_paths() {
+        let b = Id::parse("breakout", "test").unwrap();
+        for (key, path) in [
+            ("r1", "breakout/r1"),
+            ("u1:2", "breakout/u1"),
+            ("instance:s1", "breakout/instance:s1"),
+            ("port:sda", "breakout/port:sda"),
+            ("rail:3", "breakout/rail:3"),
+            ("bus:q", "breakout/bus:q"),
+            ("region:r2", "breakout/region:r2"),
+            ("note:i4", "breakout/note:i4"),
+            ("sda", "breakout/sda"),
+            ("label:sda@u1:2/5", "breakout/label:sda@u1/5"),
+            ("label:rail:gnd@r1/2", "breakout/label:rail:gnd@r1/2"),
+        ] {
+            assert_eq!(ref_path(&b, key), path, "{key}");
+        }
+    }
 
     #[test]
     fn a_layout_file_places_region_parts_relative_to_their_region() {

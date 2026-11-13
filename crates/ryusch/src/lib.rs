@@ -13,6 +13,7 @@ pub mod bus;
 pub mod canvas;
 pub mod cluster;
 pub mod describe;
+pub mod diff;
 pub mod engine;
 pub mod font;
 pub mod geom;

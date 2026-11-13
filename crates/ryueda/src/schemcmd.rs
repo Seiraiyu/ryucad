@@ -24,7 +24,7 @@ pub const INTER: &[u8] = ryu_draw::font::INTER;
 
 /// The blocks a request names: one block, else a design's (named, or the
 /// project's only one), its root first.
-fn blocks<'a>(
+pub(crate) fn blocks<'a>(
     p: &'a Project,
     design: Option<&str>,
     block: Option<&str>,
@@ -959,7 +959,7 @@ pub fn png(svg: &str, px_per_mm: f32) -> Result<Vec<u8>> {
 /// The layer of block `b` drawn: the one `layer` names (its instance
 /// path or stack path, `<design>:` before either), else the first; `None`
 /// for a block no design places. Its designators go on `laid`'s parts.
-fn show_layer(
+pub(crate) fn show_layer(
     p: &Project,
     b: &BlockFiles,
     laid: &mut Laid,

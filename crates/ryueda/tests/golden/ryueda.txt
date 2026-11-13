@@ -1,6 +1,9 @@
 # ryueda's golden hashes: UPDATE_GOLDEN=1 cargo test -p ryueda --test determinism
 breakout.erc f84678494c89aa19a5910ab3c7a8330e
 breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
+diff.breakout bcb53727d93efdce4ea7b2fd61f385bf
+diff.breakout.layout 5b18eead5435c422723dd122d40efaad
+diff.breakout.netlist cc577d2a7d2d3080f2c04a285cd14073
 generated.erc 78239ee711bef7fca90a828cc74caab3
 generated.netlist 5320f73be71d1afe60130384cd00fcea
 kicad.library 9acdf4c928678cfba0ea7435e1848d06
@@ -20,6 +23,9 @@ schematic.breakout.breakout.describe 8c14feaa57bba1b38fcd8f471706107e
 schematic.breakout.breakout.explain 48c8716d6565d33a9dadea9c66b50250
 schematic.breakout.breakout.layout ceb86c11bc236b70940d1a342d64921b
 schematic.breakout.breakout.svg 1c4c931aebc4ecb1b111a843932efac1
+schematic.breakout.compare.breakout.svg 74dca7833f77dcbbab3e634c46acd45b
+schematic.breakout.compare.pdf 3b37ce3e0c4310c4b35ed7436c1906cc
+schematic.breakout.compare.sensor.svg f6cdf302741e120b316793c5c3dfdc32
 schematic.breakout.pdf 7ae1271c400ac0a1c83aada9b4feaa72
 schematic.breakout.sensor.dark.svg 0d0459f0ad2d4cbd499ea115ccb6db86
 schematic.breakout.sensor.describe b316f637ec47f0d96f875f264869ab50

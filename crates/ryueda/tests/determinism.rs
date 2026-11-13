@@ -164,6 +164,7 @@ fn netlists_and_erc_are_bit_exact() {
     // SVG, descriptions, stacked layers and PDFs.
     schematic(&mut golden, &board, "breakout");
     styled(&mut golden, &board);
+    compared(&mut golden, &board);
     let pico = dir.path().join("pico");
     std::fs::create_dir_all(&pico).unwrap();
     ryueda(&pico, 1, &["init"]);
@@ -648,3 +649,101 @@ const MCU_PINS: &str = r#"[
     {"number": "13", "name": "USB_D+", "type": "bidirectional"},
     {"number": "14", "name": "USB_D-", "type": "bidirectional"}
 ]"#;
+
+/// Git in `dir`, reading no user's config, with a fixed identity and dates.
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", dir.join("..").join("no-gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "core.autocrlf=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The styled breakout committed, then edited as `tests/git.rs`'s
+/// `edited_breakout` edits it (plan 4.B): its `diff`, `diff --netlist` and
+/// `diff --layout` (the commit, which the manifest's random project ID
+/// moves, left out), each block's compare SVG and the compare PDF, alike
+/// on one thread and eight.
+fn compared(golden: &mut Golden, dir: &Path) {
+    git(dir, &["init", "-q"]);
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "styled"]);
+    for args in [
+        vec!["component", "edit", "breakout/r1", "--value", "10k"],
+        vec![
+            "component",
+            "add",
+            "breakout",
+            "--of",
+            "r_4k7",
+            "--id",
+            "r3",
+        ],
+        vec!["connect", "breakout/r3/1", "SDA"],
+        vec!["connect", "breakout/r3/2", "rail:3V3"],
+        vec!["component", "delete", "breakout/c3"],
+        vec!["net", "rename", "breakout/scl", "I2C_SCL"],
+        vec!["place", "breakout", "--move", "shift J1 right 4"],
+    ] {
+        ryueda(dir, 1, &args);
+    }
+    let strip = |mut v: Value| {
+        v["from"]["commit"] = Value::Null;
+        v
+    };
+    for (name, args) in [
+        ("diff.breakout", vec!["diff"]),
+        ("diff.breakout.netlist", vec!["diff", "--netlist"]),
+        ("diff.breakout.layout", vec!["diff", "--layout"]),
+    ] {
+        let one = strip(ryueda(dir, 1, &args));
+        assert_eq!(strip(ryueda(dir, 8, &args)), one, "{name}");
+        golden.json(name, &one);
+    }
+    for b in blocks_of(dir) {
+        let args = [
+            "render",
+            "--block",
+            &b,
+            "--compare",
+            "HEAD",
+            "--out",
+            "c.svg",
+        ];
+        ryueda(dir, 1, &args);
+        let svg = std::fs::read(dir.join("c.svg")).unwrap();
+        ryueda(dir, 8, &args);
+        assert_eq!(std::fs::read(dir.join("c.svg")).unwrap(), svg, "{b}");
+        golden.got.insert(
+            format!("schematic.breakout.compare.{b}.svg"),
+            blake3::hash(&svg).to_hex()[..32].to_owned(),
+        );
+    }
+    ryueda(dir, 1, &["output", "--compare", "HEAD", "--out", "c.pdf"]);
+    let pdf = std::fs::read(dir.join("c.pdf")).unwrap();
+    golden.got.insert(
+        "schematic.breakout.compare.pdf".to_owned(),
+        blake3::hash(&pdf).to_hex()[..32].to_owned(),
+    );
+}
