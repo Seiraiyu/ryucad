@@ -178,8 +178,8 @@ pub fn row_text(f: &Feature, faults: usize) -> String {
             };
             format!("{of} @ {}{freedom}{outdated}", i.rev)
         }
-        // A mate its form and what it joins, and a redundant or
-        // conflicting one says so.
+        // A mate its form and what it joins, where its value stands and
+        // the stop it rests on; a redundant or conflicting one says so.
         _ if f.mate.is_some() => {
             let m = f.mate.as_ref().expect("a mate");
             let state = match m.state.as_deref() {
@@ -188,8 +188,16 @@ pub fn row_text(f: &Feature, faults: usize) -> String {
                 }
                 _ => String::new(),
             };
+            let value = m
+                .value
+                .as_ref()
+                .map_or_else(String::new, |v| format!(", {v}"));
+            let stop = m
+                .stop
+                .as_ref()
+                .map_or_else(String::new, |s| format!(", {s}"));
             format!(
-                "{}: {} → {}{state}",
+                "{}: {} → {}{value}{stop}{state}",
                 m.form,
                 MateInfo::path_of(&m.a),
                 MateInfo::path_of(&m.b)
@@ -1757,6 +1765,50 @@ mod tests {
             Some("the radius is too large")
         );
         assert!(row("solid:bracket/base").solid);
+    }
+
+    #[test]
+    fn a_mate_says_its_value_and_the_stop_it_rests_on() {
+        let mut m = Model::default();
+        m.apply_part(
+            &json!({"part": "frame", "revision": "r", "kind": "assembly",
+            "features": [
+            {"id": "base", "type": "instance", "ok": true, "hash": "1",
+             "instance": {"part": "plate", "rev": "working", "fixed": true}},
+            {"id": "pin", "type": "instance", "ok": true, "hash": "2",
+             "instance": {"part": "bolt", "rev": "working"}},
+            {"id": "hinge", "type": "mate", "ok": true, "hash": "3",
+             "mate": {"state": "well", "form": "revolute", "a": "frame/base", "b": "frame/pin",
+                      "value": {"angle_deg": 3.9999999999}, "limit": {"angle": "max"},
+                      "limits": {"angle_rad": {"min": -0.1, "max": 0.0698131700797732}}}},
+            {"id": "tube", "type": "mate", "ok": true, "hash": "4",
+             "mate": {"state": "well", "form": "cylindrical", "a": "frame/base", "b": "frame/pin",
+                      "value": {"angle_deg": 4.0, "distance": "12.5000000001 mm"},
+                      "limit": {"angle": "max", "distance": "min"}}},
+            {"id": "glue", "type": "mate", "ok": true, "hash": "5",
+             "mate": {"state": "well", "form": "fastened", "a": "frame/base", "b": "frame/pin"}}],
+            "occurrences": []}),
+        );
+        let p = m.parts.get("frame").unwrap();
+        let hinge = p.feature("hinge").unwrap().mate.clone().unwrap();
+        assert_eq!(hinge.stop.as_deref(), Some("at max"));
+        assert_eq!(
+            hinge.limits.angle,
+            Some((Some(-0.1), Some(0.0698131700797732)))
+        );
+        assert_eq!(hinge.limits.distance, None);
+        assert_eq!(
+            row_text(p.feature("hinge").unwrap(), 0),
+            "hinge (revolute: base → pin, 4.0°, at max)"
+        );
+        assert_eq!(
+            row_text(p.feature("tube").unwrap(), 0),
+            "tube (cylindrical: base → pin, 4.0°, 12.5 mm, angle at max, distance at min)"
+        );
+        assert_eq!(
+            row_text(p.feature("glue").unwrap(), 0),
+            "glue (fastened: base → pin)"
+        );
     }
 
     #[test]

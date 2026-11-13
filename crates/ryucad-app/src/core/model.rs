@@ -178,7 +178,9 @@ pub struct Placed {
 
 /// A mate: its form (`revolute` and so on), its connectors as requests
 /// give them, its state in the solve when it built (`well`,
-/// `redundant`), and both connectors' frames in the assembly as solved.
+/// `redundant`), both connectors' frames in the assembly as solved, its
+/// measured value as the tree says it (`4.0°`, `12.5 mm`), the stop it
+/// rests on (`at max`), and its limits.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MateInfo {
     pub form: String,
@@ -186,9 +188,76 @@ pub struct MateInfo {
     pub b: String,
     pub state: Option<String>,
     pub frames: Option<[Pose; 2]>,
+    pub value: Option<String>,
+    pub stop: Option<String>,
+    pub limits: MateLimits,
+}
+
+/// A mate's stops, in radians and meters: each value's `(min, max)`,
+/// either bound missing for a one-sided stop.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MateLimits {
+    pub angle: Option<(Option<f64>, Option<f64>)>,
+    pub distance: Option<(Option<f64>, Option<f64>)>,
+}
+
+impl MateLimits {
+    /// From a report's `mate.limits` (`{angle_rad: {min, max},
+    /// distance_m: …}`); none when it has none.
+    pub fn from_json(v: &Value) -> MateLimits {
+        let range = |r: &Value| {
+            r.is_object()
+                .then(|| (r["min"].as_f64(), r["max"].as_f64()))
+        };
+        MateLimits {
+            angle: range(&v["angle_rad"]),
+            distance: range(&v["distance_m"]),
+        }
+    }
 }
 
 impl MateInfo {
+    /// The tree's words for a report's `value`: the angle to a tenth of a
+    /// degree, the distance to a thousandth of its unit, trailing zeros
+    /// dropped; `None` when it has neither.
+    pub fn value_text(v: &Value) -> Option<String> {
+        let mut out = Vec::new();
+        if let Some(a) = v["angle_deg"].as_f64() {
+            out.push(format!("{a:.1}°"));
+        }
+        if let Some(d) = v["distance"].as_str() {
+            let (n, unit) = d.split_once(' ').unwrap_or((d, ""));
+            match n.parse::<f64>() {
+                Ok(x) => {
+                    let s = format!("{x:.3}");
+                    let s = s.trim_end_matches('0').trim_end_matches('.');
+                    out.push(format!("{s} {unit}").trim_end().to_owned());
+                }
+                Err(_) => out.push(d.to_owned()),
+            }
+        }
+        (!out.is_empty()).then(|| out.join(", "))
+    }
+
+    /// The tree's words for a report's `limit`: `at max` with one stop,
+    /// `angle at max, distance at min` with two; `None` when free.
+    pub fn stop_text(v: &Value) -> Option<String> {
+        let stops: Vec<(&str, &str)> = ["angle", "distance"]
+            .into_iter()
+            .filter_map(|k| Some((k, v[k].as_str()?)))
+            .collect();
+        match stops.as_slice() {
+            [] => None,
+            [(_, s)] => Some(format!("at {s}")),
+            many => Some(
+                many.iter()
+                    .map(|(k, s)| format!("{k} at {s}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        }
+    }
+
     /// The instance path a connector is on: `base`, `ring:2/pin`. The
     /// connector is `<assembly>/<path>[/<solid>/<name>]`.
     pub fn path_of(connector: &str) -> String {
@@ -459,6 +528,9 @@ impl Part {
                                 };
                                 [pose(&f["a"]), pose(&f["b"])]
                             }),
+                            value: MateInfo::value_text(&m["value"]),
+                            stop: MateInfo::stop_text(&m["limit"]),
+                            limits: MateLimits::from_json(&m["limits"]),
                         }),
                         copies: f["copies"]
                             .as_array()
