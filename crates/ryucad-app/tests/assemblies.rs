@@ -213,3 +213,233 @@ fn the_window_hides_as_its_own_request_answers() {
     let hidden: Vec<String> = ws.model.hidden.iter().cloned().collect();
     assert_eq!(hidden, ["frame/b2"]);
 }
+
+/// [`common::two_bolts`] (b1 fixed, b2 40 mm along x) with motions `lift`
+/// (b2 up 30 mm in 4 steps) and `slam` (b2 40 mm along -x, into b1, in 11
+/// steps).
+fn with_motions() -> Project {
+    let p = common::two_bolts();
+    p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "lift",
+        "--steps",
+        "4",
+        "--drives",
+        r#"[{"instances": ["b2"], "translate": {"direction": "z", "from": "0 mm", "to": "30 mm"}}]"#,
+    ]);
+    p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "slam",
+        "--steps",
+        "11",
+        "--drives",
+        r#"[{"instances": ["b2"], "translate": {"direction": [-1, 0, 0], "from": "0 mm", "to": "40 mm"}}]"#,
+    ]);
+    p
+}
+
+fn shown_of(p: &Project) -> serde_json::Value {
+    p.ok(&["participants"])["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["kind"] == "human")
+        .map(|x| x["motion"].clone())
+        .unwrap()
+}
+
+#[test]
+fn the_window_shows_plays_and_follows_a_participants_motion() {
+    let p = with_motions();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let b2 = key("frame", "b2/shank");
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.contains_key(&b2)));
+    let z = |ws: &Workspace| ws.model.pose(&b2).origin[2];
+    let rest = z(&ws);
+    // An agent shows it at its end: b2 drawn 30 mm up, once its frames come.
+    p.ok(&[
+        "motion",
+        "show",
+        "lift",
+        "--part",
+        "frame",
+        "--fraction",
+        "1",
+    ]);
+    assert!(ws.wait_until(WAIT, |ws| (z(ws) - rest - 0.03).abs() < 1e-9));
+    assert_eq!(ws.motions.list.len(), 2);
+    assert_eq!(ws.motions.frames.as_ref().unwrap().frames.len(), 120);
+    // The slider moves it at once, to its nearest frame, and is written.
+    ws.slide_motion(0.5);
+    let want = 0.03 * 60.0 / 119.0;
+    assert!((z(&ws) - rest - want).abs() < 1e-9, "{}", z(&ws) - rest);
+    ws.show_motion(None, Some(0.5), Some(false), false);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .myself()
+                .and_then(|m| m.motion.clone())
+                .is_some_and(|m| m.fraction == 0.5)
+    }));
+    // Play moves it on its own, and says so to the session.
+    ws.play_motion(true);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    assert_eq!(shown_of(&p)["playing"], true);
+    let before = z(&ws);
+    std::thread::sleep(Duration::from_millis(400));
+    ws.tick(std::time::Instant::now());
+    assert_ne!(z(&ws), before, "Play moved it");
+    ws.play_motion(false);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.motions.playing()));
+    assert_eq!(shown_of(&p)["playing"], false);
+    // An agent's fraction is followed.
+    p.ok(&["motion", "show", "--fraction", "0"]);
+    assert!(ws.wait_until(WAIT, |ws| (z(ws) - rest).abs() < 1e-12));
+    // Nothing is drawn moved once it is off.
+    p.ok(&[
+        "motion",
+        "show",
+        "lift",
+        "--part",
+        "frame",
+        "--fraction",
+        "1",
+    ]);
+    assert!(ws.wait_until(WAIT, |ws| z(ws) > rest + 0.029));
+    p.ok(&["motion", "show", "--off"]);
+    assert!(ws.wait_until(WAIT, |ws| z(ws) == rest && ws.model.exploded.is_none()));
+    // An explode shown takes the motion away, and the reverse.
+    p.ok(&[
+        "explode",
+        "save",
+        "frame",
+        "apart",
+        "--steps",
+        r#"[{"instances": ["b2"], "translate": [0, 0, 10]}]"#,
+    ]);
+    p.ok(&[
+        "motion",
+        "show",
+        "lift",
+        "--part",
+        "frame",
+        "--fraction",
+        "1",
+    ]);
+    assert!(ws.wait_until(WAIT, |ws| z(ws) > rest + 0.029));
+    p.ok(&["explode", "show", "apart"]);
+    assert!(ws.wait_until(WAIT, |ws| (z(ws) - rest - 0.01).abs() < 1e-9));
+    assert!(ws.motions.shown.is_none());
+    // Edited from the window: the motion's range written.
+    p.ok(&["motion", "show", "lift", "--part", "frame"]);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.motions.current("frame").is_some()));
+    ws.motions.editing = Some((
+        "lift".into(),
+        vec![ryucad_app::core::motion::Range {
+            drive: 0,
+            key: "translate",
+            from: "0 mm".into(),
+            to: "50 mm".into(),
+        }],
+        "6".into(),
+    ));
+    ws.save_motion();
+    let file = p.root.join("parts/frame/motions/lift.json");
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && std::fs::read_to_string(&file).unwrap().contains("50 mm")));
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(written["steps"], 6, "{written}");
+}
+
+#[test]
+fn a_sweep_from_the_window_marks_and_lists_what_collides() {
+    let p = with_motions();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("frame").is_some()));
+    p.ok(&["motion", "show", "slam", "--part", "frame"]);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.motions.frames_current()));
+    ws.sweep_motion();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.motions.sweep.as_ref().is_some_and(|w| w.loaded)));
+    let w = ws.motions.sweep.clone().unwrap();
+    assert!(w.error.is_none(), "{w:?}");
+    assert_eq!(w.pairs.len(), 1, "{w:?}");
+    assert_eq!(w.pairs[0].label("frame"), "b1/shank and b2/shank");
+    // Shanks of radius 3 mm meet when b2 has moved 34 mm of 40.
+    assert!((w.pairs[0].t - 0.85).abs() < 0.01, "{}", w.pairs[0].t);
+    assert!(
+        w.marks()
+            .iter()
+            .any(|m| matches!(m, ryucad_app::core::motion::Mark::Contact(_)))
+    );
+    // At the contact the faces are painted; at the start they aren't.
+    ws.jump_motion(1.0);
+    assert!(
+        !ws.motions
+            .collision_faces(std::time::Instant::now())
+            .is_empty()
+    );
+    ws.jump_motion(0.0);
+    assert!(
+        ws.motions
+            .collision_faces(std::time::Instant::now())
+            .is_empty()
+    );
+    // A change to the assembly makes it stale: listed, painted no more.
+    p.ok(&["assembly", "move", "frame", "b2", "--translate", "0,10,0"]);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.motions.sweep.as_ref().is_some_and(|w| w.stale)
+    }));
+    ws.jump_motion(1.0);
+    assert!(
+        ws.motions
+            .collision_faces(std::time::Instant::now())
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_mate_says_its_value_and_its_limits_are_edited_in_the_form() {
+    let p = mated();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.part("frame").is_some_and(|f| f.feature("m1").is_some())));
+    let m1 = |ws: &Workspace| {
+        ws.part("frame")
+            .unwrap()
+            .feature("m1")
+            .unwrap()
+            .mate
+            .clone()
+            .unwrap()
+    };
+    assert!(
+        m1(&ws).value.as_deref().is_some_and(|v| v.ends_with('°')),
+        "{:?}",
+        m1(&ws)
+    );
+    assert_eq!(m1(&ws).limits, Default::default());
+    ws.open_form(Some(key("frame", "m1")));
+    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    let f = ws.form.as_mut().unwrap().mate.as_mut().unwrap();
+    f.limits[0].text = "-10 deg".into();
+    f.limits[1].text = "35 deg".into();
+    ws.save_form();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+    }));
+    let shown = p.ok(&["feature", "show", "frame", "m1"]);
+    assert_eq!(shown["limits"]["angle"]["min"], "-10 deg", "{shown}");
+    assert_eq!(shown["limits"]["angle"]["max"], "35 deg", "{shown}");
+    // The report's limits reach the window, for its arcs.
+    assert!(ws.wait_until(WAIT, |ws| m1(ws).limits.angle.is_some()));
+    let (lo, hi) = m1(&ws).limits.angle.unwrap();
+    assert!((lo.unwrap() + 10f64.to_radians()).abs() < 1e-12);
+    assert!((hi.unwrap() - 35f64.to_radians()).abs() < 1e-12);
+}
