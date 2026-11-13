@@ -23,6 +23,7 @@ pub mod flat;
 pub mod focus;
 pub mod geometry;
 pub mod gizmo;
+pub mod inserts;
 pub mod interference;
 pub mod keymap;
 pub mod keys;

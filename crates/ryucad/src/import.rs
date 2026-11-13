@@ -280,6 +280,11 @@ pub fn written(i: &Import) -> Value {
     if i.mode() == crate::doc::import::Mode::Reference {
         v["mode"] = json!("reference");
     }
+    // A flattened body (its file writes where the assembly put it): the
+    // window lists a file's flattened bodies under one row (ryucad 25.B).
+    if i.place.is_some() {
+        v["flattened"] = json!(true);
+    }
     v
 }
 

@@ -123,6 +123,10 @@ phosphor! {
     LINE_SEGMENT = "line-segment" '\u{e6d2}',
     DOT_OUTLINE = "dot-outline" '\u{ece0}',
     SQUARE_SPLIT_HORIZONTAL = "square-split-horizontal" '\u{e870}',
+    // Inserts and deletes (design 521).
+    ARROW_SQUARE_IN = "arrow-square-in" '\u{e5dc}',
+    TRASH = "trash" '\u{e4a6}',
+    FILES = "files" '\u{e710}',
 }
 
 impl Icon {

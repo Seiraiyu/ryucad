@@ -485,6 +485,7 @@ pub(crate) fn dispatch(
             mates,
         } => assembly::assembly_solve(session, part, moves, component, rev, mates),
         Request::FeatureShow { part, id, rev } => feature::feature_show(session, part, id, rev),
+        Request::FeatureTypes { ty } => crate::feature::types(ty.as_deref()),
         Request::MergeStatus {} => crate::validate::status(session),
         Request::MergePreview { rev } => crate::validate::preview(session, &rev),
         Request::WorktreeList {} => crate::worktree::list(session, live.as_deref()),
@@ -903,7 +904,10 @@ pub(crate) fn dispatch(
             transfer: _,
             rev,
             flat: Some(solid),
-        } => view::mesh_get_flat(session, part, feature, features, quality, rev, solid),
+            before,
+        } => view::before_alone(before.as_deref(), true, &features).and_then(|()| {
+            view::mesh_get_flat(session, part, feature, features, quality, rev, solid)
+        }),
         Request::MeshGet {
             part,
             feature,
@@ -912,7 +916,8 @@ pub(crate) fn dispatch(
             transfer: _,
             rev,
             flat: None,
-        } => view::mesh_get_request(session, part, feature, features, quality, rev),
+            before,
+        } => view::mesh_get_request(session, part, feature, features, quality, rev, before),
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
