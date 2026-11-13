@@ -871,7 +871,17 @@ pub fn check(
     if let Some(x) = f.instance_pattern() {
         pattern_values(id, x)?;
     }
-    let r = session.rebuilt(part)?.clone();
+    // A following pattern reads the places of the parts the assembly
+    // places, which key its rebuild only once it has one: check it in the
+    // assembly as it will be, so those places are current.
+    let r = match f.instance_pattern() {
+        Some(x) if x.form.driven() => {
+            let mut q = p.clone();
+            q.features.insert(id.clone(), Ok(f.clone()));
+            session.rebuilt_as(q)?
+        }
+        _ => session.rebuilt(part)?.clone(),
+    };
     let scope = Rebuilt(&r);
     let mut on = Vec::new();
     for (role, c) in f.connectors() {
