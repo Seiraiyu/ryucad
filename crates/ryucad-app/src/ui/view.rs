@@ -1196,6 +1196,12 @@ impl View {
             }
             names.push(((*name).to_owned(), f.origin));
         }
+        // Its stops: an arc or a bar from min to max on a's frame.
+        if let Some(limits) = self.chosen.as_ref().and_then(|k| ws.model.mate_limits(k)) {
+            for l in crate::core::model::limit_lines(&frames, &limits, length) {
+                lines.push((Place::Edge(l), style::CHOSEN));
+            }
+        }
         (lines, names)
     }
 
