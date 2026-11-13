@@ -53,7 +53,7 @@ fn merging(root: &Path) -> Result<(Repo, MergeState)> {
 
 /// The project's own files: never an alias's (`../…`), which this
 /// project's merge doesn't hold.
-pub(crate) fn own(files: &Files) -> Files {
+pub fn own(files: &Files) -> Files {
     files
         .iter()
         .filter(|(p, _)| !p.starts_with("../"))

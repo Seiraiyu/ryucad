@@ -43,13 +43,13 @@ pub const TEXTCONV: &str = "diff.ryueda.textconv";
 pub const MERGE_NAME: &str = "merge.ryueda.name";
 pub const MERGE_DRIVER: &str = "merge.ryueda.driver";
 
-/// What ryueda registers with Git: textconv and its merge driver, and
-/// from Task 12 its hook line.
+/// What ryueda registers with Git: textconv, its merge driver, and its
+/// line in the clone's shared hook.
 pub const DRIVERS: ryu_git::drivers::Drivers = ryu_git::drivers::Drivers {
     product: "ryueda",
     textconv: TEXTCONV,
     merge: Some((MERGE_NAME, MERGE_DRIVER)),
-    hook: false,
+    hook: true,
 };
 
 /// The lines `text` doesn't have.

@@ -195,12 +195,33 @@ fn init_in_a_repository_sets_the_clone_up_and_install_is_idempotent() {
         config.contains("' git merge-driver %O %A %B %P") && config.contains("[merge \"ryueda\"]"),
         "{config}"
     );
+    let hook = std::fs::read_to_string(top.join(".git/hooks/pre-merge-commit")).unwrap();
     assert!(
-        !top.join(".git/hooks/pre-merge-commit").exists(),
-        "no hook line before plan 4.C"
+        hook.contains("# ryueda") && hook.contains("' merge status --hook"),
+        "{hook}"
     );
+    // Installed again: nothing to write.
     let (code, v) = ryueda(&top.join("board"), &run, false, &["git", "install"]);
-    assert_eq!((code, &v["result"]["hooks"]), (0, &json!({})), "{v}");
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(
+        std::fs::read_to_string(top.join(".git/hooks/pre-merge-commit")).unwrap(),
+        hook
+    );
+    // Outside a merge the hook's check passes at once.
+    let out = ryueda_cmd(
+        &top.join("board"),
+        &run,
+        false,
+        &["merge", "status", "--hook"],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let (code, v) = ryueda(
         &top.join("board"),
         &run,
