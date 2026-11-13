@@ -7,8 +7,9 @@ each file: what OpenUSD (usd-core) opens, the SHA-256 of its root layer as
 OpenUSD writes it as text (so usda, usdc and usdz of one stage compare),
 what usd-brep's BrepArray validator says (the schema rules alone), for a
 usdz what OpenUSD's package validators say, and for a usda what SMLib
-imports: each brep's volume and whether it is a manifold solid (a usdc or
-usdz of the same layer imports the same). Run with the Python the
+imports: each brep's volume and whether it is a manifold solid (and its
+area and faces, a sheet's measures; a usdc or usdz of the same layer
+imports the same). Run with the Python the
 devcontainer installs: /opt/usd/bin/python reference.py manifest.json
 """
 
@@ -88,6 +89,27 @@ def imported(path):
     return json.loads(out.stdout)
 
 
+def area(b):
+    """A brep's area by SMLib (a sheet's measure), or None where this
+    usd-brep has no way to ask."""
+    try:
+        return b.area(1e-6)
+    except AttributeError:
+        pass
+    try:
+        return sum(usd_brep.face_area(f, 1e-6) for f in usd_brep.get_faces_via_api(b))
+    except AttributeError:
+        return None
+
+
+def faces(b):
+    """A brep's faces counted, or None where this usd-brep can't list them."""
+    try:
+        return len(usd_brep.get_faces_via_api(b))
+    except AttributeError:
+        return None
+
+
 def imported_here(path):
     try:
         breps = usd_brep.usd.import_breps(path)
@@ -97,7 +119,7 @@ def imported_here(path):
     for b in breps:
         manifold = bool(usd_brep.is_manifold_solid(b))
         volume = usd_brep.compute_volume(b, 1e-6) if manifold else None
-        out.append({"manifold": manifold, "volume": volume})
+        out.append({"manifold": manifold, "volume": volume, "area": area(b), "faces": faces(b)})
     return {"breps": out}
 
 

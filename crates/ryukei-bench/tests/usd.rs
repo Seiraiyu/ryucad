@@ -1,7 +1,8 @@
 //! USD against its references (design 193, plans 8.B and 8.C): every
 //! stage ryuformats writes opened by OpenUSD (PyPI's usd-core), its
 //! BrepArrays passing usd-brep's validator and imported into SMLib as
-//! manifold solids of the volume ryukei measures; its usdc and usdz read
+//! manifold solids of the volume ryukei measures, and sheets of the area
+//! it measures; its usdc and usdz read
 //! by OpenUSD to the same layer as its usda, the usdz passing OpenUSD's
 //! package checks; and ryucad's exports the same, an assembly's
 //! instances seen as instances. Devcontainer only:
@@ -89,6 +90,114 @@ fn judge(r: &Value, volumes: &[(f64, f64)]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// What a brep must import as: a manifold solid of a volume with its
+/// bound, or a sheet of an area with its bound and a count of faces (an
+/// open one never a manifold solid), in `unit`.
+#[derive(Clone, Copy, Debug)]
+enum Expect {
+    Solid(f64, f64),
+    Sheet {
+        area: f64,
+        bound: f64,
+        faces: usize,
+        closed: bool,
+    },
+}
+
+/// What `b` must import as, in `unit`.
+fn expect(b: &Body, unit: Unit) -> Expect {
+    let k = unit.per_meter();
+    match properties(b, Entity::Body).unwrap() {
+        Properties::Body { volume, .. } => {
+            Expect::Solid(volume.value() * k * k * k, volume.bound() * k * k * k)
+        }
+        Properties::Sheet { area } => Expect::Sheet {
+            area: area.value() * k * k,
+            bound: area.bound() * k * k,
+            faces: b.faces().count(),
+            closed: ryucad::kind::boundaries(b) == 0,
+        },
+        p => panic!("{p:?}"),
+    }
+}
+
+/// [`judge`] for breps of either kind: opened, valid and imported, each
+/// brep as `want` says (SMLib's area to a millionth, where it can say).
+fn judge_kinds(r: &Value, want: &[Expect]) -> Result<(), String> {
+    let bad = |why: &str| Err(format!("{}: {why}: {r}", r["path"]));
+    if r["opened"] != true || r["flattened"] != true {
+        return bad("OpenUSD didn't open it");
+    }
+    if r["valid"] != true {
+        return bad("usd-brep's validator refused it");
+    }
+    let Some(breps) = r["breps"].as_array() else {
+        return bad("SMLib didn't import it");
+    };
+    if breps.len() != want.len() {
+        return bad(&format!("{} breps against {}", breps.len(), want.len()));
+    }
+    for (b, w) in breps.iter().zip(want) {
+        match *w {
+            Expect::Solid(v, bound) => {
+                if b["manifold"] != true {
+                    return bad("a solid isn't a manifold solid");
+                }
+                let got = b["volume"].as_f64().unwrap_or(f64::NAN);
+                if (got - v).abs() > bound + 1e-6 * v.abs() {
+                    return bad(&format!("volume {got} against {v} ± {bound}"));
+                }
+            }
+            Expect::Sheet {
+                area,
+                bound,
+                faces,
+                closed,
+            } => {
+                if !closed && b["manifold"] != false {
+                    return bad("an open sheet imported as a manifold solid");
+                }
+                if let Some(got) = b["area"].as_f64()
+                    && (got - area).abs() > bound + 1e-6 * area.abs()
+                {
+                    return bad(&format!("area {got} against {area} ± {bound}"));
+                }
+                if let Some(n) = b["faces"].as_u64()
+                    && n as usize != faces
+                {
+                    return bad(&format!("{n} faces against {faces}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A block's faces but its top, each extracted as a sheet and sewn back:
+/// an open box of five faces, its rim four laminar edges.
+fn sewn_open_box() -> Body {
+    use ryukei::heal::{SewOptions, sew};
+    use ryukei::name::{FaceRole, Name, OpKey, Role};
+    use ryukei::sheet::extract;
+    let k = OpKey(1);
+    let (block, _) =
+        ryukei::primitive::block(k, 0.01, 0.02, 0.03, &ryukei::geom::Rigid::IDENTITY).unwrap();
+    let top = Name::derive(k, Role::Face(FaceRole::PlusZ), &[]);
+    let sheets: Vec<Body> = block
+        .faces()
+        .map(|f| block.face(f).unwrap().name)
+        .filter(|&n| n != top)
+        .map(|n| extract(OpKey(2), &block, &[n]).unwrap().0)
+        .collect();
+    let options = SewOptions {
+        tolerance: 1e-6,
+        solid: false,
+    };
+    let (mut pieces, _) = sew(OpKey(3), &sheets, &options).unwrap();
+    assert_eq!(pieces.len(), 1);
+    pieces.remove(0)
 }
 
 /// The references' verdict on a usdc or usdz: opened and valid, the same
@@ -412,12 +521,15 @@ fn the_references_read_what_ryucad_exports() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
-/// A part `skin` of a 10 x 10 mm planar sheet and a 5 mm box beside it,
-/// exported as usda: OpenUSD opens and flattens it, usd-brep's validator
-/// passes it, SMLib imports its one BrepArray (the box's: a sheet is
-/// written as its mesh alone, issue #624), and it holds both meshes.
+/// Sheets as their BrepArrays (#624): a planar square beside a box, an
+/// extruded arc, a dome and CTC 04's surface model, each exported by
+/// ryucad as usda; and a sewn open box and a whole ball written by the
+/// stage in all three encodings. Each opened, valid by usd-brep's
+/// validator, and imported by SMLib: each solid of its volume, each sheet
+/// of the area ryukei measures, an open one never a manifold solid.
 #[test]
-fn a_sheet_reads_through_openusd_as_its_mesh() {
+fn sheets_read_through_openusd_as_breparrays() {
+    use core::f64::consts::{FRAC_PI_2, TAU};
     use ryucad::doc::assembly::Rev;
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -426,16 +538,27 @@ fn a_sheet_reads_through_openusd_as_its_mesh() {
         let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
         ryucad::server::handle(s, req).unwrap_or_else(|e| panic!("{m}: {e}"))
     };
-    call(&mut s, "part.create", json!({"part": "skin"}));
-    call(
+    let sketch = |s: &mut ryucad::session::Session, part: &str, plane: &str, ops: Value| {
+        call(
+            s,
+            "feature.add",
+            json!({"part": part, "type": "sketch", "id": "s", "plane": plane}),
+        );
+        call(
+            s,
+            "sketch.edit",
+            json!({"part": part, "sketch": "s", "ops": ops}),
+        );
+    };
+    for part in ["skin", "wall", "dome"] {
+        call(&mut s, "part.create", json!({"part": part}));
+    }
+    // A 10 mm planar square beside a 5 mm box.
+    sketch(
         &mut s,
-        "feature.add",
-        json!({"part": "skin", "type": "sketch", "id": "s", "plane": "xy"}),
-    );
-    call(
-        &mut s,
-        "sketch.edit",
-        json!({"part": "skin", "sketch": "s", "ops": [
+        "skin",
+        "xy",
+        json!([
             {"op": "add", "id": "p1", "type": "point", "at": [0, 0]},
             {"op": "add", "id": "p2", "type": "point", "at": [10, 0]},
             {"op": "add", "id": "p3", "type": "point", "at": [10, 10]},
@@ -443,7 +566,7 @@ fn a_sheet_reads_through_openusd_as_its_mesh() {
             {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
             {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
             {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
-            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]}),
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]),
     );
     call(
         &mut s,
@@ -456,27 +579,141 @@ fn a_sheet_reads_through_openusd_as_its_mesh() {
         json!({"part": "skin", "type": "box", "id": "b", "params": {"x": 5, "y": 5, "z": 5},
                "placement": {"origin": [20, 0, 0]}}),
     );
-    let out = dir.path().join("skin.usda");
-    let params = json!({"part": "skin", "out": out, "time_stamp": "2026-11-09T00:00:00"});
-    let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
-    ryucad::server::answer_live(&mut s, None, None, req).unwrap();
-    let id = ryucad::doc::id::Id::parse("skin", "part").unwrap();
-    let boxes: Vec<(f64, f64)> = s
-        .model(&id, &Rev::Working)
-        .unwrap()
-        .occurrences
-        .iter()
-        .flat_map(|o| &o.solids)
-        .filter(|sd| sd.built.body.kind() == ryukei::topo::BodyKind::Solid)
-        .map(|sd| exact(&sd.built.body, Unit::Millimeter))
-        .collect();
-    let report = reference(dir.path(), &[out]);
-    let r = &report[0];
-    println!("skin: {r}");
-    judge(r, &boxes).unwrap();
-    assert_eq!(
-        (&r["breparrays"], &r["meshes"]),
-        (&json!(1), &json!(2)),
-        "{r}"
+    // A quarter of a 10 mm circle extruded 20 mm.
+    sketch(
+        &mut s,
+        "wall",
+        "xy",
+        json!([
+            {"op": "add", "id": "o", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "p", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "q", "type": "point", "at": [0, 10]},
+            {"op": "add", "id": "a1", "type": "arc", "center": "o", "start": "p", "end": "q"}]),
     );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "wall", "type": "extrude", "id": "w", "sketch": "s", "surface": true,
+               "extent": {"type": "blind", "length": "20 mm"}}),
+    );
+    // A quarter circle revolved a whole turn: a 10 mm hemisphere.
+    sketch(
+        &mut s,
+        "dome",
+        "zx",
+        json!([
+            {"op": "add", "id": "o", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "p", "type": "point", "at": [0, 10]},
+            {"op": "add", "id": "q", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "a1", "type": "arc", "center": "o", "start": "q", "end": "p"},
+            {"op": "add", "id": "ax", "type": "line", "start": "o", "end": "q", "construction": true}]),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "dome", "type": "revolve", "id": "d", "sketch": "s", "axis": "ax",
+               "angle": "full", "surface": true}),
+    );
+    // CTC 04: a surface model beside its solid.
+    let ctc = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ryustep/tests/corpus/nist_ctc_04_asme1_rd.stp");
+    let v = call(&mut s, "import", json!({"path": ctc, "solid": true}));
+    let mut parts: Vec<String> = vec!["skin".into(), "wall".into(), "dome".into()];
+    parts.extend(
+        v["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["part"].as_str().unwrap().to_owned()),
+    );
+    let (mut files, mut wants, mut sheets) = (Vec::new(), Vec::new(), 0);
+    for part in &parts {
+        let out = dir.path().join(format!("{part}.usda"));
+        let params = json!({"part": part, "out": out, "time_stamp": "2026-11-12T00:00:00"});
+        let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+        let a = ryucad::server::answer_live(&mut s, None, None, req).unwrap();
+        assert!(
+            a.result["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|w| w["code"] != "export_sheet_brep_skipped"),
+            "{part}: {}",
+            a.result
+        );
+        let id = ryucad::doc::id::Id::parse(part, "part").unwrap();
+        let want: Vec<Expect> = s
+            .model(&id, &Rev::Working)
+            .unwrap()
+            .occurrences
+            .iter()
+            .flat_map(|o| &o.solids)
+            .map(|sd| expect(&sd.built.body, Unit::Millimeter))
+            .collect();
+        sheets += want
+            .iter()
+            .filter(|w| matches!(w, Expect::Sheet { .. }))
+            .count();
+        files.push(out);
+        wants.push(want);
+    }
+    // The square, the wall, the dome and CTC 04's surface model at least.
+    assert!(sheets >= 4, "{sheets} sheets");
+    let report = reference(dir.path(), &files);
+    let mut wrong: Vec<String> = report
+        .iter()
+        .zip(&wants)
+        .filter_map(|(r, w)| judge_kinds(r, w).err())
+        .collect();
+    // Written by the stage alone: a sewn open box and a whole ball, a
+    // closed sheet with no edges of its own (its seams and poles are the
+    // writer's), in usda, usdc and usdz.
+    let ball = ryukei::geom::Surface::Sphere(
+        ryukei::geom::Sphere::new(ryukei::geom::Frame::WORLD, 0.01).unwrap(),
+    );
+    let globe = ryukei::sheet::from_surface(
+        ryukei::name::OpKey(4),
+        &ball,
+        [[0.0, TAU], [-FRAC_PI_2, FRAC_PI_2]],
+    )
+    .unwrap()
+    .0;
+    let opts = Options {
+        unit: Unit::Millimeter,
+        brep: true,
+        mesh: true,
+        pipe_tolerance: 1e-7,
+        layer_data: vec![],
+    };
+    let (mut files, mut wants) = (Vec::new(), Vec::new());
+    for (k, b) in [sewn_open_box(), globe].into_iter().enumerate() {
+        let model = Model {
+            products: vec![Product {
+                id: format!("S-{k}"),
+                name: format!("Sheet {k}"),
+                part: format!("s{k}"),
+                label: None,
+                solids: vec![Solid {
+                    name: "s".into(),
+                    mesh: meshed(&b),
+                    body: Arc::new(b.clone()),
+                    brep: true,
+                }],
+                children: vec![],
+            }],
+        };
+        let l = layer(&model, &opts).unwrap_or_else(|e| panic!("sheet {k}: {e}"));
+        files.extend(write_all(dir.path(), &format!("s{k}"), &l));
+        wants.push(vec![expect(&b, Unit::Millimeter)]);
+    }
+    let report = reference(dir.path(), &files);
+    for (r, w) in report.chunks(3).zip(&wants) {
+        wrong.extend(judge_kinds(&r[0], w).err());
+        wrong.extend(judge_binary(&r[1], &r[0]).err());
+        wrong.extend(judge_binary(&r[2], &r[0]).err());
+    }
+    for r in &report {
+        println!("sheet: {r}");
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }

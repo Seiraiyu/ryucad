@@ -159,6 +159,74 @@ fn holes_cavities_and_lumps() {
     assert_eq!(s.shells, 4);
 }
 
+/// The block `10 × 20 × 30` mm with its top killed: an open box, a sheet
+/// of five faces whose rim is four laminar edges (as ryukei's
+/// `tests/sheets.rs` makes one).
+fn open_box() -> Body {
+    use ryukei::euler::{kfl, mvsr};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::topo::{BodyKind, EntityId};
+    let k = OpKey(1);
+    let (mut b, _) = primitive::block(k, 0.01, 0.02, 0.03, &Rigid::IDENTITY).unwrap();
+    let s = b.shells().next().unwrap();
+    mvsr(&mut b, s).unwrap();
+    let Some(EntityId::Face(top)) = b.by_name(Name::derive(k, Role::Face(FaceRole::PlusZ), &[]))
+    else {
+        panic!("the top");
+    };
+    kfl(&mut b, top).unwrap();
+    assert_eq!(b.kind(), BodyKind::Sheet);
+    b
+}
+
+/// Sheets (#624): one void region holding a shell per sheet with both
+/// faceuses of each of its faces, a laminar edge's one edgeuse its own
+/// next round the edge; seams and poles as a solid's.
+#[test]
+fn sheets_as_breparrays() {
+    use core::f64::consts::{FRAC_PI_2, TAU};
+    use ryukei::geom::{Cylinder, Frame, Plane, Sphere, Surface};
+    use ryukei::sheet::{from_surface, remove};
+    let k = OpKey(1);
+    let plane = Surface::Plane(Plane::new(Frame::WORLD));
+    let wall = Surface::Cylinder(Cylinder::new(Frame::WORLD, 0.01).unwrap());
+    let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 0.01).unwrap());
+    let bounded = |s: &Surface, rect: [[f64; 2]; 2]| from_surface(k, s, rect).unwrap().0;
+    let block = primitive::block(k, 0.01, 0.02, 0.03, &tilted()).unwrap().0;
+    // Each sheet, its faces and its laminar edges.
+    let cases: Vec<(&str, Body, usize, usize)> = vec![
+        ("square", bounded(&plane, [[0.0, 0.01], [0.0, 0.01]]), 1, 4),
+        (
+            "quarter wall",
+            bounded(&wall, [[0.0, FRAC_PI_2], [0.0, 0.02]]),
+            1,
+            4,
+        ),
+        ("band", bounded(&wall, [[0.0, TAU], [0.0, 0.02]]), 1, 2),
+        ("dome", bounded(&ball, [[0.0, TAU], [0.0, FRAC_PI_2]]), 1, 1),
+        (
+            "globe",
+            bounded(&ball, [[0.0, TAU], [-FRAC_PI_2, FRAC_PI_2]]),
+            1,
+            0,
+        ),
+        ("open box", open_box(), 5, 4),
+        ("closed box", remove(k, &block, &[]).unwrap().0, 6, 0),
+    ];
+    for (what, b, faces, laminar) in cases {
+        assert_eq!(b.kind(), ryukei::topo::BodyKind::Sheet, "{what}");
+        for unit in [Unit::Millimeter, Unit::Meter] {
+            let s = sound(&b, unit);
+            assert_eq!(s.regions, ["voidRegion"], "{what}");
+            assert_eq!(
+                (s.shells, s.faces, s.laminar),
+                (1, faces, laminar),
+                "{what}"
+            );
+        }
+    }
+}
+
 #[test]
 fn nurbs_bodies_as_breparrays() {
     let k = OpKey(1);
