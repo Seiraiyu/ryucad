@@ -1017,4 +1017,23 @@ mod tests {
             json!({"count": 1, "uom": "l", "value": 0.005, "text": "0.005 l"})
         );
     }
+
+    /// ryucad 27.E's fetch rule, as main had it: a fetch lets go of what
+    /// was read of other projects and keeps the project's own structure.
+    #[test]
+    fn a_fetch_lets_go_of_what_was_read_of_other_projects() {
+        let (lib_dir, lib) = crate::deps::tests::library();
+        let dir = product(lib_dir.path(), &lib);
+        let mut s = Session::open(dir.path()).unwrap();
+        s.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        call(&mut s, "bom.get", json!({"part": "asm"})).unwrap();
+        let own = |s: &Session| s.structure.keys().filter(|(p, _, _)| p.is_none()).count();
+        let (ours, all) = (own(&s), s.structure.len());
+        // Main reads the project's own parts from its files here, so only
+        // what was read of the other project is kept: the fetch lets it go
+        // and keeps every own entry there is.
+        assert!(all > ours, "read the other project: {ours} of {all}");
+        s.deps_fetched();
+        assert_eq!((own(&s), s.structure.len()), (ours, ours));
+    }
 }

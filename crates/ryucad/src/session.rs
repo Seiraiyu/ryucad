@@ -2756,4 +2756,140 @@ mod tests {
         fs::remove_file(dir.path().join(MANIFEST)).unwrap();
         assert!(s.refresh().is_err());
     }
+
+    /// The rules ryucad 27.E moves into `Caches`, as main had them: a
+    /// change of files, a new budget and a trim let nothing that is kept
+    /// by content go (only the store's rebuilds), and a session over other
+    /// files starts from its owner's verdicts with meshes of its own.
+    mod cache_rules {
+        use super::*;
+        use crate::config::tests::with_config;
+        use crate::testing::{call, with_part};
+        use serde_json::json;
+
+        /// Part `p` with spheres `a` and `b`, both meshed.
+        fn two_spheres() -> (tempfile::TempDir, Session) {
+            let (dir, mut s) = with_part();
+            for (id, r) in [("a", 1), ("b", 2)] {
+                call(
+                    &mut s,
+                    "feature.add",
+                    json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+                )
+                .unwrap();
+            }
+            call(
+                &mut s,
+                "mesh.get",
+                json!({"part": "p", "quality": "coarse"}),
+            )
+            .unwrap();
+            (dir, s)
+        }
+
+        fn p() -> Id {
+            crate::part::part_id("p").unwrap()
+        }
+
+        #[test]
+        fn a_change_of_files_keeps_what_is_kept_by_content() {
+            with_config(|_| {
+                let (dir, mut s) = two_spheres();
+                assert_eq!(s.meshes.len(), 2);
+                let epoch = s.epoch();
+                // Behind the session's back, as an editor writes.
+                let mut other = Session::open(dir.path()).unwrap();
+                call(
+                    &mut other,
+                    "feature.edit",
+                    json!({"part": "p", "id": "a", "params": {"radius": 3}}),
+                )
+                .unwrap();
+                assert!(s.refresh().unwrap());
+                assert!(s.epoch() > epoch);
+                assert_eq!(s.meshes.len(), 2, "a change of files let a mesh go");
+                assert!(s.cached(&p()).is_none(), "the stale rebuild stayed");
+            });
+        }
+
+        #[test]
+        fn a_new_budget_keeps_what_is_kept_by_content() {
+            with_config(|_| {
+                let (_dir, mut s) = two_spheres();
+                assert!(s.cached(&p()).is_some());
+                s.set_heal_budget(s.heal_budget + 1);
+                assert_eq!(s.meshes.len(), 2, "a new budget let a mesh go");
+                assert!(s.cached(&p()).is_none(), "the rebuild stayed");
+            });
+        }
+
+        #[test]
+        fn a_trim_keeps_what_is_kept_by_content() {
+            with_config(|_| {
+                let (_dir, s) = with_part();
+                let mut s = s.with_budget(1);
+                for (id, r) in [("a", 1), ("b", 2)] {
+                    call(
+                        &mut s,
+                        "feature.add",
+                        json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+                    )
+                    .unwrap();
+                }
+                call(
+                    &mut s,
+                    "mesh.get",
+                    json!({"part": "p", "quality": "coarse"}),
+                )
+                .unwrap();
+                let meshes = s.meshes.len();
+                assert!(meshes > 0);
+                s.trim();
+                assert_eq!(s.meshes.len(), meshes, "a trim let a mesh go");
+                assert!(s.cached(&p()).is_none(), "the trim kept the rebuild");
+            });
+        }
+
+        #[test]
+        fn a_session_over_other_files_starts_from_its_owners_verdicts() {
+            with_config(|_| {
+                let (_dir, mut s) = two_spheres();
+                call(&mut s, "blends.get", json!({"part": "p", "solid": "a"})).unwrap();
+                let blends = s.blends.len();
+                assert!(blends > 0);
+                let r = s.over(s.snapshot()).unwrap();
+                assert_eq!(r.blends.len(), blends, "the verdicts weren't shared");
+                assert_eq!(r.meshes.len(), 0, "a revision meshes afresh");
+                assert!(r.merge_status.is_none() && r.previews.is_empty());
+            });
+        }
+    }
+
+    /// The lines of `src`'s struct at `head` that show a field.
+    fn shown_fields<'a>(file: &str, src: &'a str, head: &str) -> Vec<&'a str> {
+        let start = src.find(head).unwrap_or_else(|| panic!("{file}: no{head}"));
+        let body = &src[start..];
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("a struct ends at a column-0 brace")];
+        body.lines()
+            .filter(|l| l.starts_with("    pub"))
+            .map(str::trim)
+            .collect()
+    }
+
+    /// `Session` shows no field (ryucad 27.E): other modules reach what
+    /// they mean to through its methods.
+    #[test]
+    fn the_session_and_its_caches_show_no_field() {
+        let shown = shown_fields(
+            "session.rs",
+            include_str!("session.rs"),
+            "\npub struct Session {",
+        );
+        assert!(
+            shown.is_empty(),
+            "session.rs: fields other modules reach: {shown:?}"
+        );
+    }
 }
