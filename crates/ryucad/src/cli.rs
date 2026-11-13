@@ -1389,9 +1389,11 @@ enum FeatureCmd {
     /// a sheet; a sew (--sheet, repeated, --tolerance, --no-solid) of
     /// sheets into one body; a thicken (--sheet, or --face repeated;
     /// --front, --back, --face-sides, --operation and --target) of a sheet
-    /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
-    /// countersink, --bottom; or --spec, --thread with --pitch, --tpi, --class,
-    /// --left-hand, --starts, --thread-depth and --tap-drill, --fastener with
+    /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore,
+    /// countersink, counterdrill or spotface, --bottom, --near-diameter and
+    /// --near-angle, a far side --far-countersink-* or --far-counterbore-*;
+    /// or --spec, --thread with --pitch, --tpi, --class,
+    /// --left-hand, --starts, --thread-depth, --tap-drill and --thread-wall, --fastener with
     /// --fastener-fit, --fit) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -3103,11 +3105,48 @@ struct FieldArgs {
     /// A countersink's included angle: 90, "82 deg".
     #[arg(long, value_name = "ANGLE")]
     countersink_angle: Option<String>,
-    /// A hole's depth: a length (blind, to the drill point's shoulder), through_all, or
+    /// A counterdrill's diameter, depth and floor angle (118 when left out).
+    #[arg(long, value_name = "QUANTITY")]
+    counterdrill_diameter: Option<String>,
+    #[arg(long, value_name = "QUANTITY")]
+    counterdrill_depth: Option<String>,
+    #[arg(long, value_name = "ANGLE")]
+    counterdrill_angle: Option<String>,
+    /// A spotface's diameter, and its depth below the mouth (0 when left out).
+    #[arg(long, value_name = "QUANTITY")]
+    spotface_diameter: Option<String>,
+    #[arg(long, value_name = "QUANTITY")]
+    spotface_depth: Option<String>,
+    /// A near chamfer (a tap's lead-in) at the top: its diameter and angle (90).
+    #[arg(long, value_name = "QUANTITY")]
+    near_diameter: Option<String>,
+    #[arg(long, value_name = "ANGLE")]
+    near_angle: Option<String>,
+    /// Takes the near chamfer away.
+    #[arg(long, conflicts_with_all = ["near_diameter", "near_angle"])]
+    no_near: bool,
+    /// A far countersink where the bore leaves: its diameter and angle.
+    #[arg(long, value_name = "QUANTITY")]
+    far_countersink_diameter: Option<String>,
+    #[arg(long, value_name = "ANGLE")]
+    far_countersink_angle: Option<String>,
+    /// A far counterbore where the bore leaves: its diameter and depth.
+    #[arg(long, value_name = "QUANTITY", conflicts_with_all = ["far_countersink_diameter", "far_countersink_angle"])]
+    far_counterbore_diameter: Option<String>,
+    #[arg(long, value_name = "QUANTITY", conflicts_with_all = ["far_countersink_diameter", "far_countersink_angle"])]
+    far_counterbore_depth: Option<String>,
+    /// Takes the far side away.
+    #[arg(long)]
+    no_far: bool,
+    /// A tapped pipe thread's wall: taper (1:16 from the project's gauge plane), or "" for straight.
+    #[arg(long, value_name = "taper")]
+    thread_wall: Option<String>,
+    /// A hole's depth: a length (blind, to the drill point's shoulder),
+    /// tip:LENGTH (to the drill point's tip), through_all, through_next, or
     /// up_to (--up-to, --offset).
     #[arg(long, value_name = "DEPTH")]
     depth: Option<String>,
-    /// A hole's bottom: flat (the default), or a drill point's included angle: 118.
+    /// A hole's bottom: flat (the default), ball, or a drill point's included angle: 118.
     #[arg(long, value_name = "BOTTOM")]
     bottom: Option<String>,
     /// A hole's spec: "M6x1.0-6H THRU", "1/4-20 UNC-2B .5 DEEP, DRILL .625 DEEP",
@@ -3773,15 +3812,20 @@ impl FieldArgs {
                 }
                 json!({ "up_to": up })
             }
-            d => json!({ "blind": d }),
+            "through_next" => json!("through_next"),
+            d => match d.strip_prefix("tip:") {
+                Some(t) => json!({ "tip": t }),
+                None => json!({ "blind": d }),
+            },
         });
-        let part = |a: (&str, &Option<String>), b: (&str, &Option<String>)| {
-            let m: Map<String, Value> = [a, b]
-                .into_iter()
-                .filter_map(|(k, v)| Some((k.to_owned(), json!(v.as_ref()?))))
+        let part3 = |pairs: &[(&str, &Option<String>)]| {
+            let m: Map<String, Value> = pairs
+                .iter()
+                .filter_map(|(k, v)| Some(((*k).to_owned(), json!(v.as_ref()?))))
                 .collect();
             (!m.is_empty()).then_some(Value::Object(m))
         };
+        let part = |a: (&str, &Option<String>), b: (&str, &Option<String>)| part3(&[a, b]);
         if let Some(b) = self.both {
             extent.insert("both".into(), json!(b));
         }
@@ -3907,15 +3951,42 @@ impl FieldArgs {
                 ("diameter", &self.countersink_diameter),
                 ("angle", &self.countersink_angle),
             ),
-            // The CLI's flags for these come with Task 14.
-            counterdrill: None,
-            spotface: None,
-            near: None,
-            far: None,
-            thread_wall: None,
+            counterdrill: part3(&[
+                ("diameter", &self.counterdrill_diameter),
+                ("depth", &self.counterdrill_depth),
+                ("angle", &self.counterdrill_angle),
+            ]),
+            spotface: part(
+                ("diameter", &self.spotface_diameter),
+                ("depth", &self.spotface_depth),
+            ),
+            near: if self.no_near {
+                Some(json!(""))
+            } else {
+                part(
+                    ("diameter", &self.near_diameter),
+                    ("angle", &self.near_angle),
+                )
+            },
+            far: if self.no_far {
+                Some(json!(""))
+            } else if let Some(c) = part(
+                ("diameter", &self.far_countersink_diameter),
+                ("angle", &self.far_countersink_angle),
+            ) {
+                Some(json!({ "countersink": c }))
+            } else {
+                part(
+                    ("diameter", &self.far_counterbore_diameter),
+                    ("depth", &self.far_counterbore_depth),
+                )
+                .map(|c| json!({ "counterbore": c }))
+            },
+            thread_wall: self.thread_wall.clone(),
             depth,
             bottom: self.bottom.as_deref().map(|b| match b {
                 "flat" => json!("flat"),
+                "ball" => json!("ball"),
                 b => json!({ "drill": b }),
             }),
             features: (!self.seeds.is_empty()).then(|| self.seeds.clone()),

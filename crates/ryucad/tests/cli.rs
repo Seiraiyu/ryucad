@@ -9536,3 +9536,81 @@ fn check_runs_interference_only_when_asked() {
         (&json!("frame/b1/shank"), &json!("frame/b2/shank"))
     );
 }
+
+#[test]
+fn hole_geometry_flags() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [5, 5]},
+        {"op": "add", "type": "fix", "a": "p1"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--point",
+        "p1",
+        "--diameter",
+        "2",
+        "--form",
+        "counterdrill",
+        "--counterdrill-diameter",
+        "4",
+        "--counterdrill-depth",
+        "1",
+        "--near-diameter",
+        "5",
+        "--depth",
+        "through_next",
+        "--far-counterbore-diameter",
+        "3",
+        "--far-counterbore-depth",
+        "0.5",
+    ]);
+    // add and edit answer with the hole's report.
+    assert_eq!(
+        v["feature"]["spec"],
+        "DIA 2 THRU NEXT, CDRILL 4 1 DEEP, NEAR 5, FAR CBORE 3 0.5 DEEP"
+    );
+    let v = p.ok(&[
+        "feature", "edit", "p", "h", "--depth", "tip:3", "--bottom", "118", "--no-far",
+    ]);
+    assert_eq!(v["feature"]["depth"]["tip"]["value"], "3 mm");
+    assert!(v["feature"].get("far").is_none());
+    p.ok(&[
+        "feature", "edit", "p", "h", "--depth", "2", "--bottom", "ball",
+    ]);
+    // show gives the file's own fields.
+    let v = p.ok(&["feature", "show", "p", "h"]);
+    assert_eq!(v["bottom"], "ball");
+    // Both far kinds at once is usage.
+    p.fails(
+        &[
+            "feature",
+            "edit",
+            "p",
+            "h",
+            "--far-countersink-diameter",
+            "3",
+            "--far-counterbore-diameter",
+            "3",
+        ],
+        "usage",
+        2,
+    );
+}
