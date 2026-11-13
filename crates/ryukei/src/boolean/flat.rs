@@ -35,6 +35,11 @@ use std::sync::Arc;
 /// flat spans worth splitting, which bounds the loop over a face's pieces.
 const MOST: usize = 8;
 
+/// The least `|n · m|` of the plane's and the spline's unit normals at a
+/// point of the flat piece for which the piece's sense is taken from the
+/// sign (see [`split_off`]).
+const SENSE_MARGIN: f64 = 0.5;
+
 /// A flat Bézier span of a NURBS surface beside a knot of full
 /// multiplicity: the direction, the knot, whether the span lies after it
 /// (at greater parameters), the span's far knot, its plane and the box of
@@ -321,10 +326,22 @@ pub(crate) fn split_off(
     } else {
         made.faces[0]
     };
-    // The plane facing the way the spline faced there.
+    // The plane facing the way the spline faced there. `uv` lies inside
+    // the flat span, whose control points are all within half the
+    // resolution of the plane, so the spline's normal there is the plane's
+    // or its reverse: `|dot|` is 1 less the tilt the net's flatness allows
+    // over the span (a few thousandths for the molex span, 1.8 µm long),
+    // nowhere near 0. The sign of a dot product past `SENSE_MARGIN` is
+    // certain under any rounding of two unit normals; anything nearer 0
+    // means the normal there isn't the span's (a degenerate point), and the
+    // split is withheld rather than the sense guessed.
     let pn = span.plane.frame()?.z().get();
     let sn = n.normal(uv.x, uv.y)?.get();
-    let sense = if pn.dot(sn) > 0.0 {
+    let dot = pn.dot(sn);
+    if dot.abs() < SENSE_MARGIN {
+        return None;
+    }
+    let sense = if dot > 0.0 {
         b.faces[flat].sense
     } else {
         b.faces[flat].sense.flipped()

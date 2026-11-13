@@ -417,3 +417,37 @@ fn a_valid_body_with_a_flat_span_comes_back_as_it_was() {
     );
     assert!(journal.is_empty());
 }
+
+/// #585's molex case in small: the prism's flat span runs on into a plane
+/// face of its own shell (`flat_span_tail_twin`), a pair the check never
+/// meets since they share only an edge, and a block stands through the
+/// curved part of the underside, so the check lists the spline face
+/// against the block's faces only. The span is split off against the face
+/// whose box meets it, though no listed partner is on its plane (without
+/// that rule no split is made here, and the union heals all the same; on
+/// Voron's molex body the self-union stopped `Uncertain` without it), and
+/// the result is the two solids' union, sound.
+#[test]
+fn a_flat_span_running_on_into_its_own_plane_face_is_split_off() {
+    let (prism, block) = ryukei_testkit::nurbs::flat_span_tail_twin();
+    assert_eq!(check(&prism), []);
+    let sh = one_solid(joined(&shape(&prism), &shape(&block)));
+    let (h, journal, _) = heal(OpKey(7), &sh, &HealOptions::default()).expect("healed");
+    let (u, journal) = if check_intersections(&h).is_empty() {
+        (h, journal)
+    } else {
+        self_union(OpKey(9), &h).expect("self-united")
+    };
+    sound(&u);
+    // The union holds the prism and some of the block, and no more than
+    // both.
+    let (lo, hi, got) = (volume(&prism), volume(&prism) + volume(&block), volume(&u));
+    assert!(lo < got && got < hi, "{got} not in ({lo}, {hi})");
+    assert!(
+        journal
+            .events()
+            .iter()
+            .any(|e| matches!(e, Event::Split { children, .. } if children.len() == 2)),
+        "{journal:?}"
+    );
+}

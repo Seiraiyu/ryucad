@@ -296,7 +296,47 @@ pub fn isoline_wedge(angle: f64) -> Body {
 /// the flat span lies on, facing it. Returns `(prism, block)`; only the
 /// prism's spline face is a spline.
 pub fn flat_span_twin() -> (Body, Body) {
-    use ryukei::geom::{Curve2, Frame, Line2, Rigid, Vector3};
+    use ryukei::geom::{Rigid, Vector3};
+    let mm = 1e-3;
+    let block = ryukei::primitive::block(
+        OpKey(0x586),
+        1.5 * mm,
+        2.0 * mm,
+        mm,
+        &Rigid::translation(Vector3::new(0.5 * mm, -1.5 * mm, -mm)),
+    )
+    .expect("the block")
+    .0;
+    (flat_span_prism(false), block)
+}
+
+/// [`flat_span_twin`]'s prism with its underside run on past the flat
+/// span as a plane face on z = 0 to x = 2 mm, the two sharing the edge at
+/// x = 1.3 mm, as Voron's molex face's flat span runs on into a plane face
+/// beside it (#585): a pair the check never meets, since the faces meet
+/// only along the edge they share. The second body is a 0.4 × 0.2 × 1 mm
+/// block standing through the curved part of the underside, so the check
+/// lists the spline face against the block's faces only. Returns
+/// `(prism, block)`.
+pub fn flat_span_tail_twin() -> (Body, Body) {
+    use ryukei::geom::{Rigid, Vector3};
+    let mm = 1e-3;
+    let block = ryukei::primitive::block(
+        OpKey(0x587),
+        0.4 * mm,
+        0.2 * mm,
+        mm,
+        &Rigid::translation(Vector3::new(0.2 * mm, -0.6 * mm, -0.5 * mm)),
+    )
+    .expect("the block")
+    .0;
+    (flat_span_prism(true), block)
+}
+
+/// The prism of [`flat_span_twin`] (`tail` false) or of
+/// [`flat_span_tail_twin`].
+fn flat_span_prism(tail: bool) -> Body {
+    use ryukei::geom::{Curve2, Frame, Line2, Vector3};
     use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
     let mm = 1e-3;
     // Profile x along world x, profile y along world z.
@@ -331,16 +371,24 @@ pub fn flat_span_twin() -> (Body, Body) {
         t0: 0.0,
         t1: a.distance(b),
     };
-    let segments = vec![
-        Segment {
-            key: SegmentKey(30),
-            curve: Curve2::Nurbs2(Arc::new(spline)),
-            t0: 0.0,
-            t1: 1.01,
-        },
-        line(31, p(1.3, 0.0), p(1.3, 1.0)),
-        line(32, p(1.3, 1.0), p(0.0, 1.0)),
-    ];
+    let mut segments = vec![Segment {
+        key: SegmentKey(30),
+        curve: Curve2::Nurbs2(Arc::new(spline)),
+        t0: 0.0,
+        t1: 1.01,
+    }];
+    if tail {
+        segments.extend([
+            line(33, p(1.3, 0.0), p(2.0, 0.0)),
+            line(31, p(2.0, 0.0), p(2.0, 1.0)),
+            line(32, p(2.0, 1.0), p(0.0, 1.0)),
+        ]);
+    } else {
+        segments.extend([
+            line(31, p(1.3, 0.0), p(1.3, 1.0)),
+            line(32, p(1.3, 1.0), p(0.0, 1.0)),
+        ]);
+    }
     let profile = ValidProfile::new(Profile {
         frame,
         loops: vec![Loop {
@@ -355,14 +403,5 @@ pub fn flat_span_twin() -> (Body, Body) {
     // extrusion's NURBS form keeps the profile's knots along u.
     convert_where_with(&mut prism, |s| !matches!(s, Surface::Plane(_)), false)
         .expect("its NURBS form");
-    let block = ryukei::primitive::block(
-        OpKey(0x586),
-        1.5 * mm,
-        2.0 * mm,
-        mm,
-        &Rigid::translation(Vector3::new(0.5 * mm, -1.5 * mm, -mm)),
-    )
-    .expect("the block")
-    .0;
-    (prism, block)
+    prism
 }
