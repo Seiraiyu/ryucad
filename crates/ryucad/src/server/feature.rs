@@ -194,6 +194,17 @@ fn hole_report(
         HoleForm::Countersink { diameter, angle } => {
             v["countersink"] = mouth(&[("diameter", diameter), ("angle", angle)]);
         }
+        HoleForm::Counterdrill {
+            diameter,
+            depth,
+            angle,
+        } => {
+            v["counterdrill"] =
+                mouth(&[("diameter", diameter), ("depth", depth), ("angle", angle)]);
+        }
+        HoleForm::Spotface { diameter, depth } => {
+            v["spotface"] = mouth(&[("diameter", diameter), ("depth", depth)]);
+        }
     }
     match &h.depth {
         Depth::Blind(q) => v["depth"] = json!({"blind": q.report()}),

@@ -81,7 +81,8 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C), 20 direct edits (ryucad 22), 21
 /// inserts, deletes of bodies and solid paths (ryucad 25), 22 a mate's
 /// limits (ryucad 26), 23 a hole's
-/// thread, fastener, fit and tolerance (ryucad 28). A
+/// thread, fastener, fit and tolerance (ryucad 28), 24 a hole's new
+/// geometry and cosmetic threads (ryucad 28.B). A
 /// feature is written at the lowest format that holds it, so one with
 /// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
@@ -97,6 +98,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::body::TOOL_FORMAT,
         super::edit::FORMAT,
         super::hole::INTENT_FORMAT,
+        super::hole::GEOMETRY_FORMAT,
         super::insert::FORMAT,
         super::mate::LIMITS_FORMAT,
     ];
@@ -760,8 +762,12 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
-    // Highest first: a hole with intent is 23, whatever else it names.
     let ty = v.get("type").and_then(Value::as_str);
+    // Highest first: a hole's new geometry is 24, whatever else it holds.
+    if ty == Some("hole") && super::hole::Hole::json_has_geometry(v) {
+        return super::hole::GEOMETRY_FORMAT;
+    }
+    // Then a hole with intent is 23, whatever else it names.
     if ty == Some("hole")
         && ["thread", "fastener", "fit", "tolerance"]
             .iter()
@@ -1178,6 +1184,11 @@ impl Feature {
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
         // Highest first, as `feature_format`.
+        if let Feature::Hole(h) = self
+            && h.has_geometry()
+        {
+            return super::hole::GEOMETRY_FORMAT;
+        }
         if let Feature::Hole(h) = self
             && h.has_intent()
         {

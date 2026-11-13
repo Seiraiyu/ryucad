@@ -225,6 +225,7 @@ pub fn derive(h: &Hole, tables: Tables) -> Result<Sizes> {
         HoleForm::Simple => (None, None),
         HoleForm::Counterbore { diameter, depth } => (written(diameter).zip(written(depth)), None),
         HoleForm::Countersink { diameter, angle } => (None, written(diameter).zip(written(angle))),
+        HoleForm::Counterdrill { .. } | HoleForm::Spotface { .. } => (None, None),
     };
     let mut thread = None;
     let (drill, drill_standard) = if let Some(t) = &h.thread {
@@ -583,6 +584,7 @@ fn fastener_sizes(h: &Hole, f: &Fastener, tables: Tables) -> Result<FastenerSize
                 "countersink",
             ),
         ),
+        HoleForm::Counterdrill { .. } | HoleForm::Spotface { .. } => (None, None),
     };
     if !missing.is_empty() {
         return Err(needs_table(Kind::Fastener, &f.standard, &f.size, missing));

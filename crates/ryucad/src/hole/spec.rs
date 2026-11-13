@@ -192,7 +192,9 @@ impl Spec {
             }
             (None, Some(f)) => What::Fastener {
                 mouth: match h.form {
-                    HoleForm::Simple => None,
+                    HoleForm::Simple
+                    | HoleForm::Counterdrill { .. }
+                    | HoleForm::Spotface { .. } => None,
                     HoleForm::Counterbore { .. } => Some(MouthKind::Cbore),
                     HoleForm::Countersink { .. } => Some(MouthKind::Csk),
                 },
@@ -244,7 +246,7 @@ impl Spec {
         });
         let written = |q: &Option<Quantity>| q.as_ref().map(|q| Len::of(q, cu));
         let mouth = match &h.form {
-            HoleForm::Simple => None,
+            HoleForm::Simple | HoleForm::Counterdrill { .. } | HoleForm::Spotface { .. } => None,
             HoleForm::Counterbore { diameter, depth } => Some(Mouth {
                 kind: MouthKind::Cbore,
                 diameter: written(diameter),
