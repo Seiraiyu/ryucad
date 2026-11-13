@@ -1839,7 +1839,7 @@ pub(crate) mod tests {
         let h = |v: Value| crate::hole::derive::tests::hole(v);
         assert_eq!(
             canonical(
-                &h(json!({"format": 24, "form": "spotface", "diameter": "5 mm",
+                &h(json!({"format": 25, "form": "spotface", "diameter": "5 mm",
                 "spotface": {"diameter": "12 mm"}, "depth": "through_next",
                 "far": {"countersink": {"diameter": "8 mm", "angle": "90 deg"}}})),
                 Unit::Mm

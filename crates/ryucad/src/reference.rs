@@ -1107,7 +1107,7 @@ mod tests {
         use super::Follow;
         use crate::units::Unit;
         let r = |k: u8| json!({"feature": "shaft", "name": format!("{k:032x}")});
-        let v = json!({"format": 24, "kind": "ryucad.feature", "type": "cosmetic_thread",
+        let v = json!({"format": 25, "kind": "ryucad.feature", "type": "cosmetic_thread",
             "faces": [r(1)], "thread": {"standard": "iso_metric", "size": "M10", "class": "6g"},
             "from": r(2), "depth": "12 mm"});
         let f = crate::doc::files::Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty())

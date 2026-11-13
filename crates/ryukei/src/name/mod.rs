@@ -254,6 +254,10 @@ pub enum BooleanRole {
     Front,
     /// Likewise on the back side.
     Back,
+    /// A stand-in key for a flat piece split off a spline face before a
+    /// boolean or self-union (design 551, #585): its parents are the face
+    /// and the operand's index. The pieces themselves are MEF's.
+    FlatPiece,
 }
 
 /// The entities of a blend: fillets and chamfers.
@@ -395,6 +399,7 @@ impl fmt::Display for Role {
                 BooleanRole::Merged => "boolean-merged",
                 BooleanRole::Front => "front",
                 BooleanRole::Back => "back",
+                BooleanRole::FlatPiece => "flat-piece",
             }),
             Self::Blend(r) => f.write_str(match r {
                 BlendRole::Face => "blend-face",
@@ -638,6 +643,7 @@ mod tests {
             BooleanRole::Merged,
             BooleanRole::Front,
             BooleanRole::Back,
+            BooleanRole::FlatPiece,
         ] {
             roles.push(Role::Boolean(r));
         }

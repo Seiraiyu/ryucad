@@ -95,14 +95,7 @@ fn describe(e: &ProfileError) -> &'static str {
     }
 }
 
-/// The order anchors are chosen in: by the text before an ID's trailing
-/// digits, then by their number, so `p2` comes before `p10`.
-pub fn natural(id: &Id) -> (&str, usize, &str, &str) {
-    let s = id.as_str();
-    let stem = s.trim_end_matches(|c: char| c.is_ascii_digit());
-    let digits = s[stem.len()..].trim_start_matches('0');
-    (stem, digits.len(), digits, s)
-}
+pub use crate::doc::sketch::natural;
 
 /// A loop's anchor: the first of its curves' end points in [`natural`]
 /// order, or for a loop with none (a circle), its first curve.

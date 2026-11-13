@@ -23,9 +23,9 @@ pub const INTENT_FORMAT: u64 = 23;
 /// The feature format that holds a hole's new geometry (ryucad 28.B):
 /// counterdrills, spotfaces, near and far treatments, through_next, tip
 /// depths, ball bottoms and tapered walls. A hole holding none stays at
-/// its format. Taken in the order stages merge: if another stage holds
-/// 24 when this merges, move this to the next free number.
-pub const GEOMETRY_FORMAT: u64 = 24;
+/// its format. Taken in the order stages merge: 25.C took 24 first, so
+/// this is 25.
+pub const GEOMETRY_FORMAT: u64 = 25;
 
 /// A hole at each of a sketch's points.
 #[derive(Clone, Debug, PartialEq)]
@@ -1830,7 +1830,7 @@ mod tests {
             ("spotface", json!({"diameter": "12 mm", "depth": "0.5 mm"})),
         ] {
             let mut v = hole();
-            v["format"] = json!(24);
+            v["format"] = json!(25);
             v.as_object_mut().unwrap().remove("counterbore");
             v["form"] = json!(form);
             v[form] = mouth.clone();
@@ -1841,7 +1841,7 @@ mod tests {
         }
         // A spotface's depth may be zero (flush), never less.
         let mut v = hole();
-        v["format"] = json!(24);
+        v["format"] = json!(25);
         v.as_object_mut().unwrap().remove("counterbore");
         v["form"] = json!("spotface");
         v["spotface"] = json!({"diameter": "12 mm", "depth": "0 mm"});
@@ -1869,7 +1869,7 @@ mod tests {
             ),
         ] {
             let mut v = hole();
-            v["format"] = json!(24);
+            v["format"] = json!(25);
             v.as_object_mut().unwrap().remove("counterbore");
             v["form"] = json!(form);
             v[form] = mouth;
@@ -1885,7 +1885,7 @@ mod tests {
     #[test]
     fn near_and_far_round_trip_and_refuse() {
         let mut v = hole();
-        v["format"] = json!(24);
+        v["format"] = json!(25);
         // Through: no bottom of its own.
         v.as_object_mut().unwrap().remove("bottom");
         v["depth"] = json!("through_all");
@@ -1905,7 +1905,7 @@ mod tests {
         );
         // No near chamfer on a countersink: it is one.
         let mut v = hole();
-        v["format"] = json!(24);
+        v["format"] = json!(25);
         v.as_object_mut().unwrap().remove("counterbore");
         v["form"] = json!("countersink");
         v["countersink"] = json!({"diameter": "8 mm", "angle": "90 deg"});
@@ -1929,7 +1929,7 @@ mod tests {
     fn new_depths_bottoms_and_tapered_walls() {
         let at24 = |f: &dyn Fn(&mut Value)| {
             let mut v = hole();
-            v["format"] = json!(24);
+            v["format"] = json!(25);
             // Each case gives its own bottom.
             v.as_object_mut().unwrap().remove("bottom");
             f(&mut v);
@@ -1948,7 +1948,7 @@ mod tests {
             }),
             at24(&|v| {
                 v.as_object_mut().unwrap().remove("diameter");
-                v["format"] = json!(24);
+                v["format"] = json!(25);
                 v["thread"] =
                     json!({"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"});
                 v["depth"] = json!({"blind": "12 mm"});

@@ -134,11 +134,11 @@ mod tests {
 
     #[test]
     fn cosmetic_threads_round_trip_and_refuse() {
-        let v = json!({"format": 24, "kind": "ryucad.feature", "type": "cosmetic_thread",
+        let v = json!({"format": 25, "kind": "ryucad.feature", "type": "cosmetic_thread",
             "faces": [face(1)], "thread": {"standard": "iso_metric", "size": "M10", "class": "6g"}});
         let f = read(&v).unwrap();
         assert_eq!(f.to_json(), v);
-        assert_eq!(f.format(), 24);
+        assert_eq!(f.format(), 25);
         assert_eq!(crate::doc::files::feature_format(&v), 24);
         let mut w = v.clone();
         w["depth"] = json!("12 mm");

@@ -1439,7 +1439,9 @@ enum FeatureCmd {
     /// --a-offset, --b-offset, --angle, --distance, and stops --angle-min, --angle-max,
     /// --distance-min, --distance-max) or an instance pattern (--instance,
     /// --form linear or circular, as a pattern's, its directions and axis x, y, z or a
-    /// connector).
+    /// connector; or --form feature (--on <asm>/<instance>/<pattern or hole>, --from) or
+    /// points (--on <asm>/<instance>/<sketch>, --point, --from), copies keyed by the
+    /// driver).
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -3169,7 +3171,7 @@ struct FieldArgs {
     #[arg(long, value_name = "JSON", value_parser = groups)]
     groups: Option<Groups>,
     /// A point of its sketch a hole drills at; repeat for several. Every point no curve
-    /// uses when left out.
+    /// uses when left out. Or a point a points pattern places copies at.
     #[arg(long = "point", value_name = "POINT")]
     points: Vec<String>,
     /// Drill at every point no curve uses again, when editing.
@@ -3359,9 +3361,13 @@ struct FieldArgs {
     /// A datum plane's base plane (offset, angle, parallel), or the end a point along a
     /// curve is measured from (start, end). Geometry is xy, yz, zx, x, y, z, origin,
     /// <part>/<feature>, <part>/<feature>/<name> or <part>/<sketch>/<entity>; a bare
-    /// feature ID is the part's.
+    /// feature ID is the part's; the seed point of a following instance pattern.
     #[arg(long, value_name = "REFERENCE")]
     from: Option<String>,
+    /// A following instance pattern's places: <assembly>/<instance>[/…]/<feature>, a
+    /// pattern or hole (--form feature) or a sketch (--form points) of the part there.
+    #[arg(long, value_name = "PLACES")]
+    on: Option<String>,
     /// The axis an angle plane turns about.
     #[arg(long, value_name = "AXIS")]
     about: Option<String>,
@@ -4125,6 +4131,7 @@ impl FieldArgs {
             point: None,
             by: self.by.clone(),
             from: self.from.clone(),
+            on: self.on.clone(),
             about: self.about.clone(),
             through: self.through.clone(),
             curve: (self.curve.len() == 1 && !ordered).then(|| self.curve[0].clone()),

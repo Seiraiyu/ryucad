@@ -200,6 +200,17 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                     lines.push(format!("{k} = {}", connector(&c)));
                 }
             }
+            // A following pattern's places: the path, then the feature.
+            if let Some(on) = rest.remove("on") {
+                let path: Vec<&str> = on["instance"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                let feature = on["feature"].as_str().unwrap_or_default();
+                lines.push(format!("on = {}/{feature}", path.join("/")));
+            }
             // A mate's stops on one line: `limits = angle -6 deg .. 6 deg,
             // distance .. 10 mm`.
             if let Some(Value::Object(l)) = rest.remove("limits") {
@@ -3827,6 +3838,22 @@ mod tests {
     }
 
     #[test]
+    fn a_following_patterns_places_read_as_one_line() {
+        let v = json!({"format": 25, "kind": "ryucad.feature", "type": "instance_pattern",
+                       "form": "points", "instances": ["screw-0"], "from": "p3",
+                       "on": {"instance": ["sub", "lid"], "feature": "screw-layout"},
+                       "points": ["p3", "p4"]});
+        let t = text(v);
+        assert!(
+            t.starts_with("ryucad.feature instance_pattern (format 24)\n"),
+            "{t}"
+        );
+        assert!(t.contains("\non = sub/lid/screw-layout\n"), "{t}");
+        assert!(t.contains("\nfrom = p3\n"), "{t}");
+        assert!(!t.contains("on.instance"), "{t}");
+    }
+
+    #[test]
     fn a_mate_reads_as_text_with_a_connector_a_line() {
         let n = "0".repeat(32);
         let v = json!({"format": 4, "kind": "ryucad.feature", "type": "mate", "form": "revolute",
@@ -5630,7 +5657,7 @@ mod tests {
     #[test]
     fn a_holes_near_and_far_are_a_line_each() {
         let t = text(
-            json!({"format": 24, "kind": "ryucad.feature", "type": "hole",
+            json!({"format": 25, "kind": "ryucad.feature", "type": "hole",
             "sketch": "s", "form": "simple", "diameter": "5 mm", "depth": "through_all",
             "targets": ["b"], "near": {"diameter": "7 mm", "angle": "120 deg"},
             "far": {"countersink": {"diameter": "8 mm", "angle": "90 deg"}}}),
@@ -5639,7 +5666,7 @@ mod tests {
         assert!(t.contains("\nfar = countersink 8 mm, 90 deg\n"), "{t}");
         // A tapered wall is part of the thread's line.
         let t = text(
-            json!({"format": 24, "kind": "ryucad.feature", "type": "hole",
+            json!({"format": 25, "kind": "ryucad.feature", "type": "hole",
             "sketch": "s", "form": "simple", "depth": {"blind": "12 mm"}, "targets": ["b"],
             "thread": {"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"}}),
         );
@@ -5650,7 +5677,7 @@ mod tests {
     fn a_cosmetic_threads_thread_is_one_line() {
         let face = |k: u8| json!({"feature": "shaft", "name": format!("{k:032x}")});
         let t = text(
-            json!({"format": 24, "kind": "ryucad.feature", "type": "cosmetic_thread",
+            json!({"format": 25, "kind": "ryucad.feature", "type": "cosmetic_thread",
             "faces": [face(1), face(2)], "from": face(3), "depth": "12 mm",
             "thread": {"standard": "iso_metric", "size": "M10", "class": "6g"}}),
         );

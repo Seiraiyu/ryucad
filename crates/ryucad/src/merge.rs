@@ -187,6 +187,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
 /// A feature file: one value when its type changes (or both sides added
 /// it differently), or a datum's construction (`by`) does, a sketch per
 /// member, a split's plane and flip and a draft's hinge one value each,
+/// an instance pattern's places one value and its form the whole file,
 /// else per key.
 fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
     let ty = |v: &Value| (v.get("type").cloned(), v.get("by").cloned());
@@ -252,6 +253,16 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
                 ) =>
         {
             sheet_metal(walk, b, ours, theirs)
+        }
+        // An instance pattern's places are one value; a change of form
+        // takes the whole file (design 521).
+        Some(b) if same_type && ty(b).0 == Some(json!("instance_pattern")) => {
+            let form = |v: &Value| v.get("form").cloned();
+            if form(b) == form(ours) && form(b) == form(theirs) {
+                atomic(walk, b, ours, theirs, &["on"])
+            } else {
+                walk.whole(Some(b), ours, theirs)
+            }
         }
         Some(b) if same_type => walk
             .value("", Some(b), Some(ours), Some(theirs))
@@ -1591,6 +1602,39 @@ mod tests {
             &mirror(json!({"targets": ["b"]})),
         );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/targets"]);
+    }
+
+    #[test]
+    fn a_following_patterns_places_merge_as_one_value() {
+        let base = json!({"format": 25, "kind": "ryucad.feature", "type": "instance_pattern",
+                          "form": "feature", "instances": ["s0"],
+                          "on": {"instance": ["lid"], "feature": "holes"}});
+        let mut ours = base.clone();
+        ours["on"]["feature"] = json!("grid");
+        let mut theirs = base.clone();
+        theirs["on"]["instance"] = json!(["lid2"]);
+        let m = merge(Some(&base), &ours, &theirs);
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(at, ["/on"], "grid on lid2 is a place neither side chose");
+        // One side's from, the other's seeds: both kept.
+        let mut ours = base.clone();
+        ours["from"] = json!("p2");
+        let mut theirs = base.clone();
+        theirs["instances"] = json!(["s0", "s1"]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["from"], &m.value["instances"]),
+            (&json!("p2"), &json!(["s0", "s1"]))
+        );
+        // A form changed on one side and a field on the other: the file is one value.
+        let mut ours = base.clone();
+        ours["form"] = json!("points");
+        ours["on"]["feature"] = json!("layout");
+        let mut theirs = base.clone();
+        theirs["from"] = json!("p2");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(!m.is_clean());
     }
 
     #[test]
@@ -3225,7 +3269,7 @@ mod tests {
 
     #[test]
     fn near_and_far_merge_as_one_value_each() {
-        let base = json!({"format": 24, "kind": "ryucad.feature", "type": "hole", "sketch": "s",
+        let base = json!({"format": 25, "kind": "ryucad.feature", "type": "hole", "sketch": "s",
             "form": "simple", "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
             "near": {"diameter": "7 mm"}});
         let mut ours = base.clone();
@@ -3266,7 +3310,7 @@ mod tests {
     #[test]
     fn a_cosmetic_threads_thread_merges_as_one_value() {
         let face = |k: u8| json!({"feature": "shaft", "name": format!("{k:032x}")});
-        let base = json!({"format": 24, "kind": "ryucad.feature", "type": "cosmetic_thread",
+        let base = json!({"format": 25, "kind": "ryucad.feature", "type": "cosmetic_thread",
             "faces": [face(1)], "thread": {"standard": "iso_metric", "size": "M10"}});
         let mut ours = base.clone();
         ours["thread"]["class"] = json!("4h");

@@ -191,9 +191,19 @@ impl Crossing {
 /// cones, sizes from a coarse list) placed on a grid of quarters so they
 /// overlap, each a shell of one solid, each turned inside out by a bit
 /// (the first never, so something faces out). `None` when the bytes run
-/// out or a part can't be made.
+/// out or a part can't be made. A first byte whose top bit is set adds
+/// the flat-span twin's prism (#585), whose spline has a flat end span,
+/// placed on the grid as the others are, so its span may lie on a block's
+/// face; the bit is masked off for the rest, so inputs whose first byte is
+/// below `0x80` read as before.
 pub fn crossing_case(data: &[u8]) -> Option<Crossing> {
-    let mut b = Bytes::new(data);
+    let flat = data.first().is_some_and(|x| x & 0x80 != 0);
+    let masked: Vec<u8> = data
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| if i == 0 { x & 0x7f } else { x })
+        .collect();
+    let mut b = Bytes::new(&masked);
     if b.is_empty() {
         return None;
     }
@@ -224,6 +234,17 @@ pub fn crossing_case(data: &[u8]) -> Option<Crossing> {
         });
         parts.push((body, turned));
     }
+    if flat {
+        let at = |b: &mut Bytes| -1.0 + 0.25 * b.pick(9) as f64;
+        let place = Rigid::translation(Vector3::new(at(&mut b), at(&mut b), at(&mut b)));
+        let prism = crate::nurbs::flat_span_twin().0.transformed(&place).ok()?;
+        let s = seamed(&prism, 1e-7).ok()?;
+        shape = Some(match shape {
+            None => s,
+            Some(t) => joined(&t, &s),
+        });
+        parts.push((prism, false));
+    }
     Some(Crossing {
         shape: one_solid(shape?),
         parts,
@@ -253,5 +274,22 @@ mod tests {
         let data: Vec<u8> = (0u8..64).map(|k| k.wrapping_mul(37)).collect();
         let made = (0..16).filter_map(|k| crossing_case(&data[k..])).count();
         assert!(made > 8, "{made}");
+    }
+
+    #[test]
+    fn a_crossing_case_can_hold_the_flat_span_twin() {
+        // A first byte with its top bit set adds the twin's prism, placed
+        // on the grid like the other parts.
+        let case = crossing_case(&[0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).expect("a case");
+        assert!(
+            case.shape
+                .surfaces
+                .iter()
+                .any(|s| matches!(s, ryukei::geom::Surface::Nurbs(_))),
+            "the twin's spline is in the shape"
+        );
+        // Without the bit, the same bytes read as they did.
+        let plain = crossing_case(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).expect("a case");
+        assert_eq!(plain.parts.len() + 1, case.parts.len());
     }
 }

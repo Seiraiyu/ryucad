@@ -508,3 +508,193 @@ fn mesh_verdicts_on_drilled_plates_agree_with_booleans() {
     assert!(judged >= 6, "{judged}");
     assert_eq!(agreed, judged);
 }
+
+#[test]
+fn a_decided_pair_reads_the_same_through_solid_verdict() {
+    use ryucad::interference::{Verdict, solid_verdict, verdict};
+    use ryukei::geom::{Rigid, Vector3};
+    use ryukei::name::OpKey;
+    let a = ryukei::primitive::block(OpKey::from_bytes(b"a"), 0.01, 0.01, 0.01, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    for x in [0.005, 0.01, 0.02] {
+        let rel = Rigid::translation(Vector3::new(x, 0.0, 0.0));
+        let v = verdict(&a, &a, rel);
+        assert!(!matches!(v, Verdict::CannotCheck { .. }), "{x}: {v:?}");
+        assert_eq!(solid_verdict(&a, &a, rel), v, "{x}");
+    }
+}
+
+/// A 50 µm bar standing in a 1 mm cube's side by a rounding's depth,
+/// placed in single precision: whatever the exact boolean says, the pair
+/// is decided (#436), never unchecked.
+#[test]
+fn a_bar_in_a_cubes_side_by_a_rounding_is_decided() {
+    let (_dir, mut s) = project(3.0);
+    for (part, x, y, z) in [("cube", 1.0, 1.0, 1.0), ("bar", 0.05, 0.05, 2.0)] {
+        must(&mut s, "part.create", json!({"part": part}));
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": part, "type": "box", "id": "b",
+                   "params": {"x": x, "y": y, "z": z}}),
+        );
+    }
+    place(&mut s, "asm", "c", "cube", [0.0; 3], Z, X);
+    // The bar's -x side 1.02e-4 mm inside the cube's +x face, its pose
+    // turned by single precision's π about z.
+    place(
+        &mut s,
+        "asm",
+        "b",
+        "bar",
+        [1.0 - 1.02e-4, 0.4, -0.5],
+        Z,
+        [1.0, 8.742277657348e-08, 0.0],
+    );
+    let v = must(&mut s, "interference", json!({"part": "asm"}));
+    assert_eq!(v["pairs"], 1, "{v}");
+    assert_eq!(v["unchecked"], json!([]), "{v}");
+}
+
+/// #436's three kinds in small, each placed by an f32-rounded pose (design
+/// 551): a 50 µm bar sunk 1.02e-7 m into a box's side, a block on a plate
+/// tilted 1.75e-7 rad and sunk 6.7e-10 m, and a part flush on a drilled
+/// plate sunk 4.8e-11 m. Every pose is decided by `solid_verdict`, the
+/// block and the part clear or touching (a sink under the resolution
+/// leaves the exact intersection empty, which is clear). For the bar some
+/// pose is still `Uncertain` in the exact boolean, so the mesh answer is
+/// what decided it. The block and the part are also turned as the board's
+/// parts are (a quarter or half turn about z rounded to f32) and tilted
+/// about diagonal axes and by f32's π/4 and 3π/4; the exact boolean
+/// decides every one of their poses (see the end).
+#[test]
+fn the_pcbas_undecided_kinds_are_decided_on_meshes() {
+    use ryucad::interference::{Verdict, solid_verdict, verdict};
+    use ryukei::boolean::{BooleanOp, Tool};
+    use ryukei::geom::{Rigid, UnitVector3, Vector3};
+    use ryukei::name::{OpKey, ToolKey};
+    let block = |k: &str, x: f64, y: f64, z: f64| {
+        ryukei::primitive::block(OpKey::from_bytes(k.as_bytes()), x, y, z, &Rigid::IDENTITY)
+            .unwrap()
+            .0
+    };
+    let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+    // Tilts single precision gives: π, π/2 and 3π/2 rounded to f32, less
+    // the true angle; and the board's 1.75e-7.
+    let tilts = [
+        f64::from(core::f32::consts::PI) - PI,
+        f64::from(core::f32::consts::FRAC_PI_2) - PI / 2.0,
+        1.748455531469e-07,
+        -4.371139e-08,
+    ];
+    let axes = [UnitVector3::X, UnitVector3::Y, UnitVector3::Z];
+    // Wider, for the block and the part (plan 18.B, Task 12 Step 3).
+    let wide_tilts: Vec<f64> = tilts
+        .iter()
+        .copied()
+        .chain([
+            f64::from(core::f32::consts::FRAC_PI_4) - PI / 4.0,
+            f64::from(3.0 * core::f32::consts::FRAC_PI_4) - 3.0 * PI / 4.0,
+        ])
+        .collect();
+    let diagonal = |x: f64, y: f64, z: f64| Vector3::new(x, y, z).normalize().unwrap();
+    let wide_axes = [
+        UnitVector3::X,
+        UnitVector3::Y,
+        UnitVector3::Z,
+        diagonal(1.0, 1.0, 0.0),
+        diagonal(1.0, 1.0, 1.0),
+    ];
+    let turns = [
+        Rigid::IDENTITY,
+        Rigid::rotation(UnitVector3::Z, f64::from(core::f32::consts::FRAC_PI_2)),
+        Rigid::rotation(UnitVector3::Z, f64::from(core::f32::consts::PI)),
+    ];
+    let mut wide: Vec<Rigid> = Vec::new();
+    for turn in &turns {
+        for &t in &wide_tilts {
+            for &ax in &wide_axes {
+                wide.push(Rigid::rotation(ax, t).then_after(turn));
+            }
+        }
+    }
+    let undecided = |a: &ryukei::topo::Body, b: &ryukei::topo::Body, rel: Rigid| matches!(verdict(a, b, rel), Verdict::CannotCheck { kernel, .. } if kernel.contains("Uncertain"));
+    let mut kinds = [0usize; 3];
+    // 1. The bar in the box's side.
+    let (cube, bar) = (
+        block("cube", 1e-3, 1e-3, 1e-3),
+        block("bar", 5e-5, 5e-5, 2e-3),
+    );
+    for &t in &tilts {
+        for &ax in &axes {
+            let rel = at(1e-3 - 1.02e-7, 4e-4, -5e-4).then_after(&Rigid::rotation(ax, t));
+            let v = solid_verdict(&cube, &bar, rel);
+            assert!(
+                !matches!(v, Verdict::CannotCheck { .. }),
+                "bar {t} {ax:?}: {v:?}"
+            );
+            kinds[0] += usize::from(undecided(&cube, &bar, rel));
+        }
+    }
+    // 2. A block on a plate, tilted and sunk.
+    let (plate, chip) = (
+        block("plate", 4e-3, 3e-3, 1.6e-3),
+        block("chip", 1.6e-3, 0.8e-3, 0.5e-3),
+    );
+    for pose in &wide {
+        {
+            let rel = at(1e-3, 1e-3, 1.6e-3 - 6.7e-10).then_after(pose);
+            let v = solid_verdict(&plate, &chip, rel);
+            assert!(
+                matches!(v, Verdict::Clear | Verdict::Touching),
+                "chip {pose:?}: {v:?}"
+            );
+            kinds[1] += usize::from(undecided(&plate, &chip, rel));
+        }
+    }
+    // 3. A part flush on a drilled plate, sunk 4.8e-11 m.
+    let hole = ryukei::primitive::cylinder(OpKey::from_bytes(b"h"), 5e-4, 4e-3, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let places: Vec<Rigid> = (0..4)
+        .map(|i| at(1e-3 + i as f64 * 2.54e-3, 1.5e-3, -1e-3))
+        .collect();
+    let tools: Vec<Tool> = places
+        .iter()
+        .enumerate()
+        .map(|(k, p)| Tool {
+            key: ToolKey(OpKey::from_bytes(format!("h{k}").as_bytes()).0),
+            body: &hole,
+            place: *p,
+        })
+        .collect();
+    let drilled = ryukei::boolean::boolean(
+        OpKey::from_bytes(b"d"),
+        BooleanOp::Subtract,
+        &block("board", 1.2e-2, 3e-3, 1.6e-3),
+        &tools,
+    )
+    .unwrap()
+    .0;
+    let header = block("header", 1e-2, 2.5e-3, 2.5e-3);
+    for pose in &wide {
+        {
+            let rel = at(5e-4, 2.5e-4, 1.6e-3 - 4.8e-11).then_after(pose);
+            let v = solid_verdict(&drilled, &header, rel);
+            assert!(
+                matches!(v, Verdict::Clear | Verdict::Touching),
+                "header {pose:?}: {v:?}"
+            );
+            kinds[2] += usize::from(undecided(&drilled, &header, rel));
+        }
+    }
+    println!("poses the exact boolean leaves Uncertain, by kind: {kinds:?}");
+    // Only the bar reproduces `Uncertain` in small: no pose of the block
+    // or the part does, even widened (f32's π/4 and 3π/4, diagonal axes,
+    // quarter and half turns), so the exact boolean decides those, and
+    // the board's own pairs of those kinds are Task 13's (plan 18.B's
+    // recorded departure). Every pose of all three is still asserted
+    // decided above.
+    assert!(kinds[0] > 0, "{kinds:?}");
+}

@@ -16,7 +16,9 @@
 //!   region. Each face has two faceuses, `same` on the side its surface's
 //!   natural normal points to: the void's side for a face of sense
 //!   `Forward` (whose normal points out of the material), the material's
-//!   for `Reversed`.
+//!   for `Reversed`. A sheet's shell lies in the void region too, after
+//!   the solids' outer shells (a sheet body has only these), holding both
+//!   faceuses of each of its faces, `same` first.
 //! - **Faces** are numbered by their names (the mesh's face indices are
 //!   the same, [`face_order`]); each has its loops, the outer one first,
 //!   running counterclockwise in its parameter plane (about the surface's
@@ -24,8 +26,10 @@
 //!   direction" and its OCCT reader reverses a reversed face's), holes
 //!   clockwise, a lone vertex as a loop with no edgeuses.
 //! - **Edgeuses** follow their loops; one is `same` where its loop runs
-//!   along its edge's curve. Every edge has two, which name each other as
-//!   the next round the edge, and an edgeuse enters its face from the
+//!   along its edge's curve. Every edge of a solid has two, which name
+//!   each other as the next round the edge; a laminar edge (a sheet's
+//!   boundary) has one, its own next, `topEntry` as SMLib's writer gives a
+//!   lamina; and an edgeuse enters its face from the
 //!   bottom exactly when it is `same` (the right-hand rule round the
 //!   edge with loops counterclockwise about the normal; usd-brep's OCCT
 //!   reader writes the same).
@@ -1045,7 +1049,9 @@ fn pack(
         tolerance = tolerance.max(f.tolerance);
     }
     // Regions, shells and faceuses: each face's side away from the
-    // material is `same` when its sense is forward.
+    // material is `same` when its sense is forward. A sheet's shell
+    // (ryukei's sheets lie in the void) holds both faceuses of each of its
+    // faces, `same` first: usd-brep's "one open trimmed face" form.
     let faceuses = |a: &mut Arrays, shell: &[usize], material: bool| {
         let mut list: Vec<usize> = shell.iter().map(|&f| position[f]).collect();
         list.sort_unstable();
@@ -1059,9 +1065,25 @@ fn pack(
         }
     };
     a.region_types.push("voidRegion".into());
-    a.region_shells.push(shape.solids.len() as u32);
+    a.region_shells
+        .push((shape.solids.len() + shape.sheets.len()) as u32);
     for so in &shape.solids {
         faceuses(&mut a, &shape.shells[so.outer].faces, false);
+    }
+    for &sh in &shape.sheets {
+        let mut list: Vec<usize> = shape.shells[sh]
+            .faces
+            .iter()
+            .map(|&f| position[f])
+            .collect();
+        list.sort_unstable();
+        a.shell_faceuses.push(2 * list.len() as u32);
+        for f in list {
+            for side in ["same", "opposite"] {
+                a.faceuse_faces.push(f as u32);
+                a.faceuse_types.push(side.into());
+            }
+        }
     }
     for so in &shape.solids {
         a.region_types.push("solidRegion".into());
@@ -1153,6 +1175,14 @@ fn pack(
     for list in uses_of.values() {
         for (i, &u) in list.iter().enumerate() {
             a.edgeuse_next[u] = list[(i + 1) % list.len()] as u32;
+        }
+        // A laminar edge (a sheet's boundary) has one use, its own next
+        // round the edge: SMLib's writer gives a lamina `topEntry` (its
+        // top edgeuse's next is its own mate; usd-brep's `SmuConvert.cpp`
+        // at SCHEMA_COMMIT), and its reader builds the same cycle of the
+        // pair from either.
+        if let [u] = list.as_slice() {
+            a.edgeuse_entries[*u] = "topEntry".into();
         }
     }
     for v in &shape.vertices {

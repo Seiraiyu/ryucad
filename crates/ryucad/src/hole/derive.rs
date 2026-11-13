@@ -1205,7 +1205,7 @@ pub(crate) mod tests {
     fn new_mouths_near_and_far() {
         let d = |v: Value| derive(&hole(v), None).unwrap();
         let s = d(
-            json!({"format": 24, "form": "counterdrill", "diameter": "5 mm",
+            json!({"format": 25, "form": "counterdrill", "diameter": "5 mm",
                          "counterdrill": {"diameter": "9 mm", "depth": "4 mm"},
                          "depth": "through_all"}),
         );
@@ -1218,7 +1218,7 @@ pub(crate) mod tests {
         // 4 mm, then the cone from 4.5 to 2.5 mm radius at 59 deg.
         let cone = 2.0 / ryukei::math::tan(59f64.to_radians());
         assert!((s.mouth_depth().unwrap() - (0.004 + cone / 1000.0)).abs() < 1e-15);
-        let s = d(json!({"format": 24, "form": "spotface", "diameter": "5 mm",
+        let s = d(json!({"format": 25, "form": "spotface", "diameter": "5 mm",
                          "spotface": {"diameter": "12 mm"}, "depth": "through_all",
                          "near": {"diameter": "6 mm"}}));
         assert_eq!(s.spotface.as_ref().unwrap().1.text, "0 mm");
@@ -1229,7 +1229,7 @@ pub(crate) mod tests {
         );
         // The thread starts below the near chamfer: 0.5 mm at 45 deg.
         assert!((s.thread_start() - 0.0005).abs() < 1e-15);
-        let s = d(json!({"format": 24, "form": "simple", "diameter": "5 mm",
+        let s = d(json!({"format": 25, "form": "simple", "diameter": "5 mm",
                          "depth": "through_all",
                          "far": {"counterbore": {"diameter": "8 mm", "depth": "1 mm"}}}));
         assert!(matches!(s.far, Some(FarSizes::Counterbore(..))));
@@ -1238,7 +1238,7 @@ pub(crate) mod tests {
         // A near chamfer no wider than what it chamfers is refused.
         let e = derive(
             &hole(
-                json!({"format": 24, "form": "counterbore", "diameter": "5 mm",
+                json!({"format": 25, "form": "counterbore", "diameter": "5 mm",
                          "counterbore": {"diameter": "9 mm", "depth": "2 mm"},
                          "depth": "through_all", "near": {"diameter": "8 mm"}}),
             ),
@@ -1251,7 +1251,7 @@ pub(crate) mod tests {
         let t = tables();
         let s = derive(
             &hole(
-                json!({"format": 24, "form": "counterdrill", "counterdrill": {},
+                json!({"format": 25, "form": "counterdrill", "counterdrill": {},
                          "fastener": {"standard": "house_cap", "size": "M5"},
                          "depth": "through_all"}),
             ),
@@ -1260,7 +1260,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(s.counterdrill.as_ref().unwrap().0.text, "9.7 mm");
         let e = derive(
-            &hole(json!({"format": 24, "form": "spotface", "spotface": {},
+            &hole(json!({"format": 25, "form": "spotface", "spotface": {},
                          "fastener": {"standard": "house_cap", "size": "M5"},
                          "depth": "through_all"})),
             Some(&t),

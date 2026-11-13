@@ -81,8 +81,9 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C), 20 direct edits (ryucad 22), 21
 /// inserts, deletes of bodies and solid paths (ryucad 25), 22 a mate's
 /// limits (ryucad 26), 23 a hole's
-/// thread, fastener, fit and tolerance (ryucad 28), 24 a hole's new
-/// geometry and cosmetic threads (ryucad 28.B). A
+/// thread, fastener, fit and tolerance (ryucad 28), 24 an instance
+/// pattern that follows a part's features or a sketch's points (ryucad
+/// 25.C), 25 a hole's new geometry and cosmetic threads (ryucad 28.B). A
 /// feature is written at the lowest format that holds it, so one with
 /// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
@@ -101,6 +102,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::hole::GEOMETRY_FORMAT,
         super::insert::FORMAT,
         super::mate::LIMITS_FORMAT,
+        super::mate::DRIVEN_FORMAT,
     ];
     let (mut max, mut i) = (0, 0);
     while i < all.len() {
@@ -769,15 +771,23 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
     let ty = v.get("type").and_then(Value::as_str);
-    // Highest first: a cosmetic thread and a hole's new geometry are 24,
-    // whatever else they hold.
+    // Highest first: a cosmetic thread and a hole's new geometry are 25,
+    // a following instance pattern 24, a hole with intent 23, whatever
+    // else they hold.
     if ty == Some("cosmetic_thread") {
         return super::thread::FORMAT;
     }
     if ty == Some("hole") && super::hole::Hole::json_has_geometry(v) {
         return super::hole::GEOMETRY_FORMAT;
     }
-    // Then a hole with intent is 23, whatever else it names.
+    if ty == Some("instance_pattern")
+        && matches!(
+            v.get("form").and_then(Value::as_str),
+            Some("feature" | "points")
+        )
+    {
+        return super::mate::DRIVEN_FORMAT;
+    }
     if ty == Some("hole")
         && ["thread", "fastener", "fit", "tolerance"]
             .iter()
@@ -1202,6 +1212,11 @@ impl Feature {
             && h.has_geometry()
         {
             return super::hole::GEOMETRY_FORMAT;
+        }
+        if let Feature::InstancePattern(p) = self
+            && p.form.driven()
+        {
+            return super::mate::DRIVEN_FORMAT;
         }
         if let Feature::Hole(h) = self
             && h.has_intent()
@@ -3049,7 +3064,7 @@ mod tests {
     }
 
     #[test]
-    fn hole_geometry_is_format_24_and_old_holes_keep_theirs() {
+    fn hole_geometry_is_format_25_and_old_holes_keep_theirs() {
         use crate::units::Unit;
         let env = crate::expr::Env::empty();
         let base = json!({"kind": "ryucad.feature", "type": "hole", "sketch": "s",
@@ -3070,14 +3085,14 @@ mod tests {
                 super::super::hole::GEOMETRY_FORMAT,
                 "{k}"
             );
-            v["format"] = json!(24);
+            v["format"] = json!(25);
             let f = Feature::from_json(&v, Unit::Mm, &env).unwrap();
-            assert_eq!(f.format(), 24, "{k}");
+            assert_eq!(f.format(), 25, "{k}");
         }
         let mut v = base.clone();
         v["form"] = json!("spotface");
         v["spotface"] = json!({"diameter": "12 mm"});
-        assert_eq!(feature_format(&v), 24);
+        assert_eq!(feature_format(&v), 25);
         // A plain hole and a tapped one keep 3 and 23.
         assert_eq!(feature_format(&base), 3);
         let mut t = base.clone();
@@ -3086,12 +3101,12 @@ mod tests {
         assert_eq!(feature_format(&t), 23);
         // Geometry wins over intent: highest first.
         t["near"] = json!({"diameter": "7 mm"});
-        assert_eq!(feature_format(&t), 24);
+        assert_eq!(feature_format(&t), 25);
     }
 
     #[test]
     fn a_holes_new_geometry_holds_expressions_and_through_next_is_none() {
-        let v = json!({"format": 24, "kind": FEATURE_KIND, "type": "hole", "sketch": "s",
+        let v = json!({"format": 25, "kind": FEATURE_KIND, "type": "hole", "sketch": "s",
             "form": "counterdrill", "diameter": "d", "depth": "through_next",
             "counterdrill": {"diameter": "d * 2", "depth": "1 mm"},
             "near": {"diameter": "d + 3 mm"},
@@ -3108,7 +3123,7 @@ mod tests {
         assert!(!at.iter().any(|x| x == "/depth"), "{at:?}");
         assert!(feature_names(&v).contains("e"));
         // A cosmetic thread's depth is a length.
-        let c = json!({"format": 24, "kind": FEATURE_KIND, "type": "cosmetic_thread",
+        let c = json!({"format": 25, "kind": FEATURE_KIND, "type": "cosmetic_thread",
             "faces": [{"feature": "shaft", "name": "0123456789abcdef0123456789abcdef"}],
             "thread": {"standard": "iso_metric", "size": "M10"},
             "from": {"feature": "shaft", "name": "fedcba9876543210fedcba9876543210"},

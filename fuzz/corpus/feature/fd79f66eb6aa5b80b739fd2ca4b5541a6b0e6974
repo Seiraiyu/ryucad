@@ -1,0 +1,1 @@
+{"format":25,"kind":"ryucad.feature","type":"hole","sketch":"t","form":"simple","diameter":"2 mm","depth":"through_all","far":{"countersink":{"diameter":"3 mm","angle":"90 deg"}},"targets":["b"]}

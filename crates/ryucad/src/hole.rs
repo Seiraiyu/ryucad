@@ -60,59 +60,60 @@ pub fn point_key(part: &Id, feature: &Id, point: &Id) -> ToolKey {
     ToolKey(OpKey::from_bytes(&bytes).0)
 }
 
+/// The points of `solved` (sketch `sketch`) that `listed` names, or every
+/// point no curve uses, in natural order, in the part's frame; what for
+/// errors names the reader (`hole h`). A listed ID that isn't a point is
+/// `not_found` or `reference_wrong_kind` at `/points/<i>`. May be empty.
+pub fn sketch_points(
+    what: &str,
+    owner: &Id,
+    sketch: &Id,
+    listed: &[Id],
+    solved: &Solved,
+) -> Result<Vec<(Id, Point3)>> {
+    let s = &solved.sketch;
+    let at = |m: [f64; 2]| solved.frame.apply_point(Point3::new(m[0], m[1], 0.0));
+    if listed.is_empty() {
+        return Ok(s
+            .free_points()
+            .into_iter()
+            .filter_map(|p| match s.entities[p].geometry {
+                Geometry::Point { m } => Some((p.clone(), at(m))),
+                _ => None,
+            })
+            .collect());
+    }
+    listed
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match s.entities.get(p).map(|e| &e.geometry) {
+            Some(Geometry::Point { m }) => Ok((p.clone(), at(*m))),
+            Some(g) => Err(Error::new(
+                Code::ReferenceWrongKind,
+                format!("{what}: {p} is a {}, not a point", g.type_name()),
+            )
+            .with("feature", owner)
+            .with("entity", p)
+            .with("pointer", format!("/points/{i}"))),
+            None => Err(Error::new(
+                Code::NotFound,
+                format!("{what}: sketch {sketch} has no {p}"),
+            )
+            .with("feature", owner)
+            .with("entity", p)
+            .with("pointer", format!("/points/{i}"))),
+        })
+        .collect()
+}
+
 /// The solved sketch a hole drills at, and the points it drills: those
 /// it lists, else every point no curve uses, in natural order (`p2` before `p10`). A listed ID
 /// that isn't a point of the sketch is `not_found` or
 /// `reference_wrong_kind`; a sketch with no point to drill is
 /// `invalid_param`.
 pub fn points(id: &Id, h: &Hole, solved: &Solved) -> Result<Vec<(Id, Point3)>> {
-    let s = &solved.sketch;
-    let at = |m: [f64; 2]| solved.frame.apply_point(Point3::new(m[0], m[1], 0.0));
-    if !h.points.is_empty() {
-        return h
-            .points
-            .iter()
-            .enumerate()
-            .map(|(i, p)| match s.entities.get(p).map(|e| &e.geometry) {
-                Some(Geometry::Point { m }) => Ok((p.clone(), at(*m))),
-                Some(g) => Err(Error::new(
-                    Code::ReferenceWrongKind,
-                    format!("hole {id}: {p} is a {}, not a point", g.type_name()),
-                )
-                .with("feature", id)
-                .with("entity", p)
-                .with("pointer", format!("/points/{i}"))),
-                None => Err(Error::new(
-                    Code::NotFound,
-                    format!("hole {id}: sketch {} has no {p}", h.sketch),
-                )
-                .with("feature", id)
-                .with("entity", p)
-                .with("pointer", format!("/points/{i}"))),
-            })
-            .collect();
-    }
-    let used: BTreeSet<&Id> = s
-        .entities
-        .values()
-        .flat_map(|e| match &e.geometry {
-            Geometry::Point { .. } => Vec::new(),
-            Geometry::Line { start, end } => vec![start, end],
-            Geometry::Arc { center, start, end } => vec![center, start, end],
-            Geometry::Circle { center, .. } => vec![center],
-        })
-        .collect();
-    let mut free: Vec<(Id, Point3)> = s
-        .entities
-        .iter()
-        .filter(|(p, _)| !used.contains(p))
-        .filter_map(|(p, e)| match e.geometry {
-            Geometry::Point { m } => Some((p.clone(), at(m))),
-            _ => None,
-        })
-        .collect();
-    free.sort_by(|(a, _), (b, _)| crate::profile::natural(a).cmp(&crate::profile::natural(b)));
-    if free.is_empty() {
+    let out = sketch_points(&format!("hole {id}"), id, &h.sketch, &h.points, solved)?;
+    if out.is_empty() {
         return Err(Error::new(
             Code::InvalidParam,
             format!(
@@ -123,7 +124,7 @@ pub fn points(id: &Id, h: &Hole, solved: &Solved) -> Result<Vec<(Id, Point3)>> {
         .with("feature", id)
         .with("pointer", "/points"));
     }
-    Ok(free)
+    Ok(out)
 }
 
 /// How deep the bore goes from the sketch's plane, in meters: blind,
@@ -1206,7 +1207,7 @@ pub(crate) mod tests {
             // A counterdrill: 8 mm to 1 mm, its 118 deg floor down to the
             // 4 mm bore, the bore through.
             (
-                json!({"format": 24, "points": ["p1"], "form": "counterdrill", "diameter": 4,
+                json!({"format": 25, "points": ["p1"], "form": "counterdrill", "diameter": 4,
                        "counterdrill": {"diameter": 8, "depth": 1}, "depth": "through_all"}),
                 {
                     let floor = 2.0 / t59;
@@ -1215,25 +1216,25 @@ pub(crate) mod tests {
             ),
             // A spotface 0.5 mm deep: the top 0.5 mm within 8 mm goes.
             (
-                json!({"format": 24, "points": ["p1"], "form": "spotface", "diameter": 4,
+                json!({"format": 25, "points": ["p1"], "form": "spotface", "diameter": 4,
                        "spotface": {"diameter": 8, "depth": 0.5}, "depth": "through_all"}),
                 PI * 16.0 * 0.5 + PI * 4.0 * 4.5,
             ),
             // A near chamfer, 6 mm at 90 deg: 1 mm down to the bore.
             (
-                json!({"format": 24, "points": ["p1"], "form": "simple", "diameter": 4,
+                json!({"format": 25, "points": ["p1"], "form": "simple", "diameter": 4,
                        "near": {"diameter": 6}, "depth": "through_all"}),
                 frustum(3.0, 2.0, 1.0) + PI * 4.0 * 4.0,
             ),
             // To the tip: 3 mm to the tip, the shoulder above it.
             (
-                json!({"format": 24, "points": ["p1"], "form": "simple", "diameter": 4,
+                json!({"format": 25, "points": ["p1"], "form": "simple", "diameter": 4,
                        "depth": {"tip": 3}, "bottom": {"drill": "118 deg"}}),
                 PI * 4.0 * (3.0 - 2.0 / t59) + cone(2.0, 2.0 / t59),
             ),
             // A ball bottom: 3 mm to the shoulder, then a hemisphere.
             (
-                json!({"format": 24, "points": ["p1"], "form": "simple", "diameter": 3,
+                json!({"format": 25, "points": ["p1"], "form": "simple", "diameter": 3,
                        "depth": {"blind": 2}, "bottom": "ball"}),
                 PI * 2.25 * 2.0 + 2.0 / 3.0 * PI * 1.5 * 1.5 * 1.5,
             ),
@@ -1253,7 +1254,7 @@ pub(crate) mod tests {
         put(
             &mut s,
             "h",
-            json!({"format": 24, "points": ["p1"], "form": "counterdrill",
+            json!({"format": 25, "points": ["p1"], "form": "counterdrill",
             "diameter": 4, "counterdrill": {"diameter": 8, "depth": 1}, "near": {"diameter": 9},
             "depth": {"blind": 2.5}, "bottom": "ball"}),
         );
@@ -1273,7 +1274,7 @@ pub(crate) mod tests {
         put(
             &mut s,
             "h",
-            json!({"format": 24, "points": ["p1"], "form": "simple", "diameter": 4,
+            json!({"format": 25, "points": ["p1"], "form": "simple", "diameter": 4,
             "depth": {"tip": 1}, "bottom": {"drill": "118 deg"}}),
         );
         assert_eq!(
@@ -1312,7 +1313,7 @@ pub(crate) mod tests {
         put(
             &mut s,
             "h",
-            json!({"format": 24, "points": ["p2", "p5"], "form": "simple",
+            json!({"format": 25, "points": ["p2", "p5"], "form": "simple",
             "diameter": 2, "depth": "through_all",
             "far": {"counterbore": {"diameter": 4, "depth": 1}}}),
         );
@@ -1375,7 +1376,7 @@ pub(crate) mod tests {
             {"op": "add", "type": "fix", "a": "p1"}]}),
         )
         .unwrap();
-        let mut v = json!({"format": 24, "form": "simple", "diameter": 2,
+        let mut v = json!({"format": 25, "form": "simple", "diameter": 2,
                            "depth": "through_next"});
         v["kind"] = json!("ryucad.feature");
         v["type"] = json!("hole");
@@ -1404,7 +1405,7 @@ pub(crate) mod tests {
         put(
             &mut s,
             "h",
-            json!({"format": 24, "points": ["p5"], "form": "simple",
+            json!({"format": 25, "points": ["p5"], "form": "simple",
             "diameter": 2, "depth": "through_all",
             "far": {"counterbore": {"diameter": 4, "depth": 1}}}),
         );
@@ -1459,7 +1460,7 @@ pub(crate) mod tests {
             {"op": "add", "type": "fix", "a": "p1"}]}),
         )
         .unwrap();
-        let v = json!({"format": 24, "kind": "ryucad.feature", "type": "hole", "sketch": "u",
+        let v = json!({"format": 25, "kind": "ryucad.feature", "type": "hole", "sketch": "u",
             "form": "simple", "targets": ["t"], "depth": {"blind": "12 mm"},
             "thread": {"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"}});
         let f = Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap();

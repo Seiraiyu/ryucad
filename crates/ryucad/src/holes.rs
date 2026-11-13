@@ -1179,7 +1179,7 @@ mod tests {
         put(
             &mut s,
             "h",
-            json!({"format": 24, "points": ["p1"], "form": "simple",
+            json!({"format": 25, "points": ["p1"], "form": "simple",
             "diameter": "2 mm", "depth": {"tip": "3 mm"}, "bottom": {"drill": "90 deg"}}),
         );
         let holes = list(&mut s, &id("p"), None).unwrap();
@@ -1193,7 +1193,7 @@ mod tests {
         put(
             &mut s,
             "h",
-            json!({"format": 24, "points": ["p1"], "form": "simple",
+            json!({"format": 25, "points": ["p1"], "form": "simple",
             "diameter": "2 mm", "depth": {"blind": "2 mm"}, "bottom": "ball"}),
         );
         let r = &list(&mut s, &id("p"), None).unwrap().rows[0];
@@ -1206,7 +1206,7 @@ mod tests {
         put(
             &mut s,
             "h",
-            json!({"format": 24, "points": ["p1"], "form": "simple",
+            json!({"format": 25, "points": ["p1"], "form": "simple",
             "thread": {"standard": "iso_metric", "size": "M3"}, "depth": "through_all",
             "near": {"diameter": "3.5 mm"}}),
         );

@@ -181,6 +181,12 @@ fn transform(
     pointer: &str,
     node: &Value,
 ) -> Option<Value> {
+    // A following pattern's `on` names a feature of the part its path
+    // reaches, not of this one: only its path's steps renumber
+    // (`/on/instance`).
+    if pointer == "/on" {
+        return None;
+    }
     // A connector's entity is a solid of the part its instance places,
     // not of this one: renumbering here touches only its path's first
     // step, an instance or a pattern's copy (`<pattern>:<i>`).
@@ -1585,6 +1591,49 @@ mod tests {
     }
 
     #[test]
+    fn a_following_patterns_path_renumbers_and_its_feature_never() {
+        // Theirs' `holes` (an instance here) collided and is `holes-1`:
+        // `on`'s path follows; its feature is the lid part's `holes`, not
+        // this assembly's, and stays.
+        let screws = json!({
+            "format": 25, "kind": "ryucad.feature", "type": "instance_pattern",
+            "form": "feature", "instances": ["s0"],
+            "on": {"instance": ["holes"], "feature": "holes"},
+        });
+        let mate = json!({
+            "format": 4, "kind": "ryucad.feature", "type": "mate", "form": "fastened",
+            "a": {"instance": ["screws:p7", "s0"], "at": "origin"},
+            "b": {"instance": ["base"], "at": "origin"},
+        });
+        let f = files(&[
+            ("parts/a/features/screws.json", screws),
+            ("parts/a/features/m1.json", mate),
+        ]);
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "holes".into(),
+            to: "holes-1".into(),
+        };
+        let out = renumbered(&f, &r, &BTreeMap::new());
+        let read = |o: &Files, p: &str| serde_json::from_slice::<Value>(&o[p]).unwrap();
+        assert_eq!(
+            read(&out, "parts/a/features/screws.json")["on"],
+            json!({"instance": ["holes-1"], "feature": "holes"})
+        );
+        // A copy step keyed by a point renumbers its pattern only.
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "screws".into(),
+            to: "screws-1".into(),
+        };
+        let out = renumbered(&f, &r, &BTreeMap::new());
+        assert_eq!(
+            read(&out, "parts/a/features/m1.json")["a"]["instance"],
+            json!(["screws-1:p7", "s0"])
+        );
+    }
+
+    #[test]
     fn a_planar_follows_its_sketch_and_loops() {
         let planar = json!({
             "format": 12, "kind": "ryucad.feature", "type": "planar",
@@ -1962,7 +2011,7 @@ mod tests {
         let old = |k: u8| format!("{k:032x}");
         let new = |k: u8| format!("{:032x}", k + 100);
         let r = |k: u8| json!({"feature": "shaft", "name": old(k)});
-        let t = json!({"format": 24, "kind": "ryucad.feature", "type": "cosmetic_thread",
+        let t = json!({"format": 25, "kind": "ryucad.feature", "type": "cosmetic_thread",
             "faces": [r(1)], "from": r(2), "depth": "12 mm",
             "thread": {"standard": "iso_metric", "size": "M10"}});
         let f = files(&[("parts/a/features/t.json", t)]);

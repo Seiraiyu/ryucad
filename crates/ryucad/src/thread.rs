@@ -601,7 +601,7 @@ pub(crate) mod tests {
     /// Writes cosmetic thread `t` (feature.add takes it with Task 22).
     fn cosmetic(s: &mut crate::session::Session, v: Value) {
         let mut v = v;
-        v["format"] = json!(24);
+        v["format"] = json!(25);
         v["kind"] = json!("ryucad.feature");
         v["type"] = json!("cosmetic_thread");
         let f = crate::doc::files::Feature::from_json(
