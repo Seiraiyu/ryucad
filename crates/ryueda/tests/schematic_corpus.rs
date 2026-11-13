@@ -15,6 +15,8 @@ mod draw;
 mod ethernet;
 #[path = "support/frontend.rs"]
 mod frontend;
+#[path = "support/gitrepo.rs"]
+mod gitrepo;
 #[path = "support/rp2040.rs"]
 mod rp2040;
 
@@ -2917,4 +2919,261 @@ fn a_templates_designator_stands_off_its_pins() {
     // Eight parts, a designator and a value each.
     assert_eq!(checked, 16);
     assert!(over.is_empty(), "{over:#?}");
+}
+
+/// A circuit committed laid out in a repository with ryueda's driver and
+/// hook, a spare net pair AUX_A/AUX_B in its main block with a capacitor
+/// on each, then branches `theirs` and `main` running their commands and
+/// `git merge --no-commit theirs`. Answers the board, the repository and
+/// the base's files.
+fn corpus_branches(
+    dir: &Path,
+    name: &str,
+    block: &str,
+    cap: &str,
+    ours: &[Vec<String>],
+    theirs: &[Vec<String>],
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::collections::BTreeMap<String, Vec<u8>>,
+) {
+    let top = dir.join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    gitrepo::git(&top, &["init", "-q"]);
+    // `circuit` runs `init` inside the repository: the driver and the
+    // hook go into this clone.
+    let board = circuit(&top, name);
+    let s = |x: &str| x.to_owned();
+    let mut base = vec![
+        vec![s("net"), s("add"), s(block), s("AUX_A"), s("--id"), s("aux_a")],
+        vec![s("net"), s("add"), s(block), s("AUX_B"), s("--id"), s("aux_b")],
+    ];
+    for (id, net) in [("c80", "AUX_A"), ("c81", "AUX_B")] {
+        base.push(vec![
+            s("component"),
+            s("add"),
+            s(block),
+            s("--of"),
+            s(cap),
+            s("--id"),
+            s(id),
+            s("--refdes"),
+            id.to_uppercase(),
+        ]);
+        base.push(vec![s("connect"), format!("{block}/{id}/1"), s(net)]);
+        base.push(vec![s("connect"), format!("{block}/{id}/2"), s("rail:GND")]);
+    }
+    for args in &base {
+        ryueda(&board, 1, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+    ryueda(&board, 1, &["layout"]);
+    let commit = |m: &str| {
+        gitrepo::git(&top, &["add", "-A"]);
+        gitrepo::git(&top, &["commit", "-q", "-m", m]);
+    };
+    commit("base");
+    let before = files(&board);
+    gitrepo::git(&top, &["checkout", "-q", "-b", "theirs"]);
+    for args in theirs {
+        ryueda(&board, 1, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+    commit("theirs");
+    gitrepo::git(&top, &["checkout", "-q", "main"]);
+    for args in ours {
+        ryueda(&board, 1, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+    commit("ours");
+    let _ = gitrepo::git_try(&top, &[], &["merge", "--no-commit", "-q", "theirs"]);
+    (board, top, before)
+}
+
+/// Settles every item of the merge by its first repair (a block's areas
+/// together); answers the kinds met.
+fn settle_by_first_repairs(board: &Path) -> Vec<String> {
+    let mut met = Vec::new();
+    for _ in 0..10 {
+        let list = ryueda(board, 1, &["merge", "status"])["conflicts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let Some(c) = list
+            .iter()
+            .find(|c| c["repairs"].as_array().is_some_and(|r| !r.is_empty()))
+        else {
+            assert!(list.is_empty(), "items with no repair: {list:#?}");
+            return met;
+        };
+        met.push(c["kind"].as_str().unwrap().to_owned());
+        let repair = c["repairs"][0]["id"].as_str().unwrap().to_owned();
+        let ids: Vec<String> = match c["with"].as_array() {
+            Some(all) => all.iter().map(|x| x.as_str().unwrap().to_owned()).collect(),
+            None => vec![c["id"].as_str().unwrap().to_owned()],
+        };
+        let mut args = vec!["merge", "resolve"];
+        args.extend(ids.iter().map(String::as_str));
+        args.extend(["--repair", repair.as_str()]);
+        ryueda(board, 1, &args);
+    }
+    panic!("not settled in ten rounds");
+}
+
+/// The merged board as each side was: every design flattens, ERC finds
+/// no error code neither side had, every laid-out block keeps every hard
+/// rule and reads current, and the blocks' layout files neither side
+/// changed keep their bytes.
+fn merged_as_well_as_each_side(board: &Path, before: &std::collections::BTreeMap<String, Vec<u8>>) {
+    // The merge's sides by commit, as `merge status` names them (the
+    // merge is still in progress: nothing is committed here).
+    let status = ryueda(board, 1, &["merge", "status"]);
+    let commit = |side: &str| status[side]["commit"].as_str().unwrap().to_owned();
+    let (ours_c, theirs_c) = (commit("ours"), commit("theirs"));
+    let p = ryueda::project::Project::load(board).unwrap();
+    let codes = |p: &ryueda::project::Project| -> BTreeSet<String> {
+        p.conn
+            .designs
+            .keys()
+            .flat_map(|d| ryueda::erc::check_design(p, d).unwrap())
+            .filter(|f| f.severity == ryueda::fault::Severity::Error && f.waived.is_none())
+            .map(|f| serde_json::json!(f.code).as_str().unwrap().to_owned())
+            .collect()
+    };
+    for d in p.conn.designs.keys() {
+        ryueda::netlist::flatten(&p, d).unwrap();
+    }
+    let at = |c: &str| ryueda::git::revision(board, c).unwrap();
+    let (ours, theirs) = (at(&ours_c), at(&theirs_c));
+    let load = |r: &ryueda::git::Revision| {
+        ryueda::project::Project::load_from(board, &r.files, &r.aliases).unwrap()
+    };
+    let allowed: BTreeSet<String> = codes(&load(&ours))
+        .union(&codes(&load(&theirs)))
+        .cloned()
+        .collect();
+    let now = codes(&p);
+    assert!(
+        now.is_subset(&allowed),
+        "ERC errors neither side had: {:?}",
+        now.difference(&allowed).collect::<Vec<_>>()
+    );
+    for b in p.conn.blocks.values() {
+        if !matches!(b.layout, Some(Ok(_))) {
+            continue;
+        }
+        let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+        assert!(
+            !laid.stale && laid.invalid.is_none(),
+            "{}: {:?}",
+            b.id,
+            laid.invalid
+        );
+        let broken = ryusch::rules::check(&laid.built.input, &laid.outcome.layout);
+        assert!(broken.is_empty(), "{}: {broken:#?}", b.id);
+        let path = format!("blocks/{}/layout.json", b.id);
+        let side = |r: &ryueda::git::Revision| r.files.get(&path).map(|x| x.to_vec());
+        if side(&ours).as_ref() == before.get(&path) && side(&theirs).as_ref() == before.get(&path)
+        {
+            assert_eq!(
+                std::fs::read(board.join(&path)).ok().as_ref(),
+                before.get(&path),
+                "{path} kept its bytes"
+            );
+        }
+    }
+}
+
+/// Two branches of each corpus circuit merged through Git (plan 4.D) and
+/// settled by their first repairs: a designator both took, a pin on a
+/// net the other side joined away, a name both gave, and distant edits.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test schematic_corpus corpus_branches"
+)]
+fn corpus_branches_merge_by_their_first_repairs() {
+    // (circuit, its main block, a 100 nF capacitor's library component,
+    // a net to hang new parts on, a part to revalue, a net to rename)
+    let cases = [
+        ("breakout", "breakout", "c_100n", "SCL", "r1", "SDA"),
+        ("buck", "buck", "c_0_1uf", "SS", "r9", "VSNS"),
+        ("rp2040", "mitayi", "c_0_1uf", "RUN", "r9", "XOUT"),
+    ];
+    let s = |x: &str| x.to_owned();
+    for (name, block, cap, hang, revalue, rename) in cases {
+        // 1. Each side adds a capacitor as C90 (a refdes clash), and ours
+        // joins AUX_A into AUX_B while theirs hangs its C90 on AUX_A
+        // (follow); both on `hang` too, so the layout merges as well.
+        let dir = tempfile::tempdir().unwrap();
+        let add = |id: &str, net: &str| {
+            vec![
+                vec![
+                    s("component"),
+                    s("add"),
+                    s(block),
+                    s("--of"),
+                    s(cap),
+                    s("--id"),
+                    s(id),
+                    s("--refdes"),
+                    s("C90"),
+                ],
+                vec![s("connect"), format!("{block}/{id}/1"), s(net)],
+                vec![s("connect"), format!("{block}/{id}/2"), s(hang)],
+            ]
+        };
+        let mut ours = add("c90o", "AUX_B");
+        ours.push(vec![
+            s("net"),
+            s("join"),
+            format!("{block}/AUX_A"),
+            s("AUX_B"),
+        ]);
+        let theirs = add("c90t", "AUX_A");
+        let (board, _top, before) = corpus_branches(dir.path(), name, block, cap, &ours, &theirs);
+        let met = settle_by_first_repairs(&board);
+        assert!(
+            met.contains(&"refdes_clash".to_owned()) && met.contains(&"delete_edit".to_owned()),
+            "{name}: {met:?}"
+        );
+        let c: Value = serde_json::from_slice(
+            &std::fs::read(board.join(format!("blocks/{block}/components/c90t.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(c["pins"]["1"], "aux_b", "{name}: followed");
+        assert_ne!(c["refdes"], "C90", "{name}: theirs renumbered");
+        merged_as_well_as_each_side(&board, &before);
+
+        // 2. Both name a new net alike (joined), and edit distant parts
+        // (a value, a net's name): clean but for the layout and the name.
+        let dir = tempfile::tempdir().unwrap();
+        let ours = vec![
+            vec![s("net"), s("add"), s(block), s("TEST"), s("--id"), s("test_o")],
+            vec![
+                s("component"),
+                s("edit"),
+                format!("{block}/{revalue}"),
+                s("--value"),
+                s("47k"),
+            ],
+        ];
+        let theirs = vec![
+            vec![s("net"), s("add"), s(block), s("TEST"), s("--id"), s("test_t")],
+            vec![
+                s("net"),
+                s("rename"),
+                format!("{block}/{rename}"),
+                format!("{rename}_X"),
+            ],
+        ];
+        let (board, _top, before) = corpus_branches(dir.path(), name, block, cap, &ours, &theirs);
+        let met = settle_by_first_repairs(&board);
+        assert!(met.contains(&"name_clash".to_owned()), "{name}: {met:?}");
+        assert!(
+            !board
+                .join(format!("blocks/{block}/nets/test_t.json"))
+                .exists(),
+            "{name}: joined"
+        );
+        merged_as_well_as_each_side(&board, &before);
+    }
 }
