@@ -1,11 +1,11 @@
 //! Requests on features: add, edit, delete, move, list, show, and each type's fields and report.
 
-use crate::doc::files::{Feature, PartKind, Primitive};
+use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
 use crate::doc::project::{Part, feature_path};
 use crate::doc::sweep::{Angle, Extent, RevolveAxis};
 use crate::error::{Code, Error, Result};
-use crate::feature::{apply_placement, check_sweep, check_up_to};
+use crate::feature::{check_sweep, check_up_to};
 use crate::mesh;
 use crate::param;
 use crate::part::{
@@ -21,20 +21,15 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 // The old path, for `route.rs` (design 541, "Paths kept").
 pub(crate) use crate::feature::Given;
-use crate::feature::blend::{CHAMFER, FILLET, blend_from, blend_report};
-use crate::feature::boolean::{BOOLEAN, boolean_from};
-use crate::feature::delete_body::{DELETE_BODY, check_delete, delete_from};
-use crate::feature::extrude::{EXTRUDE, REVOLVE, sweep_from};
-use crate::feature::hole::{HOLE, hole_from, hole_report};
+use crate::feature::blend::blend_report;
+use crate::feature::delete_body::check_delete;
+use crate::feature::hole::hole_report;
 use crate::feature::import::import_not_written_here;
-use crate::feature::insert::{INSERT, check_insert, insert_from};
-use crate::feature::instance::{INSTANCE, check_instance, instance_from};
-use crate::feature::instance_pattern::{INSTANCE_PATTERN, instance_pattern_from};
-use crate::feature::mate::{MATE, mate_from};
-use crate::feature::pattern::{PATTERN, pattern_from, pattern_report};
-use crate::feature::planar::planar_from;
-use crate::feature::primitive::{combine_from, primitive_report, radius_param, refuse_sizes};
-use crate::feature::sketch::{SKETCH, sketch_plane, sketch_report};
+use crate::feature::insert::check_insert;
+use crate::feature::instance::check_instance;
+use crate::feature::pattern::pattern_report;
+use crate::feature::primitive::primitive_report;
+use crate::feature::sketch::sketch_report;
 use crate::feature::{Place, Write};
 
 /// How a feature appears in output: every quantity as written and in
@@ -514,189 +509,46 @@ pub(crate) fn feature_edit(
     session: &mut Session,
     part: &str,
     id: &str,
-    mut given: Given,
+    given: Given,
     expressions: &Map<String, Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let (pid, fid) = (part_id(part)?, feature_id(id)?);
     let unit = session.project().manifest.default_unit;
+    let (old, env) = {
+        let p = session.project().part(&pid)?;
+        (feature(p, &fid)?.clone(), p.env.clone())
+    };
+    let ty = old.type_name();
+    let kind = crate::feature::kind_of(&old);
+    let mut cx = Write {
+        session: &mut *session,
+        part: &pid,
+        unit,
+        env: &env,
+        given,
+        place: Place::Edit { id: &fid },
+        read: None,
+        took: None,
+    };
     // An insert's edit may look up its source's newest label: read it
     // before the part is borrowed for the rest.
-    let inserted = {
-        let p = session.project().part(&pid)?;
-        match feature(p, &fid)?.insert() {
-            Some(i) if expressions.is_empty() => {
-                let (i, env) = (i.clone(), p.env.clone());
-                given.only("insert", &INSERT)?;
-                Some(insert_from(session, Some(&i), &given, unit, &env)?.0)
-            }
-            _ => None,
-        }
-    };
-    let p = session.project().part(&pid)?;
+    if expressions.is_empty() {
+        kind.before_revision(ty, &old, &mut cx)?;
+    }
+    let p = cx.session.project().part(&pid)?;
     check_revision(p, expected)?;
     let list = order(p)?;
-    let old = feature(p, &fid)?.clone();
     let f = if !expressions.is_empty() {
-        edited_at(&old, &given, expressions, unit, &p.env).map_err(|e| e.with("feature", &fid))?
+        edited_at(&old, &cx.given, expressions, unit, &env).map_err(|e| e.with("feature", &fid))?
     } else {
-        match old.clone() {
-            Feature::Primitive(mut f) => {
-                radius_param(f.ty, &mut given)?;
-                refuse_sizes(f.ty, &given)?;
-                f.combine = combine_from(&f.combine, &given)?;
-                let mut merged: Map<String, Value> = f
-                    .params
-                    .iter()
-                    .map(|(k, q)| (k.clone(), Value::String(q.text())))
-                    .collect();
-                for (k, v) in given.params {
-                    if v.is_null() {
-                        merged.remove(&k);
-                    } else {
-                        merged.insert(k, v);
-                    }
-                }
-                f.params = Primitive::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
-                apply_placement(
-                    &mut f.placement,
-                    given.placement.unwrap_or_default(),
-                    unit,
-                    &p.env,
-                )?;
-                Feature::Primitive(f)
-            }
-            // Its geometry changes through sketch.edit; the plane moves the
-            // sketch without changing its solve.
-            Feature::Sketch(mut s) => {
-                given.only("sketch", &SKETCH)?;
-                s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
-                Feature::Sketch(s)
-            }
-            Feature::Instance(i) => {
-                given.only("instance", &INSTANCE)?;
-                let deps = session.project().manifest.dependencies.clone();
-                Feature::Instance(instance_from(Some(&i), &given, unit, &p.env, &deps)?)
-            }
-            Feature::Insert(_) => Feature::Insert(Box::new(
-                inserted.clone().expect("read before the part was borrowed"),
-            )),
-            Feature::DeleteBody(d) => {
-                given.only("delete_body", &DELETE_BODY)?;
-                if given.fields.solids.is_none() && given.fields.solid.is_none() {
-                    Feature::DeleteBody(d)
-                } else {
-                    Feature::DeleteBody(Box::new(delete_from(&given)?))
-                }
-            }
-            Feature::Mate(m) => {
-                given.only("mate", &MATE)?;
-                mate_from(Some(&m), &given, (session.project(), &pid), unit, &p.env)?
-            }
-            Feature::InstancePattern(x) => {
-                given.only("instance_pattern", &INSTANCE_PATTERN)?;
-                instance_pattern_from(Some(&x), &given, &pid, unit, &p.env)?
-            }
-            Feature::Boolean(b) => {
-                given.only("boolean", &BOOLEAN)?;
-                Feature::Boolean(boolean_from(Some(&b), &given)?)
-            }
-            f @ (Feature::Fillet(_) | Feature::Chamfer(_)) => {
-                let ty = f.type_name();
-                given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
-                blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
-            }
-            f @ (Feature::Shell(_)
-            | Feature::Offset(_)
-            | Feature::Mirror(_)
-            | Feature::Split(_)) => {
-                let ty = f.type_name();
-                given.only(ty, crate::doc::body::request_fields(ty))?;
-                crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
-            }
-            f @ (Feature::BaseFlange(_)
-            | Feature::Flange(_)
-            | Feature::Unfold(_)
-            | Feature::Refold(_)) => {
-                let ty = f.type_name();
-                crate::sheet_metal::take_given(ty, &mut given.fields);
-                given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
-                crate::sheet_metal::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
-            }
-            Feature::Pattern(x) => {
-                given.only("pattern", &PATTERN)?;
-                pattern_from(Some(&x), &given, &pid, unit, &p.env)?
-            }
-            Feature::Hole(h) => {
-                given.only("hole", &HOLE)?;
-                let f = hole_from(Some(&h), &given, &pid, unit, &p.env)?;
-                check_sweep(p, &list, &fid, &f)?;
-                f
-            }
-            Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
-            f
-            @ (Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)) => {
-                let ty = f.type_name();
-                given.only(ty, crate::doc::surface::request_fields(ty))?;
-                crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
-            }
-            f @ (Feature::MoveFace(_)
-            | Feature::ReplaceFace(_)
-            | Feature::Draft(_)
-            | Feature::DeleteFace(_)
-            | Feature::DeleteBlend(_)
-            | Feature::ResizeBlend(_)) => {
-                let ty = f.type_name();
-                crate::tweak::take_given(ty, &mut given.fields)?;
-                given.only(ty, crate::tweak::request_fields(ty))?;
-                crate::tweak::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
-            }
-            Feature::Datum(d) => {
-                let ty = d.type_name();
-                given.only(ty, crate::datum::request_fields(ty))?;
-                crate::datum::from_given(ty, Some(&d), &given.fields, &pid, unit, &p.env)?
-            }
-            Feature::Path(x) => {
-                let ty = x.type_name();
-                given.only(ty, crate::doc::path::request_fields(ty))?;
-                crate::path::from_given(ty, Some(&x), &given.fields, &pid, unit, &p.env)?
-            }
-            Feature::Sweep(w) => {
-                given.only("sweep", &crate::doc::sweep::SWEEP_FIELDS)?;
-                let f = crate::along::from_given(Some(&w), &given.fields, p, unit, &p.env)?;
-                if !f.profiles().is_empty() {
-                    check_sweep(p, &list, &fid, &f)?;
-                }
-                f
-            }
-            Feature::Loft(l) => {
-                given.only("loft", &crate::doc::sweep::LOFT_FIELDS)?;
-                let f = crate::loft::from_given(Some(&l), &given.fields, p, unit, &p.env)?;
-                check_sweep(p, &list, &fid, &f)?;
-                f
-            }
-            Feature::Planar(x) => {
-                given.only("planar", &crate::doc::sweep::PLANAR_FIELDS)?;
-                let f = planar_from(Some(x.fields()), &given, &pid)?;
-                if !f.profiles().is_empty() {
-                    check_sweep(p, &list, &fid, &f)?;
-                }
-                f
-            }
-            f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
-                let ty = f.type_name();
-                given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
-                let current = match &f {
-                    Feature::Extrude(e) => e.fields(),
-                    Feature::Revolve(r) => r.fields(),
-                    _ => unreachable!("a sweep"),
-                };
-                let f = sweep_from(ty, Some(current), &given, &pid, unit, &p.env)?;
-                check_sweep(p, &list, &fid, &f)?;
-                f
-            }
-        }
+        kind.take_given(ty, &mut cx.given)?;
+        kind.refuse_others(ty, &cx.given)?;
+        kind.from_given(ty, Some(&old), &mut cx)?
     };
+    // Its borrows of the session end here.
+    drop(cx);
+    let p = session.project().part(&pid)?;
     // A solid's founder that stops founding it leaves what acts on it, or
     // refers to it, with nothing.
     let founded = |f: &Feature| f.founds();
@@ -733,44 +585,14 @@ pub(crate) fn feature_edit(
     if let Feature::Pattern(x) = &f {
         crate::pattern::check_seeds(&proposed(p, &list, &[(&fid, &f)]), &fid, x)?;
     }
-    // References already there were checked when they were written; a
-    // fillet or chamfer that now grows its edges, or stops, may reach an
-    // edge twice.
-    let propagates = |f: &Feature| match f {
-        Feature::Fillet(x) => x.propagate,
-        Feature::Chamfer(x) => x.propagate,
-        _ => false,
-    };
-    // A sweep's twist and scale are judged against its path's closing, a
-    // loft's sections against each other.
-    let sweep_changed = (f.sweep().is_some() || f.loft().is_some()) && f != old;
+    // References already there were checked when they were written; the
+    // kind says what else of an edit is judged again (a blend's
+    // propagation, a sweep's twist and scale, a loft's sections, a whole
+    // body's or tweak's target, any change of sheet metal or a surface).
     if f.references() != old.references()
         || f.geometry() != old.geometry()
-        || propagates(&f) != propagates(&old)
-        || sweep_changed
-        || (matches!(
-            f,
-            Feature::Shell(_)
-                | Feature::Offset(_)
-                | Feature::Mirror(_)
-                | Feature::Split(_)
-                | Feature::MoveFace(_)
-                | Feature::ReplaceFace(_)
-                | Feature::Draft(_)
-                | Feature::DeleteFace(_)
-                | Feature::DeleteBlend(_)
-                | Feature::ResizeBlend(_)
-        ) && f.targets() != old.targets())
-        || ((f.base_flange().is_some()
-            || f.flange().is_some()
-            || f.unfold().is_some()
-            || f.refold().is_some())
-            && f != old)
-        || (matches!(
-            f,
-            Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)
-        ) && f != old)
         || f.source() != old.source()
+        || kind.rechecks(&old, &f)
     {
         followed.extend(check_references(session, &pid, &list, &fid, &f)?);
     }
