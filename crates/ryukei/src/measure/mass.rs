@@ -916,6 +916,7 @@ mod tests {
         let m = mass(&b, 1.0, &opts).unwrap();
         near(m.volume, 2.0 * PI * PI * big * small * small, 1e-9);
         near(m.area, 4.0 * PI * PI * big * small, 1e-9);
+        // unmetered: a test looks at the meshes mass made
         let meshed = Meshed::new(&b, opts.chord, &Meter::free()).unwrap();
         let old = crate::mesh::tessellate(&b, &MeshParams::new(1e-4, 0.05)).unwrap();
         assert!(
