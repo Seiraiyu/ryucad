@@ -289,7 +289,7 @@ pub(crate) struct Sides {
 pub(crate) fn sides(root: &Path, state: &MergeState) -> Result<Sides> {
     let read = |c: Option<&String>| -> Result<Files> {
         match c {
-            Some(c) => Ok(crate::git::revision(root, c)?.files),
+            Some(c) => Ok(own(&crate::git::revision(root, c)?.files)),
             None => Ok(Files::new()),
         }
     };
@@ -311,8 +311,6 @@ fn layout_on(files: &Files, path: &str) -> Result<Layout> {
 /// Block `id`'s layout merged three ways over the merged connectivity:
 /// the block as ryusch reads it (the merged instructions' notes filled),
 /// each side's layout, and what `ryusch::merge` makes of them.
-// Task 14's layout resolutions read the rest.
-#[allow(dead_code)]
 pub(crate) struct BlockMerge {
     pub built: crate::schem::Built,
     pub base: Layout,
@@ -345,6 +343,43 @@ pub(crate) fn block_merge(p: &Project, id: &Id, sides: &Sides) -> Result<BlockMe
         theirs,
         merged,
     })
+}
+
+/// `layout` for block `id`, laid out once more over `files` with it
+/// written, as a later status will read it: so what a resolution writes
+/// is current.
+fn current(root: &Path, files: &Files, id: &Id, layout: &Layout) -> Result<Layout> {
+    let mut files = files.clone();
+    files.insert(
+        crate::schem::layout_path(id),
+        crate::schem::layout_text(layout).into_bytes().into(),
+    );
+    let manifest = files
+        .get(crate::project::MANIFEST)
+        .map(|b| crate::project::Manifest::read(b))
+        .transpose()?
+        .ok_or_else(|| Error::new(Code::ProjectNotFound, "the merge left no manifest"))?;
+    let p = Project::load_from(root, &files, &crate::project::resolve(root, &manifest))?;
+    let b = p.conn.blocks.get(id).ok_or_else(|| {
+        Error::new(
+            Code::NotFound,
+            format!("block {id} isn't in the merged project"),
+        )
+        .with("block", id)
+    })?;
+    Ok(
+        crate::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None)?
+            .outcome
+            .layout,
+    )
+}
+
+/// What settling a layout needs beyond the files: the project's folder,
+/// the merge, and the merged project (`None` when it doesn't load).
+pub(crate) struct Merging<'a> {
+    pub root: &'a Path,
+    pub state: &'a MergeState,
+    pub project: Option<&'a Project>,
 }
 
 /// The blocks whose layout file holds a pending entry (the driver's).
@@ -686,9 +721,13 @@ fn settle(
     now: &Value,
     files: &mut Files,
     resolutions: &[crate::proto::Resolution],
+    at: &Merging,
 ) -> Result<Vec<String>> {
     let unmerged = repo.unmerged()?;
     let mut resolved = Vec::new();
+    // A block's areas (by number) and what each takes; a stale block's repair.
+    let mut areas: BTreeMap<String, BTreeMap<usize, ryusch::merge::Repair>> = BTreeMap::new();
+    let mut stale: Vec<(String, String)> = Vec::new();
     for r in resolutions {
         let found = find(now, &r.conflict)?;
         let kind = found["kind"].as_str().unwrap_or_default();
@@ -726,6 +765,66 @@ fn settle(
                     }
                 }
             }
+            ("layout_pending" | "layout_stale", side @ ("ours" | "theirs"))
+                if found["choices"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|x| x == side)) =>
+            {
+                let commit = if side == "ours" {
+                    &at.state.ours
+                } else {
+                    &at.state.theirs
+                };
+                let rel = crate::source::join(repo.prefix().trim_end_matches('/'), &path);
+                match repo.file_at(commit, &rel)? {
+                    Some(b) => {
+                        files.insert(path.clone(), b.into());
+                    }
+                    None => {
+                        files.remove(&path);
+                    }
+                }
+            }
+            ("layout_conflict", "ours" | "theirs" | "repair") => {
+                let repair = match (r.choice.as_str(), r.repair.as_deref()) {
+                    ("ours", _) => ryusch::merge::Repair::Ours,
+                    ("theirs", _) => ryusch::merge::Repair::Theirs,
+                    (_, Some("relayout")) => ryusch::merge::Repair::Relayout,
+                    _ => {
+                        return Err(Error::new(
+                            Code::RepairConflict,
+                            format!(
+                                "{} has no repair {:?}: its repair is relayout",
+                                r.conflict, r.repair
+                            ),
+                        )
+                        .with("conflict", &r.conflict));
+                    }
+                };
+                let (block, n) = r.conflict.split_once("#area:").unwrap_or_default();
+                let n: usize = n.parse().unwrap_or_default();
+                areas.entry(block.to_owned()).or_default().insert(n, repair);
+            }
+            ("layout_stale", "repair") => {
+                let id = r.repair.clone().unwrap_or_default();
+                if !found["repairs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|x| x["id"] == id.as_str())
+                {
+                    return Err(Error::new(
+                        Code::RepairConflict,
+                        format!(
+                            "no repair {id} for {} now: run merge status again",
+                            r.conflict
+                        ),
+                    )
+                    .with("repair", id));
+                }
+                let block = r.conflict.split('#').next().unwrap_or_default().to_owned();
+                stale.push((block, id));
+            }
             (_, choice) => {
                 let offered: Vec<&str> = found["choices"]
                     .as_array()
@@ -753,6 +852,90 @@ fn settle(
             }
         }
         resolved.push(r.conflict.clone());
+    }
+    if areas.is_empty() && stale.is_empty() {
+        return Ok(resolved);
+    }
+    let p = at.project.ok_or_else(|| {
+        Error::new(
+            Code::InvalidParam,
+            "a layout merges over the merged project, which doesn't load yet: settle ryueda.json first",
+        )
+    })?;
+    let sides = sides(at.root, at.state)?;
+    for (block, chosen) in &areas {
+        let listed: Vec<&str> = now["conflicts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["id"].as_str())
+            .filter(|c| c.starts_with(&format!("{block}#area:")))
+            .collect();
+        if chosen.len() != listed.len() {
+            let named: BTreeSet<String> =
+                chosen.keys().map(|n| format!("{block}#area:{n}")).collect();
+            let rest: Vec<&str> = listed
+                .iter()
+                .copied()
+                .filter(|c| !named.contains(*c))
+                .collect();
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "block {block}'s layout areas are settled together: add {}",
+                    rest.join(", ")
+                ),
+            )
+            .with("block", block)
+            .with("areas", &listed));
+        }
+        let id = Id::parse(block, "block")?;
+        let m = block_merge(p, &id, &sides)?;
+        if m.merged.conflicts.len() != listed.len() {
+            return Err(Error::new(
+                Code::RepairConflict,
+                format!(
+                    "block {block}'s layout merges into other areas now: run merge status again"
+                ),
+            )
+            .with("block", block));
+        }
+        let repairs: Vec<ryusch::merge::Repair> = chosen.values().copied().collect();
+        let out = ryusch::merge::resolve(
+            &m.built.input,
+            &m.base,
+            &m.ours,
+            &m.theirs,
+            &m.merged,
+            &repairs,
+        )
+        .map_err(|refused| crate::schem::refusal(&id, refused))?;
+        let l = current(at.root, files, &id, &out.layout)?;
+        files.insert(
+            crate::schem::layout_path(&id),
+            crate::schem::layout_text(&l).into_bytes().into(),
+        );
+    }
+    for (block, repair) in &stale {
+        let id = Id::parse(block, "block")?;
+        let layout = if repair == "merge" {
+            let m = block_merge(p, &id, &sides)?;
+            ryusch::merge::resolve(&m.built.input, &m.base, &m.ours, &m.theirs, &m.merged, &[])
+                .map_err(|refused| crate::schem::refusal(&id, refused))?
+                .layout
+        } else {
+            let b = p.conn.blocks.get(&id).ok_or_else(|| {
+                Error::new(Code::NotFound, format!("no block {block}")).with("block", block)
+            })?;
+            crate::schem::lay(p, b, None, &[], ryusch::input::Relayout::None)?
+                .outcome
+                .layout
+        };
+        let l = current(at.root, files, &id, &layout)?;
+        files.insert(
+            crate::schem::layout_path(&id),
+            crate::schem::layout_text(&l).into_bytes().into(),
+        );
     }
     Ok(resolved)
 }
@@ -802,10 +985,15 @@ pub fn resolve(
     }
     let root = session.root().to_path_buf();
     let now = status(session)?;
-    let (repo, _) = merging(&root)?;
-    let before = own(&session.snapshot());
+    let (repo, state) = merging(&root)?;
+    let before = session.snapshot();
     let mut files = before.clone();
-    let resolved = settle(&repo, &now, &mut files, resolutions)?;
+    let at = Merging {
+        root: &root,
+        state: &state,
+        project: Some(session.project()),
+    };
+    let resolved = settle(&repo, &now, &mut files, resolutions, &at)?;
     let changes = write(&root, &before, &files)?;
     session.reload()?;
     Ok(json!({"resolved": resolved, "changes": changes, "status": status(session)?}))
@@ -823,7 +1011,12 @@ pub fn unloaded(root: &Path, req: crate::proto::Request) -> Result<Value> {
         return Ok(now);
     };
     let mut files = working.clone();
-    let resolved = settle(&repo, &now, &mut files, &resolutions)?;
+    let at = Merging {
+        root,
+        state: &state,
+        project: None,
+    };
+    let resolved = settle(&repo, &now, &mut files, &resolutions, &at)?;
     let changes = write(root, &working, &files)?;
     let after = findings(
         root,
