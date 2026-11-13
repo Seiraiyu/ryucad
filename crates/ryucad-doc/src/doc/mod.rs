@@ -38,6 +38,7 @@ pub mod sketch;
 pub mod solid;
 pub mod surface;
 pub mod sweep;
+pub mod thread;
 pub mod tweak;
 pub mod views;
 

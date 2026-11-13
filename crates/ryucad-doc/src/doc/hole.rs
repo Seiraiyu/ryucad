@@ -185,7 +185,8 @@ impl Thread {
         v
     }
 
-    fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Thread> {
+    /// A thread as a file holds it (a hole's, or a cosmetic thread's).
+    pub fn read(v: &Value, default: Unit, env: &Env) -> Result<Thread> {
         let at = "/thread";
         let mut o = Obj::new(v, at)?;
         let standard = name(&mut o, "standard", at)?;
@@ -960,7 +961,7 @@ impl Hole {
         let points = points_from_json(o.take_opt("points"))?;
         let thread = o
             .take_opt("thread")
-            .map(|t| Thread::from_json(&t, default, env))
+            .map(|t| Thread::read(&t, default, env))
             .transpose()?;
         let fastener = o
             .take_opt("fastener")

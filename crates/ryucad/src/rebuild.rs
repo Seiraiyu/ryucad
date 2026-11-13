@@ -712,6 +712,7 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Mate(_)
         | Feature::InstancePattern(_)
         | Feature::Datum(_)
+        | Feature::CosmeticThread(_)
         | Feature::Path(_)
         | Feature::Shell(_)
         | Feature::Offset(_)

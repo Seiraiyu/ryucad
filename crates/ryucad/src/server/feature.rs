@@ -57,6 +57,8 @@ pub fn feature_report(p: &Part, unit: Unit, id: &Id, f: &Feature) -> Value {
         | Feature::DeleteBlend(_)
         | Feature::ResizeBlend(_) => crate::tweak::report(part, f),
         Feature::Datum(d) => crate::datum::report(part, d),
+        // Its full report comes with feature.add's (Task 22).
+        Feature::CosmeticThread(c) => c.fields(),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
         Feature::Loft(l) => crate::loft::feature_report(part, l),
@@ -2951,6 +2953,14 @@ pub(crate) fn feature_edit(
             Feature::InstancePattern(x) => {
                 given.only("instance_pattern", &INSTANCE_PATTERN)?;
                 instance_pattern_from(Some(&x), &given, &pid, unit, &p.env)?
+            }
+            // Edited through feature.edit with Task 22.
+            Feature::CosmeticThread(_) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "a cosmetic thread is edited by writing its file until feature.edit takes it",
+                )
+                .with("feature", &fid));
             }
             Feature::Boolean(b) => {
                 given.only("boolean", &BOOLEAN)?;

@@ -210,6 +210,8 @@ pub enum Feature {
     Fillet(Fillet),
     Chamfer(Chamfer),
     Hole(Box<Hole>),
+    /// A thread on cylindrical faces, as data (ryucad 28.B).
+    CosmeticThread(Box<super::thread::CosmeticThread>),
     Pattern(Pattern),
     Instance(Instance),
     Mate(Box<Mate>),
@@ -641,11 +643,15 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             // A base flange's bent section's depth is a plain length; a
             // hole's is an object (and "through_all" a word).
             ("depth", Value::String(s)) => {
-                if s != "through_all" {
+                if s != "through_all" && s != "through_next" {
                     out.push(s);
                 }
             }
-            (k @ ("counterbore" | "countersink" | "depth" | "bottom" | "thread"), x) => {
+            (
+                k @ ("counterbore" | "countersink" | "counterdrill" | "spotface" | "near" | "far"
+                | "depth" | "bottom" | "thread"),
+                x,
+            ) => {
                 out.extend(super::hole::expression_strings(k, x));
             }
             // A hole's tolerance is an object; a fill's or a sew's a string.
@@ -763,7 +769,11 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
     let ty = v.get("type").and_then(Value::as_str);
-    // Highest first: a hole's new geometry is 24, whatever else it holds.
+    // Highest first: a cosmetic thread and a hole's new geometry are 24,
+    // whatever else they hold.
+    if ty == Some("cosmetic_thread") {
+        return super::thread::FORMAT;
+    }
     if ty == Some("hole") && super::hole::Hole::json_has_geometry(v) {
         return super::hole::GEOMETRY_FORMAT;
     }
@@ -1098,7 +1108,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, insert, delete_body, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft, delete_face, delete_blend, resize_blend"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, insert, delete_body, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft, delete_face, delete_blend, resize_blend, cosmetic_thread"),
     )
     .with("type", s)
 }
@@ -1115,6 +1125,7 @@ impl Feature {
             Feature::Fillet(_) => "fillet",
             Feature::Chamfer(_) => "chamfer",
             Feature::Hole(_) => "hole",
+            Feature::CosmeticThread(_) => "cosmetic_thread",
             Feature::Pattern(_) => "pattern",
             Feature::Instance(_) => "instance",
             Feature::Insert(_) => "insert",
@@ -1184,6 +1195,9 @@ impl Feature {
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
         // Highest first, as `feature_format`.
+        if let Feature::CosmeticThread(_) = self {
+            return super::thread::FORMAT;
+        }
         if let Feature::Hole(h) = self
             && h.has_geometry()
         {
@@ -1270,6 +1284,7 @@ impl Feature {
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
             Feature::Import(i) => i.format(),
             Feature::Insert(_) | Feature::DeleteBody(_) => super::insert::FORMAT,
+            Feature::CosmeticThread(_) => super::thread::FORMAT,
             Feature::Datum(_) => super::datum::FORMAT,
             Feature::Path(_) => super::path::FORMAT,
             Feature::Sweep(_) | Feature::Loft(_) => super::sweep::FORMAT,
@@ -1307,6 +1322,7 @@ impl Feature {
             Feature::Fillet(f) => f.fields(),
             Feature::Chamfer(c) => c.fields(),
             Feature::Hole(h) => h.fields(),
+            Feature::CosmeticThread(c) => c.fields(),
             Feature::Pattern(p) => p.fields(),
             Feature::Instance(i) => i.fields(),
             Feature::Insert(i) => i.fields(),
@@ -1385,6 +1401,9 @@ impl Feature {
             "unfold" => Feature::Unfold(Box::new(Unfold::from_fields(&mut o, default, env)?)),
             "refold" => Feature::Refold(Box::new(Refold::from_fields(&mut o)?)),
             "hole" => Feature::Hole(Box::new(Hole::from_fields(&mut o, default, env)?)),
+            "cosmetic_thread" => Feature::CosmeticThread(Box::new(
+                super::thread::CosmeticThread::from_fields(&mut o, default, env)?,
+            )),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
             "insert" => Feature::Insert(Box::new(super::insert::Insert::from_fields(
@@ -1446,6 +1465,7 @@ impl Feature {
             | Feature::Fillet(_)
             | Feature::Chamfer(_)
             | Feature::Hole(_)
+            | Feature::CosmeticThread(_)
             | Feature::Pattern(_)
             | Feature::Instance(_)
             | Feature::Insert(_)
@@ -1673,6 +1693,7 @@ impl Feature {
                 )
                 .collect(),
             Feature::Offset(o) => o.references(),
+            Feature::CosmeticThread(c) => c.references(),
             Feature::Flange(f) => f.references(),
             Feature::Unfold(u) => u.references(),
             Feature::Refold(r) => r.references(),
@@ -3066,6 +3087,33 @@ mod tests {
         // Geometry wins over intent: highest first.
         t["near"] = json!({"diameter": "7 mm"});
         assert_eq!(feature_format(&t), 24);
+    }
+
+    #[test]
+    fn a_holes_new_geometry_holds_expressions_and_through_next_is_none() {
+        let v = json!({"format": 24, "kind": FEATURE_KIND, "type": "hole", "sketch": "s",
+            "form": "counterdrill", "diameter": "d", "depth": "through_next",
+            "counterdrill": {"diameter": "d * 2", "depth": "1 mm"},
+            "near": {"diameter": "d + 3 mm"},
+            "far": {"countersink": {"diameter": "e", "angle": "90 deg"}},
+            "targets": ["b"]});
+        let at: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
+        for p in [
+            "/counterdrill/diameter",
+            "/near/diameter",
+            "/far/countersink/diameter",
+        ] {
+            assert!(at.iter().any(|x| x == p), "{p} in {at:?}");
+        }
+        assert!(!at.iter().any(|x| x == "/depth"), "{at:?}");
+        assert!(feature_names(&v).contains("e"));
+        // A cosmetic thread's depth is a length.
+        let c = json!({"format": 24, "kind": FEATURE_KIND, "type": "cosmetic_thread",
+            "faces": [{"feature": "shaft", "name": "0123456789abcdef0123456789abcdef"}],
+            "thread": {"standard": "iso_metric", "size": "M10"},
+            "from": {"feature": "shaft", "name": "fedcba9876543210fedcba9876543210"},
+            "depth": "l"});
+        assert!(feature_names(&c).contains("l"));
     }
 
     #[test]
