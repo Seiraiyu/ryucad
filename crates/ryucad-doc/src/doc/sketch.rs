@@ -819,12 +819,65 @@ pub fn constraint_from_json(v: &Value, at: &str, default: Unit, env: &Env) -> Re
     })
 }
 
+/// The order points are taken in: by the text before an ID's trailing
+/// digits, then by their number, so `p2` comes before `p10`.
+pub fn natural(id: &Id) -> (&str, usize, &str, &str) {
+    let s = id.as_str();
+    let stem = s.trim_end_matches(|c: char| c.is_ascii_digit());
+    let digits = s[stem.len()..].trim_start_matches('0');
+    (stem, digits.len(), digits, s)
+}
+
+impl Sketch {
+    /// Its points no curve uses, in [`natural`] order: where a hole drills
+    /// and a points pattern places copies when they list none.
+    pub fn free_points(&self) -> Vec<&Id> {
+        let used: std::collections::BTreeSet<&Id> = self
+            .entities
+            .values()
+            .flat_map(|e| match &e.geometry {
+                Geometry::Point { .. } => Vec::new(),
+                Geometry::Line { start, end } => vec![start, end],
+                Geometry::Arc { center, start, end } => vec![center, start, end],
+                Geometry::Circle { center, .. } => vec![center],
+            })
+            .collect();
+        let mut free: Vec<&Id> = self
+            .entities
+            .iter()
+            .filter(|(p, e)| matches!(e.geometry, Geometry::Point { .. }) && !used.contains(p))
+            .map(|(p, _)| p)
+            .collect();
+        free.sort_by(|a, b| natural(a).cmp(&natural(b)));
+        free
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::doc::canonical;
     use crate::doc::files::Feature;
     use crate::doc::fixtures::rectangle;
+
+    #[test]
+    fn free_points_are_those_no_curve_uses_in_natural_order() {
+        let mut v = rectangle();
+        v["entities"]["p10"] = json!({"m": [0.05, 0], "type": "point"});
+        v["entities"]["p9"] = json!({"m": [0.04, 0], "type": "point"});
+        v["entities"]["k1"] = json!({"center": "p9", "r_m": 0.001, "type": "circle"});
+        v["entities"]["p11"] = json!({"m": [0.06, 0], "type": "point"});
+        let s = read(&v).unwrap();
+        let free: Vec<&str> = s.free_points().into_iter().map(Id::as_str).collect();
+        // p1 to p4 are the rectangle's corners, p9 a circle's centre.
+        assert_eq!(free, ["p10", "p11"]);
+        let mut ids = vec![
+            Id::parse("p10", "id").unwrap(),
+            Id::parse("p2", "id").unwrap(),
+        ];
+        ids.sort_by(|a, b| natural(a).cmp(&natural(b)));
+        assert_eq!(ids[0].as_str(), "p2");
+    }
 
     fn width() -> Env {
         let p = [(

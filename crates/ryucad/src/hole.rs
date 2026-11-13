@@ -30,7 +30,6 @@ use ryukei::geom::{Axis, Curve2, Frame, Line2, Point2, Point3, Vector3};
 use ryukei::name::{OpKey, ToolKey};
 use ryukei::sweep::{self, Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
 use serde_json::json;
-use std::collections::BTreeSet;
 
 /// The key of one of a hole's profile segments.
 pub fn segment_key(part: &Id, feature: &Id, segment: &str) -> u128 {
@@ -54,59 +53,60 @@ pub fn point_key(part: &Id, feature: &Id, point: &Id) -> ToolKey {
     ToolKey(OpKey::from_bytes(&bytes).0)
 }
 
+/// The points of `solved` (sketch `sketch`) that `listed` names, or every
+/// point no curve uses, in natural order, in the part's frame; what for
+/// errors names the reader (`hole h`). A listed ID that isn't a point is
+/// `not_found` or `reference_wrong_kind` at `/points/<i>`. May be empty.
+pub fn sketch_points(
+    what: &str,
+    owner: &Id,
+    sketch: &Id,
+    listed: &[Id],
+    solved: &Solved,
+) -> Result<Vec<(Id, Point3)>> {
+    let s = &solved.sketch;
+    let at = |m: [f64; 2]| solved.frame.apply_point(Point3::new(m[0], m[1], 0.0));
+    if listed.is_empty() {
+        return Ok(s
+            .free_points()
+            .into_iter()
+            .filter_map(|p| match s.entities[p].geometry {
+                Geometry::Point { m } => Some((p.clone(), at(m))),
+                _ => None,
+            })
+            .collect());
+    }
+    listed
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match s.entities.get(p).map(|e| &e.geometry) {
+            Some(Geometry::Point { m }) => Ok((p.clone(), at(*m))),
+            Some(g) => Err(Error::new(
+                Code::ReferenceWrongKind,
+                format!("{what}: {p} is a {}, not a point", g.type_name()),
+            )
+            .with("feature", owner)
+            .with("entity", p)
+            .with("pointer", format!("/points/{i}"))),
+            None => Err(Error::new(
+                Code::NotFound,
+                format!("{what}: sketch {sketch} has no {p}"),
+            )
+            .with("feature", owner)
+            .with("entity", p)
+            .with("pointer", format!("/points/{i}"))),
+        })
+        .collect()
+}
+
 /// The solved sketch a hole drills at, and the points it drills: those
 /// it lists, else every point no curve uses, in natural order (`p2` before `p10`). A listed ID
 /// that isn't a point of the sketch is `not_found` or
 /// `reference_wrong_kind`; a sketch with no point to drill is
 /// `invalid_param`.
 pub fn points(id: &Id, h: &Hole, solved: &Solved) -> Result<Vec<(Id, Point3)>> {
-    let s = &solved.sketch;
-    let at = |m: [f64; 2]| solved.frame.apply_point(Point3::new(m[0], m[1], 0.0));
-    if !h.points.is_empty() {
-        return h
-            .points
-            .iter()
-            .enumerate()
-            .map(|(i, p)| match s.entities.get(p).map(|e| &e.geometry) {
-                Some(Geometry::Point { m }) => Ok((p.clone(), at(*m))),
-                Some(g) => Err(Error::new(
-                    Code::ReferenceWrongKind,
-                    format!("hole {id}: {p} is a {}, not a point", g.type_name()),
-                )
-                .with("feature", id)
-                .with("entity", p)
-                .with("pointer", format!("/points/{i}"))),
-                None => Err(Error::new(
-                    Code::NotFound,
-                    format!("hole {id}: sketch {} has no {p}", h.sketch),
-                )
-                .with("feature", id)
-                .with("entity", p)
-                .with("pointer", format!("/points/{i}"))),
-            })
-            .collect();
-    }
-    let used: BTreeSet<&Id> = s
-        .entities
-        .values()
-        .flat_map(|e| match &e.geometry {
-            Geometry::Point { .. } => Vec::new(),
-            Geometry::Line { start, end } => vec![start, end],
-            Geometry::Arc { center, start, end } => vec![center, start, end],
-            Geometry::Circle { center, .. } => vec![center],
-        })
-        .collect();
-    let mut free: Vec<(Id, Point3)> = s
-        .entities
-        .iter()
-        .filter(|(p, _)| !used.contains(p))
-        .filter_map(|(p, e)| match e.geometry {
-            Geometry::Point { m } => Some((p.clone(), at(m))),
-            _ => None,
-        })
-        .collect();
-    free.sort_by(|(a, _), (b, _)| crate::profile::natural(a).cmp(&crate::profile::natural(b)));
-    if free.is_empty() {
+    let out = sketch_points(&format!("hole {id}"), id, &h.sketch, &h.points, solved)?;
+    if out.is_empty() {
         return Err(Error::new(
             Code::InvalidParam,
             format!(
@@ -117,7 +117,7 @@ pub fn points(id: &Id, h: &Hole, solved: &Solved) -> Result<Vec<(Id, Point3)>> {
         .with("feature", id)
         .with("pointer", "/points"));
     }
-    Ok(free)
+    Ok(out)
 }
 
 /// How deep the bore goes from the sketch's plane, in meters: blind,
