@@ -5,14 +5,16 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// A tapped hole's rings: its axis, the ends' centres and the radius.
+pub type RingAxis = ([f64; 3], [f64; 3], [f64; 3], f64);
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HoleRow {
     pub reference: String,
     pub spec: String,
     pub feature: String,
     pub faces: Vec<String>,
-    /// A tapped hole's rings: its axis, the ends' centres and the radius.
-    pub ring: Option<([f64; 3], [f64; 3], [f64; 3], f64)>,
+    pub ring: Option<RingAxis>,
 }
 
 /// A part's holes, at the revision they were listed at.
@@ -25,7 +27,11 @@ pub struct HoleTable {
 
 fn point(v: &Value) -> Option<[f64; 3]> {
     let a = v.as_array()?;
-    Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?])
+    Some([
+        a.first()?.as_f64()?,
+        a.get(1)?.as_f64()?,
+        a.get(2)?.as_f64()?,
+    ])
 }
 
 impl HoleTable {

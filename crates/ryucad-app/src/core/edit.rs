@@ -2032,6 +2032,7 @@ impl Form {
             fields: self.fields_given()?,
             expressions: Default::default(),
             expected_revision: Some(self.revision.clone()),
+            dry_run: false,
         })
     }
 

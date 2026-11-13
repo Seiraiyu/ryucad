@@ -1936,6 +1936,7 @@ impl Workspace {
             id: None,
             position: Default::default(),
             expected_revision: expected,
+            dry_run: false,
         };
         self.send(req, Pending::DepsPlace);
     }
