@@ -213,11 +213,17 @@ fn one(
     // it: one over-wide row widens every row after it (#733).
     if e.is_open() {
         let typed = ws.annotation_ui.replies.entry(e.id.clone()).or_default();
+        // Named for a screen reader (#781): a hint is only a placeholder.
+        let name = number.map_or_else(
+            || "Reply to this annotation".to_owned(),
+            |n| format!("Reply to #{n}"),
+        );
         ui.add(
             egui::TextEdit::singleline(typed)
                 .hint_text("Reply")
                 .desired_width(f32::INFINITY),
-        );
+        )
+        .accessible_name(name);
     }
     ui.horizontal_wrapped(|ui| {
         if e.is_open() {
