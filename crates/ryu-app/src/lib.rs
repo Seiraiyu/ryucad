@@ -9,3 +9,4 @@
 
 pub mod fonts;
 pub mod icon;
+pub mod style;
