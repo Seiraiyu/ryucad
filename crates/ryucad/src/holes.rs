@@ -336,6 +336,79 @@ impl Row {
     }
 }
 
+impl Holes {
+    /// The hole a face (by name, in `solid`) belongs to, and its segment.
+    pub fn of_face(&self, solid: &str, name: &str) -> Option<(&Row, &str)> {
+        self.rows
+            .iter()
+            .filter(|r| r.solid.as_str() == solid)
+            .find_map(|r| {
+                r.faces
+                    .iter()
+                    .find(|(_, n)| n.iter().any(|x| x == name))
+                    .map(|(s, _)| (r, s.as_str()))
+            })
+    }
+
+    pub fn by_ref(&self, reference: &str) -> Option<&Row> {
+        self.rows.iter().find(|r| r.reference == reference)
+    }
+}
+
+/// The part `text` names when it reads as a hole reference rather than
+/// an entity's: its last part is no entity name (32 hex digits), and its
+/// feature is a hole, a pattern or a mirror of a part (not an assembly).
+pub fn is_ref(session: &Session, text: &str) -> Option<Id> {
+    let parts: Vec<&str> = text.split('/').collect();
+    let [part, feature, .., last] = parts.as_slice() else {
+        return None;
+    };
+    if parts.len() < 3 || (last.len() == 32 && last.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return None;
+    }
+    let pid = Id::parse(part, "part").ok()?;
+    let fid = Id::parse(feature, "feature").ok()?;
+    let p = session.project().part(&pid).ok()?;
+    match p.features.get(&fid)? {
+        Ok(Feature::Hole(_) | Feature::Pattern(_) | Feature::Mirror(_)) => Some(pid),
+        _ => None,
+    }
+}
+
+/// The face references of the hole `text` names, if it names one: what
+/// `select` and `highlight` take for a hole.
+pub fn face_refs(session: &mut Session, text: &str) -> Result<Option<Vec<String>>> {
+    let Some(pid) = is_ref(session, text) else {
+        return Ok(None);
+    };
+    let holes = list(session, &pid, None)?;
+    let row = holes.by_ref(text).ok_or_else(|| {
+        Error::new(Code::NotFound, format!("{pid} has no hole {text}")).with("ref", text)
+    })?;
+    Ok(Some(
+        row.faces
+            .values()
+            .flatten()
+            .map(|n| row.face_ref(n))
+            .collect(),
+    ))
+}
+
+/// What `inspect` and `measure` add for a face of a hole: `hole` (its
+/// ref, segment and spec) and, on its wall, `thread`. Nothing when the
+/// part's holes can't be listed.
+pub fn face_note(session: &mut Session, part: &Id, solid: &str, name: &str) -> Option<Value> {
+    let holes = list(session, part, None).ok()?;
+    let (row, segment) = holes.of_face(solid, name)?;
+    let mut v = json!({"hole": {"ref": row.reference, "segment": segment, "spec": row.spec}});
+    if segment == "wall"
+        && let Some(t) = crate::thread::of_row(row)
+    {
+        v["thread"] = t.to_json();
+    }
+    Some(v)
+}
+
 /// `holes --csv`'s header.
 const CSV_HEADER: &str = "ref,spec,type,x_m,y_m,z_m,axis_x,axis_y,axis_z,drill_m,depth_m,thread_depth_m,feature,pattern,instance,mirror_of,solid";
 
@@ -664,6 +737,37 @@ mod tests {
         let gone = holes.gone.iter().find(|g| g.reference == "p/h/p1").unwrap();
         assert_eq!(gone.removed_by.as_ref().map(Id::as_str), Some("cut"));
         assert_eq!(holes.rows.len(), 3);
+    }
+
+    #[test]
+    fn faces_say_which_hole_and_holes_are_references() {
+        let (_dir, mut s) = drilled();
+        put(
+            &mut s,
+            "h",
+            json!({"format": 23, "points": ["p1"], "form": "simple",
+                   "thread": {"standard": "iso_metric", "size": "M2"}, "depth": "through_all"}),
+        );
+        let holes = list(&mut s, &id("p"), None).unwrap();
+        let name = holes.rows[0].faces["wall"][0].clone();
+        let wall = format!("p/b/{name}");
+        let i = call(&mut s, "inspect", json!({"part": "p", "entity": name})).unwrap();
+        assert_eq!(
+            i["entity"]["hole"],
+            json!({"ref": "p/h/p1", "segment": "wall", "spec": "M2x0.4-6H THRU"}),
+            "{i}"
+        );
+        assert_eq!(i["entity"]["thread"]["designation"], "M2x0.4-6H");
+        let m = call(&mut s, "measure", json!({"entities": [wall]})).unwrap();
+        assert_eq!(m["hole"]["ref"], "p/h/p1", "{m}");
+        let m = call(&mut s, "measure", json!({"entities": ["p/h/p1"]})).unwrap();
+        assert_eq!(m["hole"]["spec"], "M2x0.4-6H THRU", "{m}");
+        // Selecting or highlighting a hole takes its faces.
+        let refs = crate::entity::parse_all(&mut s, &["p/h/p1".to_owned()]).unwrap();
+        let faces: usize = holes.rows[0].faces.values().map(Vec::len).sum();
+        assert_eq!(refs.len(), faces);
+        let e = crate::entity::parse_all(&mut s, &["p/h/p9".to_owned()]).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::NotFound);
     }
 
     #[test]
