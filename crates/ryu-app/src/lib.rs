@@ -6,3 +6,5 @@
 //! requests through the traits here, and names the generic types for
 //! itself (`ryucad_app::core::keys::Keymap` is `Keymap<Ryucad>`), so its
 //! own code keeps its paths.
+
+pub mod fonts;

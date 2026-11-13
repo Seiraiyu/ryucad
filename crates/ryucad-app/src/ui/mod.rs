@@ -10,7 +10,8 @@ pub mod dialogs;
 pub mod doctor;
 pub mod export;
 pub mod feedback;
-pub mod fonts;
+/// The faces, `ryu_app`'s (ryueda 3.C).
+pub use ryu_app::fonts;
 pub mod form;
 pub mod help;
 pub mod icon;
