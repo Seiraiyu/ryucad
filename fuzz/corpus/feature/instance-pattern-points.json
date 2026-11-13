@@ -1,0 +1,10 @@
+{
+  "form": "points",
+  "format": 24,
+  "from": "p1",
+  "instances": ["i1"],
+  "kind": "ryucad.feature",
+  "on": {"feature": "s", "instance": ["i2"]},
+  "points": ["p1", "p2", "p3", "p4"],
+  "type": "instance_pattern"
+}
