@@ -21,10 +21,17 @@
 // Used from Tasks 5 and 6 of plan 18.B on; until then only its tests call it.
 #![allow(dead_code)]
 
-use crate::geom::{Box3, Direction, NurbsSurface, Surface};
+use crate::euler::{Corner, mef, semv, set_pcurve, set_surface, set_vertex_tolerance};
+use crate::geom::intersect2::{Meet2, crossings};
+use crate::geom::{
+    Box3, Curve, Curve2, Direction, Line2, NurbsCurve, NurbsSurface, Point2, Surface, Vector2,
+};
 use crate::intersect::coincide::planar_rows;
+use crate::intersect::{Place, point_in_face};
+use crate::name::{BooleanRole, Journal, Name, OpKey, Role};
 use crate::tol::LINEAR_RESOLUTION;
-use crate::topo::{Body, FaceId};
+use crate::topo::{Body, EdgeId, FaceId, Pcurve, VertexId};
+use std::sync::Arc;
 
 /// A flat Bézier span of a NURBS surface beside a knot of full
 /// multiplicity: the direction, the knot, whether the span lies after it
@@ -116,11 +123,206 @@ pub(crate) fn flat_spans(body: &Body, f: FaceId) -> Vec<FlatSpan> {
     flat_spans_of(n, crate::intersect::parameter_box(body, f))
 }
 
+/// The key a split of face `face` of operand `op` is made under: its
+/// pieces are MEF's `(sub, Part(0|1), [face])`, its split edges SEMV's.
+pub(crate) fn flat_key(key: OpKey, face: Name, op: usize) -> OpKey {
+    OpKey(
+        Name::derive(
+            key,
+            Role::Boolean(BooleanRole::FlatPiece),
+            &[face, Name::from_u128(op as u128)],
+        )
+        .to_u128(),
+    )
+}
+
+/// Face `f` of `body` split along `span`'s knot, its flat side on
+/// `span.plane`: a copy of the body, the flat piece, and the journal
+/// (SEMV's, MEF's, the pcurves' and the surface's events). `None`, the
+/// body untouched, where the face has other loops or a fin without a
+/// pcurve, where the iso-line doesn't cross its loop at exactly two places
+/// on two edges (or their ends) by certified 2D crossings, where the
+/// control row misses the vertices by more than their edges' tolerances,
+/// or where the result isn't sound topology.
+pub(crate) fn split_off(
+    body: &Body,
+    key: OpKey,
+    f: FaceId,
+    span: &FlatSpan,
+) -> Option<(Body, FaceId, Journal)> {
+    let Surface::Nurbs(n) = body.surfaces[body.faces[f].surface].clone() else {
+        return None;
+    };
+    let mut b = body.clone();
+    let mut journal = Journal::new();
+    let loops: Vec<_> = b.face_loops(f).collect();
+    let [l] = loops[..] else {
+        return None;
+    };
+    if b.loops[l].vertex.is_some() {
+        return None;
+    }
+    let (d, o) = (span.dir as usize, 1 - span.dir as usize);
+    let pb = crate::intersect::parameter_box(&b, f);
+    let reach = 0.01 * (pb[o][1] - pb[o][0]);
+    let range = [pb[o][0] - reach, pb[o][1] + reach];
+    // The iso-line in the parameter plane, its parameter the other
+    // direction's: the same parameter as the control row's curve.
+    let (origin, along) = match span.dir {
+        Direction::U => (Point2::new(span.knot, 0.0), Vector2::new(0.0, 1.0)),
+        Direction::V => (Point2::new(0.0, span.knot), Vector2::new(1.0, 0.0)),
+    };
+    let iso = Curve2::Line2(Line2::new(origin, along).ok()?);
+    // Within a part in 10⁹ of the face's parameters.
+    let tol = 1e-9 * (pb[0][1] - pb[0][0]).max(pb[1][1] - pb[1][0]);
+    // Every place the iso-line crosses the loop: the edge, the edge's
+    // parameter and the iso-line's.
+    let mut hits: Vec<(EdgeId, f64, f64)> = Vec::new();
+    for fin in b.loop_fins(l).collect::<Vec<_>>() {
+        let pc = b.fins[fin].pcurve?;
+        let e = b.fins[fin].edge;
+        let [t0, t1] = b.edges[e].interval;
+        let c2 = b.curves2[pc.curve].clone();
+        for m in crossings((&iso, range), (&c2, [pc.param(t0), pc.param(t1)]), tol)? {
+            match m {
+                Meet2::Point { ta, tb, .. } => {
+                    hits.push((e, (tb - pc.map[0]) / pc.map[1], ta));
+                }
+                Meet2::Overlap { .. } => return None,
+            }
+        }
+    }
+    // Each place a vertex: an edge's end it reaches, or a new one.
+    let mut ends: Vec<(VertexId, f64)> = Vec::new();
+    let mut inner: Vec<(EdgeId, f64, f64)> = Vec::new();
+    for (e, t, s) in hits {
+        let edge = &b.edges[e];
+        let p = b.curves[edge.curve].point(t);
+        let at_end = [edge.start, edge.end]
+            .into_iter()
+            .find(|&v| p.distance(b.vertices[v].point) <= b.vertices[v].tolerance.get());
+        match at_end {
+            Some(v) => {
+                if !ends.iter().any(|&(w, _)| w == v) {
+                    ends.push((v, s));
+                }
+            }
+            None => inner.push((e, t, s)),
+        }
+    }
+    if ends.len() + inner.len() != 2 {
+        return None;
+    }
+    if inner.len() == 2 && inner[0].0 == inner[1].0 {
+        return None;
+    }
+    for (e, t, s) in inner {
+        let p = b.curves[b.edges[e].curve].point(t);
+        let tol = b.edges[e].tolerance;
+        let (made, j) = semv(&mut b, key, e, t, p).ok()?;
+        journal.append(j);
+        if tol.get() > LINEAR_RESOLUTION {
+            journal.append(set_vertex_tolerance(&mut b, made.vertex, tol).ok()?);
+        }
+        ends.push((made.vertex, s));
+    }
+    ends.sort_by(|x, y| x.1.total_cmp(&y.1));
+    let [(va, sa), (vb, sb)] = [ends[0], ends[1]];
+    if sa.partial_cmp(&sb) != Some(core::cmp::Ordering::Less) {
+        return None;
+    }
+    // The knot's control row, exactly: at a knot of full multiplicity the
+    // iso-curve passes through that row, which is its control polygon.
+    let kv = &n.knots()[d];
+    let row = kv.span(span.knot) - kv.degree();
+    let [nu, nv] = n.counts();
+    let w = n.weights();
+    let (pts, ws): (Vec<_>, Vec<_>) = match span.dir {
+        Direction::U => (0..nv)
+            .map(|j| (n.control_point(row, j), w[row * nv + j]))
+            .unzip(),
+        Direction::V => (0..nu)
+            .map(|i| (n.control_point(i, row), w[i * nv + row]))
+            .unzip(),
+    };
+    let row_curve = NurbsCurve::new(n.knots()[o].clone(), pts, Some(ws)).ok()?;
+    for (v, s) in [(va, sa), (vb, sb)] {
+        let gap = row_curve.point(s).distance(b.vertices[v].point);
+        if gap > b.vertices[v].tolerance.get().max(LINEAR_RESOLUTION) {
+            return None;
+        }
+    }
+    let at = |b: &Body, v: VertexId| b.loop_fins(l).find(|&fin| b.start_of(fin) == v);
+    let (fa, fb) = (at(&b, va)?, at(&b, vb)?);
+    let cid = b.add_curve(Curve::Nurbs(Arc::new(row_curve)));
+    let (made, j) = mef(
+        &mut b,
+        key,
+        Corner::Before(fa),
+        Corner::Before(fb),
+        cid,
+        [sa, sb],
+    )
+    .ok()?;
+    journal.append(j);
+    // Both new fins run along the iso-line in the spline's parameters.
+    for fin in made.fins {
+        let c2 = b.add_curve2(iso.clone());
+        journal.append(
+            set_pcurve(
+                &mut b,
+                fin,
+                Some(Pcurve {
+                    curve: c2,
+                    map: [0.0, 1.0],
+                }),
+            )
+            .ok()?,
+        );
+    }
+    // The flat piece: the one holding the middle of the flat span.
+    let inside_far = if span.after {
+        span.far.min(pb[d][1])
+    } else {
+        span.far.max(pb[d][0])
+    };
+    let mid = 0.5 * (span.knot + inside_far);
+    let mid_o = 0.5 * (sa + sb);
+    let uv = match span.dir {
+        Direction::U => Point2::new(mid, mid_o),
+        Direction::V => Point2::new(mid_o, mid),
+    };
+    let flat: Vec<FaceId> = made
+        .faces
+        .into_iter()
+        .filter(|&g| matches!(point_in_face(&b, g, uv), Ok(Place::Inside)))
+        .collect();
+    let [flat] = flat[..] else {
+        return None;
+    };
+    // The plane facing the way the spline faced there.
+    let pn = span.plane.frame()?.z().get();
+    let sn = n.normal(uv.x, uv.y)?.get();
+    let sense = if pn.dot(sn) > 0.0 {
+        b.faces[flat].sense
+    } else {
+        b.faces[flat].sense.flipped()
+    };
+    let sid = b.add_surface(span.plane.clone());
+    journal.append(set_surface(&mut b, flat, sid, sense).ok()?);
+    crate::pcurve::fill(&mut b).ok()?;
+    if !crate::check::check_topology(&b).is_empty() {
+        return None;
+    }
+    Some((b, flat, journal))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::geom::{KnotVector, NurbsSurface, Point3};
     use crate::tol::LINEAR_RESOLUTION;
+    use crate::topo::Body;
 
     const MM: f64 = 1e-3;
 
@@ -220,5 +422,107 @@ mod tests {
         );
         assert!(crate::intersect::coincide::planar_rows(&n, Direction::U, 3..=6).is_some());
         assert!(crate::intersect::coincide::planar_rows(&n, Direction::U, 0..=3).is_none());
+    }
+
+    /// The twin's prism (`ryukei_testkit::nurbs::flat_span_twin`), built
+    /// here from its extrusion and its underside set to `patch`'s form.
+    fn prism() -> Body {
+        use crate::geom::{Curve2, Frame, Line2, NurbsCurve2, Point2, Vector3};
+        use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+        let frame = Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let kv = KnotVector::clamped(3, &[0.0, 1.0, 1.01], &[4, 3, 4]).unwrap();
+        let spline = NurbsCurve2::new(
+            kv,
+            END.iter()
+                .map(|&(x, z)| Point2::new(x * MM, z * MM))
+                .collect(),
+            Some(W.to_vec()),
+        )
+        .unwrap();
+        let p = |x: f64, z: f64| Point2::new(x * MM, z * MM);
+        let line = |k: u128, a: Point2, b: Point2| Segment {
+            key: SegmentKey(k),
+            curve: Curve2::Line2(Line2::through(a, b).unwrap()),
+            t0: 0.0,
+            t1: a.distance(b),
+        };
+        let profile = ValidProfile::new(Profile {
+            frame,
+            loops: vec![Loop {
+                key: LoopKey(3),
+                segments: vec![
+                    Segment {
+                        key: SegmentKey(30),
+                        curve: Curve2::Nurbs2(Arc::new(spline)),
+                        t0: 0.0,
+                        t1: 1.01,
+                    },
+                    line(31, p(1.3, 0.0), p(1.3, 1.0)),
+                    line(32, p(1.3, 1.0), p(0.0, 1.0)),
+                ],
+            }],
+        })
+        .unwrap();
+        let (mut b, _) = extrude(OpKey(0x585), &profile, frame.z().get(), 0.0, MM).unwrap();
+        // The underside on its NURBS form: the patch over y in [-1, 0] mm.
+        let f = b
+            .faces()
+            .find(|&f| !matches!(b.surfaces[b.faces[f].surface], Surface::Plane(_)))
+            .unwrap();
+        let mut pts = Vec::new();
+        let mut ws = Vec::new();
+        for (i, &(x, z)) in END.iter().enumerate() {
+            for y in [0.0, -MM] {
+                pts.push(Point3::new(x * MM, y, z * MM));
+                ws.push(W[i]);
+            }
+        }
+        let n = NurbsSurface::new(
+            [
+                KnotVector::clamped(3, &[0.0, 1.0, 1.01], &[4, 3, 4]).unwrap(),
+                KnotVector::clamped(1, &[0.0, MM], &[2, 2]).unwrap(),
+            ],
+            pts,
+            Some(ws),
+        )
+        .unwrap();
+        let sense = b.faces[f].sense;
+        let sid = b.add_surface(Surface::Nurbs(Arc::new(n)));
+        crate::euler::set_surface(&mut b, f, sid, sense).unwrap();
+        crate::pcurve::fill(&mut b).unwrap();
+        assert_eq!(crate::check::check(&b), []);
+        b
+    }
+
+    #[test]
+    fn a_flat_end_span_splits_off_exactly() {
+        let b = prism();
+        let f = b
+            .faces()
+            .find(|&f| matches!(b.surfaces[b.faces[f].surface], Surface::Nurbs(_)))
+            .unwrap();
+        let spans = flat_spans(&b, f);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        let (s, flat, journal) = split_off(&b, OpKey(77), f, &spans[0]).expect("split");
+        assert_eq!(crate::check::check(&s), []);
+        assert_eq!(s.faces().count(), b.faces().count() + 1);
+        assert!(matches!(
+            s.surfaces[s.faces[flat].surface],
+            Surface::Plane(_)
+        ));
+        // The curved piece keeps the spline itself, bit for bit.
+        assert_eq!(
+            s.surfaces[s.faces[f].surface],
+            b.surfaces[b.faces[f].surface]
+        );
+        // Two edges split (SEMV) and one made (MEF); two vertices made.
+        assert_eq!(s.edges().count(), b.edges().count() + 3);
+        assert_eq!(s.vertices().count(), b.vertices().count() + 2);
+        assert!(!journal.is_empty());
     }
 }
