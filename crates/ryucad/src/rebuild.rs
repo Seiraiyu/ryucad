@@ -187,12 +187,21 @@ pub struct Applied {
     pub body: Arc<Built>,
     pub operation: Operation,
     pub places: Vec<(Option<Id>, Rigid)>,
+    /// Places whose tool isn't `body`, by their index in `places`: a hole
+    /// whose far side or through_next depends on each place's exit
+    /// (ryucad 28.B). Empty for everything else.
+    pub others: Vec<(usize, Arc<Built>)>,
     /// BLAKE3 of the body's hash and every place, for what reads it.
     pub hash: String,
 }
 
 impl Applied {
-    fn new(body: Arc<Built>, operation: Operation, places: Vec<(Option<Id>, Rigid)>) -> Applied {
+    fn new(
+        body: Arc<Built>,
+        operation: Operation,
+        places: Vec<(Option<Id>, Rigid)>,
+        others: Vec<(usize, Arc<Built>)>,
+    ) -> Applied {
         let mut h = blake3::Hasher::new();
         h.update(body.hash.as_bytes());
         h.update(operation.as_str().as_bytes());
@@ -209,13 +218,29 @@ impl Applied {
                 h.update(&x.to_bits().to_le_bytes());
             }
         }
+        // Only a hole with other tools hashes them: every other Applied
+        // keeps its hash.
+        for (i, b) in &others {
+            h.update(b"other\0");
+            h.update(&(*i as u64).to_le_bytes());
+            h.update(b.hash.as_bytes());
+        }
         let hash = h.finalize().to_hex()[..32].to_owned();
         Applied {
             body,
             operation,
             places,
+            others,
             hash,
         }
+    }
+
+    /// The tool of place `i`.
+    pub fn body_at(&self, i: usize) -> &Arc<Built> {
+        self.others
+            .iter()
+            .find(|(j, _)| *j == i)
+            .map_or(&self.body, |(_, b)| b)
     }
 }
 
@@ -853,18 +878,9 @@ fn build_sweep(
     finish(id, ty, made, origins)
 }
 
-/// How far a through-all extrude or hole (`ty`) goes from `from` along
-/// `dir`: a margin past every point of its targets' boxes, both ways if
-/// `both`. Fails as `invalid_extent` when all of them lie behind the
-/// sketch's plane.
-pub(crate) fn through_all(
-    ty: &str,
-    id: &Id,
-    from: Point3,
-    dir: Vector3,
-    both: bool,
-    targets: &[&Built],
-) -> Result<(f64, f64)> {
+/// The least and greatest of `(p - from) · dir` over every corner of the
+/// targets' face boxes.
+pub(crate) fn span(from: Point3, dir: Vector3, targets: &[&Built]) -> (f64, f64) {
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for b in targets {
         for f in b.body.faces() {
@@ -886,6 +902,22 @@ pub(crate) fn through_all(
             }
         }
     }
+    (lo, hi)
+}
+
+/// How far a through-all extrude or hole (`ty`) goes from `from` along
+/// `dir`: a margin past every point of its targets' boxes, both ways if
+/// `both`. Fails as `invalid_extent` when all of them lie behind the
+/// sketch's plane.
+pub(crate) fn through_all(
+    ty: &str,
+    id: &Id,
+    from: Point3,
+    dir: Vector3,
+    both: bool,
+    targets: &[&Built],
+) -> Result<(f64, f64)> {
+    let (lo, hi) = span(from, dir, targets);
     // A hundredth of the targets' depth along the direction, so no end
     // face lies on theirs.
     let margin = (hi - lo).max(1e-6) * 0.01;
@@ -1443,21 +1475,54 @@ fn build_body(
         }
         _ => None,
     };
+    let exit_dependent = matches!(f, Feature::Hole(h) if crate::hole::needs_exits(h));
+    let mut others: Vec<(usize, Arc<Built>)> = Vec::new();
     let own = match tool {
-        Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
+        Some((h, Some((c, b)))) if *c == h && !exit_dependent => Ok(Arc::clone(b)),
         _ => match (f, &holes) {
-            (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
-            (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, f, m, before),
-            (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
-            (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
-            (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
-            (Feature::Thicken(x), _) => crate::surface::thicken(part, solids, id, x, before, run),
-            (_, Some((h, (solved, _, sizes)))) => {
-                crate::hole::tool(part, id, h, sizes, solved, &bodies, before).map(|(b, _)| b)
+            (Feature::Primitive(p), _) => build_primitive(&part.id, id, p).map(Arc::new),
+            (Feature::Mirror(m), _) => {
+                crate::body::mirror_copy(part, solids, id, f, m, before).map(Arc::new)
             }
-            _ => build_sweep(part, id, f, &bodies, before),
-        }
-        .map(Arc::new),
+            (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run).map(Arc::new),
+            (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run).map(Arc::new),
+            (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before).map(Arc::new),
+            (Feature::Thicken(x), _) => {
+                crate::surface::thicken(part, solids, id, x, before, run).map(Arc::new)
+            }
+            // One tool per distinct exit; never from or to the tool cache.
+            (_, Some((h, (solved, points, sizes)))) if crate::hole::needs_exits(h) => {
+                let work = crate::work::work(run.job);
+                crate::hole::ExitTools::new(part, id, h, sizes, solved, &bodies, before).and_then(
+                    |mut t| {
+                        let mut index = Vec::with_capacity(points.len());
+                        for (p, at) in points.iter() {
+                            let e = t.exit(id, p.as_str(), *at, t.down(), &work)?;
+                            index.push(t.tool(e)?);
+                        }
+                        let first = index.first().copied().unwrap_or(0);
+                        for (i, k) in index.iter().enumerate() {
+                            if *k != first {
+                                others.push((i, Arc::clone(&t.tools[*k].1)));
+                            }
+                        }
+                        match t.tools.get(first) {
+                            Some((_, b)) => Ok(Arc::clone(b)),
+                            None => Err(Error::new(
+                                Code::OperationNoEffect,
+                                format!("hole {id}: it has no places"),
+                            )
+                            .with("feature", id)),
+                        }
+                    },
+                )
+            }
+            (_, Some((h, (solved, _, sizes)))) => {
+                crate::hole::tool(part, id, h, sizes, solved, &bodies, before)
+                    .map(|(b, _)| Arc::new(b))
+            }
+            _ => build_sweep(part, id, f, &bodies, before).map(Arc::new),
+        },
     };
     let own = match own {
         Ok(own) => own,
@@ -1485,10 +1550,14 @@ fn build_body(
     };
     let tools: Vec<ToolBody> = places
         .iter()
-        .map(|(p, place)| match p {
+        .enumerate()
+        .map(|(i, (p, place))| match p {
             Some(p) => ToolBody {
                 key: crate::hole::point_key(&part.id, id, p),
-                built: own.as_ref(),
+                built: others
+                    .iter()
+                    .find(|(j, _)| *j == i)
+                    .map_or(own.as_ref(), |(_, b)| b.as_ref()),
                 place: *place,
                 name: id,
                 label: Some(json!({"point": p})),
@@ -1505,12 +1574,14 @@ fn build_body(
             Ok(((*t).clone(), Arc::new(r)))
         })
         .collect();
-    let applied = Arc::new(Applied::new(Arc::clone(&own), operation, places));
+    let applied = Arc::new(Applied::new(Arc::clone(&own), operation, places, others));
     let made = made.map(|m| Made {
         applied: Some(applied),
         ..Made::new(m)
     });
-    (made, Some(own))
+    // An exit-dependent hole's tools are as many as its exits: none goes
+    // to the tool cache.
+    (made, (!exit_dependent).then_some(own))
 }
 
 /// A pattern: its targets as it sees them, with every instance of every
