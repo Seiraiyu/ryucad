@@ -6534,6 +6534,52 @@ fn the_annotations_tiles_rows_stay_inside_it() {
     );
 }
 
+/// #775: each pin's Show is on its reference's row, before it, so it
+/// can't read as the next reference's.
+#[test]
+fn each_pins_show_is_on_its_references_row() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use egui::accesskit::Role;
+    use ryucad_app::ui::shell;
+    let p = Project::new().with_part();
+    let up = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    let down = format!("p/base/{}", common::face_up(&p, "p", "base", -1.0));
+    p.ok(&["annotations", "add", &up, &down, "--comment", "Round these"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Tools", "Annotations");
+    frames(&mut h, |a| a.opened().ws.annotations.loaded);
+    h.run_steps(3);
+    let tiles = &h.state().opened().tiles;
+    let tile = tiles
+        .tiles
+        .rect(shell::find(tiles, "annotations").unwrap())
+        .unwrap();
+    let shows: Vec<egui::Rect> = h
+        .get_all_by_role_and_label(Role::Button, "Show")
+        .map(|n| n.rect())
+        .filter(|r| tile.intersects(*r))
+        .collect();
+    assert_eq!(shows.len(), 2, "a Show a pin: {shows:?}");
+    for r in [&up, &down] {
+        let at = h
+            .get_all_by_label(r)
+            .map(|n| n.rect())
+            .find(|x| tile.intersects(*x))
+            .unwrap_or_else(|| panic!("{r} isn't listed in the tile"));
+        assert!(
+            shows
+                .iter()
+                .any(|s| (s.center().y - at.center().y).abs() < 2.0 && s.right() <= at.left()),
+            "no Show before {r} on its row: {r} at {at:?}, the Shows at {shows:?}"
+        );
+        assert!(at.right() <= tile.right() + 0.5, "{r} runs out of the tile");
+    }
+}
+
 #[test]
 fn the_annotations_tile_lists_an_agents_reply() {
     let _one = one_at_a_time();
@@ -6558,6 +6604,35 @@ fn the_annotations_tile_lists_an_agents_reply() {
     frames(&mut h, |a| {
         a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
     });
+}
+
+/// #781: an open annotation's reply box is named for a screen reader.
+#[test]
+fn an_annotations_reply_box_is_named() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use egui::accesskit::Role;
+    let p = Project::new().with_part();
+    let face = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    p.ok(&["annotations", "add", &face, "--comment", "Round this"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Tools", "Annotations");
+    frames(&mut h, |a| a.opened().ws.annotations.loaded);
+    h.run_steps(2);
+    let reply = h.get_by_role_and_label(Role::TextInput, "Reply to #1");
+    reply.focus();
+    h.run_steps(1);
+    h.get_by_role_and_label(Role::TextInput, "Reply to #1")
+        .type_text("Which edge?");
+    h.run_steps(2);
+    let id = h.state().opened().ws.annotations.all.keys().next().unwrap().clone();
+    assert_eq!(
+        h.state().opened().ws.annotation_ui.replies.get(&id).map(String::as_str),
+        Some("Which edge?")
+    );
 }
 
 #[test]
