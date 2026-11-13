@@ -13,6 +13,8 @@ pub mod icon;
 pub mod keys;
 pub mod layout;
 pub mod palette;
+pub mod people;
 pub mod shell;
+pub mod status;
 pub mod style;
 pub mod toast;

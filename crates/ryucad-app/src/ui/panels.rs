@@ -15,53 +15,29 @@ pub fn message(e: &serde_json::Value) -> String {
 /// Everyone attached, what they say they are doing, and "Follow" for
 /// anyone with a camera.
 pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
-    // One row whatever the width: where the names don't fit they are cut
-    // short (their whole text on hover), never wrapped. Wrapped, at 200 %
-    // in a window 1000 points wide the strip broke into a few letters a
-    // line and took the whole window's height from the tiles (#508).
-    ui.horizontal(|ui| {
-        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-        let me = ws.me().to_owned();
-        let mut follow = None;
-        for p in ws.people.all.values() {
-            let colour = if p.id == me {
-                style::SELECTED
-            } else {
-                style::participant(&p.id)
-            };
-            let kind = match p.kind {
-                Kind::Human => "",
-                Kind::Agent => " [agent]",
-            };
-            let you = if p.id == me { " (you)" } else { "" };
-            // A human's mode goes in their own label: the strip runs right
-            // to left, so a label of its own read before the name.
-            let mode = match mode_mark(p.mode) {
-                Some(m) if p.kind == Kind::Human => format!(" · {m}"),
-                _ => String::new(),
-            };
-            ui.label(
-                RichText::new(format!("{}{kind}{you}{mode}", p.name)).color(style::color32(colour)),
-            );
-            if let Some((text, _)) = &p.status {
-                ui.weak(text);
-            }
-            // A long request of theirs: `check 3/8 parts`.
-            if let Some(r) = ws.progress.of(&p.id, std::time::Instant::now()) {
-                ui.weak(format!("· {}", r.short()));
-            }
-            if p.id != me && p.camera.is_some() {
-                let on = ws.following.as_deref() == Some(p.id.as_str());
-                if ui.selectable_label(on, "Follow").clicked() {
-                    follow = Some(if on { None } else { Some(p.id.clone()) });
-                }
-            }
-            ui.separator();
-        }
-        if let Some(f) = follow {
-            ws.following = f;
-        }
-    });
+    let me = ws.me().to_owned();
+    let now = std::time::Instant::now();
+    let lines: Vec<ryu_app::people::Line> = ws
+        .people
+        .all
+        .values()
+        .map(|p| ryu_app::people::Line {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            agent: p.kind == Kind::Agent,
+            you: p.id == me,
+            // A human's mode goes in their own label.
+            mark: mode_mark(p.mode)
+                .filter(|_| p.kind == Kind::Human)
+                .map(str::to_owned),
+            status: p.status.as_ref().map(|(text, _)| text.clone()),
+            busy: ws.progress.of(&p.id, now).map(|r| r.short()),
+            followable: p.camera.is_some(),
+        })
+        .collect();
+    if let Some(f) = ryu_app::people::strip(ui, &lines, ws.following.as_deref()) {
+        ws.following = f;
+    }
 }
 
 /// A compare: the revision, what differs and the colours that say so,
@@ -196,27 +172,8 @@ pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, view: &crate::ui::view::Vie
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.weak(format!(
-                "{} · {}",
-                match view.contrast {
-                    crate::ui::style::Contrast::High => "High contrast",
-                    crate::ui::style::Contrast::Normal => view.look.title(),
-                },
-                if ui.visuals().dark_mode {
-                    "dark"
-                } else {
-                    "light"
-                }
-            ));
-            let (glyph, text) = match ws.lost {
-                true => (crate::ui::icon::Icon::PLUGS, "reconnecting".to_owned()),
-                false => (
-                    crate::ui::icon::Icon::PLUGS_CONNECTED,
-                    format!("daemon {}", ryucad::proto::VersionInfo::current().ryucad),
-                ),
-            };
-            ui.weak(text);
-            crate::ui::icon::show(ui, glyph, 14.0, ui.visuals().weak_text_color());
+            ryu_app::status::look(ui, view.look, view.contrast);
+            ryu_app::status::connection(ui, ws.lost, &ryucad::proto::VersionInfo::current().ryucad);
             crate::ui::feedback::waiting(ui, ws);
             if crate::ui::platform::software() {
                 ui.weak("Software rendering");
