@@ -208,7 +208,7 @@ pub fn resolve(id: &Id, p: &InstancePattern, scope: &dyn Scope) -> Result<Resolv
         }
         (Driver::Hole(points), None) => translations(id, points, from)?,
         (Driver::Sketch(s), Some(listed)) => {
-            let points = crate::hole::sketch_points(&id.to_string(), id, &on.feature, listed, s)?;
+            let points = crate::hole::sketch_points(id.as_str(), id, &on.feature, listed, s)?;
             if points.is_empty() {
                 return Err(there(fail(
                     Code::OperationNoEffect,

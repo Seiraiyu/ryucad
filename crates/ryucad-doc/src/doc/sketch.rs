@@ -871,7 +871,7 @@ pub(crate) mod tests {
         let free: Vec<&str> = s.free_points().into_iter().map(Id::as_str).collect();
         // p1 to p4 are the rectangle's corners, p9 a circle's centre.
         assert_eq!(free, ["p10", "p11"]);
-        let mut ids = vec![
+        let mut ids = [
             Id::parse("p10", "id").unwrap(),
             Id::parse("p2", "id").unwrap(),
         ];
