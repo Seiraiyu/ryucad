@@ -579,6 +579,9 @@ pub struct Workspace {
     /// A camera normal to a face, come from the daemon, for the view to
     /// turn to.
     pub looked: Option<Camera>,
+    /// A chosen annotation's camera waiting for its part (#776): shown
+    /// first, the part is framed, then the view turns to this.
+    pub looked_on: Option<(String, Camera)>,
     /// What the window shows changed (View > Show, or an agent's
     /// `ryucad focus`): the view frames it again, as it frames the first
     /// view (issue #211).
@@ -631,6 +634,9 @@ pub struct Workspace {
     /// How many meshes were fetched: an unchanged body is never fetched
     /// twice.
     pub fetched: u64,
+    /// How many `mesh.get`s [`Workspace::fetch`] sent: a part's bodies go
+    /// by the batch, as an assembly's do (#801).
+    pub mesh_requests: u64,
     /// How many bytes answers brought after their lines: meshes, mostly.
     pub received: u64,
     pending: HashMap<u64, Pending>,
@@ -741,6 +747,7 @@ impl Workspace {
             sections: Default::default(),
             explodes: Default::default(),
             looked: None,
+            looked_on: None,
             refocused: false,
             appearance: Default::default(),
             looks_read: BTreeMap::new(),
@@ -763,6 +770,7 @@ impl Workspace {
             focused: true,
             feed_only: None,
             fetched: 0,
+            mesh_requests: 0,
             received: 0,
             pending: HashMap::new(),
             daemon: daemon.clone(),
@@ -1937,6 +1945,17 @@ impl Workspace {
         self.send(req, Pending::Quiet);
     }
 
+    /// Shows `part` if the window doesn't already (#737, #778, #780):
+    /// what is chosen from the tree or the palette is shown with its
+    /// part, so the viewport, `ryucad focus` and File > Export… are about
+    /// what the person chose. A part a shown assembly places counts as
+    /// not shown: choosing its feature shows the part itself.
+    pub fn show_part(&mut self, part: &str) {
+        if !self.model.shown().contains(&part) {
+            self.set_focus(Some(part.to_owned()));
+        }
+    }
+
     /// Cuts with the planes this window's participant has; the scene and
     /// picking read them from [`Workspace::sections`].
     fn follow_sections(&mut self) {
@@ -2507,6 +2526,7 @@ impl Workspace {
     /// stops that compare.
     pub fn choose_annotation(&mut self, id: Option<&str>) {
         self.chosen_annotation = id.map(str::to_owned);
+        self.looked_on = None;
         let entry = id.and_then(|i| self.annotations.all.get(i)).cloned();
         let comparing_one = self
             .compare
@@ -2514,8 +2534,23 @@ impl Workspace {
             .is_some_and(|c| c.rev.starts_with(ryucad::session::ANNOTATION));
         match entry {
             Some(e) => {
-                if let Some(c) = e.view {
-                    self.looked = Some(c);
+                // Made on a part not shown: show it first, as the palette
+                // does a feature's (#737), and its camera waits for it,
+                // else its marks aren't drawn (#730) and its view frames
+                // another part (#776).
+                let away = e
+                    .part()
+                    .filter(|p| {
+                        !self.model.shown().contains(p) && self.model.listed.contains_key(*p)
+                    })
+                    .map(str::to_owned);
+                match (away, e.view) {
+                    (Some(part), view) => {
+                        self.set_focus(Some(part.clone()));
+                        self.looked_on = view.map(|c| (part, c));
+                    }
+                    (None, Some(c)) => self.looked = Some(c),
+                    (None, None) => {}
                 }
                 match e.change {
                     Some(_) => {
@@ -2968,9 +3003,11 @@ impl Workspace {
         self.card = Some(self.errors.len() - 1);
     }
 
-    /// A drawing's tree row chosen: the Drawings tile opens on it, its
-    /// first sheet shown.
+    /// A drawing chosen from its tree row or the palette: its part shown
+    /// if it isn't (#780), so File > Export… offers the drawing on
+    /// screen, and the Drawings tile opened on it, its first sheet shown.
     pub fn open_drawing(&mut self, part: &str, drawing: &str) {
+        self.show_part(part);
         self.show_drawings(Some(part));
         self.drawings.chosen = None;
         self.drawings.sheet = None;
@@ -5292,56 +5329,86 @@ impl Workspace {
         }
     }
 
-    /// Fetches display meshes, one body per request (an assembly's by the
-    /// batch), at [`Model::fetch_level`]: a part with one changed feature
-    /// sends one mesh, and a body already asked for at its current hash
-    /// isn't asked for again.
+    /// Fetches display meshes by the batch (`MESH_BATCH` to a request, a
+    /// part's solids as an assembly's occurrences, #801), at
+    /// [`Model::fetch_level`]: a part with one changed feature sends one
+    /// mesh, and a body already asked for at its current hash isn't asked
+    /// for again.
     fn fetch(&mut self, bodies: Vec<BodyKey>) {
         // Coarse first in a large view: finer levels follow where they show.
         let level = self.model.fetch_level();
         let quality = (level != self.model.base).then(|| level.as_str().to_owned());
-        let mut batches: BTreeMap<String, Vec<(BodyKey, String)>> = BTreeMap::new();
+        let mut batches: BTreeMap<String, Vec<(BodyKey, String, String)>> = BTreeMap::new();
         for (key, hash) in self.model.ask(bodies) {
             self.fetched += 1;
-            // An assembly's bodies come by occurrence, many to a request,
-            // meshed side by side: an assembly may place 10,000.
             let assembly = self.model.parts.get(&key.0).is_some_and(|p| p.assembly);
-            match key.1.rsplit_once('/') {
-                Some(_) if assembly => {
-                    batches.entry(key.0.clone()).or_default().push((key, hash));
+            // What `mesh.get` names: an occurrence by its path, a solid by
+            // its founder. An assembly's own key without a path goes
+            // alone, as it always did.
+            let label = match key.1.rsplit_once('/') {
+                Some((path, _)) if assembly => path.to_owned(),
+                None if assembly => {
+                    self.fetch_one(&key.0, &key.1, quality.clone(), key.clone(), hash);
+                    continue;
                 }
-                _ => {
-                    let req = Request::MeshGet {
-                        part: key.0.clone(),
-                        feature: Some(key.1.clone()),
-                        features: Vec::new(),
-                        quality: quality.clone(),
-                        transfer: Some(Transfer::Compact),
-                        rev: self.model_rev(),
-                        flat: None,
-                    };
-                    self.send(req, Pending::Mesh(key, hash));
-                }
-            }
+                _ => key.1.clone(),
+            };
+            batches
+                .entry(key.0.clone())
+                .or_default()
+                .push((key, hash, label));
         }
+        // By the batch, meshed side by side: an assembly may place 10,000
+        // bodies, and a flattened board's one part holds 4,000 (#801). A
+        // part's lone body keeps its own request.
         for (part, asked) in batches {
+            let assembly = self.model.parts.get(&part).is_some_and(|p| p.assembly);
+            if let [(key, hash, label)] = asked.as_slice()
+                && !assembly
+            {
+                self.fetch_one(&part, label, quality.clone(), key.clone(), hash.clone());
+                continue;
+            }
             for batch in asked.chunks(MESH_BATCH) {
-                let features = batch
-                    .iter()
-                    .filter_map(|(k, _)| Some(k.1.rsplit_once('/')?.0.to_owned()))
-                    .collect();
                 let req = Request::MeshGet {
                     part: part.clone(),
                     feature: None,
-                    features,
+                    features: batch.iter().map(|(_, _, l)| l.clone()).collect(),
                     quality: quality.clone(),
                     transfer: Some(Transfer::Compact),
                     rev: self.model_rev(),
                     flat: None,
                 };
-                self.send(req, Pending::Meshes(batch.to_vec()));
+                self.mesh_requests += 1;
+                let asked = batch
+                    .iter()
+                    .map(|(k, h, _)| (k.clone(), h.clone()))
+                    .collect();
+                self.send(req, Pending::Meshes(asked));
             }
         }
+    }
+
+    /// One body's mesh, in a request of its own.
+    fn fetch_one(
+        &mut self,
+        part: &str,
+        label: &str,
+        quality: Option<String>,
+        key: BodyKey,
+        hash: String,
+    ) {
+        let req = Request::MeshGet {
+            part: part.to_owned(),
+            feature: Some(label.to_owned()),
+            features: Vec::new(),
+            quality,
+            transfer: Some(Transfer::Compact),
+            rev: self.model_rev(),
+            flat: None,
+        };
+        self.mesh_requests += 1;
+        self.send(req, Pending::Mesh(key, hash));
     }
 
     /// The user's display quality, as the settings say.

@@ -181,22 +181,17 @@ pub fn show(ctx: &egui::Context, o: &mut Opened) -> Option<Action> {
 /// Chooses and frames what `place` names, as choosing it in the tree
 /// does: a feature opens its form, a part is shown.
 fn go_to(o: &mut Opened, place: &Place) {
+    // Its row brought into view in the tree (#782).
+    o.view.tree_reveal = Some(place.row());
     if let Some(d) = &place.drawing {
         o.ws.open_drawing(&place.part, d);
         return;
     }
     match &place.feature {
+        // As the tree's row: its part shown first (#737, #778).
         Some(f) => {
-            // A feature of a part not shown shows its part first (#737).
-            if !o.ws.model.shown().contains(&place.part.as_str()) {
-                o.ws.set_focus(Some(place.part.clone()));
-            }
             let key = (place.part.clone(), f.clone());
-            o.view.chosen = Some(key.clone());
-            o.ws.open_form(Some(key.clone()));
-            o.ws.choose(Some(key.clone()));
-            let bodies = o.ws.model.framed(&key);
-            o.view.fit_all(&mut o.ws, &bodies);
+            crate::ui::tiles::tree::go_to(&mut o.ws, &mut o.view, key, false);
         }
         None => o.ws.set_focus(Some(place.part.clone())),
     }

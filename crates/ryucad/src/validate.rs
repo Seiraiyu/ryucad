@@ -3993,7 +3993,7 @@ pub(crate) mod tests {
         m.merge("theirs");
         assert_eq!(told(&mut live, &mut m).len(), 1);
         // A status that fails: MERGE_HEAD naming two heads.
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["rev-parse", "--absolute-git-dir"])
             .current_dir(m.root())
             .output()

@@ -1336,7 +1336,7 @@ fn new_project_and_open_sample_from_the_start_window() {
             .is_some_and(|p| p.assembly)
     );
     // It rebuilds clean and checks clean, as an agent finds it.
-    let out = std::process::Command::new(&ryucad().exe)
+    let out = common::ryucad_cmd(&ryucad().exe)
         .arg("check")
         .current_dir(&sample)
         .output()
@@ -3857,7 +3857,7 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
     ]);
     let arm = std::path::PathBuf::from(v["path"].as_str().unwrap());
     // Both set the box's length: merging arm in would conflict.
-    let out = std::process::Command::new(&ryucad().exe)
+    let out = common::ryucad_cmd(&ryucad().exe)
         .args(["feature", "edit", "p", "base", "--param", "x=15"])
         .current_dir(&arm)
         // In process: a daemon there would say who is attached.
@@ -4002,6 +4002,141 @@ fn showing_a_part_frames_it() {
     h.run_steps(4);
     let t = target(&h);
     assert!(t[0] > -0.01 && t[0] < 0.02, "{t:?}");
+}
+
+/// #673: a part shown while it is empty is framed as its geometry comes
+/// (a point, lines, then a body), not left on its first point; once the
+/// person moves the camera it is theirs, and more geometry leaves it be.
+#[test]
+fn a_part_shown_empty_is_framed_as_its_first_geometry_comes() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // Every corner of what the window draws is in view.
+    let in_view = |h: &Harness<'static, App>, what: &str| {
+        let o = h.state().opened();
+        let (lo, hi) = ryucad_app::core::pick::Picker::new(&o.ws.model)
+            .bounds()
+            .unwrap();
+        let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+        let aspect = f64::from(o.view.rect.width() / o.view.rect.height());
+        let pr = ryucad_app::core::nav::Projector::new(&o.view.nav.camera, aspect, centre, 0.2);
+        for corner in 0..8 {
+            let c = [0, 1, 2].map(|k| if corner >> k & 1 == 1 { hi[k] } else { lo[k] });
+            let n = pr.ndc(c).unwrap_or([f64::INFINITY; 2]);
+            assert!(
+                n[0].abs() <= 1.0 && n[1].abs() <= 1.0,
+                "{what}: {c:?} is out of view at {n:?}"
+            );
+        }
+    };
+    // Drawn out to `x` metres along x, and the window idle.
+    let reaches = |x: f64| {
+        move |a: &App| {
+            let o = a.opened();
+            o.ws.idle()
+                && ryucad_app::core::pick::Picker::new(&o.ws.model)
+                    .bounds()
+                    .is_some_and(|(_, hi)| hi[0] > x)
+        }
+    };
+    // An empty part shown: nothing to frame yet.
+    p.ok(&["part", "create", "bracket"]);
+    p.ok(&["focus", "bracket"]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle()
+            && o.ws.model.focus.as_deref() == Some("bracket")
+            && ryucad_app::core::pick::Picker::new(&o.ws.model)
+                .bounds()
+                .is_none()
+    });
+    h.run_steps(2);
+    // The agent builds it a step at a time: a fixed point at the origin...
+    p.ok(&["feature", "add", "bracket", "sketch", "--id", "s"]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [0, 0]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "bracket", "s", ops]);
+    frames(&mut h, reaches(-1.0));
+    h.run_steps(4);
+    // ...a line 200 mm long (off screen when the point alone was framed)...
+    let ops = r#"[{"op": "add", "type": "point", "at": [200, 0]},
+                  {"op": "add", "type": "line", "start": "p1", "end": "p2"}]"#;
+    p.ok(&["sketch", "edit", "bracket", "s", ops]);
+    frames(&mut h, reaches(0.19));
+    h.run_steps(4);
+    in_view(&h, "the first line");
+    // ...the rest of the outline...
+    let ops = r#"[{"op": "add", "type": "point", "at": [200, 80]},
+                  {"op": "add", "type": "point", "at": [0, 80]},
+                  {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+                  {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+                  {"op": "add", "type": "line", "start": "p4", "end": "p1"}]"#;
+    p.ok(&["sketch", "edit", "bracket", "s", ops]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle()
+            && ryucad_app::core::pick::Picker::new(&o.ws.model)
+                .bounds()
+                .is_some_and(|(_, hi)| hi[1] > 0.079)
+    });
+    h.run_steps(4);
+    in_view(&h, "the outline");
+    // ...and its extrude: framed once more, a body at last.
+    p.ok(&[
+        "feature", "add", "bracket", "extrude", "--id", "e", "--sketch", "s", "--length", "30",
+    ]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.model.drawn().next().is_some()
+    });
+    h.run_steps(4);
+    in_view(&h, "the extrude");
+    // Another empty part, shown, and the person's drag before anything
+    // comes: from then on the camera is theirs.
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&["focus", "plate"]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.model.focus.as_deref() == Some("plate")
+    });
+    h.run_steps(2);
+    let c = h.state().opened().view.rect.center();
+    h.event(egui::Event::PointerMoved(c));
+    h.event(egui::Event::PointerButton {
+        pos: c,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    for i in 1..6 {
+        h.event(egui::Event::PointerMoved(
+            c + egui::vec2(10.0 * i as f32, 0.0),
+        ));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton {
+        pos: c + egui::vec2(50.0, 0.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(4);
+    let theirs = h.state().opened().view.nav.camera.clone();
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10", "--origin", "500,0,0",
+    ]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.model.drawn().next().is_some()
+    });
+    h.run_steps(4);
+    assert_eq!(h.state().opened().view.nav.camera, theirs);
 }
 
 #[test]
@@ -5397,9 +5532,34 @@ fn an_update_that_breaks_a_mate_says_so_before_it_writes() {
             .any(|f| f.starts_with("frame/m would fail")),
         "{u:?}"
     );
+    // Cancel where it is drawn, at rest and in view (#773): the dry run's
+    // answer reads the dependencies again (`load_deps`), and those answers
+    // lay the tab out again; this group is the tallest the tab draws, its
+    // buttons at the bottom tabs' foot. A click lands where the button was
+    // drawn the frame before, so on a fast adapter it missed.
+    frames(&mut h, |a| a.opened().ws.idle());
+    h.get_by_label("Cancel").scroll_to_me();
+    let at = |h: &Harness<'static, App>| h.get_by_label("Cancel").rect();
+    let mut row = at(&h);
+    for _ in 0..30 {
+        h.step();
+        let now = at(&h);
+        if now == row {
+            break;
+        }
+        row = now;
+    }
+    assert!(
+        h.ctx.content_rect().contains_rect(row),
+        "Cancel is out of the window at {row:?}"
+    );
     h.get_by_label("Cancel").click();
+    // Cancel drops the dry run in the frame it is clicked: no request.
     h.run_steps(2);
-    assert!(h.state().opened().ws.deps.update.is_none());
+    assert!(
+        h.state().opened().ws.deps.update.is_none(),
+        "Cancel at {row:?} didn't drop the dry run"
+    );
 }
 
 #[test]
@@ -6285,6 +6445,193 @@ fn the_palette_shows_the_part_of_a_feature_it_goes_to() {
     );
 }
 
+/// #776: choosing an annotation made on a part that isn't shown shows
+/// that part, then turns to the annotation's view (straight down here)
+/// and draws its marks.
+#[test]
+fn choosing_an_annotation_on_another_part_shows_it_from_its_view() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&[
+        "feature", "add", "q", "box", "--id", "b", "--param", "x=5", "--param", "y=5", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "view",
+        "save",
+        "p",
+        "above",
+        "--eye",
+        "10,5,1000",
+        "--target",
+        "10,5,2.5",
+        "--up",
+        "0,1,0",
+        "--ortho",
+        "30 mm",
+    ]);
+    let stroke = r#"{"part": "p", "list": [{"kind": "stroke", "in": "face", "on": "p/base",
+        "points_m": [[0.012, 0.002, 0.005], [0.018, 0.006, 0.005]]}]}"#;
+    p.ok(&[
+        "annotations",
+        "add",
+        "--comment",
+        "here",
+        "--model",
+        "p",
+        "--of",
+        "above",
+        "--marks",
+        stroke,
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.annotations.loaded
+    });
+    p.ok(&["focus", "q"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("q")
+    });
+    menu(&mut h, "Tools", "Annotations");
+    h.run_steps(2);
+    let e = h
+        .state()
+        .opened()
+        .ws
+        .annotations
+        .all
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let row = e.spoken(Some(1));
+    shown(&mut h, &row);
+    h.get_by_label(&row).click();
+    // Looking straight down: the saved view's direction.
+    let from_above = |a: &App| {
+        let c = &a.opened().view.nav.camera;
+        let d = [0, 1, 2].map(|k| c.eye[k] - c.target[k]);
+        d[2] > 0.0 && d[0].abs() < 1e-3 * d[2] && d[1].abs() < 1e-3 * d[2]
+    };
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle()
+            && o.ws.model.focus.as_deref() == Some("p")
+            && o.ws.view_marks().is_some()
+            && !o.view.nav.moving()
+            && from_above(a)
+    });
+    // Nothing frames it again after.
+    h.run_steps(10);
+    assert!(
+        from_above(h.state()),
+        "re-framed: {:?}",
+        h.state().opened().view.nav.camera
+    );
+}
+
+/// #782: choosing a row from the palette scrolls the tree to it.
+#[test]
+fn the_palette_scrolls_the_tree_to_what_it_goes_to() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    for i in 0..50 {
+        let (id, at) = (format!("q{i:02}"), format!("0mm,0mm,{i}mm"));
+        p.ok(&[
+            "feature",
+            "add",
+            "p",
+            "point",
+            "--id",
+            &id,
+            "--by",
+            "coordinates",
+            "--coordinates",
+            &at,
+        ]);
+    }
+    let mut h = sized(&p, 600.0);
+    frames(&mut h, |a| {
+        loaded(a)
+            && a.opened().ws.model.parts["p"]
+                .feature("q49")
+                .is_some_and(|f| f.datum.is_some())
+    });
+    h.run_steps(2);
+    let tree = h.state().opened().focus.rect("tree").unwrap();
+    let inside = |h: &Harness<'static, App>| {
+        h.query_by_label("q49 (point)")
+            .is_some_and(|n| n.rect().top() >= tree.top() && n.rect().bottom() <= tree.bottom())
+    };
+    assert!(!inside(&h), "q49 is in view before the palette");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.get_by_label("Search commands").click();
+    h.run_steps(2);
+    h.get_by_label("Search commands").type_text("@p/q49");
+    h.run_steps(2);
+    h.get_by_label("p/q49 (point)");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().view.chosen == Some(("p".to_owned(), "q49".to_owned()))
+    });
+    for _ in 0..10 {
+        if inside(&h) {
+            break;
+        }
+        h.step();
+    }
+    assert!(inside(&h), "the tree didn't scroll to q49's row");
+}
+
+/// #778: choosing a feature row of a part that isn't shown, in the tree,
+/// shows its part, as the palette does (#737).
+#[test]
+fn the_tree_shows_the_part_of_a_feature_row_it_chooses() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    for (part, id, at) in [("near", "nb", "0,0,0"), ("far", "fb", "1000,0,0")] {
+        p.ok(&["part", "create", part]);
+        p.ok(&[
+            "feature", "add", part, "box", "--id", id, "--param", "x=10", "--param", "y=10",
+            "--param", "z=10", "--origin", at,
+        ]);
+    }
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    p.ok(&["focus", "far"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("far")
+    });
+    h.step();
+    h.get_by_label("nb (box)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("near")
+    });
+    assert_eq!(
+        h.state().opened().view.chosen,
+        Some(("near".to_owned(), "nb".to_owned()))
+    );
+    // A row of the part not shown again shows it again.
+    h.get_by_label("fb (box)").click();
+    frames(&mut h, |a| {
+        a.opened().view.chosen == Some(("far".to_owned(), "fb".to_owned()))
+    });
+    frames(&mut h, |a| {
+        a.opened().ws.model.focus.as_deref() == Some("far")
+    });
+}
+
 /// #736: a search after scrolling the tree down shows its rows.
 #[test]
 fn a_search_after_scrolling_the_tree_shows_its_rows() {
@@ -6382,6 +6729,52 @@ fn the_annotations_tiles_rows_stay_inside_it() {
     );
 }
 
+/// #775: each pin's Show is on its reference's row, before it, so it
+/// can't read as the next reference's.
+#[test]
+fn each_pins_show_is_on_its_references_row() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use egui::accesskit::Role;
+    use ryucad_app::ui::shell;
+    let p = Project::new().with_part();
+    let up = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    let down = format!("p/base/{}", common::face_up(&p, "p", "base", -1.0));
+    p.ok(&["annotations", "add", &up, &down, "--comment", "Round these"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Tools", "Annotations");
+    frames(&mut h, |a| a.opened().ws.annotations.loaded);
+    h.run_steps(3);
+    let tiles = &h.state().opened().tiles;
+    let tile = tiles
+        .tiles
+        .rect(shell::find(tiles, "annotations").unwrap())
+        .unwrap();
+    let shows: Vec<egui::Rect> = h
+        .get_all_by_role_and_label(Role::Button, "Show")
+        .map(|n| n.rect())
+        .filter(|r| tile.intersects(*r))
+        .collect();
+    assert_eq!(shows.len(), 2, "a Show a pin: {shows:?}");
+    for r in [&up, &down] {
+        let at = h
+            .get_all_by_label(r)
+            .map(|n| n.rect())
+            .find(|x| tile.intersects(*x))
+            .unwrap_or_else(|| panic!("{r} isn't listed in the tile"));
+        assert!(
+            shows
+                .iter()
+                .any(|s| (s.center().y - at.center().y).abs() < 2.0 && s.right() <= at.left()),
+            "no Show before {r} on its row: {r} at {at:?}, the Shows at {shows:?}"
+        );
+        assert!(at.right() <= tile.right() + 0.5, "{r} runs out of the tile");
+    }
+}
+
 #[test]
 fn the_annotations_tile_lists_an_agents_reply() {
     let _one = one_at_a_time();
@@ -6406,6 +6799,50 @@ fn the_annotations_tile_lists_an_agents_reply() {
     frames(&mut h, |a| {
         a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
     });
+}
+
+/// #781: an open annotation's reply box is named for a screen reader.
+#[test]
+fn an_annotations_reply_box_is_named() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use egui::accesskit::Role;
+    let p = Project::new().with_part();
+    let face = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    p.ok(&["annotations", "add", &face, "--comment", "Round this"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Tools", "Annotations");
+    frames(&mut h, |a| a.opened().ws.annotations.loaded);
+    h.run_steps(2);
+    let reply = h.get_by_role_and_label(Role::TextInput, "Reply to #1");
+    reply.focus();
+    h.run_steps(1);
+    h.get_by_role_and_label(Role::TextInput, "Reply to #1")
+        .type_text("Which edge?");
+    h.run_steps(2);
+    let id = h
+        .state()
+        .opened()
+        .ws
+        .annotations
+        .all
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        h.state()
+            .opened()
+            .ws
+            .annotation_ui
+            .replies
+            .get(&id)
+            .map(String::as_str),
+        Some("Which edge?")
+    );
 }
 
 #[test]
@@ -6715,6 +7152,41 @@ fn a_drawing_opens_from_its_row_its_dimension_is_edited_and_a_view_dragged() {
         .parse()
         .unwrap();
     assert!((x - 130.0).abs() < 0.5, "{file}");
+}
+
+/// #780: choosing `@part/drawing` in the palette shows its part as well
+/// as opening the drawing, so File > Export… is about that part.
+#[test]
+fn the_palette_shows_the_part_of_a_drawing_it_opens() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_drawing();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&[
+        "feature", "add", "q", "box", "--id", "qb", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10", "--origin", "500,0,0",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    p.ok(&["focus", "q"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("q")
+    });
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.get_by_label("Search commands").click();
+    h.run_steps(2);
+    h.get_by_label("Search commands").type_text("@p/d");
+    h.run_steps(2);
+    h.get_by_label("p/d (drawing, Block)");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle() && ws.model.focus.as_deref() == Some("p") && ws.drawings.sheet.is_some()
+    });
+    assert_eq!(h.state().opened().ws.drawings.part.as_deref(), Some("p"));
 }
 
 #[test]

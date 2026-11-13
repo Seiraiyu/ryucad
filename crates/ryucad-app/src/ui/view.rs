@@ -145,6 +145,9 @@ pub struct View {
     /// What the last Expand all or Expand below left closed, said under
     /// the tree's filters until the tree is next opened or closed.
     pub tree_note: Option<String>,
+    /// A row to bring into view when the tree is next drawn (its id): the
+    /// palette's choice (#782).
+    pub tree_reveal: Option<String>,
 }
 
 /// How long the pointer rests on an entity before its tooltip shows,
@@ -388,6 +391,7 @@ impl View {
             tree_menu: None,
             tree_menu_opening: false,
             tree_note: None,
+            tree_reveal: None,
         }
     }
 
@@ -1480,8 +1484,14 @@ impl View {
             self.framing = None;
         }
         // Meshes arrive a body at a time: frame what has come so far, and
-        // again as more comes, until it has all come.
+        // again as more comes, until it has all come. A part shown empty
+        // is framed again as an agent's first geometry grows (a point, a
+        // line, a sketch) until it has a body: framed on its first point
+        // alone, the rest of the build landed off screen (#673). The
+        // person's own camera (`moved`, `turn`, Zoom to fit) ends it, and
+        // following another's camera holds it.
         if !self.framed
+            && ws.following.is_none()
             && let Some(b) = self.bounds(ws)
         {
             if self.framing != Some(b) {
@@ -1490,7 +1500,17 @@ impl View {
                 self.nav.fit(&points, self.aspect());
                 ws.share_camera(&self.nav.camera);
             }
-            self.framed = ws.idle();
+            self.framed = ws.idle() && ws.model.drawn().next().is_some();
+        }
+        // A chosen annotation's view, once the part it was made on is
+        // shown and framed (#776): turned to on the next frame.
+        if self.framed
+            && ws
+                .looked_on
+                .as_ref()
+                .is_some_and(|(p, _)| ws.model.shown().contains(&p.as_str()))
+        {
+            ws.looked = ws.looked_on.take().map(|(_, c)| c);
         }
         // Following, the window shows the other's camera, and shares it as
         // its own: what it shows.
@@ -2807,7 +2827,7 @@ impl View {
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
         scene.set_looks(&ws.model.looks);
         scene.sync_drawn(&rs.device, drawn, reference);
-        scene.sync_ghosts(&rs.device, ws.compare.as_ref());
+        scene.sync_ghosts(&rs.device, ws.compare.as_ref(), &ws.model.shown());
         let size = [f64::from(px[0]), f64::from(px[1])];
         let mut overlay = if self.sketches {
             crate::core::sketch::overlay(
