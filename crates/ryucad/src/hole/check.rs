@@ -10,6 +10,7 @@
 use crate::doc::id::Id;
 use crate::error::Result;
 use crate::holes::{Holes, Row};
+use crate::rebuild::Results;
 use crate::session::Session;
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -221,11 +222,179 @@ fn engagement(part: &Id, rows: &[&Row], k: f64) -> Vec<Finding> {
     .collect()
 }
 
+/// The material along a row's axis from its mouth: where the first
+/// stretch of its solid (as the feature that placed it saw it) ends. None
+/// when the row has no record of it; `Err` when uncertain.
+fn material(cx: &Ctx, r: &Row) -> std::result::Result<Option<f64>, ()> {
+    let Some(m) = &r.material else {
+        return Ok(None);
+    };
+    let Some(Ok(o)) = cx.result.result(&m.view) else {
+        return Ok(None);
+    };
+    let Some(b) = o.solid(&m.solid) else {
+        return Ok(None);
+    };
+    let work = crate::work::work(cx.job);
+    let s = crate::hole::exits::exits(&b.body, m.position, m.axis, &work).map_err(|_| ())?;
+    Ok(crate::hole::exits::first_exit(&s))
+}
+
+/// The floor a blind hole leaves (ryucad's rule): three pitches under a
+/// tapped hole, a quarter of the drill's diameter under a plain one.
+fn floor(r: &Row) -> (f64, &'static str) {
+    match &r.sizes.thread {
+        Some(t) => (3.0 * t.pitch.si, "three pitches under a tapped hole"),
+        None => (
+            r.sizes.drill.si / 4.0,
+            "a quarter of the drill's diameter under a plain hole",
+        ),
+    }
+}
+
+/// The hole feature a row carries the intent of, and its depth.
+fn hole_of<'a>(cx: &'a Ctx, r: &Row) -> Option<&'a crate::doc::hole::Hole> {
+    match cx.session_part.features.get(&r.feature)? {
+        Ok(crate::doc::files::Feature::Hole(h)) => Some(h),
+        _ => None,
+    }
+}
+
+/// The blind depth fix leaving `floor` under the hole in `material`: the
+/// hole's own kind of depth (to the shoulder, or to the tip).
+fn blind_fix(r: &Row, h: &crate::doc::hole::Hole, material: f64) -> Value {
+    use crate::doc::hole::{Bottom, Depth};
+    let (f, _) = floor(r);
+    let rad = r.sizes.drill.si / 2.0;
+    let point = match &h.bottom {
+        Bottom::Drill(a) => rad / ryukei::math::tan(a.radians() / 2.0),
+        Bottom::Ball => rad,
+        Bottom::Flat => 0.0,
+    };
+    let tip = material - f;
+    match &h.depth {
+        Depth::Tip(_) => json!({"tip": mm_floor(tip)}),
+        _ => json!({"blind": mm_floor(tip - point)}),
+    }
+}
+
+fn breaks_through(cx: &Ctx, rows: &[&Row]) -> Vec<Finding> {
+    let part = &cx.session_part.id;
+    let mut out = Vec::new();
+    for r in rows {
+        let Some(h) = hole_of(cx, r) else { continue };
+        if !h.depth.is_blind()
+            || ["bottom", "tip", "ball"]
+                .iter()
+                .any(|s| r.faces.contains_key(*s))
+        {
+            continue;
+        }
+        let m = match material(cx, r) {
+            Ok(m) => m,
+            Err(()) => {
+                out.push(cannot(
+                    r,
+                    "hole_breaks_through",
+                    "where its axis leaves the material is uncertain",
+                ));
+                continue;
+            }
+        };
+        let mut fixes = vec![edit(part, &r.feature, json!({"depth": "through_all"}))];
+        if let Some(m) = m {
+            let mut f = json!({"depth": blind_fix(r, h, m)});
+            if let Some(t) = &r.sizes.thread
+                && let Some(td) = &t.depth
+            {
+                let shoulder = m - floor(r).0 - (r.depth.1 - r.depth.0);
+                if td.si > shoulder - 3.0 * t.pitch.si {
+                    f["thread_depth"] = json!(mm_floor(shoulder - 3.0 * t.pitch.si));
+                }
+            }
+            fixes.push(edit(part, &r.feature, f));
+        }
+        out.push(Finding {
+            code: "hole_breaks_through",
+            holes: vec![r.reference.clone()],
+            message: format!(
+                "{}: blind hole {} leaves the material ({}): its bottom is gone",
+                r.feature,
+                r.spec,
+                m.map_or("depth unknown".into(), mm_floor)
+            ),
+            details: json!({"material_m": m, "rule": floor(r).1}),
+            fixes,
+        });
+    }
+    out
+}
+
+fn past_material(cx: &Ctx, rows: &[&Row]) -> Vec<Finding> {
+    let part = &cx.session_part.id;
+    let mut out = Vec::new();
+    for r in rows {
+        let Some(t) = &r.sizes.thread else { continue };
+        let Some(td) = &t.depth else { continue }; // a full thread runs the material
+        let m = match material(cx, r) {
+            Ok(Some(m)) => m,
+            Ok(None) => continue,
+            Err(()) => {
+                out.push(cannot(
+                    r,
+                    "hole_thread_past_material",
+                    "where its axis leaves the material is uncertain",
+                ));
+                continue;
+            }
+        };
+        if td.si <= m + ryukei::tol::LINEAR_RESOLUTION {
+            continue;
+        }
+        let short = m - 3.0 * t.pitch.si;
+        out.push(Finding {
+            code: "hole_thread_past_material",
+            holes: vec![r.reference.clone()],
+            message: format!(
+                "{}: {} thread depth {} exceeds {} of material: use THRU, or {}",
+                r.feature,
+                t.size,
+                td.text,
+                mm_floor(m),
+                mm_floor(short)
+            ),
+            details: json!({"material_m": m, "thread_m": td.si}),
+            fixes: vec![
+                edit(
+                    part,
+                    &r.feature,
+                    json!({"depth": "through_all", "thread_depth": "full"}),
+                ),
+                edit(part, &r.feature, json!({"thread_depth": mm_floor(short)})),
+            ],
+        });
+    }
+    out
+}
+
+/// `hole_cannot_check`: a check this row couldn't decide.
+fn cannot(r: &Row, check: &str, why: &str) -> Finding {
+    Finding {
+        code: "hole_cannot_check",
+        holes: vec![r.reference.clone()],
+        message: format!("{}: {check} couldn't be decided: {why}", r.reference),
+        details: json!({"check": check}),
+        fixes: Vec::new(),
+    }
+}
+
 fn solid_findings(cx: &Ctx, rows: &[&Row]) -> Result<Vec<Finding>> {
     let mut out: Vec<Finding> = Vec::new();
     let part = &cx.session_part.id;
     out.extend(tap_drills(part, rows));
     out.extend(engagement(part, rows, cx.opts.min_engagement));
+    out.extend(breaks_through(cx, rows));
+    out.extend(past_material(cx, rows));
     Ok(out)
 }
 
@@ -403,5 +572,95 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(v["findings"], json!([]), "{v}");
+    }
+
+    /// Plate `pl` 40 x 40 x 12 mm and sketch `t` on its top with point
+    /// p1 at (20, 20).
+    fn plate(s: &mut Session) {
+        call(
+            s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "pl",
+            "params": {"x": 40, "y": 40, "z": 12}, "placement": {"origin": [100, 0, 0]}}),
+        )
+        .unwrap();
+        call(
+            s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t",
+            "placement": {"origin": [100, 0, 12]}}),
+        )
+        .unwrap();
+        call(
+            s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "t", "ops": [
+            {"op": "add", "type": "point", "at": [20, 20]},
+            {"op": "add", "type": "fix", "a": "p1"}]}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_thread_past_its_material_and_a_hole_that_broke_through() {
+        let (_dir, mut s) = drilled();
+        plate(&mut s);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "m6",
+            "sketch": "t", "spec": "M6x1.0-6H 15 DEEP, DRILL 18 DEEP", "targets": ["pl"]}),
+        )
+        .unwrap();
+        let v = call(&mut s, "holes.check", json!({"part": "p", "solid": "pl"})).unwrap();
+        let by = |c: &str| {
+            v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["code"] == c)
+                .cloned()
+                .unwrap_or_else(|| panic!("{c}: {v}"))
+        };
+        let past = by("hole_thread_past_material");
+        assert_eq!(
+            past["message"],
+            "m6: M6 thread depth 15 mm exceeds 12 mm of material: use THRU, or 9 mm"
+        );
+        assert!((past["details"]["material_m"].as_f64().unwrap() - 0.012).abs() < 1e-12);
+        let through = by("hole_breaks_through");
+        assert_eq!(through["holes"], json!(["p/m6/p1"]));
+        assert_eq!(through["fixes"][0]["params"]["depth"], "through_all");
+        // Either fix leaves it clean of both.
+        let mut fixed = past["fixes"][1].clone();
+        assert_eq!(fixed["params"]["thread_depth"], "9 mm");
+        fixed["params"]["depth"] = through["fixes"][1]["params"]["depth"].clone();
+        call(&mut s, "feature.edit", fixed["params"].clone()).unwrap();
+        let v = call(&mut s, "holes.check", json!({"part": "p", "solid": "pl"})).unwrap();
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["code"] == "hole_thread_past_material"
+                    || x["code"] == "hole_breaks_through"),
+            "{v}"
+        );
+        call(
+            &mut s,
+            "feature.edit",
+            through["fixes"][0]["params"].clone(),
+        )
+        .unwrap();
+        let v = call(&mut s, "holes.check", json!({"part": "p", "solid": "pl"})).unwrap();
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["code"] == "hole_thread_past_material"
+                    || x["code"] == "hole_breaks_through"),
+            "{v}"
+        );
     }
 }
