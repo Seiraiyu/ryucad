@@ -48,6 +48,8 @@ fn the_window_loads_the_model_and_its_meshes() {
     assert_eq!(mesh.faces.len(), 6);
     assert_eq!(mesh.edges.len(), 12);
     assert_eq!(ws.fetched, 2);
+    // Both bodies in one request, meshed side by side (#801).
+    assert_eq!(ws.mesh_requests, 1);
 }
 
 #[test]

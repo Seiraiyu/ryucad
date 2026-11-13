@@ -396,6 +396,7 @@ pub fn crash_reports() {
                 "ryucad can't draw its window",
                 &format!("{m}\n\n{NO_ADAPTER}"),
             );
+            trace("exited: can't draw the window");
             std::process::exit(1);
         }
         let at = std::time::SystemTime::now()
@@ -406,14 +407,107 @@ pub fn crash_reports() {
             env!("CARGO_PKG_VERSION"),
             std::backtrace::Backtrace::force_capture()
         );
+        let what = info.payload_as_str().unwrap_or("?");
         if let Ok(dir) = ryucad::endpoint::runtime_dir() {
             let path = dir.join(format!("ryucad-app-crash-{at}.log"));
             if std::fs::write(&path, report).is_ok() {
                 eprintln!("ryucad-app: crashed; report in {}", path.display());
+                trace(&format!("panicked: {what}; report in {}", path.display()));
+            } else {
+                trace(&format!("panicked: {what}; the report couldn't be written"));
             }
+        } else {
+            trace(&format!(
+                "panicked: {what}; no runtime folder for the report"
+            ));
         }
         default(info);
     }));
+}
+
+/// The trace's cap: past it the old one becomes `ryucad-app.old.log`.
+const TRACE_CAP: u64 = 1 << 20;
+
+/// The app's trace (#799): `ryucad-app.log` in the runtime folder
+/// (`%LOCALAPPDATA%\ryucad\run` on Windows), where the crash reports go.
+pub fn trace_path() -> Option<std::path::PathBuf> {
+    ryucad::endpoint::runtime_dir()
+        .ok()
+        .map(|d| d.join("ryucad-app.log"))
+}
+
+/// Appends a line to the trace: seconds since the epoch, the process,
+/// the line. Never fails the app.
+pub fn trace(line: &str) {
+    use std::io::Write;
+    let Some(path) = trace_path() else { return };
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > TRACE_CAP) {
+        let _ = std::fs::rename(&path, path.with_file_name("ryucad-app.old.log"));
+    }
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{at} {} {line}", std::process::id());
+    }
+}
+
+/// eframe's, wgpu's and winit's warnings and errors, into the trace:
+/// eframe says why it ends the event loop only through `log`.
+struct TraceLog;
+
+impl log::Log for TraceLog {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= log::Level::Warn
+    }
+    fn log(&self, r: &log::Record) {
+        if self.enabled(r.metadata()) {
+            trace(&format!("{} {}: {}", r.level(), r.target(), r.args()));
+        }
+    }
+    fn flush(&self) {}
+}
+
+/// Starts the trace: the logger, and on Windows without a console (the
+/// release build's window, `main.rs`'s `windows_subsystem`) stderr into
+/// the trace file, so what Rust's runtime prints as it aborts -- a stack
+/// overflow, an allocation that failed, a panic's message -- is kept.
+pub fn begin_trace(what: &str) {
+    let _ = log::set_logger(&TraceLog).map(|()| log::set_max_level(log::LevelFilter::Warn));
+    #[cfg(windows)]
+    stderr_to_trace();
+    trace(&format!(
+        "ryucad-app {} started: {what}",
+        env!("CARGO_PKG_VERSION")
+    ));
+}
+
+#[cfg(windows)]
+fn stderr_to_trace() {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, SetStdHandle};
+    // SAFETY: reads the process's standard error handle.
+    let h = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    // A console or a redirect: leave it where someone sees it.
+    if !h.is_null() && h != INVALID_HANDLE_VALUE {
+        return;
+    }
+    let Some(path) = trace_path() else { return };
+    let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    // SAFETY: the handle is ours and stays open for the process's life;
+    // std reads the standard handle on each write.
+    unsafe { SetStdHandle(STD_ERROR_HANDLE, f.into_raw_handle()) };
 }
 
 /// Ctrl+click is a right-click, as on a one-button Mac: a primary press

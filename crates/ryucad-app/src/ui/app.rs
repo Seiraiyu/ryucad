@@ -866,6 +866,7 @@ impl App {
 impl eframe::App for App {
     /// The tiles as they were left.
     fn on_exit(&mut self) {
+        crate::ui::platform::trace("the window is closing");
         if let Screen::Opened(o) = &mut self.screen {
             o.save_layout_before_closing();
             o.thumbnail_before_closing();

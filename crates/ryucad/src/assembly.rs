@@ -3343,9 +3343,11 @@ pub(crate) mod tests {
             (e.code, &e.details["occurrence"]),
             (Code::NotFound, &json!("b9"))
         );
+        // A part's several solids are taken too (#801); a name that isn't
+        // one is refused as with `feature`.
         let bad = json!({"part": "bolt", "features": ["shank", "x"]});
         let e = call(&mut s, "mesh.get", bad).unwrap_err();
-        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.code, Code::NotFound);
         // The same as bytes.
         let req = crate::proto::Request::from_rpc(
             "mesh.get",

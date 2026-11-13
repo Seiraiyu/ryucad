@@ -14,6 +14,9 @@ bytemuck = { version = "1", features = ["derive"] }
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "wayland", "wgpu", "x11"] }
 # Docking tiles round the viewport (design 199), by egui's authors.
 egui_tiles = "0.18"
+# eframe says why it ends the event loop only through `log`: into the
+# trace (#799).
+log = "0.4"
 png = "0.18"
 pollster = "0.4"
 # Levels of detail for 100,000 occurrences a frame, side by side.
@@ -34,9 +37,10 @@ winit = { version = "0.30", default-features = false, features = ["wayland-csd-a
 # all-Rust connection winit's X11 backend already builds.
 x11rb = { version = "0.13", default-features = false }
 
-# Whether a dialog can be seen (not in session 0's window station).
+# Whether a dialog can be seen (not in session 0's window station), and
+# standard error into the trace without a console (#799).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_StationsAndDesktops", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_StationsAndDesktops", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 divan = "0.1"
