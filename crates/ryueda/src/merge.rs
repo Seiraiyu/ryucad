@@ -25,7 +25,10 @@
 //! The result is written at the lowest format that holds it.
 
 use crate::conn;
-use ryu_git::value::{self, Kind, Merged, Rules, Walk};
+use ryu_git::value::{self, Conflict, Kind, Merged, Rules, Walk};
+use std::collections::BTreeMap;
+
+pub use ryu_git::value::Outcome;
 use serde_json::{Map, Value, json};
 
 /// The segments of a JSON pointer, as written.
@@ -298,6 +301,120 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
         value,
         conflicts: walk.conflicts,
     }
+}
+
+/// The newest format of each file kind this build reads; kinds it
+/// doesn't know merge by the generic rule at any format.
+pub fn newest(kind: &str) -> Option<u64> {
+    Some(match kind {
+        conn::DESIGN_KIND
+        | conn::BLOCK_KIND
+        | conn::COMPONENT_KIND
+        | conn::NET_KIND
+        | conn::INSTANCE_KIND
+        | conn::RAIL_KIND
+        | conn::CLASS_KIND => conn::newest(kind),
+        crate::project::KIND => crate::project::FORMAT_2,
+        crate::erc::KIND => crate::erc::FORMAT,
+        crate::lint::KIND => crate::lint::FORMAT,
+        crate::style::KIND => crate::style::FORMAT,
+        crate::standards::KIND => crate::standards::FORMAT,
+        crate::sourcing::KIND => crate::sourcing::FORMAT,
+        crate::symbol::KIND => crate::symbol::FORMAT,
+        crate::footprint::KIND => crate::footprint::FORMAT,
+        crate::libcomp::KIND => crate::libcomp::FORMAT,
+        crate::schem::LAYOUT_KIND => crate::schem::LAYOUT_FORMAT,
+        _ => return None,
+    })
+}
+
+/// A file's JSON if ryueda can merge it by value: UTF-8 JSON, an object
+/// with a `kind` and a `format`, no conflict record, no format newer than
+/// this build reads. It needn't be canonical: the merge compares values
+/// and writes the result canonical.
+fn readable(bytes: &[u8]) -> Option<Value> {
+    let v = crate::canonical::parse(std::str::from_utf8(bytes).ok()?).ok()?;
+    if v.get(value::CONFLICTS).is_some() {
+        return None;
+    }
+    let kind = v.get("kind")?.as_str()?;
+    let format = v.get("format")?.as_u64()?;
+    if newest(kind).is_some_and(|n| format > n) {
+        return None;
+    }
+    Some(v)
+}
+
+/// A layout, which only `merge status` can merge (it needs the merged
+/// connectivity): one side's when only it changed, or both alike; else
+/// ours' with a whole-file `layout_pending` entry holding all three.
+fn layout(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
+    let one = if ours == theirs || Some(theirs) == base {
+        Some(ours)
+    } else if Some(ours) == base {
+        Some(theirs)
+    } else {
+        None
+    };
+    let mut conflicts = BTreeMap::new();
+    if one.is_none() {
+        conflicts.insert(
+            String::new(),
+            Conflict {
+                kind: Kind::LayoutPending,
+                base: base.cloned(),
+                ours: Some(ours.clone()),
+                theirs: Some(theirs.clone()),
+            },
+        );
+    }
+    Merged {
+        value: one.unwrap_or(ours).clone(),
+        conflicts,
+    }
+}
+
+/// Merges three versions of a file as Git hands them to the driver; an
+/// empty base means both sides added it. Files ryueda reads merge by
+/// value and come out canonical: by [`merge`] when all are of one kind,
+/// as one value when a side changed the kind, by [`layout`] when any is a
+/// layout. If any version can't be read they merge as lines, as `git
+/// merge-file` does.
+pub fn bytes(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, Outcome) {
+    let b = if base.is_empty() {
+        Some(None)
+    } else {
+        readable(base).map(Some)
+    };
+    if let (Some(b), Some(o), Some(t)) = (b, readable(ours), readable(theirs)) {
+        let kinds = [Some(&o), Some(&t), b.as_ref()].map(|v| v.map(|v| v["kind"].clone()));
+        let is_layout = kinds
+            .iter()
+            .any(|k| k.as_ref().is_some_and(|k| *k == crate::schem::LAYOUT_KIND));
+        let one_kind = kinds.iter().flatten().all(|k| *k == o["kind"]);
+        let m = if is_layout && one_kind {
+            layout(b.as_ref(), &o, &t)
+        } else if !one_kind {
+            let mut walk = Walk::default();
+            let value = walk.whole(b.as_ref(), &o, &t);
+            Merged {
+                value,
+                conflicts: walk.conflicts,
+            }
+        } else {
+            merge(b.as_ref(), &o, &t)
+        };
+        let outcome = match m.conflicts.len() {
+            0 => Outcome::Clean,
+            n => Outcome::Conflicts(n),
+        };
+        return (
+            crate::canonical::to_string(&m.to_json()).into_bytes(),
+            outcome,
+        );
+    }
+    let (out, n) = value::text(base, ours, theirs);
+    (out, Outcome::Text(n))
 }
 
 /// `v` (a file without its record) with the conflict at `pointer`
@@ -575,5 +692,63 @@ mod tests {
             "properties: {}",
             m.value["properties"]
         );
+    }
+
+    fn text(v: &Value) -> Vec<u8> {
+        crate::canonical::to_string(v).into_bytes()
+    }
+
+    #[test]
+    fn layouts_both_sides_changed_wait_for_the_status() {
+        let layout = |x: i64| json!({"kind": "ryueda.layout", "format": 1, "placed": {"r1": {"sheet": "s1", "at": [x, 0]}}});
+        let (out, outcome) = bytes(&text(&layout(0)), &text(&layout(1)), &text(&layout(2)));
+        assert_eq!(outcome, Outcome::Conflicts(1));
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let record = value::record(&v);
+        assert_eq!(record[""].kind, Kind::LayoutPending);
+        assert_eq!(record[""].theirs, Some(layout(2)));
+        assert_eq!(v["placed"], layout(1)["placed"]);
+        // Only one side changed it: that side, canonical.
+        let (out, outcome) = bytes(&text(&layout(0)), &text(&layout(0)), &text(&layout(2)));
+        assert_eq!((out, outcome), (text(&layout(2)), Outcome::Clean));
+        // A file that loads refuses the record until it is settled.
+        let e = crate::schem::read_layout(
+            &bytes(&text(&layout(0)), &text(&layout(1)), &text(&layout(2))).0,
+            "blocks/b/layout.json",
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::MergeConflict);
+    }
+
+    #[test]
+    fn what_isnt_a_file_this_build_reads_merges_as_lines() {
+        let c = comp(json!({}));
+        let newer = comp(json!({"format": 99}));
+        let (out, outcome) = bytes(
+            &text(&c),
+            &text(&comp(json!({"refdes": "R2"}))),
+            &text(&newer),
+        );
+        // Merged as lines: the two changes are lines apart, so both stay.
+        assert_eq!(outcome, Outcome::Text(0));
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("\"format\": 99") && out.contains("\"R2\""),
+            "{out}"
+        );
+        // One written by hand on one line still merges by value, canonical.
+        let one_line = serde_json::to_vec(&comp(json!({"refdes": "R2"}))).unwrap();
+        let (out, outcome) = bytes(&text(&c), &one_line, &text(&comp(json!({"value": "1k"}))));
+        assert_eq!(outcome, Outcome::Clean);
+        assert_eq!(out, text(&comp(json!({"refdes": "R2", "value": "1k"}))));
+        // A kind changed on a side is one value.
+        let net = json!({"kind": "ryueda.net", "format": 1, "name": "X"});
+        let (out, outcome) = bytes(&text(&c), &text(&net), &text(&comp(json!({"value": "1k"}))));
+        assert_eq!(outcome, Outcome::Conflicts(1));
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value::record(&v)[""].kind, Kind::Value);
+        // Both sides added one file differently: an ID collision.
+        let (_, outcome) = bytes(b"", &text(&c), &text(&comp(json!({"refdes": "R9"}))));
+        assert_eq!(outcome, Outcome::Conflicts(1));
     }
 }
