@@ -528,6 +528,9 @@ enum Command {
     /// Register ryueda with Git: `git install`.
     #[command(subcommand)]
     Git(GitCmd),
+    /// What a merge in progress leaves to settle, and settling it.
+    #[command(subcommand)]
+    Merge(MergeCmd),
     /// What the project folder needs that no one file says (Git's setup,
     /// files Git left unmerged, hand-written files, files no kind holds,
     /// model files no footprint names), and with --repair those fixes.
@@ -1687,6 +1690,58 @@ enum GitCmd {
     /// Print a ryueda file as one line per value, for `git diff` (Git's
     /// textconv): plain text, not JSON.
     Textconv { file: PathBuf },
+    /// Merge three versions of a ryueda file value by value, for Git's
+    /// merge (`merge.ryueda.driver`): writes the result over OURS and exits
+    /// 0, or 1 when conflicts are left in it. Prints nothing.
+    MergeDriver {
+        /// The common ancestor's version (empty when both sides added it).
+        base: PathBuf,
+        /// Ours, which the result replaces.
+        ours: PathBuf,
+        theirs: PathBuf,
+        /// The file's path in the repository, as Git names it.
+        path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MergeCmd {
+    /// Everything that blocks the merge's commit: conflicts in files'
+    /// records, paths Git left unmerged and layouts to merge, each with the
+    /// side that caused it, its choices and its repairs.
+    Status {
+        /// As Git's hooks run it: check every ryueda project the merge
+        /// concerns, print what is unresolved for people, and exit 1 if
+        /// anything is. Outside a merge it exits 0 at once.
+        #[arg(long)]
+        hook: bool,
+    },
+    /// Settle conflicts with one side's value, a value of your own, or a
+    /// planned repair, as one logged, undoable change: every ID given takes
+    /// the same choice (a block's layout areas are settled together).
+    /// Marking files resolved (git add) and committing are yours.
+    #[command(group = clap::ArgGroup::new("how").required(true))]
+    Resolve {
+        /// Conflict IDs, as `merge status` gives them.
+        #[arg(required = true)]
+        conflicts: Vec<String>,
+        #[arg(long, group = "how")]
+        ours: bool,
+        #[arg(long, group = "how")]
+        theirs: bool,
+        /// A JSON value to put in place (text that isn't JSON is a string).
+        #[arg(long, group = "how", value_name = "JSON")]
+        value: Option<String>,
+        /// A planned repair's ID.
+        #[arg(long, group = "how", value_name = "ID")]
+        repair: Option<String>,
+        /// Fail with `conflict` unless the first conflict's block (or the
+        /// project, for a file outside blocks) is still at this revision.
+        /// Refused (`invalid_param`) while ryueda.json holds a conflict
+        /// record: the project has no revision until it is settled.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2838,6 +2893,39 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         },
         Command::Design(DesignCmd::List) => Request::DesignList {},
         Command::Doctor { repairs } if repairs.is_empty() => Request::Doctor {},
+        Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
+        Command::Merge(MergeCmd::Resolve {
+            conflicts,
+            ours,
+            theirs,
+            value,
+            repair,
+            expect,
+        }) => {
+            // Clap requires exactly one.
+            let choice = match (ours, theirs, value) {
+                (true, _, _) => "ours",
+                (_, true, _) => "theirs",
+                (_, _, Some(_)) => "value",
+                _ => "repair",
+            };
+            let value = value
+                .as_ref()
+                .map(|v| serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone())));
+            let scope = ryueda::validate::scope(&conflicts[0]);
+            Request::MergeResolve {
+                resolutions: conflicts
+                    .iter()
+                    .map(|c| ryueda::proto::Resolution {
+                        conflict: c.clone(),
+                        choice: choice.to_owned(),
+                        value: value.clone(),
+                        repair: repair.clone(),
+                    })
+                    .collect(),
+                expected_revisions: expect.iter().map(|e| (scope.clone(), e.clone())).collect(),
+            }
+        }
         Command::Doctor { repairs } => Request::DoctorRepair {
             repairs: repairs.clone(),
         },
@@ -2883,6 +2971,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
         Command::Git(GitCmd::Textconv { .. }) => unreachable!("answered in main"),
+        Command::Git(GitCmd::MergeDriver { .. }) => unreachable!("answered in main"),
         // Keys go straight to the user's config folder: never through a
         // daemon, a request or a log.
         Command::Parts(PartsCmd::Login { distributor }) => {
@@ -3101,9 +3190,132 @@ pub fn main() -> ExitCode {
             Err(e) => finish(Err(Error::io(file, &e)), Vec::new(), cli.pretty),
         };
     }
+    // Git calls the merge driver: its answer is the file and the exit code.
+    if let Command::Git(GitCmd::MergeDriver {
+        base,
+        ours,
+        theirs,
+        path,
+    }) = &cli.command
+    {
+        return merge_driver(base, ours, theirs, path.as_deref());
+    }
+    // Git's hooks read the exit code; people read what it prints.
+    if let Command::Merge(MergeCmd::Status { hook: true }) = &cli.command {
+        let here = match &cli.dir {
+            Some(d) => d.clone(),
+            None => std::env::current_dir().unwrap_or_default(),
+        };
+        return hook_check(&here);
+    }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);
     finish(outcome, warnings, cli.pretty)
+}
+
+/// `ryueda git merge-driver`: merges, writes over `ours`, and exits 0 when
+/// nothing is left to resolve, 1 when conflicts are (in the file's record,
+/// or as Git's markers when it fell back to merging lines), 4 when a file
+/// can't be read or written. Failures go to stderr: Git shows them.
+fn merge_driver(
+    base: &std::path::Path,
+    ours: &std::path::Path,
+    theirs: &std::path::Path,
+    path: Option<&str>,
+) -> ExitCode {
+    let read = |p: &std::path::Path| std::fs::read(p).map_err(|e| Error::io(p, &e));
+    let merged = (|| -> Result<ryueda::merge::Outcome> {
+        let (out, outcome) = ryueda::merge::bytes(&read(base)?, &read(ours)?, &read(theirs)?);
+        std::fs::write(ours, out).map_err(|e| Error::io(ours, &e))?;
+        Ok(outcome)
+    })();
+    match merged {
+        Ok(ryueda::merge::Outcome::Clean) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!(
+                "ryueda: merging {}: {}",
+                path.unwrap_or(&ours.to_string_lossy()),
+                e.message
+            );
+            ExitCode::from(Code::Io.exit_code())
+        }
+    }
+}
+
+/// `ryueda merge status --hook`: every ryueda project a merge in progress
+/// concerns, checked in this process, then that what the commit would take
+/// is what was checked. Exits 0 when nothing is unresolved, 1 otherwise,
+/// saying what to settle on stderr.
+fn hook_check(here: &std::path::Path) -> ExitCode {
+    let projects = match ryu_git::merging_projects::<ryueda::Eda>(here) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ryueda: checking the merge: {}", e.message);
+            return ExitCode::from(1);
+        }
+    };
+    let mut failed = false;
+    for root in projects {
+        let at = root.display();
+        match server::handle_safely(&mut None, None, None, &root, Request::MergeStatus {}) {
+            Ok(a) if a.result["clean"] == true => {}
+            Ok(a) => {
+                failed = true;
+                let list = a.result["conflicts"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                eprintln!(
+                    "ryueda: the merge leaves {} conflict(s) in {at}:",
+                    list.len()
+                );
+                for c in &list {
+                    eprintln!(
+                        "  {} ({}, {}): {}",
+                        c["id"].as_str().unwrap_or_default(),
+                        c["kind"].as_str().unwrap_or_default(),
+                        c["cause"].as_str().unwrap_or_default(),
+                        c["message"].as_str().unwrap_or_default()
+                    );
+                }
+            }
+            Err(e) if e.code == Code::NotMerging => {}
+            Err(e) => {
+                failed = true;
+                eprintln!("ryueda: checking the merge in {at}: {}", e.message);
+            }
+        }
+        // The check read the work tree; the commit takes the index.
+        let unstaged = ryueda::git::Repo::open(&root).and_then(|repo| match repo {
+            Some(repo) => repo.unstaged(&ryueda::validate::own(&ryueda::session::current(&root)?)),
+            None => Ok(Vec::new()),
+        });
+        match unstaged {
+            Ok(paths) if paths.is_empty() => {}
+            Ok(paths) => {
+                failed = true;
+                eprintln!(
+                    "ryueda: {} file(s) in {at} differ from what would be committed; `git add` (or restore) them first:",
+                    paths.len()
+                );
+                for p in &paths {
+                    eprintln!("  {p}");
+                }
+            }
+            Err(e) => {
+                failed = true;
+                eprintln!("ryueda: reading the index in {at}: {}", e.message);
+            }
+        }
+    }
+    if failed {
+        eprintln!(
+            "ryueda: see `ryueda merge status`, and settle them with `ryueda merge resolve` or by editing the project; `git commit --no-verify` skips this check"
+        );
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
 }
 
 fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCode {
