@@ -7,7 +7,9 @@
 //! Lengths from tables are exact nanometres until here, and become f64
 //! metres by one division each.
 
-use crate::doc::hole::{BoreTolerance, Fastener, Hole, HoleForm, TapDrill, Thread, ThreadDepth};
+use crate::doc::hole::{
+    BoreTolerance, Far, Fastener, Hole, HoleForm, TapDrill, Thread, ThreadDepth,
+};
 use crate::doc::hole_standards::{Diameters, HOLE_STANDARDS, HoleStandards, Kind, ThreadEntry};
 use crate::error::{Code, Error, Result};
 use crate::units::Quantity;
@@ -27,6 +29,8 @@ pub enum Source {
     Override,
     /// ISO 286.
     Fit,
+    /// What the hole takes when it writes none and no table gives one.
+    Default,
 }
 
 impl Source {
@@ -37,6 +41,7 @@ impl Source {
             Source::Project => "project",
             Source::Override => "override",
             Source::Fit => "fit",
+            Source::Default => "default",
         }
     }
 }
@@ -128,6 +133,25 @@ pub struct FitSizes {
     pub limits: [Size; 2],
 }
 
+/// A far side's sizes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FarSizes {
+    /// Diameter, included angle.
+    Countersink(Size, Size),
+    /// Diameter, depth.
+    Counterbore(Size, Size),
+}
+
+/// An angle the hole takes when it writes none.
+fn default_angle(deg: u32) -> Size {
+    Size {
+        si: f64::from(deg) * core::f64::consts::PI / 180.0,
+        text: format!("{deg} deg"),
+        angle: true,
+        source: Source::Default,
+    }
+}
+
 /// Every size a hole is built from.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sizes {
@@ -139,6 +163,13 @@ pub struct Sizes {
     pub counterbore: Option<(Size, Size)>,
     /// Diameter and included angle.
     pub countersink: Option<(Size, Size)>,
+    /// Diameter, depth and the floor's included angle.
+    pub counterdrill: Option<(Size, Size, Size)>,
+    /// Diameter and depth (0 for flush).
+    pub spotface: Option<(Size, Size)>,
+    /// A near chamfer's diameter and included angle.
+    pub near: Option<(Size, Size)>,
+    pub far: Option<FarSizes>,
     pub thread: Option<ThreadSizes>,
     pub fit: Option<FitSizes>,
 }
@@ -146,12 +177,48 @@ pub struct Sizes {
 impl Sizes {
     /// How deep the mouth goes, in metres; none for a simple hole.
     pub fn mouth_depth(&self) -> Option<f64> {
+        let tan = |a: &Size| ryukei::math::tan(a.si / 2.0);
         if let Some((_, depth)) = &self.counterbore {
             return Some(depth.si);
         }
+        if let Some((d, depth, a)) = &self.counterdrill {
+            return Some(depth.si + (d.si - self.drill.si) / 2.0 / tan(a));
+        }
+        if let Some((_, depth)) = &self.spotface {
+            return Some(depth.si);
+        }
         let (d, a) = self.countersink.as_ref()?;
-        let run = (d.si - self.drill.si) / 2.0;
-        Some(run / ryukei::math::tan(a.si / 2.0))
+        Some((d.si - self.drill.si) / 2.0 / tan(a))
+    }
+
+    /// The radius a near chamfer chamfers: the counterbore's or
+    /// counterdrill's, else the drill's.
+    pub fn near_under(&self) -> f64 {
+        self.counterbore
+            .as_ref()
+            .map(|(d, _)| d.si)
+            .or(self.counterdrill.as_ref().map(|(d, ..)| d.si))
+            .unwrap_or(self.drill.si)
+            / 2.0
+    }
+
+    /// Where a near chamfer ends, from the mouth: at a spotface's floor,
+    /// else at the top.
+    pub fn near_end(&self) -> Option<f64> {
+        let (d, a) = self.near.as_ref()?;
+        let top = self.spotface.as_ref().map_or(0.0, |(_, depth)| depth.si);
+        Some(top + (d.si / 2.0 - self.near_under()) / ryukei::math::tan(a.si / 2.0))
+    }
+
+    /// Where the bore at full diameter starts, from the mouth: below its
+    /// mouth form and a near chamfer on the drill (a thread starts here).
+    pub fn thread_start(&self) -> f64 {
+        let mouth = self.mouth_depth().unwrap_or(0.0);
+        let on_drill = self.counterbore.is_none() && self.counterdrill.is_none();
+        match self.near_end() {
+            Some(e) if on_drill => mouth.max(e),
+            _ => mouth,
+        }
     }
 
     pub fn to_json(&self) -> Value {
@@ -171,6 +238,39 @@ impl Sizes {
                 "countersink".into(),
                 json!({"diameter": d.to_json(), "angle": a.to_json()}),
             );
+        }
+        if let Some((d, h, a)) = &self.counterdrill {
+            v.insert(
+                "counterdrill".into(),
+                json!({"diameter": d.to_json(), "depth": h.to_json(), "angle": a.to_json()}),
+            );
+        }
+        if let Some((d, h)) = &self.spotface {
+            v.insert(
+                "spotface".into(),
+                json!({"diameter": d.to_json(), "depth": h.to_json()}),
+            );
+        }
+        if let Some((d, a)) = &self.near {
+            v.insert(
+                "near".into(),
+                json!({"diameter": d.to_json(), "angle": a.to_json()}),
+            );
+        }
+        match &self.far {
+            Some(FarSizes::Countersink(d, a)) => {
+                v.insert(
+                    "far".into(),
+                    json!({"countersink": {"diameter": d.to_json(), "angle": a.to_json()}}),
+                );
+            }
+            Some(FarSizes::Counterbore(d, h)) => {
+                v.insert(
+                    "far".into(),
+                    json!({"counterbore": {"diameter": d.to_json(), "depth": h.to_json()}}),
+                );
+            }
+            None => {}
         }
         if let Some(t) = &self.thread {
             let mut x = json!({
@@ -221,12 +321,20 @@ pub type Tables<'a> = Option<&'a std::result::Result<HoleStandards, Error>>;
 /// A hole's sizes.
 pub fn derive(h: &Hole, tables: Tables) -> Result<Sizes> {
     let written = |q: &Option<Quantity>| q.as_ref().map(|q| Size::quantity(q, Source::Override));
-    let (mut counterbore, mut countersink) = match &h.form {
-        HoleForm::Simple => (None, None),
-        HoleForm::Counterbore { diameter, depth } => (written(diameter).zip(written(depth)), None),
-        HoleForm::Countersink { diameter, angle } => (None, written(diameter).zip(written(angle))),
-        HoleForm::Counterdrill { .. } | HoleForm::Spotface { .. } => (None, None),
-    };
+    let (mut counterbore, mut countersink, mut counterdrill_mouth, mut spotface_mouth) =
+        match &h.form {
+            HoleForm::Simple => (None, None, None, None),
+            HoleForm::Counterbore { diameter, depth } => {
+                (written(diameter).zip(written(depth)), None, None, None)
+            }
+            HoleForm::Countersink { diameter, angle } => {
+                (None, written(diameter).zip(written(angle)), None, None)
+            }
+            HoleForm::Counterdrill {
+                diameter, depth, ..
+            } => (None, None, written(diameter).zip(written(depth)), None),
+            HoleForm::Spotface { diameter, .. } => (None, None, None, written(diameter)),
+        };
     let mut thread = None;
     let (drill, drill_standard) = if let Some(t) = &h.thread {
         let (sizes, tap) = thread_sizes(h, t, tables)?;
@@ -238,10 +346,12 @@ pub fn derive(h: &Hole, tables: Tables) -> Result<Sizes> {
             (None, None) => unreachable!("thread_sizes refuses a hole with no drill"),
         }
     } else if let Some(f) = &h.fastener {
-        let (clearance, cb, cs) = fastener_sizes(h, f, tables)?;
-        counterbore = cb;
-        countersink = cs;
-        match (&h.diameter, clearance) {
+        let m = fastener_sizes(h, f, tables)?;
+        counterbore = m.counterbore;
+        countersink = m.countersink;
+        counterdrill_mouth = m.counterdrill;
+        spotface_mouth = m.spotface;
+        match (&h.diameter, m.clearance) {
             (Some(q), _) => (
                 Size::quantity(q, Source::Override),
                 is_standard(q, false) || is_standard(q, true),
@@ -260,14 +370,126 @@ pub fn derive(h: &Hole, tables: Tables) -> Result<Sizes> {
         (Size::quantity(q, Source::Override), true)
     };
     let fit = h.bore.as_ref().map(|b| fit_sizes(b, &drill)).transpose()?;
-    Ok(Sizes {
+    let counterdrill = match (&h.form, counterdrill_mouth) {
+        (HoleForm::Counterdrill { angle, .. }, Some((d, depth))) => Some((
+            d,
+            depth,
+            angle.as_ref().map_or_else(
+                || default_angle(118),
+                |a| Size::quantity(a, Source::Override),
+            ),
+        )),
+        _ => None,
+    };
+    let spotface = match (&h.form, spotface_mouth) {
+        (HoleForm::Spotface { depth, .. }, Some(d)) => Some((
+            d,
+            depth.as_ref().map_or_else(
+                || Size {
+                    si: 0.0,
+                    text: "0 mm".into(),
+                    angle: false,
+                    source: Source::Default,
+                },
+                |q| Size::quantity(q, Source::Override),
+            ),
+        )),
+        _ => None,
+    };
+    let near = h.near.as_ref().map(|n| {
+        (
+            Size::quantity(&n.diameter, Source::Override),
+            n.angle.as_ref().map_or_else(
+                || default_angle(90),
+                |a| Size::quantity(a, Source::Override),
+            ),
+        )
+    });
+    let far = h.far.as_ref().map(|f| match f {
+        Far::Countersink { diameter, angle } => FarSizes::Countersink(
+            Size::quantity(diameter, Source::Override),
+            Size::quantity(angle, Source::Override),
+        ),
+        Far::Counterbore { diameter, depth } => FarSizes::Counterbore(
+            Size::quantity(diameter, Source::Override),
+            Size::quantity(depth, Source::Override),
+        ),
+    });
+    let sizes = Sizes {
         drill,
         drill_standard,
         counterbore,
         countersink,
+        counterdrill,
+        spotface,
+        near,
+        far,
         thread,
         fit,
-    })
+    };
+    wider_than_what_they_cut(&sizes)?;
+    Ok(sizes)
+}
+
+/// Every mouth, near and far size wider than what it widens, now that a
+/// derived drill is known (a written one was checked when read).
+fn wider_than_what_they_cut(s: &Sizes) -> Result<()> {
+    let refuse = |at: &str, what: &str, d: &Size, under: f64| {
+        Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "{what} {} is no wider than the {} m it widens",
+                d.text, under
+            ),
+        )
+        .with("pointer", at)
+        .with("value", d.text.clone()))
+    };
+    let r = s.drill.si;
+    for (at, what, d) in [
+        (
+            "/counterdrill/diameter",
+            "a counterdrill",
+            s.counterdrill.as_ref().map(|x| &x.0),
+        ),
+        (
+            "/spotface/diameter",
+            "a spotface",
+            s.spotface.as_ref().map(|x| &x.0),
+        ),
+        (
+            "/counterbore/diameter",
+            "a counterbore",
+            s.counterbore.as_ref().map(|x| &x.0),
+        ),
+        (
+            "/countersink/diameter",
+            "a countersink",
+            s.countersink.as_ref().map(|x| &x.0),
+        ),
+    ] {
+        if let Some(d) = d
+            && d.si <= r
+        {
+            return refuse(at, what, d, r);
+        }
+    }
+    if let Some((d, _)) = &s.near
+        && d.si / 2.0 <= s.near_under()
+    {
+        return refuse("/near/diameter", "a near chamfer", d, s.near_under() * 2.0);
+    }
+    let far = match &s.far {
+        Some(FarSizes::Countersink(d, _)) => Some(("/far/countersink/diameter", d)),
+        Some(FarSizes::Counterbore(d, _)) => Some(("/far/counterbore/diameter", d)),
+        None => None,
+    };
+    if let Some((at, d)) = far
+        && d.si <= r
+    {
+        return refuse(at, "a far side", d, r);
+    }
+    Ok(())
 }
 
 /// `needs_project_table`: the values a hole needs that no built-in and
@@ -521,9 +743,16 @@ fn thread_sizes(
     Ok((sizes, drill))
 }
 
-/// A fastener's clearance, if the hole doesn't write its diameter, and
-/// its counterbore and countersink.
-type FastenerSizes = (Option<Size>, Option<(Size, Size)>, Option<(Size, Size)>);
+/// What a fastener gives a hole, besides what it writes.
+#[derive(Default)]
+struct FastenerSizes {
+    clearance: Option<Size>,
+    counterbore: Option<(Size, Size)>,
+    countersink: Option<(Size, Size)>,
+    /// Diameter and depth: the fastener's counterbore.
+    counterdrill: Option<(Size, Size)>,
+    spotface: Option<Size>,
+}
 
 /// A fastener's clearance and mouth: what the hole writes, else the
 /// project's entry; every value neither gives is named in one refusal.
@@ -566,30 +795,50 @@ fn fastener_sizes(h: &Hole, f: &Fastener, tables: Tables) -> Result<FastenerSize
         }
         a.zip(b)
     };
-    let (counterbore, countersink) = match &h.form {
-        HoleForm::Simple => (None, None),
-        HoleForm::Counterbore { diameter, depth } => (
-            pair(
+    let mut out = FastenerSizes {
+        clearance,
+        ..FastenerSizes::default()
+    };
+    match &h.form {
+        HoleForm::Simple => {}
+        HoleForm::Counterbore { diameter, depth } => {
+            out.counterbore = pair(
                 (diameter, depth),
                 e.and_then(|e| e.counterbore.as_ref()),
                 "counterbore",
-            ),
-            None,
-        ),
-        HoleForm::Countersink { diameter, angle } => (
-            None,
-            pair(
+            );
+        }
+        HoleForm::Countersink { diameter, angle } => {
+            out.countersink = pair(
                 (diameter, angle),
                 e.and_then(|e| e.countersink.as_ref()),
                 "countersink",
-            ),
-        ),
-        HoleForm::Counterdrill { .. } | HoleForm::Spotface { .. } => (None, None),
-    };
+            );
+        }
+        HoleForm::Counterdrill {
+            diameter, depth, ..
+        } => {
+            out.counterdrill = pair(
+                (diameter, depth),
+                e.and_then(|e| e.counterbore.as_ref()),
+                "counterbore",
+            );
+        }
+        HoleForm::Spotface { diameter, .. } => {
+            out.spotface = match (diameter, e.and_then(|e| e.spotface.as_ref())) {
+                (Some(q), _) => Some(over(q)),
+                (None, Some(q)) => Some(proj(q)),
+                (None, None) => {
+                    need("spotface");
+                    None
+                }
+            };
+        }
+    }
     if !missing.is_empty() {
         return Err(needs_table(Kind::Fastener, &f.standard, &f.size, missing));
     }
-    Ok((clearance, counterbore, countersink))
+    Ok(out)
 }
 
 /// The bore's tolerance at the drill's size.
@@ -924,5 +1173,73 @@ pub(crate) mod tests {
             derive(&h, None).unwrap_err().details["reason"],
             "fit_undefined"
         );
+    }
+
+    #[test]
+    fn new_mouths_near_and_far() {
+        let d = |v: Value| derive(&hole(v), None).unwrap();
+        let s = d(
+            json!({"format": 24, "form": "counterdrill", "diameter": "5 mm",
+                         "counterdrill": {"diameter": "9 mm", "depth": "4 mm"},
+                         "depth": "through_all"}),
+        );
+        let (dia, depth, angle) = s.counterdrill.as_ref().unwrap();
+        assert_eq!((dia.text.as_str(), depth.text.as_str()), ("9 mm", "4 mm"));
+        assert_eq!(
+            (angle.text.as_str(), angle.source),
+            ("118 deg", Source::Default)
+        );
+        // 4 mm, then the cone from 4.5 to 2.5 mm radius at 59 deg.
+        let cone = 2.0 / ryukei::math::tan(59f64.to_radians());
+        assert!((s.mouth_depth().unwrap() - (0.004 + cone / 1000.0)).abs() < 1e-15);
+        let s = d(json!({"format": 24, "form": "spotface", "diameter": "5 mm",
+                         "spotface": {"diameter": "12 mm"}, "depth": "through_all",
+                         "near": {"diameter": "6 mm"}}));
+        assert_eq!(s.spotface.as_ref().unwrap().1.text, "0 mm");
+        let (nd, na) = s.near.as_ref().unwrap();
+        assert_eq!(
+            (nd.text.as_str(), na.text.as_str(), na.source),
+            ("6 mm", "90 deg", Source::Default)
+        );
+        // The thread starts below the near chamfer: 0.5 mm at 45 deg.
+        assert!((s.thread_start() - 0.0005).abs() < 1e-15);
+        let s = d(json!({"format": 24, "form": "simple", "diameter": "5 mm",
+                         "depth": "through_all",
+                         "far": {"counterbore": {"diameter": "8 mm", "depth": "1 mm"}}}));
+        assert!(matches!(s.far, Some(FarSizes::Counterbore(..))));
+        let j = s.to_json();
+        assert_eq!(j["far"]["counterbore"]["diameter"]["value"], "8 mm");
+        // A near chamfer no wider than what it chamfers is refused.
+        let e = derive(
+            &hole(
+                json!({"format": 24, "form": "counterbore", "diameter": "5 mm",
+                         "counterbore": {"diameter": "9 mm", "depth": "2 mm"},
+                         "depth": "through_all", "near": {"diameter": "8 mm"}}),
+            ),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/near/diameter");
+        // From a fastener: a counterdrill takes its counterbore entry, a
+        // spotface its spotface; missing, named in needs_project_table.
+        let t = tables();
+        let s = derive(
+            &hole(
+                json!({"format": 24, "form": "counterdrill", "counterdrill": {},
+                         "fastener": {"standard": "house_cap", "size": "M5"},
+                         "depth": "through_all"}),
+            ),
+            Some(&t),
+        )
+        .unwrap();
+        assert_eq!(s.counterdrill.as_ref().unwrap().0.text, "9.7 mm");
+        let e = derive(
+            &hole(json!({"format": 24, "form": "spotface", "spotface": {},
+                         "fastener": {"standard": "house_cap", "size": "M5"},
+                         "depth": "through_all"})),
+            Some(&t),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["missing"], json!(["spotface"]));
     }
 }
