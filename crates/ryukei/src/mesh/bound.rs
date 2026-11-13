@@ -201,6 +201,15 @@ fn turn(b: &SurfaceBound, [ru, rv]: [[f64; 2]; 2]) -> f64 {
     along(b.turn_u, ru) + along(b.turn_v, rv)
 }
 
+/// The normal's turn across the parameter triangle `uv` that the angle
+/// test certifies: `turn_u Δu + turn_v Δv` over its box, from the same
+/// bounds (#308, mass's area bound). Infinite where the turn isn't
+/// bounded.
+pub(crate) fn triangle_turn(surface: &Surface, uv: [Point2; 3]) -> f64 {
+    let range = uv_box(&uv);
+    turn(&surface_bound(surface, range), range)
+}
+
 /// Whether a piece on `uv` (its corners at `xyz`) passes the angle test:
 /// its normal turns by at most `angle`, else it is smaller than the
 /// waiver. In a plane stretched from the speeds (see `uv::stretched`) a

@@ -32,6 +32,8 @@ pub(crate) mod uv;
 pub use check::{MeshCheckFault, check_mesh};
 pub use params::MeshParams;
 
+pub(crate) use bound::triangle_turn;
+
 use crate::Error;
 use crate::geom::{Curve, Point2, Point3, UnitVector3};
 use crate::topo::{Body, EdgeId, FaceId};

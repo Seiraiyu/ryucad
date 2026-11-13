@@ -77,9 +77,10 @@ pub struct MassProperties {
     pub principal_axes: [UnitVector3; 3],
 }
 
-/// The most the normal may turn across a triangle of the mesh the bound
-/// uses, in radians: areas are bounded to `1 / cos` of it.
-const ANGLE: f64 = 0.05;
+/// The bound mesh's normal turn, in radians. Each triangle's area
+/// allowance is its own certified turn's ([`Meshed::turn_allowance`]);
+/// this one only where that isn't bounded (#308).
+const ANGLE: f64 = 0.15;
 
 /// The normal turn of the coarse mesh the quadrature runs over: the rules'
 /// orders, not the triangles' size, make it accurate.
@@ -505,6 +506,35 @@ impl<'a> Meshed<'a> {
         out
     }
 
+    /// The most face `fm`'s true area may exceed its fine mesh's, by each
+    /// triangle's certified normal turn `θ`: `A (1 / cos θ - 1)`. A
+    /// triangle whose turn isn't bounded below a quarter turn (a piece
+    /// the angle test waived as smaller than the chord, near a pole) takes
+    /// `ANGLE`'s, the turn the mesh was made to (#308). Zero on a plane.
+    fn turn_allowance(&self, fm: &FaceMesh) -> f64 {
+        if self.planar(fm.face) {
+            return 0.0;
+        }
+        let b = self.body;
+        let surface = &b.surfaces[b.faces[fm.face].surface];
+        let worst = 1.0 / math::cos(ANGLE) - 1.0;
+        let tris = &self.mesh.triangles[fm.triangles.start as usize..fm.triangles.end as usize];
+        tris.iter()
+            .map(|t| {
+                let c = t.map(|k| self.mesh.corners[k as usize]);
+                let [p, q, r] = c.map(|c| self.mesh.positions[c.position as usize]);
+                let area = (q - p).cross(r - p).length() / 2.0;
+                let theta = crate::mesh::triangle_turn(surface, c.map(|c| c.uv));
+                let k = if theta < core::f64::consts::FRAC_PI_2 {
+                    1.0 / math::cos(theta) - 1.0
+                } else {
+                    worst
+                };
+                area * k
+            })
+            .sum()
+    }
+
     /// Whether the face's surface is a plane (its mesh then lies on it).
     fn planar(&self, f: FaceId) -> bool {
         matches!(
@@ -565,8 +595,9 @@ pub(crate) fn face_properties(body: &Body, f: FaceId, rel: f64) -> Result<Proper
             .ok_or(MeasureError::Unsupported)
     };
     let q = m.converged(&find(&m.coarse)?, rel, &meter);
-    let mesh = m.mesh_face(&find(&m.mesh)?);
-    let bound = area_bound(&m, f, q.area, mesh.area);
+    let fine = find(&m.mesh)?;
+    let mesh = m.mesh_face(&fine);
+    let bound = area_bound(&m, f, q.area, mesh.area, m.turn_allowance(&fine));
     let sign = |n: UnitVector3| match face.sense {
         Sense::Forward => n,
         Sense::Reversed => -n,
@@ -621,14 +652,10 @@ fn c_frame(s: &Surface) -> &crate::geom::Frame {
 }
 
 /// The bound on face `f`'s area: the quadrature's distance from the
-/// mesh's area, the normal turn's allowance on a curved face, and strips a
-/// chord wide (twice, for safety) along its curved edges.
-fn area_bound(m: &Meshed<'_>, f: FaceId, q: f64, mesh: f64) -> f64 {
-    let turn = if m.planar(f) {
-        0.0
-    } else {
-        mesh * (1.0 / math::cos(ANGLE) - 1.0)
-    };
+/// mesh's area, each triangle's certified turn's allowance on a curved
+/// face (`turn`, [`Meshed::turn_allowance`]), and strips a chord wide
+/// (twice, for safety) along its curved edges.
+fn area_bound(m: &Meshed<'_>, f: FaceId, q: f64, mesh: f64, turn: f64) -> f64 {
     (q - mesh).abs() + turn + 2.0 * m.slack() * m.curved_boundary(f)
 }
 
@@ -640,17 +667,18 @@ pub(crate) fn sheet_area(body: &Body, opts: &MassOptions) -> Result<Value, Error
     let meter = Meter::free();
     let m = Meshed::new(body, opts.chord, &meter)?;
     let pairs: Vec<(&FaceMesh, &FaceMesh)> = m.coarse.faces.iter().zip(&m.mesh.faces).collect();
-    let per_face: Vec<(FaceId, f64, f64)> = meter.par_map(&pairs, |meter, (c, f)| {
+    let per_face: Vec<(FaceId, f64, f64, f64)> = meter.par_map(&pairs, |meter, (c, f)| {
         (
             f.face,
             m.converged(c, opts.tolerance, meter).area,
             m.mesh_face(f).area,
+            m.turn_allowance(f),
         )
     });
     let (mut value, mut bound) = (0.0, 0.0);
-    for &(f, q, mesh) in &per_face {
+    for &(f, q, mesh, turn) in &per_face {
         value += q;
-        bound += area_bound(&m, f, q, mesh);
+        bound += area_bound(&m, f, q, mesh, turn);
     }
     Ok(Value::Bounded { value, bound })
 }
@@ -683,22 +711,23 @@ fn mass_in(
     let m = Meshed::new(body, opts.chord, meter)?;
     // Both meshes hold every face (neither has faults), in face order.
     let pairs: Vec<(&FaceMesh, &FaceMesh)> = m.coarse.faces.iter().zip(&m.mesh.faces).collect();
-    let per_face: Vec<(FaceId, Moments, Moments)> = meter.par_map(&pairs, |meter, (c, f)| {
+    let per_face: Vec<(FaceId, Moments, Moments, f64)> = meter.par_map(&pairs, |meter, (c, f)| {
         (
             f.face,
             m.converged(c, opts.tolerance, meter),
             m.mesh_face(f),
+            m.turn_allowance(f),
         )
     });
     let (mut q, mut mesh) = (Moments::default(), Moments::default());
     let (mut curved_area, mut area_bound_sum) = (0.0, 0.0);
-    for (f, qf, mf) in &per_face {
+    for (f, qf, mf, turn) in &per_face {
         q.add(qf, 1.0);
         mesh.add(mf, 1.0);
         if !m.planar(*f) {
             curved_area += mf.area;
         }
-        area_bound_sum += area_bound(&m, *f, qf.area, mf.area);
+        area_bound_sum += area_bound(&m, *f, qf.area, mf.area, *turn);
     }
     let slab = 2.0 * m.slack() * curved_area;
     let r = m.reach;
@@ -870,6 +899,40 @@ mod tests {
         let (k, _) = primitive::cone(OpKey(4), 0.3, 0.6, &Rigid::IDENTITY).unwrap();
         let m = mass(&k, 1.0, &MassOptions::default()).unwrap();
         near(m.volume, PI * 0.09 * 0.6 / 3.0, 1e-9);
+    }
+
+    /// #308: a torus whose fine mesh is set by its turn (a chord of a
+    /// ten-thousandth of a metre against a 0.1 tube): the bound mesh at
+    /// `ANGLE` with each triangle's certified turn has far fewer triangles
+    /// than one at 0.05 rad, and its bounds still hold the closed forms.
+    #[test]
+    fn the_bound_mesh_takes_each_triangles_turn() {
+        let (big, small) = (0.4, 0.1);
+        let (b, _) = primitive::torus(OpKey(5), big, small, &Rigid::IDENTITY).unwrap();
+        let opts = MassOptions {
+            chord: Some(1e-4),
+            ..Default::default()
+        };
+        let m = mass(&b, 1.0, &opts).unwrap();
+        near(m.volume, 2.0 * PI * PI * big * small * small, 1e-9);
+        near(m.area, 4.0 * PI * PI * big * small, 1e-9);
+        let meshed = Meshed::new(&b, opts.chord, &Meter::free()).unwrap();
+        let old = crate::mesh::tessellate(&b, &MeshParams::new(1e-4, 0.05)).unwrap();
+        assert!(
+            2 * meshed.mesh.triangles.len() <= old.triangles.len(),
+            "{} against {}",
+            meshed.mesh.triangles.len(),
+            old.triangles.len()
+        );
+        // Each curved face's allowance is its triangles' own.
+        for fm in &meshed.mesh.faces {
+            let turn = meshed.turn_allowance(fm);
+            let area = meshed.mesh_face(fm).area;
+            assert!(
+                turn >= 0.0 && turn.is_finite() && turn < area,
+                "{turn} of {area}"
+            );
+        }
     }
 
     #[test]
