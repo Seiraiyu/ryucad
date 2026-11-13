@@ -5397,9 +5397,34 @@ fn an_update_that_breaks_a_mate_says_so_before_it_writes() {
             .any(|f| f.starts_with("frame/m would fail")),
         "{u:?}"
     );
+    // Cancel where it is drawn, at rest and in view (#773): the dry run's
+    // answer reads the dependencies again (`load_deps`), and those answers
+    // lay the tab out again; this group is the tallest the tab draws, its
+    // buttons at the bottom tabs' foot. A click lands where the button was
+    // drawn the frame before, so on a fast adapter it missed.
+    frames(&mut h, |a| a.opened().ws.idle());
+    h.get_by_label("Cancel").scroll_to_me();
+    let at = |h: &Harness<'static, App>| h.get_by_label("Cancel").rect();
+    let mut row = at(&h);
+    for _ in 0..30 {
+        h.step();
+        let now = at(&h);
+        if now == row {
+            break;
+        }
+        row = now;
+    }
+    assert!(
+        h.ctx.content_rect().contains_rect(row),
+        "Cancel is out of the window at {row:?}"
+    );
     h.get_by_label("Cancel").click();
+    // Cancel drops the dry run in the frame it is clicked: no request.
     h.run_steps(2);
-    assert!(h.state().opened().ws.deps.update.is_none());
+    assert!(
+        h.state().opened().ws.deps.update.is_none(),
+        "Cancel at {row:?} didn't drop the dry run"
+    );
 }
 
 #[test]
