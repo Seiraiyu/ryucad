@@ -1,6 +1,6 @@
 use super::*;
 use crate::check::check_topology;
-use crate::geom::{Rigid, Vector3};
+use crate::geom::{Curve, Curve2, Rigid, Surface, Vector3};
 use crate::heal::seamed;
 use crate::heal::tests::plain;
 use crate::heal::tests::{holed_face, plate, reverse_loop, turn_face};
@@ -380,6 +380,181 @@ fn a_gap_between_samples_is_covered() {
     assert!(
         s.edges[0].tolerance >= sagitta,
         "{} < {sagitta}",
+        s.edges[0].tolerance
+    );
+}
+
+/// The largest distance, at 2,049 even samples, from edge `g` of `s` to
+/// face `k`'s surface: through `pcurve` where given (as the mesher samples
+/// an edge on a face with one), by projection otherwise.
+fn sampled_gap(s: &Shape, g: usize, k: usize, pcurve: Option<&pcurves::Found>) -> f64 {
+    let e = &s.edges[g];
+    let curve = &s.curves[e.curve];
+    let surface = &s.surfaces[s.faces[k].surface];
+    let [t0, t1] = e.interval;
+    (0..=2048)
+        .map(|i| {
+            let t = t0 + (t1 - t0) * i as f64 / 2048.0;
+            let p = curve.point(t);
+            match pcurve {
+                Some((c2, map, _)) => {
+                    let uv = c2.point(map[0] + map[1] * t);
+                    surface.point(uv.x, uv.y).distance(p)
+                }
+                None => surface.distance(p),
+            }
+        })
+        .fold(0.0, f64::max)
+}
+
+/// One planar or spline face bounded by edge 0 alone (closed or not: the
+/// tolerance passes don't look), its use given pcurve `pcurve`.
+fn one_edge_face(surface: Surface, curve: Curve, pcurve: Option<Curve2>) -> Shape {
+    use crate::topo::Sense;
+    let [t0, t1] = [0.0, 1.0];
+    let mut s = Shape {
+        surfaces: vec![surface],
+        curves: vec![curve],
+        curves2: pcurve.into_iter().collect(),
+        ..Shape::default()
+    };
+    for t in [t0, t1] {
+        s.vertices.push(super::super::Vertex {
+            point: s.curves[0].point(t),
+            tolerance: 0.0,
+            seam: false,
+        });
+    }
+    s.edges.push(super::super::Edge {
+        curve: 0,
+        interval: [t0, t1],
+        start: 0,
+        end: 1,
+        tolerance: 0.0,
+    });
+    let pcurve = (!s.curves2.is_empty()).then_some(0);
+    s.faces.push(super::super::Face {
+        surface: 0,
+        sense: Sense::Forward,
+        loops: vec![Loop::Edges(vec![Use {
+            edge: 0,
+            sense: Sense::Forward,
+            pcurve,
+        }])],
+        tolerance: 0.0,
+    });
+    s
+}
+
+/// #795: a spline edge on its plane at every knot but one, in a span
+/// shorter than the samples' spacing, lifted a micrometre there (a file's
+/// spline edge straying from its spline face within its last, sixtieth,
+/// span). The 33 even samples all lie on the plane; the tolerance is to
+/// cover the stray, as the mesher's samples there find it.
+#[test]
+fn a_stray_inside_a_short_span_is_covered() {
+    use crate::geom::{Curve, Frame, KnotVector, NurbsCurve, Plane, Point3, Surface};
+    let (l, h) = (0.01, 1e-6);
+    let mut knots: Vec<f64> = (0..32).map(|i| i as f64 / 32.0).collect();
+    knots.extend([63.0 / 64.0, 1.0]);
+    let points: Vec<Point3> = knots
+        .iter()
+        .map(|&t| Point3::new(l * t, 0.0, if t == 63.0 / 64.0 { h } else { 0.0 }))
+        .collect();
+    let mut mults = vec![1; knots.len()];
+    mults[0] = 2;
+    *mults.last_mut().unwrap() = 2;
+    let kv = KnotVector::clamped(1, &knots, &mults).unwrap();
+    let curve = Curve::Nurbs(std::sync::Arc::new(
+        NurbsCurve::new(kv, points, None).unwrap(),
+    ));
+    let mut s = one_edge_face(Surface::Plane(Plane::new(Frame::WORLD)), curve, None);
+    let work = Work::unlimited();
+    crate::work::run(&work, |m| {
+        tolerate(&mut s, 1e-4, m);
+        Ok(())
+    })
+    .unwrap();
+    let gap = sampled_gap(&s, 0, 0, None);
+    assert!(gap >= h * 0.99, "{gap}");
+    assert!(
+        s.edges[0].tolerance >= gap,
+        "tolerance {} < gap {gap}",
+        s.edges[0].tolerance
+    );
+}
+
+/// #797: a file's pcurve on a spline face, through the edge's points on
+/// the surface at the 17 samples a pcurve is fitted at and 70 µm off them
+/// in the parameters halfway between, a micrometre in space. The edge
+/// lies on the surface, so its projected gap is nothing; the mesher
+/// samples it through the pcurve, which the tolerance is to cover.
+#[test]
+fn a_file_pcurve_straying_between_samples_is_covered() {
+    use crate::geom::{
+        Curve, Curve2, KnotVector, NurbsCurve, NurbsCurve2, NurbsSurface, Point2, Point3, Surface,
+    };
+    let (l, d) = (0.01, 0.002);
+    // A twisted bilinear patch, (l u, l v, d u v), and its diagonal, the
+    // parabola (l s, l s, d s²): on no iso-line, so no exact pcurve.
+    let lin = KnotVector::clamped(1, &[0.0, 1.0], &[2, 2]).unwrap();
+    let surface = Surface::Nurbs(std::sync::Arc::new(
+        NurbsSurface::new(
+            [lin.clone(), lin],
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(0.0, l, 0.0),
+                Point3::new(l, 0.0, 0.0),
+                Point3::new(l, l, d),
+            ],
+            None,
+        )
+        .unwrap(),
+    ));
+    let quad = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+    let curve = Curve::Nurbs(std::sync::Arc::new(
+        NurbsCurve::new(
+            quad,
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(l / 2.0, l / 2.0, 0.0),
+                Point3::new(l, l, d),
+            ],
+            None,
+        )
+        .unwrap(),
+    ));
+    let delta = 7e-5;
+    let knots: Vec<f64> = (0..=32).map(|i| i as f64 / 32.0).collect();
+    let uv: Vec<Point2> = knots
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| {
+            let off = if i % 2 == 1 { delta } else { 0.0 };
+            Point2::new(s + off, s - off)
+        })
+        .collect();
+    let mut mults = vec![1; knots.len()];
+    mults[0] = 2;
+    mults[32] = 2;
+    let kv = KnotVector::clamped(1, &knots, &mults).unwrap();
+    let c2 = Curve2::Nurbs2(std::sync::Arc::new(NurbsCurve2::new(kv, uv, None).unwrap()));
+    let mut s = one_edge_face(surface, curve, Some(c2));
+    let work = Work::unlimited();
+    let found = crate::work::run(&work, |m| {
+        tolerate(&mut s, 1e-4, m);
+        let found = find_pcurves(&s, m);
+        tolerate_pcurves(&mut s, &found, 1e-4, m);
+        Ok(found)
+    })
+    .unwrap();
+    let pcurve = found[0][0][0].as_ref().expect("the file's pcurve kept");
+    assert!(sampled_gap(&s, 0, 0, None) < 1e-9);
+    let gap = sampled_gap(&s, 0, 0, Some(pcurve));
+    assert!(gap > 5e-7, "{gap}");
+    assert!(
+        s.edges[0].tolerance >= gap,
+        "tolerance {} < gap {gap}",
         s.edges[0].tolerance
     );
 }
