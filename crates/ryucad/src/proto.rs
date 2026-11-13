@@ -2384,6 +2384,10 @@ pub enum Request {
         /// Draw the shown part's datums (default true).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         datums: Option<bool>,
+        /// Draw tapped holes' cosmetic threads, a ring at each end
+        /// (default true).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threads: Option<bool>,
         /// Render the project as this Git revision has it (the working
         /// files by default).
         #[serde(default, skip_serializing_if = "Option::is_none")]
