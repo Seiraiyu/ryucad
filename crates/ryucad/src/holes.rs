@@ -86,6 +86,9 @@ pub struct Gone {
 pub struct Holes {
     pub rows: Vec<Row>,
     pub gone: Vec<Gone>,
+    /// Each cosmetic thread (ryucad 28.B) whose faces are all still its
+    /// solid's, in list order.
+    pub threads: Vec<crate::thread::Thread>,
 }
 
 /// What a face's origin says about the hole it belongs to.
@@ -248,7 +251,37 @@ fn build(p: &Part, result: &PartResult, unit: crate::units::Unit) -> Result<Hole
         rows.extend(r);
         gone.extend(g);
     }
-    Ok(Holes { rows, gone })
+    // Cosmetic threads, as data beside the holes.
+    let mut threads = Vec::new();
+    for fid in p.order() {
+        let Some(Ok(crate::rebuild::Output::Thread(c))) = result.result(fid) else {
+            continue;
+        };
+        let alive = c.thread.faces.iter().all(|f| {
+            let mut it = f.splitn(3, '/');
+            let (_, solid, name) = (it.next(), it.next(), it.next());
+            let (Some(solid), Some(name)) = (solid, name) else {
+                return false;
+            };
+            solids
+                .tips()
+                .find(|(s, _)| s.as_str() == solid)
+                .and_then(|(s, tip)| result.result(tip)?.as_ref().ok()?.solid(s).cloned())
+                .is_some_and(|b| {
+                    b.body
+                        .faces()
+                        .any(|x| b.body.face(x).is_some_and(|x| x.name.to_string() == name))
+                })
+        });
+        if alive {
+            threads.push(c.thread.clone());
+        }
+    }
+    Ok(Holes {
+        rows,
+        gone,
+        threads,
+    })
 }
 
 /// What [`rows_at`] reads.
@@ -521,7 +554,12 @@ pub fn face_refs(session: &mut Session, text: &str) -> Result<Option<Vec<String>
 /// part's holes can't be listed.
 pub fn face_note(session: &mut Session, part: &Id, solid: &str, name: &str) -> Option<Value> {
     let holes = list(session, part, None).ok()?;
-    let (row, segment) = holes.of_face(solid, name)?;
+    let Some((row, segment)) = holes.of_face(solid, name) else {
+        // A cosmetic thread's face.
+        let face = format!("{part}/{solid}/{name}");
+        let t = holes.threads.iter().find(|t| t.faces.contains(&face))?;
+        return Some(json!({"thread": t.to_json()}));
+    };
     let mut v = json!({"hole": {"ref": row.reference, "segment": segment, "spec": row.spec}});
     if segment == "wall"
         && let Some(t) = crate::thread::of_row(row)
@@ -609,10 +647,22 @@ pub fn request(
         .filter(|g| reference.is_none_or(|r| g.reference == r))
         .map(Gone::to_json)
         .collect();
-    Ok(json!({
+    let mut v = json!({
         "holes": rows.iter().map(|r| r.to_json(unit)).collect::<Vec<_>>(),
         "gone": gone,
-    }))
+    });
+    // Cosmetic threads only when there are some: every other answer keeps
+    // its bytes.
+    let threads: Vec<Value> = holes
+        .threads
+        .iter()
+        .filter(|t| solid.is_none_or(|s| t.faces.iter().any(|f| f.split('/').nth(1) == Some(s))))
+        .map(crate::thread::Thread::to_json)
+        .collect();
+    if !threads.is_empty() && reference.is_none() {
+        v["threads"] = json!(threads);
+    }
+    Ok(v)
 }
 
 fn row_key(r: &Row) -> Key {
@@ -1111,5 +1161,32 @@ mod tests {
         // M3's 2.5 mm drill: the chamfer ends 0.5 mm down at 90 deg.
         assert!((t.mouth.z - 0.0045).abs() < 1e-12, "{:?}", t.mouth);
         assert_eq!(holes.rows[0].kind(), "tapped");
+    }
+
+    #[test]
+    fn cosmetic_threads_are_listed_with_the_holes() {
+        let (_dir, mut s) = drilled();
+        let (side, _) = crate::thread::tests::shaft(&mut s);
+        let name = side["name"].as_str().unwrap().to_owned();
+        let side = format!("p/shaft/{name}");
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cosmetic_thread", "id": "t",
+                   "faces": [side], "thread": "iso_metric:M10"}),
+        )
+        .unwrap();
+        let v = request(&mut s, "p", Some("shaft"), false, false, None, None).unwrap();
+        assert_eq!(v["holes"], json!([]));
+        assert_eq!(v["threads"][0]["feature"], "p/t");
+        assert_eq!(v["threads"][0]["internal"], false);
+        let holes = list(&mut s, &id("p"), None).unwrap();
+        assert_eq!(crate::thread::of(&holes).len(), 1);
+        // inspect of the shaft's face adds the thread.
+        let note = face_note(&mut s, &id("p"), "shaft", &name).unwrap();
+        assert_eq!(note["thread"]["designation"], "M10x1.5-6g");
+        // A part with no cosmetic thread answers as before: no `threads`.
+        let v = request(&mut s, "p", Some("b"), false, false, None, None).unwrap();
+        assert!(v.get("threads").is_none(), "{v}");
     }
 }

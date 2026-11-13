@@ -72,9 +72,15 @@ impl Thread {
     }
 }
 
-/// Every tapped hole's thread, in the holes' order.
+/// Every tapped hole's thread, in the holes' order, then every cosmetic
+/// thread's.
 pub fn of(holes: &Holes) -> Vec<Thread> {
-    holes.rows.iter().filter_map(of_row).collect()
+    holes
+        .rows
+        .iter()
+        .filter_map(of_row)
+        .chain(holes.threads.iter().cloned())
+        .collect()
 }
 
 /// A row's thread, if it is tapped.

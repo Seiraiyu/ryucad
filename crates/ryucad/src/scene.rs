@@ -968,7 +968,7 @@ pub(crate) fn render_scene(
                     continue;
                 }
                 for centre in [t.mouth, t.end] {
-                    g.add_ring(centre, t.axis, t.major / 2.0, None);
+                    g.add_ring(centre, t.axis, t.ring_diameter() / 2.0, None);
                 }
             }
         }
