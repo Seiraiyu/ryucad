@@ -10,14 +10,14 @@
 //! Nothing here reads a side unless the merged project holds an error or
 //! an ERC finding: a clean merge costs one judgement of the merged project.
 
-use crate::conn;
+use crate::conn::{self, Node};
 use crate::design::{Part, part_path};
 use crate::erc::Finding;
 use crate::error::{Code, Error, Result};
 use crate::fault::{Fault, Severity};
 use crate::id::Id;
 use crate::project::Project;
-use crate::validate::{Sides, item, json_of};
+use crate::validate::{Sides, concerns, item, json_of};
 use ryu_git::MergeState;
 use ryu_git::value::Kind;
 use ryu_session::fresh::Files;
@@ -554,6 +554,208 @@ fn apply(files: &mut Files, w: crate::write::Writes) {
     }
 }
 
+/// The node a user (`<block>/<object>/<pin>`, as `write::users` names
+/// them) has in `q`: a component's pin or an instance's port.
+fn node_at(q: &Project, user: &str) -> Option<Node> {
+    let mut it = user.splitn(3, '/');
+    let (b, x, pin) = (it.next()?, it.next()?, it.next()?);
+    let b = q.conn.blocks.get(&Id::parse(b, "block").ok()?)?;
+    let x = Id::parse(x, "object").ok()?;
+    if let Some(c) = b.components.get(&x) {
+        return c.item.as_ref().ok()?.pins.get(pin).cloned();
+    }
+    let port = Id::parse(pin, "port").ok()?;
+    b.instances.get(&x)?.item.as_ref().ok()?.ports.get(&port).cloned()
+}
+
+/// Whether node `n` of block `b` is there in `p`.
+fn has_node(p: &Project, b: &Id, n: &Node) -> bool {
+    let Some(block) = p.conn.blocks.get(b) else {
+        return false;
+    };
+    match n {
+        Node::Net(id) => block.nets.contains_key(id),
+        Node::Rail(id) => p.conn.rails.contains_key(id),
+        Node::Port(id) => block
+            .block
+            .item
+            .as_ref()
+            .is_ok_and(|x| x.ports.contains_key(id)),
+        Node::Nc => true,
+    }
+}
+
+/// The `delete_edit` items: a pin, port, bus or pair naming a net the
+/// base had and one side removed (`net_not_found` in the merge, on
+/// neither side), and a component or library component naming a local
+/// library object the base had and the merge lacks (`not_found`).
+fn deleted(
+    p: &Project,
+    new: &[&Fault],
+    three: &Three,
+    full: &Files,
+    sides: &Sides,
+    covered: &mut BTreeSet<String>,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for f in new {
+        let path = detail(f, "path");
+        let pointer = detail(f, "pointer");
+        let x = match f.error.code {
+            Code::NetNotFound => net_gone(p, three, full, &path, &pointer),
+            Code::NotFound => library_gone(full, sides, &path, &pointer),
+            _ => None,
+        };
+        if let Some(mut x) = x {
+            covered.insert(key(f));
+            x["pointer"] = json!(pointer);
+            out.push(x);
+        }
+    }
+    out
+}
+
+fn net_gone(p: &Project, three: &Three, full: &Files, path: &str, pointer: &str) -> Option<Value> {
+    let b = Id::parse(path.strip_prefix("blocks/")?.split('/').next()?, "block").ok()?;
+    let v = json_of(full.get(path)?)?;
+    let n = Id::parse(
+        v.pointer(pointer)?.as_str().filter(|s| *s != conn::NC)?,
+        "net",
+    )
+    .ok()?;
+    let base = three.base?;
+    let had = |q: &Project| q.conn.blocks.get(&b).is_some_and(|x| x.nets.contains_key(&n));
+    if !had(base) {
+        return None;
+    }
+    let (removed_by, remover, edited_by) = if !had(three.ours) {
+        ("ours", three.ours, "theirs")
+    } else if !had(three.theirs) {
+        ("theirs", three.theirs, "ours")
+    } else {
+        return None;
+    };
+    // Where the remover put the base's pins and ports on the net.
+    let now: BTreeSet<Node> = crate::write::users(base, &Node::Net(n.clone()), Some(&b))
+        .iter()
+        .filter_map(|u| node_at(remover, u))
+        .collect();
+    let net_only = pointer.starts_with("/buses/") || pointer == "/pair/with";
+    let follow = match now.into_iter().collect::<Vec<_>>().as_slice() {
+        [m] if *m != Node::Net(n.clone())
+            && has_node(p, &b, m)
+            && (!net_only || matches!(m, Node::Net(_))) =>
+        {
+            Some(m.clone())
+        }
+        _ => None,
+    };
+    let mut repairs = Vec::new();
+    if let Some(m) = follow {
+        repairs.push(json!({"id": "follow", "node": m, "summary": format!(
+            "connect it where {removed_by} moved net {b}/{n}'s pins: {}", crate::write::node_text(&b, &m)
+        )}));
+    }
+    repairs.push(json!({"id": "restore", "files": [part_path(&b, Part::Net, &n)],
+        "summary": format!("bring net {b}/{n} back from the base")}));
+    repairs.push(json!({"id": "disconnect", "summary": "leave it unconnected"}));
+    let mut x = item(
+        format!("{path}#{pointer}"),
+        "delete_edit",
+        vec![path.to_owned()],
+        concerns(path, pointer),
+        "both",
+        format!(
+            "{edited_by} connected {path} at {pointer} to net {b}/{n}, which {removed_by} removed"
+        ),
+    );
+    x["net"] = json!(format!("{b}/{n}"));
+    x["removed_by"] = json!(removed_by);
+    x["edited_by"] = json!(edited_by);
+    x["repairs"] = json!(repairs);
+    Some(x)
+}
+
+/// The local library object a reference at `pointer` of `path` names:
+/// `library/<folder>/<id>.json`; `None` for another library's.
+fn library_target(full: &Files, path: &str, pointer: &str) -> Option<String> {
+    let folder = match pointer {
+        "/of" => "components",
+        "/symbol" => "symbols",
+        "/footprint" => "footprints",
+        p if p.starts_with("/footprints/") && p.ends_with("/footprint") => "footprints",
+        _ => return None,
+    };
+    let v = json_of(full.get(path)?)?;
+    let r = v.pointer(pointer)?;
+    if r.get("library").is_some_and(|l| !l.is_null()) {
+        return None;
+    }
+    Some(format!("library/{folder}/{}.json", r.get("id")?.as_str()?))
+}
+
+fn library_gone(full: &Files, sides: &Sides, path: &str, pointer: &str) -> Option<Value> {
+    let target = library_target(full, path, pointer)?;
+    if !sides.base.contains_key(&target) || full.contains_key(&target) {
+        return None;
+    }
+    let removed_by = if !sides.ours.contains_key(&target) {
+        "ours"
+    } else {
+        "theirs"
+    };
+    let edited_by = if removed_by == "ours" {
+        "theirs"
+    } else {
+        "ours"
+    };
+    let mut x = item(
+        format!("{path}#{pointer}"),
+        "delete_edit",
+        vec![path.to_owned(), target.clone()],
+        concerns(path, pointer),
+        "both",
+        format!("{edited_by} named {target} in {path}, which {removed_by} deleted"),
+    );
+    x["removed_by"] = json!(removed_by);
+    x["edited_by"] = json!(edited_by);
+    x["repairs"] = json!([{"id": "restore", "files": [target],
+        "summary": "bring it back from the base"}]);
+    Some(x)
+}
+
+/// Puts `node` (`None`: nothing) where `delete_edit` item `x` names the
+/// removed net: a pin or a port takes it or is left unconnected, a bus's
+/// member is replaced or dropped, a pair's other half replaced or the
+/// pair dropped.
+fn place(files: &mut Files, x: &Value, node: Option<Value>) -> Result<()> {
+    let path = x["files"][0].as_str().unwrap_or_default().to_owned();
+    let pointer = x["pointer"].as_str().unwrap_or_default().to_owned();
+    if pointer.starts_with("/buses/") {
+        let (list, i) = pointer.rsplit_once('/').unwrap_or_default();
+        let i: usize = i.parse().unwrap_or(usize::MAX);
+        let v = files.get(&path).and_then(|b| json_of(b)).unwrap_or(Value::Null);
+        let mut nets = v
+            .pointer(list)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if i < nets.len() {
+            match node {
+                Some(n) if !nets.contains(&n) => nets[i] = n,
+                _ => {
+                    nets.remove(i);
+                }
+            }
+        }
+        edit(files, &path, list, Some(Value::Array(nets)))
+    } else if pointer == "/pair/with" && node.is_none() {
+        edit(files, &path, "/pair", None)
+    } else {
+        edit(files, &path, &pointer, node)
+    }
+}
+
 /// The semantic items of the merge `state` for the merged project `p`
 /// over the session's files `full`.
 pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -> Result<Found> {
@@ -585,8 +787,11 @@ pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -
         .clashes
         .extend(refdes(root, full, p, &merged, &new_erc, &three)?);
     found.clashes.extend(names(p, &new, &three, &mut covered));
+    found
+        .clashes
+        .extend(deleted(p, &new, &three, full, &files, &mut covered));
     //CLASH-CALLS
-    let _ = (&files, &covered);
+    let _ = &covered;
     found.already = merged
         .faults
         .iter()
@@ -634,7 +839,6 @@ pub(crate) fn repair(
             )
             .with("repair", id)
         })?;
-    let _ = sides;
     match (x["kind"].as_str().unwrap_or_default(), id) {
         ("refdes_clash", "renumber" | "annotate") => {
             for c in planned["changes"].as_array().into_iter().flatten() {
@@ -668,6 +872,18 @@ pub(crate) fn repair(
                     n["pointer"].as_str().unwrap_or_default(),
                     Some(n["to"].clone()),
                 )?;
+            }
+        }
+        ("delete_edit", "follow") => place(files, x, Some(planned["node"].clone()))?,
+        ("delete_edit", "disconnect") => place(files, x, None)?,
+        ("delete_edit", "restore") => {
+            for f in planned["files"].as_array().into_iter().flatten() {
+                let f = f.as_str().unwrap_or_default();
+                let bytes = sides.base.get(f).cloned().ok_or_else(|| {
+                    Error::new(Code::RepairConflict, format!("the base has no {f}"))
+                        .with("path", f)
+                })?;
+                files.insert(f.to_owned(), bytes);
             }
         }
         //REPAIR-ARMS
@@ -909,5 +1125,72 @@ pub(crate) mod tests {
         crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
         let t: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/nets/aux_t.json")).unwrap()).unwrap();
         assert_eq!(t["name"], "AUX_3");
+    }
+
+    /// Ours joins SDA into a new net SDB by hand (R1's pin and both
+    /// channels' ports moved, SDA deleted); theirs hangs R3 on SDA.
+    pub(crate) fn sda_joined_away(r: &Path, channels_to: Value) {
+        let mut top_r1 = part(json!({"refdes": "R1", "pins": {"1": "sdb", "2": {"rail": "v3v3"}}})).unwrap();
+        top_r1["of"] = json!({"id": "r_100k"});
+        let inst = |ch: &str| Some(json!({"kind": "ryueda.instance", "format": 2, "of": "s",
+            "ports": {"sda": channels_to}, "refdes": {"rule": "suffix", "value": ch}}));
+        merging(
+            r,
+            &[
+                ("blocks/top/nets/sda.json", None),
+                ("blocks/top/nets/sdb.json", Some(json!({"kind": "ryueda.net", "format": 1, "name": "SDB"}))),
+                ("blocks/top/components/r1.json", Some(top_r1)),
+                ("blocks/top/instances/ch_a.json", inst("_A")),
+                ("blocks/top/instances/ch_b.json", inst("_B")),
+            ],
+            &[("blocks/top/components/r3.json", part(json!({"refdes": "R3", "pins": {"1": "sda", "2": {"rail": "gnd"}}})))],
+        );
+    }
+
+    #[test]
+    fn a_pin_on_a_net_the_other_side_joined_away_follows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        sda_joined_away(r, json!("sdb"));
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        let c = of_kind(&v, "delete_edit");
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "blocks/top/components/r3.json#/pins/1");
+        assert_eq!((c[0]["removed_by"].clone(), c[0]["edited_by"].clone()), (json!("ours"), json!("theirs")));
+        let ids: Vec<&str> = c[0]["repairs"].as_array().unwrap().iter().filter_map(|x| x["id"].as_str()).collect();
+        assert_eq!(ids, ["follow", "restore", "disconnect"]);
+        assert_eq!(c[0]["repairs"][0]["node"], "sdb");
+        let fix = crate::proto::Resolution {
+            conflict: "blocks/top/components/r3.json#/pins/1".to_owned(),
+            choice: "repair".to_owned(),
+            value: None,
+            repair: Some("follow".to_owned()),
+        };
+        let out = crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
+        assert_eq!(out["status"]["clean"], true, "{out}");
+        let r3: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/components/r3.json")).unwrap()).unwrap();
+        assert_eq!(r3["pins"]["1"], "sdb");
+    }
+
+    #[test]
+    fn with_no_single_place_to_follow_restore_comes_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        // The channels' ports went to GND, R1's pin to SDB: two places.
+        sda_joined_away(r, json!({"rail": "gnd"}));
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        let c = of_kind(&v, "delete_edit");
+        assert_eq!(c[0]["repairs"][0]["id"], "restore", "{v}");
+        let fix = crate::proto::Resolution {
+            conflict: "blocks/top/components/r3.json#/pins/1".to_owned(),
+            choice: "repair".to_owned(),
+            value: None,
+            repair: Some("disconnect".to_owned()),
+        };
+        crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
+        let r3: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/components/r3.json")).unwrap()).unwrap();
+        assert!(r3["pins"].get("1").is_none(), "{r3}");
     }
 }
