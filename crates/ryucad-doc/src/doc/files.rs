@@ -3028,8 +3028,50 @@ mod tests {
     }
 
     #[test]
+    fn hole_geometry_is_format_24_and_old_holes_keep_theirs() {
+        use crate::units::Unit;
+        let env = crate::expr::Env::empty();
+        let base = json!({"kind": "ryucad.feature", "type": "hole", "sketch": "s",
+                          "form": "simple", "diameter": "5 mm", "depth": "through_all",
+                          "targets": ["b"]});
+        for (k, x) in [
+            ("depth", json!("through_next")),
+            ("near", json!({"diameter": "7 mm"})),
+            (
+                "far",
+                json!({"countersink": {"diameter": "8 mm", "angle": "90 deg"}}),
+            ),
+        ] {
+            let mut v = base.clone();
+            v[k] = x;
+            assert_eq!(
+                feature_format(&v),
+                super::super::hole::GEOMETRY_FORMAT,
+                "{k}"
+            );
+            v["format"] = json!(24);
+            let f = Feature::from_json(&v, Unit::Mm, &env).unwrap();
+            assert_eq!(f.format(), 24, "{k}");
+        }
+        let mut v = base.clone();
+        v["form"] = json!("spotface");
+        v["spotface"] = json!({"diameter": "12 mm"});
+        assert_eq!(feature_format(&v), 24);
+        // A plain hole and a tapped one keep 3 and 23.
+        assert_eq!(feature_format(&base), 3);
+        let mut t = base.clone();
+        t.as_object_mut().unwrap().remove("diameter");
+        t["thread"] = json!({"standard": "iso_metric", "size": "M6"});
+        assert_eq!(feature_format(&t), 23);
+        // Geometry wins over intent: highest first.
+        t["near"] = json!({"diameter": "7 mm"});
+        assert_eq!(feature_format(&t), 24);
+    }
+
+    #[test]
     fn a_hole_with_intent_is_format_23_and_one_without_keeps_its_own() {
         const { assert!(FEATURE_FORMAT >= super::super::hole::INTENT_FORMAT) };
+        const { assert!(FEATURE_FORMAT >= super::super::hole::GEOMETRY_FORMAT) };
         let plain = json!({"format": 3, "kind": FEATURE_KIND, "type": "hole", "sketch": "s",
                            "form": "simple", "diameter": "5 mm", "depth": "through_all",
                            "targets": ["b"]});
