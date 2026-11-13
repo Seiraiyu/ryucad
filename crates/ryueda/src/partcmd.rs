@@ -620,18 +620,22 @@ fn net_refs(b: &BlockFiles, id: &Id) -> Vec<String> {
     out
 }
 
-/// `net.join`: every pin and port on `net` moves to `into` (a net of the
-/// same block, or `rail:<name>`), its buses take `into` (or drop it, for a
-/// rail), and `net` goes, in one change.
-pub fn net_join(
-    session: &mut Session,
-    target: &str,
-    into: &str,
-    expected: Option<&str>,
-) -> Result<Value> {
-    let p = session.project();
+/// What `net.join` writes, worked out against `p` alone: every pin and
+/// port on `target` moved to `into` (a net of the same block, or
+/// `rail:<name>`), its buses taking `into` (or dropping it, for a rail),
+/// and `target` deleted. `merge resolve`'s `join` repair writes the same.
+pub struct Joined {
+    pub block: Id,
+    pub net: Id,
+    pub to: Node,
+    pub writes: Writes,
+    /// The pins and ports moved, as `<block>/<object>/<pin>`.
+    pub moved: Vec<String>,
+}
+
+/// [`Joined`] for `target` joined into `into`.
+pub fn join_writes(p: &Project, target: &str, into: &str) -> Result<Joined> {
     let (b, id, _) = net(p, target)?;
-    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
     let bid = b.id.clone();
     let to = write::node(p, b, into)?;
     if to == Node::Net(id.clone()) || to == Node::Nc {
@@ -722,12 +726,33 @@ pub fn net_join(
         w.put(crate::design::block_path(&bid), &block, conn::BLOCK_KIND);
     }
     w.delete(part_path(&bid, Part::Net, &id));
-    commit(session, &format!("net {bid}/{id}"), w)?;
-    let b = session.project().conn.block(&bid)?;
+    Ok(Joined {
+        block: bid,
+        net: id,
+        to,
+        writes: w,
+        moved,
+    })
+}
+
+/// `net.join`: [`join_writes`], guarded by the block's revision, as one
+/// change.
+pub fn net_join(
+    session: &mut Session,
+    target: &str,
+    into: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let (b, _, _) = net(p, target)?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    let j = join_writes(p, target, into)?;
+    commit(session, &format!("net {}/{}", j.block, j.net), j.writes)?;
+    let b = session.project().conn.block(&j.block)?;
     Ok(json!({
-        "joined": format!("{bid}/{id}"),
-        "into": node_text(&bid, &to),
-        "moved": moved,
+        "joined": format!("{}/{}", j.block, j.net),
+        "into": node_text(&j.block, &j.to),
+        "moved": j.moved,
         "revision": b.revision,
     }))
 }
@@ -1102,4 +1127,33 @@ pub fn tag(
         "tags": tags,
         "revision": session.project().conn.block(&bid)?.revision,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `net.join`'s writes, worked out against a project alone: the test
+    /// design's net `sda` joined into rail GND moves R1's pin 1 and both
+    /// channels' `sda` port, and deletes the net's file.
+    #[test]
+    fn a_joins_writes_need_no_session() {
+        let (_dir, p) = crate::netlist::tests::project(&[]);
+        let j = join_writes(&p, "top/sda", "rail:GND").unwrap();
+        assert_eq!((j.block.as_str(), j.net.as_str()), ("top", "sda"));
+        assert_eq!(j.moved, ["top/r1/1", "top/ch_a/sda", "top/ch_b/sda"]);
+        assert_eq!(
+            j.writes.paths(),
+            [
+                "blocks/top/components/r1.json",
+                "blocks/top/instances/ch_a.json",
+                "blocks/top/instances/ch_b.json",
+                "blocks/top/nets/sda.json",
+            ]
+        );
+        assert!(j.writes.0.last().unwrap().1.is_none(), "the net deleted");
+        // A net into itself is refused as before.
+        let e = join_writes(&p, "top/sda", "sda").err().unwrap();
+        assert_eq!(e.code, Code::InvalidParam);
+    }
 }
