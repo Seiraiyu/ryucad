@@ -38,7 +38,11 @@ mod winding;
 
 pub(crate) use beside::CELLS as BESIDE_CELLS;
 pub use beside::beside;
-pub(crate) use beside::{face_beside, face_off_ball, faces_apart, section_plane};
+pub(crate) use beside::{
+    CONE_PARTS, face_beside, face_off_ball, faces_apart, normal_cones, section_plane, sine_apart,
+};
+#[cfg(test)]
+pub(crate) use beside::{Tangency, tangency};
 pub(crate) use coincide::{coincident, common, covering};
 pub(crate) use contour::fit_contour;
 pub(crate) use cs::curve_surface_in;
@@ -47,7 +51,8 @@ pub(crate) use face::coarse_box;
 pub(crate) use face::face_face_in;
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{
-    face_face_over, face_face_within, face_rect, max_tolerance, region_outside, shifted, shifts,
+    face_face_over, face_face_within, face_rect, max_tolerance, region_outside,
+    region_outside_boxes, shifted, shifts,
 };
 pub(crate) use fit::{
     fit_along, fit_on, fit_on_feet, fit_pcurve, fit_pcurve_by, fit_pcurve_tolerant,
