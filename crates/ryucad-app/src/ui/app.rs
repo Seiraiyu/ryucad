@@ -459,6 +459,10 @@ impl Opened {
         if self.ws.camera_due() {
             ctx.request_repaint_after(crate::core::workspace::CAMERA_EVERY);
         }
+        // Play draws a frame each refresh.
+        if self.ws.motions.playing() {
+            ctx.request_repaint();
+        }
         // An error leaves the status line on time, mouse or not.
         if let Some(d) = self.ws.error_due(Instant::now()) {
             ctx.request_repaint_after(d);
