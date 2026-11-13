@@ -508,15 +508,22 @@ impl HoleForm {
 pub struct PatternForm {
     /// Whether it is an instance pattern: its seeds are `instances`.
     pub instances: bool,
-    /// `linear`, `circular` or `mirror`.
+    /// `linear`, `circular` or `mirror`; an instance pattern's `feature`
+    /// or `points` too.
     pub form: String,
     /// Each size by its key in the file, with its field.
     pub sizes: Vec<(String, Field)>,
     pub reverse: Vec<(String, Flag)>,
     pub skip: Field,
-    /// Its direction, second direction, axis or plane, by key.
+    /// Its direction, second direction, axis or plane, by key; a
+    /// following pattern's places (`on`).
     pub refs: Vec<(String, String)>,
     pub seeds: Picks,
+    /// A following pattern's seed point (empty for its first).
+    pub from: Field,
+    /// A points pattern's points, comma-separated (empty for every free
+    /// point).
+    pub points: Field,
 }
 
 impl PatternForm {
@@ -546,7 +553,7 @@ impl PatternForm {
             x => x.to_string(),
         };
         // A reference as text; a connector as the text requests give it.
-        let refs = ["direction", "direction2", "axis", "plane"]
+        let refs = ["direction", "direction2", "axis", "plane", "on"]
             .into_iter()
             .filter_map(|k| {
                 let t = v[k].as_str().or_else(|| v[k]["text"].as_str())?;
@@ -560,6 +567,16 @@ impl PatternForm {
             .flatten()
             .map(text)
             .collect();
+        let ids = |x: &Value| {
+            x.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let from = Field::new("from", text(&v["from"]));
+        let points = Field::new("points", ids(&v["points"]));
         PatternForm {
             instances,
             form: text(&v["form"]),
@@ -568,11 +585,16 @@ impl PatternForm {
             skip: Field::new("skip", skip),
             refs,
             seeds: Picks::new("seeds", seeds),
+            from,
+            points,
         }
     }
 
     fn fields(&self) -> impl Iterator<Item = &Field> {
-        self.sizes.iter().map(|(_, f)| f).chain([&self.skip])
+        self.sizes
+            .iter()
+            .map(|(_, f)| f)
+            .chain([&self.skip, &self.from, &self.points])
     }
 
     pub fn dirty(&self) -> bool {
@@ -589,6 +611,8 @@ impl PatternForm {
             f.chosen = f.read;
         }
         self.skip.text.clone_from(&self.skip.read);
+        self.from.text.clone_from(&self.from.read);
+        self.points.text.clone_from(&self.points.read);
         self.seeds.chosen.clone_from(&self.seeds.read);
     }
 
@@ -624,6 +648,20 @@ impl PatternForm {
                     )
                 })?;
             out.skip = Some(v);
+        }
+        if self.from.dirty() {
+            out.from = Some(self.from.text.trim().to_owned());
+        }
+        if self.points.dirty() {
+            out.points = Some(
+                self.points
+                    .text
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            );
         }
         if self.seeds.dirty() {
             let seeds = Some(self.seeds.chosen.clone());
@@ -2851,6 +2889,29 @@ mod tests {
             ("up_to", Some("p/b/ff"))
         );
         assert_eq!(given(&f).depth, None);
+    }
+
+    #[test]
+    fn a_following_patterns_from_and_points_are_edited_and_its_driver_shown() {
+        let v = json!({"type": "instance_pattern", "form": "points", "instances": ["s0"],
+                       "on": {"instance": ["lid"], "feature": "layout", "text": "pack/lid/layout"},
+                       "from": "p1", "points": ["p1", "p5"]});
+        let mut f = PatternForm::from_show(&v);
+        assert_eq!(f.refs, [("on".to_owned(), "pack/lid/layout".to_owned())]);
+        assert!(!f.dirty());
+        f.from.text = "p5".into();
+        f.points.text = "p1, p5, p7".into();
+        let mut out = FeatureFields::default();
+        f.given(&mut out).unwrap();
+        assert_eq!(out.from.as_deref(), Some("p5"));
+        assert_eq!(
+            out.points,
+            Some(vec!["p1".to_owned(), "p5".to_owned(), "p7".to_owned()])
+        );
+        f.points.text = String::new();
+        let mut out = FeatureFields::default();
+        f.given(&mut out).unwrap();
+        assert_eq!(out.points, Some(Vec::new()), "every free point again");
     }
 
     #[test]
