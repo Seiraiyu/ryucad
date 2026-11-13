@@ -296,13 +296,13 @@ fn at(x: f64, y: f64, z: f64) -> Rigid {
     Rigid::translation(Vector3::new(x, y, z))
 }
 
-/// Design 326 asks ryukei to beat OCCT's `HLRBRep_Algo` in both races;
-/// plan 10.C ships slower (issue #608: on cox-worker-2, an AMD Ryzen 7
-/// 9700X, one thread, the plate took 6.51 s against OCCT's 1.83 s and the
-/// race bodies 424 s against 2.24 s), so the races assert only these
-/// guards against regressions and print the ratio.
-const PLATE_BAR: f64 = 5.0;
-const RACE_BAR: f64 = 300.0;
+/// Design 484's bars (plan 17.C), on cox-worker-2 (an AMD Ryzen 7 9700X)
+/// on one thread: the 1,000-hole plate's view beats OCCT's
+/// `HLRBRep_Algo`, as design 326 asked; the race bodies' views take at
+/// most ten times OCCT's total (design 484's decision 522; the rest of
+/// the gap stays on #608). Each race prints its ratio.
+const PLATE_BAR: f64 = 1.0;
+const RACE_BAR: f64 = 10.0;
 
 #[test]
 fn the_1000_hole_plates_iso_view_against_occt_on_one_thread() {

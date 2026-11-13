@@ -588,8 +588,8 @@ fn refused_at(body: &Body, e: &Error) -> String {
 /// The race bodies' isometric views on one thread (design 484's bar):
 /// every refusal takes at most 10 s with `RYUKEI_BARS=1` on the bar
 /// machine (cox-worker-2), 100 s otherwise; each is printed with what it
-/// refused on and its time, and the total. Minutes: plan 17.B's bars
-/// run it with `--ignored`.
+/// refused on and its time, and the total. Minutes: plans 17.B's and
+/// 17.C's bars run it with `--ignored`.
 #[test]
 #[ignore = "minutes: the bars run it"]
 fn race_views_refuse_quickly() {
