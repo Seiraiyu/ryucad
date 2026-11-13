@@ -820,12 +820,25 @@ enum Command {
         /// `--of`'s window shows, as --hidden.
         #[arg(long, value_name = "EXPLODE", conflicts_with = "no_explode")]
         explode: Option<String>,
-        /// How far through the explode, from 0 (assembled) to 1 (exploded).
+        /// How far through the explode (1 by default) or the motion (0 by
+        /// default), from 0 to 1.
         #[arg(long)]
         fraction: Option<f64>,
         /// Draw no explode, whatever a window shows.
         #[arg(long)]
         no_explode: bool,
+        /// Draw the assembly where this motion puts it at --fraction (0
+        /// by default); by default what `--of`'s window shows, as
+        /// --hidden. Never with --explode.
+        #[arg(long, value_name = "MOTION", conflicts_with_all = ["no_motion", "explode"])]
+        motion: Option<String>,
+        /// Draw no motion, whatever a window shows.
+        #[arg(long)]
+        no_motion: bool,
+        /// Paint the faces that collide at the motion's fraction, and
+        /// don't at rest (intersects pairs).
+        #[arg(long)]
+        interference: bool,
         /// Draw a sheet metal solid's flat pattern (the part's one unless
         /// named) instead of the model.
         #[arg(long, value_name = "SOLID", num_args = 0..=1, default_missing_value = "")]
@@ -2122,6 +2135,49 @@ enum MotionCmd {
         motion: String,
         #[command(flatten)]
         expect: Expect,
+    },
+    /// Show a motion in a participant's window (the one human's, else the
+    /// caller's), from its start or --fraction of the way, paused or
+    /// with --play; with only --fraction, --play or --pause, change the
+    /// one shown (a fraction alone pauses it); --off shows none. A motion
+    /// shown takes an explode away.
+    Show {
+        #[arg(conflicts_with = "off", required_unless_present_any = ["off", "fraction", "play", "pause"])]
+        motion: Option<String>,
+        /// The assembly whose motion it is (the window's, else the
+        /// project's model).
+        #[arg(long, requires = "motion")]
+        part: Option<String>,
+        /// From 0 (its start) to 1 (its end); 0 for a new one.
+        #[arg(long, conflicts_with = "off")]
+        fraction: Option<f64>,
+        /// Play it, back and forth, in the window.
+        #[arg(long, conflicts_with_all = ["off", "pause"])]
+        play: bool,
+        /// Stop playing it where it is.
+        #[arg(long, conflicts_with = "off")]
+        pause: bool,
+        #[arg(long)]
+        off: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
+    /// Where a motion puts each moved body at even fractions: each
+    /// frame's state, drive values, moved instances' poses and offsets.
+    /// It only solves; nothing is intersected.
+    Frames {
+        part: String,
+        #[arg(conflicts_with = "drives", required_unless_present = "drives")]
+        motion: Option<String>,
+        /// Inline drives, as `save --drives` takes them.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        drives: Option<Value>,
+        /// Steps of the inline drives (11 when left out).
+        #[arg(long, requires = "drives")]
+        steps: Option<u32>,
+        /// How many frames, 2 to 1,000 (120 when left out).
+        #[arg(long)]
+        frames: Option<u32>,
     },
 }
 
@@ -4971,6 +5027,41 @@ fn request(cmd: &Command) -> Option<Request> {
             motion: motion.clone(),
             expected_revision: expect.revision.clone(),
         },
+        Command::Motion(MotionCmd::Show {
+            motion,
+            part,
+            fraction,
+            play,
+            pause,
+            off,
+            of,
+        }) => Request::MotionShow {
+            part: part.clone(),
+            motion: motion.clone(),
+            fraction: *fraction,
+            playing: if *play {
+                Some(true)
+            } else if *pause {
+                Some(false)
+            } else {
+                None
+            },
+            off: *off,
+            participant: of.clone(),
+        },
+        Command::Motion(MotionCmd::Frames {
+            part,
+            motion,
+            drives,
+            steps,
+            frames,
+        }) => Request::MotionFrames {
+            part: part.clone(),
+            motion: motion.clone(),
+            drives: drives.clone(),
+            steps: *steps,
+            frames: *frames,
+        },
         Command::View(ViewCmd::Save {
             part,
             view,
@@ -5621,6 +5712,9 @@ fn request(cmd: &Command) -> Option<Request> {
             explode,
             fraction,
             no_explode,
+            motion,
+            no_motion,
+            interference,
             flat,
         } => Request::Render {
             part: part.clone(),
@@ -5648,6 +5742,12 @@ fn request(cmd: &Command) -> Option<Request> {
                 explode.clone()
             },
             fraction: *fraction,
+            motion: if *no_motion {
+                Some(String::new())
+            } else {
+                motion.clone()
+            },
+            interference: *interference,
             annotations: *annotations,
             annotation: annotation.clone(),
             flat: flat.clone(),

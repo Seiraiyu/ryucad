@@ -709,6 +709,9 @@ pub struct MateForm {
     pub form: Choice,
     pub angle: Field,
     pub distance: Field,
+    /// Its stops as typed: angle min, angle max, distance min, distance
+    /// max; empty for none.
+    pub limits: [Field; 4],
     pub a: OffsetForm,
     pub b: OffsetForm,
     /// Each connector by side, as requests give it.
@@ -733,6 +736,13 @@ impl MateForm {
             ),
             angle: Field::new("angle", text(&v["angle"])),
             distance: Field::new("distance", text(&v["distance"])),
+            limits: [
+                ("angle min", &v["limits"]["angle"]["min"]),
+                ("angle max", &v["limits"]["angle"]["max"]),
+                ("distance min", &v["limits"]["distance"]["min"]),
+                ("distance max", &v["limits"]["distance"]["max"]),
+            ]
+            .map(|(name, x)| Field::new(name, text(x))),
             a: OffsetForm::from_connector("a", &v["a"]),
             b: OffsetForm::from_connector("b", &v["b"]),
             connectors: ["a", "b"]
@@ -751,9 +761,20 @@ impl MateForm {
         )
     }
 
+    /// Whether the chosen form may stop its angle, and its distance (a
+    /// planar mate's distance is always driven).
+    pub fn takes_limits(&self) -> (bool, bool) {
+        let f = self.form.chosen.as_str();
+        (
+            matches!(f, "revolute" | "cylindrical" | "planar"),
+            matches!(f, "slider" | "cylindrical"),
+        )
+    }
+
     fn fields(&self) -> impl Iterator<Item = &Field> {
         [&self.angle, &self.distance]
             .into_iter()
+            .chain(self.limits.iter())
             .chain(self.a.fields())
             .chain(self.b.fields())
     }
@@ -762,13 +783,17 @@ impl MateForm {
         self.form.dirty()
             || self.angle.dirty()
             || self.distance.dirty()
+            || self.limits.iter().any(Field::dirty)
             || self.a.dirty()
             || self.b.dirty()
     }
 
     fn revert(&mut self) {
         self.form.chosen.clone_from(&self.form.read);
-        for f in [&mut self.angle, &mut self.distance] {
+        for f in [&mut self.angle, &mut self.distance]
+            .into_iter()
+            .chain(self.limits.iter_mut())
+        {
             f.text.clone_from(&f.read);
         }
         self.a.revert();
@@ -786,6 +811,18 @@ impl MateForm {
         }
         if self.distance.dirty() {
             out.distance = Some(json!(self.distance.text.trim()));
+        }
+        // Each changed bound, laid over what the mate has ("" clears it).
+        let mut limits = json!({});
+        for (k, f) in self.limits.iter().enumerate() {
+            if f.dirty() {
+                let value = if k < 2 { "angle" } else { "distance" };
+                let bound = if k % 2 == 0 { "min" } else { "max" };
+                limits[value][bound] = json!(f.text.trim());
+            }
+        }
+        if limits.as_object().is_some_and(|o| !o.is_empty()) {
+            out.limits = Some(limits);
         }
         if self.a.dirty() {
             out.a_offset = Some(self.a.json());
@@ -3365,6 +3402,37 @@ mod tests {
         let g = given(&f);
         assert_eq!(g.instances, Some(vec!["pin".to_owned()]));
         assert_eq!(g.features, None);
+    }
+
+    #[test]
+    fn a_mates_limits_are_edited_bound_by_bound() {
+        let shown = json!({"id": "m1", "type": "mate", "revision": "r1", "form": "cylindrical",
+                           "a": {"instance": ["base"], "at": "origin", "text": "frame/base"},
+                           "b": {"instance": ["pin"], "at": "origin", "text": "frame/pin"},
+                           "limits": {"angle": {"min": "-6 deg", "max": "6 deg"}}});
+        let mut f = Form::from_show("frame", &shown);
+        let m = f.mate.as_ref().unwrap();
+        assert_eq!(m.takes_limits(), (true, true));
+        let reads: Vec<&str> = m.limits.iter().map(|l| l.read.as_str()).collect();
+        assert_eq!(reads, ["-6 deg", "6 deg", "", ""]);
+        // A bound changed, one cleared, a distance stop added.
+        let m = f.mate.as_mut().unwrap();
+        m.limits[1].text = "8 deg".into();
+        m.limits[0].text = String::new();
+        m.limits[3].text = "10 mm".into();
+        assert_eq!(
+            given(&f).limits,
+            Some(json!({"angle": {"min": "", "max": "8 deg"}, "distance": {"max": "10 mm"}}))
+        );
+        f.revert();
+        assert!(!f.dirty());
+        assert_eq!(given(&f).limits, None);
+        // A planar mate's distance is always driven: no distance stops.
+        let m = f.mate.as_mut().unwrap();
+        m.form.chosen = "planar".into();
+        assert_eq!(m.takes_limits(), (true, false));
+        m.form.chosen = "slider".into();
+        assert_eq!(m.takes_limits(), (false, true));
     }
 
     #[test]

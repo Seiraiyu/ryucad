@@ -763,6 +763,22 @@ pub(crate) fn dispatch(
         ),
         Request::ExplodeList { part } => crate::explode::list(session, part.as_deref()),
         Request::MotionList { part } => crate::motion::list(session, part.as_deref()),
+        Request::MotionFrames {
+            part,
+            motion,
+            drives,
+            steps,
+            frames,
+        } => crate::playback::frames(
+            session,
+            crate::playback::FramesAsk {
+                part,
+                motion,
+                drives,
+                steps,
+                frames,
+            },
+        ),
         Request::MotionSave {
             part,
             motion,
@@ -781,7 +797,7 @@ pub(crate) fn dispatch(
             part,
             motion,
             expected_revision,
-        } => crate::motion::delete(session, &part, &motion, expected_revision.as_deref()),
+        } => assembly::motion_delete(session, live, part, motion, expected_revision),
         Request::ExplodeSave {
             part,
             explode,
@@ -878,6 +894,24 @@ pub(crate) fn dispatch(
             off,
             participant,
         } => assembly::explode_show(session, live, me, part, explode, fraction, off, participant),
+        Request::MotionShow {
+            part,
+            motion,
+            fraction,
+            playing,
+            off,
+            participant,
+        } => assembly::motion_show(
+            session,
+            live,
+            me,
+            part,
+            motion,
+            fraction,
+            playing,
+            off,
+            participant,
+        ),
         // Where `section.set` would cut: `participant`, else the one
         // human, else the caller.
         Request::SectionGet { participant } => view::section_get(live, me, participant),
