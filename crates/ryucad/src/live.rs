@@ -72,6 +72,9 @@ pub struct View {
     pub sections: Vec<crate::section::Plane>,
     /// The exploded view the participant's window shows, if any.
     pub explode: Option<crate::explode::Shown>,
+    /// The motion the participant's window shows, if any. Never with an
+    /// explode: showing one takes the other away.
+    pub motion: Option<crate::playback::Shown>,
     /// What the participant's window lets its person do: View until they
     /// choose another, every time it connects.
     pub mode: Mode,
@@ -118,6 +121,9 @@ pub trait CadLive {
     fn set_sections(&mut self, id: &str, sections: Vec<crate::section::Plane>) -> Result<()>;
     /// Sets the exploded view participant `id`'s window shows.
     fn set_explode(&mut self, id: &str, explode: Option<crate::explode::Shown>) -> Result<()>;
+    /// Sets the motion participant `id`'s window shows. A motion shown
+    /// takes away the explode, and an explode shown the motion.
+    fn set_motion(&mut self, id: &str, motion: Option<crate::playback::Shown>) -> Result<()>;
     /// Sets what participant `id`'s window lets its person do.
     fn set_mode(&mut self, id: &str, mode: Mode) -> Result<()>;
 }
@@ -144,7 +150,20 @@ impl CadLive for Live {
     }
 
     fn set_explode(&mut self, id: &str, explode: Option<crate::explode::Shown>) -> Result<()> {
-        self.get_mut(id)?.view.explode = explode;
+        let v = &mut self.get_mut(id)?.view;
+        if explode.is_some() {
+            v.motion = None;
+        }
+        v.explode = explode;
+        Ok(())
+    }
+
+    fn set_motion(&mut self, id: &str, motion: Option<crate::playback::Shown>) -> Result<()> {
+        let v = &mut self.get_mut(id)?.view;
+        if motion.is_some() {
+            v.explode = None;
+        }
+        v.motion = motion;
         Ok(())
     }
 
@@ -180,6 +199,7 @@ mod tests {
                 "hidden": [],
                 "sections": [],
                 "explode": null,
+                "motion": null,
                 "mode": "view",
             })
         );
@@ -196,6 +216,41 @@ mod tests {
             live.get(&h).unwrap().to_json()["sections"],
             json!([{"origin_m": [0.0, 0.0, 0.01], "normal": [0.0, 0.0, 1.0]}])
         );
+    }
+
+    #[test]
+    fn a_window_shows_an_explode_or_a_motion_never_both() {
+        let mut live = Live::new();
+        let h = live.hello(Kind::Human, Some("Dana"), None).unwrap();
+        let frame = Id::parse("frame", "part").unwrap();
+        let explode = crate::explode::Shown {
+            part: frame.clone(),
+            explode: Id::parse("apart", "explode").unwrap(),
+            fraction: 1.0,
+        };
+        let motion = crate::playback::Shown {
+            part: frame,
+            motion: Id::parse("swing", "motion").unwrap(),
+            fraction: 0.25,
+            playing: true,
+        };
+        live.set_explode(&h, Some(explode.clone())).unwrap();
+        live.set_motion(&h, Some(motion.clone())).unwrap();
+        let v = live.get(&h).unwrap().to_json();
+        assert_eq!(v["explode"], Value::Null, "{v}");
+        assert_eq!(
+            v["motion"],
+            json!({"part": "frame", "motion": "swing", "fraction": 0.25, "playing": true})
+        );
+        // Showing an explode takes the motion away.
+        live.set_explode(&h, Some(explode)).unwrap();
+        assert_eq!(live.get(&h).unwrap().view.motion, None);
+        // Clearing one leaves the other.
+        live.set_motion(&h, None).unwrap();
+        assert!(live.get(&h).unwrap().view.explode.is_some());
+        live.set_motion(&h, Some(motion)).unwrap();
+        live.set_explode(&h, None).unwrap();
+        assert!(live.get(&h).unwrap().view.motion.is_some());
     }
 
     #[test]

@@ -43,6 +43,7 @@ impl ryu_session::Product for Cad {
         into.insert("hidden".into(), json!(view.hidden));
         into.insert("sections".into(), json!(view.sections));
         into.insert("explode".into(), json!(view.explode));
+        into.insert("motion".into(), json!(view.motion));
         into.insert("mode".into(), json!(view.mode));
     }
 }
@@ -107,6 +108,7 @@ pub mod part;
 pub mod path;
 pub mod pattern;
 pub mod pdm;
+pub mod playback;
 pub mod process;
 pub mod profile;
 pub mod proto;
