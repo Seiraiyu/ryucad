@@ -367,7 +367,8 @@ fn tolerate(s: &mut Shape, cap: f64, m: &Meter) {
 
 /// Golden-section steps a sampled gap's largest sample is refined by:
 /// its bracket shrinks to under 1% of the samples' spacing either side.
-const REFINE: usize = 12;
+/// A gap under a hundredth of resolution at every sample isn't refined.
+const REFINE: usize = 10;
 
 /// The parameters an edge's gap is sampled at: [`SAMPLES`] intervals,
 /// and the middle of each knot span of a spline edge that no sample falls
@@ -408,6 +409,11 @@ fn worst(at: &[f64], gap: impl Fn(f64) -> f64) -> f64 {
     else {
         return 0.0;
     };
+    // An edge on its face at every sample (an exact one, mostly) has no
+    // stray worth the projections a search costs.
+    if most < 1e-2 * LINEAR_RESOLUTION {
+        return most;
+    }
     let (mut a, mut b) = (at[i.saturating_sub(1)], at[(i + 1).min(at.len() - 1)]);
     let mut best = most;
     const PHI: f64 = 0.618_033_988_749_894_8;
