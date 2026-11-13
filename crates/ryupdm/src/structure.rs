@@ -11,6 +11,7 @@ use crate::record::{Kind, Records};
 use ryucad_doc::doc::assembly::Rev;
 use ryucad_doc::doc::files::{Feature, PartKind};
 use ryucad_doc::doc::id::{CopyKey, Id, ProjectId};
+use ryucad_doc::doc::mate::{InstancePattern, PatternForm};
 use ryucad_doc::doc::project::{Part, Project};
 use ryucad_doc::doc::source::Source;
 use ryucad_doc::error::{Code, Error, Result};
@@ -470,12 +471,28 @@ pub struct Occurrence {
     pub rev: Rev,
 }
 
+/// What assembly `part` places, as [`occurrences_with`] finds it with no
+/// part read: a pattern that follows another part's places is a problem
+/// here, never counted.
+pub fn occurrences(part: &Part) -> (Vec<Occurrence>, Vec<Error>) {
+    occurrences_with(part, &mut |fid, _| {
+        Err(Error::new(
+            Code::DependencyFailed,
+            format!("{fid}'s copies follow another part's places, which weren't read"),
+        ))
+    })
+}
+
 /// What assembly `part` places, in list order: each instance, then each
 /// instance pattern's copies of each of its seeds, the seed's own place
-/// and every skipped copy left out. Features that can't be read (and a
-/// pattern whose seed can't) are the second list's, with the feature's ID
-/// in `feature`; mates place nothing.
-pub fn occurrences(part: &Part) -> (Vec<Occurrence>, Vec<Error>) {
+/// and every skipped copy left out; a following pattern's copies are what
+/// `keys` gives (design 521). Features that can't be read (and a pattern
+/// whose seed or places can't) are the second list's, with the feature's
+/// ID in `feature`; mates place nothing.
+pub fn occurrences_with(
+    part: &Part,
+    keys: &mut dyn FnMut(&Id, &InstancePattern) -> Result<Vec<CopyKey>>,
+) -> (Vec<Occurrence>, Vec<Error>) {
     let mut out = Vec::new();
     let mut problems = Vec::new();
     for fid in part.order() {
@@ -486,8 +503,16 @@ pub fn occurrences(part: &Part) -> (Vec<Occurrence>, Vec<Error>) {
                 rev: i.rev.clone(),
             }),
             Some(Ok(Feature::InstancePattern(p))) => {
-                let Some([n, m]) = p.form.counts() else {
-                    continue;
+                let copies: Vec<CopyKey> = if p.form.driven() {
+                    match keys(fid, p) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            problems.push(e.with("feature", fid));
+                            continue;
+                        }
+                    }
+                } else {
+                    p.copies().into_iter().map(CopyKey::Index).collect()
                 };
                 for seed in &p.instances {
                     let Some(Ok(Feature::Instance(i))) = part.features.get(seed) else {
@@ -500,18 +525,12 @@ pub fn occurrences(part: &Part) -> (Vec<Occurrence>, Vec<Error>) {
                         );
                         continue;
                     };
-                    for j in 0..m {
-                        for k in 0..n {
-                            let index = [k, j];
-                            if index == [0, 0] || p.skip.contains(&index) {
-                                continue;
-                            }
-                            out.push(Occurrence {
-                                path: format!("{}/{seed}", Id::copy(fid, &CopyKey::Index(index))),
-                                part: i.part.clone(),
-                                rev: i.rev.clone(),
-                            });
-                        }
+                    for key in &copies {
+                        out.push(Occurrence {
+                            path: format!("{}/{seed}", Id::copy(fid, key)),
+                            part: i.part.clone(),
+                            rev: i.rev.clone(),
+                        });
                     }
                 }
             }
@@ -520,6 +539,75 @@ pub fn occurrences(part: &Part) -> (Vec<Occurrence>, Vec<Error>) {
         }
     }
     (out, problems)
+}
+
+/// A following pattern's copies from files alone (design 521): the part
+/// at the end of its `on` path, each step read at its instance's
+/// revision, and the places its feature gives, the seed's own left out:
+/// a pattern's instances less its skips, a hole's points (listed, else
+/// its sketch's free points), a sketch's points (listed, else free).
+pub fn driven_keys(
+    reader: &mut Reader,
+    assembly: &Part,
+    p: &InstancePattern,
+) -> Result<Vec<CopyKey>> {
+    let on = p.form.driver().expect("a following pattern");
+    let missing = |what: String| Error::new(Code::NotFound, what).with("param", "on");
+    let mut node: Option<Arc<Node>> = None;
+    for step in &on.instance {
+        let at = node.as_ref().map_or(assembly, |n| &n.part);
+        let i = match at.features.get(step) {
+            Some(Ok(Feature::Instance(i))) => i.clone(),
+            _ => return Err(missing(format!("{} has no instance {step}", at.id))),
+        };
+        node = Some(reader.node(&i.part, &i.rev)?);
+    }
+    let at = node.as_ref().map_or(assembly, |n| &n.part);
+    let (from, listed) = match &p.form {
+        PatternForm::Feature { from, .. } => (from.as_ref(), None),
+        PatternForm::Points { from, points, .. } => (from.as_ref(), Some(points)),
+        _ => unreachable!("a following pattern"),
+    };
+    let wrong = |what: &str| {
+        Error::new(
+            Code::ReferenceWrongKind,
+            format!("{} of {} {what}", on.feature, at.id),
+        )
+        .with("param", "on")
+    };
+    let points: Vec<Id> = match (at.features.get(&on.feature), listed) {
+        (Some(Ok(Feature::Pattern(x))), None) => {
+            if matches!(x.kind, ryucad_doc::doc::pattern::Kind::Mirror { .. }) {
+                return Err(
+                    Error::new(Code::InvalidParam, "an instance can't be mirrored")
+                        .with("param", "on"),
+                );
+            }
+            return Ok(x.instances().into_iter().map(CopyKey::Index).collect());
+        }
+        (Some(Ok(Feature::Hole(h))), None) if !h.points.is_empty() => h.points.clone(),
+        (Some(Ok(Feature::Hole(h))), None) => match at.features.get(&h.sketch) {
+            Some(Ok(Feature::Sketch(s))) => s.free_points().into_iter().cloned().collect(),
+            _ => return Err(missing(format!("{} has no sketch {}", at.id, h.sketch))),
+        },
+        (Some(Ok(Feature::Sketch(s))), Some(listed)) => {
+            if listed.is_empty() {
+                s.free_points().into_iter().cloned().collect()
+            } else {
+                listed.clone()
+            }
+        }
+        (Some(Ok(_)), None) => return Err(wrong("isn't a pattern or a hole")),
+        (Some(Ok(_)), Some(_)) => return Err(wrong("isn't a sketch")),
+        (Some(Err(e)), _) => return Err(e.clone()),
+        (None, _) => return Err(missing(format!("{} has no feature {}", at.id, on.feature))),
+    };
+    let seed = from.or(points.first()).cloned();
+    Ok(points
+        .iter()
+        .filter(|p| Some(*p) != seed.as_ref())
+        .map(CopyKey::point)
+        .collect())
 }
 
 #[cfg(test)]
@@ -671,6 +759,113 @@ pub(crate) mod tests {
         assert_eq!(occ[2].rev, Rev::Working);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].details["feature"], "broken");
+    }
+
+    #[test]
+    fn a_following_patterns_copies_are_counted_from_the_driving_parts_files() {
+        use ryucad_doc::doc::canonical;
+        use serde_json::json;
+        let pattern = |form: &str, feature: &str, more: serde_json::Value| {
+            let mut v = json!({"type": "instance_pattern", "form": form, "instances": ["s0"],
+                               "on": {"instance": ["lid"], "feature": feature}});
+            v.as_object_mut()
+                .unwrap()
+                .extend(more.as_object().unwrap().clone());
+            v
+        };
+        for (p, want) in [
+            (
+                pattern("feature", "grid", json!({})),
+                vec!["p:1/s0", "p:2/s0", "p:0:1/s0", "p:1:1/s0"],
+            ),
+            (
+                pattern("feature", "row", json!({})),
+                vec!["p:p2/s0", "p:p10/s0"],
+            ),
+            (
+                pattern("feature", "row", json!({"from": "p2"})),
+                vec!["p:p1/s0", "p:p10/s0"],
+            ),
+            (
+                pattern("points", "layout", json!({"points": ["p3", "p4"]})),
+                vec!["p:p4/s0"],
+            ),
+            (
+                pattern("points", "layout", json!({})),
+                vec!["p:p2/s0", "p:p10/s0"],
+            ),
+        ] {
+            let mut f = files(&[
+                ("screw", &[("b", block())]),
+                ("lid", &[("b", block())]),
+                (
+                    "pack",
+                    &[
+                        ("lid", instance("lid", json!("working"))),
+                        ("s0", instance("screw", json!("working"))),
+                        ("p", p),
+                    ],
+                ),
+            ]);
+            // The lid's features and the pattern at the formats they need
+            // (`files` writes every feature at 1, or 4 in an assembly).
+            let mut put = |path: &str, v: serde_json::Value| {
+                f.insert(path.to_owned(), canonical::to_string(&v).into_bytes());
+            };
+            put(
+                "parts/lid/part.json",
+                json!({"features": ["b", "layout", "row", "grid"],
+                                              "format": 1, "kind": "ryucad.part"}),
+            );
+            put(
+                "parts/lid/features/layout.json",
+                json!({"format": 2, "kind": "ryucad.feature",
+                "type": "sketch", "plane": "xy", "constraints": {},
+                "entities": {"p1": {"m": [0, 0], "type": "point"},
+                             "p2": {"m": [0.01, 0], "type": "point"},
+                             "p10": {"m": [0.02, 0], "type": "point"},
+                             "p3": {"m": [0, 0.01], "type": "point"},
+                             "p4": {"m": [0, 0.02], "type": "point"},
+                             "l1": {"start": "p3", "end": "p4", "type": "line"}}}),
+            );
+            put(
+                "parts/lid/features/row.json",
+                json!({"format": 3, "kind": "ryucad.feature",
+                "type": "hole", "form": "simple", "sketch": "layout", "diameter": "3 mm",
+                "depth": "through_all", "targets": ["b"]}),
+            );
+            put(
+                "parts/lid/features/grid.json",
+                json!({"format": 3, "kind": "ryucad.feature",
+                "type": "pattern", "form": "linear", "features": ["row"], "direction": "x",
+                "spacing": "30 mm", "count": "3", "direction2": "y", "spacing2": "30 mm",
+                "count2": "2", "skip": [[2, 1]], "targets": ["b"]}),
+            );
+            let mut pv: serde_json::Value =
+                serde_json::from_slice(&f["parts/pack/features/p.json"]).unwrap();
+            pv["format"] = json!(24);
+            f.insert(
+                "parts/pack/features/p.json".into(),
+                canonical::to_string(&pv).into_bytes(),
+            );
+            let project = Project::load_from(Path::new(""), &f).unwrap();
+            let pack = project.part(&id("pack")).unwrap();
+            let mut cache = Cache::new();
+            let mut reader = Reader::new(&f, &project, None, None, &mut cache);
+            let (occ, problems) =
+                occurrences_with(pack, &mut |_, x| driven_keys(&mut reader, pack, x));
+            assert!(problems.is_empty(), "{problems:?}");
+            let copies: Vec<&str> = occ
+                .iter()
+                .map(|o| o.path.as_str())
+                .filter(|p| p.contains(':'))
+                .collect();
+            assert_eq!(copies, want);
+            // Without a reader a following pattern is a problem, never counted.
+            let (occ, problems) = occurrences(pack);
+            assert_eq!(occ.len(), 2);
+            assert_eq!(problems[0].code, Code::DependencyFailed);
+        }
     }
 
     /// A library (`[1; 16]`, named `lib`) whose `kit` places two of its own
