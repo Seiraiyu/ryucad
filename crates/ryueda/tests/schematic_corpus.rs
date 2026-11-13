@@ -409,6 +409,79 @@ fn the_corpus_from_nothing_lays_out_within_its_bar() {
     }
 }
 
+/// Design 519's bar: the RP2040's largest sheet drawn as a scene through
+/// a warm daemon in under 50 ms (500 without RYUEDA_BARS=1), the session
+/// not yet keeping it; a kept one is printed beside it.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test schematic_corpus scene"
+)]
+fn a_scene_is_drawn_within_its_bar() {
+    use std::time::{Duration, Instant};
+    let bars = std::env::var("RYUEDA_BARS").is_ok_and(|v| v == "1");
+    let bar = Duration::from_millis(if bars { 50 } else { 500 });
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "rp2040");
+    ryueda(&board, 1, &["layout"]);
+    // The largest sheet, by owners, found in process.
+    let p = ryueda::project::Project::load(&board).unwrap();
+    let scene = |ask: &ryueda::scene::Ask| -> Value {
+        serde_json::from_str(&ryueda::scene::scene(&p, ask).unwrap()).unwrap()
+    };
+    let first = scene(&ryueda::scene::Ask::default());
+    let block = first["block"].as_str().unwrap().to_owned();
+    let (largest, owners) = first["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            let id = s["sheet"].as_str().unwrap().to_owned();
+            let v = scene(&ryueda::scene::Ask {
+                block: Some(block.clone()),
+                sheet: Some(id.clone()),
+                ..ryueda::scene::Ask::default()
+            });
+            (id, v["owners"].as_array().unwrap().len())
+        })
+        .max_by_key(|(_, n)| *n)
+        .unwrap();
+    let run = dir.path().join("run");
+    let through = |args: &[&str]| {
+        let t = Instant::now();
+        let mut cmd = Command::cargo_bin("ryueda").unwrap();
+        cmd.current_dir(&board)
+            .env("RYUEDA_RUNTIME_DIR", &run)
+            .env("RYUEDA_IDLE_TIMEOUT", "60")
+            .env("RYUEDA_CONFIG_DIR", dir.path().join("config"))
+            .env_remove("RYUEDA_NO_DAEMON");
+        for v in ryueda_parts::distributor::env_vars() {
+            cmd.env_remove(v);
+        }
+        let out = cmd.args(args).output().unwrap();
+        let took = t.elapsed();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["ok"], true, "{args:?}: {v}");
+        took
+    };
+    // Warm: the daemon started and the project read.
+    through(&["info"]);
+    let args = [
+        "scene",
+        "--block",
+        block.as_str(),
+        "--sheet",
+        largest.as_str(),
+    ];
+    let drawn = through(&args);
+    let kept = through(&args);
+    through(&["daemon", "stop"]);
+    println!(
+        "rp2040 sheet {largest} ({owners} owners) through a warm daemon: drawn in {drawn:?}, kept in {kept:?}"
+    );
+    assert!(drawn < bar, "{drawn:?}");
+}
+
 /// Design 236's score bars: each block's least sheet score laid out from
 /// nothing, (circuit, block, threshold). Each is the score measured less
 /// 5, measured on cox-worker-4 (AMD Opteron 6380, 8 threads, shared with
