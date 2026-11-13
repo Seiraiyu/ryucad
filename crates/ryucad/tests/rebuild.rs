@@ -38,6 +38,8 @@ fn part(features: Vec<(&str, Feature)>) -> Part {
         appearance: None,
         explodes: Default::default(),
         explode_uses: Default::default(),
+        motions: Default::default(),
+        motion_uses: Default::default(),
         drawings: Default::default(),
         features: features.into_iter().map(|(f, x)| (id(f), Ok(x))).collect(),
         revision: String::new(),

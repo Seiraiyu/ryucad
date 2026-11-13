@@ -59,7 +59,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 47] = [
+pub const CODES: [(&str, &str); 48] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -99,6 +99,7 @@ pub const CODES: [(&str, &str); 47] = [
     ("material_unknown", "warning"),
     ("appearance_unresolved", "warning"),
     ("explode_unresolved", "warning"),
+    ("motion_unresolved", "warning"),
     ("reference_followed", "warning"),
     ("parameter_shadows", "error"),
     ("parameter_unused", "warning"),
@@ -1413,6 +1414,7 @@ fn diagnose_part(
                 || (n == "features" && d)
                 || (n == crate::doc::views::VIEWS && d)
                 || (n == crate::doc::explode::EXPLODES && d)
+                || (n == crate::doc::motion::MOTIONS && d)
                 || (n == crate::doc::drawing::DRAWINGS && d)
                 || (n == crate::doc::appearance::APPEARANCE && !d)
         },
@@ -1423,6 +1425,7 @@ fn diagnose_part(
     diagnose_drawings(root, &dir, issues);
     diagnose_appearance(builds, part, issues);
     diagnose_explodes(builds, part, issues);
+    diagnose_motions(builds, part, issues);
     let params = format!("{dir}/parameters.json");
     // Features are checked against the parameters; when those can't be
     // read, that is reported once, not again for every feature.
@@ -1789,6 +1792,72 @@ fn diagnose_explodes(builds: &mut Builds, part: &str, issues: &mut Vec<Issue>) {
                         );
                         issues.push(issue("explode_unresolved", vec![rel.clone()], message));
                     }
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+/// An assembly's motions: each file that doesn't read (against the
+/// assembly's parameters, or in a part that isn't an assembly) is
+/// `invalid_document`, one not written canonically `non_canonical`,
+/// anything else in the folder `unknown_file`, and one whose drives
+/// name what the assembly no longer has `motion_unresolved`, a warning
+/// with no repair. A motion never fails a rebuild.
+fn diagnose_motions(builds: &mut Builds, part: &str, issues: &mut Vec<Issue>) {
+    use crate::doc::motion::{MOTIONS, check_id};
+    let root = builds.root;
+    let mdir = format!("parts/{part}/{MOTIONS}");
+    let files = names(&root.join(&mdir));
+    let ids: Vec<&str> = files
+        .iter()
+        .filter_map(|(n, d)| {
+            (!d).then_some(n.strip_suffix(".json")?)
+                .filter(|s| check_id(s).is_ok())
+        })
+        .collect();
+    classify(
+        root,
+        &mdir,
+        &files,
+        |n, d| !d && n.strip_suffix(".json").is_some_and(|s| check_id(s).is_ok()),
+        &ids,
+        issues,
+    );
+    let pid = Id::parse(part, "part").ok();
+    for m in &ids {
+        let rel = format!("{mdir}/{m}.json");
+        let canonical = match read(root, &rel) {
+            Read::Missing => continue,
+            Read::Bad(i) => {
+                issues.push(i);
+                continue;
+            }
+            Read::Json(_, canonical) => canonical,
+        };
+        let Some(s) = builds.session() else { continue };
+        let Some(p) = pid.as_ref().and_then(|id| s.project().parts.get(id)) else {
+            continue;
+        };
+        let read = Id::parse(m, "motion")
+            .ok()
+            .and_then(|k| p.motions.get(&k).cloned());
+        match read {
+            Some(Err(err)) => issues.push(document_issue(&rel, &err)),
+            Some(Ok(_)) => {
+                if !canonical {
+                    issues.push(non_canonical(&rel));
+                }
+                let pid = pid.clone().expect("found above");
+                if let Err(e) = crate::motion::resolve_in(s, &pid, m)
+                    && e.code == Code::MotionUnresolved
+                {
+                    let message = format!(
+                        "{}; fix it with `ryucad motion save {part} {m} --drives …`",
+                        e.message
+                    );
+                    issues.push(issue("motion_unresolved", vec![rel.clone()], message));
                 }
             }
             None => {}
@@ -3415,6 +3484,70 @@ pub(crate) mod tests {
                 (
                     "invalid_document",
                     vec!["parts/p/explodes/apart.json".to_owned()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn motions_are_read_and_their_drives_judged() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "one", "of": "p"}),
+        )
+        .unwrap();
+        drop(s);
+        let file = |instance: &str| {
+            json!({"format": 1, "kind": "ryucad.motion", "steps": 3,
+                   "drives": [{"instances": [instance],
+                               "translate": {"direction": "z", "from": "0 mm", "to": "5 mm"}}]})
+        };
+        let at = "parts/asm/motions/lift.json";
+        w(r, at, &canonical::to_string(&file("one")));
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        w(r, at, &file("one").to_string());
+        assert_eq!(codes(r), [("non_canonical", vec![at.to_owned()])]);
+        w(r, at, &canonical::to_string(&file("gone")));
+        let found = diagnose(r);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            (found[0].code, found[0].severity),
+            ("motion_unresolved", "warning")
+        );
+        assert!(found[0].message.contains("gone"), "{}", found[0].message);
+        w(
+            r,
+            at,
+            "{\"format\": 1, \"kind\": \"ryucad.motion\", \"drives\": []}",
+        );
+        w(r, "parts/asm/motions/notes.txt", "");
+        // In a part, a motion is the wrong kind of file.
+        w(
+            r,
+            "parts/p/motions/lift.json",
+            &canonical::to_string(&file("one")),
+        );
+        assert_eq!(
+            codes(r),
+            [
+                (
+                    "unknown_file",
+                    vec!["parts/asm/motions/notes.txt".to_owned()]
+                ),
+                ("invalid_document", vec![at.to_owned()]),
+                (
+                    "invalid_document",
+                    vec!["parts/p/motions/lift.json".to_owned()]
                 ),
             ]
         );

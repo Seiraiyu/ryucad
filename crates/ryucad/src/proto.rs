@@ -1121,6 +1121,39 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mates: Vec<Map<String, Value>>,
     },
+    /// Sweeps a motion of assembly `part`, writing nothing: a saved one
+    /// (`motion`), inline `drives` (as a motion file writes them) with
+    /// `steps`, or one mate's angle (a slider's distance) from `from` to
+    /// `to`. Each step solved from the last; with `interference` what
+    /// collides that doesn't at rest, refined `refine` times (10 by
+    /// default); with `clearance` the closest moving pair within `below`;
+    /// with `poses` each step's moved instances' poses.
+    #[serde(rename = "assembly.sweep")]
+    AssemblySweep {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drives: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mate: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interference: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clearance: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        poses: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refine: Option<u32>,
+    },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.
     /// `path` (instance IDs, `/` between: `m3/s31`) starts the tree at
@@ -1829,6 +1862,35 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The motions of assembly `part`, or of every assembly: each one's
+    /// steps and drives as written and as they resolve now, with
+    /// warnings or its error, and each listed assembly's revision.
+    #[serde(rename = "motion.list")]
+    MotionList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// Saves a motion of assembly `part` from `drives` (as the file
+    /// writes them) and `steps` (11 when left out), replacing one of that
+    /// ID. Refused when it doesn't read or doesn't resolve.
+    #[serde(rename = "motion.save")]
+    MotionSave {
+        part: String,
+        motion: String,
+        drives: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Deletes a motion of assembly `part`.
+    #[serde(rename = "motion.delete")]
+    MotionDelete {
+        part: String,
+        motion: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// A part's drawings, or every part's (design 417).
     #[serde(rename = "drawing.list")]
     DrawingList {
@@ -2434,6 +2496,8 @@ impl Request {
                 | Request::ViewRename { .. }
                 | Request::ExplodeSave { .. }
                 | Request::ExplodeDelete { .. }
+                | Request::MotionSave { .. }
+                | Request::MotionDelete { .. }
                 | Request::DrawingCreate { .. }
                 | Request::DrawingEdit { .. }
                 | Request::DrawingDelete { .. }

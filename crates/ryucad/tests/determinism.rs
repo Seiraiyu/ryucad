@@ -170,6 +170,8 @@ fn rebuild_section(golden: &mut Golden) {
         appearance: None,
         explodes: Default::default(),
         explode_uses: Default::default(),
+        motions: Default::default(),
+        motion_uses: Default::default(),
         drawings: Default::default(),
         features,
         revision: String::new(),
@@ -5112,6 +5114,43 @@ fn limits_section(golden: &mut Golden) {
     s.str(&r.hash);
 }
 
+/// The mated assembly swept: its revolute `m1` (on the seed of `ring`,
+/// so the copies follow) driven from 0° to 90° in 19 steps with
+/// interference, clearance and poses; and `slide` moved 20 mm along x on
+/// its planar mate, held, with `m1` free. Each answer as canonical JSON.
+fn motions_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("motions");
+    let (_dir, mut session) = mated();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let turned = call(
+        &mut session,
+        "assembly.sweep",
+        json!({"part": "frame", "mate": "m1", "from": "0 deg", "to": "90 deg", "steps": 19,
+               "interference": true, "clearance": true, "poses": true}),
+    );
+    assert!(
+        turned["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|st| st["state"] == "holds"),
+        "{turned}"
+    );
+    s.str(&ryucad::doc::canonical::to_string(&turned));
+    let slid = call(
+        &mut session,
+        "assembly.sweep",
+        json!({"part": "frame", "steps": 5, "interference": true, "poses": true,
+               "drives": [{"instances": ["slide"], "translate":
+                   {"direction": "x", "from": "0 mm", "to": "20 mm"}}]}),
+    );
+    s.str(&ryucad::doc::canonical::to_string(&slid));
+}
+
 /// A millimetre part of holes and patterns: a plate drilled at a
 /// sketch's points (a counterbore with a drill point, a countersink
 /// through all, a plain blind hole), a grid of the
@@ -6688,6 +6727,7 @@ sections! {
     assemblies => assemblies_section(&mut golden),
     mates => mates_section(&mut golden),
     limits => limits_section(&mut golden),
+    motions => motions_section(&mut golden),
     interference => interference_section(&mut golden),
     measure => measure_section(&mut golden),
     imports => imports_section(&mut golden),

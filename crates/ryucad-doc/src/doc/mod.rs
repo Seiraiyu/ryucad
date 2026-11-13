@@ -25,6 +25,7 @@ pub mod insert;
 pub mod lock;
 pub mod mate;
 pub mod materials;
+pub mod motion;
 pub mod path;
 pub mod pattern;
 pub mod project;

@@ -117,7 +117,7 @@ pub fn named_by(file: &ParametersFile, name: &str) -> Vec<String> {
 }
 
 /// A loaded part's readers: its listed features in order, then its
-/// explodes by ID.
+/// explodes by ID, then its motions by ID.
 pub fn readers(part: &Part) -> Vec<Reader> {
     let features = part
         .order()
@@ -127,7 +127,11 @@ pub fn readers(part: &Part) -> Vec<Reader> {
         .explode_uses
         .iter()
         .map(|(e, names)| (format!("{}/{e}", explode::EXPLODES), names.clone()));
-    features.chain(explodes).collect()
+    let motions = part
+        .motion_uses
+        .iter()
+        .map(|(m, names)| (format!("{}/{m}", super::motion::MOTIONS), names.clone()));
+    features.chain(explodes).chain(motions).collect()
 }
 
 /// What reaches every parameter of a loaded project. A parameters file
@@ -196,6 +200,21 @@ pub fn readers_in(src: &dyn Source, part: &Id) -> (ParametersFile, Vec<Reader>) 
         };
         if let Some(v) = json_in(src, &join(&explodes, &name)) {
             out.push((format!("{}/{e}", explode::EXPLODES), explode::names(&v)));
+        }
+    }
+    let motions = join(&dir, super::motion::MOTIONS);
+    for (name, kind) in src.list(&motions).unwrap_or_default() {
+        let Some(m) = name
+            .strip_suffix(".json")
+            .filter(|m| kind == Kind::File && super::motion::check_id(m).is_ok())
+        else {
+            continue;
+        };
+        if let Some(v) = json_in(src, &join(&motions, &name)) {
+            out.push((
+                format!("{}/{m}", super::motion::MOTIONS),
+                super::motion::names(&v),
+            ));
         }
     }
     (own, out)

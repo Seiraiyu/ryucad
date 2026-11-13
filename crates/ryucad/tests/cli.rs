@@ -1121,6 +1121,7 @@ fn every_protocol_method_has_a_command() {
         ("assembly.move", &["assembly", "move"]),
         ("assembly.tree", &["assembly", "tree"]),
         ("assembly.solve", &["assembly", "solve"]),
+        ("assembly.sweep", &["assembly", "sweep"]),
         ("interference", &["interference"]),
         ("measure", &["measure"]),
         ("mass", &["mass"]),
@@ -1187,6 +1188,9 @@ fn every_protocol_method_has_a_command() {
         ("drawing.export", &["drawing", "export"]),
         ("drawing.layout", &["drawing", "layout"]),
         ("explode.list", &["explode", "list"]),
+        ("motion.list", &["motion", "list"]),
+        ("motion.save", &["motion", "save"]),
+        ("motion.delete", &["motion", "delete"]),
         ("explode.save", &["explode", "save"]),
         ("explode.delete", &["explode", "delete"]),
         ("explode.show", &["explode", "show"]),
@@ -6632,6 +6636,36 @@ fn mate_limits_from_the_cli() {
 }
 
 #[test]
+fn motions_save_list_and_delete_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let _ = plate_and_bolt(&p);
+    let v = p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "lift",
+        "--drives",
+        r#"[{"instances": ["pin"], "translate": {"direction": "z", "from": "0 mm", "to": "5 mm"}}]"#,
+        "--steps",
+        "6",
+    ]);
+    assert_eq!(v["motion"], "lift", "{v}");
+    let list = p.ok(&["motion", "list", "frame"]);
+    assert_eq!(list["motions"][0]["steps"], 6, "{list}");
+    p.fails(
+        &["motion", "delete", "frame", "nope"],
+        "motion_not_found",
+        1,
+    );
+    p.ok(&["motion", "delete", "frame", "lift"]);
+    assert_eq!(
+        p.ok(&["motion", "list", "frame"])["motions"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
 fn a_failing_mate_warns_from_the_cli() {
     // Issues #155 and #158: the slot grown into a skim over the plate's
     // whole top takes away the face m1 stands on, in frame, which top
@@ -8746,6 +8780,165 @@ fn properties_in_and_out_from_the_cli() {
             .filter_map(|w| w.as_str())
             .any(|w| w.starts_with("export_metadata_omitted"))
     );
+}
+
+#[test]
+fn a_sweep_from_the_cli_three_ways() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    let short = p.ok(&[
+        "assembly",
+        "sweep",
+        "frame",
+        "--mate",
+        "m1",
+        "--from",
+        "-3deg",
+        "--to",
+        "3deg",
+        "--steps",
+        "7",
+        "--interference",
+    ]);
+    assert_eq!(short["steps"].as_array().unwrap().len(), 7, "{short}");
+    assert_eq!(short["first_collision"], serde_json::Value::Null, "{short}");
+    let inline = p.ok(&[
+        "assembly",
+        "sweep",
+        "frame",
+        "--drives",
+        r#"[{"mate": "m1", "angle": {"from": "-3 deg", "to": "3 deg"}}]"#,
+        "--steps",
+        "7",
+        "--interference",
+    ]);
+    assert_eq!(inline["steps"], short["steps"]);
+    p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "turn",
+        "--drives",
+        r#"[{"mate": "m1", "angle": {"from": "-3 deg", "to": "3 deg"}}]"#,
+        "--steps",
+        "7",
+    ]);
+    let saved = p.ok(&[
+        "assembly",
+        "sweep",
+        "frame",
+        "turn",
+        "--interference",
+        "--poses",
+    ]);
+    assert_eq!(saved["motion"], "turn");
+    assert!(saved["steps"][3]["poses"]["pin"].is_object(), "{saved}");
+    p.fails(
+        &["assembly", "sweep", "frame", "gone"],
+        "motion_not_found",
+        1,
+    );
+}
+
+#[test]
+fn a_motion_against_a_stop_from_the_cli_both_ways_with_undo() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    p.ok(&[
+        "feature",
+        "edit",
+        "frame",
+        "m1",
+        "--angle-min",
+        "-6deg",
+        "--angle-max",
+        "6deg",
+    ]);
+    let saved = p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "swing",
+        "--drives",
+        r#"[{"mate": "m1", "angle": {"from": "0 deg", "to": "10 deg"}}]"#,
+        "--steps",
+        "11",
+    ]);
+    assert_eq!(saved["warnings"][0]["code"], "motion_past_limit", "{saved}");
+    // A sweep lifts its `motion_past_limit` warning into the envelope.
+    let (code, env) = p.both_from("", &["assembly", "sweep", "frame", "swing"]);
+    assert_eq!(code, 0, "{env}");
+    assert!(
+        env["warnings"][0]
+            .as_str()
+            .is_some_and(|w| w.contains("past its max stop")),
+        "{env}"
+    );
+    let swept = env["result"].clone();
+    assert_eq!(swept["first_blocked"]["index"], 7, "{swept}");
+    assert_eq!(swept["first_blocked"]["limit"]["at"], "max");
+    let deg = swept["first_blocked"]["stop"]["values"]["m1"]["angle_deg"]
+        .as_f64()
+        .unwrap();
+    assert!(deg > 6.0 && deg < 6.01, "{deg}");
+    let report = p.ok(&["check", "frame"]);
+    assert_eq!(report["passed"], true, "{report}");
+    let codes: Vec<&str> = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"motion_blocked") && codes.contains(&"motion_past_limit"),
+        "{codes:?}"
+    );
+    // Deleted both ways; undone in the daemon, the file comes back there.
+    p.ok(&["motion", "delete", "frame", "swing"]);
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(p.daemon.join("parts/frame/motions/swing.json").exists());
+    assert!(!p.direct.join("parts/frame/motions/swing.json").exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["motion", "list", "frame"]);
+    assert_eq!(code, 0, "{v}");
 }
 
 /// Design 525: plain `check` leaves interference out and notes where it
