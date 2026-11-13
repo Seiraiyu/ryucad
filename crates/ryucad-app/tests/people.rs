@@ -99,7 +99,7 @@ fn ryucad_open_asks_the_window_forward() {
     let p = Project::new().with_part();
     let mut ws = open(&p, "Dana");
     // With a window attached, nothing is started.
-    let out = std::process::Command::new(&ryucad().exe)
+    let out = common::ryucad_cmd(&ryucad().exe)
         .arg("open")
         .current_dir(&p.root)
         .env(ryucad::client::APP_VAR, p.root.join("no-such-app"))

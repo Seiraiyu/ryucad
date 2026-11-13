@@ -1217,7 +1217,7 @@ pub(crate) mod tests {
         git(root, &["add", "."]);
         git(root, &["commit", "-q", "-m", "release A"]);
         let head = String::from_utf8(
-            std::process::Command::new("git")
+            ryupdm::git_env::isolated()
                 .args(["rev-parse", "HEAD"])
                 .current_dir(root)
                 .output()
@@ -1307,7 +1307,7 @@ pub(crate) mod tests {
     }
 
     fn rev(root: &std::path::Path, what: &str) -> String {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["rev-parse", what])
             .current_dir(root)
             .output()
@@ -1795,7 +1795,7 @@ pub(crate) mod tests {
             v["left_to_service"],
             json!([{"tag": "ryupdm/p/A", "path": "releases/p/A.json"}])
         );
-        let tags = std::process::Command::new("git")
+        let tags = ryupdm::git_env::isolated()
             .args(["tag", "-l", "ryupdm/*"])
             .current_dir(root)
             .output()

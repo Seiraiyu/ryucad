@@ -124,6 +124,18 @@ pub struct Place {
     pub drawing: Option<String>,
 }
 
+impl Place {
+    /// The tree row it is (`core::tree`'s row ids), which the tree
+    /// scrolls to when the palette goes to it (#782).
+    pub fn row(&self) -> String {
+        match (&self.drawing, &self.feature) {
+            (Some(d), _) => format!("drawing:{}/{d}", self.part),
+            (None, Some(f)) => format!("feature:{}/{f}", self.part),
+            (None, None) => format!("part:{}", self.part),
+        }
+    }
+}
+
 /// Each part's PDM number and name, as far as the window knows them: the
 /// BOM tab's lines, once it has read one.
 pub fn pdm_names(bom: &crate::core::bom::BomTab) -> BTreeMap<String, String> {
@@ -240,6 +252,20 @@ mod tests {
                 .iter()
                 .any(|p| p.drawing.as_deref() == Some("d"))
         );
+    }
+
+    /// #782: each place names the tree row it is.
+    #[test]
+    fn a_place_names_its_tree_row() {
+        let place = |feature: Option<&str>, drawing: Option<&str>| Place {
+            label: String::new(),
+            part: "bracket".into(),
+            feature: feature.map(String::from),
+            drawing: drawing.map(String::from),
+        };
+        assert_eq!(place(None, None).row(), "part:bracket");
+        assert_eq!(place(Some("e1"), None).row(), "feature:bracket/e1");
+        assert_eq!(place(None, Some("d")).row(), "drawing:bracket/d");
     }
 
     #[test]

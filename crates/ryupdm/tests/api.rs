@@ -17,12 +17,11 @@ use ryupdm::state;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 
 const PROJECT: &str = "0123456789abcdef0123456789abcdef";
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ryupdm::git_env::isolated()
         .args([
             "-c",
             "user.name=Test",
@@ -549,7 +548,7 @@ fn attested_with(
     change: impl Fn(&mut ryupdm::attest::Attestation),
 ) -> String {
     use ryupdm::attest::*;
-    let out = Command::new("git")
+    let out = ryupdm::git_env::isolated()
         .args(["cat-file", "blob", &format!("{commit}:{rel}")])
         .current_dir(dir)
         .output()

@@ -1073,7 +1073,7 @@ pub(crate) mod tests {
     fn origin_and_branch_of_a_clone() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = ryupdm::git_env::isolated()
                 .args(args)
                 .current_dir(dir.path())
                 .output()
@@ -1104,7 +1104,7 @@ pub(crate) mod tests {
     /// the installers registered ryucad's drivers, or Git for Windows set
     /// `core.autocrlf`, tests would merge and check out otherwise.
     pub(crate) fn git_command() -> Command {
-        let mut git = Command::new("git");
+        let mut git = ryupdm::git_env::isolated();
         git.env(
             "GIT_CONFIG_GLOBAL",
             std::env::temp_dir().join("ryucad-no-gitconfig"),

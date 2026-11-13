@@ -775,13 +775,13 @@ mod tests {
         assert_eq!(v["approvals"], team);
         let file = std::fs::read_to_string(dir.path().join("ryupdm.json")).unwrap();
         assert_eq!(crate::doc::canonical::parse(&file).unwrap()["format"], 3);
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["init", "-q"])
             .current_dir(dir.path())
             .output()
             .unwrap();
         assert!(out.status.success());
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args([
                 "remote",
                 "add",

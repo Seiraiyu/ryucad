@@ -561,3 +561,61 @@ fn a_chosen_annotations_marks_go_when_another_part_is_shown() {
     assert!(ws.wait_until(WAIT, |ws| ws.model.focus.as_deref() == Some("p")));
     assert!(ws.view_marks().is_some());
 }
+
+/// #776: choosing an annotation made on a part that isn't shown shows
+/// that part, so its marks are drawn.
+#[test]
+fn choosing_an_annotation_on_another_part_shows_that_part() {
+    let p = Project::new().with_part();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&[
+        "feature", "add", "q", "box", "--id", "b", "--param", "x=5", "--param", "y=5", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "view",
+        "save",
+        "p",
+        "above",
+        "--eye",
+        "10,5,1000",
+        "--target",
+        "10,5,2.5",
+        "--up",
+        "0,1,0",
+        "--ortho",
+        "30 mm",
+    ]);
+    let stroke = r#"{"part": "p", "list": [{"kind": "stroke", "in": "face", "on": "p/base",
+        "points_m": [[0.012, 0.002, 0.005], [0.018, 0.006, 0.005]]}]}"#;
+    let a = p.ok(&[
+        "annotations",
+        "add",
+        "--comment",
+        "here",
+        "--model",
+        "p",
+        "--of",
+        "above",
+        "--marks",
+        stroke,
+    ]);
+    let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    ws.set_focus(Some("q".into()));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws.model.focus.as_deref() == Some("q")
+            && ws
+                .annotations
+                .all
+                .get(&id)
+                .is_some_and(|e| e.mark_count() == 1)
+    }));
+    ws.choose_annotation(Some(&id));
+    assert!(
+        ws.wait_until(WAIT, |ws| ws.model.focus.as_deref() == Some("p")),
+        "choosing it didn't show p"
+    );
+    assert!(ws.view_marks().is_some());
+}
