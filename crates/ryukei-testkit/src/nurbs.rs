@@ -286,3 +286,83 @@ pub fn isoline_wedge(angle: f64) -> Body {
     convert_where_with(&mut b, |_| true, false).expect("NURBS forms");
     b
 }
+
+/// Voron's molex body's case in small (#585, design 551): a prism 1 mm
+/// deep in y whose underside is a rational bicubic-by-linear spline with u
+/// knots `(0, 1, 1.01)` at multiplicities `(4, 3, 4)`. The curved span
+/// comes down from `(0, 1)` mm to `(1, 0)` mm, meeting z = 0 at an angle
+/// at u = 1, and the last span is flat on z = 0 from x = 1 to 1.3 mm. The
+/// second body is a block `[0.5, 2] × [−1.5, 0.5] × [−1, 0]` mm whose top
+/// the flat span lies on, facing it. Returns `(prism, block)`; only the
+/// prism's spline face is a spline.
+pub fn flat_span_twin() -> (Body, Body) {
+    use ryukei::geom::{Curve2, Frame, Line2, Rigid, Vector3};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    let mm = 1e-3;
+    // Profile x along world x, profile y along world z.
+    let frame = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .expect("a frame");
+    let xz = [
+        (0.0, 1.0),
+        (0.0, 0.5),
+        (0.6, 0.3),
+        (1.0, 0.0),
+        (1.1, 0.0),
+        (1.2, 0.0),
+        (1.3, 0.0),
+    ];
+    let knots = KnotVector::clamped(3, &[0.0, 1.0, 1.01], &[4, 3, 4]).expect("knots");
+    let spline = NurbsCurve2::new(
+        knots,
+        xz.iter()
+            .map(|&(x, z)| Point2::new(x * mm, z * mm))
+            .collect(),
+        Some(vec![1.0, 0.9, 0.9, 1.0, 1.0, 1.0, 1.0]),
+    )
+    .expect("the underside");
+    let p = |x: f64, z: f64| Point2::new(x * mm, z * mm);
+    let line = |key: u128, a: Point2, b: Point2| Segment {
+        key: SegmentKey(key),
+        curve: Curve2::Line2(Line2::through(a, b).expect("a side")),
+        t0: 0.0,
+        t1: a.distance(b),
+    };
+    let segments = vec![
+        Segment {
+            key: SegmentKey(30),
+            curve: Curve2::Nurbs2(Arc::new(spline)),
+            t0: 0.0,
+            t1: 1.01,
+        },
+        line(31, p(1.3, 0.0), p(1.3, 1.0)),
+        line(32, p(1.3, 1.0), p(0.0, 1.0)),
+    ];
+    let profile = ValidProfile::new(Profile {
+        frame,
+        loops: vec![Loop {
+            key: LoopKey(3),
+            segments,
+        }],
+    })
+    .expect("the prism's profile");
+    let (mut prism, _) =
+        extrude(OpKey(0x585), &profile, frame.z().get(), 0.0, mm).expect("the prism");
+    // The underside's exact spline form over its own parameters: the
+    // extrusion's NURBS form keeps the profile's knots along u.
+    convert_where_with(&mut prism, |s| !matches!(s, Surface::Plane(_)), false)
+        .expect("its NURBS form");
+    let block = ryukei::primitive::block(
+        OpKey(0x586),
+        1.5 * mm,
+        2.0 * mm,
+        mm,
+        &Rigid::translation(Vector3::new(0.5 * mm, -1.5 * mm, -mm)),
+    )
+    .expect("the block")
+    .0;
+    (prism, block)
+}

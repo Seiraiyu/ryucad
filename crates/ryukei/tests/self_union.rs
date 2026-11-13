@@ -348,3 +348,32 @@ fn glued_pieces_touching_along_an_edge_say_so() {
         other => panic!("{:?}", other.map(|x| x.0.counts())),
     }
 }
+
+/// The molex body's case (#585) in small: a prism whose underside is a
+/// rational bicubic-by-linear spline, knots (0, 1, 1.01), its last span
+/// flat on z = 0, standing on a block's top. Its spline face has the
+/// knots and the flat span the twin promises.
+#[test]
+fn the_flat_span_twin_is_what_it_says() {
+    let (prism, slab) = ryukei_testkit::nurbs::flat_span_twin();
+    assert_eq!(check(&prism), []);
+    assert_eq!(check(&slab), []);
+    let splines: Vec<_> = prism
+        .faces()
+        .filter_map(
+            |f| match prism.surface(prism.face(f).unwrap().surface).unwrap() {
+                Surface::Nurbs(n) => Some(n.clone()),
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(splines.len(), 1, "one spline face");
+    let n = &splines[0];
+    assert_eq!(n.knots()[0].knots(), [0.0, 1.0, 1.01]);
+    assert_eq!(n.knots()[0].mults(), [4, 3, 4]);
+    for i in 3..7 {
+        for j in 0..2 {
+            assert!(n.control_point(i, j).z.abs() <= 5e-9, "row {i}");
+        }
+    }
+}
