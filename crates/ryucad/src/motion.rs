@@ -420,7 +420,7 @@ fn path(session: &Session, part: &Id, motion: &Id) -> std::path::PathBuf {
 
 /// The assembly `part`, refusing a part (`wrong_part_kind`) and a stale
 /// revision.
-fn assembly(session: &Session, part: &str, expected: Option<&str>) -> Result<Id> {
+pub(crate) fn assembly(session: &Session, part: &str, expected: Option<&str>) -> Result<Id> {
     let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
     if crate::part::part_kind(p) != PartKind::Assembly {
@@ -431,7 +431,7 @@ fn assembly(session: &Session, part: &str, expected: Option<&str>) -> Result<Id>
 }
 
 /// A file's refusal as a request's: `invalid_param` at the same pointer.
-fn as_param(e: Error) -> Error {
+pub(crate) fn as_param(e: Error) -> Error {
     Error::new(Code::InvalidParam, e.message.clone()).with("pointer", e.details["pointer"].clone())
 }
 
@@ -844,7 +844,7 @@ pub struct Caches<'c> {
 }
 
 /// `assembly_unsolved` for a sweep from an assembly that doesn't hold.
-fn unsolved(asm: &Id) -> Error {
+pub(crate) fn unsolved(asm: &Id) -> Error {
     Error::new(
         Code::AssemblyUnsolved,
         format!("{asm}'s mates can't all hold: settle them before sweeping"),
@@ -854,7 +854,7 @@ fn unsolved(asm: &Id) -> Error {
 
 /// The value of each drive at `t`: a mate's by its ID, a move's as
 /// `drives/<i>`; angles in degrees, lengths in `unit`.
-fn values_at(drives: &[Drive], t: f64, unit: crate::units::Unit) -> Value {
+pub(crate) fn values_at(drives: &[Drive], t: f64, unit: crate::units::Unit) -> Value {
     let deg = |r: f64| r * (180.0 / core::f64::consts::PI);
     let len = |m: f64| json!(format!("{} {}", m / unit.factor(), unit.as_str()));
     let mut out = serde_json::Map::new();
@@ -912,7 +912,7 @@ fn occurrence_of(name: &str) -> &str {
 }
 
 /// A pair's two names.
-fn pair_key(v: &Value) -> (String, String) {
+pub(crate) fn pair_key(v: &Value) -> (String, String) {
     (
         v["a"].as_str().unwrap_or_default().to_owned(),
         v["b"].as_str().unwrap_or_default().to_owned(),
@@ -930,7 +930,7 @@ fn collision(i: &Value) -> Value {
 }
 
 /// Each moved instance's pose, as a file would hold it.
-fn poses_json(rest: &Rest, moved: &BTreeMap<u32, ryumate::Pose>) -> Value {
+pub(crate) fn poses_json(rest: &Rest, moved: &BTreeMap<u32, ryumate::Pose>) -> Value {
     let mut out = serde_json::Map::new();
     for (k, p) in moved {
         out.insert(

@@ -2191,6 +2191,27 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// Shows a motion in a participant's window (`participant`, else the
+    /// one human, else the caller): `motion` of `part` (else the window's
+    /// focus, else the project's model), `fraction` of the way through (0
+    /// for a new one; alone, it moves the one shown and pauses it), and
+    /// whether it plays; or none with `off`. A motion shown takes an
+    /// explode away.
+    #[serde(rename = "motion.show")]
+    MotionShow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fraction: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        playing: Option<bool>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     /// A participant's section planes: `participant`, else the one human,
     /// else the caller.
     #[serde(rename = "section.get")]
