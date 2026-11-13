@@ -167,6 +167,16 @@ pub(crate) fn mate(ui: &mut egui::Ui, m: &mut crate::core::edit::MateForm) -> Ke
         if distance {
             rows.quantity("distance (empty: free)", &mut m.distance);
         }
+        let (angle_stops, distance_stops) = m.takes_limits();
+        let [amin, amax, dmin, dmax] = &mut m.limits;
+        if angle_stops {
+            rows.quantity("angle min (empty: none)", amin);
+            rows.quantity("angle max (empty: none)", amax);
+        }
+        if distance_stops {
+            rows.quantity("distance min (empty: none)", dmin);
+            rows.quantity("distance max (empty: none)", dmax);
+        }
     });
     for (side, o) in [("a", &mut m.a), ("b", &mut m.b)] {
         ui.collapsing(format!("Offset of {side}"), |ui| {
