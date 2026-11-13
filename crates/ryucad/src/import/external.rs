@@ -85,13 +85,47 @@ pub fn candidates(x: &External, folder: &Path, search: &[PathBuf]) -> Vec<PathBu
     out
 }
 
-/// The file a document is: the first of [`candidates`] that is a file,
-/// else, in `folder` and then each of `search`, the one file whose name
-/// matches a file name of it ignoring ASCII case.
+/// Whether `p` is a file whose every named component is spelled as its
+/// folder holds it. A case-insensitive disk (macOS's, Windows') finds
+/// `PART1.STEP` for `Part1.step`; this doesn't, so a document resolves to
+/// the same path on every system (the ignoring-case pass then names the
+/// file as the disk does).
+fn exactly(p: &Path) -> bool {
+    use std::path::Component;
+    if !p.is_file() {
+        return false;
+    }
+    let mut at = PathBuf::new();
+    for c in p.components() {
+        if let Component::Normal(name) = c {
+            let dir = if at.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                at.as_path()
+            };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return false;
+            };
+            if !entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name() == name)
+            {
+                return false;
+            }
+        }
+        at.push(c);
+    }
+    true
+}
+
+/// The file a document is: the first of [`candidates`] that is a file
+/// spelled exactly as on disk, else, in `folder` and then each of
+/// `search`, the one file whose name matches a file name of it ignoring
+/// ASCII case.
 pub fn locate(x: &External, folder: &Path, search: &[PathBuf]) -> Option<PathBuf> {
     if let Some(p) = candidates(x, folder, search)
         .into_iter()
-        .find(|p| p.is_file())
+        .find(|p| exactly(p))
     {
         return Some(p);
     }
