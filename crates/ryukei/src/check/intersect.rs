@@ -598,8 +598,9 @@ fn crossing_beside(
 /// wider than `w`, then both faces' cones ([`normal_cones`]) over the box
 /// grown by `3 w + 2 tol` (which holds every `x` and the ball of radius `d`
 /// round it for every `p` within `w` of the piece). They must cross at
-/// `sin θ ≥ 4 K (w + tol)`. `None` where a piece fails that, a cone
-/// can't be had, more than [`CROSSING_PIECES`] pieces are needed, or the
+/// `sin θ ≥ 4 K (w + tol)`. `None` where a piece fails that, a piece is
+/// still wider than `w` after 20 halvings, a cone can't be had, more than
+/// [`CROSSING_PIECES`] pieces are needed, or the
 /// meter halts.
 fn crossing_pieces(
     body: &Body,
@@ -617,7 +618,13 @@ fn crossing_pieces(
         let mut stack = vec![(x.interval, 0u32)];
         while let Some((iv, depth)) = stack.pop() {
             let bx = curve.piece_bounds(iv);
-            if (bx.max() - bx.min()).length() > w && depth < 20 {
+            if (bx.max() - bx.min()).length() > w {
+                // A piece still wider than `w` after 20 halvings would
+                // break the bound the trace's cut boxes rely on (within
+                // `2 w` of the curve): withhold the certificate instead.
+                if depth >= 20 {
+                    return None;
+                }
                 let mid = (iv[0] + iv[1]) / 2.0;
                 stack.push(([iv[0], mid], depth + 1));
                 stack.push(([mid, iv[1]], depth + 1));
@@ -1396,6 +1403,7 @@ mod tests {
     /// so any angle above zero gives a strip.
     #[test]
     fn faces_crossing_at_an_edge_are_certified_beside_it() {
+        // unmetered: a test, its fixtures small and bounded
         let m = Meter::free();
         for deg in [90.0f64, 10.0] {
             let body = prism(deg * core::f64::consts::PI / 180.0);
@@ -1437,6 +1445,7 @@ mod tests {
     /// tol))`, and outside the strip the cap keeps off the cylinder.
     #[test]
     fn a_curved_face_crossing_at_an_edge_is_certified_beside_it() {
+        // unmetered: a test, its fixtures small and bounded
         let m = Meter::free();
         let k = OpKey(1);
         let body = loosened(
@@ -1472,6 +1481,7 @@ mod tests {
     /// pieces' boxes, which finds the crossing: `FacesCross`, never clean.
     #[test]
     fn a_crossing_outside_the_strip_is_traced() {
+        // unmetered: a test, its fixtures small and bounded
         let m = Meter::free();
         let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
         let body = loosened(
@@ -1527,6 +1537,7 @@ mod tests {
         };
         let a = named(0x03fb1a8c5bb71be1bd31f756f6eb7ec3);
         let b = named(0xa6571fb65f4e1ff5d03edcaaa985a9bd);
+        // unmetered: a test, its fixtures small and bounded
         let m = Meter::free();
         let v = shared_vertices(&body, a, b);
         assert_eq!(v.len(), 1);

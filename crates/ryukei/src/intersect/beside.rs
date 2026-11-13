@@ -1233,6 +1233,7 @@ mod cone_tests {
     /// least `1 / r`.
     #[test]
     fn normal_cones_hold_normals_and_bound_the_bend() {
+        // unmetered: a test, its fixtures small and bounded
         let m = Meter::free();
         let (block, _) = primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
         let top = block
@@ -1315,6 +1316,7 @@ mod tangency_tests {
     /// cylinder's ruling: flat. A spline's form isn't implicit: unsure.
     #[test]
     fn tangencies_are_told_apart() {
+        // unmetered: a test, its fixtures small and bounded
         let m = Meter::free();
         let up = Vector3::new(0.0, 0.0, 1.0);
         let x = Vector3::new(1.0, 0.0, 0.0);
