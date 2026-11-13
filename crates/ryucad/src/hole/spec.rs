@@ -1343,6 +1343,9 @@ pub fn thread_line(t: &Value) -> Option<String> {
     let mut line = crate::hole::derive::designation(standard, size, pitch, class.as_deref(), left);
     line.push_str(", ");
     line.push_str(t.get("depth").and_then(Value::as_str).unwrap_or("full"));
+    if t.get("wall").and_then(Value::as_str) == Some("taper") {
+        line.push_str(", taper");
+    }
     match t.get("drill") {
         Some(Value::String(s)) if s == "roll_form" => line.push_str(", roll form"),
         Some(d) => {

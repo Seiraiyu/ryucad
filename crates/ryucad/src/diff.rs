@@ -575,13 +575,15 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
-        // A hole's thread and fastener are a line each, as a spec says
-        // them.
+        // A hole's thread, fastener, near chamfer and far side are a line
+        // each, as a spec says them.
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("hole") => {
             type Line = fn(&Value) -> Option<String>;
-            let each: [(&str, Line); 2] = [
+            let each: [(&str, Line); 4] = [
                 ("thread", crate::hole::spec::thread_line),
                 ("fastener", crate::hole::spec::fastener_line),
+                ("near", crate::hole::spec::near_line),
+                ("far", crate::hole::spec::far_line),
             ];
             for (key, line) in each {
                 if let Some(x) = rest.remove(key) {
@@ -5648,5 +5650,24 @@ mod tests {
         assert_eq!(change["at"], "/rev/label", "{v}");
         assert_eq!((&change["from"], &change["to"]), (&json!("A"), &json!("B")));
         assert!(p["solids"].get("pcb/board").is_some(), "{v}");
+    }
+
+    #[test]
+    fn a_holes_near_and_far_are_a_line_each() {
+        let t = text(
+            json!({"format": 24, "kind": "ryucad.feature", "type": "hole",
+            "sketch": "s", "form": "simple", "diameter": "5 mm", "depth": "through_all",
+            "targets": ["b"], "near": {"diameter": "7 mm", "angle": "120 deg"},
+            "far": {"countersink": {"diameter": "8 mm", "angle": "90 deg"}}}),
+        );
+        assert!(t.contains("\nnear = 7 mm, 120 deg\n"), "{t}");
+        assert!(t.contains("\nfar = countersink 8 mm, 90 deg\n"), "{t}");
+        // A tapered wall is part of the thread's line.
+        let t = text(
+            json!({"format": 24, "kind": "ryucad.feature", "type": "hole",
+            "sketch": "s", "form": "simple", "depth": {"blind": "12 mm"}, "targets": ["b"],
+            "thread": {"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"}}),
+        );
+        assert!(t.contains(", 8 mm, taper\n"), "{t}");
     }
 }
