@@ -1410,7 +1410,7 @@ pub fn sweep_request(session: &mut Session, ask: SweepAsk) -> Result<Value> {
     if let Some(v) = session.caches_mut().sweeps_mut().get(&key) {
         return Ok((*v).clone());
     }
-    let job = session.job.clone();
+    let job = session.job().clone();
     let input = Input {
         asm: &pid,
         part: &part,

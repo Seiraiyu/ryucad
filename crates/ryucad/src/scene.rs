@@ -68,7 +68,7 @@ pub fn meshes(
             Some((&features[f], b))
         })
         .collect();
-    let job = session.job.clone();
+    let job = session.job().clone();
     let mut made = session
         .caches_mut()
         .meshes_mut()
@@ -124,7 +124,7 @@ pub fn mesh_before(
         .with("before", reader));
     };
     let b = b.as_ref().clone();
-    let job = session.job.clone();
+    let job = session.job().clone();
     let mesh = session
         .caches_mut()
         .meshes_mut()
@@ -262,7 +262,7 @@ pub fn occurrence_meshes(
         .iter()
         .map(|s| (s.feature.as_ref(), s.built.as_ref()))
         .collect();
-    let job = session.job.clone();
+    let job = session.job().clone();
     session
         .caches_mut()
         .meshes_mut()

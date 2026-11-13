@@ -54,25 +54,25 @@ pub struct Session {
     /// Each part's rebuild, and its results by feature keyed by their
     /// inputs' hash, so a rebuild reuses every feature whose inputs haven't
     /// changed; the same for parts read at release labels.
-    pub(crate) store: Store,
+    store: Store,
     /// Parts as release labels have them, loaded from the commit where
     /// each record became official, by part and commit.
     pinned_parts: BTreeMap<(Id, String), Part>,
     /// The dependency cache this session reads other projects' releases
     /// from: `None` until first asked for, then [`crate::deps::cache`]'s
     /// (tests give one of their own).
-    pub(crate) deps_cache: Option<ryupdm::deps::Cache>,
+    deps_cache: Option<ryupdm::deps::Cache>,
     /// A reader over it, keeping its repositories open and each release
     /// branch read once per tip.
     deps_reader: Option<ryupdm::deps::read::Reader>,
     /// Fetches the daemon made without its lock for the request it is
     /// answering ([`crate::deps::prepare`]), taken by that request.
-    pub(crate) prefetched: crate::deps::Prefetched,
+    prefetched: crate::deps::Prefetched,
     /// Other projects' labels as resolved, by project, part and label,
     /// each with the lock entry it was resolved from: read again when that
     /// entry changes or a fetch moves the cache.
     #[allow(clippy::type_complexity)]
-    pub(crate) foreign_pins: BTreeMap<
+    foreign_pins: BTreeMap<
         (crate::doc::id::ProjectId, Id, String),
         (String, Result<crate::assembly::Pinned>),
     >,
@@ -82,7 +82,7 @@ pub struct Session {
     /// gone can still say what it named.
     known: BTreeMap<(Id, Id), BTreeMap<ryukei::name::Name, Known>>,
     /// What the session keeps only to answer faster (see [`Caches`]).
-    pub caches: Caches,
+    caches: Caches,
     /// A revision's session: its files never change, and it never reads
     /// the disk.
     frozen: bool,
@@ -107,13 +107,13 @@ pub struct Session {
     /// The request being answered's progress and cancel (design 199): no
     /// job between requests. A revision's session takes its owner's when
     /// a request names it ([`Session::at`]).
-    pub job: Job,
+    job: Job,
     /// The work units each imported body may heal in: the user's
     /// `heal.budget`, read when the session opens and before each request.
-    pub heal_budget: u64,
+    heal_budget: u64,
     /// The work units each direct edit may spend: the user's
     /// `edit.budget`, read when the session opens and before each request.
-    pub edit_budget: u64,
+    edit_budget: u64,
     /// What the budget last counted the session holding besides parts'
     /// rebuilds, by what it was counted from (the epoch, the names learnt,
     /// the models and verdicts kept, the files kept open): counted again
@@ -880,6 +880,66 @@ impl Session {
     /// [`Session::caches`], to fill or let go of.
     pub fn caches_mut(&mut self) -> &mut Caches {
         &mut self.caches
+    }
+
+    /// The request being answered's progress and cancel (no job between
+    /// requests).
+    pub fn job(&self) -> &Job {
+        &self.job
+    }
+
+    /// Takes `job` for the request about to be answered, and
+    /// `Job::default()` after it.
+    pub fn set_job(&mut self, job: Job) {
+        self.job = job;
+    }
+
+    /// The work units each imported body may heal in.
+    pub fn heal_budget(&self) -> u64 {
+        self.heal_budget
+    }
+
+    /// The work units each direct edit may spend.
+    pub fn edit_budget(&self) -> u64 {
+        self.edit_budget
+    }
+
+    /// Each part's rebuild and its results, as the session holds them.
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Keeps `part`'s holes beside the rebuild of `hash` they were found
+    /// in (see [`crate::holes::list`]).
+    pub(crate) fn put_holes(&mut self, part: Id, hash: String, holes: Arc<crate::holes::Holes>) {
+        self.store.holes.insert(part, (hash, holes));
+    }
+
+    /// Fetches made for the request being answered, to take.
+    pub(crate) fn prefetched_mut(&mut self) -> &mut crate::deps::Prefetched {
+        &mut self.prefetched
+    }
+
+    /// Other projects' labels as resolved (see the field).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn foreign_pins_mut(
+        &mut self,
+    ) -> &mut BTreeMap<
+        (crate::doc::id::ProjectId, Id, String),
+        (String, Result<crate::assembly::Pinned>),
+    > {
+        &mut self.foreign_pins
+    }
+
+    /// The dependency cache this session reads, if it has one yet.
+    pub(crate) fn held_deps_cache(&self) -> Option<ryupdm::deps::Cache> {
+        self.deps_cache.clone()
+    }
+
+    /// The dependency cache's slot, for tests that give one of their own.
+    #[cfg(test)]
+    pub(crate) fn deps_cache_slot(&mut self) -> &mut Option<ryupdm::deps::Cache> {
+        &mut self.deps_cache
     }
 
     /// Each assembly's (and each part inserting another's) key for

@@ -1243,7 +1243,7 @@ fn project(
             })
         })
         .collect();
-    let job = session.job.clone();
+    let job = session.job().clone();
     let stage = job.begin(ryu_session::job::Phase::Project, "views", plans.len());
     use rayon::prelude::*;
     let made: Vec<Option<std::result::Result<Projection, ryukei::Error>>> = plans

@@ -338,7 +338,7 @@ pub fn frames(session: &mut Session, ask: FramesAsk) -> Result<Value> {
     if let Some(v) = session.caches_mut().sweeps_mut().get(&key) {
         return Ok((*v).clone());
     }
-    let job = session.job.clone();
+    let job = session.job().clone();
     let ts: Vec<f64> = (0..n as usize)
         .map(|k| crate::motion::t_of(k, n as usize))
         .collect();
@@ -407,7 +407,7 @@ pub fn drawn(
     }
     let resolved = crate::motion::resolve(asm, &part, &rest, motion, &file)?;
     let model = session.model(asm, &Rev::Working)?;
-    let job = session.job.clone();
+    let job = session.job().clone();
     let steps = crate::motion::steps(
         &rest.asm,
         &resolved.drives,

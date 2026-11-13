@@ -107,12 +107,8 @@ pub(crate) fn doctor_repair(
     params: Map<String, Value>,
 ) -> Result<Value> {
     let params = crate::doctor::Params::from_json(&params)?;
-    let r = crate::doctor::repair_with(
-        session.root(),
-        &repairs,
-        &params,
-        session.deps_cache.clone(),
-    )?;
+    let r =
+        crate::doctor::repair_with(session.root(), &repairs, &params, session.held_deps_cache())?;
     session.reload()?;
     Ok(r)
 }

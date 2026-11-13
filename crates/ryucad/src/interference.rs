@@ -642,7 +642,7 @@ pub fn run(
     let only = instance_paths(&pid, instances)?;
     let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
     let revision = session.project().part(&pid)?.revision.clone();
-    let job = session.job.clone();
+    let job = session.job().clone();
     let mut v = find_for(
         &pid,
         &model,

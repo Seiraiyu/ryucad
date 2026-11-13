@@ -846,7 +846,7 @@ mod tests {
         use crate::deps::tests::{depend, place_foreign, write_lock};
         let (dir, mut s) = crate::assembly::tests::project();
         let root = dir.path();
-        s.deps_cache = Some(ryupdm::deps::Cache::new(root.join("cache")));
+        *s.deps_cache_slot() = Some(ryupdm::deps::Cache::new(root.join("cache")));
         call(
             &mut s,
             "part.create",
@@ -856,7 +856,7 @@ mod tests {
         depend(&mut s, lib, lib_dir);
         place_foreign(root, "asm", "b", lib, "p", "A");
         s.refresh().unwrap();
-        s.deps_cache
+        s.deps_cache_slot()
             .clone()
             .unwrap()
             .fetch(&crate::deps::tests::url(lib_dir), &[""])
@@ -873,7 +873,7 @@ mod tests {
         let mut s = Session::open(lib_dir.path()).unwrap();
         // Fetched by the products into their own caches; the library reads
         // its own parts from its own history, with an empty cache.
-        s.deps_cache = Some(ryupdm::deps::Cache::new(lib_dir.path().join("cache")));
+        *s.deps_cache_slot() = Some(ryupdm::deps::Cache::new(lib_dir.path().join("cache")));
         let parent = one.path().parent().unwrap().to_path_buf();
         let within = vec![
             one.path().display().to_string(),
@@ -1025,7 +1025,7 @@ mod tests {
         let (lib_dir, lib) = crate::deps::tests::library();
         let dir = product(lib_dir.path(), &lib);
         let mut s = Session::open(dir.path()).unwrap();
-        s.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        *s.deps_cache_slot() = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
         call(&mut s, "bom.get", json!({"part": "asm"})).unwrap();
         let own = |s: &Session| {
             s.caches()

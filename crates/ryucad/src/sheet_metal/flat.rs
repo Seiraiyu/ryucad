@@ -288,9 +288,9 @@ pub fn of(
                 overrides,
             };
             let key = crate::rebuild::op_key(&pid, &solid);
-            s.job.check()?;
+            s.job().check()?;
             let u = ryukei::sheet_metal::unfold(key, &built.body, &model, &spec).map_err(kernel)?;
-            s.job.check()?;
+            s.job().check()?;
             let body = crate::rebuild::finish(
                 &solid,
                 "flat",

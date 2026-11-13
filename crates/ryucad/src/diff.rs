@@ -2995,7 +2995,7 @@ pub(crate) fn diff(
     v["from"] = a;
     v["to"] = b;
     if model {
-        let job = session.job.clone();
+        let job = session.job().clone();
         let stage = job.begin(Phase::Rebuild, "revisions", 2);
         stage.step(|| from.to_owned())?;
         let from = rebuilt_at(session, from)?;

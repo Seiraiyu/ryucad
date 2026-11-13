@@ -710,13 +710,13 @@ pub fn handle_job_raw(
 ) -> Result<Answer> {
     let watch = live.is_some();
     guarded(slot, root, watch, |s| {
-        s.job = job.clone();
+        s.set_job(job.clone());
         // A `config set heal.budget` or `edit.budget` in another process
         // reaches this session at its next request.
         s.set_heal_budget(crate::session::heal_budget());
         s.set_edit_budget(crate::session::edit_budget());
         let a = answer_live(s, live, me, req);
-        s.job = Job::default();
+        s.set_job(Job::default());
         // A write a cancel came too late for says so, as a daemon's does.
         // A failure written as text is a failure, which settling leaves.
         let a = match a {
@@ -758,7 +758,7 @@ pub fn prepare_job(
     {
         return Some(Box::new(move || {
             let got = fetch();
-            Box::new(move |s: &mut Session| s.prefetched = got)
+            Box::new(move |s: &mut Session| *s.prefetched_mut() = got)
         }));
     }
     let Request::MeshGet {

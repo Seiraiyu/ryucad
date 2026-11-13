@@ -1394,7 +1394,7 @@ fn compute(session: &mut Session) -> Result<Value> {
     let staged = repo.unstaged(&working)?;
     let untracked = repo.untracked(&working)?;
     // Four rebuilds: each side, then the merge.
-    let job = session.job.clone();
+    let job = session.job().clone();
     let stage = job.begin(Phase::Rebuild, "revisions", 4);
     stage.step(|| "ours".into())?;
     let ours = side(session, Some(&state.ours))?;

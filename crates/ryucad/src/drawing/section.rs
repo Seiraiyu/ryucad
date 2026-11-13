@@ -519,7 +519,7 @@ pub(super) fn cut_all(session: &mut Session, plans: &mut [(super::Plan, Source)]
             })
         })
         .collect();
-    let job = session.job.clone();
+    let job = session.job().clone();
     let stage = job.begin(ryu_session::job::Phase::Project, "sections", jobs.len());
     use rayon::prelude::*;
     let made: Vec<Option<Made>> = jobs

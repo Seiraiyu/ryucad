@@ -354,7 +354,7 @@ pub fn get(
         .transpose()?
         .unwrap_or(ryukei::tweak::DEFAULT_TOLERANCE);
     let below = below.map(|t| length(t, "below")).transpose()?;
-    let job = s.job.clone();
+    let job = s.job().clone();
     let at = format!("{pid}/{solid}");
     let rec = s
         .caches_mut()
