@@ -5496,6 +5496,7 @@ fn request(cmd: &Command) -> Option<Request> {
             }),
             rev: rev.rev.clone(),
             flat: flat.clone(),
+            before: None,
         },
         Command::History { part, limit } => Request::HistoryLog {
             part: part.clone(),

@@ -388,6 +388,74 @@ pub(crate) fn mesh_binary(
     Ok(Answer::bytes(result, encoding, b))
 }
 
+/// `mesh.get` with `before`: solid `feature` as feature `before` of the
+/// part read it, shown or not (a delete's ghost, ryucad 25.B), with the
+/// part's ID and the quality it was meshed at.
+fn mesh_before(
+    session: &mut Session,
+    part: &str,
+    solid: Option<&str>,
+    reader: &str,
+    quality: Option<&str>,
+) -> Result<(Id, Id, mesh::Quality, mesh::Meshed)> {
+    let Some(solid) = solid else {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "before names the feature that read the solid named by feature",
+        )
+        .with("param", "feature"));
+    };
+    if is_assembly(session, part) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "before is a part's: an assembly's features don't read solids",
+        )
+        .with("param", "before"));
+    }
+    let (pid, solid, quality) = mesh_args(part, Some(solid), quality)?;
+    let solid = solid.expect("given");
+    let reader = feature_id(reader).map_err(|e| e.with("param", "before"))?;
+    let m = crate::scene::mesh_before(session, &pid, &solid, &reader, quality)?;
+    Ok((pid, solid, quality, m))
+}
+
+/// `mesh_before` answered as JSON.
+fn mesh_before_json(
+    session: &mut Session,
+    part: &str,
+    solid: Option<&str>,
+    reader: &str,
+    quality: Option<&str>,
+) -> Result<Value> {
+    let (pid, solid, quality, m) = mesh_before(session, part, solid, reader, quality)?;
+    let mut body = mesh::to_json(&m.body, &m.mesh);
+    body["feature"] = json!(solid);
+    body["hash"] = json!(m.hash);
+    let mut v = json!({"part": pid, "quality": quality.as_str(), "bodies": [body]});
+    with_warnings(&mut v, m.warning.into_iter().collect());
+    Ok(v)
+}
+
+/// `mesh_before` answered as bytes: `ryucad.mesh.1`, or `.2` compact.
+pub(crate) fn mesh_before_binary(
+    session: &mut Session,
+    part: &str,
+    solid: Option<&str>,
+    reader: &str,
+    quality: Option<&str>,
+    compact: bool,
+) -> Result<Answer> {
+    let (pid, solid, quality, m) = mesh_before(session, part, solid, reader, quality)?;
+    let bodies = [(solid, Ok(m))];
+    let mut result = json!({"part": pid, "quality": quality.as_str()});
+    with_warnings(&mut result, mesh_warnings(&bodies));
+    let (encoding, b) = match compact {
+        true => (mesh::COMPACT, mesh::encode_compact(&bodies)),
+        false => (mesh::ENCODING, mesh::encode(&bodies)),
+    };
+    Ok(Answer::bytes(result, encoding, b))
+}
+
 pub(crate) fn mesh_get(
     session: &mut Session,
     part: &str,
@@ -1159,8 +1227,15 @@ pub(crate) fn mesh_get_request(
     features: Vec<String>,
     quality: Option<String>,
     rev: Option<String>,
+    before: Option<String>,
 ) -> Result<Value> {
     let (commit, s) = session.at(rev.as_deref())?;
+    if let Some(reader) = before {
+        return versioned(noted(
+            mesh_before_json(s, &part, feature.as_deref(), &reader, quality.as_deref()),
+            commit,
+        ));
+    }
     let only = wanted(feature.as_deref(), &features);
     versioned(noted(
         mesh_get(s, &part, only.as_ref(), quality.as_deref()),

@@ -560,6 +560,20 @@ impl PartResult {
             .and_then(|(_, r)| r.as_ref().ok())
     }
 
+    /// The state solid `key` had as `reader` read it: the last feature of
+    /// its chain listed before `reader` that built it, with its body.
+    /// `None` when nothing of it built before `reader`. A deleted or
+    /// consumed solid still has one: what its deleter or consumer read.
+    pub fn read_by(&self, solids: &Solids, key: &Id, reader: &Id) -> Option<(Id, Arc<Built>)> {
+        let chain = solids.chain(key)?;
+        let last = solids.view(key, reader)?;
+        let upto = chain.iter().position(|f| f == last)?;
+        chain[..=upto].iter().rev().find_map(|f| {
+            let (_, b) = self.output(f)?.solids().iter().find(|(s, _)| s == key)?;
+            Some((f.clone(), Arc::clone(b)))
+        })
+    }
+
     /// `sketch_stale` for each sketch rebuilt from positions solved in
     /// memory, each insert's (`insert_source_failed`, `insert_obsolete`),
     /// `instance_obsolete` for each instance of an obsolete

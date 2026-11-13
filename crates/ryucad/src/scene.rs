@@ -91,6 +91,53 @@ pub fn meshes(
         .collect())
 }
 
+/// Solid `solid` of `part` as feature `reader` read it, meshed: the last
+/// state its chain built before `reader`, shown or not (a deleted solid's
+/// ghost, ryucad 25.B).
+pub fn mesh_before(
+    session: &mut Session,
+    part: &Id,
+    solid: &Id,
+    reader: &Id,
+    quality: mesh::Quality,
+) -> Result<mesh::Meshed> {
+    let p = session.project().part(part)?;
+    feature(p, reader)?;
+    let solids = Solids::of(p);
+    if !solids.is_solid(solid) {
+        return Err(rebuild::not_a_solid(p, &solids, solid, "feature", solid));
+    }
+    let features: BTreeMap<Id, Feature> = p
+        .features
+        .iter()
+        .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
+        .collect();
+    let result = session.rebuilt(part)?;
+    let Some((f, b)) = result.read_by(&solids, solid, reader) else {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("{reader} reads no {solid} of {part}: nothing of it built before {reader}"),
+        )
+        .with("part", part)
+        .with("feature", solid)
+        .with("before", reader));
+    };
+    let b = b.as_ref().clone();
+    let job = session.job.clone();
+    let mesh = session
+        .meshes
+        .get_all_for(&[(&features[&f], &b)], quality, mesh_budget(), &job)?
+        .pop()
+        .expect("one mesh for one body");
+    let warning = mesh::unmeshed_warning(part, solid, &b, &mesh);
+    Ok(mesh::Meshed {
+        body: b.body,
+        hash: b.hash,
+        mesh,
+        warning,
+    })
+}
+
 /// The points of the given entities, or of the whole model when there
 /// are none, from coarse display meshes: what a camera frames.
 pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f64; 3]>> {

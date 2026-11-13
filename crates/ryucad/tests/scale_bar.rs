@@ -160,6 +160,7 @@ fn window_open(root: &Path) -> (f64, f64, usize, usize) {
             transfer: Some(Transfer::Compact),
             rev: None,
             flat: None,
+            before: None,
         };
         bytes += conn
             .call_answer(&req)

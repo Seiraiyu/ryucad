@@ -818,6 +818,7 @@ pub(crate) fn dispatch(
             transfer: _,
             rev,
             flat: Some(solid),
+            before: _,
         } => view::mesh_get_flat(session, part, feature, features, quality, rev, solid),
         Request::MeshGet {
             part,
@@ -827,7 +828,8 @@ pub(crate) fn dispatch(
             transfer: _,
             rev,
             flat: None,
-        } => view::mesh_get_request(session, part, feature, features, quality, rev),
+            before,
+        } => view::mesh_get_request(session, part, feature, features, quality, rev, before),
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
