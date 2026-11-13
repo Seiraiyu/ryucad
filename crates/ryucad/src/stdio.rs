@@ -205,6 +205,76 @@ impl Frame {
     }
 }
 
+/// What the session's Ctrl+C does. The first cancels the running
+/// request if it is long (another finishes), and the session ends once
+/// that request has its answer. With nothing running, or the second
+/// time, the process exits at once.
+#[derive(Default)]
+pub struct Stop {
+    fired: AtomicU8,
+    running: Mutex<Option<Running>>,
+}
+
+/// The request being answered, as a Ctrl+C cancels it.
+pub enum Running {
+    /// A long request through the daemon: `request.cancel` of its token
+    /// as the agent `name`, on a connection of its own, as the CLI's.
+    Daemon {
+        root: PathBuf,
+        name: Option<String>,
+        token: String,
+    },
+    /// A long request in this process: its job's flag.
+    Local(Arc<AtomicBool>),
+    /// Any other request: it finishes.
+    Plain,
+}
+
+/// What a Ctrl+C leaves to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Fired {
+    /// Exit now.
+    Exit,
+    /// End the session once the running request has its answer.
+    AfterAnswer,
+}
+
+impl Stop {
+    /// A request starts being answered.
+    pub fn begin(&self, r: Running) {
+        *lock(&self.running) = Some(r);
+    }
+
+    /// The request has its answer.
+    pub fn end(&self) {
+        lock(&self.running).take();
+    }
+
+    /// Whether a Ctrl+C came: the session ends after the answer it is
+    /// writing.
+    pub fn stopping(&self) -> bool {
+        self.fired.load(Ordering::SeqCst) > 0
+    }
+
+    /// A Ctrl+C.
+    pub fn fire(&self) -> Fired {
+        if self.fired.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Fired::Exit;
+        }
+        let Some(running) = lock(&self.running).take() else {
+            return Fired::Exit;
+        };
+        match running {
+            // Nothing to cancel if it finished meanwhile; the answer says.
+            Running::Daemon { root, name, token } => {
+                let _ = client::cancel(&root, name.as_deref(), &token);
+            }
+            Running::Local(flag) => flag.store(true, Ordering::SeqCst),
+            Running::Plain => {}
+        }
+        Fired::AfterAnswer
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -325,5 +395,34 @@ mod tests {
         want.extend(rpc_response(json!(3), &Err(Error::new(Code::Usage, "no"))).as_bytes());
         want.push(b'\n');
         assert_eq!(*lock(&out), want);
+    }
+
+    #[test]
+    fn ctrl_c_exits_when_idle_and_the_second_time() {
+        let s = Stop::default();
+        assert_eq!(s.fire(), Fired::Exit);
+        let s = Stop::default();
+        s.begin(Running::Plain);
+        assert_eq!(s.fire(), Fired::AfterAnswer);
+        assert!(s.stopping());
+        assert_eq!(s.fire(), Fired::Exit);
+    }
+
+    #[test]
+    fn ctrl_c_sets_a_local_requests_flag() {
+        let s = Stop::default();
+        let flag = crate::cancel::local_flag();
+        s.begin(Running::Local(Arc::clone(&flag)));
+        assert_eq!(s.fire(), Fired::AfterAnswer);
+        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn ctrl_c_after_an_answer_finds_nothing_running() {
+        let s = Stop::default();
+        s.begin(Running::Plain);
+        s.end();
+        assert!(!s.stopping());
+        assert_eq!(s.fire(), Fired::Exit);
     }
 }
