@@ -301,7 +301,6 @@ fn part(f: Feature, reference: bool, placed: bool) -> Part {
         parameters: None,
         env: project().clone(),
         project_reads: Default::default(),
-        hole_standards: None,
         features,
         uses: BTreeMap::new(),
         explode_uses: Default::default(),
