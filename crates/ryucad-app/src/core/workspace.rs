@@ -579,6 +579,9 @@ pub struct Workspace {
     /// A camera normal to a face, come from the daemon, for the view to
     /// turn to.
     pub looked: Option<Camera>,
+    /// A chosen annotation's camera waiting for its part (#776): shown
+    /// first, the part is framed, then the view turns to this.
+    pub looked_on: Option<(String, Camera)>,
     /// What the window shows changed (View > Show, or an agent's
     /// `ryucad focus`): the view frames it again, as it frames the first
     /// view (issue #211).
@@ -741,6 +744,7 @@ impl Workspace {
             sections: Default::default(),
             explodes: Default::default(),
             looked: None,
+            looked_on: None,
             refocused: false,
             appearance: Default::default(),
             looks_read: BTreeMap::new(),
@@ -2518,6 +2522,7 @@ impl Workspace {
     /// stops that compare.
     pub fn choose_annotation(&mut self, id: Option<&str>) {
         self.chosen_annotation = id.map(str::to_owned);
+        self.looked_on = None;
         let entry = id.and_then(|i| self.annotations.all.get(i)).cloned();
         let comparing_one = self
             .compare
@@ -2525,8 +2530,23 @@ impl Workspace {
             .is_some_and(|c| c.rev.starts_with(ryucad::session::ANNOTATION));
         match entry {
             Some(e) => {
-                if let Some(c) = e.view {
-                    self.looked = Some(c);
+                // Made on a part not shown: show it first, as the palette
+                // does a feature's (#737), and its camera waits for it,
+                // else its marks aren't drawn (#730) and its view frames
+                // another part (#776).
+                let away = e
+                    .part()
+                    .filter(|p| {
+                        !self.model.shown().contains(p) && self.model.listed.contains_key(*p)
+                    })
+                    .map(str::to_owned);
+                match (away, e.view) {
+                    (Some(part), view) => {
+                        self.set_focus(Some(part.clone()));
+                        self.looked_on = view.map(|c| (part, c));
+                    }
+                    (None, Some(c)) => self.looked = Some(c),
+                    (None, None) => {}
                 }
                 match e.change {
                     Some(_) => {

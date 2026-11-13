@@ -6285,6 +6285,62 @@ fn the_palette_shows_the_part_of_a_feature_it_goes_to() {
     );
 }
 
+/// #776: choosing an annotation made on a part that isn't shown shows
+/// that part, then turns to the annotation's view (straight down here)
+/// and draws its marks.
+#[test]
+fn choosing_an_annotation_on_another_part_shows_it_from_its_view() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&[
+        "feature", "add", "q", "box", "--id", "b", "--param", "x=5", "--param", "y=5", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "view", "save", "p", "above", "--eye", "10,5,1000", "--target", "10,5,2.5", "--up",
+        "0,1,0", "--ortho", "30 mm",
+    ]);
+    let stroke = r#"{"part": "p", "list": [{"kind": "stroke", "in": "face", "on": "p/base",
+        "points_m": [[0.012, 0.002, 0.005], [0.018, 0.006, 0.005]]}]}"#;
+    p.ok(&[
+        "annotations", "add", "--comment", "here", "--model", "p", "--of", "above", "--marks",
+        stroke,
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle() && a.opened().ws.annotations.loaded);
+    p.ok(&["focus", "q"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("q")
+    });
+    menu(&mut h, "Tools", "Annotations");
+    h.run_steps(2);
+    let e = h.state().opened().ws.annotations.all.values().next().unwrap().clone();
+    let row = e.spoken(Some(1));
+    shown(&mut h, &row);
+    h.get_by_label(&row).click();
+    // Looking straight down: the saved view's direction.
+    let from_above = |a: &App| {
+        let c = &a.opened().view.nav.camera;
+        let d = [0, 1, 2].map(|k| c.eye[k] - c.target[k]);
+        d[2] > 0.0 && d[0].abs() < 1e-3 * d[2] && d[1].abs() < 1e-3 * d[2]
+    };
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle()
+            && o.ws.model.focus.as_deref() == Some("p")
+            && o.ws.view_marks().is_some()
+            && !o.view.nav.moving()
+            && from_above(a)
+    });
+    // Nothing frames it again after.
+    h.run_steps(10);
+    assert!(from_above(h.state()), "re-framed: {:?}", h.state().opened().view.nav.camera);
+}
+
 /// #782: choosing a row from the palette scrolls the tree to it.
 #[test]
 fn the_palette_scrolls_the_tree_to_what_it_goes_to() {

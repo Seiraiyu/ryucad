@@ -1496,6 +1496,16 @@ impl View {
             }
             self.framed = ws.idle();
         }
+        // A chosen annotation's view, once the part it was made on is
+        // shown and framed (#776): turned to on the next frame.
+        if self.framed
+            && ws
+                .looked_on
+                .as_ref()
+                .is_some_and(|(p, _)| ws.model.shown().contains(&p.as_str()))
+        {
+            ws.looked = ws.looked_on.take().map(|(_, c)| c);
+        }
         // Following, the window shows the other's camera, and shares it as
         // its own: what it shows.
         if let Some(c) = ws.followed_camera()
