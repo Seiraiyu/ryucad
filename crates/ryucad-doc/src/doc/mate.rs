@@ -10,7 +10,7 @@
 //! face, edge or vertex of a solid of the part at the end of the path, by
 //! its founder and stable name, or the part's own frame, and an offset in
 //! the frame's own axes. Which of the six kinds a mate is, and which of
-//! the two an instance pattern is, is its `form` (a feature file's `kind`
+//! the four an instance pattern is, is its `form` (a feature file's `kind`
 //! is its header).
 
 use super::files::{Obj, invalid};
@@ -569,6 +569,87 @@ pub struct Way {
     pub reverse: bool,
 }
 
+/// The feature format of an instance pattern that follows a part's
+/// pattern, hole or sketch (ryucad 25.C, design 521). Linear and
+/// circular patterns stay at 4.
+pub const DRIVEN_FORMAT: u64 = 24;
+
+/// Where a following pattern's places are: feature `feature` of the part
+/// at the end of `instance`, a path from this assembly down. No step is
+/// a copy: places move with an instance.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Driver {
+    pub instance: Vec<Id>,
+    pub feature: Id,
+}
+
+impl Driver {
+    pub fn to_json(&self) -> Value {
+        json!({"instance": self.instance, "feature": self.feature})
+    }
+
+    fn from_json(v: &Value, at: &str) -> Result<Driver> {
+        let mut o = Obj::new(v, at)?;
+        let here = format!("{at}/instance");
+        let path = o.take("instance")?;
+        let path = path
+            .as_array()
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| invalid(&here, "an instance path is a list of instance IDs"))?;
+        let mut instance = Vec::with_capacity(path.len());
+        for (i, s) in path.iter().enumerate() {
+            let w = format!("{here}/{i}");
+            let s = s
+                .as_str()
+                .ok_or_else(|| invalid(&w, "an instance path's steps are strings"))?;
+            match parse_step(s, &w)? {
+                (id, None) => instance.push(id),
+                (_, Some(_)) => {
+                    return Err(invalid(
+                        &w,
+                        "places move with an instance, never with a pattern's copy",
+                    ));
+                }
+            }
+        }
+        let w = format!("{at}/feature");
+        let feature = o.take("feature")?;
+        let feature = feature
+            .as_str()
+            .ok_or_else(|| invalid(&w, "a feature's ID"))?;
+        let feature = Id::parse(feature, "feature").map_err(|e| e.with("pointer", &w))?;
+        o.finish()?;
+        Ok(Driver { instance, feature })
+    }
+
+    /// The path, then the feature, joined by `/`: `lid/hole-pattern`.
+    pub fn text(&self) -> String {
+        let mut s: Vec<&str> = self.instance.iter().map(Id::as_str).collect();
+        s.push(self.feature.as_str());
+        s.join("/")
+    }
+}
+
+/// Point IDs, each once.
+fn point_ids(v: &Value, at: &str) -> Result<Vec<Id>> {
+    let a = v
+        .as_array()
+        .ok_or_else(|| invalid(at, "a list of the sketch's point IDs"))?;
+    let mut out: Vec<Id> = Vec::with_capacity(a.len());
+    for (i, x) in a.iter().enumerate() {
+        let w = format!("{at}/{i}");
+        let id = x
+            .as_str()
+            .ok_or_else(|| invalid(&w, "a point's ID"))
+            .and_then(|s| Id::parse(s, "point").map_err(|e| e.with("pointer", &w)))?;
+        if out.contains(&id) {
+            return Err(invalid(&w, &format!("{id} is named twice")));
+        }
+        out.push(id);
+    }
+    Ok(out)
+}
+
 /// How an instance pattern places its copies.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternForm {
@@ -583,6 +664,20 @@ pub enum PatternForm {
         count: Quantity,
         angle: Quantity,
     },
+    /// A copy at each instance of a part's `pattern`, or at each point of
+    /// a `hole` but the seed's (`from`, else its first).
+    Feature {
+        on: Driver,
+        from: Option<Id>,
+    },
+    /// A copy at each point of a sketch but the seed's: `points` when
+    /// listed, else every point no curve uses; the seed at `from`, else
+    /// the first.
+    Points {
+        on: Driver,
+        from: Option<Id>,
+        points: Vec<Id>,
+    },
 }
 
 impl PatternForm {
@@ -590,18 +685,35 @@ impl PatternForm {
         match self {
             PatternForm::Linear { .. } => "linear",
             PatternForm::Circular { .. } => "circular",
+            PatternForm::Feature { .. } => "feature",
+            PatternForm::Points { .. } => "points",
         }
     }
 
-    /// How many along each way, the seed's place included.
-    pub fn counts(&self) -> [u32; 2] {
+    /// How many along each way, the seed's place included; none for a
+    /// pattern that follows a part, whose places its part says.
+    pub fn counts(&self) -> Option<[u32; 2]> {
         let n = |q: &Quantity| q.number() as u32;
         match self {
             PatternForm::Linear { first, second } => {
-                [n(&first.count), second.as_ref().map_or(1, |w| n(&w.count))]
+                Some([n(&first.count), second.as_ref().map_or(1, |w| n(&w.count))])
             }
-            PatternForm::Circular { count, .. } => [n(count), 1],
+            PatternForm::Circular { count, .. } => Some([n(count), 1]),
+            PatternForm::Feature { .. } | PatternForm::Points { .. } => None,
         }
+    }
+
+    /// Where a following pattern's places are.
+    pub fn driver(&self) -> Option<&Driver> {
+        match self {
+            PatternForm::Feature { on, .. } | PatternForm::Points { on, .. } => Some(on),
+            _ => None,
+        }
+    }
+
+    /// Whether it follows a part's places (forms `feature` and `points`).
+    pub fn driven(&self) -> bool {
+        self.driver().is_some()
     }
 }
 
@@ -663,6 +775,21 @@ impl InstancePattern {
                 v["count"] = json!(count.text());
                 v["angle"] = json!(angle.text());
             }
+            PatternForm::Feature { on, from } => {
+                v["on"] = on.to_json();
+                if let Some(f) = from {
+                    v["from"] = json!(f);
+                }
+            }
+            PatternForm::Points { on, from, points } => {
+                v["on"] = on.to_json();
+                if let Some(f) = from {
+                    v["from"] = json!(f);
+                }
+                if !points.is_empty() {
+                    v["points"] = json!(points);
+                }
+            }
         }
         if !self.skip.is_empty() {
             let two = self.two_ways();
@@ -722,15 +849,38 @@ impl InstancePattern {
                 }
                 PatternForm::Circular { axis, count, angle }
             }
+            Some(f @ ("feature" | "points")) => {
+                let on = Driver::from_json(&o.take("on")?, "/on")?;
+                let from = match o.take_opt("from") {
+                    None => None,
+                    Some(v) => Some(
+                        v.as_str()
+                            .ok_or_else(|| invalid("/from", "a point's ID"))
+                            .and_then(|s| {
+                                Id::parse(s, "point").map_err(|e| e.with("pointer", "/from"))
+                            })?,
+                    ),
+                };
+                if f == "feature" {
+                    PatternForm::Feature { on, from }
+                } else {
+                    let points = match o.take_opt("points") {
+                        None => Vec::new(),
+                        Some(v) => point_ids(&v, "/points")?,
+                    };
+                    PatternForm::Points { on, from, points }
+                }
+            }
             _ => {
                 return Err(invalid(
                     "/form",
-                    "an instance pattern's form is linear or circular",
+                    "an instance pattern's form is linear, circular, feature or points",
                 ));
             }
         };
-        let [n, m] = form.counts();
-        if f64::from(n) * f64::from(m) > super::pattern::MAX_INSTANCES {
+        if let Some([n, m]) = form.counts()
+            && f64::from(n) * f64::from(m) > super::pattern::MAX_INSTANCES
+        {
             return Err(Error::new(
                 Code::InvalidParam,
                 format!(
@@ -751,7 +901,13 @@ impl InstancePattern {
         );
         let skip = match o.take_opt("skip") {
             None => Vec::new(),
-            Some(v) => skip_from_json(&v, [n, m], two)?,
+            Some(_) if form.driven() => {
+                return Err(invalid(
+                    "/skip",
+                    "a pattern that follows a part skips nothing: list the points it takes",
+                ));
+            }
+            Some(v) => skip_from_json(&v, form.counts().expect("not driven"), two)?,
         };
         Ok(InstancePattern {
             form,
@@ -763,7 +919,9 @@ impl InstancePattern {
     /// Every copy but the seeds' own place and those skipped, in order:
     /// along the first direction, then each further step along the second.
     pub fn copies(&self) -> Vec<[u32; 2]> {
-        let [n, m] = self.form.counts();
+        let Some([n, m]) = self.form.counts() else {
+            return Vec::new();
+        };
         (0..m)
             .flat_map(|j| (0..n).map(move |i| [i, j]))
             .filter(|x| *x != [0, 0] && !self.skip.contains(x))
@@ -789,6 +947,7 @@ impl InstancePattern {
             PatternForm::Circular { axis, .. } => {
                 axis.connector().map(|c| ("axis", c)).into_iter().collect()
             }
+            PatternForm::Feature { .. } | PatternForm::Points { .. } => Vec::new(),
         }
     }
 }
@@ -987,6 +1146,54 @@ mod tests {
         );
         assert_eq!(m.a.path(), ["p1:2:1", "bolt", "nut"]);
         assert_eq!(f.to_json(), v);
+    }
+
+    #[test]
+    fn following_patterns_read_and_write_at_format_24() {
+        let v = json!({"format": 24, "kind": "ryucad.feature", "type": "instance_pattern",
+                       "form": "feature", "instances": ["screw-0"],
+                       "on": {"instance": ["lid"], "feature": "hole-pattern"}});
+        let f = read(&v).unwrap();
+        assert_eq!(f.to_json(), v);
+        assert_eq!((feature_format(&v), f.format()), (24, 24));
+        let Feature::InstancePattern(p) = &f else {
+            panic!()
+        };
+        assert!(p.form.driven() && p.copies().is_empty() && p.connectors().is_empty());
+        assert_eq!(p.form.driver().unwrap().text(), "lid/hole-pattern");
+        let v = json!({"format": 24, "kind": "ryucad.feature", "type": "instance_pattern",
+                       "form": "points", "instances": ["screw-0"], "from": "p3",
+                       "on": {"instance": ["sub", "lid"], "feature": "screw-layout"},
+                       "points": ["p3", "p4"]});
+        let f = read(&v).unwrap();
+        assert_eq!(f.to_json(), v);
+        let Feature::InstancePattern(p) = &f else {
+            panic!()
+        };
+        assert_eq!(p.form.type_name(), "points");
+        // Refusals: a copy in the path, a skip, points on form feature, a
+        // point named twice, an unknown form.
+        for (k, x, at) in [
+            (
+                "on",
+                json!({"instance": ["ring:2", "lid"], "feature": "h"}),
+                "/on/instance/0",
+            ),
+            ("skip", json!([1]), "/skip"),
+            ("points", json!(["p1", "p1"]), "/points/1"),
+        ] {
+            let mut w = v.clone();
+            w[k] = x;
+            assert_eq!(read(&w).unwrap_err().details["pointer"], at, "{k}");
+        }
+        let mut w = v.clone();
+        w["form"] = json!("feature");
+        assert!(read(&w).is_err(), "points belong to form points");
+        let mut w = v.clone();
+        w["form"] = json!("holes");
+        assert_eq!(read(&w).unwrap_err().details["pointer"], "/form");
+        // A linear or circular pattern stays at format 4.
+        assert_eq!(feature_format(&circular()), 4);
     }
 
     fn circular() -> Value {

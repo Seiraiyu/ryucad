@@ -480,6 +480,13 @@ fn pattern(
                 step,
             }
         }
+        PatternForm::Feature { .. } | PatternForm::Points { .. } => {
+            return Err(Error::new(
+                Code::Internal,
+                format!("{id}: a pattern that follows a part's places isn't built yet (Task 11)"),
+            )
+            .with("feature", id));
+        }
     };
     Ok(Resolved {
         pattern: ryumate::Pattern {
@@ -742,6 +749,7 @@ fn pattern_values(id: &Id, p: &InstancePattern) -> Result<()> {
             }
         }
         PatternForm::Circular { angle, .. } => angle_ok(id, "angle", angle.radians())?,
+        PatternForm::Feature { .. } | PatternForm::Points { .. } => {}
     }
     Ok(())
 }

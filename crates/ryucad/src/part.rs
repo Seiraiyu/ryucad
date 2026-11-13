@@ -259,7 +259,6 @@ pub(crate) fn part_report(
         .features
         .iter()
         .filter_map(|(fid, f)| {
-            use crate::doc::mate::PatternForm;
             use crate::doc::pattern::Kind;
             let form = match f.as_ref().ok()? {
                 Feature::Pattern(p) => match p.kind {
@@ -267,10 +266,7 @@ pub(crate) fn part_report(
                     Kind::Circular { .. } => "circular",
                     Kind::Mirror { .. } => "mirror",
                 },
-                Feature::InstancePattern(p) => match p.form {
-                    PatternForm::Linear { .. } => "linear",
-                    PatternForm::Circular { .. } => "circular",
-                },
+                Feature::InstancePattern(p) => p.form.type_name(),
                 _ => return None,
             };
             Some((fid.clone(), form))

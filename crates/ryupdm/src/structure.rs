@@ -486,7 +486,9 @@ pub fn occurrences(part: &Part) -> (Vec<Occurrence>, Vec<Error>) {
                 rev: i.rev.clone(),
             }),
             Some(Ok(Feature::InstancePattern(p))) => {
-                let [n, m] = p.form.counts();
+                let Some([n, m]) = p.form.counts() else {
+                    continue;
+                };
                 for seed in &p.instances {
                     let Some(Ok(Feature::Instance(i))) = part.features.get(seed) else {
                         problems.push(
