@@ -771,6 +771,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// Every feature type `feature.add` takes, or one: the request fields
+    /// it takes, the body it needs and whether it founds one (ryucad 27,
+    /// the feature registry read back).
+    #[serde(rename = "feature.types")]
+    FeatureTypes {
+        #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+        ty: Option<String>,
+    },
     #[serde(rename = "param.list")]
     ParamList {
         /// The part, or none with `scope: project`.
@@ -2534,6 +2542,10 @@ mod tests {
     #[test]
     fn requests_round_trip_through_rpc() {
         let reqs = [
+            Request::FeatureTypes { ty: None },
+            Request::FeatureTypes {
+                ty: Some("hole".into()),
+            },
             Request::ImportReport {
                 file: "imports/box.step".into(),
                 detail: true,

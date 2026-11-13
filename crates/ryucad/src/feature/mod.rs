@@ -1,4 +1,3 @@
-#![allow(dead_code)] // ryucad 27.C: until feature.types (Task 12) uses every item
 //! Feature kinds (ryucad 27.C, design 541): what ryucad does with each
 //! feature type a request names, one module per kind, registered in
 //! `KINDS`. The file formats stay in `ryucad-doc`, which ryupdm reads.
@@ -250,6 +249,31 @@ pub fn report(p: &Part, id: &Id, f: &Feature) -> Value {
     v["id"] = json!(id);
     v["type"] = json!(f.type_name());
     v
+}
+
+/// `feature.types`: each type the registry holds, in its order, with the
+/// request fields it takes, the body it needs (`solid`, `sheet`, or
+/// null) and whether it founds one; `ty` names one type.
+pub(crate) fn types(ty: Option<&str>) -> Result<Value> {
+    if let Some(t) = ty
+        && kind(t).is_none()
+    {
+        return Err(unknown_type(t));
+    }
+    let types: Vec<Value> = KINDS
+        .iter()
+        .flat_map(|k| k.types().iter().map(move |t| (*k, *t)))
+        .filter(|(_, t)| ty.is_none_or(|x| x == *t))
+        .map(|(k, t)| {
+            let b = k.body(t);
+            let needs = b.needs.map(|w| match w {
+                Want::Solid => "solid",
+                Want::Sheet => "sheet",
+            });
+            json!({"type": t, "fields": k.fields(t), "body": needs, "founds": b.founds.as_str()})
+        })
+        .collect();
+    Ok(json!({ "types": types }))
 }
 
 /// A join, cut or intersect, or a kind that acts whatever its operation
@@ -817,5 +841,38 @@ mod tests {
                 "point"
             ]
         );
+    }
+
+    /// `feature.types` is the registry read back: every type in its
+    /// order, its fields and its body; one type alone; an unknown one
+    /// refused as `feature.add` refuses it.
+    #[test]
+    fn feature_types_reads_back_the_registry() {
+        let (_dir, mut s) = crate::testing::fresh();
+        let all = crate::testing::call(&mut s, "feature.types", json!({})).unwrap();
+        let listed = all["types"].as_array().unwrap();
+        let types: Vec<&str> = listed.iter().map(|t| t["type"].as_str().unwrap()).collect();
+        assert_eq!(types, owned());
+        for t in listed {
+            let ty = t["type"].as_str().unwrap();
+            let k = kind(ty).unwrap();
+            let b = k.body(ty);
+            assert_eq!(t["fields"], json!(k.fields(ty)), "{ty}");
+            assert_eq!(
+                (&t["body"], &t["founds"]),
+                (
+                    &json!(b.needs.map(|w| match w {
+                        Want::Solid => "solid",
+                        Want::Sheet => "sheet",
+                    })),
+                    &json!(b.founds.as_str())
+                ),
+                "{ty}"
+            );
+            let one = crate::testing::call(&mut s, "feature.types", json!({"type": ty})).unwrap();
+            assert_eq!(one, json!({"types": [t]}), "{ty}");
+        }
+        let e = crate::testing::call(&mut s, "feature.types", json!({"type": "gear"})).unwrap_err();
+        assert_eq!(e.code, Code::UnknownFeatureType);
     }
 }

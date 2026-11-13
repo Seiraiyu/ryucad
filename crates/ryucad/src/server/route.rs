@@ -422,6 +422,7 @@ pub(crate) fn dispatch(
             mates,
         } => assembly::assembly_solve(session, part, moves, component, rev, mates),
         Request::FeatureShow { part, id, rev } => feature::feature_show(session, part, id, rev),
+        Request::FeatureTypes { ty } => crate::feature::types(ty.as_deref()),
         Request::MergeStatus {} => crate::validate::status(session),
         Request::MergePreview { rev } => crate::validate::preview(session, &rev),
         Request::WorktreeList {} => crate::worktree::list(session, live.as_deref()),
