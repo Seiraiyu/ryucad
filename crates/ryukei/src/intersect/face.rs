@@ -288,6 +288,24 @@ pub(crate) fn face_face_over(
         SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same, m),
         SurfaceHit::Meet { branches, points } => (branches, points),
     };
+    placed(faces, [sa, sb], branches, points, slack, m)
+}
+
+/// Branches and points where two faces' surfaces meet, cut wherever an
+/// edge of either face meets the other's surface and placed in both
+/// faces: the stretches and contacts the faces share. A traced meeting
+/// ([`face_face_over`]) and a known seam's ([`super::known`]) both end
+/// here, so a known stretch is cut, placed and filtered exactly as a
+/// traced one is.
+pub(super) fn placed(
+    faces: [(&Body, FaceId); 2],
+    [sa, sb]: [&Surface; 2],
+    branches: Vec<super::ss::Branch>,
+    points: Vec<Point3>,
+    slack: f64,
+    m: &Meter,
+) -> Result<FaceMeet, Failure> {
+    let [a, b] = faces;
     // Surfaces that don't meet in the region: nothing for edges to cut.
     if branches.is_empty() && points.is_empty() {
         return Ok(FaceMeet::apart());
@@ -809,7 +827,7 @@ fn within_reach(
     true
 }
 
-fn surface_of((body, face): (&Body, FaceId)) -> Result<&Surface, Failure> {
+pub(super) fn surface_of((body, face): (&Body, FaceId)) -> Result<&Surface, Failure> {
     let f = body.face(face).ok_or(Failure::Uncertain)?;
     body.surface(f.surface).ok_or(Failure::Uncertain)
 }
@@ -929,7 +947,7 @@ fn edges((body, face): (&Body, FaceId)) -> Vec<EdgeId> {
 }
 
 /// The overlap of two boxes grown by `slack`, if they meet.
-fn overlap(a: &Box3, b: &Box3, slack: f64) -> Option<Box3> {
+pub(super) fn overlap(a: &Box3, b: &Box3, slack: f64) -> Option<Box3> {
     let (a, b) = (a.grow(slack), b.grow(slack));
     a.intersects(&b)
         .then(|| Box3::new(a.min().max(b.min()), a.max().min(b.max())))
