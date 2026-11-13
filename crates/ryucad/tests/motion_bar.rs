@@ -4,7 +4,10 @@
 //!   neighbours share 0.4 mm at rest, and every twist intersects the
 //!   pairs between the turning layer and the rest again) and a core,
 //!   with nine layer motions of 13 steps, each turning its layer from
-//!   -6° to 6°. All nine swept with interference, cold, under 10 s;
+//!   -6° to 6°. All nine swept with interference, cold, under 60 s
+//!   (design 529's target is 10 s: #804, ryukei's boolean of parallel
+//!   faces overlapping and turned in their plane, takes ~830 ms a pair
+//!   where others take ~4 ms; 40.9 s measured on cox-worker-3);
 //!   again over the warm session, under 0.2 s.
 //! - **5.D's 1,000-pin bar project:** one free revolute swept over 101
 //!   steps without interference, under 1 s.
@@ -147,7 +150,9 @@ fn nine_layer_twists_sweep_with_interference_cold_and_warm() {
         machine(),
         warm_s * 1e3
     );
-    assert!(cold_s < 10.0 * slack(), "cold {cold_s:.2} s");
+    // 10 s is the target once #804 makes the face-to-face pairs as quick
+    // as the rest; until then the bar is 60 s (the coxswain's decision).
+    assert!(cold_s < 60.0 * slack(), "cold {cold_s:.2} s (#804)");
     assert!(warm_s < 0.2 * slack(), "warm {warm_s:.3} s");
 }
 
