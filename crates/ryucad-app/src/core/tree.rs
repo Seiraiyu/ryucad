@@ -195,6 +195,22 @@ pub fn row_text(f: &Feature, faults: usize) -> String {
                 MateInfo::path_of(&m.b)
             )
         }
+        // An insert what it inserts, at which pin, and how many solids.
+        _ if f.insert.is_some() => {
+            let i = f.insert.as_ref().expect("an insert");
+            let mut s = format!("insert of {} @ {}", i.of(), i.rev_text());
+            if i.behind.is_some() {
+                s.push_str(", behind");
+            }
+            if let Some(n) = i.count {
+                s.push_str(&format!(", {n} solid{}", if n == 1 { "" } else { "s" }));
+            }
+            s
+        }
+        // A delete what it takes out.
+        _ if f.delete.is_some() => {
+            format!("delete {}", f.delete.as_ref().expect("a delete").text())
+        }
         // An import its file and product: `import: bracket.step /
         // BRK-100`, and its body when the product has several.
         _ if f.import.is_some() => {
@@ -694,6 +710,20 @@ fn release_badges(state: &Value, text: &str) -> (Vec<Badge>, bool) {
     (out, weak)
 }
 
+/// The newest official label of an insert's source when it is newer than
+/// the insert's own (design 521's `insert_behind`, as the window knows it
+/// from the release states): `None` at working, for another project's
+/// part (its Dependencies tab says), or at the newest.
+pub fn behind(i: &crate::core::model::InsertInfo, states: &States) -> Option<String> {
+    let pinned = i.label.as_deref().filter(|_| i.project.is_none())?;
+    let s = states.by_part.get(&i.part)?;
+    if !matches!(s["state"].as_str(), Some("released" | "modified")) {
+        return None;
+    }
+    let newest = s["label"].as_str()?;
+    (newest != pinned).then(|| newest.to_owned())
+}
+
 struct Builder<'a> {
     src: &'a Source<'a>,
     rows: Vec<Row>,
@@ -722,6 +752,17 @@ impl Builder<'_> {
     /// A feature's row, and under it what it reads, a subassembly's
     /// instances and a pattern's copies.
     fn feature(&mut self, part: &Part, f: &Feature, depth: usize, parent: Option<usize>) {
+        // An insert behind its source is read with that said.
+        let marked;
+        let f = match f.insert.as_ref().and_then(|i| behind(i, self.src.states)) {
+            Some(newest) => {
+                let mut g = f.clone();
+                g.insert.as_mut().expect("an insert").behind = Some(newest);
+                marked = g;
+                &marked
+            }
+            None => f,
+        };
         let key = (part.id.clone(), f.id.clone());
         let mark = self.src.compare.and_then(|c| {
             let m = c.features.get(&key)?;
@@ -769,6 +810,29 @@ impl Builder<'_> {
             row.import = Some(i.reference);
             if i.reference {
                 row.badges.push(reference_badge());
+            }
+        }
+        if let Some(i) = &f.insert {
+            if let Some(newest) = &i.behind {
+                row.badges
+                    .push(Badge::new("warning-circle", Tint::Warn, "behind"));
+                row.tip = Some(format!(
+                    "{} is released at {newest}: Update in the insert\u{2019}s properties moves its pin",
+                    i.of()
+                ));
+            }
+            if i.warned("insert_source_failed") {
+                let tip = format!(
+                    "{}\u{2019}s own rebuild failed: the insert shows its model as it stands",
+                    i.of()
+                );
+                row.badges
+                    .push(Badge::new("warning", Tint::Warn, tip.clone()));
+                row.tip = Some(tip);
+            }
+            if i.warned("insert_obsolete") {
+                row.badges
+                    .push(Badge::new("prohibit", Tint::Weak, "obsolete label"));
             }
         }
         if let Some(i) = &f.instance {
@@ -904,6 +968,19 @@ impl Builder<'_> {
         }
     }
 
+    /// An insert's row (design 521, The app): one row whatever its source
+    /// shows; under it each inserted solid a later feature acted on, by
+    /// its key, with its chain as any solid's.
+    fn insert(&mut self, part: &Part, f: &Feature, depth: usize, parent: Option<usize>) {
+        let me = self.rows.len();
+        self.feature(part, f, depth, parent);
+        for key in f.solids.iter().filter(|k| **k != f.id) {
+            if part.solid(key).is_some() {
+                self.solid(part, key, false, depth + 1, Some(me));
+            }
+        }
+    }
+
     /// The instances of assembly `id` (placed at `at`), under the instance
     /// that places it, to any depth: read-only rows. One the window hasn't
     /// loaded is a closed row, loaded when opened.
@@ -964,10 +1041,12 @@ impl Builder<'_> {
             .get(&key)
             .and_then(|m| m.mesh.as_ref().ok())
             .map_or(0, |m| m.faults.len());
+        // An inserted reference has no import row of its own here.
         let import = part
             .feature(solid)
             .and_then(|f| f.import.as_ref())
-            .map(|i| i.reference);
+            .map(|i| i.reference)
+            .or_else(|| shown.filter(|s| s.reference).map(|_| true));
         // A consumed body isn't among the shown ones: a sew's or
         // thicken's is a sheet.
         let sheet = shown.map_or_else(
@@ -1044,6 +1123,8 @@ impl Builder<'_> {
             .iter()
             .filter(|f| f.solids.iter().any(|s| s == solid))
             .filter(|f| !(f.id == solid && f.solids.len() > 1))
+            // An insert's row is the parent of its acted-on solids.
+            .filter(|f| f.insert.is_none())
             .collect();
         for f in chain {
             self.feature(part, f, depth + 1, Some(me));
@@ -1125,6 +1206,11 @@ impl Builder<'_> {
                         self.feature(part, m, 2, Some(g));
                     }
                 }
+                continue;
+            }
+            // An insert is one row, whatever its source shows (design 521).
+            if f.insert.is_some() {
+                self.insert(part, f, 1, Some(me));
                 continue;
             }
             match f.solids.as_slice() {
@@ -1656,6 +1742,55 @@ mod tests {
             .iter()
             .map(|s| format!("{}{}", "  ".repeat(rows[s.index].depth), rows[s.index].text))
             .collect()
+    }
+
+    #[test]
+    fn an_insert_is_one_row_and_a_delete_says_what_it_deletes() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "e", "revision": "r", "features": [
+            {"id": "brd", "type": "insert", "ok": true, "hash": "1", "solids": ["brd", "brd/base"],
+             "insert": {"of": "pcb", "rev": {"label": "A"}, "count": 690}},
+            {"id": "nub", "type": "box", "ok": true, "hash": "2", "solids": ["brd/base"],
+             "operation": "join"},
+            {"id": "d", "type": "delete_body", "ok": true, "hash": "3",
+             "delete_body": {"solids": ["brd/boss"]}}],
+          "solids": [
+            {"solid": "brd/base", "ok": true, "features": ["brd", "nub"], "hash": "2"},
+            {"solid": "brd/u1", "ok": true, "features": ["brd"], "hash": "4"}]}));
+        let mut states = States::default();
+        states
+            .by_part
+            .insert("pcb".into(), json!({"state": "released", "label": "B"}));
+        let pdm = BTreeMap::new();
+        let rows = rows(&source(&m, &states, &pdm));
+        assert_eq!(
+            texts(&rows, &Tree::default()),
+            [
+                "e",
+                "  brd (insert of pcb @ label A, behind, 690 solids)",
+                "    brd/base (solid)",
+                "      nub (box, join)",
+                "  d (delete brd/boss)",
+            ]
+        );
+        let row = |t: &str| rows.iter().find(|r| r.text.starts_with(t)).unwrap();
+        let brd = row("brd (");
+        assert_eq!(brd.icon, "arrow-square-in");
+        assert_eq!(brd.choose, Some(("e".to_owned(), "brd".to_owned())));
+        assert!(brd.badges.iter().any(|b| b.icon == "warning-circle"));
+        assert!(brd.tip.as_deref().unwrap().contains("released at B"));
+        assert_eq!(row("d (").icon, "trash");
+        // An inserted solid nothing acted on is never listed.
+        assert!(!rows.iter().any(|r| r.text.starts_with("brd/u1")));
+        // At its newest label, it isn't behind.
+        states
+            .by_part
+            .insert("pcb".into(), json!({"state": "released", "label": "A"}));
+        let rows = super::rows(&source(&m, &states, &pdm));
+        assert!(
+            rows.iter()
+                .any(|r| r.text == "brd (insert of pcb @ label A, 690 solids)")
+        );
     }
 
     #[test]
