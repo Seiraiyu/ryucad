@@ -993,3 +993,72 @@ fn blocks_sunk_into_each_other_by_less_than_a_touch_meet_in_nothing() {
         assert!((v - 2e-10).abs() <= 1e-3 * 2e-10, "turn {turn}: {v}");
     }
 }
+
+/// The intersection of #804's pair (two 20.4 mm blocks on a 20 mm pitch
+/// along x, sharing a 0.4 mm slab, the second turned through `deg` about
+/// `axis`), and the work it took.
+fn slab_pair(axis: ryukei::geom::UnitVector3, deg: f64) -> u64 {
+    use ryukei::boolean::boolean_with;
+    use ryukei::work::Work;
+    let s = 0.0204;
+    let a = primitive::block(OpKey(1), s, s, s, &at(-0.0302, 0.0098, -0.0102))
+        .unwrap()
+        .0;
+    let b = primitive::block(OpKey(2), s, s, s, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let corner = at(-0.0102, 0.0098, -0.0102);
+    let w = Work::unlimited();
+    let place = Rigid::rotation(axis, deg * PI / 180.0).then_after(&corner);
+    let (i, _) = boolean_with(
+        OpKey(3),
+        BooleanOp::Intersect,
+        &a,
+        &[Tool {
+            key: ToolKey(1),
+            body: &b,
+            place,
+        }],
+        &w,
+    )
+    .unwrap();
+    assert!(i.faces().next().is_some(), "{axis:?} {deg}°: no overlap");
+    w.spent()
+}
+
+/// #804: two 20.4 mm blocks on a 20 mm pitch along x share a 0.4 mm
+/// slab; the second turned about x, in the plane of the faces they share
+/// (ryucad 26.B's cube of layers). The intersection took ~830 ms against
+/// ~4 ms for the same pair turned out of that plane: it is to take about
+/// the same work.
+#[test]
+fn blocks_sharing_a_slab_turned_in_their_plane_take_a_tilts_work() {
+    use ryukei::geom::UnitVector3;
+    for deg in [1.0, 6.0] {
+        let in_plane = slab_pair(UnitVector3::X, deg);
+        let tilted = slab_pair(UnitVector3::Y, deg);
+        eprintln!("{deg}°: in plane {in_plane} units, tilted {tilted}");
+        assert!(
+            in_plane <= 4 * tilted,
+            "{deg}°: in plane {in_plane} units, tilted {tilted}"
+        );
+    }
+}
+
+/// #804's in-plane pair at 1°, twenty times, timed: for a profiler.
+#[test]
+#[ignore]
+fn profile_804() {
+    use ryukei::geom::UnitVector3;
+    for (axis, name) in [(UnitVector3::X, "in plane"), (UnitVector3::Y, "tilted")] {
+        let t = std::time::Instant::now();
+        let mut units = 0;
+        for _ in 0..20 {
+            units = slab_pair(axis, 1.0);
+        }
+        eprintln!(
+            "{name}: {units} units, {:.1} ms each",
+            t.elapsed().as_secs_f64() * 50.0
+        );
+    }
+}
