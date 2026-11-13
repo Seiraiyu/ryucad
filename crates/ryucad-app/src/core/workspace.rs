@@ -4293,6 +4293,10 @@ impl Workspace {
                     }
                 }
             }
+            // A delete chosen before this one answers too late to matter:
+            // its ghosts and its failures alike are dropped.
+            (Pending::Deleted(key), _)
+                if !self.deleted.as_ref().is_some_and(|d| d.is_for(&key)) => {}
             (Pending::Deleted(key), a) => {
                 match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
                     Ok(Some(Ok(bodies))) => {

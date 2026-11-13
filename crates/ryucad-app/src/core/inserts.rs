@@ -48,9 +48,15 @@ impl Deleted {
         Some((me, asked))
     }
 
+    /// Whether an answer asked for `feature` is this delete's, not a stale
+    /// one's from a delete chosen before.
+    pub fn is_for(&self, feature: &BodyKey) -> bool {
+        *feature == self.feature
+    }
+
     /// Keeps a ghost that came for this delete; false for another's.
     pub fn take(&mut self, feature: &BodyKey, body: WireBody) -> bool {
-        if *feature != self.feature {
+        if !self.is_for(feature) {
             return false;
         }
         let key = (self.feature.0.clone(), body.feature.clone());
@@ -230,6 +236,7 @@ mod tests {
         };
         assert!(d.take(&key("d"), body("brd/boss")));
         assert!(!d.take(&key("other"), body("brd/boss")));
+        assert!(d.is_for(&key("d")) && !d.is_for(&key("other")));
         assert_eq!(
             d.ghosts.keys().cloned().collect::<Vec<_>>(),
             [key("brd/boss")]
