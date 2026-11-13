@@ -272,6 +272,7 @@ impl Equations {
                 fields: Default::default(),
                 expressions: Map::from_iter([(pointer.clone(), json!(typed))]),
                 expected_revision,
+                dry_run: false,
             },
             Place::Dimension {
                 part,

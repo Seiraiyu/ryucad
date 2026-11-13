@@ -161,6 +161,9 @@ const ENTITIES: [Context; 5] = [
     Context::Entity(Pick::Datum),
 ];
 
+/// A face alone: what a hole is picked by.
+const FACE: [Context; 1] = [Context::Entity(Pick::Face)];
+
 /// What can be annotated: every row and entity (a ghost is gone).
 const ANNOTATABLE: [Context; 13] = [
     Context::Row(Row::Part),
@@ -407,6 +410,12 @@ pub const COMMANDS: &[Command] = &[
         .icon("selection")
         .context(&ENTITIES)
         .hidden(),
+    cmd("edit.select_hole", "Select hole", Edit)
+        .context(&FACE)
+        .hidden(),
+    cmd("edit.select_siblings", "Select siblings", Edit)
+        .context(&FACE)
+        .hidden(),
     cmd("edit.clear_selection", "Clear selection", Edit).keys(&["Escape"]),
     cmd("tree.find", "Find in tree", Edit)
         .icon("magnifying-glass")
@@ -484,6 +493,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.edges", "Edges", View).toggle(),
     cmd("view.sketches", "Sketches", View).toggle(),
     cmd("view.datums", "Datums, paths and helices", View).toggle(),
+    cmd("view.threads", "Cosmetic threads", View).toggle(),
     cmd("view.flat", "Flat pattern", View)
         .icon("square-split-horizontal")
         .toggle(),
@@ -787,6 +797,7 @@ pub struct State {
     pub edges: bool,
     pub sketches: bool,
     pub datums: bool,
+    pub threads: bool,
     pub nav_cube: bool,
     pub triad: bool,
     pub origin: bool,
@@ -994,6 +1005,16 @@ pub fn enabled_on(id: &str, target: &str) -> Result<(), &'static str> {
     }
 }
 
+/// Whether a face's context menu lists `id`: Select hole and Select
+/// siblings only on a face a listed hole has (`hole`), every other
+/// command always.
+pub fn on_hole(id: &str, hole: bool) -> bool {
+    match id {
+        "edit.select_hole" | "edit.select_siblings" => hole,
+        _ => true,
+    }
+}
+
 /// Whether a command opens or closes the rows under the row it runs on:
 /// a tree's context menu offers it only on a row with rows under it.
 pub fn below(id: &str) -> bool {
@@ -1018,6 +1039,7 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
         "view.edges" => s.edges,
         "view.sketches" => s.sketches,
         "view.datums" => s.datums,
+        "view.threads" => s.threads,
         "view.nav_cube" => s.nav_cube,
         "view.triad" => s.triad,
         "view.origin" => s.origin,
@@ -1505,12 +1527,11 @@ mod tests {
         assert!(below("tree.expand_below") && !below("tree.expand_all"));
 
         for k in Pick::ALL {
-            let mut want = vec![
-                "edit.copy_reference",
-                "edit.select",
-                "edit.select_other",
-                "annotation.add",
-            ];
+            let mut want = vec!["edit.copy_reference", "edit.select", "edit.select_other"];
+            if k == Pick::Face {
+                want.extend(["edit.select_hole", "edit.select_siblings"]);
+            }
+            want.push("annotation.add");
             if matches!(k, Pick::Face | Pick::Edge | Pick::Vertex) {
                 want.extend(["edit.move", "edit.mate"]);
             }
@@ -1532,6 +1553,18 @@ mod tests {
         assert_eq!(ids(Context::Tab), ["view.close_tile", "view.reset_layout"]);
         assert!(enabled_on("view.close_tile", "viewport").is_err());
         assert_eq!(enabled_on("view.close_tile", "history"), Ok(()));
+    }
+
+    #[test]
+    fn a_holes_face_offers_its_hole_and_siblings() {
+        let ids: Vec<&str> = context(Context::Entity(Pick::Face)).map(|c| c.id).collect();
+        assert!(ids.contains(&"edit.select_hole") && ids.contains(&"edit.select_siblings"));
+        let ids: Vec<&str> = context(Context::Entity(Pick::Edge)).map(|c| c.id).collect();
+        assert!(!ids.contains(&"edit.select_hole"));
+        // Listed only on a face a hole has.
+        assert!(on_hole("edit.select_hole", true) && on_hole("edit.select_siblings", true));
+        assert!(!on_hole("edit.select_hole", false) && !on_hole("edit.select_siblings", false));
+        assert!(on_hole("edit.select", false));
     }
 
     #[test]

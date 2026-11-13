@@ -116,7 +116,7 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
         );
         let dark = theme == "dark";
         let mut sheet = Harness::builder()
-            .with_size(egui::vec2(800.0, 2120.0))
+            .with_size(egui::vec2(800.0, 2320.0))
             .wgpu()
             .build_ui(move |ui| {
                 ryucad_app::ui::fonts::install(ui.ctx());

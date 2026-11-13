@@ -311,3 +311,10 @@ path = "fuzz_targets/style.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hole_spec"
+path = "fuzz_targets/hole_spec.rs"
+test = false
+doc = false
+bench = false

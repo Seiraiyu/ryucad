@@ -8,7 +8,7 @@
 
 use crate::core::command;
 use crate::core::compare::{Change, Compare, Mark};
-use crate::core::model::{BodyKey, Feature, MateInfo, Model, Part};
+use crate::core::model::{BodyKey, Feature, MateInfo, Model, Part, Solid};
 use crate::core::pdm::States;
 use crate::ui::style::{self, Rgb};
 use serde_json::Value;
@@ -157,7 +157,10 @@ impl Row {
 
 /// A feature's line in the tree: its ID and type, a sketch's solve state,
 /// and why it failed or how many faces weren't meshed.
-pub fn row_text(f: &Feature, faults: usize) -> String {
+/// `holes` is how many holes the feature makes, as its part's
+/// `holes.list` counts them: a hole with a spec gives it after the spec
+/// when more than one.
+pub fn row_text(f: &Feature, faults: usize, holes: usize) -> String {
     let ty = match (&f.ty, &f.operation, &f.instance) {
         // An instance says what it places, and what its mates leave it.
         (_, _, Some(i)) => {
@@ -203,6 +206,22 @@ pub fn row_text(f: &Feature, faults: usize) -> String {
                 MateInfo::path_of(&m.b)
             )
         }
+        // An insert what it inserts, at which pin, and how many solids.
+        _ if f.insert.is_some() => {
+            let i = f.insert.as_ref().expect("an insert");
+            let mut s = format!("insert of {} @ {}", i.of(), i.rev_text());
+            if i.behind.is_some() {
+                s.push_str(", behind");
+            }
+            if let Some(n) = i.count {
+                s.push_str(&format!(", {n} solid{}", if n == 1 { "" } else { "s" }));
+            }
+            s
+        }
+        // A delete what it takes out.
+        _ if f.delete.is_some() => {
+            format!("delete {}", f.delete.as_ref().expect("a delete").text())
+        }
         // An import its file and product: `import: bracket.step /
         // BRK-100`, and its body when the product has several.
         _ if f.import.is_some() => {
@@ -218,6 +237,15 @@ pub fn row_text(f: &Feature, faults: usize) -> String {
                 s.push_str(", reference");
             }
             s
+        }
+        // A hole with intent its spec, and how many holes it makes.
+        (Some(t), _, None) if t == "hole" && f.spec.is_some() => {
+            let spec = f.spec.as_deref().unwrap_or_default();
+            if holes > 1 {
+                format!("{spec}, {holes}×")
+            } else {
+                spec.to_owned()
+            }
         }
         // An instance pattern how many copies it places.
         (Some(t), _, None) if t == "instance_pattern" && f.error.is_none() => {
@@ -417,6 +445,8 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "delete_face" => "delete-face",
         "delete_blend" => "delete-blend",
         "resize_blend" => "resize-blend",
+        "insert" => "arrow-square-in",
+        "delete_body" => "trash",
         _ => "question",
     }
 }
@@ -516,6 +546,12 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Tool solid, consumed", "cube-focus", Tint::Weak),
             ("Sheet", "sheet", Tint::Plain),
             ("Sheet, consumed (sewn, thickened)", "sheet", Tint::Weak),
+            (
+                "Flattened file (its bodies under one row)",
+                "files",
+                Tint::Plain,
+            ),
+            ("A flattened file\u{2019}s product", "package", Tint::Plain),
             ("Sketch", "pencil-simple-line", Tint::Plain),
             ("Drawing", "drawing", Tint::Plain),
             (
@@ -573,6 +609,12 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Circular pattern", "pattern-circular", Tint::Plain),
             ("Mirror pattern", "flip-horizontal", Tint::Plain),
             ("Import", "file-arrow-down", Tint::Plain),
+            (
+                "Insert (another part\u{2019}s solids)",
+                "arrow-square-in",
+                Tint::Plain,
+            ),
+            ("Delete body", "trash", Tint::Plain),
             ("Unknown feature", "question", Tint::Plain),
         ],
     ),
@@ -619,6 +661,11 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
                 Tint::Weak,
             ),
             ("Reference import", "file-lock", Tint::Info),
+            (
+                "Insert behind its source\u{2019}s newest release",
+                "warning-circle",
+                Tint::Warn,
+            ),
             ("Surface: a sweep that makes a sheet", "sheet", Tint::Info),
             ("Instance fixed", "push-pin", Tint::Plain),
             ("Mate redundant", "warning-circle", Tint::Warn),
@@ -691,6 +738,37 @@ fn release_badges(state: &Value, text: &str) -> (Vec<Badge>, bool) {
     (out, weak)
 }
 
+/// The newest official label of an insert's source when it is newer than
+/// the insert's own (design 521's `insert_behind`, as the window knows it
+/// from the release states): `None` at working, for another project's
+/// part (its Dependencies tab says), or at the newest.
+pub fn behind(i: &crate::core::model::InsertInfo, states: &States) -> Option<String> {
+    let pinned = i.label.as_deref().filter(|_| i.project.is_none())?;
+    let s = states.by_part.get(&i.part)?;
+    if !matches!(s["state"].as_str(), Some("released" | "modified")) {
+        return None;
+    }
+    let newest = s["label"].as_str()?;
+    (newest != pinned).then(|| newest.to_owned())
+}
+
+/// The import features of `part` founding a solid the model shows, by
+/// the file they read, for each file two or more read: a flattened
+/// file's bodies (question 627), or several bodies imported one by one.
+fn import_files(part: &Part) -> BTreeMap<&str, Vec<&Feature>> {
+    let mut by: BTreeMap<&str, Vec<&Feature>> = BTreeMap::new();
+    for f in &part.features {
+        if let Some(i) = &f.import
+            && f.founds()
+            && part.solid(&f.id).is_some()
+        {
+            by.entry(i.file.as_str()).or_default().push(f);
+        }
+    }
+    by.retain(|_, v| v.len() > 1);
+    by
+}
+
 struct Builder<'a> {
     src: &'a Source<'a>,
     rows: Vec<Row>,
@@ -719,6 +797,17 @@ impl Builder<'_> {
     /// A feature's row, and under it what it reads, a subassembly's
     /// instances and a pattern's copies.
     fn feature(&mut self, part: &Part, f: &Feature, depth: usize, parent: Option<usize>) {
+        // An insert behind its source is read with that said.
+        let marked;
+        let f = match f.insert.as_ref().and_then(|i| behind(i, self.src.states)) {
+            Some(newest) => {
+                let mut g = f.clone();
+                g.insert.as_mut().expect("an insert").behind = Some(newest);
+                marked = g;
+                &marked
+            }
+            None => f,
+        };
         let key = (part.id.clone(), f.id.clone());
         let mark = self.src.compare.and_then(|c| {
             let m = c.features.get(&key)?;
@@ -728,7 +817,13 @@ impl Builder<'_> {
                 mark_badges(m, &mark_text(m, &c.rev)),
             ))
         });
-        let mut text = row_text(f, 0);
+        let holes = self
+            .src
+            .model
+            .holes
+            .get(&part.id)
+            .map_or(0, |t| t.count(&f.id));
+        let mut text = row_text(f, 0, holes);
         let (icon, intersects) = feature_icon(f, |p| self.is_assembly(p));
         let reference = format!("{}/{}", part.id, f.id);
         let mut row = Row::new(format!("feature:{reference}"), depth, icon, String::new());
@@ -766,6 +861,29 @@ impl Builder<'_> {
             row.import = Some(i.reference);
             if i.reference {
                 row.badges.push(reference_badge());
+            }
+        }
+        if let Some(i) = &f.insert {
+            if let Some(newest) = &i.behind {
+                row.badges
+                    .push(Badge::new("warning-circle", Tint::Warn, "behind"));
+                row.tip = Some(format!(
+                    "{} is released at {newest}: Update in the insert\u{2019}s properties moves its pin",
+                    i.of()
+                ));
+            }
+            if i.warned("insert_source_failed") {
+                let tip = format!(
+                    "{}\u{2019}s own rebuild failed: the insert shows its model as it stands",
+                    i.of()
+                );
+                row.badges
+                    .push(Badge::new("warning", Tint::Warn, tip.clone()));
+                row.tip = Some(tip);
+            }
+            if i.warned("insert_obsolete") {
+                row.badges
+                    .push(Badge::new("prohibit", Tint::Weak, "obsolete label"));
             }
         }
         if let Some(i) = &f.instance {
@@ -901,6 +1019,92 @@ impl Builder<'_> {
         }
     }
 
+    /// An insert's row (design 521, The app): one row whatever its source
+    /// shows; under it each inserted solid a later feature acted on, by
+    /// its key, with its chain as any solid's.
+    fn insert(&mut self, part: &Part, f: &Feature, depth: usize, parent: Option<usize>) {
+        let me = self.rows.len();
+        self.feature(part, f, depth, parent);
+        for key in f.solids.iter().filter(|k| **k != f.id) {
+            if part.solid(key).is_some() {
+                self.solid(part, key, false, depth + 1, Some(me));
+            }
+        }
+    }
+
+    /// A file's row, `nucleo.step (690 bodies, flattened)`, closed; under
+    /// it a row per product when its bodies come from more than one
+    /// (`U1 (STM32F4, 3 bodies)`), closed; under those each body's solid
+    /// row as any (design 521, question 627).
+    fn file_group(&mut self, part: &Part, file: &str, imports: &[&Feature], parent: usize) {
+        let info = |f: &Feature| f.import.clone().expect("an import");
+        let first = info(imports[0]);
+        let n = imports.len();
+        let mut words = vec![format!("{n} bodies")];
+        if imports.iter().any(|f| info(f).flattened) {
+            words.push("flattened".into());
+        }
+        let reference = imports.iter().all(|f| info(f).reference);
+        if reference {
+            words.push("reference".into());
+        }
+        let failed = imports
+            .iter()
+            .filter(|f| part.solid(&f.id).and_then(Solid::failure).is_some())
+            .count();
+        if failed > 0 {
+            words.push(format!("{failed} failed"));
+        }
+        let text = format!("{} ({})", first.file_name(), words.join(", "));
+        let mut row = Row::new(format!("file:{}/{file}", part.id), 1, "files", text);
+        row.open = false;
+        if reference {
+            row.badges.push(reference_badge());
+        }
+        if failed > 0 {
+            row.fail(&format!("{failed} bodies failed"));
+        }
+        let me = self.push(row, Some(parent));
+        // Products in the order their first bodies are listed.
+        // A product's id, name and ordinal, and the bodies from it.
+        type Product = (String, String, u64);
+        let mut products: Vec<(Option<Product>, Vec<&Feature>)> = Vec::new();
+        for f in imports {
+            let p = info(f).product;
+            match products.iter_mut().find(|(q, _)| *q == p) {
+                Some((_, v)) => v.push(f),
+                None => products.push((p, vec![f])),
+            }
+        }
+        if products.len() < 2 {
+            for f in imports {
+                self.solid(part, &f.id, false, 2, Some(me));
+            }
+            return;
+        }
+        for (product, bodies) in products {
+            let (under, depth) = match &product {
+                Some((id, name, ordinal)) => {
+                    let k = bodies.len();
+                    let text =
+                        format!("{id} ({name}, {k} bod{})", if k == 1 { "y" } else { "ies" });
+                    let mut r = Row::new(
+                        format!("product:{}/{file}/{id}#{ordinal}", part.id),
+                        2,
+                        "package",
+                        text,
+                    );
+                    r.open = false;
+                    (self.push(r, Some(me)), 3)
+                }
+                None => (me, 2),
+            };
+            for f in bodies {
+                self.solid(part, &f.id, false, depth, Some(under));
+            }
+        }
+    }
+
     /// The instances of assembly `id` (placed at `at`), under the instance
     /// that places it, to any depth: read-only rows. One the window hasn't
     /// loaded is a closed row, loaded when opened.
@@ -939,7 +1143,8 @@ impl Builder<'_> {
         for f in &sub.features {
             let (icon, _) = feature_icon(f, |p| self.is_assembly(p));
             let path = format!("{at}/{}", f.id);
-            let mut r = Row::new(format!("placed:{path}"), depth, icon, row_text(f, 0));
+            let holes = model.holes.get(&sub.id).map_or(0, |t| t.count(&f.id));
+            let mut r = Row::new(format!("placed:{path}"), depth, icon, row_text(f, 0, holes));
             r.weak = true;
             r.tint = Tint::Weak;
             let me = self.push(r, Some(parent));
@@ -961,10 +1166,12 @@ impl Builder<'_> {
             .get(&key)
             .and_then(|m| m.mesh.as_ref().ok())
             .map_or(0, |m| m.faults.len());
+        // An inserted reference has no import row of its own here.
         let import = part
             .feature(solid)
             .and_then(|f| f.import.as_ref())
-            .map(|i| i.reference);
+            .map(|i| i.reference)
+            .or_else(|| shown.filter(|s| s.reference).map(|_| true));
         // A consumed body isn't among the shown ones: a sew's or
         // thicken's is a sheet.
         let sheet = shown.map_or_else(
@@ -1041,6 +1248,8 @@ impl Builder<'_> {
             .iter()
             .filter(|f| f.solids.iter().any(|s| s == solid))
             .filter(|f| !(f.id == solid && f.solids.len() > 1))
+            // An insert's row is the parent of its acted-on solids.
+            .filter(|f| f.insert.is_none())
             .collect();
         for f in chain {
             self.feature(part, f, depth + 1, Some(me));
@@ -1103,6 +1312,8 @@ impl Builder<'_> {
         }
         row.text = text;
         let me = self.push(row, None);
+        let files = import_files(part);
+        let mut listed: BTreeSet<&str> = BTreeSet::new();
         // An assembly's mates go under one Mates row, all of them where
         // the first is listed.
         let mut grouped = false;
@@ -1121,6 +1332,21 @@ impl Builder<'_> {
                     for m in part.features.iter().filter(|m| m.mate.is_some()) {
                         self.feature(part, m, 2, Some(g));
                     }
+                }
+                continue;
+            }
+            // An insert is one row, whatever its source shows (design 521).
+            if f.insert.is_some() {
+                self.insert(part, f, 1, Some(me));
+                continue;
+            }
+            // A file several bodies come from is one row (question 627).
+            if let Some(i) = &f.import
+                && let Some(group) = files.get(i.file.as_str())
+                && group.iter().any(|g| g.id == f.id)
+            {
+                if listed.insert(i.file.as_str()) {
+                    self.file_group(part, &i.file, group, me);
                 }
                 continue;
             }
@@ -1563,7 +1789,24 @@ mod tests {
             body: None,
             sheet: None,
             tweak: None,
+            insert: None,
+            delete: None,
+            spec: None,
         }
+    }
+
+    #[test]
+    fn a_holes_row_gives_its_spec_and_count() {
+        let mut h = feature("hole");
+        h.id = "h1".into();
+        h.spec = Some("M6x1.0-6H THRU".into());
+        assert_eq!(row_text(&h, 0, 100), "h1 (M6x1.0-6H THRU, 100×)");
+        assert_eq!(row_text(&h, 0, 1), "h1 (M6x1.0-6H THRU)");
+        assert_eq!(row_text(&h, 0, 0), "h1 (M6x1.0-6H THRU)");
+        // A hole with no spec, and everything else, read as before.
+        h.spec = None;
+        assert_eq!(row_text(&h, 0, 3), "h1 (hole)");
+        assert_eq!(row_text(&feature("box"), 0, 0), "f (box)");
     }
 
     #[test]
@@ -1582,15 +1825,15 @@ mod tests {
             outdated: Some("C".into()),
         });
         assert_eq!(
-            row_text(&b, 0),
+            row_text(&b, 0, 0),
             "b1 (fasteners:m6-bolt @ label B, outdated)"
         );
         b.instance.as_mut().unwrap().outdated = None;
-        assert_eq!(row_text(&b, 0), "b1 (fasteners:m6-bolt @ label B)");
+        assert_eq!(row_text(&b, 0, 0), "b1 (fasteners:m6-bolt @ label B)");
         // The project's own part at an old label says so too.
         let i = b.instance.as_mut().unwrap();
         (i.project, i.dependency, i.outdated) = (None, None, Some("C".into()));
-        assert_eq!(row_text(&b, 0), "b1 (m6-bolt @ label B, outdated)");
+        assert_eq!(row_text(&b, 0, 0), "b1 (m6-bolt @ label B, outdated)");
     }
 
     /// A part with a solid built by a box, a sketch, an extrude cutting it,
@@ -1651,6 +1894,101 @@ mod tests {
             .iter()
             .map(|s| format!("{}{}", "  ".repeat(rows[s.index].depth), rows[s.index].text))
             .collect()
+    }
+
+    #[test]
+    fn an_insert_is_one_row_and_a_delete_says_what_it_deletes() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "e", "revision": "r", "features": [
+            {"id": "brd", "type": "insert", "ok": true, "hash": "1", "solids": ["brd", "brd/base"],
+             "insert": {"of": "pcb", "rev": {"label": "A"}, "count": 690}},
+            {"id": "nub", "type": "box", "ok": true, "hash": "2", "solids": ["brd/base"],
+             "operation": "join"},
+            {"id": "d", "type": "delete_body", "ok": true, "hash": "3",
+             "delete_body": {"solids": ["brd/boss"]}}],
+          "solids": [
+            {"solid": "brd/base", "ok": true, "features": ["brd", "nub"], "hash": "2"},
+            {"solid": "brd/u1", "ok": true, "features": ["brd"], "hash": "4"}]}));
+        let mut states = States::default();
+        states
+            .by_part
+            .insert("pcb".into(), json!({"state": "released", "label": "B"}));
+        let pdm = BTreeMap::new();
+        let rows = rows(&source(&m, &states, &pdm));
+        assert_eq!(
+            texts(&rows, &Tree::default()),
+            [
+                "e",
+                "  brd (insert of pcb @ label A, behind, 690 solids)",
+                "    brd/base (solid)",
+                "      nub (box, join)",
+                "  d (delete brd/boss)",
+            ]
+        );
+        let row = |t: &str| rows.iter().find(|r| r.text.starts_with(t)).unwrap();
+        let brd = row("brd (");
+        assert_eq!(brd.icon, "arrow-square-in");
+        assert_eq!(brd.choose, Some(("e".to_owned(), "brd".to_owned())));
+        assert!(brd.badges.iter().any(|b| b.icon == "warning-circle"));
+        assert!(brd.tip.as_deref().unwrap().contains("released at B"));
+        assert_eq!(row("d (").icon, "trash");
+        // An inserted solid nothing acted on is never listed.
+        assert!(!rows.iter().any(|r| r.text.starts_with("brd/u1")));
+        // At its newest label, it isn't behind.
+        states
+            .by_part
+            .insert("pcb".into(), json!({"state": "released", "label": "A"}));
+        let rows = super::rows(&source(&m, &states, &pdm));
+        assert!(
+            rows.iter()
+                .any(|r| r.text == "brd (insert of pcb @ label A, 690 solids)")
+        );
+    }
+
+    #[test]
+    fn a_flattened_files_bodies_are_one_row_then_one_per_product() {
+        let imp = |id: &str, product: &str, name: &str| {
+            json!({"id": id, "type": "import", "ok": true, "hash": id, "solids": [id],
+                   "import": {"file": "imports/n.step", "blake3": "00", "body": 0,
+                              "mode": "reference", "flattened": true,
+                              "product": {"id": product, "name": name}}})
+        };
+        let shown = |id: &str| json!({"solid": id, "ok": true, "features": [id], "hash": id, "reference": true});
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "f", "revision": "r", "features": [
+            imp("a", "U1", "MCU"), imp("b", "U1", "MCU"), imp("c", "J1", "USB"),
+            {"id": "x", "type": "box", "ok": true, "hash": "x", "solids": ["x"]}],
+          "solids": [shown("a"), shown("b"), shown("c"),
+                     {"solid": "x", "ok": true, "features": ["x"], "hash": "x"}]}));
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let all: Vec<String> = rows
+            .iter()
+            .map(|r| format!("{}{}", "  ".repeat(r.depth), r.text))
+            .filter(|t| !t.trim_start().starts_with(['a', 'b', 'c']) || t.contains("(solid"))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                "f",
+                "  n.step (3 bodies, flattened, reference)",
+                "    U1 (MCU, 2 bodies)",
+                "      a (solid, reference)",
+                "      b (solid, reference)",
+                "    J1 (USB, 1 body)",
+                "      c (solid, reference)",
+                "  x (solid)",
+                "    x (box)",
+            ]
+        );
+        let file = rows.iter().find(|r| r.text.starts_with("n.step")).unwrap();
+        assert_eq!((file.icon, file.open), ("files", false));
+        let product = rows.iter().find(|r| r.text.starts_with("U1")).unwrap();
+        assert_eq!((product.icon, product.open), ("package", false));
+        // Closed, the file shows its row alone.
+        let shown = texts(&rows, &Tree::default());
+        assert!(shown.contains(&"  n.step (3 bodies, flattened, reference)".to_owned()));
+        assert!(!shown.iter().any(|t| t.contains("U1 (")), "{shown:?}");
     }
 
     #[test]
@@ -1798,15 +2136,15 @@ mod tests {
         );
         assert_eq!(hinge.limits.distance, None);
         assert_eq!(
-            row_text(p.feature("hinge").unwrap(), 0),
+            row_text(p.feature("hinge").unwrap(), 0, 0),
             "hinge (revolute: base → pin, 4.0°, at max)"
         );
         assert_eq!(
-            row_text(p.feature("tube").unwrap(), 0),
+            row_text(p.feature("tube").unwrap(), 0, 0),
             "tube (cylindrical: base → pin, 4.0°, 12.5 mm, angle at max, distance at min)"
         );
         assert_eq!(
-            row_text(p.feature("glue").unwrap(), 0),
+            row_text(p.feature("glue").unwrap(), 0, 0),
             "glue (fastened: base → pin)"
         );
     }
@@ -2314,6 +2652,8 @@ mod tests {
             "delete_face",
             "delete_blend",
             "resize_blend",
+            "insert",
+            "delete_body",
             "mystery",
         ] {
             for op in [
@@ -2350,6 +2690,8 @@ mod tests {
             "stethoscope",
             "spinner-gap",
             "link-simple",
+            "files",
+            "package",
         ]);
         for c in cases {
             assert!(names.contains(&c), "{c}");
@@ -2386,6 +2728,8 @@ mod tests {
         let mut p = feature("pattern");
         p.form = Some("mirror".into());
         assert_eq!(feature_icon(&p, no).0, "flip-horizontal");
+        assert_eq!(feature_icon(&feature("insert"), no).0, "arrow-square-in");
+        assert_eq!(feature_icon(&feature("delete_body"), no).0, "trash");
     }
 
     #[test]

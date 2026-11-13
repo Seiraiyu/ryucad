@@ -239,6 +239,22 @@ pub(crate) fn part_report(
         .collect();
     // A pattern's form (`linear`, `circular` or `mirror`), for the
     // window's icons, whatever it rebuilt to.
+    // Each hole's spec, and its sizes when they derive (ryucad 28).
+    let holes: BTreeMap<Id, (String, Option<Value>)> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            let Ok(Feature::Hole(h)) = f else { return None };
+            let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref()).ok();
+            Some((
+                fid.clone(),
+                (
+                    crate::hole::spec::canonical(h, unit),
+                    sizes.map(|s| s.to_json()),
+                ),
+            ))
+        })
+        .collect();
     let forms: BTreeMap<Id, &'static str> = part
         .features
         .iter()
@@ -475,6 +491,12 @@ pub(crate) fn part_report(
             }
             if let Some(form) = forms.get(fid) {
                 v["form"] = json!(form);
+            }
+            if let Some((spec, sizes)) = holes.get(fid) {
+                v["spec"] = json!(spec);
+                if let Some(s) = sizes {
+                    v["sizes"] = s.clone();
+                }
             }
             if let Some((k, x)) = bodied.get(fid) {
                 v[*k] = x.clone();

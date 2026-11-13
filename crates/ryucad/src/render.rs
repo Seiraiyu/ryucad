@@ -631,6 +631,51 @@ impl Geometry {
     }
 }
 
+impl Geometry {
+    /// A cosmetic thread's ring: a dashed circle of `radius` about
+    /// `centre`, square to `axis`, as 64 points closed.
+    pub fn add_ring(
+        &mut self,
+        centre: ryukei::geom::Point3,
+        axis: ryukei::geom::Vector3,
+        radius: f64,
+        color: Option<Rgb>,
+    ) {
+        use ryukei::geom::Vector3;
+        let Some(a) = axis.normalize() else {
+            return;
+        };
+        let a = a.get();
+        let seed = if a.x.abs() < 0.9 {
+            Vector3::new(1.0, 0.0, 0.0)
+        } else {
+            Vector3::new(0.0, 1.0, 0.0)
+        };
+        let Some(u) = a.cross(seed).normalize() else {
+            return;
+        };
+        let u = u.get();
+        let v = a.cross(u);
+        let mut points = Vec::new();
+        for i in 0..=64 {
+            let t = core::f64::consts::TAU * f64::from(i) / 64.0;
+            let p =
+                centre + u * (radius * ryukei::math::cos(t)) + v * (radius * ryukei::math::sin(t));
+            points.push(self.positions.len() as u32);
+            self.positions.push([p.x, p.y, p.z]);
+        }
+        self.lines.push(Line {
+            points,
+            color: color.unwrap_or(THREAD),
+            width: if color.is_some() { 3.0 } else { 1.5 },
+            dash: true,
+        });
+    }
+}
+
+/// A cosmetic thread's rings.
+pub const THREAD: Rgb = [0.2, 0.2, 0.2];
+
 /// A dashed line's dashes and the gaps between them, in output pixels.
 pub const DASH: [f32; 2] = [6.0, 4.0];
 

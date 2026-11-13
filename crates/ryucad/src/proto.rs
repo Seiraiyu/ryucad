@@ -269,6 +269,41 @@ pub struct FeatureFields {
     /// A hole's bottom: `"flat"` (the default) or `{"drill": angle}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bottom: Option<Value>,
+    /// A hole's spec: "M6x1.0-6H THRU", "CBORE ISO4762 M5", "DIA 6 H7
+    /// THRU" (`hole::spec`). It sets the fields it names; a field it sets
+    /// and given beside it is `usage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<String>,
+    /// A tapped hole's thread: `{standard, size, pitch?, tpi?, class?,
+    /// hand?, starts?, depth?, drill?}`, its fields laid over the
+    /// current thread's; `"STANDARD:SIZE"` for a new one; `""` takes it
+    /// away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<Value>,
+    /// A clearance hole's screw: `{standard, size, fit?}`,
+    /// `"STANDARD:SIZE"`, or `""`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fastener: Option<Value>,
+    /// A clearance hole's fit: close, normal or loose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fastener_fit: Option<String>,
+    /// A hole's ISO 286 class ("H7"); `""` takes it away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit: Option<String>,
+    /// A tapped hole's TPI, class, starts,
+    /// thread depth ("full" or a length) and tap drill ("table",
+    /// "roll-form" or "engagement:N"), each laid into its thread. A
+    /// hole's `pitch` and `hand` are its thread's (a helix's its own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpi: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_depth: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_drill: Option<String>,
     /// The joins, cuts and holes a pattern repeats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<Vec<String>>,
@@ -571,7 +606,9 @@ pub struct FeatureFields {
     /// `<part>/<feature>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sides: Option<Value>,
-    /// A fill's or a sew's tolerance: a length from 0.00001 mm to 0.1 mm.
+    /// A fill's or a sew's tolerance: a length from 0.00001 mm to 0.1 mm;
+    /// a hole's bore tolerance, `{symmetric}` or `{deviation}`, `""` for
+    /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tolerance: Option<Value>,
     /// Faces given one by one, two or more (`--face` repeated): an
@@ -723,6 +760,10 @@ pub enum Request {
         position: Position,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// Validate and derive, and write nothing: what the feature would
+        /// be, sizes and all.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
     },
     #[serde(rename = "feature.edit")]
     FeatureEdit {
@@ -742,6 +783,10 @@ pub enum Request {
         expressions: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// Validate and derive, and write nothing: what the feature would
+        /// be, sizes and all.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
     },
     #[serde(rename = "feature.delete")]
     FeatureDelete {
@@ -1167,6 +1212,50 @@ pub enum Request {
         path: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         depth: Option<u32>,
+    },
+    /// Every hole of a part (`holes`): each place of each hole feature,
+    /// with patterns and mirrors expanded, in a fixed order; or one by its
+    /// reference, as CSV, or grouped by spec.
+    #[serde(rename = "holes.list")]
+    HolesList {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        /// One row per hole as CSV text, in `csv`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        csv: bool,
+        /// Rows of one spec together: `{spec, count, refs}`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        group: bool,
+        /// One hole by its reference.
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// What the hole standards hold: `threads`, `fasteners` or `drills`,
+    /// optionally one standard (or drill series) and size, each value
+    /// with its source.
+    #[serde(rename = "standards.list")]
+    StandardsList {
+        table: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        standard: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
+    },
+    /// A hole's every size, limit and source, and its canonical spec, for
+    /// a spec or fields with no model (`hole derive`). Reads the project's
+    /// hole_standards.json, and `part`'s parameters when given.
+    #[serde(rename = "hole.derive")]
+    HoleDerive {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spec: Option<String>,
+        /// Hole fields as a file holds them, laid over the spec's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fields: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
     },
     /// Which solids of an assembly's occurrences overlap: every pair whose
     /// boxes do, or those with a side under `instances` (instance paths
@@ -2365,6 +2454,11 @@ pub enum Request {
         /// it out: labelled by the solid, every name the shown body's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         flat: Option<String>,
+        /// Mesh solid `feature` as this feature of the part read it,
+        /// whether or not the model still shows it: what a delete takes
+        /// out, ghosted where it was (ryucad 25.B).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
     },
     /// Draws a part (or the whole project) to a PNG, sent as bytes after
     /// the answer. The view is `camera`, a participant's camera, a standard
@@ -2402,6 +2496,10 @@ pub enum Request {
         /// Draw the shown part's datums (default true).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         datums: Option<bool>,
+        /// Draw tapped holes' cosmetic threads, a ring at each end
+        /// (default true).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threads: Option<bool>,
         /// Render the project as this Git revision has it (the working
         /// files by default).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2526,8 +2624,9 @@ impl Request {
             Request::ProjectInit { .. }
                 | Request::PartCreate { .. }
                 | Request::PartDelete { .. }
-                | Request::FeatureAdd { .. }
-                | Request::FeatureEdit { .. }
+                // A dry run reads the model without taking the write lock.
+                | Request::FeatureAdd { dry_run: false, .. }
+                | Request::FeatureEdit { dry_run: false, .. }
                 | Request::FeatureDelete { .. }
                 | Request::FeatureMove { .. }
                 | Request::ParamSet { .. }
@@ -2692,6 +2791,7 @@ mod tests {
                     first: false,
                 },
                 expected_revision: None,
+                dry_run: false,
             },
             Request::FeatureAdd {
                 part: "p".into(),
@@ -2705,6 +2805,21 @@ mod tests {
                 id: None,
                 position: Position::default(),
                 expected_revision: None,
+                dry_run: false,
+            },
+            Request::FeatureAdd {
+                part: "p".into(),
+                ty: "hole".into(),
+                params: Map::new(),
+                placement: None,
+                fields: FeatureFields {
+                    spec: Some("M6x1.0-6H THRU".into()),
+                    ..Default::default()
+                },
+                id: Some("h".into()),
+                position: Position::default(),
+                expected_revision: None,
+                dry_run: true,
             },
             Request::FeatureMove {
                 part: "p".into(),

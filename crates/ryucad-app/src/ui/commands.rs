@@ -35,6 +35,7 @@ pub fn state(o: &mut Opened) -> State {
         edges: o.view.edges,
         sketches: o.view.sketches,
         datums: o.view.datums,
+        threads: o.view.threads,
         nav_cube: o.view.cube,
         triad: o.view.triad,
         origin: o.view.origin,
@@ -264,6 +265,24 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         }
         // Everything along the ray where the menu was opened.
         "edit.select_other" => o.view.select_other(&o.ws),
+        // The faces of the hole a face is in, or of every hole its
+        // feature makes, patterns' and mirrors' too.
+        "edit.select_hole" => {
+            if let Some(t) = target
+                && let Some(h) = crate::core::threads::hole(&o.ws.model, t)
+            {
+                let faces = h.faces.clone();
+                o.ws.select(faces, SelectMode::Replace);
+            }
+        }
+        "edit.select_siblings" => {
+            if let Some(t) = target {
+                let faces = crate::core::threads::siblings(&o.ws.model, t);
+                if !faces.is_empty() {
+                    o.ws.select(faces, SelectMode::Replace);
+                }
+            }
+        }
         "select.faces" => o.view.filter.faces = !o.view.filter.faces,
         "select.edges" => o.view.filter.edges = !o.view.filter.edges,
         "select.vertices" => o.view.filter.vertices = !o.view.filter.vertices,
@@ -320,6 +339,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "view.edges" => toggle(o, "display.edges", o.view.edges),
         "view.sketches" => toggle(o, "display.sketches", o.view.sketches),
         "view.datums" => toggle(o, "display.datums", o.view.datums),
+        "view.threads" => toggle(o, "display.threads", o.view.threads),
         // A sheet metal solid laid flat where its fixed flange lies, or
         // folded again.
         "view.flat" => {

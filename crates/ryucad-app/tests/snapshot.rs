@@ -540,6 +540,104 @@ fn datums_paths_and_helices_look_as_they_did() {
     looks_as_it_did(&adapter, &px, "datums");
 }
 
+/// Cosmetic threads: a 30 × 30 × 6 mm plate with a 3 × 3 grid of M3
+/// through holes on 10 mm, each thread drawn as a dashed ring at its
+/// mouth and its end.
+#[test]
+fn cosmetic_threads_look_as_they_did() {
+    let _one = one_at_a_time();
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot");
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "plate", "--param", "x=30", "--param", "y=30",
+        "--param", "z=6",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,6",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [5, 5]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--spec",
+        "M3x0.5-6H THRU",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "pattern",
+        "--id",
+        "grid",
+        "--seed",
+        "h",
+        "--direction",
+        "x",
+        "--spacing",
+        "10",
+        "--count",
+        "3",
+        "--direction2",
+        "y",
+        "--spacing2",
+        "10",
+        "--count2",
+        "3",
+    ]);
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 1
+        && ws.model.holes.get("p").is_some_and(|t| !t.rows.is_empty())));
+    assert_eq!(ws.model.holes["p"].rows.len(), 9);
+    let rings: Vec<_> = ws
+        .model
+        .holes
+        .values()
+        .flat_map(|t| ryucad_app::core::threads::marks(t))
+        .collect();
+    assert_eq!(rings.len(), 18, "a ring at each end of nine threads");
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    // The plate's bounding sphere, so the near plane spares its corners.
+    let radius = (0..3)
+        .map(|k| (hi[k] - lo[k]) * (hi[k] - lo[k]))
+        .sum::<f64>()
+        .sqrt()
+        / 2.0;
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, radius);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let overlay =
+        ryucad_app::core::threads::overlay(&ws.model, &pr, [f64::from(W), f64::from(H)], 1.0);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &overlay,
+        glass: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "threads");
+}
+
 /// A loft chosen as the window draws it: its two square sections, each
 /// with a square where its loop starts, over the loft and a twisted sweep
 /// beside it.

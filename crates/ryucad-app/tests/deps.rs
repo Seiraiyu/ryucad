@@ -21,7 +21,7 @@ fn open(p: &Project) -> Workspace {
 /// The tree's text for the first feature of `frame`.
 fn row(ws: &Workspace) -> String {
     match ws.part("frame").and_then(|f| f.features.first()) {
-        Some(f) => ryucad_app::core::tree::row_text(f, 0),
+        Some(f) => ryucad_app::core::tree::row_text(f, 0, 0),
         None => String::new(),
     }
 }

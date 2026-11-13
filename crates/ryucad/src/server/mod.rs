@@ -174,7 +174,9 @@ pub fn answer_live(
             transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
             rev,
             flat: Some(solid),
-        } => flat_alone(feature.as_deref(), &features, quality.as_deref())
+            before,
+        } => view::before_alone(before.as_deref(), true, &features)
+            .and_then(|()| flat_alone(feature.as_deref(), &features, quality.as_deref()))
             .and_then(|()| {
                 mesh_flat_binary(
                     session,
@@ -196,6 +198,31 @@ pub fn answer_live(
             transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
             rev,
             flat: None,
+            before: Some(reader),
+        } => view::before_alone(Some(&reader), false, &features)
+            .and_then(|()| session.at(rev.as_deref()))
+            .and_then(|(commit, s)| {
+                let compact = t == Transfer::Compact;
+                let mut a = view::mesh_before_binary(
+                    s,
+                    &part,
+                    feature.as_deref(),
+                    &reader,
+                    quality.as_deref(),
+                    compact,
+                )?;
+                a.result = versioned(noted(Ok(a.result), commit))?;
+                Ok(a)
+            }),
+        Request::MeshGet {
+            part,
+            feature,
+            features,
+            quality,
+            transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
+            rev,
+            flat: None,
+            before: None,
         } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             let only = wanted(feature.as_deref(), &features);
             let compact = t == Transfer::Compact;
@@ -215,6 +242,7 @@ pub fn answer_live(
             labels,
             sketches,
             datums,
+            threads,
             rev,
             frame,
             compare,
@@ -465,6 +493,7 @@ pub fn answer_live(
                 labels: labels.unwrap_or(false),
                 sketches: sketches.unwrap_or(true),
                 datums: datums.unwrap_or(true),
+                threads: threads.unwrap_or(true),
                 rev,
                 frame,
                 compare,
@@ -739,6 +768,7 @@ pub fn prepare_job(
         quality,
         rev,
         flat: None,
+        before: None,
         ..
     } = req
     else {

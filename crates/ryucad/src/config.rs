@@ -206,6 +206,13 @@ const KEYS: &[Key] = &[
         about: "whether datums, paths and helices are drawn",
     },
     Key {
+        name: "display.threads",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether tapped holes' cosmetic threads are drawn",
+    },
+    Key {
         name: "display.annotations",
         scope: Scope::User,
         rule: Rule::Bool,
@@ -749,6 +756,11 @@ pub fn project_revision_from(read: &dyn Fn(&str) -> Result<Option<Vec<u8>>>) -> 
         piece(crate::doc::drawing_lint::DRAWING_LINT.as_bytes());
         piece(&l);
     }
+    // Only when there is one: other projects' revisions keep their bits.
+    if let Some(t) = read(crate::doc::hole_standards::HOLE_STANDARDS)? {
+        piece(crate::doc::hole_standards::HOLE_STANDARDS.as_bytes());
+        piece(&t);
+    }
     Ok(h.finalize().to_hex()[..32].to_owned())
 }
 
@@ -1107,6 +1119,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_project_revision_covers_the_hole_standards() {
+        use crate::doc::hole_standards::HOLE_STANDARDS;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(crate::doc::project::MANIFEST), "{}").unwrap();
+        let before = project_revision(root).unwrap();
+        std::fs::write(root.join(HOLE_STANDARDS), "{}").unwrap();
+        assert_ne!(project_revision(root).unwrap(), before);
+    }
+
+    #[test]
     fn the_project_revision_covers_the_material_library() {
         use crate::doc::materials::MATERIALS;
         use crate::doc::project::{MANIFEST, PDM_CONFIG};
@@ -1147,6 +1170,7 @@ pub(crate) mod tests {
             ("display.triad", true),
             ("display.origin", false),
             ("display.datums", true),
+            ("display.threads", true),
             ("display.annotations", true),
         ] {
             assert_eq!(scope_of(key).unwrap(), Scope::User, "{key}");
