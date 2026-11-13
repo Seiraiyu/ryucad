@@ -168,10 +168,7 @@ impl Icon {
 pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, colour: Color32) {
     match icon {
         Icon::Ph(_, cp) => {
-            let font = FontId::new(
-                rect.height(),
-                FontFamily::Name(crate::fonts::ICONS.into()),
-            );
+            let font = FontId::new(rect.height(), FontFamily::Name(crate::fonts::ICONS.into()));
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, cp, font, colour);
         }
         Icon::Glyph(g) => glyphs::paint(painter, rect, g, colour),
