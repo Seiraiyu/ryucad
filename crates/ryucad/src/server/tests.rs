@@ -4611,3 +4611,35 @@ fn subscribers_hear_of_model_changes_once() {
     assert_eq!(got[0].1["parts"], json!([]));
     assert_eq!(got[1].1["removed"], json!(["p"]));
 }
+
+/// ryucad 25.B: the window fetches an inserted solid's mesh by its key,
+/// one body per request as it fetches any solid's.
+#[test]
+fn mesh_get_takes_an_inserted_solids_key() {
+    let (_dir, mut s) = crate::insert::tests::boarded();
+    let all = call(&mut s, "mesh.get", json!({"part": "enclosure"})).unwrap();
+    let u1 = all["bodies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["feature"] == "pcb/u1")
+        .cloned()
+        .unwrap_or_else(|| panic!("{all}"));
+    let one = call(
+        &mut s,
+        "mesh.get",
+        json!({"part": "enclosure", "feature": "pcb/u1"}),
+    )
+    .unwrap();
+    assert_eq!(one["bodies"].as_array().unwrap().len(), 1, "{one}");
+    assert_eq!(one["bodies"][0]["feature"], "pcb/u1");
+    assert_eq!(one["bodies"][0]["hash"], u1["hash"]);
+    // A key below a feature that inserts nothing is refused, by name.
+    let e = call(
+        &mut s,
+        "mesh.get",
+        json!({"part": "enclosure", "feature": "nothing/u1"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::NotFound, "{e:?}");
+}

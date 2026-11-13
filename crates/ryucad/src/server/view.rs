@@ -234,7 +234,11 @@ fn mesh_args(
         Some(q) => mesh::Quality::parse(q)?,
         None => mesh::Quality::preferred(),
     };
-    Ok((part_id(part)?, only.map(feature_id).transpose()?, quality))
+    Ok((
+        part_id(part)?,
+        only.map(|s| Id::solid_key(s, "feature")).transpose()?,
+        quality,
+    ))
 }
 
 /// What a `mesh.get` asks for: a solid or occurrence (`feature`), several

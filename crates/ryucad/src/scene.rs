@@ -33,8 +33,10 @@ pub fn meshes(
     let p = session.project().part(part)?;
     let solids = Solids::of(p);
     if let Some(f) = only {
-        let found = feature(p, f)?;
-        if found.sketch().is_none() && !solids.is_solid(f) {
+        // An inserted solid's key names no feature of its own: its
+        // insert's family holds it (design 521).
+        let sketch = !f.is_path() && feature(p, f)?.sketch().is_some();
+        if !sketch && !solids.is_solid(f) {
             return Err(rebuild::not_a_solid(p, &solids, f, "feature", f));
         }
     }
