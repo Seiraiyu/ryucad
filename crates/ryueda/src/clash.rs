@@ -327,6 +327,233 @@ fn refdes(
     Ok(out)
 }
 
+/// One object a name clash names.
+struct Named {
+    /// Its file, and the pointer of its name in it.
+    path: String,
+    pointer: String,
+    /// `net`, `port` or `rail`.
+    what: &'static str,
+    block: Option<Id>,
+    id: Id,
+}
+
+impl Named {
+    /// Its reference path: `<block>/<net>`, `<block>/port:<port>`,
+    /// `rail:<rail>`.
+    fn reference(&self) -> String {
+        match (self.what, &self.block) {
+            ("net", Some(b)) => format!("{b}/{}", self.id),
+            ("port", Some(b)) => format!("{b}/port:{}", self.id),
+            _ => format!("rail:{}", self.id),
+        }
+    }
+
+    /// Its name in `q`, if `q` has it.
+    fn name_in(&self, q: &Project) -> Option<String> {
+        match (self.what, &self.block) {
+            ("net", Some(b)) => q
+                .conn
+                .blocks
+                .get(b)?
+                .nets
+                .get(&self.id)?
+                .item
+                .as_ref()
+                .ok()
+                .map(|n| n.name.clone()),
+            ("port", Some(b)) => q
+                .conn
+                .blocks
+                .get(b)?
+                .block
+                .item
+                .as_ref()
+                .ok()?
+                .ports
+                .get(&self.id)
+                .map(|p| p.name.clone()),
+            _ => q
+                .conn
+                .rails
+                .get(&self.id)?
+                .item
+                .as_ref()
+                .ok()
+                .map(|r| r.name.clone()),
+        }
+    }
+}
+
+/// What a `net_name_duplicate` fault names, from its file and pointer.
+fn named(f: &Fault) -> Option<Named> {
+    let path = detail(f, "path");
+    let pointer = detail(f, "pointer");
+    let seg: Vec<&str> = path.trim_end_matches(".json").split('/').collect();
+    let (what, block, id) = match seg.as_slice() {
+        ["blocks", b, "nets", n] => ("net", Some(*b), (*n).to_owned()),
+        ["blocks", b, "block"] => {
+            let p = pointer.strip_prefix("/ports/")?.strip_suffix("/name")?;
+            ("port", Some(*b), ryu_git::value::unescape(p))
+        }
+        ["rails", r] => ("rail", None, (*r).to_owned()),
+        _ => return None,
+    };
+    Some(Named {
+        what,
+        block: block.and_then(|b| Id::parse(b, "block").ok()),
+        id: Id::parse(&id, "object").ok()?,
+        path,
+        pointer,
+    })
+}
+
+/// Every name a scope holds in `p`: a block's nets and ports and the
+/// rails (the block `None`: the rails).
+fn names_in(p: &Project, block: Option<&Id>) -> BTreeSet<String> {
+    let mut out: BTreeSet<String> = p
+        .conn
+        .rails
+        .values()
+        .filter_map(|r| Some(r.item.as_ref().ok()?.name.clone()))
+        .collect();
+    if let Some(b) = block.and_then(|b| p.conn.blocks.get(b)) {
+        out.extend(
+            b.nets
+                .values()
+                .filter_map(|n| Some(n.item.as_ref().ok()?.name.clone())),
+        );
+        if let Ok(x) = &b.block.item {
+            out.extend(x.ports.values().map(|p| p.name.clone()));
+        }
+    }
+    out
+}
+
+/// The `name_clash` items: names `net_name_duplicate` finds in the merge
+/// and on neither side, by scope.
+fn names(
+    p: &Project,
+    new: &[&Fault],
+    three: &Three,
+    covered: &mut BTreeSet<String>,
+) -> Vec<Value> {
+    let mut groups: BTreeMap<(String, String), Vec<Named>> = BTreeMap::new();
+    for f in new.iter().filter(|f| f.error.code == Code::NetNameDuplicate) {
+        let Some(n) = named(f) else { continue };
+        let Some(name) = n.name_in(p) else { continue };
+        covered.insert(key(f));
+        let scope = n.block.as_ref().map(Id::to_string).unwrap_or_default();
+        groups.entry((scope, name)).or_default().push(n);
+    }
+    let mut out = Vec::new();
+    for ((scope, name), mut objs) in groups {
+        objs.sort_by_key(Named::reference);
+        let block = objs[0].block.clone();
+        let came = |n: &Named, q: &Project| {
+            let it = n.name_in(q);
+            it.is_some()
+                && it != three.base.and_then(|b| n.name_in(b))
+                && it.as_deref() == Some(name.as_str())
+        };
+        let (mut by_ours, mut by_theirs) = (false, false);
+        let mut theirs: Vec<&Named> = Vec::new();
+        let mut ours: Vec<&Named> = Vec::new();
+        for n in &objs {
+            let t = came(n, three.theirs);
+            by_ours |= came(n, three.ours);
+            by_theirs |= t;
+            if t {
+                theirs.push(n)
+            } else {
+                ours.push(n)
+            }
+        }
+        if theirs.is_empty() {
+            // Neither side's alone: every object but the first.
+            theirs = objs.iter().skip(1).collect();
+            ours = objs.iter().take(1).collect();
+        }
+        let mut repairs = Vec::new();
+        // join: theirs' one net into ours' one net, or into the rail of
+        // that name, when net join can.
+        if let [t] = theirs.as_slice()
+            && t.what == "net"
+            && block.is_some()
+        {
+            let into = match ours.as_slice() {
+                // `into` as `net join` reads it: a net of the block by ID.
+                [o] if o.what == "net" => Some(o.id.to_string()),
+                [o] if o.what == "rail" => Some(format!("rail:{name}")),
+                [] if names_in(p, None).contains(&name) => Some(format!("rail:{name}")),
+                _ => None,
+            };
+            if let Some(into) = into {
+                let net = t.reference();
+                if crate::partcmd::join_writes(p, &net, &into).is_ok() {
+                    repairs.push(json!({"id": "join", "net": net, "into": into, "summary": format!(
+                        "theirs' net {net} joins ours' (both meant the same signal): its pins and bus memberships move, as net join moves them"
+                    )}));
+                }
+            }
+        }
+        // rename: each of theirs' takes the next free `<name>_<k>`.
+        let mut taken = names_in(p, block.as_ref());
+        let mut renames = Vec::new();
+        for t in &theirs {
+            let to = (2u64..)
+                .map(|k| format!("{name}_{k}"))
+                .find(|s| !taken.contains(s))
+                .expect("some k is free");
+            taken.insert(to.clone());
+            renames.push(json!({"path": t.path, "pointer": t.pointer, "to": to}));
+        }
+        repairs.push(json!({"id": "rename", "renames": renames, "summary": "theirs' take the next free name"}));
+        let refs: Vec<String> = objs
+            .iter()
+            .filter(|n| n.what != "rail")
+            .map(Named::reference)
+            .collect();
+        let mut what = json!({ "refs": refs });
+        if !scope.is_empty() {
+            what["block"] = json!(scope);
+        }
+        let id = format!("name:{scope}/{name}");
+        let mut x = item(
+            id,
+            "name_clash",
+            objs.iter().map(|n| n.path.clone()).collect(),
+            what,
+            cause(by_ours, by_theirs),
+            format!(
+                "{} take the name {name} in the merge, which neither side had them share",
+                objs.iter()
+                    .map(Named::reference)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+        x["name"] = json!(name);
+        x["repairs"] = json!(repairs);
+        out.push(x);
+    }
+    out
+}
+
+/// `w`'s files put in `files` (deleted where `w` deletes them).
+fn apply(files: &mut Files, w: crate::write::Writes) {
+    for (path, text) in w.0 {
+        match text {
+            Some(t) => {
+                files.insert(path, t.into_bytes().into());
+            }
+            None => {
+                files.remove(&path);
+            }
+        }
+    }
+}
+
 /// The semantic items of the merge `state` for the merged project `p`
 /// over the session's files `full`.
 pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -> Result<Found> {
@@ -357,8 +584,9 @@ pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -
     found
         .clashes
         .extend(refdes(root, full, p, &merged, &new_erc, &three)?);
+    found.clashes.extend(names(p, &new, &three, &mut covered));
     //CLASH-CALLS
-    let _ = (&new, &files, &mut covered);
+    let _ = (&files, &covered);
     found.already = merged
         .faults
         .iter()
@@ -406,7 +634,7 @@ pub(crate) fn repair(
             )
             .with("repair", id)
         })?;
-    let _ = (root, sides);
+    let _ = sides;
     match (x["kind"].as_str().unwrap_or_default(), id) {
         ("refdes_clash", "renumber" | "annotate") => {
             for c in planned["changes"].as_array().into_iter().flatten() {
@@ -421,6 +649,25 @@ pub(crate) fn repair(
                     &Id::parse(comp, "component")?,
                 );
                 edit(files, &path, "/refdes", Some(c["refdes"].clone()))?;
+            }
+        }
+        ("name_clash", "join") => {
+            let p = crate::validate::project_over(root, files)?;
+            let j = crate::partcmd::join_writes(
+                &p,
+                planned["net"].as_str().unwrap_or_default(),
+                planned["into"].as_str().unwrap_or_default(),
+            )?;
+            apply(files, j.writes);
+        }
+        ("name_clash", "rename") => {
+            for n in planned["renames"].as_array().into_iter().flatten() {
+                edit(
+                    files,
+                    n["path"].as_str().unwrap_or_default(),
+                    n["pointer"].as_str().unwrap_or_default(),
+                    Some(n["to"].clone()),
+                )?;
             }
         }
         //REPAIR-ARMS
@@ -593,5 +840,74 @@ pub(crate) mod tests {
         let c = of_kind(&v, "annotate_conflict");
         assert_eq!(c.len(), 1, "{v}");
         assert_eq!((c[0]["id"].clone(), c[0]["repairs"].clone()), (json!("refdes:d/R5"), json!([])));
+    }
+
+    #[test]
+    fn two_branches_naming_a_net_alike_clash_and_join() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let net = |name: &str| Some(json!({"kind": "ryueda.net", "format": 1, "name": name}));
+        merging(
+            r,
+            &[
+                ("blocks/top/nets/aux_o.json", net("AUX")),
+                ("blocks/top/components/r2.json", part(json!({"refdes": "R2", "pins": {"1": "aux_o", "2": {"rail": "gnd"}}}))),
+            ],
+            &[
+                ("blocks/top/nets/aux_t.json", net("AUX")),
+                ("blocks/top/components/r3.json", part(json!({"refdes": "R3", "pins": {"1": "aux_t", "2": {"rail": "gnd"}}}))),
+            ],
+        );
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        let c = of_kind(&v, "name_clash");
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "name:top/AUX");
+        assert_eq!(c[0]["concerns"]["refs"], json!(["top/aux_o", "top/aux_t"]));
+        assert_eq!(
+            c[0]["repairs"][0],
+            json!({"id": "join", "net": "top/aux_t", "into": "aux_o",
+                   "summary": "theirs' net top/aux_t joins ours' (both meant the same signal): its pins and bus memberships move, as net join moves them"})
+        );
+        assert_eq!(
+            c[0]["repairs"][1]["renames"],
+            json!([{"path": "blocks/top/nets/aux_t.json", "pointer": "/name", "to": "AUX_2"}])
+        );
+        let fix = crate::proto::Resolution {
+            conflict: "name:top/AUX".to_owned(),
+            choice: "repair".to_owned(),
+            value: None,
+            repair: Some("join".to_owned()),
+        };
+        let out = crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
+        assert_eq!(out["status"]["clean"], true, "{out}");
+        assert!(!r.join("blocks/top/nets/aux_t.json").exists());
+        let r3: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/components/r3.json")).unwrap()).unwrap();
+        assert_eq!(r3["pins"]["1"], "aux_o");
+    }
+
+    #[test]
+    fn a_name_clash_renamed_takes_the_next_free_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let net = |name: &str| Some(json!({"kind": "ryueda.net", "format": 1, "name": name}));
+        merging(
+            r,
+            &[("blocks/top/nets/aux_o.json", net("AUX")), ("blocks/top/nets/aux2.json", net("AUX_2"))],
+            &[("blocks/top/nets/aux_t.json", net("AUX"))],
+        );
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        let c = of_kind(&v, "name_clash");
+        assert_eq!(c[0]["repairs"][1]["renames"][0]["to"], "AUX_3", "{v}");
+        let fix = crate::proto::Resolution {
+            conflict: "name:top/AUX".to_owned(),
+            choice: "repair".to_owned(),
+            value: None,
+            repair: Some("rename".to_owned()),
+        };
+        crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
+        let t: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/nets/aux_t.json")).unwrap()).unwrap();
+        assert_eq!(t["name"], "AUX_3");
     }
 }
