@@ -14,7 +14,7 @@
 
 use crate::assembly::Model;
 use crate::doc::files::{Feature, PartKind};
-use crate::doc::id::Id;
+use crate::doc::id::{CopyKey, Id};
 use crate::doc::motion::{Driven, MotionFile};
 use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
@@ -42,6 +42,8 @@ pub struct Rest {
     pub mates: Vec<Id>,
     /// The instance pattern each of ryumate's patterns is, by its index.
     pub patterns: Vec<Id>,
+    /// Each pattern's copies by key with ryumate's index, by its index.
+    pub keys: Vec<Vec<(CopyKey, [u32; 2])>>,
     pub asm: ryumate::Assembly,
     /// Whether its mates hold (true with none).
     pub holds: bool,
@@ -54,6 +56,7 @@ impl Rest {
                 instances: s.instances.clone(),
                 mates: s.mates.clone(),
                 patterns: s.patterns.clone(),
+                keys: s.keys.clone(),
                 asm: s.asm.clone(),
                 holds: s.report.converged,
             };
@@ -76,6 +79,7 @@ impl Rest {
             instances,
             mates: Vec::new(),
             patterns: Vec::new(),
+            keys: Vec::new(),
             asm,
             holds: true,
         }
@@ -86,6 +90,23 @@ impl Rest {
             .iter()
             .position(|i| i == id)
             .map(|k| k as u32)
+    }
+
+    /// The body carrying pattern `k`'s places, for a following pattern.
+    fn carrier(&self, k: u32) -> Option<u32> {
+        match &self.asm.patterns.get(&k)?.motion {
+            ryumate::Motion::Places { body, .. } => Some(*body),
+            _ => None,
+        }
+    }
+
+    /// ryumate's index for copy `key` of pattern `pattern`.
+    fn index(&self, pattern: u32, key: &CopyKey) -> Option<[u32; 2]> {
+        self.keys
+            .get(pattern as usize)?
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, i)| *i)
     }
 }
 
@@ -741,7 +762,8 @@ fn top_body(rest: &Rest, path: &[Id]) -> Option<u32> {
 }
 
 /// The rest model with each occurrence under a body in `moved` (a
-/// top-level instance, or a copy of a moved seed) placed where the step
+/// top-level instance, or a copy of a moved seed or of a pattern whose
+/// places a moved body carries) placed where the step
 /// puts it, and for each occurrence the body that moved it.
 pub fn step_model(
     rest_model: &Model,
@@ -756,10 +778,12 @@ pub fn step_model(
     }
     let mut copies: Vec<(u32, u32, [u32; 2])> = Vec::new();
     for o in &rest_model.occurrences {
-        if let Some((pattern, index)) = o.path[0].copy_of()
+        if let Some((pattern, key)) = o.path[0].copy_of()
             && let Some(seed) = o.path.get(1).and_then(|s| rest.body(s))
-            && moved.contains_key(&seed)
             && let Some(k) = pattern_of(&pattern)
+            && (moved.contains_key(&seed)
+                || rest.carrier(k).is_some_and(|b| moved.contains_key(&b)))
+            && let Some(index) = rest.index(k, &key)
         {
             copies.push((k, seed, index));
         }
@@ -775,12 +799,15 @@ pub fn step_model(
     let mut movers = Vec::with_capacity(rest_model.occurrences.len());
     for o in &rest_model.occurrences {
         let top = match o.path[0].copy_of() {
-            Some((pattern, index)) => {
+            Some((pattern, key)) => {
                 match (
                     pattern_of(&pattern),
                     o.path.get(1).and_then(|s| rest.body(s)),
                 ) {
-                    (Some(k), Some(seed)) => copy_at.get(&(k, seed, index)).map(|p| (seed, *p)),
+                    (Some(k), Some(seed)) => rest
+                        .index(k, &key)
+                        .and_then(|index| copy_at.get(&(k, seed, index)))
+                        .map(|p| (seed, *p)),
                     _ => None,
                 }
             }
@@ -2520,5 +2547,38 @@ pub(crate) mod tests {
             after["first_collision"], before["first_collision"],
             "{after}"
         );
+    }
+
+    #[test]
+    fn a_step_moves_copies_with_the_body_that_carries_their_places() {
+        use crate::places::tests::{id, must, tray};
+        let (_dir, mut s) = tray();
+        must(
+            &mut s,
+            "feature.add",
+            serde_json::json!({"part": "pack", "type": "instance_pattern",
+             "id": "screws", "instances": ["screw-0"], "form": "feature", "on": "pack/lid/grid"}),
+        );
+        let r = s.rebuilt(&id("pack")).unwrap().clone();
+        let rest = Rest::of(&r);
+        let model = Model::of_assembly(&r);
+        let lid = rest.body(&id("lid")).unwrap();
+        // The lid a quarter turn about z at its origin.
+        let turned = ryumate::Pose {
+            rotation: [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            origin: [0.1, 0.0, 0.0],
+        };
+        let (m, movers) = step_model(&model, &rest, &[(lid, turned)].into()).unwrap();
+        let k = m
+            .occurrences
+            .iter()
+            .position(|o| crate::assembly::path_text(&o.path) == "screws:1/screw-0")
+            .unwrap();
+        let t = m.occurrences[k].pose.translation_part();
+        assert_eq!(
+            [t.x, t.y, t.z].map(|c| (c * 1e3).round() as i64),
+            [110, 30, 0]
+        );
+        assert!(movers[k].is_some());
     }
 }

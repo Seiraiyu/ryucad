@@ -22,7 +22,7 @@
 
 use crate::assembly::{Occurrence, Placed, path_text};
 use crate::doc::assembly::Pose as DocPose;
-use crate::doc::id::Id;
+use crate::doc::id::{CopyKey, Id};
 use crate::doc::mate::{At, Connector, Offset};
 use crate::error::{Code, Error, Result};
 use ryukei::geom::{Curve, Rigid, Surface};
@@ -193,7 +193,7 @@ pub fn offset(frame: &Pose, offset: &Offset) -> Pose {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Found {
     pub instance: Id,
-    pub copy: Option<(Id, [u32; 2])>,
+    pub copy: Option<(Id, CopyKey)>,
     pub frame: Pose,
     /// Where its entity went, when a later feature of its part split or
     /// merged it and the connector followed (design 447).
@@ -206,9 +206,9 @@ pub trait Scope {
     /// Instance `id`'s result, if the assembly lists one.
     fn instance(&self, id: &Id) -> Option<core::result::Result<&Placed, &Error>>;
 
-    /// Whether pattern `pattern` places a copy of `seed` at `index`, or
+    /// Whether pattern `pattern` places a copy of `seed` keyed `key`, or
     /// why it failed; `None` when the assembly has no such pattern.
-    fn places(&self, pattern: &Id, seed: &Id, index: [u32; 2]) -> Option<Result<bool>>;
+    fn places(&self, pattern: &Id, seed: &Id, key: &CopyKey) -> Option<Result<bool>>;
 }
 
 /// Resolves connector `c`, held by `owner` in its `role`, in `scope`.
@@ -220,11 +220,11 @@ pub fn resolve(owner: &Id, role: &str, c: &Connector, scope: &dyn Scope) -> Resu
             .with("role", role)
             .with("connector", &text)
     };
-    let (instance, inside, copy) = match c.copy {
+    let (instance, inside, copy) = match &c.copy {
         None => (c.root.clone(), &c.rest[..], None),
-        Some(index) => {
+        Some(key) => {
             let seed = c.rest[0].clone();
-            match scope.places(&c.root, &seed, index) {
+            match scope.places(&c.root, &seed, key) {
                 None => {
                     return Err(fail(
                         Code::NotFound,
@@ -243,14 +243,15 @@ pub fn resolve(owner: &Id, role: &str, c: &Connector, scope: &dyn Scope) -> Resu
                     return Err(fail(
                         Code::NotFound,
                         format!(
-                            "names a copy pattern {} doesn't place (of {seed}, at {index:?})",
-                            c.root
+                            "names a copy pattern {} doesn't place (of {seed}, at {})",
+                            c.root,
+                            key.text()
                         ),
                     ));
                 }
                 Some(Ok(true)) => {}
             }
-            (seed, &c.rest[1..], Some((c.root.clone(), index)))
+            (seed, &c.rest[1..], Some((c.root.clone(), key.clone())))
         }
     };
     let p = match scope.instance(&instance) {

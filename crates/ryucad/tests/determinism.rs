@@ -5115,6 +5115,161 @@ fn limits_section(golden: &mut Golden) {
     s.str(&r.hash);
 }
 
+/// The battery tray of #547 (Task 8's `places::tests::tray`): part
+/// `tray` with a 3 by 2 hole grid (one skipped) and a hole at a sketch's
+/// free points, part `screw`, and assembly `pack` with `lid` of the tray
+/// and three seeds.
+fn tray_for_patterns() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let must = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| must(s, "feature.add", f);
+    must(&mut s, "part.create", json!({"part": "tray"}));
+    add(
+        &mut s,
+        json!({"part": "tray", "type": "box", "id": "plate",
+                           "params": {"x": 60, "y": 40, "z": 5},
+                           "placement": {"origin": [0, 0, -5]}}),
+    );
+    add(
+        &mut s,
+        json!({"part": "tray", "type": "sketch", "id": "seat", "plane": "xy"}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "tray", "sketch": "seat",
+             "ops": [{"op": "add", "type": "point", "at": [10, 10]}]}),
+    );
+    add(
+        &mut s,
+        json!({"part": "tray", "type": "hole", "id": "h", "sketch": "seat",
+                           "diameter": 3, "depth": "through_all"}),
+    );
+    add(
+        &mut s,
+        json!({"part": "tray", "type": "pattern", "id": "grid", "features": ["h"],
+                           "direction": "x", "spacing": 20, "count": 3,
+                           "direction2": "y", "spacing2": 20, "count2": 2, "skip": [[2, 1]]}),
+    );
+    add(
+        &mut s,
+        json!({"part": "tray", "type": "sketch", "id": "layout", "plane": "xy"}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "tray", "sketch": "layout", "ops": [
+            {"op": "add", "id": "p1", "type": "point", "at": [5, 35]},
+            {"op": "add", "id": "p2", "type": "point", "at": [25, 35]},
+            {"op": "add", "id": "p3", "type": "point", "at": [2, 2]},
+            {"op": "add", "id": "p4", "type": "point", "at": [8, 2]},
+            {"op": "add", "id": "p5", "type": "point", "at": [45, 35]},
+            {"op": "add", "type": "line", "start": "p3", "end": "p4"}]}),
+    );
+    add(
+        &mut s,
+        json!({"part": "tray", "type": "hole", "id": "row", "sketch": "layout",
+                           "diameter": 3, "depth": "through_all"}),
+    );
+    must(&mut s, "part.create", json!({"part": "screw"}));
+    add(
+        &mut s,
+        json!({"part": "screw", "type": "cylinder", "id": "shank",
+                           "params": {"radius": 1.4, "height": 8}}),
+    );
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "pack", "kind": "assembly"}),
+    );
+    for (i, of, at) in [
+        ("lid", "tray", [100, 0, 0]),
+        ("screw-0", "screw", [110, 10, 0]),
+        ("bolt-0", "screw", [105, 35, 0]),
+        ("pin-0", "screw", [105, 35, 0]),
+    ] {
+        add(
+            &mut s,
+            json!({"part": "pack", "type": "instance", "id": i, "of": of,
+                               "placement": {"origin": at}}),
+        );
+    }
+    (dir, s)
+}
+
+/// The tray with `screws` on `grid`, `bolts` on `row` and `pins` on
+/// `layout` (points p1, p5), the lid turned 30° about z.
+fn instance_tray() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let (dir, mut s) = tray_for_patterns();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    for (pid, seed, form, on, points) in [
+        ("screws", "screw-0", "feature", "pack/lid/grid", None),
+        ("bolts", "bolt-0", "feature", "pack/lid/row", None),
+        (
+            "pins",
+            "pin-0",
+            "points",
+            "pack/lid/layout",
+            Some(json!(["p1", "p5"])),
+        ),
+    ] {
+        let mut f = json!({"part": "pack", "type": "instance_pattern", "id": pid,
+                           "instances": [seed], "form": form, "on": on});
+        if let Some(p) = points {
+            f["points"] = p;
+        }
+        call(&mut s, "feature.add", f);
+    }
+    call(
+        &mut s,
+        "assembly.move",
+        json!({"part": "pack", "instance": "lid",
+                                          "axis": [0, 0, 1], "angle": "30 deg"}),
+    );
+    (dir, s)
+}
+
+/// Instance patterns that follow a part (design 521): the tray's pack
+/// with a grid-driven, a hole-driven and a points pattern, the lid turned
+/// 30° about z; every copy's path and pose bits, the solve, the files as
+/// stored, the model's and the rebuild's hashes.
+fn instance_patterns_section(golden: &mut Golden) {
+    use ryucad::doc::assembly::Rev;
+    let mut s = golden.section("instance_patterns");
+    let (dir, mut session) = instance_tray();
+    let pack = Id::parse("pack", "part").unwrap();
+    let r = session.rebuilt(&pack).unwrap().clone();
+    assert_eq!(r.failed(), 0, "{:?}", r.features);
+    s.str(&r.solve.as_ref().unwrap().to_json().to_string());
+    let model = session.model(&pack, &Rev::Working).unwrap();
+    for o in &model.occurrences {
+        s.str(&ryucad::assembly::path_text(&o.path));
+        let p = ryucad::assembly::rigid_pose(&o.pose);
+        for x in p.origin_m.iter().chain(&p.z).chain(&p.x) {
+            s.str(&format!("{:016x}", x.to_bits()));
+        }
+    }
+    for f in ["screws", "bolts", "pins"] {
+        s.str(
+            &std::fs::read_to_string(dir.path().join(format!("parts/pack/features/{f}.json")))
+                .unwrap(),
+        );
+    }
+    s.str(&model.hash);
+    s.str(&model.places_hash);
+    s.str(&r.hash);
+}
+
 /// The mated assembly swept: its revolute `m1` (on the seed of `ring`,
 /// so the copies follow) driven from 0° to 90° in 19 steps with
 /// interference, clearance and poses; and `slide` moved 20 mm along x on
@@ -6978,6 +7133,7 @@ sections! {
     limits => limits_section(&mut golden),
     motions => motions_section(&mut golden),
     motion_renders => motion_renders_section(&mut golden),
+    instance_patterns => instance_patterns_section(&mut golden),
     interference => interference_section(&mut golden),
     measure => measure_section(&mut golden),
     imports => imports_section(&mut golden),

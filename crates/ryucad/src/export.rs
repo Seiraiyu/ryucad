@@ -1559,13 +1559,13 @@ impl Walk {
                     Ok(Output::Copies(c)) => {
                         for copy in &c.copies {
                             let product = self.product(s, &copy.placed.part, &copy.placed.rev)?;
-                            let id = Id::copy(fid, copy.index).to_string();
+                            let id = Id::copy(fid, &copy.key).to_string();
                             children.push(Child {
                                 product,
                                 place: copy.placed.pose,
                                 usage: id.clone(),
                                 instance: id,
-                                steps: vec![Id::copy(fid, copy.index), copy.seed.clone()],
+                                steps: vec![Id::copy(fid, &copy.key), copy.seed.clone()],
                             });
                         }
                     }

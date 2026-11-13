@@ -249,7 +249,7 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub d2: Option<Value>,
     /// The points of its sketch a hole drills at; empty means every point
-    /// no curve uses.
+    /// no curve uses; the points a points pattern places copies at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub points: Option<Vec<String>>,
     /// A hole's diameter.
@@ -388,9 +388,15 @@ pub struct FeatureFields {
     /// where a point along a curve is measured from (`start`, `end`).
     /// Geometric references are text: `xy`, `x`, `origin`,
     /// `<part>/<feature>`, `<part>/<feature>/<name>`,
-    /// `<part>/<sketch>/<entity>`, or a bare feature ID of the part.
+    /// `<part>/<sketch>/<entity>`, or a bare feature ID of the part; a
+    /// following instance pattern's seed point (`""` drops it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// A following instance pattern's places: `<assembly>/<instance>[/…]/<feature>`,
+    /// a pattern or hole (form `feature`) or a sketch (form `points`) of
+    /// the part at the path's end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
     /// One point a datum takes (`axis_point`, `normal`, `of`,
     /// `projection`); `points` takes several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
