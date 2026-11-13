@@ -95,16 +95,18 @@ fn the_corpus_weighs_in_under_the_mark() {
 /// ```
 ///
 /// Measured 37.0 to 37.9 s on cox-worker-2 (AMD Ryzen 7 9700X, one thread,
-/// load 1.1 to 2.5, 2026-11-10; main before #308's follow-up 39.8 to 40.5
-/// s), so the bar is a regression guard, not step-hunt's 30 s mark (#308
-/// stays open for that): 45 s with `RYUKEI_BARS=1`, else ten times looser.
+/// load 1.1 to 2.5, 2026-11-10) with the bound mesh at 0.05 rad. Since
+/// v0.9.1 the bound mesh is at 0.15 rad with each triangle's certified
+/// turn in the area bound (#308, the owner's decision): the same values,
+/// bounds a little wider, under step-hunt's 30 s mark with
+/// `RYUKEI_BARS=1`, else ten times looser.
 #[test]
 #[ignore = "needs the pinned KiCad corpus: sh scripts/fetch-kicad.sh"]
 fn smolhaj_body_5_weighs_in_bit_for_bit() {
     let bar = if std::env::var("RYUKEI_BARS").as_deref() == Ok("1") {
-        45.0
+        30.0
     } else {
-        450.0
+        300.0
     };
     let corpus = std::env::var_os("RYUEDA_KICAD_CORPUS")
         .map(std::path::PathBuf::from)
@@ -141,14 +143,14 @@ fn smolhaj_body_5_weighs_in_bit_for_bit() {
         bits(m.volume),
         (
             2.1423404921823934e-6f64.to_bits(),
-            3.831909103299148e-8f64.to_bits()
+            3.834075368398429e-8f64.to_bits()
         )
     );
     assert_eq!(
         bits(m.area),
         (
             0.0021604480982536293f64.to_bits(),
-            5.222247636179033e-5f64.to_bits()
+            5.226259438657934e-5f64.to_bits()
         )
     );
     assert!(s <= bar, "{s:.1} s, past {bar} s");
