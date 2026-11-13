@@ -25,7 +25,7 @@
 
 use crate::attest::Verdict;
 use crate::config::Config;
-use crate::history::{Approval, Releases, Tag, tag_name, tag_name_of};
+use crate::history::{Approval, Releases, Tag};
 use crate::label;
 use crate::props;
 use crate::record::{Entry, Kind, Record, Records};
@@ -327,7 +327,7 @@ pub fn run(
                 && let crate::package::attest::Verdict::Invalid(c) =
                     crate::package::attest::of_release(h.repo, releases, h.prefix, &e.path, None)
             {
-                let tag = crate::package::attest::tag_name(&part, &e.label);
+                let tag = releases.name(&crate::package::attest::tag_key(&part, &e.label));
                 out.push(
                     Finding::new(
                         "release_package_invalid",
@@ -353,10 +353,10 @@ pub fn run(
                             format!(
                                 "{part} {} has no tag {}: `ryucad release sync` makes it",
                                 e.label,
-                                tag_name(&part, &e.label)
+                                releases.name_of(&part, &e.label, Kind::Release)
                             ),
                         )
-                        .with("tag", tag_name(&part, &e.label))
+                        .with("tag", releases.name_of(&part, &e.label, Kind::Release))
                         .with("official", &o.commit),
                     ),
                     Tag::Moved(to) => out.push(
@@ -366,12 +366,12 @@ pub fn run(
                             Some(&e.label),
                             format!(
                                 "tag {} points away from {}, where {part} {} became official: `ryucad release sync` moves it back",
-                                tag_name(&part, &e.label),
+                                releases.name_of(&part, &e.label, Kind::Release),
                                 short(&o.commit),
                                 e.label
                             ),
                         )
-                        .with("tag", tag_name(&part, &e.label))
+                        .with("tag", releases.name_of(&part, &e.label, Kind::Release))
                         .with("official", &o.commit)
                         .with("points_at", to),
                     ),
@@ -445,6 +445,7 @@ pub fn run(
             );
         }
         for key in releases.orphaned_tags() {
+            let name = releases.name(key);
             let (part, label) = key.split_once('/').unwrap_or((key, ""));
             let Ok(part) = Id::parse(part, "part") else {
                 continue;
@@ -455,10 +456,10 @@ pub fn run(
                     &part,
                     Some(label),
                     format!(
-                        "tag ryupdm/{key} names no official release; delete it if it is wrong (`git tag -d ryupdm/{key}`)"
+                        "tag {name} names no official release; delete it if it is wrong (`git tag -d {name}`)"
                     ),
                 )
-                .with("tag", format!("ryupdm/{key}")),
+                .with("tag", &name),
             );
         }
     }
@@ -482,7 +483,7 @@ fn approval_finding(
     a: &Approval,
     releases: &Releases,
 ) -> Option<Finding> {
-    let tag = tag_name_of(part, &e.label, e.kind);
+    let tag = releases.name_of(part, &e.label, e.kind);
     let rules: Vec<Value> = a
         .rules
         .iter()

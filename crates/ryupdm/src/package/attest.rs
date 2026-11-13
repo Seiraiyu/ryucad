@@ -1,6 +1,7 @@
 //! Package attestations (design 436): what the service signs once it has
 //! built an official release's package, carried as the message of the
-//! annotated tag `ryupdm/<part>/<label>.package` at the official commit.
+//! annotated tag `ryupdm/<folder><part>/<label>.package` at the official commit
+//! (`<folder>` the project's, `""` at a repository's root).
 //! The message and the keys are a release attestation's
 //! ([`crate::attest`]); the signature is over
 //! `ryupdm.package_attestation.1\0`, so neither kind can be replayed as
@@ -23,14 +24,20 @@ pub const DOMAIN: &[u8] = b"ryupdm.package_attestation.1\0";
 /// What a package tag's key adds to its release's: `<part>/<label>.package`.
 pub const TAG_SUFFIX: &str = ".package";
 
-/// The key of a release's package tag below `ryupdm/`.
+/// The key of a release's package tag below the project's tag prefix
+/// (`ryupdm/<folder>`).
 pub fn tag_key(part: &Id, label: &str) -> String {
     format!("{part}/{label}{TAG_SUFFIX}")
 }
 
-/// The package tag's name, without `refs/tags/`.
-pub fn tag_name(part: &Id, label: &str) -> String {
-    format!("{}{}", crate::history::TAG_PREFIX, tag_key(part, label))
+/// The package tag's name in the project at `prefix` (`""` or ending in
+/// `/`), without `refs/tags/`.
+pub fn tag_name(prefix: &str, part: &Id, label: &str) -> String {
+    format!(
+        "{}{prefix}{}",
+        crate::history::TAG_PREFIX,
+        tag_key(part, label)
+    )
 }
 
 /// `ryupdm.package_attestation`, format 1.
