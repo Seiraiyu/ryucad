@@ -1241,6 +1241,7 @@ fn every_protocol_method_has_a_command() {
         ("hole.derive", &["hole", "derive"]),
         ("standards.list", &["standards"]),
         ("holes.list", &["holes"]),
+        ("holes.check", &["holes"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
         ("feature_faces.get", &["feature-faces"]),
