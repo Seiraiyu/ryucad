@@ -43,6 +43,8 @@ pub mod pdf;
 pub mod project;
 pub mod props;
 pub mod proto;
+pub mod refs;
+pub mod scene;
 pub mod schem;
 pub mod schemcmd;
 pub mod server;
@@ -74,7 +76,7 @@ impl ryu_session::Product for Eda {
     /// (`lib/self/symbol/r`); ryueda uses selections from stage 3.
     type Target = String;
     /// What a participant shows besides its selection: its compare (plan
-    /// 4.B); stage 3 adds its sheet and camera.
+    /// 4.B), and its sheet, layer and camera (plan 3.B).
     type View = view::View;
     /// The revisions subscribers were last told of.
     type Seen = notify::Seen;
@@ -82,6 +84,9 @@ impl ryu_session::Product for Eda {
 
     fn view_json(v: &view::View, into: &mut serde_json::Map<String, serde_json::Value>) {
         into.insert("compare".into(), serde_json::json!(v.compare));
+        if let serde_json::Value::Object(shown) = view::to_json(v) {
+            into.extend(shown);
+        }
     }
 }
 
