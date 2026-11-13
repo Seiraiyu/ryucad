@@ -1484,8 +1484,14 @@ impl View {
             self.framing = None;
         }
         // Meshes arrive a body at a time: frame what has come so far, and
-        // again as more comes, until it has all come.
+        // again as more comes, until it has all come. A part shown empty
+        // is framed again as an agent's first geometry grows (a point, a
+        // line, a sketch) until it has a body: framed on its first point
+        // alone, the rest of the build landed off screen (#673). The
+        // person's own camera (`moved`, `turn`, Zoom to fit) ends it, and
+        // following another's camera holds it.
         if !self.framed
+            && ws.following.is_none()
             && let Some(b) = self.bounds(ws)
         {
             if self.framing != Some(b) {
@@ -1494,7 +1500,7 @@ impl View {
                 self.nav.fit(&points, self.aspect());
                 ws.share_camera(&self.nav.camera);
             }
-            self.framed = ws.idle();
+            self.framed = ws.idle() && ws.model.drawn().next().is_some();
         }
         // A chosen annotation's view, once the part it was made on is
         // shown and framed (#776): turned to on the next frame.

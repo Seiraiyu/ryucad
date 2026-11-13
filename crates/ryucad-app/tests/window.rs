@@ -4004,6 +4004,137 @@ fn showing_a_part_frames_it() {
     assert!(t[0] > -0.01 && t[0] < 0.02, "{t:?}");
 }
 
+/// #673: a part shown while it is empty is framed as its geometry comes
+/// (a point, lines, then a body), not left on its first point; once the
+/// person moves the camera it is theirs, and more geometry leaves it be.
+#[test]
+fn a_part_shown_empty_is_framed_as_its_first_geometry_comes() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // Every corner of what the window draws is in view.
+    let in_view = |h: &Harness<'static, App>, what: &str| {
+        let o = h.state().opened();
+        let (lo, hi) = ryucad_app::core::pick::Picker::new(&o.ws.model)
+            .bounds()
+            .unwrap();
+        let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+        let aspect = f64::from(o.view.rect.width() / o.view.rect.height());
+        let pr = ryucad_app::core::nav::Projector::new(&o.view.nav.camera, aspect, centre, 0.2);
+        for corner in 0..8 {
+            let c = [0, 1, 2].map(|k| if corner >> k & 1 == 1 { hi[k] } else { lo[k] });
+            let n = pr.ndc(c).unwrap_or([f64::INFINITY; 2]);
+            assert!(
+                n[0].abs() <= 1.0 && n[1].abs() <= 1.0,
+                "{what}: {c:?} is out of view at {n:?}"
+            );
+        }
+    };
+    // Drawn out to `x` metres along x, and the window idle.
+    let reaches = |x: f64| {
+        move |a: &App| {
+            let o = a.opened();
+            o.ws.idle()
+                && ryucad_app::core::pick::Picker::new(&o.ws.model)
+                    .bounds()
+                    .is_some_and(|(_, hi)| hi[0] > x)
+        }
+    };
+    // An empty part shown: nothing to frame yet.
+    p.ok(&["part", "create", "bracket"]);
+    p.ok(&["focus", "bracket"]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle()
+            && o.ws.model.focus.as_deref() == Some("bracket")
+            && ryucad_app::core::pick::Picker::new(&o.ws.model).bounds().is_none()
+    });
+    h.run_steps(2);
+    // The agent builds it a step at a time: a fixed point at the origin...
+    p.ok(&["feature", "add", "bracket", "sketch", "--id", "s"]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [0, 0]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "bracket", "s", ops]);
+    frames(&mut h, reaches(-1.0));
+    h.run_steps(4);
+    // ...a line 200 mm long (off screen when the point alone was framed)...
+    let ops = r#"[{"op": "add", "type": "point", "at": [200, 0]},
+                  {"op": "add", "type": "line", "start": "p1", "end": "p2"}]"#;
+    p.ok(&["sketch", "edit", "bracket", "s", ops]);
+    frames(&mut h, reaches(0.19));
+    h.run_steps(4);
+    in_view(&h, "the first line");
+    // ...the rest of the outline...
+    let ops = r#"[{"op": "add", "type": "point", "at": [200, 80]},
+                  {"op": "add", "type": "point", "at": [0, 80]},
+                  {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+                  {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+                  {"op": "add", "type": "line", "start": "p4", "end": "p1"}]"#;
+    p.ok(&["sketch", "edit", "bracket", "s", ops]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle()
+            && ryucad_app::core::pick::Picker::new(&o.ws.model)
+                .bounds()
+                .is_some_and(|(_, hi)| hi[1] > 0.079)
+    });
+    h.run_steps(4);
+    in_view(&h, "the outline");
+    // ...and its extrude: framed once more, a body at last.
+    p.ok(&[
+        "feature", "add", "bracket", "extrude", "--id", "e", "--sketch", "s", "--length", "30",
+    ]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.model.drawn().next().is_some()
+    });
+    h.run_steps(4);
+    in_view(&h, "the extrude");
+    // Another empty part, shown, and the person's drag before anything
+    // comes: from then on the camera is theirs.
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&["focus", "plate"]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.model.focus.as_deref() == Some("plate")
+    });
+    h.run_steps(2);
+    let c = h.state().opened().view.rect.center();
+    h.event(egui::Event::PointerMoved(c));
+    h.event(egui::Event::PointerButton {
+        pos: c,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    for i in 1..6 {
+        h.event(egui::Event::PointerMoved(c + egui::vec2(10.0 * i as f32, 0.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton {
+        pos: c + egui::vec2(50.0, 0.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(4);
+    let theirs = h.state().opened().view.nav.camera.clone();
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10", "--origin", "500,0,0",
+    ]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.model.drawn().next().is_some()
+    });
+    h.run_steps(4);
+    assert_eq!(h.state().opened().view.nav.camera, theirs);
+}
+
 #[test]
 fn the_palette_runs_a_command_and_goes_to_a_feature() {
     let _one = one_at_a_time();
