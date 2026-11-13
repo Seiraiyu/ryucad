@@ -27,7 +27,7 @@ use crate::intersect::coincide::{coincident, planar_rows};
 use crate::intersect::{Place, point_in_face};
 use crate::name::{BooleanRole, Journal, Name, OpKey, Role};
 use crate::tol::LINEAR_RESOLUTION;
-use crate::topo::{Body, EdgeId, FaceId, Pcurve, VertexId};
+use crate::topo::{Body, EdgeId, FaceId, FinId, Pcurve, VertexId};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -282,26 +282,40 @@ pub(crate) fn split_off(
             .ok()?,
         );
     }
-    // The flat piece: the one holding the middle of the flat span.
+    // The flat piece: past the knot the face is all one piece, the loop
+    // crossing the iso-line only at the split's two ends, so the first
+    // point there certified inside a piece names it. The span's middle
+    // alone won't do: a wedge-shaped piece's slanted edge can run through
+    // it (Voron's molex face, #585).
     let inside_far = if span.after {
         span.far.min(pb[d][1])
     } else {
         span.far.max(pb[d][0])
     };
-    let mid = 0.5 * (span.knot + inside_far);
-    let mid_o = 0.5 * (sa + sb);
-    let uv = match span.dir {
-        Direction::U => Point2::new(mid, mid_o),
-        Direction::V => Point2::new(mid_o, mid),
-    };
-    let flat: Vec<FaceId> = made
-        .faces
-        .into_iter()
-        .filter(|&g| matches!(point_in_face(&b, g, uv), Ok(Place::Inside)))
-        .collect();
-    let [flat] = flat[..] else {
-        return None;
-    };
+    let (lo_o, hi_o) = (pb[o][0], pb[o][1]);
+    let mut flat = None;
+    'search: for f in [0.5, 0.25, 0.75, 0.1, 0.9, 0.05] {
+        let along = span.knot + f * (inside_far - span.knot);
+        for g in [0.5, 0.25, 0.75, 0.1, 0.9, 0.05, 0.95] {
+            let across = sa + g * (sb - sa);
+            for across in [across, lo_o + g * (hi_o - lo_o)] {
+                let uv = match span.dir {
+                    Direction::U => Point2::new(along, across),
+                    Direction::V => Point2::new(across, along),
+                };
+                let inside: Vec<FaceId> = made
+                    .faces
+                    .into_iter()
+                    .filter(|&g| matches!(point_in_face(&b, g, uv), Ok(Place::Inside)))
+                    .collect();
+                if let [one] = inside[..] {
+                    flat = Some((one, uv));
+                    break 'search;
+                }
+            }
+        }
+    }
+    let (flat, uv) = flat?;
     let curved = if made.faces[0] == flat {
         made.faces[1]
     } else {
@@ -325,7 +339,18 @@ pub(crate) fn split_off(
     let half = if span.after { lo } else { hi };
     let cid = b.add_surface(Surface::Nurbs(Arc::new(half)));
     let cs = b.faces[curved].sense;
+    // Its pcurves stay exact: the half has the spline's own parameters,
+    // and an edge the spline met another surface in (a cut's) may have
+    // no exact pcurve `fill` could make again.
+    let kept: Vec<(FinId, Option<Pcurve>)> = b
+        .face_loops(curved)
+        .flat_map(|l| b.loop_fins(l))
+        .map(|fin| (fin, b.fins[fin].pcurve))
+        .collect();
     journal.append(set_surface(&mut b, curved, cid, cs).ok()?);
+    for (fin, pc) in kept {
+        journal.append(set_pcurve(&mut b, fin, pc).ok()?);
+    }
     crate::pcurve::fill(&mut b).ok()?;
     if !crate::check::check_topology(&b).is_empty() {
         return None;
@@ -357,10 +382,18 @@ pub(crate) fn split_listed(
         for _ in 0..MOST {
             let b = out.as_ref().map_or(body, |(b, _)| b);
             let name = b.faces[f].name;
+            // On a listed partner's surface, or on that of any other face
+            // whose box meets the span's: the check lists a face against
+            // what it crosses, which needn't be the face its flat span
+            // lies on (Voron's molex face, #585).
+            let listed = partners(f);
             let found = flat_spans(b, f).into_iter().find(|s| {
-                partners(f)
-                    .into_iter()
-                    .any(|g| coincident(&s.plane, &b.surfaces[b.faces[g].surface]).is_some())
+                b.faces().any(|g| {
+                    g != f
+                        && (listed.contains(&g)
+                            || crate::intersect::face_box(b, g).intersects(&s.bounds))
+                        && coincident(&s.plane, &b.surfaces[b.faces[g].surface]).is_some()
+                })
             });
             let Some(span) = found else {
                 break;
@@ -525,6 +558,41 @@ mod tests {
         assert!(crate::intersect::coincide::planar_rows(&n, Direction::U, 0..=3).is_none());
     }
 
+    /// Voron's molex face's flat span as its file gives it (#585): 1.8 µm
+    /// long and 0.43 mm wide, every point on z = -2.55 mm. The cross
+    /// product of its diagonals is about 2e-9 m², under the resolution
+    /// `normalize` takes as zero, so the plane was never formed.
+    #[test]
+    fn a_thin_flat_span_is_flat() {
+        let pts = [
+            (2.991446443e-3, 7.249998331e-4),
+            (3.296916573e-3, 4.195297036e-4),
+            (2.992056344e-3, 7.256097338e-4),
+            (3.297526473e-3, 4.201396043e-4),
+            (2.992666244e-3, 7.262196344e-4),
+            (3.298136374e-3, 4.207495050e-4),
+            (2.993276145e-3, 7.268295351e-4),
+            (3.298746275e-3, 4.213594056e-4),
+        ]
+        .map(|(x, y)| Point3::new(x, y, -2.55e-3));
+        let n = NurbsSurface::new(
+            [
+                KnotVector::clamped(3, &[1.0, 1.01], &[4, 4]).unwrap(),
+                KnotVector::clamped(1, &[0.0, 0.0432], &[2, 2]).unwrap(),
+            ],
+            pts.to_vec(),
+            None,
+        )
+        .unwrap();
+        let plane = crate::intersect::coincide::planar_rows(&n, Direction::U, 0..=3)
+            .expect("the span is flat");
+        let f = plane.frame().unwrap();
+        assert!(f.z().get().z.abs() > 1.0 - 1e-12, "{f:?}");
+        assert!((f.origin().z + 2.55e-3).abs() <= LINEAR_RESOLUTION);
+        // `planar` keeps its own rule, bit for bit (no golden moves).
+        assert_eq!(crate::intersect::coincide::planar(&n), None);
+    }
+
     /// The twin's prism (`ryukei_testkit::nurbs::flat_span_twin`), built
     /// here from its extrusion and its underside set to `patch`'s form.
     fn prism() -> Body {
@@ -598,6 +666,60 @@ mod tests {
         crate::pcurve::fill(&mut b).unwrap();
         assert_eq!(crate::check::check(&b), []);
         b
+    }
+
+    /// The prism cut by a block turned about z, so its flat piece is the
+    /// triangle (1, 0), (1.3, 0), (1, -0.75) mm, as Voron's molex face's is
+    /// a wedge (#585): the slanted edge runs through the middle of the
+    /// span's box in the parameters, where no piece holds the point. The
+    /// flat piece is still found, by a point certified inside it past the
+    /// knot.
+    #[test]
+    fn a_wedge_shaped_flat_piece_splits_off() {
+        use crate::boolean::{BooleanOp, Tool, boolean};
+        use crate::geom::{Rigid, UnitVector3, Vector3};
+        use crate::name::ToolKey;
+        let b = prism();
+        // The cut's line from (1.3, 0) mm towards (1, -0.75) mm; the block
+        // lies on its left, the side holding (1.3, -1), its local y
+        // turning with it to the line's left.
+        let (dx, dy) = (-0.3 * MM, -0.75 * MM);
+        let len = crate::math::sqrt(dx * dx + dy * dy);
+        let u = (dx / len, dy / len);
+        let theta = crate::math::atan2(u.1, u.0);
+        let (w, l) = (3.0 * MM, 4.0 * MM);
+        let origin = Vector3::new(1.3 * MM - 2.0 * MM * u.0, -2.0 * MM * u.1, -MM);
+        let place = Rigid::translation(origin).then_after(&Rigid::rotation(UnitVector3::Z, theta));
+        let cutter = crate::primitive::block(OpKey(0x5c), l, w, 3.0 * MM, &place)
+            .unwrap()
+            .0;
+        let (cut, _) = boolean(
+            OpKey(0x5d),
+            BooleanOp::Subtract,
+            &b,
+            &[Tool {
+                key: ToolKey(1),
+                body: &cutter,
+                place: Rigid::IDENTITY,
+            }],
+        )
+        .unwrap();
+        assert_eq!(crate::check::check(&cut), []);
+        let f = cut
+            .faces()
+            .find(|&f| matches!(cut.surfaces[cut.faces[f].surface], Surface::Nurbs(_)))
+            .unwrap();
+        let spans = flat_spans(&cut, f);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        let (s, flat, _) = split_off(&cut, OpKey(78), f, &spans[0]).expect("split");
+        assert_eq!(crate::check::check(&s), []);
+        assert!(matches!(
+            s.surfaces[s.faces[flat].surface],
+            Surface::Plane(_)
+        ));
+        // The triangle: three edges.
+        let edges: usize = s.face_loops(flat).map(|l| s.loop_fins(l).count()).sum();
+        assert_eq!(edges, 3);
     }
 
     #[test]

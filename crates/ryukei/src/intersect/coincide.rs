@@ -221,7 +221,7 @@ fn general(a: &Surface, b: &Surface) -> Option<bool> {
 /// then lie within it too). `None` for a spline that isn't flat.
 pub(crate) fn planar(n: &NurbsSurface) -> Option<Surface> {
     let [nu, nv] = n.counts();
-    planar_grid(nu, nv, |i, j| n.control_point(i, j))
+    planar_grid(nu, nv, false, |i, j| n.control_point(i, j))
 }
 
 /// [`planar`]'s rule applied to the control rows `rows` alone: along `dir`
@@ -236,16 +236,31 @@ pub(crate) fn planar_rows(
     let [nu, nv] = n.counts();
     let (r0, r1) = (*rows.start(), *rows.end());
     match dir {
-        Direction::U => planar_grid(r1 - r0 + 1, nv, |i, j| n.control_point(r0 + i, j)),
-        Direction::V => planar_grid(nu, r1 - r0 + 1, |i, j| n.control_point(i, r0 + j)),
+        Direction::U => planar_grid(r1 - r0 + 1, nv, true, |i, j| n.control_point(r0 + i, j)),
+        Direction::V => planar_grid(nu, r1 - r0 + 1, true, |i, j| n.control_point(i, r0 + j)),
     }
 }
 
 /// The plane through a grid of `nu × nv` points, `at(i, j)`, by
-/// [`planar`]'s rule.
-fn planar_grid(nu: usize, nv: usize, at: impl Fn(usize, usize) -> Point3) -> Option<Surface> {
+/// [`planar`]'s rule. `unit`: the normal from the diagonals' directions,
+/// not the diagonals themselves, whose cross product is an area that
+/// `normalize` takes as zero under the resolution: a span a few microns
+/// long and a fraction of a millimetre wide gives about 2e-9 m² (Voron's
+/// molex face, #585). [`planar`] keeps the plain product, bit for bit.
+fn planar_grid(
+    nu: usize,
+    nv: usize,
+    unit: bool,
+    at: impl Fn(usize, usize) -> Point3,
+) -> Option<Surface> {
     let c = [at(0, 0), at(nu - 1, 0), at(0, nv - 1), at(nu - 1, nv - 1)];
-    let normal = (c[3] - c[0]).cross(c[2] - c[1]).normalize()?;
+    let normal = if unit {
+        let d = (c[3] - c[0]).normalize()?.get();
+        let e = (c[2] - c[1]).normalize()?.get();
+        d.cross(e).normalize()?
+    } else {
+        (c[3] - c[0]).cross(c[2] - c[1]).normalize()?
+    };
     let along = (c[1] - c[0])
         .normalize()
         .or_else(|| (c[3] - c[0]).normalize())?;
