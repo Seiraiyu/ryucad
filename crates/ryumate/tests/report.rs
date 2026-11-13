@@ -629,3 +629,80 @@ fn the_report_gives_each_mates_values_and_stops() {
     assert!((v.value - 0.3).abs() < 1e-15);
     assert_eq!(v.at, None);
 }
+
+/// A lid (body 1) carrying three places in its own frame: 20 mm along x,
+/// 30 mm along y, and a quarter turn about its z; a screw (body 2, free)
+/// 10 mm along x is the seed.
+fn screws_on_a_lid(lid: Pose) -> Assembly {
+    let mut asm = Assembly::default();
+    asm.bodies.insert(1, free(lid));
+    asm.bodies.insert(2, free(moved([0.01, 0.0, 0.0])));
+    asm.patterns.insert(
+        20,
+        Pattern {
+            seeds: vec![2],
+            motion: Motion::Places {
+                body: 1,
+                places: vec![
+                    moved([0.02, 0.0, 0.0]),
+                    moved([0.0, 0.03, 0.0]),
+                    turned([0.0, 0.0, 1.0], std::f64::consts::FRAC_PI_2, [0.0; 3]),
+                ],
+            },
+        },
+    );
+    asm
+}
+
+fn fastened_to(index: [u32; 2], other: u32) -> Mate {
+    Mate {
+        kind: Kind::Fastened,
+        a: Connector {
+            on: On::Copy {
+                pattern: 20,
+                seed: 2,
+                index,
+            },
+            frame: Pose::IDENTITY,
+        },
+        b: on(other, Pose::IDENTITY),
+        limits: Limits::NONE,
+    }
+}
+
+#[test]
+fn places_are_checked() {
+    let mut asm = screws_on_a_lid(Pose::IDENTITY);
+    assert_eq!(asm.validate(), Ok(()));
+    asm.bodies.insert(3, fixed(Pose::IDENTITY));
+    asm.mates.insert(10, fastened_to([3, 0], 3));
+    assert_eq!(asm.validate(), Ok(()));
+    // Three places: copies [1, 0] to [3, 0], one row.
+    for index in [[4, 0], [1, 1]] {
+        asm.mates.insert(10, fastened_to(index, 3));
+        assert_eq!(
+            asm.validate(),
+            Err(MateError::UnknownCopy {
+                mate: Some(10),
+                pattern: 20,
+                seed: 2
+            })
+        );
+    }
+    let mut asm = screws_on_a_lid(Pose::IDENTITY);
+    if let Motion::Places { body, .. } = &mut asm.patterns.get_mut(&20).unwrap().motion {
+        *body = 9;
+    }
+    assert_eq!(
+        asm.validate(),
+        Err(MateError::UnknownBody {
+            mate: None,
+            body: 9
+        })
+    );
+    let mut asm = screws_on_a_lid(Pose::IDENTITY);
+    if let Motion::Places { places, .. } = &mut asm.patterns.get_mut(&20).unwrap().motion {
+        places[0].origin[0] = f64::NAN;
+    }
+    assert!(matches!(asm.validate(), Err(MateError::BadGeometry { .. })));
+}

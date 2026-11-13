@@ -158,7 +158,7 @@ fn scale(asm: &Assembly) -> f64 {
             (spacing * f64::from(index[0])).abs()
                 + second.map_or(0.0, |(_, s)| (s * f64::from(index[1])).abs())
         }
-        Motion::Circular { .. } => 0.0,
+        Motion::Circular { .. } | Motion::Places { .. } => 0.0,
     };
     for mate in asm.mates.values() {
         for c in [&mate.a, &mate.b] {
@@ -188,6 +188,11 @@ fn scale(asm: &Assembly) -> f64 {
                 }
             }
             Motion::Circular { axis, .. } => m = m.max(dir(axis)),
+            Motion::Places { places, .. } => {
+                for place in places {
+                    m = m.max(big(place));
+                }
+            }
         }
     }
     power_of_two_above(m)
@@ -391,6 +396,7 @@ impl<'a> System<'a> {
                 let r = Rot::about(n, i * step);
                 (add(q, r.apply(sub(o, q))), axes.map(|a| r.apply(a)))
             }
+            Motion::Places { .. } => unimplemented!("Task 2"),
         }
     }
 
