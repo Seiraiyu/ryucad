@@ -4,9 +4,12 @@ use super::{BodyUse, FeatureKind, Write, apply_placement, new_placement};
 use super::{Given, placement_report};
 use crate::doc::files::Feature;
 use crate::doc::files::{Primitive, PrimitiveType};
+use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::solid::Combine;
 use crate::error::{Code, Error, Result};
+use crate::rebuild::{Built, Origins, finish, names, op_key, placement};
+use ryukei::primitive;
 use serde_json::{Map, Value, json};
 
 fn primitive_report(f: &Primitive) -> Value {
@@ -162,4 +165,30 @@ impl FeatureKind for Primitives {
         };
         primitive_report(p)
     }
+}
+
+pub(crate) fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {
+    let key = op_key(part, id);
+    let at = placement(&f.placement)?;
+    let m = |name| f.meters(name);
+    let made = match f.ty {
+        PrimitiveType::Box => primitive::block(key, m("x"), m("y"), m("z"), &at),
+        PrimitiveType::Cylinder => primitive::cylinder(key, m("radius"), m("height"), &at),
+        PrimitiveType::Cone if m("top_radius") > 0.0 => {
+            primitive::frustum(key, m("radius"), m("top_radius"), m("height"), &at)
+        }
+        PrimitiveType::Cone => primitive::cone(key, m("radius"), m("height"), &at),
+        PrimitiveType::Sphere => primitive::sphere(key, m("radius"), &at),
+        PrimitiveType::Torus => primitive::torus(key, m("major_radius"), m("minor_radius"), &at),
+    };
+    let made = made.map_err(|e| {
+        Error::new(Code::RebuildFailed, format!("{} {id}: {e}", f.ty.as_str()))
+            .with("feature", id)
+            .with("kernel", format!("{e:?}"))
+    })?;
+    let origins: Origins = names(&made.0)
+        .into_iter()
+        .map(|n| (n.to_string(), json!({"feature": id})))
+        .collect();
+    finish(id, f.ty.as_str(), made, origins)
 }

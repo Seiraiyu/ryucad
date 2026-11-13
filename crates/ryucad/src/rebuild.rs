@@ -5,30 +5,33 @@
 //! solid, or joins its body to, cuts it from or intersects it with each
 //! solid it targets, as its view of that solid ([`crate::solid`]) left it.
 
+use crate::body::build_split;
 use crate::cache::{Disk, Kind};
-use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
+use crate::doc::files::{Feature, Placement};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
-use crate::doc::reference::Reference;
-use crate::doc::sketch::Geometry;
 use crate::doc::solid::Operation;
-use crate::doc::sweep::{Angle, Extent, RevolveAxis};
+use crate::doc::sweep::Extent;
 use crate::error::{Code, Error, Result};
-use crate::profile::Keys;
+use crate::feature::blend::build_blend;
+use crate::feature::boolean::build_boolean;
+use crate::feature::extrude::build_sweep;
+use crate::feature::pattern::build_pattern;
+use crate::feature::primitive::build_primitive;
 use crate::sketch::Solved;
 use crate::solid::Solids;
-use core::f64::consts::TAU;
 use rayon::prelude::*;
 use ryu_session::job::{Job, Phase};
-use ryukei::SweepError;
+use ryukei::BooleanError;
 use ryukei::boolean::{BooleanOp, Tool};
-use ryukei::geom::{Axis, Frame, Point3, Rigid, Vector3};
+use ryukei::geom::{Frame, Point3, Rigid, Vector3};
 use ryukei::name::{Event, Journal, Name, OpKey, ToolKey};
 use ryukei::topo::{Body, EntityId};
-use ryukei::{BooleanError, primitive, sweep};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+// The old public path (design 541, "Paths kept"); 27.F removes it.
+pub use crate::feature::blend::check_blend;
 
 /// A solid as a feature leaves it.
 #[derive(Clone, Debug)]
@@ -777,82 +780,6 @@ pub(crate) fn sketch_input<'a>(
     })
 }
 
-/// An extrude or a revolve, from its sketch's result; `targets` are the
-/// solids it acts on, which a through-all extrude reaches past.
-fn build_sweep(
-    part: &Part,
-    id: &Id,
-    f: &Feature,
-    targets: &[&Built],
-    before: &dyn Results,
-) -> Result<Built> {
-    let ty = f.type_name();
-    let sketch = f.profiles()[0];
-    let solved = sketch_input(part, id, sketch, before)?;
-    let (loops, axis) = match f {
-        Feature::Extrude(e) => (&e.loops, None),
-        Feature::Revolve(r) => match &r.axis {
-            RevolveAxis::Line(l) => (&r.loops, Some(l)),
-            RevolveAxis::Ref(_) => (&r.loops, None),
-        },
-        _ => unreachable!("a sweep"),
-    };
-    // A surface sweep takes its sketch's loops and open chains, and
-    // founds the sheet they sweep (ryucad 18).
-    let of = if f.surface() {
-        crate::profile::surface
-    } else {
-        crate::profile::profile
-    };
-    let (valid, keys) = of(&part.id, sketch, solved, loops)
-        .map_err(|e| e.with("feature", id).with("sketch", sketch))?;
-    let key = op_key(&part.id, id);
-    let made = match f {
-        Feature::Extrude(e) => {
-            let n = valid.frame().z().get();
-            let dir = if e.reverse { -n } else { n };
-            let (start, end) = match &e.extent {
-                Extent::Blind(q) => (0.0, q.meters()),
-                Extent::Symmetric(q) => (-q.meters() / 2.0, q.meters() / 2.0),
-                Extent::UpTo { target, offset } => {
-                    let to = UpTo {
-                        ty: "extrude",
-                        role: "target",
-                        target,
-                        offset: offset.as_ref(),
-                        from: valid.frame().origin(),
-                        dir,
-                    };
-                    (0.0, to.length(part, id, before)?)
-                }
-                Extent::ThroughAll { both } => {
-                    through_all("extrude", id, valid.frame().origin(), dir, *both, targets)?
-                }
-            };
-            sweep::extrude(key, &valid, dir, start, end)
-        }
-        Feature::Revolve(r) => {
-            let axis = match &r.axis {
-                RevolveAxis::Line(l) => sweep_axis(solved, id, l)?,
-                RevolveAxis::Ref(g) => ref_axis(part, id, g, solved, before)?,
-            };
-            let (start, end) = match &r.angle {
-                Angle::Full => (0.0, TAU),
-                Angle::Of(q) if r.symmetric => (-q.radians() / 2.0, q.radians() / 2.0),
-                Angle::Of(q) => (0.0, q.radians()),
-            };
-            sweep::revolve(key, &valid, axis, start, end)
-        }
-        _ => unreachable!("a sweep"),
-    };
-    let made = made.map_err(|e| sweep_error(id, ty, e, &keys, axis))?;
-    let mut origins = crate::profile::origins(key, sketch, &valid, &keys);
-    for o in origins.values_mut() {
-        o["feature"] = json!(id);
-    }
-    finish(id, ty, made, origins)
-}
-
 /// How far a through-all extrude or hole (`ty`) goes from `from` along
 /// `dir`: a margin past every point of its targets' boxes, both ways if
 /// `both`. Fails as `invalid_extent` when all of them lie behind the
@@ -965,148 +892,6 @@ impl UpTo<'_> {
         }
         Ok(l)
     }
-}
-
-/// A revolve's axis: a line of its sketch, from its start to its end.
-fn sweep_axis(solved: &crate::sketch::Solved, id: &Id, axis: &Id) -> Result<Axis> {
-    let s = &solved.sketch;
-    let at = |p: &Id| match s.entities[p].geometry {
-        Geometry::Point { m } => solved.frame.apply_point(Point3::new(m[0], m[1], 0.0)),
-        _ => unreachable!("validated: lines join points"),
-    };
-    match s.entities.get(axis).map(|e| &e.geometry) {
-        Some(Geometry::Line { start, end }) => {
-            let (a, b) = (at(start), at(end));
-            Axis::new(a, b - a).map_err(|e| {
-                Error::new(
-                    Code::InvalidExtent,
-                    format!("revolve {id}: its axis {axis} has no length"),
-                )
-                .with("feature", id)
-                .with("kernel", format!("{e:?}"))
-            })
-        }
-        Some(g) => Err(Error::new(
-            Code::ReferenceWrongKind,
-            format!(
-                "revolve {id}: its axis {axis} is a {}, not a line",
-                g.type_name()
-            ),
-        )
-        .with("feature", id)
-        .with("axis", axis)),
-        None => Err(Error::new(
-            Code::NotFound,
-            format!("revolve {id}: its sketch has no {axis}"),
-        )
-        .with("feature", id)
-        .with("axis", axis)),
-    }
-}
-
-/// A revolve's axis from any axis lying in the sketch's plane (a straight
-/// edge from its start to its end, a datum axis, another sketch's line),
-/// put exactly in the plane.
-fn ref_axis(
-    part: &Part,
-    id: &Id,
-    g: &crate::doc::geometry::GeomRef,
-    solved: &crate::sketch::Solved,
-    before: &dyn Results,
-) -> Result<Axis> {
-    use crate::geometry::{At, Want, one};
-    let at = At {
-        part,
-        order: part.order(),
-        owner: id,
-        results: before,
-    };
-    let axis = one(&at, "axis", g, Want::Axis)?.axis();
-    let (a, b) = (axis.origin, axis.to);
-    let inv = solved.frame.inverse();
-    let (a, b) = (inv.apply_point(a), inv.apply_point(b));
-    let text = g.text(&part.id);
-    let invalid = |msg: &str| {
-        Error::new(
-            Code::InvalidExtent,
-            format!("revolve {id}: its axis {text} {msg}"),
-        )
-        .with("feature", id)
-        .with("role", "axis")
-        .with("reference", &text)
-    };
-    if a.z.abs().max(b.z.abs()) > ryukei::tol::LINEAR_RESOLUTION {
-        return Err(invalid("doesn't lie in the sketch's plane"));
-    }
-    let flat = |p: Point3| solved.frame.apply_point(Point3::new(p.x, p.y, 0.0));
-    let (a, b) = (flat(a), flat(b));
-    Axis::new(a, b - a).map_err(|k| invalid("has no length").with("kernel", format!("{k:?}")))
-}
-
-/// The kernel's refusal of a sweep, in the sketch's terms.
-fn sweep_error(id: &Id, ty: &str, e: ryukei::Error, keys: &Keys, axis: Option<&Id>) -> Error {
-    let kernel = format!("{e:?}");
-    let (code, msg, entities) = match e {
-        ryukei::Error::InvalidSweep(
-            SweepError::CrossesAxis { segment }
-            | SweepError::TouchesAxisInside { segment }
-            | SweepError::PinchedOnAxis { segment },
-        ) => {
-            let seg = keys.segments[&segment.0].clone();
-            let mut entities = vec![seg.clone()];
-            entities.extend(axis.cloned());
-            let msg = format!("{seg} crosses or touches the axis");
-            (Code::ProfileInvalid, msg, entities)
-        }
-        ryukei::Error::InvalidSweep(SweepError::ChainOnAxis { segment }) => {
-            let seg = keys.segments[&segment.0].clone();
-            let mut entities = vec![seg.clone()];
-            entities.extend(axis.cloned());
-            let msg = format!(
-                "{seg} lies along the axis: a surface revolve's chain may end on it, never run along it"
-            );
-            (Code::ProfileInvalid, msg, entities)
-        }
-        ryukei::Error::InvalidSweep(SweepError::ShortSpan | SweepError::BadAngle) => (
-            Code::InvalidExtent,
-            "the sweep is too short".to_owned(),
-            Vec::new(),
-        ),
-        e => (Code::RebuildFailed, e.to_string(), Vec::new()),
-    };
-    let mut err = Error::new(code, format!("{ty} {id}: {msg}"))
-        .with("feature", id)
-        .with("kernel", kernel);
-    if !entities.is_empty() {
-        err = err.with("entities", entities);
-    }
-    err
-}
-
-fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {
-    let key = op_key(part, id);
-    let at = placement(&f.placement)?;
-    let m = |name| f.meters(name);
-    let made = match f.ty {
-        PrimitiveType::Box => primitive::block(key, m("x"), m("y"), m("z"), &at),
-        PrimitiveType::Cylinder => primitive::cylinder(key, m("radius"), m("height"), &at),
-        PrimitiveType::Cone if m("top_radius") > 0.0 => {
-            primitive::frustum(key, m("radius"), m("top_radius"), m("height"), &at)
-        }
-        PrimitiveType::Cone => primitive::cone(key, m("radius"), m("height"), &at),
-        PrimitiveType::Sphere => primitive::sphere(key, m("radius"), &at),
-        PrimitiveType::Torus => primitive::torus(key, m("major_radius"), m("minor_radius"), &at),
-    };
-    let made = made.map_err(|e| {
-        Error::new(Code::RebuildFailed, format!("{} {id}: {e}", f.ty.as_str()))
-            .with("feature", id)
-            .with("kernel", format!("{e:?}"))
-    })?;
-    let origins: Origins = names(&made.0)
-        .into_iter()
-        .map(|n| (n.to_string(), json!({"feature": id})))
-        .collect();
-    finish(id, f.ty.as_str(), made, origins)
 }
 
 /// The names of a body's faces, edges and vertices.
@@ -1513,129 +1298,22 @@ fn build_body(
     (made, Some(own))
 }
 
-/// A pattern: its targets as it sees them, with every instance of every
-/// seed's own body, moved, in one kernel call per target. An instance
-/// that changes nothing, or that alone the kernel refuses, is named.
-fn build_pattern(
-    part: &Part,
-    solids: &Solids,
-    id: &Id,
-    f: &Feature,
-    p: &crate::doc::pattern::Pattern,
-    before: &dyn Results,
-    run: &crate::rebuild::Run,
-) -> Result<Made> {
-    use crate::pattern::{Motion, instance_key};
-    let targets: Vec<(&Id, &Built)> = p
-        .targets
-        .iter()
-        .map(|t| Ok((t, read(part, solids, id, f, "targets", t, before)?)))
-        .collect::<Result<_>>()?;
-    let (operation, seeds) = crate::pattern::seeds(part, id, p, before)?;
-    let motions = crate::pattern::motions(part, id, p, before)?;
-    if motions.is_empty() {
-        return Err(Error::new(
-            Code::OperationNoEffect,
-            format!("pattern {id} has no instance but its seeds: every other one is skipped"),
-        )
-        .with("feature", id)
-        .with("pointer", "/skip"));
-    }
-    // A mirror image is a body of its own: each seed's, at each place,
-    // reflected.
-    let mut mirrored: Vec<Built> = Vec::new();
-    for (_, m) in &motions {
-        let Motion::Mirror(plane) = m else { continue };
-        for (seed, a) in &seeds {
-            for (_, place) in &a.places {
-                let body = a
-                    .body
-                    .body
-                    .transformed(place)
-                    .and_then(|b| b.mirrored(plane))
-                    .map_err(|e| {
-                        Error::new(
-                            Code::RebuildFailed,
-                            format!("pattern {id}: the mirror image of {seed} leaves the size box"),
-                        )
-                        .with("feature", id)
-                        .with("seed", *seed)
-                        .with("kernel", format!("{e:?}"))
-                    })?;
-                let journal = a.body.journal.clone();
-                let origins = (*a.body.origins).clone();
-                mirrored.push(finish(id, "pattern", (body, journal), origins)?);
-            }
-        }
-    }
-    let mut images = mirrored.iter();
-    let mut tools: Vec<ToolBody> = Vec::new();
-    for ([i, j], m) in &motions {
-        let instance = instance_json(p, [*i, *j]);
-        for (seed, a) in &seeds {
-            for (point, place) in &a.places {
-                let mut label = json!({"feature": id, "seed": seed, "instance": instance});
-                if let Some(pt) = point {
-                    label["point"] = json!(pt);
-                }
-                let (built, place) = match m {
-                    Motion::Rigid(r) => (a.body.as_ref(), r.then_after(place)),
-                    Motion::Mirror(_) => {
-                        (images.next().expect("an image per place"), Rigid::IDENTITY)
-                    }
-                };
-                tools.push(ToolBody {
-                    key: instance_key(&part.id, id, seed, point.as_ref(), [*i, *j]),
-                    built,
-                    place,
-                    name: id,
-                    label: Some(label),
-                });
-            }
-        }
-    }
-    let kop = match operation {
-        Operation::Join => BooleanOp::Unite,
-        _ => BooleanOp::Subtract,
-    };
-    let made: Vec<(Id, Arc<Built>)> = targets
-        .par_iter()
-        .map(|(t, b)| {
-            let r = apply(
-                part,
-                id,
-                "pattern",
-                (kop, operation.as_str()),
-                t,
-                b,
-                &tools,
-                run,
-            )?;
-            Ok(((*t).clone(), Arc::new(r)))
-        })
-        // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect::<Result<_>>()?;
-    Ok(Made::new(made))
-}
-
 /// A body a feature applies to a solid: its key, the body and where it
 /// is placed, and what to call it in errors (the feature whose own body
 /// it is, or the solid a `boolean` uses as a tool) with, for one of
 /// several tools of one feature, which (`{"point": …}`): it goes into
 /// the origins of what it leaves.
-struct ToolBody<'a> {
-    key: ToolKey,
-    built: &'a Built,
-    place: Rigid,
-    name: &'a Id,
-    label: Option<Value>,
+pub(crate) struct ToolBody<'a> {
+    pub(crate) key: ToolKey,
+    pub(crate) built: &'a Built,
+    pub(crate) place: Rigid,
+    pub(crate) name: &'a Id,
+    pub(crate) label: Option<Value>,
 }
 
 impl<'a> ToolBody<'a> {
     /// A feature's or a solid's whole body, where it is.
-    fn whole(key: ToolKey, built: &'a Built, name: &'a Id) -> ToolBody<'a> {
+    pub(crate) fn whole(key: ToolKey, built: &'a Built, name: &'a Id) -> ToolBody<'a> {
         ToolBody {
             key,
             built,
@@ -1662,7 +1340,7 @@ impl<'a> ToolBody<'a> {
 /// of itself and nothing of the target changes, `body_emptied` when
 /// nothing is left.
 #[allow(clippy::too_many_arguments)]
-fn apply(
+pub(crate) fn apply(
     part: &Part,
     id: &Id,
     ty: &str,
@@ -1779,7 +1457,7 @@ fn apply(
 /// entities' where they all agree, and feature `id`'s for everything
 /// else it made: the edges and vertices where faces cross, and merges of
 /// entities from different features.
-fn boolean_origins(
+pub(crate) fn boolean_origins(
     id: &Id,
     target: &Built,
     tools: &[ToolBody],
@@ -1891,7 +1569,7 @@ fn culprit(
 /// alone is refused (`alone`), the faces are its own and the error says
 /// which it is.
 #[allow(clippy::too_many_arguments)]
-fn boolean_error(
+pub(crate) fn boolean_error(
     part: &Part,
     id: &Id,
     ty: &str,
@@ -1971,436 +1649,6 @@ fn boolean_error(
         );
     }
     err
-}
-
-/// A `boolean` feature: its target as it sees it, with its tools as it
-/// sees them, each placed under a key from its founder.
-fn build_boolean(
-    part: &Part,
-    solids: &Solids,
-    id: &Id,
-    f: &Feature,
-    b: &crate::doc::solid::Boolean,
-    before: &dyn Results,
-    run: &crate::rebuild::Run,
-) -> Result<Made> {
-    let target = read(part, solids, id, f, "target", &b.target, before)?;
-    let tools: Vec<(&Id, &Built)> = b
-        .tools
-        .iter()
-        .map(|t| Ok((t, read(part, solids, id, f, "tools", t, before)?)))
-        .collect::<Result<_>>()?;
-    let keys: Vec<ToolKey> = b.tools.iter().map(|t| solid_key(&part.id, id, t)).collect();
-    let tools: Vec<ToolBody> = tools
-        .iter()
-        .zip(keys)
-        .map(|((name, built), key)| ToolBody::whole(key, built, name))
-        .collect();
-    let kop = match b.op {
-        crate::doc::solid::BooleanOp::Unite => BooleanOp::Unite,
-        crate::doc::solid::BooleanOp::Subtract => BooleanOp::Subtract,
-        crate::doc::solid::BooleanOp::Intersect => BooleanOp::Intersect,
-    };
-    let built = apply(
-        part,
-        id,
-        "boolean",
-        (kop, b.op.as_str()),
-        &b.target,
-        target,
-        &tools,
-        run,
-    )?;
-    Ok(Made::new(vec![(b.target.clone(), Arc::new(built))]))
-}
-
-/// One group of a fillet or chamfer: what it does to each edge, and the
-/// edges it lists, each with its role in the feature.
-struct Group<'a> {
-    kind: ryukei::blend::BlendKind,
-    edges: Vec<(String, &'a Reference)>,
-}
-
-/// A fillet's or chamfer's groups, each chamfer face resolved in `solid`
-/// as `id` sees it.
-fn groups<'a>(
-    part: &Part,
-    id: &Id,
-    f: &'a Feature,
-    before: &dyn Results,
-) -> Result<Vec<Group<'a>>> {
-    use crate::doc::blend::ChamferForm;
-    use ryukei::blend::{BlendKind, Chamfer};
-    let roles = |i: usize, edges: &'a [Reference]| {
-        edges
-            .iter()
-            .enumerate()
-            .map(|(j, e)| (format!("groups.{i}.edges.{j}"), e))
-            .collect::<Vec<_>>()
-    };
-    match f {
-        Feature::Fillet(fl) => Ok(fl
-            .groups
-            .iter()
-            .enumerate()
-            .map(|(i, g)| Group {
-                kind: BlendKind::Fillet {
-                    radius: g.radius.meters(),
-                },
-                edges: roles(i, &g.edges),
-            })
-            .collect()),
-        Feature::Chamfer(c) => c
-            .groups
-            .iter()
-            .enumerate()
-            .map(|(i, g)| {
-                let face = |r: &Reference| -> Result<Name> {
-                    let role = format!("groups.{i}.face");
-                    let found = crate::reference::resolve(
-                        part,
-                        part.order(),
-                        id,
-                        &role,
-                        crate::reference::Follow::One,
-                        r,
-                        before,
-                    )?;
-                    match found.1 {
-                        EntityId::Face(_) => Ok(r.name),
-                        e => Err(crate::reference::wrong_kind(
-                            part,
-                            id,
-                            &role,
-                            r,
-                            crate::reference::kind(e),
-                            "a face",
-                        )),
-                    }
-                };
-                let chamfer = match &g.form {
-                    ChamferForm::Equal { d } => Chamfer::Equal {
-                        distance: d.meters(),
-                    },
-                    ChamferForm::Distances { d1, d2, face: on } => Chamfer::Distances {
-                        first: d1.meters(),
-                        second: d2.meters(),
-                        first_face: face(on)?,
-                    },
-                    ChamferForm::DistanceAngle { d, angle, face: on } => Chamfer::DistanceAngle {
-                        distance: d.meters(),
-                        angle: angle.radians(),
-                        face: face(on)?,
-                    },
-                };
-                Ok(Group {
-                    kind: BlendKind::Chamfer(chamfer),
-                    edges: roles(i, &g.edges),
-                })
-            })
-            .collect(),
-        _ => unreachable!("a fillet or a chamfer"),
-    }
-}
-
-/// The edges a fillet or chamfer (feature `id`) blends in `solid`, as
-/// its view of it holds them: each listed edge resolved and, when it
-/// propagates, grown to its tangent chain, with the role of the listed
-/// edge that reached it. An edge in two groups is `edge_listed_twice`;
-/// one reached twice in one group is blended once.
-fn blend_edges<'g>(
-    part: &Part,
-    id: &Id,
-    ty: &str,
-    (solid, built): (&Id, &Built),
-    groups: &'g [Group],
-    propagate: bool,
-    before: &dyn Results,
-) -> Result<Vec<(ryukei::blend::EdgeBlend, &'g str)>> {
-    use ryukei::topo::EdgeId;
-    let body = &built.body;
-    // Each edge blended so far: its group and the role that reached it.
-    let mut seen: BTreeMap<EdgeId, (usize, &str)> = BTreeMap::new();
-    let mut out = Vec::new();
-    for (i, g) in groups.iter().enumerate() {
-        for (role, r) in &g.edges {
-            // An edge a later feature split is every piece (design 447).
-            let (_, found) =
-                crate::reference::resolve_all(part, part.order(), id, role, r, before)?;
-            for e in found {
-                let EntityId::Edge(e) = e else {
-                    return Err(crate::reference::wrong_kind(
-                        part,
-                        id,
-                        role,
-                        r,
-                        crate::reference::kind(e),
-                        "an edge",
-                    ));
-                };
-                // The kernel rounds only edges with a face either side; a
-                // tangent chain from an inner edge never reaches a laminar one.
-                if body.is_laminar(e) {
-                    let name = body.edge(e).expect("a live edge").name;
-                    return Err(laminar_blend(part, id, ty, solid, name));
-                }
-                let chain = if propagate {
-                    ryukei::blend::tangent_chain(body, e).map_err(|k| {
-                        Error::new(Code::Internal, format!("{id}: {k}")).with("feature", id)
-                    })?
-                } else {
-                    vec![e]
-                };
-                for x in chain {
-                    match seen.get(&x) {
-                        Some((j, _)) if *j == i => {}
-                        Some((j, other)) => {
-                            let name = body.edge(x).expect("a live edge").name;
-                            return Err(Error::new(
-                            Code::EdgeListedTwice,
-                            format!(
-                                "{id}: edge {}/{solid}/{name} is in group {j} (by its {other}) and group {i} (by its {role})",
-                                part.id
-                            ),
-                        )
-                        .with("feature", id)
-                        .with("edge", format!("{}/{solid}/{name}", part.id))
-                        .with("groups", [*j, i])
-                        .with("roles", [*other, role.as_str()]));
-                        }
-                        None => {
-                            seen.insert(x, (i, role.as_str()));
-                            let edge = ryukei::blend::EdgeBlend {
-                                edge: body.edge(x).expect("a live edge").name,
-                                kind: g.kind,
-                            };
-                            out.push((edge, role.as_str()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// The one solid a fillet or chamfer (feature `id`) acts on, and whether
-/// it propagates: `targets_mixed` when its references name several.
-fn blend_solid(id: &Id, f: &Feature) -> Result<(Id, bool)> {
-    let ty = f.type_name();
-    match (f.targets().as_slice(), f) {
-        ([one], Feature::Fillet(x)) => Ok(((*one).clone(), x.propagate)),
-        ([one], Feature::Chamfer(x)) => Ok(((*one).clone(), x.propagate)),
-        (many, _) => Err(Error::new(
-            Code::TargetsMixed,
-            format!(
-                "{ty} {id}: its edges belong to {}; a {ty} acts on one solid, so split it in two",
-                many.iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        )
-        .with("feature", id)
-        .with("solids", many)),
-    }
-}
-
-/// Refuses a fillet or chamfer (feature `id` of `part`, as a write would
-/// leave it) whose references don't resolve in `results` to what it
-/// needs: edges of one solid, a face where a face goes, no edge in two
-/// groups. What the kernel makes of them only rebuild can tell.
-pub fn check_blend(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
-    let solids = Solids::of(part);
-    let (solid, propagate) = blend_solid(id, f)?;
-    let built = read(part, &solids, id, f, "targets", &solid, results)?;
-    let groups = groups(part, id, f, results)?;
-    blend_edges(
-        part,
-        id,
-        f.type_name(),
-        (&solid, built),
-        &groups,
-        propagate,
-        results,
-    )
-    .map(drop)
-}
-
-/// The kernel's refusal of a fillet or chamfer: `blend_failed`, with its
-/// `reason` and each entity it names (`entities`, with its `role` in the
-/// refusal): as a reference into the solid as the feature sees it, its
-/// kind, its origin, and for an edge the listed edge whose chain reached
-/// it (`listed`).
-fn blend_error(
-    part: &Part,
-    id: &Id,
-    ty: &str,
-    (solid, built): (&Id, &Built),
-    listed: &[(ryukei::blend::EdgeBlend, &str)],
-    e: ryukei::Error,
-) -> Error {
-    use ryukei::BlendError as B;
-    let entity = |role: &str, n: &Name| -> Value {
-        let mut v = json!({"role": role});
-        match built.body.by_name(*n) {
-            Some(x) => {
-                v["reference"] = json!(format!("{}/{solid}/{n}", part.id));
-                v["kind"] = json!(crate::reference::kind(x));
-                if let Some(o) = built.origins.get(&n.to_string()) {
-                    v["origin"] = o.clone();
-                }
-                if let Some((_, by)) = listed.iter().find(|(b, _)| b.edge == *n) {
-                    v["listed"] = json!(by);
-                }
-            }
-            // A name a staged corner made between its stages.
-            None => v["name"] = json!(n.to_string()),
-        }
-        v
-    };
-    let (reason, msg, entities) = match &e {
-        ryukei::Error::InvalidBlend(b) => match b {
-            B::NoSuchEdge { edge } => (
-                "no_such_edge",
-                "an edge isn't there",
-                vec![entity("edge", edge)],
-            ),
-            B::DuplicateEdge { edge } => (
-                "duplicate_edge",
-                "an edge is named twice",
-                vec![entity("edge", edge)],
-            ),
-            B::BadSize { edge } => (
-                "bad_size",
-                "a size is too small for the kernel's resolution, or an angle out of range",
-                vec![entity("edge", edge)],
-            ),
-            B::NotAFace { edge, face } => (
-                "not_a_face",
-                "the face a chamfer's first distance runs along doesn't bound one of its edges",
-                vec![entity("edge", edge), entity("face", face)],
-            ),
-            B::SmoothEdge { edge } => (
-                "smooth_edge",
-                "an edge's faces meet tangentially: there is nothing to round",
-                vec![entity("edge", edge)],
-            ),
-            B::ConvexityChanges { edge } => (
-                "convexity_changes",
-                "an edge is convex in one place and concave in another",
-                vec![entity("edge", edge)],
-            ),
-            B::OpenTangentChain { blended, open } => (
-                "open_tangent_chain",
-                "a blended edge runs on tangentially into one that isn't: blend the whole chain (propagate)",
-                vec![entity("blended", blended), entity("open", open)],
-            ),
-            B::SizeChangeAlongChain { a, b } => (
-                "size_change_along_chain",
-                "edges that meet tangentially are blended with different sizes",
-                vec![entity("a", a), entity("b", b)],
-            ),
-            B::Overflow { edge, face } => (
-                "overflow",
-                "the blend would run off a face it lies on, or cross another there",
-                vec![entity("edge", edge), entity("face", face)],
-            ),
-            B::RadiusTooLarge { edge } => (
-                "radius_too_large",
-                "the size is too large for the faces or the edge",
-                vec![entity("edge", edge)],
-            ),
-            B::Unsupported { at } => (
-                "unsupported",
-                "a face, edge or vertex the kernel can't blend yet",
-                vec![entity("at", at)],
-            ),
-            B::Uncertain { at } => (
-                "uncertain",
-                "a decision rounding left uncertain",
-                vec![entity("at", at)],
-            ),
-            B::NonManifold { at } => (
-                "non_manifold",
-                "blends would meet only at an edge or a point",
-                vec![entity("at", at)],
-            ),
-        },
-        _ => ("kernel", "the kernel refused it", Vec::new()),
-    };
-    let mut err = Error::new(Code::BlendFailed, format!("{ty} {id}: {msg} ({e})"))
-        .with("feature", id)
-        .with("solid", solid)
-        .with("reason", reason)
-        .with("kernel", format!("{e:?}"));
-    if !entities.is_empty() {
-        err = err.with("entities", entities);
-    }
-    if let ryukei::Error::InvalidBlend(B::Unsupported { at }) = &e
-        && let Some(EntityId::Edge(x)) = built.body.by_name(*at)
-        && built.body.is_laminar(x)
-    {
-        err = err.with(
-            "hint",
-            laminar_hint(&format!("{}/{solid}/{at}", part.id), solid),
-        );
-    }
-    err
-}
-
-/// What to say of boundary (laminar) edge `reference` of sheet `solid`
-/// that a fillet or chamfer names.
-fn laminar_hint(reference: &str, solid: &Id) -> String {
-    format!(
-        "{reference} is a boundary of sheet {solid} (laminar): only a sheet's inner edges are rounded"
-    )
-}
-
-/// `blend_failed` for a fillet or chamfer of a sheet's boundary: the
-/// kernel rounds only edges with a face either side.
-fn laminar_blend(part: &Part, id: &Id, ty: &str, solid: &Id, edge: Name) -> Error {
-    let reference = format!("{}/{solid}/{edge}", part.id);
-    let hint = laminar_hint(&reference, solid);
-    Error::new(Code::BlendFailed, format!("{ty} {id}: {hint}"))
-        .with("feature", id)
-        .with("solid", solid)
-        .with("reason", "unsupported")
-        .with(
-            "entities",
-            json!([{"role": "edge", "reference": reference, "kind": "edge"}]),
-        )
-        .with("hint", hint)
-}
-
-/// A fillet or chamfer: its solid as it sees it, with every edge its
-/// groups name, grown along tangent chains, blended in one kernel call.
-fn build_blend(
-    part: &Part,
-    solids: &Solids,
-    id: &Id,
-    f: &Feature,
-    before: &dyn Results,
-    run: &crate::rebuild::Run,
-) -> Result<Made> {
-    let ty = f.type_name();
-    let (solid, propagate) = blend_solid(id, f)?;
-    let built = read(part, solids, id, f, "targets", &solid, before)?;
-    let groups = groups(part, id, f, before)?;
-    let listed = blend_edges(part, id, ty, (&solid, built), &groups, propagate, before)?;
-    let edges: Vec<ryukei::blend::EdgeBlend> = listed.iter().map(|(e, _)| *e).collect();
-    let work = crate::work::work(run.job);
-    let made = ryukei::blend::blend_with(op_key(&part.id, id), &built.body, &edges, &work)
-        .map_err(|e| {
-            crate::work::stopped(&e, run.job)
-                .unwrap_or_else(|| blend_error(part, id, ty, (&solid, built), &listed, e))
-        })?;
-    // A blend face says which edges (and corner vertices) it took the
-    // place of; what else is new is the feature's; the rest keeps its
-    // origin.
-    let origins = replaced_origins(id, built, &made);
-    let built = finish(id, ty, made, origins)?;
-    Ok(Made::new(vec![(solid, Arc::new(built))]))
 }
 
 /// Origins of a body an operation on `built` made (feature `id`): an
@@ -2561,156 +1809,6 @@ pub fn rebuild_feature_in(
     run: &Run,
 ) -> Result<Output> {
     rebuild_with(part, solids, id, f, before, None, run).0
-}
-
-/// A split: its target as it sees it, cut by its plane (turned round by
-/// `flip`). The side behind the plane, the target less the half-space in
-/// front, is the target as the split leaves it; keeping both sides, the
-/// side in front, the target and the half-space, founds a solid named by
-/// the split. Each side is one boolean under a tool key of its own, so
-/// each cut face keeps its name whatever moves; each side is one solid
-/// however many lumps it has.
-fn build_split(
-    part: &Part,
-    solids: &Solids,
-    id: &Id,
-    f: &Feature,
-    s: &crate::doc::body::Split,
-    before: &dyn Results,
-    run: &Run,
-) -> Result<Made> {
-    let t = &s.target;
-    let built = read(part, solids, id, f, "target", t, before)?;
-    let at = crate::geometry::At {
-        part,
-        order: part.order(),
-        owner: id,
-        results: before,
-    };
-    let Some(plane) = s.plane() else {
-        return match crate::body::split_tool(part, solids, id, f, s, before)? {
-            crate::body::SplitTool::Solid(tool) => {
-                // Its inside is behind, its outside in front; flip swaps them.
-                let (inside, outside) = (BooleanOp::Intersect, BooleanOp::Subtract);
-                let (behind_op, front_op) = if s.flip {
-                    (outside, inside)
-                } else {
-                    (inside, outside)
-                };
-                let side = |name: &'static str, kop: BooleanOp| -> Result<Built> {
-                    let key = crate::body::side_key(&part.id, id, name);
-                    let tools = [ToolBody::whole(key, &tool, id)];
-                    apply(part, id, "split", (kop, "split"), t, built, &tools, run)
-                        .map_err(|e| crate::body::tool_side_error(id, t, name, e))
-                };
-                sides(
-                    s,
-                    t,
-                    id,
-                    || side("behind", behind_op),
-                    || side("front", front_op),
-                )
-            }
-            crate::body::SplitTool::Sheet(sheet) => {
-                split_by_sheet(part, id, s, (t, built), &sheet, run)
-            }
-        };
-    };
-    let pl = crate::geometry::one(&at, "plane", plane, crate::geometry::Want::Plane)?.plane();
-    let normal = if s.flip { -pl.normal } else { pl.normal };
-    let half = crate::body::half_space(&part.id, id, t, &built.body, pl.point, normal)?;
-    let side = |name: &'static str, kop: BooleanOp| -> Result<Built> {
-        let tool = crate::body::side_tool(id, &half, name)?;
-        let key = crate::body::side_key(&part.id, id, name);
-        let tools = [ToolBody::whole(key, &tool, id)];
-        apply(part, id, "split", (kop, "split"), t, built, &tools, run)
-            .map_err(|e| crate::body::side_error(id, t, name, e))
-    };
-    sides(
-        s,
-        t,
-        id,
-        || side("behind", BooleanOp::Subtract),
-        || side("front", BooleanOp::Intersect),
-    )
-}
-
-/// A split's sides from two closures, behind and front: the target keeps
-/// behind; with `keep: both`, the split founds what is in front. Both
-/// sides are made side by side, the first failure in order reported.
-fn sides(
-    s: &crate::doc::body::Split,
-    t: &Id,
-    id: &Id,
-    behind: impl FnOnce() -> Result<Built> + Send,
-    front: impl FnOnce() -> Result<Built> + Send,
-) -> Result<Made> {
-    use crate::doc::body::Keep;
-    match s.keep {
-        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(behind()?))])),
-        Keep::Both => {
-            let (b, f) = rayon::join(behind, front);
-            // The first failure in order, not the first a thread found.
-            let (b, f) = (b?, f?);
-            Ok(Made::new(vec![
-                (t.clone(), Arc::new(b)),
-                (id.clone(), Arc::new(f)),
-            ]))
-        }
-    }
-}
-
-/// Split `id` (`s`) of target `t` (`built`) by a sheet: one division,
-/// each side one body. The side behind the sheet (against its normal,
-/// and what it doesn't reach) is the target's; flip swaps them.
-fn split_by_sheet(
-    part: &Part,
-    id: &Id,
-    s: &crate::doc::body::Split,
-    (t, built): (&Id, &Built),
-    sheet: &Body,
-    run: &Run,
-) -> Result<Made> {
-    use crate::doc::body::Keep;
-    let key = op_key(&part.id, id);
-    let tk = crate::body::side_key(&part.id, id, "tool");
-    let tool = crate::body::side_tool(id, sheet, "tool")?;
-    let tools = [ToolBody::whole(tk, &tool, id)];
-    let placed = [Tool {
-        key: tk,
-        body: sheet,
-        place: Rigid::IDENTITY,
-    }];
-    let work = crate::work::work(run.job);
-    let (d, journal) = ryukei::boolean::divide_sides_with(key, &built.body, &placed, &work)
-        .map_err(|e| {
-            crate::work::stopped(&e, run.job)
-                .unwrap_or_else(|| boolean_error(part, id, "split", t, built, &tools, None, e))
-        })?;
-    let (back, front) = if s.flip {
-        (d.front, d.back)
-    } else {
-        (d.back, d.front)
-    };
-    // A side left empty is refused whatever `keep` says, as a plane's or a
-    // solid tool's split refuses it: a sheet that misses the target divides
-    // nothing.
-    let (back, front) = match (back, front) {
-        (Some(b), Some(f)) => (b, f),
-        (_, None) => return Err(crate::body::empty_side(id, t, "front", "tool")),
-        (None, _) => return Err(crate::body::empty_side(id, t, "behind", "tool")),
-    };
-    let one = |b: Body| -> Result<Built> {
-        let origins = boolean_origins(id, built, &tools, &b, &journal);
-        finish(id, "split", (b, journal.clone()), origins)
-    };
-    match s.keep {
-        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(one(back)?))])),
-        Keep::Both => Ok(Made::new(vec![
-            (t.clone(), Arc::new(one(back)?)),
-            (id.clone(), Arc::new(one(front)?)),
-        ])),
-    }
 }
 
 /// [`rebuild_feature`], taking a join, cut or intersect's own body from
@@ -3618,6 +2716,7 @@ pub fn successors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::files::{Primitive, PrimitiveType};
     use crate::units::{Quantity, Unit};
 
     #[test]
