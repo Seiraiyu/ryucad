@@ -16,9 +16,16 @@
 //! - Sizes above 1-3/4 in are not built in (from 2 in, UNC has 4.5
 //!   threads per inch); a project's table adds them.
 //!
-//! External classes (1A, 2A, 3A) arrive with ryucad 28.B.
+//! - External classes 1A, 2A and 3A (ryucad 28.B) are the published
+//!   formulas: the major-diameter tolerance 0.060 ∛p² in (1A: 0.090), the
+//!   allowance 0.300 × the 2A pitch-diameter tolerance
+//!   (0.0015 ∛D + 0.0015 √LE + 0.015 ∛p²) for 1A and 2A and none for 3A,
+//!   each to 0.0001 in. H28/2B's printed external limits (Tables II.A.1
+//!   and II.A.2) fix the length of engagement LE and the rounding, and
+//!   every row to 1-3/4 in is checked (`tests/h28_2b_external.rs`);
+//!   `PRINTED_EXTERNAL` holds the values it prints otherwise.
 
-use crate::exact::{Big, isqrt, prod, round_div};
+use crate::exact::{Big, icbrt, isqrt, prod, round_div};
 use crate::{NM_PER_IN, Nm, Source, Valued};
 
 /// A unified size and the TPI of each series it is in.
@@ -283,6 +290,109 @@ pub fn internal_limits(size: &Size, tpi: u16, class: Class) -> Limits {
     out
 }
 
+/// An external class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtClass {
+    A1,
+    A2,
+    A3,
+}
+
+impl ExtClass {
+    pub const DEFAULT: ExtClass = ExtClass::A2;
+    pub const ALL: [ExtClass; 3] = [ExtClass::A1, ExtClass::A2, ExtClass::A3];
+
+    pub fn parse(t: &str) -> Option<ExtClass> {
+        ExtClass::ALL.into_iter().find(|c| c.text() == t)
+    }
+
+    pub fn text(self) -> &'static str {
+        match self {
+            ExtClass::A1 => "1A",
+            ExtClass::A2 => "2A",
+            ExtClass::A3 => "3A",
+        }
+    }
+}
+
+/// Billionths of an inch, for the roots below.
+const NANO_IN: u128 = 1_000_000_000;
+
+/// The nearest whole ten-thousandth of an inch of `[lo, hi)` billionths
+/// of an inch times `scale`, halves up, if both ends agree; else none (a
+/// tie the bounds can't settle, which the oracle test would show).
+fn tenths(lo: u128, hi: u128, scale: u128) -> Option<i128> {
+    let r = |x: u128| ((x * 2 / scale / 100_000) + 1) / 2;
+    (r(lo) == r(hi)).then(|| r(lo) as i128)
+}
+
+/// ∛p² for p = 1/tpi in, in billionths of an inch: `[floor, floor + 1)`.
+fn cbrt_p2(tpi: u16) -> u128 {
+    icbrt(NANO_IN.pow(3) / u128::from(tpi).pow(2))
+}
+
+/// The major-diameter tolerance in ten-thousandths of an inch.
+fn major_tolerance(tpi: u16, class: ExtClass) -> i128 {
+    let c = cbrt_p2(tpi);
+    let k: u128 = if class == ExtClass::A1 { 90 } else { 60 };
+    // k/1000 × ∛p², in billionths × 1000.
+    tenths(k * c, k * (c + 1), 1_000).expect("a tie in a unified tolerance")
+}
+
+/// The length of engagement the allowance's formula takes, in pitches:
+/// the one H28/2B's printed allowances bear out (see the module doc).
+const LE_PITCHES: u128 = 9;
+
+/// The allowance (1A, 2A) in ten-thousandths of an inch.
+fn allowance(major: Nm, tpi: u16, class: ExtClass) -> i128 {
+    if class == ExtClass::A3 {
+        return 0;
+    }
+    let d = major as u128; // nm; inches are d / 25.4e6
+    let a = icbrt(d * NANO_IN.pow(3) / 25_400_000); // ∛D
+    let b = isqrt(LE_PITCHES * NANO_IN.pow(2) / u128::from(tpi)); // √LE
+    let c = cbrt_p2(tpi); // ∛p²
+    // 0.300 × (0.0015 a + 0.0015 b + 0.015 c), in billionths × 10^5.
+    let lo = 3 * (15 * a + 15 * b + 150 * c);
+    let hi = 3 * (15 * (a + 1) + 15 * (b + 1) + 150 * (c + 1));
+    tenths(lo, hi, 100_000).expect("a tie in a unified allowance")
+}
+
+/// An external thread's limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtLimits {
+    pub major: (Valued<Nm>, Valued<Nm>),
+    pub basic_minor: Valued<Nm>,
+}
+
+/// H28/2B's printed external values where the formulas round otherwise:
+/// size, threads per inch, class, which limit (`MajorMin` or the greatest,
+/// `MinorMax` standing for it), the printed value, the table.
+pub const PRINTED_EXTERNAL: &[(&str, u16, &str, Which, Nm, &str)] = &[];
+
+pub fn external_limits(size: &Size, tpi: u16, class: ExtClass) -> ExtLimits {
+    let formula = Source::Formula("FED-STD-H28/2B");
+    let max = size.major - allowance(size.major, tpi, class) as Nm * TENTH_MIL;
+    let min = max - major_tolerance(tpi, class) as Nm * TENTH_MIL;
+    let mut out = ExtLimits {
+        major: (Valued::new(min, formula), Valued::new(max, formula)),
+        basic_minor: Valued::new(
+            basic_minor(size.major, tpi),
+            Source::Formula("FED-STD-H28/2B"),
+        ),
+    };
+    for &(name, t, c, which, value, table) in PRINTED_EXTERNAL {
+        if (name, t, c) == (size.name, tpi, class.text()) {
+            let v = Valued::new(value, Source::Public(table));
+            match which {
+                Which::MajorMin => out.major.0 = v,
+                _ => out.major.1 = v,
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +432,15 @@ mod tests {
             "external classes arrive with 28.B"
         );
         assert_eq!(Class::DEFAULT, Class::B2);
+    }
+
+    #[test]
+    fn quarter_twenty_2a_by_hand() {
+        // H28/2B: 1/4-20 UNC-2A major 0.2408 to 0.2489 in; 3A 0.2419 to 0.2500.
+        let l = external_limits(size("1/4").unwrap(), 20, ExtClass::A2);
+        assert_eq!((l.major.0.value, l.major.1.value), (6_116_320, 6_322_060));
+        let l = external_limits(size("1/4").unwrap(), 20, ExtClass::A3);
+        assert_eq!((l.major.0.value, l.major.1.value), (6_144_260, 6_350_000));
+        assert_eq!(l.basic_minor.value, basic_minor(NM_PER_IN / 4, 20));
     }
 }

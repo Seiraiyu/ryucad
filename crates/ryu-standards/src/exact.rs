@@ -125,6 +125,20 @@ pub(crate) fn prod(terms: &[(u128, u32)]) -> Big {
     })
 }
 
+/// `floor(cbrt(n))`.
+pub(crate) fn icbrt(n: u128) -> u128 {
+    let (mut lo, mut hi) = (0u128, 1u128 << 43);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if mid.checked_pow(3).is_some_and(|c| c <= n) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
 /// `floor(sqrt(n))`.
 pub(crate) fn isqrt(n: u128) -> u128 {
     if n < 2 {
