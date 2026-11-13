@@ -9614,3 +9614,31 @@ fn hole_geometry_flags() {
         2,
     );
 }
+
+#[test]
+fn standards_list_external_classes() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let m10 = p.ok(&["standards", "threads", "iso_metric", "M10"]);
+    let classes = m10["classes"].as_array().unwrap();
+    let g6 = classes.iter().find(|c| c["class"] == "6g").unwrap();
+    assert_eq!(g6["side"], "external");
+    assert_eq!(
+        g6["major"],
+        json!([
+            {"value": "9.732 mm", "source": "formula: ISO 965-1"},
+            {"value": "9.968 mm", "source": "formula: ISO 965-1"}
+        ])
+    );
+    let h6 = classes.iter().find(|c| c["class"] == "6H").unwrap();
+    assert_eq!(h6["side"], "internal");
+    // Unified lists its internal classes only.
+    let q = p.ok(&["standards", "threads", "unc", "1/4"]);
+    assert!(
+        q["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["side"] == "internal")
+    );
+}

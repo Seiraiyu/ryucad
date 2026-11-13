@@ -744,10 +744,26 @@ fn pitch_of(standard: Standard, t: &Thread) -> Result<Option<Pitch>> {
     }
 }
 
+/// A tapped hole's thread resolved, as [`resolve_any`] does: an external
+/// thread's class (`6g`) is refused, since a tapped hole is internal.
+pub fn resolve(t: &Thread) -> Result<Option<builtin::Thread>> {
+    match resolve_any(t)? {
+        Some(b) if !b.internal => Err(refuse(
+            "/thread/class",
+            "external_class",
+            format!(
+                "{} is an external thread's class; a tapped hole is internal: give an internal class (6H, 2B) or none",
+                t.class.as_deref().unwrap_or("")
+            ),
+        )),
+        b => Ok(b),
+    }
+}
+
 /// The built-in thread a hole's thread names, or `None` for a project
 /// standard; a size, pitch or class the built-in doesn't have is refused
 /// with what it does have.
-pub fn resolve(t: &Thread) -> Result<Option<builtin::Thread>> {
+pub fn resolve_any(t: &Thread) -> Result<Option<builtin::Thread>> {
     let Some(standard) = Standard::parse(&t.standard) else {
         return Ok(None);
     };
@@ -1761,7 +1777,7 @@ mod tests {
         assert_eq!(e.details["listed"], json!(["1.0", "0.75"]));
         let e = err(with(
             "thread",
-            json!({"standard": "iso_metric", "size": "M6", "class": "6g"}),
+            json!({"standard": "iso_metric", "size": "M6", "class": "6e"}),
         ));
         assert_eq!(e.details["reason"], "unknown_thread_class");
         let e = err(with(
@@ -2000,5 +2016,20 @@ mod tests {
             v["far"] = json!({"counterbore": {"diameter": "8 mm", "depth": "1 mm"}});
         });
         read(&v).unwrap();
+    }
+
+    #[test]
+    fn a_tapped_hole_is_internal() {
+        let mut v = hole();
+        v["format"] = json!(23);
+        v.as_object_mut().unwrap().remove("diameter");
+        v["thread"] = json!({"standard": "iso_metric", "size": "M6", "class": "6g"});
+        v["depth"] = json!("through_all");
+        v.as_object_mut().unwrap().remove("bottom");
+        let e = read(&v).unwrap_err();
+        assert_eq!(
+            (e.details["pointer"].as_str(), e.details["reason"].as_str()),
+            (Some("/thread/class"), Some("external_class"))
+        );
     }
 }
