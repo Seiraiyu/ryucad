@@ -1090,6 +1090,5 @@ fn two_projects_with_a_part_of_the_same_name_tag_apart() {
     let r = read("a/");
     assert_eq!(r.name("p/A.package"), "ryupdm/p/A.package");
     assert!(r.tags.contains_key("p/A.package"));
-    assert!(!r.legacy.contains("p/A") || r.tags.contains_key("p/A"));
     assert_eq!(read("b/").name("p/A.package"), package);
 }

@@ -33,7 +33,11 @@ pub fn tag_key(part: &Id, label: &str) -> String {
 /// The package tag's name in the project at `prefix` (`""` or ending in
 /// `/`), without `refs/tags/`.
 pub fn tag_name(prefix: &str, part: &Id, label: &str) -> String {
-    format!("{}{prefix}{}", crate::history::TAG_PREFIX, tag_key(part, label))
+    format!(
+        "{}{prefix}{}",
+        crate::history::TAG_PREFIX,
+        tag_key(part, label)
+    )
 }
 
 /// `ryupdm.package_attestation`, format 1.

@@ -641,10 +641,8 @@ fn legacy(
                     continue;
                 };
                 let attests = match attest::split_message(&data[at + 2..]) {
-                    Ok((v, _, _)) if package => {
-                        crate::package::attest::Attestation::from_json(&v)
-                            .is_ok_and(|a| a.project == project)
-                    }
+                    Ok((v, _, _)) if package => crate::package::attest::Attestation::from_json(&v)
+                        .is_ok_and(|a| a.project == project),
                     Ok((v, _, _)) => {
                         attest::Attestation::from_json(&v).is_ok_and(|a| a.project == project)
                     }
