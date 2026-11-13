@@ -271,7 +271,7 @@ pub(crate) mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     /// Serves the repositories under `root` over Git's smart HTTP on a
     /// loopback port, through `git http-backend`, until the test ends;
