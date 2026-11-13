@@ -15,3 +15,4 @@ pub mod layout;
 pub mod palette;
 pub mod shell;
 pub mod style;
+pub mod toast;
