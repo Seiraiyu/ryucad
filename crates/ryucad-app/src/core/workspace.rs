@@ -2931,7 +2931,11 @@ impl Workspace {
             self.model.generation += 1;
             return;
         }
-        if p.feature(&key.1).is_none_or(|f| f.sketch.is_some()) {
+        // An insert paints its solids whole, a delete ghosts what it took
+        // out: neither reads the model's faces by origin.
+        if p.feature(&key.1)
+            .is_none_or(|f| f.sketch.is_some() || f.insert.is_some() || f.delete.is_some())
+        {
             return;
         }
         let revision = p.revision.clone();

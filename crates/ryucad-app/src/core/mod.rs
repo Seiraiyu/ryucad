@@ -22,6 +22,7 @@ pub mod feedback;
 pub mod flat;
 pub mod focus;
 pub mod geometry;
+pub mod inserts;
 pub mod gizmo;
 pub mod interference;
 pub mod keymap;

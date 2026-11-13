@@ -910,6 +910,15 @@ impl View {
                 }
             }
         }
+        // An insert chosen: every solid it founds, whole (design 521).
+        if let Some(k) = &chosen
+            && let Some(p) = ws.model.parts.get(&k.0)
+        {
+            let c = linear(style::CHOSEN);
+            for key in crate::core::inserts::painted(p, k) {
+                faces.extend((0..picker.faces(&key)).map(|i| (key.clone(), i, c)));
+            }
+        }
         // A compare's new and changed faces, over the chosen feature so
         // choosing one still shows what changed in it.
         if let Some(c) = ws.painted() {
