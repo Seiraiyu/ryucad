@@ -1203,6 +1203,7 @@ fn every_protocol_method_has_a_command() {
         ("feature.move", &["feature", "move"]),
         ("feature.list", &["feature", "list"]),
         ("feature.show", &["feature", "show"]),
+        ("feature.types", &["feature", "types"]),
         ("insert.update", &["insert", "update"]),
         ("param.list", &["param", "list"]),
         ("param.set", &["param", "set"]),
@@ -1361,6 +1362,42 @@ fn every_protocol_method_has_a_command() {
             .unwrap();
         assert!(out.status.success(), "ryucad {args:?} --help");
     }
+}
+
+/// `feature types`: the registry read back, the same in process and
+/// through the daemon; `feature add --help` names every type (design 541).
+#[test]
+fn feature_types_lists_what_each_type_takes() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    let all = p.ok(&["feature", "types"]);
+    let types = all["types"].as_array().unwrap();
+    assert_eq!(
+        types[0],
+        json!({"type": "box", "fields": ["params", "placement", "operation", "targets"],
+               "body": null, "founds": "when_new"})
+    );
+    let names: Vec<&str> = types.iter().map(|t| t["type"].as_str().unwrap()).collect();
+    for t in ["hole", "shell", "move_face", "import"] {
+        assert!(names.contains(&t), "{t}: {names:?}");
+    }
+    let shell = p.ok(&["feature", "types", "shell"]);
+    assert_eq!(shell["types"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        (&shell["types"][0]["body"], &shell["types"][0]["founds"]),
+        (&json!("solid"), &json!("never"))
+    );
+    p.fails(&["feature", "types", "gear"], "unknown_feature_type", 1);
+    let help = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["feature", "add", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    for t in names {
+        assert!(help.contains(t), "feature add --help names {t}");
+    }
+    assert!(help.contains("ryucad feature types"), "{help}");
 }
 
 #[test]
