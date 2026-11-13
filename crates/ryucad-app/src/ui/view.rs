@@ -145,6 +145,9 @@ pub struct View {
     /// What the last Expand all or Expand below left closed, said under
     /// the tree's filters until the tree is next opened or closed.
     pub tree_note: Option<String>,
+    /// A row to bring into view when the tree is next drawn (its id): the
+    /// palette's choice (#782).
+    pub tree_reveal: Option<String>,
 }
 
 /// How long the pointer rests on an entity before its tooltip shows,
@@ -388,6 +391,7 @@ impl View {
             tree_menu: None,
             tree_menu_opening: false,
             tree_note: None,
+            tree_reveal: None,
         }
     }
 

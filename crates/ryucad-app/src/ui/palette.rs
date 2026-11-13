@@ -181,6 +181,8 @@ pub fn show(ctx: &egui::Context, o: &mut Opened) -> Option<Action> {
 /// Chooses and frames what `place` names, as choosing it in the tree
 /// does: a feature opens its form, a part is shown.
 fn go_to(o: &mut Opened, place: &Place) {
+    // Its row brought into view in the tree (#782).
+    o.view.tree_reveal = Some(place.row());
     if let Some(d) = &place.drawing {
         o.ws.open_drawing(&place.part, d);
         return;

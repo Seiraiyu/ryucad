@@ -531,6 +531,12 @@ fn keys(ui: &egui::Ui) -> Vec<Key> {
 /// those only the other side has follow, to be chosen for their changes.
 pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     let (rows, _) = rows(ws);
+    // A row the palette went to (#782): every row above it opened here,
+    // and scrolled to as it is drawn below.
+    let reveal = view
+        .tree_reveal
+        .take()
+        .filter(|id| view.tree.reveal(&rows, id));
     let shown = view.tree.shown(&rows, &|b, q| names(ws, b, q));
     let narrowed_by =
         |t: &crate::core::tree::Tree| (t.query.clone(), t.failing, t.changed, t.hidden);
@@ -574,6 +580,9 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         for s in &shown {
             let row = &rows[s.index];
             let open = narrowing || view.tree.is_open(row);
+            if reveal.as_deref() == Some(row.id.as_str()) {
+                ui.scroll_to_cursor(Some(egui::Align::Center));
+            }
             let did = row_ui(ui, ws, view, row, s, open, narrowing, focused);
             if did.caret || (did.clicked && row.choose.is_none() && row.children && !narrowing) {
                 toggled.push((row.id.clone(), !view.tree.is_open(row)));

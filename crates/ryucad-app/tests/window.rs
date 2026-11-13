@@ -6285,6 +6285,63 @@ fn the_palette_shows_the_part_of_a_feature_it_goes_to() {
     );
 }
 
+/// #782: choosing a row from the palette scrolls the tree to it.
+#[test]
+fn the_palette_scrolls_the_tree_to_what_it_goes_to() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    for i in 0..50 {
+        let (id, at) = (format!("q{i:02}"), format!("0mm,0mm,{i}mm"));
+        p.ok(&[
+            "feature",
+            "add",
+            "p",
+            "point",
+            "--id",
+            &id,
+            "--by",
+            "coordinates",
+            "--coordinates",
+            &at,
+        ]);
+    }
+    let mut h = sized(&p, 600.0);
+    frames(&mut h, |a| {
+        loaded(a)
+            && a.opened().ws.model.parts["p"]
+                .feature("q49")
+                .is_some_and(|f| f.datum.is_some())
+    });
+    h.run_steps(2);
+    let tree = h.state().opened().focus.rect("tree").unwrap();
+    let inside = |h: &Harness<'static, App>| {
+        h.query_by_label("q49 (point)")
+            .is_some_and(|n| n.rect().top() >= tree.top() && n.rect().bottom() <= tree.bottom())
+    };
+    assert!(!inside(&h), "q49 is in view before the palette");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.get_by_label("Search commands").click();
+    h.run_steps(2);
+    h.get_by_label("Search commands").type_text("@p/q49");
+    h.run_steps(2);
+    h.get_by_label("p/q49 (point)");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().view.chosen == Some(("p".to_owned(), "q49".to_owned()))
+    });
+    for _ in 0..10 {
+        if inside(&h) {
+            break;
+        }
+        h.step();
+    }
+    assert!(inside(&h), "the tree didn't scroll to q49's row");
+}
+
 /// #778: choosing a feature row of a part that isn't shown, in the tree,
 /// shows its part, as the palette does (#737).
 #[test]

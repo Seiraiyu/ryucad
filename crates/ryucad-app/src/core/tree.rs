@@ -1320,6 +1320,19 @@ impl Tree {
         self.open.insert(id.to_owned(), open);
     }
 
+    /// Opens every row above the row `id` names, so it is drawn (#782):
+    /// what the palette goes to. Whether there is such a row.
+    pub fn reveal(&mut self, rows: &[Row], id: &str) -> bool {
+        let Some(mut at) = rows.iter().position(|r| r.id == id) else {
+            return false;
+        };
+        while let Some(p) = rows[at].parent {
+            self.set_open(&rows[p].id, true);
+            at = p;
+        }
+        true
+    }
+
     /// Opens every row with rows under it (Expand all, `None`), or `of`
     /// and every row under it (Expand below, by row id). A part or
     /// subassembly the window hasn't loaded opens, and so loads, only
@@ -2483,6 +2496,28 @@ mod tests {
             ["big (assembly) (2 failed)", "  loading…"]
         );
         assert_eq!(tree.loads(&rows[0]), Some("big"));
+    }
+
+    /// #782: revealing a row opens every row above it, so it is drawn.
+    #[test]
+    fn reveal_opens_every_row_above_one() {
+        let m = model();
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let none = |_: &BodyKey, _: &str| false;
+        let drawn = |t: &Tree, id: &str| {
+            t.shown(&rows, &none)
+                .iter()
+                .any(|s| rows[s.index].id == id)
+        };
+        let mut tree = Tree::default();
+        tree.collapse(&rows, None);
+        assert!(!drawn(&tree, "feature:bracket/e1"));
+        assert!(tree.reveal(&rows, "feature:bracket/e1"));
+        assert!(drawn(&tree, "feature:bracket/e1"));
+        // Only the rows above it: the other part stays closed.
+        assert!(!tree.is_open(rows.iter().find(|r| r.id == "part:frame").unwrap()));
+        assert!(!tree.reveal(&rows, "feature:bracket/nothing"));
     }
 
     #[test]
