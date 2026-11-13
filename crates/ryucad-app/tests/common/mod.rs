@@ -346,6 +346,49 @@ impl Project {
         self
     }
 
+    /// Part `pcb` (a 20 × 10 × 5 mm box `base`, a 3 mm cylinder `boss` 8 mm
+    /// tall on its middle) numbered P-1 and released as A, then made 30 mm
+    /// long and released as B; part `e` inserting pcb at A as `brd` raised
+    /// 20 mm, a 2 mm cube `nub` joined to the inserted base, a box `lid`,
+    /// and a delete `d` of the inserted boss. In a repository.
+    pub fn with_inserts(self) -> Project {
+        self.ok(&["part", "create", "pcb"]);
+        self.ok(&[
+            "feature", "add", "pcb", "box", "--id", "base", "--param", "x=20", "--param", "y=10",
+            "--param", "z=5",
+        ]);
+        self.ok(&[
+            "feature", "add", "pcb", "cylinder", "--id", "boss", "--param", "radius=3",
+            "--param", "height=8", "--origin", "10,5,5",
+        ]);
+        self.ok(&["pdm", "init"]);
+        self.ok(&["props", "set", "pcb", "number=P-1"]);
+        let p = self.committed();
+        p.ok(&["release", "propose", "pcb"]);
+        p.git(&["add", "."]);
+        p.git(&["commit", "-q", "-m", "pcb A"]);
+        p.ok(&["feature", "edit", "pcb", "base", "--param", "x=30"]);
+        p.git(&["commit", "-q", "-am", "longer"]);
+        p.ok(&["release", "propose", "pcb"]);
+        p.git(&["add", "."]);
+        p.git(&["commit", "-q", "-m", "pcb B"]);
+        p.ok(&["part", "create", "e"]);
+        p.ok(&[
+            "feature", "add", "e", "insert", "--id", "brd", "--of", "pcb", "--rev", "A",
+            "--origin", "0,0,20",
+        ]);
+        p.ok(&[
+            "feature", "add", "e", "box", "--id", "nub", "--operation", "join", "--target",
+            "brd/base", "--param", "x=2", "--param", "y=2", "--param", "z=2", "--origin", "1,1,25",
+        ]);
+        p.ok(&[
+            "feature", "add", "e", "box", "--id", "lid", "--param", "x=30", "--param", "y=20",
+            "--param", "z=2",
+        ]);
+        p.ok(&["feature", "add", "e", "delete_body", "--id", "d", "--solid", "brd/boss"]);
+        p
+    }
+
     /// A part with a box and a cylinder on it.
     pub fn with_part(self) -> Project {
         self.ok(&["part", "create", "p"]);
