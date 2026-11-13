@@ -6,9 +6,12 @@
 //! model's: only an assembly with a following pattern keys its rebuild
 //! on it, so nothing else rebuilds when a sketch point moves.
 
+use crate::connector::{Scope, pose};
 use crate::doc::files::Feature;
-use crate::doc::id::Id;
+use crate::doc::id::{CopyKey, Id};
+use crate::doc::mate::{InstancePattern, PatternForm};
 use crate::doc::project::Part;
+use crate::error::{Code, Error, Result};
 use crate::rebuild::{Output, PartResult, Results};
 use crate::sketch::Solved;
 use ryukei::geom::{Point3, Rigid};
@@ -106,6 +109,187 @@ fn hash_of(by: &BTreeMap<Id, Driver>) -> String {
         }
     }
     h.finalize().to_hex()[..32].to_owned()
+}
+
+/// A following pattern's places as resolved: the instance that carries
+/// them (ryumate's body), and each copy's key with its motion in that
+/// instance's part frame, the seed's own place left out, in the driver's
+/// order.
+#[derive(Clone, Debug)]
+pub struct Resolved {
+    pub carrier: Id,
+    pub places: Vec<(CopyKey, ryumate::Pose)>,
+}
+
+/// Resolves the places of following pattern `id` (`p`) in `scope`:
+/// through `on`'s instances to its part's occurrence, its feature's
+/// driver there, and each place but the seed's.
+pub fn resolve(id: &Id, p: &InstancePattern, scope: &dyn Scope) -> Result<Resolved> {
+    let (on, from, listed) = match &p.form {
+        PatternForm::Feature { on, from } => (on, from.as_ref(), None),
+        PatternForm::Points { on, from, points } => (on, from.as_ref(), Some(&points[..])),
+        _ => unreachable!("only a following pattern has places"),
+    };
+    let text = on.text();
+    let fail = |code, msg: String| {
+        Error::new(code, format!("{id}: its places {text} {msg}"))
+            .with("feature", id)
+            .with("param", "on")
+    };
+    let carrier = on.instance[0].clone();
+    if p.instances.contains(&carrier) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{id}: {carrier} carries its places and is one of its seeds; a copy can't move itself"),
+        )
+        .with("feature", id)
+        .with("pointer", "/instances"));
+    }
+    let placed = match scope.instance(&carrier) {
+        None => {
+            return Err(fail(
+                Code::NotFound,
+                format!("name {carrier}, which isn't an instance the assembly lists"),
+            ));
+        }
+        Some(Err(e)) => {
+            return Err(fail(
+                Code::DependencyFailed,
+                format!("name {carrier}, which failed to rebuild"),
+            )
+            .with("dependency", &carrier)
+            .with("cause", e.code));
+        }
+        Some(Ok(p)) => p,
+    };
+    let inside = &on.instance[1..];
+    let Some(o) = placed.model.occurrences.iter().find(|o| o.path == inside) else {
+        return Err(fail(
+            Code::NotFound,
+            format!(
+                "name {}, where {} places no part",
+                crate::assembly::path_text(&on.instance),
+                placed.part
+            ),
+        ));
+    };
+    let there = |e: Error| e.with("part", &o.part).with("rev", o.rev.to_json());
+    let Some(d) = o.places.by_feature.get(&on.feature) else {
+        return Err(there(fail(
+            Code::NotFound,
+            format!(
+                "name {}, which isn't a pattern, hole or sketch of {} that built",
+                on.feature, o.part
+            ),
+        )));
+    };
+    let motions: Vec<(CopyKey, Rigid)> = match (d, listed) {
+        (Driver::Pattern(list), None) => {
+            if from.is_some() {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{id}: a pattern's seed is at its own place, [0, 0]; leave from out"),
+                )
+                .with("feature", id)
+                .with("pointer", "/from"));
+            }
+            list.iter()
+                .map(|(i, m)| match m {
+                    Some(r) => Ok((CopyKey::Index(*i), *r)),
+                    None => Err(there(fail(
+                        Code::InvalidParam,
+                        format!(
+                            "name mirror pattern {}: an instance can't be mirrored",
+                            on.feature
+                        ),
+                    ))),
+                })
+                .collect::<Result<_>>()?
+        }
+        (Driver::Hole(points), None) => translations(id, points, from)?,
+        (Driver::Sketch(s), Some(listed)) => {
+            let points = crate::hole::sketch_points(&id.to_string(), id, &on.feature, listed, s)?;
+            if points.is_empty() {
+                return Err(there(fail(
+                    Code::OperationNoEffect,
+                    format!(
+                        "name sketch {}, which has no point that no curve uses; list them",
+                        on.feature
+                    ),
+                )));
+            }
+            translations(id, &points, from)?
+        }
+        (Driver::Sketch(_), None) => {
+            return Err(there(fail(
+                Code::ReferenceWrongKind,
+                format!(
+                    "name sketch {}: a sketch's points are form points",
+                    on.feature
+                ),
+            )));
+        }
+        (_, Some(_)) => {
+            return Err(there(fail(
+                Code::ReferenceWrongKind,
+                format!(
+                    "name {}, which isn't a sketch: form points takes a sketch",
+                    on.feature
+                ),
+            )));
+        }
+    };
+    if motions.is_empty() {
+        return Err(fail(
+            Code::OperationNoEffect,
+            "give no place but the seed's".to_owned(),
+        ));
+    }
+    // A motion in the part's frame, seen from the carrying instance's.
+    let w = pose(&o.pose);
+    let wi = w.inverse();
+    Ok(Resolved {
+        carrier,
+        places: motions
+            .into_iter()
+            .map(|(k, m)| (k, w.then_after(&pose(&m)).then_after(&wi)))
+            .collect(),
+    })
+}
+
+/// Each point but the seed's (`from`, else the first) as the translation
+/// from the seed's, keyed by its ID.
+fn translations(
+    id: &Id,
+    points: &[(Id, Point3)],
+    from: Option<&Id>,
+) -> Result<Vec<(CopyKey, Rigid)>> {
+    let seed = match from {
+        None => &points[0],
+        Some(f) => points.iter().find(|(p, _)| p == f).ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                format!("{id}: from {f} isn't one of its places"),
+            )
+            .with("feature", id)
+            .with("pointer", "/from")
+        })?,
+    };
+    points
+        .iter()
+        .filter(|(p, _)| *p != seed.0)
+        .map(|(p, at)| {
+            let key = CopyKey::point(p);
+            if key == CopyKey::Index([0, 0]) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{id}: point {p} can't name a copy (copy 0 is the seed); rename it"),
+                )
+                .with("feature", id));
+            }
+            Ok((key, Rigid::translation(at.to_vector() - seed.1.to_vector())))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -276,5 +460,128 @@ pub(crate) mod tests {
         let m = s.model(&id("tray"), &Rev::Working).unwrap();
         assert_eq!(m.hash, before.0);
         assert_ne!(m.places_hash, before.1);
+    }
+
+    /// The pack's rebuild as connectors are resolved in it.
+    struct In<'a>(&'a crate::rebuild::PartResult);
+
+    impl crate::connector::Scope for In<'_> {
+        fn instance(
+            &self,
+            i: &Id,
+        ) -> Option<core::result::Result<&crate::assembly::Placed, &Error>> {
+            match self.0.result(i)? {
+                Ok(o) => o.instance().map(Ok),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        fn places(&self, _: &Id, _: &Id, _: &CopyKey) -> Option<Result<bool>> {
+            None
+        }
+    }
+
+    fn pattern(form: &str, feature: &str, from: Option<&str>, points: &[&str]) -> InstancePattern {
+        let on = crate::doc::mate::Driver {
+            instance: vec![id("lid")],
+            feature: id(feature),
+        };
+        let from = from.map(id);
+        InstancePattern {
+            form: match form {
+                "feature" => PatternForm::Feature { on, from },
+                _ => PatternForm::Points {
+                    on,
+                    from,
+                    points: points.iter().map(|p| id(p)).collect(),
+                },
+            },
+            instances: vec![id("screw-0")],
+            skip: Vec::new(),
+        }
+    }
+
+    fn mm(p: &ryumate::Pose) -> [i64; 3] {
+        p.origin.map(|c| (c * 1e3).round() as i64)
+    }
+
+    #[test]
+    fn places_resolve_by_their_drivers_keys() {
+        let (_dir, mut s) = tray();
+        let r = s.rebuilt(&id("pack")).unwrap().clone();
+        let got = |p: &InstancePattern| -> Result<Vec<(String, [i64; 3])>> {
+            let r = resolve(&id("screws"), p, &In(&r))?;
+            assert_eq!(r.carrier, id("lid"));
+            Ok(r.places.iter().map(|(k, m)| (k.text(), mm(m))).collect())
+        };
+        let s = |v: &[(&str, [i64; 3])]| -> Vec<(String, [i64; 3])> {
+            v.iter().map(|(k, a)| (k.to_string(), *a)).collect()
+        };
+        assert_eq!(
+            got(&pattern("feature", "grid", None, &[])).unwrap(),
+            s(&[
+                ("1", [20, 0, 0]),
+                ("2", [40, 0, 0]),
+                ("0:1", [0, 20, 0]),
+                ("1:1", [20, 20, 0])
+            ])
+        );
+        assert_eq!(
+            got(&pattern("feature", "row", None, &[])).unwrap(),
+            s(&[("p2", [20, 0, 0]), ("p5", [40, 0, 0])])
+        );
+        assert_eq!(
+            got(&pattern("feature", "row", Some("p2"), &[])).unwrap(),
+            s(&[("p1", [-20, 0, 0]), ("p5", [20, 0, 0])])
+        );
+        assert_eq!(
+            got(&pattern("points", "layout", None, &["p1", "p5"])).unwrap(),
+            s(&[("p5", [40, 0, 0])])
+        );
+        assert_eq!(
+            got(&pattern("points", "layout", Some("p5"), &[])).unwrap(),
+            s(&[("p1", [-40, 0, 0]), ("p2", [-20, 0, 0])])
+        );
+        // Refusals.
+        let code = |p: InstancePattern| got(&p).unwrap_err();
+        assert_eq!(
+            code(pattern("feature", "layout", None, &[])).code,
+            Code::ReferenceWrongKind
+        );
+        assert_eq!(
+            code(pattern("points", "row", None, &[])).code,
+            Code::ReferenceWrongKind
+        );
+        assert_eq!(
+            code(pattern("feature", "h", None, &[])).code,
+            Code::OperationNoEffect
+        );
+        assert_eq!(
+            code(pattern("feature", "nothing", None, &[])).code,
+            Code::NotFound
+        );
+        let e = code(pattern("feature", "row", Some("p3"), &[]));
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::InvalidParam, &json!("/from"))
+        );
+        let e = code(pattern("feature", "grid", Some("p1"), &[]));
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::InvalidParam, &json!("/from"))
+        );
+        let e = code(pattern("points", "layout", None, &["p3", "l1"]));
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::ReferenceWrongKind, &json!("/points/1"))
+        );
+        let mut p = pattern("feature", "grid", None, &[]);
+        p.instances = vec![id("lid")];
+        assert_eq!(code(p).details["pointer"], "/instances");
+        let mut p = pattern("feature", "grid", None, &[]);
+        if let PatternForm::Feature { on, .. } = &mut p.form {
+            on.instance = vec![id("nobody")];
+        }
+        assert_eq!(code(p).code, Code::NotFound);
     }
 }
