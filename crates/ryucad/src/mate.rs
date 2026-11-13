@@ -18,7 +18,7 @@
 use crate::assembly::{Placed, placed_at, pose_rigid};
 use crate::connector::{Found, Scope, doc_pose, pose, resolve};
 use crate::doc::files::Feature;
-use crate::doc::id::Id;
+use crate::doc::id::{CopyKey, Id};
 use crate::doc::mate::{Direction, Form, InstancePattern, Mate, PatternForm};
 use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
@@ -41,11 +41,14 @@ pub struct Mated {
     pub values: Option<ryumate::MateValues>,
 }
 
-/// One copy an instance pattern places: its index, the seed it copies,
+/// One copy an instance pattern places: its key, the seed it copies,
 /// and the seed's part placed where the copy is.
 #[derive(Clone, Debug)]
 pub struct Copy {
-    pub index: [u32; 2],
+    /// Its key: an index, or the point that drives it (design 521).
+    pub key: CopyKey,
+    /// ryumate's index for it in this solve.
+    pub solver: [u32; 2],
     pub seed: Id,
     pub placed: Arc<Placed>,
 }
@@ -81,7 +84,7 @@ impl Copies {
             self.copies
                 .iter()
                 .map(|c| json!({
-                    "copy": Id::copy(id, c.index),
+                    "copy": Id::copy(id, &c.key),
                     "seed": c.seed,
                     "pose": crate::assembly::rigid_pose(&c.placed.pose).to_json(),
                 }))
@@ -102,6 +105,9 @@ pub struct Solve {
     /// The instance pattern each of ryumate's patterns is, by its index
     /// (what a sweep needs to move a seed's copies). Not in `to_json`.
     pub patterns: Vec<Id>,
+    /// Each pattern's copies by key with ryumate's index, by its index
+    /// (what a sweep needs to find a copy). Not in `to_json`.
+    pub keys: Vec<Vec<(CopyKey, [u32; 2])>>,
     /// The instances solved off their stored poses.
     pub moved: Vec<Id>,
     /// What was solved, with each body where the rebuild placed it: what
@@ -367,7 +373,8 @@ fn kind(m: &Mate) -> ryumate::Kind {
 struct Resolved {
     pattern: ryumate::Pattern,
     seeds: Vec<Id>,
-    copies: Vec<[u32; 2]>,
+    /// Each copy's key, with ryumate's index for it.
+    copies: Vec<(CopyKey, [u32; 2])>,
 }
 
 /// The assembly's instances and patterns as connectors are resolved in
@@ -385,9 +392,9 @@ impl Scope for In<'_> {
         }
     }
 
-    fn places(&self, pattern: &Id, seed: &Id, index: [u32; 2]) -> Option<Result<bool>> {
+    fn places(&self, pattern: &Id, seed: &Id, key: &CopyKey) -> Option<Result<bool>> {
         Some(match self.patterns.get(pattern)? {
-            Ok(r) => Ok(r.seeds.contains(seed) && r.copies.contains(&index)),
+            Ok(r) => Ok(r.seeds.contains(seed) && r.copies.iter().any(|(k, _)| k == key)),
             Err(e) => Err(e.clone()),
         })
     }
@@ -480,18 +487,27 @@ fn pattern(
             motion,
         },
         seeds: p.instances.clone(),
-        copies: p.copies(),
+        copies: p
+            .copies()
+            .into_iter()
+            .map(|i| (CopyKey::Index(i), i))
+            .collect(),
     })
 }
 
 /// The solver's connector for a resolved one.
-fn on(f: &Found, body: &dyn Fn(&Id) -> u32, pattern: &dyn Fn(&Id) -> u32) -> ryumate::Connector {
+fn on(
+    f: &Found,
+    body: &dyn Fn(&Id) -> u32,
+    pattern: &dyn Fn(&Id) -> u32,
+    index: &dyn Fn(&Id, &CopyKey) -> [u32; 2],
+) -> ryumate::Connector {
     let on = match &f.copy {
         None => ryumate::On::Body(body(&f.instance)),
-        Some((p, index)) => ryumate::On::Copy {
+        Some((p, key)) => ryumate::On::Copy {
             pattern: pattern(p),
             seed: body(&f.instance),
-            index: *index,
+            index: index(p, key),
         },
     };
     ryumate::Connector { on, frame: f.frame }
@@ -544,7 +560,7 @@ impl Scope for Rebuilt<'_> {
         }
     }
 
-    fn places(&self, pattern: &Id, seed: &Id, index: [u32; 2]) -> Option<Result<bool>> {
+    fn places(&self, pattern: &Id, seed: &Id, key: &CopyKey) -> Option<Result<bool>> {
         match self
             .0
             .features
@@ -557,7 +573,7 @@ impl Scope for Rebuilt<'_> {
                 Some(Ok(c
                     .copies
                     .iter()
-                    .any(|c| c.index == index && c.seed == *seed)))
+                    .any(|c| c.key == *key && c.seed == *seed)))
             }
             Err(e) => Some(Err(e.clone())),
         }
@@ -881,6 +897,14 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
     }
     // Mates whose connectors resolve, by index, with what they resolved
     // to; the rest fail now.
+    let index_of = |p: &Id, k: &CopyKey| -> [u32; 2] {
+        patterns[p]
+            .as_ref()
+            .ok()
+            .and_then(|r| r.copies.iter().find(|(x, _)| x == k))
+            .map(|(_, i)| *i)
+            .expect("a resolved copy is placed")
+    };
     let mut mated: BTreeMap<Id, Result<(u32, [Found; 2])>> = BTreeMap::new();
     let mut solved_mates: Vec<Id> = Vec::new();
     {
@@ -907,8 +931,8 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                     solved_mates.len() as u32,
                     ryumate::Mate {
                         kind: kind(m),
-                        a: on(a, &body_of, &pattern_of),
-                        b: on(b, &body_of, &pattern_of),
+                        a: on(a, &body_of, &pattern_of, &index_of),
+                        b: on(b, &body_of, &pattern_of, &index_of),
                         limits: limits(m),
                     },
                 );
@@ -984,7 +1008,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
     for (id, r) in &patterns {
         if let Ok(r) = r {
             let k = pattern_of(id);
-            for index in &r.copies {
+            for (_, index) in &r.copies {
                 for seed in &r.seeds {
                     wanted.push((k, body_of(seed), *index));
                 }
@@ -1107,6 +1131,15 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
         };
         features.insert(id, out);
     }
+    let keys: Vec<Vec<(CopyKey, [u32; 2])>> = pattern_ids
+        .iter()
+        .map(|id| {
+            patterns[id]
+                .as_ref()
+                .map(|r| r.copies.clone())
+                .unwrap_or_default()
+        })
+        .collect();
     // Patterns: their copies where the seeds now are; a copy that can't be
     // placed there fails its pattern, naming it.
     for (id, r) in patterns {
@@ -1114,7 +1147,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
             let k = pattern_of(&id);
             let mut copies = Vec::new();
             let mut h = blake3::Hasher::new();
-            for index in &r.copies {
+            for (key, index) in &r.copies {
                 for seed in &r.seeds {
                     let p = copy_at[&(k, body_of(seed), *index)];
                     let seed_placed = features[seed]
@@ -1123,14 +1156,16 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                         .and_then(|o| o.instance())
                         .expect("a seed placed");
                     let rigid = pose_rigid(&doc_pose(&p)).map_err(|e| {
-                        outside(&id, format!("copy {index:?} of {seed}"), &e)
-                            .with("copy", index)
+                        outside(&id, format!("copy {} of {seed}", key.hash_text()), &e)
+                            .with("copy", key.to_json())
                             .with("seed", seed)
                     })?;
                     let placed = placed_at(seed_placed, rigid);
-                    h.update(format!("{index:?} {seed} {}\n", placed.hash).as_bytes());
+                    // Unchanged bits for indices.
+                    h.update(format!("{} {seed} {}\n", key.hash_text(), placed.hash).as_bytes());
                     copies.push(Copy {
-                        index: *index,
+                        key: key.clone(),
+                        solver: *index,
                         seed: seed.clone(),
                         placed: Arc::new(placed),
                     });
@@ -1148,6 +1183,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
         instances,
         mates: solved_mates,
         patterns: pattern_ids.clone(),
+        keys,
         moved,
         asm: at,
     }))
@@ -1540,6 +1576,7 @@ fn component_request(
         instances: s.instances.clone(),
         mates: s.mates.clone(),
         patterns: s.patterns.clone(),
+        keys: s.keys.clone(),
         moved: Vec::new(),
         asm: asm.component(&roots),
     };

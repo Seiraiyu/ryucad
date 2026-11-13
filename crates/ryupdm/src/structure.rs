@@ -10,7 +10,7 @@ use crate::props::Properties;
 use crate::record::{Kind, Records};
 use ryucad_doc::doc::assembly::Rev;
 use ryucad_doc::doc::files::{Feature, PartKind};
-use ryucad_doc::doc::id::{Id, ProjectId};
+use ryucad_doc::doc::id::{CopyKey, Id, ProjectId};
 use ryucad_doc::doc::project::{Part, Project};
 use ryucad_doc::doc::source::Source;
 use ryucad_doc::error::{Code, Error, Result};
@@ -505,7 +505,7 @@ pub fn occurrences(part: &Part) -> (Vec<Occurrence>, Vec<Error>) {
                                 continue;
                             }
                             out.push(Occurrence {
-                                path: format!("{}/{seed}", Id::copy(fid, index)),
+                                path: format!("{}/{seed}", Id::copy(fid, &CopyKey::Index(index))),
                                 part: i.part.clone(),
                                 rev: i.rev.clone(),
                             });

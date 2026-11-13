@@ -4,8 +4,9 @@
 //!
 //! A connector is `{"instance": [path], "at": {feature, name} | "origin",
 //! "offset": {…}}`: the instance path from this assembly down through
-//! subassemblies (a pattern's copy written `<pattern>:<i>`, or
-//! `<pattern>:<i>:<j>` past its first row, then the seed it copies), a
+//! subassemblies (a pattern's copy written `<pattern>:<i>`,
+//! `<pattern>:<i>:<j>` past its first row, or `<pattern>:<point>` for a
+//! pattern that follows a sketch's points, then the seed it copies), a
 //! face, edge or vertex of a solid of the part at the end of the path, by
 //! its founder and stable name, or the part's own frame, and an offset in
 //! the frame's own axes. Which of the six kinds a mate is, and which of
@@ -13,7 +14,7 @@
 //! is its header).
 
 use super::files::{Obj, invalid};
-use super::id::Id;
+use super::id::{CopyKey, Id};
 use super::pattern::{OriginAxis, count, flag, skip_from_json, spacing};
 use super::reference::Reference;
 use crate::error::{Code, Error, Result};
@@ -27,8 +28,9 @@ pub struct Connector {
     /// The instance path's first step: an instance of this assembly, or a
     /// pattern whose copy `copy` it names.
     pub root: Id,
-    /// For a pattern's copy, its index (never `[0, 0]`, the seed).
-    pub copy: Option<[u32; 2]>,
+    /// For a pattern's copy, its key: an index (never `[0, 0]`, the
+    /// seed), or the sketch point that drives it.
+    pub copy: Option<CopyKey>,
     /// The rest of the path: for a copy, the seed first; then instances
     /// of subassemblies, down to the part the frame is on.
     pub rest: Vec<Id>,
@@ -133,7 +135,7 @@ pub use super::id::{parse_step, step_text};
 impl Connector {
     /// The instance path as a file writes it.
     pub fn path(&self) -> Vec<String> {
-        std::iter::once(step_text(&self.root, self.copy))
+        std::iter::once(step_text(&self.root, self.copy.as_ref()))
             .chain(self.rest.iter().map(Id::to_string))
             .collect()
     }
@@ -979,7 +981,10 @@ mod tests {
         v["a"]["instance"] = json!(["p1:2:1", "bolt", "nut"]);
         let f = read(&v).unwrap();
         let Feature::Mate(m) = &f else { panic!() };
-        assert_eq!((m.a.root.as_str(), m.a.copy), ("p1", Some([2, 1])));
+        assert_eq!(
+            (m.a.root.as_str(), m.a.copy.clone()),
+            ("p1", Some(CopyKey::Index([2, 1])))
+        );
         assert_eq!(m.a.path(), ["p1:2:1", "bolt", "nut"]);
         assert_eq!(f.to_json(), v);
     }

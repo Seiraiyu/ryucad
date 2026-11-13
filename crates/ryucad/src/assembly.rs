@@ -216,7 +216,7 @@ impl Model {
                 Ok(Output::Copies(c)) => {
                     for copy in &c.copies {
                         place(
-                            vec![Id::copy(id, copy.index), copy.seed.clone()],
+                            vec![Id::copy(id, &copy.key), copy.seed.clone()],
                             &copy.placed,
                         );
                     }
@@ -1764,7 +1764,7 @@ fn nodes(
                         .iter()
                         .map(|c| {
                             let mut path = prefix.to_vec();
-                            path.extend([Id::copy(fid, c.index), c.seed.clone()]);
+                            path.extend([Id::copy(fid, &c.key), c.seed.clone()]);
                             serde_json::json!({
                                 "path": path_text(&path),
                                 "seed": c.seed,
