@@ -9573,3 +9573,77 @@ fn check_runs_interference_only_when_asked() {
         (&json!("frame/b1/shank"), &json!("frame/b2/shank"))
     );
 }
+
+#[test]
+fn following_instance_patterns_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "lid"]);
+    p.ok(&[
+        "feature", "add", "lid", "box", "--id", "plate", "--param", "x=60", "--param", "y=40",
+        "--param", "z=5", "--origin", "0,0,-5",
+    ]);
+    p.ok(&[
+        "feature", "add", "lid", "sketch", "--id", "layout", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "lid",
+        "layout",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [5, 5]},
+        {"op": "add", "id": "p3", "type": "point", "at": [25, 5]},
+        {"op": "add", "id": "p4", "type": "point", "at": [45, 5]}]"#,
+    ]);
+    p.ok(&["part", "create", "screw"]);
+    p.ok(&[
+        "feature", "add", "screw", "cylinder", "--id", "shank", "--param", "radius=1", "--param",
+        "height=6",
+    ]);
+    p.ok(&["part", "create", "pack", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "pack", "instance", "--id", "lid", "--of", "lid",
+    ]);
+    p.ok(&[
+        "feature", "add", "pack", "instance", "--id", "screw-0", "--of", "screw", "--origin",
+        "25,5,0",
+    ]);
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "pack",
+        "instance_pattern",
+        "--id",
+        "screws",
+        "--instance",
+        "screw-0",
+        "--form",
+        "points",
+        "--on",
+        "pack/lid/layout",
+        "--from",
+        "p3",
+        "--point",
+        "p1",
+        "--point",
+        "p3",
+        "--point",
+        "p4",
+    ]);
+    assert_eq!(v["feature"]["on"]["text"], "pack/lid/layout");
+    let r = p.ok(&["rebuild", "pack"]);
+    let f = r["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "screws")
+        .unwrap();
+    let keys: Vec<&str> = f["copies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["copy"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["screws:p1", "screws:p4"]);
+    assert_eq!(f["driver"], "lid/layout");
+}
