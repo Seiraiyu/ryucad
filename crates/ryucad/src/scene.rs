@@ -241,6 +241,8 @@ pub(crate) struct RenderAsk {
     pub(crate) sections: Vec<crate::section::Plane>,
     /// An explode to draw.
     pub(crate) explode: Option<DrawExplode>,
+    /// A motion to draw (never with an explode).
+    pub(crate) motion: Option<DrawMotion>,
     /// Draw open annotations' pins, numbered.
     pub(crate) annotations: bool,
     /// A sheet metal solid whose flat pattern to draw instead (`""`: the
@@ -285,6 +287,7 @@ impl RenderAsk {
             appearance: false,
             sections,
             explode: None,
+            motion: None,
             annotations: false,
             flat: None,
             camera_m: Some(camera),
@@ -315,6 +318,18 @@ pub(crate) struct DrawExplode {
     pub(crate) id: String,
     /// How far through it.
     pub(crate) fraction: f64,
+}
+
+/// A motion a render draws.
+pub(crate) struct DrawMotion {
+    /// The assembly of the motion a participant's window shows, which the
+    /// render draws only if it draws that assembly; `None` for one the
+    /// request names, of the one part rendered.
+    pub(crate) shown: Option<Id>,
+    pub(crate) id: String,
+    pub(crate) fraction: f64,
+    /// Paint what collides there and doesn't at rest.
+    pub(crate) interference: bool,
 }
 
 /// The explode a render draws: its assembly, where it moves each
@@ -526,6 +541,7 @@ pub(crate) fn render_for_package(session: &mut Session, part: &Id, commit: &str)
         appearance: true,
         sections: Vec::new(),
         explode: None,
+        motion: None,
         annotations: false,
         flat: None,
         camera_m: None,
@@ -702,6 +718,50 @@ pub(crate) fn render_scene(
             Some((part.clone(), offsets, r.steps, *fraction))
         }
     };
+    // The motion drawn, by its assembly: where it moves each occurrence,
+    // and with interference the faces it paints.
+    let motioned: Option<(Id, BTreeMap<String, crate::explode::Offset>)> = match &ask.motion {
+        None => None,
+        // A window's motion of an assembly not drawn draws nothing.
+        Some(DrawMotion { shown: Some(p), .. }) if !parts.contains(p) => None,
+        Some(m) => {
+            let part = match &m.shown {
+                Some(p) => p.clone(),
+                None => {
+                    let [part] = parts.as_slice() else {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            "the render shows several parts: render the assembly whose motion it is",
+                        )
+                        .with("motion", m.id.as_str()));
+                    };
+                    part.clone()
+                }
+            };
+            match crate::playback::drawn(session, &part, &m.id, m.fraction, m.interference) {
+                Ok(d) => {
+                    for f in d.faces {
+                        marks
+                            .entry(f)
+                            .or_insert((crate::render::COMPARE_REMOVED, None));
+                    }
+                    Some((part, d.offsets))
+                }
+                // A window's motion that is gone (deleted, undone, checked
+                // out away) draws nothing, with a warning, as an explode.
+                Err(e) if m.shown.is_some() => {
+                    warnings.push(json!({
+                        "code": e.code,
+                        "message": format!("the window's motion isn't drawn: {}", e.message),
+                        "part": part,
+                        "motion": m.id,
+                    }));
+                    None
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    };
     // Renders don't follow anyone's display quality, so they compare
     // across machines.
     for part in &parts {
@@ -736,7 +796,15 @@ pub(crate) fn render_scene(
                 if ask.hidden.contains(&format!("{part}/{path}")) {
                     continue;
                 }
-                let pose = match moved.and_then(|(_, offsets, ..)| offsets.get(&path)) {
+                let offset = moved
+                    .and_then(|(_, offsets, ..)| offsets.get(&path))
+                    .or_else(|| {
+                        motioned
+                            .as_ref()
+                            .filter(|(p, _)| p == part)
+                            .and_then(|(_, offsets)| offsets.get(&path))
+                    });
+                let pose = match offset {
                     Some(off) => off.0.then_after(&o.pose),
                     None => o.pose,
                 };

@@ -2441,10 +2441,20 @@ pub enum Request {
         /// `""`); by default the participant's, as `hidden`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         explode: Option<String>,
-        /// How far through the explode, from 0 to 1 (1 by default, or the
-        /// participant's).
+        /// How far through the explode (1 by default) or the motion (0 by
+        /// default), from 0 to 1; or the participant's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fraction: Option<f64>,
+        /// Draw the rendered assembly where this motion puts it at
+        /// `fraction` (0 by default, or the participant's; none: `""`);
+        /// by default the participant's shown motion, as `hidden`. Never
+        /// with an explode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+        /// Paint the faces that collide at the motion's fraction, and
+        /// don't at rest, in the removed colour (intersects pairs).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interference: bool,
         /// Draw a sheet metal solid's flat pattern instead of the model:
         /// the solid's flat body seen from its viewer side, its bend lines
         /// dashed with their notes; `""` for the part's one sheet metal

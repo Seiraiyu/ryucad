@@ -358,6 +358,100 @@ pub fn frames(session: &mut Session, ask: FramesAsk) -> Result<Value> {
     Ok(v)
 }
 
+use std::collections::BTreeSet;
+
+/// The fractions a render's motion is solved through to reach
+/// `fraction`: the motion's own steps (of `n`) before it, then
+/// `fraction`: continuation from rest, as its sweep runs.
+pub fn ts_to(n: usize, fraction: f64) -> Vec<f64> {
+    let mut ts: Vec<f64> = (0..n)
+        .map(|k| crate::motion::t_of(k, n))
+        .filter(|t| *t < fraction)
+        .collect();
+    ts.push(fraction);
+    ts
+}
+
+/// What a render draws of a motion at a fraction: each moved
+/// occurrence's offset by path, and with `interference` the faces of
+/// the pairs that collide there and don't at rest.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Drawn {
+    pub offsets: BTreeMap<String, Offset>,
+    pub faces: Vec<String>,
+}
+
+/// Motion `motion` of assembly `asm` at `fraction`, as `session`'s files
+/// have it: solved through [`ts_to`], drawn where the last step that held
+/// leaves it; with `interference` its collisions against rest found
+/// with the session's cache.
+pub fn drawn(
+    session: &mut Session,
+    asm: &Id,
+    motion: &str,
+    fraction: f64,
+    interference: bool,
+) -> Result<Drawn> {
+    if !(0.0..=1.0).contains(&fraction) {
+        return Err(bad_fraction(fraction));
+    }
+    let file = crate::motion::file_of(session, asm, motion)?;
+    let part = session.project().part(asm)?.clone();
+    let result = session.rebuilt(asm)?.clone();
+    let rest = Rest::of(&result);
+    if !rest.holds {
+        return Err(crate::motion::unsolved(asm));
+    }
+    let resolved = crate::motion::resolve(asm, &part, &rest, motion, &file)?;
+    let model = session.model(asm, &Rev::Working)?;
+    let job = session.job.clone();
+    let steps = crate::motion::steps(
+        &rest.asm,
+        &resolved.drives,
+        &ts_to(resolved.steps, fraction),
+        &job,
+    )?;
+    let moved = steps
+        .iter()
+        .rev()
+        .find(|s| s.holds)
+        .map(|s| s.moved.clone())
+        .unwrap_or_default();
+    let (step, movers) = crate::motion::step_model(&model, &rest, &moved)?;
+    let offsets = occurrence_offsets(&model, &step, &movers);
+    let mut faces = Vec::new();
+    if interference {
+        let pairs = |v: &Value| -> Vec<Value> {
+            v["interferences"].as_array().cloned().unwrap_or_default()
+        };
+        let at_rest: BTreeSet<(String, String)> = pairs(&crate::interference::find_for(
+            asm,
+            &model,
+            &[],
+            &mut session.interference,
+            &job,
+        )?)
+        .iter()
+        .map(crate::motion::pair_key)
+        .collect();
+        let found =
+            crate::interference::find_for(asm, &step, &[], &mut session.interference, &job)?;
+        for i in pairs(&found)
+            .iter()
+            .filter(|i| !at_rest.contains(&crate::motion::pair_key(i)))
+        {
+            for side in ["a", "b"] {
+                for f in i["faces"][side].as_array().into_iter().flatten() {
+                    if let Some(f) = f.as_str() {
+                        faces.push(f.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    Ok(Drawn { offsets, faces })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,5 +804,175 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::AssemblyUnsolved, "{e:?}");
+    }
+
+    /// A render of `params` (64 × 48) over the project at `r`, as a
+    /// participant `me` of `live` asks it.
+    fn ask(
+        slot: &mut Option<crate::session::Session>,
+        live: &mut Live,
+        r: &std::path::Path,
+        me: Option<&str>,
+        method: &str,
+        v: Value,
+    ) -> crate::error::Result<crate::proto::Answer> {
+        let req = crate::proto::Request::from_rpc(method, Some(v)).unwrap();
+        crate::server::handle_safely(slot, Some(live), me, r, req)
+    }
+
+    #[test]
+    fn ts_to_runs_the_motions_steps_then_the_fraction() {
+        assert_eq!(ts_to(5, 0.0), [0.0]);
+        assert_eq!(ts_to(5, 0.6), [0.0, 0.25, 0.5, 0.6]);
+        assert_eq!(ts_to(5, 0.5), [0.0, 0.25, 0.5]);
+        assert_eq!(ts_to(5, 1.0), [0.0, 0.25, 0.5, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn renders_draw_motions_and_nothing_else_moves() {
+        let (dir, mut s) = swing(false);
+        call(
+            &mut s,
+            "motion.save",
+            json!({"part": "swing", "motion": "turn", "steps": 46, "drives": turning("45 deg")}),
+        )
+        .unwrap();
+        drop(s);
+        let r = dir.path();
+        let small = json!({"part": "swing", "width": 64, "height": 48, "view": "top"});
+        let mut live = Live::new();
+        let human = live.hello(Kind::Human, Some("ann"), None).unwrap();
+        let mut slot = Some(crate::session::Session::open(r).unwrap());
+        let before = ask(
+            &mut slot,
+            &mut live,
+            r,
+            None,
+            "rebuild",
+            json!({"part": "swing"}),
+        )
+        .unwrap()
+        .result;
+        let whole = ask(&mut slot, &mut live, r, None, "render", small.clone())
+            .unwrap()
+            .binary;
+        let mut named = small.clone();
+        named["motion"] = json!("turn");
+        // At its start (by default) it is drawn at rest.
+        assert_eq!(
+            ask(&mut slot, &mut live, r, None, "render", named.clone())
+                .unwrap()
+                .binary,
+            whole
+        );
+        named["fraction"] = json!(1.0);
+        let end = ask(&mut slot, &mut live, r, None, "render", named.clone())
+            .unwrap()
+            .binary;
+        assert_ne!(end, whole);
+        named["fraction"] = json!(0.5);
+        let half = ask(&mut slot, &mut live, r, None, "render", named.clone())
+            .unwrap()
+            .binary;
+        assert!(half != whole && half != end);
+        named["fraction"] = json!(2.0);
+        assert_eq!(
+            ask(&mut slot, &mut live, r, None, "render", named)
+                .unwrap_err()
+                .code,
+            Code::InvalidParam
+        );
+        // A window's motion, by default, where it shows it; "" draws none.
+        ask(
+            &mut slot,
+            &mut live,
+            r,
+            None,
+            "motion.show",
+            json!({"part": "swing", "motion": "turn", "fraction": 0.5}),
+        )
+        .unwrap();
+        assert_eq!(
+            ask(
+                &mut slot,
+                &mut live,
+                r,
+                Some(&human),
+                "render",
+                small.clone()
+            )
+            .unwrap()
+            .binary,
+            half
+        );
+        let mut none = small.clone();
+        none["motion"] = json!("");
+        assert_eq!(
+            ask(&mut slot, &mut live, r, None, "render", none)
+                .unwrap()
+                .binary,
+            whole
+        );
+        // A motion and an explode aren't drawn together.
+        let mut both = small.clone();
+        both["motion"] = json!("turn");
+        both["explode"] = json!("apart");
+        assert_eq!(
+            ask(&mut slot, &mut live, r, None, "render", both)
+                .unwrap_err()
+                .code,
+            Code::InvalidParam
+        );
+        // Nothing a motion draws moves the assembly, or intersects a pair.
+        assert_eq!(
+            ask(
+                &mut slot,
+                &mut live,
+                r,
+                None,
+                "rebuild",
+                json!({"part": "swing"})
+            )
+            .unwrap()
+            .result,
+            before
+        );
+        assert!(slot.as_ref().unwrap().interference.is_empty());
+        // Another part's render never reads the window's motion; one
+        // named of a part is wrong_part_kind.
+        let mut arm = small.clone();
+        arm["part"] = json!("arm");
+        let plain_arm = ask(&mut slot, &mut live, r, None, "render", arm.clone()).unwrap();
+        assert!(plain_arm.result.get("warnings").is_none());
+        arm["motion"] = json!("turn");
+        assert_eq!(
+            ask(&mut slot, &mut live, r, None, "render", arm)
+                .unwrap_err()
+                .code,
+            Code::WrongPartKind
+        );
+        // Gone behind the session's back: the window's draws nothing, with
+        // a warning; one the request names is still an error.
+        std::fs::remove_file(r.join("parts/swing/motions/turn.json")).unwrap();
+        let a = ask(
+            &mut slot,
+            &mut live,
+            r,
+            Some(&human),
+            "render",
+            small.clone(),
+        )
+        .unwrap();
+        assert_eq!(a.binary, whole);
+        assert_eq!(a.result["warnings"][0]["code"], "motion_not_found");
+        assert_eq!(a.result["warnings"][0]["motion"], "turn");
+        let mut gone = small;
+        gone["motion"] = json!("turn");
+        assert_eq!(
+            ask(&mut slot, &mut live, r, None, "render", gone)
+                .unwrap_err()
+                .code,
+            Code::MotionNotFound
+        );
     }
 }

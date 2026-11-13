@@ -786,12 +786,25 @@ enum Command {
         /// `--of`'s window shows, as --hidden.
         #[arg(long, value_name = "EXPLODE", conflicts_with = "no_explode")]
         explode: Option<String>,
-        /// How far through the explode, from 0 (assembled) to 1 (exploded).
+        /// How far through the explode (1 by default) or the motion (0 by
+        /// default), from 0 to 1.
         #[arg(long)]
         fraction: Option<f64>,
         /// Draw no explode, whatever a window shows.
         #[arg(long)]
         no_explode: bool,
+        /// Draw the assembly where this motion puts it at --fraction (0
+        /// by default); by default what `--of`'s window shows, as
+        /// --hidden. Never with --explode.
+        #[arg(long, value_name = "MOTION", conflicts_with_all = ["no_motion", "explode"])]
+        motion: Option<String>,
+        /// Draw no motion, whatever a window shows.
+        #[arg(long)]
+        no_motion: bool,
+        /// Paint the faces that collide at the motion's fraction, and
+        /// don't at rest (intersects pairs).
+        #[arg(long)]
+        interference: bool,
         /// Draw a sheet metal solid's flat pattern (the part's one unless
         /// named) instead of the model.
         #[arg(long, value_name = "SOLID", num_args = 0..=1, default_missing_value = "")]
@@ -5540,6 +5553,9 @@ fn request(cmd: &Command) -> Option<Request> {
             explode,
             fraction,
             no_explode,
+            motion,
+            no_motion,
+            interference,
             flat,
         } => Request::Render {
             part: part.clone(),
@@ -5566,6 +5582,12 @@ fn request(cmd: &Command) -> Option<Request> {
                 explode.clone()
             },
             fraction: *fraction,
+            motion: if *no_motion {
+                Some(String::new())
+            } else {
+                motion.clone()
+            },
+            interference: *interference,
             annotations: *annotations,
             annotation: annotation.clone(),
             flat: flat.clone(),
