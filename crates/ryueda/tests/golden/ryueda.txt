@@ -7,6 +7,8 @@ diff.breakout.netlist cc577d2a7d2d3080f2c04a285cd14073
 generated.erc 78239ee711bef7fca90a828cc74caab3
 generated.netlist 5320f73be71d1afe60130384cd00fcea
 kicad.library 9acdf4c928678cfba0ea7435e1848d06
+merge.breakout.layout 94d5d004668c8dfc7b12ddf155f51d1c
+merge.breakout.status 2331d051d4dfbf37d30c824b4f031292
 parts.digikey.records 22ee956abb9ece594e25dd55164199c9
 parts.erc 2ff58524a6d1db3950b280aa911f6dcb
 parts.jlc.search 89035579682f3f880b534a9c10a8223e
