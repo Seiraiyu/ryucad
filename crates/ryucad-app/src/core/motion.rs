@@ -564,4 +564,30 @@ mod tests {
         assert_eq!(p["expected_revision"], "r1");
         assert!(save("asm", "twist", &drives, &r, "lots", None).is_err());
     }
+
+    #[test]
+    fn the_viewport_paints_the_sweeps_faces_of_the_shown_motion_only() {
+        let mut m = Motions::default();
+        let now = std::time::Instant::now();
+        let mut w = Sweep::asked("asm", "lift");
+        w.loaded = true;
+        w.steps = vec![
+            (0.0, true, vec![]),
+            (1.0, true, vec!["asm/two/body/aa".into()]),
+        ];
+        m.sweep = Some(w);
+        assert!(m.collision_faces(now).is_empty(), "nothing shown");
+        m.shown = Some(Shown {
+            part: "asm".into(),
+            motion: "lift".into(),
+            fraction: 1.0,
+            playing: false,
+        });
+        assert_eq!(m.collision_faces(now), ["asm/two/body/aa"]);
+        m.sliding = Some(0.1);
+        assert!(m.collision_faces(now).is_empty());
+        m.shown.as_mut().unwrap().motion = "other".into();
+        m.sliding = Some(1.0);
+        assert!(m.collision_faces(now).is_empty(), "another motion's sweep");
+    }
 }

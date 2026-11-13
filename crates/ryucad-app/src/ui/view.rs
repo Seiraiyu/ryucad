@@ -940,6 +940,16 @@ impl View {
                 }
             }
         }
+        // The shown motion's last sweep: the faces colliding at the step
+        // nearest the slider, but not over a compare.
+        if ws.compare.is_none() {
+            let removed = linear(style::REMOVED);
+            for r in ws.motions.collision_faces(std::time::Instant::now()) {
+                if let Some(Place::Face(k, f)) = picker.place(&r) {
+                    faces.push((k, f, removed));
+                }
+            }
+        }
         let mut lines = Vec::new();
         // An unfold chosen: its bend lines; a refold: the strips it
         // folded. A bend under the pointer in the Part tile's table.
