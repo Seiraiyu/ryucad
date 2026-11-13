@@ -3907,6 +3907,12 @@ impl FieldArgs {
                 ("diameter", &self.countersink_diameter),
                 ("angle", &self.countersink_angle),
             ),
+            // The CLI's flags for these come with Task 14.
+            counterdrill: None,
+            spotface: None,
+            near: None,
+            far: None,
+            thread_wall: None,
             depth,
             bottom: self.bottom.as_deref().map(|b| match b {
                 "flat" => json!("flat"),

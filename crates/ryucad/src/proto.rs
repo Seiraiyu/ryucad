@@ -261,6 +261,23 @@ pub struct FeatureFields {
     /// A countersunk hole's countersink, `{diameter, angle}`, or either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub countersink: Option<Value>,
+    /// A hole's counterdrill {diameter, depth, angle?}, laid over the
+    /// current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterdrill: Option<Value>,
+    /// A hole's spotface {diameter, depth?}, laid over the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotface: Option<Value>,
+    /// A hole's near chamfer {diameter, angle?}; "" takes it away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<Value>,
+    /// A hole's far side {countersink: {..}} or {counterbore: {..}}; ""
+    /// takes it away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub far: Option<Value>,
+    /// A tapped hole's wall: "taper", or "" for straight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_wall: Option<String>,
     /// A hole's depth: `{"blind": length}`, `"through_all"`, or
     /// `{"up_to": {target, offset}}` with its target as
     /// `<part>/<feature>/<name>`.

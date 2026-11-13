@@ -1508,4 +1508,86 @@ pub(crate) mod tests {
             json!(["gauge_diameter", "gauge_length"])
         );
     }
+
+    #[test]
+    fn the_new_fields_through_the_protocol() {
+        let (_dir, mut s) = drilled();
+        let add = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "h",
+            "sketch": "s", "points": ["p1"], "diameter": "2 mm", "form": "counterdrill",
+            "counterdrill": {"diameter": "4 mm", "depth": "1 mm"}, "depth": "through_all",
+            "near": {"diameter": "5 mm"}, "targets": ["b"]}),
+        )
+        .unwrap();
+        let f = &add["feature"];
+        assert_eq!(f["counterdrill"]["diameter"]["value"], "4 mm");
+        assert_eq!(f["near"]["diameter"]["value"], "5 mm");
+        assert_eq!(f["spec"], "DIA 2 THRU, CDRILL 4 1 DEEP, NEAR 5");
+        // Part of a mouth is laid over the rest; a new form drops the old.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "counterdrill": {"angle": "90 deg"}}),
+        )
+        .unwrap();
+        assert_eq!(e["feature"]["counterdrill"]["depth"]["value"], "1 mm");
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "form": "spotface", "spotface": {"diameter": "6 mm"}}),
+        )
+        .unwrap();
+        assert!(e["feature"].get("counterdrill").is_none());
+        // "" takes near or far away.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "near": ""}),
+        )
+        .unwrap();
+        assert!(e["feature"].get("near").is_none());
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "far": {"countersink": {"diameter": "3 mm", "angle": "90 deg"}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            e["feature"]["far"]["countersink"]["angle"]["value"],
+            "90 deg"
+        );
+        // A spec sets them; given twice is usage.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "spec": "DIA 2 THRU NEXT, NEAR 3", "near": {"diameter": "3 mm"}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        // A spec naming no far side keeps it: through_next takes one.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "spec": "DIA 2 THRU NEXT"}),
+        )
+        .unwrap();
+        assert_eq!(e["feature"]["depth"], "through_next");
+        assert!(e["feature"].get("far").is_some());
+        // A thread's wall, given flat, needs a thread.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "thread_wall": "taper"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
+    }
 }

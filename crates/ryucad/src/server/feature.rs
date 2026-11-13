@@ -167,7 +167,7 @@ fn hole_report(
     unit: Unit,
     tables: crate::hole::derive::Tables,
 ) -> Value {
-    use crate::doc::hole::{Bottom, Depth, HoleForm};
+    use crate::doc::hole::{Bottom, Depth, Far, HoleForm};
     let mut v = h.fields();
     v["spec"] = json!(crate::hole::spec::canonical(h, unit));
     match crate::hole::derive::derive(h, tables) {
@@ -220,6 +220,24 @@ fn hole_report(
     }
     if let Bottom::Drill(q) = &h.bottom {
         v["bottom"] = json!({"drill": q.report()});
+    }
+    if let Some(n) = &h.near {
+        let mut x = json!({"diameter": n.diameter.report()});
+        if let Some(a) = &n.angle {
+            x["angle"] = a.report();
+        }
+        v["near"] = x;
+    }
+    match &h.far {
+        Some(Far::Countersink { diameter, angle }) => {
+            v["far"] =
+                json!({"countersink": {"diameter": diameter.report(), "angle": angle.report()}});
+        }
+        Some(Far::Counterbore { diameter, depth }) => {
+            v["far"] =
+                json!({"counterbore": {"diameter": diameter.report(), "depth": depth.report()}});
+        }
+        None => {}
     }
     v
 }
@@ -934,13 +952,18 @@ fn pattern_from(
     Ok(Feature::Pattern(p))
 }
 
-const HOLE: [&str; 22] = [
+const HOLE: [&str; 27] = [
     "sketch",
     "points",
     "form",
     "diameter",
     "counterbore",
     "countersink",
+    "counterdrill",
+    "spotface",
+    "near",
+    "far",
+    "thread_wall",
     "depth",
     "bottom",
     "targets",
@@ -997,6 +1020,9 @@ fn tap_drill_json(s: &str) -> Result<Value> {
     }
 }
 
+/// A hole's mouth objects, one per form but simple.
+const MOUTHS: [&str; 4] = ["counterbore", "countersink", "counterdrill", "spotface"];
+
 /// A hole from `current`'s fields (none for a new one, which is simple)
 /// with what was given laid over them. A counterbore or countersink given
 /// in part keeps the rest; a new form keeps only its own; an up-to target
@@ -1036,7 +1062,7 @@ fn hole_from(
                     o.remove("bottom");
                 }
                 ("form", Value::String(form)) => {
-                    for m in ["counterbore", "countersink"] {
+                    for m in MOUTHS {
                         if form != m {
                             o.remove(m);
                         }
@@ -1082,8 +1108,20 @@ fn hole_from(
             }
         }
     }
+    // A near chamfer and a far side: whole values, "" takes one away.
+    for (k, x) in [("near", &f.near), ("far", &f.far)] {
+        match x {
+            None => {}
+            Some(Value::String(s)) if s.is_empty() => {
+                o.remove(k);
+            }
+            Some(x) => {
+                o.insert(k.into(), x.clone());
+            }
+        }
+    }
     // A thread's own fields, given flat.
-    let flat: [(&str, Option<Value>); 7] = [
+    let flat: [(&str, Option<Value>); 8] = [
         ("pitch", f.pitch.clone()),
         ("tpi", f.tpi.clone()),
         ("class", f.class.clone().map(Value::String)),
@@ -1102,6 +1140,7 @@ fn hole_from(
             "drill",
             f.tap_drill.as_deref().map(tap_drill_json).transpose()?,
         ),
+        ("wall", f.thread_wall.clone().map(Value::String)),
     ];
     for (k, x) in flat {
         let Some(x) = x else { continue };
@@ -1148,7 +1187,7 @@ fn hole_from(
     }
     if let Some(form) = &f.form {
         o.insert("form".into(), json!(form));
-        for k in ["counterbore", "countersink"] {
+        for k in MOUTHS {
             if form != k {
                 o.remove(k);
             }
@@ -1157,6 +1196,8 @@ fn hole_from(
     for (k, x) in [
         ("counterbore", &f.counterbore),
         ("countersink", &f.countersink),
+        ("counterdrill", &f.counterdrill),
+        ("spotface", &f.spotface),
     ] {
         match (o.get_mut(k), x) {
             (Some(Value::Object(old)), Some(Value::Object(new))) => old.extend(new.clone()),
