@@ -435,11 +435,11 @@ fn a_thread_cut_from_a_shank_takes_away_its_segment() {
 /// A triangular thread swept up a helix builds (#376): ryukei certifies
 /// the sweep one to one, so the self-intersection check, which can't part
 /// two flat sides meeting along their lateral, isn't asked. Its cut from
-/// the shank, pinned as uncertain until v0.9.0, builds since ryukei 15.D (#587, 5115916a),
-/// taking away the tip of its triangle inside the shank, by Pappus; one
-/// pair of its faces, a swept flat side against the shank's cylinder, is
-/// still one the self-intersection check can't settle (#698), pinned so
-/// a fix shows.
+/// the shank, pinned as uncertain until v0.9.0, builds since ryukei 15.D
+/// (#587, 5115916a), taking away the tip of its triangle inside the
+/// shank, by Pappus. Since ryukei 18.A the cut checks clean: the
+/// triangle's two swept flat sides, which cross along the helical edge
+/// they share, are certified beside it (#698).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
 fn a_flat_sided_thread_up_a_helix_sweeps() {
@@ -469,7 +469,7 @@ fn a_flat_sided_thread_up_a_helix_sweeps() {
     // 5.5 mm, so 0.4 mm tall and 0.8 × 0.4 / 0.9 mm wide at the shank,
     // its centroid two thirds of the way from the apex.
     let (tall, wide) = (0.4, 0.8 * 0.4 / 0.9);
-    cut_by_pappus(&mut s, 0.5 * tall * wide, 4.6 + 2.0 * tall / 3.0, 1);
+    cut_by_pappus(&mut s, 0.5 * tall * wide, 4.6 + 2.0 * tall / 3.0, 0);
 }
 
 #[test]

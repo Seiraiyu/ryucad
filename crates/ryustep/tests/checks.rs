@@ -461,8 +461,11 @@ fn coilcraft_coils_mesh_whole_as_references() {
 /// (#529's case): 45 to 46 s, 8.2M units. Trying the pair apart beside the
 /// edge first would settle each in under 1,300 units, but for faces
 /// crossing at an angle it would accept a crossing inside the strip, so
-/// it isn't done; the cause is on #303. Under 60 s on one thread with
-/// `RYUKEI_BARS=1`, not step-hunt's 30 s.
+/// it isn't done. Nor does ryukei 18.A's crossing certificate settle
+/// them: the faces turn tangent at or beside the shared edge (their
+/// normal cones overlap at every strip down to 1.9 µm, bending about 2e6
+/// a metre), so no strip is certified; the cause is on #303. Under 60 s
+/// on one thread with `RYUKEI_BARS=1`, not step-hunt's 30 s.
 #[test]
 #[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
 fn msop_8_1ep_checks_in_time() {
@@ -484,7 +487,7 @@ fn msop_8_1ep_checks_in_time() {
         .install(|| ryukei::check::check_intersections_with(&body, &work))
         .unwrap();
     let secs = t.elapsed().as_secs_f64();
-    eprintln!("MSOP-8-1EP: {secs:.1} s");
+    eprintln!("MSOP-8-1EP: {secs:.1} s, {} units", work.spent());
     assert_eq!(named(&body, &faults), []);
     // #303: the check bar of 30 s is unmet for this one case.
     assert!(!bars() || secs < 60.0, "{secs:.1} s");

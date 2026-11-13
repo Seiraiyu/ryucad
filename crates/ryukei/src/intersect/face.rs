@@ -143,18 +143,31 @@ pub(crate) fn face_face_within(
 }
 
 /// The boxes `region` holds outside cubes of half side `half` round
-/// `points`: for each cube, what is left of every box it meets, cut into
-/// up to six slabs (its x sides, then y, then z, each taken off what is
-/// left). Together they cover the region less the cubes' insides.
+/// `points`: [`region_outside_boxes`] of those cubes.
 pub(crate) fn region_outside(region: &Box3, points: &[Point3], half: f64) -> Vec<Box3> {
+    let cubes: Vec<Box3> = points
+        .iter()
+        .map(|p| {
+            Box3::new(
+                Point3::new(p.x - half, p.y - half, p.z - half),
+                Point3::new(p.x + half, p.y + half, p.z + half),
+            )
+        })
+        .collect();
+    region_outside_boxes(region, &cubes)
+}
+
+/// The boxes `region` holds outside `cuts`: for each cut, what is left
+/// of every box it meets, cut into up to six slabs (its x sides, then y,
+/// then z, each taken off what is left). Together they cover the region
+/// less the cuts' insides, and no two overlap.
+pub(crate) fn region_outside_boxes(region: &Box3, cuts: &[Box3]) -> Vec<Box3> {
     let mut boxes = vec![*region];
-    for p in points {
-        let lo_c = Point3::new(p.x - half, p.y - half, p.z - half);
-        let hi_c = Point3::new(p.x + half, p.y + half, p.z + half);
-        let cube = Box3::new(lo_c, hi_c);
+    for cut in cuts {
+        let (lo_c, hi_c) = (cut.min(), cut.max());
         let mut next = Vec::new();
         for bx in boxes {
-            if !bx.intersects(&cube) {
+            if !bx.intersects(cut) {
                 next.push(bx);
                 continue;
             }
@@ -2070,5 +2083,51 @@ mod tests {
                 assert!(!b.intersects(&inside), "{b:?}");
             }
         }
+    }
+
+    /// The region less two boxes, one reaching out of it: the pieces cover
+    /// what is left, none reaches into a box, and cubes round points give
+    /// the boxes `region_outside` always gave.
+    #[test]
+    fn the_region_less_boxes_covers_what_is_left() {
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let region = Box3::new(p(0.0, 0.0, 0.0), p(1.0, 1.0, 1.0));
+        let cuts = [
+            Box3::new(p(0.2, 0.2, -1.0), p(0.4, 0.4, 2.0)),
+            Box3::new(p(0.3, 0.3, 0.3), p(0.9, 0.9, 0.9)),
+        ];
+        let left = region_outside_boxes(&region, &cuts);
+        let volume = |b: &Box3| {
+            let d = b.max() - b.min();
+            d.x * d.y * d.z
+        };
+        let inside = |b: &Box3, c: &Box3| {
+            let lo = b.min().max(c.min());
+            let hi = b.max().min(c.max());
+            if lo.x < hi.x && lo.y < hi.y && lo.z < hi.z {
+                volume(&Box3::new(lo, hi))
+            } else {
+                0.0
+            }
+        };
+        let total: f64 = left.iter().map(volume).sum();
+        // The column (0.04) and the cube (0.216) share 0.1 × 0.1 × 0.6.
+        let want = 1.0 - (0.04 + 0.216 - 0.006);
+        assert!((total - want).abs() < 1e-12, "{total} against {want}");
+        for b in &left {
+            for c in &cuts {
+                assert!(inside(b, c) < 1e-15, "{b:?} in {c:?}");
+            }
+        }
+        let half = 0.1;
+        let q = p(0.5, 0.5, 0.5);
+        let cube = Box3::new(
+            p(q.x - half, q.y - half, q.z - half),
+            p(q.x + half, q.y + half, q.z + half),
+        );
+        assert_eq!(
+            format!("{:?}", region_outside(&region, &[q], half)),
+            format!("{:?}", region_outside_boxes(&region, &[cube]))
+        );
     }
 }
