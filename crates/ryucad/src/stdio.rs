@@ -299,6 +299,8 @@ pub enum Ended {
 }
 
 /// What answers the session's requests.
+// One per session, on the stack of `serve`: a `Session`'s size is no cost.
+#[allow(clippy::large_enum_variant)]
 enum Via {
     /// The project's daemon. `None` once it closed the connection, until
     /// the next request opens another.
