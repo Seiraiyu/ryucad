@@ -1224,6 +1224,24 @@ impl FeatureKind for Paths {
     fn check(&self, cx: &Check<'_>, f: &crate::doc::files::Feature) -> Result<()> {
         crate::path::check(cx.part, cx.order, cx.id, path_of(f), cx.results)
     }
+
+    fn rebuild(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+    ) -> crate::feature::Outcome {
+        let crate::doc::files::Feature::Path(p) = f else {
+            unreachable!("a path or helix")
+        };
+        let at = crate::geometry::At {
+            part: cx.part,
+            order: cx.part.order(),
+            owner: cx.id,
+            results: cx.before,
+        };
+        let r = build(&at, p).map(|m| crate::rebuild::Output::Path(std::sync::Arc::new(m)));
+        (r, None)
+    }
 }
 
 #[cfg(test)]

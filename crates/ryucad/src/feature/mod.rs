@@ -34,8 +34,8 @@ use serde_json::{Map, Value, json};
 /// What ryucad does with one kind of feature: one or several `type`s
 /// sharing a module (`fillet` and `chamfer`, the five primitives).
 /// `feature.add` and `feature.edit` keep their shared steps and call the
-/// kind where they matched on the type. Every method after `report` does
-/// nothing unless its kind needs it.
+/// kind where they matched on the type. Every method after `report` but
+/// `rebuild` does nothing unless its kind needs it.
 pub(crate) trait FeatureKind: Sync {
     /// The `type` strings this kind owns, as `feature.add` takes them.
     fn types(&self) -> &'static [&'static str];
@@ -116,6 +116,36 @@ pub(crate) trait FeatureKind: Sync {
     /// rebuild can tell.
     fn check(&self, _cx: &Check<'_>, _f: &Feature) -> Result<()> {
         Ok(())
+    }
+
+    /// Its rebuild step (ryucad 27.D): what it makes of the results
+    /// before it, and a join, cut or intersect's own body, for the cache.
+    fn rebuild(&self, cx: &RebuildCx<'_>, f: &Feature) -> Outcome;
+
+    /// The body of its own a body-making feature builds, before
+    /// `rebuild::body_step` founds a solid with it or applies it to
+    /// `targets` (their bodies as it sees them). Only kinds whose
+    /// `rebuild` is `body_step` are asked; a hole's tools are built
+    /// there, at its points.
+    fn own_body(
+        &self,
+        cx: &RebuildCx<'_>,
+        f: &Feature,
+        _targets: &[&crate::rebuild::Built],
+    ) -> Result<crate::rebuild::Built> {
+        Err(built_elsewhere(cx.id, f, "makes no body of its own"))
+    }
+
+    /// Its body built from nothing before it (`rebuild::build_feature`):
+    /// a primitive's. Every other kind says what it is built from.
+    fn alone(&self, _part: &Id, id: &Id, f: &Feature) -> Result<crate::rebuild::Built> {
+        Err(built_elsewhere(id, f, "makes no body of its own"))
+    }
+
+    /// The bodies `f` names, each with what it wants of it
+    /// (`kind::bodies_read`, design 388's table).
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        crate::kind::combined_reads(f)
     }
 }
 
@@ -241,6 +271,56 @@ impl Check<'_> {
     pub(crate) fn proposed(&self, f: &Feature) -> Part {
         crate::part::proposed(self.part, self.order, &[(self.id, f)])
     }
+}
+
+/// What a rebuild hands a kind's `rebuild` (ryucad 27.D): the part, its
+/// solids, the feature's ID, the results of the features it may read, a
+/// join, cut or intersect's own body as the cache holds it (`tool`), and
+/// the run (its job and budgets).
+#[derive(Clone, Copy)]
+pub(crate) struct RebuildCx<'a> {
+    pub(crate) part: &'a Part,
+    pub(crate) solids: &'a Solids,
+    pub(crate) id: &'a Id,
+    pub(crate) before: &'a dyn crate::rebuild::Results,
+    pub(crate) tool: Option<crate::rebuild::ToolInput<'a>>,
+    pub(crate) run: &'a crate::rebuild::Run<'a>,
+}
+
+/// A rebuild step's result, and the own body a join, cut or intersect
+/// built, for the cache to keep.
+pub(crate) type Outcome = (
+    Result<crate::rebuild::Output>,
+    Option<std::sync::Arc<crate::rebuild::Built>>,
+);
+
+/// The solids a step made, with no own body to keep.
+pub(crate) fn made(r: Result<crate::rebuild::Made>) -> Outcome {
+    (
+        r.map(|m| crate::rebuild::Output::Solids(std::sync::Arc::new(m))),
+        None,
+    )
+}
+
+/// The one body feature `id` founds.
+pub(crate) fn founded(id: &Id, r: Result<crate::rebuild::Built>) -> Outcome {
+    made(r.map(|b| crate::rebuild::Made::new(vec![(id.clone(), std::sync::Arc::new(b))])))
+}
+
+/// The one body feature `id` founds, with the report kept beside it (a
+/// fill's, an import's).
+pub(crate) fn founded_with_report(id: &Id, r: Result<(crate::rebuild::Built, Value)>) -> Outcome {
+    made(r.map(|(b, report)| crate::rebuild::Made {
+        report: Some(std::sync::Arc::new(report)),
+        ..crate::rebuild::Made::new(vec![(id.clone(), std::sync::Arc::new(b))])
+    }))
+}
+
+/// The internal error for a feature asked for what it isn't built from:
+/// `<type> <id> <how>` (`makes no body of its own`, `is built from its
+/// sketch`, `is solved with its assembly`, …).
+pub(crate) fn built_elsewhere(id: &Id, f: &Feature, how: &str) -> Error {
+    Error::new(Code::Internal, format!("{} {id} {how}", f.type_name())).with("feature", id)
 }
 
 /// How a feature appears in output: every quantity as written and in
@@ -888,5 +968,74 @@ mod tests {
         }
         let e = crate::testing::call(&mut s, "feature.types", json!({"type": "gear"})).unwrap_err();
         assert_eq!(e.code, Code::UnknownFeatureType);
+    }
+
+    /// The rebuild asks the kinds (ryucad 27.D): `rebuild_with`,
+    /// `build_feature` and `kind::bodies_read` name no feature type.
+    #[test]
+    fn the_rebuild_matches_on_no_type() {
+        let rebuild = include_str!("../rebuild.rs");
+        let kind = include_str!("../kind.rs");
+        for (file, src, head) in [
+            ("rebuild.rs", rebuild, "\nfn rebuild_with("),
+            ("rebuild.rs", rebuild, "\npub fn build_feature("),
+            ("kind.rs", kind, "\npub fn bodies_read("),
+        ] {
+            let start = src.find(head).unwrap_or_else(|| panic!("{file}: no{head}"));
+            let body = &src[start..];
+            let end = body[1..]
+                .find("\n}\n")
+                .expect("a top-level fn ends at a column-0 brace");
+            let body = &body[..end + 1];
+            for pat in ["Feature::", "F::"] {
+                assert!(
+                    !body.contains(pat),
+                    "{file}: {} matches on a type ({pat}); ask the kind",
+                    head.trim().trim_end_matches('(')
+                );
+            }
+        }
+        // The transitional matches are gone (27.D Task 8).
+        for (file, src) in [("rebuild.rs", rebuild), ("kind.rs", kind)] {
+            for name in ["rebuild", "alone", "reads"] {
+                let gone = format!("fn {name}_by_type");
+                assert!(!src.contains(&gone), "{file} still has {gone}");
+            }
+        }
+    }
+
+    /// `build_feature` builds a primitive alone and refuses every other
+    /// type with the message it always gave (27.D moved its arms into
+    /// the kinds' `alone`).
+    #[test]
+    fn a_feature_alone_is_a_primitive_or_its_old_refusal() {
+        let (_dir, mut s) = crate::testing::fresh();
+        crate::testing::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for f in [
+            json!({"type": "sphere", "id": "b", "params": {"radius": 1}}),
+            json!({"type": "sketch", "id": "s"}),
+            json!({"type": "extrude", "id": "e", "sketch": "s", "extent": {"length": 1}}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            crate::testing::call(&mut s, "feature.add", f).unwrap();
+        }
+        let p = s.project().part(&Id::parse("p", "part").unwrap()).unwrap();
+        let at = |name: &str| {
+            let id = Id::parse(name, "feature").unwrap();
+            let f = p.features[&id].as_ref().unwrap().clone();
+            (id, f)
+        };
+        let (b, sphere) = at("b");
+        assert!(crate::rebuild::build_feature(&p.id, &b, &sphere).is_ok());
+        for (name, message) in [
+            ("s", "sketch s makes no body of its own"),
+            ("e", "extrude e is built from its sketch"),
+        ] {
+            let (id, f) = at(name);
+            let e = crate::rebuild::build_feature(&p.id, &id, &f).unwrap_err();
+            assert_eq!((e.code, e.message.as_str()), (Code::Internal, message));
+            assert_eq!(e.details["feature"], name);
+        }
     }
 }

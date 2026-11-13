@@ -172,4 +172,14 @@ impl FeatureKind for Sketches {
         };
         crate::sketch::context(cx.part, cx.order, cx.id, s, cx.results).map(|_| ())
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::Sketch(s) = f else {
+            unreachable!("a sketch")
+        };
+        let r = crate::sketch::context(cx.part, cx.part.order(), cx.id, s, cx.before)
+            .and_then(|c| crate::sketch::solve_in(cx.id, s, &c))
+            .map(|s| crate::rebuild::Output::Sketch(std::sync::Arc::new(s)));
+        (r, None)
+    }
 }
