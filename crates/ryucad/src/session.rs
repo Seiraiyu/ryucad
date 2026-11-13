@@ -35,6 +35,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod caches;
+
+pub use caches::Caches;
+
 /// Set, a daemon doesn't watch its folder and checks every file on every
 /// request (tests compare both ways; a filesystem whose events lie can be
 /// told).
@@ -76,43 +80,14 @@ pub struct Session {
     /// it came from. Names are only added, so a reference whose name has
     /// gone can still say what it named.
     known: BTreeMap<(Id, Id), BTreeMap<ryukei::name::Name, Known>>,
-    /// Display meshes of rebuilt bodies.
-    pub meshes: crate::mesh::Cache,
-    /// The last flat patterns asked for (`flat.get`, DXF exports,
-    /// `render --flat`), by the shown body and the options.
-    pub flats: crate::sheet_metal::flat::Cache,
-    /// What intersecting pairs of placed solids found, for `interference`.
-    pub interference: crate::interference::Cache,
-    /// Drawing views' projections, by their placed bodies and the view.
-    pub projections: crate::drawing::Cache,
-    /// Section views' cut bodies and caps, by body, pose and cut.
-    pub sections: crate::drawing::section::Cache,
-    /// Mass properties worked out, for `mass`.
-    pub mass: crate::mass::Cache,
-    /// Blends recognised, for `blends`, by body hash and tolerance.
-    pub blends: crate::blends::Cache,
-    /// Distances between placed solids, for `clearance`.
-    pub clearance: crate::clearance::Cache,
-    /// The last sweeps' answers (`assembly.sweep`), by what they swept.
-    pub sweeps: crate::motion::Cache,
+    /// What the session keeps only to answer faster (see [`Caches`]).
+    pub caches: Caches,
     /// A revision's session: its files never change, and it never reads
     /// the disk.
     frozen: bool,
     /// The revisions requests have named, by the project folder's tree,
     /// most recently used first.
     revisions: Vec<(String, Session)>,
-    /// The last merge status, by the key of what it was computed from.
-    pub(crate) merge_status: Option<(String, serde_json::Value)>,
-    /// The release branch as last read, by the key of the refs it was
-    /// read from (see [`crate::release::history`]).
-    pub(crate) releases: Option<(String, ryupdm::history::Releases)>,
-    /// Release states as last published, by part revision.
-    pub(crate) states: Option<crate::release::States>,
-    /// Bodies of released content as this build rebuilds them, by content
-    /// hash, for `release_result_changed`.
-    pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
-    /// Parts read at commits for BOMs and where-used, by commit and part.
-    pub(crate) structure: ryupdm::structure::Cache,
     /// A daemon's watch of the folder: `None` checks every file on
     /// every request.
     watching: Option<Watching>,
@@ -128,12 +103,6 @@ pub struct Session {
     /// folders: what a compare, diff or merge preview with a worktree
     /// reads, checked as this session's own files are.
     worktrees: BTreeMap<PathBuf, Stamps>,
-    /// How many project files each worktree's working files change from
-    /// its head, by the head and a digest of the files.
-    pub(crate) worktree_changes: BTreeMap<String, usize>,
-    /// The last merge previews, by the key of what each was made from,
-    /// most recently made first.
-    pub(crate) previews: Vec<(String, serde_json::Value)>,
     /// The request being answered's progress and cancel (design 199): no
     /// job between requests. A revision's session takes its owner's when
     /// a request names it ([`Session::at`]).
@@ -151,9 +120,6 @@ pub struct Session {
     fixed_key: Option<[u64; 7]>,
     /// Where this session's writes go (see [`Sink`]).
     sink: Sink,
-    /// Warnings the revision a request named gives its answer (a stale
-    /// `annotation:<id>`), taken by `server::answer_live`.
-    pub(crate) rev_warnings: Vec<Value>,
 }
 
 /// How a revision names another worktree's working files:
@@ -266,35 +232,19 @@ impl Session {
             prefetched: Default::default(),
             foreign_pins: BTreeMap::new(),
             known: BTreeMap::new(),
-            meshes: crate::mesh::Cache::default(),
-            flats: Default::default(),
-            interference: crate::interference::Cache::default(),
-            projections: crate::drawing::Cache::default(),
-            sections: crate::drawing::section::Cache::default(),
-            mass: crate::mass::Cache::default(),
-            blends: crate::blends::Cache::default(),
-            clearance: crate::clearance::Cache::default(),
-            sweeps: crate::motion::Cache::default(),
+            caches: Caches::default(),
             frozen: false,
             revisions: Vec::new(),
-            merge_status: None,
-            releases: None,
-            states: None,
-            release_results: BTreeMap::new(),
-            structure: ryupdm::structure::Cache::new(),
             watching: None,
             epoch: 0,
             labels: None,
             cycles: None,
             worktrees: BTreeMap::new(),
-            worktree_changes: BTreeMap::new(),
-            previews: Vec::new(),
             fixed_key: None,
             job: Job::default(),
             heal_budget: heal_budget(),
             edit_budget: edit_budget(),
             sink: Sink::Disk,
-            rev_warnings: Vec::new(),
         };
         Ok(s)
     }
@@ -350,7 +300,7 @@ impl Session {
             return;
         }
         self.note_fixed();
-        let meshes = self.meshes.bytes() as u64;
+        let meshes = self.caches.meshes.bytes() as u64;
         if self.store.held(&self.project, meshes) > self.store.budget.max {
             for (_, r) in &mut self.revisions {
                 let project = &r.project;
@@ -374,8 +324,10 @@ impl Session {
             self.known.len() as u64,
             self.known.values().map(|n| n.len() as u64).sum(),
             self.store.models.len() as u64,
-            (self.interference.len() + self.clearance.len() + self.mass.len() + self.blends.len())
-                as u64,
+            (self.caches.interference.len()
+                + self.caches.clearance.len()
+                + self.caches.mass.len()
+                + self.caches.blends.len()) as u64,
             crate::import::opened_bytes(),
             self.store.results.len() as u64,
         ];
@@ -407,7 +359,9 @@ impl Session {
     /// The budget's state for `daemon status`: its bound, what it holds,
     /// how many parts' rebuilds it has let go, and how many it holds.
     pub fn budget_status(&self) -> Value {
-        let held = self.store.held(&self.project, self.meshes.bytes() as u64);
+        let held = self
+            .store
+            .held(&self.project, self.caches.meshes.bytes() as u64);
         let mut v = self.store.budget.to_json(held);
         v["parts_held"] = json!(
             self.store
@@ -416,7 +370,7 @@ impl Session {
                 .filter(|id| crate::assembly::is_leaf(&self.project, id))
                 .count()
         );
-        v["meshes_bytes"] = json!(self.meshes.bytes());
+        v["meshes_bytes"] = json!(self.caches.meshes.bytes());
         v
     }
 
@@ -437,7 +391,7 @@ impl Session {
     /// The session with `disk` beneath its caches: results it doesn't
     /// hold are read from it, and what it builds is written to it.
     pub fn with_disk(mut self, disk: Option<Arc<crate::cache::Disk>>) -> Session {
-        self.meshes.disk = disk.clone();
+        self.caches.meshes.disk = disk.clone();
         self.store.disk = disk;
         self
     }
@@ -478,35 +432,19 @@ impl Session {
             prefetched: Default::default(),
             foreign_pins: from.foreign_pins.clone(),
             known: from.known.clone(),
-            meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),
-            flats: Default::default(),
-            interference: from.interference.clone(),
-            projections: from.projections.clone(),
-            sections: from.sections.clone(),
-            mass: from.mass.clone(),
-            blends: from.blends.clone(),
-            clearance: from.clearance.clone(),
-            sweeps: from.sweeps.clone(),
+            caches: from.caches.for_revision(from.store.disk.clone()),
             frozen: true,
             revisions: Vec::new(),
-            merge_status: None,
-            releases: None,
-            states: None,
-            release_results: BTreeMap::new(),
-            structure: from.structure.clone(),
             watching: None,
             epoch: 0,
             labels: None,
             cycles: None,
             worktrees: BTreeMap::new(),
-            worktree_changes: BTreeMap::new(),
-            previews: Vec::new(),
             fixed_key: None,
             job: from.job.clone(),
             heal_budget: from.heal_budget,
             edit_budget: from.edit_budget,
             sink: Sink::Disk,
-            rev_warnings: Vec::new(),
         })
     }
 
@@ -522,7 +460,7 @@ impl Session {
         }
         if let Some((_, files, stale)) = self.annotation_files(rev)? {
             if !stale.is_empty() {
-                self.rev_warnings.push(stale_warning(rev, &stale));
+                self.caches.rev_warnings.push(stale_warning(rev, &stale));
             }
             return self.at_files(rev, files);
         }
@@ -1365,7 +1303,8 @@ impl Session {
     pub(crate) fn deps_fetched(&mut self) {
         self.deps_reader = None;
         self.foreign_pins.clear();
-        self.structure
+        self.caches
+            .structure
             .retain(|(project, _, _), _| project.is_none());
     }
 
@@ -2795,7 +2734,7 @@ mod tests {
         fn a_change_of_files_keeps_what_is_kept_by_content() {
             with_config(|_| {
                 let (dir, mut s) = two_spheres();
-                assert_eq!(s.meshes.len(), 2);
+                assert_eq!(s.caches.meshes.len(), 2);
                 let epoch = s.epoch();
                 // Behind the session's back, as an editor writes.
                 let mut other = Session::open(dir.path()).unwrap();
@@ -2807,7 +2746,7 @@ mod tests {
                 .unwrap();
                 assert!(s.refresh().unwrap());
                 assert!(s.epoch() > epoch);
-                assert_eq!(s.meshes.len(), 2, "a change of files let a mesh go");
+                assert_eq!(s.caches.meshes.len(), 2, "a change of files let a mesh go");
                 assert!(s.cached(&p()).is_none(), "the stale rebuild stayed");
             });
         }
@@ -2818,7 +2757,7 @@ mod tests {
                 let (_dir, mut s) = two_spheres();
                 assert!(s.cached(&p()).is_some());
                 s.set_heal_budget(s.heal_budget + 1);
-                assert_eq!(s.meshes.len(), 2, "a new budget let a mesh go");
+                assert_eq!(s.caches.meshes.len(), 2, "a new budget let a mesh go");
                 assert!(s.cached(&p()).is_none(), "the rebuild stayed");
             });
         }
@@ -2842,10 +2781,10 @@ mod tests {
                     json!({"part": "p", "quality": "coarse"}),
                 )
                 .unwrap();
-                let meshes = s.meshes.len();
+                let meshes = s.caches.meshes.len();
                 assert!(meshes > 0);
                 s.trim();
-                assert_eq!(s.meshes.len(), meshes, "a trim let a mesh go");
+                assert_eq!(s.caches.meshes.len(), meshes, "a trim let a mesh go");
                 assert!(s.cached(&p()).is_none(), "the trim kept the rebuild");
             });
         }
@@ -2855,12 +2794,12 @@ mod tests {
             with_config(|_| {
                 let (_dir, mut s) = two_spheres();
                 call(&mut s, "blends.get", json!({"part": "p", "solid": "a"})).unwrap();
-                let blends = s.blends.len();
+                let blends = s.caches.blends.len();
                 assert!(blends > 0);
                 let r = s.over(s.snapshot()).unwrap();
-                assert_eq!(r.blends.len(), blends, "the verdicts weren't shared");
-                assert_eq!(r.meshes.len(), 0, "a revision meshes afresh");
-                assert!(r.merge_status.is_none() && r.previews.is_empty());
+                assert_eq!(r.caches.blends.len(), blends, "the verdicts weren't shared");
+                assert_eq!(r.caches.meshes.len(), 0, "a revision meshes afresh");
+                assert!(r.caches.merge_status.is_none() && r.caches.previews.is_empty());
             });
         }
     }

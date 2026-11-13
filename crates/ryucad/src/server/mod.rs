@@ -627,7 +627,7 @@ pub fn answer_live(
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
     // A stale annotation's revision says so in the answer.
-    let notes = std::mem::take(&mut session.rev_warnings);
+    let notes = std::mem::take(&mut session.caches.rev_warnings);
     let result = match result {
         Ok(mut a) if !notes.is_empty() && a.raw.is_none() => {
             let mut list = a
@@ -793,7 +793,7 @@ pub fn prepare_job(
     let (budget, job) = (mesh_budget(), job.clone());
     Some(Box::new(move || {
         let made = pending.make_for(&job);
-        Box::new(move |s: &mut Session| s.meshes.put(made, budget))
+        Box::new(move |s: &mut Session| s.caches.meshes.put(made, budget))
     }))
 }
 

@@ -227,7 +227,14 @@ pub fn run(
         .transpose()?;
     let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
     let revision = session.project().part(&pid)?.revision.clone();
-    let mut v = find(&pid, &model, &only, below, unit, &mut session.clearance)?;
+    let mut v = find(
+        &pid,
+        &model,
+        &only,
+        below,
+        unit,
+        &mut session.caches.clearance,
+    )?;
     v["revision"] = json!(revision);
     Ok(v)
 }
@@ -292,12 +299,12 @@ mod tests {
         assert!((d - 0.01).abs() < 1e-9, "{v}");
         assert_eq!(c[1]["b"], "frame/b2/shank");
         // Asking again works out nothing new.
-        let n = s.clearance.len();
+        let n = s.caches.clearance.len();
         assert_eq!(
             call(&mut s, "clearance", json!({"part": "frame"})).unwrap(),
             v
         );
-        assert_eq!(s.clearance.len(), n);
+        assert_eq!(s.caches.clearance.len(), n);
         let v = call(
             &mut s,
             "clearance",

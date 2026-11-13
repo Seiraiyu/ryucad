@@ -1055,9 +1055,12 @@ fn meshed_with(
         .collect();
     let builts: Vec<&Built> = solids.iter().map(|(_, x)| x.built.as_ref()).collect();
     let job = s.job.clone();
-    let made =
-        s.meshes
-            .export_all_for(&builts, &opts.params, crate::budget::mesh_budget(), &job)?;
+    let made = s.caches.meshes.export_all_for(
+        &builts,
+        &opts.params,
+        crate::budget::mesh_budget(),
+        &job,
+    )?;
     let mut meshes: BTreeMap<&str, Arc<ryukei::mesh::BodyMesh>> = BTreeMap::new();
     let mut faults = Vec::new();
     let mut warnings = Vec::new();
@@ -2968,7 +2971,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             // A fresh mesh cache each time, so every boundary is reached.
-            slot.as_mut().unwrap().meshes = Default::default();
+            slot.as_mut().unwrap().caches.meshes = Default::default();
             match crate::server::handle_job(
                 &mut slot,
                 None,

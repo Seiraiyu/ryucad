@@ -1940,9 +1940,15 @@ mod tests {
         // A part of the second version may fail (its product is gone):
         // what the rebuild answers doesn't matter here, only that it ran.
         let _ = call(&mut s, "rebuild", json!({}));
-        assert!(s.interference.is_empty(), "the import ran interference");
+        assert!(
+            s.caches.interference.is_empty(),
+            "the import ran interference"
+        );
         update(&mut s, &frame_version(2), json!({"solid": false})).unwrap();
         let _ = call(&mut s, "rebuild", json!({}));
-        assert!(s.interference.is_empty(), "the update ran interference");
+        assert!(
+            s.caches.interference.is_empty(),
+            "the update ran interference"
+        );
     }
 }

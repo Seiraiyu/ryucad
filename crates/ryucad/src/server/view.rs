@@ -45,7 +45,7 @@ pub(crate) fn mesh_pending(
             .filter(|o| only.is_none_or(|w| w.contains(&crate::assembly::path_text(&o.path))))
             .flat_map(|o| &o.solids)
             .filter(|s| seen.insert(s.built.hash.clone()))
-            .filter(|s| !session.meshes.has(&s.built.hash, quality))
+            .filter(|s| !session.caches.meshes.has(&s.built.hash, quality))
             .map(|s| (s.feature.as_ref().clone(), s.built.as_ref().clone()))
             .collect();
         (quality, items)
@@ -72,7 +72,7 @@ pub(crate) fn mesh_pending(
         (quality, items)
     };
     let refs: Vec<(&Feature, &crate::rebuild::Built)> = items.iter().map(|(f, b)| (f, b)).collect();
-    session.meshes.pending(&refs, quality)
+    session.caches.meshes.pending(&refs, quality)
 }
 
 /// How a camera is to look: a view's name (standard, else a named view of

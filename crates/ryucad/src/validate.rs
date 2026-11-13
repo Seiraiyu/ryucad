@@ -1370,14 +1370,14 @@ pub fn retry_stamp(session: &Session) -> String {
 /// [`key`], so asking again about the same state costs nothing.
 pub fn status(session: &mut Session) -> Result<Value> {
     let key = key(session);
-    if let (Some(k), Some((was, v))) = (&key, &session.merge_status)
+    if let (Some(k), Some((was, v))) = (&key, &session.caches.merge_status)
         && k == was
     {
         return Ok(v.clone());
     }
     let v = compute(session)?;
     if let Some(k) = key {
-        session.merge_status = Some((k, v.clone()));
+        session.caches.merge_status = Some((k, v.clone()));
     }
     Ok(v)
 }
@@ -1561,7 +1561,7 @@ pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
         }
     };
     let key = format!("{ours_head}:{}:{theirs_key}", session.digest());
-    if let Some((_, v)) = session.previews.iter().find(|(k, _)| *k == key) {
+    if let Some((_, v)) = session.caches.previews.iter().find(|(k, _)| *k == key) {
         return Ok(v.clone());
     }
     let base_commit = repo.merge_base(&ours_head, &theirs_head)?;
@@ -1619,8 +1619,8 @@ pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
         "unmerged": merged.unmerged.keys().collect::<Vec<_>>(),
         "warnings": warnings,
     });
-    session.previews.insert(0, (key, v.clone()));
-    session.previews.truncate(PREVIEWS);
+    session.caches.previews.insert(0, (key, v.clone()));
+    session.caches.previews.truncate(PREVIEWS);
     Ok(v)
 }
 
@@ -3973,7 +3973,7 @@ pub(crate) mod tests {
         // Nothing changed: nothing said, and the status is kept.
         assert!(told(&mut live, &mut m).is_empty());
         let key = key(&m.session).unwrap();
-        assert_eq!(m.session.merge_status.as_ref().unwrap().0, key);
+        assert_eq!(m.session.caches.merge_status.as_ref().unwrap().0, key);
         resolve(
             &mut m,
             "parts/p/features/b.json#/params/x",

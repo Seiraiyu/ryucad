@@ -47,7 +47,7 @@ pub(crate) fn reading<T>(
         Err(e) if e.code == Code::NotAGitRepo => None,
         Err(e) => return Err(e),
     };
-    let mut cache = std::mem::take(&mut s.structure);
+    let mut cache = std::mem::take(&mut s.caches.structure);
     let mut deps = s.take_deps_reader()?;
     let lock = crate::deps::lock_of(s.project()).unwrap_or_default();
     let out = {
@@ -77,7 +77,7 @@ pub(crate) fn reading<T>(
         f(&mut reader, &ground)
     };
     s.put_deps_reader(deps);
-    s.structure = cache;
+    s.caches.structure = cache;
     Ok((commit, out?))
 }
 
@@ -1027,13 +1027,19 @@ mod tests {
         let mut s = Session::open(dir.path()).unwrap();
         s.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
         call(&mut s, "bom.get", json!({"part": "asm"})).unwrap();
-        let own = |s: &Session| s.structure.keys().filter(|(p, _, _)| p.is_none()).count();
-        let (ours, all) = (own(&s), s.structure.len());
+        let own = |s: &Session| {
+            s.caches
+                .structure
+                .keys()
+                .filter(|(p, _, _)| p.is_none())
+                .count()
+        };
+        let (ours, all) = (own(&s), s.caches.structure.len());
         // Main reads the project's own parts from its files here, so only
         // what was read of the other project is kept: the fetch lets it go
         // and keeps every own entry there is.
         assert!(all > ours, "read the other project: {ours} of {all}");
         s.deps_fetched();
-        assert_eq!((own(&s), s.structure.len()), (ours, ours));
+        assert_eq!((own(&s), s.caches.structure.len()), (ours, ours));
     }
 }

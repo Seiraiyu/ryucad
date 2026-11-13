@@ -357,6 +357,7 @@ pub fn get(
     let job = s.job.clone();
     let at = format!("{pid}/{solid}");
     let rec = s
+        .caches
         .blends
         .get_or(&built.hash, tol, || {
             ryukei::tweak::recognise_blends_with(

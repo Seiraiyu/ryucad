@@ -51,13 +51,13 @@ pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releas
     let repo = crate::git::repo(session.root())?;
     let config = Config::read(&*session)?;
     let key = refs_key(&repo, &config)?;
-    if let Some((k, r)) = &session.releases
+    if let Some((k, r)) = &session.caches.releases
         && *k == key
     {
         return Ok((repo, r.clone()));
     }
     let releases = Releases::read(repo.gix(), repo.prefix(), &config)?;
-    session.releases = Some((key, releases.clone()));
+    session.caches.releases = Some((key, releases.clone()));
     Ok((repo, releases))
 }
 
@@ -713,7 +713,7 @@ fn state_value(part: &Id, s: &state::State, releases: &Releases) -> Value {
 pub(crate) fn summary(session: &mut Session) -> std::collections::BTreeMap<Id, Value> {
     let releases = history(session).map(|(_, r)| r).unwrap_or_default();
     let key = states_key(session);
-    let kept = match session.states.take() {
+    let kept = match session.caches.states.take() {
         Some(s) if s.key == key => s.parts,
         _ => Default::default(),
     };
@@ -742,7 +742,7 @@ pub(crate) fn summary(session: &mut Session) -> std::collections::BTreeMap<Id, V
         .iter()
         .map(|(id, (_, v))| (id.clone(), v.clone()))
         .collect();
-    session.states = Some(States { key, parts });
+    session.caches.states = Some(States { key, parts });
     out
 }
 
@@ -1040,7 +1040,7 @@ impl ryupdm::check::Results for Rebuilds<'_> {
         part: &Id,
         content: &str,
     ) -> Result<std::collections::BTreeMap<String, String>> {
-        if let Some(b) = self.session.release_results.get(content) {
+        if let Some(b) = self.session.caches.release_results.get(content) {
             return Ok(b.clone());
         }
         let project = crate::doc::project::Project::load_from(self.session.root(), src)?;
@@ -1054,6 +1054,7 @@ impl ryupdm::check::Results for Rebuilds<'_> {
             .filter_map(|(fid, r)| Some((fid.to_string(), r.as_ref().ok()?.body()?.hash.clone())))
             .collect();
         self.session
+            .caches
             .release_results
             .insert(content.to_owned(), bodies.clone());
         Ok(bodies)
@@ -1465,7 +1466,7 @@ pub(crate) mod tests {
         // Rebuilt, A's bodies are what the record says, once per content.
         let v = call(&mut s, "release.check", json!({"results": true})).unwrap();
         assert_eq!(v["warnings"], 1);
-        assert_eq!(s.release_results.len(), 1);
+        assert_eq!(s.caches.release_results.len(), 1);
         // A proposal the part has moved on from fails.
         call(
             &mut s,
@@ -1497,12 +1498,12 @@ pub(crate) mod tests {
         let (dir, mut s) = released_project();
         let root = dir.path();
         call(&mut s, "release.list", json!({})).unwrap();
-        let key = s.releases.as_ref().unwrap().0.clone();
+        let key = s.caches.releases.as_ref().unwrap().0.clone();
         call(&mut s, "release.list", json!({})).unwrap();
-        assert_eq!(s.releases.as_ref().unwrap().0, key);
+        assert_eq!(s.caches.releases.as_ref().unwrap().0, key);
         git(root, &["commit", "-q", "--allow-empty", "-m", "moves main"]);
         call(&mut s, "release.list", json!({})).unwrap();
-        assert_ne!(s.releases.as_ref().unwrap().0, key);
+        assert_ne!(s.caches.releases.as_ref().unwrap().0, key);
     }
 
     fn rev(root: &std::path::Path, what: &str) -> String {

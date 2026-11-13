@@ -1230,7 +1230,7 @@ fn project(
             if matches!(plans[i].0.extra, Extra::Flat { .. }) {
                 return Some(Arc::new(Projection::default()));
             }
-            session.projections.get(k).or_else(|| {
+            session.caches.projections.get(k).or_else(|| {
                 let d = disk.as_ref()?;
                 let bytes = d.get(crate::cache::Kind::Projection, k.as_bytes())?;
                 match ryukei::codec::decode_projection(&bytes) {
@@ -1293,7 +1293,7 @@ fn project(
                         &ryukei::codec::encode_projection(&p),
                     );
                 }
-                session.projections.put(keys[i].clone(), p.clone());
+                session.caches.projections.put(keys[i].clone(), p.clone());
                 out.push(Ok(p));
             }
             Some(Err(e)) => {
