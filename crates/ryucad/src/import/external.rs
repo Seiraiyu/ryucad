@@ -62,48 +62,56 @@ fn absolute(w: &str) -> bool {
 /// relative to `folder` (each unless written absolute); then its file
 /// name alone in `folder` and in each of `search`.
 pub fn candidates(x: &External, folder: &Path, search: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    let mut push = |p: PathBuf| {
-        if !out.contains(&p) {
-            out.push(p);
+    rooted(x, folder, search)
+        .into_iter()
+        .map(|(base, rel)| base.join(rel))
+        .collect()
+}
+
+/// [`candidates`] as `(base, rel)`: the folder looked in, as given, and
+/// what the document adds below it.
+fn rooted<'a>(x: &External, folder: &'a Path, search: &'a [PathBuf]) -> Vec<(&'a Path, PathBuf)> {
+    let mut out: Vec<(&Path, PathBuf)> = Vec::new();
+    let mut push = |base: &'a Path, rel: PathBuf| {
+        let p = base.join(&rel);
+        if !out.iter().any(|(b, r)| b.join(r) == p) {
+            out.push((base, rel));
         }
     };
     for w in written(x) {
         if !absolute(&w) {
-            push(folder.join(w.trim_start_matches("./")));
+            push(folder, PathBuf::from(w.trim_start_matches("./")));
         }
     }
     let names = file_names(x);
     for n in &names {
-        push(folder.join(n));
+        push(folder, PathBuf::from(n));
     }
     for dir in search {
         for n in &names {
-            push(dir.join(n));
+            push(dir, PathBuf::from(n));
         }
     }
     out
 }
 
-/// Whether `p` is a file whose every named component is spelled as its
-/// folder holds it. A case-insensitive disk (macOS's, Windows') finds
-/// `PART1.STEP` for `Part1.step`; this doesn't, so a document resolves to
-/// the same path on every system (the ignoring-case pass then names the
-/// file as the disk does).
-fn exactly(p: &Path) -> bool {
+/// Whether `base`/`rel` is a file whose every component `rel` names is
+/// spelled as its folder holds it. A case-insensitive disk (macOS's,
+/// Windows') finds `PART1.STEP` for `Part1.step`; this doesn't, so a
+/// document resolves to the same path on every system (the ignoring-case
+/// pass then names the file as the disk does). `base` itself, the folder
+/// of the file naming the document or a `--search` folder, is taken as
+/// given: Windows' 8.3 short names (`RUNNER~1`) and a folder typed in
+/// another case never appear in a listing.
+fn exactly(base: &Path, rel: &Path) -> bool {
     use std::path::Component;
-    if !p.is_file() {
+    let mut at = base.to_path_buf();
+    if !at.join(rel).is_file() {
         return false;
     }
-    let mut at = PathBuf::new();
-    for c in p.components() {
+    for c in rel.components() {
         if let Component::Normal(name) = c {
-            let dir = if at.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                at.as_path()
-            };
-            let Ok(entries) = std::fs::read_dir(dir) else {
+            let Ok(entries) = std::fs::read_dir(&at) else {
                 return false;
             };
             if !entries
@@ -123,11 +131,11 @@ fn exactly(p: &Path) -> bool {
 /// `search`, the one file whose name matches a file name of it ignoring
 /// ASCII case.
 pub fn locate(x: &External, folder: &Path, search: &[PathBuf]) -> Option<PathBuf> {
-    if let Some(p) = candidates(x, folder, search)
+    if let Some((base, rel)) = rooted(x, folder, search)
         .into_iter()
-        .find(|p| exactly(p))
+        .find(|(base, rel)| exactly(base, rel))
     {
-        return Some(p);
+        return Some(base.join(rel));
     }
     let names = file_names(x);
     for dir in std::iter::once(folder).chain(search.iter().map(PathBuf::as_path)) {
@@ -1035,6 +1043,34 @@ mod tests {
             Some(s[0].join("Part1.step"))
         );
         assert_eq!(locate(&doc("none.stp", None), &a, &s), None);
+    }
+
+    /// Only what the document names is spelled exactly: its base folder is
+    /// taken as given (Windows' `RUNNER~1`, a folder typed in another case
+    /// on macOS). On a case-insensitive disk the base below is spelled in
+    /// another case; on Linux it is spelled as made.
+    #[test]
+    fn a_sub_folder_document_is_found_under_a_base_spelled_otherwise() {
+        let d = crate::import::tests::folder(&[("Base/parts/x.stp", b"1".to_vec())]);
+        let upper = d.path().join("BASE");
+        let base = if upper.is_dir() {
+            upper
+        } else {
+            d.path().join("Base")
+        };
+        assert_eq!(
+            locate(&doc("x.stp", Some("parts/x.stp")), &base, &[]),
+            Some(base.join("parts/x.stp"))
+        );
+        // A search folder likewise.
+        assert_eq!(
+            locate(
+                &doc("x.stp", None),
+                &d.path().join("nowhere"),
+                &[base.join("parts")]
+            ),
+            Some(base.join("parts/x.stp"))
+        );
     }
 
     #[test]
