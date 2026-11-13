@@ -392,4 +392,16 @@ impl FeatureKind for Holes {
             _ => Ok(()),
         }
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        crate::rebuild::body_step(cx, f)
+    }
+
+    fn alone(&self, _part: &Id, id: &Id, f: &Feature) -> Result<crate::rebuild::Built> {
+        Err(super::built_elsewhere(id, f, "is built from its sketch"))
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        crate::kind::targets(f, "targets", None, None)
+    }
 }

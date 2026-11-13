@@ -7,6 +7,7 @@ use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::part::proposed;
+use crate::rebuild::{Made, Results};
 use crate::session::Session;
 use crate::solid::Solids;
 use serde_json::Value;
@@ -98,4 +99,81 @@ impl FeatureKind for Deletes {
         };
         d.fields()
     }
+
+    /// Ends the chains it names; makes nothing (design 521).
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::DeleteBody(d) = f else {
+            unreachable!("a delete")
+        };
+        super::made(delete_body(cx.part, cx.solids, cx.id, d, cx.before))
+    }
+}
+
+/// A `delete_body`: each solid it names must be a solid of the part as
+/// it sees it (`not_found`), not consumed (`body_consumed`) nor deleted
+/// already (`body_deleted`). It builds to no solids: [`Solids`] ends the
+/// chains, so what follows can't read them and what came before reads
+/// them as it did. An insert's ID names every solid it founded.
+pub fn delete_body(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    d: &crate::doc::body::DeleteBody,
+    before: &dyn Results,
+) -> Result<Made> {
+    for (i, t) in d.solids.iter().enumerate() {
+        let at = format!("/solids/{i}");
+        if let Some(by) = solids.consumed_by(t, id) {
+            return Err(crate::rebuild::consumed(id, t, by).with("pointer", at));
+        }
+        // Deleted by an earlier delete: this one records its own list at
+        // its own place, so it is never before itself.
+        if let Some(by) = solids.deleted_by(t, id).filter(|by| *by != id) {
+            return Err(crate::rebuild::deleted(id, t, by).with("pointer", at));
+        }
+        let is_insert = part
+            .features
+            .get(t)
+            .is_some_and(|f| f.as_ref().is_ok_and(Feature::inserts));
+        if !(solids.is_solid(t) || is_insert) {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("{id} deletes {t}, which is no solid of {}", part.id),
+            )
+            .with("feature", id)
+            .with("solid", t)
+            .with("pointer", at));
+        }
+        // A key below an insert must be one its source shows.
+        if t.is_path()
+            && let Some(view) = solids.view(t, id)
+            && let Ok(out) = crate::graph::input(part, id, view, before)
+            && out.solid(t).is_none()
+        {
+            return Err(crate::rebuild::not_inserted(
+                id,
+                "solids",
+                t,
+                &t.founder(),
+                out.solids().iter().map(|(k, _)| k).collect(),
+            )
+            .with("pointer", at));
+        }
+    }
+    Ok(Made::new(Vec::new()))
+}
+
+/// A delete's report: `solids` as written, an insert's ID expanded to the
+/// keys it founded (design 521).
+pub fn delete_report(d: &crate::doc::body::DeleteBody, results: &dyn Results) -> Value {
+    let mut out = Vec::new();
+    for t in &d.solids {
+        match results.result(t).and_then(|r| r.as_ref().ok()) {
+            Some(o) if o.inserted().is_some() => {
+                out.extend(o.solids().iter().map(|(k, _)| json!(k)));
+            }
+            _ => out.push(json!(t)),
+        }
+    }
+    json!({"solids": out})
 }

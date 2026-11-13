@@ -242,4 +242,18 @@ impl FeatureKind for Inserts {
     fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         f.insert().expect("an insert").fields()
     }
+
+    /// Its source's model comes from outside the part: see
+    /// [`crate::rebuild::rebuild_part_in`].
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::Insert(i) = f else {
+            unreachable!("an insert")
+        };
+        super::made(crate::insert::build_checked(
+            cx.part,
+            cx.id,
+            i,
+            &crate::assembly::Children::new(),
+        ))
+    }
 }

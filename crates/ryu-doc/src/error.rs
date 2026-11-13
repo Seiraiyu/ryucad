@@ -163,6 +163,10 @@ pub enum Code {
     NothingToRelease,
     /// The part has a proposed record that isn't official yet.
     ReleasePending,
+    /// The project's folder can't be part of a Git ref name (a space,
+    /// `..`, `~`, `:`, a `.lock` component and so on), so its releases
+    /// can't be tagged `ryupdm/<folder>/<part>/<label>`.
+    ReleaseFolderUnsafe,
     /// `ryucad review` has no GitHub token, or the service refused the one
     /// it has.
     ReviewUnauthenticated,
@@ -903,8 +907,9 @@ pub enum Code {
     /// holds the angle in the section square to it instead). The face,
     /// both angles and the angle asked are in the details.
     DraftAngleVaries,
-    /// A warning: a USD export wrote a sheet as its mesh alone (ryucad
-    /// 18.C writes no BrepArray of a sheet).
+    /// A warning: a USD export wrote a sheet as its mesh alone, the
+    /// BrepArray writer having refused it (`solid`, `face`, `reason`;
+    /// until ryucad 24.E every sheet was written so).
     ExportSheetBrepSkipped,
     /// No drawing of that ID in the part (design 417); the details name
     /// the part and the drawings it has (`drawings`).
@@ -1531,6 +1536,7 @@ mod tests {
         assert_eq!(Code::ReleaseNotReady.exit_code(), 1);
         assert_eq!(Code::NothingToRelease.exit_code(), 1);
         assert_eq!(Code::ReleasePending.exit_code(), 1);
+        assert_eq!(Code::ReleaseFolderUnsafe.exit_code(), 1);
         assert_eq!(Code::ReviewUnauthenticated.exit_code(), 1);
         assert_eq!(Code::ReviewNoRemote.exit_code(), 1);
         assert_eq!(Code::ReviewHeadMoved.exit_code(), 1);

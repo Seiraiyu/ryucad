@@ -54,4 +54,20 @@ impl FeatureKind for Imports {
     fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         f.import().expect("an import").fields()
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::Import(i) = f else {
+            unreachable!("an import")
+        };
+        super::founded_with_report(cx.id, crate::import::build(cx.part, cx.id, i, cx.run))
+    }
+
+    fn alone(
+        &self,
+        _part: &crate::doc::id::Id,
+        id: &crate::doc::id::Id,
+        f: &Feature,
+    ) -> Result<crate::rebuild::Built> {
+        Err(super::built_elsewhere(id, f, "is built from its file"))
+    }
 }

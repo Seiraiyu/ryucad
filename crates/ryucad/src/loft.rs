@@ -1449,4 +1449,32 @@ impl FeatureKind for Lofts {
             cx.results,
         )
     }
+
+    fn rebuild(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+    ) -> crate::feature::Outcome {
+        crate::rebuild::body_step(cx, f)
+    }
+
+    fn own_body(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+        _targets: &[&Built],
+    ) -> Result<Built> {
+        let crate::doc::files::Feature::Loft(l) = f else {
+            unreachable!("a loft")
+        };
+        build(cx.part, cx.id, l, cx.before, cx.run)
+    }
+
+    fn alone(&self, _part: &Id, id: &Id, f: &crate::doc::files::Feature) -> Result<Built> {
+        Err(crate::feature::built_elsewhere(
+            id,
+            f,
+            "is built from its sections",
+        ))
+    }
 }

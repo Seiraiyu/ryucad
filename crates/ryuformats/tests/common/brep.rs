@@ -1,8 +1,9 @@
 //! A check of a `BrepArray` prim against the omniSolid schema, written
 //! from the schema alone (its equations, its packing rules) and usd-brep's
 //! validator's rule names, so the writer is checked by something other
-//! than itself: sizes, faceuse pairs, radial cycles, loops that chain, and
-//! every curve where the schema's equations put it.
+//! than itself: sizes, faceuse pairs (a sheet's both in one void shell),
+//! radial cycles (a laminar edge's its own), loops that chain, and every
+//! curve where the schema's equations put it.
 
 use ryuformats::usd::layer::{Prim, Value};
 use ryukei::math;
@@ -25,6 +26,9 @@ pub struct Summary {
     /// Loops whose edgeuses have no UV curves ((0, 0) records): loops
     /// through a pole.
     pub uvless: usize,
+    /// Laminar edges: edges of one edgeuse, their own next round the edge
+    /// (a sheet's boundary).
+    pub laminar: usize,
 }
 
 struct A<'a>(BTreeMap<&'a str, &'a Value>);
@@ -316,15 +320,16 @@ pub fn check(p: &Prim) -> Summary {
         };
         assert_eq!(n, want, "{name}");
     }
-    // Faceuse pairs (BA_580): each face twice, once each way, one in a
-    // solid region and one in a void.
+    // Faceuse pairs (BA_580): each face twice, once each way: a solid's
+    // face once in a solid region and once in a void, a sheet's both in
+    // one shell of the void (usd-brep's "one open trimmed face").
     let mut shell_region = Vec::new();
     for (r, &n) in shell_counts.iter().enumerate() {
         shell_region.extend(std::iter::repeat_n(r, n));
     }
-    let mut fu_region = Vec::new();
+    let mut fu_shell = Vec::new();
     for (s, &n) in fu_counts.iter().enumerate() {
-        fu_region.extend(std::iter::repeat_n(shell_region[s], n));
+        fu_shell.extend(std::iter::repeat_n(s, n));
     }
     for f in 0..faces {
         let uses: Vec<usize> = (0..fu).filter(|&i| fu_faces[i] == f).collect();
@@ -333,22 +338,39 @@ pub fn check(p: &Prim) -> Summary {
         assert!(kinds.contains(&"same") && kinds.contains(&"opposite"));
         let sides: Vec<&str> = uses
             .iter()
-            .map(|&i| rtypes[fu_region[i]].as_str())
+            .map(|&i| rtypes[shell_region[fu_shell[i]]].as_str())
             .collect();
-        assert!(sides.contains(&"solidRegion") && sides.contains(&"voidRegion"));
+        let sheet = fu_shell[uses[0]] == fu_shell[uses[1]];
+        assert!(
+            if sheet {
+                sides == ["voidRegion", "voidRegion"]
+            } else {
+                sides.contains(&"solidRegion") && sides.contains(&"voidRegion")
+            },
+            "face {f}'s faceuses lie in {sides:?}"
+        );
     }
     // Radial cycles (BA_581, BA_582): every edge used, each cycle of
     // uses of one edge, entering from the bottom exactly when `same`.
     for (e, _) in ctypes.iter().enumerate() {
         assert!(eu_edges.contains(&e), "edge {e} has no edgeuse");
     }
+    let mut laminar = 0;
     for u in 0..eus {
         assert!(eu_edges[u] < edges);
-        assert_eq!(
-            eu_entries[u] == "bottomEntry",
-            eu_types[u] == "same",
-            "edgeuse {u}"
-        );
+        if eu_next[u] == u {
+            // A laminar edge's one use, its own next: `topEntry`, as
+            // SMLib's writer gives every lamina (usd-brep's
+            // `SmuConvert.cpp`).
+            assert_eq!(eu_entries[u], "topEntry", "laminar edgeuse {u}");
+            laminar += 1;
+        } else {
+            assert_eq!(
+                eu_entries[u] == "bottomEntry",
+                eu_types[u] == "same",
+                "edgeuse {u}"
+            );
+        }
         let mut x = eu_next[u];
         let mut steps = 1;
         while x != u {
@@ -873,6 +895,7 @@ pub fn check(p: &Prim) -> Summary {
     }
     Summary {
         uvless,
+        laminar,
         regions: rtypes,
         shells,
         faces,

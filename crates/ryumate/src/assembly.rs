@@ -85,7 +85,7 @@ pub enum Direction {
 }
 
 /// How a pattern moves copy `[i, j]` of a seed from where the seed is.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Motion {
     /// `i × spacing` along `direction`, and `j × spacing2` along the
     /// second direction if there is one.
@@ -96,6 +96,11 @@ pub enum Motion {
     },
     /// `i × step` radians about `axis` (right-handed).
     Circular { axis: Direction, step: f64 },
+    /// Copy `[k, 0]` (`k` from 1) at `places[k - 1]`: a rigid motion in
+    /// body `body`'s own frame, so the copy is `body ∘ place ∘ body⁻¹ ∘
+    /// seed` and follows both its seed and the body (design 521: screws
+    /// at a lid's holes).
+    Places { body: Id, places: Vec<Pose> },
 }
 
 /// Copies of bodies: each copy of a seed is the seed moved by the
@@ -268,6 +273,17 @@ impl Assembly {
                         });
                     }
                 }
+                Motion::Places { body, places } => {
+                    if !self.bodies.contains_key(body) {
+                        return Err(MateError::UnknownBody {
+                            mate: None,
+                            body: *body,
+                        });
+                    }
+                    for (k, place) in places.iter().enumerate() {
+                        pose_ok(place, &format!("pattern {pid}'s place {}", k + 1))?;
+                    }
+                }
             }
         }
         for (mid, m) in &self.mates {
@@ -368,15 +384,17 @@ impl Assembly {
                 index,
             } => {
                 // A circular pattern, or a linear one in one direction, has
-                // copies in one row only.
-                let one_row = |p: &Pattern| match p.motion {
-                    Motion::Linear { second, .. } => second.is_none(),
-                    Motion::Circular { .. } => true,
-                };
-                let known = self
-                    .patterns
-                    .get(&pattern)
-                    .is_some_and(|p| p.seeds.contains(&seed) && (index[1] == 0 || !one_row(p)));
+                // copies in one row only; places have one copy each.
+                let known = self.patterns.get(&pattern).is_some_and(|p| {
+                    p.seeds.contains(&seed)
+                        && match &p.motion {
+                            Motion::Linear { second, .. } => index[1] == 0 || second.is_some(),
+                            Motion::Circular { .. } => index[1] == 0,
+                            Motion::Places { places, .. } => {
+                                index[1] == 0 && index[0] as usize <= places.len()
+                            }
+                        }
+                });
                 if !known {
                     return Err(MateError::UnknownCopy {
                         mate,
@@ -493,6 +511,7 @@ impl Assembly {
                 .chain(second.as_ref().and_then(|(d, _)| on(d)))
                 .collect(),
             Motion::Circular { axis, .. } => on(axis).into_iter().collect(),
+            Motion::Places { body, .. } => vec![*body],
         }
     }
 }

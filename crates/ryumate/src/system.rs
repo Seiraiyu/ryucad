@@ -27,7 +27,7 @@
 
 use crate::assembly::{Assembly, Connector, Direction, Id, Kind, Motion, On};
 use crate::pose::Pose;
-use crate::rot::{Rot, V, add, dot, konst, scaled, sub};
+use crate::rot::{Rot, V, add, dot, konst, scaled, sub, times};
 use ryusketch::core::dual::D;
 use ryusketch::core::{Component, Equations, MAX_STEP};
 use ryusketch::{ANGLE_TOL, SOLVE_TOL};
@@ -158,7 +158,7 @@ fn scale(asm: &Assembly) -> f64 {
             (spacing * f64::from(index[0])).abs()
                 + second.map_or(0.0, |(_, s)| (s * f64::from(index[1])).abs())
         }
-        Motion::Circular { .. } => 0.0,
+        Motion::Circular { .. } | Motion::Places { .. } => 0.0,
     };
     for mate in asm.mates.values() {
         for c in [&mate.a, &mate.b] {
@@ -188,6 +188,11 @@ fn scale(asm: &Assembly) -> f64 {
                 }
             }
             Motion::Circular { axis, .. } => m = m.max(dir(axis)),
+            Motion::Places { places, .. } => {
+                for place in places {
+                    m = m.max(big(place));
+                }
+            }
         }
     }
     power_of_two_above(m)
@@ -390,6 +395,26 @@ impl<'a> System<'a> {
                 let (n, q) = self.direction::<N>(axis, bodies, x);
                 let r = Rot::about(n, i * step);
                 (add(q, r.apply(sub(o, q))), axes.map(|a| r.apply(a)))
+            }
+            Motion::Places { body, places } => {
+                let place = &places[index[0] as usize - 1];
+                // The carrying body's frame where the variables put it.
+                let (bo, b) = self.on_body::<N>(*body, &Pose::IDENTITY, bodies, x);
+                // Into the body's frame, through the place, and back out.
+                let local = |v: V<N>| [0, 1, 2].map(|k| dot(b[k], v));
+                let turn = |l: [D<N>; 3]| {
+                    [0, 1, 2].map(|i| {
+                        l[0].scale(place.rotation[i][0])
+                            + l[1].scale(place.rotation[i][1])
+                            + l[2].scale(place.rotation[i][2])
+                    })
+                };
+                let back = |l: [D<N>; 3]| {
+                    add(add(times(b[0], l[0]), times(b[1], l[1])), times(b[2], l[2]))
+                };
+                let l = turn(local(sub(o, bo)));
+                let l = [0, 1, 2].map(|i| l[i] + D::constant(place.origin[i] / self.scale));
+                (add(bo, back(l)), axes.map(|a| back(turn(local(a)))))
             }
         }
     }

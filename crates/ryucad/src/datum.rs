@@ -1048,6 +1048,24 @@ impl FeatureKind for Datums {
     fn check(&self, cx: &Check<'_>, f: &crate::doc::files::Feature) -> Result<()> {
         crate::datum::check(cx.part, cx.order, cx.id, datum_of(f), cx.results)
     }
+
+    fn rebuild(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+    ) -> crate::feature::Outcome {
+        let crate::doc::files::Feature::Datum(d) = f else {
+            unreachable!("a datum")
+        };
+        let at = crate::geometry::At {
+            part: cx.part,
+            order: cx.part.order(),
+            owner: cx.id,
+            results: cx.before,
+        };
+        let r = build(&at, d).map(|m| crate::rebuild::Output::Datum(std::sync::Arc::new(m)));
+        (r, None)
+    }
 }
 
 #[cfg(test)]

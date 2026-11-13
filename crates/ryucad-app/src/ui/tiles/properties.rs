@@ -129,8 +129,15 @@ pub(crate) fn pattern(ui: &mut egui::Ui, p: &mut crate::core::edit::PatternForm)
             let name = f.name.clone();
             rows.quantity(&name, f);
         }
-        if p.form != "mirror" {
+        if matches!(p.form.as_str(), "linear" | "circular") {
             rows.text("skip", &mut p.skip);
+        }
+        // A following pattern's seed point, and a points pattern's points.
+        if matches!(p.form.as_str(), "feature" | "points") {
+            rows.text("from", &mut p.from);
+        }
+        if p.form == "points" {
+            rows.text("points", &mut p.points);
         }
     });
     for (k, f) in &mut p.reverse {

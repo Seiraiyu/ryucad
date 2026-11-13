@@ -3,11 +3,17 @@
 use super::Given;
 use super::{BodyUse, FeatureKind, Write};
 use crate::doc::files::Feature;
+use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::solid::Boolean;
 use crate::error::{Code, Error, Result};
+use crate::rebuild::{Built, Made, Results, ToolBody, apply, read, solid_key};
+use crate::solid::Solids;
+use ryukei::boolean::BooleanOp;
+use ryukei::name::ToolKey;
 use serde_json::Value;
 use serde_json::json;
+use std::sync::Arc;
 
 pub(crate) const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
 
@@ -80,4 +86,75 @@ impl FeatureKind for Booleans {
     fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         f.boolean().expect("a boolean").fields()
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::Boolean(b) = f else {
+            unreachable!("a boolean")
+        };
+        super::made(build_boolean(
+            cx.part, cx.solids, cx.id, f, b, cx.before, cx.run,
+        ))
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        use crate::kind as k;
+        let Feature::Boolean(b) = f else {
+            unreachable!("a boolean")
+        };
+        let unite = matches!(b.op, crate::doc::solid::BooleanOp::Unite);
+        let target = k::read(
+            "target",
+            &b.target,
+            unite.then_some(k::Want::Solid),
+            unite.then_some(k::JOIN),
+        );
+        std::iter::once(target)
+            .chain(
+                b.tools
+                    .iter()
+                    .map(|t| k::read("tools", t, Some(k::Want::Solid), Some(k::TOOL))),
+            )
+            .collect()
+    }
+}
+
+/// A `boolean` feature: its target as it sees it, with its tools as it
+/// sees them, each placed under a key from its founder.
+pub(crate) fn build_boolean(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    b: &crate::doc::solid::Boolean,
+    before: &dyn Results,
+    run: &crate::rebuild::Run,
+) -> Result<Made> {
+    let target = read(part, solids, id, f, "target", &b.target, before)?;
+    let tools: Vec<(&Id, &Built)> = b
+        .tools
+        .iter()
+        .map(|t| Ok((t, read(part, solids, id, f, "tools", t, before)?)))
+        .collect::<Result<_>>()?;
+    let keys: Vec<ToolKey> = b.tools.iter().map(|t| solid_key(&part.id, id, t)).collect();
+    let tools: Vec<ToolBody> = tools
+        .iter()
+        .zip(keys)
+        .map(|((name, built), key)| ToolBody::whole(key, built, name))
+        .collect();
+    let kop = match b.op {
+        crate::doc::solid::BooleanOp::Unite => BooleanOp::Unite,
+        crate::doc::solid::BooleanOp::Subtract => BooleanOp::Subtract,
+        crate::doc::solid::BooleanOp::Intersect => BooleanOp::Intersect,
+    };
+    let built = apply(
+        part,
+        id,
+        "boolean",
+        (kop, b.op.as_str()),
+        &b.target,
+        target,
+        &tools,
+        run,
+    )?;
+    Ok(Made::new(vec![(b.target.clone(), Arc::new(built))]))
 }
