@@ -9,11 +9,11 @@
 
 use crate::doc::id::Id;
 use crate::error::Result;
-use crate::holes::{Holes, Row};
+use crate::holes::Row;
 use crate::rebuild::Results;
 use crate::session::Session;
 use rayon::prelude::*;
-use ryukei::geom::Point3;
+use ryukei::geom::{Point3, Vector3};
 use serde_json::{Value, json};
 
 /// Every code and its severity, in the order findings come out.
@@ -113,7 +113,6 @@ fn hundredths(h: i64) -> String {
 pub(crate) struct Ctx<'a> {
     pub session_part: &'a crate::doc::project::Part,
     pub result: &'a crate::rebuild::PartResult,
-    pub holes: &'a Holes,
     pub opts: Options,
     pub job: &'a ryu_session::job::Job,
 }
@@ -448,6 +447,10 @@ fn touch(b: &crate::rebuild::Built, x: &Row, y: &Row) -> bool {
     })
 }
 
+/// A bore in the sweep: its box's least and greatest x, its row's
+/// index, its segment and its radius.
+type SweepItem = (f64, f64, usize, (Point3, Point3), f64);
+
 fn breakouts(cx: &Ctx, rows: &[&Row]) -> Vec<Finding> {
     let part = &cx.session_part.id;
     let Some(first) = rows.first() else {
@@ -466,7 +469,7 @@ fn breakouts(cx: &Ctx, rows: &[&Row]) -> Vec<Finding> {
         return Vec::new();
     };
     // Sweep along x of each bore's box.
-    let mut items: Vec<(f64, f64, usize, (Point3, Point3), f64)> = rows
+    let mut items: Vec<SweepItem> = rows
         .iter()
         .enumerate()
         .filter_map(|(i, r)| {
@@ -547,11 +550,148 @@ fn part_fix(cx: &Ctx, part: &Id, x: &Row, y: &Row) -> Option<Value> {
     None
 }
 
+/// `hole_edge_distance`: a bore's wall nearer than `k × D` to a face that
+/// isn't its own or beside its own (the faces it enters and leaves by),
+/// by `measure`'s certified distance; a face met along the bore's axis (a
+/// floor) is the break-through check's. Its fix needs a sketch point moved
+/// under its constraints, which only the agent can judge: the finding
+/// gives the distance, what is needed, the face and the way away from it.
+fn edge_distances(cx: &Ctx, rows: &[&Row]) -> Vec<Finding> {
+    use ryukei::measure::{DistanceOptions, Entity, distance_with};
+    let mut out = Vec::new();
+    let Some(first) = rows.first() else {
+        return out;
+    };
+    let Some(tip) = crate::solid::Solids::of(cx.session_part)
+        .tip(&first.solid)
+        .cloned()
+    else {
+        return out;
+    };
+    let Some(Ok(o)) = cx.result.result(&tip) else {
+        return out;
+    };
+    let Some(b) = o.solid(&first.solid) else {
+        return out;
+    };
+    let body = &b.body;
+    let by_name: std::collections::BTreeMap<String, ryukei::topo::FaceId> = body
+        .faces()
+        .map(|f| (body.face(f).expect("a face").name.to_string(), f))
+        .collect();
+    let work = crate::work::work(cx.job);
+    let rigid = ryukei::geom::Rigid::IDENTITY;
+    for r in rows {
+        let d = r
+            .sizes
+            .thread
+            .as_ref()
+            .and_then(|t| t.major.as_ref())
+            .map_or(r.sizes.drill.si, |m| m.si);
+        let need = cx.opts.edge_factor * d;
+        let own: std::collections::BTreeSet<ryukei::topo::FaceId> = r
+            .faces
+            .values()
+            .flatten()
+            .filter_map(|n| by_name.get(n).copied())
+            .collect();
+        let walls: Vec<ryukei::topo::FaceId> = ["wall", "drill_wall"]
+            .iter()
+            .filter_map(|s| r.faces.get(*s))
+            .flatten()
+            .filter_map(|n| by_name.get(n).copied())
+            .collect();
+        let beside: std::collections::BTreeSet<ryukei::topo::FaceId> = own
+            .iter()
+            .flat_map(|f| crate::holes::neighbours(body, *f))
+            .collect();
+        let mut nearest: Option<(f64, f64, ryukei::topo::FaceId, [Point3; 2])> = None;
+        let mut unsure = false;
+        for w in &walls {
+            let wb = ryukei::intersect::face_box(body, *w);
+            let pad = Vector3::new(need, need, need);
+            let reach = ryukei::geom::Box3::new(wb.min() - pad, wb.max() + pad);
+            for f in body.faces() {
+                if own.contains(&f)
+                    || beside.contains(&f)
+                    || !ryukei::intersect::face_box(body, f).intersects(&reach)
+                {
+                    continue;
+                }
+                match distance_with(
+                    (body, Entity::Face(*w), &rigid),
+                    (body, Entity::Face(f), &rigid),
+                    &DistanceOptions::default(),
+                    &work,
+                ) {
+                    Ok(dist) => {
+                        // A face the bore's wall meets along its axis (a
+                        // floor under a blind hole) is the break-through
+                        // check's, not an edge.
+                        let off = dist.points[0] - dist.points[1];
+                        let across = off - r.axis * off.dot(r.axis);
+                        if off.length() > ryukei::tol::LINEAR_RESOLUTION
+                            && across.length() <= 1e-6 * off.length()
+                        {
+                            continue;
+                        }
+                        let (v, bound) = (dist.distance.value(), dist.distance.bound());
+                        if v - bound >= need {
+                            continue;
+                        }
+                        if v + bound >= need {
+                            unsure = true;
+                            continue;
+                        }
+                        if nearest.is_none_or(|n| v < n.0) {
+                            nearest = Some((v, bound, f, dist.points));
+                        }
+                    }
+                    Err(_) => unsure = true,
+                }
+            }
+        }
+        if let Some((v, _, f, pts)) = nearest {
+            let mut away = pts[0] - pts[1];
+            away = away - r.axis * away.dot(r.axis);
+            let away = away
+                .normalize()
+                .map_or(Vector3::new(0.0, 0.0, 0.0), |u| u.get());
+            let face = format!(
+                "{}/{}/{}",
+                r.part,
+                r.solid,
+                body.face(f).expect("a face").name
+            );
+            out.push(Finding {
+                code: "hole_edge_distance",
+                holes: vec![r.reference.clone()],
+                message: format!("{}: its bore is {} from {face}, under {} x its diameter ({})",
+                    r.reference, mm_floor(v), cx.opts.edge_factor, mm_ceil(need)),
+                details: json!({
+                    "distance_m": v, "needed_m": need, "face": face,
+                    "away": [away.x, away.y, away.z],
+                    "hint": format!("move the hole {} along away, or pass a smaller --edge-factor", mm_ceil(need - v)),
+                }),
+                fixes: Vec::new(),
+            });
+        } else if unsure {
+            out.push(cannot(
+                r,
+                "hole_edge_distance",
+                "a distance stayed within its bound of the limit",
+            ));
+        }
+    }
+    out
+}
+
 fn solid_findings(cx: &Ctx, rows: &[&Row]) -> Result<Vec<Finding>> {
     let mut out: Vec<Finding> = Vec::new();
     let part = &cx.session_part.id;
     out.extend(breakouts(cx, rows));
     out.extend(tap_drills(part, rows));
+    out.extend(edge_distances(cx, rows));
     out.extend(engagement(part, rows, cx.opts.min_engagement));
     out.extend(breaks_through(cx, rows));
     out.extend(past_material(cx, rows));
@@ -575,7 +715,6 @@ pub fn check(
     let cx = Ctx {
         session_part: &p,
         result: &result,
-        holes: &holes,
         opts,
         job: &job,
     };
@@ -916,5 +1055,48 @@ pub(crate) mod tests {
                 .any(|f| f["code"] == "hole_breakout"),
             "{v}"
         );
+    }
+
+    #[test]
+    fn a_hole_too_near_a_face() {
+        let (_dir, mut s) = drilled();
+        // Box b: 20 x 10 x 5 mm. A Ø2 hole at (4, 5) is 3 mm from x = 0;
+        // at --edge-factor 2 it needs 4 mm.
+        put(
+            &mut s,
+            "h",
+            json!({"points": ["p2"], "form": "simple", "diameter": 2,
+            "depth": "through_all"}),
+        );
+        let v = call(&mut s, "holes.check", json!({"part": "p", "solid": "b"})).unwrap();
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "hole_edge_distance")
+        );
+        let v = call(
+            &mut s,
+            "holes.check",
+            json!({"part": "p", "solid": "b", "edge_factor": 2}),
+        )
+        .unwrap();
+        let f = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["code"] == "hole_edge_distance")
+            .unwrap()
+            .clone();
+        assert_eq!(f["severity"], "warning");
+        assert!((f["details"]["distance_m"].as_f64().unwrap() - 0.003).abs() < 1e-6);
+        assert_eq!(f["details"]["needed_m"], 0.004);
+        let away = f["details"]["away"].as_array().unwrap();
+        for (a, w) in away.iter().zip([1.0, 0.0, 0.0]) {
+            assert!((a.as_f64().unwrap() - w).abs() < 1e-9, "{away:?}");
+        }
+        assert_eq!(f["fixes"], json!([]));
+        assert!(f["details"]["hint"].as_str().unwrap().contains("1 mm"));
     }
 }

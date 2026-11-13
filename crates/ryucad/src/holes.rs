@@ -709,6 +709,33 @@ fn reflect_vector(plane: &Plane, v: Vector3) -> Vector3 {
     Mirror::in_plane_of(plane.frame()).apply_vector(v)
 }
 
+/// The faces sharing an edge with `face`, through its loops' fins.
+pub(crate) fn neighbours(
+    body: &ryukei::topo::Body,
+    face: ryukei::topo::FaceId,
+) -> Vec<ryukei::topo::FaceId> {
+    let mut out = Vec::new();
+    for l in body.face_loops(face) {
+        for fin in body.loop_fins(l) {
+            let Some(e) = body.fin(fin).map(|f| f.edge) else {
+                continue;
+            };
+            for g in body.edge_fins(e) {
+                if let Some(f) = body
+                    .fin(g)
+                    .and_then(|x| body.loop_(x.loop_))
+                    .map(|l| l.face)
+                    && f != face
+                    && !out.contains(&f)
+                {
+                    out.push(f);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The names of the faces on either side of edge `e`, through its fins.
 pub(crate) fn edge_face_names(body: &ryukei::topo::Body, e: ryukei::topo::EdgeId) -> Vec<String> {
     body.edge_fins(e)
