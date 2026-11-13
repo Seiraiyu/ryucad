@@ -11,8 +11,8 @@
 //! holding the usdc's bytes. Every BrepArray must pass the schema's
 //! checks, and a body the BrepArray can't describe must be a typed
 //! refusal. A last byte may put a sheet's open square in the first part:
-//! its triangles counted in STL, a `surface` object in 3MF, a mesh with no
-//! BrepArray in USD. Any panic is a bug. With a first byte `0xd5`, the rest is a
+//! its triangles counted in STL, a `surface` object in 3MF, a BrepArray
+//! and a mesh in USD, the BrepArray checked as a sheet's. Any panic is a bug. With a first byte `0xd5`, the rest is a
 //! seeded sheet metal part (`sheet_metal_bytes::case`) whose flat pattern
 //! is written as DXF in millimetres and inches and read back.
 
@@ -229,7 +229,7 @@ fuzz_target!(|data: &[u8]| {
         })
         .collect();
     // A sheet in the first part, where the last byte read says: an open
-    // 10 mm square, a 3MF `surface` object, USD's mesh with no BrepArray.
+    // 10 mm square, a 3MF `surface` object, USD's BrepArray beside its mesh.
     let sheet = b.pick(2) == 1;
     if sheet {
         use ryukei::geom::{Frame, Plane, Surface};
@@ -250,7 +250,7 @@ fuzz_target!(|data: &[u8]| {
             name: "sheet".into(),
             body: Arc::new(square),
             mesh: Some(mesh),
-            brep: false,
+            brep: true,
         });
     }
     for (p, u) in leaves {
