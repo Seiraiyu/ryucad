@@ -10,8 +10,13 @@
 //! the merge or squash commit that brought it in. A record whose bytes
 //! change after that, or that later leaves the branch, was modified.
 //!
-//! Tags `ryupdm/<part>/<label>` are read too: they are derived from the
-//! records, so they are only compared, never trusted.
+//! Tags `ryupdm/<folder><part>/<label>` are read too, where `<folder>` is
+//! the project's folder in the repository (`""` at the root, else
+//! `a/b/`): they are derived from the records, so they are only compared,
+//! never trusted. A project reads only its own tags, and a project in a
+//! folder also accepts a tag ryucad before 0.9.1 made, `ryupdm/<part>/<label>`,
+//! when it points at the record's official commit and, if annotated,
+//! attests this project ([`Releases::read`]).
 //!
 //! Under approval rules (`approvals` in `ryupdm.json` at the official
 //! commit's first parent) a record's tag is the hosted service's, an
@@ -88,12 +93,21 @@ pub struct Releases {
     pub official: BTreeMap<String, Official>,
     /// Official records changed or deleted since, by path.
     pub modified: BTreeMap<String, Modified>,
-    /// Every `ryupdm/<part>/<label>` tag, by `<part>/<label>`, with the
-    /// commit it points at (`None` if it doesn't point at a commit).
+    /// The project's folder in the repository, as read (`""` or ending in
+    /// `/`): its tags are `ryupdm/<prefix><part>/<label>`.
+    pub prefix: String,
+    /// The project's tags, by `<part>/<label>` (below `ryupdm/<prefix>`),
+    /// with the commit each points at (`None` if it doesn't point at a
+    /// commit). Other projects' tags aren't here; an old-form tag
+    /// accepted for a project in a folder is (see `legacy`).
     pub tags: BTreeMap<String, Option<String>>,
-    /// Every `ryupdm/` tag's own object, by `<part>/<label>`: the tag
-    /// object of an annotated tag, the commit of a lightweight one.
+    /// Each of those tags' own object, by `<part>/<label>`: the tag object
+    /// of an annotated tag, the commit of a lightweight one.
     pub objects: BTreeMap<String, gix::ObjectId>,
+    /// The keys whose tag is the old form, `ryupdm/<part>/<label>`, made
+    /// before ryucad 0.9.1 for this project in a folder: accepted only at
+    /// the record's official commit, attesting this project if annotated.
+    pub legacy: std::collections::BTreeSet<String>,
     /// Official records some rule applied to where they arrived, by path.
     pub approvals: BTreeMap<String, Approval>,
     /// `approvals` in `ryupdm.json` at the branch's tip: what a proposal
@@ -123,14 +137,15 @@ impl Tag {
     }
 }
 
-/// The tag a release of `part`'s `label` gets, without `refs/tags/`.
-pub fn tag_name(part: &Id, label: &str) -> String {
-    format!("{TAG_PREFIX}{part}/{label}")
+/// The tag a release of `part`'s `label` gets in the project at `prefix`
+/// (`""` or ending in `/`), without `refs/tags/`.
+pub fn tag_name(prefix: &str, part: &Id, label: &str) -> String {
+    format!("{TAG_PREFIX}{prefix}{part}/{label}")
 }
 
-/// The key of a record's tag below `ryupdm/`: `<part>/<label>`, or
-/// `<part>/<label>.obsolete` for an obsolete record (tagged only under
-/// rules).
+/// The key of a record's tag below the project's tag prefix
+/// (`ryupdm/<folder>`): `<part>/<label>`, or `<part>/<label>.obsolete`
+/// for an obsolete record (tagged only under rules).
 pub fn tag_key(part: &Id, label: &str, kind: Kind) -> String {
     match kind {
         Kind::Release => format!("{part}/{label}"),
@@ -138,9 +153,76 @@ pub fn tag_key(part: &Id, label: &str, kind: Kind) -> String {
     }
 }
 
-/// The tag of a record of either kind, without `refs/tags/`.
-pub fn tag_name_of(part: &Id, label: &str, kind: Kind) -> String {
-    format!("{TAG_PREFIX}{}", tag_key(part, label, kind))
+/// The tag of a record of either kind in the project at `prefix`, without
+/// `refs/tags/`.
+pub fn tag_name_of(prefix: &str, part: &Id, label: &str, kind: Kind) -> String {
+    format!("{TAG_PREFIX}{prefix}{}", tag_key(part, label, kind))
+}
+
+/// Refuses a project folder (`prefix`, `""` or ending in `/`) that can't
+/// be part of a Git ref name, so its releases can't be tagged
+/// (`release_folder_unsafe`): git check-ref-format's rules for each
+/// component (no space, control character, `~ ^ : ? * [ \`, `..` or `@{`;
+/// not empty, `@`, starting with `.`, or ending with `.` or `.lock`).
+/// The folder is never encoded.
+pub fn check_folder(prefix: &str) -> Result<()> {
+    let folder = prefix.strip_suffix('/').unwrap_or(prefix);
+    if folder.is_empty() {
+        return Ok(());
+    }
+    let bad = |why: &str| {
+        Err(Error::new(
+            Code::ReleaseFolderUnsafe,
+            format!(
+                "the project's folder {folder:?} can't be part of a Git tag name ({why}), \
+                 so its releases can't be tagged ryupdm/{folder}/<part>/<label>: \
+                 move the project to a folder whose name Git accepts in a ref"
+            ),
+        )
+        .with("folder", folder)
+        .with("reason", why))
+    };
+    if folder.contains("..") {
+        return bad("it holds `..`");
+    }
+    if folder.contains("@{") {
+        return bad("it holds `@{`");
+    }
+    for c in folder.chars() {
+        if c.is_ascii_control() {
+            return bad("it holds a control character");
+        }
+        if " ~^:?*[\\".contains(c) {
+            return bad(&format!("it holds {c:?}"));
+        }
+    }
+    for comp in folder.split('/') {
+        if comp.is_empty() {
+            return bad("a component is empty");
+        }
+        if comp == "@" {
+            return bad("a component is `@`");
+        }
+        if comp.starts_with('.') {
+            return bad("a component starts with `.`");
+        }
+        if comp.ends_with('.') {
+            return bad("a component ends with `.`");
+        }
+        if comp.ends_with(".lock") {
+            return bad("a component ends with `.lock`");
+        }
+    }
+    Ok(())
+}
+
+/// The project-relative key of the tag `key` (below `ryupdm/`) if it is
+/// the project at `prefix`'s: below its folder, with exactly a part and a
+/// label left. Part IDs hold no `/`, so the last segment is the label and
+/// the one before it the part; the rest is the folder.
+fn scoped<'a>(prefix: &str, key: &'a str) -> Option<&'a str> {
+    let rest = key.strip_prefix(prefix)?;
+    (rest.matches('/').count() == 1).then_some(rest)
 }
 
 /// The part, label and kind of the record at `path`
@@ -510,6 +592,73 @@ fn judged(
     Ok(out)
 }
 
+/// The old-form tags (`ryupdm/<part>/<label>`, and a release's
+/// `….package`) a project in a folder accepts for official records whose
+/// new-form tag is absent, added to `refs`: those at the record's
+/// official commit whose attestation, if annotated, names the record's
+/// project. Returns their keys.
+fn legacy(
+    repo: &gix::Repository,
+    official: &BTreeMap<String, Official>,
+    all: &TagRefs,
+    refs: &mut TagRefs,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut out = std::collections::BTreeSet::new();
+    for (path, o) in official {
+        let Some((part, label, kind)) = record_at(path) else {
+            continue;
+        };
+        let mut keys = vec![(tag_key(&part, &label, kind), false)];
+        if kind == Kind::Release {
+            keys.push((crate::package::attest::tag_key(&part, &label), true));
+        }
+        for (key, package) in keys {
+            if refs.contains_key(&key) {
+                continue;
+            }
+            let Some((Some(commit), Some(object))) = all.get(&key) else {
+                continue;
+            };
+            if *commit != o.commit {
+                continue;
+            }
+            let Ok(obj) = repo.find_object(*object) else {
+                continue;
+            };
+            if obj.kind == gix::object::Kind::Tag {
+                // Annotated: ours only if it attests this record's project.
+                let bytes = repo.find_object(o.blob).map_err(git_error)?.data.clone();
+                let Some(project) = std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|t| ryucad_doc::doc::canonical::parse(t).ok())
+                    .and_then(|v| crate::record::Record::from_json(&v, kind).ok())
+                    .map(|r| r.project().clone())
+                else {
+                    continue;
+                };
+                let data = &obj.data;
+                let Some(at) = data.windows(2).position(|w| w == b"\n\n") else {
+                    continue;
+                };
+                let attests = match attest::split_message(&data[at + 2..]) {
+                    Ok((v, _, _)) if package => crate::package::attest::Attestation::from_json(&v)
+                        .is_ok_and(|a| a.project == project),
+                    Ok((v, _, _)) => {
+                        attest::Attestation::from_json(&v).is_ok_and(|a| a.project == project)
+                    }
+                    Err(_) => false,
+                };
+                if !attests {
+                    continue;
+                }
+            }
+            refs.insert(key.clone(), all[&key].clone());
+            out.insert(key);
+        }
+    }
+    Ok(out)
+}
+
 /// One record's unbroken run of commits on the chain, oldest first.
 struct Run {
     /// Where it started, an index into the chain.
@@ -526,18 +675,35 @@ impl Releases {
     /// Reads the release branch `config` names and the tags, for the
     /// project at `prefix` in the repository (ending in `/` unless it is
     /// the root).
+    ///
+    /// Only the project's own tags are read, `ryupdm/<prefix><part>/<label>`
+    /// (a root project ignores tags with more segments). For a project in
+    /// a folder whose new-form tag is absent, the old form
+    /// `ryupdm/<part>/<label>` is accepted when it points at the record's
+    /// official commit and, if annotated, its attestation's `project` is
+    /// the record's; any other is another project's, never this one's
+    /// moved tag.
     pub fn read(repo: &gix::Repository, prefix: &str, config: &Config) -> Result<Releases> {
-        let refs = tag_refs(repo)?;
-        let tags: BTreeMap<String, Option<String>> = refs
+        let all = tag_refs(repo)?;
+        let mut refs: TagRefs = all
             .iter()
-            .map(|(k, (c, _))| (k.clone(), c.clone()))
+            .filter_map(|(k, v)| Some((scoped(prefix, k)?.to_owned(), v.clone())))
             .collect();
-        let objects: BTreeMap<String, gix::ObjectId> = refs
-            .iter()
-            .filter_map(|(k, (_, o))| Some((k.clone(), (*o)?)))
-            .collect();
+        let finish = |refs: &TagRefs| {
+            let tags: BTreeMap<String, Option<String>> = refs
+                .iter()
+                .map(|(k, (c, _))| (k.clone(), c.clone()))
+                .collect();
+            let objects: BTreeMap<String, gix::ObjectId> = refs
+                .iter()
+                .filter_map(|(k, (_, o))| Some((k.clone(), (*o)?)))
+                .collect();
+            (tags, objects)
+        };
         let Some(branch) = branch(repo, &config.release_branch)? else {
+            let (tags, objects) = finish(&refs);
             return Ok(Releases {
+                prefix: prefix.to_owned(),
                 tags,
                 objects,
                 ..Releases::default()
@@ -637,6 +803,12 @@ impl Releases {
                 },
             );
         }
+        let legacy = if prefix.is_empty() {
+            Default::default()
+        } else {
+            legacy(repo, &official, &all, &mut refs)?
+        };
+        let (tags, objects) = finish(&refs);
         let tip_approvals = config_at(repo, &branch.tip, prefix)
             .ok()
             .and_then(|c| c.approvals);
@@ -648,6 +820,8 @@ impl Releases {
             .unwrap_or_default();
         let approvals = judged(repo, prefix, &official, &refs, &tip_revoked)?;
         Ok(Releases {
+            prefix: prefix.to_owned(),
+            legacy,
             branch: Some(branch),
             official,
             modified,
@@ -675,7 +849,24 @@ impl Releases {
         }
     }
 
-    /// Tags no official release record accounts for, by `<part>/<label>`.
+    /// The name of the project's tag with the key `key`
+    /// (`<part>/<label>`), without `refs/tags/`: the old form if that is
+    /// the one accepted, else `ryupdm/<prefix><key>`.
+    pub fn name(&self, key: &str) -> String {
+        if self.legacy.contains(key) {
+            format!("{TAG_PREFIX}{key}")
+        } else {
+            format!("{TAG_PREFIX}{}{key}", self.prefix)
+        }
+    }
+
+    /// The name of a record's tag (see [`Releases::name`]).
+    pub fn name_of(&self, part: &Id, label: &str, kind: Kind) -> String {
+        self.name(&tag_key(part, label, kind))
+    }
+
+    /// The project's tags no official release record accounts for, by
+    /// `<part>/<label>`.
     pub fn orphaned_tags(&self) -> Vec<&str> {
         self.tags
             .keys()
@@ -754,6 +945,51 @@ pub(crate) mod tests {
     }
 
     const A: &str = "releases/p/A.json";
+
+    #[test]
+    fn tags_are_scoped_to_the_project_folder() {
+        assert_eq!(scoped("", "p/A"), Some("p/A"));
+        assert_eq!(scoped("", "a/p/A"), None);
+        assert_eq!(scoped("a/", "a/p/A"), Some("p/A"));
+        assert_eq!(scoped("a/", "a/p/A.obsolete"), Some("p/A.obsolete"));
+        assert_eq!(scoped("a/", "p/A"), None);
+        assert_eq!(scoped("a/", "a/b/p/A"), None);
+        assert_eq!(scoped("a/b/", "a/b/p/A"), Some("p/A"));
+        // A root project's part named like the folder isn't the folder's.
+        assert_eq!(scoped("a/", "a/A"), None);
+    }
+
+    #[test]
+    fn folders_git_refuses_in_a_ref_are_refused() {
+        for ok in ["", "a/", "a/b/", "cad-2/", "my_parts/x.y/", "ünï/"] {
+            assert!(check_folder(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "my parts/",
+            "a..b/",
+            "a~1/",
+            "a^/",
+            "a:b/",
+            "a*/",
+            "a?/",
+            "a[1]/",
+            "a\\b/",
+            "x.lock/",
+            "a/x.lock/",
+            ".hidden/",
+            "a./",
+            "@/",
+            "a@{1}/",
+            "a\tb/",
+        ] {
+            let e = check_folder(bad).unwrap_err();
+            assert_eq!(e.code, Code::ReleaseFolderUnsafe, "{bad}");
+            assert!(
+                e.message.contains("can't be part of a Git tag name"),
+                "{bad}"
+            );
+        }
+    }
 
     #[test]
     fn no_branch_no_releases() {
@@ -904,7 +1140,8 @@ pub(crate) mod tests {
         let later = commit(d, "later");
         let r = read(d);
         let p = Id::parse("p", "part").unwrap();
-        assert_eq!(tag_name(&p, "A"), "ryupdm/p/A");
+        assert_eq!(tag_name("", &p, "A"), "ryupdm/p/A");
+        assert_eq!(tag_name("a/b/", &p, "A"), "ryupdm/a/b/p/A");
         assert_eq!(r.tag(&p, "A", &a), Tag::Missing);
         git(d, &["tag", "ryupdm/p/A", &a]);
         git(d, &["tag", "ryupdm/p/Z", &a]);

@@ -4753,3 +4753,58 @@ fn renders_draw_thread_rings_unless_told_not_to() {
     );
     assert_eq!(png(&mut s, true), png(&mut s, false));
 }
+
+#[test]
+fn following_patterns_are_written_shown_and_edited() {
+    use crate::places::tests::{must, tray};
+    let (dir, mut s) = tray();
+    let r = must(
+        &mut s,
+        "feature.add",
+        json!({"part": "pack", "type": "instance_pattern",
+        "id": "bolts", "instances": ["bolt-0"], "form": "feature", "on": "pack/lid/row"}),
+    );
+    assert_eq!(
+        r["feature"]["on"],
+        json!({"instance": ["lid"], "feature": "row", "text": "pack/lid/row"})
+    );
+    let file = std::fs::read_to_string(dir.path().join("parts/pack/features/bolts.json")).unwrap();
+    assert!(file.contains("\"format\": 24"), "{file}");
+    // From and points, given and taken away; a new form keeps only its own.
+    let r = must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "pack", "id": "bolts", "from": "p2"}),
+    );
+    assert_eq!(r["feature"]["from"], "p2");
+    let r = must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "pack", "id": "bolts", "form": "points",
+        "on": "pack/lid/layout", "points": ["p1", "p5"], "from": ""}),
+    );
+    assert_eq!(
+        (
+            r["feature"]["form"].as_str(),
+            r["feature"]["from"].is_null()
+        ),
+        (Some("points"), true)
+    );
+    assert_eq!(r["feature"]["points"], json!(["p1", "p5"]));
+    let e = crate::server::handle(&mut s, crate::proto::Request::from_rpc("feature.add",
+        Some(json!({"part": "pack", "type": "instance_pattern", "id": "x", "instances": ["pin-0"],
+                    "form": "feature", "on": "lid/row"}))).unwrap()).unwrap_err();
+    assert_eq!(e.code, crate::error::Code::InvalidParam);
+    // The rebuild report names each following pattern's driver.
+    let rep = must(&mut s, "rebuild", json!({"part": "pack"}));
+    let bolts = rep["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "bolts")
+        .unwrap();
+    assert_eq!(
+        (&bolts["form"], &bolts["driver"]),
+        (&json!("points"), &json!("lid/layout"))
+    );
+}

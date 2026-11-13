@@ -112,7 +112,7 @@ impl EntityRef {
             })?;
             match step {
                 (id, None) => Ok(id),
-                (pattern, Some(index)) => Ok(Id::copy(&pattern, index)),
+                (pattern, Some(key)) => Ok(Id::copy(&pattern, &key)),
             }
         };
         let ids = |xs: &[&str]| -> Result<Vec<Id>> { xs.iter().map(|x| step(x)).collect() };
@@ -519,7 +519,10 @@ mod tests {
         assert_eq!(r.to_string(), "a/i1/i2");
         assert_eq!(
             EntityRef::parse("a/ring:2/pin").unwrap().path[0].copy_of(),
-            Some((Id::parse("ring", "feature").unwrap(), [2, 0]))
+            Some((
+                Id::parse("ring", "feature").unwrap(),
+                crate::doc::id::CopyKey::Index([2, 0])
+            ))
         );
         for bad in ["a/ring:0/pin", "a/ring:2:0/pin"] {
             assert_eq!(

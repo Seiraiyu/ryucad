@@ -11,7 +11,11 @@
 //! two share, which hold no volume). A solid intersection is an
 //! interference, with its box, its volume estimated from its mesh at
 //! normal quality and the faces of each side it touches. Any other
-//! refusal leaves the pair unchecked, saying why.
+//! refusal leaves the pair unchecked, saying why, except `Uncertain`,
+//! which leaves the pair judged on both meshes as a reference pair is
+//! (design 551, #436): parts sunk a rounding's depth into each other by
+//! poses written in single precision touch, and a real overlap past the
+//! reach is an approximate interference.
 //!
 //! A pair with a reference import's body on a side (design 364) is
 //! judged on both meshes at normal quality instead ([`mesh`]): clear or
@@ -241,9 +245,77 @@ pub fn mesh_verdict(a: &Prepared, b: &Prepared, rel: &Rigid) -> Option<Verdict> 
     mesh::verdict(a, b, rel, &mut mesh::Search::new(&job)).ok()
 }
 
+/// What the exact boolean said of two solids: a verdict, or `Uncertain`
+/// with its refusal's text, which [`find_for`] then answers on meshes
+/// (design 551, #436).
+enum Exact {
+    Decided(Verdict),
+    Uncertain(String),
+}
+
 /// [`verdict`] for a request's `job`: a cancel stops the kernel inside the
-/// pair, and the pair answers the job's `cancelled` (never a verdict).
+/// pair, and the pair answers the job's `cancelled` (never a verdict). An
+/// `Uncertain` refusal is `CannotCheck` here, as it always was; only
+/// [`find_for`] and [`solid_verdict`] answer it on meshes.
 pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict> {
+    Ok(match exact_for(a, b, rel, job)? {
+        Exact::Decided(v) => v,
+        Exact::Uncertain(kernel) => Verdict::CannotCheck {
+            kernel,
+            spent: None,
+        },
+    })
+}
+
+/// A pair judged on both sides' meshes at normal quality, as a reference
+/// pair is: `Clear`, `Touching` or `Approximate`; unchecked with what it
+/// spent past the mesh search's budget, or with the mesher's refusal.
+fn on_meshes(
+    ma: &std::result::Result<Arc<Prepared>, String>,
+    mb: &std::result::Result<Arc<Prepared>, String>,
+    rel: &Rigid,
+    job: &Job,
+) -> Result<Verdict> {
+    match (ma, mb) {
+        (Ok(ma), Ok(mb)) => {
+            let mut search = mesh::Search::new(job);
+            match mesh::verdict(ma, mb, rel, &mut search) {
+                Ok(v) => Ok(v),
+                Err(mesh::Halt::OverBudget) => Ok(Verdict::CannotCheck {
+                    kernel: "mesh search past its budget".to_owned(),
+                    spent: Some(search.spent),
+                }),
+                Err(mesh::Halt::Cancelled) => {
+                    Err(crate::work::stopped(&ryukei::Error::Cancelled, job)
+                        .expect("a cancel is stopped"))
+                }
+            }
+        }
+        (Err(e), _) | (_, Err(e)) => Ok(Verdict::CannotCheck {
+            kernel: e.clone(),
+            spent: None,
+        }),
+    }
+}
+
+/// How interference judges two solids, `b` placed at `rel` in `a`'s
+/// frame: the exact boolean's verdict, or where the boolean is
+/// `Uncertain`, both meshes' (design 551, #436). Public for tests.
+pub fn solid_verdict(a: &Body, b: &Body, rel: Rigid) -> Verdict {
+    let job = Job::default();
+    match exact_for(a, b, rel, &job) {
+        Ok(Exact::Decided(v)) => v,
+        Ok(Exact::Uncertain(_)) => {
+            let prep = |x: &Body| Prepared::new(x).map(Arc::new);
+            on_meshes(&prep(a), &prep(b), &rel, &job).expect("no job, no cancel")
+        }
+        Err(_) => unreachable!("no job, no cancel"),
+    }
+}
+
+/// [`verdict_for`]'s exact half: the boolean's verdict, or its
+/// `Uncertain` refusal told apart.
+fn exact_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Exact> {
     let work = crate::work::work(job);
     let tool = Tool {
         key: ToolKey(OpKey::from_bytes(b"ryucad.interference\0b").0),
@@ -255,20 +327,28 @@ pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict>
         match ryukei::boolean::boolean_with(key, BooleanOp::Intersect, a, &[tool], &work) {
             Ok(r) => r,
             Err(ryukei::Error::InvalidBoolean(ryukei::BooleanError::NonManifold { .. })) => {
-                return Ok(Verdict::Touching);
+                return Ok(Exact::Decided(Verdict::Touching));
             }
             Err(e) => {
                 if let Some(e) = crate::work::stopped(&e, job) {
                     return Err(e);
                 }
-                return Ok(Verdict::CannotCheck {
-                    kernel: format!("{e:?}"),
+                let kernel = format!("{e:?}");
+                // The one refusal interference answers on meshes (#436).
+                if matches!(
+                    e,
+                    ryukei::Error::InvalidBoolean(ryukei::BooleanError::Uncertain { .. })
+                ) {
+                    return Ok(Exact::Uncertain(kernel));
+                }
+                return Ok(Exact::Decided(Verdict::CannotCheck {
+                    kernel,
                     spent: None,
-                });
+                }));
             }
         };
     if body.faces().next().is_none() {
-        return Ok(Verdict::Clear);
+        return Ok(Exact::Decided(Verdict::Clear));
     }
     // Sized by its faces' boxes, which may hold whole spheres or circles;
     // its own box is its mesh's.
@@ -284,10 +364,10 @@ pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict>
             if let Some(e) = crate::work::stopped(&e, job) {
                 return Err(e);
             }
-            return Ok(Verdict::CannotCheck {
+            return Ok(Exact::Decided(Verdict::CannotCheck {
                 kernel: format!("{e:?}"),
                 spent: None,
-            });
+            }));
         }
     };
     let mut volume_m3 = 0.0;
@@ -307,7 +387,7 @@ pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict>
     if flat([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]) || thin(&m.positions, &normals) {
         // Faces both sides hold (a file's tolerant bodies sharing a face):
         // the result holds no volume, so the pair touches (#523).
-        return Ok(Verdict::Touching);
+        return Ok(Exact::Decided(Verdict::Touching));
     }
     // Each face of the result is a piece of a face of one side: followed
     // back through the journal to the name it had there.
@@ -349,13 +429,13 @@ pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict>
             }
         }
     }
-    Ok(Verdict::Interferes {
+    Ok(Exact::Decided(Verdict::Interferes {
         min: [lo.x, lo.y, lo.z],
         max: [hi.x, hi.y, hi.z],
         volume_m3,
         faces_a: faces_a.into_iter().collect(),
         faces_b: faces_b.into_iter().collect(),
-    })
+    }))
 }
 
 /// Whether occurrence `o` lies under one of `only` (instance paths, as
@@ -383,7 +463,8 @@ fn unchecked_entry(a: &str, b: &str, kernel: &str, spent: Option<u64>) -> Value 
 }
 
 /// [`find`] for a request's `job`: each pair it intersects is a
-/// boundary. Cancelled, it keeps the verdicts it reached and answers
+/// boundary; a solid pair the boolean leaves `Uncertain` is then judged
+/// on meshes (#436), in a second stage. Cancelled, it keeps the verdicts it reached and answers
 /// `cancelled`.
 pub fn find_for(
     asm: &Id,
@@ -482,9 +563,9 @@ pub fn find_for(
         prepared.insert(k, r);
     }
     let stage = job.begin(Phase::Intersect, "pairs", missing.len());
-    let worked: Vec<Result<(String, Verdict)>> = missing
-        .into_par_iter()
-        .map(|(k, (a, b, rel))| {
+    let first: Vec<Result<(String, Exact)>> = missing
+        .par_iter()
+        .map(|(&k, &(a, b, rel))| {
             let (x, y) = (&pieces[a].1, &pieces[b].1);
             stage.step(|| {
                 let at = |p: &Piece| format!("{}/{}", path_text(&p.occurrence.path), p.founder);
@@ -492,39 +573,22 @@ pub fn find_for(
             })?;
             let v = if x.built.reference || y.built.reference {
                 let get = |b: &Built| prepared[&(b as *const Built as usize)].clone();
-                match (get(x.built), get(y.built)) {
-                    (Ok(ma), Ok(mb)) => {
-                        let mut search = mesh::Search::new(job);
-                        match mesh::verdict(&ma, &mb, &rel, &mut search) {
-                            Ok(v) => v,
-                            Err(mesh::Halt::OverBudget) => Verdict::CannotCheck {
-                                kernel: "mesh search past its budget".to_owned(),
-                                spent: Some(search.spent),
-                            },
-                            Err(mesh::Halt::Cancelled) => {
-                                return Err(crate::work::stopped(&ryukei::Error::Cancelled, job)
-                                    .expect("a cancel is stopped"));
-                            }
-                        }
-                    }
-                    (Err(e), _) | (_, Err(e)) => Verdict::CannotCheck {
-                        kernel: e,
-                        spent: None,
-                    },
-                }
+                Exact::Decided(on_meshes(&get(x.built), &get(y.built), &rel, job)?)
             } else {
-                verdict_for(&x.built.body, &y.built.body, rel, job)?
+                exact_for(&x.built.body, &y.built.body, rel, job)?
             };
             Ok((k.to_owned(), v))
         })
         .collect();
     drop(stage);
     let mut stopped = None;
-    for r in worked {
+    let mut undecided: Vec<String> = Vec::new();
+    for r in first {
         match r {
-            Ok((k, v)) => {
+            Ok((k, Exact::Decided(v))) => {
                 cache.verdicts.insert(k, Arc::new(v));
             }
+            Ok((k, Exact::Uncertain(_))) => undecided.push(k),
             Err(e) => {
                 stopped.get_or_insert(e);
             }
@@ -532,6 +596,64 @@ pub fn find_for(
     }
     if let Some(e) = stopped {
         return Err(e);
+    }
+    // Solid pairs the boolean left Uncertain, judged on both meshes as
+    // reference pairs are (design 551, #436), each body meshed once.
+    if !undecided.is_empty() {
+        let mut more: BTreeMap<usize, &Built> = BTreeMap::new();
+        for k in &undecided {
+            let (a, b, _) = missing[k.as_str()];
+            for x in [pieces[a].1.built, pieces[b].1.built] {
+                let at = x as *const Built as usize;
+                if !prepared.contains_key(&at) {
+                    more.insert(at, x);
+                }
+            }
+        }
+        let meshed: Vec<(usize, std::result::Result<Arc<Prepared>, ryukei::Error>)> = more
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|(k, b)| (k, Prepared::new_for(&b.body, &work).map(Arc::new)))
+            .collect();
+        for (k, r) in meshed {
+            let r = match r {
+                Ok(p) => Ok(p),
+                Err(e) => match crate::work::stopped(&e, job) {
+                    Some(stop) => return Err(stop),
+                    None => Err(format!("{e:?}")),
+                },
+            };
+            prepared.insert(k, r);
+        }
+        let stage = job.begin(Phase::Intersect, "pairs on meshes", undecided.len());
+        let second: Vec<Result<(String, Verdict)>> = undecided
+            .into_par_iter()
+            .map(|k| {
+                let (a, b, rel) = missing[k.as_str()];
+                let (x, y) = (&pieces[a].1, &pieces[b].1);
+                stage.step(|| {
+                    let at = |p: &Piece| format!("{}/{}", path_text(&p.occurrence.path), p.founder);
+                    format!("{} {}", at(x), at(y))
+                })?;
+                let get = |b: &Built| prepared[&(b as *const Built as usize)].clone();
+                Ok((k, on_meshes(&get(x.built), &get(y.built), &rel, job)?))
+            })
+            .collect();
+        drop(stage);
+        for r in second {
+            match r {
+                Ok((k, v)) => {
+                    cache.verdicts.insert(k, Arc::new(v));
+                }
+                Err(e) => {
+                    stopped.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = stopped {
+            return Err(e);
+        }
     }
     let solid = |p: &Piece| format!("{asm}/{}/{}", path_text(&p.occurrence.path), p.founder);
     let (mut interferences, mut touching, mut unchecked) = (Vec::new(), Vec::new(), Vec::new());

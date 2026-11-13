@@ -60,11 +60,11 @@ impl Id {
         &self.0
     }
 
-    /// The step of an instance path that reaches copy `index` of instance
-    /// pattern `pattern`: `<pattern>:<i>`, or `<pattern>:<i>:<j>` past its
-    /// first row. Not an ID a file may name a feature by.
-    pub fn copy(pattern: &Id, index: [u32; 2]) -> Id {
-        Id(step_text(pattern, Some(index)))
+    /// The step of an instance path that reaches copy `key` of instance
+    /// pattern `pattern`: `<pattern>:<key>`. Not an ID a file may name a
+    /// feature by.
+    pub fn copy(pattern: &Id, key: &CopyKey) -> Id {
+        Id(step_text(pattern, Some(key)))
     }
 
     /// The key an assembly's item numbers give another project's part:
@@ -82,8 +82,8 @@ impl Id {
         ))
     }
 
-    /// The pattern and index of a step [`Id::copy`] made.
-    pub fn copy_of(&self) -> Option<(Id, [u32; 2])> {
+    /// The pattern and key of a step [`Id::copy`] made.
+    pub fn copy_of(&self) -> Option<(Id, CopyKey)> {
         if !self.0.contains(':') {
             return None;
         }
@@ -201,15 +201,15 @@ impl ProjectId {
         &self.0
     }
 
-    /// The step of an instance path that reaches copy `index` of instance
-    /// pattern `pattern`: `<pattern>:<i>`, or `<pattern>:<i>:<j>` past its
-    /// first row. Not an ID a file may name a feature by.
-    pub fn copy(pattern: &Id, index: [u32; 2]) -> Id {
-        Id(step_text(pattern, Some(index)))
+    /// The step of an instance path that reaches copy `key` of instance
+    /// pattern `pattern`: `<pattern>:<key>`. Not an ID a file may name a
+    /// feature by.
+    pub fn copy(pattern: &Id, key: &CopyKey) -> Id {
+        Id(step_text(pattern, Some(key)))
     }
 
-    /// The pattern and index of a step [`Id::copy`] made.
-    pub fn copy_of(&self) -> Option<(Id, [u32; 2])> {
+    /// The pattern and key of a step [`Id::copy`] made.
+    pub fn copy_of(&self) -> Option<(Id, CopyKey)> {
         if !self.0.contains(':') {
             return None;
         }
@@ -239,40 +239,102 @@ impl Serialize for ProjectId {
     }
 }
 
+/// Which copy of an instance pattern's seed a path step names (design
+/// 521): an index (`<pattern>:<i>`, `<pattern>:<i>:<j>` past the first
+/// row), or the sketch point that drives it (`<pattern>:<point>`). A
+/// point whose ID is a canonical number is that index, so a key reads
+/// back as it was made ([`CopyKey::point`]).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CopyKey {
+    Index([u32; 2]),
+    Point(Id),
+}
+
+/// `t` as a number written canonically: `7`, never `07` or `+7`.
+fn canonical(t: &str) -> Option<u32> {
+    t.parse::<u32>().ok().filter(|i| i.to_string() == t)
+}
+
+impl CopyKey {
+    /// The key of the copy at sketch point `id`.
+    pub fn point(id: &Id) -> CopyKey {
+        match canonical(id.as_str()) {
+            Some(i) => CopyKey::Index([i, 0]),
+            None => CopyKey::Point(id.clone()),
+        }
+    }
+
+    /// The step's text after the pattern's ID: `2`, `2:1` or `p7`.
+    pub fn text(&self) -> String {
+        match self {
+            CopyKey::Index([i, 0]) => i.to_string(),
+            CopyKey::Index([i, j]) => format!("{i}:{j}"),
+            CopyKey::Point(p) => p.to_string(),
+        }
+    }
+
+    /// As errors and reports give it: `[i, j]`, or the point's ID.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            CopyKey::Index(i) => serde_json::json!(i),
+            CopyKey::Point(p) => serde_json::json!(p),
+        }
+    }
+
+    /// As copies' hashes take it: `[i, j]` as they always have, or the
+    /// point's ID.
+    pub fn hash_text(&self) -> String {
+        match self {
+            CopyKey::Index(i) => format!("{i:?}"),
+            CopyKey::Point(p) => p.to_string(),
+        }
+    }
+
+    /// Its index, for a key that is one.
+    pub fn index(&self) -> Option<[u32; 2]> {
+        match self {
+            CopyKey::Index(i) => Some(*i),
+            CopyKey::Point(_) => None,
+        }
+    }
+}
+
 /// One step of an instance path as text: an instance's ID, or a copy
-/// `<pattern>:<i>` (`<pattern>:<i>:<j>` past the first row).
-pub fn step_text(id: &Id, copy: Option<[u32; 2]>) -> String {
+/// `<pattern>:<key>` ([`CopyKey::text`]).
+pub fn step_text(id: &Id, copy: Option<&CopyKey>) -> String {
     match copy {
         None => id.to_string(),
-        Some([i, 0]) => format!("{id}:{i}"),
-        Some([i, j]) => format!("{id}:{i}:{j}"),
+        Some(k) => format!("{id}:{}", k.text()),
     }
 }
 
 /// Reads one step of an instance path: an ID, or a copy's.
-pub fn parse_step(s: &str, at: &str) -> Result<(Id, Option<[u32; 2]>)> {
+pub fn parse_step(s: &str, at: &str) -> Result<(Id, Option<CopyKey>)> {
     let mut parts = s.split(':');
     let head = parts.next().unwrap_or_default();
     let id = Id::parse(head, "instance").map_err(|e| e.with("pointer", at))?;
     let rest: Vec<&str> = parts.collect();
-    if rest.is_empty() {
-        return Ok((id, None));
-    }
-    let index = |t: &str| t.parse::<u32>().ok().filter(|_| !t.starts_with('+'));
     let copy = match rest.as_slice() {
-        [i] => index(i).map(|i| [i, 0]),
-        [i, j] => index(i).zip(index(j)).map(|(i, j)| [i, j]),
+        [] => return Ok((id, None)),
+        [i] => match canonical(i) {
+            Some(i) => Some(CopyKey::Index([i, 0])),
+            None => Id::parse(i, "point").ok().map(CopyKey::Point),
+        },
+        [i, j] => canonical(i)
+            .zip(canonical(j))
+            .filter(|(_, j)| *j != 0)
+            .map(|(i, j)| CopyKey::Index([i, j])),
         _ => None,
     };
     match copy {
-        Some([0, 0]) => Err(invalid_step(
+        Some(CopyKey::Index([0, 0])) => Err(invalid_step(
             at,
             "copy 0 of a pattern is its seed: name the seed",
         )),
-        Some(c) if step_text(&id, Some(c)) == s => Ok((id, Some(c))),
-        _ => Err(invalid_step(
+        Some(c) => Ok((id, Some(c))),
+        None => Err(invalid_step(
             at,
-            "a pattern's copy is <pattern>:<i>, or <pattern>:<i>:<j> past its first row",
+            "a pattern's copy is <pattern>:<i>, <pattern>:<i>:<j> past its first row, or <pattern>:<point>",
         )),
     }
 }
@@ -284,6 +346,38 @@ fn invalid_step(at: &str, msg: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_steps_are_indices_or_points() {
+        let id = |s: &str| Id::parse(s, "id").unwrap();
+        for (text, key) in [
+            ("ring:2", CopyKey::Index([2, 0])),
+            ("ring:2:1", CopyKey::Index([2, 1])),
+            ("ring:p7", CopyKey::Point(id("p7"))),
+            ("ring:07", CopyKey::Point(id("07"))),
+        ] {
+            let (p, k) = parse_step(text, "").unwrap();
+            assert_eq!((p.as_str(), k.as_ref()), ("ring", Some(&key)), "{text}");
+            assert_eq!(step_text(&p, Some(&key)), text);
+            assert_eq!(Id::copy(&p, &key).copy_of(), Some((p.clone(), key)));
+        }
+        // A point named by a canonical number is that index.
+        assert_eq!(CopyKey::point(&id("3")), CopyKey::Index([3, 0]));
+        assert_eq!(CopyKey::point(&id("p3")), CopyKey::Point(id("p3")));
+        for bad in [
+            "ring:0",
+            "ring:0:0",
+            "ring:2:0",
+            "ring:+1",
+            "ring:P7",
+            "ring:1:2:3",
+        ] {
+            assert!(parse_step(bad, "/x").is_err(), "{bad}");
+        }
+        assert_eq!(CopyKey::Index([2, 1]).hash_text(), "[2, 1]");
+        assert_eq!(CopyKey::Point(id("p7")).to_json(), serde_json::json!("p7"));
+        assert_eq!(CopyKey::Index([2, 0]).to_json(), serde_json::json!([2, 0]));
+    }
 
     #[test]
     fn ids_deserialize_only_when_valid() {

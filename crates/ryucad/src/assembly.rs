@@ -35,6 +35,9 @@ pub struct Occurrence {
     /// Its part's datums that built, by ID, in its part's frame: what a
     /// connector may be at.
     pub datums: Arc<Vec<(Id, Arc<crate::datum::Made>)>>,
+    /// Its part's places, in its part's frame: what a following instance
+    /// pattern reads (design 521).
+    pub places: Arc<crate::places::Places>,
     pub pose: Rigid,
     /// Its pose in each assembly along its path: `within[i]` in the one
     /// `path[..i]` reaches (`within[0]` is `pose`), each composed from
@@ -70,6 +73,10 @@ pub struct Model {
     pub failing: Option<Vec<String>>,
     /// Whether it is an assembly's model, which nothing inserts.
     pub assembly: bool,
+    /// Over its occurrences' places: what an assembly with a following
+    /// pattern keys its rebuild on. Not in `hash`, so models without such
+    /// readers key as before.
+    pub places_hash: String,
 }
 
 /// How a release label resolved: at the commit where its record became
@@ -128,12 +135,26 @@ impl Model {
             }
             h.update(&pose_bits(&o.pose));
         }
+        let mut ph = blake3::Hasher::new();
+        let mut any = false;
+        for o in &occurrences {
+            if !o.places.hash.is_empty() {
+                any = true;
+                ph.update(format!("{} {}\n", path_text(&o.path), o.places.hash).as_bytes());
+            }
+        }
+        let places_hash = if any {
+            ph.finalize().to_hex()[..32].to_owned()
+        } else {
+            String::new()
+        };
         Model {
             occurrences,
             hash: h.finalize().to_hex()[..32].to_owned(),
             pin: None,
             failing: None,
             assembly: false,
+            places_hash,
         }
     }
 
@@ -174,6 +195,7 @@ impl Model {
             rev: rev.clone(),
             solids: shown,
             datums: Arc::new(datums),
+            places: Arc::new(crate::places::Places::of(part, result)),
             pose: Rigid::IDENTITY,
             within: Vec::new(),
         }]);
@@ -204,6 +226,7 @@ impl Model {
                     rev: o.rev.clone(),
                     solids: o.solids.clone(),
                     datums: Arc::clone(&o.datums),
+                    places: Arc::clone(&o.places),
                     pose,
                     within,
                 });
@@ -216,7 +239,7 @@ impl Model {
                 Ok(Output::Copies(c)) => {
                     for copy in &c.copies {
                         place(
-                            vec![Id::copy(id, copy.index), copy.seed.clone()],
+                            vec![Id::copy(id, &copy.key), copy.seed.clone()],
                             &copy.placed,
                         );
                     }
@@ -1233,9 +1256,16 @@ impl<'p> Rebuild<'p> {
             }
             children.insert(at, m);
         }
+        // A pattern that follows a part's places reads them: only then do
+        // they key the rebuild, so every other assembly keys as before.
+        let follows = p
+            .features
+            .values()
+            .any(|f| matches!(f, Ok(Feature::InstancePattern(x)) if x.form.driven()));
         let mut h = blake3::Hasher::new();
         for ((c, crev), m) in &children {
             let what = match m {
+                Ok(m) if follows => format!("{} {:?} {}", m.hash, m.pin, m.places_hash),
                 Ok(m) => format!("{} {:?}", m.hash, m.pin),
                 Err(e) => serde_json::to_string(&e.code).expect("codes serialize"),
             };
@@ -1764,7 +1794,7 @@ fn nodes(
                         .iter()
                         .map(|c| {
                             let mut path = prefix.to_vec();
-                            path.extend([Id::copy(fid, c.index), c.seed.clone()]);
+                            path.extend([Id::copy(fid, &c.key), c.seed.clone()]);
                             serde_json::json!({
                                 "path": path_text(&path),
                                 "seed": c.seed,

@@ -18,7 +18,7 @@
 
 use crate::config::Scheme;
 use crate::label;
-use crate::structure::{Node, Reader, occurrences};
+use crate::structure::{Node, Reader, driven_keys, occurrences_with};
 use ryucad_doc::doc::assembly::{Rev, snap_origin};
 use ryucad_doc::doc::files::{PartKind, item_key};
 use ryucad_doc::doc::id::{Id, ProjectId};
@@ -159,7 +159,8 @@ fn expand(
         .as_ref()
         .map(|f| f.items.clone())
         .unwrap_or_default();
-    let (occ, problems) = occurrences(&node.part);
+    let part = node.part.clone();
+    let (occ, problems) = occurrences_with(&part, &mut |_, p| driven_keys(reader, &part, p));
     row.problems = problems
         .into_iter()
         .map(|e| e.with("part", &row.part))

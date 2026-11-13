@@ -931,3 +931,164 @@ fn teams_and_revoked_keys_verify_offline_in_a_clone() {
         )
     );
 }
+
+/// Two projects in one repository, each with a part `p` released as A
+/// (#835): each reads only its own tags, `ryupdm/<folder>/p/A`, and an
+/// old-form tag `ryupdm/p/A` counts only where it points at the record's
+/// official commit and attests the record's project.
+#[test]
+fn two_projects_with_a_part_of_the_same_name_tag_apart() {
+    use ryupdm::attest::Outcome;
+    use ryupdm::history::Tag;
+    use ryupdm::record::Kind;
+    const OTHER: &str = "fedcba9876543210fedcba9876543210";
+    let work = tempfile::tempdir().unwrap();
+    let w = work.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    for (folder, id) in [("a", PROJECT), ("b", OTHER)] {
+        put(
+            w,
+            &format!("{folder}/ryucad.json"),
+            &json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project", "project": id}),
+        );
+        put(
+            w,
+            &format!("{folder}/parts/p/part.json"),
+            &json!({"features": ["a"], "format": 1, "kind": "ryucad.part"}),
+        );
+        put(
+            w,
+            &format!("{folder}/parts/p/features/a.json"),
+            &json!({"x": folder}),
+        );
+        put(
+            w,
+            &format!("{folder}/parts/p/properties.json"),
+            &json!({"format": 1, "kind": "ryupdm.properties", "number": "100"}),
+        );
+    }
+    commit(w, "start");
+    let mut officials = BTreeMap::new();
+    for (folder, id) in [("a", PROJECT), ("b", OTHER)] {
+        let Record::Release(mut r) = release_a(&w.join(folder)) else {
+            unreachable!()
+        };
+        r.project = ProjectId::parse(id).unwrap();
+        let r = Record::Release(r);
+        put(w, &format!("{folder}/{}", r.path()), &r.to_json());
+        officials.insert(folder, commit(w, &format!("release {folder} p A")));
+    }
+    let (oa, ob) = (officials["a"].clone(), officials["b"].clone());
+    let p = Id::parse("p", "part").unwrap();
+    let read = |prefix: &str| {
+        let repo = gix::open(w).unwrap();
+        Releases::read(&repo, prefix, &Config::default()).unwrap()
+    };
+    let findings = |prefix: &str| {
+        let repo = gix::open(w).unwrap();
+        let releases = read(prefix);
+        let src = history::files(&repo, "HEAD", prefix).unwrap();
+        let h = History {
+            repo: &repo,
+            prefix,
+            releases: &releases,
+        };
+        check::run(&src, Some(h), None)
+            .unwrap()
+            .iter()
+            .map(|f| f.to_json())
+            .map(|v| {
+                (
+                    v["code"].as_str().unwrap().to_owned(),
+                    v["details"]["tag"].clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let tag_a = history::tag_name("a/", &p, "A");
+    let tag_b = history::tag_name("b/", &p, "A");
+    assert_eq!(tag_a, "ryupdm/a/p/A");
+    assert_eq!(tag_b, "ryupdm/b/p/A");
+    assert_eq!(read("a/").tag(&p, "A", &oa), Tag::Missing);
+    assert_eq!(read("b/").tag(&p, "A", &ob), Tag::Missing);
+
+    // Both tagged: both verify, and neither sees the other's as orphaned.
+    git(w, &["tag", &tag_a, &oa]);
+    git(w, &["tag", &tag_b, &ob]);
+    for (prefix, official) in [("a/", &oa), ("b/", &ob)] {
+        let r = read(prefix);
+        assert_eq!(r.tag(&p, "A", official), Tag::Ok, "{prefix}");
+        assert!(r.orphaned_tags().is_empty(), "{prefix}");
+        assert_eq!(
+            r.name_of(&p, "A", Kind::Release),
+            format!("ryupdm/{prefix}p/A")
+        );
+        assert!(
+            findings(prefix).is_empty(),
+            "{prefix}: {:?}",
+            findings(prefix)
+        );
+    }
+    // A root project in the same repository ignores them: they have a
+    // folder's segments.
+    assert!(read("").tags.is_empty());
+
+    // An old-form tag (ryucad before 0.9.1) made for a: a prefers its
+    // new-form tag, and b reads it as not its own, missing, never moved.
+    git(w, &["tag", "ryupdm/p/A", &oa]);
+    git(w, &["tag", "-d", &tag_b]);
+    assert_eq!(read("a/").tag(&p, "A", &oa), Tag::Ok);
+    assert_eq!(read("a/").name_of(&p, "A", Kind::Release), tag_a);
+    assert_eq!(read("b/").tag(&p, "A", &ob), Tag::Missing);
+    assert!(read("b/").orphaned_tags().is_empty());
+    assert_eq!(
+        findings("b/"),
+        [("release_tag_missing".to_owned(), json!(tag_b))]
+    );
+    // Without its new-form tag, a accepts the old one: it is at a's
+    // official commit.
+    git(w, &["tag", "-d", &tag_a]);
+    let r = read("a/");
+    assert_eq!(r.tag(&p, "A", &oa), Tag::Ok);
+    assert_eq!(r.name_of(&p, "A", Kind::Release), "ryupdm/p/A");
+    assert!(findings("a/").is_empty(), "{:?}", findings("a/"));
+    // The root project reads that one as its own, as before 0.9.1.
+    assert_eq!(read("").tags.keys().collect::<Vec<_>>(), ["p/A"]);
+
+    // An annotated old-form tag at b's official commit attesting another
+    // project isn't b's; one attesting b's project is.
+    git(w, &["tag", "-d", "ryupdm/p/A"]);
+    let rel = "b/releases/p/A.json";
+    let foreign = attested(w, rel, "p", "A", Kind::Release, &ob, Outcome::Approved);
+    annotated(w, "ryupdm/p/A", &ob, &foreign);
+    assert_eq!(read("b/").tag(&p, "A", &ob), Tag::Missing);
+    assert_eq!(read("a/").tag(&p, "A", &oa), Tag::Missing);
+    git(w, &["tag", "-d", "ryupdm/p/A"]);
+    let own = attested_with(
+        w,
+        rel,
+        "p",
+        "A",
+        Kind::Release,
+        &ob,
+        Outcome::Approved,
+        |a| a.project = ProjectId::parse(OTHER).unwrap(),
+    );
+    annotated(w, "ryupdm/p/A", &ob, &own);
+    assert_eq!(read("b/").tag(&p, "A", &ob), Tag::Ok);
+    assert_eq!(read("b/").name_of(&p, "A", Kind::Release), "ryupdm/p/A");
+
+    // Package tags carry the folder too, and an old-form one counts on the
+    // same terms: at the release's official commit.
+    let package = ryupdm::package::attest::tag_name("b/", &p, "A");
+    assert_eq!(package, "ryupdm/b/p/A.package");
+    git(w, &["tag", &package, &ob]);
+    assert!(read("b/").tags.contains_key("p/A.package"));
+    assert!(!read("a/").tags.contains_key("p/A.package"));
+    assert!(read("b/").orphaned_tags().is_empty());
+    git(w, &["tag", "ryupdm/p/A.package", &oa]);
+    let r = read("a/");
+    assert_eq!(r.name("p/A.package"), "ryupdm/p/A.package");
+    assert!(r.tags.contains_key("p/A.package"));
+    assert_eq!(read("b/").name("p/A.package"), package);
+}
