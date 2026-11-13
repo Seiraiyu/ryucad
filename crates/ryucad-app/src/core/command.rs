@@ -484,6 +484,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.edges", "Edges", View).toggle(),
     cmd("view.sketches", "Sketches", View).toggle(),
     cmd("view.datums", "Datums, paths and helices", View).toggle(),
+    cmd("view.threads", "Cosmetic threads", View).toggle(),
     cmd("view.flat", "Flat pattern", View)
         .icon("square-split-horizontal")
         .toggle(),
@@ -785,6 +786,7 @@ pub struct State {
     pub edges: bool,
     pub sketches: bool,
     pub datums: bool,
+    pub threads: bool,
     pub nav_cube: bool,
     pub triad: bool,
     pub origin: bool,
@@ -1012,6 +1014,7 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
         "view.edges" => s.edges,
         "view.sketches" => s.sketches,
         "view.datums" => s.datums,
+        "view.threads" => s.threads,
         "view.nav_cube" => s.nav_cube,
         "view.triad" => s.triad,
         "view.origin" => s.origin,

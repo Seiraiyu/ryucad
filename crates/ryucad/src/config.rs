@@ -206,6 +206,13 @@ const KEYS: &[Key] = &[
         about: "whether datums, paths and helices are drawn",
     },
     Key {
+        name: "display.threads",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether tapped holes' cosmetic threads are drawn",
+    },
+    Key {
         name: "display.annotations",
         scope: Scope::User,
         rule: Rule::Bool,
@@ -1163,6 +1170,7 @@ pub(crate) mod tests {
             ("display.triad", true),
             ("display.origin", false),
             ("display.datums", true),
+            ("display.threads", true),
             ("display.annotations", true),
         ] {
             assert_eq!(scope_of(key).unwrap(), Scope::User, "{key}");

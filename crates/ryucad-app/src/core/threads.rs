@@ -1,0 +1,222 @@
+//! Holes as the app sees them: each part's `holes.list`, by face for
+//! hover and the selection menu, by feature for the tree, and each
+//! tapped hole's cosmetic thread as two dashed rings.
+
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HoleRow {
+    pub reference: String,
+    pub spec: String,
+    pub feature: String,
+    pub faces: Vec<String>,
+    /// A tapped hole's rings: its axis, the ends' centres and the radius.
+    pub ring: Option<([f64; 3], [f64; 3], [f64; 3], f64)>,
+}
+
+/// A part's holes, at the revision they were listed at.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HoleTable {
+    pub revision: String,
+    pub rows: Vec<HoleRow>,
+    by_face: BTreeMap<String, usize>,
+}
+
+fn point(v: &Value) -> Option<[f64; 3]> {
+    let a = v.as_array()?;
+    Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?])
+}
+
+impl HoleTable {
+    /// From `holes.list`'s answer.
+    pub fn from_list(v: &Value) -> HoleTable {
+        let mut t = HoleTable::default();
+        for r in v["holes"].as_array().into_iter().flatten() {
+            let mut faces = Vec::new();
+            for f in r["faces"].as_object().into_iter().flat_map(|o| o.values()) {
+                match f {
+                    Value::String(s) => faces.push(s.clone()),
+                    Value::Array(a) => {
+                        faces.extend(a.iter().filter_map(|x| x.as_str().map(str::to_owned)));
+                    }
+                    _ => {}
+                }
+            }
+            let th = &r["thread"];
+            let ring = (|| {
+                Some((
+                    point(&th["axis"])?,
+                    point(&th["mouth"])?,
+                    point(&th["end"])?,
+                    th["major"].as_f64()? / 2.0,
+                ))
+            })();
+            let i = t.rows.len();
+            for f in &faces {
+                t.by_face.insert(f.clone(), i);
+            }
+            t.rows.push(HoleRow {
+                reference: r["ref"].as_str().unwrap_or_default().to_owned(),
+                spec: r["spec"].as_str().unwrap_or_default().to_owned(),
+                feature: r["feature"].as_str().unwrap_or_default().to_owned(),
+                faces,
+                ring,
+            });
+        }
+        t
+    }
+
+    pub fn by_face(&self, face: &str) -> Option<&HoleRow> {
+        self.by_face.get(face).map(|&i| &self.rows[i])
+    }
+
+    /// How many holes a hole feature makes, its patterns' and mirrors'
+    /// too.
+    pub fn count(&self, feature: &str) -> usize {
+        self.rows.iter().filter(|r| r.feature == feature).count()
+    }
+
+    /// Every face of every hole of the feature a face's hole belongs to.
+    pub fn siblings(&self, face: &str) -> Vec<String> {
+        let Some(h) = self.by_face(face) else {
+            return Vec::new();
+        };
+        self.rows
+            .iter()
+            .filter(|r| r.feature == h.feature)
+            .flat_map(|r| r.faces.clone())
+            .collect()
+    }
+}
+
+/// One ring: a closed polyline, dashed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ring {
+    pub hole: String,
+    pub points: Vec<[f64; 3]>,
+    pub dashed: bool,
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn unit(a: [f64; 3]) -> Option<[f64; 3]> {
+    let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+    (l > 0.0 && l.is_finite()).then(|| a.map(|x| x / l))
+}
+
+/// A ring at each end of each tapped hole's thread, 64 segments each.
+pub fn marks(t: &HoleTable) -> Vec<Ring> {
+    let mut out = Vec::new();
+    for r in &t.rows {
+        let Some((axis, mouth, end, radius)) = r.ring else {
+            continue;
+        };
+        let Some(n) = unit(axis) else {
+            continue;
+        };
+        let seed = if n[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let Some(u) = unit(cross(n, seed)) else {
+            continue;
+        };
+        let v = cross(n, u);
+        for c in [mouth, end] {
+            let points = (0..=64)
+                .map(|i| {
+                    let a = core::f64::consts::TAU * f64::from(i) / 64.0;
+                    let (s, k) = ryu_math::sin_cos(a);
+                    [0, 1, 2].map(|j| c[j] + radius * (k * u[j] + s * v[j]))
+                })
+                .collect();
+            out.push(Ring {
+                hole: r.reference.clone(),
+                points,
+                dashed: true,
+            });
+        }
+    }
+    out
+}
+
+/// Every shown part's thread rings as bands, in the colour renders draw
+/// them.
+pub fn overlay(
+    model: &crate::core::model::Model,
+    pr: &crate::core::nav::Projector,
+    size: [f64; 2],
+    scale: f64,
+) -> Vec<crate::core::sketch::Corner> {
+    let mut out = Vec::new();
+    for t in model.holes.values() {
+        let rings = marks(t);
+        crate::core::sketch::bands(
+            rings
+                .iter()
+                .map(|r| (r.points.as_slice(), ryucad::render::THREAD, r.dashed)),
+            pr,
+            size,
+            scale,
+            crate::core::sketch::CURVE_WIDTH,
+            &mut out,
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn table() -> HoleTable {
+        HoleTable::from_list(&json!({"holes": [
+            {"ref": "p/h/p1", "spec": "M6x1.0-6H THRU", "feature": "h", "solid": "b",
+             "faces": {"wall": "p/b/00aa"},
+             "thread": {"designation": "M6x1.0-6H", "major": 0.006, "internal": true,
+                        "axis": [0.0, 0.0, -1.0], "mouth": [0.0, 0.0, 0.012], "end": [0.0, 0.0, 0.0]}},
+            {"ref": "p/row/h/p1/1", "spec": "M6x1.0-6H THRU", "feature": "h", "solid": "b",
+             "pattern": {"feature": "row", "seed": "h", "instance": [1]},
+             "faces": {"wall": ["p/b/00bb", "p/b/00cc"]}},
+            {"ref": "p/c/p1", "spec": "DIA 6 THRU", "feature": "c", "solid": "b",
+             "faces": {"wall": "p/b/00dd"}}
+        ], "gone": []}))
+    }
+
+    #[test]
+    fn holes_by_face_and_feature() {
+        let t = table();
+        assert_eq!(
+            t.by_face("p/b/00cc").map(|r| r.reference.as_str()),
+            Some("p/row/h/p1/1")
+        );
+        assert_eq!(t.count("h"), 2);
+        assert_eq!(t.siblings("p/b/00aa"), ["p/b/00aa", "p/b/00bb", "p/b/00cc"]);
+        assert!(t.by_face("p/b/00ee").is_none());
+    }
+
+    #[test]
+    fn a_ring_at_each_end_of_each_thread() {
+        let marks = marks(&table());
+        assert_eq!(marks.len(), 2, "one thread, a ring at each end");
+        for m in &marks {
+            assert!(m.dashed);
+            assert_eq!(m.points.len(), 65);
+            for p in &m.points {
+                let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+                assert!((r - 0.003).abs() < 1e-12, "a ring at the major diameter");
+            }
+        }
+        assert_eq!(marks[0].points[0][2], 0.012);
+        assert_eq!(marks[1].points[0][2], 0.0);
+    }
+}

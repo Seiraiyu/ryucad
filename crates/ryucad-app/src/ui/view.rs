@@ -32,6 +32,8 @@ pub struct View {
     pub sketches: bool,
     /// Draw datums, paths and helices (`display.datums`).
     pub datums: bool,
+    /// Draw tapped holes' cosmetic threads (`display.threads`).
+    pub threads: bool,
     /// Draw annotations' pins (`display.annotations`).
     pub annotations: bool,
     /// Draw the navigation cube (`display.nav_cube`), the axis triad
@@ -338,6 +340,7 @@ impl View {
             edges: true,
             sketches: true,
             datums: true,
+            threads: true,
             annotations: true,
             cube: true,
             triad: true,
@@ -2825,6 +2828,14 @@ impl View {
             Vec::new()
         };
         overlay.extend(datum_lines);
+        if self.threads {
+            overlay.extend(crate::core::threads::overlay(
+                &ws.model,
+                pr,
+                size,
+                f64::from(ppp),
+            ));
+        }
         // Painted edges and vertices, depth-tested so they show only where
         // the entity does (#504); the pre-highlighted one stands out.
         overlay.extend(crate::core::sketch::painted(

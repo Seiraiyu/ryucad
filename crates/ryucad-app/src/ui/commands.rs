@@ -35,6 +35,7 @@ pub fn state(o: &mut Opened) -> State {
         edges: o.view.edges,
         sketches: o.view.sketches,
         datums: o.view.datums,
+        threads: o.view.threads,
         nav_cube: o.view.cube,
         triad: o.view.triad,
         origin: o.view.origin,
@@ -319,6 +320,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "view.edges" => toggle(o, "display.edges", o.view.edges),
         "view.sketches" => toggle(o, "display.sketches", o.view.sketches),
         "view.datums" => toggle(o, "display.datums", o.view.datums),
+        "view.threads" => toggle(o, "display.threads", o.view.threads),
         // A sheet metal solid laid flat where its fixed flange lies, or
         // folded again.
         "view.flat" => {

@@ -10,6 +10,7 @@ pub mod command;
 pub mod compare;
 pub mod cube;
 pub mod datums;
+pub mod threads;
 pub mod deps;
 pub mod doctor;
 pub mod drawings;
