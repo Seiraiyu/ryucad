@@ -6273,7 +6273,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
 
 /// How long a request run in this process waits, before it exits, for
 /// what it built to reach the shared cache.
-const REMOTE_FLUSH: Duration = Duration::from_secs(30);
+pub(crate) const REMOTE_FLUSH: Duration = Duration::from_secs(30);
 
 /// The CLI's warnings are all in its envelope: the warnings a request
 /// returns in its result (the protocol has no envelope) move there, as

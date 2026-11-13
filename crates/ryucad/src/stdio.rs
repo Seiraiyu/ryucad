@@ -276,6 +276,131 @@ impl Stop {
     }
 }
 
+/// What a session needs to know.
+pub struct Options {
+    /// The project's root.
+    pub root: PathBuf,
+    /// The script's folder, which relative paths mean.
+    pub here: PathBuf,
+    /// The agent to act as (`--as`, `RYUCAD_PARTICIPANT`); `agent` when
+    /// `None`.
+    pub name: Option<String>,
+    /// Answer in this process (`--no-daemon`, `RYUCAD_NO_DAEMON=1`).
+    pub no_daemon: bool,
+}
+
+/// How a session ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// Stdin ended, and every request has its answer.
+    Eof,
+    /// A Ctrl+C, after the running request's answer.
+    Interrupted,
+}
+
+/// Answers each request line of `input` in order, writing each answer to
+/// `out`, until `input` ends or a Ctrl+C (`stop`) has had its answer.
+/// `Err`: stdin or stdout failed.
+pub fn serve<R: BufRead, W: Write + Send + 'static>(
+    mut input: R,
+    out: &Out<W>,
+    opts: &Options,
+    stop: &Stop,
+) -> Result<Ended> {
+    let me = opts.name.clone();
+    let mut slot = None;
+    let mut text = String::new();
+    let ended = loop {
+        text.clear();
+        if input
+            .read_line(&mut text)
+            .map_err(|e| Error::io(Path::new("<stdin>"), &e))?
+            == 0
+        {
+            break Ended::Eof;
+        }
+        if text.trim().is_empty() {
+            continue;
+        }
+        let wrote = match Line::read(text.trim_end(), &opts.here) {
+            Err((id, e)) => write_answer(out, &id, Err(e)),
+            Ok(line) => answer_local(&mut slot, opts, me.as_deref(), line, out, stop),
+        };
+        stdout(wrote)?;
+        if stop.stopping() {
+            break Ended::Interrupted;
+        }
+    };
+    flush_remote(&slot);
+    Ok(ended)
+}
+
+/// Answers `line` with the session in `slot` (opened at the first
+/// request), as a daemon would: its progress, when it asks, as
+/// `progress` lines before its answer. `Ok(ok)`: written, and whether a
+/// result.
+fn answer_local<W: Write + Send + 'static>(
+    slot: &mut Option<Session>,
+    opts: &Options,
+    me: Option<&str>,
+    mut line: Line,
+    out: &Out<W>,
+    stop: &Stop,
+) -> std::io::Result<bool> {
+    let token = line.token();
+    let mut params = line.params.take();
+    let ask = match line.long() {
+        true => Ask::take(&mut params),
+        false => Ok(Ask::default()),
+    };
+    let req = ask.and_then(|ask| Ok((ask, Request::from_rpc(&line.method, params)?)));
+    let (ask, req) = match req {
+        Ok(r) => r,
+        Err(e) => return write_answer(out, &line.id, Err(e)),
+    };
+    let req = client::with_author(req, me);
+    let job = match token {
+        None => {
+            stop.begin(Running::Plain);
+            Job::default()
+        }
+        Some(token) => {
+            let flag = cancel::local_flag();
+            stop.begin(Running::Local(Arc::clone(&flag)));
+            let job = Job::new(&token, me.unwrap_or("agent"), &line.method, flag);
+            match ask.progress {
+                false => job,
+                true => {
+                    let out = Arc::clone(out);
+                    job.with_line(Box::new(move |p| {
+                        let mut w = lock(&out);
+                        let _ = writeln!(w, "{}", ryu_session::notify::line("progress", p));
+                        let _ = w.flush();
+                    }))
+                }
+            }
+        }
+    };
+    let answer = server::handle_job_raw(slot, None, me, &opts.root, req, &job);
+    // Its last progress line, as a daemon sends it.
+    job.finish();
+    stop.end();
+    write_answer(out, &line.id, answer)
+}
+
+/// What a session in this process built goes to the shared cache before
+/// the process exits, as the CLI's in-process requests do.
+fn flush_remote(slot: &Option<Session>) {
+    if let Some(r) = slot.as_ref().and_then(|s| s.disk()?.remote()) {
+        r.flush(crate::cli::REMOTE_FLUSH);
+    }
+}
+
+/// An answer's write, as the session's error: stdout is gone.
+fn stdout(r: std::io::Result<bool>) -> Result<bool> {
+    r.map_err(|e| Error::io(Path::new("<stdout>"), &e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +549,125 @@ mod tests {
         s.end();
         assert!(!s.stopping());
         assert_eq!(s.fire(), Fired::Exit);
+    }
+
+    /// A project in a temporary folder, and a session's options on it in
+    /// this process.
+    fn local() -> (tempfile::TempDir, Options) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::server::init(dir.path(), Some(crate::units::Unit::Mm)).unwrap();
+        let root = crate::doc::project::find_root(dir.path()).unwrap();
+        let opts = Options {
+            root: root.clone(),
+            here: root,
+            name: None,
+            no_daemon: true,
+        };
+        (dir, opts)
+    }
+
+    /// Splits what a session wrote into its lines, each with the bytes
+    /// it announces.
+    fn frames(mut b: &[u8]) -> Vec<(Value, Vec<u8>)> {
+        let mut v = Vec::new();
+        while !b.is_empty() {
+            let end = b.iter().position(|&c| c == b'\n').expect("a line break");
+            let line = std::str::from_utf8(&b[..end]).unwrap();
+            let n = Frame::of(line).binary.unwrap_or(0);
+            v.push((
+                serde_json::from_str(line).unwrap(),
+                b[end + 1..end + 1 + n].to_vec(),
+            ));
+            b = &b[end + 1 + n..];
+        }
+        v
+    }
+
+    /// `lines` through a session: how it ended, and what it wrote.
+    fn script(opts: &Options, lines: &[&str]) -> (Ended, Vec<(Value, Vec<u8>)>) {
+        let out: Out<Vec<u8>> = Arc::new(Mutex::new(Vec::new()));
+        let input = lines.join("\n") + "\n";
+        let ended = serve(std::io::Cursor::new(input), &out, opts, &Stop::default()).unwrap();
+        let bytes = std::mem::take(&mut *lock(&out));
+        (ended, frames(&bytes))
+    }
+
+    #[test]
+    fn a_script_runs_in_process_answer_by_answer() {
+        let (_dir, opts) = local();
+        let (ended, got) = script(
+            &opts,
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"part.create","params":{"part":"p"}}"#,
+                "",
+                "{nope",
+                r#"{"jsonrpc":"2.0","id":2,"method":"feature.add","params":{"part":"p","type":"box","id":"plate","params":{"x":"10","y":"20","z":"5"}}}"#,
+                r#"{"jsonrpc":"2.0","id":"m","method":"mesh.get","params":{"part":"p","transfer":"binary"}}"#,
+                r#"{"jsonrpc":"2.0","id":3,"method":"no.such"}"#,
+                r#"{"jsonrpc":"2.0","id":4,"method":"session.hello","params":{"kind":"agent"}}"#,
+                r#"{"jsonrpc":"2.0","id":5,"method":"rebuild","params":{"progress":true}}"#,
+                r#"{"jsonrpc":"2.0","id":6,"method":"part.list"}"#,
+            ],
+        );
+        assert_eq!(ended, Ended::Eof);
+        // Progress lines come only for the request that asked, before its answer.
+        let answers: Vec<&(Value, Vec<u8>)> = got
+            .iter()
+            .filter(|(v, _)| v.get("method").is_none())
+            .collect();
+        assert!(
+            got.iter()
+                .all(|(v, _)| v.get("method").is_none() || v["method"] == "progress")
+        );
+        let ids: Vec<&Value> = answers.iter().map(|(v, _)| &v["id"]).collect();
+        assert_eq!(
+            ids,
+            [
+                &json!(1),
+                &Value::Null,
+                &json!(2),
+                &json!("m"),
+                &json!(3),
+                &json!(4),
+                &json!(5),
+                &json!(6)
+            ]
+        );
+        assert_eq!(answers[1].0["error"]["data"]["code"], "invalid_json");
+        assert!(
+            answers[2].0["result"]["revision"].is_string(),
+            "{}",
+            answers[2].0
+        );
+        let n = answers[3].0["result"]["binary"]["length"].as_u64().unwrap();
+        assert!(n > 0);
+        assert_eq!(answers[3].1.len() as u64, n);
+        assert_eq!(answers[4].0["error"]["data"]["code"], "usage");
+        // No daemon, no participants, as with the CLI's --no-daemon.
+        assert_eq!(answers[5].0["error"]["data"]["code"], "no_live_session");
+        assert_eq!(
+            answers[6].0["result"]["parts"][0]["failed"], 0,
+            "{}",
+            answers[6].0
+        );
+        assert_eq!(answers[7].0["result"]["parts"][0]["part"], "p");
+    }
+
+    #[test]
+    fn relative_paths_mean_the_scripts_folder_in_process_too() {
+        let (dir, mut opts) = local();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        opts.here = out.clone();
+        let (_, got) = script(
+            &opts,
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"part.create","params":{"part":"p"}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"feature.add","params":{"part":"p","type":"box","id":"plate","params":{"x":"10","y":"20","z":"5"}}}"#,
+                r#"{"jsonrpc":"2.0","id":3,"method":"export","params":{"part":"p","out":"p.stl"}}"#,
+            ],
+        );
+        assert!(got[2].0.get("result").is_some(), "{}", got[2].0);
+        assert!(out.join("p.stl").is_file());
     }
 }
