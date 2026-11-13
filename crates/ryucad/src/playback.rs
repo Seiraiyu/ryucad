@@ -118,6 +118,149 @@ pub fn shown_json(session: &mut Session, participant: &str, shown: Option<&Shown
     v
 }
 
+use crate::assembly::{Model, path_text};
+use crate::explode::Offset;
+use crate::motion::{Job, Resolved, Rest};
+use std::collections::BTreeMap;
+
+/// The key a frame's offset is under, for occurrence `path`: its
+/// top-level instance (`pin` for `pin/below`), or the copy and seed it
+/// is under (`ring:2/pin`). Every occurrence under one moves with it.
+pub fn top_key(path: &str) -> &str {
+    let first = path.split('/').next().unwrap_or(path);
+    if !first.contains(':') {
+        return first;
+    }
+    match path[first.len()..].strip_prefix('/') {
+        Some(rest) => {
+            let seed = rest.split('/').next().unwrap_or(rest);
+            &path[..first.len() + 1 + seed.len()]
+        }
+        None => path,
+    }
+}
+
+/// Each moved occurrence's offset from the rest model `model` to the
+/// step's `step` (`motion::step_model`'s, with its `movers`), by path:
+/// where it is drawn, applied after its rest pose.
+pub fn occurrence_offsets(
+    model: &Model,
+    step: &Model,
+    movers: &[Option<u32>],
+) -> BTreeMap<String, Offset> {
+    model
+        .occurrences
+        .iter()
+        .zip(&step.occurrences)
+        .zip(movers)
+        .filter(|(_, m)| m.is_some())
+        .map(|((o, n), _)| {
+            (
+                path_text(&o.path),
+                Offset(n.pose.then_after(&o.pose.inverse())),
+            )
+        })
+        .collect()
+}
+
+/// [`occurrence_offsets`] by [`top_key`]: one per moved body, the first
+/// occurrence under it in path order.
+fn body_offsets(by_path: &BTreeMap<String, Offset>) -> BTreeMap<String, Offset> {
+    let mut out = BTreeMap::new();
+    for (p, o) in by_path {
+        out.entry(top_key(p).to_owned()).or_insert(*o);
+    }
+    out
+}
+
+/// One frame of a motion: its fraction, whether it holds, each drive's
+/// value there (as a sweep gives them), and each moved body's offset by
+/// [`top_key`]. A blocked frame keeps the last held frame's offsets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    pub t: f64,
+    pub holds: bool,
+    pub values: Value,
+    pub offsets: BTreeMap<String, Offset>,
+}
+
+impl Frame {
+    /// As `motion.frames` gives it: frame `index`, with `poses` (the
+    /// moved instances' poses, as a sweep's `poses` gives them).
+    pub fn to_json(&self, index: usize, poses: Value) -> Value {
+        let offsets: serde_json::Map<String, Value> = self
+            .offsets
+            .iter()
+            .map(|(k, o)| (k.clone(), crate::assembly::rigid_pose(&o.0).to_json()))
+            .collect();
+        json!({"index": index, "t": self.t,
+               "state": if self.holds { "holds" } else { "blocked" },
+               "values": self.values, "poses": poses, "offsets": offsets})
+    }
+
+    /// From `motion.frames`' answer; `None` if it isn't one.
+    pub fn from_json(v: &Value) -> Option<Frame> {
+        let mut offsets = BTreeMap::new();
+        for (k, p) in v["offsets"].as_object()? {
+            let pose = crate::doc::assembly::Pose::from_json(p, "/offsets").ok()?;
+            offsets.insert(k.clone(), Offset(crate::assembly::pose_rigid(&pose).ok()?));
+        }
+        Some(Frame {
+            t: v["t"].as_f64()?,
+            holds: v["state"] == "holds",
+            values: v["values"].clone(),
+            offsets,
+        })
+    }
+
+    /// Where this frame draws occurrence `path`, relative to rest: its
+    /// body's offset; `None` for what doesn't move.
+    pub fn offset_of(&self, path: &str) -> Option<&Offset> {
+        self.offsets.get(top_key(path))
+    }
+}
+
+/// `resolved`'s frames at fractions `ts` over the assembly at `rest` and
+/// `model`: each solved from the last that held, as a sweep's steps are
+/// (`motion::steps`), with the moved instances' poses. A blocked frame,
+/// or one whose model can't be placed, keeps the last held frame's
+/// offsets and poses.
+pub fn frames_of(
+    rest: &Rest,
+    model: &Model,
+    resolved: &Resolved,
+    ts: &[f64],
+    unit: crate::units::Unit,
+    job: &Job,
+) -> Result<Vec<(Frame, Value)>> {
+    let steps = crate::motion::steps(&rest.asm, &resolved.drives, ts, job)?;
+    let mut out = Vec::with_capacity(steps.len());
+    let mut held: (BTreeMap<String, Offset>, Value) = (BTreeMap::new(), json!({}));
+    for s in &steps {
+        job.check()?;
+        let mut holds = s.holds;
+        if holds {
+            match crate::motion::step_model(model, rest, &s.moved) {
+                Ok((m, movers)) => {
+                    held = (
+                        body_offsets(&occurrence_offsets(model, &m, &movers)),
+                        crate::motion::poses_json(rest, &s.moved),
+                    );
+                }
+                Err(_) => holds = false,
+            }
+        }
+        let frame = Frame {
+            t: s.t,
+            holds,
+            values: crate::motion::values_at(&resolved.drives, s.t, unit),
+            offsets: held.0.clone(),
+        };
+        out.push((frame, held.1.clone()));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +414,90 @@ mod tests {
             files
         );
         assert!(s.interference.is_empty(), "nothing intersected");
+    }
+
+    /// `resolved` frames of a saved motion at `n` even fractions.
+    fn framed(
+        s: &mut crate::session::Session,
+        asm: &str,
+        motion: &str,
+        n: usize,
+    ) -> Vec<(Frame, Value)> {
+        let pid = Id::parse(asm, "part").unwrap();
+        let r = crate::motion::resolve_in(s, &pid, motion).unwrap();
+        let result = s.rebuilt(&pid).unwrap().clone();
+        let rest = crate::motion::Rest::of(&result);
+        let model = s.model(&pid, &crate::doc::assembly::Rev::Working).unwrap();
+        let ts: Vec<f64> = (0..n).map(|k| crate::motion::t_of(k, n)).collect();
+        let unit = s.project().manifest.default_unit;
+        frames_of(&rest, &model, &r, &ts, unit, &crate::motion::Job::default()).unwrap()
+    }
+
+    #[test]
+    fn top_keys_are_instances_and_copies() {
+        assert_eq!(top_key("pin"), "pin");
+        assert_eq!(top_key("sub/inner/deep"), "sub");
+        assert_eq!(top_key("ring:2/pin"), "ring:2/pin");
+        assert_eq!(top_key("ring:2/pin/below"), "ring:2/pin");
+        assert_eq!(top_key("grid:1:3/pin"), "grid:1:3/pin");
+    }
+
+    #[test]
+    fn frames_move_what_the_motion_moves_by_continuation() {
+        let (_dir, mut s) = swing(false);
+        call(
+            &mut s,
+            "motion.save",
+            json!({"part": "swing", "motion": "turn", "steps": 46, "drives": turning("45 deg")}),
+        )
+        .unwrap();
+        let frames = framed(&mut s, "swing", "turn", 10);
+        assert_eq!(frames.len(), 10);
+        // At rest nothing has moved; the block, fixed, never moves.
+        assert!(frames[0].0.offsets.is_empty(), "{:?}", frames[0].0);
+        assert!(
+            frames
+                .iter()
+                .all(|(f, _)| f.holds && !f.offsets.contains_key("block"))
+        );
+        // At the end the arm's far end has turned 45° about z.
+        let last = &frames[9].0;
+        assert_eq!(last.t, 1.0);
+        let tip = last.offset_of("arm").unwrap().apply([0.05, 0.0, 0.0]);
+        let c = 0.05 * ryukei::math::cos(core::f64::consts::FRAC_PI_4);
+        assert!(
+            (tip[0] - c).abs() < 1e-12 && (tip[1] - c).abs() < 1e-12,
+            "{tip:?}"
+        );
+        assert_eq!(last.values["drives/0"]["angle_deg"], 45.0);
+        // Each frame's poses are the moved instances', as a sweep's.
+        assert!(frames[9].1["arm"]["origin_m"].is_array(), "{}", frames[9].1);
+        // A frame reads back as it was written.
+        let v = last.to_json(9, frames[9].1.clone());
+        assert_eq!(v["index"], 9);
+        assert_eq!(v["state"], "holds");
+        let back = Frame::from_json(&v).unwrap();
+        let p = back.offset_of("arm/below").unwrap().apply([0.05, 0.0, 0.0]);
+        assert!((p[0] - tip[0]).abs() < 1e-12 && (p[1] - tip[1]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_blocked_frame_stays_where_the_motion_last_held() {
+        let (_dir, mut s) = swinging();
+        let frames = framed(&mut s, "frame", "swing", 11);
+        // 0° to 10° by 1°: past the 6° stop from 7°.
+        let states: Vec<bool> = frames.iter().map(|(f, _)| f.holds).collect();
+        assert_eq!(
+            states,
+            [
+                true, true, true, true, true, true, true, false, false, false, false
+            ]
+        );
+        assert_eq!(frames[10].0.offsets, frames[6].0.offsets);
+        assert_eq!(frames[10].1, frames[6].1);
+        assert_ne!(frames[6].0.offsets, frames[1].0.offsets);
+        // Its values still say where the drive is.
+        let deg = frames[10].0.values["m1"]["angle_deg"].as_f64().unwrap();
+        assert!((deg - 10.0).abs() < 1e-12, "{deg}");
     }
 }
