@@ -5502,6 +5502,213 @@ fn hole_specs_section(golden: &mut Golden) {
     }
 }
 
+/// A project of one part `id`, with a call helper.
+fn hole_project(id: &str) -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    ryucad::server::handle(
+        &mut s,
+        ryucad::proto::Request::from_rpc("part.create", Some(json!({"part": id}))).unwrap(),
+    )
+    .unwrap();
+    (dir, s)
+}
+
+fn hole_call(s: &mut ryucad::session::Session, m: &str, p: serde_json::Value) -> serde_json::Value {
+    ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+        .unwrap_or_else(|e| panic!("{m}: {e}"))
+}
+
+/// Part `hg` (ryucad 28.B): a 60 x 40 x 16 mm plate with a 30 x 40 x 8 mm
+/// step joined under its left half, drilled with every new form, depth
+/// and bottom; a far-sided hole at two points over different exits and a
+/// pattern of it; through_next; and a stud with a cosmetic thread.
+fn hole_geometry_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut g = golden.section("hole_geometry");
+    let (_dir, mut s) = hole_project("hg");
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("hg");
+        hole_call(s, "feature.add", f)
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "plate", "params": {"x": 60, "y": 40, "z": 16}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "step", "operation": "join", "targets": ["plate"],
+               "params": {"x": 30, "y": 40, "z": 8}, "placement": {"origin": [0, 0, -8]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "top", "placement": {"origin": [0, 0, 16]}}),
+    );
+    let points = [
+        [8, 8],
+        [22, 8],
+        [38, 8],
+        [52, 8],
+        [15, 26],
+        [45, 26],
+        [52, 18],
+    ];
+    let mut ops = Vec::new();
+    for (i, at) in points.iter().enumerate() {
+        ops.push(json!({"op": "add", "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    hole_call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "hg", "sketch": "top", "ops": ops}),
+    );
+    for (id, pts, spec) in [
+        ("cd", vec!["p1"], "DIA 5 THRU, CDRILL 9 3 DEEP"),
+        ("sf", vec!["p2"], "DIA 5 THRU, SPOTFACE 12 0.5 DEEP, NEAR 6"),
+        ("tp", vec!["p3"], "DIA 5 10 DEEP TIP 118DEG"),
+        ("bl", vec!["p4"], "DIA 6 8 DEEP BALL"),
+        ("fh", vec!["p5", "p6"], "DIA 4 THRU, FAR CBORE 7 1 DEEP"),
+        ("nx", vec!["p7"], "DIA 4 THRU NEXT"),
+    ] {
+        add(
+            &mut s,
+            json!({"type": "hole", "id": id, "sketch": "top", "points": pts, "spec": spec,
+                   "targets": ["plate"]}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "fp", "features": ["fh"], "direction": "y",
+               "spacing": "8 mm", "count": 2}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "stud", "params": {"radius": 5, "height": 20},
+               "placement": {"origin": [100, 0, 0]}}),
+    );
+    let side = hole_call(&mut s, "inspect", json!({"part": "hg", "feature": "stud"}))["bodies"][0]
+        ["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .map(|f| format!("hg/stud/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    add(
+        &mut s,
+        json!({"type": "cosmetic_thread", "id": "ct", "faces": [side],
+               "thread": "iso_metric:M10"}),
+    );
+    let part = Id::parse("hg", "part").unwrap();
+    let result = s.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (id, o) in &result.features {
+        let o = o.as_ref().unwrap();
+        g.str(id.as_str());
+        for (solid, b) in o.solids() {
+            g.str(solid.as_str());
+            g.str(&b.body.dump());
+        }
+        if o.solids().is_empty() {
+            g.str(o.hash());
+        }
+    }
+    g.str(&result.hash);
+    let holes = ryucad::holes::list(&mut s, &part, None).unwrap();
+    // Six holes, one at two points, and the pattern's two copies.
+    assert_eq!(holes.rows.len(), 9);
+    for r in &holes.rows {
+        g.str(&ryucad::doc::canonical::to_string(&r.to_json(Unit::Mm)));
+    }
+    let threads = ryucad::thread::of(&holes);
+    assert_eq!(threads.len(), 1);
+    for t in threads {
+        g.str(&ryucad::doc::canonical::to_string(&t.to_json()));
+    }
+}
+
+/// Part `hc` (ryucad 28.B): one of each hole check's findings in a 60 x
+/// 40 x 12 mm plate; the canonical answer of `holes.check`.
+fn hole_checks_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut g = golden.section("hole_checks");
+    let (_dir, mut s) = hole_project("hc");
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("hc");
+        hole_call(s, "feature.add", f)
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "pl", "params": {"x": 60, "y": 40, "z": 12}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "t", "placement": {"origin": [0, 0, 12]}}),
+    );
+    let mut ops = Vec::new();
+    for (i, at) in [[10, 10], [3, 30], [50, 10], [30, 20]].iter().enumerate() {
+        ops.push(json!({"op": "add", "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    hole_call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "hc", "sketch": "t", "ops": ops}),
+    );
+    for (id, point, spec) in [
+        ("past", "p1", "M6x1.0-6H 15 DEEP, DRILL 18 DEEP"),
+        ("edge", "p2", "DIA 4 THRU"),
+        ("short", "p3", "M3x0.5-6H 1.5 DEEP, DRILL 2.52 6 DEEP"),
+        ("v", "p4", "DIA 4 10 DEEP"),
+    ] {
+        add(
+            &mut s,
+            json!({"type": "hole", "id": id, "sketch": "t", "points": [point], "spec": spec,
+                   "targets": ["pl"]}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "side",
+               "placement": {"origin": [60, 0, 0], "x": [0, 1, 0], "z": [1, 0, 0]}}),
+    );
+    hole_call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "hc", "sketch": "side", "ops": [
+            {"op": "add", "type": "point", "at": [20, 6]},
+            {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "x", "sketch": "side", "spec": "DIA 4 35 DEEP",
+               "targets": ["pl"]}),
+    );
+    let v = hole_call(&mut s, "holes.check", json!({"part": "hc"}));
+    let codes: std::collections::BTreeSet<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    for c in [
+        "hole_breakout",
+        "hole_breaks_through",
+        "hole_thread_past_material",
+        "hole_edge_distance",
+        "hole_thread_engagement",
+        "hole_tap_drill_nonstandard",
+    ] {
+        assert!(codes.contains(c), "{c}: {v}");
+    }
+    g.str(&ryucad::doc::canonical::to_string(&v));
+}
+
 #[test]
 fn drilled_solids_are_sound() {
     let (_dir, mut session) = drilled(false);
@@ -6967,6 +7174,8 @@ sections! {
     holes => drilled_section(&mut golden, "holes", true),
     patterns => drilled_section(&mut golden, "patterns", false),
     hole_specs => hole_specs_section(&mut golden),
+    hole_geometry => hole_geometry_section(&mut golden),
+    hole_checks => hole_checks_section(&mut golden),
     sketch_drawing => sketch_drawing_section(&mut golden),
     diff => diff_section(&mut golden),
     merge => merge_section(&mut golden),

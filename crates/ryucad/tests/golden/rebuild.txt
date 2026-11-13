@@ -25,6 +25,8 @@ external_imports 3d1a7f610ba4b87c
 fills c23ab58058cf5d7b
 flatten 2d40ea70acae18ed
 formats b1d8612856607f56
+hole_checks 861ad7af2f17e990
+hole_geometry 43bd3336423e2482
 hole_specs 4d1b7b278c6ad67b
 holes ad955e972c9cdf98
 imports 51b4bb06f2c160a6

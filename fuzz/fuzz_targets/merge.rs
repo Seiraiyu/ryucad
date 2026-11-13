@@ -11,7 +11,7 @@
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
 //! unfold or refold, `0xed` a face tweak, `0xec` a thicken or a fill (by the
 //! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool, `0xe8` a delete_face or a tweak's topology and blends, each at the format a build writes, `0xe7` a blend edit, `0xe6` an insert or a delete of bodies (by
-//! the parity of the edit bytes). Merging must never panic, must give the same bytes twice,
+//! the parity of the edit bytes), `0xe5` a hole's geometry (ryucad 28.B). Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -1423,6 +1423,49 @@ fn edit_blends(v: &mut Value, op: u8, arg: u8) {
 /// Edits an insert: its label (or `working`), its placement's origin, its
 /// axes turned, its placement dropped; or a delete of bodies: a solid
 /// added, the first taken out, the list replaced.
+/// A hole's geometry (ryucad 28.B): its near chamfer set or taken away,
+/// a far countersink or counterbore, its thread's class, or through all
+/// or to the next wall.
+fn edit_hole_geometry(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    match op % 4 {
+        0 if arg % 3 == 0 => {
+            o.remove("near");
+        }
+        0 => {
+            o.insert(
+                "near".into(),
+                json!({"diameter": format!("{} mm", 7 + arg % 3), "angle": "90 deg"}),
+            );
+        }
+        1 if arg % 2 == 0 => {
+            o.insert(
+                "far".into(),
+                json!({"countersink": {"diameter": format!("{} mm", 8 + arg % 3),
+                                       "angle": "90 deg"}}),
+            );
+        }
+        1 => {
+            o.insert(
+                "far".into(),
+                json!({"counterbore": {"diameter": "9 mm",
+                                       "depth": format!("{} mm", 1 + arg % 3)}}),
+            );
+        }
+        2 => {
+            let class = ["6H", "5H", "6G"][usize::from(arg % 3)];
+            o.insert(
+                "thread".into(),
+                json!({"standard": "iso_metric", "size": "M6", "class": class}),
+            );
+        }
+        _ => {
+            let d = if arg % 2 == 0 { "through_all" } else { "through_next" };
+            o.insert("depth".into(), json!(d));
+        }
+    }
+}
+
 fn edit_insert(v: &mut Value, op: u8, arg: u8) {
     let o = v.as_object_mut().unwrap();
     if o.get("type").and_then(Value::as_str) == Some("delete_body") {
@@ -1564,9 +1607,11 @@ fuzz_target!(|data: &[u8]| {
     // tweak (27), `0xec` a thicken or a fill (28), `0xeb` a draft (29),
     // `0xea` a split by a tool (30), `0xe9` a drawing (31), `0xe8` a
     // delete_face or a tweak's topology and blends (32), `0xe7` a blend
-    // edit (33), `0xe6` an insert or a delete of bodies (34); every other byte
-    // picks as it did before them.
+    // edit (33), `0xe6` an insert or a delete of bodies (34), `0xe5` a
+    // hole's geometry (35, ryucad 28.B); every other byte picks as it did
+    // before them.
     let kind = match mode {
+        0xe5 => 35,
         0xe6 => 34,
         0xe7 => 33,
         0xe8 => 32,
@@ -1673,6 +1718,10 @@ fuzz_target!(|data: &[u8]| {
                          "target": "b", "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
             // An insert when the edits leave no odd byte over, else a
             // delete of bodies.
+            35 => json!({"format": 24, "kind": "ryucad.feature", "type": "hole",
+                "sketch": "t", "form": "simple", "depth": "through_all", "targets": ["b"],
+                "thread": {"standard": "iso_metric", "size": "M6"},
+                "near": {"diameter": "7 mm"}}),
             34 if rest.len() % 2 == 0 => json!({"format": 21, "kind": "ryucad.feature",
                 "type": "insert", "part": "pcb", "rev": {"label": "A"},
                 "placement": {"origin": ["0 mm", "0 mm", "1 mm"], "x": [1, 0, 0], "z": [0, 0, 1]}}),
@@ -1786,6 +1835,7 @@ fuzz_target!(|data: &[u8]| {
             32 => edit_direct(v, op, arg),
             33 => edit_blends(v, op, arg),
             34 => edit_insert(v, op, arg),
+            35 => edit_hole_geometry(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -1996,6 +2046,26 @@ fuzz_target!(|data: &[u8]| {
         // conflicting inside the tool, and a clean merge reads.
         // An insert's pin and placement, and a delete's solids, are each
         // one value: a clean merge reads.
+        // A hole's near chamfer, far side and thread are each one value
+        // (ryucad 28.B): a conflict is on one whole, and a clean merge reads.
+        if kind == 35 {
+            let (merged, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    ["", "/near", "/far", "/thread", "/depth"].contains(&k.as_str()),
+                    "conflicted inside a hole's near, far or thread at {k}: {v}"
+                );
+            }
+            if outcome == Outcome::Clean {
+                ryucad::doc::files::Feature::from_json(
+                    &v,
+                    ryucad::units::Unit::Mm,
+                    &ryucad::expr::Env::empty(),
+                )
+                .expect("a clean merge of a hole's geometry reads");
+            }
+        }
         if kind == 34 {
             let (merged, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
