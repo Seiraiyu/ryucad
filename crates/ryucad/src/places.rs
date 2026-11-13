@@ -584,4 +584,104 @@ pub(crate) mod tests {
         }
         assert_eq!(code(p).code, Code::NotFound);
     }
+
+    /// Every copy's path in the pack's model with its origin, mm.
+    fn copies(s: &mut Session) -> BTreeMap<String, [i64; 3]> {
+        let m = s.model(&id("pack"), &Rev::Working).unwrap();
+        m.occurrences
+            .iter()
+            .filter(|o| o.path[0].copy_of().is_some())
+            .map(|o| {
+                let t = o.pose.translation_part();
+                (
+                    crate::assembly::path_text(&o.path),
+                    [t.x, t.y, t.z].map(|c| (c * 1e3).round() as i64),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn copies_follow_a_parts_pattern_hole_and_sketch_and_keep_their_keys() {
+        let (_dir, mut s) = tray();
+        for (pid, seed, form, on, points) in [
+            ("screws", "screw-0", "feature", "pack/lid/grid", json!(null)),
+            ("bolts", "bolt-0", "feature", "pack/lid/row", json!(null)),
+            (
+                "pins",
+                "pin-0",
+                "points",
+                "pack/lid/layout",
+                json!(["p1", "p5"]),
+            ),
+        ] {
+            let mut f = json!({"part": "pack", "type": "instance_pattern", "id": pid,
+                               "instances": [seed], "form": form, "on": on});
+            if !points.is_null() {
+                f["points"] = points;
+            }
+            must(&mut s, "feature.add", f);
+        }
+        let want = |v: &[(&str, [i64; 3])]| -> BTreeMap<String, [i64; 3]> {
+            v.iter().map(|(k, a)| (k.to_string(), *a)).collect()
+        };
+        assert_eq!(
+            copies(&mut s),
+            want(&[
+                ("screws:1/screw-0", [130, 10, 0]),
+                ("screws:2/screw-0", [150, 10, 0]),
+                ("screws:0:1/screw-0", [110, 30, 0]),
+                ("screws:1:1/screw-0", [130, 30, 0]),
+                ("bolts:p2/bolt-0", [125, 35, 0]),
+                ("bolts:p5/bolt-0", [145, 35, 0]),
+                ("pins:p5/pin-0", [145, 35, 0]),
+            ])
+        );
+        // A mate on a copy, by its key, to a fixed nut where the copy is.
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "pack", "type": "instance", "id": "nut",
+             "of": "screw", "fixed": true, "placement": {"origin": [145, 35, 0]}}),
+        );
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "pack", "type": "mate", "id": "m",
+             "form": "fastened", "a": "pack/bolts:p5/bolt-0", "b": "pack/nut"}),
+        );
+        // p2 removed: p5's copy keeps its key, and its mate holds.
+        must(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "tray", "sketch": "layout",
+             "ops": [{"op": "remove", "id": "p2"}]}),
+        );
+        let c = copies(&mut s);
+        assert!(!c.contains_key("bolts:p2/bolt-0"));
+        assert_eq!(c["bolts:p5/bolt-0"], [145, 35, 0]);
+        let r = s.rebuilt(&id("pack")).unwrap().clone();
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        // A point added is a copy added; nothing else is renumbered.
+        must(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "tray", "sketch": "layout",
+             "ops": [{"op": "add", "id": "p7", "type": "point", "at": [35, 35]}]}),
+        );
+        assert_eq!(copies(&mut s)["bolts:p7/bolt-0"], [135, 35, 0]);
+        // The lid turned a quarter about z: the copies turn with it.
+        must(
+            &mut s,
+            "assembly.move",
+            json!({"part": "pack", "instance": "lid",
+             "axis": [0, 0, 1], "angle": "90 deg"}),
+        );
+        assert_eq!(copies(&mut s)["screws:1/screw-0"], [110, 30, 0]);
+        // Refused at write: a seed that carries the places.
+        let e = crate::server::handle(&mut s, crate::proto::Request::from_rpc("feature.add",
+            Some(json!({"part": "pack", "type": "instance_pattern", "id": "x", "instances": ["lid"],
+                        "form": "feature", "on": "pack/lid/grid"}))).unwrap()).unwrap_err();
+        assert_eq!(e.details["pointer"], "/instances");
+    }
 }

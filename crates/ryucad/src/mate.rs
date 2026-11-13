@@ -454,6 +454,29 @@ fn pattern(
         let s = w.spacing.meters();
         if w.reverse { -s } else { s }
     };
+    if p.form.driven() {
+        let r = crate::places::resolve(id, p, scope)?;
+        for (key, m) in &r.places {
+            frame_ok(id, &format!("on ({})", key.text()), m)?;
+        }
+        let copies = r
+            .places
+            .iter()
+            .enumerate()
+            .map(|(k, (key, _))| (key.clone(), [k as u32 + 1, 0]))
+            .collect();
+        return Ok(Resolved {
+            pattern: ryumate::Pattern {
+                seeds: p.instances.iter().map(body).collect(),
+                motion: ryumate::Motion::Places {
+                    body: body(&r.carrier),
+                    places: r.places.into_iter().map(|(_, m)| m).collect(),
+                },
+            },
+            seeds: p.instances.clone(),
+            copies,
+        });
+    }
     let motion = match &p.form {
         PatternForm::Linear { first, second } => ryumate::Motion::Linear {
             direction: direction(id, "direction", &first.direction, scope, body)?,
@@ -481,11 +504,7 @@ fn pattern(
             }
         }
         PatternForm::Feature { .. } | PatternForm::Points { .. } => {
-            return Err(Error::new(
-                Code::Internal,
-                format!("{id}: a pattern that follows a part's places isn't built yet (Task 11)"),
-            )
-            .with("feature", id));
+            unreachable!("returned above")
         }
     };
     Ok(Resolved {
@@ -816,6 +835,11 @@ pub fn check(
             .with("feature", id)
             .with("role", role));
         }
+    }
+    if let Some(x) = f.instance_pattern()
+        && x.form.driven()
+    {
+        crate::places::resolve(id, x, &scope)?;
     }
     if f.mate().is_some() && on[0] == on[1] {
         return Err(Error::new(
