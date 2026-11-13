@@ -1371,9 +1371,13 @@ pub fn sweep_request(session: &mut Session, ask: SweepAsk) -> Result<Value> {
         ask.motion.as_deref().unwrap_or("(inline)"),
         &file,
     )?;
+    // The model's hash covers what the assembly places (a placed part
+    // edited leaves the assembly's own revision as it was).
+    let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
     let key = {
         let mut h = blake3::Hasher::new();
         h.update(part.revision.as_bytes());
+        h.update(model.hash.as_bytes());
         h.update(crate::doc::canonical::to_string(&resolved.to_json()).as_bytes());
         h.update(&(resolved.steps as u64).to_le_bytes());
         h.update(crate::doc::canonical::to_string(&opts.to_json()).as_bytes());
@@ -1383,7 +1387,6 @@ pub fn sweep_request(session: &mut Session, ask: SweepAsk) -> Result<Value> {
     if let Some(v) = session.sweeps.get(&key) {
         return Ok((*v).clone());
     }
-    let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
     let job = session.job.clone();
     let input = Input {
         asm: &pid,
@@ -2469,6 +2472,30 @@ pub(crate) mod tests {
                 .iter()
                 .any(|f| f["code"] == "motion_interferes" && f["motion"] == "sweep"),
             "{asked}"
+        );
+    }
+
+    #[test]
+    fn a_placed_part_edited_sweeps_again() {
+        let (_dir, mut s) = swing(false);
+        let ask = json!({"part": "swing", "drives": turning("45 deg"), "steps": 46,
+                         "interference": true, "refine": 0});
+        let before = call(&mut s, "assembly.sweep", ask.clone()).unwrap();
+        assert_eq!(before["first_collision"]["index"], 22, "{before}");
+        assert_eq!(s.sweeps.len(), 1);
+        // The block made shorter: the assembly's own files are unchanged,
+        // but the arm now meets the block's corner at (35, 20) mm, sooner.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "block", "id": "body", "params": {"x": "5 mm"}}),
+        )
+        .unwrap();
+        let after = call(&mut s, "assembly.sweep", ask).unwrap();
+        assert_eq!(s.sweeps.len(), 2, "a stale answer was given");
+        assert_ne!(
+            after["first_collision"], before["first_collision"],
+            "{after}"
         );
     }
 }
