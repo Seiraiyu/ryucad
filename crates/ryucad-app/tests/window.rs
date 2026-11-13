@@ -1553,6 +1553,83 @@ fn a_click_on_a_cut_face_selects_it() {
 }
 
 #[test]
+fn hovering_a_tapped_hole_shows_its_spec() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    // A 30 × 30 × 6 mm plate, one M3 through hole at its centre.
+    let p = Project::new();
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "plate", "--param", "x=30", "--param", "y=30",
+        "--param", "z=6",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,6",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [15, 15]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--spec",
+        "M3x0.5-6H THRU",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a)
+            && a.opened()
+                .ws
+                .model
+                .holes
+                .get("p")
+                .is_some_and(|t| !t.rows.is_empty())
+    });
+    // Looking into the bore from above and aside, framed on it.
+    if let ryucad_app::ui::app::Screen::Opened(o) = &mut h.state_mut().screen {
+        o.view.nav.camera = ryucad::view::frame(
+            [0.012, 0.012, 0.003],
+            [0.018, 0.018, 0.006],
+            ryucad::view::StandardView::Iso,
+            ryucad::view::DEFAULT_PROJECTION,
+        );
+    }
+    h.run_steps(2);
+    // The wall shows on the bore's far side: try round it, 0.4 mm down.
+    let r = 0.00125;
+    let mut found = None;
+    for k in 0..16 {
+        let a = std::f64::consts::TAU * f64::from(k) / 16.0;
+        let (sin, cos) = ryu_math::sin_cos(a);
+        let at = on_screen(&h, [0.015 + r * cos, 0.015 + r * sin, 0.0056]);
+        h.event(egui::Event::PointerMoved(at));
+        h.step();
+        let o = h.state().opened();
+        if let Some(hover) = o.view.hover.clone()
+            && hover.kind.as_str() == "face"
+            && ryucad_app::core::threads::hole(&o.ws.model, &hover.entity).is_some()
+        {
+            found = Some(hover);
+            break;
+        }
+    }
+    let hover = found.expect("the bore's wall under the pointer somewhere round it");
+    let text = ryucad_app::ui::view::describe(&h.state().opened().ws, &hover);
+    assert!(
+        text.contains("M3x0.5-6H THRU") && text.contains("p/h/p1"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_click_on_a_sketch_line_selects_it() {
     let _one = one_at_a_time();
     if !gpu() {
