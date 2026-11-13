@@ -29,6 +29,7 @@ hole_specs 4d1b7b278c6ad67b
 holes ad955e972c9cdf98
 imports 51b4bb06f2c160a6
 inserts 7e44d307e6c9e832
+instance_patterns 67eb536abe169ac7
 interference b3a04774fcaeb4fe
 limits a80f41b6adea49f4
 lofts 97c8ae8c328b3d66
