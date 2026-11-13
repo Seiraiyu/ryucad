@@ -6,13 +6,13 @@ use super::{BodyUse, FeatureKind, Write};
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
-use crate::error::Result;
+use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::units::Unit;
 use serde_json::Value;
 use serde_json::json;
 
-pub(crate) const INSTANCE_PATTERN: [&str; 13] = [
+pub(crate) const INSTANCE_PATTERN: [&str; 16] = [
     "form",
     "instances",
     "direction",
@@ -26,6 +26,9 @@ pub(crate) const INSTANCE_PATTERN: [&str; 13] = [
     "axis",
     "angle",
     "skip",
+    "on",
+    "from",
+    "points",
 ];
 
 /// An instance pattern from `current`'s fields (none for a new one, whose
@@ -41,7 +44,15 @@ pub(crate) fn instance_pattern_from(
 ) -> Result<Feature> {
     use crate::doc::mate::InstancePattern;
     let f = &given.fields;
-    let fresh = || json!({"form": if f.axis.is_some() { "circular" } else { "linear" }});
+    let fresh = || {
+        let form = match (&f.on, &f.points, &f.axis) {
+            (Some(_), Some(_), _) => "points",
+            (Some(_), None, _) => "feature",
+            (None, _, Some(_)) => "circular",
+            _ => "linear",
+        };
+        json!({ "form": form })
+    };
     let mut v = current.map_or_else(fresh, InstancePattern::fields);
     let o = v.as_object_mut().expect("an object");
     const SECOND: [&str; 4] = ["direction2", "spacing2", "count2", "reverse2"];
@@ -59,6 +70,8 @@ pub(crate) fn instance_pattern_from(
                 "skip",
             ],
             "circular" => &["axis", "count", "angle", "skip"],
+            "feature" => &["on", "from"],
+            "points" => &["on", "from", "points"],
             _ => &[],
         };
         o.retain(|k, _| takes.contains(&k.as_str()) || k == "instances");
@@ -115,10 +128,47 @@ pub(crate) fn instance_pattern_from(
     if let Some(x) = &f.instances {
         o.insert("instances".into(), json!(x));
     }
+    if let Some(t) = f.on.as_deref().filter(|t| !t.is_empty()) {
+        o.insert("on".into(), driver_json(t, part)?);
+    }
+    match f.from.as_deref() {
+        Some("") => {
+            o.remove("from");
+        }
+        Some(t) => {
+            o.insert("from".into(), json!(t));
+        }
+        None => {}
+    }
+    match &f.points {
+        Some(p) if p.is_empty() => {
+            o.remove("points");
+        }
+        Some(p) => {
+            o.insert("points".into(), json!(p));
+        }
+        None => {}
+    }
     let mut o = crate::doc::files::Obj::new(&v, "")?;
     let p = InstancePattern::from_fields(&mut o, unit, env)?;
     o.finish()?;
     Ok(Feature::InstancePattern(Box::new(p)))
+}
+
+/// A following pattern's `on` from its text: `<assembly>/<instance>[/…]/<feature>`,
+/// from assembly `asm`, as connectors are given.
+fn driver_json(t: &str, asm: &Id) -> Result<Value> {
+    let bad = || {
+        Error::new(
+            Code::InvalidParam,
+            format!("{t}: on is {asm}/<instance>[/<instance>…]/<feature>, from this assembly"),
+        )
+        .with("param", "on")
+    };
+    let rest = t.strip_prefix(&format!("{asm}/")).ok_or_else(bad)?;
+    let mut steps: Vec<&str> = rest.split('/').collect();
+    let feature = steps.pop().filter(|_| !steps.is_empty()).ok_or_else(bad)?;
+    Ok(json!({"instance": steps, "feature": feature}))
 }
 
 /// Instance patterns.
@@ -157,6 +207,9 @@ impl FeatureKind for InstancePatterns {
         let mut v = x.fields();
         for (role, c) in x.connectors() {
             v[role]["text"] = json!(crate::part::connector_text(&part.id, c));
+        }
+        if let Some(d) = x.form.driver() {
+            v["on"]["text"] = json!(format!("{}/{}", part.id, d.text()));
         }
         v
     }

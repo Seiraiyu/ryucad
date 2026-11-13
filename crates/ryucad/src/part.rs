@@ -272,6 +272,17 @@ pub(crate) fn part_report(
             Some((fid.clone(), form))
         })
         .collect();
+    // A following instance pattern's driver: `lid/hole-pattern`.
+    let drivers: BTreeMap<Id, String> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            Some((
+                fid.clone(),
+                f.as_ref().ok()?.instance_pattern()?.form.driver()?.text(),
+            ))
+        })
+        .collect();
     // A mate's form and connectors, as requests give them, for showing it
     // whatever it rebuilt to.
     let mates: BTreeMap<Id, Value> = part
@@ -482,6 +493,9 @@ pub(crate) fn part_report(
             }
             if let Some(form) = forms.get(fid) {
                 v["form"] = json!(form);
+            }
+            if let Some(d) = drivers.get(fid) {
+                v["driver"] = json!(d);
             }
             if let Some((spec, sizes)) = holes.get(fid) {
                 v["spec"] = json!(spec);

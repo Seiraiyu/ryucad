@@ -3972,6 +3972,7 @@ impl FieldArgs {
             point: None,
             by: self.by.clone(),
             from: self.from.clone(),
+            on: None,
             about: self.about.clone(),
             through: self.through.clone(),
             curve: (self.curve.len() == 1 && !ordered).then(|| self.curve[0].clone()),
