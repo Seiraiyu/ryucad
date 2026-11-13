@@ -11,11 +11,13 @@
 //! dimension's text, tolerance and precision (`set`), each one write.
 
 use crate::core::edit::{Choice, Field};
+use ryu_app::canvas::{arc_steps, bezier_at, inside, segment_distance};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// A point on the sheet, in millimetres, y up.
-pub type P = [f64; 2];
+/// A point on the sheet, in millimetres, y up; and the 2D camera over a
+/// sheet (`ryu_app::canvas`', ryueda 3.C).
+pub use ryu_app::canvas::{Camera, P};
 
 /// One of the part's drawings, as `drawing.list` gives it.
 #[derive(Clone, Debug, PartialEq)]
@@ -406,37 +408,6 @@ impl Sheet {
     }
 }
 
-/// How many pieces an arc of `radius` turning `sweep` takes so no chord
-/// strays more than `chord` from it: from 1 to 1,024.
-fn arc_steps(radius: f64, sweep: f64, chord: f64) -> usize {
-    let r = radius.abs().max(1e-9);
-    let c = (chord / r).min(1.0);
-    let step = 2.0 * ryu_math::acos(1.0 - c);
-    if step <= 0.0 || !step.is_finite() {
-        return 1024;
-    }
-    ((sweep.abs() / step).ceil() as usize).clamp(1, 1024)
-}
-
-/// A rational Bézier's point at `t` (de Casteljau, homogeneous).
-fn bezier_at(ctrl: &[P], w: &[f64], t: f64) -> P {
-    let mut q: Vec<[f64; 3]> = ctrl
-        .iter()
-        .zip(w)
-        .map(|(p, w)| [p[0] * w, p[1] * w, *w])
-        .collect();
-    let n = q.len();
-    for k in 1..n {
-        for i in 0..n - k {
-            let next = q[i + 1];
-            for (c, x) in q[i].iter_mut().enumerate() {
-                *x = (1.0 - t) * *x + t * next[c];
-            }
-        }
-    }
-    [q[0][0] / q[0][2], q[0][1] / q[0][2]]
-}
-
 /// A path's points, each curve cut so no chord strays more than `chord`
 /// (sheet mm) from it; a text's corners.
 pub fn outline(it: &Item, chord: f64) -> Vec<P> {
@@ -527,76 +498,6 @@ pub fn outline(it: &Item, chord: f64) -> Vec<P> {
     }
 }
 
-/// The 2D camera over a sheet: the sheet point at the screen's middle and
-/// how many screen points a millimetre takes.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Camera {
-    pub centre: P,
-    pub zoom: f64,
-}
-
-impl Default for Camera {
-    fn default() -> Camera {
-        Camera {
-            centre: [0.0, 0.0],
-            zoom: 1.0,
-        }
-    }
-}
-
-impl Camera {
-    /// The whole sheet in a screen of `size` points, a margin of 4% round
-    /// it.
-    pub fn fit(paper: P, size: P) -> Camera {
-        let z = (size[0] / paper[0]).min(size[1] / paper[1]) * 0.96;
-        Camera {
-            centre: [paper[0] / 2.0, paper[1] / 2.0],
-            zoom: if z.is_finite() && z > 0.0 { z } else { 1.0 },
-        }
-    }
-
-    /// A sheet point on a screen of `size` points (y down, its origin the
-    /// screen's top left).
-    pub fn to_screen(&self, p: P, size: P) -> P {
-        [
-            size[0] / 2.0 + (p[0] - self.centre[0]) * self.zoom,
-            size[1] / 2.0 - (p[1] - self.centre[1]) * self.zoom,
-        ]
-    }
-
-    pub fn to_sheet(&self, q: P, size: P) -> P {
-        [
-            self.centre[0] + (q[0] - size[0] / 2.0) / self.zoom,
-            self.centre[1] - (q[1] - size[1] / 2.0) / self.zoom,
-        ]
-    }
-
-    /// Moved by a drag of `d` screen points.
-    pub fn pan(&mut self, d: P) {
-        self.centre = [
-            self.centre[0] - d[0] / self.zoom,
-            self.centre[1] + d[1] / self.zoom,
-        ];
-    }
-
-    /// Zoomed by `factor` about screen point `at`, which stays where it
-    /// is; from a twentieth to 200 points a millimetre.
-    pub fn zoom_at(&mut self, factor: f64, at: P, size: P) {
-        let before = self.to_sheet(at, size);
-        self.zoom = (self.zoom * factor).clamp(0.05, 200.0);
-        let after = self.to_sheet(at, size);
-        self.centre = [
-            self.centre[0] + before[0] - after[0],
-            self.centre[1] + before[1] - after[1],
-        ];
-    }
-
-    /// The chord curves are cut to: a quarter of a screen point.
-    pub fn chord(&self) -> f64 {
-        0.25 / self.zoom
-    }
-}
-
 /// What a click on the sheet chose.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pick {
@@ -608,24 +509,6 @@ pub enum Pick {
     },
     Annotation(String),
     View(String),
-}
-
-fn segment_distance(p: P, a: P, b: P) -> f64 {
-    let d = [b[0] - a[0], b[1] - a[1]];
-    let l2 = d[0] * d[0] + d[1] * d[1];
-    let t = if l2 > 0.0 {
-        (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / l2).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    ryu_math::hypot(p[0] - a[0] - t * d[0], p[1] - a[1] - t * d[1])
-}
-
-fn inside(p: P, b: [P; 2], grow: f64) -> bool {
-    p[0] >= b[0][0] - grow
-        && p[0] <= b[1][0] + grow
-        && p[1] >= b[0][1] - grow
-        && p[1] <= b[1][1] + grow
 }
 
 /// What lies at sheet point `p` within `reach` mm: an annotation first
