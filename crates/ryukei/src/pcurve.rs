@@ -88,6 +88,32 @@ pub fn fill(body: &mut Body) -> Result<(), Error> {
 
 /// A planar curve in a plane's frame, with the same parameter. The curve
 /// is assumed to lie in the plane; [`fits`] confirms it.
+/// A straight edge's pcurve on a plane it lies near but not within its
+/// tolerance of: its projection, at the projection's speed (the cosine of
+/// its slope to the plane), and how far the edge is from the plane, which
+/// is largest at an end. Exact up to that distance, where a fit aiming at
+/// resolution can't get within it and spends its samples finding so
+/// (#804: a block's edge crossing a face turned a degree, 2e-8 m off it
+/// over a micrometre, fitted for 50,000 units).
+pub(crate) fn line_near_plane(
+    surface: &Surface,
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+) -> Option<((Curve2, [f64; 2]), f64)> {
+    let (Surface::Plane(_), Curve::Line(l)) = (surface, curve) else {
+        return None;
+    };
+    let frame = surface.frame()?;
+    let o = frame.to_local(l.origin());
+    let d = l.dir().get();
+    let along = Vector2::new(d.dot(frame.x().get()), d.dot(frame.y().get()));
+    let c2 = Curve2::Line2(Line2::new(Point2::new(o.x, o.y), along).ok()?);
+    let gap = surface
+        .distance(curve.point(t0))
+        .max(surface.distance(curve.point(t1)));
+    Some(((c2, [0.0, along.length()]), gap))
+}
+
 fn on_plane(frame: &Frame, curve: &Curve) -> Option<(Curve2, [f64; 2])> {
     let local = |p: Point3| {
         let v = frame.to_local(p);
