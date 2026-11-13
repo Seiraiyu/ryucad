@@ -1603,6 +1603,30 @@ enum MergeCmd {
         #[arg(long)]
         hook: bool,
     },
+    /// Settle conflicts with one side's value, a value of your own, or a
+    /// planned repair, as one logged, undoable change: every ID given takes
+    /// the same choice (a block's layout areas are settled together).
+    /// Marking files resolved (git add) and committing are yours.
+    #[command(group = clap::ArgGroup::new("how").required(true))]
+    Resolve {
+        /// Conflict IDs, as `merge status` gives them.
+        #[arg(required = true)]
+        conflicts: Vec<String>,
+        #[arg(long, group = "how")]
+        ours: bool,
+        #[arg(long, group = "how")]
+        theirs: bool,
+        /// A JSON value to put in place (text that isn't JSON is a string).
+        #[arg(long, group = "how", value_name = "JSON")]
+        value: Option<String>,
+        /// A planned repair's ID.
+        #[arg(long, group = "how", value_name = "ID")]
+        repair: Option<String>,
+        /// Fail with `conflict` unless the first conflict's block (or the
+        /// project, for a file outside blocks) is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2646,6 +2670,38 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Design(DesignCmd::List) => Request::DesignList {},
         Command::Doctor { repairs } if repairs.is_empty() => Request::Doctor {},
         Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
+        Command::Merge(MergeCmd::Resolve {
+            conflicts,
+            ours,
+            theirs,
+            value,
+            repair,
+            expect,
+        }) => {
+            // Clap requires exactly one.
+            let choice = match (ours, theirs, value) {
+                (true, _, _) => "ours",
+                (_, true, _) => "theirs",
+                (_, _, Some(_)) => "value",
+                _ => "repair",
+            };
+            let value = value
+                .as_ref()
+                .map(|v| serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone())));
+            let scope = ryueda::validate::scope(&conflicts[0]);
+            Request::MergeResolve {
+                resolutions: conflicts
+                    .iter()
+                    .map(|c| ryueda::proto::Resolution {
+                        conflict: c.clone(),
+                        choice: choice.to_owned(),
+                        value: value.clone(),
+                        repair: repair.clone(),
+                    })
+                    .collect(),
+                expected_revisions: expect.iter().map(|e| (scope.clone(), e.clone())).collect(),
+            }
+        }
         Command::Doctor { repairs } => Request::DoctorRepair {
             repairs: repairs.clone(),
         },

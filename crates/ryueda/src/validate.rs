@@ -354,6 +354,223 @@ fn findings(
     }))
 }
 
+/// A file's JSON from the files being written.
+fn file_json(files: &Files, path: &str) -> Result<Value> {
+    files
+        .get(path)
+        .and_then(|b| json_of(b))
+        .ok_or_else(|| Error::new(Code::ConflictNotFound, format!("{path} isn't readable now")))
+}
+
+/// Settles the conflict at `pointer` of `path`'s record with `x`, in
+/// `files`: the value put in place ([`crate::merge::settle`]), the entry
+/// gone from the record (and the record with its last entry), the file
+/// canonical at the lowest format.
+fn settle_record(
+    files: &mut Files,
+    path: &str,
+    pointer: &str,
+    kind: Kind,
+    x: Option<Value>,
+) -> Result<()> {
+    let v = file_json(files, path)?;
+    let mut record = ryu_git::value::record(&v);
+    if record.remove(pointer).is_none() {
+        return Err(Error::new(
+            Code::ConflictNotFound,
+            format!("{path} has no conflict at {pointer} now"),
+        )
+        .with("conflict", format!("{path}#{pointer}")));
+    }
+    let mut plain = v;
+    if let Some(o) = plain.as_object_mut() {
+        o.remove(ryu_git::value::CONFLICTS);
+    }
+    let out = ryu_git::value::Merged {
+        value: crate::merge::settle(&plain, pointer, kind, x),
+        conflicts: record,
+    }
+    .to_json();
+    files.insert(
+        path.to_owned(),
+        crate::canonical::to_string(&out).into_bytes().into(),
+    );
+    Ok(())
+}
+
+/// The item `id` of a status, or `conflict_not_found`.
+fn find<'a>(now: &'a Value, id: &str) -> Result<&'a Value> {
+    now["conflicts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|c| c["id"] == id)
+        .ok_or_else(|| {
+            Error::new(
+                Code::ConflictNotFound,
+                format!("the merge has no conflict {id} now; run merge status"),
+            )
+            .with("conflict", id)
+        })
+}
+
+/// Settles each of `resolutions`, in order, in `files`: every conflict
+/// must be in `now` (the status) and every choice one it offers. Answers
+/// the IDs settled.
+fn settle(
+    repo: &Repo,
+    now: &Value,
+    files: &mut Files,
+    resolutions: &[crate::proto::Resolution],
+) -> Result<Vec<String>> {
+    let unmerged = repo.unmerged()?;
+    let mut resolved = Vec::new();
+    for r in resolutions {
+        let found = find(now, &r.conflict)?;
+        let kind = found["kind"].as_str().unwrap_or_default();
+        let path = found["files"][0].as_str().unwrap_or_default().to_owned();
+        let usage = |why: String| Error::new(Code::Usage, why).with("conflict", &r.conflict);
+        match (kind, r.choice.as_str()) {
+            ("value" | "delete_edit" | "order" | "id_collision", "ours" | "theirs" | "value") => {
+                let x = match r.choice.as_str() {
+                    "value" => Some(
+                        r.value
+                            .clone()
+                            .ok_or_else(|| usage("choice value needs a value".to_owned()))?,
+                    ),
+                    side => found.get(side).cloned(),
+                };
+                let pointer = found["pointer"].as_str().unwrap_or_default();
+                let kind = Kind::parse(kind).expect("a record's kind");
+                settle_record(files, &path, pointer, kind, x)?;
+            }
+            ("modify_delete" | "merge_unparsed", side @ ("ours" | "theirs")) => {
+                let bytes = match unmerged.get(&path) {
+                    Some(u) if side == "ours" => u.ours.clone(),
+                    Some(u) => u.theirs.clone(),
+                    // Kept and staged: the file as it is now, unless the
+                    // side chosen deleted it.
+                    None if found["deleted_by"] == side => None,
+                    None => files.get(&path).map(|b| b.to_vec()),
+                };
+                match bytes {
+                    Some(b) => {
+                        files.insert(path.clone(), b.into());
+                    }
+                    None => {
+                        files.remove(&path);
+                    }
+                }
+            }
+            (_, choice) => {
+                let offered: Vec<&str> = found["choices"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .chain(
+                        found["repairs"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|x| x["id"].as_str()),
+                    )
+                    .collect();
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "{} ({kind}) can't be settled by {choice:?}; it takes {}",
+                        r.conflict,
+                        offered.join(", ")
+                    ),
+                )
+                .with("conflict", &r.conflict)
+                .with("choice", choice));
+            }
+        }
+        resolved.push(r.conflict.clone());
+    }
+    Ok(resolved)
+}
+
+/// Writes what `files` changed from `before`, each atomically.
+fn write(root: &Path, before: &Files, files: &Files) -> Result<Vec<Value>> {
+    let mut changes = Vec::new();
+    for (path, bytes) in files {
+        if before.get(path) != Some(bytes) {
+            crate::source::write_atomic(&crate::session::path_of(root, path), bytes)?;
+            changes.push(json!({"path": path, "change": "written"}));
+        }
+    }
+    for path in before.keys().filter(|p| !files.contains_key(*p)) {
+        crate::source::remove_file(&crate::session::path_of(root, path))?;
+        changes.push(json!({"path": path, "change": "deleted"}));
+    }
+    Ok(changes)
+}
+
+/// The revision `--expect` names for `scope` ([`scope`]): a block's, or
+/// the project's.
+fn revision_of(p: &Project, scope: &str) -> Result<String> {
+    if scope == "project" {
+        return Ok(p.revision.clone());
+    }
+    let id = crate::id::Id::parse(scope, "block")?;
+    p.conn
+        .blocks
+        .get(&id)
+        .map(|b| b.revision.clone())
+        .ok_or_else(|| Error::new(Code::NotFound, format!("no block {scope}")).with("block", scope))
+}
+
+/// `merge.resolve`: settles each conflict as asked, in order, and writes
+/// the files as one change, guarded by the revisions given. Every
+/// conflict must be in the merge's status now, or nothing is written.
+/// Answers what changed and the new status.
+pub fn resolve(
+    session: &mut Session,
+    resolutions: &[crate::proto::Resolution],
+    expected: &BTreeMap<String, String>,
+) -> Result<Value> {
+    for (scope, rev) in expected {
+        let actual = revision_of(session.project(), scope)?;
+        crate::server::check_revision(scope, &actual, Some(rev))?;
+    }
+    let root = session.root().to_path_buf();
+    let now = status(session)?;
+    let (repo, _) = merging(&root)?;
+    let before = own(&session.snapshot());
+    let mut files = before.clone();
+    let resolved = settle(&repo, &now, &mut files, resolutions)?;
+    let changes = write(&root, &before, &files)?;
+    session.reload()?;
+    Ok(json!({"resolved": resolved, "changes": changes, "status": status(session)?}))
+}
+
+/// `merge.status` or `merge.resolve` for a project that doesn't open (its
+/// manifest holds a record): from the files alone, records and unmerged
+/// paths only, the resolution written but not logged (no session holds
+/// the project to log it against).
+pub fn unloaded(root: &Path, req: crate::proto::Request) -> Result<Value> {
+    let (repo, state) = merging(root)?;
+    let working = own(&crate::session::current(root)?);
+    let now = findings(root, &repo, &state, &working, None)?;
+    let crate::proto::Request::MergeResolve { resolutions, .. } = req else {
+        return Ok(now);
+    };
+    let mut files = working.clone();
+    let resolved = settle(&repo, &now, &mut files, &resolutions)?;
+    let changes = write(root, &working, &files)?;
+    let after = findings(
+        root,
+        &repo,
+        &state,
+        &own(&crate::session::current(root)?),
+        None,
+    )?;
+    Ok(json!({"resolved": resolved, "changes": changes, "status": after, "unloaded": true}))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -453,5 +670,121 @@ pub(crate) mod tests {
         git(&["merge", "--abort"]);
         s.reload().unwrap();
         assert_eq!(status(&mut s).unwrap_err().code, Code::NotMerging);
+    }
+
+    fn res(conflict: &str, choice: &str) -> crate::proto::Resolution {
+        crate::proto::Resolution {
+            conflict: conflict.to_owned(),
+            choice: choice.to_owned(),
+            value: None,
+            repair: None,
+        }
+    }
+
+    fn record(r: &Path) {
+        let rec = json!({"format": 1, "kind": "ryueda.erc", "severity": {"pin_conflict": "error"},
+            "conflicts": {"/severity/pin_conflict": {"kind": "value", "base": "warning", "ours": "error", "theirs": "off"}}});
+        std::fs::write(r.join("erc.json"), crate::canonical::to_string(&rec)).unwrap();
+    }
+
+    #[test]
+    fn resolutions_settle_records_and_unmerged_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        erc_conflict(r);
+        let mut s = Session::open(r).unwrap();
+        let none = BTreeMap::new();
+        let e = resolve(&mut s, &[res("nope#", "ours")], &none).unwrap_err();
+        assert_eq!(e.code, Code::ConflictNotFound);
+        // Theirs of a file Git merged as lines: the index's stage 3.
+        let v = resolve(&mut s, &[res("erc.json#", "theirs")], &none).unwrap();
+        assert_eq!(v["resolved"], json!(["erc.json#"]));
+        assert_eq!(
+            v["changes"],
+            json!([{"path": "erc.json", "change": "written"}])
+        );
+        assert_eq!(
+            std::fs::read_to_string(r.join("erc.json")).unwrap(),
+            erc("off")
+        );
+        assert_eq!(
+            (
+                v["status"]["clean"].clone(),
+                v["status"]["unstaged"].clone()
+            ),
+            (json!(true), json!(["erc.json"]))
+        );
+        // A record's entry settled by a value: the record goes with it.
+        record(r);
+        s.reload().unwrap();
+        let mut by_value = res("erc.json#/severity/pin_conflict", "value");
+        by_value.value = Some(json!("warning"));
+        resolve(&mut s, &[by_value], &none).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(r.join("erc.json")).unwrap(),
+            erc("warning")
+        );
+        // A choice the item doesn't offer, and a stale project revision.
+        record(r);
+        s.reload().unwrap();
+        let e = resolve(
+            &mut s,
+            &[res("erc.json#/severity/pin_conflict", "repair")],
+            &none,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let stale = BTreeMap::from([("project".to_owned(), "0".repeat(32))]);
+        let e = resolve(
+            &mut s,
+            &[res("erc.json#/severity/pin_conflict", "ours")],
+            &stale,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Conflict);
+        assert_eq!(
+            std::fs::read_to_string(r.join("erc.json")).unwrap(),
+            crate::canonical::to_string(
+                &json!({"format": 1, "kind": "ryueda.erc", "severity": {"pin_conflict": "error"},
+            "conflicts": {"/severity/pin_conflict": {"kind": "value", "base": "warning", "ours": "error", "theirs": "off"}}})
+            ),
+            "refused: nothing written"
+        );
+    }
+
+    #[test]
+    fn a_manifest_record_is_settled_without_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        erc_conflict(r);
+        let mut m: Value =
+            serde_json::from_slice(&std::fs::read(r.join("ryueda.json")).unwrap()).unwrap();
+        m["format"] = json!(2);
+        m["properties"] = json!({"a": "1"});
+        m["conflicts"] =
+            json!({"/properties/a": {"kind": "value", "base": "0", "ours": "1", "theirs": "2"}});
+        std::fs::write(r.join("ryueda.json"), crate::canonical::to_string(&m)).unwrap();
+        assert_eq!(
+            Session::open(r).err().map(|e| e.code),
+            Some(Code::MergeConflict)
+        );
+        let ask = |req| crate::server::handle_safely(&mut None, None, None, r, req);
+        let v = ask(crate::proto::Request::MergeStatus {}).unwrap().result;
+        let ids: Vec<&str> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["erc.json#", "ryueda.json#/properties/a"]);
+        let v = ask(crate::proto::Request::MergeResolve {
+            resolutions: vec![res("ryueda.json#/properties/a", "theirs")],
+            expected_revisions: BTreeMap::new(),
+        })
+        .unwrap()
+        .result;
+        assert_eq!(v["unloaded"], true);
+        let p = Project::load(r).unwrap();
+        assert_eq!(p.manifest.properties["a"], "2");
     }
 }

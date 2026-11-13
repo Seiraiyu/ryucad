@@ -79,7 +79,22 @@ pub fn handle_job(
     req: Request,
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
-    guarded(slot, root, |s| answer(s, live, me, req, job))
+    // A merge that left a record in the manifest leaves no project to
+    // open: its status and resolutions are read from the files alone.
+    let merge =
+        matches!(req, Request::MergeStatus {} | Request::MergeResolve { .. }).then(|| req.clone());
+    match (
+        guarded(slot, root, |s| answer(s, live, me, req, job)),
+        merge,
+    ) {
+        (Err(e), Some(req))
+            if e.code == Code::MergeConflict
+                && e.details.get("path").and_then(Value::as_str) == Some(MANIFEST) =>
+        {
+            crate::validate::unloaded(root, req).map(Answer::json)
+        }
+        (r, _) => r,
+    }
 }
 
 /// A long request's work, run by the daemon with its lock released: what
@@ -478,10 +493,10 @@ fn dispatch(
         Request::Doctor {} => Ok(crate::doctor::report(session.root(), session.project())),
         Request::DoctorRepair { repairs } => doctor_repair(session, &repairs),
         Request::MergeStatus {} => crate::validate::status(session),
-        Request::MergeResolve { .. } => Err(Error::new(
-            Code::Usage,
-            "merge.resolve arrives with Task 10",
-        )),
+        Request::MergeResolve {
+            resolutions,
+            expected_revisions,
+        } => crate::validate::resolve(session, &resolutions, &expected_revisions),
         Request::LibAdd {
             alias,
             path,
