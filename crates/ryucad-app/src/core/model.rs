@@ -59,6 +59,10 @@ pub struct Feature {
     /// reads it: a draft's neutral plane, pull, parting edges and angles,
     /// a move's line.
     pub tweak: Option<crate::core::tweaks::TweakInfo>,
+    /// An insert's source, pin and count (design 521).
+    pub insert: Option<InsertInfo>,
+    /// A delete_body's solids.
+    pub delete: Option<DeleteInfo>,
     /// A hole's canonical spec (`M6x1.0-6H THRU`), from its report.
     pub spec: Option<String>,
 }
@@ -67,8 +71,12 @@ impl Feature {
     /// Whether it founds the body named by its own ID: its operation is
     /// none, or `new`, as a sew's or a thicken's from a sheet reports it
     /// beside the sheets it consumes (ryucad 18).
+    /// An insert founds none of its own: its solids are keyed below it
+    /// (design 521).
     pub fn founds(&self) -> bool {
-        self.operation.as_deref().is_none_or(|o| o == "new") && self.solids == [self.id.clone()]
+        self.insert.is_none()
+            && self.operation.as_deref().is_none_or(|o| o == "new")
+            && self.solids == [self.id.clone()]
     }
 
     /// A path or helix that built: one `path.get` draws.
@@ -99,6 +107,8 @@ pub struct ImportInfo {
     /// alone (`split_faces`), left out (`dropped_faces`) or kept as the
     /// file has them (`unoriented`), each listed only when some were.
     pub faults: Vec<(String, usize)>,
+    /// Its file writes `place`: `import --flatten` made it (ryucad 25.B).
+    pub flattened: bool,
 }
 
 impl ImportInfo {
@@ -138,6 +148,7 @@ impl ImportInfo {
             tolerance_m: heal["tolerance_m"].as_f64(),
             reference,
             faults,
+            flattened: v["flattened"] == true,
         }
     }
 
@@ -155,6 +166,127 @@ impl ImportInfo {
     pub fn file_name(&self) -> &str {
         self.file.rsplit('/').next().unwrap_or(&self.file)
     }
+}
+
+/// An insert as its report gives it (design 521): its source part, its
+/// pin, how many solids it founds once built, and its own warnings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InsertInfo {
+    /// The source part's ID in its own project.
+    pub part: String,
+    /// Another project's ID, for a dependency's part.
+    pub project: Option<String>,
+    /// That dependency's name, from the marks (`deps.list`).
+    pub dependency: Option<String>,
+    /// Its label; `None` at `working`.
+    pub label: Option<String>,
+    /// How many solids it founds, once built.
+    pub count: Option<u64>,
+    /// Its own warnings' codes (`insert_source_failed`, `insert_obsolete`).
+    pub warnings: Vec<String>,
+    /// The source's newer official label, when the tree knows of one.
+    pub behind: Option<String>,
+}
+
+impl InsertInfo {
+    /// From a feature's report object, if it is an insert's.
+    pub fn from_report(f: &Value) -> Option<InsertInfo> {
+        let i = f.get("insert")?;
+        let of = text(&i["of"]);
+        let part = of
+            .rsplit_once(':')
+            .map_or(of.as_str(), |(_, p)| p)
+            .to_owned();
+        Some(InsertInfo {
+            part,
+            project: i["rev"]["project"].as_str().map(str::to_owned),
+            dependency: None,
+            label: i["rev"]["label"].as_str().map(str::to_owned),
+            count: i["count"].as_u64(),
+            warnings: f["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|w| w["code"].as_str().map(str::to_owned))
+                .collect(),
+            behind: None,
+        })
+    }
+
+    /// What it inserts, for people: `pcb`, or `fasteners:pcb`.
+    pub fn of(&self) -> String {
+        match &self.dependency {
+            Some(d) => format!("{d}:{}", self.part),
+            None => self.part.clone(),
+        }
+    }
+
+    /// Its pin, for people: `working`, `label B`, `label A obsolete`.
+    pub fn rev_text(&self) -> String {
+        match &self.label {
+            None => "working".to_owned(),
+            Some(l) if self.warned("insert_obsolete") => format!("label {l} obsolete"),
+            Some(l) => format!("label {l}"),
+        }
+    }
+
+    /// Whether its rebuild warned `code`.
+    pub fn warned(&self, code: &str) -> bool {
+        self.warnings.iter().any(|w| w == code)
+    }
+}
+
+/// A delete_body as its report gives it: the solids it takes out by key
+/// (an insert's ID expanded to its keys), and as people name them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeleteInfo {
+    pub solids: Vec<String>,
+    /// An insert all of whose solids it takes, by the insert's ID; else
+    /// each key.
+    pub named: Vec<String>,
+}
+
+impl DeleteInfo {
+    /// `brd/boss`, `brd`, `a, b`, `a, b, c and 2 more`.
+    pub fn text(&self) -> String {
+        match self.named.as_slice() {
+            [] => "nothing".to_owned(),
+            [a, b, c, rest @ ..] if !rest.is_empty() => {
+                format!("{a}, {b}, {c} and {} more", rest.len())
+            }
+            all => all.join(", "),
+        }
+    }
+}
+
+/// `keys` as people name them: an insert by its ID where every solid it
+/// founds is among them, else each key, each once, in order.
+fn named(keys: &[String], features: &[Feature]) -> Vec<String> {
+    let mut per: HashMap<&str, u64> = HashMap::new();
+    for k in keys {
+        if let Some((f, _)) = k.split_once('/') {
+            *per.entry(f).or_default() += 1;
+        }
+    }
+    let whole = |f: &str| {
+        features
+            .iter()
+            .find(|x| x.id == f)
+            .and_then(|x| x.insert.as_ref())
+            .and_then(|i| i.count)
+            .is_some_and(|n| per.get(f) == Some(&n))
+    };
+    let mut out: Vec<String> = Vec::new();
+    for k in keys {
+        let name = match k.split_once('/') {
+            Some((f, _)) if whole(f) => f.to_owned(),
+            _ => k.clone(),
+        };
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// What an instance places: a part at a revision, whether it is fixed,
@@ -330,6 +462,8 @@ pub struct Solid {
     /// A sheet's boundaries (rings of laminar edges; none: closed), when
     /// its report says; an occurrence's sheet doesn't.
     pub boundaries: Option<u64>,
+    /// A reference import's body, here or in an insert's source.
+    pub reference: bool,
 }
 
 impl Solid {
@@ -408,7 +542,7 @@ impl Occurrence {
 impl Part {
     /// A part from a rebuild report (`rebuild` or `model.changed`).
     pub fn from_report(v: &Value) -> Part {
-        let features = v["features"]
+        let mut features: Vec<Feature> = v["features"]
             .as_array()
             .map(|fs| {
                 fs.iter()
@@ -476,11 +610,26 @@ impl Part {
                         body: crate::core::bodies::BodyInfo::from_report(f),
                         sheet: crate::core::sheet::SheetInfo::from_report(f),
                         tweak: crate::core::tweaks::TweakInfo::from_report(f),
+                        insert: InsertInfo::from_report(f),
+                        delete: f.get("delete_body").map(|d| DeleteInfo {
+                            solids: texts(&d["solids"]),
+                            named: Vec::new(),
+                        }),
                         spec: f["spec"].as_str().map(str::to_owned),
                     })
                     .collect()
             })
             .unwrap_or_default();
+        // A delete's names read the inserts listed with it.
+        let names: Vec<Option<Vec<String>>> = features
+            .iter()
+            .map(|f| f.delete.as_ref().map(|d| named(&d.solids, &features)))
+            .collect();
+        for (f, n) in features.iter_mut().zip(names) {
+            if let (Some(d), Some(n)) = (f.delete.as_mut(), n) {
+                d.named = n;
+            }
+        }
         let solids: Vec<Solid> = v["solids"]
             .as_array()
             .into_iter()
@@ -494,6 +643,7 @@ impl Part {
                 // picked and listed as the file has it (ryucad 21.C).
                 sheet: s["kind"] == "sheet" && s["reference"] != true,
                 boundaries: s["boundaries"].as_u64(),
+                reference: s["reference"] == true,
             })
             .collect();
         let assembly = v["kind"] == "assembly";
@@ -524,6 +674,7 @@ impl Part {
                         error: None,
                         sheet: o.sheets.contains(s),
                         boundaries: None,
+                        reference: false,
                     })
                 })
                 .collect(),
@@ -579,6 +730,15 @@ impl Part {
             true => self.solids.iter().find(|s| s.id == id),
             false => self.by_id.get(id).map(|i| &self.solids[*i]),
         }
+    }
+
+    /// The solids the model shows that insert `id` founds, in order.
+    pub fn inserted(&self, id: &str) -> Vec<&Solid> {
+        let prefix = format!("{id}/");
+        self.solids
+            .iter()
+            .filter(|s| s.id.starts_with(&prefix))
+            .collect()
     }
 
     /// The features that found solids, in list order: what a feature can
@@ -813,6 +973,9 @@ impl Model {
             if let Some(i) = f.instance.as_mut() {
                 i.dependency = i.project.as_deref().map(|p| marks.name(p));
                 i.outdated = marks.outdated(&id, &f.id).map(str::to_owned);
+            }
+            if let Some(i) = f.insert.as_mut() {
+                i.dependency = i.project.as_deref().map(|p| marks.name(p));
             }
         }
     }
@@ -1619,6 +1782,52 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inserts_and_deletes_are_read_and_named() {
+        use serde_json::json;
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "e", "revision": "r", "features": [
+            {"id": "brd", "type": "insert", "ok": true, "hash": "1", "solids": ["brd", "brd/base"],
+             "insert": {"of": "pcb", "rev": {"label": "A"}, "count": 2,
+                        "solids": [{"key": "brd/base"}, {"key": "brd/boss"}]},
+             "warnings": [{"code": "insert_obsolete"}]},
+            {"id": "nub", "type": "box", "ok": true, "hash": "2", "solids": ["brd/base"],
+             "operation": "join"},
+            {"id": "d", "type": "delete_body", "ok": true, "hash": "3",
+             "delete_body": {"solids": ["brd/boss"]}},
+            // Only how it is named is read here: a second delete of the
+            // whole family wouldn't build after d.
+            {"id": "d2", "type": "delete_body", "ok": true, "hash": "4",
+             "delete_body": {"solids": ["brd/base", "brd/boss"]}},
+            {"id": "imp", "type": "import", "ok": true, "hash": "5", "solids": ["imp"],
+             "import": {"file": "imports/n.step", "blake3": "00", "body": 0, "flattened": true}}],
+          "solids": [
+            {"solid": "brd/base", "ok": true, "features": ["brd", "nub"], "hash": "2"},
+            {"solid": "imp", "ok": true, "features": ["imp"], "hash": "5", "reference": true}]}));
+        let p = &m.parts["e"];
+        let i = p.feature("brd").unwrap().insert.clone().unwrap();
+        assert_eq!(
+            (i.of(), i.rev_text(), i.count),
+            ("pcb".to_owned(), "label A obsolete".to_owned(), Some(2))
+        );
+        // An insert founds no solid of its own: forms never offer its ID.
+        assert!(!p.feature("brd").unwrap().founds());
+        assert_eq!(p.founders(), ["imp"]);
+        assert_eq!(
+            p.inserted("brd")
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            ["brd/base"]
+        );
+        // A delete names keys, or an insert whose every solid it takes.
+        let named = |f: &str| p.feature(f).unwrap().delete.as_ref().unwrap().text();
+        assert_eq!(named("d"), "brd/boss");
+        assert_eq!(named("d2"), "brd");
+        assert!(p.feature("imp").unwrap().import.as_ref().unwrap().flattened);
+        assert!(p.solid("imp").unwrap().reference);
+    }
 
     #[test]
     fn a_pins_point_is_in_its_entity_s_own_part_s_frame() {

@@ -33,6 +33,7 @@
 
 use crate::core::appearance::Look;
 use crate::core::compare::Compare;
+use crate::core::inserts::Deleted;
 use crate::core::lod::Drawn;
 use crate::core::model::{BodyKey, Model, Pose};
 use crate::core::nav::Mat4;
@@ -568,6 +569,10 @@ pub struct Scene {
     /// uploaded at.
     ghosts: BTreeMap<BodyKey, GpuBody>,
     ghosts_at: u64,
+    /// A chosen delete's ghosts, uploaded for that delete at that
+    /// generation.
+    deleted: BTreeMap<BodyKey, GpuBody>,
+    deleted_at: Option<(BodyKey, u64)>,
     target: Option<Target>,
 }
 
@@ -1162,6 +1167,8 @@ impl Scene {
             identity: instances(device, "identity", &[Instance::IDENTITY]),
             ghosts: BTreeMap::new(),
             ghosts_at: u64::MAX,
+            deleted: BTreeMap::new(),
+            deleted_at: None,
             target: None,
         }
     }
@@ -1202,6 +1209,8 @@ impl Scene {
         if reference != self.reference {
             self.ghosts.clear();
             self.ghosts_at = u64::MAX;
+            self.deleted.clear();
+            self.deleted_at = None;
             self.reference = reference;
         }
         self.placed.clear();
@@ -1335,6 +1344,41 @@ impl Scene {
                     face_count: faces.len() as u32,
                     indices: None,
                     edges: buffer(device, "ghost edges", &[]),
+                    edge_count: 0,
+                    glass: None,
+                },
+            );
+        }
+    }
+
+    /// Uploads a chosen delete's ghosts, translucent in the ghost colour
+    /// where the delete read them: again whenever another comes. With
+    /// none chosen there are none.
+    pub fn sync_deleted(&mut self, device: &wgpu::Device, deleted: Option<&Deleted>) {
+        let Some(d) = deleted else {
+            self.deleted.clear();
+            self.deleted_at = None;
+            return;
+        };
+        let at = (d.feature.clone(), d.generation);
+        if self.deleted_at.as_ref() == Some(&at) {
+            return;
+        }
+        self.deleted.clear();
+        self.deleted_at = Some(at);
+        let mut ghost = linear(crate::ui::style::GHOST);
+        ghost[3] = GHOST_ALPHA;
+        for (key, body) in &d.ghosts {
+            let Ok(m) = &body.mesh else { continue };
+            let faces = face_vertices(m, offset(m, self.reference), &m.triangles[..], ghost);
+            self.deleted.insert(
+                key.clone(),
+                GpuBody {
+                    mesh: Arc::clone(body),
+                    faces: buffer(device, "deleted", &faces),
+                    face_count: faces.len() as u32,
+                    indices: None,
+                    edges: buffer(device, "deleted edges", &[]),
                     edge_count: 0,
                     glass: None,
                 },
@@ -1669,9 +1713,9 @@ impl Scene {
                 }
             }
             pass.set_vertex_buffer(1, self.identity.slice(..));
-            if !self.ghosts.is_empty() {
+            if !self.ghosts.is_empty() || !self.deleted.is_empty() {
                 pass.set_pipeline(&pipes.ghost);
-                for b in self.ghosts.values() {
+                for b in self.ghosts.values().chain(self.deleted.values()) {
                     pass.set_vertex_buffer(0, b.faces.slice(..));
                     pass.draw(0..b.face_count, 0..1);
                 }

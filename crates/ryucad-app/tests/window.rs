@@ -1552,6 +1552,121 @@ fn a_click_on_a_cut_face_selects_it() {
     );
 }
 
+/// Every solid of part `e` meshed: an inserted project's window loaded.
+fn inserted(app: &App) -> bool {
+    let ryucad_app::ui::app::Screen::Opened(o) = &app.screen else {
+        return false;
+    };
+    o.ws.idle()
+        && o.ws.model.parts.get("e").is_some_and(|p| {
+            !p.solids.is_empty()
+                && p.solids.iter().all(|s| {
+                    o.ws.model
+                        .meshes
+                        .contains_key(&("e".to_owned(), s.id.clone()))
+                })
+        })
+        && !o.ws.states.by_part.is_empty()
+}
+
+#[test]
+fn an_inserted_face_is_picked_by_its_full_reference() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_inserts();
+    let mut h = window(&p);
+    frames(&mut h, inserted);
+    // The insert is one row, behind B, its acted-on base under it.
+    h.get_by_label("brd (insert of pcb @ label A, behind, 2 solids)");
+    h.get_by_label("d (delete brd/boss)");
+    // Looking down on the inserted base's top, 25 mm up.
+    if let ryucad_app::ui::app::Screen::Opened(o) = &mut h.state_mut().screen {
+        o.view.nav.camera = ryucad::view::frame(
+            [0.0, 0.0, 0.02],
+            [0.02, 0.01, 0.025],
+            ryucad::view::StandardView::Top,
+            ryucad::view::DEFAULT_PROJECTION,
+        );
+    }
+    h.run_steps(2);
+    let at = on_screen(&h, [0.012, 0.006, 0.025]);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    let hover = h.state().opened().view.hover.clone().unwrap();
+    assert_eq!(hover.kind.as_str(), "face");
+    assert!(hover.entity.starts_with("e/brd/base/"), "{}", hover.entity);
+    click(&h, at);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == [hover.entity.clone()])
+            && a.opened().ws.idle()
+    });
+    // The CLI reads the same reference, and inspect finds the face in the
+    // inserted solid (as nub left it: `inspect e` counts inserted solids
+    // under their insert rather than listing them).
+    assert_eq!(
+        p.ok(&["selection"])["selection"],
+        serde_json::json!([hover.entity])
+    );
+    let name = hover.entity.rsplit('/').next().unwrap();
+    let all = p.ok(&["inspect", "e", "nub"]);
+    let body = all["bodies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["solid"] == "brd/base")
+        .unwrap_or_else(|| panic!("{all}"));
+    assert!(
+        body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["name"] == name)
+    );
+}
+
+#[test]
+fn an_inserts_pin_is_previewed_and_moved_from_its_panel() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_inserts();
+    let mut h = window(&p);
+    frames(&mut h, inserted);
+    h.get_by_label("brd (insert of pcb @ label A, behind, 2 solids)")
+        .click();
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| f.of.is_some())
+    });
+    h.step();
+    h.get_by_label("Update to B").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .insert_preview
+            .as_ref()
+            .is_some_and(|p| p.answer.is_some())
+    });
+    h.step();
+    h.get_by_label("Moving the pin to label B: 1 solid changed");
+    h.get_by_label("Nothing fails after it");
+    assert_eq!(p.ok(&["feature", "show", "e", "brd"])["rev"]["label"], "A");
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    assert_eq!(p.ok(&["feature", "show", "e", "brd"])["rev"]["label"], "B");
+}
+
 #[test]
 fn hovering_a_tapped_hole_shows_its_spec() {
     let _one = one_at_a_time();

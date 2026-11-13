@@ -1203,6 +1203,7 @@ fn every_protocol_method_has_a_command() {
         ("feature.move", &["feature", "move"]),
         ("feature.list", &["feature", "list"]),
         ("feature.show", &["feature", "show"]),
+        ("feature.types", &["feature", "types"]),
         ("insert.update", &["insert", "update"]),
         ("param.list", &["param", "list"]),
         ("param.set", &["param", "set"]),
@@ -1361,6 +1362,42 @@ fn every_protocol_method_has_a_command() {
             .unwrap();
         assert!(out.status.success(), "ryucad {args:?} --help");
     }
+}
+
+/// `feature types`: the registry read back, the same in process and
+/// through the daemon; `feature add --help` names every type (design 541).
+#[test]
+fn feature_types_lists_what_each_type_takes() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    let all = p.ok(&["feature", "types"]);
+    let types = all["types"].as_array().unwrap();
+    assert_eq!(
+        types[0],
+        json!({"type": "box", "fields": ["params", "placement", "operation", "targets"],
+               "body": null, "founds": "when_new"})
+    );
+    let names: Vec<&str> = types.iter().map(|t| t["type"].as_str().unwrap()).collect();
+    for t in ["hole", "shell", "move_face", "import"] {
+        assert!(names.contains(&t), "{t}: {names:?}");
+    }
+    let shell = p.ok(&["feature", "types", "shell"]);
+    assert_eq!(shell["types"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        (&shell["types"][0]["body"], &shell["types"][0]["founds"]),
+        (&json!("solid"), &json!("never"))
+    );
+    p.fails(&["feature", "types", "gear"], "unknown_feature_type", 1);
+    let help = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["feature", "add", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    for t in names {
+        assert!(help.contains(t), "feature add --help names {t}");
+    }
+    assert!(help.contains("ryucad feature types"), "{help}");
 }
 
 #[test]
@@ -7431,6 +7468,13 @@ fn flattened_imports_from_the_cli() {
     assert!(features.len() > 1, "{v}");
     assert!(features.iter().all(|f| f["mode"] == "reference"), "{v}");
     let built = p.ok(&["rebuild", "board"]);
+    // Each flattened body's import says so, for the window's one row per
+    // file (ryucad 25.B).
+    let reported = built["parts"][0]["features"].as_array().unwrap();
+    assert!(
+        reported.iter().all(|f| f["import"]["flattened"] == true),
+        "{built}"
+    );
     let solids = built["parts"][0]["solids"].as_array().unwrap();
     assert_eq!(solids.len(), features.len(), "{built}");
     assert!(solids.iter().all(|s| s["ok"] == true), "{built}");
@@ -7461,6 +7505,12 @@ fn reference_imports_from_the_cli() {
     let fid = f["id"].as_str().unwrap().to_owned();
     let built = p.ok(&["rebuild", "r"]);
     assert_eq!(built["parts"][0]["solids"][0]["reference"], true, "{built}");
+    assert!(
+        built["parts"][0]["features"][0]["import"]
+            .get("flattened")
+            .is_none(),
+        "{built}"
+    );
     let body = p.ok(&["inspect", "r", &fid]);
     let edge = body["bodies"][0]["edges"][0]["name"]
         .as_str()
