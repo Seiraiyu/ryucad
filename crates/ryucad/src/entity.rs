@@ -255,10 +255,16 @@ impl EntityRef {
         }
         let solids = crate::solid::Solids::of(p);
         let built = session.rebuilt(&self.part)?;
-        let Some((_, feature)) = built.features.iter().find(|(id, _)| *id == self.feature) else {
-            return Err(missing("no such feature").with("part", &self.part));
+        // An inserted solid's key names no feature of its own: its shown
+        // solid is looked for below (ryucad 25.B).
+        let feature = match self.feature.is_path() {
+            true => None,
+            false => match built.features.iter().find(|(id, _)| *id == self.feature) {
+                Some((_, f)) => Some(f),
+                None => return Err(missing("no such feature").with("part", &self.part)),
+            },
         };
-        if let Ok(b) = feature
+        if let Some(Ok(b)) = feature
             && let Some(sk) = b.sketch()
         {
             let e = Id::parse(&self.name, "entity")
@@ -434,6 +440,35 @@ mod tests {
         assert!(r.path.is_empty());
         assert_eq!(r.feature.as_str(), "board/u1");
         assert_eq!(r.to_string(), format!("enc/board/u1/{n}"));
+    }
+
+    /// ryucad 25.B: a face of an inserted solid, picked in the window as
+    /// `<part>/<insert>/<key>/<name>`, resolves (a selection, a pin).
+    #[test]
+    fn an_inserted_solids_face_resolves() {
+        let (_dir, mut s) = crate::insert::tests::boarded();
+        let part = Id::parse("enclosure", "part").unwrap();
+        let built = s.rebuilt(&part).unwrap().clone();
+        let out = built.output(&Id::parse("pcb", "feature").unwrap()).unwrap();
+        let (_, b) = out
+            .solids()
+            .iter()
+            .find(|(k, _)| k.as_str() == "pcb/u1")
+            .unwrap();
+        let f = b.body.faces().next().unwrap();
+        let name = b.body.face(f).unwrap().name.to_string();
+        let r = EntityRef::parse(&format!("enclosure/pcb/u1/{name}")).unwrap();
+        assert!(matches!(r.resolve(&mut s), Ok(Target::Body(_))));
+        let e = EntityRef::parse(&format!("enclosure/pcb/nope/{NAME}"))
+            .unwrap()
+            .resolve(&mut s)
+            .unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e:?}");
+        let e = EntityRef::parse(&format!("enclosure/pcb/u1/{NAME}"))
+            .unwrap()
+            .resolve(&mut s)
+            .unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e:?}");
     }
 
     #[test]
