@@ -529,6 +529,19 @@ impl Compare {
         self.ghost_poses.get(key).copied().unwrap_or(Pose::IDENTITY)
     }
 
+    /// The ghosts to draw while the window shows `shown` (its parts,
+    /// [`crate::core::model::Model::shown`]): each over its own part only,
+    /// so a draft's compare of one part isn't drawn beside another
+    /// (#778). An assembly's occurrence ghosts are keyed by the assembly.
+    pub fn ghosts_over<'a>(
+        &'a self,
+        shown: &'a [&str],
+    ) -> impl Iterator<Item = (&'a BodyKey, &'a Arc<WireBody>)> + 'a {
+        self.ghosts
+            .iter()
+            .filter(move |(k, _)| shown.contains(&k.0.as_str()))
+    }
+
     /// What `mesh.get` is asked for to draw `key`'s ghost: an assembly's
     /// occurrence by its path (`<path>/<solid>` less its solid, whose
     /// body comes labelled `<path>/<solid>`), else the feature itself.
@@ -791,5 +804,23 @@ mod tests {
         assert!(c.ghosts.is_empty());
         c.failed(Error::new(ryucad::error::Code::RevNotFound, "gone"));
         assert!(c.features.is_empty() && c.error.is_some() && c.rev == "HEAD");
+    }
+
+    /// #778: a ghost is drawn only over its own part: a draft's compare
+    /// of `p` draws nothing beside another part.
+    #[test]
+    fn ghosts_are_drawn_only_over_their_own_part() {
+        let mut c = Compare::new("HEAD");
+        c.take_diff(&diff());
+        assert!(c.take_ghost("p", ghost("b", "h1")));
+        let over = |shown: &[&str]| {
+            c.ghosts_over(shown)
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(over(&["p"]), [key("b")]);
+        assert_eq!(over(&["q", "p"]), [key("b")]);
+        assert!(over(&["q"]).is_empty());
+        assert!(over(&[]).is_empty());
     }
 }

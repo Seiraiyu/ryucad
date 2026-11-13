@@ -161,24 +161,14 @@ fn one(
             ui.label(&e.comment);
         }
     }
-    if !e.pins.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            for p in &e.pins {
-                let text = p
-                    .reference
-                    .clone()
-                    .unwrap_or_else(|| format!("a point on {}", p.part));
-                ui.label(RichText::new(&text).monospace().small());
-                if let Some(r) = &p.reference
-                    && ui.small_button("Show").clicked()
-                {
-                    ws.select(vec![r.clone()], ryucad::live::SelectMode::Replace);
-                    view.fit_entities(ws, std::slice::from_ref(r));
-                }
-            }
-        });
+    for p in &e.pins {
+        let text = p
+            .reference
+            .clone()
+            .unwrap_or_else(|| format!("a point on {}", p.part));
+        reference_row(ui, ws, view, &text, p.reference.as_ref());
     }
-    // What its marks touch, each a chip with Show, as pins are.
+    // What its marks touch, each a row with Show, as pins are.
     let touches: Vec<String> = e
         .marks
         .iter()
@@ -192,16 +182,10 @@ fn one(
             all
         });
     if !touches.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.weak("marks touch");
-            for r in &touches {
-                ui.label(RichText::new(r).monospace().small());
-                if ui.small_button("Show").clicked() {
-                    ws.select(vec![r.clone()], ryucad::live::SelectMode::Replace);
-                    view.fit_entities(ws, std::slice::from_ref(r));
-                }
-            }
-        });
+        ui.weak("marks touch");
+        for r in &touches {
+            reference_row(ui, ws, view, r, Some(r));
+        }
     }
     for r in &e.replies {
         ui.horizontal_wrapped(|ui| {
@@ -229,11 +213,17 @@ fn one(
     // it: one over-wide row widens every row after it (#733).
     if e.is_open() {
         let typed = ws.annotation_ui.replies.entry(e.id.clone()).or_default();
+        // Named for a screen reader (#781): a hint is only a placeholder.
+        let name = number.map_or_else(
+            || "Reply to this annotation".to_owned(),
+            |n| format!("Reply to #{n}"),
+        );
         ui.add(
             egui::TextEdit::singleline(typed)
                 .hint_text("Reply")
                 .desired_width(f32::INFINITY),
-        );
+        )
+        .accessible_name(name);
     }
     ui.horizontal_wrapped(|ui| {
         if e.is_open() {
@@ -276,5 +266,29 @@ fn one(
         {
             ws.apply_annotation(&e.id);
         }
+    });
+}
+
+/// One reference a row: Show first, then the reference elided to the
+/// tile (whole on hover). Wrapped together, a Show fell under the next
+/// reference and read as its (#775).
+fn reference_row(
+    ui: &mut egui::Ui,
+    ws: &mut Workspace,
+    view: &mut View,
+    text: &str,
+    reference: Option<&String>,
+) {
+    ui.horizontal(|ui| {
+        if let Some(r) = reference
+            && ui
+                .small_button("Show")
+                .on_hover_text(format!("Select and frame {r}"))
+                .clicked()
+        {
+            ws.select(vec![r.clone()], ryucad::live::SelectMode::Replace);
+            view.fit_entities(ws, std::slice::from_ref(r));
+        }
+        ui.add(egui::Label::new(RichText::new(text).monospace().small()).truncate());
     });
 }

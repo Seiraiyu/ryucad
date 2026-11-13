@@ -34,6 +34,7 @@ pub mod check;
 pub mod config;
 pub mod content;
 pub mod deps;
+pub mod git_env;
 pub mod history;
 pub mod items;
 pub mod label;

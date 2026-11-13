@@ -579,6 +579,9 @@ pub struct Workspace {
     /// A camera normal to a face, come from the daemon, for the view to
     /// turn to.
     pub looked: Option<Camera>,
+    /// A chosen annotation's camera waiting for its part (#776): shown
+    /// first, the part is framed, then the view turns to this.
+    pub looked_on: Option<(String, Camera)>,
     /// What the window shows changed (View > Show, or an agent's
     /// `ryucad focus`): the view frames it again, as it frames the first
     /// view (issue #211).
@@ -741,6 +744,7 @@ impl Workspace {
             sections: Default::default(),
             explodes: Default::default(),
             looked: None,
+            looked_on: None,
             refocused: false,
             appearance: Default::default(),
             looks_read: BTreeMap::new(),
@@ -1937,6 +1941,17 @@ impl Workspace {
         self.send(req, Pending::Quiet);
     }
 
+    /// Shows `part` if the window doesn't already (#737, #778, #780):
+    /// what is chosen from the tree or the palette is shown with its
+    /// part, so the viewport, `ryucad focus` and File > Export… are about
+    /// what the person chose. A part a shown assembly places counts as
+    /// not shown: choosing its feature shows the part itself.
+    pub fn show_part(&mut self, part: &str) {
+        if !self.model.shown().contains(&part) {
+            self.set_focus(Some(part.to_owned()));
+        }
+    }
+
     /// Cuts with the planes this window's participant has; the scene and
     /// picking read them from [`Workspace::sections`].
     fn follow_sections(&mut self) {
@@ -2507,6 +2522,7 @@ impl Workspace {
     /// stops that compare.
     pub fn choose_annotation(&mut self, id: Option<&str>) {
         self.chosen_annotation = id.map(str::to_owned);
+        self.looked_on = None;
         let entry = id.and_then(|i| self.annotations.all.get(i)).cloned();
         let comparing_one = self
             .compare
@@ -2514,8 +2530,23 @@ impl Workspace {
             .is_some_and(|c| c.rev.starts_with(ryucad::session::ANNOTATION));
         match entry {
             Some(e) => {
-                if let Some(c) = e.view {
-                    self.looked = Some(c);
+                // Made on a part not shown: show it first, as the palette
+                // does a feature's (#737), and its camera waits for it,
+                // else its marks aren't drawn (#730) and its view frames
+                // another part (#776).
+                let away = e
+                    .part()
+                    .filter(|p| {
+                        !self.model.shown().contains(p) && self.model.listed.contains_key(*p)
+                    })
+                    .map(str::to_owned);
+                match (away, e.view) {
+                    (Some(part), view) => {
+                        self.set_focus(Some(part.clone()));
+                        self.looked_on = view.map(|c| (part, c));
+                    }
+                    (None, Some(c)) => self.looked = Some(c),
+                    (None, None) => {}
                 }
                 match e.change {
                     Some(_) => {
@@ -2968,9 +2999,11 @@ impl Workspace {
         self.card = Some(self.errors.len() - 1);
     }
 
-    /// A drawing's tree row chosen: the Drawings tile opens on it, its
-    /// first sheet shown.
+    /// A drawing chosen from its tree row or the palette: its part shown
+    /// if it isn't (#780), so File > Export… offers the drawing on
+    /// screen, and the Drawings tile opened on it, its first sheet shown.
     pub fn open_drawing(&mut self, part: &str, drawing: &str) {
+        self.show_part(part);
         self.show_drawings(Some(part));
         self.drawings.chosen = None;
         self.drawings.sheet = None;
