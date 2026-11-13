@@ -970,6 +970,15 @@ pub enum Code {
     ModelOrphaned,
     /// A project file Git left unmerged in the index.
     UnmergedPath,
+    /// A clone's hook doesn't run a product's merge check (ryueda's
+    /// doctor; ryucad's says it by name).
+    GitHookMissing,
+    /// A clone's hook is another tool's and doesn't run the check: left
+    /// alone, with the line to add.
+    GitHookForeign,
+    /// A layout both sides of a merge changed, which `ryueda merge status`
+    /// merges once the merged connectivity reads (design 518).
+    LayoutPending,
 }
 
 impl Code {
@@ -1406,6 +1415,9 @@ mod tests {
             (Code::UnknownFile, "unknown_file"),
             (Code::ModelOrphaned, "model_orphaned"),
             (Code::UnmergedPath, "unmerged_path"),
+            (Code::GitHookMissing, "git_hook_missing"),
+            (Code::GitHookForeign, "git_hook_foreign"),
+            (Code::LayoutPending, "layout_pending"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);
