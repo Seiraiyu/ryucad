@@ -2055,6 +2055,49 @@ enum MotionCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Show a motion in a participant's window (the one human's, else the
+    /// caller's), from its start or --fraction of the way, paused or
+    /// with --play; with only --fraction, --play or --pause, change the
+    /// one shown (a fraction alone pauses it); --off shows none. A motion
+    /// shown takes an explode away.
+    Show {
+        #[arg(conflicts_with = "off", required_unless_present_any = ["off", "fraction", "play", "pause"])]
+        motion: Option<String>,
+        /// The assembly whose motion it is (the window's, else the
+        /// project's model).
+        #[arg(long, requires = "motion")]
+        part: Option<String>,
+        /// From 0 (its start) to 1 (its end); 0 for a new one.
+        #[arg(long, conflicts_with = "off")]
+        fraction: Option<f64>,
+        /// Play it, back and forth, in the window.
+        #[arg(long, conflicts_with_all = ["off", "pause"])]
+        play: bool,
+        /// Stop playing it where it is.
+        #[arg(long, conflicts_with = "off")]
+        pause: bool,
+        #[arg(long)]
+        off: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
+    /// Where a motion puts each moved body at even fractions: each
+    /// frame's state, drive values, moved instances' poses and offsets.
+    /// It only solves; nothing is intersected.
+    Frames {
+        part: String,
+        #[arg(conflicts_with = "drives", required_unless_present = "drives")]
+        motion: Option<String>,
+        /// Inline drives, as `save --drives` takes them.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        drives: Option<Value>,
+        /// Steps of the inline drives (11 when left out).
+        #[arg(long, requires = "drives")]
+        steps: Option<u32>,
+        /// How many frames, 2 to 1,000 (120 when left out).
+        #[arg(long)]
+        frames: Option<u32>,
+    },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -4812,6 +4855,41 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             motion: motion.clone(),
             expected_revision: expect.revision.clone(),
+        },
+        Command::Motion(MotionCmd::Show {
+            motion,
+            part,
+            fraction,
+            play,
+            pause,
+            off,
+            of,
+        }) => Request::MotionShow {
+            part: part.clone(),
+            motion: motion.clone(),
+            fraction: *fraction,
+            playing: if *play {
+                Some(true)
+            } else if *pause {
+                Some(false)
+            } else {
+                None
+            },
+            off: *off,
+            participant: of.clone(),
+        },
+        Command::Motion(MotionCmd::Frames {
+            part,
+            motion,
+            drives,
+            steps,
+            frames,
+        }) => Request::MotionFrames {
+            part: part.clone(),
+            motion: motion.clone(),
+            drives: drives.clone(),
+            steps: *steps,
+            frames: *frames,
         },
         Command::View(ViewCmd::Save {
             part,

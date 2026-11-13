@@ -1191,6 +1191,8 @@ fn every_protocol_method_has_a_command() {
         ("motion.list", &["motion", "list"]),
         ("motion.save", &["motion", "save"]),
         ("motion.delete", &["motion", "delete"]),
+        ("motion.show", &["motion", "show"]),
+        ("motion.frames", &["motion", "frames"]),
         ("explode.save", &["explode", "save"]),
         ("explode.delete", &["explode", "delete"]),
         ("explode.show", &["explode", "show"]),
