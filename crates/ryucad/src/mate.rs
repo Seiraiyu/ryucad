@@ -473,6 +473,47 @@ impl Scope for Rebuilt<'_> {
     }
 }
 
+/// A revolute or cylindrical mate's frames made to point the same way
+/// where one is a cylindrical or conical face's (#770): such an axis has
+/// no way of its own, so where its z points against the other's at the
+/// poses the instances hold now, it is turned over about its x, as
+/// `offset.flip` turns a frame. A connector flipped by its offset, or one
+/// on a pattern's copy, is taken as it is.
+fn agree(
+    m: &Mate,
+    asm: &ryumate::Assembly,
+    body_of: &impl Fn(&Id) -> u32,
+    a: &mut Found,
+    b: &mut Found,
+) {
+    if !matches!(m.form, Form::Revolute | Form::Cylindrical)
+        || m.a.offset.flip
+        || m.b.offset.flip
+        || a.copy.is_some()
+        || b.copy.is_some()
+        || !(a.axial || b.axial)
+    {
+        return;
+    }
+    let z = |f: &Found| {
+        asm.bodies[&body_of(&f.instance)]
+            .pose
+            .then_after(&f.frame)
+            .axis(2)
+    };
+    let (za, zb) = (z(a), z(b));
+    if za[0] * zb[0] + za[1] * zb[1] + za[2] * zb[2] >= 0.0 {
+        return;
+    }
+    let over = crate::doc::mate::Offset {
+        origin: None,
+        rotate: None,
+        flip: true,
+    };
+    let turned = if b.axial { b } else { a };
+    turned.frame = crate::connector::offset(&turned.frame, &over);
+}
+
 /// Refuses a connector `role` of feature `id` whose frame `ryumate` can't
 /// take: its origin, in its instance's coordinates (offsets and the
 /// occurrences a path goes through included), past the size box.
@@ -707,10 +748,11 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                 // What it names comes before it; what it is, resolving says.
                 crate::graph::check_order(part, order, id, feature(id))?;
                 mate_values(id, m)?;
-                let a = resolve(id, "a", &m.a, &scope)?;
-                let b = resolve(id, "b", &m.b, &scope)?;
+                let mut a = resolve(id, "a", &m.a, &scope)?;
+                let mut b = resolve(id, "b", &m.b, &scope)?;
                 frame_ok(id, "a", &a.frame)?;
                 frame_ok(id, "b", &b.frame)?;
+                agree(m, &asm, &body_of, &mut a, &mut b);
                 let k = solved_mates.len() as u32;
                 Ok((k, [a, b]))
             })();
@@ -1637,6 +1679,88 @@ pub(crate) mod tests {
             .find(|f| f["id"] == "pin")
             .unwrap();
         assert_eq!(pin["instance"]["solve"]["dof"], 1);
+    }
+
+    /// #770: a revolute between a hole's bore (its frame down the drill)
+    /// and a bolt's side (its frame up) leaves the bolt upright.
+    #[test]
+    fn a_revolute_on_a_holes_bore_keeps_the_part_upright() {
+        let (_dir, mut s) = project();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "sketch", "id": "top",
+                   "placement": {"origin": [0, 0, 5]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "plate", "sketch": "top", "ops": [
+                {"op": "add", "id": "p1", "type": "point", "at": [20, 10]},
+                {"op": "add", "type": "fix", "a": "p1"}]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "hole", "id": "h", "sketch": "top",
+                   "points": ["p1"], "diameter": 6, "depth": "through_all"}),
+        )
+        .unwrap();
+        let cylinder = |s: &mut Session, part: &str, solid: &str| -> (String, f64) {
+            let body =
+                call(s, "inspect", json!({"part": part, "feature": solid})).unwrap()["bodies"][0]
+                    .clone();
+            let f = body["faces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["surface"]["type"] == "cylinder")
+                .unwrap_or_else(|| panic!("no cylindrical face in {body}"))
+                .clone();
+            (
+                f["name"].as_str().unwrap().to_owned(),
+                f["surface"]["frame"]["z"][2].as_f64().unwrap(),
+            )
+        };
+        // The plate as the hole leaves it (its solid is still slab's).
+        let (bore, bore_z) = cylinder(&mut s, "plate", "h");
+        let (side, side_z) = cylinder(&mut s, "bolt", "shank");
+        // The case #770 turned over: frames pointing opposite ways.
+        assert!(bore_z < 0.0 && side_z > 0.0, "{bore_z} {side_z}");
+        for (i, of, fixed) in [("base", "plate", true), ("pin", "bolt", false)] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": i, "of": of, "fixed": fixed}),
+            )
+            .unwrap();
+        }
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "mate", "id": "m1", "form": "revolute",
+                   "a": format!("frame/base/slab/{bore}"),
+                   "b": format!("frame/pin/shank/{side}")}),
+        )
+        .unwrap();
+        let r = s.rebuilt(&id("frame")).unwrap().clone();
+        let m = crate::assembly::Model::of_assembly(&r);
+        let pin = m
+            .occurrences
+            .iter()
+            .find(|o| crate::assembly::path_text(&o.path) == "pin")
+            .expect("the pin");
+        let z = pin
+            .pose
+            .apply_vector(ryukei::geom::Vector3::new(0.0, 0.0, 1.0));
+        assert!(z.z > 0.5, "the bolt was turned over: its z is {z:?}");
+        let t = pin.pose.translation_part();
+        assert!(
+            (t.x - 0.02).abs() < 1e-9 && (t.y - 0.01).abs() < 1e-9,
+            "{t:?}"
+        );
     }
 
     #[test]
