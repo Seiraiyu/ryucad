@@ -2807,7 +2807,7 @@ impl View {
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
         scene.set_looks(&ws.model.looks);
         scene.sync_drawn(&rs.device, drawn, reference);
-        scene.sync_ghosts(&rs.device, ws.compare.as_ref());
+        scene.sync_ghosts(&rs.device, ws.compare.as_ref(), &ws.model.shown());
         let size = [f64::from(px[0]), f64::from(px[1])];
         let mut overlay = if self.sketches {
             crate::core::sketch::overlay(

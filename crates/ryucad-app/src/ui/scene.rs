@@ -565,9 +565,10 @@ pub struct Scene {
     /// One identity instance, for what is drawn where it is.
     identity: wgpu::Buffer,
     /// A compare's ghosts, coloured for the compare generation they were
-    /// uploaded at.
+    /// uploaded at, of the parts then shown.
     ghosts: BTreeMap<BodyKey, GpuBody>,
     ghosts_at: u64,
+    ghosts_over: Vec<String>,
     target: Option<Target>,
 }
 
@@ -1162,6 +1163,7 @@ impl Scene {
             identity: instances(device, "identity", &[Instance::IDENTITY]),
             ghosts: BTreeMap::new(),
             ghosts_at: u64::MAX,
+            ghosts_over: Vec::new(),
             target: None,
         }
     }
@@ -1289,21 +1291,30 @@ impl Scene {
         (self.bodies.len(), self.placed.len())
     }
 
-    /// Uploads a compare's ghosts, each face translucent in the ghost
-    /// colour or, gone from the working files, the removed one: again
-    /// whenever the compare changes. Call it after [`Scene::sync`]; with
+    /// Uploads a compare's ghosts over the parts the window shows
+    /// (`shown`), each face translucent in the ghost colour or, gone from
+    /// the working files, the removed one: again whenever the compare or
+    /// the parts shown change (#778). Call it after [`Scene::sync`]; with
     /// no compare there are none.
-    pub fn sync_ghosts(&mut self, device: &wgpu::Device, compare: Option<&Compare>) {
+    pub fn sync_ghosts(
+        &mut self,
+        device: &wgpu::Device,
+        compare: Option<&Compare>,
+        shown: &[&str],
+    ) {
         let Some(c) = compare else {
             self.ghosts.clear();
             self.ghosts_at = u64::MAX;
             return;
         };
-        if self.ghosts_at == c.generation {
+        if self.ghosts_at == c.generation
+            && self.ghosts_over.iter().map(String::as_str).eq(shown.iter().copied())
+        {
             return;
         }
         self.ghosts.clear();
         self.ghosts_at = c.generation;
+        self.ghosts_over = shown.iter().map(|s| (*s).to_owned()).collect();
         let tint = |rgb: [f32; 3]| {
             let mut l = linear(rgb);
             l[3] = GHOST_ALPHA;
@@ -1313,7 +1324,7 @@ impl Scene {
             tint(crate::ui::style::GHOST),
             tint(crate::ui::style::REMOVED),
         );
-        for (key, body) in &c.ghosts {
+        for (key, body) in c.ghosts_over(shown) {
             let Ok(m) = &body.mesh else { continue };
             let pose = c.ghost_pose(key);
             let mut faces = Vec::new();
