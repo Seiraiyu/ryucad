@@ -508,3 +508,19 @@ fn mesh_verdicts_on_drilled_plates_agree_with_booleans() {
     assert!(judged >= 6, "{judged}");
     assert_eq!(agreed, judged);
 }
+
+#[test]
+fn a_decided_pair_reads_the_same_through_solid_verdict() {
+    use ryucad::interference::{Verdict, solid_verdict, verdict};
+    use ryukei::geom::{Rigid, Vector3};
+    use ryukei::name::OpKey;
+    let a = ryukei::primitive::block(OpKey::from_bytes(b"a"), 0.01, 0.01, 0.01, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    for x in [0.005, 0.01, 0.02] {
+        let rel = Rigid::translation(Vector3::new(x, 0.0, 0.0));
+        let v = verdict(&a, &a, rel);
+        assert!(!matches!(v, Verdict::CannotCheck { .. }), "{x}: {v:?}");
+        assert_eq!(solid_verdict(&a, &a, rel), v, "{x}");
+    }
+}
