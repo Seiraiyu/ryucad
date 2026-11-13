@@ -7,6 +7,7 @@
 //! itself (`ryucad_app::core::keys::Keymap` is `Keymap<Ryucad>`), so its
 //! own code keeps its paths.
 
+pub mod command;
 pub mod fonts;
 pub mod icon;
 pub mod style;
