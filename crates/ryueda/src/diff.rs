@@ -421,19 +421,10 @@ fn layout(from: &Side, to: &Side, block: &Id, opts: &Options) -> Value {
         v["changes"] = entries
             .iter()
             .map(|e| {
-                let owner = match e.key.section {
-                    "labels" => format!("label:{}", e.key.key.replacen('|', "@", 1)),
-                    "routes" | "buses" => {
-                        e.key.key.split('|').next().unwrap_or_default().to_owned()
-                    }
-                    "regions" => format!("region:{}", e.key.key),
-                    "notes" => format!("note:{}", e.key.key),
-                    _ => e.key.key.clone(),
-                };
                 let mut x = json!(e);
                 x["key"] = json!(e.key.to_string());
-                if e.key.section != "sheets" {
-                    x["ref"] = json!(crate::schem::ref_path(block, &owner));
+                if let Some(r) = crate::schem::key_ref(block, &e.key.to_string()) {
+                    x["ref"] = json!(r);
                 }
                 x
             })

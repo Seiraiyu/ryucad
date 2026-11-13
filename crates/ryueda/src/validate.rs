@@ -10,13 +10,16 @@
 
 use crate::error::{Code, Error, Result};
 use crate::git::Repo;
+use crate::id::Id;
 use crate::project::Project;
 use crate::session::Session;
 use ryu_git::value::{Conflict, Kind};
 use ryu_git::{MergeState, Unmerged};
 use ryu_session::fresh::Files;
+use ryusch::layout::Layout;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Every kind `merge.status` reports. The strings are stable.
@@ -275,6 +278,266 @@ fn unmerged(working: &Files, paths: &BTreeMap<String, Unmerged>) -> (Vec<Value>,
     (conflicts, unstaged)
 }
 
+/// Each side's files, from the merge's commits; the base's are empty
+/// when the sides share no ancestor.
+pub(crate) struct Sides {
+    pub base: Files,
+    pub ours: Files,
+    pub theirs: Files,
+}
+
+pub(crate) fn sides(root: &Path, state: &MergeState) -> Result<Sides> {
+    let read = |c: Option<&String>| -> Result<Files> {
+        match c {
+            Some(c) => Ok(crate::git::revision(root, c)?.files),
+            None => Ok(Files::new()),
+        }
+    };
+    Ok(Sides {
+        base: read(state.base.as_ref())?,
+        ours: read(Some(&state.ours))?,
+        theirs: read(Some(&state.theirs))?,
+    })
+}
+
+/// A side's layout at `path`: an empty one where the side has no file.
+fn layout_on(files: &Files, path: &str) -> Result<Layout> {
+    match files.get(path) {
+        None => Ok(Layout::default()),
+        Some(b) => crate::schem::read_layout(b, path),
+    }
+}
+
+/// Block `id`'s layout merged three ways over the merged connectivity:
+/// the block as ryusch reads it (the merged instructions' notes filled),
+/// each side's layout, and what `ryusch::merge` makes of them.
+// Task 14's layout resolutions read the rest.
+#[allow(dead_code)]
+pub(crate) struct BlockMerge {
+    pub built: crate::schem::Built,
+    pub base: Layout,
+    pub ours: Layout,
+    pub theirs: Layout,
+    pub merged: ryusch::merge::Merged,
+}
+
+pub(crate) fn block_merge(p: &Project, id: &Id, sides: &Sides) -> Result<BlockMerge> {
+    let path = crate::schem::layout_path(id);
+    let b = p.conn.blocks.get(id).ok_or_else(|| {
+        Error::new(
+            Code::NotFound,
+            format!("block {id} isn't in the merged project"),
+        )
+        .with("block", id)
+    })?;
+    let mut built = crate::schem::build(p, b)?;
+    let base = layout_on(&sides.base, &path)?;
+    let ours = layout_on(&sides.ours, &path)?;
+    let theirs = layout_on(&sides.theirs, &path)?;
+    let merged = ryusch::merge::merge(&built.input, &base, &ours, &theirs);
+    // The merged instructions' notes, as `schem::lay` fills a file's.
+    built.input.instructions = merged.layout.instructions.clone();
+    let _ = crate::schem::fill_notes(p, b, &mut built.input);
+    Ok(BlockMerge {
+        built,
+        base,
+        ours,
+        theirs,
+        merged,
+    })
+}
+
+/// The blocks whose layout file holds a pending entry (the driver's).
+fn pending(working: &Files) -> Vec<Id> {
+    working
+        .iter()
+        .filter_map(|(path, bytes)| {
+            let b = path.strip_prefix("blocks/")?.strip_suffix("/layout.json")?;
+            let v = json_of(bytes)?;
+            ryu_git::value::record(&v)
+                .get("")
+                .filter(|c| c.kind == Kind::LayoutPending)?;
+            Id::parse(b, "block").ok()
+        })
+        .collect()
+}
+
+/// Whether the file at `path` can move block `block`'s drawing: the
+/// block's own files, every block's `block.json` (an instance's ports),
+/// and everything outside `blocks/` (rails, the library, the style, the
+/// manifest's sheet) but ERC's, lint's and sourcing's settings and the
+/// attributes.
+fn affects(path: &str, block: &str) -> bool {
+    match path.strip_prefix("blocks/") {
+        Some(rest) => {
+            rest.strip_prefix(block).is_some_and(|r| r.starts_with('/'))
+                || rest.ends_with("/block.json")
+        }
+        None => !matches!(
+            path,
+            crate::project::ERC
+                | crate::project::LINT
+                | crate::project::PARTS
+                | crate::project::ATTRIBUTES
+        ),
+    }
+}
+
+/// Whether `a` and `b` agree on every file block `block`'s drawing reads.
+fn same(a: &Files, b: &Files, block: &str) -> bool {
+    a.keys()
+        .chain(b.keys())
+        .filter(|p| affects(p, block))
+        .all(|p| a.get(p) == b.get(p))
+}
+
+/// The layout items: pending, conflicting by area, or stale (see the
+/// module's doc and design 518's phase 6). `blocked` when other
+/// conflicts are listed: no layout merges until they settle.
+fn layouts(
+    root: &Path,
+    state: &MergeState,
+    working: &Files,
+    project: Option<&Project>,
+    blocked: bool,
+) -> Result<Vec<Value>> {
+    let pending = pending(working);
+    let mut out = Vec::new();
+    let waiting = |id: &Id, why: String| {
+        let mut x = item(
+            format!("{id}#layout"),
+            "layout_pending",
+            vec![crate::schem::layout_path(id)],
+            json!({"block": id, "refs": []}),
+            "both",
+            why,
+        );
+        x["choices"] = json!(["ours", "theirs"]);
+        x
+    };
+    let Some(p) = project.filter(|_| !blocked) else {
+        for id in &pending {
+            out.push(waiting(id, format!(
+                "both sides changed block {id}'s layout: it merges once the merge's other conflicts are settled (or take one side's whole)"
+            )));
+        }
+        return Ok(out);
+    };
+    if pending.is_empty() && p.conn.blocks.values().all(|b| b.layout.is_none()) {
+        return Ok(out);
+    }
+    let sides = sides(root, state)?;
+    for id in &pending {
+        let path = crate::schem::layout_path(id);
+        let m = match block_merge(p, id, &sides) {
+            Ok(m) => m,
+            Err(e) => {
+                let mut x = waiting(
+                    id,
+                    format!(
+                        "both sides changed block {id}'s layout, and the merged block can't be laid out yet: {}",
+                        e.message
+                    ),
+                );
+                x["error"] = json!(e);
+                out.push(x);
+                continue;
+            }
+        };
+        if m.merged.conflicts.is_empty() {
+            let mut x = item(
+                format!("{id}#layout"),
+                "layout_stale",
+                vec![path],
+                json!({"block": id, "refs": []}),
+                "both",
+                format!(
+                    "both sides changed block {id}'s layout in separate areas: merge them over the merged connectivity (repair merge)"
+                ),
+            );
+            x["choices"] = json!(["ours", "theirs"]);
+            x["repairs"] = json!([{"id": "merge", "summary": format!(
+                "merge both sides' layouts of block {id} and lay it out over them, incrementally"
+            )}]);
+            out.push(x);
+            continue;
+        }
+        let ids: Vec<String> = (1..=m.merged.conflicts.len())
+            .map(|n| format!("{id}#area:{n}"))
+            .collect();
+        for (i, c) in m.merged.conflicts.iter().enumerate() {
+            let refs: BTreeSet<String> = c
+                .ours
+                .iter()
+                .chain(&c.theirs)
+                .filter_map(|k| crate::schem::key_ref(id, k))
+                .collect();
+            let sheets: Vec<&String> = c.areas.keys().collect();
+            let mut x = item(
+                ids[i].clone(),
+                "layout_conflict",
+                vec![path.clone()],
+                json!({"block": id, "sheets": sheets, "refs": refs}),
+                "both",
+                format!(
+                    "both sides changed this area of block {id}'s layout ({} key(s) ours, {} theirs); settle every area of the block in one resolve",
+                    c.ours.len(),
+                    c.theirs.len()
+                ),
+            );
+            x["areas"] = json!(c.areas);
+            x["keys"] = json!({"ours": c.ours, "theirs": c.theirs});
+            x["with"] = json!(ids);
+            x["choices"] = json!(["ours", "theirs"]);
+            x["repairs"] = json!([{"id": "relayout", "summary":
+                "lay this area out again from the base layout, with the merged connectivity and both sides' instructions"}]);
+            out.push(x);
+        }
+    }
+    // Blocks no record names whose drawing the merge moved past.
+    for (id, b) in &p.conn.blocks {
+        if pending.contains(id) || !matches!(b.layout, Some(Ok(_))) {
+            continue;
+        }
+        if same(working, &sides.ours, id.as_str()) || same(working, &sides.theirs, id.as_str()) {
+            continue;
+        }
+        let path = crate::schem::layout_path(id);
+        let laid = crate::schem::lay(p, b, None, &[], ryusch::input::Relayout::None);
+        if laid.as_ref().is_ok_and(|l| !l.stale && l.invalid.is_none()) {
+            continue;
+        }
+        let kept = working.get(&path);
+        let cause = if kept == sides.ours.get(&path) {
+            "theirs"
+        } else if kept == sides.theirs.get(&path) {
+            "ours"
+        } else {
+            "both"
+        };
+        let mut x = item(
+            format!("{id}#layout"),
+            "layout_stale",
+            vec![path],
+            json!({"block": id, "refs": []}),
+            cause,
+            format!(
+                "block {id}'s layout no longer matches the merged connectivity: lay it out again (repair relayout), or the next write will, in someone else's diff"
+            ),
+        );
+        match laid {
+            Ok(_) => {
+                x["repairs"] = json!([{"id": "relayout", "summary": format!(
+                    "lay block {id} out over its file, incrementally"
+                )}]);
+            }
+            Err(e) => x["error"] = json!(e),
+        }
+        out.push(x);
+    }
+    Ok(out)
+}
+
 /// What `merge.status` is kept by: the merge Git is in, the index's
 /// stamp and the working files' digest; `None` outside a repository or a
 /// merge.
@@ -330,7 +593,6 @@ fn findings(
     working: &Files,
     project: Option<&Project>,
 ) -> Result<Value> {
-    let _ = (root, project);
     let paths = repo.unmerged()?;
     let mut unstaged = repo.unstaged(working)?;
     let untracked = repo.untracked(working)?;
@@ -340,6 +602,8 @@ fn findings(
     unstaged.extend(settled);
     unstaged.sort();
     unstaged.dedup();
+    let blocked = !conflicts.is_empty();
+    conflicts.extend(layouts(root, state, working, project, blocked)?);
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
@@ -786,5 +1050,31 @@ pub(crate) mod tests {
         assert_eq!(v["unloaded"], true);
         let p = Project::load(r).unwrap();
         assert_eq!(p.manifest.properties["a"], "2");
+    }
+
+    #[test]
+    fn what_a_blocks_layout_depends_on() {
+        assert!(affects("blocks/b/components/r1.json", "b"));
+        assert!(affects("blocks/c/block.json", "b"), "an instance's ports");
+        assert!(!affects("blocks/c/components/r1.json", "b"));
+        assert!(!affects("blocks/bb/layout.json", "b"));
+        assert!(affects("rails/gnd.json", "b") && affects("../lib/library/symbols/r.json", "b"));
+        assert!(!affects("erc.json", "b") && affects("style.json", "b"));
+        let f = |pairs: &[(&str, &str)]| -> Files {
+            pairs
+                .iter()
+                .map(|(p, b)| (p.to_string(), std::sync::Arc::from(b.as_bytes())))
+                .collect()
+        };
+        let a = f(&[("blocks/b/layout.json", "1"), ("blocks/c/nets/n.json", "1")]);
+        let b = f(&[("blocks/b/layout.json", "1"), ("blocks/c/nets/n.json", "2")]);
+        assert!(same(&a, &b, "b") && !same(&a, &b, "c"));
+        let rec = json!({"kind": "ryueda.layout", "format": 1,
+            "conflicts": {"": {"kind": "layout_pending", "ours": {}, "theirs": {}}}});
+        let w = f(&[
+            ("blocks/b/layout.json", &crate::canonical::to_string(&rec)),
+            ("blocks/c/layout.json", "{}"),
+        ]);
+        assert_eq!(pending(&w), [crate::id::Id::parse("b", "block").unwrap()]);
     }
 }
