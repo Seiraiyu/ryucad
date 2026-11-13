@@ -391,6 +391,7 @@ fn a_gap_between_samples_is_covered() {
 /// than as a fault drawn as a hole; every other face meshes as before.
 #[test]
 fn a_face_of_no_width_between_coincident_edges_meshes_empty() {
+    use crate::geom::Curve;
     use crate::mesh::check_mesh;
     let b = primitive::block(OpKey(1), 4.0, 3.0, 1.0, &Rigid::IDENTITY)
         .unwrap()
