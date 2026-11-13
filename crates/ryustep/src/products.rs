@@ -29,8 +29,7 @@ pub struct Products {
     /// Representations holding B-rep or mapped items that no definition's
     /// shape reaches (a file without products, say). A representation of
     /// a property's shape (a `SHAPE_ASPECT`'s, as validation properties
-    /// on a sub-shape are written) isn't one, nor one holding only solids
-    /// a definition's shape already holds (#809).
+    /// on a sub-shape are written) isn't one (#809).
     pub unplaced: Vec<Shape>,
     /// What couldn't be read: definitions, then usages, in instance order,
     /// then usages that closed a cycle, then unplaced representations.
@@ -480,8 +479,9 @@ fn transform(
 
 /// Representations with B-rep or mapped items that no definition's shape
 /// reaches, directly or through mapped items; not a property's shape
-/// (`aspects`), nor one whose items are all solids a reached one holds
-/// (#809: the same solid would be read twice, at the origin).
+/// (`aspects`, #809: its solid is the part's own, and would be read
+/// again at the origin). A loose representation repeating a placed
+/// solid is still one: a file may say so on purpose.
 fn unplaced(
     e: &Entities,
     p: &Products,
@@ -490,7 +490,6 @@ fn unplaced(
     faults: &mut Vec<ImportError>,
 ) -> Vec<Shape> {
     let mut reached = BTreeSet::new();
-    let mut owned: BTreeSet<Id> = BTreeSet::new();
     let mut stack: Vec<Id> = p
         .definitions
         .iter()
@@ -504,7 +503,6 @@ fn unplaced(
         // Its faults were reported with the definition that reached it.
         if let Ok(Some(sh)) = shape(e, r, r, &mut Vec::new()) {
             stack.extend(sh.mapped.iter().map(|m| m.representation));
-            owned.extend(sh.breps);
         }
     }
     let mut out = Vec::new();
@@ -513,7 +511,6 @@ fn unplaced(
             continue;
         }
         match shape(e, r, r, faults) {
-            Ok(Some(sh)) if sh.mapped.is_empty() && sh.breps.iter().all(|b| owned.contains(b)) => {}
             Ok(Some(sh)) => out.push(sh),
             Ok(None) => {}
             Err(f) => faults.push(f),
@@ -714,8 +711,8 @@ mod tests {
     /// #809: validation properties on a sub-shape, as Open CASCADE
     /// writes them: a `SHAPE_ASPECT` of the part's shape, whose own
     /// representation holds the part's solid again (and here one more).
-    /// Neither it nor a loose representation repeating an owned solid is
-    /// unplaced; one holding a solid of its own still is.
+    /// It isn't unplaced; a loose representation repeating the solid
+    /// still is, as is one holding a solid of its own.
     #[test]
     fn a_shape_aspects_representation_is_not_loose_geometry() {
         let data = format!(
@@ -733,7 +730,7 @@ mod tests {
         assert_eq!(p.roots, [0]);
         assert_eq!(p.definitions[0].shapes.len(), 1);
         let unplaced: Vec<Id> = p.unplaced.iter().map(|s| s.representation).collect();
-        assert_eq!(unplaced, [170]);
+        assert_eq!(unplaced, [160, 170]);
     }
 
     #[test]
