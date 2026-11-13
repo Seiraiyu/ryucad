@@ -8,7 +8,9 @@
 //! the product's, behind the trait.
 
 pub mod activity;
+pub mod chords;
 pub mod client;
+pub mod colours;
 pub mod daemon;
 pub mod endpoint;
 pub mod fresh;
