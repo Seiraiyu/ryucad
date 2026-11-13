@@ -181,6 +181,42 @@ pub(crate) fn face_beside(
     )
 }
 
+/// [`face_beside`] for a face touching `other` along `rails`, pcurves on
+/// its own surface over their parameter ranges that need not be edges of
+/// it: a re-trim's known seam runs across its working face (design 551,
+/// #652). The face's own fins bound it as in [`face_beside`], and `Ok`
+/// certifies the same: the face meets `other` nowhere outside the strip.
+/// Fails with `Uncertain` where there is no rail, a fin has no pcurve,
+/// or a part can't be signed.
+pub(crate) fn face_beside_rails(
+    body: &Body,
+    face: FaceId,
+    other: &Surface,
+    rails: &[(&Curve2, [f64; 2])],
+    strip: f64,
+    cells: usize,
+    m: &Meter,
+) -> Result<[bool; 2], Failure> {
+    if rails.is_empty() {
+        return Err(Failure::Uncertain);
+    }
+    let surface = &body.surfaces[body.faces[face].surface];
+    let boundary = boundary_of(body, face).ok_or(Failure::Uncertain)?;
+    let periods = surface.periods();
+    let keep = |c: Cell| !outside(body, face, &boundary, periods, c);
+    run(
+        surface,
+        other,
+        parameter_box(body, face),
+        (rails, &[]),
+        strip,
+        &keep,
+        false,
+        cells.min(CELLS),
+        m,
+    )
+}
+
 /// The plane of a planar curve along which two surfaces meet: a circle's
 /// or an ellipse's, or the plane through three of a NURBS's control
 /// points (spread as far apart as they go) when every control point lies
@@ -1340,5 +1376,69 @@ mod tangency_tests {
         let (spline, _) = side.to_nurbs([[-1.0, 1.0], [-1.0, 1.0]]).unwrap();
         let spline = Surface::Nurbs(std::sync::Arc::new(spline));
         assert_eq!(tangency(&spline, &ball, p, 0.1, &m), Tangency::Unsure);
+    }
+}
+
+#[cfg(test)]
+mod rails_tests {
+    use super::*;
+    use crate::geom::{Cylinder, Frame, Line2, Plane, Vector3};
+    use crate::name::OpKey;
+
+    const MM: f64 = 1e-3;
+
+    /// A plane sheet 4 × 2 mm under a cylinder of radius 1 mm about the x
+    /// axis, the plane `tilt` about the line they share (y = 0, z = -r).
+    fn plane_under(tilt: f64) -> (Body, Surface) {
+        let (s, c) = crate::math::sin_cos(tilt);
+        let frame = Frame::new(
+            Point3::new(0.0, 0.0, -MM),
+            Vector3::new(0.0, -s, c),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let plane = Surface::Plane(Plane::new(frame));
+        let (b, _) =
+            crate::sheet::from_surface(OpKey(0x18c3), &plane, [[-2.0 * MM, 2.0 * MM], [-MM, MM]])
+                .unwrap();
+        let axis = Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+        )
+        .unwrap();
+        (b, Surface::Cylinder(Cylinder::new(axis, MM).unwrap()))
+    }
+
+    fn rail() -> Curve2 {
+        Curve2::Line2(Line2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0)).unwrap())
+    }
+
+    #[test]
+    fn a_plane_tangent_to_a_cylinder_keeps_off_it_beside_a_rail_across_it() {
+        let (b, cyl) = plane_under(0.0);
+        let f = b.faces().next().unwrap();
+        // The line they share, on the plane's parameters: v = 0, u = x.
+        let rail = rail();
+        let strip = 0.05 * MM;
+        let m = Meter::free(); // unmetered: a test
+        let r = face_beside_rails(&b, f, &cyl, &[(&rail, [-2.0 * MM, 2.0 * MM])], strip, CELLS, &m);
+        // Outside the strip the plane lies outside the cylinder only.
+        assert_eq!(r, Ok([false, true]));
+        // No rail, no strip: refused.
+        assert!(face_beside_rails(&b, f, &cyl, &[], strip, CELLS, &m).is_err());
+    }
+
+    #[test]
+    fn a_plane_crossing_a_cylinder_away_from_the_rail_is_not_beside() {
+        // Turned 0.3 rad about the line, the plane crosses the cylinder
+        // along a second line too, outside any strip round the first.
+        let (b, cyl) = plane_under(0.3);
+        let f = b.faces().next().unwrap();
+        let rail = rail();
+        let m = Meter::free(); // unmetered: a test
+        let r =
+            face_beside_rails(&b, f, &cyl, &[(&rail, [-2.0 * MM, 2.0 * MM])], 0.05 * MM, CELLS, &m);
+        assert!(r.is_err(), "{r:?}");
     }
 }

@@ -39,7 +39,7 @@ mod winding;
 pub(crate) use beside::CELLS as BESIDE_CELLS;
 pub use beside::beside;
 pub(crate) use beside::{
-    CONE_PARTS, face_beside, face_off_ball, faces_apart, normal_cones, parameter_box,
+    CONE_PARTS, face_beside, face_beside_rails, face_off_ball, faces_apart, normal_cones, parameter_box,
     section_plane, sine_apart,
 };
 #[cfg(test)]
