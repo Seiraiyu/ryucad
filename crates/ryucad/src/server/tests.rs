@@ -3610,7 +3610,7 @@ fn hello_registers_a_participant() {
         r["session"]["participants"],
         json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
                 "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": [],
-                "sections": [], "explode": null, "mode": "view"}])
+                "sections": [], "explode": null, "motion": null, "mode": "view"}])
     );
     let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
     assert_eq!(list, r["session"]);
