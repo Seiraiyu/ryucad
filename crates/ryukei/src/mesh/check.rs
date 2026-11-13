@@ -31,7 +31,8 @@ pub enum MeshCheckFault {
 /// Checks a mesh against the body it was made from: indices in range,
 /// every face's triangles on its own corners, wound with its parameters,
 /// without degenerate triangles, every welded edge used by exactly two
-/// triangles in opposite directions (once, on a laminar edge of a sheet),
+/// triangles in opposite directions (once, on a laminar edge of a sheet
+/// or an edge of a face of no width, meshed as no triangles),
 /// and edge polylines from vertex to
 /// vertex. A mesh with face faults fails here with the holes they leave.
 pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault>> {
@@ -97,9 +98,22 @@ pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault
         }
     }
     // A sheet's laminar edges bound one face: their segments have one use.
+    // So do the edges of a face meshed as no triangles (one of no width,
+    // see `no_width`): the faces either side meet along both, a slit of
+    // no width.
+    let empty: BTreeSet<FaceId> = mesh
+        .faces
+        .iter()
+        .filter(|fm| fm.triangles.is_empty())
+        .map(|fm| fm.face)
+        .collect();
     let mut boundary: BTreeSet<(u32, u32)> = BTreeSet::new();
     for p in &mesh.edges {
-        if body.is_laminar(p.edge) {
+        let slit = !empty.is_empty()
+            && body
+                .edge_fins(p.edge)
+                .any(|f| empty.contains(&body.loops[body.fins[f].loop_].face));
+        if body.is_laminar(p.edge) || slit {
             for w in p.positions.windows(2) {
                 boundary.insert((w[0].min(w[1]), w[0].max(w[1])));
             }
