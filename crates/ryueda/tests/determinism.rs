@@ -173,6 +173,9 @@ fn netlists_and_erc_are_bit_exact() {
     let repo = dir.path().join("merge");
     std::fs::create_dir_all(&repo).unwrap();
     merged(&mut golden, &repo);
+    let repo = dir.path().join("clashes").join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    clashes(&mut golden, &repo);
     let pico = dir.path().join("pico");
     std::fs::create_dir_all(&pico).unwrap();
     ryueda(&pico, 1, &["init"]);
@@ -789,6 +792,137 @@ fn compared(golden: &mut Golden, dir: &Path) {
         "schematic.breakout.compare.pdf".to_owned(),
         blake3::hash(&pdf).to_hex()[..32].to_owned(),
     );
+}
+
+/// Every file under `dir` but its manifest (whose project ID is random),
+/// by its path from there, in path order.
+fn files_of(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let e = e.unwrap();
+            if e.file_name() == ".git" {
+                continue;
+            }
+            if e.file_type().unwrap().is_dir() {
+                stack.push(e.path());
+            } else {
+                let rel = e
+                    .path()
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if rel != "ryueda.json" {
+                    out.insert(rel, std::fs::read(e.path()).unwrap());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Semantic clashes on the breakout (plan 4.D): each side adds a
+/// resistor as R5 and a net AUX, ours joins SDA into SCL and theirs hangs
+/// its resistor on SDA. The status (commits left out) and the merged
+/// files after every item is settled by its first repair, alike on one
+/// thread and eight.
+fn clashes(golden: &mut Golden, repo: &Path) {
+    git(repo, &["init", "-q"]);
+    let board = repo.join("board");
+    std::fs::create_dir_all(&board).unwrap();
+    ryueda(&board, 1, &["init"]);
+    breakout_at(&board);
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "base"]);
+    git(repo, &["checkout", "-q", "-b", "theirs"]);
+    for args in [
+        vec![
+            "component",
+            "add",
+            "breakout",
+            "--of",
+            "r_4k7",
+            "--id",
+            "r9",
+            "--refdes",
+            "R5",
+        ],
+        vec!["net", "add", "breakout", "AUX", "--id", "aux_t"],
+        vec!["connect", "breakout/r9/1", "AUX"],
+        vec!["connect", "breakout/r9/2", "SDA"],
+    ] {
+        ryueda(&board, 1, &args);
+    }
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "theirs"]);
+    git(repo, &["checkout", "-q", "main"]);
+    for args in [
+        vec![
+            "component",
+            "add",
+            "breakout",
+            "--of",
+            "r_4k7",
+            "--id",
+            "r8",
+            "--refdes",
+            "R5",
+        ],
+        vec!["net", "add", "breakout", "AUX", "--id", "aux_o"],
+        vec!["net", "join", "breakout/SDA", "SCL"],
+    ] {
+        ryueda(&board, 1, &args);
+    }
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "ours"]);
+    let run = |threads: usize| {
+        let _ = git_try(repo, &["merge", "--no-commit", "-q", "theirs"]);
+        let mut status = ryueda(&board, threads, &["merge", "status"]);
+        for side in ["ours", "theirs", "base"] {
+            status[side]["commit"] = Value::Null;
+        }
+        loop {
+            let now = ryueda(&board, threads, &["merge", "status"]);
+            let Some(c) = now["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["repairs"].as_array().is_some_and(|r| !r.is_empty()))
+                .cloned()
+            else {
+                break;
+            };
+            let repair = c["repairs"][0]["id"].as_str().unwrap().to_owned();
+            ryueda(
+                &board,
+                threads,
+                &[
+                    "merge",
+                    "resolve",
+                    c["id"].as_str().unwrap(),
+                    "--repair",
+                    &repair,
+                ],
+            );
+        }
+        let mut h = blake3::Hasher::new();
+        for (path, bytes) in files_of(&board) {
+            h.update(path.as_bytes());
+            h.update(&bytes);
+        }
+        // The repairs changed files the merge staged, which `merge
+        // --abort` refuses to reset: a hard reset ends the merge as well.
+        git(repo, &["reset", "-q", "--hard"]);
+        (status, h.finalize().to_hex()[..32].to_owned())
+    };
+    let one = run(1);
+    assert_eq!(run(8), one, "one thread and eight");
+    golden.json("merge.breakout.clashes", &one.0);
+    golden
+        .got
+        .insert("merge.breakout.clashes.files".to_owned(), one.1);
 }
 
 /// The breakout laid out on two branches that add a capacitor each in
