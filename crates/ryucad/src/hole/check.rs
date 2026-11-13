@@ -27,10 +27,18 @@ pub const CODES: [(&str, &str); 7] = [
     ("hole_tap_drill_nonstandard", "info"),
 ];
 
-/// How many times the checks ran (a test holds that nothing runs them
-/// unasked).
+thread_local! {
+    /// How many times the checks ran on this thread (a test holds that
+    /// nothing runs them unasked; per thread, so tests running beside it
+    /// don't count).
+    static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times the checks ran on this thread.
 #[doc(hidden)]
-pub static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub fn runs() -> usize {
+    RUNS.with(std::cell::Cell::get)
+}
 
 /// What the checks take.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -706,7 +714,7 @@ pub fn check(
     opts: Options,
     rev: Option<&str>,
 ) -> Result<(Vec<Finding>, usize)> {
-    RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    RUNS.with(|r| r.set(r.get() + 1));
     let holes = crate::holes::list(session, part, rev)?;
     let (_, at) = session.at(rev)?;
     let p = at.project().part(part)?.clone();
@@ -735,6 +743,9 @@ pub fn check(
         .par_iter()
         .map(|(_, rows)| solid_findings(&cx, rows))
         .collect();
+    // A cancel that stopped a kernel call mid-way left an undecided
+    // finding: the request answers `cancelled` instead.
+    cx.job.check()?;
     let mut out = Vec::new();
     for f in found {
         let mut f = f?;
@@ -1098,5 +1109,58 @@ pub(crate) mod tests {
         }
         assert_eq!(f["fixes"], json!([]));
         assert!(f["details"]["hint"].as_str().unwrap().contains("1 mm"));
+    }
+
+    #[test]
+    fn a_cancelled_check_answers_cancelled() {
+        let (_dir, mut s) = drilled();
+        put(
+            &mut s,
+            "h",
+            json!({"points": ["p1"], "form": "simple", "diameter": 2,
+            "depth": "through_all"}),
+        );
+        crate::holes::list(&mut s, &Id::parse("p", "part").unwrap(), None).unwrap();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        s.job = ryu_session::job::Job::new("t", "p", "holes.check", flag);
+        let e = request(&mut s, "p", None, None, None, None).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Cancelled, "{e}");
+    }
+
+    /// Rebuilds, edits, listing holes, an import and a plain check never
+    /// run the hole checks; asking does, once.
+    #[test]
+    fn nothing_runs_the_hole_checks_unasked() {
+        let (_dir, mut s) = drilled();
+        let before = runs();
+        put(
+            &mut s,
+            "h",
+            json!({"format": 23, "points": ["p1", "p2"], "form": "simple",
+            "thread": {"standard": "iso_metric", "size": "M3", "depth": "2 mm"},
+            "depth": {"blind": "4 mm"}}),
+        );
+        call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "thread_depth": "3 mm"}),
+        )
+        .unwrap();
+        call(&mut s, "holes.list", json!({"part": "p"})).unwrap();
+        let file = format!(
+            "{}/tests/data/surface_disc.step",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        call(
+            &mut s,
+            "import",
+            json!({"path": file, "part": "imp", "solid": false}),
+        )
+        .unwrap();
+        call(&mut s, "check", json!({})).unwrap();
+        assert_eq!(runs(), before, "nothing ran them unasked");
+        call(&mut s, "holes.check", json!({"part": "p"})).unwrap();
+        assert_eq!(runs(), before + 1, "asking runs them once");
     }
 }

@@ -303,6 +303,16 @@ enum Command {
         /// run, and each assembly says so.
         #[arg(long)]
         interference: bool,
+        /// Also run the hole checks (breakout, edge distance, break-through,
+        /// threads past the material, engagement, tap drills): only when asked.
+        #[arg(long)]
+        holes: bool,
+        /// With --holes: a bore's least distance to another face, times its diameter.
+        #[arg(long, requires = "holes", value_name = "K")]
+        edge_factor: Option<f64>,
+        /// With --holes: a thread's least engagement, times its diameter.
+        #[arg(long, requires = "holes", value_name = "K")]
+        min_engagement: Option<f64>,
     },
     /// An assembly's bill of materials, from its files alone: indented (each
     /// assembly's children with how many it places), or flat (every part
@@ -5707,11 +5717,17 @@ fn request(cmd: &Command) -> Option<Request> {
             against,
             results,
             interference,
+            holes,
+            edge_factor,
+            min_engagement,
         } => Request::Check {
             part: part.clone(),
             against: against.clone(),
             results: *results,
             interference: *interference,
+            holes: *holes,
+            edge_factor: *edge_factor,
+            min_engagement: *min_engagement,
         },
         Command::Diff {
             from,

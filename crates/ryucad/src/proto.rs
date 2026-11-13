@@ -1751,6 +1751,16 @@ pub enum Request {
         /// `interference_not_checked` note.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         interference: bool,
+        /// Also run the hole checks (`hole_*`, design 533): only when asked.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        holes: bool,
+        /// With `holes`: a bore's least distance to another face, times
+        /// its diameter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge_factor: Option<f64>,
+        /// With `holes`: a thread's least engagement, times its diameter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_engagement: Option<f64>,
     },
     /// What changed between two revisions (`HEAD` and the working files by
     /// default): files as ryucad reads them, and with `model` the bodies.
