@@ -301,6 +301,8 @@ fn part(f: Feature, reference: bool, placed: bool) -> Part {
         parameters: None,
         env: project().clone(),
         project_reads: Default::default(),
+        // No project table: a hole's derived sizes are the built-ins'.
+        hole_standards: None,
         features,
         uses: BTreeMap::new(),
         explode_uses: Default::default(),
@@ -770,6 +772,10 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(m.kernel().check(), Ok(m.closed), "{r}");
         }
         // An assembly's feature in a part fails before it builds.
+        // A cosmetic thread is data: its ring sits on its faces' axis.
+        Some(Output::Thread(t)) => {
+            assert!(t.thread.ring_diameter().is_finite(), "{t:?}");
+        }
         Some(Output::Instance(_) | Output::Mate(_) | Output::Copies(_)) => {
             panic!("an assembly's feature built in a part")
         }
