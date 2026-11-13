@@ -872,8 +872,13 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     form::heading(ui, icon, &form.feature, form.dirty());
     ui.label(format!("{} in part {}", form.ty, form.part));
     if let Some(d) = &dependency {
+        let verb = if form.of.is_some() {
+            "inserts"
+        } else {
+            "places"
+        };
         ui.weak(format!(
-            "places a part of dependency {d}: its official labels only"
+            "{verb} a part of dependency {d}: its official labels only"
         ));
     }
     match form::banner(ui, &form.feature, &form.changed) {
@@ -931,6 +936,16 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     {
         keys.apply |= k.apply;
         keys.revert |= k.revert;
+    }
+    // An insert: what it inserts, which the pin and placement below read.
+    if let Some(of) = &form.of {
+        let shown = match &dependency {
+            Some(d) => format!("{d}:{of}"),
+            None => of.clone(),
+        };
+        form::grid(ui, "insert", |rows| {
+            rows.read_only("inserts", &shown, false, None);
+        });
     }
     if let Some(i) = form.import.clone() {
         let key = (form.part.clone(), form.feature.clone());

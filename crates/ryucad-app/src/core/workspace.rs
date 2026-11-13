@@ -4724,6 +4724,14 @@ impl Workspace {
                     {
                         form.offer_revs(&[l.to_owned()]);
                     }
+                    // An insert of this project's part may take any of its
+                    // official labels (design 521): every one, read now.
+                    if form.ty == "insert" && form.foreign.is_none() {
+                        let req = Request::ReleaseList {
+                            part: Some(placed.to_owned()),
+                        };
+                        self.send(req, Pending::FormLabels(part.clone(), form.feature.clone()));
+                    }
                     self.form = Some(form);
                 }
             }
@@ -4733,12 +4741,10 @@ impl Workspace {
                     .as_mut()
                     .filter(|f| f.part == part && f.feature == id)
                 {
-                    let labels: Vec<String> = a.result["parts"][0]["labels"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|l| l["label"].as_str().map(str::to_owned))
-                        .collect();
+                    // An insert's from `release.list`, an instance's of
+                    // another project from `deps.parts`.
+                    let of = f.of.clone().unwrap_or_default();
+                    let labels = crate::core::inserts::official_labels(&a.result, &of);
                     f.offer_revs(&labels);
                 }
             }

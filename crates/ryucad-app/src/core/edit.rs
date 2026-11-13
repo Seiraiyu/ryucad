@@ -1366,6 +1366,8 @@ pub struct Form {
     /// For an instance of another project's part: that project's ID.
     /// Its revision offers only its official labels (never `working`).
     pub foreign: Option<String>,
+    /// An insert's source part (design 521): shown, never edited here.
+    pub of: Option<String>,
     /// An import's file, hash, product and body: shown, never edited
     /// (`ryucad import` writes imports).
     pub import: Option<crate::core::model::ImportInfo>,
@@ -1438,9 +1440,10 @@ impl Form {
             .collect();
         let ty = text(&v["type"]);
         let instance = ty == "instance";
+        let insert = ty == "insert";
         let foreign = v["project"]
             .as_str()
-            .filter(|_| instance)
+            .filter(|_| instance || insert)
             .map(str::to_owned);
         // An instance's pose is its placement, the origin in the
         // project's unit (issue #108).
@@ -1457,7 +1460,19 @@ impl Form {
             let axis = |a: &Value| -> Vec<String> { (0..3).map(|i| pose_number(&a[i])).collect() };
             json!({"origin": [o(0), o(1), o(2)], "z": axis(&p["z"]), "x": axis(&p["x"])})
         });
-        let p = pose.as_ref().unwrap_or(&v["placement"]);
+        // An insert at the identity writes no placement: read it as one,
+        // so it can be moved (design 521).
+        let zero = format!("0 {}", unit.as_str());
+        let identity = json!({
+            "origin": [zero.clone(), zero.clone(), zero],
+            "z": ["0", "0", "1"],
+            "x": ["1", "0", "0"],
+        });
+        let p = match pose.as_ref() {
+            Some(p) => p,
+            None if insert && !v["placement"].is_object() => &identity,
+            None => &v["placement"],
+        };
         let strings =
             |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().map(text).collect() };
         let acts = matches!(
@@ -1546,7 +1561,7 @@ impl Form {
             surface,
             surface_form,
             tweak,
-            rev: instance.then(|| {
+            rev: (instance || insert).then(|| {
                 let read = match v["rev"]["label"].as_str() {
                     Some(l) => l.to_owned(),
                     None => "working".to_owned(),
@@ -1559,6 +1574,7 @@ impl Form {
                 c
             }),
             foreign,
+            of: insert.then(|| text(&v["part"])),
             fixed: instance.then(|| Flag {
                 name: "fixed".to_owned(),
                 read: v["fixed"] == true,
@@ -2186,6 +2202,42 @@ impl DimForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_inserts_form_edits_its_pin_and_its_placement_from_the_identity() {
+        let shown = json!({"id": "brd", "type": "insert", "revision": "r1",
+                           "part": "pcb", "rev": {"label": "A"}});
+        let mut f = Form::from_show_in("e", &shown, Unit::Mm);
+        assert_eq!(f.of.as_deref(), Some("pcb"));
+        let rev = f.rev.as_ref().unwrap();
+        assert_eq!(
+            (rev.read.as_str(), rev.options.clone()),
+            ("A", vec!["working".to_owned(), "A".to_owned()])
+        );
+        f.offer_revs(&["B".to_owned(), "A".to_owned()]);
+        assert_eq!(f.rev.as_ref().unwrap().options, ["working", "A", "B"]);
+        // At the identity its placement still reads, so it can be moved.
+        assert!(f.placed());
+        assert_eq!(f.origin[2].read, "0 mm");
+        f.origin[2].text = "20 mm".into();
+        f.rev.as_mut().unwrap().chosen = "B".into();
+        let Request::FeatureEdit {
+            placement, fields, ..
+        } = f.request().unwrap()
+        else {
+            panic!("an edit")
+        };
+        let p = placement.unwrap();
+        assert_eq!(p.origin.unwrap()[2], json!("20 mm"));
+        assert!(p.z.is_none() && p.x.is_none());
+        assert_eq!(fields.rev.as_deref(), Some("B"));
+        // Another project's part offers only its labels.
+        let foreign = json!({"id": "brd", "type": "insert", "revision": "r1",
+                             "part": "pcb", "project": "aa", "rev": {"label": "A"}});
+        let f = Form::from_show_in("e", &foreign, Unit::Mm);
+        assert_eq!(f.foreign.as_deref(), Some("aa"));
+        assert_eq!(f.rev.unwrap().options, ["A"]);
+    }
 
     #[test]
     fn a_shells_thickness_direction_open_faces_and_groups_are_edited() {

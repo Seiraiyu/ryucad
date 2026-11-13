@@ -64,6 +64,33 @@ impl Deleted {
     }
 }
 
+/// A part's official release labels from `release.list` (its records)
+/// or `deps.parts` (a dependency's part's labels), in the order given.
+/// With `part` empty, `deps.parts`' every listed part's.
+pub fn official_labels(v: &serde_json::Value, part: &str) -> Vec<String> {
+    let label = |x: &serde_json::Value| x["label"].as_str().map(str::to_owned);
+    if let Some(records) = v["records"].as_array() {
+        return records
+            .iter()
+            .filter(|r| r["part"] == part && r["status"] == "official")
+            .filter_map(label)
+            .collect();
+    }
+    v["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| part.is_empty() || p["part"] == part || p.get("part").is_none())
+        .flat_map(|p| {
+            p["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(label)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +143,17 @@ mod tests {
             [key("brd/boss")]
         );
         assert_eq!(d.generation, 1);
+    }
+
+    #[test]
+    fn official_labels_come_from_either_list() {
+        let released = json!({"records": [
+            {"part": "pcb", "label": "A", "status": "official"},
+            {"part": "pcb", "label": "B", "status": "official"},
+            {"part": "pcb", "label": "C", "status": "proposed"},
+            {"part": "lid", "label": "A", "status": "official"}]});
+        assert_eq!(official_labels(&released, "pcb"), ["A", "B"]);
+        let deps = json!({"parts": [{"part": "pcb", "labels": [{"label": "B"}, {"label": "A"}]}]});
+        assert_eq!(official_labels(&deps, "pcb"), ["B", "A"]);
     }
 }
