@@ -8,7 +8,7 @@
 
 use crate::core::command;
 use crate::core::compare::{Change, Compare, Mark};
-use crate::core::model::{BodyKey, Feature, MateInfo, Model, Part};
+use crate::core::model::{BodyKey, Feature, MateInfo, Model, Part, Solid};
 use crate::core::pdm::States;
 use crate::ui::style::{self, Rgb};
 use serde_json::Value;
@@ -724,6 +724,23 @@ pub fn behind(i: &crate::core::model::InsertInfo, states: &States) -> Option<Str
     (newest != pinned).then(|| newest.to_owned())
 }
 
+/// The import features of `part` founding a solid the model shows, by
+/// the file they read, for each file two or more read: a flattened
+/// file's bodies (question 627), or several bodies imported one by one.
+fn import_files(part: &Part) -> BTreeMap<&str, Vec<&Feature>> {
+    let mut by: BTreeMap<&str, Vec<&Feature>> = BTreeMap::new();
+    for f in &part.features {
+        if let Some(i) = &f.import
+            && f.founds()
+            && part.solid(&f.id).is_some()
+        {
+            by.entry(i.file.as_str()).or_default().push(f);
+        }
+    }
+    by.retain(|_, v| v.len() > 1);
+    by
+}
+
 struct Builder<'a> {
     src: &'a Source<'a>,
     rows: Vec<Row>,
@@ -981,6 +998,76 @@ impl Builder<'_> {
         }
     }
 
+    /// A file's row, `nucleo.step (690 bodies, flattened)`, closed; under
+    /// it a row per product when its bodies come from more than one
+    /// (`U1 (STM32F4, 3 bodies)`), closed; under those each body's solid
+    /// row as any (design 521, question 627).
+    fn file_group(&mut self, part: &Part, file: &str, imports: &[&Feature], parent: usize) {
+        let info = |f: &Feature| f.import.clone().expect("an import");
+        let first = info(imports[0]);
+        let n = imports.len();
+        let mut words = vec![format!("{n} bodies")];
+        if imports.iter().any(|f| info(f).flattened) {
+            words.push("flattened".into());
+        }
+        let reference = imports.iter().all(|f| info(f).reference);
+        if reference {
+            words.push("reference".into());
+        }
+        let failed = imports
+            .iter()
+            .filter(|f| part.solid(&f.id).and_then(Solid::failure).is_some())
+            .count();
+        if failed > 0 {
+            words.push(format!("{failed} failed"));
+        }
+        let text = format!("{} ({})", first.file_name(), words.join(", "));
+        let mut row = Row::new(format!("file:{}/{file}", part.id), 1, "files", text);
+        row.open = false;
+        if reference {
+            row.badges.push(reference_badge());
+        }
+        if failed > 0 {
+            row.fail(&format!("{failed} bodies failed"));
+        }
+        let me = self.push(row, Some(parent));
+        // Products in the order their first bodies are listed.
+        let mut products: Vec<(Option<(String, String, u64)>, Vec<&Feature>)> = Vec::new();
+        for f in imports {
+            let p = info(f).product;
+            match products.iter_mut().find(|(q, _)| *q == p) {
+                Some((_, v)) => v.push(f),
+                None => products.push((p, vec![f])),
+            }
+        }
+        if products.len() < 2 {
+            for f in imports {
+                self.solid(part, &f.id, false, 2, Some(me));
+            }
+            return;
+        }
+        for (product, bodies) in products {
+            let (under, depth) = match &product {
+                Some((id, name, ordinal)) => {
+                    let k = bodies.len();
+                    let text = format!("{id} ({name}, {k} bod{})", if k == 1 { "y" } else { "ies" });
+                    let mut r = Row::new(
+                        format!("product:{}/{file}/{id}#{ordinal}", part.id),
+                        2,
+                        "package",
+                        text,
+                    );
+                    r.open = false;
+                    (self.push(r, Some(me)), 3)
+                }
+                None => (me, 2),
+            };
+            for f in bodies {
+                self.solid(part, &f.id, false, depth, Some(under));
+            }
+        }
+    }
+
     /// The instances of assembly `id` (placed at `at`), under the instance
     /// that places it, to any depth: read-only rows. One the window hasn't
     /// loaded is a closed row, loaded when opened.
@@ -1187,6 +1274,8 @@ impl Builder<'_> {
         }
         row.text = text;
         let me = self.push(row, None);
+        let files = import_files(part);
+        let mut listed: BTreeSet<&str> = BTreeSet::new();
         // An assembly's mates go under one Mates row, all of them where
         // the first is listed.
         let mut grouped = false;
@@ -1211,6 +1300,16 @@ impl Builder<'_> {
             // An insert is one row, whatever its source shows (design 521).
             if f.insert.is_some() {
                 self.insert(part, f, 1, Some(me));
+                continue;
+            }
+            // A file several bodies come from is one row (question 627).
+            if let Some(i) = &f.import
+                && let Some(group) = files.get(i.file.as_str())
+                && group.iter().any(|g| g.id == f.id)
+            {
+                if listed.insert(i.file.as_str()) {
+                    self.file_group(part, &i.file, group, me);
+                }
                 continue;
             }
             match f.solids.as_slice() {
@@ -1791,6 +1890,54 @@ mod tests {
             rows.iter()
                 .any(|r| r.text == "brd (insert of pcb @ label A, 690 solids)")
         );
+    }
+
+    #[test]
+    fn a_flattened_files_bodies_are_one_row_then_one_per_product() {
+        let imp = |id: &str, product: &str, name: &str| {
+            json!({"id": id, "type": "import", "ok": true, "hash": id, "solids": [id],
+                   "import": {"file": "imports/n.step", "blake3": "00", "body": 0,
+                              "mode": "reference", "flattened": true,
+                              "product": {"id": product, "name": name}}})
+        };
+        let shown = |id: &str| {
+            json!({"solid": id, "ok": true, "features": [id], "hash": id, "reference": true})
+        };
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "f", "revision": "r", "features": [
+            imp("a", "U1", "MCU"), imp("b", "U1", "MCU"), imp("c", "J1", "USB"),
+            {"id": "x", "type": "box", "ok": true, "hash": "x", "solids": ["x"]}],
+          "solids": [shown("a"), shown("b"), shown("c"),
+                     {"solid": "x", "ok": true, "features": ["x"], "hash": "x"}]}));
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let all: Vec<String> = rows
+            .iter()
+            .map(|r| format!("{}{}", "  ".repeat(r.depth), r.text))
+            .filter(|t| !t.trim_start().starts_with(['a', 'b', 'c']) || t.contains("(solid"))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                "f",
+                "  n.step (3 bodies, flattened, reference)",
+                "    U1 (MCU, 2 bodies)",
+                "      a (solid, reference)",
+                "      b (solid, reference)",
+                "    J1 (USB, 1 body)",
+                "      c (solid, reference)",
+                "  x (solid)",
+                "    x (box)",
+            ]
+        );
+        let file = rows.iter().find(|r| r.text.starts_with("n.step")).unwrap();
+        assert_eq!((file.icon, file.open), ("files", false));
+        let product = rows.iter().find(|r| r.text.starts_with("U1")).unwrap();
+        assert_eq!((product.icon, product.open), ("package", false));
+        // Closed, the file shows its row alone.
+        let shown = texts(&rows, &Tree::default());
+        assert!(shown.contains(&"  n.step (3 bodies, flattened, reference)".to_owned()));
+        assert!(!shown.iter().any(|t| t.contains("U1 (")), "{shown:?}");
     }
 
     #[test]
