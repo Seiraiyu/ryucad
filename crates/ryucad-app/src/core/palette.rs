@@ -8,112 +8,16 @@ use crate::core::command::{self, COMMANDS};
 use crate::core::model::Model;
 use std::collections::BTreeMap;
 
-/// How many recently run commands the palette remembers.
-pub const RECENT: usize = 8;
-
 /// What the palette's query starts with to list the other branches
 /// (File > Switch branch…): Enter opens the Check out dialog.
 pub const BRANCHES: &str = "branch:";
 
-/// How well `query` matches `text`: its characters in order, ignoring
-/// case, `None` if they aren't all there. Higher is better: runs of
-/// characters together, matches at the start of a word, and a match at
-/// the very start score more; a long text scores a little less.
-pub fn score(query: &str, text: &str) -> Option<i32> {
-    let q: Vec<char> = query
-        .chars()
-        .flat_map(char::to_lowercase)
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    if q.is_empty() {
-        return Some(0);
-    }
-    let t: Vec<char> = text.chars().collect();
-    let mut s = 0;
-    let mut qi = 0;
-    let mut prev: Option<usize> = None;
-    for (i, c) in t.iter().enumerate() {
-        if qi == q.len() {
-            break;
-        }
-        if c.to_lowercase().eq(std::iter::once(q[qi])) {
-            let word_start = i == 0 || !t[i - 1].is_alphanumeric();
-            s += 1;
-            if word_start {
-                s += 8;
-            }
-            if i == 0 {
-                s += 4;
-            }
-            if prev.is_some_and(|p| p + 1 == i) {
-                s += 5;
-            }
-            prev = Some(i);
-            qi += 1;
-        }
-    }
-    if qi < q.len() {
-        return None;
-    }
-    // The query whole, as typed, counts most: at a word's start most.
-    let lower: Vec<char> = t.iter().flat_map(|c| c.to_lowercase()).collect();
-    if lower.len() == t.len() {
-        let at = (0..=lower.len().saturating_sub(q.len())).find(|i| lower[*i..].starts_with(&q));
-        if let Some(i) = at {
-            s += 20;
-            if i == 0 || !t[i - 1].is_alphanumeric() {
-                s += 20;
-            }
-        }
-    }
-    Some(s * 16 - t.len() as i32)
-}
+pub use ryu_app::palette::{RECENT, ran, score};
 
-/// A command's best score over its title, category and id.
-fn command_score(query: &str, c: &command::Command) -> Option<i32> {
-    [
-        score(query, c.title).map(|s| s + 2),
-        score(query, c.category.title()),
-        score(query, c.id),
-    ]
-    .into_iter()
-    .flatten()
-    .max()
-}
-
-/// The commands matching `query`, best first; recently run commands
-/// (`recent`, newest first) before the rest, and with an empty query in
-/// that order then the registry's. Disabled commands stay in: the window
-/// shows them greyed with their reason.
+/// ryucad's commands matching `query` ([`ryu_app::palette::commands`]
+/// over [`COMMANDS`]).
 pub fn commands(query: &str, recent: &[&'static str]) -> Vec<&'static command::Command> {
-    let mut found: Vec<(bool, usize, i32, usize, &'static command::Command)> = COMMANDS
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.kind == command::Kind::Action || c.kind == command::Kind::Toggle)
-        // A context row's own copy of a command the menus list under the
-        // same title (`view.fit_row` beside `view.fit`) is one action to
-        // whoever types its name: listed once (#519).
-        .filter(|(_, c)| {
-            c.menu
-                || !COMMANDS
-                    .iter()
-                    .any(|o| o.menu && o.id != c.id && o.title == c.title)
-        })
-        .filter_map(|(i, c)| {
-            let s = command_score(query, c)?;
-            let r = recent.iter().position(|id| *id == c.id);
-            Some((r.is_none(), r.unwrap_or(0), -s, i, c))
-        })
-        .collect();
-    found.sort_by_key(|(not_recent, r, s, i, _)| (*not_recent, *r, *s, *i));
-    found.into_iter().map(|x| x.4).collect()
-}
-
-/// Notes a command as just run.
-pub fn ran(recent: &mut Vec<&'static str>, id: &'static str) {
-    recent.retain(|r| *r != id);
-    recent.insert(0, id);
-    recent.truncate(RECENT);
+    ryu_app::palette::commands(COMMANDS, query, recent)
 }
 
 /// Something in the model the palette can go to after `@`.
@@ -254,17 +158,6 @@ mod tests {
             .map(|c| c.id)
             .collect();
         assert_eq!(found, ["view.fit"]);
-    }
-
-    #[test]
-    fn matching_is_in_order_and_ignores_case() {
-        assert!(score("zf", "Zoom to fit").is_some());
-        assert!(score("fz", "Zoom to fit").is_none());
-        assert!(score("ZOOM", "zoom to fit").is_some());
-        assert_eq!(score("", "anything"), Some(0));
-        // Word starts and runs beat scattered letters.
-        assert!(score("zoom", "Zoom to fit") > score("zoom", "Zap of a room"));
-        assert!(score("fit", "Zoom to fit") > score("fit", "Find it"));
     }
 
     #[test]
