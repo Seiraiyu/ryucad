@@ -212,14 +212,17 @@ fn faces_by_key(b: &Built, sources: &BTreeMap<String, Source>) -> Faces {
 /// the working files' are cached with the part's rebuild.
 pub fn list(session: &mut Session, part: &Id, rev: Option<&str>) -> Result<Arc<Holes>> {
     let (_, session) = session.at(rev)?;
-    let hash = session.rebuilt(part)?.hash.clone();
+    // The rows read the features' own fields (a spec, a thread's depth)
+    // as well as the bodies, and an edit may leave every body as it was
+    // (a through bore made through_all): the key holds both.
+    let p = session.project().part(part)?.clone();
+    let hash = format!("{}:{}", session.rebuilt(part)?.hash, inputs(&p));
     if let Some((h, holes)) = session.store.holes.get(part)
         && *h == hash
     {
         return Ok(Arc::clone(holes));
     }
     let unit = session.project().manifest.default_unit;
-    let p = session.project().part(part)?.clone();
     let result = session.rebuilt(part)?;
     let holes = Arc::new(build(&p, result, unit)?);
     session
@@ -227,6 +230,20 @@ pub fn list(session: &mut Session, part: &Id, rev: Option<&str>) -> Result<Arc<H
         .holes
         .insert(part.clone(), (hash, Arc::clone(&holes)));
     Ok(holes)
+}
+
+/// BLAKE3 of the part's feature list and each feature's file, canonical.
+fn inputs(p: &Part) -> String {
+    let mut h = blake3::Hasher::new();
+    for fid in p.order() {
+        h.update(fid.as_str().as_bytes());
+        h.update(&[0]);
+        if let Some(Ok(f)) = p.features.get(fid) {
+            h.update(crate::doc::canonical::to_string(&f.to_json()).as_bytes());
+        }
+        h.update(&[0]);
+    }
+    h.finalize().to_hex()[..32].to_owned()
 }
 
 fn build(p: &Part, result: &PartResult, unit: crate::units::Unit) -> Result<Holes> {
