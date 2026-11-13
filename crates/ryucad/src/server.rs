@@ -2108,8 +2108,8 @@ fn mesh_pending(
             .collect();
         (quality, items)
     } else {
-        let one = one_of(only).ok()?;
-        let (pid, only, quality) = mesh_args(part, one, quality).ok()?;
+        let (pid, _, quality) = mesh_args(part, None, quality).ok()?;
+        let only = solid_ids(only).ok()?;
         let p = session.project().part(&pid).ok()?;
         let solids = Solids::of(p);
         let features: BTreeMap<Id, Feature> = p
@@ -2121,7 +2121,7 @@ fn mesh_pending(
         let items = result
             .shown(&solids)
             .into_iter()
-            .filter(|s| only.as_ref().is_none_or(|o| o == s.solid))
+            .filter(|s| only.as_ref().is_none_or(|o| o.contains(s.solid)))
             .filter_map(|s| {
                 let (f, b) = s.state?;
                 Some((features.get(f)?.clone(), b.as_ref().clone()))
@@ -5993,18 +5993,30 @@ fn rebuild(session: &mut Session, part: Option<&str>, commit: Option<&str>) -> R
     Ok(Answer::raw(Raw::Result(text)))
 }
 
-/// The display meshes of a part's solids as the model shows them,
-/// `(solid, body, mesh)` by founder; a solid that never built has its
-/// error instead. `only` keeps one solid; a sketch has none.
+/// [`meshes_of`] for one solid, or (`None`) all.
 pub fn meshes(
     session: &mut Session,
     part: &Id,
     only: Option<&Id>,
     quality: mesh::Quality,
 ) -> Result<Vec<(Id, Result<mesh::Meshed>)>> {
+    let one = only.map(|f| BTreeSet::from([f.clone()]));
+    meshes_of(session, part, one.as_ref(), quality)
+}
+
+/// The display meshes of a part's solids as the model shows them,
+/// `(solid, body, mesh)` by founder, made side by side; a solid that
+/// never built has its error instead. `only` keeps those solids (#801:
+/// the window asks for a part's by the batch); a sketch has none.
+pub fn meshes_of(
+    session: &mut Session,
+    part: &Id,
+    only: Option<&BTreeSet<Id>>,
+    quality: mesh::Quality,
+) -> Result<Vec<(Id, Result<mesh::Meshed>)>> {
     let p = session.project().part(part)?;
     let solids = Solids::of(p);
-    if let Some(f) = only {
+    for f in only.into_iter().flatten() {
         let found = feature(p, f)?;
         if found.sketch().is_none() && !solids.is_solid(f) {
             return Err(rebuild::not_a_solid(p, &solids, f, "feature", f));
@@ -6021,7 +6033,7 @@ pub fn meshes(
     let built: Vec<(Id, Result<(Id, crate::rebuild::Built)>)> = result
         .shown(&solids)
         .into_iter()
-        .filter(|s| only.is_none_or(|o| o == s.solid))
+        .filter(|s| only.is_none_or(|o| o.contains(s.solid)))
         .map(|s| {
             let r = match (s.state, s.error) {
                 (Some((f, b)), _) => Ok((f.clone(), b.as_ref().clone())),
@@ -7585,7 +7597,7 @@ fn mesh_args(
 }
 
 /// What a `mesh.get` asks for: a solid or occurrence (`feature`), several
-/// of an assembly's occurrences (`features`), or (`None`) everything.
+/// solids or occurrences (`features`), or (`None`) everything.
 fn wanted(feature: Option<&str>, features: &[String]) -> Option<BTreeSet<String>> {
     let all: BTreeSet<String> = feature
         .map(str::to_owned)
@@ -7595,18 +7607,11 @@ fn wanted(feature: Option<&str>, features: &[String]) -> Option<BTreeSet<String>
     (!all.is_empty()).then_some(all)
 }
 
-/// The one solid a part's `mesh.get` names, if any: several are an
-/// assembly's occurrences only.
-fn one_of(only: Option<&BTreeSet<String>>) -> Result<Option<&str>> {
-    match only.map(|w| w.iter().collect::<Vec<_>>()).as_deref() {
-        None => Ok(None),
-        Some([one]) => Ok(Some(one.as_str())),
-        Some(_) => Err(Error::new(
-            Code::InvalidParam,
-            "features names several of an assembly's occurrences; a part's solid is feature",
-        )
-        .with("pointer", "/features")),
-    }
+/// The solids a part's `mesh.get` names: one (`feature`), several
+/// (`features`, #801), or (`None`) all.
+fn solid_ids(only: Option<&BTreeSet<String>>) -> Result<Option<BTreeSet<Id>>> {
+    only.map(|w| w.iter().map(|f| feature_id(f)).collect())
+        .transpose()
 }
 
 /// Display meshes, each with its label.
@@ -7723,8 +7728,9 @@ fn mesh_binary(
         let (encoding, b) = bytes(&bodies, compact);
         return Ok(Answer::bytes(result, encoding, b));
     }
-    let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
-    let bodies = meshes(session, &pid, only.as_ref(), quality)?;
+    let (pid, _, quality) = mesh_args(part, None, quality)?;
+    let only = solid_ids(only)?;
+    let bodies = meshes_of(session, &pid, only.as_ref(), quality)?;
     let mut result = json!({"part": pid, "quality": quality.as_str()});
     with_warnings(&mut result, mesh_warnings(&bodies));
     let (encoding, b) = bytes(&bodies, compact);
@@ -7756,9 +7762,10 @@ fn mesh_get(
         with_warnings(&mut v, warnings);
         return Ok(v);
     }
-    let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
+    let (pid, _, quality) = mesh_args(part, None, quality)?;
+    let only = solid_ids(only)?;
     let mut warnings = Vec::new();
-    let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
+    let bodies: Vec<Value> = meshes_of(session, &pid, only.as_ref(), quality)?
         .into_iter()
         .map(|(id, r)| match r {
             Ok(m) => {
@@ -12837,6 +12844,61 @@ pub(crate) mod tests {
                 let (x, y) = (x.mesh.as_ref().unwrap(), y.mesh.as_ref().unwrap());
                 assert_eq!((&x.positions, &x.triangles), (&y.positions, &y.triangles));
             }
+        });
+    }
+
+    /// #801: a part's `mesh.get` takes several of its solids in
+    /// `features`, so the window asks for a part's bodies by the batch and
+    /// the daemon meshes them side by side, outside its lock.
+    #[test]
+    fn a_parts_mesh_get_takes_several_solids() {
+        crate::config::tests::with_config(|_| {
+            let (_dir, s) = with_part();
+            let mut slot = Some(s);
+            for (id, r) in [("a", 1), ("b", 2), ("c", 3)] {
+                call(
+                    slot.as_mut().unwrap(),
+                    "feature.add",
+                    json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+                )
+                .unwrap();
+            }
+            let v = call(
+                slot.as_mut().unwrap(),
+                "mesh.get",
+                json!({"part": "p", "features": ["a", "c"], "quality": "coarse"}),
+            )
+            .unwrap();
+            let got: Vec<&str> = v["bodies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["feature"].as_str().unwrap())
+                .collect();
+            assert_eq!(got, ["a", "c"]);
+            // Made together before the lock, as an assembly's are.
+            let req = Request::from_rpc(
+                "mesh.get",
+                Some(
+                    json!({"part": "p", "features": ["a", "b"], "quality": "normal",
+                            "transfer": "compact"}),
+                ),
+            )
+            .unwrap();
+            let job = prepare(&mut slot, &req).expect("two meshes to make");
+            let put = job();
+            let s = slot.as_mut().unwrap();
+            let before = s.meshes.len();
+            put(s);
+            assert_eq!(s.meshes.len(), before + 2);
+            // A name that isn't a solid is refused, as with `feature`.
+            let e = call(
+                slot.as_mut().unwrap(),
+                "mesh.get",
+                json!({"part": "p", "features": ["a", "nope"]}),
+            )
+            .unwrap_err();
+            assert_eq!(e.code, Code::NotFound);
         });
     }
 

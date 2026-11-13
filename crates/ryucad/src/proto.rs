@@ -2080,8 +2080,9 @@ pub enum Request {
         part: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feature: Option<String>,
-        /// Several of an assembly's occurrences (paths), meshed side by
-        /// side and answered together: a window fetching 10,000 bodies.
+        /// Several solids of a part, or occurrences of an assembly
+        /// (paths), meshed side by side and answered together: a window
+        /// fetching 10,000 bodies (#801: a part's too).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         features: Vec<String>,
         /// coarse, normal or fine; the user's display quality by default.
