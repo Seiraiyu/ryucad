@@ -473,7 +473,7 @@ impl Cache {
 
 /// A join, cut or intersect's own body: the hash of what it is built
 /// from, and the body as a cache holds it, if it does.
-type ToolInput<'a> = (blake3::Hash, Option<&'a (blake3::Hash, Arc<Built>)>);
+pub(crate) type ToolInput<'a> = (blake3::Hash, Option<&'a (blake3::Hash, Arc<Built>)>);
 
 /// A solid as the model shows it: as its tip left it, or, when the tip
 /// failed, as the last feature of its chain that built left it, with the
@@ -676,7 +676,14 @@ pub fn placement(p: &Placement) -> Result<Rigid> {
 }
 
 /// Builds a primitive's own body, whatever its operation, and checks it.
+/// Every other type's kind refuses it (ryucad 27.D).
 pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
+    crate::feature::kind_of(f).alone(part, id, f)
+}
+
+/// `build_feature`'s old match, `FeatureKind::alone`'s default until
+/// every kind says (27.D Task 8 removes it).
+pub(crate) fn alone_by_type(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     match f {
         Feature::Primitive(p) => build_primitive(part, id, p),
         Feature::Sketch(_)
@@ -1298,6 +1305,18 @@ fn build_body(
     (made, Some(own))
 }
 
+/// The rebuild step of a feature that makes a body of its own (its
+/// kind's `own_body`, or a hole's tools at its points) and founds a
+/// solid with it or applies it to its targets: [`build_body`].
+#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
+pub(crate) fn body_step(
+    cx: &crate::feature::RebuildCx<'_>,
+    f: &Feature,
+) -> crate::feature::Outcome {
+    let (r, own) = build_body(cx.part, cx.solids, cx.id, f, cx.before, cx.tool, cx.run);
+    (r.map(|m| Output::Solids(Arc::new(m))), own)
+}
+
 /// A body a feature applies to a solid: its key, the body and where it
 /// is placed, and what to call it in errors (the feature whose own body
 /// it is, or the solid a `boolean` uses as a tool) with, for one of
@@ -1812,7 +1831,8 @@ pub fn rebuild_feature_in(
 }
 
 /// [`rebuild_feature`], taking a join, cut or intersect's own body from
-/// `tool` when its hash matches; also returns that body, to cache.
+/// `tool` when its hash matches; also returns that body, to cache. The
+/// feature's kind says its step (ryucad 27.D).
 fn rebuild_with(
     part: &Part,
     solids: &Solids,
@@ -1822,6 +1842,31 @@ fn rebuild_with(
     tool: Option<ToolInput>,
     run: &Run,
 ) -> (Result<Output>, Option<Arc<Built>>) {
+    let cx = crate::feature::RebuildCx {
+        part,
+        solids,
+        id,
+        before,
+        tool,
+        run,
+    };
+    crate::feature::kind_of(f).rebuild(&cx, f)
+}
+
+/// The rebuild's old match on the type, `FeatureKind::rebuild`'s
+/// default until every kind says its own step (27.D Task 8 removes it).
+pub(crate) fn rebuild_by_type(
+    cx: &crate::feature::RebuildCx<'_>,
+    f: &Feature,
+) -> crate::feature::Outcome {
+    let crate::feature::RebuildCx {
+        part,
+        solids,
+        id,
+        before,
+        tool,
+        run,
+    } = *cx;
     let solid = |m: Made| Output::Solids(Arc::new(m));
     match f {
         Feature::Sketch(s) => {

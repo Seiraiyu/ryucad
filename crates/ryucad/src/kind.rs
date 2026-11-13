@@ -141,12 +141,14 @@ pub struct Read<'a> {
     pub hint: Option<&'static str>,
 }
 
-const JOIN: &str = "a sheet has no inside to join: sew sheets into a body, or thicken a sheet";
-const TOOL: &str =
+pub(crate) const JOIN: &str =
+    "a sheet has no inside to join: sew sheets into a body, or thicken a sheet";
+pub(crate) const TOOL: &str =
     "a sheet can't be a boolean's tool: split a body by the sheet instead (split --tool)";
-const SHELL: &str = "a sheet has no inside to hollow: thicken it instead";
-const COPY: &str = "a sheet's mirror image can't be joined, cut or intersected: make it new";
-const SHEET_METAL: &str = "sheet metal is a solid: thicken a sheet into one first";
+pub(crate) const SHELL: &str = "a sheet has no inside to hollow: thicken it instead";
+pub(crate) const COPY: &str =
+    "a sheet's mirror image can't be joined, cut or intersected: make it new";
+pub(crate) const SHEET_METAL: &str = "sheet metal is a solid: thicken a sheet into one first";
 
 /// The bodies feature `f` names, each with what it wants of it: the one
 /// table of design 388's "Sheets through other features". A join's
@@ -156,6 +158,12 @@ const SHEET_METAL: &str = "sheet metal is a solid: thicken a sheet into one firs
 /// mirror's source either when its copy is new, else a solid; sheet
 /// metal solids; a sew's sheets and a thicken's sheet sheets.
 pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
+    crate::feature::kind_of(f).reads(f)
+}
+
+/// `bodies_read`'s old match, `FeatureKind::reads`' default until every
+/// kind says (27.D Task 8 removes it).
+pub(crate) fn reads_by_type(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
     use crate::doc::files::Feature as F;
     use crate::doc::solid::{BooleanOp, Combine, Operation};
     let read = |role, body, want, hint| Read {
@@ -262,6 +270,63 @@ pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
             }
             None => Vec::new(),
         },
+    }
+}
+
+/// A body read in `role`, which the feature changes.
+#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
+pub(crate) fn read<'a>(
+    role: &'static str,
+    body: &'a Id,
+    want: Option<Want>,
+    hint: Option<&'static str>,
+) -> Read<'a> {
+    Read {
+        role,
+        body,
+        want,
+        changes: true,
+        hint,
+    }
+}
+
+/// What a combine's targets must be: solids to join, either to cut or
+/// intersect.
+#[allow(dead_code)] // 27.D: used from Task 7; Task 8 removes this allow.
+pub(crate) fn combined(c: &crate::doc::solid::Combine) -> (Option<Want>, Option<&'static str>) {
+    match c.operation {
+        crate::doc::solid::Operation::Join => (Some(Want::Solid), Some(JOIN)),
+        _ => (None, None),
+    }
+}
+
+/// `f`'s targets, each read in `role`.
+#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
+pub(crate) fn targets<'a>(
+    f: &'a crate::doc::files::Feature,
+    role: &'static str,
+    want: Option<Want>,
+    hint: Option<&'static str>,
+) -> Vec<Read<'a>> {
+    f.targets()
+        .into_iter()
+        .map(|t| read(role, t, want, hint))
+        .collect()
+}
+
+/// A combine's targets, what each must be: what a feature reads when its
+/// kind names nothing else (`FeatureKind::reads`' default).
+#[allow(dead_code)] // 27.D: used from Task 7; Task 8 removes this allow.
+pub(crate) fn combined_reads(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
+    match f.combine() {
+        Some(c) => {
+            let (want, hint) = combined(c);
+            c.targets
+                .iter()
+                .map(|t| read("targets", t, want, hint))
+                .collect()
+        }
+        None => Vec::new(),
     }
 }
 

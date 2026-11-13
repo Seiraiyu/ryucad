@@ -117,6 +117,42 @@ pub(crate) trait FeatureKind: Sync {
     fn check(&self, _cx: &Check<'_>, _f: &Feature) -> Result<()> {
         Ok(())
     }
+
+    /// Its rebuild step (ryucad 27.D): what it makes of the results
+    /// before it, and a join, cut or intersect's own body, for the cache.
+    fn rebuild(&self, cx: &RebuildCx<'_>, f: &Feature) -> Outcome {
+        // 27.D: the old match until every kind says; Task 8 removes it.
+        crate::rebuild::rebuild_by_type(cx, f)
+    }
+
+    /// The body of its own a body-making feature builds, before
+    /// `rebuild::body_step` founds a solid with it or applies it to
+    /// `targets` (their bodies as it sees them). Only kinds whose
+    /// `rebuild` is `body_step` are asked; a hole's tools are built
+    /// there, at its points.
+    #[allow(dead_code)] // 27.D: asked from Task 8; Task 8 removes this allow.
+    fn own_body(
+        &self,
+        cx: &RebuildCx<'_>,
+        f: &Feature,
+        _targets: &[&crate::rebuild::Built],
+    ) -> Result<crate::rebuild::Built> {
+        Err(built_elsewhere(cx.id, f, "makes no body of its own"))
+    }
+
+    /// Its body built from nothing before it (`rebuild::build_feature`):
+    /// a primitive's. Every other kind says what it is built from.
+    fn alone(&self, part: &Id, id: &Id, f: &Feature) -> Result<crate::rebuild::Built> {
+        // 27.D: the old match until every kind says; Task 8 removes it.
+        crate::rebuild::alone_by_type(part, id, f)
+    }
+
+    /// The bodies `f` names, each with what it wants of it
+    /// (`kind::bodies_read`, design 388's table).
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        // 27.D: the old match until every kind says; Task 8 removes it.
+        crate::kind::reads_by_type(f)
+    }
 }
 
 /// The body a feature type needs and whether it founds one, whatever its
@@ -241,6 +277,60 @@ impl Check<'_> {
     pub(crate) fn proposed(&self, f: &Feature) -> Part {
         crate::part::proposed(self.part, self.order, &[(self.id, f)])
     }
+}
+
+/// What a rebuild hands a kind's `rebuild` (ryucad 27.D): the part, its
+/// solids, the feature's ID, the results of the features it may read, a
+/// join, cut or intersect's own body as the cache holds it (`tool`), and
+/// the run (its job and budgets).
+#[derive(Clone, Copy)]
+pub(crate) struct RebuildCx<'a> {
+    pub(crate) part: &'a Part,
+    pub(crate) solids: &'a Solids,
+    pub(crate) id: &'a Id,
+    pub(crate) before: &'a dyn crate::rebuild::Results,
+    pub(crate) tool: Option<crate::rebuild::ToolInput<'a>>,
+    pub(crate) run: &'a crate::rebuild::Run<'a>,
+}
+
+/// A rebuild step's result, and the own body a join, cut or intersect
+/// built, for the cache to keep.
+pub(crate) type Outcome = (
+    Result<crate::rebuild::Output>,
+    Option<std::sync::Arc<crate::rebuild::Built>>,
+);
+
+/// The solids a step made, with no own body to keep.
+#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
+pub(crate) fn made(r: Result<crate::rebuild::Made>) -> Outcome {
+    (
+        r.map(|m| crate::rebuild::Output::Solids(std::sync::Arc::new(m))),
+        None,
+    )
+}
+
+/// The one body feature `id` founds.
+#[allow(dead_code)] // 27.D: used from Task 7; Task 8 removes this allow.
+pub(crate) fn founded(id: &Id, r: Result<crate::rebuild::Built>) -> Outcome {
+    made(r.map(|b| crate::rebuild::Made::new(vec![(id.clone(), std::sync::Arc::new(b))])))
+}
+
+/// The one body feature `id` founds, with the report kept beside it (a
+/// fill's, an import's).
+#[allow(dead_code)] // 27.D: used from Task 6; Task 8 removes this allow.
+pub(crate) fn founded_with_report(id: &Id, r: Result<(crate::rebuild::Built, Value)>) -> Outcome {
+    made(r.map(|(b, report)| crate::rebuild::Made {
+        report: Some(std::sync::Arc::new(report)),
+        ..crate::rebuild::Made::new(vec![(id.clone(), std::sync::Arc::new(b))])
+    }))
+}
+
+/// The internal error for a feature asked for what it isn't built from:
+/// `<type> <id> <how>` (`makes no body of its own`, `is built from its
+/// sketch`, `is solved with its assembly`, …).
+#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
+pub(crate) fn built_elsewhere(id: &Id, f: &Feature, how: &str) -> Error {
+    Error::new(Code::Internal, format!("{} {id} {how}", f.type_name())).with("feature", id)
 }
 
 /// How a feature appears in output: every quantity as written and in
