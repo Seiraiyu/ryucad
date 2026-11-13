@@ -1555,6 +1555,8 @@ mod tests {
             body: None,
             sheet: None,
             tweak: None,
+            insert: None,
+            delete: None,
         }
     }
 
