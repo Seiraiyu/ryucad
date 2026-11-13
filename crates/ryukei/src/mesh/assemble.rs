@@ -59,7 +59,17 @@ pub(super) fn assemble(
             mesh.faults.push(FaceFault { face: f, kind });
             continue;
         }
-        let d = w.domain.as_ref().expect("a domain");
+        // A face of no width (see `no_width`) has no domain and no
+        // triangles.
+        let Some(d) = w.domain.as_ref() else {
+            let (c, t) = (mesh.corners.len() as u32, mesh.triangles.len() as u32);
+            mesh.faces.push(FaceMesh {
+                face: f,
+                corners: c..c,
+                triangles: t..t,
+            });
+            continue;
+        };
         let g = geoms[f.index()].as_ref().expect("live face");
         let corner_start = mesh.corners.len() as u32;
         let triangle_start = mesh.triangles.len() as u32;
