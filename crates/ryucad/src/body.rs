@@ -1208,6 +1208,71 @@ impl FeatureKind for WholeBodies {
     fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
         crate::body::check(&cx.proposed(f), cx.id, f, cx.results)
     }
+
+    fn rebuild(&self, cx: &crate::feature::RebuildCx<'_>, f: &Feature) -> crate::feature::Outcome {
+        match f {
+            Feature::Shell(_) | Feature::Offset(_) => {
+                crate::feature::made(build(cx.part, cx.solids, cx.id, f, cx.before, cx.run))
+            }
+            Feature::Split(x) => crate::feature::made(build_split(
+                cx.part, cx.solids, cx.id, f, x, cx.before, cx.run,
+            )),
+            // A mirror's copy founds a solid or applies as an extrude's body.
+            _ => crate::rebuild::body_step(cx, f),
+        }
+    }
+
+    fn own_body(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &Feature,
+        _targets: &[&Built],
+    ) -> Result<Built> {
+        let Feature::Mirror(m) = f else {
+            unreachable!("a mirror's copy is the one body of its own")
+        };
+        mirror_copy(cx.part, cx.solids, cx.id, f, m, cx.before)
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        use crate::kind as k;
+        match f {
+            Feature::Mirror(m) => {
+                let new = m.combine.is_new();
+                let (want, hint) = k::combined(&m.combine);
+                std::iter::once(k::read(
+                    "solid",
+                    &m.solid,
+                    (!new).then_some(k::Want::Solid),
+                    (!new).then_some(k::COPY),
+                ))
+                .chain(
+                    m.combine
+                        .targets
+                        .iter()
+                        .map(|t| k::read("targets", t, want, hint)),
+                )
+                .collect()
+            }
+            Feature::Shell(s) => vec![k::read(
+                "target",
+                &s.target,
+                Some(k::Want::Solid),
+                Some(k::SHELL),
+            )],
+            Feature::Split(s) => {
+                let mut out = vec![k::read("target", &s.target, None, None)];
+                if let Some(t) = s.tool_body() {
+                    out.push(k::Read {
+                        changes: false,
+                        ..k::read("tool", t, None, None)
+                    });
+                }
+                out
+            }
+            _ => k::targets(f, "target", None, None),
+        }
+    }
 }
 
 /// A split: its target as it sees it, cut by its plane (turned round by
