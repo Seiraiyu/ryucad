@@ -34,8 +34,8 @@ use serde_json::{Map, Value, json};
 /// What ryucad does with one kind of feature: one or several `type`s
 /// sharing a module (`fillet` and `chamfer`, the five primitives).
 /// `feature.add` and `feature.edit` keep their shared steps and call the
-/// kind where they matched on the type. Every method after `report` does
-/// nothing unless its kind needs it.
+/// kind where they matched on the type. Every method after `report` but
+/// `rebuild` does nothing unless its kind needs it.
 pub(crate) trait FeatureKind: Sync {
     /// The `type` strings this kind owns, as `feature.add` takes them.
     fn types(&self) -> &'static [&'static str];
@@ -120,17 +120,13 @@ pub(crate) trait FeatureKind: Sync {
 
     /// Its rebuild step (ryucad 27.D): what it makes of the results
     /// before it, and a join, cut or intersect's own body, for the cache.
-    fn rebuild(&self, cx: &RebuildCx<'_>, f: &Feature) -> Outcome {
-        // 27.D: the old match until every kind says; Task 8 removes it.
-        crate::rebuild::rebuild_by_type(cx, f)
-    }
+    fn rebuild(&self, cx: &RebuildCx<'_>, f: &Feature) -> Outcome;
 
     /// The body of its own a body-making feature builds, before
     /// `rebuild::body_step` founds a solid with it or applies it to
     /// `targets` (their bodies as it sees them). Only kinds whose
     /// `rebuild` is `body_step` are asked; a hole's tools are built
     /// there, at its points.
-    #[allow(dead_code)] // 27.D: asked from Task 8; Task 8 removes this allow.
     fn own_body(
         &self,
         cx: &RebuildCx<'_>,
@@ -142,16 +138,14 @@ pub(crate) trait FeatureKind: Sync {
 
     /// Its body built from nothing before it (`rebuild::build_feature`):
     /// a primitive's. Every other kind says what it is built from.
-    fn alone(&self, part: &Id, id: &Id, f: &Feature) -> Result<crate::rebuild::Built> {
-        // 27.D: the old match until every kind says; Task 8 removes it.
-        crate::rebuild::alone_by_type(part, id, f)
+    fn alone(&self, _part: &Id, id: &Id, f: &Feature) -> Result<crate::rebuild::Built> {
+        Err(built_elsewhere(id, f, "makes no body of its own"))
     }
 
     /// The bodies `f` names, each with what it wants of it
     /// (`kind::bodies_read`, design 388's table).
     fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
-        // 27.D: the old match until every kind says; Task 8 removes it.
-        crate::kind::reads_by_type(f)
+        crate::kind::combined_reads(f)
     }
 }
 
@@ -301,7 +295,6 @@ pub(crate) type Outcome = (
 );
 
 /// The solids a step made, with no own body to keep.
-#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
 pub(crate) fn made(r: Result<crate::rebuild::Made>) -> Outcome {
     (
         r.map(|m| crate::rebuild::Output::Solids(std::sync::Arc::new(m))),
@@ -310,14 +303,12 @@ pub(crate) fn made(r: Result<crate::rebuild::Made>) -> Outcome {
 }
 
 /// The one body feature `id` founds.
-#[allow(dead_code)] // 27.D: used from Task 7; Task 8 removes this allow.
 pub(crate) fn founded(id: &Id, r: Result<crate::rebuild::Built>) -> Outcome {
     made(r.map(|b| crate::rebuild::Made::new(vec![(id.clone(), std::sync::Arc::new(b))])))
 }
 
 /// The one body feature `id` founds, with the report kept beside it (a
 /// fill's, an import's).
-#[allow(dead_code)] // 27.D: used from Task 6; Task 8 removes this allow.
 pub(crate) fn founded_with_report(id: &Id, r: Result<(crate::rebuild::Built, Value)>) -> Outcome {
     made(r.map(|(b, report)| crate::rebuild::Made {
         report: Some(std::sync::Arc::new(report)),
@@ -328,7 +319,6 @@ pub(crate) fn founded_with_report(id: &Id, r: Result<(crate::rebuild::Built, Val
 /// The internal error for a feature asked for what it isn't built from:
 /// `<type> <id> <how>` (`makes no body of its own`, `is built from its
 /// sketch`, `is solved with its assembly`, …).
-#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
 pub(crate) fn built_elsewhere(id: &Id, f: &Feature, how: &str) -> Error {
     Error::new(Code::Internal, format!("{} {id} {how}", f.type_name())).with("feature", id)
 }
@@ -1003,6 +993,13 @@ mod tests {
                     "{file}: {} matches on a type ({pat}); ask the kind",
                     head.trim().trim_end_matches('(')
                 );
+            }
+        }
+        // The transitional matches are gone (27.D Task 8).
+        for (file, src) in [("rebuild.rs", rebuild), ("kind.rs", kind)] {
+            for name in ["rebuild", "alone", "reads"] {
+                let gone = format!("fn {name}_by_type");
+                assert!(!src.contains(&gone), "{file} still has {gone}");
             }
         }
     }

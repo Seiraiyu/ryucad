@@ -5,7 +5,6 @@
 //! solid, or joins its body to, cuts it from or intersects it with each
 //! solid it targets, as its view of that solid ([`crate::solid`]) left it.
 
-use crate::body::build_split;
 use crate::cache::{Disk, Kind};
 use crate::doc::files::{Feature, Placement};
 use crate::doc::id::Id;
@@ -13,11 +12,6 @@ use crate::doc::project::Part;
 use crate::doc::solid::Operation;
 use crate::doc::sweep::Extent;
 use crate::error::{Code, Error, Result};
-use crate::feature::blend::build_blend;
-use crate::feature::boolean::build_boolean;
-use crate::feature::extrude::build_sweep;
-use crate::feature::pattern::build_pattern;
-use crate::feature::primitive::build_primitive;
 use crate::sketch::Solved;
 use crate::solid::Solids;
 use rayon::prelude::*;
@@ -681,74 +675,6 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     crate::feature::kind_of(f).alone(part, id, f)
 }
 
-/// `build_feature`'s old match, `FeatureKind::alone`'s default until
-/// every kind says (27.D Task 8 removes it).
-pub(crate) fn alone_by_type(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
-    match f {
-        Feature::Primitive(p) => build_primitive(part, id, p),
-        Feature::Sketch(_)
-        | Feature::Boolean(_)
-        | Feature::Fillet(_)
-        | Feature::Chamfer(_)
-        | Feature::Pattern(_)
-        | Feature::Insert(_)
-        | Feature::DeleteBody(_)
-        | Feature::Instance(_)
-        | Feature::Mate(_)
-        | Feature::InstancePattern(_)
-        | Feature::Datum(_)
-        | Feature::Path(_)
-        | Feature::Shell(_)
-        | Feature::Offset(_)
-        | Feature::Mirror(_)
-        | Feature::Split(_)
-        | Feature::Flange(_)
-        | Feature::Unfold(_)
-        | Feature::Refold(_)
-        | Feature::MoveFace(_)
-        | Feature::ReplaceFace(_)
-        | Feature::Draft(_)
-        | Feature::DeleteFace(_)
-        | Feature::DeleteBlend(_)
-        | Feature::ResizeBlend(_) => Err(Error::new(
-            Code::Internal,
-            format!("{} {id} makes no body of its own", f.type_name()),
-        )
-        .with("feature", id)),
-        Feature::Extrude(_)
-        | Feature::Revolve(_)
-        | Feature::Hole(_)
-        | Feature::Planar(_)
-        | Feature::BaseFlange(_) => Err(Error::new(
-            Code::Internal,
-            format!("{} {id} is built from its sketch", f.type_name()),
-        )
-        .with("feature", id)),
-        Feature::Sweep(_) => Err(Error::new(
-            Code::Internal,
-            format!("sweep {id} is built from its profile and path"),
-        )
-        .with("feature", id)),
-        Feature::Loft(_) => Err(Error::new(
-            Code::Internal,
-            format!("loft {id} is built from its sections"),
-        )
-        .with("feature", id)),
-        Feature::Import(_) => Err(Error::new(
-            Code::Internal,
-            format!("import {id} is built from its file"),
-        )
-        .with("feature", id)),
-        Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => {
-            Err(Error::new(
-                Code::Internal,
-                format!("{} {id} is built from what it names", f.type_name()),
-            )
-            .with("feature", id))
-        }
-    }
-}
-
 /// A pattern instance as its origins name it: `[i, j]` for a linear
 /// pattern in two directions, else `[i]`.
 pub(crate) fn instance_json(p: &crate::doc::pattern::Pattern, [i, j]: [u32; 2]) -> Value {
@@ -1198,14 +1124,17 @@ pub fn applies(f: &Feature) -> bool {
 /// solid, or its body applied to each solid it targets (a hole's at each
 /// of its points).
 fn build_body(
-    part: &Part,
-    solids: &Solids,
-    id: &Id,
+    cx: &crate::feature::RebuildCx<'_>,
     f: &Feature,
-    before: &dyn Results,
-    tool: Option<ToolInput>,
-    run: &crate::rebuild::Run,
 ) -> (Result<Made>, Option<Arc<Built>>) {
+    let crate::feature::RebuildCx {
+        part,
+        solids,
+        id,
+        before,
+        tool,
+        run,
+    } = *cx;
     let (operation, targets) = operation(f);
     // Its targets first: a cut of a solid that failed is
     // `dependency_failed`, whatever its own body would be.
@@ -1237,17 +1166,13 @@ fn build_body(
     };
     let own = match tool {
         Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
-        _ => match (f, &holes) {
-            (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
-            (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, f, m, before),
-            (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
-            (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
-            (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
-            (Feature::Thicken(x), _) => crate::surface::thicken(part, solids, id, x, before, run),
-            (_, Some((h, (solved, _, sizes)))) => {
+        // A hole's tools are its body at each of its points; any other
+        // kind builds its own (27.D).
+        _ => match &holes {
+            Some((h, (solved, _, sizes))) => {
                 crate::hole::tool(part, id, h, sizes, solved, &bodies, before).map(|(b, _)| b)
             }
-            _ => build_sweep(part, id, f, &bodies, before),
+            None => crate::feature::kind_of(f).own_body(cx, f, &bodies),
         }
         .map(Arc::new),
     };
@@ -1308,12 +1233,11 @@ fn build_body(
 /// The rebuild step of a feature that makes a body of its own (its
 /// kind's `own_body`, or a hole's tools at its points) and founds a
 /// solid with it or applies it to its targets: [`build_body`].
-#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
 pub(crate) fn body_step(
     cx: &crate::feature::RebuildCx<'_>,
     f: &Feature,
 ) -> crate::feature::Outcome {
-    let (r, own) = build_body(cx.part, cx.solids, cx.id, f, cx.before, cx.tool, cx.run);
+    let (r, own) = build_body(cx, f);
     (r.map(|m| Output::Solids(Arc::new(m))), own)
 }
 
@@ -1851,156 +1775,6 @@ fn rebuild_with(
         run,
     };
     crate::feature::kind_of(f).rebuild(&cx, f)
-}
-
-/// The rebuild's old match on the type, `FeatureKind::rebuild`'s
-/// default until every kind says its own step (27.D Task 8 removes it).
-pub(crate) fn rebuild_by_type(
-    cx: &crate::feature::RebuildCx<'_>,
-    f: &Feature,
-) -> crate::feature::Outcome {
-    let crate::feature::RebuildCx {
-        part,
-        solids,
-        id,
-        before,
-        tool,
-        run,
-    } = *cx;
-    let solid = |m: Made| Output::Solids(Arc::new(m));
-    match f {
-        Feature::Sketch(s) => {
-            let r = crate::sketch::context(part, part.order(), id, s, before)
-                .and_then(|c| crate::sketch::solve_in(id, s, &c))
-                .map(|s| Output::Sketch(Arc::new(s)));
-            (r, None)
-        }
-        Feature::Datum(d) => {
-            let at = crate::geometry::At {
-                part,
-                order: part.order(),
-                owner: id,
-                results: before,
-            };
-            let r = crate::datum::build(&at, d).map(|m| Output::Datum(Arc::new(m)));
-            (r, None)
-        }
-        Feature::Path(p) => {
-            let at = crate::geometry::At {
-                part,
-                order: part.order(),
-                owner: id,
-                results: before,
-            };
-            let r = crate::path::build(&at, p).map(|m| Output::Path(Arc::new(m)));
-            (r, None)
-        }
-        Feature::Boolean(b) => (
-            build_boolean(part, solids, id, f, b, before, run).map(solid),
-            None,
-        ),
-        Feature::Fillet(_) | Feature::Chamfer(_) => (
-            build_blend(part, solids, id, f, before, run).map(solid),
-            None,
-        ),
-        Feature::Shell(_) | Feature::Offset(_) => (
-            crate::body::build(part, solids, id, f, before, run).map(solid),
-            None,
-        ),
-        Feature::MoveFace(_)
-        | Feature::ReplaceFace(_)
-        | Feature::Draft(_)
-        | Feature::DeleteFace(_)
-        | Feature::DeleteBlend(_)
-        | Feature::ResizeBlend(_) => (
-            crate::tweak::build(part, solids, id, f, before, run).map(solid),
-            None,
-        ),
-        Feature::BaseFlange(b) => (
-            crate::sheet_metal::base_flange(part, id, b, before, run)
-                .map(|built| solid(Made::new(vec![(id.clone(), Arc::new(built))]))),
-            None,
-        ),
-        Feature::Flange(x) => (
-            crate::sheet_metal::flange(part, solids, id, x, before, run).map(solid),
-            None,
-        ),
-        Feature::Unfold(u) => (
-            crate::sheet_metal::unfold::unfold(part, solids, id, u, before, run).map(solid),
-            None,
-        ),
-        Feature::Refold(x) => (
-            crate::sheet_metal::unfold::refold(part, solids, id, x, before, run).map(solid),
-            None,
-        ),
-        Feature::Split(x) => (
-            build_split(part, solids, id, f, x, before, run).map(solid),
-            None,
-        ),
-        Feature::Fill(x) => {
-            let r = crate::surface::fill(part, id, x, before, run).map(|(b, rep)| {
-                solid(Made {
-                    report: Some(Arc::new(rep)),
-                    ..Made::new(vec![(id.clone(), Arc::new(b))])
-                })
-            });
-            (r, None)
-        }
-        Feature::Sew(x) => (
-            crate::surface::sew(part, solids, id, x, before, run)
-                .map(|b| solid(Made::new(vec![(id.clone(), Arc::new(b))]))),
-            None,
-        ),
-        Feature::Extract(x) => (
-            crate::surface::extract(part, id, x, before)
-                .map(|b| solid(Made::new(vec![(id.clone(), Arc::new(b))]))),
-            None,
-        ),
-        Feature::Pattern(p) => (
-            build_pattern(part, solids, id, f, p, before, run).map(solid),
-            None,
-        ),
-        Feature::Import(i) => {
-            let r = crate::import::build(part, id, i, run).map(|(b, report)| {
-                solid(Made {
-                    report: Some(Arc::new(report)),
-                    ..Made::new(vec![(id.clone(), Arc::new(b))])
-                })
-            });
-            (r, None)
-        }
-        // Ends the chains it names; makes nothing (design 521).
-        Feature::DeleteBody(d) => (
-            crate::body::delete_body(part, solids, id, d, before).map(solid),
-            None,
-        ),
-        // Its source's model comes from outside the part: see
-        // [`rebuild_part_in`].
-        Feature::Insert(i) => (
-            crate::insert::build_checked(part, id, i, &crate::assembly::Children::new()).map(solid),
-            None,
-        ),
-        // Its part's model comes from outside the part: see
-        // [`rebuild_part_in`].
-        Feature::Instance(i) => {
-            let r = crate::assembly::place(id, i, &crate::assembly::Children::new())
-                .map(|p| Output::Instance(Arc::new(p)));
-            (r, None)
-        }
-        // Solved with the whole assembly, over what its instances place.
-        Feature::Mate(_) | Feature::InstancePattern(_) => (
-            Err(Error::new(
-                Code::Internal,
-                format!("{} {id} is solved with its assembly", f.type_name()),
-            )
-            .with("feature", id)),
-            None,
-        ),
-        f => {
-            let (r, own) = build_body(part, solids, id, f, before, tool, run);
-            (r.map(solid), own)
-        }
-    }
 }
 
 /// The hash of everything a feature's result depends on: ryucad's and

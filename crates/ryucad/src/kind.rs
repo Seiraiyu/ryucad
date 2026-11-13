@@ -161,120 +161,7 @@ pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
     crate::feature::kind_of(f).reads(f)
 }
 
-/// `bodies_read`'s old match, `FeatureKind::reads`' default until every
-/// kind says (27.D Task 8 removes it).
-pub(crate) fn reads_by_type(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
-    use crate::doc::files::Feature as F;
-    use crate::doc::solid::{BooleanOp, Combine, Operation};
-    let read = |role, body, want, hint| Read {
-        role,
-        body,
-        want,
-        changes: true,
-        hint,
-    };
-    // A combine's targets: solids to join, either to cut or intersect.
-    let combined = |c: &Combine| -> (Option<Want>, Option<&'static str>) {
-        match c.operation {
-            Operation::Join => (Some(Want::Solid), Some(JOIN)),
-            _ => (None, None),
-        }
-    };
-    match f {
-        F::Boolean(b) => {
-            let unite = matches!(b.op, BooleanOp::Unite);
-            let target = read(
-                "target",
-                &b.target,
-                unite.then_some(Want::Solid),
-                unite.then_some(JOIN),
-            );
-            std::iter::once(target)
-                .chain(
-                    b.tools
-                        .iter()
-                        .map(|t| read("tools", t, Some(Want::Solid), Some(TOOL))),
-                )
-                .collect()
-        }
-        F::Mirror(m) => {
-            let new = m.combine.is_new();
-            let (want, hint) = combined(&m.combine);
-            std::iter::once(read(
-                "solid",
-                &m.solid,
-                (!new).then_some(Want::Solid),
-                (!new).then_some(COPY),
-            ))
-            .chain(
-                m.combine
-                    .targets
-                    .iter()
-                    .map(|t| read("targets", t, want, hint)),
-            )
-            .collect()
-        }
-        F::Shell(s) => vec![read("target", &s.target, Some(Want::Solid), Some(SHELL))],
-        F::Split(s) => {
-            let mut out = vec![read("target", &s.target, None, None)];
-            if let Some(t) = s.tool_body() {
-                out.push(Read {
-                    changes: false,
-                    ..read("tool", t, None, None)
-                });
-            }
-            out
-        }
-        F::Offset(_)
-        | F::MoveFace(_)
-        | F::ReplaceFace(_)
-        | F::Draft(_)
-        | F::DeleteFace(_)
-        | F::DeleteBlend(_)
-        | F::ResizeBlend(_) => f
-            .targets()
-            .into_iter()
-            .map(|t| read("target", t, None, None))
-            .collect(),
-        F::Fillet(_) | F::Chamfer(_) | F::Hole(_) | F::Pattern(_) => f
-            .targets()
-            .into_iter()
-            .map(|t| read("targets", t, None, None))
-            .collect(),
-        F::Flange(_) | F::Unfold(_) | F::Refold(_) => f
-            .targets()
-            .into_iter()
-            .map(|t| read("targets", t, Some(Want::Solid), Some(SHEET_METAL)))
-            .collect(),
-        F::Sew(s) => s
-            .sheets
-            .iter()
-            .map(|t| read("sheets", t, Some(Want::Sheet), None))
-            .collect(),
-        F::Thicken(t) => {
-            let (want, hint) = combined(&t.combine);
-            t.combine
-                .targets
-                .iter()
-                .map(|x| read("targets", x, want, hint))
-                .chain(t.sheet().map(|s| read("from", s, Some(Want::Sheet), None)))
-                .collect()
-        }
-        f => match f.combine() {
-            Some(c) => {
-                let (want, hint) = combined(c);
-                c.targets
-                    .iter()
-                    .map(|t| read("targets", t, want, hint))
-                    .collect()
-            }
-            None => Vec::new(),
-        },
-    }
-}
-
 /// A body read in `role`, which the feature changes.
-#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
 pub(crate) fn read<'a>(
     role: &'static str,
     body: &'a Id,
@@ -292,7 +179,6 @@ pub(crate) fn read<'a>(
 
 /// What a combine's targets must be: solids to join, either to cut or
 /// intersect.
-#[allow(dead_code)] // 27.D: used from Task 7; Task 8 removes this allow.
 pub(crate) fn combined(c: &crate::doc::solid::Combine) -> (Option<Want>, Option<&'static str>) {
     match c.operation {
         crate::doc::solid::Operation::Join => (Some(Want::Solid), Some(JOIN)),
@@ -301,7 +187,6 @@ pub(crate) fn combined(c: &crate::doc::solid::Combine) -> (Option<Want>, Option<
 }
 
 /// `f`'s targets, each read in `role`.
-#[allow(dead_code)] // 27.D: used from Task 5; Task 8 removes this allow.
 pub(crate) fn targets<'a>(
     f: &'a crate::doc::files::Feature,
     role: &'static str,
@@ -316,7 +201,6 @@ pub(crate) fn targets<'a>(
 
 /// A combine's targets, what each must be: what a feature reads when its
 /// kind names nothing else (`FeatureKind::reads`' default).
-#[allow(dead_code)] // 27.D: used from Task 7; Task 8 removes this allow.
 pub(crate) fn combined_reads(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
     match f.combine() {
         Some(c) => {
