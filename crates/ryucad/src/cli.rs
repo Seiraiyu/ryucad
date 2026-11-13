@@ -1493,6 +1493,15 @@ enum FeatureCmd {
         #[arg(long)]
         rev: Option<String>,
     },
+    /// The feature types `feature add` takes, or one: the request fields
+    /// each takes, the body it needs (solid, sheet, or null for either or
+    /// none) and whether it founds one (always, when_new, when_both_kept
+    /// or never).
+    Types {
+        /// One type; every type when left out.
+        #[arg(value_name = "TYPE")]
+        ty: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4683,6 +4692,7 @@ fn request(cmd: &Command) -> Option<Request> {
             id: id.clone(),
             rev: rev.clone(),
         },
+        Command::Feature(FeatureCmd::Types { ty }) => Request::FeatureTypes { ty: ty.clone() },
         Command::Param(ParamCmd::List { part, project, rev }) => Request::ParamList {
             part: part.clone(),
             scope: param_scope(*project),
@@ -6934,6 +6944,18 @@ fn version_flag(args: &[String]) -> bool {
     !flags.is_empty() && rest.iter().all(|a| *a == "--pretty")
 }
 
+/// The command line, parsed as `Cli::try_parse` does, with `feature add
+/// --help` ending with the feature registry's types.
+fn parse_with_types() -> std::result::Result<Cli, clap::Error> {
+    use clap::{CommandFactory, FromArgMatches};
+    let types = crate::feature::type_list();
+    let mut cmd = Cli::command().mut_subcommand("feature", |f| {
+        f.mut_subcommand("add", |a| a.after_help(types))
+    });
+    let mut matches = cmd.try_get_matches_from_mut(std::env::args_os())?;
+    Cli::from_arg_matches_mut(&mut matches).map_err(|e| e.format(&mut cmd))
+}
+
 pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args_os()
         .map(|a| a.to_string_lossy().into_owned())
@@ -6942,7 +6964,7 @@ pub fn main() -> ExitCode {
         let pretty = args.iter().any(|a| a == "--pretty");
         return finish(Ok(json!(VersionInfo::current())), Vec::new(), pretty);
     }
-    let mut cli = match Cli::try_parse() {
+    let mut cli = match parse_with_types() {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;
