@@ -17,6 +17,7 @@
 //! within the tolerance of both curves, and is then a touching point, or
 //! a stretch where they overlap.
 
+use super::bernstein::Bernstein;
 use super::bernstein2::{Bernstein2, krawczyk};
 use super::chain2::{Chain2, Piece2};
 use super::{Box3, Curve2, Point3, Vector2};
@@ -458,6 +459,22 @@ pub(crate) fn crossings_in(
     if let Some(found) = closed_misses(a, b, tol) {
         return Some(found);
     }
+    match subdivided(a, b, tol, m) {
+        // Uncertain, not cancelled: a spline may lie on the other's line
+        // or conic (#643, plan 17.C).
+        None if !m.halted() => on_carrier(a, b, tol),
+        found => found,
+    }
+}
+
+/// The subdivision of every pair of pieces, and the merge of what it
+/// found (`crossings_in`'s general case).
+fn subdivided(
+    a: (&Curve2, [f64; 2]),
+    b: (&Curve2, [f64; 2]),
+    tol: f64,
+    m: &Meter,
+) -> Option<Vec<Meet2>> {
     let ca = Chain2::new(a.0, a.1[0], a.1[1]);
     let cb = Chain2::new(b.0, b.1[0], b.1[1]);
     let mut out: Vec<Meet2> = Vec::new();
@@ -745,6 +762,145 @@ fn closed_misses(a: (&Curve2, [f64; 2]), b: (&Curve2, [f64; 2]), tol: f64) -> Op
         _ => false,
     };
     apart.then(Vec::new)
+}
+
+/// A spline lying along a line, a circle or an ellipse within `tol`: an
+/// overlap where both run (#643: a boss's saddle seen along the case's
+/// axis lies on its rim's circle), tried only where the subdivision
+/// couldn't certify the pair. `None` (uncertain, as before) for any other
+/// pair, a piece not certified on the carrier, or a conic whose range
+/// would cut the spline or that it runs across the start of.
+fn on_carrier(a: (&Curve2, [f64; 2]), b: (&Curve2, [f64; 2]), tol: f64) -> Option<Vec<Meet2>> {
+    let swap = |v: Vec<Meet2>| -> Vec<Meet2> {
+        v.into_iter()
+            .map(|m| match m {
+                Meet2::Point { ta, tb, at } => Meet2::Point { ta: tb, tb: ta, at },
+                Meet2::Overlap { ta, tb } => Meet2::Overlap { ta: tb, tb: ta },
+            })
+            .collect()
+    };
+    match (a.0, b.0) {
+        (Curve2::Nurbs2(_), Curve2::Nurbs2(_)) => None,
+        (Curve2::Nurbs2(_), _) => along_carrier(a, b, tol),
+        (_, Curve2::Nurbs2(_)) => along_carrier(b, a, tol).map(swap),
+        _ => None,
+    }
+}
+
+/// `spline` over its range certified within `tol` of `carrier`'s line or
+/// conic, piece by piece; then the overlap.
+fn along_carrier(
+    (spline, rs): (&Curve2, [f64; 2]),
+    (carrier, rc): (&Curve2, [f64; 2]),
+    tol: f64,
+) -> Option<Vec<Meet2>> {
+    let i = Interval::point;
+    let chain = Chain2::new(spline, rs[0], rs[1]);
+    let conic = Conic::of(carrier);
+    for p in &chain.pieces {
+        let wmin = p.pts.iter().map(|h| h.w).fold(f64::INFINITY, f64::min);
+        if !(wmin > 0.0 && wmin.is_finite()) {
+            return None;
+        }
+        let on = match (carrier, &conic) {
+            (Curve2::Line2(l), _) => {
+                let (o, d) = (l.origin().to_vector(), l.dir());
+                let reach = tol - 4.0 * SLACK_2D;
+                p.pts.iter().all(|h| {
+                    let off = (i(h.p.x) - i(o.x)) * i(-d.y) + (i(h.p.y) - i(o.y)) * i(d.x);
+                    off.mag() <= reach
+                })
+            }
+            (_, Some(k)) => {
+                let reach = tol - k.slack(p.pts[0].p);
+                if reach <= 0.0 {
+                    return None;
+                }
+                let axis = |u: Vector2| {
+                    Bernstein::new(
+                        p.pts
+                            .iter()
+                            .map(|h| {
+                                ((i(h.p.x) - i(k.c.x)) * i(u.x) + (i(h.p.y) - i(k.c.y)) * i(u.y))
+                                    * i(h.w)
+                            })
+                            .collect(),
+                    )
+                };
+                let (xs, ys) = (axis(k.x), axis(k.y));
+                let ws = Bernstein::new(p.pts.iter().map(|h| i(h.w)).collect());
+                let (a2, b2) = (i(k.ax).square(), i(k.ay).square());
+                let q = xs
+                    .mul(&xs)
+                    .scale(b2)
+                    .add(&ys.mul(&ys).scale(a2))
+                    .sub(&ws.mul(&ws).scale(a2 * b2));
+                let allowed = (i(reach) * i(wmin).square() * a2 * b2).lo() / k.big();
+                q.range().mag() <= allowed * (1.0 - 1e-12)
+            }
+            _ => return None,
+        };
+        if !on {
+            return None;
+        }
+    }
+    let (s0, s1) = (rs[0], rs[1]);
+    let (p0, p1) = (spline.point(s0), spline.point(s1));
+    let (c0, c1) = (carrier.project(p0).param, carrier.project(p1).param);
+    let (clo, chi) = (rc[0].min(rc[1]), rc[0].max(rc[1]));
+    match carrier.period() {
+        None => {
+            // A line: the spline's stretch on it, clipped to the segment.
+            let (lo, hi) = (c0.min(c1).max(clo), c0.max(c1).min(chi));
+            if hi - lo <= OVERLAP * tol {
+                // Apart along the line, or meeting at an end: the
+                // subdivision's case, left uncertain.
+                return None;
+            }
+            let back = |c: f64, end: f64, s: f64| {
+                if c == end {
+                    s
+                } else {
+                    spline.project(carrier.point(c)).param
+                }
+            };
+            let (slo, shi) = if c0 <= c1 {
+                (back(lo, c0, s0), back(hi, c1, s1))
+            } else {
+                (back(lo, c1, s1), back(hi, c0, s0))
+            };
+            Some(vec![Meet2::Overlap {
+                ta: [slo, shi],
+                tb: [lo, hi],
+            }])
+        }
+        Some(per) => {
+            // A conic: both ends and the middle inside its range (anywhere
+            // on a whole turn), met in order, with no wrap past its start.
+            // An end on a whole turn's start may read as its end: both are
+            // tried.
+            let whole = chi - clo >= per - 1e-12;
+            let into = |c: f64| clo + (c - clo).rem_euclid(per);
+            let mid = into(carrier.project(spline.point((s0 + s1) / 2.0)).param);
+            let ends = |c: f64| {
+                let x = into(c);
+                [x, x - per, x + per]
+                    .into_iter()
+                    .filter(|y| *y >= clo - 1e-9 && *y <= chi + 1e-9)
+                    .collect::<Vec<f64>>()
+            };
+            let inside = |c: f64| whole || (c > clo + 1e-9 && c < chi - 1e-9);
+            for &a in &ends(c0) {
+                for &b in &ends(c1) {
+                    let ordered = (a < mid && mid < b) || (b < mid && mid < a);
+                    if inside(a) && inside(b) && inside(mid) && ordered {
+                        return Some(vec![Meet2::Overlap { ta: rs, tb: [a, b] }]);
+                    }
+                }
+            }
+            None
+        }
+    }
 }
 
 /// `A(s) Wb(t) - B(t) Wa(s)`, by component, for two pieces.
@@ -1523,5 +1679,61 @@ mod tests {
         }
         eprintln!("{closed} of {all} pairs settled apart in closed form");
         assert!(closed * 10 > all);
+    }
+
+    /// A quarter circle as a rational spline lies on its circle, and a
+    /// straight cubic on its line: overlaps where both run. A spline a
+    /// micron off the circle isn't on it.
+    #[test]
+    fn a_spline_on_a_carrier_overlaps_it() {
+        use crate::geom::{KnotVector, NurbsCurve2};
+        use std::sync::Arc;
+        let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        let h = core::f64::consts::FRAC_1_SQRT_2;
+        let quarter = |r: f64| {
+            let c = NurbsCurve2::new(
+                k.clone(),
+                vec![Point2::new(r, 0.0), Point2::new(r, r), Point2::new(0.0, r)],
+                Some(vec![1.0, h, 1.0]),
+            )
+            .unwrap();
+            (Curve2::Nurbs2(Arc::new(c)), [0.0, 1.0])
+        };
+        let c = circle((0.0, 0.0), 1.0, 0.0, TAU);
+        let tol = LINEAR_RESOLUTION;
+        let a = quarter(1.0);
+        let found = on_carrier((&a.0, a.1), (&c.0, c.1), tol).unwrap();
+        let [Meet2::Overlap { ta, tb }] = found[..] else {
+            panic!("{found:?}")
+        };
+        assert_eq!(ta, [0.0, 1.0]);
+        assert!(
+            tb[0].abs() < 1e-12 && (tb[1] - TAU / 4.0).abs() < 1e-12,
+            "{tb:?}"
+        );
+        // Swapped round, the parameters swap too.
+        let back = on_carrier((&c.0, c.1), (&a.0, a.1), tol).unwrap();
+        let [Meet2::Overlap { tb, .. }] = back[..] else {
+            panic!("{back:?}")
+        };
+        assert_eq!(tb, [0.0, 1.0]);
+        let off = quarter(1.0 + 1e-6);
+        assert_eq!(on_carrier((&off.0, off.1), (&c.0, c.1), tol), None);
+        // A straight cubic on [1, 3] of the x axis against the segment [0, 2].
+        let k3 = KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+        let pts = (0..4)
+            .map(|i| Point2::new(1.0 + i as f64 * 2.0 / 3.0, 0.0))
+            .collect();
+        let s = Curve2::Nurbs2(Arc::new(NurbsCurve2::new(k3, pts, None).unwrap()));
+        let l = line((0.0, 0.0), (2.0, 0.0));
+        let found = on_carrier((&s, [0.0, 1.0]), (&l.0, l.1), tol).unwrap();
+        let [Meet2::Overlap { ta, tb }] = found[..] else {
+            panic!("{found:?}")
+        };
+        assert!(ta[0].abs() < 1e-9 && (ta[1] - 0.5).abs() < 1e-9, "{ta:?}");
+        assert!(
+            (tb[0] - 1.0).abs() < 1e-12 && (tb[1] - 2.0).abs() < 1e-12,
+            "{tb:?}"
+        );
     }
 }
