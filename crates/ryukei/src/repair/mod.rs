@@ -8,7 +8,9 @@
 //! [`crate::check::check_intersections`] lists the pairs of faces that
 //! cross or overlap, and only those are met in the table
 //! ([`crate::boolean::table::Scope::Pairs`]), so faces meeting only at
-//! the edges and vertices they share are not intersected again; each face
+//! the edges and vertices they share are not intersected again; a spline
+//! face whose flat span lies on a listed partner's plane is first split
+//! there and the body checked again ([`crate::boolean::flat`], #585); each face
 //! is split by the curves where its partners meet it; each piece is kept
 //! by the winding number just outside it, counted by a certified ray
 //! ([`crate::intersect::winding_off`]): a piece bounds the region when
@@ -62,24 +64,34 @@ pub(crate) fn self_union_in(key: OpKey, body: &Body, m: &Meter) -> Result<(Body,
     if !crate::check::check_topology(body).is_empty() {
         return Err(Error::Topology(TopologyError::Inconsistent));
     }
-    let mut pairs: BTreeSet<(FaceId, FaceId)> = BTreeSet::new();
-    let mut cannot: Option<(FaceId, FaceId)> = None;
-    for fault in check_intersections_in(body, m) {
-        match fault {
-            Fault::FacesCross { a, b } | Fault::FacesOverlap { a, b } => {
-                pairs.insert((a.min(b), a.max(b)));
-            }
-            Fault::CannotCheck { a, b } => {
-                cannot = cannot.or(Some((a, b)));
-            }
-            _ => {}
-        }
+    let (mut pairs, mut cannot) = faulted(body, m);
+    if cannot.is_empty() && pairs.is_empty() {
+        return Ok((body.clone(), Journal::new()));
     }
-    if let Some((a, b)) = cannot {
+    // Flat spans of splines lying on a listed partner's plane split off
+    // (design 551, #585), and the body checked again: the flat piece is
+    // then wholly coincident with its partner. Bodies without the case go
+    // on as before, bit for bit.
+    let listed: BTreeSet<(FaceId, FaceId)> = pairs
+        .iter()
+        .copied()
+        .chain(cannot.iter().map(|&(a, b)| (a.min(b), a.max(b))))
+        .collect();
+    let split = crate::boolean::flat::split_listed(body, key, &listed);
+    let mut journal = Journal::new();
+    let body: &Body = match &split {
+        Some((b, j)) => {
+            (pairs, cannot) = faulted(b, m);
+            journal = j.clone();
+            b
+        }
+        None => body,
+    };
+    if let Some(&(a, b)) = cannot.first() {
         return Err(uncertain(body, &[a, b]).into());
     }
     if pairs.is_empty() {
-        return Ok((body.clone(), Journal::new()));
+        return Ok((body.clone(), journal));
     }
     let named = |f: Fail| -> Error {
         match f {
@@ -87,9 +99,10 @@ pub(crate) fn self_union_in(key: OpKey, body: &Body, m: &Meter) -> Result<(Body,
             f => refusal(body, f).into(),
         }
     };
-    let (out, journal) = resolve(key, body, &pairs, &select, &|_| false, m)
+    let (out, resolved) = resolve(key, body, &pairs, &select, &|_| false, m)
         .map_err(named)?
         .ok_or(RepairError::Empty)?;
+    journal.append(resolved);
     // Never an inside-out body, in either build (a debug build's resolve
     // leaves that to its caller).
     if crate::check::check(&out)
@@ -102,6 +115,26 @@ pub(crate) fn self_union_in(key: OpKey, body: &Body, m: &Meter) -> Result<(Body,
         return Err(RepairError::ToleranceTooLarge { at, needed }.into());
     }
     Ok((out, journal))
+}
+
+/// Two faces of one body.
+type FacePair = (FaceId, FaceId);
+
+/// The pairs of `body`'s faces the check finds crossing or overlapping,
+/// in face order, and those it couldn't check, in its order.
+fn faulted(body: &Body, m: &Meter) -> (BTreeSet<FacePair>, Vec<FacePair>) {
+    let mut pairs = BTreeSet::new();
+    let mut cannot = Vec::new();
+    for fault in check_intersections_in(body, m) {
+        match fault {
+            Fault::FacesCross { a, b } | Fault::FacesOverlap { a, b } => {
+                pairs.insert((a.min(b), a.max(b)));
+            }
+            Fault::CannotCheck { a, b } => cannot.push((a, b)),
+            _ => {}
+        }
+    }
+    (pairs, cannot)
 }
 
 /// How [`resolve`] chooses which pieces to keep: from the body (one

@@ -377,3 +377,43 @@ fn the_flat_span_twin_is_what_it_says() {
         }
     }
 }
+
+/// #585's case in small: the prism's flat span lies on the block's top,
+/// facing it. Healing joins the two shells into one solid without a
+/// repair (they only touch, and its own tests don't see the touch), so
+/// the body is self-united as the molex body is: the self-union splits the
+/// span off, the flat piece and the block's top cancel, and the result is
+/// the two solids' union, sound. Before 18.B the self-union was refused.
+#[test]
+fn a_spline_with_a_flat_span_on_a_plane_self_unions_to_the_union() {
+    let (prism, slab) = ryukei_testkit::nurbs::flat_span_twin();
+    let sh = one_solid(joined(&shape(&prism), &shape(&slab)));
+    let (h, _, _) = heal(OpKey(7), &sh, &HealOptions::default()).expect("healed");
+    assert!(!check_intersections(&h).is_empty(), "the touch is a fault");
+    let (u, journal) = self_union(OpKey(9), &h).expect("self-united");
+    sound(&u);
+    let (want, got) = (volume(&prism) + volume(&slab), volume(&u));
+    assert!((got - want).abs() <= 1e-3 * want, "{got} against {want}");
+    // The spline face was split: a Split event whose children are two
+    // faces.
+    assert!(
+        journal
+            .events()
+            .iter()
+            .any(|e| matches!(e, Event::Split { children, .. } if children.len() == 2)),
+        "{journal:?}"
+    );
+}
+
+/// The same with the block moved off: the prism alone is valid and its
+/// self-union is itself, bit for bit, with no split.
+#[test]
+fn a_valid_body_with_a_flat_span_comes_back_as_it_was() {
+    let (prism, _) = ryukei_testkit::nurbs::flat_span_twin();
+    let (r, journal) = self_union(OpKey(9), &prism).unwrap();
+    assert_eq!(
+        ryukei::codec::encode_body(&r),
+        ryukei::codec::encode_body(&prism)
+    );
+    assert!(journal.is_empty());
+}

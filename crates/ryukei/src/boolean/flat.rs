@@ -26,12 +26,17 @@ use crate::geom::intersect2::{Meet2, crossings};
 use crate::geom::{
     Box3, Curve, Curve2, Direction, Line2, NurbsCurve, NurbsSurface, Point2, Surface, Vector2,
 };
-use crate::intersect::coincide::planar_rows;
+use crate::intersect::coincide::{coincident, planar_rows};
 use crate::intersect::{Place, point_in_face};
 use crate::name::{BooleanRole, Journal, Name, OpKey, Role};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId, FaceId, Pcurve, VertexId};
+use std::collections::BTreeSet;
 use std::sync::Arc;
+
+/// How many flat pieces one face may give: a face holds at most this many
+/// flat spans worth splitting, which bounds the loop over a face's pieces.
+const MOST: usize = 8;
 
 /// A flat Bézier span of a NURBS surface beside a knot of full
 /// multiplicity: the direction, the knot, whether the span lies after it
@@ -300,6 +305,11 @@ pub(crate) fn split_off(
     let [flat] = flat[..] else {
         return None;
     };
+    let curved = if made.faces[0] == flat {
+        made.faces[1]
+    } else {
+        made.faces[0]
+    };
     // The plane facing the way the spline faced there.
     let pn = span.plane.frame()?.z().get();
     let sn = n.normal(uv.x, uv.y)?.get();
@@ -310,11 +320,67 @@ pub(crate) fn split_off(
     };
     let sid = b.add_surface(span.plane.clone());
     journal.append(set_surface(&mut b, flat, sid, sense).ok()?);
+    // The curved piece on its own half of the spline, cut at the knot (at
+    // a knot of full multiplicity, its control rows as they were): the
+    // whole spline would still hold the flat span past its trim, on the
+    // partner's plane, where no trace of the two surfaces settles.
+    let (lo, hi) = n.split(span.dir, span.knot).ok()?;
+    let half = if span.after { lo } else { hi };
+    let cid = b.add_surface(Surface::Nurbs(Arc::new(half)));
+    let cs = b.faces[curved].sense;
+    journal.append(set_surface(&mut b, curved, cid, cs).ok()?);
     crate::pcurve::fill(&mut b).ok()?;
     if !crate::check::check_topology(&b).is_empty() {
         return None;
     }
     Some((b, flat, journal))
+}
+
+/// [`split_off`] on every face of `body` listed in `pairs` whose flat span
+/// lies on the surface of a face listed with it: the split body and
+/// journal, or `None` where nothing was split. Each face's curved piece
+/// keeps its id and is looked at again, up to [`MOST`] times, for a flat
+/// span on its other side.
+pub(crate) fn split_listed(
+    body: &Body,
+    key: OpKey,
+    pairs: &BTreeSet<(FaceId, FaceId)>,
+) -> Option<(Body, Journal)> {
+    let mut faces: Vec<FaceId> = pairs.iter().flat_map(|&(a, b)| [a, b]).collect();
+    faces.sort_unstable();
+    faces.dedup();
+    let partners = |f: FaceId| -> Vec<FaceId> {
+        pairs
+            .iter()
+            .filter_map(|&(a, b)| (a == f).then_some(b).or((b == f).then_some(a)))
+            .collect()
+    };
+    let mut out: Option<(Body, Journal)> = None;
+    for f in faces {
+        for _ in 0..MOST {
+            let b = out.as_ref().map_or(body, |(b, _)| b);
+            let name = b.faces[f].name;
+            let found = flat_spans(b, f).into_iter().find(|s| {
+                partners(f)
+                    .into_iter()
+                    .any(|g| coincident(&s.plane, &b.surfaces[b.faces[g].surface]).is_some())
+            });
+            let Some(span) = found else {
+                break;
+            };
+            let Some((split, _, j)) = split_off(b, flat_key(key, name, 0), f, &span) else {
+                break;
+            };
+            match &mut out {
+                Some((ob, oj)) => {
+                    *ob = split;
+                    oj.append(j);
+                }
+                None => out = Some((split, j)),
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -515,11 +581,19 @@ mod tests {
             s.surfaces[s.faces[flat].surface],
             Surface::Plane(_)
         ));
-        // The curved piece keeps the spline itself, bit for bit.
-        assert_eq!(
-            s.surfaces[s.faces[f].surface],
-            b.surfaces[b.faces[f].surface]
-        );
+        // The curved piece keeps its id, on the spline's half before the
+        // knot: its control rows bit for bit.
+        let Surface::Nurbs(n) = &b.surfaces[b.faces[f].surface] else {
+            unreachable!("the spline face")
+        };
+        let (lo, _) = n.split(Direction::U, 1.0).unwrap();
+        assert_eq!(s.surfaces[s.faces[f].surface], Surface::Nurbs(Arc::new(lo)));
+        for (i, j) in (0..4).flat_map(|i| (0..2).map(move |j| (i, j))) {
+            let Surface::Nurbs(m) = &s.surfaces[s.faces[f].surface] else {
+                unreachable!()
+            };
+            assert_eq!(m.control_point(i, j), n.control_point(i, j));
+        }
         // Two edges split (SEMV) and one made (MEF); two vertices made.
         assert_eq!(s.edges().count(), b.edges().count() + 3);
         assert_eq!(s.vertices().count(), b.vertices().count() + 2);
