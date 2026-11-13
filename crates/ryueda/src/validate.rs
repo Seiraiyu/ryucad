@@ -648,7 +648,14 @@ pub fn status(session: &mut Session) -> Result<Value> {
     let (repo, state) = merging(&root)?;
     let full = session.snapshot();
     let working = own(&full);
-    let v = findings(&root, &repo, &state, &working, &full, Some(session.project()))?;
+    let v = findings(
+        &root,
+        &repo,
+        &state,
+        &working,
+        &full,
+        Some(session.project()),
+    )?;
     if let Some(k) = key {
         session.merge_status = Some((k, v.clone()));
     }
@@ -1150,7 +1157,12 @@ pub(crate) mod tests {
         assert_eq!(scope("faults:blocks/b/nets/n.json#/class"), "b");
         assert_eq!(scope("faults:erc:0123456789abcdef"), "project");
         assert_eq!(scope("faults:rails/gnd.json#/name"), "project");
-        for k in ["refdes_clash", "annotate_conflict", "name_clash", "merge_faults"] {
+        for k in [
+            "refdes_clash",
+            "annotate_conflict",
+            "name_clash",
+            "merge_faults",
+        ] {
             assert!(KINDS.contains(&k), "{k}");
         }
     }

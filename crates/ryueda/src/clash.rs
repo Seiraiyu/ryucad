@@ -49,11 +49,23 @@ pub(crate) fn judge(p: &Project) -> Judged {
     let mut erc = Vec::new();
     let mut nets = BTreeMap::new();
     for d in p.conn.designs.keys() {
-        let Ok(n) = crate::netlist::flatten(p, d) else {
-            continue;
+        // A design a file fault keeps from flattening (a pin on a net the
+        // merge lost, two nets of one name) still shows its designators:
+        // flattened regardless, only those findings are kept, so every
+        // clash is listed at once.
+        let (n, whole) = match crate::netlist::flatten(p, d) {
+            Ok(n) => (n, true),
+            Err(_) => match crate::netlist::flatten_ungated(p, d) {
+                Ok(n) => (n, false),
+                Err(_) => continue,
+            },
         };
         let found = crate::erc::config(p).apply(crate::erc::check_netlist(p, &n));
-        erc.extend(found.into_iter().filter(|f| f.waived.is_none()));
+        erc.extend(
+            found
+                .into_iter()
+                .filter(|f| f.waived.is_none() && (whole || f.code == Code::RefdesDuplicate)),
+        );
         nets.insert(d.clone(), n);
     }
     Judged { faults, erc, nets }
@@ -263,7 +275,9 @@ fn refdes(
             } else if sides.contains(&"theirs") {
                 theirs.push((b.clone(), c.clone()));
             }
-            listed.push(json!({"component": format!("{b}/{c}"), "locked": lock, "brought_by": sides}));
+            listed.push(
+                json!({"component": format!("{b}/{c}"), "locked": lock, "brought_by": sides}),
+            );
         }
         let id = format!("refdes:{}/{r}", f.design);
         let what = json!({"design": f.design, "refs": refs});
@@ -293,7 +307,9 @@ fn refdes(
             let Some((prefix, _, rest)) = conn::numbered(&cur) else {
                 continue;
             };
-            let n = next.entry((prefix.to_owned(), rest.to_owned())).or_insert(1);
+            let n = next
+                .entry((prefix.to_owned(), rest.to_owned()))
+                .or_insert(1);
             let Some(to) = crate::annotate::next_free(prefix, rest, n, &taken) else {
                 continue;
             };
@@ -432,14 +448,12 @@ fn names_in(p: &Project, block: Option<&Id>) -> BTreeSet<String> {
 
 /// The `name_clash` items: names `net_name_duplicate` finds in the merge
 /// and on neither side, by scope.
-fn names(
-    p: &Project,
-    new: &[&Fault],
-    three: &Three,
-    covered: &mut BTreeSet<String>,
-) -> Vec<Value> {
+fn names(p: &Project, new: &[&Fault], three: &Three, covered: &mut BTreeSet<String>) -> Vec<Value> {
     let mut groups: BTreeMap<(String, String), Vec<Named>> = BTreeMap::new();
-    for f in new.iter().filter(|f| f.error.code == Code::NetNameDuplicate) {
+    for f in new
+        .iter()
+        .filter(|f| f.error.code == Code::NetNameDuplicate)
+    {
         let Some(n) = named(f) else { continue };
         let Some(name) = n.name_in(p) else { continue };
         covered.insert(key(f));
@@ -463,11 +477,7 @@ fn names(
             let t = came(n, three.theirs);
             by_ours |= came(n, three.ours);
             by_theirs |= t;
-            if t {
-                theirs.push(n)
-            } else {
-                ours.push(n)
-            }
+            if t { theirs.push(n) } else { ours.push(n) }
         }
         if theirs.is_empty() {
             // Neither side's alone: every object but the first.
@@ -565,7 +575,14 @@ fn node_at(q: &Project, user: &str) -> Option<Node> {
         return c.item.as_ref().ok()?.pins.get(pin).cloned();
     }
     let port = Id::parse(pin, "port").ok()?;
-    b.instances.get(&x)?.item.as_ref().ok()?.ports.get(&port).cloned()
+    b.instances
+        .get(&x)?
+        .item
+        .as_ref()
+        .ok()?
+        .ports
+        .get(&port)
+        .cloned()
 }
 
 /// Whether node `n` of block `b` is there in `p`.
@@ -624,7 +641,12 @@ fn net_gone(p: &Project, three: &Three, full: &Files, path: &str, pointer: &str)
     )
     .ok()?;
     let base = three.base?;
-    let had = |q: &Project| q.conn.blocks.get(&b).is_some_and(|x| x.nets.contains_key(&n));
+    let had = |q: &Project| {
+        q.conn
+            .blocks
+            .get(&b)
+            .is_some_and(|x| x.nets.contains_key(&n))
+    };
     if !had(base) {
         return None;
     }
@@ -656,8 +678,10 @@ fn net_gone(p: &Project, three: &Three, full: &Files, path: &str, pointer: &str)
             "connect it where {removed_by} moved net {b}/{n}'s pins: {}", crate::write::node_text(&b, &m)
         )}));
     }
-    repairs.push(json!({"id": "restore", "files": [part_path(&b, Part::Net, &n)],
-        "summary": format!("bring net {b}/{n} back from the base")}));
+    repairs.push(
+        json!({"id": "restore", "files": [part_path(&b, Part::Net, &n)],
+        "summary": format!("bring net {b}/{n} back from the base")}),
+    );
     repairs.push(json!({"id": "disconnect", "summary": "leave it unconnected"}));
     let mut x = item(
         format!("{path}#{pointer}"),
@@ -734,7 +758,10 @@ fn place(files: &mut Files, x: &Value, node: Option<Value>) -> Result<()> {
     if pointer.starts_with("/buses/") {
         let (list, i) = pointer.rsplit_once('/').unwrap_or_default();
         let i: usize = i.parse().unwrap_or(usize::MAX);
-        let v = files.get(&path).and_then(|b| json_of(b)).unwrap_or(Value::Null);
+        let v = files
+            .get(&path)
+            .and_then(|b| json_of(b))
+            .unwrap_or(Value::Null);
         let mut nets = v
             .pointer(list)
             .and_then(Value::as_array)
@@ -821,7 +848,9 @@ fn renumber_library(files: &mut Files, x: &Value, planned: &Value, sides: &Sides
     crate::validate::settle_record(files, &path, "", Kind::IdCollision, x.get("ours").cloned())?;
     files.insert(
         new_path,
-        crate::canonical::to_string(&x["theirs"]).into_bytes().into(),
+        crate::canonical::to_string(&x["theirs"])
+            .into_bytes()
+            .into(),
     );
     let taken: Vec<String> = files
         .iter()
@@ -1061,8 +1090,7 @@ pub(crate) fn repair(
             for f in planned["files"].as_array().into_iter().flatten() {
                 let f = f.as_str().unwrap_or_default();
                 let bytes = sides.base.get(f).cloned().ok_or_else(|| {
-                    Error::new(Code::RepairConflict, format!("the base has no {f}"))
-                        .with("path", f)
+                    Error::new(Code::RepairConflict, format!("the base has no {f}")).with("path", f)
                 })?;
                 files.insert(f.to_owned(), bytes);
             }
@@ -1091,7 +1119,9 @@ pub(crate) mod tests {
         for (path, v) in files {
             let at = r.join(path);
             match v {
-                Some(v) => crate::source::write_atomic(&at, crate::canonical::to_string(v)).unwrap(),
+                Some(v) => {
+                    crate::source::write_atomic(&at, crate::canonical::to_string(v)).unwrap()
+                }
                 None => std::fs::remove_file(&at).unwrap(),
             }
         }
@@ -1102,7 +1132,11 @@ pub(crate) mod tests {
     /// `theirs` committed on branch `other`, `ours` on `main`, and the
     /// merge begun with `--no-commit`. With no driver installed Git
     /// merges as lines, so each test changes any file on one side only.
-    pub(crate) fn merging(r: &Path, ours: &[(&str, Option<Value>)], theirs: &[(&str, Option<Value>)]) {
+    pub(crate) fn merging(
+        r: &Path,
+        ours: &[(&str, Option<Value>)],
+        theirs: &[(&str, Option<Value>)],
+    ) {
         let git = |a: &[&str]| crate::git::tests::git(r, a);
         git(&["init", "-q"]);
         manifest(r, ProjectKind::Design, &[]);
@@ -1150,13 +1184,22 @@ pub(crate) mod tests {
         // Each side adds a part on SDA, with designators of their own.
         merging(
             r,
-            &[("blocks/top/components/r2.json", part(json!({"refdes": "R2", "pins": {"1": "sda", "2": {"rail": "gnd"}}})))],
-            &[("blocks/top/components/r3.json", part(json!({"refdes": "R3", "pins": {"1": "sda", "2": {"rail": "gnd"}}})))],
+            &[(
+                "blocks/top/components/r2.json",
+                part(json!({"refdes": "R2", "pins": {"1": "sda", "2": {"rail": "gnd"}}})),
+            )],
+            &[(
+                "blocks/top/components/r3.json",
+                part(json!({"refdes": "R3", "pins": {"1": "sda", "2": {"rail": "gnd"}}})),
+            )],
         );
         let mut s = Session::open(r).unwrap();
         let v = crate::validate::status(&mut s).unwrap();
         assert_eq!(v["clean"], true, "{v}");
-        assert_eq!((v["already_failing"].clone(), v["warnings"].clone()), (json!([]), json!([])));
+        assert_eq!(
+            (v["already_failing"].clone(), v["warnings"].clone()),
+            (json!([]), json!([]))
+        );
         // The merged project alone: nothing to compare.
         let p = s.project();
         let j = judge(p);
@@ -1176,7 +1219,10 @@ pub(crate) mod tests {
             waived: None,
         };
         let side = [f("a", &["d:r1/1", "d:sda"])];
-        assert!(erc_on(&side, &f("b", &["d:sda", "d:r2/1"])), "grown, still the side's");
+        assert!(
+            erc_on(&side, &f("b", &["d:sda", "d:r2/1"])),
+            "grown, still the side's"
+        );
         assert!(!erc_on(&side, &f("c", &["d:r3/1"])));
     }
 
@@ -1184,7 +1230,8 @@ pub(crate) mod tests {
     fn two_branches_taking_one_designator_clash_and_renumber_theirs() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
-        let on_sda = |d: &str| part(json!({"refdes": d, "pins": {"1": "sda", "2": {"rail": "gnd"}}}));
+        let on_sda =
+            |d: &str| part(json!({"refdes": d, "pins": {"1": "sda", "2": {"rail": "gnd"}}}));
         merging(
             r,
             &[("blocks/top/components/r2.json", on_sda("R5"))],
@@ -1214,7 +1261,10 @@ pub(crate) mod tests {
         };
         let out = crate::validate::resolve(&mut s, std::slice::from_ref(&fix), &none).unwrap();
         assert_eq!(out["status"]["clean"], true, "{out}");
-        let r3: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/components/r3.json")).unwrap()).unwrap();
+        let r3: Value = serde_json::from_slice(
+            &std::fs::read(r.join("blocks/top/components/r3.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(r3["refdes"], "R2");
         // Asked again, there is no such clash.
         fix.repair = Some("annotate".to_owned());
@@ -1226,7 +1276,11 @@ pub(crate) mod tests {
     fn two_locked_alike_are_an_annotate_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
-        let locked = |d: &str| part(json!({"refdes": d, "refdes_locked": true, "pins": {"1": "sda", "2": {"rail": "gnd"}}}));
+        let locked = |d: &str| {
+            part(
+                json!({"refdes": d, "refdes_locked": true, "pins": {"1": "sda", "2": {"rail": "gnd"}}}),
+            )
+        };
         merging(
             r,
             &[("blocks/top/components/r2.json", locked("R5"))],
@@ -1236,7 +1290,56 @@ pub(crate) mod tests {
         let v = crate::validate::status(&mut s).unwrap();
         let c = of_kind(&v, "annotate_conflict");
         assert_eq!(c.len(), 1, "{v}");
-        assert_eq!((c[0]["id"].clone(), c[0]["repairs"].clone()), (json!("refdes:d/R5"), json!([])));
+        assert_eq!(
+            (c[0]["id"].clone(), c[0]["repairs"].clone()),
+            (json!("refdes:d/R5"), json!([]))
+        );
+    }
+
+    #[test]
+    fn a_designator_clash_shows_beside_a_net_the_merge_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        // Ours deletes SDA (R1 and the channels moved to GND) and adds R9;
+        // theirs adds another R9 on SDA. The merged design won't flatten
+        // (theirs' pin names SDA), yet both clashes are listed.
+        let to_gnd = json!({"rail": "gnd"});
+        let inst = |ch: &str| {
+            Some(json!({"kind": "ryueda.instance", "format": 2, "of": "s",
+            "ports": {"sda": to_gnd}, "refdes": {"rule": "suffix", "value": ch}}))
+        };
+        merging(
+            r,
+            &[
+                ("blocks/top/nets/sda.json", None),
+                (
+                    "blocks/top/components/r1.json",
+                    part(
+                        json!({"refdes": "R1", "pins": {"1": {"rail": "gnd"}, "2": {"rail": "v3v3"}}}),
+                    ),
+                ),
+                ("blocks/top/instances/ch_a.json", inst("_A")),
+                ("blocks/top/instances/ch_b.json", inst("_B")),
+                (
+                    "blocks/top/components/r2.json",
+                    part(
+                        json!({"refdes": "R9", "pins": {"1": {"rail": "gnd"}, "2": {"rail": "gnd"}}}),
+                    ),
+                ),
+            ],
+            &[(
+                "blocks/top/components/r3.json",
+                part(json!({"refdes": "R9", "pins": {"1": "sda", "2": {"rail": "gnd"}}})),
+            )],
+        );
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        assert_eq!(of_kind(&v, "delete_edit").len(), 1, "{v}");
+        let c = of_kind(&v, "refdes_clash");
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "refdes:d/R9");
+        assert_eq!(c[0]["repairs"][0]["id"], "renumber");
+        assert!(of_kind(&v, "merge_faults").is_empty(), "{v}");
     }
 
     #[test]
@@ -1248,11 +1351,17 @@ pub(crate) mod tests {
             r,
             &[
                 ("blocks/top/nets/aux_o.json", net("AUX")),
-                ("blocks/top/components/r2.json", part(json!({"refdes": "R2", "pins": {"1": "aux_o", "2": {"rail": "gnd"}}}))),
+                (
+                    "blocks/top/components/r2.json",
+                    part(json!({"refdes": "R2", "pins": {"1": "aux_o", "2": {"rail": "gnd"}}})),
+                ),
             ],
             &[
                 ("blocks/top/nets/aux_t.json", net("AUX")),
-                ("blocks/top/components/r3.json", part(json!({"refdes": "R3", "pins": {"1": "aux_t", "2": {"rail": "gnd"}}}))),
+                (
+                    "blocks/top/components/r3.json",
+                    part(json!({"refdes": "R3", "pins": {"1": "aux_t", "2": {"rail": "gnd"}}})),
+                ),
             ],
         );
         let mut s = Session::open(r).unwrap();
@@ -1279,7 +1388,10 @@ pub(crate) mod tests {
         let out = crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
         assert_eq!(out["status"]["clean"], true, "{out}");
         assert!(!r.join("blocks/top/nets/aux_t.json").exists());
-        let r3: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/components/r3.json")).unwrap()).unwrap();
+        let r3: Value = serde_json::from_slice(
+            &std::fs::read(r.join("blocks/top/components/r3.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(r3["pins"]["1"], "aux_o");
     }
 
@@ -1290,7 +1402,10 @@ pub(crate) mod tests {
         let net = |name: &str| Some(json!({"kind": "ryueda.net", "format": 1, "name": name}));
         merging(
             r,
-            &[("blocks/top/nets/aux_o.json", net("AUX")), ("blocks/top/nets/aux2.json", net("AUX_2"))],
+            &[
+                ("blocks/top/nets/aux_o.json", net("AUX")),
+                ("blocks/top/nets/aux2.json", net("AUX_2")),
+            ],
             &[("blocks/top/nets/aux_t.json", net("AUX"))],
         );
         let mut s = Session::open(r).unwrap();
@@ -1304,27 +1419,38 @@ pub(crate) mod tests {
             repair: Some("rename".to_owned()),
         };
         crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
-        let t: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/nets/aux_t.json")).unwrap()).unwrap();
+        let t: Value =
+            serde_json::from_slice(&std::fs::read(r.join("blocks/top/nets/aux_t.json")).unwrap())
+                .unwrap();
         assert_eq!(t["name"], "AUX_3");
     }
 
     /// Ours joins SDA into a new net SDB by hand (R1's pin and both
     /// channels' ports moved, SDA deleted); theirs hangs R3 on SDA.
     pub(crate) fn sda_joined_away(r: &Path, channels_to: Value) {
-        let mut top_r1 = part(json!({"refdes": "R1", "pins": {"1": "sdb", "2": {"rail": "v3v3"}}})).unwrap();
+        let mut top_r1 =
+            part(json!({"refdes": "R1", "pins": {"1": "sdb", "2": {"rail": "v3v3"}}})).unwrap();
         top_r1["of"] = json!({"id": "r_100k"});
-        let inst = |ch: &str| Some(json!({"kind": "ryueda.instance", "format": 2, "of": "s",
-            "ports": {"sda": channels_to}, "refdes": {"rule": "suffix", "value": ch}}));
+        let inst = |ch: &str| {
+            Some(json!({"kind": "ryueda.instance", "format": 2, "of": "s",
+            "ports": {"sda": channels_to}, "refdes": {"rule": "suffix", "value": ch}}))
+        };
         merging(
             r,
             &[
                 ("blocks/top/nets/sda.json", None),
-                ("blocks/top/nets/sdb.json", Some(json!({"kind": "ryueda.net", "format": 1, "name": "SDB"}))),
+                (
+                    "blocks/top/nets/sdb.json",
+                    Some(json!({"kind": "ryueda.net", "format": 1, "name": "SDB"})),
+                ),
                 ("blocks/top/components/r1.json", Some(top_r1)),
                 ("blocks/top/instances/ch_a.json", inst("_A")),
                 ("blocks/top/instances/ch_b.json", inst("_B")),
             ],
-            &[("blocks/top/components/r3.json", part(json!({"refdes": "R3", "pins": {"1": "sda", "2": {"rail": "gnd"}}})))],
+            &[(
+                "blocks/top/components/r3.json",
+                part(json!({"refdes": "R3", "pins": {"1": "sda", "2": {"rail": "gnd"}}})),
+            )],
         );
     }
 
@@ -1338,8 +1464,16 @@ pub(crate) mod tests {
         let c = of_kind(&v, "delete_edit");
         assert_eq!(c.len(), 1, "{v}");
         assert_eq!(c[0]["id"], "blocks/top/components/r3.json#/pins/1");
-        assert_eq!((c[0]["removed_by"].clone(), c[0]["edited_by"].clone()), (json!("ours"), json!("theirs")));
-        let ids: Vec<&str> = c[0]["repairs"].as_array().unwrap().iter().filter_map(|x| x["id"].as_str()).collect();
+        assert_eq!(
+            (c[0]["removed_by"].clone(), c[0]["edited_by"].clone()),
+            (json!("ours"), json!("theirs"))
+        );
+        let ids: Vec<&str> = c[0]["repairs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["id"].as_str())
+            .collect();
         assert_eq!(ids, ["follow", "restore", "disconnect"]);
         assert_eq!(c[0]["repairs"][0]["node"], "sdb");
         let fix = crate::proto::Resolution {
@@ -1350,7 +1484,10 @@ pub(crate) mod tests {
         };
         let out = crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
         assert_eq!(out["status"]["clean"], true, "{out}");
-        let r3: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/components/r3.json")).unwrap()).unwrap();
+        let r3: Value = serde_json::from_slice(
+            &std::fs::read(r.join("blocks/top/components/r3.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(r3["pins"]["1"], "sdb");
     }
 
@@ -1371,7 +1508,10 @@ pub(crate) mod tests {
             repair: Some("disconnect".to_owned()),
         };
         crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
-        let r3: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/components/r3.json")).unwrap()).unwrap();
+        let r3: Value = serde_json::from_slice(
+            &std::fs::read(r.join("blocks/top/components/r3.json")).unwrap(),
+        )
+        .unwrap();
         assert!(r3["pins"].get("1").is_none(), "{r3}");
     }
 
@@ -1385,14 +1525,24 @@ pub(crate) mod tests {
         let sym = |name: &str| json!({"kind": "ryueda.symbol", "format": 1, "name": name, "units": 1, "pins": {}});
         let rec = {
             let mut v = sym("Ours");
-            v["conflicts"] = json!({"": {"kind": "id_collision", "ours": sym("Ours"), "theirs": sym("Theirs")}});
+            v["conflicts"] =
+                json!({"": {"kind": "id_collision", "ours": sym("Ours"), "theirs": sym("Theirs")}});
             v
         };
-        crate::source::write_atomic(&r.join("library/symbols/x.json"), crate::canonical::to_string(&rec)).unwrap();
+        crate::source::write_atomic(
+            &r.join("library/symbols/x.json"),
+            crate::canonical::to_string(&rec),
+        )
+        .unwrap();
         let mut s = Session::open(r).unwrap();
         let v = crate::validate::status(&mut s).unwrap();
-        let c: Vec<Value> = v["conflicts"].as_array().unwrap().iter()
-            .filter(|c| c["id"] == "library/symbols/x.json#").cloned().collect();
+        let c: Vec<Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["id"] == "library/symbols/x.json#")
+            .cloned()
+            .collect();
         assert_eq!(c[0]["repairs"][0]["id"], "renumber", "{v}");
         assert_eq!(c[0]["repairs"][0]["to"], "x-2");
         let fix = crate::proto::Resolution {
@@ -1402,7 +1552,9 @@ pub(crate) mod tests {
             repair: Some("renumber".to_owned()),
         };
         crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
-        let read = |p: &str| -> Value { serde_json::from_slice(&std::fs::read(r.join(p)).unwrap()).unwrap() };
+        let read = |p: &str| -> Value {
+            serde_json::from_slice(&std::fs::read(r.join(p)).unwrap()).unwrap()
+        };
         assert_eq!(read("library/symbols/x.json"), sym("Ours"));
         assert_eq!(read("library/symbols/x-2.json"), sym("Theirs"));
     }
@@ -1412,12 +1564,19 @@ pub(crate) mod tests {
         let mut v = json!({"kind": "ryueda.component", "format": 1, "of": {"id": "ldo"}, "footprint": {"id": "ldo"}});
         assert!(rename_refs(&mut v, "components", "ldo", "ldo-2"));
         assert_eq!(v["of"], json!({"id": "ldo-2"}));
-        assert_eq!(v["footprint"], json!({"id": "ldo"}), "a footprint's ID is another folder's");
+        assert_eq!(
+            v["footprint"],
+            json!({"id": "ldo"}),
+            "a footprint's ID is another folder's"
+        );
         let mut lc = json!({"kind": "ryueda.libcomp", "format": 1, "symbol": {"id": "ldo"},
             "footprints": [{"footprint": {"id": "ldo"}}, {"footprint": {"library": "kicad", "id": "ldo"}}]});
         assert!(rename_refs(&mut lc, "footprints", "ldo", "ldo-2"));
         assert_eq!(lc["footprints"][0]["footprint"], json!({"id": "ldo-2"}));
-        assert_eq!(lc["footprints"][1]["footprint"]["id"], "ldo", "another library's");
+        assert_eq!(
+            lc["footprints"][1]["footprint"]["id"], "ldo",
+            "another library's"
+        );
         assert_eq!(lc["symbol"], json!({"id": "ldo"}));
     }
 
@@ -1428,7 +1587,10 @@ pub(crate) mod tests {
         // Theirs deletes class Power, which nothing used; ours gives SDA it.
         merging(
             r,
-            &[("blocks/top/nets/sda.json", Some(json!({"kind": "ryueda.net", "format": 1, "name": "SDA", "class": "power"})))],
+            &[(
+                "blocks/top/nets/sda.json",
+                Some(json!({"kind": "ryueda.net", "format": 1, "name": "SDA", "class": "power"})),
+            )],
             &[("classes/power.json", None)],
         );
         let mut s = Session::open(r).unwrap();
@@ -1436,9 +1598,18 @@ pub(crate) mod tests {
         let c = of_kind(&v, "merge_faults");
         assert_eq!(c.len(), 1, "{v}");
         assert_eq!(c[0]["id"], "faults:blocks/top/nets/sda.json#/class");
-        assert_eq!(c[0]["cause"], "both", "ours changed the net, theirs the class");
-        assert_eq!(c[0]["touched"], json!(["blocks/top/nets/sda.json", "classes/power.json"]));
-        assert_eq!((c[0]["choices"].clone(), c[0]["repairs"].clone()), (json!([]), json!([])));
+        assert_eq!(
+            c[0]["cause"], "both",
+            "ours changed the net, theirs the class"
+        );
+        assert_eq!(
+            c[0]["touched"],
+            json!(["blocks/top/nets/sda.json", "classes/power.json"])
+        );
+        assert_eq!(
+            (c[0]["choices"].clone(), c[0]["repairs"].clone()),
+            (json!([]), json!([]))
+        );
         assert_eq!(c[0]["fault"]["code"], "not_found");
         // It blocks the commit, not the layouts: nothing here is pending.
         assert_eq!(v["clean"], false);
@@ -1452,31 +1623,62 @@ pub(crate) mod tests {
         // edits something else.
         merging(
             r,
-            &[("blocks/top/components/r1.json", Some(json!({"kind": "ryueda.component", "format": 1,
-                "of": {"id": "nope"}, "refdes": "R1", "pins": {"1": "sda", "2": {"rail": "v3v3"}}})))],
-            &[("rails/gnd.json", Some(json!({"kind": "ryueda.rail", "format": 1, "name": "GND", "voltage": "0 V"})))],
+            &[(
+                "blocks/top/components/r1.json",
+                Some(json!({"kind": "ryueda.component", "format": 1,
+                "of": {"id": "nope"}, "refdes": "R1", "pins": {"1": "sda", "2": {"rail": "v3v3"}}})),
+            )],
+            &[(
+                "rails/gnd.json",
+                Some(json!({"kind": "ryueda.rail", "format": 1, "name": "GND", "voltage": "0 V"})),
+            )],
         );
         let mut s = Session::open(r).unwrap();
         let v = crate::validate::status(&mut s).unwrap();
         assert_eq!(v["clean"], true, "{v}");
-        let codes: Vec<&str> = v["already_failing"].as_array().unwrap().iter()
-            .filter_map(|f| f["code"].as_str()).collect();
+        let codes: Vec<&str> = v["already_failing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["code"].as_str())
+            .collect();
         assert!(codes.contains(&"not_found"), "{v}");
     }
 
     #[test]
     fn blame_reaches_through_what_a_blocks_drawing_reads() {
         let f = |pairs: &[(&str, &str)]| -> Files {
-            pairs.iter().map(|(p, b)| (p.to_string(), std::sync::Arc::from(b.as_bytes()))).collect()
+            pairs
+                .iter()
+                .map(|(p, b)| (p.to_string(), std::sync::Arc::from(b.as_bytes())))
+                .collect()
         };
         let sides = Sides {
-            base: f(&[("blocks/b/nets/n.json", "1"), ("rails/gnd.json", "1"), ("blocks/c/nets/m.json", "1")]),
-            ours: f(&[("blocks/b/nets/n.json", "2"), ("rails/gnd.json", "1"), ("blocks/c/nets/m.json", "1")]),
-            theirs: f(&[("blocks/b/nets/n.json", "1"), ("rails/gnd.json", "1"), ("blocks/c/nets/m.json", "2")]),
+            base: f(&[
+                ("blocks/b/nets/n.json", "1"),
+                ("rails/gnd.json", "1"),
+                ("blocks/c/nets/m.json", "1"),
+            ]),
+            ours: f(&[
+                ("blocks/b/nets/n.json", "2"),
+                ("rails/gnd.json", "1"),
+                ("blocks/c/nets/m.json", "1"),
+            ]),
+            theirs: f(&[
+                ("blocks/b/nets/n.json", "1"),
+                ("rails/gnd.json", "1"),
+                ("blocks/c/nets/m.json", "2"),
+            ]),
         };
-        assert_eq!(blame(&["blocks/b/components/r1.json".to_owned()], &sides),
-            ("ours", vec!["blocks/b/nets/n.json".to_owned()]));
-        assert_eq!(blame(&["rails/gnd.json".to_owned()], &sides).0, "both", "neither reached it");
+        assert_eq!(
+            blame(&["blocks/b/components/r1.json".to_owned()], &sides),
+            ("ours", vec!["blocks/b/nets/n.json".to_owned()])
+        );
+        assert_eq!(
+            blame(&["rails/gnd.json".to_owned()], &sides).0,
+            "both",
+            "neither reached it"
+        );
     }
 
     #[test]
@@ -1501,7 +1703,13 @@ pub(crate) mod tests {
         };
         let e = crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap_err();
         assert_eq!(e.code, Code::NetNameDuplicate, "{}", e.message);
-        assert!(!r.join("blocks/top/nets/sda.json").exists(), "nothing written");
-        assert_eq!(std::fs::read(r.join("blocks/top/components/r3.json")).unwrap(), before);
+        assert!(
+            !r.join("blocks/top/nets/sda.json").exists(),
+            "nothing written"
+        );
+        assert_eq!(
+            std::fs::read(r.join("blocks/top/components/r3.json")).unwrap(),
+            before
+        );
     }
 }

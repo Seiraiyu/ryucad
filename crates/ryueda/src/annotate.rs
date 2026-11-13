@@ -230,7 +230,12 @@ fn locked_clashes(p: &Project) -> Result<()> {
 /// taken, `*n` left past it; `None` once one isn't a designator (a
 /// library prefix like `#PWR`, or too long), since a larger `n` never
 /// makes one again.
-pub(crate) fn next_free(prefix: &str, rest: &str, n: &mut u64, taken: &BTreeSet<String>) -> Option<String> {
+pub(crate) fn next_free(
+    prefix: &str,
+    rest: &str,
+    n: &mut u64,
+    taken: &BTreeSet<String>,
+) -> Option<String> {
     loop {
         let t = format!("{prefix}{n}{rest}");
         if !conn::refdes_ok(&t) {
