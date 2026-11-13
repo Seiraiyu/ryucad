@@ -128,6 +128,50 @@ fn refuse(owner: &Id, at: &str, reason: &str, msg: &str) -> Error {
     .with("reason", reason)
 }
 
+/// Each of a cosmetic thread's faces, as `owner` would see it, is a
+/// cylindrical face (`reference_wrong_kind` if not): what a write checks.
+/// What the faces make together (one axis, radius and side) only rebuild
+/// tells.
+pub fn check_faces(
+    part: &crate::doc::project::Part,
+    order: &[Id],
+    owner: &Id,
+    c: &crate::doc::thread::CosmeticThread,
+    results: &dyn crate::rebuild::Results,
+) -> Result<()> {
+    use ryukei::geom::Surface;
+    use ryukei::topo::EntityId;
+    for (i, r) in c.faces.iter().enumerate() {
+        let role = format!("faces.{i}");
+        let (b, ids) = crate::reference::resolve_all(part, order, owner, &role, r, results)?;
+        for id in ids {
+            let cylinder = match id {
+                EntityId::Face(f) => matches!(
+                    b.body.face(f).and_then(|x| b.body.surface(x.surface)),
+                    Some(Surface::Cylinder(_))
+                ),
+                _ => false,
+            };
+            if !cylinder {
+                let kind = match id {
+                    EntityId::Face(_) => "face that isn't a cylinder",
+                    EntityId::Edge(_) => "edge",
+                    _ => "vertex",
+                };
+                return Err(crate::reference::wrong_kind(
+                    part,
+                    owner,
+                    &role,
+                    r,
+                    kind,
+                    "a cylindrical face",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A cosmetic thread from its faces as `owner` sees them.
 pub fn build(
     part: &crate::doc::project::Part,
@@ -470,7 +514,7 @@ fn mismatch(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::doc::id::Id;
     use crate::hole::tests::{drilled, put};
@@ -508,7 +552,7 @@ mod tests {
 
     /// Part p's 10 mm shaft (`shaft`, radius 4.95 mm, height 20 mm, at x
     /// 40 mm): its side face's and its top edge's references.
-    fn shaft(s: &mut crate::session::Session) -> (Value, Value) {
+    pub(crate) fn shaft(s: &mut crate::session::Session) -> (Value, Value) {
         crate::testing::call(
             s,
             "feature.add",

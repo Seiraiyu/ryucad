@@ -9792,3 +9792,48 @@ fn standards_list_external_classes() {
             .all(|c| c["side"] == "internal")
     );
 }
+
+#[test]
+fn cosmetic_threads_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "shaft",
+        "--param",
+        "radius=4.95",
+        "--param",
+        "height=20",
+    ]);
+    let shown = p.ok(&["inspect", "p", "shaft"]);
+    // The shaft's side, its cylinder, by name.
+    let faces = shown["bodies"][0]["faces"].as_array().unwrap();
+    let side = faces
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .unwrap_or_else(|| panic!("{shown}"));
+    let side = format!("p/shaft/{}", side["name"].as_str().unwrap());
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cosmetic_thread",
+        "--id",
+        "t",
+        "--face",
+        &side,
+        "--thread",
+        "iso_metric:M10",
+        "--class",
+        "6g",
+    ]);
+    assert_eq!(v["feature"]["thread"]["class"], "6g");
+    assert_eq!(v["feature"]["faces"], serde_json::json!([side]));
+    let types = p.ok(&["feature", "types", "cosmetic_thread"]);
+    assert!(types.to_string().contains("thread_depth"), "{types}");
+}
