@@ -36,6 +36,7 @@ pub(crate) use bound::triangle_turn;
 
 use crate::Error;
 use crate::geom::{Curve, Point2, Point3, UnitVector3};
+use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId, FaceId};
 use crate::work::{Meter, Work};
 use bound::Targets;
@@ -553,7 +554,11 @@ fn mesh_face(
             Ok(d)
         });
     let Ok(mut d) = built else {
-        w.fault = Some(MeshFaultKind::BadDomain);
+        // A face of no width bounds nothing: it meshes as no triangles
+        // (no domain and no fault), not as a hole.
+        if !no_width(b, g.face, samples, t) {
+            w.fault = Some(MeshFaultKind::BadDomain);
+        }
         return w;
     };
     let fixed = |a: Anchor| match a {
@@ -590,6 +595,48 @@ fn mesh_face(
     w.requests = r.requests;
     w.domain = Some(d);
     w
+}
+
+/// Whether face `f` is a face of no width: one loop of two edges between
+/// the same two vertices, each edge's samples within the edges'
+/// tolerances (and the samples' chord) of the other's, as a file can
+/// leave between two faces that meet along an edge (#796). Its loops make
+/// no region of its parameter plane, and it covers nothing a mesh would
+/// draw. Two arcs of one circle around a disc aren't one: each lies far
+/// from the other's samples.
+fn no_width(b: &Body, f: FaceId, samples: &[Option<EdgeSamples>], t: &Targets) -> bool {
+    let mut loops = b.face_loops(f);
+    let (Some(l), None) = (loops.next(), loops.next()) else {
+        return false;
+    };
+    let fins: Vec<_> = b.loop_fins(l).collect();
+    let [x, y] = fins[..] else {
+        return false;
+    };
+    let (ex, ey) = (b.fins[x].edge, b.fins[y].edge);
+    let (a, c) = (&b.edges[ex], &b.edges[ey]);
+    let ends = |e: &crate::topo::Edge| [e.start.min(e.end), e.start.max(e.end)];
+    if ex == ey || a.start == a.end || ends(a) != ends(c) {
+        return false;
+    }
+    let reach = a.tolerance.get() + c.tolerance.get() + t.chord + LINEAR_RESOLUTION;
+    let points = |e: EdgeId| &samples[e.index()].as_ref().expect("sampled").points;
+    // Every point of `p` within `reach` of the polyline `q`.
+    let near = |p: &[Point3], q: &[Point3]| {
+        p.iter().all(|&o| {
+            q.windows(2).any(|s| {
+                let d = s[1] - s[0];
+                let len2 = d.dot(d);
+                let k = if len2 > 0.0 {
+                    ((o - s[0]).dot(d) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (s[0] + d * k).distance(o) <= reach
+            })
+        })
+    };
+    near(points(ex), points(ey)) && near(points(ey), points(ex))
 }
 
 #[cfg(test)]
