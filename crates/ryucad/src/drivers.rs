@@ -279,7 +279,11 @@ fn hook_script() -> Result<String> {
 
 /// Runs `git config` with `args` in `dir` (any folder for `--global`).
 fn git_config(dir: Option<&Path>, args: &[&str]) -> Result<()> {
-    let mut git = std::process::Command::new("git");
+    let mut git = if dir.is_some() {
+        ryupdm::git_env::here()
+    } else {
+        std::process::Command::new("git")
+    };
     if let Some(d) = dir {
         git.current_dir(d);
     }

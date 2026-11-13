@@ -77,7 +77,7 @@ impl Repo {
     /// Runs git in the work tree with a fixed identity and time; its exit
     /// code and output.
     fn git_status(&self, args: &[&str]) -> (i32, String) {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
             .args(args)
@@ -111,8 +111,12 @@ impl Repo {
 
     /// Runs ryucad in the project, in process; its exit code and envelope.
     fn ryucad_status(&self, args: &[&str]) -> (i32, Value) {
-        let out = Command::cargo_bin("ryucad")
-            .unwrap()
+        let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        // No GIT_DIR or kin inherited (#721).
+        for v in ryupdm::git_env::inherited() {
+            cmd.env_remove(v);
+        }
+        let out = cmd
             .args(args)
             .current_dir(&self.root)
             .env("HOME", self.home())
@@ -347,7 +351,7 @@ fn git_follows_a_feature_it_thinks_was_renamed() {
 /// Git's version, as `(major, minor)`: `git version 2.50.1 (Apple
 /// Git-155)` and `git version 2.56.0.windows.2` alike.
 fn git_version() -> (u32, u32) {
-    let out = std::process::Command::new("git")
+    let out = ryupdm::git_env::isolated()
         .arg("--version")
         .output()
         .unwrap();
@@ -360,6 +364,38 @@ fn git_version() -> (u32, u32) {
 #[test]
 fn git_versions_read_as_numbers() {
     assert!(git_version() >= (2, 0), "{:?}", git_version());
+}
+
+/// #721: run under `git bisect run` or a hook (GIT_DIR and the rest
+/// naming another repository), tests that run git leave that repository
+/// alone: one of this file's tests, re-run with a decoy in GIT_DIR.
+#[test]
+fn an_inherited_git_dir_is_left_alone() {
+    let decoy = tempfile::tempdir().unwrap();
+    let st = ryupdm::git_env::isolated()
+        .args(["init", "-q", "--bare"])
+        .arg(decoy.path())
+        .status()
+        .unwrap();
+    assert!(st.success(), "git init --bare");
+    let config = fs::read(decoy.path().join("config")).unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "disjoint_edits_merge_value_by_value"])
+        .args(["--test-threads", "1"])
+        .env("GIT_DIR", decoy.path())
+        .env("GIT_WORK_TREE", decoy.path())
+        .env("GIT_INDEX_FILE", decoy.path().join("index"))
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&fs::read(decoy.path().join("config")).unwrap()),
+        String::from_utf8_lossy(&config),
+        "the decoy's config changed: {said}"
+    );
+    assert!(!decoy.path().join("index").exists(), "a test wrote the decoy's index: {said}");
+    assert!(out.status.success(), "{said}");
 }
 
 #[test]

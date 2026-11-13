@@ -1336,7 +1336,7 @@ fn new_project_and_open_sample_from_the_start_window() {
             .is_some_and(|p| p.assembly)
     );
     // It rebuilds clean and checks clean, as an agent finds it.
-    let out = std::process::Command::new(&ryucad().exe)
+    let out = common::bin(&ryucad().exe)
         .arg("check")
         .current_dir(&sample)
         .output()
@@ -3857,7 +3857,7 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
     ]);
     let arm = std::path::PathBuf::from(v["path"].as_str().unwrap());
     // Both set the box's length: merging arm in would conflict.
-    let out = std::process::Command::new(&ryucad().exe)
+    let out = common::bin(&ryucad().exe)
         .args(["feature", "edit", "p", "base", "--param", "x=15"])
         .current_dir(&arm)
         // In process: a daemon there would say who is attached.

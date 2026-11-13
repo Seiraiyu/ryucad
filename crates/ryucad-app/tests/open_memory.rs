@@ -52,7 +52,7 @@ fn opening_ten_thousand_occurrences_stays_within_the_budget() {
     };
     let made = write(&root, &spec, &[]);
     // In process, so no daemon starts before the budget is set.
-    let set = Command::new(&ryucad().exe)
+    let set = common::bin(&ryucad().exe)
         .args([
             "--no-daemon",
             "config",

@@ -1940,7 +1940,7 @@ fn compare_section(golden: &mut Golden) {
     let mut s = golden.section("compare");
     let (dir, mut session) = showcase();
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args([
                 "-c",
                 "user.name=Test",
@@ -4945,7 +4945,7 @@ fn drilled_solids_are_sound() {
 fn deps_projects() -> (tempfile::TempDir, tempfile::TempDir) {
     use serde_json::json;
     let git = |dir: &std::path::Path, args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)

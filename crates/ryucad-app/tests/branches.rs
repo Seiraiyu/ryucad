@@ -17,7 +17,7 @@ const WAIT: Duration = Duration::from_secs(60);
 
 /// Runs the CLI in `dir`; its result, which must be ok.
 fn ok_in(dir: &Path, args: &[&str]) -> Value {
-    let out = std::process::Command::new(&ryucad().exe)
+    let out = common::bin(&ryucad().exe)
         .args(args)
         .current_dir(dir)
         .output()

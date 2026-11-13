@@ -696,7 +696,7 @@ pub(crate) mod tests {
 
     /// Runs git in `dir` with a fixed identity, and returns what it printed.
     pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = crate::git_env::isolated()
             .args([
                 "-c",
                 "user.name=Test",

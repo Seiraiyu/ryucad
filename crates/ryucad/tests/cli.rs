@@ -1556,7 +1556,7 @@ fn doctor_repairs_a_damaged_project() {
 /// Runs git in `dir` with a fixed identity and time, so the same commits
 /// in two repositories have the same IDs, and its output.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
+    let out = ryupdm::git_env::isolated()
         .args([
             "-c",
             "user.name=Test",
@@ -1944,7 +1944,7 @@ fn merges_through_the_cli() {
     p.ok(&["feature", "edit", "p", "b", "--param", "x=12"]);
     p.git(&["commit", "-q", "-am", "ours"]);
     for root in [&p.direct, &p.daemon] {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["merge", "--no-edit", "theirs"])
             .current_dir(root)

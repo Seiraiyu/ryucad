@@ -122,7 +122,7 @@ fn a_compare_looks_as_it_did() {
     let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.02);
     let mut scene = Scene::new(&device, &adapter);
     scene.sync(&device, &ws.model, centre);
-    scene.sync_ghosts(&device, Some(c));
+    scene.sync_ghosts(&device, Some(c), &ws.model.shown());
     // Painted as the view paints a compare.
     let mut faces = Vec::new();
     for (key, marks) in &c.faces {
