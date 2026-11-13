@@ -611,7 +611,13 @@ fn cosmetic_threads_look_as_they_did() {
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
     let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
-    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    // The plate's bounding sphere, so the near plane spares its corners.
+    let radius = (0..3)
+        .map(|k| (hi[k] - lo[k]) * (hi[k] - lo[k]))
+        .sum::<f64>()
+        .sqrt()
+        / 2.0;
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, radius);
     let mut scene = Scene::new(&device, &adapter);
     scene.sync(&device, &ws.model, centre);
     let overlay =

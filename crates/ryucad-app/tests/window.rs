@@ -1584,15 +1584,32 @@ fn hovering_a_tapped_hole_shows_its_spec() {
         "M3x0.5-6H THRU",
     ]);
     let mut h = window(&p);
+    // One body, the plate (`loaded` waits for `with_part`'s two).
     frames(&mut h, |a| {
-        loaded(a)
-            && a.opened()
-                .ws
-                .model
-                .holes
-                .get("p")
-                .is_some_and(|t| !t.rows.is_empty())
+        matches!(&a.screen, ryucad_app::ui::app::Screen::Opened(o)
+            if o.ws.idle() && o.ws.model.meshes.len() == 1)
     });
+    let t = Instant::now();
+    while !h
+        .state()
+        .opened()
+        .ws
+        .model
+        .holes
+        .get("p")
+        .is_some_and(|t| !t.rows.is_empty())
+    {
+        let m = &h.state().opened().ws.model;
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "no holes: {:?} asked {:?}, revision {:?}",
+            m.holes,
+            m.holes_asked,
+            m.parts.get("p").map(|p| &p.revision)
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
     // Looking into the bore from above and aside, framed on it.
     if let ryucad_app::ui::app::Screen::Opened(o) = &mut h.state_mut().screen {
         o.view.nav.camera = ryucad::view::frame(
