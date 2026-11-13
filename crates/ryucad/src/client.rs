@@ -158,9 +158,173 @@ pub fn stop_all() -> Result<Value> {
     ryu_session::client::stop_all::<Cad>()
 }
 
+/// The params, by method, that name files or folders on the caller's
+/// machine. The daemon runs in a folder of its own, so a client makes
+/// them absolute against its own folder before sending
+/// ([`absolute_params`]): the CLI's, or a script's (`ryucad session
+/// --stdio`).
+pub const PATH_PARAMS: [(&str, &[&str]); 6] = [
+    ("import", &["path", "search"]),
+    ("export", &["out"]),
+    ("drawing.export", &["out"]),
+    ("release.package", &["out", "into"]),
+    ("release.package.verify", &["file"]),
+    ("bom.where_used", &["in"]),
+];
+
+/// The params of any method that name revisions: any of them may name a
+/// worktree by its path (`worktree:../arm`).
+pub const REVISION_PARAMS: [&str; 6] = ["rev", "from", "to", "against", "compare", "frame"];
+
+/// `params` of `method` with every relative path in them made absolute
+/// against `here`, as the daemon takes them: [`PATH_PARAMS`]' values,
+/// and the worktree paths of [`REVISION_PARAMS`]' values (each a string
+/// or a list of them). A path keeps its trailing separator (a folder to
+/// write into). Anything else, a value that isn't a string included, is
+/// left for the request's own checks.
+pub fn absolute_params(method: &str, params: &mut Value, here: &Path) {
+    let Some(map) = params.as_object_mut() else {
+        return;
+    };
+    let paths = PATH_PARAMS
+        .iter()
+        .find(|(m, _)| *m == method)
+        .map_or(&[][..], |(_, keys)| *keys);
+    for key in paths {
+        if let Some(v) = map.get_mut(*key) {
+            each_string(v, |s| {
+                (!s.is_empty() && Path::new(s).is_relative()).then(|| absolute_text(s, here))
+            });
+        }
+    }
+    for key in REVISION_PARAMS {
+        if let Some(v) = map.get_mut(key) {
+            each_string(v, |s| {
+                crate::session::worktree_path(s)
+                    .filter(|p| p.is_relative())
+                    .map(|p| {
+                        let abs = absolute_text(&p.to_string_lossy(), here);
+                        format!("{}{abs}", crate::session::WORKTREE)
+                    })
+            });
+        }
+    }
+}
+
+/// Replaces `v`, a string or a list of them, by what `fix` makes of each
+/// string it changes.
+fn each_string(v: &mut Value, fix: impl Fn(&str) -> Option<String>) {
+    let one = |v: &mut Value| {
+        if let Some(new) = v.as_str().and_then(&fix) {
+            *v = Value::String(new);
+        }
+    };
+    match v.as_array_mut() {
+        Some(list) => list.iter_mut().for_each(one),
+        None => one(v),
+    }
+}
+
+/// `s`, a relative path, joined to `here` and made absolute, its
+/// trailing separator kept.
+fn absolute_text(s: &str, here: &Path) -> String {
+    let joined = here.join(s);
+    let abs = std::path::absolute(&joined).unwrap_or(joined);
+    let mut t = abs.to_string_lossy().into_owned();
+    if s.ends_with(['/', '\\']) && !t.ends_with(['/', '\\']) {
+        t.push('/');
+    }
+    t
+}
+
+/// `req` with its paths made absolute against `here`
+/// ([`absolute_params`]); given back as it was when none are relative.
+pub fn absolute(req: Request, here: &Path) -> Result<Request> {
+    let method = req.method();
+    let mut params = req.params();
+    let before = params.clone();
+    absolute_params(&method, &mut params, here);
+    if params == before {
+        return Ok(req);
+    }
+    Request::from_rpc(&method, Some(params))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `here` made absolute, `p` joined to it, as text.
+    fn abs(here: &Path, p: &str) -> String {
+        std::path::absolute(here.join(p))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn paths_become_absolute_against_the_callers_folder() {
+        let here = std::env::temp_dir().join("caller");
+        let already = abs(&here, "already.step");
+        let mut p = json!({"part": "p", "out": "o/p.stl"});
+        absolute_params("export", &mut p, &here);
+        assert_eq!(p, json!({"part": "p", "out": abs(&here, "o/p.stl")}));
+        let mut p = json!({"path": "a.step", "search": ["lib", already]});
+        absolute_params("import", &mut p, &here);
+        assert_eq!(
+            p,
+            json!({"path": abs(&here, "a.step"), "search": [abs(&here, "lib"), already]})
+        );
+        let mut p = json!({"part": "p", "in": ["../other"]});
+        absolute_params("bom.where_used", &mut p, &here);
+        assert_eq!(p["in"], json!([abs(&here, "../other")]));
+        let mut p = json!({"file": "pkg.zip"});
+        absolute_params("release.package.verify", &mut p, &here);
+        assert_eq!(p["file"], json!(abs(&here, "pkg.zip")));
+        let mut p = json!({"part": "d", "drawing": "a", "out": "a.pdf"});
+        absolute_params("drawing.export", &mut p, &here);
+        assert_eq!(p["out"], json!(abs(&here, "a.pdf")));
+        // A folder to write into keeps its trailing separator.
+        let mut p = json!({"part": "p", "into": "pkgs/"});
+        absolute_params("release.package", &mut p, &here);
+        let into = p["into"].as_str().unwrap();
+        assert!(into.ends_with(['/', '\\']), "{into}");
+        assert!(into.starts_with(abs(&here, "pkgs").as_str()), "{into}");
+        // Another method's `out` isn't a path the daemon reads.
+        let mut p = json!({"part": "p", "out": "x"});
+        absolute_params("mesh.get", &mut p, &here);
+        assert_eq!(p, json!({"part": "p", "out": "x"}));
+    }
+
+    #[test]
+    fn worktree_revisions_become_absolute_in_every_method() {
+        let here = std::env::temp_dir().join("caller");
+        let mut p =
+            json!({"part": "p", "rev": "worktree:../arm", "compare": ["worktree:b", "HEAD"]});
+        absolute_params("render", &mut p, &here);
+        assert_eq!(
+            p["rev"],
+            json!(format!("worktree:{}", abs(&here, "../arm")))
+        );
+        assert_eq!(
+            p["compare"],
+            json!([format!("worktree:{}", abs(&here, "b")), "HEAD"])
+        );
+        // Not a revision of a worktree: left alone.
+        let mut p = json!({"from": "a", "to": "b"});
+        absolute_params("param.rename", &mut p, &here);
+        assert_eq!(p, json!({"from": "a", "to": "b"}));
+    }
+
+    #[test]
+    fn a_request_with_nothing_relative_is_given_back_as_it_was() {
+        let here = std::env::temp_dir().join("caller");
+        let req = Request::PartList {};
+        assert_eq!(absolute(req.clone(), &here).unwrap(), req);
+        let req = Request::from_rpc("export", Some(json!({"part": "p", "out": "p.stl"}))).unwrap();
+        let back = absolute(req, &here).unwrap();
+        assert_eq!(back.params()["out"], json!(abs(&here, "p.stl")));
+    }
 
     #[test]
     fn the_same_build_may_have_another_target() {
