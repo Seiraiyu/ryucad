@@ -174,7 +174,7 @@ pub fn list(session: &Session, part: &str) -> Result<Value> {
 /// `param.list` of the project's parameters: each as written, its value
 /// or error, the project parameters that read it and the parts that read
 /// it (directly, or through another project parameter), and
-/// `unused: true` when no part's features or explodes reach it.
+/// `unused: true` when no part's features, explodes or motions reach it.
 pub fn list_project(session: &Session) -> Result<Value> {
     let project = session.project();
     let file = current_project(project)?;
@@ -336,6 +336,43 @@ pub fn delete(
 /// `param.rename`: renames a parameter, and every expression that reads
 /// it, in the parameters and the feature files, as one change. Names of
 /// faces and edges never depend on parameters, so nothing else changes.
+/// Every motion of `part` that names `from`, rewritten to name `to`
+/// (plan 26.B), pushed onto `writes`. A file that doesn't read is left.
+fn rename_in_motions(
+    session: &Session,
+    root: &std::path::Path,
+    part: &Part,
+    from: &str,
+    to: &str,
+    writes: &mut Vec<(std::path::PathBuf, Value)>,
+) {
+    for mid in part.motions.keys() {
+        if !part.motion_uses.get(mid).is_some_and(|u| u.contains(from)) {
+            continue;
+        }
+        let path = crate::doc::project::part_dir(root, &part.id)
+            .join(crate::doc::motion::motion_file(mid));
+        let Ok(text) = session.read_text(&path) else {
+            continue;
+        };
+        let Ok(mut v) = canonical::parse(&text) else {
+            continue;
+        };
+        let mut changed = false;
+        for s in crate::doc::motion::expression_strings(&mut v) {
+            if let Ok(e) = expr::Expr::parse(s)
+                && e.names().contains(from)
+            {
+                *s = e.rename(from, to).text().to_owned();
+                changed = true;
+            }
+        }
+        if changed {
+            writes.push((path, v));
+        }
+    }
+}
+
 pub fn rename(
     session: &mut Session,
     part: &str,
@@ -382,6 +419,8 @@ pub fn rename(
             writes.push((path, v));
         }
     }
+    let root = session.root().to_path_buf();
+    rename_in_motions(session, &root, p, from, &to, &mut writes);
     for (path, v) in &writes {
         session.write_json(path, v)?;
     }
@@ -550,7 +589,7 @@ pub fn delete_project(session: &mut Session, name: &str, expected: Option<&str>)
 
 /// `param.rename` of a project parameter: the project's file, and every
 /// expression that reads it in every part (its parameters, its feature
-/// files and its explodes), as one change.
+/// files, its explodes and its motions), as one change.
 pub fn rename_project(
     session: &mut Session,
     from: &str,
@@ -649,6 +688,7 @@ pub fn rename_project(
                 writes.push((path, v));
             }
         }
+        rename_in_motions(session, &root, p, from, &to, &mut writes);
         if writes.len() > before {
             reached.push(p.id.clone());
         }

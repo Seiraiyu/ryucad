@@ -44,6 +44,9 @@ run feature add smoke cone --param radius=5 --param height=10 --param top_radius
 run feature add smoke sphere --param radius=8 --origin 50,0,0
 run feature add smoke torus --param major_radius=20 --param minor_radius=3 --x 0,1,0
 run rebuild
+run part create rig --assembly
+run feature add rig instance --id body --of smoke
+run assembly sweep rig --steps 5 --interference --drives '[{"instances": ["body"], "rotate": {"axis": {"origin": [0, 0, 0], "direction": "z"}, "from": "0 deg", "to": "90 deg"}}]'
 run inspect smoke torus-1
 run check-format
 run participants

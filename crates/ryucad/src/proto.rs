@@ -1121,6 +1121,39 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mates: Vec<Map<String, Value>>,
     },
+    /// Sweeps a motion of assembly `part`, writing nothing: a saved one
+    /// (`motion`), inline `drives` (as a motion file writes them) with
+    /// `steps`, or one mate's angle (a slider's distance) from `from` to
+    /// `to`. Each step solved from the last; with `interference` what
+    /// collides that doesn't at rest, refined `refine` times (10 by
+    /// default); with `clearance` the closest moving pair within `below`;
+    /// with `poses` each step's moved instances' poses.
+    #[serde(rename = "assembly.sweep")]
+    AssemblySweep {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drives: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mate: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interference: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clearance: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        poses: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refine: Option<u32>,
+    },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.
     /// `path` (instance IDs, `/` between: `m3/s31`) starts the tree at
@@ -1450,6 +1483,11 @@ pub enum Request {
         /// the file's assemblies put it (#499).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         flatten: bool,
+        /// Folders to look in for the files an assembly's parts are kept
+        /// in (design 448, 24.D), after the folder of the file naming
+        /// each: absolute, or relative to the project.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        search: Vec<String>,
     },
     /// Sets an import feature's mode (`feature`), or every import feature
     /// of `part`'s: a healed solid, or with `reference` a reference
@@ -1826,6 +1864,35 @@ pub enum Request {
     ExplodeDelete {
         part: String,
         explode: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// The motions of assembly `part`, or of every assembly: each one's
+    /// steps and drives as written and as they resolve now, with
+    /// warnings or its error, and each listed assembly's revision.
+    #[serde(rename = "motion.list")]
+    MotionList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// Saves a motion of assembly `part` from `drives` (as the file
+    /// writes them) and `steps` (11 when left out), replacing one of that
+    /// ID. Refused when it doesn't read or doesn't resolve.
+    #[serde(rename = "motion.save")]
+    MotionSave {
+        part: String,
+        motion: String,
+        drives: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Deletes a motion of assembly `part`.
+    #[serde(rename = "motion.delete")]
+    MotionDelete {
+        part: String,
+        motion: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -2434,6 +2501,8 @@ impl Request {
                 | Request::ViewRename { .. }
                 | Request::ExplodeSave { .. }
                 | Request::ExplodeDelete { .. }
+                | Request::MotionSave { .. }
+                | Request::MotionDelete { .. }
                 | Request::DrawingCreate { .. }
                 | Request::DrawingEdit { .. }
                 | Request::DrawingDelete { .. }
@@ -2530,6 +2599,22 @@ pub fn parse_rpc_request(line: &str) -> (Value, Result<Request>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_takes_search_folders() {
+        let r = Request::from_rpc(
+            "import",
+            Some(json!({"path": "/a/asm.stp", "search": ["/lib", "parts"]})),
+        )
+        .unwrap();
+        let Request::Import { search, .. } = r else {
+            panic!("{r:?}")
+        };
+        assert_eq!(search, ["/lib", "parts"]);
+        // Left out, it is empty and not written.
+        let r = Request::from_rpc("import", Some(json!({"path": "/a/asm.stp"}))).unwrap();
+        assert!(!serde_json::to_string(&r).unwrap().contains("search"));
+    }
 
     #[test]
     fn requests_round_trip_through_rpc() {

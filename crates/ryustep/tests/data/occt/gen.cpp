@@ -10,7 +10,9 @@
 //     -lTKCDF -lTKBool -lTKGeomAlgo -lTKShHealing -lTKOffset
 //   /tmp/gen
 //
-// Only the time stamps in the headers change from run to run.
+// Only the time stamps in the headers change from run to run. multi/
+// holds the assembly again as XDE's multi-file mode writes it (ryucad
+// 24.D): run from this folder, so it lands there.
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
@@ -51,6 +53,7 @@
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <cmath>
+#include <filesystem>
 #include <XCAFDoc_MaterialTool.hxx>
 #include <TCollection_HAsciiString.hxx>
 
@@ -218,6 +221,22 @@ int main() {
     c->SetColor(two, Quantity_Color(0., 0., 1., Quantity_TOC_RGB), XCAFDoc_ColorSurf);
     t->UpdateAssemblies();
     write_doc(d, "colour_assembly.stp");
+  }
+  // The first assembly again, written by XDE in its multi-file mode
+  // (ryucad 24.D, #443): its parts as files of their own beside
+  // multi/assembly.stp, named by external references, in AP214 as
+  // SolidWorks' "assembly + part files" sets are.
+  {
+    std::filesystem::create_directories("multi");
+    Interface_Static::SetIVal("write.step.schema", 4);
+    Interface_Static::SetCVal("write.step.unit", "MM");
+    STEPCAFControl_Writer mw;
+    mw.Transfer(doc, STEPControl_AsIs, "");
+    // XDE writes the part files into the current folder, not beside the
+    // assembly, so it writes from inside multi/.
+    std::filesystem::current_path("multi");
+    mw.Write("assembly.stp");
+    std::filesystem::current_path("..");
   }
   material();
   return 0;

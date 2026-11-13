@@ -102,6 +102,10 @@ enum Command {
     /// participant's window, part of the way through with --fraction.
     #[command(subcommand)]
     Explode(ExplodeCmd),
+    /// An assembly's motions: list, save or delete one. Sweep one with
+    /// `assembly sweep`.
+    #[command(subcommand)]
+    Motion(MotionCmd),
     /// A part's 2D drawings: sheets on a template with a title block, and
     /// views projected with exact hidden lines, written as PDF, SVG and
     /// PNG. Every value a sheet shows comes from the model.
@@ -1236,6 +1240,59 @@ enum AssemblyCmd {
         #[arg(long = "mate", value_name = "JSON", value_parser = json_object)]
         mates: Vec<Value>,
     },
+    /// Sweep a motion, writing nothing: step its drives from start to
+    /// end, each step solved from the last, and report where it is
+    /// blocked, where anything collides that doesn't at rest
+    /// (--interference, the first contact refined), and how close the
+    /// moving parts come (--clearance). A saved motion, one mate's angle
+    /// (a slider's distance) with --mate --from --to, or --drives.
+    Sweep {
+        part: String,
+        /// A saved motion of the assembly.
+        #[arg(conflicts_with_all = ["mate", "drives"], required_unless_present_any = ["mate", "drives"])]
+        motion: Option<String>,
+        /// Drive this mate's angle (a slider's distance) from --from to --to.
+        #[arg(long, requires_all = ["from", "to"], conflicts_with = "drives")]
+        mate: Option<String>,
+        #[arg(
+            long,
+            value_name = "QUANTITY",
+            allow_hyphen_values = true,
+            requires = "mate"
+        )]
+        from: Option<String>,
+        #[arg(
+            long,
+            value_name = "QUANTITY",
+            allow_hyphen_values = true,
+            requires = "mate"
+        )]
+        to: Option<String>,
+        /// Drives, as a motion file writes them.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        drives: Option<Value>,
+        /// Steps from start to end, 2 to 1,000 (11 when left out; a saved
+        /// motion has its own).
+        #[arg(long, conflicts_with = "motion")]
+        steps: Option<u32>,
+        /// Check each step for instances that collide and don't at rest.
+        #[arg(long)]
+        interference: bool,
+        /// Report each step's closest moving pair.
+        #[arg(long)]
+        clearance: bool,
+        /// How far clearance looks (a length; by default a hundredth of
+        /// the assembly's diagonal).
+        #[arg(long, value_name = "LENGTH", requires = "clearance")]
+        below: Option<String>,
+        /// Give each step's moved instances' poses.
+        #[arg(long)]
+        poses: bool,
+        /// Bisections of the first collision and the first stop (10; 0
+        /// for none).
+        #[arg(long, value_name = "N")]
+        refine: Option<u32>,
+    },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
     Tree {
@@ -1969,6 +2026,37 @@ enum ExplodeCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum MotionCmd {
+    /// The motions of an assembly, or of every assembly: each one's steps
+    /// and drives as written and as they resolve, with each assembly's
+    /// revision.
+    List { part: Option<String> },
+    /// Save a motion of an assembly, replacing one of that name.
+    Save {
+        part: String,
+        motion: String,
+        /// The drives, as the file writes them:
+        /// '[{"mate": "hinge", "angle": {"from": "-6 deg", "to": "6 deg"}}]' or
+        /// '[{"instances": ["p1"], "rotate": {"axis": {"origin": [0, 0, 0],
+        /// "direction": "z"}, "from": "0 deg", "to": "90 deg"}}]'.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        drives: Value,
+        /// Steps from start to end, 2 to 1,000 (11 when left out).
+        #[arg(long)]
+        steps: Option<u32>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a motion.
+    Delete {
+        part: String,
+        motion: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum DrawingCmd {
@@ -2683,6 +2771,10 @@ struct ImportArgs {
     /// part of references.
     #[arg(long)]
     flatten: bool,
+    /// A folder to look in for the files an assembly's parts are kept in, after the
+    /// folder of the file naming each (repeatable, in order).
+    #[arg(long, value_name = "DIR")]
+    search: Vec<std::path::PathBuf>,
     /// Write nothing: say what it would store and make, and what each body would be
     /// (a reference, or with --solid how it heals).
     #[arg(long)]
@@ -4323,6 +4415,33 @@ fn request(cmd: &Command) -> Option<Request> {
                 })
                 .collect(),
         },
+        Command::Assembly(AssemblyCmd::Sweep {
+            part,
+            motion,
+            mate,
+            from,
+            to,
+            drives,
+            steps,
+            interference,
+            clearance,
+            below,
+            poses,
+            refine,
+        }) => Request::AssemblySweep {
+            part: part.clone(),
+            motion: motion.clone(),
+            drives: drives.clone(),
+            mate: mate.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            steps: *steps,
+            interference: *interference,
+            clearance: *clearance,
+            below: below.clone(),
+            poses: *poses,
+            refine: *refine,
+        },
         Command::Feature(FeatureCmd::Add {
             part,
             ty,
@@ -4671,6 +4790,29 @@ fn request(cmd: &Command) -> Option<Request> {
             off: *off,
             participant: of.clone(),
         },
+        Command::Motion(MotionCmd::List { part }) => Request::MotionList { part: part.clone() },
+        Command::Motion(MotionCmd::Save {
+            part,
+            motion,
+            drives,
+            steps,
+            expect,
+        }) => Request::MotionSave {
+            part: part.clone(),
+            motion: motion.clone(),
+            drives: drives.clone(),
+            steps: *steps,
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Motion(MotionCmd::Delete {
+            part,
+            motion,
+            expect,
+        }) => Request::MotionDelete {
+            part: part.clone(),
+            motion: motion.clone(),
+            expected_revision: expect.revision.clone(),
+        },
         Command::View(ViewCmd::Save {
             part,
             view,
@@ -4937,6 +5079,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     product,
                     solid,
                     flatten,
+                    search,
                     dry_run,
                     expect,
                 },
@@ -4956,6 +5099,16 @@ fn request(cmd: &Command) -> Option<Request> {
                 update: update.clone(),
                 solid: *solid,
                 flatten: *flatten,
+                // The daemon's folder isn't the caller's.
+                search: search
+                    .iter()
+                    .map(|d| {
+                        std::path::absolute(d)
+                            .unwrap_or_else(|_| d.clone())
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect(),
             }
         }
         Command::Export {
@@ -5951,6 +6104,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Mass { .. }
             | Command::Feature(FeatureCmd::Edit { .. })
             | Command::Assembly(AssemblyCmd::Tree { .. })
+            | Command::Assembly(AssemblyCmd::Sweep { .. })
             | Command::Interference { .. }
             | Command::Appearance { .. }
             | Command::Render { .. }

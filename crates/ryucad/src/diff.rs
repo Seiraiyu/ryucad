@@ -629,6 +629,14 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // Each drive on one line, in order: what it drives, then how far.
+        Some(crate::doc::motion::KIND) => {
+            if let Some(Value::Array(drives)) = rest.remove("drives") {
+                for (i, d) in drives.iter().enumerate() {
+                    out.push(format!("drive {} = {}", i + 1, motion_drive(d)));
+                }
+            }
+        }
         Some(ryupdm::config::KIND) => {
             if let Some(Value::Object(decls)) = rest.remove("properties") {
                 for (name, d) in &decls {
@@ -1116,6 +1124,54 @@ fn explode_step(v: &Value) -> String {
         for (k, x) in o.iter().filter(|(k, _)| !known.contains(&k.as_str())) {
             how.push(format!("{k} {}", scalar(x)));
         }
+    }
+    format!("{}: {}", list(v.get("instances")), how.join("; "))
+}
+
+/// A motion's drive on one line: `hinge: angle -6 deg .. 6 deg`, or
+/// `p1, p2: rotate 0 deg .. 90 deg about z through 0 mm, 0 mm, 0 mm;
+/// translate 0 mm .. 5 mm along x`.
+fn motion_drive(v: &Value) -> String {
+    let span = |r: &Value| {
+        format!(
+            "{} .. {}",
+            r.get("from").map(scalar).unwrap_or_default(),
+            r.get("to").map(scalar).unwrap_or_default()
+        )
+    };
+    let direction = |d: Option<&Value>| match d {
+        Some(Value::String(s)) => s.clone(),
+        Some(d) => d.to_string(),
+        None => String::new(),
+    };
+    let list = |v: Option<&Value>| match v {
+        Some(Value::Array(a)) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+        Some(v) => scalar(v),
+        None => String::new(),
+    };
+    if let Some(m) = v.get("mate") {
+        let (key, r) = match v.get("angle") {
+            Some(r) => ("angle", r),
+            None => ("distance", v.get("distance").unwrap_or(&Value::Null)),
+        };
+        return format!("{}: {key} {}", scalar(m), span(r));
+    }
+    let mut how = Vec::new();
+    if let Some(r) = v.get("rotate") {
+        let axis = r.get("axis");
+        how.push(format!(
+            "rotate {} about {} through {}",
+            span(r),
+            direction(axis.and_then(|a| a.get("direction"))),
+            list(axis.and_then(|a| a.get("origin")))
+        ));
+    }
+    if let Some(t) = v.get("translate") {
+        how.push(format!(
+            "translate {} along {}",
+            span(t),
+            direction(t.get("direction"))
+        ));
     }
     format!("{}: {}", list(v.get("instances")), how.join("; "))
 }
@@ -1975,6 +2031,14 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
         }
         if let Some(d) = explodes {
             v["explodes"] = d;
+        }
+        // Its motions, each by ID, likewise.
+        if let Some(d) = folder_diff(
+            &folder(from, part, crate::doc::motion::MOTIONS),
+            &folder(to, part, crate::doc::motion::MOTIONS),
+            "motion",
+        ) {
+            v["motions"] = d;
         }
         // Its drawings, each by ID, likewise.
         if let Some(d) = folder_diff(
@@ -4506,6 +4570,51 @@ mod tests {
         assert_eq!(d["changed"][0]["changes"][0]["at"], "/steps");
         assert_eq!(v["parts"]["a"]["status"], "changed");
         assert!(v["parts"]["a"].get("views").is_none());
+    }
+
+    #[test]
+    fn motions_textconv_a_drive_a_line_and_diff_per_assembly() {
+        let file = |to: &str| {
+            json!({"format": 1, "kind": "ryucad.motion", "steps": 13, "drives": [
+                {"mate": "hinge", "angle": {"from": "-6 deg", "to": to}},
+                {"instances": ["p1", "p2"],
+                 "rotate": {"axis": {"origin": ["0 mm", "0 mm", "0 mm"], "direction": "z"},
+                            "from": "0 deg", "to": "90 deg"},
+                 "translate": {"direction": [1, 0, 0], "from": "0 mm", "to": "5 mm"}}
+            ]})
+        };
+        let t = text(file("6 deg"));
+        assert!(t.starts_with("ryucad.motion (format 1)\n"), "{t}");
+        assert!(
+            t.contains("drive 1 = hinge: angle -6 deg .. 6 deg\n"),
+            "{t}"
+        );
+        assert!(
+            t.contains(
+                "drive 2 = p1, p2: rotate 0 deg .. 90 deg about z through 0 mm, 0 mm, 0 mm; \
+                 translate 0 mm .. 5 mm along [1,0,0]\n"
+            ),
+            "{t}"
+        );
+        assert!(t.contains("steps = 13"), "{t}");
+        let manifest = (
+            "ryucad.json",
+            json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"}),
+        );
+        let asm = (
+            "parts/a/part.json",
+            json!({"features": [], "format": 2, "kind": "ryucad.part", "part_kind": "assembly"}),
+        );
+        let from = files(&[
+            manifest.clone(),
+            asm.clone(),
+            ("parts/a/motions/twist.json", file("6 deg")),
+        ]);
+        let to = files(&[manifest, asm, ("parts/a/motions/twist.json", file("8 deg"))]);
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        let d = &v["parts"]["a"]["motions"];
+        assert_eq!(d["changed"][0]["motion"], "twist", "{v}");
+        assert_eq!(d["changed"][0]["changes"][0]["at"], "/drives");
     }
 
     #[test]
