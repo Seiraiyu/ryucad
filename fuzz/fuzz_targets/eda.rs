@@ -3,7 +3,9 @@
 //! unreadable files included), rails and a design, over a small library,
 //! loaded, flattened and checked. Loading never fails on what files hold;
 //! a design either flattens or is refused with a typed error; ERC's
-//! findings and the netlist are the same on one thread and eight. Any
+//! findings and the netlist are the same on one thread and eight. Each
+//! of the first two blocks' first sheet is a scene or a typed refusal,
+//! its owners whole, the same on one thread and eight (plan 3.B). Any
 //! panic is a bug.
 
 #![no_main]
@@ -192,4 +194,26 @@ fuzz_target!(|data: &[u8]| {
         (a, b) => panic!("one thread and eight disagree: {:?} vs {:?}", a.is_ok(), b.is_ok()),
     }
     let _ = ryueda::erc::erc(&p, None);
+    // Each block's first sheet as a window draws it (plan 3.B): a scene
+    // or a typed refusal, every item's owner one of its owners, the same
+    // on one thread and eight.
+    for block in p.conn.blocks.keys().take(2) {
+        let ask = ryueda::scene::Ask {
+            block: Some(block.to_string()),
+            ..ryueda::scene::Ask::default()
+        };
+        let draw = |pool: &rayon::ThreadPool| pool.install(|| ryueda::scene::scene(&p, &ask));
+        match (draw(one), draw(eight)) {
+            (Ok(a), Ok(b)) => {
+                assert_eq!(a, b, "one thread and eight draw differently");
+                let v: Value = serde_json::from_str(&a).expect("a scene is JSON");
+                let owners = v["owners"].as_array().expect("owners").len() as u64;
+                for it in v["items"].as_array().expect("items") {
+                    assert!(it["owner"].as_u64().is_none_or(|i| i < owners), "{it}");
+                }
+            }
+            (Err(a), Err(b)) => assert_eq!(a.code, b.code),
+            (a, b) => panic!("one thread and eight disagree: {:?} vs {:?}", a.is_ok(), b.is_ok()),
+        }
+    }
 });

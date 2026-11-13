@@ -970,6 +970,13 @@ pub enum Code {
     ModelOrphaned,
     /// A project file Git left unmerged in the index.
     UnmergedPath,
+    /// ryueda: a `scene` or a view naming a sheet its block's layout
+    /// doesn't have; `details.sheets` lists the block's (plan 3.B).
+    SheetNotFound,
+    /// ryueda: a selection, highlight, status or `view.show` naming
+    /// nothing in the project; `details.ref`, and `details.closest`, the
+    /// nearest reference paths (plan 3.B).
+    RefUnresolved,
 }
 
 impl Code {
@@ -1406,6 +1413,17 @@ mod tests {
             (Code::UnknownFile, "unknown_file"),
             (Code::ModelOrphaned, "model_orphaned"),
             (Code::UnmergedPath, "unmerged_path"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+        }
+    }
+
+    #[test]
+    fn eda_live_codes() {
+        for (c, s) in [
+            (Code::SheetNotFound, "sheet_not_found"),
+            (Code::RefUnresolved, "ref_unresolved"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);

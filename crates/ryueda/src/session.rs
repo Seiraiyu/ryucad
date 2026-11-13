@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 /// How many revisions a session keeps read, most recently used first.
 pub const REVISIONS: usize = 4;
 
+/// How many scenes a session keeps drawn (plan 3.B), most recently used
+/// first.
+pub const SCENES: usize = 8;
+
 pub struct Session {
     root: PathBuf,
     project: Project,
@@ -24,6 +28,9 @@ pub struct Session {
     /// The last [`REVISIONS`] revisions read ([`Session::at`]), by what
     /// they read, most recently used first.
     pub(crate) revisions: Vec<(String, std::sync::Arc<Project>)>,
+    /// The last [`SCENES`] scenes drawn, by their ask and the revisions
+    /// they were drawn from, most recently used first.
+    pub(crate) scenes: Vec<(String, std::sync::Arc<String>)>,
 }
 
 /// `rel` (relative to the project, with `/`) as a path under `root`.
@@ -41,6 +48,22 @@ fn listed(root: &Path) -> Vec<(PathBuf, std::fs::Metadata)> {
 }
 
 impl Session {
+    /// The scene kept under `key`, now the most recently used.
+    pub(crate) fn scene(&mut self, key: &str) -> Option<std::sync::Arc<String>> {
+        let i = self.scenes.iter().position(|(k, _)| k == key)?;
+        let hit = self.scenes.remove(i);
+        let text = hit.1.clone();
+        self.scenes.insert(0, hit);
+        Some(text)
+    }
+
+    /// Keeps a scene drawn under `key`, forgetting the least recently
+    /// used past [`SCENES`].
+    pub(crate) fn keep_scene(&mut self, key: String, text: std::sync::Arc<String>) {
+        self.scenes.insert(0, (key, text));
+        self.scenes.truncate(SCENES);
+    }
+
     /// Loads the project at `root`.
     pub fn open(root: &Path) -> Result<Session> {
         let mut stamps = Stamps::default();
@@ -53,6 +76,7 @@ impl Session {
             prepared: None,
             catalogues: None,
             revisions: Vec::new(),
+            scenes: Vec::new(),
         })
     }
 

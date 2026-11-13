@@ -956,13 +956,12 @@ pub fn png(svg: &str, px_per_mm: f32) -> Result<Vec<u8>> {
         .map_err(|e| Error::new(Code::Internal, format!("PNG: {e}")))
 }
 
-/// The layer of block `b` drawn: the one `layer` names (its instance
-/// path or stack path, `<design>:` before either), else the first; `None`
-/// for a block no design places. Its designators go on `laid`'s parts.
-pub(crate) fn show_layer(
+/// The layers of block `b` and the one `layer` names (its instance path
+/// or stack path, `<design>:` before either), else the first; `None` for
+/// a block no design places.
+pub(crate) fn pick_layer(
     p: &Project,
     b: &BlockFiles,
-    laid: &mut Laid,
     layer: Option<&str>,
 ) -> Result<(Vec<schem::Layer>, Option<schem::Layer>)> {
     let all = schem::layers(p, &b.id);
@@ -980,6 +979,18 @@ pub(crate) fn show_layer(
         })?),
         None => all.first().cloned(),
     };
+    Ok((all, chosen))
+}
+
+/// The layer of block `b` drawn ([`pick_layer`]); its designators go on
+/// `laid`'s parts.
+pub(crate) fn show_layer(
+    p: &Project,
+    b: &BlockFiles,
+    laid: &mut Laid,
+    layer: Option<&str>,
+) -> Result<(Vec<schem::Layer>, Option<schem::Layer>)> {
+    let (all, chosen) = pick_layer(p, b, layer)?;
     if let Some(l) = &chosen {
         laid.built.designators(&l.refdes);
     }
