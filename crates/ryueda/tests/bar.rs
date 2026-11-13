@@ -206,3 +206,69 @@ fn the_jlc_catalogue_searches_under_its_bar() {
         assert!(worst <= bar(Duration::from_millis(500)), "{worst:?}");
     });
 }
+
+/// Design 519's bar: a 500-part block's sheet drawn again within 150 ms
+/// of the write that edited one of its values, through a warm daemon
+/// (ten times looser without RYUEDA_BARS=1). Unmet (plan 3.B): laying
+/// the 500 parts out again takes 3.5 s of the 3.7 s, the engine's cost
+/// whatever reads the block (#802, incremental lay-out of a big block).
+#[test]
+#[ignore = "unmet until #802: cargo test -p ryueda --release --test bar an_edited_sheet -- --ignored"]
+fn an_edited_sheet_is_drawn_again_within_its_bar() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board");
+    // One channel of 500 resistors: block `ch`.
+    generated::write(&board, 1, 500);
+    let run = dir.path().join("run");
+    let ryueda = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("ryueda").unwrap();
+        cmd.current_dir(&board)
+            .env("RYUEDA_RUNTIME_DIR", &run)
+            .env("RYUEDA_CONFIG_DIR", dir.path().join("config"))
+            .env("RYUEDA_IDLE_TIMEOUT", "120")
+            .env_remove("RYUEDA_NO_DAEMON");
+        for v in ryueda_parts::distributor::env_vars() {
+            cmd.env_remove(v);
+        }
+        let out = cmd.args(args).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["ok"], true, "{args:?}: {v}");
+        v["result"].clone()
+    };
+    let start = Instant::now();
+    ryueda(&["layout", "--block", "ch"]);
+    println!("500 parts laid out in {:?}", start.elapsed());
+    let before = ryueda(&["scene", "--block", "ch"]);
+    let sheet = before["sheet"].as_str().unwrap().to_owned();
+    let part = before["owners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["kind"] == "component")
+        .unwrap()["ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let start = Instant::now();
+    ryueda(&["component", "edit", &part, "--value", "22 kOhm"]);
+    let wrote = start.elapsed();
+    let start = Instant::now();
+    let after = ryueda(&["scene", "--block", "ch", "--sheet", &sheet]);
+    let drawn = start.elapsed();
+    ryueda(&["daemon", "stop"]);
+    let hash = |v: &serde_json::Value| {
+        v["owners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["ref"] == part.as_str())
+            .unwrap()["hash"]
+            .clone()
+    };
+    assert_ne!(hash(&after), hash(&before), "{part}'s drawing moved");
+    println!(
+        "{part} edited in {wrote:?}; its sheet ({} owners) drawn again in {drawn:?}",
+        after["owners"].as_array().unwrap().len()
+    );
+    assert!(drawn < bar(Duration::from_millis(150)), "{drawn:?}");
+}

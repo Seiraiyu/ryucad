@@ -62,13 +62,17 @@ const LABEL: Nm = 1_500_000;
 const VALUE: Nm = 2_500_000;
 const TITLE_VALUE: Nm = 3_500_000;
 
+/// [`title_items_in`] in the default look: the PDF's.
+pub fn title_items(paper: [Nm; 2], t: &TitleBlock) -> Vec<Item> {
+    title_items_in(paper, t, &ryusch::style::Look::default())
+}
+
 /// The title block on a page of `paper`, in the drawing frame's lower
 /// right: a top row (Title, Number) and a bottom row (Organisation,
 /// Design · block, Rev, Date, Sheet), each cell's label at its top left
 /// and its value under it.
-pub fn title_items(paper: [Nm; 2], t: &TitleBlock) -> Vec<Item> {
-    use ryusch::style::{Look, Role};
-    let look = Look::default();
+pub fn title_items_in(paper: [Nm; 2], t: &TitleBlock, look: &ryusch::style::Look) -> Vec<Item> {
+    use ryusch::style::Role;
     let ink = look.role(Role::Text);
     let x1 = paper[0] - crate::schem::BORDER;
     let x0 = x1 - TITLE_W;
@@ -158,12 +162,33 @@ pub fn zone_of(paper: [Nm; 2], at: Point) -> String {
     zone_text(zone_at(paper, at))
 }
 
+/// [`zone_items_in`] in the default look: the PDF's.
+pub fn zone_items(paper: [Nm; 2]) -> Vec<Item> {
+    zone_items_in(paper, &ryusch::style::Look::default())
+}
+
+/// What a window draws round a sheet (plan 3.B), in `look`: the border
+/// the PDF strokes at [`FRAME`], the zone marks and the title block, in
+/// the paper's frame.
+pub fn paper_items(paper: [Nm; 2], t: &TitleBlock, look: &ryusch::style::Look) -> Vec<Item> {
+    let (x0, y0, x1, y1) = (FRAME, FRAME, paper[0] - FRAME, paper[1] - FRAME);
+    let mut out = vec![Item::Polyline {
+        points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]],
+        stroke: look.role(ryusch::style::Role::Text),
+        fill: None,
+        width: LINE,
+        dash: false,
+    }];
+    out.extend(zone_items_in(paper, look));
+    out.extend(title_items_in(paper, t, look));
+    out
+}
+
 /// The drawing frame and the zone marks between it and the page's border:
 /// a tick at each division, each zone's number (columns) or letter (rows)
 /// in both margins.
-pub fn zone_items(paper: [Nm; 2]) -> Vec<Item> {
-    use ryusch::style::{Look, Role};
-    let look = Look::default();
+pub fn zone_items_in(paper: [Nm; 2], look: &ryusch::style::Look) -> Vec<Item> {
+    use ryusch::style::Role;
     let ink = look.role(Role::Name);
     let b = crate::schem::BORDER;
     let (cols, rows) = zones(paper);
@@ -536,6 +561,42 @@ pub fn write(title: &str, pages: &[Page], marks: &[Mark]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_paper_in_a_look_is_the_pdfs_in_the_default_one() {
+        use ryusch::style::{Look, Role, Theme};
+        let a3 = [420_000_000, 297_000_000];
+        let t = TitleBlock {
+            title: "Sensor board".into(),
+            sheet: "1/2".into(),
+            ..TitleBlock::default()
+        };
+        assert_eq!(zone_items(a3), zone_items_in(a3, &Look::default()));
+        assert_eq!(
+            title_items(a3, &t),
+            title_items_in(a3, &t, &Look::default())
+        );
+        // In the dark look every line and text takes the dark colours.
+        let dark = Look::builtin(Theme::Dark);
+        let ink = [dark.role(Role::Text), dark.role(Role::Name)];
+        let items = paper_items(a3, &t, &dark);
+        assert_eq!(
+            items.len(),
+            1 + zone_items(a3).len() + title_items(a3, &t).len()
+        );
+        for it in &items {
+            match it {
+                Item::Polyline { stroke, .. } => assert!(ink.contains(stroke), "{it:?}"),
+                Item::Text { colour, .. } => assert!(ink.contains(colour), "{it:?}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        // The border first, at FRAME from the paper's edge.
+        let Item::Polyline { points, .. } = &items[0] else {
+            panic!()
+        };
+        assert_eq!(points[0], [FRAME, FRAME]);
+    }
 
     fn page(text: &str, links: Vec<Link>) -> Page {
         Page {
