@@ -25,14 +25,30 @@ const MANIFEST: &str = include_str!("../Cargo.toml");
 fn depends_on_no_product_and_no_kernel() {
     assert_eq!(
         names(MANIFEST, "[dependencies]"),
-        ["egui", "egui_tiles", "ryu-doc", "ryu-math", "ryu-session", "serde_json"]
+        [
+            "egui",
+            "egui_tiles",
+            "ryu-doc",
+            "ryu-math",
+            "ryu-session",
+            "serde_json"
+        ]
     );
     for section in ["[dependencies]", "[dev-dependencies]"] {
         for name in names(MANIFEST, section) {
             assert!(
                 ![
-                    "ryukei", "ryucad", "ryucad-doc", "ryucad-app", "ryueda", "ryusch",
-                    "ryudfm", "ryu-board", "ryupdm", "ryustep", "eframe",
+                    "ryukei",
+                    "ryucad",
+                    "ryucad-doc",
+                    "ryucad-app",
+                    "ryueda",
+                    "ryusch",
+                    "ryudfm",
+                    "ryu-board",
+                    "ryupdm",
+                    "ryustep",
+                    "eframe",
                 ]
                 .contains(&name),
                 "{section} names {name}"
