@@ -31,6 +31,7 @@ use crate::intersect::{
     CurveHit, FaceMeet, Failure, Place, curve_surface_in, face_box, face_face_in, point_in_face,
 };
 use crate::tol::LINEAR_RESOLUTION;
+use crate::intersect::Seams;
 use crate::topo::{Body, FaceId, Sense};
 use crate::work::Meter;
 use std::collections::{BTreeMap, BTreeSet};
@@ -293,15 +294,33 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
 
 /// Builds the table for `ops` within `scope`.
 pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, Fail> {
-    build_capped(ops, scope, None, m)
+    build_capped(ops, scope, None, None, m)
 }
 
+/// [`build_in`] for one body whose pairs in `seams` are known to meet
+/// along those curves (the re-trim's kept faces tangent along an edge of
+/// its input, design 551, #652).
+pub(crate) fn build_seamed(
+    ops: &[Body],
+    scope: Scope,
+    seams: &Seams,
+    m: &Meter,
+) -> Result<Table, Fail> {
+    build_capped(ops, scope, None, Some(seams), m)
+}
+
+/// The units a pair with known seams is first traced under, before it is
+/// met along them: a pair settling within them settles as before.
+const SEAM_TRACE_FIRST: u64 = 1 << 16;
+
 /// [`build_in`], each face pair met under `pair`'s cap when given (a
-/// file's union, #550).
+/// file's union, #550), and the pairs in `seams` met along them where
+/// their first trace fails.
 pub(crate) fn build_capped(
     ops: &[Body],
     scope: Scope,
     pair: Option<crate::work::Scope>,
+    seams: Option<&Seams>,
     m: &Meter,
 ) -> Result<Table, Fail> {
     let faces: Vec<FaceRef> = ops
@@ -327,7 +346,33 @@ pub(crate) fn build_capped(
     let pairs: Vec<Pair> = m
         .par_map(&face_pairs, |m, &(i, j)| {
             let (a, b) = (faces[i], faces[j]);
-            let meet = |m: &Meter| face_face_in((&ops[a.op], a.face), (&ops[b.op], b.face), m);
+            let meet = |m: &Meter| -> Result<FaceMeet, Failure> {
+                let trace = |m: &Meter| face_face_in((&ops[a.op], a.face), (&ops[b.op], b.face), m);
+                let key = (a.face.min(b.face), a.face.max(b.face));
+                let known = seams
+                    .filter(|_| a.op == b.op)
+                    .and_then(|s| s.get(&key));
+                let Some(known) = known else {
+                    return trace(m);
+                };
+                // Traced first under a small cap, so a pair that settles
+                // there settles as before; then along its seams; then
+                // traced whole (#652).
+                if let Ok(meet) = m.capped_by(SEAM_TRACE_FIRST, || trace(m)) {
+                    return Ok(meet);
+                }
+                let (x, y) = if a.face == key.0 { (a, b) } else { (b, a) };
+                match crate::intersect::known_seam(
+                    (&ops[x.op], x.face),
+                    (&ops[y.op], y.face),
+                    known,
+                    m,
+                ) {
+                    Ok(meet) if x.face == a.face => Ok(meet),
+                    Ok(meet) => Ok(meet.swapped()),
+                    Err(_) => trace(m),
+                }
+            };
             let meet = match pair {
                 Some(s) => m.capped(s, || meet(m)),
                 None => meet(m),
