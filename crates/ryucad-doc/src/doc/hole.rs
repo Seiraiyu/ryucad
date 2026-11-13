@@ -75,6 +75,9 @@ pub struct Thread {
     /// tapped hole must give it.
     pub depth: Option<ThreadDepth>,
     pub drill: TapDrill,
+    /// A tapered thread's wall is tapered too (`"wall": "taper"`), not a
+    /// straight drill.
+    pub taper_wall: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -176,6 +179,9 @@ impl Thread {
             TapDrill::Engagement(e) => v["drill"] = json!({"engagement": e}),
             TapDrill::RollForm => v["drill"] = json!("roll_form"),
         }
+        if self.taper_wall {
+            v["wall"] = json!("taper");
+        }
         v
     }
 
@@ -256,6 +262,16 @@ impl Thread {
                 }
             },
         };
+        let taper_wall = match o.take_opt("wall") {
+            None => false,
+            Some(w) if w == "taper" => true,
+            Some(_) => {
+                return Err(invalid(
+                    "/thread/wall",
+                    "wall is \"taper\", written only for a tapered wall",
+                ));
+            }
+        };
         o.finish()?;
         Ok(Thread {
             standard,
@@ -267,6 +283,7 @@ impl Thread {
             starts,
             depth,
             drill,
+            taper_wall,
         })
     }
 }
@@ -518,6 +535,11 @@ pub enum Depth {
     Blind(Quantity),
     /// Past everything of its targets.
     ThroughAll,
+    /// Through the first wall its axis meets inside its targets, and no
+    /// further.
+    ThroughNext,
+    /// Blind, to the drill point's tip (needs a drill bottom).
+    Tip(Quantity),
     /// To a planar face parallel to the sketch, or a vertex, then
     /// `offset` further (a length, of either sign).
     UpTo {
@@ -530,6 +552,8 @@ pub enum Depth {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Bottom {
     Flat,
+    /// A half sphere of the bore's diameter (a ball end mill's).
+    Ball,
     /// A drill point of this included angle.
     Drill(Quantity),
 }
@@ -569,14 +593,28 @@ impl Depth {
         match self {
             Depth::Blind(_) => "blind",
             Depth::ThroughAll => "through_all",
+            Depth::ThroughNext => "through_next",
+            Depth::Tip(_) => "tip",
             Depth::UpTo { .. } => "up_to",
         }
+    }
+
+    /// Whether it ends in the material: blind, or to a tip.
+    pub fn is_blind(&self) -> bool {
+        matches!(self, Depth::Blind(_) | Depth::Tip(_))
+    }
+
+    /// Whether it goes through: all, or the next wall.
+    pub fn is_through(&self) -> bool {
+        matches!(self, Depth::ThroughAll | Depth::ThroughNext)
     }
 
     pub fn to_json(&self) -> Value {
         match self {
             Depth::Blind(q) => json!({"blind": q.text()}),
             Depth::ThroughAll => json!("through_all"),
+            Depth::ThroughNext => json!("through_next"),
+            Depth::Tip(q) => json!({"tip": q.text()}),
             Depth::UpTo { target, offset } => {
                 let mut v = json!({"target": target.to_json()});
                 if let Some(q) = offset {
@@ -591,10 +629,13 @@ impl Depth {
         if v == "through_all" {
             return Ok(Depth::ThroughAll);
         }
+        if v == "through_next" {
+            return Ok(Depth::ThroughNext);
+        }
         let bad = || {
             invalid_extent(
                 "/depth",
-                "a hole's depth is {\"blind\": length}, \"through_all\" or {\"up_to\": {target, offset}}"
+                "a hole's depth is {\"blind\": length}, {\"tip\": length}, \"through_all\", \"through_next\" or {\"up_to\": {target, offset}}"
                     .to_owned(),
             )
         };
@@ -609,6 +650,13 @@ impl Depth {
                 env,
                 "/depth/blind",
                 "a hole's depth",
+            )?)),
+            "tip" => Ok(Depth::Tip(size(
+                x,
+                Field::Length(default),
+                env,
+                "/depth/tip",
+                "a hole's depth to its tip",
             )?)),
             "up_to" => {
                 let mut o = Obj::new(x, "/depth/up_to")?;
@@ -632,6 +680,7 @@ impl Bottom {
     pub fn to_json(&self) -> Value {
         match self {
             Bottom::Flat => json!("flat"),
+            Bottom::Ball => json!("ball"),
             Bottom::Drill(q) => json!({"drill": q.text()}),
         }
     }
@@ -639,6 +688,9 @@ impl Bottom {
     fn from_json(v: &Value, env: &Env) -> Result<Bottom> {
         if v == "flat" {
             return Ok(Bottom::Flat);
+        }
+        if v == "ball" {
+            return Ok(Bottom::Ball);
         }
         match v
             .as_object()
@@ -653,7 +705,7 @@ impl Bottom {
             )?)),
             None => Err(invalid(
                 "/bottom",
-                "a hole's bottom is \"flat\" or {\"drill\": angle}",
+                "a hole's bottom is \"flat\", \"ball\" or {\"drill\": angle}",
             )),
         }
     }
@@ -863,6 +915,9 @@ impl Hole {
             HoleForm::Counterdrill { .. } | HoleForm::Spotface { .. }
         ) || self.near.is_some()
             || self.far.is_some()
+            || matches!(self.depth, Depth::ThroughNext | Depth::Tip(_))
+            || self.bottom == Bottom::Ball
+            || self.thread.as_ref().is_some_and(|t| t.taper_wall)
     }
 
     /// Whether its JSON holds anything [`Hole::has_geometry`] counts.
@@ -1030,18 +1085,36 @@ impl Hole {
             None => Bottom::Flat,
             Some(b) => Bottom::from_json(&b, env)?,
         };
-        if matches!(bottom, Bottom::Drill(_)) && !matches!(depth, Depth::Blind(_)) {
-            return Err(invalid_extent(
-                "/bottom",
-                format!(
-                    "a drill point ends a blind hole; a {} hole has no bottom of its own",
-                    depth.type_name()
-                ),
-            ));
+        match (&bottom, &depth) {
+            (Bottom::Drill(_), Depth::Blind(_) | Depth::Tip(_)) => {}
+            (Bottom::Drill(_), d) => {
+                return Err(invalid_extent(
+                    "/bottom",
+                    format!(
+                        "a drill point ends a blind hole; a {} hole has no bottom of its own",
+                        d.type_name()
+                    ),
+                ));
+            }
+            (Bottom::Ball, Depth::Blind(_)) => {}
+            (Bottom::Ball, d) => {
+                return Err(invalid_extent(
+                    "/bottom",
+                    format!("a ball ends a blind hole, not a {} one", d.type_name()),
+                ));
+            }
+            (Bottom::Flat, Depth::Tip(_)) => {
+                return Err(invalid_extent(
+                    "/bottom",
+                    "a depth to the tip is to a drill point's: give bottom {\"drill\": angle}"
+                        .into(),
+                ));
+            }
+            _ => {}
         }
         // Full depth on a through hole is the default: never written.
         let thread = thread.map(|mut t| {
-            if !matches!(depth, Depth::Blind(_)) && t.depth == Some(ThreadDepth::Full) {
+            if !depth.is_blind() && t.depth == Some(ThreadDepth::Full) {
                 t.depth = None;
             }
             t
@@ -1069,7 +1142,7 @@ impl Hole {
                     .into(),
             ));
         }
-        if hole.far.is_some() && !matches!(hole.depth, Depth::ThroughAll) {
+        if hole.far.is_some() && !hole.depth.is_through() {
             return Err(refuse(
                 "/far",
                 "far_needs_through",
@@ -1120,7 +1193,26 @@ impl Hole {
         }
         if let Some(t) = &hole.thread {
             let built = resolve(t)?;
-            if let Depth::Blind(drill) = &hole.depth {
+            if t.taper_wall {
+                if built.as_ref().and_then(|b| b.taper).is_none() {
+                    return Err(refuse(
+                        "/thread/wall",
+                        "wall_not_tapered",
+                        format!(
+                            "{} {} isn't a tapered thread: take wall out",
+                            t.standard, t.size
+                        ),
+                    ));
+                }
+                if !matches!(t.depth, Some(ThreadDepth::Length(_))) {
+                    return Err(refuse(
+                        "/thread/depth",
+                        "thread_depth_needed",
+                        "a tapered wall runs a given length: give the thread's depth".into(),
+                    ));
+                }
+            }
+            if let Depth::Blind(drill) | Depth::Tip(drill) = &hole.depth {
                 match &t.depth {
                     None => {
                         let mut e = refuse(
@@ -1287,7 +1379,7 @@ pub fn expression_strings<'a>(k: &str, field: &'a mut Value) -> Vec<&'a mut Stri
         ("depth", Value::Object(o)) => {
             for (k, x) in o.iter_mut() {
                 match (k.as_str(), x) {
-                    ("blind", Value::String(s)) => out.push(s),
+                    ("blind" | "tip", Value::String(s)) => out.push(s),
                     ("up_to", Value::Object(u)) => {
                         if let Some(Value::String(s)) = u.get_mut("offset") {
                             out.push(s);
@@ -1814,5 +1906,99 @@ mod tests {
         v["far"] = json!({"countersink": {"diameter": "8 mm", "angle": "90 deg"},
                           "counterbore": {"diameter": "8 mm", "depth": "1 mm"}});
         assert_eq!(read(&v).unwrap_err().details["pointer"], "/far");
+    }
+
+    #[test]
+    fn new_depths_bottoms_and_tapered_walls() {
+        let at24 = |f: &dyn Fn(&mut Value)| {
+            let mut v = hole();
+            v["format"] = json!(24);
+            // Each case gives its own bottom.
+            v.as_object_mut().unwrap().remove("bottom");
+            f(&mut v);
+            v
+        };
+        // Round trips.
+        for v in [
+            at24(&|v| v["depth"] = json!("through_next")),
+            at24(&|v| {
+                v["depth"] = json!({"tip": "12 mm"});
+                v["bottom"] = json!({"drill": "118 deg"});
+            }),
+            at24(&|v| {
+                v["depth"] = json!({"blind": "10 mm"});
+                v["bottom"] = json!("ball");
+            }),
+            at24(&|v| {
+                v.as_object_mut().unwrap().remove("diameter");
+                v["format"] = json!(24);
+                v["thread"] =
+                    json!({"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"});
+                v["depth"] = json!({"blind": "12 mm"});
+            }),
+        ] {
+            assert_eq!(read(&v).unwrap_or_else(|e| panic!("{v}: {e}")).to_json(), v);
+        }
+        // Refusals.
+        for (v, pointer, reason) in [
+            // A tip depth is to a drill point.
+            (
+                at24(&|v| v["depth"] = json!({"tip": "12 mm"})),
+                "/bottom",
+                None,
+            ),
+            // A ball ends a blind hole.
+            (
+                at24(&|v| {
+                    v["depth"] = json!("through_all");
+                    v["bottom"] = json!("ball");
+                }),
+                "/bottom",
+                None,
+            ),
+            // A tapered wall is a tapered thread's...
+            (
+                at24(&|v| {
+                    v.as_object_mut().unwrap().remove("diameter");
+                    v["thread"] = json!({"standard": "iso_metric", "size": "M6", "wall": "taper"});
+                    v["depth"] = json!("through_all");
+                }),
+                "/thread/wall",
+                Some("wall_not_tapered"),
+            ),
+            // ...and runs a given length.
+            (
+                at24(&|v| {
+                    v.as_object_mut().unwrap().remove("diameter");
+                    v["thread"] = json!({"standard": "npt", "size": "1/8", "wall": "taper"});
+                    v["depth"] = json!("through_all");
+                }),
+                "/thread/depth",
+                Some("thread_depth_needed"),
+            ),
+        ] {
+            let e = read(&v).unwrap_err();
+            assert_eq!(e.details["pointer"], pointer, "{v}: {e}");
+            if let Some(r) = reason {
+                assert_eq!(e.details["reason"], r, "{v}: {e}");
+            }
+        }
+        // A blind tapped hole to a tip still gives its thread's depth.
+        let v = at24(&|v| {
+            v.as_object_mut().unwrap().remove("diameter");
+            v["thread"] = json!({"standard": "iso_metric", "size": "M6"});
+            v["depth"] = json!({"tip": "15 mm"});
+            v["bottom"] = json!({"drill": "118 deg"});
+        });
+        assert_eq!(
+            read(&v).unwrap_err().details["reason"],
+            "thread_depth_needed"
+        );
+        // A far side on through_next is taken.
+        let v = at24(&|v| {
+            v["depth"] = json!("through_next");
+            v["far"] = json!({"counterbore": {"diameter": "8 mm", "depth": "1 mm"}});
+        });
+        read(&v).unwrap();
     }
 }

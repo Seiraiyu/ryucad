@@ -217,7 +217,7 @@ impl Spec {
         let tapped = h.thread.is_some();
         let angle = match &h.bottom {
             Bottom::Drill(a) => Some(Len::of_angle(a)),
-            Bottom::Flat => None,
+            Bottom::Flat | Bottom::Ball => None,
         };
         let depth = match (&h.thread, &h.depth) {
             (Some(t), d) => match (&t.depth, d) {
@@ -228,7 +228,7 @@ impl Spec {
             },
             (None, HoleDepth::ThroughAll) => Some(Depth::Thru),
             (None, HoleDepth::Blind(q)) => Some(Depth::Deep(Len::of(q, cu))),
-            (None, HoleDepth::UpTo { .. }) => None,
+            (None, HoleDepth::UpTo { .. } | HoleDepth::ThroughNext | HoleDepth::Tip(_)) => None,
         };
         let derived = h.thread.is_some() || h.fastener.is_some();
         let drill_diameter = h

@@ -149,6 +149,13 @@ fn depth(
     }
     let d = match &h.depth {
         Depth::Blind(q) => return Ok(q.meters()),
+        Depth::Tip(_) | Depth::ThroughNext => {
+            return Err(Error::new(
+                Code::RebuildFailed,
+                format!("hole {id}: a {} depth isn't built yet", h.depth.type_name()),
+            )
+            .with("feature", id));
+        }
         Depth::ThroughAll => crate::rebuild::through_all("hole", id, from, dir, false, targets)?.1,
         Depth::UpTo { target, offset } => crate::rebuild::UpTo {
             ty: "hole",
@@ -212,7 +219,7 @@ fn corners(h: &Hole, s: &Sizes, depth: f64) -> Vec<((f64, f64), &'static str)> {
         out.push(((r, t.si), "drill_wall"));
     }
     match &h.bottom {
-        Bottom::Flat => {
+        Bottom::Flat | Bottom::Ball => {
             out.push(((r, depth), "bottom"));
             out.push(((0.0, depth), "axis"));
         }

@@ -209,6 +209,8 @@ fn hole_report(
     match &h.depth {
         Depth::Blind(q) => v["depth"] = json!({"blind": q.report()}),
         Depth::ThroughAll => {}
+        Depth::ThroughNext => v["depth"] = json!("through_next"),
+        Depth::Tip(q) => v["depth"] = json!({"tip": q.report()}),
         Depth::UpTo { target, offset } => {
             v["depth"]["up_to"]["target"] = json!(target.text(part));
             if let Some(q) = offset {
