@@ -213,10 +213,19 @@ pub fn describe(ws: &Workspace, hit: &Hit) -> String {
         return format!("{} of {} at {rev}, gone", hit.kind.as_str(), hit.feature);
     }
     let from = ws.model.source(&hit.part, &hit.feature);
-    if from.is_empty() {
-        return format!("{} of {}", hit.kind.as_str(), hit.feature);
+    let mut text = if from.is_empty() {
+        format!("{} of {}", hit.kind.as_str(), hit.feature)
+    } else {
+        format!("{} of {} ({from})", hit.kind.as_str(), hit.feature)
+    };
+    // A hole's face: its spec and the hole's reference.
+    if hit.kind == ryucad::entity::Target::Body(ryucad::entity::EntityKind::Face)
+        && let Some(line) = crate::core::threads::line(&ws.model, &hit.entity)
+    {
+        text.push('\n');
+        text.push_str(&line);
     }
-    format!("{} of {} ({from})", hit.kind.as_str(), hit.feature)
+    text
 }
 
 impl View {
@@ -2206,12 +2215,14 @@ impl View {
                         (None, Target::Datum(_)) => Context::Entity(Pick::Datum),
                         (None, _) => Context::Entity(Pick::Sketch),
                     };
-                    crate::ui::commands::context_menu(
+                    let hole = crate::core::threads::hole(&ws.model, &h.entity).is_some();
+                    crate::ui::commands::context_menu_where(
                         ui,
                         &self.commands,
                         what,
                         Some(&h.entity),
                         None,
+                        |id| crate::core::command::on_hole(id, hole),
                     )
                 }
                 None => crate::ui::commands::context_menu(

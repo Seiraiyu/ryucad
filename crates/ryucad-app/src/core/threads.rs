@@ -96,6 +96,31 @@ impl HoleTable {
     }
 }
 
+/// The hole a face reference (`<part>/<solid>/<face>`) is a face of, from
+/// its part's listed holes.
+pub fn hole<'a>(model: &'a crate::core::model::Model, face: &str) -> Option<&'a HoleRow> {
+    let part = face.split('/').next()?;
+    model.holes.get(part)?.by_face(face)
+}
+
+/// Every face of every hole the hole with `face` shares a feature with;
+/// nothing for a face no hole has.
+pub fn siblings(model: &crate::core::model::Model, face: &str) -> Vec<String> {
+    let Some(part) = face.split('/').next() else {
+        return Vec::new();
+    };
+    model
+        .holes
+        .get(part)
+        .map(|t| t.siblings(face))
+        .unwrap_or_default()
+}
+
+/// What hover says of a hole's face: its spec and its reference.
+pub fn line(model: &crate::core::model::Model, face: &str) -> Option<String> {
+    hole(model, face).map(|h| format!("{} · {}", h.spec, h.reference))
+}
+
 /// One ring: a closed polyline, dashed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ring {
@@ -208,6 +233,25 @@ mod tests {
         assert_eq!(t.count("h"), 2);
         assert_eq!(t.siblings("p/b/00aa"), ["p/b/00aa", "p/b/00bb", "p/b/00cc"]);
         assert!(t.by_face("p/b/00ee").is_none());
+    }
+
+    #[test]
+    fn a_holes_face_describes_its_spec_and_ref() {
+        let mut m = crate::core::model::Model::default();
+        m.holes.insert("p".into(), std::sync::Arc::new(table()));
+        assert_eq!(
+            line(&m, "p/b/00cc").as_deref(),
+            Some("M6x1.0-6H THRU · p/row/h/p1/1")
+        );
+        assert_eq!(line(&m, "p/b/00ee"), None, "a face no hole has");
+        assert_eq!(line(&m, "q/b/00aa"), None, "a part with no holes listed");
+        assert_eq!(
+            hole(&m, "p/b/00aa").map(|h| h.faces.clone()),
+            Some(vec!["p/b/00aa".to_owned()])
+        );
+        assert_eq!(siblings(&m, "p/b/00dd"), ["p/b/00dd"]);
+        assert_eq!(siblings(&m, "p/b/00bb").len(), 3);
+        assert!(siblings(&m, "p/b/00ee").is_empty());
     }
 
     #[test]

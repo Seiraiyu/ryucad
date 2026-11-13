@@ -264,6 +264,24 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         }
         // Everything along the ray where the menu was opened.
         "edit.select_other" => o.view.select_other(&o.ws),
+        // The faces of the hole a face is in, or of every hole its
+        // feature makes, patterns' and mirrors' too.
+        "edit.select_hole" => {
+            if let Some(t) = target
+                && let Some(h) = crate::core::threads::hole(&o.ws.model, t)
+            {
+                let faces = h.faces.clone();
+                o.ws.select(faces, SelectMode::Replace);
+            }
+        }
+        "edit.select_siblings" => {
+            if let Some(t) = target {
+                let faces = crate::core::threads::siblings(&o.ws.model, t);
+                if !faces.is_empty() {
+                    o.ws.select(faces, SelectMode::Replace);
+                }
+            }
+        }
         "select.faces" => o.view.filter.faces = !o.view.filter.faces,
         "select.edges" => o.view.filter.edges = !o.view.filter.edges,
         "select.vertices" => o.view.filter.vertices = !o.view.filter.vertices,
