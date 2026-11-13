@@ -276,6 +276,19 @@ pub(crate) fn types(ty: Option<&str>) -> Result<Value> {
     Ok(json!({ "types": types }))
 }
 
+/// The line `feature add --help` ends with: the registry's types, in
+/// order.
+pub fn type_list() -> String {
+    let types: Vec<&str> = KINDS
+        .iter()
+        .flat_map(|k| k.types().iter().copied())
+        .collect();
+    format!(
+        "Types: {}.\n`ryucad feature types [TYPE]` lists the fields each takes.",
+        types.join(", ")
+    )
+}
+
 /// A join, cut or intersect, or a kind that acts whatever its operation
 /// (a hole), with no targets acts on the part's one solid; the file names
 /// it all the same.
