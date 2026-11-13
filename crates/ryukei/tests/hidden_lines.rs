@@ -7,9 +7,10 @@ use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
 use ryukei::geom::{Curve, Frame, Plane, Point3, Rigid, Surface, Vector3};
 use ryukei::name::OpKey;
 use ryukei::project::{
-    Class, Piece, Placed, Projection, Source, View, ViewOptions, Visibility, view,
+    Class, Piece, Placed, Projection, Source, View, ViewOptions, Visibility, view, view_with,
 };
 use ryukei::topo::Body;
+use ryukei::work::Work;
 use ryukei::{Error, ViewError, primitive, sheet};
 use ryukei_testkit::projection::{Oracle, judge, placed_bodies, size};
 
@@ -703,4 +704,32 @@ fn the_crankcase_twins_front_view_mostly_certifies() {
     let o = Oracle::new(&bodies, &v, size(&bodies) * 1e-3).unwrap();
     let j = judge(&p, &bodies, &o);
     assert!(j.wrong.is_empty(), "{:?}", j.wrong);
+}
+
+/// #767 (plan 17.C): race bodies 16, 56 and 229, spline revolutions whose
+/// formula's branches `fit_contour` couldn't certify whole, drawn from
+/// ryucad's isometric corner: drawn with no piece the mesh contradicts,
+/// or refused `Uncertain`.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: the race's revolutions")]
+fn the_slow_revolutions_draw_or_refuse() {
+    let bodies = ryukei_testkit::race::bodies(200);
+    let v = look(Vector3::new(1.0, -1.0, 1.0));
+    for i in [16, 56, 229] {
+        let placed = [at(&bodies[i])];
+        let w = Work::unlimited();
+        match view_with(&placed, &v, &ViewOptions::default(), &w) {
+            Ok(p) => {
+                let bs = placed_bodies(&placed);
+                let o = Oracle::new(&bs, &v, size(&bs) * 1e-3).unwrap();
+                let j = judge(&p, &bs, &o);
+                assert!(j.wrong.is_empty(), "race {i}: {:?}", j.wrong);
+                eprintln!("race {i}: drawn, {} units", w.spent());
+            }
+            Err(Error::InvalidView(ViewError::Uncertain { .. })) => {
+                eprintln!("race {i}: refused, {} units", w.spent());
+            }
+            Err(e) => panic!("race {i}: {e:?}"),
+        }
+    }
 }
