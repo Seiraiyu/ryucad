@@ -1737,6 +1737,8 @@ enum MergeCmd {
         repair: Option<String>,
         /// Fail with `conflict` unless the first conflict's block (or the
         /// project, for a file outside blocks) is still at this revision.
+        /// Refused (`invalid_param`) while ryueda.json holds a conflict
+        /// record: the project has no revision until it is settled.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
     },

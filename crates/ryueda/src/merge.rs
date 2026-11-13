@@ -103,10 +103,18 @@ fn sets(kind: &str) -> &'static [&'static str] {
 }
 
 /// `v` with each of `sets` that is an array of strings as an object of
-/// its items, so the walk merges item by item.
+/// its items, so the walk merges item by item. An absent set is an empty
+/// one: writers leave an empty set out, and a side that removed its last
+/// member must still merge member by member with one that added another.
 fn set_objects(v: &Value, sets: &[&str]) -> Value {
     let mut v = v.clone();
     for s in sets {
+        if let Some(o) = v.as_object_mut()
+            && !o.contains_key(*s)
+        {
+            o.insert((*s).to_owned(), Value::Object(Map::new()));
+            continue;
+        }
         if let Some(items) = v.get(*s).and_then(Value::as_array)
             && items.iter().all(Value::is_string)
         {
@@ -660,6 +668,46 @@ mod tests {
         );
         assert_eq!(m.value["locks"], json!(["dash"]));
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/rules"]);
+    }
+
+    #[test]
+    fn a_set_emptied_on_one_side_merges_with_one_added_to_on_the_other() {
+        // Writers leave an empty set out: ours removed the last tag, so its
+        // file has no `tags`; theirs added one. Removed by either, added by
+        // either, either way round.
+        let base = comp(json!({"tags": ["a"]}));
+        let emptied = comp(json!({}));
+        let added = comp(json!({"tags": ["a", "b"]}));
+        for (o, t) in [(&emptied, &added), (&added, &emptied)] {
+            let m = merge(Some(&base), o, t);
+            assert!(m.is_clean(), "{:?}", m.conflicts);
+            assert_eq!(m.value["tags"], json!(["b"]));
+        }
+        // Both emptied it: no `tags` at all, as a writer leaves it.
+        let m = merge(Some(&base), &emptied, &emptied);
+        assert!(m.is_clean() && m.value.get("tags").is_none(), "{}", m.value);
+        // A file whose kind has sets but that never had one: none appears.
+        let m = merge(
+            Some(&comp(json!({}))),
+            &comp(json!({})),
+            &comp(json!({"value": "1k"})),
+        );
+        assert!(m.value.get("tags").is_none(), "{}", m.value);
+        // `style.json`'s locks likewise.
+        let style = |locks: Option<Value>| {
+            let mut v = json!({"kind": "ryueda.style", "format": 1});
+            if let Some(l) = locks {
+                v["locks"] = l;
+            }
+            v
+        };
+        let m = merge(
+            Some(&style(Some(json!(["colour"])))),
+            &style(None),
+            &style(Some(json!(["colour", "dash"]))),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["locks"], json!(["dash"]));
     }
 
     #[test]

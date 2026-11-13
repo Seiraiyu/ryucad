@@ -1004,6 +1004,22 @@ pub fn resolve(
 /// paths only, the resolution written but not logged (no session holds
 /// the project to log it against).
 pub fn unloaded(root: &Path, req: crate::proto::Request) -> Result<Value> {
+    // `--expect` guards a revision, and a project that doesn't open has
+    // none: refused, never written unguarded.
+    if let crate::proto::Request::MergeResolve {
+        expected_revisions, ..
+    } = &req
+        && !expected_revisions.is_empty()
+    {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "--expect can't be checked while {} holds a merge's conflict record: the project has no revision until it is settled; resolve without --expect",
+                crate::project::MANIFEST
+            ),
+        )
+        .with("expected_revisions", expected_revisions));
+    }
     let (repo, state) = merging(root)?;
     let working = own(&crate::session::current(root)?);
     let now = findings(root, &repo, &state, &working, None)?;
@@ -1234,6 +1250,15 @@ pub(crate) mod tests {
             .filter_map(|c| c["id"].as_str())
             .collect();
         assert_eq!(ids, ["erc.json#", "ryueda.json#/properties/a"]);
+        // `--expect` has no revision to guard here: refused, nothing written.
+        let before = std::fs::read(r.join("ryueda.json")).unwrap();
+        let e = ask(crate::proto::Request::MergeResolve {
+            resolutions: vec![res("ryueda.json#/properties/a", "theirs")],
+            expected_revisions: BTreeMap::from([("project".to_owned(), "0".repeat(32))]),
+        })
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{}", e.message);
+        assert_eq!(std::fs::read(r.join("ryueda.json")).unwrap(), before);
         let v = ask(crate::proto::Request::MergeResolve {
             resolutions: vec![res("ryueda.json#/properties/a", "theirs")],
             expected_revisions: BTreeMap::new(),
