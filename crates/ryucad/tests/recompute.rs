@@ -1419,6 +1419,72 @@ fn assemblies_recompute_as_from_nothing() {
     }
 }
 
+/// A number of millimetres from `lo` to `hi`, bare: a sketch point's `at`
+/// takes numbers.
+fn mm_num(g: &mut Lcg, lo: u64, hi: u64) -> u64 {
+    lo + g.next_u64() % (hi - lo + 1)
+}
+
+/// The assembled project with plate's sketch `layout` on xy (free points
+/// p1 (10, 5), p2 (30, 5), p3 (50, 5)), frame's instance `screw` of bolt
+/// over p1 on base, and pattern `screws` of it, form points on
+/// frame/base/layout.
+fn followed() -> (tempfile::TempDir, Session) {
+    let (dir, mut s) = assembled();
+    must(&mut s, "feature.add", json!({"part": "plate", "type": "sketch", "id": "layout", "plane": "xy"}));
+    must(&mut s, "sketch.edit", json!({"part": "plate", "sketch": "layout", "ops": [
+        {"op": "add", "id": "p1", "type": "point", "at": [10, 5]},
+        {"op": "add", "id": "p2", "type": "point", "at": [30, 5]},
+        {"op": "add", "id": "p3", "type": "point", "at": [50, 5]}]}));
+    must(&mut s, "feature.add", json!({"part": "frame", "type": "instance", "id": "screw",
+         "of": "bolt", "placement": {"origin": [10, 5, 6]}}));
+    must(&mut s, "feature.add", json!({"part": "frame", "type": "instance_pattern",
+         "id": "screws", "instances": ["screw"], "form": "points", "on": "frame/base/layout"}));
+    (dir, s)
+}
+
+/// One random edit: the assembled project's, or the layout's points.
+fn followed_edit(g: &mut Lcg, s: &mut Session) {
+    let n = g.next_u64() % 9;
+    if n < 6 {
+        return assembly_edit(g, s);
+    }
+    let op = match n {
+        6 => json!({"op": "move", "id": "p2", "at": [mm_num(g, 20, 40), 5]}),
+        7 => json!({"op": "add", "id": "p9", "type": "point", "at": [40, 15]}),
+        _ => json!({"op": "remove", "id": "p9"}),
+    };
+    let _ = call(s, "sketch.edit", json!({"part": "plate", "sketch": "layout", "ops": [op]}));
+}
+
+#[test]
+fn following_patterns_recompute_as_from_nothing() {
+    use ryucad::doc::assembly::Rev;
+    let hashes = |s: &mut Session| {
+        let frame = Id::parse("frame", "part").unwrap();
+        let mut out = vec![s.model(&frame, &Rev::Working).unwrap().hash.clone()];
+        for p in ["bolt", "plate", "pair", "frame"] {
+            let id = Id::parse(p, "part").unwrap();
+            out.push(s.rebuilt(&id).unwrap().hash.clone());
+        }
+        out
+    };
+    for seed in [1, 2] {
+        let (dir, mut s) = followed();
+        let mut tight = Session::open(dir.path()).unwrap().with_budget(1);
+        let mut g = Lcg::new(seed);
+        for step in 0..20 {
+            followed_edit(&mut g, &mut s);
+            let incremental = hashes(&mut s);
+            tight.refresh().unwrap();
+            assert_eq!(hashes(&mut tight), incremental, "seed {seed}, step {step}");
+            tight.trim();
+            assert_eq!(incremental, assembly_full(&s, 1), "seed {seed}, step {step}");
+            assert_eq!(incremental, assembly_full(&s, 8), "seed {seed}, step {step}");
+        }
+    }
+}
+
 /// The planar face of `part`'s solid `solid` facing `n`.
 fn face_along(s: &mut Session, part: &str, solid: &str, n: [f64; 3]) -> String {
     let v = must(s, "inspect", json!({"part": part, "feature": solid}));
