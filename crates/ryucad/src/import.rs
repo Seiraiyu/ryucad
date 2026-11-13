@@ -1712,6 +1712,78 @@ pub(crate) mod tests {
         }
     }
 
+    /// #800: a flattened import whose file starts a line 499.8 m away
+    /// (inside the size box) is placed 0.3 m further that way: the line's
+    /// origin leaves the box, the body doesn't, and the body stands there,
+    /// healed or as a reference.
+    #[test]
+    fn a_placed_import_whose_line_starts_far_away_stands() {
+        use crate::doc::files::Feature;
+        use crate::doc::import::{Mode, Place, ProductRef, Via};
+        use crate::doc::project::{feature_path, write_json};
+        let text = String::from_utf8(occt("box_ap214.stp")).unwrap();
+        // Line #27 (edge #21, along z) starts 499.8 m down its axis; its
+        // pcurves #38 and #50 run along u, so they start there too.
+        let far = text
+            .replace(
+                "#28 = CARTESIAN_POINT('',(0.,0.,0.));",
+                "#28 = CARTESIAN_POINT('',(0.,0.,-499800.));",
+            )
+            .replace(
+                "#39 = CARTESIAN_POINT('',(0.,0.));",
+                "#39 = CARTESIAN_POINT('',(-499800.,0.));",
+            )
+            .replace(
+                "#51 = CARTESIAN_POINT('',(0.,0.));",
+                "#51 = CARTESIAN_POINT('',(-499800.,0.));",
+            );
+        assert_ne!(far, text);
+        let bytes = far.into_bytes();
+        for mode in [None, Some(Mode::Reference)] {
+            let (dir, mut s) = with_import_as(&bytes, Some(("part 2", "part 2")), mode);
+            let bounds = |s: &mut crate::session::Session| {
+                let v = crate::server::tests::call(s, "inspect", json!({"part": "p"})).unwrap();
+                let b = &v["bodies"][0]["bounds"];
+                [0, 1, 2].map(|k| b["min"][k].as_f64().unwrap())
+            };
+            let before = bounds(&mut s);
+            let f = ImportFile::new(bytes.clone());
+            let i = Feature::Import(Import {
+                mode,
+                place: Some(Place {
+                    pose: crate::doc::assembly::Pose {
+                        origin_m: [0.0, 0.0, -0.3],
+                        ..crate::doc::assembly::Pose::IDENTITY
+                    },
+                    via: vec![Via {
+                        usage: "u1".into(),
+                        product: ProductRef {
+                            id: "part 2".into(),
+                            name: "part 2".into(),
+                            ordinal: 0,
+                        },
+                        ordinal: 0,
+                    }],
+                }),
+                ..import(&f, Some(("part 2", "part 2")), 0)
+            });
+            let p = Id::parse("p", "part").unwrap();
+            write_json(&feature_path(dir.path(), &p, &id("i")), &i.to_json()).unwrap();
+            s.reload().unwrap();
+            let v = rebuild(&mut s);
+            let features = v["features"].as_array().unwrap();
+            assert!(!features.is_empty(), "{mode:?}: {v}");
+            assert!(features.iter().all(|f| f["ok"] == true), "{mode:?}: {v}");
+            let after = bounds(&mut s);
+            assert!(
+                (after[2] - before[2] + 0.3).abs() < 1e-9,
+                "{mode:?}: {before:?} {after:?}"
+            );
+            assert!((after[0] - before[0]).abs() < 1e-9);
+            assert!((after[1] - before[1]).abs() < 1e-9);
+        }
+    }
+
     #[test]
     fn a_reference_import_builds_the_files_topology_with_healings_face_names() {
         use crate::doc::import::Mode;
