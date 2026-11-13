@@ -796,6 +796,8 @@ fn every_protocol_method_has_a_command() {
         ("diff", &["diff"]),
         ("doctor", &["doctor"]),
         ("doctor.repair", &["doctor"]),
+        ("merge.status", &["merge", "status"]),
+        ("merge.resolve", &["merge", "resolve"]),
         ("layout", &["layout"]),
         ("layout.place", &["place"]),
         ("layout.instructions", &["place"]),

@@ -16,6 +16,9 @@ pub enum Topic {
     Activity,
     /// `progress`: long requests' progress, any participant's.
     Progress,
+    /// `merge.changed`: a merge in progress started, ended, or what it
+    /// leaves to settle changed (design 518).
+    Merge,
 }
 
 impl ryu_session::notify::Topics for Topic {
@@ -24,6 +27,7 @@ impl ryu_session::notify::Topics for Topic {
         Topic::Participants,
         Topic::Activity,
         Topic::Progress,
+        Topic::Merge,
     ];
     const PARTICIPANTS: Topic = Topic::Participants;
     const ACTIVITY: Topic = Topic::Activity;
@@ -36,4 +40,9 @@ impl ryu_session::notify::Topics for Topic {
 #[derive(Debug, Default)]
 pub struct Seen {
     pub revisions: Option<BTreeMap<String, serde_json::Value>>,
+    /// The merge status's key last told ([`crate::validate::key`]).
+    pub merge: Option<String>,
+    /// Git's waiting files when the last status told failed: told again
+    /// once they move.
+    pub merge_failed: Option<String>,
 }

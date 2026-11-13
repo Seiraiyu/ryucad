@@ -573,6 +573,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("section.clear", "Remove section planes", View),
     cmd("explode.edit", "Exploded view", View).icon("arrows-out-cardinal"),
     cmd("explode.collapse", "Collapse exploded view", View),
+    cmd("motion.edit", "Motion", View).icon("arrow-counter-clockwise"),
+    cmd("motion.stop", "Stop showing the motion", View),
     cmd("drawing.show", "Drawings", View).icon("drawing"),
     // The viewport's keys while it has the keyboard (F6 or a click).
     cmd("view.orbit_left", "Orbit left", View)
@@ -806,6 +808,8 @@ pub struct State {
     pub sectioned: bool,
     /// The window shows an exploded view.
     pub exploded: bool,
+    /// The window shows a motion.
+    pub motion_shown: bool,
     /// What a click in the viewport picks.
     pub filter: crate::core::pick::Filter,
     /// The app's size (`ui.scale`).
@@ -956,6 +960,8 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
         "section.clear" => need(s.sectioned, "The view isn't cut."),
         "explode.edit" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
         "explode.collapse" => need(s.exploded, "No exploded view is shown."),
+        "motion.edit" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
+        "motion.stop" => need(s.motion_shown, "No motion is shown."),
         "drawing.show" => need(s.one_shown, "Show one part first (View > Show)."),
         "measure.mass" => need(s.weighable, "Show one part or assembly, or select a solid."),
         "measure.clearance" | "tools.interference" => {
@@ -1294,6 +1300,8 @@ mod tests {
             "section.clear",
             "explode.edit",
             "explode.collapse",
+            "motion.edit",
+            "motion.stop",
         ] {
             assert!(get(id).is_some(), "{id}");
         }
@@ -1358,6 +1366,7 @@ mod tests {
             },
             sectioned: true,
             exploded: true,
+            motion_shown: true,
             scale: 1.0,
             mode: crate::core::modes::Mode::Edit,
             flattenable: true,

@@ -155,8 +155,8 @@ function Install-Ryueda {
         Move-Aside $exe
         Copy-Item (Join-Path $tmp "ryueda-$version-$target\ryueda.exe") $exe
         Clear-OldCopy $exe
-        # git diff reads ryueda's files through ryueda: its textconv, in
-        # the user's Git config.
+        # git diff and git merge read ryueda's files through ryueda: its
+        # textconv and merge driver, in the user's Git config.
         if (Get-Command git -ErrorAction SilentlyContinue) {
             & $exe git install --global *> $null
             if ($LASTEXITCODE -ne 0) {

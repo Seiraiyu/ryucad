@@ -86,12 +86,14 @@ pub fn request() -> Request {
         hidden,
         section,
         explode,
+        motion,
         ..
     } = &mut req
     {
         *hidden = Some(Vec::new());
         *section = Some(Vec::new());
         *explode = Some(String::new());
+        *motion = Some(String::new());
     }
     req
 }
@@ -229,6 +231,7 @@ mod tests {
         assert_eq!(p["hidden"], serde_json::json!([]));
         assert_eq!(p["section"], serde_json::json!([]));
         assert_eq!(p["explode"], "");
+        assert_eq!(p["motion"], "");
         assert_eq!(p["sketches"], false);
         assert_eq!(p["datums"], false);
         assert!(p.get("part").is_none());
