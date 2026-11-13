@@ -119,6 +119,83 @@ fn annotating_ten_thousand_occurrences_is_within_its_bar() {
 
 /// Design 347's bar: a search over 10,000 library components takes under
 /// 50 ms on one thread (the project already loaded).
+/// Design 518's bars: on the 10,000-occurrence design in a repository,
+/// `diff --netlist` from HEAD (read from Git's objects) within 1 s, and
+/// `merge status` of a clean merge (two branches renaming a net each)
+/// within 2 s, the session already open as a daemon's is.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test bar"
+)]
+fn a_netlist_diff_and_a_clean_merges_status_are_within_their_bars() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board");
+    generated::write(&board, 100, 100);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&board)
+            .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+            .args(["-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "base"]);
+    let rename = |path: &str, name: &str| {
+        let at = board.join(path);
+        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&at).unwrap()).unwrap();
+        v["name"] = serde_json::json!(name);
+        std::fs::write(&at, ryueda::canonical::to_string(&v)).unwrap();
+    };
+    // diff --netlist: a link renamed in the working files.
+    rename("blocks/top/nets/l1.json", "LINK1_W");
+    let mut s = ryueda::session::Session::open(&board).unwrap();
+    let opts = ryueda::diff::Options {
+        netlist: true,
+        ..Default::default()
+    };
+    let start = Instant::now();
+    let d = ryueda::diff::between(&mut s, "HEAD", "working", &opts).unwrap();
+    let diffed = start.elapsed();
+    assert!(d.to_string().contains("LINK1_W"));
+    // A clean merge: theirs renames a link, ours a channel's spare net.
+    git(&["checkout", "-q", "--", "."]);
+    git(&["checkout", "-q", "-b", "theirs"]);
+    rename("blocks/top/nets/l2.json", "LINK2_T");
+    git(&["commit", "-q", "-a", "-m", "theirs"]);
+    git(&["checkout", "-q", "main"]);
+    rename("blocks/ch/nets/s0.json", "SPARE0_O");
+    git(&["commit", "-q", "-a", "-m", "ours"]);
+    git(&["merge", "--no-commit", "-q", "theirs"]);
+    let mut s = ryueda::session::Session::open(&board).unwrap();
+    let start = Instant::now();
+    let v = ryueda::validate::status(&mut s).unwrap();
+    let status = start.elapsed();
+    println!(
+        "10,000 occurrences: diff --netlist from HEAD in {diffed:?}; a clean merge's status in {status:?} ({} warnings, {} already failing)",
+        v["warnings"].as_array().map_or(0, Vec::len),
+        v["already_failing"].as_array().map_or(0, Vec::len)
+    );
+    assert_eq!(v["clean"], true, "{}", v["conflicts"]);
+    assert!(diffed < bar(Duration::from_secs(1)), "{diffed:?}");
+    assert!(status < bar(Duration::from_secs(2)), "{status:?}");
+}
+
 #[test]
 #[cfg_attr(
     debug_assertions,
