@@ -1118,6 +1118,74 @@ fn an_exploded_assembly_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "explode");
 }
 
+/// The part placed twice, a motion an agent shows half way: `two`
+/// turned 90° about x over the motion, so 45° here.
+#[test]
+fn a_motion_half_way_looks_as_it_did() {
+    let _one = one_at_a_time();
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_part();
+    p.ok(&["part", "create", "asm", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "asm", "instance", "--id", "one", "--of", "p",
+    ]);
+    p.ok(&[
+        "feature", "add", "asm", "instance", "--id", "two", "--of", "p", "--origin", "25,0,0",
+    ]);
+    p.ok(&[
+        "motion",
+        "save",
+        "asm",
+        "tip",
+        "--steps",
+        "9",
+        "--drives",
+        r#"[{"instances": ["two"], "rotate": {"axis": {"origin": ["25 mm", 0, 0], "direction": "x"},
+             "from": "0 deg", "to": "90 deg"}}]"#,
+    ]);
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let two = ("asm".to_owned(), "two/base".to_owned());
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.contains_key(&two)
+        && ws.model.meshes.len() >= 4));
+    // 0.5 of 120 frames is frame 60 (t = 60/119): a hair past 45°.
+    p.ok(&[
+        "motion",
+        "show",
+        "tip",
+        "--part",
+        "asm",
+        "--fraction",
+        "0.5",
+    ]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.exploded.is_some()
+        && ws.motions.frames_current()));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.03);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &[],
+        glass: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "motion");
+}
+
 fn looks_as_it_did(adapter: &eframe::wgpu::Adapter, px: &[u8], name: &str) {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/snapshots/{name}-lavapipe.png"));

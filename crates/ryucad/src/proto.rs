@@ -833,6 +833,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// Every feature type `feature.add` takes, or one: the request fields
+    /// it takes, the body it needs and whether it founds one (ryucad 27,
+    /// the feature registry read back).
+    #[serde(rename = "feature.types")]
+    FeatureTypes {
+        #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+        ty: Option<String>,
+    },
     #[serde(rename = "param.list")]
     ParamList {
         /// The part, or none with `scope: project`.
@@ -2002,6 +2010,25 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Where a motion of assembly `part` (a saved `motion`, or inline
+    /// `drives` and `steps`) puts each moved body at `frames` even
+    /// fractions (120 by default, at most 1,000): each frame's state,
+    /// drive values, the moved instances' poses and each moved body's
+    /// offset (by instance, or copy and seed). Solved by continuation as
+    /// a sweep is; nothing is intersected. A window fetches them once and
+    /// plays locally.
+    #[serde(rename = "motion.frames")]
+    MotionFrames {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drives: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frames: Option<u32>,
+    },
     /// A part's drawings, or every part's (design 417).
     #[serde(rename = "drawing.list")]
     DrawingList {
@@ -2297,6 +2324,27 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// Shows a motion in a participant's window (`participant`, else the
+    /// one human, else the caller): `motion` of `part` (else the window's
+    /// focus, else the project's model), `fraction` of the way through (0
+    /// for a new one; alone, it moves the one shown and pauses it), and
+    /// whether it plays; or none with `off`. A motion shown takes an
+    /// explode away.
+    #[serde(rename = "motion.show")]
+    MotionShow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fraction: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        playing: Option<bool>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     /// A participant's section planes: `participant`, else the one human,
     /// else the caller.
     #[serde(rename = "section.get")]
@@ -2516,10 +2564,20 @@ pub enum Request {
         /// `""`); by default the participant's, as `hidden`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         explode: Option<String>,
-        /// How far through the explode, from 0 to 1 (1 by default, or the
-        /// participant's).
+        /// How far through the explode (1 by default) or the motion (0 by
+        /// default), from 0 to 1; or the participant's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fraction: Option<f64>,
+        /// Draw the rendered assembly where this motion puts it at
+        /// `fraction` (0 by default, or the participant's; none: `""`);
+        /// by default the participant's shown motion, as `hidden`. Never
+        /// with an explode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+        /// Paint the faces that collide at the motion's fraction, and
+        /// don't at rest, in the removed colour (intersects pairs).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interference: bool,
         /// Draw a sheet metal solid's flat pattern instead of the model:
         /// the solid's flat body seen from its viewer side, its bend lines
         /// dashed with their notes; `""` for the part's one sheet metal
@@ -2735,6 +2793,10 @@ mod tests {
     #[test]
     fn requests_round_trip_through_rpc() {
         let reqs = [
+            Request::FeatureTypes { ty: None },
+            Request::FeatureTypes {
+                ty: Some("hole".into()),
+            },
             Request::ImportReport {
                 file: "imports/box.step".into(),
                 detail: true,

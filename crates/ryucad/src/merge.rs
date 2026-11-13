@@ -18,140 +18,34 @@ use crate::doc::project::CONFLICTS;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// What kind of conflict a file holds. The strings are stable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Kind {
-    /// A value changed differently on both sides, or changed on one and
-    /// removed on the other.
-    Value,
-    /// A sketch entity or constraint removed on one side and changed, or
-    /// used by something new, on the other.
-    DeleteEdit,
-    /// A feature placed differently in a part's list by each side, or
-    /// moved on one and removed on the other.
-    Order,
-    /// Two different things added under one ID: a feature file, a sketch
-    /// entity or constraint.
-    IdCollision,
+pub use ryu_git::value::{
+    Conflict, Kind, Merged, Outcome, Walk, escape, place, record, text, unescape,
+};
+use ryu_git::value::{Rules, child};
+
+/// What ryucad merges as one value wherever it sits: a reference and a
+/// connector.
+fn kept_whole(v: &Value) -> bool {
+    is_reference(v) || is_connector(v)
 }
 
-impl Kind {
-    pub const ALL: [Kind; 4] = [
-        Kind::Value,
-        Kind::DeleteEdit,
-        Kind::Order,
-        Kind::IdCollision,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::Value => "value",
-            Kind::DeleteEdit => "delete_edit",
-            Kind::Order => "order",
-            Kind::IdCollision => "id_collision",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().find(|k| k.as_str() == s)
-    }
+fn no_atom(_: &str) -> bool {
+    false
 }
 
-/// One conflict: its kind and each side's value, `None` where the side
-/// doesn't have one (it removed it, or never had it).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Conflict {
-    pub kind: Kind,
-    pub base: Option<Value>,
-    pub ours: Option<Value>,
-    pub theirs: Option<Value>,
+/// A walk with ryucad's rules: `atom`'s pointers, and references and
+/// connectors anywhere, one value each.
+pub(crate) fn walk(atom: Option<fn(&str) -> bool>) -> Walk {
+    Walk::new(Rules {
+        atom: atom.unwrap_or(no_atom),
+        whole: kept_whole,
+    })
 }
 
-impl Conflict {
-    /// As the record lists it: a side without a value is left out.
-    pub fn to_json(&self) -> Value {
-        let mut v = json!({"kind": self.kind.as_str()});
-        for (k, x) in [
-            ("base", &self.base),
-            ("ours", &self.ours),
-            ("theirs", &self.theirs),
-        ] {
-            if let Some(x) = x {
-                v[k] = x.clone();
-            }
-        }
-        v
-    }
-
-    /// Reads a record's entry; `None` if it isn't one.
-    pub fn from_json(v: &Value) -> Option<Conflict> {
-        let o = v.as_object()?;
-        Some(Conflict {
-            kind: Kind::parse(o.get("kind")?.as_str()?)?,
-            base: o.get("base").cloned(),
-            ours: o.get("ours").cloned(),
-            theirs: o.get("theirs").cloned(),
-        })
-    }
-}
-
-/// A merged file: its value, ours' at each conflict, and the conflicts by
-/// JSON pointer.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Merged {
-    pub value: Value,
-    pub conflicts: BTreeMap<String, Conflict>,
-}
-
-impl Merged {
-    pub fn is_clean(&self) -> bool {
-        self.conflicts.is_empty()
-    }
-
-    /// The file as written: the value, with the conflict record when there
-    /// is one.
-    pub fn to_json(&self) -> Value {
-        let mut v = self.value.clone();
-        if !self.conflicts.is_empty()
-            && let Some(o) = v.as_object_mut()
-        {
-            let record: Map<String, Value> = self
-                .conflicts
-                .iter()
-                .map(|(p, c)| (p.clone(), c.to_json()))
-                .collect();
-            o.insert(CONFLICTS.to_owned(), Value::Object(record));
-        }
-        v
-    }
-}
-
-/// A file's conflict record, by pointer; empty when it has none. Entries
-/// that don't read as conflicts are left out.
-pub fn record(v: &Value) -> BTreeMap<String, Conflict> {
-    v.get(CONFLICTS)
-        .and_then(Value::as_object)
-        .map(|o| {
-            o.iter()
-                .filter_map(|(p, c)| Some((p.clone(), Conflict::from_json(c)?)))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// `key` as one segment of a JSON pointer.
-pub fn escape(key: &str) -> String {
-    key.replace('~', "~0").replace('/', "~1")
-}
-
-/// A JSON pointer's segment back as a key.
-pub fn unescape(segment: &str) -> String {
-    segment.replace("~1", "/").replace("~0", "~")
-}
-
-/// `at` with `key` appended.
-fn child(at: &str, key: &str) -> String {
-    format!("{at}/{}", escape(key))
+/// A part's feature list, merged by identity ([`ryu_git::value::order`]
+/// at `/features`).
+pub fn order(walk: &mut Walk, base: &[String], ours: &[String], theirs: &[String]) -> Vec<String> {
+    ryu_git::value::order(walk, "/features", base, ours, theirs)
 }
 
 /// A reference to another feature's face, edge or vertex, or a
@@ -176,14 +70,6 @@ pub fn is_connector(v: &Value) -> bool {
         .is_some_and(|o| o.get("instance").is_some_and(Value::is_array) && o.contains_key("at"))
 }
 
-/// The walk over one file: the conflicts found so far.
-#[derive(Default)]
-pub struct Walk {
-    conflicts: BTreeMap<String, Conflict>,
-    /// Pointers to objects this file kind merges as one value.
-    atoms: Option<fn(&str) -> bool>,
-}
-
 /// A manifest's dependency is one value: its name, URL and folder go
 /// together.
 fn manifest_atom(at: &str) -> bool {
@@ -196,116 +82,6 @@ fn manifest_atom(at: &str) -> bool {
 fn lock_atom(at: &str) -> bool {
     let seg: Vec<&str> = at.split('/').collect();
     matches!(seg.as_slice(), ["", "projects", _, "labels", _])
-}
-
-impl Walk {
-    /// A conflict at `at`; the result there is ours'.
-    fn conflict(
-        &mut self,
-        at: &str,
-        kind: Kind,
-        base: Option<&Value>,
-        ours: Option<&Value>,
-        theirs: Option<&Value>,
-    ) -> Option<Value> {
-        self.conflicts.insert(
-            at.to_owned(),
-            Conflict {
-                kind,
-                base: base.cloned(),
-                ours: ours.cloned(),
-                theirs: theirs.cloned(),
-            },
-        );
-        ours.cloned()
-    }
-
-    /// The value at `at`: one side's if only it changed, either if they
-    /// agree, else per key where all present sides are objects, else a
-    /// conflict.
-    fn value(
-        &mut self,
-        at: &str,
-        base: Option<&Value>,
-        ours: Option<&Value>,
-        theirs: Option<&Value>,
-    ) -> Option<Value> {
-        if ours == theirs || theirs == base {
-            return ours.cloned();
-        }
-        if ours == base {
-            return theirs.cloned();
-        }
-        let split = |v: Option<&Value>| {
-            v.is_none_or(|v| v.is_object() && !is_reference(v) && !is_connector(v))
-        };
-        let atom = self.atoms.is_some_and(|f| f(at));
-        match (ours, theirs) {
-            (Some(o), Some(t))
-                if o.is_object()
-                    && t.is_object()
-                    && !atom
-                    && split(Some(o))
-                    && split(base)
-                    && split(Some(t)) =>
-            {
-                let empty = Map::new();
-                let b = base.and_then(Value::as_object).unwrap_or(&empty);
-                Some(Value::Object(self.object(
-                    at,
-                    b,
-                    o.as_object().expect("an object"),
-                    t.as_object().expect("an object"),
-                    &[],
-                )))
-            }
-            _ => self.conflict(at, Kind::Value, base, ours, theirs),
-        }
-    }
-
-    /// Three objects merged key by key; `skip` keys are left out.
-    fn object(
-        &mut self,
-        at: &str,
-        base: &Map<String, Value>,
-        ours: &Map<String, Value>,
-        theirs: &Map<String, Value>,
-        skip: &[&str],
-    ) -> Map<String, Value> {
-        let keys: BTreeSet<&String> = base
-            .keys()
-            .chain(ours.keys())
-            .chain(theirs.keys())
-            .collect();
-        let mut out = Map::new();
-        for k in keys {
-            if skip.contains(&k.as_str()) {
-                continue;
-            }
-            if let Some(v) = self.value(&child(at, k), base.get(k), ours.get(k), theirs.get(k)) {
-                out.insert(k.clone(), v);
-            }
-        }
-        out
-    }
-
-    /// The whole file as one value: one side's, or a conflict at the root.
-    /// Two different files added under one name are an ID collision.
-    fn whole(&mut self, base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
-        if ours == theirs || Some(theirs) == base {
-            return ours.clone();
-        }
-        if Some(ours) == base {
-            return theirs.clone();
-        }
-        let kind = if base.is_none() {
-            Kind::IdCollision
-        } else {
-            Kind::Value
-        };
-        self.conflict("", kind, base, Some(ours), Some(theirs));
-        ours.clone()
-    }
 }
 
 /// The newest format of each file kind this build reads; kinds it doesn't
@@ -367,17 +143,14 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
         unformatted(ours),
         unformatted(theirs),
     );
-    let mut walk = Walk {
-        atoms: match kind.as_str() {
-            crate::doc::files::PROJECT_KIND => Some(manifest_atom),
-            crate::doc::lock::KIND => Some(lock_atom),
-            crate::doc::annotation::KIND => Some(annotation_atom),
-            crate::doc::drawing::KIND => Some(drawing_atom),
-            crate::doc::files::FEATURE_KIND => Some(feature_atom),
-            _ => None,
-        },
-        ..Walk::default()
-    };
+    let mut walk = walk(match kind.as_str() {
+        crate::doc::files::PROJECT_KIND => Some(manifest_atom as fn(&str) -> bool),
+        crate::doc::lock::KIND => Some(lock_atom),
+        crate::doc::annotation::KIND => Some(annotation_atom),
+        crate::doc::drawing::KIND => Some(drawing_atom),
+        crate::doc::files::FEATURE_KIND => Some(feature_atom),
+        _ => None,
+    });
     let mut value = match kind.as_str() {
         "ryupdm.release" | "ryupdm.obsolete" => walk.whole(b.as_ref(), &o, &t),
         crate::doc::files::FEATURE_KIND => feature(&mut walk, b.as_ref(), &o, &t),
@@ -1101,166 +874,6 @@ fn part(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) -> 
     Value::Object(out)
 }
 
-/// Where `id` sits in `list`: `{"after": <the feature before it>}`,
-/// `{"first": true}`, or `None` when the list doesn't have it.
-pub fn place(list: &[String], id: &str) -> Option<Value> {
-    let i = list.iter().position(|f| f == id)?;
-    Some(match i {
-        0 => json!({"first": true}),
-        i => json!({"after": list[i - 1]}),
-    })
-}
-
-/// Which side a feature's place in the merged list comes from.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum From {
-    Ours,
-    Theirs,
-}
-
-/// Inserts `id` into `out` after every feature before it in `side` that
-/// `out` has (first if none), and past any of `skip` that follow the last
-/// of those: whatever it could read on its side still comes before it.
-fn insert(out: &mut Vec<String>, side: &[String], id: &str, skip: &BTreeSet<String>) {
-    let i = side.iter().position(|f| f == id).expect("listed");
-    let mut at = side[..i]
-        .iter()
-        .filter_map(|p| out.iter().position(|f| f == p))
-        .max()
-        .map_or(0, |p| p + 1);
-    while at < out.len() && skip.contains(&out[at]) {
-        at += 1;
-    }
-    out.insert(at, id.to_owned());
-}
-
-/// A part's feature list, merged by identity. The result keeps base's
-/// features that neither side removed, in base's order; a feature one side
-/// moved takes that side's place; each side's additions go after the
-/// feature they follow on that side (after all that preceded them there,
-/// so nothing they could read comes after them), ours first where both
-/// add at one spot. A feature moved differently by both sides, moved on one and
-/// removed on the other, moved where the other side's moves leave it out
-/// of its side's order, or added by both at different places is an
-/// `order` conflict at `/features/<id>`, its sides' places as
-/// [`place`] gives them.
-pub fn order(walk: &mut Walk, base: &[String], ours: &[String], theirs: &[String]) -> Vec<String> {
-    let has = |l: &[String], id: &str| l.iter().any(|f| f == id);
-    let (mo, mt) = (
-        crate::diff::moved_features(base, ours),
-        crate::diff::moved_features(base, theirs),
-    );
-    let mut out: Vec<String> = base
-        .iter()
-        .filter(|f| has(ours, f) && has(theirs, f) && !mo.contains(*f) && !mt.contains(*f))
-        .cloned()
-        .collect();
-    let all: BTreeSet<&String> = base.iter().chain(ours).chain(theirs).collect();
-    let mut from: BTreeMap<&String, From> = BTreeMap::new();
-    for id in all {
-        if out.contains(id) {
-            continue;
-        }
-        let (b, o, t) = (has(base, id), has(ours, id), has(theirs, id));
-        let (pb, po, pt) = (place(base, id), place(ours, id), place(theirs, id));
-        let conflict = |walk: &mut Walk| {
-            walk.conflict(
-                &child("/features", id),
-                Kind::Order,
-                pb.as_ref(),
-                po.as_ref(),
-                pt.as_ref(),
-            );
-        };
-        let side = match (b, o, t) {
-            (true, true, true) => match (mo.contains(id), mt.contains(id)) {
-                (true, true) if po != pt => {
-                    conflict(walk);
-                    Some(From::Ours)
-                }
-                (_, true) if !mo.contains(id) => Some(From::Theirs),
-                _ => Some(From::Ours),
-            },
-            // Moved on one side, removed on the other.
-            (true, true, false) if mo.contains(id) => {
-                conflict(walk);
-                Some(From::Ours)
-            }
-            (true, false, true) if mt.contains(id) => {
-                conflict(walk);
-                None
-            }
-            (true, _, _) => None,
-            (false, true, true) => {
-                if po != pt {
-                    conflict(walk);
-                }
-                Some(From::Ours)
-            }
-            (false, true, false) => Some(From::Ours),
-            (false, false, true) => Some(From::Theirs),
-            (false, false, false) => None,
-        };
-        if let Some(s) = side {
-            from.insert(id, s);
-        }
-    }
-    let none = BTreeSet::new();
-    let mut ours_placed = BTreeSet::new();
-    for id in ours {
-        if from.get(id) == Some(&From::Ours) {
-            insert(&mut out, ours, id, &none);
-            ours_placed.insert(id.clone());
-        }
-    }
-    for id in theirs {
-        if from.get(id) == Some(&From::Theirs) {
-            insert(&mut out, theirs, id, &ours_placed);
-        }
-    }
-    // Each side's moves keep that side's order against what it lists: two
-    // moves can pull against each other, and placing each alone would
-    // undo one of them silently.
-    let at = |l: &[String], id: &str| l.iter().position(|f| f == id);
-    for (side, moved) in [(ours, &mo), (theirs, &mt)] {
-        for id in moved {
-            let key = child("/features", id);
-            let (Some(si), Some(oi)) = (at(side, id), at(&out, id)) else {
-                continue;
-            };
-            if walk.conflicts.contains_key(&key) {
-                continue;
-            }
-            let broken = side
-                .iter()
-                .enumerate()
-                .any(|(j, f)| f != id && at(&out, f).is_some_and(|k| (j < si) != (k < oi)));
-            if broken {
-                walk.conflict(
-                    &key,
-                    Kind::Order,
-                    place(base, id).as_ref(),
-                    place(ours, id).as_ref(),
-                    place(theirs, id).as_ref(),
-                );
-            }
-        }
-    }
-    out
-}
-
-/// How a file's merge came out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    /// Merged, nothing left to resolve.
-    Clean,
-    /// Merged, with this many conflicts in the file's record.
-    Conflicts(usize),
-    /// A version isn't a ryucad file this build can merge: merged as
-    /// lines, with this many conflicts marked as Git marks them.
-    Text(usize),
-}
-
 /// A file's JSON if ryucad can merge it: UTF-8 JSON, an object with a
 /// `kind`, no conflict record, and no format newer than this build reads.
 /// It needn't be canonical: an agent that writes a file itself (on one
@@ -1307,116 +920,6 @@ pub fn bytes(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, Outcome) {
     }
     let (out, n) = text(base, ours, theirs);
     (out, Outcome::Text(n))
-}
-
-/// Lines with their endings.
-fn lines(b: &[u8]) -> Vec<&[u8]> {
-    b.split_inclusive(|c| *c == b'\n').collect()
-}
-
-/// The most cells the line matcher fills; past it the changed middle of
-/// two files is one change.
-const MATCH_CELLS: usize = 1 << 22;
-
-/// For each line of `a`, the line of `b` it is matched with in a longest
-/// common subsequence: common ends first, then the middle by dynamic
-/// programming when it is small enough.
-fn matches(a: &[&[u8]], b: &[&[u8]]) -> Vec<Option<usize>> {
-    let mut out = vec![None; a.len()];
-    let pre = a.iter().zip(b).take_while(|(x, y)| x == y).count();
-    for (i, m) in out.iter_mut().enumerate().take(pre) {
-        *m = Some(i);
-    }
-    let suf = a[pre..]
-        .iter()
-        .rev()
-        .zip(b[pre..].iter().rev())
-        .take_while(|(x, y)| x == y)
-        .count();
-    for i in 0..suf {
-        out[a.len() - 1 - i] = Some(b.len() - 1 - i);
-    }
-    let (x, y) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
-    let (n, m) = (x.len(), y.len());
-    if n == 0 || m == 0 || (n + 1) * (m + 1) > MATCH_CELLS {
-        return out;
-    }
-    let mut l = vec![0u32; (n + 1) * (m + 1)];
-    let at = |i: usize, j: usize| i * (m + 1) + j;
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            l[at(i, j)] = if x[i] == y[j] {
-                l[at(i + 1, j + 1)] + 1
-            } else {
-                l[at(i + 1, j)].max(l[at(i, j + 1)])
-            };
-        }
-    }
-    let (mut i, mut j) = (0, 0);
-    while i < n && j < m {
-        if x[i] == y[j] {
-            out[pre + i] = Some(pre + j);
-            i += 1;
-            j += 1;
-        } else if l[at(i + 1, j)] >= l[at(i, j + 1)] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    out
-}
-
-/// A three-way merge of lines, as `git merge-file` makes one: between the
-/// lines all three versions keep, a stretch only one side changed takes
-/// that side, one both changed alike takes it, and any other is marked
-/// `<<<<<<< ours`, `=======`, `>>>>>>> theirs`. The merged bytes and the
-/// number of conflicts.
-pub fn text(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, usize) {
-    let (b, o, t) = (lines(base), lines(ours), lines(theirs));
-    let (mo, mt) = (matches(&b, &o), matches(&b, &t));
-    let mut out: Vec<u8> = Vec::new();
-    let mut conflicts = 0;
-    let (mut i, mut j, mut k) = (0, 0, 0);
-    let emit = |out: &mut Vec<u8>, chunk: &[&[u8]]| {
-        for l in chunk {
-            out.extend_from_slice(l);
-        }
-    };
-    let marker = |out: &mut Vec<u8>, m: &str| {
-        if out.last().is_some_and(|c| *c != b'\n') {
-            out.push(b'\n');
-        }
-        out.extend_from_slice(m.as_bytes());
-    };
-    loop {
-        let next = (i..b.len()).find_map(|x| match (mo[x], mt[x]) {
-            (Some(y), Some(z)) if y >= j && z >= k => Some((x, y, z)),
-            _ => None,
-        });
-        let (bx, oy, tz) = next.unwrap_or((b.len(), o.len(), t.len()));
-        let (cb, co, ct) = (&b[i..bx], &o[j..oy], &t[k..tz]);
-        if co == cb {
-            emit(&mut out, ct);
-        } else if ct == cb || co == ct {
-            emit(&mut out, co);
-        } else {
-            conflicts += 1;
-            marker(&mut out, "<<<<<<< ours\n");
-            emit(&mut out, co);
-            marker(&mut out, "=======\n");
-            emit(&mut out, ct);
-            marker(&mut out, ">>>>>>> theirs\n");
-        }
-        match next {
-            None => break,
-            Some((x, y, z)) => {
-                out.extend_from_slice(b[x]);
-                (i, j, k) = (x + 1, y + 1, z + 1);
-            }
-        }
-    }
-    (out, conflicts)
 }
 
 /// Whether Git hands `path` (relative to the project) to ryucad's merge
@@ -3735,5 +3238,23 @@ mod tests {
         assert!(m.is_clean(), "{:?}", m.conflicts);
         assert_eq!(m.value["far"], theirs["far"]);
         assert_eq!(m.value["near"], ours["near"]);
+    }
+
+    #[test]
+    fn the_walk_and_the_record_are_ryu_gits() {
+        // One record format for every product, under one member name.
+        assert_eq!(crate::doc::project::CONFLICTS, ryu_git::value::CONFLICTS);
+        let w: ryu_git::value::Walk = super::walk(None);
+        assert!(w.conflicts.is_empty());
+        // ryucad's references and connectors stay one value in every kind.
+        let r = json!({"feature": "f1", "name": "e1"});
+        let m = merge(
+            Some(
+                &json!({"kind": "ryucad.test", "format": 1, "x": {"feature": "f0", "name": "e1"}}),
+            ),
+            &json!({"kind": "ryucad.test", "format": 1, "x": r}),
+            &json!({"kind": "ryucad.test", "format": 1, "x": {"feature": "f0", "name": "e2"}}),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/x"]);
     }
 }

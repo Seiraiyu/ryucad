@@ -11,6 +11,7 @@ pub mod unfold;
 
 use crate::doc::id::Id;
 use crate::error::{Code, Error};
+use crate::feature::{BodyUse, Check, FeatureKind, Given, Write};
 use crate::rebuild::Built;
 use ryukei::name::Name;
 use ryukei::{FlangeSize, SheetMetalError as S};
@@ -1136,3 +1137,126 @@ pub fn report(project_part: &Part, f: &Feature) -> Value {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// Sheet metal: base flanges, flanges, unfolds and refolds (ryucad 16).
+pub(crate) struct SheetMetal;
+
+impl FeatureKind for SheetMetal {
+    fn types(&self) -> &'static [&'static str] {
+        &["base_flange", "flange", "unfold", "refold"]
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        crate::doc::sheet_metal::request_fields(ty)
+    }
+
+    fn body(&self, ty: &str) -> BodyUse {
+        if ty == "base_flange" {
+            BodyUse::FOUNDS
+        } else {
+            BodyUse::SOLID
+        }
+    }
+
+    fn take_given(&self, ty: &str, given: &mut Given) -> crate::error::Result<()> {
+        crate::sheet_metal::take_given(ty, &mut given.fields);
+        Ok(())
+    }
+
+    fn default_target(&self, ty: &str, cx: &mut Write<'_>) -> crate::error::Result<()> {
+        if !matches!(ty, "flange" | "unfold" | "refold")
+            || cx.given.fields.target.is_some()
+            || cx.given.fields.targets.is_some()
+        {
+            return Ok(());
+        }
+        let before = cx.solids_before()?;
+        let p = cx.session.project().part(cx.part)?;
+        let sheet: Vec<Id> = before
+            .iter()
+            .filter(|s| crate::sheet_metal::founder(p, s).is_some())
+            .cloned()
+            .collect();
+        match (before.as_slice(), sheet.as_slice()) {
+            ([one], _) | (_, [one]) => cx.given.fields.target = Some(one.to_string()),
+            _ => {
+                return Err(crate::error::Error::new(
+                    crate::error::Code::InvalidParam,
+                    format!("a {ty} names the solid it acts on (target): the part has {} solids before it, {} of them founded by a base flange", before.len(), sheet.len()),
+                )
+                .with("param", "target")
+                .with("solids", before));
+            }
+        }
+        Ok(())
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> crate::error::Result<Feature> {
+        crate::sheet_metal::from_given(ty, current, &cx.given.fields, cx.part, cx.unit, cx.env)
+    }
+
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
+        crate::sheet_metal::report(part, f)
+    }
+
+    fn rechecks(&self, old: &Feature, new: &Feature) -> bool {
+        new != old
+    }
+
+    // An unfold's allowance and a refold's unfold are judged against the
+    // rebuild whatever they reference.
+    fn always_checked(&self, f: &Feature) -> bool {
+        f.unfold().is_some() || f.refold().is_some()
+    }
+
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> crate::error::Result<()> {
+        crate::sheet_metal::check(&cx.proposed(f), cx.id, f, cx.results)
+    }
+
+    fn rebuild(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+    ) -> crate::feature::Outcome {
+        use crate::doc::files::Feature as F;
+        use crate::feature::{founded, made};
+        match f {
+            F::BaseFlange(b) => founded(cx.id, base_flange(cx.part, cx.id, b, cx.before, cx.run)),
+            F::Flange(x) => made(flange(cx.part, cx.solids, cx.id, x, cx.before, cx.run)),
+            F::Unfold(u) => made(unfold::unfold(
+                cx.part, cx.solids, cx.id, u, cx.before, cx.run,
+            )),
+            F::Refold(x) => made(unfold::refold(
+                cx.part, cx.solids, cx.id, x, cx.before, cx.run,
+            )),
+            _ => unreachable!("sheet metal"),
+        }
+    }
+
+    fn alone(
+        &self,
+        _part: &Id,
+        id: &Id,
+        f: &crate::doc::files::Feature,
+    ) -> crate::error::Result<Built> {
+        let how = if matches!(f, crate::doc::files::Feature::BaseFlange(_)) {
+            "is built from its sketch"
+        } else {
+            "makes no body of its own"
+        };
+        Err(crate::feature::built_elsewhere(id, f, how))
+    }
+
+    fn reads<'f>(&self, f: &'f crate::doc::files::Feature) -> Vec<crate::kind::Read<'f>> {
+        use crate::kind as k;
+        match f {
+            crate::doc::files::Feature::BaseFlange(_) => k::combined_reads(f),
+            _ => k::targets(f, "targets", Some(k::Want::Solid), Some(k::SHEET_METAL)),
+        }
+    }
+}

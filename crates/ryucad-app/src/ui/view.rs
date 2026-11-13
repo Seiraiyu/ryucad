@@ -961,6 +961,16 @@ impl View {
                 }
             }
         }
+        // The shown motion's last sweep: the faces colliding at the step
+        // nearest the slider, but not over a compare.
+        if ws.compare.is_none() {
+            let removed = linear(style::REMOVED);
+            for r in ws.motions.collision_faces(std::time::Instant::now()) {
+                if let Some(Place::Face(k, f)) = picker.place(&r) {
+                    faces.push((k, f, removed));
+                }
+            }
+        }
         let mut lines = Vec::new();
         // An unfold chosen: its bend lines; a refold: the strips it
         // folded. A bend under the pointer in the Part tile's table.
@@ -1216,6 +1226,12 @@ impl View {
                 lines.push((Place::Edge(vec![f.origin, end]), c));
             }
             names.push(((*name).to_owned(), f.origin));
+        }
+        // Its stops: an arc or a bar from min to max on a's frame.
+        if let Some(limits) = self.chosen.as_ref().and_then(|k| ws.model.mate_limits(k)) {
+            for l in crate::core::model::limit_lines(&frames, &limits, length) {
+                lines.push((Place::Edge(l), style::CHOSEN));
+            }
         }
         (lines, names)
     }

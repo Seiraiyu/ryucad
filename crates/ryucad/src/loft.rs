@@ -28,6 +28,7 @@ use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::sweep::{Loft, Section, Source, Tangent as FileTangent, TangentDirection};
 use crate::error::{Code, Error, Result};
+use crate::feature::{BodyUse, Check, FeatureKind, Write};
 use crate::geometry::{At, Geom, Want, resolve};
 use crate::profile::{Keys, natural};
 use crate::rebuild::{Built, Results, Run, op_key};
@@ -1384,4 +1385,96 @@ pub fn from_given(
     v["kind"] = json!(crate::doc::files::FEATURE_KIND);
     v["type"] = json!("loft");
     crate::doc::files::Feature::from_json(&v, unit, env)
+}
+
+/// Lofts through sections.
+pub(crate) struct Lofts;
+
+impl FeatureKind for Lofts {
+    fn types(&self) -> &'static [&'static str] {
+        &["loft"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &crate::doc::sweep::LOFT_FIELDS
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::WHEN_NEW
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&crate::doc::files::Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<crate::doc::files::Feature> {
+        let p = cx.session.project().part(cx.part)?;
+        let f = crate::loft::from_given(
+            current.and_then(crate::doc::files::Feature::loft),
+            &cx.given.fields,
+            p,
+            cx.unit,
+            cx.env,
+        )?;
+        cx.check_profile(&f)?;
+        Ok(f)
+    }
+
+    fn report(
+        &self,
+        part: &Part,
+        _unit: crate::units::Unit,
+        f: &crate::doc::files::Feature,
+    ) -> Value {
+        crate::loft::feature_report(&part.id, f.loft().expect("a loft"))
+    }
+
+    // Its sections are judged against each other.
+    fn rechecks(&self, old: &crate::doc::files::Feature, new: &crate::doc::files::Feature) -> bool {
+        new != old
+    }
+
+    // Its sections are matched against the rebuild whatever they reference.
+    fn always_checked(&self, _f: &crate::doc::files::Feature) -> bool {
+        true
+    }
+
+    fn check(&self, cx: &Check<'_>, f: &crate::doc::files::Feature) -> Result<()> {
+        crate::loft::check(
+            cx.part,
+            cx.order,
+            cx.id,
+            f.loft().expect("a loft"),
+            cx.results,
+        )
+    }
+
+    fn rebuild(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+    ) -> crate::feature::Outcome {
+        crate::rebuild::body_step(cx, f)
+    }
+
+    fn own_body(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+        _targets: &[&Built],
+    ) -> Result<Built> {
+        let crate::doc::files::Feature::Loft(l) = f else {
+            unreachable!("a loft")
+        };
+        build(cx.part, cx.id, l, cx.before, cx.run)
+    }
+
+    fn alone(&self, _part: &Id, id: &Id, f: &crate::doc::files::Feature) -> Result<Built> {
+        Err(crate::feature::built_elsewhere(
+            id,
+            f,
+            "is built from its sections",
+        ))
+    }
 }

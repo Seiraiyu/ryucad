@@ -15,6 +15,7 @@ use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::sweep::{Law, Section, Source, Sweep};
 use crate::error::{Code, Error, Result};
+use crate::feature::{BodyUse, Check, FeatureKind, Write};
 use crate::geometry::{At, Geom, Want, resolve};
 use crate::path::Made as PathMade;
 use crate::profile::Keys;
@@ -737,4 +738,93 @@ pub fn described(part: &Part, id: &Id, w: &Sweep, results: &dyn Results) -> Opti
     let p = profile(part, id, &w.profile, results, w.surface).ok()?;
     let path = crate::path::of_curve(&at, "path", &w.path).ok()?;
     Some(report(&part.id, &p, &path, w))
+}
+
+/// Sweeps along a path.
+pub(crate) struct Sweeps;
+
+impl FeatureKind for Sweeps {
+    fn types(&self) -> &'static [&'static str] {
+        &["sweep"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &crate::doc::sweep::SWEEP_FIELDS
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::WHEN_NEW
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&crate::doc::files::Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<crate::doc::files::Feature> {
+        let p = cx.session.project().part(cx.part)?;
+        let f = crate::along::from_given(
+            current.and_then(crate::doc::files::Feature::sweep),
+            &cx.given.fields,
+            p,
+            cx.unit,
+            cx.env,
+        )?;
+        if !f.profiles().is_empty() {
+            cx.check_profile(&f)?;
+        }
+        Ok(f)
+    }
+
+    fn report(
+        &self,
+        part: &Part,
+        _unit: crate::units::Unit,
+        f: &crate::doc::files::Feature,
+    ) -> Value {
+        crate::along::feature_report(&part.id, f.sweep().expect("a sweep"))
+    }
+
+    // Its twist and scale are judged against its path's closing.
+    fn rechecks(&self, old: &crate::doc::files::Feature, new: &crate::doc::files::Feature) -> bool {
+        new != old
+    }
+
+    fn check(&self, cx: &Check<'_>, f: &crate::doc::files::Feature) -> Result<()> {
+        crate::along::check(
+            cx.part,
+            cx.order,
+            cx.id,
+            f.sweep().expect("a sweep"),
+            cx.results,
+        )
+    }
+
+    fn rebuild(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+    ) -> crate::feature::Outcome {
+        crate::rebuild::body_step(cx, f)
+    }
+
+    fn own_body(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+        _targets: &[&Built],
+    ) -> Result<Built> {
+        let crate::doc::files::Feature::Sweep(w) = f else {
+            unreachable!("a sweep")
+        };
+        build(cx.part, cx.id, w, cx.before, cx.run)
+    }
+
+    fn alone(&self, _part: &Id, id: &Id, f: &crate::doc::files::Feature) -> Result<Built> {
+        Err(crate::feature::built_elsewhere(
+            id,
+            f,
+            "is built from its profile and path",
+        ))
+    }
 }

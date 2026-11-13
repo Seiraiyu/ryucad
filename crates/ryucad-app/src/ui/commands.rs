@@ -43,6 +43,7 @@ pub fn state(o: &mut Opened) -> State {
         selector: o.view.selector.is_some() || o.view.others.is_some(),
         sectioned: !o.ws.sections.planes.is_empty(),
         exploded: o.ws.explodes.shown.is_some(),
+        motion_shown: o.ws.motions.shown.is_some(),
         filter: o.view.filter,
         scale: f64::from(crate::ui::app::scale_of(
             o.ws.settings.get("ui.scale").unwrap_or(&json!(1.0)),
@@ -518,6 +519,11 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.layout_dirty = true;
         }
         "explode.collapse" => o.ws.show_explode(None, None, true),
+        "motion.edit" => {
+            crate::ui::shell::open(&mut o.tiles, "motion");
+            o.layout_dirty = true;
+        }
+        "motion.stop" => o.ws.show_motion(None, None, None, true),
         "drawing.show" => {
             o.ws.show_drawings(None);
             crate::ui::shell::open(&mut o.tiles, "drawings");

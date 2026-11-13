@@ -77,7 +77,7 @@ pub fn laid(session: &Session, by: &By) -> (Files, Vec<Annotation>) {
 /// subset of `Request::mutates`. Releases, PDM settings, dependencies,
 /// imports, doctor's repairs, merge resolutions, undo and redo need
 /// Direct edit.
-pub const PROPOSABLE: [&str; 23] = [
+pub const PROPOSABLE: [&str; 25] = [
     "feature.add",
     "feature.edit",
     "feature.delete",
@@ -96,6 +96,8 @@ pub const PROPOSABLE: [&str; 23] = [
     "view.save",
     "explode.save",
     "explode.delete",
+    "motion.save",
+    "motion.delete",
     "drawing.create",
     "drawing.edit",
     "drawing.delete",
@@ -605,6 +607,13 @@ pub(crate) mod tests {
         );
         c(
             &mut s,
+            "motion.save",
+            json!({"part": "rig", "motion": "rise",
+                   "drives": [{"instances": ["p1"], "translate":
+                       {"direction": "z", "from": "0 mm", "to": "5 mm"}}]}),
+        );
+        c(
+            &mut s,
             "materials.set",
             json!({"name": "steel", "density": "7850 kg/m^3"}),
         );
@@ -690,6 +699,13 @@ pub(crate) mod tests {
                                     "steps": [{"instances": ["p1"], "translate": [0, 0, 10]}]}),
             ),
             ("explode.delete", json!({"part": "rig", "explode": "apart"})),
+            (
+                "motion.save",
+                json!({"part": "rig", "motion": "lift", "steps": 5,
+                       "drives": [{"instances": ["p1"], "translate":
+                           {"direction": "z", "from": "0 mm", "to": "10 mm"}}]}),
+            ),
+            ("motion.delete", json!({"part": "rig", "motion": "rise"})),
             (
                 "drawing.create",
                 json!({"part": "plate", "drawing": "second", "size": "iso_a4"}),

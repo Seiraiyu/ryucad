@@ -1203,6 +1203,7 @@ fn every_protocol_method_has_a_command() {
         ("feature.move", &["feature", "move"]),
         ("feature.list", &["feature", "list"]),
         ("feature.show", &["feature", "show"]),
+        ("feature.types", &["feature", "types"]),
         ("insert.update", &["insert", "update"]),
         ("param.list", &["param", "list"]),
         ("param.set", &["param", "set"]),
@@ -1307,6 +1308,8 @@ fn every_protocol_method_has_a_command() {
         ("motion.list", &["motion", "list"]),
         ("motion.save", &["motion", "save"]),
         ("motion.delete", &["motion", "delete"]),
+        ("motion.show", &["motion", "show"]),
+        ("motion.frames", &["motion", "frames"]),
         ("explode.save", &["explode", "save"]),
         ("explode.delete", &["explode", "delete"]),
         ("explode.show", &["explode", "show"]),
@@ -1361,6 +1364,42 @@ fn every_protocol_method_has_a_command() {
             .unwrap();
         assert!(out.status.success(), "ryucad {args:?} --help");
     }
+}
+
+/// `feature types`: the registry read back, the same in process and
+/// through the daemon; `feature add --help` names every type (design 541).
+#[test]
+fn feature_types_lists_what_each_type_takes() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    let all = p.ok(&["feature", "types"]);
+    let types = all["types"].as_array().unwrap();
+    assert_eq!(
+        types[0],
+        json!({"type": "box", "fields": ["params", "placement", "operation", "targets"],
+               "body": null, "founds": "when_new"})
+    );
+    let names: Vec<&str> = types.iter().map(|t| t["type"].as_str().unwrap()).collect();
+    for t in ["hole", "shell", "move_face", "import"] {
+        assert!(names.contains(&t), "{t}: {names:?}");
+    }
+    let shell = p.ok(&["feature", "types", "shell"]);
+    assert_eq!(shell["types"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        (&shell["types"][0]["body"], &shell["types"][0]["founds"]),
+        (&json!("solid"), &json!("never"))
+    );
+    p.fails(&["feature", "types", "gear"], "unknown_feature_type", 1);
+    let help = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["feature", "add", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    for t in names {
+        assert!(help.contains(t), "feature add --help names {t}");
+    }
+    assert!(help.contains("ryucad feature types"), "{help}");
 }
 
 #[test]
@@ -6659,6 +6698,117 @@ fn explodes_from_the_cli() {
     let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
     assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
     assert!(p.daemon.join("parts/frame/explodes/apart.json").is_file());
+}
+
+#[test]
+fn motions_are_shown_and_drawn_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    for (part, x, y) in [("arm", "50", "4"), ("block", "10", "10")] {
+        p.ok(&["part", "create", part]);
+        let (px, py) = (format!("x={x}"), format!("y={y}"));
+        p.ok(&[
+            "feature", "add", part, "box", "--id", "body", "--param", &px, "--param", &py,
+            "--param", "z=4",
+        ]);
+    }
+    p.ok(&["part", "create", "swing", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "swing", "instance", "--id", "arm", "--of", "arm",
+    ]);
+    p.ok(&[
+        "feature", "add", "swing", "instance", "--id", "block", "--of", "block", "--fixed",
+        "--origin", "30,20,0",
+    ]);
+    p.ok(&[
+        "motion",
+        "save",
+        "swing",
+        "turn",
+        "--steps",
+        "46",
+        "--drives",
+        r#"[{"instances": ["arm"], "rotate": {"axis": {"origin": [0, 0, 0], "direction": "z"},
+             "from": "0 deg", "to": "45 deg"}}]"#,
+    ]);
+    // Frames, alike both ways.
+    let frames = p.ok(&["motion", "frames", "swing", "turn", "--frames", "5"]);
+    assert_eq!(frames["frames"].as_array().unwrap().len(), 5, "{frames}");
+    assert!(
+        frames["frames"][4]["offsets"]["arm"].is_object(),
+        "{frames}"
+    );
+    // Renders at a fraction, and with what collides painted, alike both
+    // ways.
+    let png = |name: &str| {
+        let a = fs::read(p.direct.join(name)).unwrap();
+        assert_eq!(
+            a,
+            fs::read(p.daemon.join(name)).unwrap(),
+            "{name} both ways"
+        );
+        a
+    };
+    let render = |out: &str, extra: &[&str]| {
+        let mut args = vec![
+            "render", "swing", "--out", out, "--size", "96x72", "--view", "top",
+        ];
+        args.extend(extra);
+        p.ok(&args);
+        png(out)
+    };
+    let whole = render("whole.png", &[]);
+    let half = render("half.png", &["--motion", "turn", "--fraction", "0.5"]);
+    let hit = render(
+        "hit.png",
+        &["--motion", "turn", "--fraction", "0.5", "--interference"],
+    );
+    assert_ne!(whole, half);
+    assert_ne!(half, hit);
+    p.fails(
+        &["render", "swing", "--out", "x.png", "--motion", "nothing"],
+        "motion_not_found",
+        1,
+    );
+    p.fails(
+        &["render", "swing", "--out", "x.png", "--interference"],
+        "invalid_param",
+        1,
+    );
+    // Shown in a window, in a session only.
+    let (code, v) = p.run_in(
+        &p.direct,
+        "",
+        &["motion", "show", "turn", "--part", "swing"],
+    );
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("no_live_session")),
+        "{v}"
+    );
+    let (code, v) = p.run_in(
+        &p.daemon,
+        "",
+        &[
+            "motion",
+            "show",
+            "turn",
+            "--part",
+            "swing",
+            "--fraction",
+            "0.5",
+            "--play",
+        ],
+    );
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(
+        v["result"]["motion"],
+        json!({"part": "swing", "motion": "turn", "fraction": 0.5, "playing": true})
+    );
+    let (_, v) = p.run_in(&p.daemon, "", &["motion", "show", "--pause"]);
+    assert_eq!(v["result"]["motion"]["playing"], false, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["motion", "show", "--off"]);
+    assert_eq!(v["result"]["motion"], Value::Null, "{v}");
 }
 
 #[test]

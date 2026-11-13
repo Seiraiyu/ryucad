@@ -11,8 +11,11 @@ use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
 use crate::error::{Code, Error, Result};
+use crate::feature::{BodyUse, Check, FeatureKind, Place, Write};
 use crate::rebuild::{Built, Made, Origins, Results, Run};
+use crate::rebuild::{ToolBody, apply, boolean_error, boolean_origins, finish, op_key, read};
 use crate::solid::Solids;
+use ryukei::boolean::{BooleanOp, Tool};
 use ryukei::geom::{Frame, Point3, Rigid, Vector3};
 use ryukei::name::{Event, Name};
 use ryukei::name::{OpKey, ToolKey};
@@ -22,6 +25,8 @@ use ryukei::topo::{Body, RegionKind};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+// The old public paths (design 541, "Paths kept"); 27.F removes them.
+pub use crate::feature::delete_body::{delete_body, delete_report};
 
 /// What a shell or offset acts on as its view of it holds it, and the
 /// faces it names, by name: the open ones, and each grouped one with its
@@ -1074,73 +1079,350 @@ pub(crate) fn split_tool(
     }
 }
 
-/// A `delete_body`: each solid it names must be a solid of the part as
-/// it sees it (`not_found`), not consumed (`body_consumed`) nor deleted
-/// already (`body_deleted`). It builds to no solids: [`Solids`] ends the
-/// chains, so what follows can't read them and what came before reads
-/// them as it did. An insert's ID names every solid it founded.
-pub fn delete_body(
+/// Shells, offsets, mirrors and splits: operations on a whole body.
+pub(crate) struct WholeBodies;
+
+impl FeatureKind for WholeBodies {
+    fn types(&self) -> &'static [&'static str] {
+        &["shell", "offset", "mirror", "split"]
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        crate::doc::body::request_fields(ty)
+    }
+
+    fn body(&self, ty: &str) -> BodyUse {
+        match ty {
+            "shell" => BodyUse::SOLID,
+            "mirror" => BodyUse::WHEN_NEW,
+            "split" => BodyUse {
+                needs: None,
+                founds: crate::feature::Founds::WhenBothKept,
+            },
+            _ => BodyUse::NONE,
+        }
+    }
+
+    fn before_targets(&self, ty: &str, cx: &mut Write<'_>) -> Result<()> {
+        if ty != "mirror" {
+            return Ok(());
+        }
+        // A mirror whose operation is left out joins its own source
+        // (design 327, question 20); one with no solid copies the part's
+        // one solid. The file names both all the same.
+        if cx.given.fields.solid.is_none() {
+            let before = cx.solids_before()?;
+            match before.as_slice() {
+                [one] => cx.given.fields.solid = Some(one.to_string()),
+                _ => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!(
+                            "a mirror names the solid it copies (solid): the part has {} before it",
+                            before.len()
+                        ),
+                    )
+                    .with("param", "solid")
+                    .with("solids", before));
+                }
+            }
+        }
+        // A sheet's copy can't be joined: left out, its operation is new
+        // (design 388).
+        if cx.given.fields.operation.is_none() {
+            let Place::New { order, at, .. } = cx.place else {
+                unreachable!("a new mirror's defaults")
+            };
+            let x = cx
+                .given
+                .fields
+                .solid
+                .as_deref()
+                .and_then(|x| Id::parse(x, "feature").ok());
+            let sheet = x.is_some_and(|x| {
+                crate::feature::source_is_sheet(cx.session, cx.part, order, at, &x)
+            });
+            if sheet {
+                cx.given.fields.operation = Some("new".into());
+            } else {
+                cx.given.fields.operation = Some("join".into());
+                if cx.given.fields.targets.is_none() {
+                    cx.given.fields.targets = cx.given.fields.solid.clone().map(|s| vec![s]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // A shell, offset or split with no target acts on the part's one
+    // solid; the file names it all the same.
+    fn default_target(&self, ty: &str, cx: &mut Write<'_>) -> Result<()> {
+        if !matches!(ty, "shell" | "offset" | "split")
+            || cx.given.fields.target.is_some()
+            || cx.given.fields.targets.is_some()
+        {
+            return Ok(());
+        }
+        let before = cx.solids_before()?;
+        match before.as_slice() {
+            [one] => cx.given.fields.target = Some(one.to_string()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a {ty} names the solid it acts on (target): the part has {} before it",
+                        before.len()
+                    ),
+                )
+                .with("param", "target")
+                .with("solids", before));
+            }
+        }
+        Ok(())
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        crate::body::from_given(ty, current, &cx.given.fields, cx.part, cx.unit, cx.env)
+    }
+
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
+        crate::body::report(&part.id, f)
+    }
+
+    fn rechecks(&self, old: &Feature, new: &Feature) -> bool {
+        new.targets() != old.targets()
+    }
+
+    // A split by a body, not a plane, is judged against the rebuild.
+    fn always_checked(&self, f: &Feature) -> bool {
+        matches!(f, Feature::Split(s) if s.plane().is_none())
+    }
+
+    // Faces of its target, each once; what the kernel makes of them only
+    // rebuild can tell.
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        crate::body::check(&cx.proposed(f), cx.id, f, cx.results)
+    }
+
+    fn rebuild(&self, cx: &crate::feature::RebuildCx<'_>, f: &Feature) -> crate::feature::Outcome {
+        match f {
+            Feature::Shell(_) | Feature::Offset(_) => {
+                crate::feature::made(build(cx.part, cx.solids, cx.id, f, cx.before, cx.run))
+            }
+            Feature::Split(x) => crate::feature::made(build_split(
+                cx.part, cx.solids, cx.id, f, x, cx.before, cx.run,
+            )),
+            // A mirror's copy founds a solid or applies as an extrude's body.
+            _ => crate::rebuild::body_step(cx, f),
+        }
+    }
+
+    fn own_body(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &Feature,
+        _targets: &[&Built],
+    ) -> Result<Built> {
+        let Feature::Mirror(m) = f else {
+            unreachable!("a mirror's copy is the one body of its own")
+        };
+        mirror_copy(cx.part, cx.solids, cx.id, f, m, cx.before)
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        use crate::kind as k;
+        match f {
+            Feature::Mirror(m) => {
+                let new = m.combine.is_new();
+                let (want, hint) = k::combined(&m.combine);
+                std::iter::once(k::read(
+                    "solid",
+                    &m.solid,
+                    (!new).then_some(k::Want::Solid),
+                    (!new).then_some(k::COPY),
+                ))
+                .chain(
+                    m.combine
+                        .targets
+                        .iter()
+                        .map(|t| k::read("targets", t, want, hint)),
+                )
+                .collect()
+            }
+            Feature::Shell(s) => vec![k::read(
+                "target",
+                &s.target,
+                Some(k::Want::Solid),
+                Some(k::SHELL),
+            )],
+            Feature::Split(s) => {
+                let mut out = vec![k::read("target", &s.target, None, None)];
+                if let Some(t) = s.tool_body() {
+                    out.push(k::Read {
+                        changes: false,
+                        ..k::read("tool", t, None, None)
+                    });
+                }
+                out
+            }
+            _ => k::targets(f, "target", None, None),
+        }
+    }
+}
+
+/// A split: its target as it sees it, cut by its plane (turned round by
+/// `flip`). The side behind the plane, the target less the half-space in
+/// front, is the target as the split leaves it; keeping both sides, the
+/// side in front, the target and the half-space, founds a solid named by
+/// the split. Each side is one boolean under a tool key of its own, so
+/// each cut face keeps its name whatever moves; each side is one solid
+/// however many lumps it has.
+pub(crate) fn build_split(
     part: &Part,
     solids: &Solids,
     id: &Id,
-    d: &crate::doc::body::DeleteBody,
+    f: &Feature,
+    s: &crate::doc::body::Split,
     before: &dyn Results,
+    run: &Run,
 ) -> Result<Made> {
-    for (i, t) in d.solids.iter().enumerate() {
-        let at = format!("/solids/{i}");
-        if let Some(by) = solids.consumed_by(t, id) {
-            return Err(crate::rebuild::consumed(id, t, by).with("pointer", at));
-        }
-        // Deleted by an earlier delete: this one records its own list at
-        // its own place, so it is never before itself.
-        if let Some(by) = solids.deleted_by(t, id).filter(|by| *by != id) {
-            return Err(crate::rebuild::deleted(id, t, by).with("pointer", at));
-        }
-        let is_insert = part
-            .features
-            .get(t)
-            .is_some_and(|f| f.as_ref().is_ok_and(Feature::inserts));
-        if !(solids.is_solid(t) || is_insert) {
-            return Err(Error::new(
-                Code::NotFound,
-                format!("{id} deletes {t}, which is no solid of {}", part.id),
-            )
-            .with("feature", id)
-            .with("solid", t)
-            .with("pointer", at));
-        }
-        // A key below an insert must be one its source shows.
-        if t.is_path()
-            && let Some(view) = solids.view(t, id)
-            && let Ok(out) = crate::graph::input(part, id, view, before)
-            && out.solid(t).is_none()
-        {
-            return Err(crate::rebuild::not_inserted(
-                id,
-                "solids",
-                t,
-                &t.founder(),
-                out.solids().iter().map(|(k, _)| k).collect(),
-            )
-            .with("pointer", at));
-        }
-    }
-    Ok(Made::new(Vec::new()))
+    let t = &s.target;
+    let built = read(part, solids, id, f, "target", t, before)?;
+    let at = crate::geometry::At {
+        part,
+        order: part.order(),
+        owner: id,
+        results: before,
+    };
+    let Some(plane) = s.plane() else {
+        return match crate::body::split_tool(part, solids, id, f, s, before)? {
+            crate::body::SplitTool::Solid(tool) => {
+                // Its inside is behind, its outside in front; flip swaps them.
+                let (inside, outside) = (BooleanOp::Intersect, BooleanOp::Subtract);
+                let (behind_op, front_op) = if s.flip {
+                    (outside, inside)
+                } else {
+                    (inside, outside)
+                };
+                let side = |name: &'static str, kop: BooleanOp| -> Result<Built> {
+                    let key = crate::body::side_key(&part.id, id, name);
+                    let tools = [ToolBody::whole(key, &tool, id)];
+                    apply(part, id, "split", (kop, "split"), t, built, &tools, run)
+                        .map_err(|e| crate::body::tool_side_error(id, t, name, e))
+                };
+                sides(
+                    s,
+                    t,
+                    id,
+                    || side("behind", behind_op),
+                    || side("front", front_op),
+                )
+            }
+            crate::body::SplitTool::Sheet(sheet) => {
+                split_by_sheet(part, id, s, (t, built), &sheet, run)
+            }
+        };
+    };
+    let pl = crate::geometry::one(&at, "plane", plane, crate::geometry::Want::Plane)?.plane();
+    let normal = if s.flip { -pl.normal } else { pl.normal };
+    let half = crate::body::half_space(&part.id, id, t, &built.body, pl.point, normal)?;
+    let side = |name: &'static str, kop: BooleanOp| -> Result<Built> {
+        let tool = crate::body::side_tool(id, &half, name)?;
+        let key = crate::body::side_key(&part.id, id, name);
+        let tools = [ToolBody::whole(key, &tool, id)];
+        apply(part, id, "split", (kop, "split"), t, built, &tools, run)
+            .map_err(|e| crate::body::side_error(id, t, name, e))
+    };
+    sides(
+        s,
+        t,
+        id,
+        || side("behind", BooleanOp::Subtract),
+        || side("front", BooleanOp::Intersect),
+    )
 }
 
-/// A delete's report: `solids` as written, an insert's ID expanded to the
-/// keys it founded (design 521).
-pub fn delete_report(d: &crate::doc::body::DeleteBody, results: &dyn Results) -> Value {
-    let mut out = Vec::new();
-    for t in &d.solids {
-        match results.result(t).and_then(|r| r.as_ref().ok()) {
-            Some(o) if o.inserted().is_some() => {
-                out.extend(o.solids().iter().map(|(k, _)| json!(k)));
-            }
-            _ => out.push(json!(t)),
+/// A split's sides from two closures, behind and front: the target keeps
+/// behind; with `keep: both`, the split founds what is in front. Both
+/// sides are made side by side, the first failure in order reported.
+fn sides(
+    s: &crate::doc::body::Split,
+    t: &Id,
+    id: &Id,
+    behind: impl FnOnce() -> Result<Built> + Send,
+    front: impl FnOnce() -> Result<Built> + Send,
+) -> Result<Made> {
+    use crate::doc::body::Keep;
+    match s.keep {
+        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(behind()?))])),
+        Keep::Both => {
+            let (b, f) = rayon::join(behind, front);
+            // The first failure in order, not the first a thread found.
+            let (b, f) = (b?, f?);
+            Ok(Made::new(vec![
+                (t.clone(), Arc::new(b)),
+                (id.clone(), Arc::new(f)),
+            ]))
         }
     }
-    json!({"solids": out})
+}
+
+/// Split `id` (`s`) of target `t` (`built`) by a sheet: one division,
+/// each side one body. The side behind the sheet (against its normal,
+/// and what it doesn't reach) is the target's; flip swaps them.
+fn split_by_sheet(
+    part: &Part,
+    id: &Id,
+    s: &crate::doc::body::Split,
+    (t, built): (&Id, &Built),
+    sheet: &Body,
+    run: &Run,
+) -> Result<Made> {
+    use crate::doc::body::Keep;
+    let key = op_key(&part.id, id);
+    let tk = crate::body::side_key(&part.id, id, "tool");
+    let tool = crate::body::side_tool(id, sheet, "tool")?;
+    let tools = [ToolBody::whole(tk, &tool, id)];
+    let placed = [Tool {
+        key: tk,
+        body: sheet,
+        place: Rigid::IDENTITY,
+    }];
+    let work = crate::work::work(run.job);
+    let (d, journal) = ryukei::boolean::divide_sides_with(key, &built.body, &placed, &work)
+        .map_err(|e| {
+            crate::work::stopped(&e, run.job)
+                .unwrap_or_else(|| boolean_error(part, id, "split", t, built, &tools, None, e))
+        })?;
+    let (back, front) = if s.flip {
+        (d.front, d.back)
+    } else {
+        (d.back, d.front)
+    };
+    // A side left empty is refused whatever `keep` says, as a plane's or a
+    // solid tool's split refuses it: a sheet that misses the target divides
+    // nothing.
+    let (back, front) = match (back, front) {
+        (Some(b), Some(f)) => (b, f),
+        (_, None) => return Err(crate::body::empty_side(id, t, "front", "tool")),
+        (None, _) => return Err(crate::body::empty_side(id, t, "behind", "tool")),
+    };
+    let one = |b: Body| -> Result<Built> {
+        let origins = boolean_origins(id, built, &tools, &b, &journal);
+        finish(id, "split", (b, journal.clone()), origins)
+    };
+    match s.keep {
+        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(one(back)?))])),
+        Keep::Both => Ok(Made::new(vec![
+            (t.clone(), Arc::new(one(back)?)),
+            (id.clone(), Arc::new(one(front)?)),
+        ])),
+    }
 }
 
 #[cfg(test)]

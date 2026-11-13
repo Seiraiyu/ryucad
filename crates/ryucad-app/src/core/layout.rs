@@ -13,7 +13,7 @@ pub const FORMAT: u64 = 1;
 
 /// Every tile, by id, with its tab title: the order View > Panels lists
 /// them in.
-pub const TILES: [(&str, &str); 19] = [
+pub const TILES: [(&str, &str); 20] = [
     ("viewport", "Viewport"),
     ("tree", "Tree"),
     ("properties", "Properties"),
@@ -30,6 +30,7 @@ pub const TILES: [(&str, &str); 19] = [
     ("shortcuts", "Shortcuts"),
     ("section", "Section"),
     ("explode", "Explode"),
+    ("motion", "Motion"),
     ("equations", "Equations"),
     ("annotations", "Annotations"),
     ("drawings", "Drawings"),
@@ -78,7 +79,7 @@ pub fn home(id: &str) -> Home {
         "tree" => Home::Left,
         "viewport" | "shortcuts" | "drawings" => Home::Centre,
         "properties" | "parameters" | "part" | "conflicts" | "changes" | "section" | "explode"
-        | "annotations" => Home::Right,
+        | "motion" | "annotations" => Home::Right,
         _ => Home::Bottom,
     }
 }
@@ -310,6 +311,7 @@ mod tests {
                 "shortcuts",
                 "section",
                 "explode",
+                "motion",
                 "equations",
                 "annotations",
                 "drawings",
@@ -317,6 +319,13 @@ mod tests {
             .contains(&id);
             assert_eq!(d.tiles().contains(&id), !on_demand, "{id}");
         }
+    }
+
+    #[test]
+    fn the_motion_tile_opens_on_the_right_beside_explode() {
+        assert_eq!(title("motion"), Some("Motion"));
+        assert_eq!(home("motion"), Home::Right);
+        assert!(!default().tiles().contains(&"motion"), "opened on demand");
     }
 
     #[test]

@@ -221,6 +221,16 @@ enum Pending {
     /// An assembly's explode written or deleted, to show `explode` next
     /// if it is still there.
     ExplodeSaved(String, Option<String>),
+    /// An assembly's motions (`motion.list`).
+    Motions(String),
+    /// A motion's frames (`motion.frames`): its assembly and ID.
+    MotionFrames(String, String),
+    /// This window's own `motion.show`.
+    MotionShown,
+    /// A motion written (`motion.save`), of an assembly.
+    MotionSaved(String),
+    /// A motion swept with interference: its assembly and ID.
+    MotionSwept(String, String),
     /// A sheet metal solid's table (`sheet.get`): its part and the solid
     /// asked for, at a part revision.
     SheetTable(BodyKey, String),
@@ -609,6 +619,9 @@ pub struct Workspace {
     /// The shown assembly's explodes, the one shown, and a step being
     /// made.
     pub explodes: crate::core::explode::Explodes,
+    /// The shown assembly's motions, the one shown, its frames, Play and
+    /// the last sweep.
+    pub motions: crate::core::motion::Motions,
     /// How the shown bodies look, as the daemon last said.
     looks_read: BTreeMap<BodyKey, Arc<crate::core::appearance::Look>>,
     /// The last appearance reading asked for: an older answer is dropped.
@@ -762,6 +775,7 @@ impl Workspace {
             views: Default::default(),
             sections: Default::default(),
             explodes: Default::default(),
+            motions: Default::default(),
             looked: None,
             refocused: false,
             appearance: Default::default(),
@@ -2052,12 +2066,7 @@ impl Workspace {
 
     /// Moves the model's occurrences where the explode drawn puts them.
     pub fn sync_explode(&mut self) {
-        let moved = self
-            .explodes
-            .part
-            .clone()
-            .map(|p| (p.clone(), self.explodes.offsets(&p)));
-        self.model.explode(moved);
+        self.sync_moved();
     }
 
     /// Shows explode `explode` of the explodes' assembly in this window,
@@ -2173,6 +2182,186 @@ impl Workspace {
             crate::core::explode::save_without(&part, &e, k, self.explodes.revision.clone())
         };
         self.send(req, Pending::ExplodeSaved(part, Some(e.id)));
+    }
+
+    /// The motion this window's participant shows: its list read when it
+    /// is another assembly's, its frames fetched when they aren't this
+    /// motion's at this revision, Play started or stopped as the session
+    /// says, and where it moves occurrences.
+    fn follow_motion(&mut self) {
+        let shown = self.myself().and_then(|m| m.motion.clone());
+        if self.motions.shown != shown {
+            let was_playing = self.motions.shown.as_ref().is_some_and(|s| s.playing);
+            self.motions.shown = shown.clone();
+            self.motions.sliding = None;
+            match &shown {
+                Some(s) if s.playing && !was_playing => {
+                    self.motions.started = Some((Instant::now(), s.fraction));
+                }
+                Some(s) if s.playing => {}
+                _ => self.motions.started = None,
+            }
+        }
+        let part = shown
+            .as_ref()
+            .map(|s| s.part.clone())
+            .or_else(|| self.shown_assembly());
+        if part.is_some() && part != self.motions.part {
+            self.motions.part = part;
+            self.motions.list.clear();
+            self.motions.frames = None;
+            self.read_motions();
+        }
+        if shown.is_some() && !self.motions.frames_current() {
+            self.read_frames();
+        }
+        self.sync_moved();
+    }
+
+    /// Reads the motions of the assembly they are of (`motion.list`).
+    pub fn read_motions(&mut self) {
+        if let Some(p) = self.motions.part.clone() {
+            self.send(
+                Request::MotionList {
+                    part: Some(p.clone()),
+                },
+                Pending::Motions(p),
+            );
+        }
+    }
+
+    /// Fetches the shown motion's frames (`motion.frames`, 120 of them).
+    fn read_frames(&mut self) {
+        if let Some(s) = self.motions.shown.clone() {
+            let req = Request::MotionFrames {
+                part: s.part.clone(),
+                motion: Some(s.motion.clone()),
+                drives: None,
+                steps: None,
+                frames: None,
+            };
+            self.send(req, Pending::MotionFrames(s.part, s.motion));
+        }
+    }
+
+    /// Shows motion `motion` of the motions' assembly in this window
+    /// (`motion.show`); with no motion, moves or plays the one shown;
+    /// `off` shows none.
+    pub fn show_motion(
+        &mut self,
+        motion: Option<&str>,
+        fraction: Option<f64>,
+        playing: Option<bool>,
+        off: bool,
+    ) {
+        let req = Request::MotionShow {
+            part: motion.and(self.motions.part.clone()),
+            motion: motion.map(str::to_owned),
+            fraction,
+            playing,
+            off,
+            participant: Some(self.link.participant.clone()),
+        };
+        self.send(req, Pending::MotionShown);
+    }
+
+    /// Draws the motion `fraction` of the way while the slider moves
+    /// (Play stops); written when let go.
+    pub fn slide_motion(&mut self, fraction: f64) {
+        self.motions.started = None;
+        self.motions.sliding = Some(fraction.clamp(0.0, 1.0));
+        self.sync_moved();
+    }
+
+    /// Plays the shown motion from where it is, or pauses it there.
+    pub fn play_motion(&mut self, play: bool) {
+        let at = self.motions.fraction(Instant::now());
+        if play {
+            self.motions.started = Some((Instant::now(), at.unwrap_or(0.0)));
+        } else {
+            self.motions.started = None;
+            self.motions.sliding = at;
+        }
+        self.show_motion(None, at, Some(play), false);
+    }
+
+    /// Sweeps the shown motion with interference (`assembly.sweep`): its
+    /// collisions marked on the slider and listed.
+    pub fn sweep_motion(&mut self) {
+        let Some(s) = self.motions.shown.clone() else {
+            return;
+        };
+        self.motions.sweep = Some(crate::core::motion::Sweep::asked(&s.part, &s.motion));
+        let req = Request::AssemblySweep {
+            part: s.part.clone(),
+            motion: Some(s.motion.clone()),
+            drives: None,
+            mate: None,
+            from: None,
+            to: None,
+            steps: None,
+            interference: true,
+            clearance: false,
+            below: None,
+            poses: false,
+            refine: None,
+        };
+        self.send(req, Pending::MotionSwept(s.part, s.motion));
+    }
+
+    /// Jumps the slider to `fraction` and writes it (a sweep's Show).
+    pub fn jump_motion(&mut self, fraction: f64) {
+        self.slide_motion(fraction);
+        self.show_motion(None, Some(fraction), Some(false), false);
+    }
+
+    /// Writes the shown motion's ranges and steps as edited
+    /// (`motion.save`); a refusal is the daemon's, shown as any.
+    pub fn save_motion(&mut self) {
+        let (Some(part), Some((id, ranges, steps))) =
+            (self.motions.part.clone(), self.motions.editing.clone())
+        else {
+            return;
+        };
+        let Some(entry) = self.motions.list.iter().find(|e| e.id == id).cloned() else {
+            return;
+        };
+        match crate::core::motion::save(
+            &part,
+            &id,
+            &entry.drives,
+            &ranges,
+            &steps,
+            self.motions.revision.clone(),
+        ) {
+            Ok(req) => self.send(req, Pending::MotionSaved(part)),
+            Err(why) => self.fail(Error::new(Code::InvalidParam, why)),
+        }
+    }
+
+    /// Moves the model's occurrences where the explode drawn puts them,
+    /// else where the motion drawn does: a window shows one or neither.
+    fn sync_moved(&mut self) {
+        let explode = self
+            .explodes
+            .part
+            .clone()
+            .map(|p| {
+                let o = self.explodes.offsets(&p);
+                (p, o)
+            })
+            .filter(|(_, o)| !o.is_empty());
+        let moved = explode.or_else(|| {
+            let p = self.motions.part.clone()?;
+            let part = self.model.parts.get(&p)?;
+            let offsets = self.motions.offsets(
+                &p,
+                part.occurrences.iter().map(|o| o.path.as_str()),
+                Instant::now(),
+            );
+            Some((p, offsets))
+        });
+        self.model.explode(moved);
     }
 
     /// Shows what this window's participant's focus says, and hides what
@@ -3683,6 +3872,10 @@ impl Workspace {
             return;
         }
         self.follow_views();
+        // Play moves the model on every frame.
+        if self.motions.playing() {
+            self.sync_moved();
+        }
         let ready = self
             .camera_sent
             .is_none_or(|t| now.saturating_duration_since(t) >= CAMERA_EVERY);
@@ -4609,10 +4802,74 @@ impl Workspace {
                 let me = self.link.participant.clone();
                 if let Some(p) = self.people.all.get_mut(&me) {
                     p.explode = crate::core::explode::Shown::from_json(&a.result["explode"]);
+                    if p.explode.is_some() {
+                        p.motion = None;
+                    }
                     self.people.generation += 1;
                 }
                 self.explodes.sliding = None;
                 self.follow_explode();
+                self.follow_motion();
+            }
+            (Pending::Motions(part), Ok(a)) => {
+                if self.motions.part.as_deref() == Some(part.as_str()) {
+                    self.motions.listed(&part, &a.result);
+                    if self.motions.shown.is_some() && !self.motions.frames_current() {
+                        self.read_frames();
+                    }
+                    self.sync_moved();
+                }
+            }
+            (Pending::MotionFrames(part, id), Ok(a)) => {
+                let wanted = self
+                    .motions
+                    .shown
+                    .as_ref()
+                    .is_some_and(|s| s.part == part && s.motion == id);
+                if wanted {
+                    self.motions.frames = crate::core::motion::Frames::from_json(&a.result);
+                    self.sync_moved();
+                }
+            }
+            (Pending::MotionShown, Ok(a)) => {
+                let me = self.link.participant.clone();
+                if let Some(p) = self.people.all.get_mut(&me) {
+                    p.motion = crate::core::motion::Shown::from_json(&a.result["motion"]);
+                    if p.motion.is_some() {
+                        p.explode = None;
+                    }
+                    self.people.generation += 1;
+                }
+                self.motions.sliding = None;
+                self.follow_explode();
+                self.follow_motion();
+            }
+            (Pending::MotionSaved(part), r) => match r {
+                Ok(_) => {
+                    if self.motions.part.as_deref() == Some(part.as_str()) {
+                        self.motions.editing = None;
+                        self.read_motions();
+                    }
+                }
+                Err(e) => self.fail(e),
+            },
+            (Pending::MotionSwept(part, id), r) => {
+                let Some(w) = self
+                    .motions
+                    .sweep
+                    .as_mut()
+                    .filter(|w| w.part == part && w.motion == id)
+                else {
+                    return;
+                };
+                match r {
+                    Ok(a) => *w = crate::core::motion::Sweep::from_json(&a.result),
+                    Err(e) => {
+                        w.loaded = true;
+                        w.error = Some(e.message.clone());
+                    }
+                }
+                self.model.generation += 1;
             }
             (Pending::ExplodeSaved(part, show), r) => match r {
                 Ok(a) => {
@@ -5375,6 +5632,7 @@ impl Workspace {
                 self.follow_focus();
                 self.follow_sections();
                 self.follow_explode();
+                self.follow_motion();
                 // Following someone who left ends.
                 if self
                     .following
@@ -5402,6 +5660,20 @@ impl Workspace {
             .is_some_and(|p| report["part"] == p)
         {
             self.read_explodes();
+        }
+        // Its motions and their frames may have changed with it; the last
+        // sweep goes stale (asked again only when someone asks).
+        if self
+            .motions
+            .part
+            .as_deref()
+            .is_some_and(|p| report["part"] == p)
+        {
+            self.motions.frames = None;
+            self.read_motions();
+            if let Some(w) = self.motions.sweep.as_mut() {
+                w.stale = true;
+            }
         }
         // Its named views may have changed with it.
         if self

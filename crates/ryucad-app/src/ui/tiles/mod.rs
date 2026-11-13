@@ -11,6 +11,7 @@ pub mod drawings;
 pub mod equations;
 pub mod explode;
 pub mod history;
+pub mod motion;
 pub mod parameters;
 pub mod part;
 pub mod properties;
@@ -149,6 +150,7 @@ pub fn show(
         "shortcuts" => crate::ui::shortcuts::show(ui, o),
         "section" => scroll_both(ui, &mut |ui| section::section(ui, &mut o.ws, &mut o.view)),
         "explode" => scroll_both(ui, &mut |ui| explode::explode(ui, &mut o.ws)),
+        "motion" => scroll_both(ui, &mut |ui| motion::motion(ui, &mut o.ws, &mut o.view)),
         "equations" => scroll(ui, &mut |ui| equations::equations(ui, &mut o.ws)),
         "drawings" => drawings::drawings(ui, &mut o.ws, &mut o.view),
         "annotations" => scroll(ui, &mut |ui| {

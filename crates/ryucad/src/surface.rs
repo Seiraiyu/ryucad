@@ -11,6 +11,7 @@ use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::surface::{Extract, Fill, Side};
 use crate::error::{Code, Error, Result};
+use crate::feature::{BodyUse, Check, FeatureKind, Write};
 use crate::rebuild::{Built, Origins, Results, Run};
 use ryukei::fill::{FillBoundary, FillOptions, FillReport, FillSide};
 use ryukei::name::{FillRole, Name, OpKey, Role};
@@ -1029,6 +1030,120 @@ pub fn from_given(
     };
     r.finish()?;
     Ok(out)
+}
+
+/// Fills, extracts, sews and thickens (ryucad 18).
+pub(crate) struct Surfaces;
+
+impl FeatureKind for Surfaces {
+    fn types(&self) -> &'static [&'static str] {
+        &["fill", "extract", "sew", "thicken"]
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        crate::doc::surface::request_fields(ty)
+    }
+
+    fn body(&self, ty: &str) -> BodyUse {
+        match ty {
+            "sew" => BodyUse {
+                needs: Some(crate::kind::Want::Sheet),
+                founds: crate::feature::Founds::Always,
+            },
+            "thicken" => BodyUse::WHEN_NEW,
+            _ => BodyUse::FOUNDS,
+        }
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        crate::surface::from_given(ty, current, &cx.given.fields, cx.part, cx.unit, cx.env)
+    }
+
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
+        crate::surface::report(&part.id, f)
+    }
+
+    fn rechecks(&self, old: &Feature, new: &Feature) -> bool {
+        new != old
+    }
+
+    // Its sides edges and curves, its faces of one body; whether they
+    // close up, or extract cleanly, only rebuild can tell. A sew's sheets
+    // are judged by kind and order already.
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        match f {
+            Feature::Fill(x) => crate::surface::check_fill(&cx.proposed(f), cx.id, x, cx.results),
+            Feature::Extract(x) => {
+                crate::surface::check_extract(&cx.proposed(f), cx.id, x, cx.results)
+            }
+            Feature::Thicken(x) => {
+                crate::surface::check_thicken(&cx.proposed(f), cx.id, x, cx.results)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn rebuild(&self, cx: &crate::feature::RebuildCx<'_>, f: &Feature) -> crate::feature::Outcome {
+        use crate::feature::{founded, founded_with_report};
+        match f {
+            Feature::Fill(x) => {
+                founded_with_report(cx.id, fill(cx.part, cx.id, x, cx.before, cx.run))
+            }
+            Feature::Sew(x) => founded(cx.id, sew(cx.part, cx.solids, cx.id, x, cx.before, cx.run)),
+            Feature::Extract(x) => founded(cx.id, extract(cx.part, cx.id, x, cx.before)),
+            // A thicken founds its solid or applies it as an extrude does.
+            _ => crate::rebuild::body_step(cx, f),
+        }
+    }
+
+    fn own_body(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &Feature,
+        _targets: &[&Built],
+    ) -> Result<Built> {
+        let Feature::Thicken(x) = f else {
+            unreachable!("a thicken is the one body of its own")
+        };
+        thicken(cx.part, cx.solids, cx.id, x, cx.before, cx.run)
+    }
+
+    fn alone(&self, _part: &Id, id: &Id, f: &Feature) -> Result<Built> {
+        Err(crate::feature::built_elsewhere(
+            id,
+            f,
+            "is built from what it names",
+        ))
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        use crate::kind as k;
+        match f {
+            Feature::Sew(s) => s
+                .sheets
+                .iter()
+                .map(|t| k::read("sheets", t, Some(k::Want::Sheet), None))
+                .collect(),
+            Feature::Thicken(t) => {
+                let (want, hint) = k::combined(&t.combine);
+                t.combine
+                    .targets
+                    .iter()
+                    .map(|x| k::read("targets", x, want, hint))
+                    .chain(
+                        t.sheet()
+                            .map(|s| k::read("from", s, Some(k::Want::Sheet), None)),
+                    )
+                    .collect()
+            }
+            _ => k::combined_reads(f),
+        }
+    }
 }
 
 #[cfg(test)]

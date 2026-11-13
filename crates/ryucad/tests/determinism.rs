@@ -5152,6 +5152,70 @@ fn motions_section(golden: &mut Golden) {
     s.str(&ryucad::doc::canonical::to_string(&slid));
 }
 
+/// An arm turned 45° about z into a block (26.B's `swing`): the frames
+/// of its saved motion, and renders of it a quarter and half of the way,
+/// the half with what collides there painted.
+fn motion_renders_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("motion_renders");
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    for (part, x, y, z) in [("arm", 50, 4, 4), ("block", 10, 10, 4)] {
+        call(&mut session, "part.create", json!({"part": part}));
+        call(
+            &mut session,
+            "feature.add",
+            json!({"part": part, "type": "box", "id": "body", "params":
+                {"x": format!("{x} mm"), "y": format!("{y} mm"), "z": format!("{z} mm")}}),
+        );
+    }
+    call(
+        &mut session,
+        "part.create",
+        json!({"part": "swing", "kind": "assembly"}),
+    );
+    call(
+        &mut session,
+        "feature.add",
+        json!({"part": "swing", "type": "instance", "id": "arm", "of": "arm"}),
+    );
+    call(
+        &mut session,
+        "feature.add",
+        json!({"part": "swing", "type": "instance", "id": "block", "of": "block",
+               "fixed": true, "placement": {"origin": ["30 mm", "20 mm", "0 mm"]}}),
+    );
+    call(
+        &mut session,
+        "motion.save",
+        json!({"part": "swing", "motion": "turn", "steps": 46, "drives": [{"instances": ["arm"],
+               "rotate": {"axis": {"origin": ["0 mm", "0 mm", "0 mm"], "direction": "z"},
+                          "from": "0 deg", "to": "45 deg"}}]}),
+    );
+    let frames = call(
+        &mut session,
+        "motion.frames",
+        json!({"part": "swing", "motion": "turn", "frames": 9}),
+    );
+    s.str(&ryucad::doc::canonical::to_string(&frames));
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![
+            json!({"part": "swing", "view": "top", "motion": "turn", "fraction": 0.25}),
+            json!({"part": "swing", "view": "top", "motion": "turn", "fraction": 0.5,
+                   "interference": true}),
+            json!({"part": "swing", "view": "iso", "motion": "turn", "fraction": 1.0}),
+        ],
+    );
+}
+
 /// A millimetre part of holes and patterns: a plate drilled at a
 /// sketch's points (a counterbore with a drill point, a countersink
 /// through all, a plain blind hole), a grid of the
@@ -6913,6 +6977,7 @@ sections! {
     mates => mates_section(&mut golden),
     limits => limits_section(&mut golden),
     motions => motions_section(&mut golden),
+    motion_renders => motion_renders_section(&mut golden),
     interference => interference_section(&mut golden),
     measure => measure_section(&mut golden),
     imports => imports_section(&mut golden),

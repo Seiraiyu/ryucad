@@ -1,5 +1,6 @@
 //! `doctor` (design 518): what a ryueda project folder needs that no one
-//! file says. Git's setup (`gitattributes_missing`, `git_drivers_missing`),
+//! file says. Git's setup (`gitattributes_missing`, `git_drivers_missing`;
+//! `git_hook_missing` and `git_hook_foreign`, the clone's hooks),
 //! paths Git left unmerged (`unmerged_path`), files not written
 //! canonically (`non_canonical`), files holding a merge's conflict record
 //! (`merge_conflict`), files no kind holds (`unknown_file`,
@@ -29,6 +30,8 @@ impl Issue {
         match self.code {
             Code::GitattributesMissing => "gitattributes_missing",
             Code::GitDriversMissing => "git_drivers_missing",
+            Code::GitHookMissing => "git_hook_missing",
+            Code::GitHookForeign => "git_hook_foreign",
             Code::UnmergedPath => "unmerged_path",
             Code::NonCanonical => "non_canonical",
             Code::UnknownFile => "unknown_file",
@@ -211,6 +214,53 @@ fn git_issues(root: &Path, out: &mut Vec<Issue>) {
                 }],
             )],
         ));
+    }
+    use ryu_git::drivers::Hook;
+    let line = ryu_git::drivers::hook_line("ryueda").unwrap_or_default();
+    for (name, hook) in setup.hooks {
+        match hook {
+            Hook::Installed(_) => {}
+            Hook::Missing(p) => out.push(issue(
+                Code::GitHookMissing,
+                "warning",
+                Vec::new(),
+                format!(
+                    "this clone has no {name} hook running ryueda's merge check ({}): a merge can be committed with conflicts unsettled; run `ryueda git install`",
+                    p.display()
+                ),
+                vec![Repair::new(
+                    "git_hook_missing",
+                    &format!("install:{name}"),
+                    root,
+                    &[],
+                    "run ryueda git install in this clone".into(),
+                    vec![Change {
+                        path: GIT_INSTALL.to_owned(),
+                        content: None,
+                    }],
+                )],
+            )),
+            Hook::HooksPath(p) => out.push(issue(
+                Code::GitHookMissing,
+                "warning",
+                Vec::new(),
+                format!(
+                    "core.hooksPath is set and its {name} hook ({}) doesn't run ryueda's merge check; add this line to it: {line}",
+                    p.display()
+                ),
+                Vec::new(),
+            )),
+            Hook::Foreign(p) => out.push(issue(
+                Code::GitHookForeign,
+                "warning",
+                Vec::new(),
+                format!(
+                    "the {name} hook ({}) is another tool's, so ryueda left it alone; add this line to it: {line}",
+                    p.display()
+                ),
+                Vec::new(),
+            )),
+        }
     }
     if let Ok(Some(repo)) = crate::git::Repo::open(root)
         && let Ok(unmerged) = repo.unmerged()
@@ -441,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn in_a_repository_attributes_and_drivers() {
+    fn in_a_repository_attributes_drivers_and_hooks() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
         crate::git::tests::git(r, &["init", "-q"]);
@@ -450,9 +500,39 @@ mod tests {
         let issues = diagnose(r, &p);
         assert_eq!(
             codes(&issues),
-            ["git_drivers_missing", "gitattributes_missing"]
+            [
+                "git_drivers_missing",
+                "git_hook_missing",
+                "git_hook_missing",
+                "gitattributes_missing"
+            ]
         );
         assert_eq!(issues[0].repairs[0].changes[0].path, GIT_INSTALL);
+        let hook = &issues[1].repairs[0];
+        assert!(
+            hook.id.starts_with("git_hook_missing:install:"),
+            "{}",
+            hook.id
+        );
+        assert_ne!(
+            issues[1].repairs[0].id, issues[2].repairs[0].id,
+            "one repair per hook"
+        );
+        // Someone else's hook is left alone, with the line to add.
+        let hooks = r.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nmytool check\n").unwrap();
+        let issues = diagnose(r, &p);
+        let foreign = issues
+            .iter()
+            .find(|i| i.code == Code::GitHookForeign)
+            .unwrap();
+        assert!(
+            foreign.message.contains("merge status --hook"),
+            "{}",
+            foreign.message
+        );
+        assert!(foreign.repairs.is_empty());
     }
 
     #[test]
