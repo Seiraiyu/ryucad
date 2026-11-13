@@ -358,9 +358,12 @@ pub fn layers(p: &Project, block: &Id) -> Vec<Layer> {
         stack: &str,
         want: &Id,
         found: &mut Vec<(Vec<Id>, String)>,
+        within: &mut Vec<Id>,
     ) {
-        // A block holding itself is a fault the files report; stop there.
-        if path.len() > 64 {
+        // A block holding itself is a fault the files report; stop there,
+        // at the cycle (a cap on depth alone walks 2^64 paths when a
+        // block places itself twice).
+        if path.len() > 64 || within.contains(at) {
             return;
         }
         if at == want {
@@ -381,7 +384,9 @@ pub fn layers(p: &Project, block: &Id) -> Vec<Layer> {
                 stack.to_owned()
             };
             path.push(iid.clone());
-            walk(p, &i.of, path, &s, want, found);
+            within.push(at.clone());
+            walk(p, &i.of, path, &s, want, found, within);
+            within.pop();
             path.pop();
         }
     }
@@ -391,7 +396,15 @@ pub fn layers(p: &Project, block: &Id) -> Vec<Layer> {
             continue;
         };
         let mut found = Vec::new();
-        walk(p, &root, &mut Vec::new(), "", block, &mut found);
+        walk(
+            p,
+            &root,
+            &mut Vec::new(),
+            "",
+            block,
+            &mut found,
+            &mut Vec::new(),
+        );
         if found.is_empty() {
             continue;
         }
@@ -1158,6 +1171,29 @@ pub fn alias(c: &crate::conn::Component) -> &str {
 mod tests {
     use super::*;
     use crate::netlist::tests::project;
+
+    #[test]
+    fn a_block_placing_itself_is_walked_once() {
+        use crate::project::ProjectKind;
+        use crate::project::tests::{design_in, library_in, manifest};
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        library_in(&board);
+        design_in(&board);
+        // The root places itself twice (the eda fuzz target's input):
+        // every path through it is a cycle, 2^64 of them before a cap.
+        for i in ["self_a", "self_b"] {
+            let text = br#"{"format": 1, "kind": "ryueda.instance", "of": "top", "ports": {}}"#;
+            std::fs::write(board.join(format!("blocks/top/instances/{i}.json")), text).unwrap();
+        }
+        let p = Project::load(&board).unwrap();
+        let top = Id::parse("top", "b").unwrap();
+        let s = Id::parse("s", "b").unwrap();
+        assert_eq!(layers(&p, &top).len(), 1);
+        let paths: Vec<String> = layers(&p, &s).iter().map(Layer::path_text).collect();
+        assert_eq!(paths, ["ch_a", "ch_b"]);
+    }
 
     #[test]
     fn layout_keys_have_reference_paths() {
