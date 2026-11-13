@@ -208,6 +208,24 @@ pub(crate) fn flat_alone(
     }
 }
 
+/// `before` meshes one solid as a feature read it, so it takes neither
+/// `flat` nor `features`: given beside either, it is refused by name,
+/// never ignored.
+pub(crate) fn before_alone(before: Option<&str>, flat: bool, features: &[String]) -> Result<()> {
+    if before.is_none() {
+        return Ok(());
+    }
+    let given = [("flat", flat), ("features", !features.is_empty())];
+    match given.iter().find(|(_, g)| *g) {
+        Some((field, _)) => Err(Error::new(
+            Code::InvalidParam,
+            format!("before meshes one solid as a feature read it: give before without {field}"),
+        )
+        .with("param", "before")),
+        None => Ok(()),
+    }
+}
+
 /// `mesh.get --flat` as JSON: the flat's one body, as `mesh_get` gives a
 /// part's.
 pub(crate) fn mesh_flat_json(
@@ -1245,6 +1263,7 @@ pub(crate) fn mesh_get_request(
     rev: Option<String>,
     before: Option<String>,
 ) -> Result<Value> {
+    before_alone(before.as_deref(), false, &features)?;
     let (commit, s) = session.at(rev.as_deref())?;
     if let Some(reader) = before {
         return versioned(noted(

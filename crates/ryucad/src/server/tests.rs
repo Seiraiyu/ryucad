@@ -4690,6 +4690,29 @@ fn mesh_get_before_meshes_a_deleted_solid_as_its_delete_read_it() {
     let bodies = mesh::decode(&a.binary.expect("bytes")).unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0].feature, "pcb/u1");
+    // `before` meshes one solid: beside `flat` or `features` it is refused
+    // by name, by JSON and as bytes alike, never ignored.
+    for extra in [json!({"flat": ""}), json!({"features": ["lid"]})] {
+        for transfer in [None, Some("compact")] {
+            let mut params = json!({"part": "enclosure", "feature": "pcb/u1", "before": "d"});
+            for (k, v) in extra.as_object().unwrap() {
+                params[k] = v.clone();
+            }
+            if let Some(t) = transfer {
+                params["transfer"] = json!(t);
+            }
+            let req = Request::from_rpc("mesh.get", Some(params.clone())).unwrap();
+            let e = match answer_live(&mut s, None, None, req) {
+                Err(e) => e,
+                Ok(_) => panic!("{params}: answered"),
+            };
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!("before")),
+                "{params}: {e:?}"
+            );
+        }
+    }
     // `before` needs the solid it reads, and a feature of the part.
     for (params, code) in [
         (

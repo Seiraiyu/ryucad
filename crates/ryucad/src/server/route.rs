@@ -903,8 +903,10 @@ pub(crate) fn dispatch(
             transfer: _,
             rev,
             flat: Some(solid),
-            before: _,
-        } => view::mesh_get_flat(session, part, feature, features, quality, rev, solid),
+            before,
+        } => view::before_alone(before.as_deref(), true, &features).and_then(|()| {
+            view::mesh_get_flat(session, part, feature, features, quality, rev, solid)
+        }),
         Request::MeshGet {
             part,
             feature,
