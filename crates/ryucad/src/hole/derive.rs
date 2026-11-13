@@ -531,7 +531,7 @@ pub fn needs_table(kind: Kind, standard: &str, size: &str, missing: Vec<String>)
 
 /// The project's table when a value is wanted from it: none when the
 /// project has none, its error when it can't be read.
-fn table<'a>(tables: Tables<'a>) -> Result<Option<&'a HoleStandards>> {
+pub(crate) fn table<'a>(tables: Tables<'a>) -> Result<Option<&'a HoleStandards>> {
     match tables {
         None => Ok(None),
         Some(Ok(t)) => Ok(Some(t)),
@@ -544,7 +544,7 @@ fn nm(q: &Quantity) -> i64 {
 }
 
 /// A pitch as a size: millimetres, or 1/tpi inch.
-fn pitch_size(p: Pitch, source: Source) -> Size {
+pub(crate) fn pitch_size(p: Pitch, source: Source) -> Size {
     match p {
         Pitch::Mm(n) => Size::nm(n, false, source),
         Pitch::Tpi(_) | Pitch::Tpi10(_) => {

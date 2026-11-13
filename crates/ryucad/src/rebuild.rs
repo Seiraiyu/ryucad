@@ -320,6 +320,8 @@ pub enum Output {
     Datum(Arc<crate::datum::Made>),
     /// A path or a helix.
     Path(Arc<crate::path::Made>),
+    /// A cosmetic thread (ryucad 28.B).
+    Thread(Arc<crate::thread::Cosmetic>),
 }
 
 impl Output {
@@ -341,7 +343,8 @@ impl Output {
             | Output::Mate(_)
             | Output::Copies(_)
             | Output::Datum(_)
-            | Output::Path(_) => &[],
+            | Output::Path(_)
+            | Output::Thread(_) => &[],
         }
     }
 
@@ -395,6 +398,7 @@ impl Output {
             Output::Copies(c) => &c.hash,
             Output::Datum(d) => &d.hash,
             Output::Path(p) => &p.hash,
+            Output::Thread(t) => &t.hash,
         }
     }
 
@@ -618,6 +622,9 @@ impl PartResult {
                 };
                 if let Some(i) = o.inserted() {
                     return i.warnings.clone();
+                }
+                if let Output::Thread(t) = o {
+                    return t.warnings.clone();
                 }
                 if let Some(s) = o.sketch() {
                     return s
@@ -2879,6 +2886,10 @@ fn rebuild_with(
             let r = crate::sketch::context(part, part.order(), id, s, before)
                 .and_then(|c| crate::sketch::solve_in(id, s, &c))
                 .map(|s| Output::Sketch(Arc::new(s)));
+            (r, None)
+        }
+        Feature::CosmeticThread(c) => {
+            let r = crate::thread::build(part, id, c, before).map(|m| Output::Thread(Arc::new(m)));
             (r, None)
         }
         Feature::Datum(d) => {
