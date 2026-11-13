@@ -6,96 +6,12 @@
 mod breakout;
 #[path = "support/draw.rs"]
 mod draw;
+#[path = "support/gitrepo.rs"]
+mod gitrepo;
+use gitrepo::*;
 
-use assert_cmd::Command;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-
-/// `git`, reading no user's or system's config, with a fixed identity
-/// and dates.
-fn git_command(dir: &Path) -> std::process::Command {
-    let mut git = std::process::Command::new("git");
-    git.env(
-        "GIT_CONFIG_GLOBAL",
-        std::env::temp_dir().join("ryueda-no-gitconfig"),
-    )
-    .env("GIT_CONFIG_NOSYSTEM", "1")
-    .env("GIT_AUTHOR_NAME", "Test")
-    .env("GIT_AUTHOR_EMAIL", "t@example.com")
-    .env("GIT_COMMITTER_NAME", "Test")
-    .env("GIT_COMMITTER_EMAIL", "t@example.com")
-    .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
-    .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
-    .args([
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "init.defaultBranch=main",
-        "-c",
-        "core.autocrlf=false",
-    ])
-    .current_dir(dir);
-    git
-}
-
-/// Runs git in `dir`; panics on failure.
-fn git(dir: &Path, args: &[&str]) {
-    let out = git_command(dir).args(args).output().unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-/// `ryueda` in `dir`, in process or through a daemon run from `run`.
-fn ryueda_cmd(dir: &Path, run: &Path, daemon: bool, args: &[&str]) -> Command {
-    let mut cmd = Command::cargo_bin("ryueda").unwrap();
-    cmd.env("RYUEDA_RUNTIME_DIR", run)
-        .env("RYUEDA_IDLE_TIMEOUT", "60")
-        .env("RYUEDA_CONFIG_DIR", run.with_file_name("config"))
-        .env("RYUEDA_CACHE_DIR", run.with_file_name("cache"))
-        .env("RYUEDA_ID_SEED", "git")
-        .env("GIT_CONFIG_GLOBAL", run.with_file_name("gitconfig"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env_remove("RYUEDA_PARTICIPANT")
-        .current_dir(dir)
-        .args(args);
-    if daemon {
-        cmd.env_remove("RYUEDA_NO_DAEMON");
-    } else {
-        cmd.env("RYUEDA_NO_DAEMON", "1");
-    }
-    cmd
-}
-
-/// [`ryueda_cmd`] run: its exit code and its JSON.
-fn ryueda(dir: &Path, run: &Path, daemon: bool, args: &[&str]) -> (i32, Value) {
-    let out = ryueda_cmd(dir, run, daemon, args).output().unwrap();
-    let v: Value = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
-    (out.status.code().unwrap(), v)
-}
-
-/// The sensor breakout in `top/board`, committed.
-fn breakout_in_git(top: &Path, run: &Path) -> PathBuf {
-    git(top, &["init", "-q"]);
-    let board = top.join("board");
-    std::fs::create_dir_all(&board).unwrap();
-    assert_eq!(ryueda(&board, run, false, &["init"]).0, 0);
-    for (path, text) in breakout::footprints() {
-        let at = board.join(path);
-        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-        std::fs::write(at, text).unwrap();
-    }
-    for args in breakout::script() {
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        assert_eq!(ryueda(&board, run, false, &args).0, 0, "{args:?}");
-    }
-    git(top, &["add", "."]);
-    git(top, &["commit", "-q", "-m", "breakout"]);
-    board
-}
 
 #[test]
 fn reads_at_any_revision_both_ways() {
@@ -192,15 +108,36 @@ fn init_in_a_repository_sets_the_clone_up_and_install_is_idempotent() {
         "{config}"
     );
     assert!(
-        !config.contains("merge-driver"),
-        "no merge driver before plan 4.C"
+        config.contains("' git merge-driver %O %A %B %P") && config.contains("[merge \"ryueda\"]"),
+        "{config}"
     );
+    let hook = std::fs::read_to_string(top.join(".git/hooks/pre-merge-commit")).unwrap();
     assert!(
-        !top.join(".git/hooks/pre-merge-commit").exists(),
-        "no hook line before plan 4.C"
+        hook.contains("# ryueda") && hook.contains("' merge status --hook"),
+        "{hook}"
     );
+    // Installed again: nothing to write.
     let (code, v) = ryueda(&top.join("board"), &run, false, &["git", "install"]);
-    assert_eq!((code, &v["result"]["hooks"]), (0, &json!({})), "{v}");
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(
+        std::fs::read_to_string(top.join(".git/hooks/pre-merge-commit")).unwrap(),
+        hook
+    );
+    // Outside a merge the hook's check passes at once.
+    let out = ryueda_cmd(
+        &top.join("board"),
+        &run,
+        false,
+        &["merge", "status", "--hook"],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let (code, v) = ryueda(
         &top.join("board"),
         &run,
@@ -213,6 +150,7 @@ fn init_in_a_repository_sets_the_clone_up_and_install_is_idempotent() {
         global.contains("textconv") && !global.contains("renames"),
         "{global}"
     );
+    assert!(global.contains("git merge-driver"), "{global}");
 }
 
 #[test]
@@ -839,4 +777,42 @@ fn a_compare_is_set_on_a_participant() {
     let (_, off) = ryueda(&board, &run, true, &["compare", "--off"]);
     assert_eq!(off["result"]["compare"], Value::Null);
     ryueda(&board, &run, true, &["daemon", "stop"]);
+}
+
+#[test]
+fn the_merge_driver_writes_over_ours_and_exits_by_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let comp = |refdes: &str, value: &str| {
+        format!(
+            "{{\n  \"format\": 1,\n  \"kind\": \"ryueda.component\",\n  \"of\": {{\n    \"id\": \"r\"\n  }},\n  \"refdes\": \"{refdes}\",\n  \"value\": \"{value}\"\n}}\n"
+        )
+    };
+    let write = |name: &str, text: &str| {
+        let p = dir.path().join(name);
+        std::fs::write(&p, text).unwrap();
+        p
+    };
+    let (b, o, t) = (
+        write("b", &comp("R1", "1k")),
+        write("o", &comp("R2", "1k")),
+        write("t", &comp("R1", "2k")),
+    );
+    let out = ryueda_cmd(dir.path(), &run, false, &["git", "merge-driver"])
+        .args([&b, &o, &t])
+        .arg("blocks/x/components/r1.json")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty(), "prints nothing");
+    assert_eq!(std::fs::read_to_string(&o).unwrap(), comp("R2", "2k"));
+    // Both sides changed one value: exit 1, the record in ours' file.
+    let o = write("o", &comp("R1", "3k"));
+    let out = ryueda_cmd(dir.path(), &run, false, &["git", "merge-driver"])
+        .args([&b, &o, &t])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: Value = serde_json::from_slice(&std::fs::read(&o).unwrap()).unwrap();
+    assert_eq!(v["conflicts"]["/value"]["theirs"], "2k");
 }

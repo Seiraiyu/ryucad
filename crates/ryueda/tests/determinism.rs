@@ -115,6 +115,19 @@ fn ryueda_out(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+/// The sensor breakout entered by its script in `board` (made by `init`).
+fn breakout_at(board: &Path) {
+    for (path, text) in breakout::footprints() {
+        let at = board.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+    for args in breakout::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        ryueda(board, 1, &args);
+    }
+}
+
 #[test]
 fn netlists_and_erc_are_bit_exact() {
     let mut golden = Golden::new(concat!(
@@ -125,15 +138,7 @@ fn netlists_and_erc_are_bit_exact() {
     let board = dir.path().join("board");
     std::fs::create_dir_all(&board).unwrap();
     ryueda(&board, 1, &["init"]);
-    for (path, text) in breakout::footprints() {
-        let at = board.join(path);
-        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-        std::fs::write(at, text).unwrap();
-    }
-    for args in breakout::script() {
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        ryueda(&board, 1, &args);
-    }
+    breakout_at(&board);
     for what in ["netlist", "erc"] {
         let one = ryueda(&board, 1, &[what]);
         assert_eq!(ryueda(&board, 8, &[what]), one, "{what}");
@@ -165,6 +170,9 @@ fn netlists_and_erc_are_bit_exact() {
     schematic(&mut golden, &board, "breakout");
     styled(&mut golden, &board);
     compared(&mut golden, &board);
+    let repo = dir.path().join("merge");
+    std::fs::create_dir_all(&repo).unwrap();
+    merged(&mut golden, &repo);
     let pico = dir.path().join("pico");
     std::fs::create_dir_all(&pico).unwrap();
     ryueda(&pico, 1, &["init"]);
@@ -679,8 +687,9 @@ const MCU_PINS: &str = r#"[
     {"number": "14", "name": "USB_D-", "type": "bidirectional"}
 ]"#;
 
-/// Git in `dir`, reading no user's config, with a fixed identity and dates.
-fn git(dir: &Path, args: &[&str]) {
+/// Git in `dir`, reading no user's config, with a fixed identity and
+/// dates: whether it succeeded, and what it said on stderr.
+fn git_try(dir: &Path, args: &[&str]) -> (bool, String) {
     let out = std::process::Command::new("git")
         .env("GIT_CONFIG_GLOBAL", dir.join("..").join("no-gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -702,11 +711,16 @@ fn git(dir: &Path, args: &[&str]) {
         .current_dir(dir)
         .output()
         .unwrap();
-    assert!(
+    (
         out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// [`git_try`], which must succeed.
+fn git(dir: &Path, args: &[&str]) {
+    let (ok, said) = git_try(dir, args);
+    assert!(ok, "git {args:?}: {said}");
 }
 
 /// The styled breakout committed, then edited as `tests/git.rs`'s
@@ -774,5 +788,89 @@ fn compared(golden: &mut Golden, dir: &Path) {
     golden.got.insert(
         "schematic.breakout.compare.pdf".to_owned(),
         blake3::hash(&pdf).to_hex()[..32].to_owned(),
+    );
+}
+
+/// The breakout laid out on two branches that add a capacitor each in
+/// the same free space (as `tests/merge.rs`'s `laid_out_branches`),
+/// merged: `merge status` (the commits, which the manifest's random
+/// project ID moves, left out) and the layout `relayout` writes, alike on
+/// one thread and eight.
+fn merged(golden: &mut Golden, repo: &Path) {
+    git(repo, &["init", "-q"]);
+    let board = repo.join("board");
+    std::fs::create_dir_all(&board).unwrap();
+    ryueda(&board, 1, &["init"]);
+    breakout_at(&board);
+    ryueda(&board, 1, &["layout"]);
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "laid out"]);
+    git(repo, &["checkout", "-q", "-b", "theirs"]);
+    for args in [
+        vec![
+            "component",
+            "add",
+            "breakout",
+            "--of",
+            "c_100n",
+            "--id",
+            "c97",
+            "--refdes",
+            "C97",
+        ],
+        vec!["connect", "breakout/c97/1", "SCL"],
+        vec!["component", "edit", "breakout/r1", "--value", "47k"],
+    ] {
+        ryueda(&board, 1, &args);
+    }
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "theirs"]);
+    git(repo, &["checkout", "-q", "main"]);
+    for args in [
+        vec![
+            "component",
+            "add",
+            "breakout",
+            "--of",
+            "c_100n",
+            "--id",
+            "c98",
+            "--refdes",
+            "C98",
+        ],
+        vec!["connect", "breakout/c98/1", "SCL"],
+    ] {
+        ryueda(&board, 1, &args);
+    }
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "ours"]);
+    let run = |threads: usize| {
+        let (merged, _) = git_try(repo, &["merge", "-q", "theirs"]);
+        assert!(!merged, "both sides changed the layout");
+        let mut status = ryueda(&board, threads, &["merge", "status"]);
+        for side in ["ours", "theirs", "base"] {
+            status[side]["commit"] = Value::Null;
+        }
+        let areas: Vec<String> = status["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "layout_conflict")
+            .map(|c| c["id"].as_str().unwrap().to_owned())
+            .collect();
+        let mut args = vec!["merge", "resolve"];
+        args.extend(areas.iter().map(String::as_str));
+        args.extend(["--repair", "relayout"]);
+        ryueda(&board, threads, &args);
+        let layout = std::fs::read(board.join("blocks/breakout/layout.json")).unwrap();
+        git(repo, &["merge", "--abort"]);
+        (status, layout)
+    };
+    let one = run(1);
+    assert_eq!(run(8), one, "one thread and eight");
+    golden.json("merge.breakout.status", &one.0);
+    golden.got.insert(
+        "merge.breakout.layout".to_owned(),
+        blake3::hash(&one.1).to_hex()[..32].to_owned(),
     );
 }

@@ -131,6 +131,7 @@ check ".bashrc gets the PATH line" '[ "$(markers "$work/home-fresh/.bashrc")" = 
 check ".bash_profile is not created" '[ ! -e "$work/home-fresh/.bash_profile" ]'
 if command -v git >/dev/null 2>&1; then
     check "registers ryueda's textconv with Git" 'git config -f "$work/home-fresh/.gitconfig" diff.ryueda.textconv | grep -q "/.ryueda/bin/ryueda'"'"' git textconv$"'
+    check "registers ryueda's merge driver with Git" 'git config -f "$work/home-fresh/.gitconfig" merge.ryueda.driver | grep -q "/.ryueda/bin/ryueda'"'"' git merge-driver %O %A %B %P$"'
 fi
 if command -v zsh >/dev/null 2>&1; then
     check ".zshenv gets the PATH line" '[ "$(markers "$work/home-fresh/.zshenv")" = 1 ]'

@@ -92,6 +92,23 @@ pub fn ref_path(block: &Id, key: &str) -> String {
     format!("{block}/{}", part_of(key))
 }
 
+/// The reference path of what a layout key draws, the key as ryusch's
+/// merge and diff write it (`<section>/<key>`): a part's, a label's, a
+/// net's wires, a bus's, a region's, a note's ([`ref_path`]); `None` for
+/// a sheet.
+pub fn key_ref(block: &Id, key: &str) -> Option<String> {
+    let (section, k) = key.split_once('/')?;
+    let owner = match section {
+        "sheets" => return None,
+        "labels" => format!("label:{}", k.replacen('|', "@", 1)),
+        "routes" | "buses" => k.split('|').next().unwrap_or_default().to_owned(),
+        "regions" => format!("region:{k}"),
+        "notes" => format!("note:{k}"),
+        _ => k.to_owned(),
+    };
+    Some(ref_path(block, &owner))
+}
+
 fn pin_kind(t: PinType) -> PinKind {
     match t {
         PinType::Input => PinKind::Input,
@@ -1171,6 +1188,26 @@ pub fn alias(c: &crate::conn::Component) -> &str {
 mod tests {
     use super::*;
     use crate::netlist::tests::project;
+
+    #[test]
+    fn layout_keys_name_what_they_draw() {
+        let b = Id::parse("breakout", "block").unwrap();
+        assert_eq!(key_ref(&b, "placed/u3:2").as_deref(), Some("breakout/u3"));
+        assert_eq!(
+            key_ref(&b, "labels/sda|r1/2").as_deref(),
+            Some("breakout/label:sda@r1/2")
+        );
+        assert_eq!(
+            key_ref(&b, "routes/sda|s1").as_deref(),
+            Some("breakout/sda")
+        );
+        assert_eq!(
+            key_ref(&b, "regions/r2").as_deref(),
+            Some("breakout/region:r2")
+        );
+        assert_eq!(key_ref(&b, "notes/i3").as_deref(), Some("breakout/note:i3"));
+        assert_eq!(key_ref(&b, "sheets/s1"), None);
+    }
 
     #[test]
     fn a_block_placing_itself_is_walked_once() {

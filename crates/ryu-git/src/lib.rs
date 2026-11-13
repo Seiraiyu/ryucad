@@ -9,6 +9,7 @@ pub mod drivers;
 pub mod repo;
 #[cfg(test)]
 pub(crate) mod testing;
+pub mod value;
 
 pub use repo::{MergeState, Repo, Revision, Step, Unmerged, Worktree, merging_projects};
 
