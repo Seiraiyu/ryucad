@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Targets to run, a JSON list such as ["odb","merge"]; empty runs every one'
+        required: false
+        default: ""
+      file_issues:
+        description: "File issues for red targets off main too (to test the issues job)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,15 +24,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [predicates, interval, euler, nurbs, mesh, feature, merge, sweep, intersect, general, boolean, blend, offset, tweak, edit, heal, tolerant, self_union, expr, sketch, step, measure, eda, kicad, odb, shapes, export, schematic, parts, sheet, sheet_metal, projection, drawing, style, hole_spec]
+        # Every target the nightly runs; a dispatch may name fewer.
+        target: ${{ fromJSON(inputs.targets || '["predicates", "interval", "euler", "nurbs", "mesh", "feature", "merge", "sweep", "intersect", "general", "boolean", "blend", "offset", "tweak", "edit", "heal", "tolerant", "self_union", "expr", "sketch", "step", "measure", "eda", "kicad", "odb", "shapes", "export", "schematic", "parts", "sheet", "sheet_metal", "projection", "drawing", "style", "hole_spec"]') }}
     steps:
       - uses: actions/checkout@v4
       # cargo-fuzz needs nightly; the pinned stable toolchain stays the
       # default everywhere else.
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo install cargo-fuzz --locked
-      - name: Fuzz for 10 minutes
+      # Built apart from the run, so a build failure is told from a find.
+      - name: Build
+        id: build
         working-directory: fuzz
+        run: cargo +nightly fuzz build ${{ matrix.target }}
+      - name: Fuzz for 10 minutes
+        id: fuzz
+        working-directory: fuzz
+        # bash, for pipefail: the log is kept for the report below.
+        shell: bash
         # ASan's quarantine (256 MB by default) held most of the offset
         # target's gigabyte a case (#746: 41 MB without the sanitizer, 199
         # MB with a 16 MB quarantine): it runs with a 64 MB one.
@@ -41,9 +59,42 @@ jobs:
           cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
           ${{ (matrix.target == 'boolean' || matrix.target == 'blend' || matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak' || matrix.target == 'edit' || matrix.target == 'export' || matrix.target == 'sheet' || matrix.target == 'sheet_metal' || matrix.target == 'projection') && '-rss_limit_mb=6144' || '' }}
           ${{ (matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak' || matrix.target == 'edit') && '-timeout=600' || '' }}
+          2>&1 | tee "$RUNNER_TEMP/fuzz.log"
       - name: Upload crashes
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-${{ matrix.target }}-artifacts
           path: fuzz/artifacts/${{ matrix.target }}
+      # One line for the issues job: target, kind, libFuzzer's summary.
+      - name: What went wrong
+        if: failure()
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BUILD: ${{ steps.build.outcome }}
+          FUZZ: ${{ steps.fuzz.outcome }}
+        run: |
+          mkdir -p report
+          summary=""
+          if [ "$BUILD" = failure ]; then
+            kind="build failure"
+          elif [ "$FUZZ" = failure ]; then
+            summary=$(grep -m1 'SUMMARY: ' "$RUNNER_TEMP/fuzz.log" | sed 's/.*SUMMARY: //' | tr '\t' ' ' || true)
+            case "$summary" in
+              *out-of-memory*|*malloc*) kind="out of memory" ;;
+              *timeout*) kind="timeout" ;;
+              "") kind="failure without a libFuzzer summary" ;;
+              *) kind="crash" ;;
+            esac
+          else
+            kind="setup failure"
+          fi
+          printf '%s\t%s\t%s\n' "$TARGET" "$kind" "$summary" > "report/$TARGET.tsv"
+          cat "report/$TARGET.tsv"
+      - name: Upload the report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-report-${{ matrix.target }}
+          path: report/${{ matrix.target }}.tsv
