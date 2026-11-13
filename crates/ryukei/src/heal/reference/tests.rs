@@ -383,3 +383,68 @@ fn a_gap_between_samples_is_covered() {
         s.edges[0].tolerance
     );
 }
+
+/// #796: a face of no width between two coincident edges, as a file can
+/// leave one where two faces meet: a block's edge split into two copies,
+/// one for each of its faces, and a two-edge face along them in one
+/// face's plane. It bounds nothing, so it meshes as no triangles rather
+/// than as a fault drawn as a hole; every other face meshes as before.
+#[test]
+fn a_face_of_no_width_between_coincident_edges_meshes_empty() {
+    use crate::mesh::check_mesh;
+    let b = primitive::block(OpKey(1), 4.0, 3.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    let g = (0..s.edges.len())
+        .find(|&g| matches!(s.curves[s.edges[g].curve], Curve::Line(_)))
+        .unwrap();
+    let mut uses = Vec::new();
+    for (k, f) in s.faces.iter().enumerate() {
+        for (l, lp) in f.loops.iter().enumerate() {
+            if let Loop::Edges(us) = lp {
+                for (j, u) in us.iter().enumerate() {
+                    if u.edge == g {
+                        uses.push((k, l, j, u.sense));
+                    }
+                }
+            }
+        }
+    }
+    let [(k1, _, _, sense1), (k2, l2, j2, sense2)] = uses[..] else {
+        panic!("{uses:?}")
+    };
+    let copy = s.edges.len();
+    s.edges.push(s.edges[g]);
+    let Loop::Edges(us) = &mut s.faces[k2].loops[l2] else {
+        unreachable!()
+    };
+    us[j2].edge = copy;
+    let sliver = super::super::Face {
+        surface: s.faces[k1].surface,
+        sense: s.faces[k1].sense,
+        loops: vec![Loop::Edges(vec![
+            Use {
+                edge: g,
+                sense: sense1.flipped(),
+                pcurve: None,
+            },
+            Use {
+                edge: copy,
+                sense: sense2.flipped(),
+                pcurve: None,
+            },
+        ])],
+        tolerance: 0.0,
+    };
+    s.faces.push(sliver);
+    if let Some(sh) = s.shells.first_mut() {
+        sh.faces.push(s.faces.len() - 1);
+    }
+    let (body, _) = reference(OpKey(7), &s, &ReferenceOptions::default()).unwrap();
+    assert_eq!(body.faces().count(), 7);
+    let mesh = tessellate(&body, &MeshParams::new(1e-2, 0.5)).unwrap();
+    assert_eq!(mesh.faults, []);
+    assert_eq!(check_mesh(&body, &mesh), Ok(()));
+    assert_eq!(mesh.faces.len(), 7);
+}
