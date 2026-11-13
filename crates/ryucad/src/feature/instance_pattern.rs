@@ -160,4 +160,16 @@ impl FeatureKind for InstancePatterns {
         }
         v
     }
+
+    /// Solved with the whole assembly, over what its instances place.
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        (
+            Err(super::built_elsewhere(
+                cx.id,
+                f,
+                "is solved with its assembly",
+            )),
+            None,
+        )
+    }
 }

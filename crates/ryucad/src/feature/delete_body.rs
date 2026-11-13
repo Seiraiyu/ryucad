@@ -99,6 +99,14 @@ impl FeatureKind for Deletes {
         };
         d.fields()
     }
+
+    /// Ends the chains it names; makes nothing (design 521).
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::DeleteBody(d) = f else {
+            unreachable!("a delete")
+        };
+        super::made(delete_body(cx.part, cx.solids, cx.id, d, cx.before))
+    }
 }
 
 /// A `delete_body`: each solid it names must be a solid of the part as
