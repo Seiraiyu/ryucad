@@ -13,6 +13,7 @@
 //! touch. A point's tool key is `ryucad.tool\0<part>\0<feature>\0<point>`.
 
 pub mod derive;
+pub mod exits;
 pub mod spec;
 
 use crate::doc::files::Feature;
