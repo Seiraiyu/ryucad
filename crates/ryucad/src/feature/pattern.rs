@@ -5,11 +5,18 @@ use super::{BodyUse, Check, FeatureKind, Place, Write};
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
+use crate::doc::solid::Operation;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::geometry::geom_json;
+use crate::rebuild::{Built, Made, Results, ToolBody, apply, finish, instance_json, read};
+use crate::solid::Solids;
 use crate::units::Unit;
+use rayon::prelude::*;
+use ryukei::boolean::BooleanOp;
+use ryukei::geom::Rigid;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 /// A pattern as output reports it: its file's fields, every spacing,
 /// count and angle as written and as a value, every reference as
@@ -283,4 +290,124 @@ impl FeatureKind for Patterns {
         let x = f.pattern().expect("a pattern");
         crate::pattern::motions(&cx.proposed(f), cx.id, x, cx.results).map(|_| ())
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::Pattern(p) = f else {
+            unreachable!("a pattern")
+        };
+        super::made(build_pattern(
+            cx.part, cx.solids, cx.id, f, p, cx.before, cx.run,
+        ))
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        crate::kind::targets(f, "targets", None, None)
+    }
+}
+
+/// A pattern: its targets as it sees them, with every instance of every
+/// seed's own body, moved, in one kernel call per target. An instance
+/// that changes nothing, or that alone the kernel refuses, is named.
+pub(crate) fn build_pattern(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    p: &crate::doc::pattern::Pattern,
+    before: &dyn Results,
+    run: &crate::rebuild::Run,
+) -> Result<Made> {
+    use crate::pattern::{Motion, instance_key};
+    let targets: Vec<(&Id, &Built)> = p
+        .targets
+        .iter()
+        .map(|t| Ok((t, read(part, solids, id, f, "targets", t, before)?)))
+        .collect::<Result<_>>()?;
+    let (operation, seeds) = crate::pattern::seeds(part, id, p, before)?;
+    let motions = crate::pattern::motions(part, id, p, before)?;
+    if motions.is_empty() {
+        return Err(Error::new(
+            Code::OperationNoEffect,
+            format!("pattern {id} has no instance but its seeds: every other one is skipped"),
+        )
+        .with("feature", id)
+        .with("pointer", "/skip"));
+    }
+    // A mirror image is a body of its own: each seed's, at each place,
+    // reflected.
+    let mut mirrored: Vec<Built> = Vec::new();
+    for (_, m) in &motions {
+        let Motion::Mirror(plane) = m else { continue };
+        for (seed, a) in &seeds {
+            for (_, place) in &a.places {
+                let body = a
+                    .body
+                    .body
+                    .transformed(place)
+                    .and_then(|b| b.mirrored(plane))
+                    .map_err(|e| {
+                        Error::new(
+                            Code::RebuildFailed,
+                            format!("pattern {id}: the mirror image of {seed} leaves the size box"),
+                        )
+                        .with("feature", id)
+                        .with("seed", *seed)
+                        .with("kernel", format!("{e:?}"))
+                    })?;
+                let journal = a.body.journal.clone();
+                let origins = (*a.body.origins).clone();
+                mirrored.push(finish(id, "pattern", (body, journal), origins)?);
+            }
+        }
+    }
+    let mut images = mirrored.iter();
+    let mut tools: Vec<ToolBody> = Vec::new();
+    for ([i, j], m) in &motions {
+        let instance = instance_json(p, [*i, *j]);
+        for (seed, a) in &seeds {
+            for (point, place) in &a.places {
+                let mut label = json!({"feature": id, "seed": seed, "instance": instance});
+                if let Some(pt) = point {
+                    label["point"] = json!(pt);
+                }
+                let (built, place) = match m {
+                    Motion::Rigid(r) => (a.body.as_ref(), r.then_after(place)),
+                    Motion::Mirror(_) => {
+                        (images.next().expect("an image per place"), Rigid::IDENTITY)
+                    }
+                };
+                tools.push(ToolBody {
+                    key: instance_key(&part.id, id, seed, point.as_ref(), [*i, *j]),
+                    built,
+                    place,
+                    name: id,
+                    label: Some(label),
+                });
+            }
+        }
+    }
+    let kop = match operation {
+        Operation::Join => BooleanOp::Unite,
+        _ => BooleanOp::Subtract,
+    };
+    let made: Vec<(Id, Arc<Built>)> = targets
+        .par_iter()
+        .map(|(t, b)| {
+            let r = apply(
+                part,
+                id,
+                "pattern",
+                (kop, operation.as_str()),
+                t,
+                b,
+                &tools,
+                run,
+            )?;
+            Ok(((*t).clone(), Arc::new(r)))
+        })
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Result<_>>()?;
+    Ok(Made::new(made))
 }

@@ -181,6 +181,16 @@ impl Solve {
         let k = self.instances.iter().position(|i| i == id)?;
         self.report.bodies.get(&(k as u32))
     }
+
+    /// Mate `id`'s stops as the solve had them, when it has any.
+    pub fn limits(&self, id: &Id) -> Option<ryumate::Limits> {
+        let k = self.mates.iter().position(|m| m == id)?;
+        self.asm
+            .mates
+            .get(&(k as u32))
+            .map(|m| m.limits)
+            .filter(|l| !l.is_none())
+    }
 }
 
 /// An instance's state and freedom, as reports give it.
@@ -307,6 +317,47 @@ pub fn values_json(m: &ryumate::MateValues, unit: crate::units::Unit) -> (Value,
         }
     }
     (value, limit)
+}
+
+/// A mate's stops as reports give them, in radians and meters:
+/// `{angle_rad: {min, max}, distance_m: {min, max}}`, a missing bound
+/// `null`, a value with no range left out.
+pub fn limits_json(l: &ryumate::Limits) -> Value {
+    let range = |r: &ryumate::Range| json!({"min": r.min, "max": r.max});
+    let mut v = json!({});
+    if let Some(a) = &l.angle {
+        v["angle_rad"] = range(a);
+    }
+    if let Some(d) = &l.distance {
+        v["distance_m"] = range(d);
+    }
+    v
+}
+
+/// `segments + 1` points on the arc of `radius` about `origin` in the
+/// plane of unit `x` and `y`, from angle `from` to `to` (radians, from
+/// `x` towards `y`): a mate's angular stops as the app draws them.
+pub fn arc(
+    origin: [f64; 3],
+    x: [f64; 3],
+    y: [f64; 3],
+    radius: f64,
+    from: f64,
+    to: f64,
+    segments: usize,
+) -> Vec<[f64; 3]> {
+    let n = segments.max(1);
+    (0..=n)
+        .map(|k| {
+            let a = if k == n {
+                to
+            } else {
+                from + (to - from) * (k as f64 / n as f64)
+            };
+            let (s, c) = (ryukei::math::sin(a), ryukei::math::cos(a));
+            [0, 1, 2].map(|i| origin[i] + radius * (c * x[i] + s * y[i]))
+        })
+        .collect()
 }
 
 /// `value` and, when it rests on a stop, `limit` written into `v`.
@@ -1669,6 +1720,68 @@ pub(crate) mod tests {
     use crate::testing::call;
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn a_limited_mate_reports_its_limits_and_an_unlimited_one_does_not() {
+        let (_dir, mut s) = hinged();
+        let built = |s: &mut Session| {
+            let v = call(s, "rebuild", json!({"part": "frame"})).unwrap();
+            v["parts"][0]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == "m1")
+                .unwrap()
+                .clone()
+        };
+        assert!(built(&mut s)["mate"].get("limits").is_none());
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1",
+                   "limits": {"angle": {"min": "-6 deg", "max": "6 deg"}}}),
+        )
+        .unwrap();
+        let m = built(&mut s);
+        let six = 6f64.to_radians();
+        let lim = &m["mate"]["limits"];
+        assert!(
+            (lim["angle_rad"]["min"].as_f64().unwrap() + six).abs() < 1e-15,
+            "{m}"
+        );
+        assert!(
+            (lim["angle_rad"]["max"].as_f64().unwrap() - six).abs() < 1e-15,
+            "{m}"
+        );
+        assert!(lim.get("distance_m").is_none(), "{m}");
+        // One-sided: the other bound is null.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "limits": {"angle": {"min": ""}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            built(&mut s)["mate"]["limits"]["angle_rad"]["min"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn an_arc_runs_from_one_angle_to_the_other_about_z() {
+        let pts = arc(
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            2.0,
+            0.0,
+            core::f64::consts::FRAC_PI_2,
+            4,
+        );
+        assert_eq!(pts.len(), 5);
+        assert_eq!(pts[0], [3.0, 0.0, 0.0]);
+        assert!((pts[4][0] - 1.0).abs() < 1e-15 && (pts[4][1] - 2.0).abs() < 1e-15);
+    }
 
     #[test]
     fn a_limited_hinge_settles_at_its_stop() {

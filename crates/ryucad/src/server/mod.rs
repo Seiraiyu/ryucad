@@ -37,8 +37,8 @@ pub(crate) use crate::part::{
 pub(crate) use crate::save::save;
 #[allow(unused_imports)]
 pub(crate) use crate::scene::{
-    DrawExplode, RenderAsk, Scene, draw_body, ghost, render, render_flat, render_for_package,
-    render_noting, render_scene, sketches,
+    DrawExplode, DrawMotion, RenderAsk, Scene, draw_body, ghost, render, render_flat,
+    render_for_package, render_noting, render_scene, sketches,
 };
 
 mod annotation;
@@ -252,6 +252,8 @@ pub fn answer_live(
             section,
             explode,
             fraction,
+            motion,
+            interference,
             annotations,
             annotation,
             flat,
@@ -283,6 +285,7 @@ pub fn answer_live(
                 for (param, given) in [
                     ("section", section.is_some()),
                     ("explode", explode.is_some() || fraction.is_some()),
+                    ("motion", motion.is_some() || interference),
                 ] {
                     if given {
                         return Err(Error::new(
@@ -293,10 +296,15 @@ pub fn answer_live(
                     }
                 }
             }
-            let (section, explode) = if flat.is_some() {
-                (Some(Vec::new()), Some(String::new()))
+            let (section, explode, motion, interference) = if flat.is_some() {
+                (
+                    Some(Vec::new()),
+                    Some(String::new()),
+                    Some(String::new()),
+                    false,
+                )
             } else {
-                (section, explode)
+                (section, explode, motion, interference)
             };
             // A named view brings the planes and the explode it saved,
             // unless the request names its own.
@@ -340,9 +348,29 @@ pub fn answer_live(
                 .as_ref()
                 .and_then(|s| s.explode.as_ref())
                 .map(|s| s.fraction));
-            // The participant's shown explode, unless one is named.
+            // An explode and a motion are never drawn together.
+            if explode.as_deref().is_some_and(|e| !e.is_empty())
+                && motion.as_deref().is_some_and(|m| !m.is_empty())
+            {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "draw an explode or a motion, not both",
+                )
+                .with("param", "motion"));
+            }
+            // The participant's shown motion, unless the request (or a
+            // named view) names an explode or a motion.
+            let shown_motion = match live.as_deref_mut() {
+                Some(l) if motion.is_none() && explode.is_none() => {
+                    let who = l.view_target(participant.as_deref(), me)?;
+                    l.get(&who)?.view.motion.clone()
+                }
+                _ => None,
+            };
+            // The participant's shown explode, unless one (or a motion) is
+            // named.
             let shown = match live.as_deref_mut() {
-                Some(l) if explode.is_none() => {
+                Some(l) if explode.is_none() && motion.is_none() => {
                     let who = l.view_target(participant.as_deref(), me)?;
                     l.get(&who)?.view.explode.clone()
                 }
@@ -351,11 +379,17 @@ pub fn answer_live(
             if let Some(f) = fraction
                 && !(0.0..=1.0).contains(&f)
             {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    "an explode's fraction is from 0 (assembled) to 1 (exploded)",
-                )
-                .with("fraction", f));
+                return Err(
+                    if motion.as_deref().is_some_and(|m| !m.is_empty()) || shown_motion.is_some() {
+                        crate::playback::bad_fraction(f)
+                    } else {
+                        Error::new(
+                            Code::InvalidParam,
+                            "an explode's fraction is from 0 (assembled) to 1 (exploded)",
+                        )
+                        .with("fraction", f)
+                    },
+                );
             }
             let explode = match (explode, shown) {
                 (Some(e), _) if e.is_empty() => None,
@@ -371,6 +405,29 @@ pub fn answer_live(
                 }),
                 (None, None) => None,
             };
+            let motion = match (motion, shown_motion) {
+                (Some(m), _) if m.is_empty() => None,
+                (Some(m), _) => Some(DrawMotion {
+                    shown: None,
+                    id: m,
+                    fraction: fraction.unwrap_or(0.0),
+                    interference,
+                }),
+                (None, Some(s)) => Some(DrawMotion {
+                    shown: Some(s.part),
+                    id: s.motion.to_string(),
+                    fraction: fraction.unwrap_or(s.fraction),
+                    interference,
+                }),
+                (None, None) => None,
+            };
+            if interference && motion.is_none() {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "interference paints a motion's collisions: name a motion, or show one",
+                )
+                .with("param", "interference"));
+            }
             // What the participant's window cuts away, as it hides.
             let sections = match (section, saved_sections) {
                 (Some(args), _) => crate::section::resolve_all(session, &args, "/section")?,
@@ -445,6 +502,7 @@ pub fn answer_live(
                 appearance: appearance.unwrap_or(true),
                 sections,
                 explode,
+                motion,
                 annotations,
                 flat,
                 camera_m: annotation

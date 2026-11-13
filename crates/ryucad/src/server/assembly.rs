@@ -141,3 +141,60 @@ pub(crate) fn explode_show(
     live.set_explode(&id, shown.clone())?;
     Ok(crate::explode::shown_json(session, &id, shown.as_ref()))
 }
+
+/// `motion.delete`: the motion goes, and from every window showing it.
+pub(crate) fn motion_delete(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    part: String,
+    motion: String,
+    expected_revision: Option<String>,
+) -> Result<Value> {
+    let v = crate::motion::delete(session, &part, &motion, expected_revision.as_deref())?;
+    if let Some(l) = live {
+        let showing: Vec<String> = l
+            .participants()
+            .filter(|p| {
+                p.view.motion.as_ref().is_some_and(|m| {
+                    m.part.as_str() == v["part"] && m.motion.as_str() == v["motion"]
+                })
+            })
+            .map(|p| p.id.clone())
+            .collect();
+        for id in showing {
+            l.set_motion(&id, None)?;
+        }
+    }
+    Ok(v)
+}
+
+/// `motion.show`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn motion_show(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    part: Option<String>,
+    motion: Option<String>,
+    fraction: Option<f64>,
+    playing: Option<bool>,
+    off: bool,
+    participant: Option<String>,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("motion.show"))?;
+    let id = live.compare_target(participant.as_deref(), me)?;
+    let (now, focus) = {
+        let v = &live.get(&id)?.view;
+        (v.motion.clone(), v.focus.clone())
+    };
+    let ask = crate::playback::ShowAsk {
+        part,
+        motion,
+        fraction,
+        playing,
+        off,
+    };
+    let shown = crate::playback::show(session, now.as_ref(), focus.as_ref(), &ask)?;
+    live.set_motion(&id, shown.clone())?;
+    Ok(crate::playback::shown_json(session, &id, shown.as_ref()))
+}

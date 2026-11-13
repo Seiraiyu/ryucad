@@ -38,6 +38,8 @@ pub struct Person {
     pub sections: Vec<ryucad::section::Plane>,
     /// The exploded view their window shows.
     pub explode: Option<crate::core::explode::Shown>,
+    /// The motion their window shows.
+    pub motion: Option<crate::core::motion::Shown>,
     /// The mode their window is in (design 374): an agent's is shown,
     /// never enforced.
     pub mode: ryucad::live::Mode,
@@ -87,6 +89,7 @@ impl Person {
             sections: serde_json::from_value(v["sections"].clone()).unwrap_or_default(),
             mode: serde_json::from_value(v["mode"].clone()).unwrap_or_default(),
             explode: crate::core::explode::Shown::from_json(&v["explode"]),
+            motion: crate::core::motion::Shown::from_json(&v["motion"]),
         })
     }
 }
@@ -137,6 +140,23 @@ impl People {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_person_shows_a_motion() {
+        let v = serde_json::json!({"id": "p-1", "kind": "human", "name": "Dana",
+            "motion": {"part": "asm", "motion": "lift", "fraction": 0.25, "playing": true}});
+        let p = Person::from_json(&v).unwrap();
+        assert_eq!(
+            p.motion,
+            Some(crate::core::motion::Shown {
+                part: "asm".into(),
+                motion: "lift".into(),
+                fraction: 0.25,
+                playing: true
+            })
+        );
+        assert_eq!(p.explode, None);
+    }
 
     #[test]
     fn notifications_carry_whole_participants() {

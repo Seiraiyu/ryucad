@@ -1688,37 +1688,7 @@ fn order(a: &[String], b: &[String]) -> Value {
 /// The features `a` and `b` both list that `b` moved: those not in the
 /// longest run both keep in order, the fewest moves that explain `b`.
 pub(crate) fn moved_features(a: &[String], b: &[String]) -> BTreeSet<String> {
-    let x: Vec<&String> = a.iter().filter(|f| b.contains(f)).collect();
-    let y: Vec<&String> = b.iter().filter(|f| a.contains(f)).collect();
-    // The longest common subsequence, by dynamic programming.
-    let (n, m) = (x.len(), y.len());
-    let mut l = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            l[i][j] = if x[i] == y[j] {
-                l[i + 1][j + 1] + 1
-            } else {
-                l[i + 1][j].max(l[i][j + 1])
-            };
-        }
-    }
-    let mut kept = BTreeSet::new();
-    let (mut i, mut j) = (0, 0);
-    while i < n && j < m {
-        if x[i] == y[j] {
-            kept.insert(x[i]);
-            i += 1;
-            j += 1;
-        } else if l[i + 1][j] >= l[i][j + 1] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    y.into_iter()
-        .filter(|f| !kept.contains(*f))
-        .cloned()
-        .collect()
+    ryu_git::value::moved(a, b)
 }
 
 /// A part's listed features, if its `part.json` reads.

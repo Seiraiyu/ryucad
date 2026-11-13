@@ -199,4 +199,15 @@ impl FeatureKind for Instances {
     fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         f.instance().expect("an instance").fields()
     }
+
+    /// Its part's model comes from outside the part: see
+    /// [`crate::rebuild::rebuild_part_in`]; alone it places nothing.
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::Instance(i) = f else {
+            unreachable!("an instance")
+        };
+        let r = crate::assembly::place(cx.id, i, &crate::assembly::Children::new())
+            .map(|p| crate::rebuild::Output::Instance(std::sync::Arc::new(p)));
+        (r, None)
+    }
 }

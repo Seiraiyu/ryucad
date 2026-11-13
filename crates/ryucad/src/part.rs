@@ -463,8 +463,13 @@ pub(crate) fn part_report(
                     v
                 }
                 Ok(crate::rebuild::Output::Mate(m)) => {
-                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": m.hash,
-                           "mate": m.to_json(unit)})
+                    let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
+                                       "hash": m.hash, "mate": m.to_json(unit)});
+                    // A mate with stops says them, for the window's arcs.
+                    if let Some(l) = r.solve.as_ref().and_then(|s| s.limits(fid)) {
+                        v["mate"]["limits"] = crate::mate::limits_json(&l);
+                    }
+                    v
                 }
                 Ok(crate::rebuild::Output::Copies(c)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": c.hash,

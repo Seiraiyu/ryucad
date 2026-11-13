@@ -1217,4 +1217,46 @@ impl FeatureKind for SheetMetal {
     fn check(&self, cx: &Check<'_>, f: &Feature) -> crate::error::Result<()> {
         crate::sheet_metal::check(&cx.proposed(f), cx.id, f, cx.results)
     }
+
+    fn rebuild(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &crate::doc::files::Feature,
+    ) -> crate::feature::Outcome {
+        use crate::doc::files::Feature as F;
+        use crate::feature::{founded, made};
+        match f {
+            F::BaseFlange(b) => founded(cx.id, base_flange(cx.part, cx.id, b, cx.before, cx.run)),
+            F::Flange(x) => made(flange(cx.part, cx.solids, cx.id, x, cx.before, cx.run)),
+            F::Unfold(u) => made(unfold::unfold(
+                cx.part, cx.solids, cx.id, u, cx.before, cx.run,
+            )),
+            F::Refold(x) => made(unfold::refold(
+                cx.part, cx.solids, cx.id, x, cx.before, cx.run,
+            )),
+            _ => unreachable!("sheet metal"),
+        }
+    }
+
+    fn alone(
+        &self,
+        _part: &Id,
+        id: &Id,
+        f: &crate::doc::files::Feature,
+    ) -> crate::error::Result<Built> {
+        let how = if matches!(f, crate::doc::files::Feature::BaseFlange(_)) {
+            "is built from its sketch"
+        } else {
+            "makes no body of its own"
+        };
+        Err(crate::feature::built_elsewhere(id, f, how))
+    }
+
+    fn reads<'f>(&self, f: &'f crate::doc::files::Feature) -> Vec<crate::kind::Read<'f>> {
+        use crate::kind as k;
+        match f {
+            crate::doc::files::Feature::BaseFlange(_) => k::combined_reads(f),
+            _ => k::targets(f, "targets", Some(k::Want::Solid), Some(k::SHEET_METAL)),
+        }
+    }
 }

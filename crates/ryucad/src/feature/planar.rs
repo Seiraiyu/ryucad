@@ -110,4 +110,24 @@ impl FeatureKind for Planars {
             _ => Ok(()),
         }
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        crate::rebuild::body_step(cx, f)
+    }
+
+    fn own_body(
+        &self,
+        cx: &super::RebuildCx<'_>,
+        f: &Feature,
+        _targets: &[&crate::rebuild::Built],
+    ) -> Result<crate::rebuild::Built> {
+        let Feature::Planar(x) = f else {
+            unreachable!("a planar")
+        };
+        crate::profile::planar(cx.part, cx.id, x, cx.before)
+    }
+
+    fn alone(&self, _part: &Id, id: &Id, f: &Feature) -> Result<crate::rebuild::Built> {
+        Err(super::built_elsewhere(id, f, "is built from its sketch"))
+    }
 }

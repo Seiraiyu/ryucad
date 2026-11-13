@@ -314,7 +314,9 @@ pub struct Placed {
 
 /// A mate: its form (`revolute` and so on), its connectors as requests
 /// give them, its state in the solve when it built (`well`,
-/// `redundant`), and both connectors' frames in the assembly as solved.
+/// `redundant`), both connectors' frames in the assembly as solved, its
+/// measured value as the tree says it (`4.0°`, `12.5 mm`), the stop it
+/// rests on (`at max`), and its limits.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MateInfo {
     pub form: String,
@@ -322,9 +324,111 @@ pub struct MateInfo {
     pub b: String,
     pub state: Option<String>,
     pub frames: Option<[Pose; 2]>,
+    pub value: Option<String>,
+    pub stop: Option<String>,
+    pub limits: MateLimits,
+}
+
+/// A mate's stops, in radians and meters: each value's `(min, max)`,
+/// either bound missing for a one-sided stop.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MateLimits {
+    pub angle: Option<(Option<f64>, Option<f64>)>,
+    pub distance: Option<(Option<f64>, Option<f64>)>,
+}
+
+impl MateLimits {
+    /// From a report's `mate.limits` (`{angle_rad: {min, max},
+    /// distance_m: …}`); none when it has none.
+    pub fn from_json(v: &Value) -> MateLimits {
+        let range = |r: &Value| {
+            r.is_object()
+                .then(|| (r["min"].as_f64(), r["max"].as_f64()))
+        };
+        MateLimits {
+            angle: range(&v["angle_rad"]),
+            distance: range(&v["distance_m"]),
+        }
+    }
+}
+
+/// The lines a mate's limits draw on its frames (`a`'s frame), `length`
+/// being the frames' axis length:
+/// - an angle range: an arc of 0.8 `length` in `a`'s xy plane from min
+///   to max about `a`'s z (from `a`'s x), and a tick from the origin
+///   out to each bound;
+/// - a distance range: a bar along `a`'s z from min to max, and a tick
+///   across (along `a`'s x, a tenth of `length` each way) at each bound.
+///
+/// One-sided ranges draw their tick alone. Each line is a polyline.
+pub fn limit_lines(frames: &[Pose; 2], limits: &MateLimits, length: f64) -> Vec<Vec<[f64; 3]>> {
+    let a = &frames[0];
+    let at = |p: [f64; 3], v: [f64; 3], s: f64| [0, 1, 2].map(|k| p[k] + v[k] * s);
+    let mut out = Vec::new();
+    if let Some((min, max)) = limits.angle {
+        let r = 0.8 * length;
+        if let (Some(lo), Some(hi)) = (min, max) {
+            out.push(ryucad::mate::arc(a.origin, a.x, a.y, r, lo, hi, 32));
+        }
+        for b in [min, max].into_iter().flatten() {
+            let end = ryucad::mate::arc(a.origin, a.x, a.y, r, b, b, 1)[0];
+            out.push(vec![a.origin, end]);
+        }
+    }
+    if let Some((min, max)) = limits.distance {
+        if let (Some(lo), Some(hi)) = (min, max) {
+            out.push(vec![at(a.origin, a.z, lo), at(a.origin, a.z, hi)]);
+        }
+        for b in [min, max].into_iter().flatten() {
+            let c = at(a.origin, a.z, b);
+            out.push(vec![at(c, a.x, -0.1 * length), at(c, a.x, 0.1 * length)]);
+        }
+    }
+    out
 }
 
 impl MateInfo {
+    /// The tree's words for a report's `value`: the angle to a tenth of a
+    /// degree, the distance to a thousandth of its unit, trailing zeros
+    /// dropped; `None` when it has neither.
+    pub fn value_text(v: &Value) -> Option<String> {
+        let mut out = Vec::new();
+        if let Some(a) = v["angle_deg"].as_f64() {
+            out.push(format!("{a:.1}°"));
+        }
+        if let Some(d) = v["distance"].as_str() {
+            let (n, unit) = d.split_once(' ').unwrap_or((d, ""));
+            match n.parse::<f64>() {
+                Ok(x) => {
+                    let s = format!("{x:.3}");
+                    let s = s.trim_end_matches('0').trim_end_matches('.');
+                    out.push(format!("{s} {unit}").trim_end().to_owned());
+                }
+                Err(_) => out.push(d.to_owned()),
+            }
+        }
+        (!out.is_empty()).then(|| out.join(", "))
+    }
+
+    /// The tree's words for a report's `limit`: `at max` with one stop,
+    /// `angle at max, distance at min` with two; `None` when free.
+    pub fn stop_text(v: &Value) -> Option<String> {
+        let stops: Vec<(&str, &str)> = ["angle", "distance"]
+            .into_iter()
+            .filter_map(|k| Some((k, v[k].as_str()?)))
+            .collect();
+        match stops.as_slice() {
+            [] => None,
+            [(_, s)] => Some(format!("at {s}")),
+            many => Some(
+                many.iter()
+                    .map(|(k, s)| format!("{k} at {s}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        }
+    }
+
     /// The instance path a connector is on: `base`, `ring:2/pin`. The
     /// connector is `<assembly>/<path>[/<solid>/<name>]`.
     pub fn path_of(connector: &str) -> String {
@@ -597,6 +701,9 @@ impl Part {
                                 };
                                 [pose(&f["a"]), pose(&f["b"])]
                             }),
+                            value: MateInfo::value_text(&m["value"]),
+                            stop: MateInfo::stop_text(&m["limit"]),
+                            limits: MateLimits::from_json(&m["limits"]),
                         }),
                         copies: f["copies"]
                             .as_array()
@@ -1731,6 +1838,21 @@ impl Model {
             .frames
     }
 
+    /// The limits of the mate `key` names, when it is a mate shown.
+    pub fn mate_limits(&self, key: &BodyKey) -> Option<MateLimits> {
+        if !self.shown().contains(&key.0.as_str()) {
+            return None;
+        }
+        Some(
+            self.parts
+                .get(&key.0)?
+                .feature(&key.1)?
+                .mate
+                .as_ref()?
+                .limits,
+        )
+    }
+
     /// The bodies choosing `key` frames: in an assembly, every solid of
     /// every occurrence under the instance (or pattern) it names, at any
     /// depth (issue #107); else the solid it shows in, or itself (a
@@ -1785,6 +1907,46 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mates_limits_draw_an_arc_or_a_bar_on_its_frame() {
+        let a = Pose::IDENTITY;
+        let frames = [a, a];
+        // An angle from -90° to 90°: an arc through +x, ticks at both ends.
+        let l = MateLimits {
+            angle: Some((
+                Some(-core::f64::consts::FRAC_PI_2),
+                Some(core::f64::consts::FRAC_PI_2),
+            )),
+            distance: None,
+        };
+        let lines = limit_lines(&frames, &l, 1.0);
+        assert_eq!(lines.len(), 3, "an arc and two ticks");
+        let arc = &lines[0];
+        let near = |p: [f64; 3], q: [f64; 3]| (0..3).all(|k| (p[k] - q[k]).abs() < 1e-12);
+        assert!(near(arc[0], [0.0, -0.8, 0.0]) && near(*arc.last().unwrap(), [0.0, 0.8, 0.0]));
+        assert!(arc.iter().any(|p| near(*p, [0.8, 0.0, 0.0])));
+        assert_eq!(lines[1], vec![[0.0; 3], arc[0]]);
+        // One-sided: the tick alone.
+        let one = MateLimits {
+            angle: Some((None, Some(0.0))),
+            distance: None,
+        };
+        assert_eq!(
+            limit_lines(&frames, &one, 1.0),
+            [vec![[0.0; 3], [0.8, 0.0, 0.0]]]
+        );
+        // A distance from -1 to 2 along z: a bar, and a cross tick at each end.
+        let d = MateLimits {
+            angle: None,
+            distance: Some((Some(-1.0), Some(2.0))),
+        };
+        let lines = limit_lines(&frames, &d, 1.0);
+        assert_eq!(lines[0], vec![[0.0, 0.0, -1.0], [0.0, 0.0, 2.0]]);
+        assert_eq!(lines[1], vec![[-0.1, 0.0, -1.0], [0.1, 0.0, -1.0]]);
+        assert_eq!(lines.len(), 3);
+        assert!(limit_lines(&frames, &MateLimits::default(), 1.0).is_empty());
+    }
 
     #[test]
     fn inserts_and_deletes_are_read_and_named() {

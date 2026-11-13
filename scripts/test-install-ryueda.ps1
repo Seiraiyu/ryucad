@@ -99,6 +99,8 @@ try {
     if (Get-Command git -ErrorAction SilentlyContinue) {
         $textconv = & git config -f (Join-Path $r.Home '.gitconfig') diff.ryueda.textconv
         Test-Case 'registers ryueda''s textconv with Git' ($textconv -match '/\.ryueda/bin/ryueda\.exe'' git textconv$') $r
+        $driver = & git config -f (Join-Path $r.Home '.gitconfig') merge.ryueda.driver
+        Test-Case 'registers ryueda''s merge driver with Git' ($driver -match '/\.ryueda/bin/ryueda\.exe'' git merge-driver %O %A %B %P$') $r
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     Test-Case 'user PATH gets the bin directory' (($userPath -split ';') -contains (Split-Path $exe)) $r
