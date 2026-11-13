@@ -889,4 +889,66 @@ mod tests {
         let e = crate::testing::call(&mut s, "feature.types", json!({"type": "gear"})).unwrap_err();
         assert_eq!(e.code, Code::UnknownFeatureType);
     }
+
+    /// The rebuild asks the kinds (ryucad 27.D): `rebuild_with`,
+    /// `build_feature` and `kind::bodies_read` name no feature type.
+    #[test]
+    fn the_rebuild_matches_on_no_type() {
+        let rebuild = include_str!("../rebuild.rs");
+        let kind = include_str!("../kind.rs");
+        for (file, src, head) in [
+            ("rebuild.rs", rebuild, "\nfn rebuild_with("),
+            ("rebuild.rs", rebuild, "\npub fn build_feature("),
+            ("kind.rs", kind, "\npub fn bodies_read("),
+        ] {
+            let start = src.find(head).unwrap_or_else(|| panic!("{file}: no{head}"));
+            let body = &src[start..];
+            let end = body[1..]
+                .find("\n}\n")
+                .expect("a top-level fn ends at a column-0 brace");
+            let body = &body[..end + 1];
+            for pat in ["Feature::", "F::"] {
+                assert!(
+                    !body.contains(pat),
+                    "{file}: {} matches on a type ({pat}); ask the kind",
+                    head.trim().trim_end_matches('(')
+                );
+            }
+        }
+    }
+
+    /// `build_feature` builds a primitive alone and refuses every other
+    /// type with the message it always gave (27.D moved its arms into
+    /// the kinds' `alone`).
+    #[test]
+    fn a_feature_alone_is_a_primitive_or_its_old_refusal() {
+        let (_dir, mut s) = crate::testing::fresh();
+        crate::testing::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for f in [
+            json!({"type": "sphere", "id": "b", "params": {"radius": 1}}),
+            json!({"type": "sketch", "id": "s"}),
+            json!({"type": "extrude", "id": "e", "sketch": "s", "extent": {"length": 1}}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            crate::testing::call(&mut s, "feature.add", f).unwrap();
+        }
+        let p = s.project().part(&Id::parse("p", "part").unwrap()).unwrap();
+        let at = |name: &str| {
+            let id = Id::parse(name, "feature").unwrap();
+            let f = p.features[&id].as_ref().unwrap().clone();
+            (id, f)
+        };
+        let (b, sphere) = at("b");
+        assert!(crate::rebuild::build_feature(&p.id, &b, &sphere).is_ok());
+        for (name, message) in [
+            ("s", "sketch s makes no body of its own"),
+            ("e", "extrude e is built from its sketch"),
+        ] {
+            let (id, f) = at(name);
+            let e = crate::rebuild::build_feature(&p.id, &id, &f).unwrap_err();
+            assert_eq!((e.code, e.message.as_str()), (Code::Internal, message));
+            assert_eq!(e.details["feature"], name);
+        }
+    }
 }

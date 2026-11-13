@@ -470,4 +470,27 @@ mod tests {
         assert_eq!(e.details["role"], "targets");
         assert_eq!(e.details["feature"], "c");
     }
+
+    /// Where `feature.types`' table says a type needs a solid or a sheet
+    /// (`FeatureKind::body`), every body it reads wants that (ryucad
+    /// 27.D: the table can't replace `bodies_read`, which depends on the
+    /// fields, so the two are held together here).
+    #[test]
+    fn what_each_body_read_wants_agrees_with_the_types_table() {
+        use serde_json::json;
+        for v in [
+            json!({"type": "shell", "target": "w", "thickness": 1}),
+            json!({"type": "sew", "sheets": ["w", "v"], "tolerance": "0.01 mm", "solid": true}),
+        ] {
+            let f = feature(v);
+            let ty = f.type_name();
+            let needs = crate::feature::kind_of(&f).body(ty).needs;
+            assert!(needs.is_some(), "{ty} needs a kind of body");
+            let read = bodies_read(&f);
+            assert!(!read.is_empty(), "{ty} reads a body");
+            for r in read {
+                assert_eq!(r.want, needs, "{ty} {}", r.role);
+            }
+        }
+    }
 }
