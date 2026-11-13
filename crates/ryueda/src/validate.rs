@@ -922,6 +922,14 @@ fn settle(
         for (x, id) in &semantic {
             crate::clash::repair(at.root, files, x, id, &sides)?;
         }
+        // A repair may not add an error the merge didn't have.
+        if let Some(p) = at.project {
+            let after = project_over(at.root, files)?;
+            let added = crate::write::added_errors(&p.faults(), &after.faults());
+            if !added.is_empty() {
+                return Err(crate::write::refused("the repairs", &added));
+            }
+        }
     }
     if areas.is_empty() && stale.is_empty() {
         return Ok(resolved);

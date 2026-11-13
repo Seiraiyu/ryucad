@@ -1478,4 +1478,30 @@ pub(crate) mod tests {
             ("ours", vec!["blocks/b/nets/n.json".to_owned()]));
         assert_eq!(blame(&["rails/gnd.json".to_owned()], &sides).0, "both", "neither reached it");
     }
+
+    #[test]
+    fn a_repair_that_adds_an_error_is_refused_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        sda_joined_away(r, json!("sdb"));
+        // Ours also named a new net SDA, so bringing the old SDA back
+        // would make two.
+        crate::source::write_atomic(
+            &r.join("blocks/top/nets/sdx.json"),
+            crate::canonical::to_string(&json!({"kind": "ryueda.net", "format": 1, "name": "SDA"})),
+        )
+        .unwrap();
+        let mut s = Session::open(r).unwrap();
+        let before = std::fs::read(r.join("blocks/top/components/r3.json")).unwrap();
+        let fix = crate::proto::Resolution {
+            conflict: "blocks/top/components/r3.json#/pins/1".to_owned(),
+            choice: "repair".to_owned(),
+            value: None,
+            repair: Some("restore".to_owned()),
+        };
+        let e = crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap_err();
+        assert_eq!(e.code, Code::NetNameDuplicate, "{}", e.message);
+        assert!(!r.join("blocks/top/nets/sda.json").exists(), "nothing written");
+        assert_eq!(std::fs::read(r.join("blocks/top/components/r3.json")).unwrap(), before);
+    }
 }
