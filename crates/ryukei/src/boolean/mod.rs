@@ -3,15 +3,16 @@
 //!
 //! [`boolean`] combines a target body with any number of tool bodies, each
 //! placed by a rigid motion, in one pass (design 32): every tool is moved
-//! into place ([`place`]); the operands' faces are paired by a broad phase
-//! and intersected, and every place where they meet, and every edge they
-//! cut, goes into one table ([`table`]), so neighbouring faces can't
-//! disagree; each face is split in its parameter plane into pieces
-//! ([`crate::split`]); pieces are classified against the other operands
-//! by certified ray casts ([`classify`]); the operation keeps some of
-//! them, some reversed ([`select`]); the kept pieces are built into a
-//! new body through Euler operators ([`build`]); and what is left
-//! redundant (faces either side of an edge on one surface, vertices
+//! into place ([`place`]); a spline face's flat span lying on another
+//! operand's face is split off ([`flat`], #585); the operands' faces are
+//! paired by a broad phase and intersected, and every place where they
+//! meet, and every edge they cut, goes into one table ([`table`]), so
+//! neighbouring faces can't disagree; each face is split in its parameter
+//! plane into pieces ([`crate::split`]); pieces are classified against the
+//! other operands by certified ray casts ([`classify`]); the operation
+//! keeps some of them, some reversed ([`select`]); the kept pieces are
+//! built into a new body through Euler operators ([`build`]); and what is
+//! left redundant (faces either side of an edge on one surface, vertices
 //! between two edges on one curve) is merged ([`merge`]). The result's
 //! entities are named from the caller's keys and from which faces cut
 //! which, and the journal says what happened to every operand's
@@ -180,6 +181,9 @@ fn boolean_scoped_in(
         }
     }
     let ops = place::operands(target, tools)?;
+    // Flat spans of splines lying on another operand's face split off
+    // (design 551, #585); operands without the case are as they were.
+    let (ops, split) = flat::split_operands(ops, key);
     let named = |f: Fail| error(&ops, f);
     let table = table::build_capped(&ops, table::Scope::Operands, pair, m).map_err(named)?;
     let pieces = crate::split::split_all(&ops, &table, m).map_err(named)?;
@@ -200,7 +204,8 @@ fn boolean_scoped_in(
     };
     let (mut body, sources) = merged(key, &ops, &table, &kept, built, m).map_err(named)?;
     let tool_keys: Vec<ToolKey> = tools.iter().map(|t| t.key).collect();
-    let journal = names::name(
+    let mut journal = split;
+    journal.append(names::name(
         key,
         &ops,
         &tool_keys,
@@ -209,7 +214,7 @@ fn boolean_scoped_in(
         &mut body,
         &sources,
         None,
-    );
+    ));
     checked(&body)?;
     Ok((body, journal))
 }

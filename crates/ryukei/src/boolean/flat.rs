@@ -18,9 +18,6 @@
 //! edges. Where anything withholds the split the face is left as it was,
 //! so bodies without the case keep their bits.
 
-// Used from Tasks 5 and 6 of plan 18.B on; until then only its tests call it.
-#![allow(dead_code)]
-
 use crate::euler::{Corner, mef, semv, set_pcurve, set_surface, set_vertex_tolerance};
 use crate::geom::intersect2::{Meet2, crossings};
 use crate::geom::{
@@ -381,6 +378,44 @@ pub(crate) fn split_listed(
         }
     }
     out
+}
+
+/// [`split_off`] on every operand's spline faces whose flat span lies on
+/// the surface of another operand's face that its box meets: the operands
+/// with those faces split, and the journal of the splits, empty where
+/// none was. Each split is keyed by the boolean's key, the face's name and
+/// its operand's index, so copies of one body placed as two tools split
+/// apart.
+pub(crate) fn split_operands(mut ops: Vec<Body>, key: OpKey) -> (Vec<Body>, Journal) {
+    let mut journal = Journal::new();
+    for op in 0..ops.len() {
+        let faces: Vec<FaceId> = ops[op].faces().collect();
+        for f in faces {
+            for _ in 0..MOST {
+                let found = flat_spans(&ops[op], f).into_iter().find(|s| {
+                    ops.iter().enumerate().any(|(other, b)| {
+                        other != op
+                            && b.faces().any(|g| {
+                                crate::intersect::face_box(b, g).intersects(&s.bounds)
+                                    && coincident(&s.plane, &b.surfaces[b.faces[g].surface])
+                                        .is_some()
+                            })
+                    })
+                });
+                let Some(span) = found else {
+                    break;
+                };
+                let name = ops[op].faces[f].name;
+                let Some((split, _, j)) = split_off(&ops[op], flat_key(key, name, op), f, &span)
+                else {
+                    break;
+                };
+                ops[op] = split;
+                journal.append(j);
+            }
+        }
+    }
+    (ops, journal)
 }
 
 #[cfg(test)]
