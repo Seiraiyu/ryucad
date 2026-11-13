@@ -1212,7 +1212,12 @@ impl FeatureKind for Paths {
         )
     }
 
-    fn report(&self, part: &Part, f: &crate::doc::files::Feature) -> Value {
+    fn report(
+        &self,
+        part: &Part,
+        _unit: crate::units::Unit,
+        f: &crate::doc::files::Feature,
+    ) -> Value {
         crate::path::report(&part.id, path_of(f))
     }
 

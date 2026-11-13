@@ -154,6 +154,15 @@ fn check_resolved(
     crate::feature::kind_of(f).check(&cx, f)
 }
 
+/// A dry run's answer: the feature as it would be, sizes and all, with
+/// nothing written.
+fn dry(session: &Session, pid: &Id, fid: &Id, f: &Feature) -> Result<Value> {
+    let p = session.project().part(pid)?;
+    let unit = session.project().manifest.default_unit;
+    Ok(json!({"dry_run": true, "feature": feature_report(p, unit, fid, f)}))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn feature_add(
     session: &mut Session,
     part: &str,
@@ -162,6 +171,7 @@ pub(crate) fn feature_add(
     id: Option<&str>,
     position: &Position,
     expected: Option<&str>,
+    dry_run: bool,
 ) -> Result<Value> {
     let pid = part_id(part)?;
     let unit = session.project().manifest.default_unit;
@@ -266,12 +276,15 @@ pub(crate) fn feature_add(
         let q = proposed(p, &list, &[(&fid, &f)]);
         crate::mate::refuse_overconstrained(session, q)?;
     }
+    if dry_run {
+        return dry(session, &pid, &fid, &f);
+    }
     let assemblies = crate::mate::current(session, &pid)?;
     save(session, &pid, &[(&fid, &f)], list)?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let saved = session.project().part(&pid)?;
     let revision = &saved.revision;
-    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
+    let mut v = json!({"feature": feature_report(saved, session.project().manifest.default_unit, &fid, &f), "revision": revision});
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
     }
@@ -337,6 +350,7 @@ pub(crate) fn feature_edit(
     given: Given,
     expressions: &Map<String, Value>,
     expected: Option<&str>,
+    dry_run: bool,
 ) -> Result<Value> {
     let (pid, fid) = (part_id(part)?, feature_id(id)?);
     let unit = session.project().manifest.default_unit;
@@ -426,6 +440,9 @@ pub(crate) fn feature_edit(
         let q = proposed(p, &list, &[(&fid, &f)]);
         crate::mate::refuse_overconstrained(session, q)?;
     }
+    if dry_run {
+        return dry(session, &pid, &fid, &f);
+    }
     let before = crate::sketch::current(session, &pid)?;
     let assemblies = crate::mate::current(session, &pid)?;
     save(session, &pid, &[(&fid, &f)], list)?;
@@ -439,7 +456,7 @@ pub(crate) fn feature_edit(
     warnings.extend(followed);
     let saved = session.project().part(&pid)?;
     let revision = &saved.revision;
-    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
+    let mut v = json!({"feature": feature_report(saved, session.project().manifest.default_unit, &fid, &f), "revision": revision});
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);
     }
@@ -719,7 +736,8 @@ pub(crate) fn feature_show(
     let (_, session) = session.at(rev.as_deref())?;
     let (part, fid) = (part_id(&part)?, feature_id(&id)?);
     let p = session.project().part(&part)?;
-    let mut v = feature_report(p, &fid, feature(p, &fid)?);
+    let unit = session.project().manifest.default_unit;
+    let mut v = feature_report(p, unit, &fid, feature(p, &fid)?);
     // The revision it was read at: an edit made from it says so.
     v["revision"] = json!(p.revision);
     Ok(v)

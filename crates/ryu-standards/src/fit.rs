@@ -1,14 +1,19 @@
 //! ISO 286 limits and fits: standard tolerance grades, and the limit
 //! deviations of a tolerance class ("H7", "g6") at a nominal size.
 //!
-//! Every value is table data, never a formula. The tables are those of
-//! ISO 286-1:1988 (Table 1, standard tolerances; Table 2, fundamental
-//! deviations of shafts; Table 3, fundamental deviations of holes and the
-//! values of Δ; Annex A Table 5, IT01 and IT0), as reproduced word for word by
-//! IS 919 (Part 1):1993, and checked against ISO 286-2:1988's limit deviation
-//! tables (IS 919 (Part 2):1993). The tolerance grades were checked against
-//! Wikipedia's "IT Grade" table (which reproduces ISO 286-1 Table 1) and the
-//! `saucecode/ISO286` tables; A to H and Δ against `saucecode/ISO286` too.
+//! Sources: every value is table data, never a formula. The tables are
+//! those of ISO 286-1:1988 (Table 1, standard tolerances; Table 2,
+//! fundamental deviations of shafts; Table 3, fundamental deviations of
+//! holes and the values of Δ; Annex A Table 5, IT01 and IT0) as the
+//! Bureau of Indian Standards reproduces them word for word in IS 919
+//! (Part 1):1993, published freely by Public.Resource.Org
+//! (law.resource.org/pub/in/bis/S01/is.919.1.1993.pdf), and checked
+//! against ISO 286-2:1988's limit deviation tables as IS 919
+//! (Part 2):1993 reproduces them. The tolerance grades were checked
+//! against Wikipedia's "IT Grade" table and the `saucecode/ISO286`
+//! tables; A to H and Δ against `saucecode/ISO286` too. These tables
+//! came to ryu-standards from `ryucad::drawing::fit` unchanged (ryucad
+//! 28, design 533).
 //!
 //! Where ISO 286-2 prints a class differently from ISO 286-1's rules, ISO
 //! 286-2 is followed:

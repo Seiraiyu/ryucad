@@ -156,7 +156,7 @@ impl FeatureKind for Primitives {
         }
     }
 
-    fn report(&self, _part: &Part, f: &Feature) -> Value {
+    fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         let Feature::Primitive(p) = f else {
             unreachable!("a primitive")
         };

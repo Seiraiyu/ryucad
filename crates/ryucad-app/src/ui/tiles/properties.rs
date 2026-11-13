@@ -70,6 +70,14 @@ pub(crate) fn blend(ui: &mut egui::Ui, b: &mut crate::core::edit::BlendForm) -> 
 pub(crate) fn hole(ui: &mut egui::Ui, h: &mut crate::core::edit::HoleForm) -> Keys {
     let keys = form::grid(ui, "hole", |rows| {
         rows.read_only("form", &h.form, false, None);
+        if let Some(spec) = &h.spec {
+            rows.read_only("spec", spec, true, Some(spec));
+        }
+        // What the rebuild worked out, each with where it came from; an
+        // override is a written size, edited below.
+        for (label, value, source) in &h.derived {
+            rows.read_only(label, &format!("{value} ({source})"), false, None);
+        }
         for (_, f) in &mut h.sizes {
             let name = f.name.clone();
             rows.quantity(&name, f);
@@ -849,6 +857,18 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         })
         .map(|t| t.angles.clone())
         .unwrap_or_default();
+    // An insert's source's newest official label, and what moving its pin
+    // changes (design 521).
+    let newest = ws
+        .form
+        .as_ref()
+        .filter(|f| f.foreign.is_none())
+        .and_then(|f| f.of.as_ref())
+        .and_then(|of| ws.states.by_part.get(of))
+        .filter(|s| matches!(s["state"].as_str(), Some("released" | "modified")))
+        .and_then(|s| s["label"].as_str())
+        .map(str::to_owned);
+    let preview = ws.insert_preview.clone();
     let Some(form) = &mut ws.form else {
         crate::ui::tiles::empty(
             ui,
@@ -872,8 +892,13 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     form::heading(ui, icon, &form.feature, form.dirty());
     ui.label(format!("{} in part {}", form.ty, form.part));
     if let Some(d) = &dependency {
+        let verb = if form.of.is_some() {
+            "inserts"
+        } else {
+            "places"
+        };
         ui.weak(format!(
-            "places a part of dependency {d}: its official labels only"
+            "{verb} a part of dependency {d}: its official labels only"
         ));
     }
     match form::banner(ui, &form.feature, &form.changed) {
@@ -932,6 +957,35 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         keys.apply |= k.apply;
         keys.revert |= k.revert;
     }
+    // An insert: what it inserts, which the pin and placement below read.
+    if let Some(of) = &form.of {
+        let shown = match &dependency {
+            Some(d) => format!("{d}:{of}"),
+            None => of.clone(),
+        };
+        form::grid(ui, "insert", |rows| {
+            rows.read_only("inserts", &shown, false, None);
+        });
+        if let (Some(n), Some(rev)) = (&newest, form.rev.as_mut())
+            && rev.chosen != *n
+            && ui
+                .button(format!("Update to {n}"))
+                .on_hover_text(
+                    "Choose its source\u{2019}s newest official release: what moving the pin changes shows before you apply it",
+                )
+                .clicked()
+        {
+            rev.chosen = n.clone();
+        }
+        if let Some(p) = preview
+            .as_ref()
+            .filter(|p| p.key.0 == form.part && p.key.1 == form.feature)
+        {
+            for line in p.lines() {
+                ui.weak(line);
+            }
+        }
+    }
     if let Some(i) = form.import.clone() {
         let key = (form.part.clone(), form.feature.clone());
         let built = ws
@@ -953,7 +1007,10 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     // What it acts on: none for a new solid, nor a surface.
     let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new")
         || form.surface.as_ref().is_some_and(|f| f.chosen);
-    for p in [&mut form.targets, &mut form.tools].into_iter().flatten() {
+    for p in [&mut form.targets, &mut form.tools, &mut form.solids]
+        .into_iter()
+        .flatten()
+    {
         if !new {
             picks(ui, p);
         }
@@ -987,6 +1044,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     if let Some(e) = card {
         ws.open_card(e);
     }
+    ws.preview_insert();
     names(ui, ws, &key);
 }
 

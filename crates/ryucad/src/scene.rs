@@ -33,8 +33,10 @@ pub fn meshes(
     let p = session.project().part(part)?;
     let solids = Solids::of(p);
     if let Some(f) = only {
-        let found = feature(p, f)?;
-        if found.sketch().is_none() && !solids.is_solid(f) {
+        // An inserted solid's key names no feature of its own: its
+        // insert's family holds it (design 521).
+        let sketch = !f.is_path() && feature(p, f)?.sketch().is_some();
+        if !sketch && !solids.is_solid(f) {
             return Err(rebuild::not_a_solid(p, &solids, f, "feature", f));
         }
     }
@@ -87,6 +89,53 @@ pub fn meshes(
             (id, r)
         })
         .collect())
+}
+
+/// Solid `solid` of `part` as feature `reader` read it, meshed: the last
+/// state its chain built before `reader`, shown or not (a deleted solid's
+/// ghost, ryucad 25.B).
+pub fn mesh_before(
+    session: &mut Session,
+    part: &Id,
+    solid: &Id,
+    reader: &Id,
+    quality: mesh::Quality,
+) -> Result<mesh::Meshed> {
+    let p = session.project().part(part)?;
+    feature(p, reader)?;
+    let solids = Solids::of(p);
+    if !solids.is_solid(solid) {
+        return Err(rebuild::not_a_solid(p, &solids, solid, "feature", solid));
+    }
+    let features: BTreeMap<Id, Feature> = p
+        .features
+        .iter()
+        .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
+        .collect();
+    let result = session.rebuilt(part)?;
+    let Some((f, b)) = result.read_by(&solids, solid, reader) else {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("{reader} reads no {solid} of {part}: nothing of it built before {reader}"),
+        )
+        .with("part", part)
+        .with("feature", solid)
+        .with("before", reader));
+    };
+    let b = b.as_ref().clone();
+    let job = session.job.clone();
+    let mesh = session
+        .meshes
+        .get_all_for(&[(&features[&f], &b)], quality, mesh_budget(), &job)?
+        .pop()
+        .expect("one mesh for one body");
+    let warning = mesh::unmeshed_warning(part, solid, &b, &mesh);
+    Ok(mesh::Meshed {
+        body: b.body,
+        hash: b.hash,
+        mesh,
+        warning,
+    })
 }
 
 /// The points of the given entities, or of the whole model when there
@@ -228,6 +277,8 @@ pub(crate) struct RenderAsk {
     pub(crate) sketches: bool,
     /// Draw the shown parts' datums.
     pub(crate) datums: bool,
+    /// Draw tapped holes' cosmetic threads, a ring at each end.
+    pub(crate) threads: bool,
     pub(crate) rev: Option<String>,
     pub(crate) frame: Vec<String>,
     pub(crate) compare: Option<String>,
@@ -277,6 +328,7 @@ impl RenderAsk {
             labels: false,
             sketches: true,
             datums: false,
+            threads: false,
             rev: None,
             frame: Vec::new(),
             compare: None,
@@ -518,6 +570,7 @@ pub(crate) fn render_for_package(session: &mut Session, part: &Id, commit: &str)
         labels: false,
         sketches: true,
         datums: true,
+        threads: true,
         rev: Some(commit.to_owned()),
         frame: Vec::new(),
         compare: None,
@@ -835,6 +888,20 @@ pub(crate) fn render_scene(
                     continue;
                 }
                 g.add_path(&key, &m.chain(), span, marks.get(&key).map(|m| m.0));
+            }
+        }
+        if ask.threads
+            && let Ok(holes) = crate::holes::list(session, part, None)
+        {
+            for t in crate::thread::of(&holes) {
+                // A hidden solid's holes go with it.
+                let solid = t.faces.first().and_then(|f| f.split('/').nth(1));
+                if solid.is_some_and(|s| ask.hidden.contains(&format!("{part}/{s}"))) {
+                    continue;
+                }
+                for centre in [t.mouth, t.end] {
+                    g.add_ring(centre, t.axis, t.major / 2.0, None);
+                }
             }
         }
     }

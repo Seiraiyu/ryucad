@@ -152,7 +152,7 @@ impl FeatureKind for InstancePatterns {
         )
     }
 
-    fn report(&self, part: &Part, f: &Feature) -> Value {
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         let x = f.instance_pattern().expect("an instance pattern");
         let mut v = x.fields();
         for (role, c) in x.connectors() {

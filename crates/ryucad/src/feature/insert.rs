@@ -239,7 +239,7 @@ impl FeatureKind for Inserts {
         Ok(cx.read.take().expect("read before the part was borrowed"))
     }
 
-    fn report(&self, _part: &Part, f: &Feature) -> Value {
+    fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         f.insert().expect("an insert").fields()
     }
 }

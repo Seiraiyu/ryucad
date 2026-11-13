@@ -345,15 +345,66 @@ pub struct HoleForm {
     /// An up-to depth's target.
     pub target: Option<String>,
     pub points: Picks,
+    /// The hole's canonical spec, when the rebuild reported one.
+    pub spec: Option<String>,
+    /// Every size the hole is built from, read-only: label, value and
+    /// source (`rule`, `formula`, `override`, a standard, …).
+    pub derived: Vec<(String, String, String)>,
+}
+
+/// A hole's sizes as the rebuild worked them out (`feature.show`'s
+/// `sizes`), in the order the panel lists them.
+fn derived_sizes(s: &Value) -> Vec<(String, String, String)> {
+    let one = |x: &Value| (text(&x["value"]), text(&x["source"]));
+    let mut out = Vec::new();
+    let mut push = |label: &str, x: &Value| {
+        if x.is_object() {
+            let (v, src) = one(x);
+            out.push((label.to_owned(), v, src));
+        } else if let Some([lo, hi]) = x.as_array().map(Vec::as_slice) {
+            // Limits: least and greatest, the greatest open when null.
+            let (a, src) = one(lo);
+            let b = if hi.is_null() {
+                String::new()
+            } else {
+                text(&hi["value"])
+            };
+            out.push((
+                label.to_owned(),
+                format!("{a} – {b}").trim_end().to_owned(),
+                src,
+            ));
+        }
+    };
+    push("drill", &s["drill"]);
+    for (group, keys) in [
+        ("counterbore", ["diameter", "depth"]),
+        ("countersink", ["diameter", "angle"]),
+    ] {
+        for k in keys {
+            push(&format!("{group} {k}"), &s[group][k]);
+        }
+    }
+    push("major", &s["thread"]["major"]);
+    push("pitch", &s["thread"]["pitch"]);
+    push("minor", &s["thread"]["limits"]["minor"]);
+    push("fit", &s["fit"]["limits"]);
+    out
 }
 
 impl HoleForm {
     /// From a `feature.show` of a hole.
     fn from_show(v: &Value) -> HoleForm {
-        let mut sizes = vec![(
-            "diameter".to_owned(),
-            Field::new("diameter", text(&v["diameter"])),
-        )];
+        // A thread or fastener derives the drill: its diameter is an edit
+        // only when written (an override).
+        let intent = !v["thread"].is_null() || !v["fastener"].is_null();
+        let mut sizes = Vec::new();
+        if !intent || !v["diameter"].is_null() {
+            sizes.push((
+                "diameter".to_owned(),
+                Field::new("diameter", text(&v["diameter"])),
+            ));
+        }
         for (group, keys) in [
             ("counterbore", ["diameter", "depth"]),
             ("countersink", ["diameter", "angle"]),
@@ -393,6 +444,8 @@ impl HoleForm {
             length: Field::new("depth", length),
             target: v["depth"]["up_to"]["target"].as_str().map(str::to_owned),
             points: Picks::new("points", points),
+            spec: v["spec"].as_str().map(str::to_owned),
+            derived: derived_sizes(&v["sizes"]),
         }
     }
 
@@ -1325,6 +1378,9 @@ pub struct Form {
     pub op: Option<Choice>,
     pub target: Option<Choice>,
     pub tools: Option<Picks>,
+    /// A delete_body's solids, each to take out (adding one is an agent's
+    /// work).
+    pub solids: Option<Picks>,
     /// A fillet's or chamfer's groups.
     pub blend: Option<BlendForm>,
     /// A hole's sizes, depth and points.
@@ -1366,6 +1422,8 @@ pub struct Form {
     /// For an instance of another project's part: that project's ID.
     /// Its revision offers only its official labels (never `working`).
     pub foreign: Option<String>,
+    /// An insert's source part (design 521): shown, never edited here.
+    pub of: Option<String>,
     /// An import's file, hash, product and body: shown, never edited
     /// (`ryucad import` writes imports).
     pub import: Option<crate::core::model::ImportInfo>,
@@ -1438,9 +1496,10 @@ impl Form {
             .collect();
         let ty = text(&v["type"]);
         let instance = ty == "instance";
+        let insert = ty == "insert";
         let foreign = v["project"]
             .as_str()
-            .filter(|_| instance)
+            .filter(|_| instance || insert)
             .map(str::to_owned);
         // An instance's pose is its placement, the origin in the
         // project's unit (issue #108).
@@ -1457,7 +1516,19 @@ impl Form {
             let axis = |a: &Value| -> Vec<String> { (0..3).map(|i| pose_number(&a[i])).collect() };
             json!({"origin": [o(0), o(1), o(2)], "z": axis(&p["z"]), "x": axis(&p["x"])})
         });
-        let p = pose.as_ref().unwrap_or(&v["placement"]);
+        // An insert at the identity writes no placement: read it as one,
+        // so it can be moved (design 521).
+        let zero = format!("0 {}", unit.as_str());
+        let identity = json!({
+            "origin": [zero.clone(), zero.clone(), zero],
+            "z": ["0", "0", "1"],
+            "x": ["1", "0", "0"],
+        });
+        let p = match pose.as_ref() {
+            Some(p) => p,
+            None if insert && !v["placement"].is_object() => &identity,
+            None => &v["placement"],
+        };
         let strings =
             |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().map(text).collect() };
         let acts = matches!(
@@ -1531,6 +1602,7 @@ impl Form {
                 .then(|| Choice::new("op", &["unite", "subtract", "intersect"], text(&v["op"]))),
             target: boolean.then(|| Choice::new("target", &[], text(&v["target"]))),
             tools: boolean.then(|| Picks::new("tools", strings(&v["tools"]))),
+            solids: (ty == "delete_body").then(|| Picks::new("solids", strings(&v["solids"]))),
             blend,
             hole,
             pattern,
@@ -1546,7 +1618,7 @@ impl Form {
             surface,
             surface_form,
             tweak,
-            rev: instance.then(|| {
+            rev: (instance || insert).then(|| {
                 let read = match v["rev"]["label"].as_str() {
                     Some(l) => l.to_owned(),
                     None => "working".to_owned(),
@@ -1559,6 +1631,7 @@ impl Form {
                 c
             }),
             foreign,
+            of: insert.then(|| text(&v["part"])),
             fixed: instance.then(|| Flag {
                 name: "fixed".to_owned(),
                 read: v["fixed"] == true,
@@ -1796,7 +1869,7 @@ impl Form {
                 .flatten()
                 .any(Choice::dirty)
             || self.fixed.as_ref().is_some_and(Flag::dirty)
-            || [&self.targets, &self.tools]
+            || [&self.targets, &self.tools, &self.solids]
                 .into_iter()
                 .flatten()
                 .any(Picks::dirty)
@@ -1842,7 +1915,10 @@ impl Form {
         if let Some(f) = &mut self.fixed {
             f.chosen = f.read;
         }
-        for p in [&mut self.targets, &mut self.tools].into_iter().flatten() {
+        for p in [&mut self.targets, &mut self.tools, &mut self.solids]
+            .into_iter()
+            .flatten()
+        {
             p.chosen.clone_from(&p.read);
         }
         if let Some(e) = &mut self.extent {
@@ -1937,6 +2013,7 @@ impl Form {
             op: chosen(&self.op),
             target: chosen(&self.target),
             tools: picked(&self.tools),
+            solids: picked(&self.solids),
             groups: blend
                 .filter(|b| b.groups_dirty())
                 .map(BlendForm::groups_json),
@@ -2032,6 +2109,7 @@ impl Form {
             fields: self.fields_given()?,
             expressions: Default::default(),
             expected_revision: Some(self.revision.clone()),
+            dry_run: false,
         })
     }
 
@@ -2186,6 +2264,96 @@ impl DimForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deletes_solids_are_taken_out_one_by_one() {
+        let shown = json!({"id": "d", "type": "delete_body", "revision": "r1",
+                           "solids": ["brd/boss", "lid"]});
+        let mut f = Form::from_show_in("e", &shown, Unit::Mm);
+        let s = f.solids.as_mut().unwrap();
+        assert_eq!(s.read, ["brd/boss", "lid"]);
+        s.toggle("lid");
+        assert!(f.dirty());
+        let Request::FeatureEdit { fields, .. } = f.request().unwrap() else {
+            panic!("an edit")
+        };
+        assert_eq!(fields.solids, Some(vec!["brd/boss".to_owned()]));
+        f.revert();
+        assert!(!f.dirty());
+    }
+
+    #[test]
+    fn an_inserts_form_edits_its_pin_and_its_placement_from_the_identity() {
+        let shown = json!({"id": "brd", "type": "insert", "revision": "r1",
+                           "part": "pcb", "rev": {"label": "A"}});
+        let mut f = Form::from_show_in("e", &shown, Unit::Mm);
+        assert_eq!(f.of.as_deref(), Some("pcb"));
+        let rev = f.rev.as_ref().unwrap();
+        assert_eq!(
+            (rev.read.as_str(), rev.options.clone()),
+            ("A", vec!["working".to_owned(), "A".to_owned()])
+        );
+        f.offer_revs(&["B".to_owned(), "A".to_owned()]);
+        assert_eq!(f.rev.as_ref().unwrap().options, ["working", "A", "B"]);
+        // At the identity its placement still reads, so it can be moved.
+        assert!(f.placed());
+        assert_eq!(f.origin[2].read, "0 mm");
+        f.origin[2].text = "20 mm".into();
+        f.rev.as_mut().unwrap().chosen = "B".into();
+        let Request::FeatureEdit {
+            placement, fields, ..
+        } = f.request().unwrap()
+        else {
+            panic!("an edit")
+        };
+        let p = placement.unwrap();
+        assert_eq!(p.origin.unwrap()[2], json!("20 mm"));
+        assert!(p.z.is_none() && p.x.is_none());
+        assert_eq!(fields.rev.as_deref(), Some("B"));
+        // Another project's part offers only its labels.
+        let foreign = json!({"id": "brd", "type": "insert", "revision": "r1",
+                             "part": "pcb", "project": "aa", "rev": {"label": "A"}});
+        let f = Form::from_show_in("e", &foreign, Unit::Mm);
+        assert_eq!(f.foreign.as_deref(), Some("aa"));
+        assert_eq!(f.rev.unwrap().options, ["A"]);
+    }
+
+    #[test]
+    fn a_holes_derived_sizes_show_read_only() {
+        let show = json!({"id": "h", "type": "hole", "form": "simple",
+            "spec": "M6x1.0-6H THRU", "thread": {"standard": "iso_metric", "size": "M6"},
+            "sizes": {"drill": {"value": "5 mm", "m": 0.005, "source": "rule"},
+                      "thread": {"designation": "M6x1.0-6H",
+                                 "pitch": {"value": "1 mm", "m": 0.001, "source": "iso_261"},
+                                 "limits": {"minor": [{"value": "4.917 mm", "source": "formula"},
+                                                      {"value": "5.153 mm", "source": "formula"}]}}},
+            "depth": "through_all", "points": ["p1"]});
+        let f = HoleForm::from_show(&show);
+        assert_eq!(f.spec.as_deref(), Some("M6x1.0-6H THRU"));
+        assert_eq!(f.derived[0], ("drill".into(), "5 mm".into(), "rule".into()));
+        assert!(
+            f.derived
+                .iter()
+                .any(|(l, v, _)| l == "pitch" && v == "1 mm")
+        );
+        assert!(
+            f.derived
+                .iter()
+                .any(|(l, v, s)| l == "minor" && v == "4.917 mm – 5.153 mm" && s == "formula")
+        );
+        assert!(
+            f.sizes.iter().all(|(k, _)| k != "diameter"),
+            "a derived drill isn't an edit"
+        );
+        // A hole without intent edits its diameter as before.
+        let plain = json!({"id": "c", "type": "hole", "form": "simple", "diameter": "6 mm",
+                           "spec": "DIA 6 THRU",
+                           "sizes": {"drill": {"value": "6 mm", "m": 0.006, "source": "override"}},
+                           "depth": "through_all", "points": ["p1"]});
+        let f = HoleForm::from_show(&plain);
+        assert_eq!(f.sizes[0].0, "diameter");
+        assert_eq!(f.derived[0].2, "override");
+    }
 
     #[test]
     fn a_shells_thickness_direction_open_faces_and_groups_are_edited() {

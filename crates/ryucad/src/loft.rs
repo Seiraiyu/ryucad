@@ -1421,7 +1421,12 @@ impl FeatureKind for Lofts {
         Ok(f)
     }
 
-    fn report(&self, part: &Part, f: &crate::doc::files::Feature) -> Value {
+    fn report(
+        &self,
+        part: &Part,
+        _unit: crate::units::Unit,
+        f: &crate::doc::files::Feature,
+    ) -> Value {
         crate::loft::feature_report(&part.id, f.loft().expect("a loft"))
     }
 

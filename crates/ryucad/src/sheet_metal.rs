@@ -1200,7 +1200,7 @@ impl FeatureKind for SheetMetal {
         crate::sheet_metal::from_given(ty, current, &cx.given.fields, cx.part, cx.unit, cx.env)
     }
 
-    fn report(&self, part: &Part, f: &Feature) -> Value {
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         crate::sheet_metal::report(part, f)
     }
 

@@ -159,7 +159,7 @@ impl FeatureKind for Sketches {
         }
     }
 
-    fn report(&self, part: &Part, f: &Feature) -> Value {
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         let Feature::Sketch(s) = f else {
             unreachable!("a sketch")
         };

@@ -92,7 +92,7 @@ impl FeatureKind for Deletes {
         }
     }
 
-    fn report(&self, _part: &Part, f: &Feature) -> Value {
+    fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         let Feature::DeleteBody(d) = f else {
             unreachable!("a delete_body")
         };

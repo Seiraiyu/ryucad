@@ -12,6 +12,7 @@
 //! parts/<part>/views/<view>.json     (optional: named views)
 //! parts/<part>/appearance.json      (optional: colours and opacities)
 //! parts/<asm>/explodes/<explode>.json (optional: exploded views)
+//! parts/<asm>/motions/<motion>.json (optional: motions to sweep)
 //! parts/<part>/drawings/<drawing>.json (optional: 2D drawings)
 //! templates/<template>.json         (optional: drawing templates)
 //! releases/<part>/<label>.json      (ryupdm's release records)
@@ -82,7 +83,7 @@ pub struct TemplateFile {
 }
 
 /// The files at the project's root that a session tracks.
-pub const ROOT_FILES: [&str; 7] = [
+pub const ROOT_FILES: [&str; 8] = [
     MANIFEST,
     ATTRIBUTES,
     PDM_CONFIG,
@@ -90,6 +91,7 @@ pub const ROOT_FILES: [&str; 7] = [
     super::lock::LOCK,
     PARAMETERS,
     super::drawing_lint::DRAWING_LINT,
+    super::hole_standards::HOLE_STANDARDS,
 ];
 
 /// The tag of the piece of a part's revision holding the project
@@ -130,6 +132,12 @@ pub struct Project {
     /// The root `parameters.json` as read: a part reading a project
     /// parameter while it can't be read hashes it.
     parameters_bytes: Option<Vec<u8>>,
+    /// `hole_standards.json`, if the project has one, or why it can't be
+    /// used: the house standards and gap entries holes read.
+    pub hole_standards: Option<Arc<Result<super::hole_standards::HoleStandards>>>,
+    /// Its bytes as read: a part reading it while it can't be read hashes
+    /// them.
+    hole_standards_bytes: Option<Arc<[u8]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +150,8 @@ pub struct Part {
     /// The parameters' values, which the features were evaluated with:
     /// the part's own, and the project's around them.
     pub env: Env,
+    /// The project's hole standards, shared, as the part was loaded with.
+    pub hole_standards: Option<Arc<Result<super::hole_standards::HoleStandards>>>,
     /// The project parameters it reads (its features, its own parameters
     /// and its explodes name them, and what those read in turn), by name.
     pub project_reads: BTreeSet<String>,
@@ -171,6 +181,13 @@ pub struct Part {
     /// so it is known even for an explode that doesn't load
     /// (`doc::reads`).
     pub explode_uses: BTreeMap<Id, BTreeSet<String>>,
+    /// Its motions, by ID, or why each can't be used (in a part that
+    /// isn't an assembly, `wrong_part_kind`). Nothing a rebuild makes
+    /// reads them.
+    pub motions: BTreeMap<Id, Result<super::motion::MotionFile>>,
+    /// The parameters each motion file names, by ID, read from its
+    /// text (`doc::reads`).
+    pub motion_uses: BTreeMap<Id, BTreeSet<String>>,
     /// Its drawings, by ID, or why each can't be used. Nothing a rebuild
     /// makes reads them.
     pub drawings: BTreeMap<Id, Result<super::drawing::DrawingFile>>,
@@ -178,7 +195,7 @@ pub struct Part {
     /// the listed feature files in order, the hashes of the files their
     /// imports read, ryupdm's properties, the named views, the
     /// appearance, the explodes, the drawings and the project templates
-    /// they name, and the project parameters it reads: it changes
+    /// they name, the motions, and the project parameters it reads: it changes
     /// whenever anything that defines the part does.
     pub revision: String,
 }
@@ -528,6 +545,8 @@ impl Project {
                     file: self.parameters.clone(),
                     env: self.env.clone(),
                     bytes: self.parameters_bytes.clone(),
+                    standards: self.hole_standards.clone(),
+                    standards_bytes: self.hole_standards_bytes.clone(),
                 };
                 let part = load_part(
                     src,
@@ -589,11 +608,18 @@ struct Scope {
     file: Option<Result<ParametersFile>>,
     env: Env,
     bytes: Option<Vec<u8>>,
+    /// The project's hole standards (`hole_standards.json`), read with it.
+    standards: Option<Arc<Result<super::hole_standards::HoleStandards>>>,
+    standards_bytes: Option<Arc<[u8]>>,
 }
 
 /// The root `parameters.json`, if the project has one: a file that can't
 /// be read fails every name a part reads from it, naming the file.
 fn load_scope(src: &dyn Source) -> Result<Scope> {
+    let (standards, standards_bytes) = match super::hole_standards::read(src)? {
+        Some((bytes, parsed)) => (Some(Arc::new(parsed)), Some(Arc::from(bytes))),
+        None => (None, None),
+    };
     let Some(bytes) = src
         .read(PARAMETERS)
         .map_err(|e| e.with("path", PARAMETERS))?
@@ -602,6 +628,8 @@ fn load_scope(src: &dyn Source) -> Result<Scope> {
             file: None,
             env: Env::empty(),
             bytes: None,
+            standards,
+            standards_bytes,
         });
     };
     let file = read_json(src, PARAMETERS)
@@ -614,6 +642,8 @@ fn load_scope(src: &dyn Source) -> Result<Scope> {
         file: Some(file),
         env,
         bytes: Some(bytes),
+        standards,
+        standards_bytes,
     })
 }
 
@@ -778,6 +808,8 @@ impl Begun {
             manifest_bytes: self.manifest_bytes,
             lock_bytes: self.lock_bytes,
             parameters_bytes: self.scope.bytes,
+            hole_standards: self.scope.standards,
+            hole_standards_bytes: self.scope.standards_bytes,
         })
     }
 }
@@ -816,6 +848,7 @@ fn load_part(
             "part.json" | "features" => {}
             super::views::VIEWS if kind == Kind::Dir => {}
             super::explode::EXPLODES if kind == Kind::Dir => {}
+            super::motion::MOTIONS if kind == Kind::Dir => {}
             super::drawing::DRAWINGS if kind == Kind::Dir => {}
             super::appearance::APPEARANCE if kind == Kind::File => has_appearance = true,
             PARAMETERS => has_parameters = kind == Kind::File,
@@ -1046,6 +1079,38 @@ fn load_part(
             None => piece(&mut hasher, b"missing"),
         }
     }
+    // Motions, by ID, after the drawings: tagged, so an assembly
+    // without them hashes as before. Like explodes, they change no
+    // geometry, so the release content hash never reads them.
+    let mut motions = BTreeMap::new();
+    let mut motion_uses = BTreeMap::new();
+    let mut tagged = false;
+    let motions_dir = join(&dir, super::motion::MOTIONS);
+    for (name, kind) in src.list(&motions_dir)? {
+        let at = join(&motions_dir, &name);
+        let mid = name
+            .strip_suffix(".json")
+            .and_then(|stem| super::motion::check_id(stem).ok());
+        match mid {
+            Some(mid) if kind == Kind::File => {
+                let motion = read_json(src, &at).and_then(|(bytes, v)| {
+                    motion_uses.insert(mid.clone(), super::motion::names(&v));
+                    if !tagged {
+                        piece(&mut hasher, super::motion::MOTIONS.as_bytes());
+                        tagged = true;
+                    }
+                    piece(&mut hasher, mid.as_str().as_bytes());
+                    piece(&mut hasher, &bytes);
+                    if assembly == Some(false) {
+                        return Err(super::motion::not_an_assembly(id.as_str()));
+                    }
+                    super::motion::MotionFile::from_json(&v, manifest.default_unit, &env)
+                });
+                motions.insert(mid, motion.map_err(|e| e.with("path", &at)));
+            }
+            _ => unknown.push(at),
+        }
+    }
     // The project parameters it reads, and those its own shadow, last:
     // their text, tagged, so a part reading and shadowing none hashes as
     // before. While the project's file can't
@@ -1055,6 +1120,7 @@ fn load_part(
         _ => BTreeSet::new(),
     };
     let mut names: BTreeSet<String> = explode_uses.values().flatten().cloned().collect();
+    names.extend(motion_uses.values().flatten().cloned());
     for fid in file.as_ref().map_or(&[][..], |f| &f.features[..]) {
         names.extend(uses.get(fid).into_iter().flatten().cloned());
     }
@@ -1082,6 +1148,33 @@ fn load_part(
         }
         _ => {}
     }
+    // The hole standards its holes read, last and tagged, so a part whose
+    // holes read none hashes as before: each entry's canonical text, or
+    // "missing"; while the table can't be read, its bytes.
+    let reads = super::hole_standards::reads(features.values().filter_map(|f| f.as_ref().ok()));
+    if !reads.is_empty() {
+        piece(&mut hasher, super::hole_standards::TAG.as_bytes());
+        match scope.standards.as_deref() {
+            Some(Err(_)) => piece(
+                &mut hasher,
+                scope.standards_bytes.as_deref().unwrap_or_default(),
+            ),
+            table => {
+                for (kind, standard, size) in &reads {
+                    piece(&mut hasher, kind.key().as_bytes());
+                    piece(&mut hasher, standard.as_bytes());
+                    piece(&mut hasher, size.as_bytes());
+                    let entry = table
+                        .and_then(|t| t.as_ref().ok())
+                        .and_then(|t| t.entry_json(*kind, standard, size));
+                    match entry {
+                        Some(e) => piece(&mut hasher, super::canonical::to_string(&e).as_bytes()),
+                        None => piece(&mut hasher, b"missing"),
+                    }
+                }
+            }
+        }
+    }
     let revision = hasher.finalize().to_hex()[..32].to_owned();
     // A conflicted manifest leaves no part usable.
     let file = match manifest_fault {
@@ -1093,6 +1186,7 @@ fn load_part(
         file,
         parameters,
         env,
+        hole_standards: scope.standards.clone(),
         project_reads,
         features,
         uses,
@@ -1102,6 +1196,8 @@ fn load_part(
         appearance,
         explodes,
         explode_uses,
+        motions,
+        motion_uses,
         drawings,
         revision,
     })
@@ -1538,6 +1634,88 @@ mod tests {
     }
 
     #[test]
+    fn a_part_hashes_only_the_hole_standards_its_holes_read() {
+        use super::super::fixtures::house_standards as house;
+        use super::super::hole_standards::HOLE_STANDARDS;
+        let dir = sample();
+        let root = dir.path();
+        let p = id("p");
+        write_json(
+            &part_path(root, &p),
+            &PartFile::new(vec![id("a"), id("b"), id("h")]).to_json(),
+        )
+        .unwrap();
+        // A hole's file reads without its sketch or target being there.
+        let write_hole = |fields: serde_json::Value| {
+            let mut v = serde_json::json!({"format": 23, "kind": "ryucad.feature",
+                "type": "hole", "sketch": "s", "form": "simple", "depth": "through_all",
+                "targets": ["b"]});
+            for (k, x) in fields.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            write_json(&feature_path(root, &p, &id("h")), &v).unwrap();
+        };
+        let write_table = |t: &serde_json::Value| {
+            write_json(&root.join(HOLE_STANDARDS), t).unwrap();
+        };
+        write_hole(serde_json::json!({"fastener": {"standard": "house_cap", "size": "M5"}}));
+        let rev = || {
+            let project = Project::load(root).unwrap();
+            assert!(project.parts[&p].features[&id("h")].is_ok());
+            project.parts[&p].revision.clone()
+        };
+        let none = rev();
+        // A table without house_cap/M5: the part reads "missing" either way.
+        let mut t = house();
+        t["fasteners"].as_object_mut().unwrap().remove("house_cap");
+        write_table(&t);
+        assert_eq!(rev(), none, "an entry it doesn't read moves nothing");
+        write_table(&house());
+        let with = rev();
+        assert_ne!(with, none);
+        // Another fastener's change moves nothing; its own does.
+        let mut t = house();
+        t["fasteners"]["house_flat"]["M5"]["clearance"]["normal"] = serde_json::json!("5.7 mm");
+        write_table(&t);
+        assert_eq!(rev(), with);
+        t["fasteners"]["house_cap"]["M5"]["clearance"]["normal"] = serde_json::json!("5.7 mm");
+        write_table(&t);
+        assert_ne!(rev(), with);
+        // A part whose holes read nothing hashes as before the table existed.
+        write_hole(serde_json::json!({"diameter": "5 mm"}));
+        let plain = rev();
+        std::fs::remove_file(root.join(HOLE_STANDARDS)).unwrap();
+        assert_eq!(rev(), plain);
+    }
+
+    #[test]
+    fn the_hole_standards_are_read_with_the_project() {
+        use super::super::fixtures::house_standards as house;
+        use super::super::hole_standards::HOLE_STANDARDS;
+        let dir = sample();
+        let root = dir.path();
+        let mut p = Project::load(root).unwrap();
+        assert!(p.hole_standards.is_none());
+        fs::write(
+            root.join(HOLE_STANDARDS),
+            super::super::canonical::to_string(&house()),
+        )
+        .unwrap();
+        p.reload(&[HOLE_STANDARDS.to_owned()]).unwrap();
+        let t = p.hole_standards.as_deref().unwrap().as_ref().unwrap();
+        assert!(t.fastener("house_cap", "M5").is_some());
+        assert!(!p.parts.is_empty());
+        for part in p.parts.values() {
+            assert!(part.hole_standards.is_some());
+        }
+        // A table that doesn't read fails no load: only what reads it.
+        fs::write(root.join(HOLE_STANDARDS), "{").unwrap();
+        p.reload(&[HOLE_STANDARDS.to_owned()]).unwrap();
+        assert!(p.hole_standards.as_deref().unwrap().is_err());
+        assert!(ROOT_FILES.contains(&"hole_standards.json"));
+    }
+
+    #[test]
     fn ryupdm_files_are_known_and_reload_nothing_they_dont_define() {
         let dir = sample();
         let root = dir.path();
@@ -1788,6 +1966,74 @@ mod tests {
         // Gone again, the part hashes as it did.
         fs::remove_dir_all(&drawings).unwrap();
         assert_eq!(Project::load(root).unwrap().parts[&p].revision, rev);
+    }
+
+    #[test]
+    fn motions_load_with_their_assembly_and_count_in_its_revision() {
+        use super::super::files::PartKind;
+        let dir = sample();
+        let root = dir.path();
+        let a = id("asm");
+        let mut file = PartFile::new(Vec::new());
+        file.kind = PartKind::Assembly;
+        write_json(&part_path(root, &a), &file.to_json()).unwrap();
+        write_json(
+            &parameters_path(root, &a),
+            &serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                                "parameters": {"swing": "6 deg"}}),
+        )
+        .unwrap();
+        let before = Project::load(root).unwrap();
+        let rev = before.parts[&a].revision.clone();
+        assert!(before.parts[&a].motions.is_empty());
+        let motions = part_dir(root, &a).join("motions");
+        fs::create_dir_all(&motions).unwrap();
+        let twist = serde_json::json!({"format": 1, "kind": "ryucad.motion", "steps": 13,
+            "drives": [{"mate": "hinge", "angle": {"from": "-swing", "to": "swing"}}]});
+        write_json(&motions.join("twist.json"), &twist).unwrap();
+        let mut project = Project::load(root).unwrap();
+        let part = &project.parts[&a];
+        let m = part.motions[&id("twist")].as_ref().unwrap();
+        // Read against the assembly's parameters.
+        let super::super::motion::Drive::Mate { range, .. } = &m.drives[0] else {
+            panic!()
+        };
+        assert!((range.to.radians() - 6f64.to_radians()).abs() < 1e-15);
+        assert_eq!(
+            part.motion_uses[&id("twist")].iter().collect::<Vec<_>>(),
+            ["swing"]
+        );
+        assert_ne!(part.revision, rev);
+        assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+        fs::write(motions.join("broken.json"), "{").unwrap();
+        fs::write(motions.join("notes.txt"), "").unwrap();
+        project
+            .reload(&[
+                "parts/asm/motions/broken.json".into(),
+                "parts/asm/motions/notes.txt".into(),
+            ])
+            .unwrap();
+        let broken = project.parts[&a].motions[&id("broken")]
+            .as_ref()
+            .unwrap_err();
+        assert_eq!(broken.code, Code::InvalidJson);
+        assert_eq!(project.unknown, ["parts/asm/motions/notes.txt"]);
+        // In a part, a motion is the wrong kind of file.
+        let motions_p = part_dir(root, &id("p")).join("motions");
+        fs::create_dir_all(&motions_p).unwrap();
+        write_json(&motions_p.join("twist.json"), &twist).unwrap();
+        let project = Project::load(root).unwrap();
+        let e = project.parts[&id("p")].motions[&id("twist")]
+            .as_ref()
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["path"].as_str()),
+            (Code::WrongPartKind, Some("parts/p/motions/twist.json"))
+        );
+        // Gone again, the assembly hashes as it did.
+        fs::remove_dir_all(&motions).unwrap();
+        let project = Project::load(root).unwrap();
+        assert_eq!(project.parts[&a].revision, rev);
     }
 
     #[test]

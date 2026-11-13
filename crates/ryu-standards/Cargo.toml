@@ -1,0 +1,11 @@
+[package]
+name = "ryu-standards"
+description = "Engineering standards data for every ryu product: threads, drills and ISO 286 fits, in integer nanometres, each value with its source"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]

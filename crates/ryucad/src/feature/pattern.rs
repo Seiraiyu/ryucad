@@ -273,7 +273,7 @@ impl FeatureKind for Patterns {
         )
     }
 
-    fn report(&self, part: &Part, f: &Feature) -> Value {
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         pattern_report(&part.id, f.pattern().expect("a pattern"))
     }
 

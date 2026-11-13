@@ -84,7 +84,7 @@ impl FeatureKind for Planars {
         Ok(f)
     }
 
-    fn report(&self, part: &Part, f: &Feature) -> Value {
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         let Feature::Planar(x) = f else {
             unreachable!("a planar face")
         };

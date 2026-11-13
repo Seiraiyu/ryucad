@@ -136,7 +136,7 @@ impl FeatureKind for Extrusions {
         Ok(f)
     }
 
-    fn report(&self, part: &Part, f: &Feature) -> Value {
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         let part = &part.id;
         match f {
             Feature::Extrude(e) => {

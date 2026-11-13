@@ -2425,6 +2425,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-git"
+version = "0.0.0"
+dependencies = [
+ "gix",
+ "ryu-doc",
+ "ryu-session",
+ "serde_json",
+]
+
+[[package]]
 name = "ryu-math"
 version = "0.0.0"
 dependencies = [
@@ -2443,6 +2453,7 @@ name = "ryu-session"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "inotify",
  "interprocess",
  "libc",
  "notify",
@@ -2453,6 +2464,10 @@ dependencies = [
  "widestring",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "ryu-standards"
+version = "0.0.0"
 
 [[package]]
 name = "ryucad"
@@ -2471,8 +2486,10 @@ dependencies = [
  "rayon",
  "resvg",
  "ryu-draw",
+ "ryu-git",
  "ryu-math",
  "ryu-session",
+ "ryu-standards",
  "ryucad-doc",
  "ryuformats",
  "ryukei",
@@ -2494,6 +2511,7 @@ dependencies = [
  "blake3",
  "rayon",
  "ryu-doc",
+ "ryu-standards",
  "ryukei",
  "ryusketch",
  "serde",
@@ -2533,6 +2551,7 @@ dependencies = [
  "resvg",
  "ryu-doc",
  "ryu-draw",
+ "ryu-git",
  "ryu-math",
  "ryu-part21",
  "ryu-session",

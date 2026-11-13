@@ -68,6 +68,8 @@ enum Pending {
     Sketch(BodyKey, String),
     /// A path's or helix's drawing, asked for at this part revision.
     Path(BodyKey, String),
+    /// A part's holes, at its revision.
+    Holes(String, String),
     /// The chosen sweep's or loft's drawing, asked for at this part
     /// revision.
     Sweep(BodyKey, String),
@@ -130,6 +132,10 @@ enum Pending {
     Compare(u64),
     /// A ghost's mesh, asked for at this hash.
     Ghost(BodyKey, String),
+    /// A chosen delete's ghost: the delete it was asked for.
+    Deleted(BodyKey),
+    /// An insert update's dry run for the form: part, insert and `to`.
+    InsertPreview((String, String, String)),
     /// The model's solids, read for the faces a feature made, at this
     /// part revision.
     Made(BodyKey, String),
@@ -445,6 +451,10 @@ pub struct Workspace {
     /// shows them; and the feature, once asked for.
     pub made: Option<Made>,
     made_for: Option<BodyKey>,
+    /// The chosen delete's ghosts, as they come.
+    pub deleted: Option<crate::core::inserts::Deleted>,
+    /// What moving the insert form's chosen pin changes, once asked.
+    pub insert_preview: Option<crate::core::inserts::Preview>,
     /// The sweep or loft chosen in the tree as `sweep.get` drew it: its
     /// profile and path, or its sections with their starts.
     pub swept: Option<crate::core::sweeps::SweepDrawing>,
@@ -680,6 +690,8 @@ impl Workspace {
             following: None,
             form: None,
             made: None,
+            deleted: None,
+            insert_preview: None,
             made_for: None,
             swept: None,
             swept_at: None,
@@ -1934,6 +1946,7 @@ impl Workspace {
             id: None,
             position: Default::default(),
             expected_revision: expected,
+            dry_run: false,
         };
         self.send(req, Pending::DepsPlace);
     }
@@ -2323,6 +2336,7 @@ impl Workspace {
                 transfer: Some(Transfer::Compact),
                 rev: Some(rev.clone()),
                 flat: None,
+                before: None,
             };
             self.send(req, Pending::Ghost(key, hash));
         }
@@ -2669,10 +2683,12 @@ impl Workspace {
     /// be painted.
     pub fn choose(&mut self, feature: Option<BodyKey>) {
         self.made = None;
+        self.deleted = None;
         self.swept = None;
         self.swept_at = None;
         self.made_for.clone_from(&feature);
         if let Some(key) = feature {
+            self.ask_deleted(&key);
             self.ask_swept(&key);
             self.ask_sheet_paint(&key);
             self.ask_made(key);
@@ -2837,6 +2853,7 @@ impl Workspace {
             transfer: Some(Transfer::Compact),
             rev: self.model_rev(),
             flat: Some(key.1.clone()),
+            before: None,
         };
         self.send(req, Pending::FlatMesh(key, revision));
     }
@@ -2908,6 +2925,33 @@ impl Workspace {
 
     /// Reads the faces `key` made, unless it is a sketch: it makes none. A
     /// mate's are the faces its connectors are on, known already.
+    /// What a chosen delete ghosts: each solid it takes out, meshed as it
+    /// read them.
+    fn ask_deleted(&mut self, key: &BodyKey) {
+        let Some((d, asked)) = self
+            .model
+            .parts
+            .get(&key.0)
+            .and_then(|p| crate::core::inserts::Deleted::of(p, &key.1))
+        else {
+            return;
+        };
+        self.deleted = Some(d);
+        for (part, solid) in asked {
+            let req = Request::MeshGet {
+                part,
+                feature: Some(solid),
+                features: Vec::new(),
+                quality: None,
+                transfer: Some(Transfer::Compact),
+                rev: self.model_rev(),
+                flat: None,
+                before: Some(key.1.clone()),
+            };
+            self.send(req, Pending::Deleted(key.clone()));
+        }
+    }
+
     fn ask_made(&mut self, key: BodyKey) {
         let Some(p) = self.model.parts.get(&key.0) else {
             return;
@@ -2929,7 +2973,11 @@ impl Workspace {
             self.model.generation += 1;
             return;
         }
-        if p.feature(&key.1).is_none_or(|f| f.sketch.is_some()) {
+        // An insert paints its solids whole, a delete ghosts what it took
+        // out: neither reads the model's faces by origin.
+        if p.feature(&key.1)
+            .is_none_or(|f| f.sketch.is_some() || f.insert.is_some() || f.delete.is_some())
+        {
             return;
         }
         let revision = p.revision.clone();
@@ -3547,6 +3595,36 @@ impl Workspace {
     }
 
     /// Saves what was typed into the form.
+    /// While an insert's form has a pin chosen other than the one read,
+    /// asks once what moving it there changes (`insert.update`'s dry run;
+    /// its `expected_revision` is the project's, so none is sent).
+    pub fn preview_insert(&mut self) {
+        let chosen = self.form.as_ref().and_then(|f| {
+            let r = f.rev.as_ref().filter(|r| f.ty == "insert" && r.dirty())?;
+            let to = match r.chosen.as_str() {
+                "working" => "working".to_owned(),
+                l => format!("label:{l}"),
+            };
+            Some((f.part.clone(), f.feature.clone(), to))
+        });
+        let Some(key) = chosen else {
+            self.insert_preview = None;
+            return;
+        };
+        if self.insert_preview.as_ref().is_some_and(|p| p.key == key) {
+            return;
+        }
+        self.insert_preview = Some(crate::core::inserts::Preview::asked(key.clone()));
+        let req = Request::InsertUpdate {
+            part: key.0.clone(),
+            feature: key.1.clone(),
+            to: Some(key.2.clone()),
+            dry_run: true,
+            expected_revision: None,
+        };
+        self.send(req, Pending::InsertPreview(key));
+    }
+
     pub fn save_form(&mut self) {
         let Some(form) = &mut self.form else { return };
         match form.request() {
@@ -4215,6 +4293,30 @@ impl Workspace {
                     }
                 }
             }
+            // A delete chosen before this one answers too late to matter:
+            // its ghosts and its failures alike are dropped.
+            (Pending::Deleted(key), _)
+                if !self.deleted.as_ref().is_some_and(|d| d.is_for(&key)) => {}
+            (Pending::Deleted(key), a) => {
+                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(bodies))) => {
+                        for b in bodies {
+                            if self.deleted.as_mut().is_some_and(|d| d.take(&key, b)) {
+                                self.model.generation += 1;
+                            }
+                        }
+                    }
+                    Ok(Some(Err(e))) | Err(e) => self.fail(e),
+                    Ok(None) => {
+                        self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
+                    }
+                }
+            }
+            (Pending::InsertPreview(key), a) => {
+                if let Some(p) = self.insert_preview.as_mut().filter(|p| p.key == key) {
+                    p.answer = Some(a.map(|a| crate::core::inserts::Moved::from_answer(&a.result)));
+                }
+            }
             (Pending::Quiet, Ok(_)) => {}
             // Drawn as its own request answers, not only when the
             // notification comes (#143).
@@ -4669,6 +4771,14 @@ impl Workspace {
                     {
                         form.offer_revs(&[l.to_owned()]);
                     }
+                    // An insert of this project's part may take any of its
+                    // official labels (design 521): every one, read now.
+                    if form.ty == "insert" && form.foreign.is_none() {
+                        let req = Request::ReleaseList {
+                            part: Some(placed.to_owned()),
+                        };
+                        self.send(req, Pending::FormLabels(part.clone(), form.feature.clone()));
+                    }
                     self.form = Some(form);
                 }
             }
@@ -4678,12 +4788,10 @@ impl Workspace {
                     .as_mut()
                     .filter(|f| f.part == part && f.feature == id)
                 {
-                    let labels: Vec<String> = a.result["parts"][0]["labels"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|l| l["label"].as_str().map(str::to_owned))
-                        .collect();
+                    // An insert's from `release.list`, an instance's of
+                    // another project from `deps.parts`.
+                    let of = f.of.clone().unwrap_or_default();
+                    let labels = crate::core::inserts::official_labels(&a.result, &of);
                     f.offer_revs(&labels);
                 }
             }
@@ -4911,6 +5019,16 @@ impl Workspace {
                     }
                     Err(e) => self.fail(e),
                 }
+            }
+            // A part that doesn't rebuild has no holes to show.
+            (Pending::Holes(part, revision), a) => {
+                self.model.holes_answered(&part, &revision);
+                let mut t = match a {
+                    Ok(a) => crate::core::threads::HoleTable::from_list(&a.result),
+                    Err(_) => crate::core::threads::HoleTable::default(),
+                };
+                t.revision = revision;
+                self.model.take_holes(&part, t);
             }
             (Pending::Sweep(key, _), a) => {
                 if self.made_for.as_ref() == Some(&key) {
@@ -5423,6 +5541,17 @@ impl Workspace {
             };
             self.send(req, Pending::Path(key, revision));
         }
+        if let Some(revision) = self.model.ask_holes(part) {
+            let req = Request::HolesList {
+                part: part.to_owned(),
+                solid: None,
+                csv: false,
+                group: false,
+                reference: None,
+                rev: self.model_rev(),
+            };
+            self.send(req, Pending::Holes(part.to_owned(), revision));
+        }
     }
 
     /// Fetches display meshes, one body per request (an assembly's by the
@@ -5452,6 +5581,7 @@ impl Workspace {
                         transfer: Some(Transfer::Compact),
                         rev: self.model_rev(),
                         flat: None,
+                        before: None,
                     };
                     self.send(req, Pending::Mesh(key, hash));
                 }
@@ -5471,6 +5601,7 @@ impl Workspace {
                     transfer: Some(Transfer::Compact),
                     rev: self.model_rev(),
                     flat: None,
+                    before: None,
                 };
                 self.send(req, Pending::Meshes(batch.to_vec()));
             }
@@ -5501,6 +5632,7 @@ impl Workspace {
                 transfer: Some(Transfer::Compact),
                 rev: self.model_rev(),
                 flat: None,
+                before: None,
             };
             self.send(req, Pending::Level(hash, level));
         }
@@ -5563,6 +5695,7 @@ fn import_request(path: &str, update: Option<String>, dry_run: bool, solid: bool
         update,
         solid,
         flatten: false,
+        search: Vec::new(),
     }
 }
 

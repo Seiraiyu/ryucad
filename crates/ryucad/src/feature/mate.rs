@@ -273,7 +273,7 @@ impl FeatureKind for Mates {
         )
     }
 
-    fn report(&self, part: &Part, f: &Feature) -> Value {
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         let m = f.mate().expect("a mate");
         let part = &part.id;
         let mut v = m.fields();

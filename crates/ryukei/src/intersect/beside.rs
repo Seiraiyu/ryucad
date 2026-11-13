@@ -21,8 +21,10 @@ use super::implicit::Implicit;
 use super::inface::{Place, point_in_face};
 use super::pipe::{Cell, Field, Form, signed};
 use crate::geom::chain2::Chain2;
+use crate::geom::jet::{JVec, Jet};
 use crate::geom::sheet::Sheet;
-use crate::geom::{Box2, Curve2, Point2, Point3, Surface, Vector2};
+use crate::geom::{Box2, Box3, Curve2, Point2, Point3, Surface, Vector2};
+use crate::interval::Interval;
 use crate::predicates::Sign;
 use crate::topo::{Body, EdgeId, FaceId, Pcurve, VertexId};
 use crate::work::{Meter, Scope};
@@ -274,6 +276,224 @@ pub(crate) fn face_off_ball(
         m,
     )?;
     Ok(!negative)
+}
+
+/// What a face's surface does near a box: the hull of its unit normals
+/// and a bound on its normal curvature over every part of the face whose
+/// surface's box meets the box ([`normal_cone`]). The check's crossing
+/// certificate (#303) bounds the angle two faces cross at, and how fast
+/// either bends away from its tangent plane, from these.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Cone {
+    /// Holds `S_u × S_v / |S_u × S_v|` at every such point.
+    pub(crate) n: [Interval; 3],
+    /// At least `|κ_n|`, the normal curvature in any direction, at every
+    /// such point.
+    pub(crate) k: f64,
+}
+
+/// The most parts [`normal_cone`] examines.
+pub(crate) const CONE_PARTS: usize = 1 << 10;
+
+/// The deepest [`normal_cone`] halves a part.
+const CONE_DEPTH: u32 = 24;
+
+fn dot3(a: &[Interval; 3], b: &[Interval; 3]) -> Interval {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross3(a: &[Interval; 3], b: &[Interval; 3]) -> [Interval; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// The box a part's point enclosure spans in model space.
+fn image_box(j: &JVec<Interval>) -> Box3 {
+    Box3::new(
+        Point3::new(j[0].v.lo(), j[1].v.lo(), j[2].v.lo()),
+        Point3::new(j[0].v.hi(), j[1].v.hi(), j[2].v.hi()),
+    )
+}
+
+/// The cone of one part from its enclosed jets: the unit normal
+/// `n = S_u × S_v / |S_u × S_v|`, and `|κ_n| ≤ ‖II‖_F / λ_min(I)` with
+/// `II = [S_uu·n, S_uv·n; S_uv·n, S_vv·n]` and `I` the first fundamental
+/// form, whose least eigenvalue is `(E + G)/2 - sqrt(((E - G)/2)² + F²)`
+/// and at least `(EG - F²) / (E + G)`, over the part's parameters scaled
+/// by constants making `|S_u|` and `|S_v|` about one.
+/// Every step is outward-rounded interval arithmetic. `None` where the
+/// normal or `λ_min` can't be bounded away from zero.
+fn cell_cone(j: &JVec<Interval>) -> Option<Cone> {
+    let col = |f: &dyn Fn(&Jet<Interval>) -> Interval| -> [Interval; 3] {
+        core::array::from_fn(|i| f(&j[i]))
+    };
+    // Normal curvature doesn't depend on the parameterization, so `u` and
+    // `v` are first scaled by constants making `|S_u|` and `|S_v|` about
+    // one: unscaled, `‖II‖_F / λ_min(I)` overweights the mixed term by
+    // `sqrt(E / G)` where they differ by orders of magnitude (a sweep up a
+    // helix: `E` about 1, `G` about 2e-5, a bound 300 times the bend, #698).
+    let scale = |k: usize| {
+        let len2 = (0..3).map(|i| j[i].d[k].mag()).map(|x| x * x).sum::<f64>();
+        let s = 1.0 / crate::math::sqrt(len2);
+        (s.is_finite() && s > 0.0).then_some(Interval::point(s))
+    };
+    let (a, b) = (scale(0)?, scale(1)?);
+    let times = |v: [Interval; 3], k: Interval| v.map(|x| x * k);
+    let su = times(col(&|x| x.d[0]), a);
+    let sv = times(col(&|x| x.d[1]), b);
+    let (suu, suv, svv) = (
+        times(col(&|x| x.h[0]), a * a),
+        times(col(&|x| x.h[1]), a * b),
+        times(col(&|x| x.h[2]), b * b),
+    );
+    let n = cross3(&su, &sv);
+    let len = dot3(&n, &n).sqrt()?;
+    if len.lo() <= 0.0 {
+        return None;
+    }
+    let unit = [
+        n[0].checked_div(len)?,
+        n[1].checked_div(len)?,
+        n[2].checked_div(len)?,
+    ];
+    let (e, f, g) = (dot3(&su, &su), dot3(&su, &sv), dot3(&sv, &sv));
+    let half = Interval::point(0.5);
+    let closed = half * (e + g) - ((half * (e - g)).square() + f.square()).sqrt()?;
+    // `det I / tr I` is at most the least eigenvalue too, the greater being
+    // at most the trace, and keeps its sign where the closed form cancels.
+    let ratio = dot3(&n, &n).checked_div(e + g)?;
+    let least = closed.lo().max(ratio.lo());
+    if least <= 0.0 {
+        return None;
+    }
+    let (l, mm, nn) = (dot3(&suu, &unit), dot3(&suv, &unit), dot3(&svv, &unit));
+    let top = (l.square() + Interval::point(2.0) * mm.square() + nn.square()).sqrt()?;
+    let k = top.hi() / least;
+    Some(Cone {
+        n: unit,
+        k: if k == 0.0 { 0.0 } else { k.next_up() },
+    })
+}
+
+/// The cone of a face's surface near `near` ([`Cone`]): [`normal_cones`]
+/// of the one box.
+#[cfg(test)]
+pub(crate) fn normal_cone(
+    body: &Body,
+    face: FaceId,
+    near: &Box3,
+    parts: usize,
+    m: &Meter,
+) -> Result<Option<Cone>, Failure> {
+    Ok(normal_cones(body, face, core::slice::from_ref(near), parts, m)?[0])
+}
+
+/// The cone of a face's surface near each of `nears` ([`Cone`]), in one
+/// search: its parameter box, breadth first, each part carrying the boxes
+/// of `nears` its surface's box meets, and halved across its longer side
+/// in model space until its surface's box is no wider than half of the
+/// narrowest of them. Then its cone joins each of theirs. Parts whose box
+/// meets none, or certified outside the face ([`outside`]), are left out.
+/// `None` for a box no part of the face meets. `Err(Uncertain)` past
+/// `parts` parts or [`CONE_DEPTH`] halvings, or for a face with a fin
+/// that has no pcurve.
+pub(crate) fn normal_cones(
+    body: &Body,
+    face: FaceId,
+    nears: &[Box3],
+    parts: usize,
+    m: &Meter,
+) -> Result<Vec<Option<Cone>>, Failure> {
+    let surface = &body.surfaces[body.faces[face].surface];
+    let boundary = boundary_of(body, face).ok_or(Failure::Uncertain)?;
+    let periods = surface.periods();
+    let sheet = Sheet::of(surface);
+    let fine: Vec<f64> = nears
+        .iter()
+        .map(|n| (n.max() - n.min()).length() / 2.0)
+        .collect();
+    let mut cones: Vec<Option<Cone>> = vec![None; nears.len()];
+    let mut budget = parts;
+    let all: Vec<usize> = (0..nears.len()).collect();
+    let mut queue = VecDeque::from([(parameter_box(body, face), 0u32, all)]);
+    while let Some((c, depth, near)) = queue.pop_front() {
+        budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
+        m.charge(sheet.cost())?;
+        let j = sheet.jet_box_in(c, m.enclosures());
+        let near = match &j {
+            Some(j) => {
+                let bx = image_box(j);
+                let near: Vec<usize> = near
+                    .into_iter()
+                    .filter(|&i| bx.intersects(&nears[i]))
+                    .collect();
+                if near.is_empty() || outside(body, face, &boundary, periods, c) {
+                    continue;
+                }
+                let finest = near.iter().map(|&i| fine[i]).fold(f64::INFINITY, f64::min);
+                if (bx.max() - bx.min()).length() <= finest
+                    && let Some(here) = cell_cone(j)
+                {
+                    for &i in &near {
+                        cones[i] = Some(match cones[i] {
+                            None => here,
+                            Some(k) => Cone {
+                                n: core::array::from_fn(|x| k.n[x].hull(here.n[x])),
+                                k: k.k.max(here.k),
+                            },
+                        });
+                    }
+                    continue;
+                }
+                near
+            }
+            None => near,
+        };
+        if depth == CONE_DEPTH {
+            return Err(Failure::Uncertain);
+        }
+        let [[u0, u1], [v0, v1]] = c;
+        let across_u = match &j {
+            Some(j) => {
+                let len = |k: usize| (0..3).map(|i| j[i].d[k].mag()).fold(0.0, f64::max);
+                len(0) * (u1 - u0) >= len(1) * (v1 - v0)
+            }
+            None => u1 - u0 >= v1 - v0,
+        };
+        if across_u {
+            let mid = (u0 + u1) / 2.0;
+            queue.push_back(([[u0, mid], [v0, v1]], depth + 1, near.clone()));
+            queue.push_back(([[mid, u1], [v0, v1]], depth + 1, near));
+        } else {
+            let mid = (v0 + v1) / 2.0;
+            queue.push_back(([[u0, u1], [v0, mid]], depth + 1, near.clone()));
+            queue.push_back(([[u0, u1], [mid, v1]], depth + 1, near));
+        }
+    }
+    Ok(cones)
+}
+
+/// A lower bound on `|p × q|` over every `p` in `a` and `q` in `b`: for
+/// unit vectors, the sine of the least angle between lines along them.
+/// Each component of the enclosed cross product is at least its least
+/// magnitude, zero where it may vanish.
+pub(crate) fn sine_apart(a: &[Interval; 3], b: &[Interval; 3]) -> f64 {
+    let least = |x: Interval| {
+        if x.lo() > 0.0 {
+            x.lo()
+        } else if x.hi() < 0.0 {
+            -x.hi()
+        } else {
+            0.0
+        }
+    };
+    let sum = cross3(a, b).iter().fold(Interval::point(0.0), |acc, &x| {
+        acc + Interval::point(least(x)).square()
+    });
+    sum.sqrt().map_or(0.0, |r| r.lo().max(0.0))
 }
 
 /// Whether a part of a face's parameter plane is certified outside the
@@ -557,6 +777,49 @@ fn run(
     })
 }
 
+/// The most parts [`strip_bound`] halves a parameter box into.
+const STRIP_PARTS: usize = 256;
+
+/// Bounds on `|S_u|` and `|S_v|` over `cell` ([`first_bound`]), for
+/// turning the strip's width into parameters. Where the surface's
+/// enclosure fails over the whole box (a sweep along three turns of a
+/// helix, whose frame can't be enclosed over more than a part of a turn,
+/// #698), the greatest bound over parts of it, each halved along its
+/// longer side, up to [`STRIP_PARTS`] parts: infinite (a strip of no
+/// width) only past that.
+fn strip_bound(surface: &Surface, cell: Cell) -> (f64, f64) {
+    let whole = first_bound(surface, cell);
+    if whole.0.is_finite() && whole.1.is_finite() {
+        return whole;
+    }
+    let (mut lu, mut lv) = (0.0f64, 0.0f64);
+    let mut queue = VecDeque::from([cell]);
+    let mut parts = 1;
+    while let Some(c) = queue.pop_front() {
+        let (bu, bv) = first_bound(surface, c);
+        if bu.is_finite() && bv.is_finite() {
+            lu = lu.max(bu);
+            lv = lv.max(bv);
+            continue;
+        }
+        parts += 1;
+        if parts > STRIP_PARTS {
+            return whole;
+        }
+        let [[u0, u1], [v0, v1]] = c;
+        if u1 - u0 >= v1 - v0 {
+            let m = (u0 + u1) / 2.0;
+            queue.push_back([[u0, m], [v0, v1]]);
+            queue.push_back([[m, u1], [v0, v1]]);
+        } else {
+            let m = (v0 + v1) / 2.0;
+            queue.push_back([[u0, u1], [v0, m]]);
+            queue.push_back([[u0, u1], [m, v1]]);
+        }
+    }
+    (lu, lv)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn signs(
     surface: &Surface,
@@ -576,7 +839,7 @@ fn signs(
         form: Form::Implicit(imp),
         table: m.enclosures(),
     });
-    let (lu, lv) = first_bound(surface, cell);
+    let (lu, lv) = strip_bound(surface, cell);
     let w = [strip / lu, strip / lv];
     let pieces = pieces_of(rails, PIECES, surface.periods(), cell, w);
     // A part near a rail's end, which coverage along it can't reach.
@@ -843,5 +1106,239 @@ mod tests {
         assert_eq!(face_off_ball(&b, top, above, 1.1, &m), Ok(false));
         let beside = Point3::new(3.0, 0.5, 1.0);
         assert_eq!(face_off_ball(&b, top, beside, 1.5, &m), Ok(true));
+    }
+}
+
+/// How one surface meets another at a point where they are tangent
+/// ([`tangency`]). A diagnostic only, in tests: ryukei 18.A found NIST
+/// CTC 02's tangent cylinder and cone a saddle (#264), so no certificate
+/// of a definite contact is built on it.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Tangency {
+    /// `h = f ∘ S` has a certified definite Hessian over the parameter
+    /// box round the point, and is certified non-zero there outside
+    /// `inner` (in `S`'s parameters scaled by `|S_u|` and `|S_v|` at the
+    /// point: about a length in model space).
+    Definite { inner: f64 },
+    /// The Hessian is certified indefinite: a saddle, which
+    /// `outside_vertices` handles.
+    Saddle,
+    /// Neither: semidefinite (a contact along a ruling) or too wide an
+    /// enclosure to tell.
+    Flat,
+    /// The first surface has no implicit form, or an enclosure failed.
+    Unsure,
+}
+
+/// How `implicit_of`'s surface and `sheet_of`'s meet at `at`, where they
+/// are tangent (#264): `h = f ∘ S`, with `f` the first's implicit form and
+/// `S` the second's parameterization, over the box of `S`'s parameters
+/// `radius / |S_u|` and `radius / |S_v|` round `at`'s foot ([`Field`]).
+/// With the parameters scaled to lengths at the foot, the Hessian's
+/// eigenvalues are `(h_uu + h_vv)/2 ± sqrt(((h_uu - h_vv)/2)² + h_uv²)`
+/// over the box, in intervals. Both of one sign is definite with
+/// `λ₀ = min |λ|`, and then by Taylor's theorem `|h(q)| ≥ λ₀ r²/2 - g r -
+/// |h₀|` at scaled distance `r` with `g = |∇h|` and `h₀ = h` at the foot.
+/// That is positive past `inner = (g + sqrt(g² + 2 λ₀ |h₀|)) / λ₀`.
+/// Certified opposite signs are a saddle; anything else is flat.
+#[cfg(test)]
+pub(crate) fn tangency(
+    implicit_of: &Surface,
+    sheet_of: &Surface,
+    at: Point3,
+    radius: f64,
+    m: &Meter,
+) -> Tangency {
+    let Some(imp) = Implicit::of(implicit_of) else {
+        return Tangency::Unsure;
+    };
+    let sheet = Sheet::of(sheet_of);
+    if m.charge(2 * sheet.cost()).is_err() {
+        return Tangency::Unsure;
+    }
+    let (u0, v0) = sheet_of.project(at).param;
+    let j = sheet.jets_at(u0, v0);
+    let len = |k: usize| crate::math::sqrt(j.iter().map(|c| c.d[k] * c.d[k]).sum::<f64>());
+    let (cu, cv) = (len(0), len(1));
+    if !(cu > 0.0 && cv > 0.0 && radius > 0.0) {
+        return Tangency::Unsure;
+    }
+    let field = Field {
+        sheet,
+        form: Form::Implicit(&imp),
+        table: m.enclosures(),
+    };
+    let cell = [
+        [u0 - radius / cu, u0 + radius / cu],
+        [v0 - radius / cv, v0 + radius / cv],
+    ];
+    let (Some(over), Some(here)) = (field.enclose(cell), field.enclose([[u0, u0], [v0, v0]]))
+    else {
+        return Tangency::Unsure;
+    };
+    classify(&over, &here, cu, cv).unwrap_or(Tangency::Unsure)
+}
+
+/// [`tangency`]'s verdict from `h`'s enclosures over the box and at the
+/// foot, its parameters scaled by `cu` and `cv`.
+#[cfg(test)]
+fn classify(
+    over: &super::pipe::Enclosure,
+    here: &super::pipe::Enclosure,
+    cu: f64,
+    cv: f64,
+) -> Option<Tangency> {
+    let (pu, pv) = (Interval::point(cu), Interval::point(cv));
+    let huu = over.h[0].checked_div(pu * pu)?;
+    let huv = over.h[1].checked_div(pu * pv)?;
+    let hvv = over.h[2].checked_div(pv * pv)?;
+    let half = Interval::point(0.5);
+    let mid = half * (huu + hvv);
+    let spread = ((half * (huu - hvv)).square() + huv.square()).sqrt()?;
+    let (least, most) = (mid - spread, mid + spread);
+    let lambda = if least.lo() > 0.0 {
+        least.lo()
+    } else if most.hi() < 0.0 {
+        -most.hi()
+    } else if least.hi() < 0.0 && most.lo() > 0.0 {
+        return Some(Tangency::Saddle);
+    } else {
+        return Some(Tangency::Flat);
+    };
+    let g = (here.d[0].checked_div(pu)?.square() + here.d[1].checked_div(pv)?.square()).sqrt()?;
+    let l = Interval::point(lambda);
+    let h0 = Interval::point(here.v.mag());
+    let inner = (g + (g.square() + Interval::point(2.0) * l * h0).sqrt()?).checked_div(l)?;
+    Some(Tangency::Definite { inner: inner.hi() })
+}
+
+#[cfg(test)]
+mod cone_tests {
+    use super::*;
+    use crate::geom::{Box3, Rigid};
+    use crate::intersect::face_box;
+    use crate::name::OpKey;
+    use crate::primitive;
+
+    fn cube(c: Point3, half: f64) -> Box3 {
+        Box3::new(
+            Point3::new(c.x - half, c.y - half, c.z - half),
+            Point3::new(c.x + half, c.y + half, c.z + half),
+        )
+    }
+
+    /// A block's top: one normal, no bend; a box away from it holds none
+    /// of it. A cylinder's side: normals square to its axis, bent at
+    /// least `1 / r`.
+    #[test]
+    fn normal_cones_hold_normals_and_bound_the_bend() {
+        // unmetered: a test, its fixtures small and bounded
+        let m = Meter::free();
+        let (block, _) = primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let top = block
+            .faces()
+            .find(|&f| {
+                matches!(&block.surfaces[block.faces[f].surface], Surface::Plane(_))
+                    && face_box(&block, f).min().z > 0.99
+            })
+            .unwrap();
+        let mid = face_box(&block, top).min()
+            + (face_box(&block, top).max() - face_box(&block, top).min()) * 0.5;
+        let cone = normal_cone(&block, top, &cube(mid, 0.1), CONE_PARTS, &m)
+            .unwrap()
+            .expect("the top meets the box");
+        // A certified bound of an exact zero is `√TINY` at most (#301).
+        assert!(cone.k <= 1e-60, "{}", cone.k);
+        let z = [
+            Interval::point(0.0),
+            Interval::point(0.0),
+            Interval::point(1.0),
+        ];
+        assert_eq!(sine_apart(&cone.n, &z), 0.0);
+        let far = cube(Point3::new(5.0, 5.0, 5.0), 0.1);
+        assert!(
+            normal_cone(&block, top, &far, CONE_PARTS, &m)
+                .unwrap()
+                .is_none()
+        );
+
+        let (rod, _) = primitive::cylinder(OpKey(2), 0.5, 1.0, &Rigid::IDENTITY).unwrap();
+        let side = rod
+            .faces()
+            .find(|&f| matches!(&rod.surfaces[rod.faces[f].surface], Surface::Cylinder(_)))
+            .unwrap();
+        let cone = normal_cone(
+            &rod,
+            side,
+            &cube(Point3::new(0.5, 0.0, 0.5), 0.05),
+            CONE_PARTS,
+            &m,
+        )
+        .unwrap()
+        .expect("the side meets the box");
+        assert!(cone.k >= 2.0 * (1.0 - 1e-9), "{}", cone.k);
+        assert!(cone.k <= 20.0, "{}", cone.k);
+        assert!(sine_apart(&cone.n, &z) > 0.9);
+    }
+
+    /// Parallel lines have no angle between them; square ones a sine of 1.
+    #[test]
+    fn the_sine_apart_is_a_lower_bound() {
+        let p =
+            |x: f64, y: f64, z: f64| [Interval::point(x), Interval::point(y), Interval::point(z)];
+        assert_eq!(sine_apart(&p(0.0, 0.0, 1.0), &p(0.0, 0.0, -1.0)), 0.0);
+        let s = sine_apart(&p(1.0, 0.0, 0.0), &p(0.0, 1.0, 0.0));
+        assert!(s <= 1.0 && s > 1.0 - 1e-12, "{s}");
+        // A cone wide enough to hold the other direction: no bound.
+        let wide = [
+            Interval::new(-0.1, 0.1).unwrap(),
+            Interval::point(0.0),
+            Interval::new(0.99, 1.0).unwrap(),
+        ];
+        assert_eq!(sine_apart(&wide, &p(0.0, 0.0, 1.0)), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod tangency_tests {
+    use super::*;
+    use crate::geom::{Cylinder, Frame, Plane, Sphere, Torus, Vector3};
+
+    fn frame(o: Point3, z: Vector3, x: Vector3) -> Frame {
+        Frame::new(o, z, x).unwrap()
+    }
+
+    /// A sphere of radius 0.5 inside a cylinder of radius 1, touching it
+    /// at (1, 0, 0): curvatures (2, 2) against (1, 0), definite (the
+    /// design's cylinder and cone is ctc_02's cut, Task 13). A plane
+    /// tangent to a torus at the inner equator: a saddle. A plane along a
+    /// cylinder's ruling: flat. A spline's form isn't implicit: unsure.
+    #[test]
+    fn tangencies_are_told_apart() {
+        // unmetered: a test, its fixtures small and bounded
+        let m = Meter::free();
+        let up = Vector3::new(0.0, 0.0, 1.0);
+        let x = Vector3::new(1.0, 0.0, 0.0);
+        let y = Vector3::new(0.0, 1.0, 0.0);
+        let cyl = Surface::Cylinder(Cylinder::new(frame(Point3::ORIGIN, up, x), 1.0).unwrap());
+        let ball =
+            Surface::Sphere(Sphere::new(frame(Point3::new(0.5, 0.0, 0.0), up, x), 0.5).unwrap());
+        let p = Point3::new(1.0, 0.0, 0.0);
+        match tangency(&cyl, &ball, p, 0.1, &m) {
+            Tangency::Definite { inner } => assert!(inner < 1e-6, "{inner}"),
+            t => panic!("{t:?}"),
+        }
+        let torus = Surface::Torus(Torus::new(frame(Point3::ORIGIN, up, x), 2.0, 0.5).unwrap());
+        let wall = Surface::Plane(Plane::new(frame(Point3::new(1.5, 0.0, 0.0), x, y)));
+        assert_eq!(
+            tangency(&wall, &torus, Point3::new(1.5, 0.0, 0.0), 0.05, &m),
+            Tangency::Saddle
+        );
+        let side = Surface::Plane(Plane::new(frame(p, x, y)));
+        assert_eq!(tangency(&cyl, &side, p, 0.1, &m), Tangency::Flat);
+        let (spline, _) = side.to_nurbs([[-1.0, 1.0], [-1.0, 1.0]]).unwrap();
+        let spline = Surface::Nurbs(std::sync::Arc::new(spline));
+        assert_eq!(tangency(&spline, &ball, p, 0.1, &m), Tangency::Unsure);
     }
 }

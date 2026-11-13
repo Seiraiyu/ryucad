@@ -776,7 +776,12 @@ impl FeatureKind for Sweeps {
         Ok(f)
     }
 
-    fn report(&self, part: &Part, f: &crate::doc::files::Feature) -> Value {
+    fn report(
+        &self,
+        part: &Part,
+        _unit: crate::units::Unit,
+        f: &crate::doc::files::Feature,
+    ) -> Value {
         crate::along::feature_report(&part.id, f.sweep().expect("a sweep"))
     }
 

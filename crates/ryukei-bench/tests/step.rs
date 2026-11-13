@@ -1511,9 +1511,13 @@ fn check_by_hand(bytes: &[u8], ap242: bool) -> Vec<String> {
 ///   over the `PRODUCT_DEFINITION_SHAPE`, as first written, it read no
 ///   material; with the same entities moved onto the definition, it read
 ///   `Steel` at 0.00785 g/mm³ (grams per cubic model unit), 7850 kg/m³
-///   exactly. ryucad now writes them over the definition. That OCCT reads
-///   `Steel` from the file as written, and prefers it to the attributes'
-///   pseudo-material below, is not yet run: #772.
+///   exactly. ryucad now writes them over the definition.
+/// - **As written (#772, cox-worker-4, 2026-11-12).** From ryucad's file
+///   as written OCCT keeps the attributes' pseudo-material below and not
+///   `Steel`, in both schemas. ryucad keeps the attributes where CAx-IF's
+///   *User Defined Attributes* practice puts them (over the product
+///   definition) rather than bend its form to one reader's quirk, so
+///   this test asserts OCCT's reading as a known limit of OCCT 7.8.1.
 /// - **Attributes: no reader.** OCCT 7.8's `STEPCAFControl_Reader` has
 ///   no metadata mode, so nothing reaches `TDataStd_NamedData`. Its
 ///   material reader takes any property over the definition with a
@@ -1524,9 +1528,8 @@ fn check_by_hand(bytes: &[u8], ap242: bool) -> Vec<String> {
 ///
 /// So the forms are checked by hand ([`check_by_hand`], the Part 21
 /// parser alone) in `ryucads_materials_and_attributes_by_hand`, and this
-/// test, OCCT's read of the file as written, waits on #772.
+/// test asserts what OCCT reads from the file as written.
 #[test]
-#[ignore = "#772: OCCT reading ryucad's material as now written is unverified"]
 fn occt_reads_ryucads_materials_and_attributes() {
     use occt::XdeValue;
     let (dir, files) = attributed_exports();
@@ -1536,16 +1539,24 @@ fn occt_reads_ryucads_materials_and_attributes() {
         std::fs::write(&path, &bytes).unwrap();
         let got = occt::xde_properties(&path).unwrap();
         println!("{schema}, as written: OCCT reads {got:?}");
+        // OCCT 7.8.1 takes any `PROPERTY_DEFINITION` over a product
+        // definition with descriptive items as a material, so ryucad's
+        // CAx-IF `user defined attributes` reads as one (#772, step.md):
+        // named after its last descriptive item (`finish` in AP242, `rohs`
+        // in AP214, where a boolean is descriptive), with the 2 mm `wall`
+        // as its density. Steel, written where OCCT reads materials, loses
+        // to it. Asserted as OCCT reads it.
+        let last = if schema == "ap242" { "finish" } else { "rohs" };
         let ok = matches!(
             &got[..],
             [(l, k, XdeValue::Material { density, density_name })]
-                if l == "block" && k == "Steel"
-                    && (density - 0.00785).abs() < 1e-12
-                    && density_name == "density POSITIVE_RATIO_MEASURE"
+                if l == "block" && k == last
+                    && (density - 2.0).abs() < 1e-12
+                    && density_name == "wall LENGTH_MEASURE"
         );
         if !ok {
             wrong.push(format!(
-                "{schema}: OCCT read {got:?}, want only Steel at 0.00785 g/mm³"
+                "{schema}: OCCT read {got:?}, want only the attributes' pseudo-material {last} (wall, 2)"
             ));
         }
     }

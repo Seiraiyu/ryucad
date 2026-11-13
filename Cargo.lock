@@ -4925,6 +4925,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-standards"
+version = "0.0.0"
+
+[[package]]
 name = "ryucad"
 version = "0.0.0"
 dependencies = [
@@ -4951,6 +4955,7 @@ dependencies = [
  "ryu-git",
  "ryu-math",
  "ryu-session",
+ "ryu-standards",
  "ryucad-doc",
  "ryuformats",
  "ryukei",
@@ -5001,6 +5006,7 @@ dependencies = [
  "blake3",
  "rayon",
  "ryu-doc",
+ "ryu-standards",
  "ryukei",
  "ryusketch",
  "serde",

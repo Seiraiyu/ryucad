@@ -59,8 +59,9 @@ pub(crate) trait FeatureKind: Sync {
     ) -> Result<Feature>;
 
     /// Its part of `report`: its file's fields, every quantity as written
-    /// and in meters, every reference as `<part>/<feature>/<name>`.
-    fn report(&self, part: &Part, f: &Feature) -> Value;
+    /// and in meters, every reference as `<part>/<feature>/<name>`. `unit`
+    /// is the project's: a hole's spec writes bare numbers in it.
+    fn report(&self, part: &Part, unit: crate::units::Unit, f: &Feature) -> Value;
 
     /// What a new feature fills in, or reads, before the shared target
     /// default (`one_target`): a pattern's targets, a mirror's solid and
@@ -244,8 +245,8 @@ impl Check<'_> {
 
 /// How a feature appears in output: every quantity as written and in
 /// meters, every reference as `<part>/<feature>/<name>`.
-pub fn report(p: &Part, id: &Id, f: &Feature) -> Value {
-    let mut v = kind_of(f).report(p, f);
+pub fn report(p: &Part, unit: Unit, id: &Id, f: &Feature) -> Value {
+    let mut v = kind_of(f).report(p, unit, f);
     v["id"] = json!(id);
     v["type"] = json!(f.type_name());
     v

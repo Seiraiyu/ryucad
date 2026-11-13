@@ -1788,6 +1788,9 @@ fn hole_callout(
     let Some(Ok(crate::doc::files::Feature::Hole(h))) = part.features.get(&hid) else {
         return Err(not());
     };
+    // Its sizes as rebuild builds them: written, or derived.
+    let sizes =
+        crate::hole::derive::derive(h, part.hole_standards.as_deref()).map_err(|_| not())?;
     // How many of its bores the solid has: walls by hole, instance, point.
     let mut bores = std::collections::BTreeSet::new();
     for (_, origin) in src[body].0.origins.iter() {
@@ -1821,7 +1824,7 @@ fn hole_callout(
         first.push(Run::Text(format!("{n}{x} ")));
     }
     first.push(Run::Symbol(Symbol::Diameter));
-    first.push(Run::Text(len(h.diameter.meters())));
+    first.push(Run::Text(len(sizes.drill.si)));
     let depth = match &h.depth {
         Depth::ThroughAll => Some("THRU".to_owned()),
         Depth::Blind(d) => Some(len(d.meters())),
@@ -1837,26 +1840,26 @@ fn hole_callout(
         Depth::UpTo { .. } => {}
     }
     let mut lines = vec![first];
-    match &h.form {
-        HoleForm::Simple => {}
-        HoleForm::Counterbore { diameter, depth } => lines.push(vec![
+    match (&h.form, &sizes.counterbore, &sizes.countersink) {
+        (HoleForm::Counterbore { .. }, Some((diameter, depth)), _) => lines.push(vec![
             Run::Symbol(Symbol::Counterbore),
             Run::Text(" ".into()),
             Run::Symbol(Symbol::Diameter),
-            Run::Text(format!("{} ", len(diameter.meters()))),
+            Run::Text(format!("{} ", len(diameter.si))),
             Run::Symbol(Symbol::Depth),
-            Run::Text(len(depth.meters())),
+            Run::Text(len(depth.si)),
         ]),
-        HoleForm::Countersink { diameter, angle } => lines.push(vec![
+        (HoleForm::Countersink { .. }, _, Some((diameter, angle))) => lines.push(vec![
             Run::Symbol(Symbol::Countersink),
             Run::Text(" ".into()),
             Run::Symbol(Symbol::Diameter),
             Run::Text(format!(
                 "{} {x} {}°",
-                len(diameter.meters()),
-                text::decimal(angle.radians().to_degrees(), 0, false)
+                len(diameter.si),
+                text::decimal(angle.si.to_degrees(), 0, false)
             )),
         ]),
+        _ => {}
     }
     // The bore's circle seen end on: the leader meets it at 45°.
     let tip = match &r.feat {
@@ -1871,7 +1874,7 @@ fn hole_callout(
     };
     let report = json!({
         "hole": hid, "part": pid, "count": n, "form": h.form.type_name(),
-        "diameter": h.diameter.meters(), "depth": h.depth.type_name(),
+        "diameter": sizes.drill.si, "depth": h.depth.type_name(),
     });
     Ok((lines, (pid, hid), report, tip))
 }

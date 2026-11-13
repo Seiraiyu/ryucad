@@ -57,6 +57,8 @@
 //! finite and sound too. Each assembly's interference and clearances are
 //! found, and found again with nothing cached: the same reports, every
 //! volume, box and distance finite, and a pair sharing a volume 0 apart.
+//! Each assembly is swept too, `i1` a quarter turn, from what it cached
+//! and from nothing: the same report, or a typed refusal.
 //! An insert, a delete of bodies, or a feature naming an inserted solid
 //! (`i/…`) is built as feature `f` of a part `fz` after an insert `i` of
 //! a part `src` holding the base (design 521): it must build or give a
@@ -302,6 +304,8 @@ fn part(f: Feature, reference: bool, placed: bool) -> Part {
         features,
         uses: BTreeMap::new(),
         explode_uses: Default::default(),
+        motions: Default::default(),
+        motion_uses: Default::default(),
         acts: BTreeMap::new(),
         imports: BTreeMap::from([("imports/seeded.step".to_owned(), seeded().clone())]),
         views: BTreeMap::new(),
@@ -379,7 +383,8 @@ fn assemble(written: &str, after_instances: bool) {
     for asm in ["asm", "sub"] {
         let result = r
             .result(&Id::parse(asm, "part").unwrap())
-            .expect("assemblies rebuild");
+            .expect("assemblies rebuild")
+            .clone();
         let sound = |p: &ryucad::assembly::Placed| {
             for o in &p.model.occurrences {
                 let pose = ryucad::assembly::rigid_pose(&o.pose);
@@ -482,6 +487,66 @@ fn assemble(written: &str, after_instances: bool) {
                         .all(|x| x.as_f64().is_some_and(f64::is_finite)),
                     "{i}"
                 );
+            }
+        }
+        // A sweep (ryucad 26.B): `i1` turned a quarter turn about z in five
+        // steps with interference, clearance and refining, from what it
+        // cached and from nothing alike, or a typed refusal. Never an
+        // internal error.
+        let asm_part = project.part(&part).unwrap();
+        if let Ok(file) = ryucad::doc::motion::MotionFile::from_json(
+            &serde_json::json!({"format": 1, "kind": "ryucad.motion", "steps": 5,
+                "drives": [{"instances": ["i1"], "rotate": {"axis":
+                    {"origin": ["0 mm", "0 mm", "0 mm"], "direction": "z"},
+                    "from": "0 deg", "to": "90 deg"}}]}),
+            unit,
+            &asm_part.env,
+        ) {
+            let rest = ryucad::motion::Rest::of(&result);
+            if let Ok(resolved) = ryucad::motion::resolve(&part, asm_part, &rest, "fz", &file) {
+                let input = ryucad::motion::Input {
+                    asm: &part,
+                    part: asm_part,
+                    result: &result,
+                    model: &model,
+                    unit,
+                };
+                let opts = ryucad::motion::Options {
+                    interference: true,
+                    clearance: true,
+                    refine: 4,
+                    ..Default::default()
+                };
+                let run = |i: &mut ryucad::interference::Cache,
+                           c: &mut ryucad::clearance::Cache| {
+                    ryucad::motion::sweep(
+                        &input,
+                        None,
+                        &resolved,
+                        &opts,
+                        ryucad::motion::Caches {
+                            interference: i,
+                            clearance: c,
+                        },
+                        &ryucad::motion::Job::default(),
+                    )
+                };
+                let (mut i, mut c) = (Default::default(), Default::default());
+                match run(&mut i, &mut c) {
+                    Ok(v) => {
+                        assert_eq!(
+                            run(&mut i, &mut c).ok(),
+                            Some(v.clone()),
+                            "from what it cached"
+                        );
+                        assert_eq!(
+                            run(&mut Default::default(), &mut Default::default()).ok(),
+                            Some(v),
+                            "from nothing"
+                        );
+                    }
+                    Err(e) => assert_ne!(e.code, Code::Internal, "{e:?}"),
+                }
             }
         }
     }

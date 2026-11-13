@@ -2477,7 +2477,7 @@ impl FeatureKind for Tweaks {
         crate::tweak::from_given(ty, current, &cx.given.fields, cx.part, cx.unit, cx.env)
     }
 
-    fn report(&self, part: &Part, f: &Feature) -> Value {
+    fn report(&self, part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         crate::tweak::report(&part.id, f)
     }
 

@@ -163,6 +163,7 @@ fn rebuild_section(golden: &mut Golden) {
         parameters: None,
         env: ryucad::expr::Env::empty(),
         project_reads: Default::default(),
+        hole_standards: None,
         uses: Default::default(),
         acts: Default::default(),
         imports: Default::default(),
@@ -170,6 +171,8 @@ fn rebuild_section(golden: &mut Golden) {
         appearance: None,
         explodes: Default::default(),
         explode_uses: Default::default(),
+        motions: Default::default(),
+        motion_uses: Default::default(),
         drawings: Default::default(),
         features,
         revision: String::new(),
@@ -5112,6 +5115,43 @@ fn limits_section(golden: &mut Golden) {
     s.str(&r.hash);
 }
 
+/// The mated assembly swept: its revolute `m1` (on the seed of `ring`,
+/// so the copies follow) driven from 0° to 90° in 19 steps with
+/// interference, clearance and poses; and `slide` moved 20 mm along x on
+/// its planar mate, held, with `m1` free. Each answer as canonical JSON.
+fn motions_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("motions");
+    let (_dir, mut session) = mated();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let turned = call(
+        &mut session,
+        "assembly.sweep",
+        json!({"part": "frame", "mate": "m1", "from": "0 deg", "to": "90 deg", "steps": 19,
+               "interference": true, "clearance": true, "poses": true}),
+    );
+    assert!(
+        turned["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|st| st["state"] == "holds"),
+        "{turned}"
+    );
+    s.str(&ryucad::doc::canonical::to_string(&turned));
+    let slid = call(
+        &mut session,
+        "assembly.sweep",
+        json!({"part": "frame", "steps": 5, "interference": true, "poses": true,
+               "drives": [{"instances": ["slide"], "translate":
+                   {"direction": "x", "from": "0 mm", "to": "20 mm"}}]}),
+    );
+    s.str(&ryucad::doc::canonical::to_string(&slid));
+}
+
 /// A millimetre part of holes and patterns: a plate drilled at a
 /// sketch's points (a counterbore with a drill point, a countersink
 /// through all, a plain blind hole), a grid of the
@@ -5271,6 +5311,131 @@ fn drilled_section(golden: &mut Golden, name: &str, holes_only: bool) {
         ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
     assert_eq!(meshes.len(), 1);
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
+}
+
+/// Part `hs`: holes with intent in a 60 × 40 × 16 mm plate at x 0 to
+/// 60: tapped through, blind with a split wall, unified left-hand; a
+/// clearance hole from a made-up house table; a fitted bore; a 3 × 3
+/// pattern of the first; and the plate's mirror image about yz, a solid
+/// of its own.
+fn hole_specs_project() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    // Made-up house values.
+    ryucad::doc::project::write_json(
+        &dir.path().join("hole_standards.json"),
+        &json!({
+            "format": 1, "kind": "ryucad.hole_standards",
+            "fasteners": {
+                "house_cap": {"M5": {"clearance": {"close": "5.4 mm", "normal": "5.6 mm",
+                                                   "loose": "6.1 mm"},
+                                     "counterbore": {"diameter": "9.7 mm", "depth": "5.3 mm"}}}
+            }
+        }),
+    )
+    .unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(&mut s, "part.create", json!({"part": "hs"}));
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("hs");
+        call(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "plate", "params": {"x": "60 mm", "y": "40 mm", "z": "16 mm"},
+               "placement": {"origin": ["0 mm", "-20 mm", "0 mm"]}}),
+    );
+    let top =
+        call(&mut s, "inspect", json!({"part": "hs", "feature": "plate"}))["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+            })
+            .map(|f| format!("hs/plate/{}", f["name"].as_str().unwrap()))
+            .unwrap();
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "spots", "face": top}),
+    );
+    let mut ops = Vec::new();
+    for (i, at) in [[6, -16], [30, -12], [45, -12], [20, 10], [45, 10]]
+        .iter()
+        .enumerate()
+    {
+        ops.push(json!({"op": "add", "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "hs", "sketch": "spots", "ops": ops}),
+    );
+    for (id, point, spec) in [
+        ("m6", "p1", "M6x1.0-6H THRU"),
+        ("m8", "p2", "M8x1.0-5H 10 DEEP, DRILL 14 DEEP 118DEG"),
+        ("unc", "p3", "1/4-20 UNC-2B-LH THRU"),
+        ("cap", "p4", "CBORE HOUSE_CAP M5 THRU"),
+        ("fit", "p5", "DIA 6 H7 THRU"),
+    ] {
+        add(
+            &mut s,
+            json!({"type": "hole", "id": id, "sketch": "spots", "points": [point],
+                   "spec": spec}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "grid", "features": ["m6"], "direction": "x",
+               "spacing": "6 mm", "count": 3, "direction2": "y", "spacing2": "6 mm",
+               "count2": 3}),
+    );
+    add(
+        &mut s,
+        json!({"type": "mirror", "id": "m", "solid": "plate", "plane": "yz",
+               "operation": "new"}),
+    );
+    (dir, s)
+}
+
+/// Holes with intent: their bodies bit for bit, the part's hash, every
+/// hole's JSON and every cosmetic thread.
+fn hole_specs_section(golden: &mut Golden) {
+    let mut s = golden.section("hole_specs");
+    let (_dir, mut session) = hole_specs_project();
+    let part = Id::parse("hs", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (id, o) in &result.features {
+        let o = o.as_ref().unwrap();
+        s.str(id.as_str());
+        for (solid, b) in o.solids() {
+            s.str(solid.as_str());
+            s.str(&b.body.dump());
+        }
+        if o.solids().is_empty() {
+            s.str(o.hash());
+        }
+    }
+    s.str(&result.hash);
+    let holes = ryucad::holes::list(&mut session, &part, None).unwrap();
+    // Five holes, eight more from the grid, and the copy's 13.
+    assert_eq!(holes.rows.len(), 26);
+    for r in &holes.rows {
+        s.str(&ryucad::doc::canonical::to_string(&r.to_json(Unit::Mm)));
+    }
+    for t in ryucad::thread::of(&holes) {
+        s.str(&ryucad::doc::canonical::to_string(&t.to_json()));
+    }
 }
 
 #[test]
@@ -6360,6 +6525,10 @@ fn transfer_section(golden: &mut Golden) {
         let mut details = e.details.clone();
         details["path"] = serde_json::json!("occt_style.stp");
         details["transfer"]["file"] = serde_json::json!("occt_style.stp");
+        for m in details["missing"].as_array_mut().into_iter().flatten() {
+            m["referenced_by"] = serde_json::json!("occt_style.stp");
+            m["searched"] = serde_json::json!(["."]);
+        }
         out.push(ryucad::doc::canonical::to_string(&details));
         let params = serde_json::json!({"part": root.expect("an assembly"),
                                         "time_stamp": "2026-10-27T00:00:00", "file_name": "a.step"});
@@ -6368,6 +6537,60 @@ fn transfer_section(golden: &mut Golden) {
             .install(|| ryucad::server::answer_live(&mut session, None, None, req))
             .unwrap();
         out.push(ryucad::doc::canonical::to_string(&a.result["transfer"]));
+        runs.push(out);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for x in &runs[0] {
+        s.str(x);
+    }
+}
+
+/// External-reference assemblies (design 448, plan 24.D): the committed
+/// set imported as references (an agent's default) and flattened; each
+/// answer's parts, instances and `external` lines without the machine's
+/// paths, and every body's hash. One thread and four.
+fn external_imports_section(golden: &mut Golden) {
+    let mut s = golden.section("external_imports");
+    let set = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ryustep/tests/data/external/set/asm.stp");
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+        let mut out = Vec::new();
+        for params in [
+            serde_json::json!({"path": set}),
+            serde_json::json!({"path": set, "flatten": true, "part": "rig"}),
+        ] {
+            let req = ryucad::proto::Request::from_rpc("import", Some(params)).unwrap();
+            let mut v = pool
+                .install(|| ryucad::server::handle(&mut session, req))
+                .unwrap();
+            for x in v["external"].as_array_mut().unwrap() {
+                x["source"] = serde_json::json!("…");
+            }
+            out.push(ryucad::doc::canonical::to_string(&v["parts"]));
+            out.push(ryucad::doc::canonical::to_string(&v["external"]));
+            out.push(ryucad::doc::canonical::to_string(&v["file"]));
+        }
+        let parts: Vec<ryucad::doc::id::Id> = session.project().parts.keys().cloned().collect();
+        for part in &parts {
+            let r = pool.install(|| session.rebuilt(part).unwrap().clone());
+            assert_eq!(r.failed(), 0, "{part}: {:?}", r.features);
+            out.push(part.to_string());
+            for (id, o) in &r.features {
+                out.push(id.to_string());
+                for (solid, b) in o.as_ref().unwrap().solids() {
+                    out.push(solid.to_string());
+                    out.push(b.body.dump());
+                }
+            }
+        }
         runs.push(out);
     }
     assert_eq!(runs[0], runs[1], "one thread and four");
@@ -6679,6 +6902,7 @@ sections! {
     sheet_metal_flat => sheet_metal_flat_section(&mut golden),
     holes => drilled_section(&mut golden, "holes", true),
     patterns => drilled_section(&mut golden, "patterns", false),
+    hole_specs => hole_specs_section(&mut golden),
     sketch_drawing => sketch_drawing_section(&mut golden),
     diff => diff_section(&mut golden),
     merge => merge_section(&mut golden),
@@ -6688,6 +6912,7 @@ sections! {
     assemblies => assemblies_section(&mut golden),
     mates => mates_section(&mut golden),
     limits => limits_section(&mut golden),
+    motions => motions_section(&mut golden),
     interference => interference_section(&mut golden),
     measure => measure_section(&mut golden),
     imports => imports_section(&mut golden),
@@ -6696,6 +6921,7 @@ sections! {
     flatten => flatten_section(&mut golden),
     exports => exports_section(&mut golden),
     transfer => transfer_section(&mut golden),
+    external_imports => external_imports_section(&mut golden),
     styles => styles_section(&mut golden),
     properties => properties_section(&mut golden),
     formats => formats_section(&mut golden),

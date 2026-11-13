@@ -51,7 +51,7 @@ impl FeatureKind for Imports {
         }
     }
 
-    fn report(&self, _part: &Part, f: &Feature) -> Value {
+    fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         f.import().expect("an import").fields()
     }
 }

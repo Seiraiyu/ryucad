@@ -1077,6 +1077,119 @@ fn protocol_methods() -> Vec<String> {
 /// Parity: nothing an agent can't do. Every protocol method has a CLI
 /// command, and each command exists.
 #[test]
+fn hole_derive_answers_with_no_model() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let d = p.ok(&["hole", "derive", "--spec", "M6x1.0-6H THRU"]);
+    assert_eq!(d["spec"], "M6x1.0-6H THRU");
+    assert_eq!(d["sizes"]["drill"]["value"], "5 mm");
+    assert_eq!(d["sizes"]["drill"]["source"], "rule");
+    assert_eq!(
+        d["fields"]["thread"],
+        json!({"standard": "iso_metric", "size": "M6"})
+    );
+    assert_eq!(d["fields"].get("sketch"), None, "placeholders are left out");
+    let minor = &d["sizes"]["thread"]["limits"]["minor"][1];
+    assert_eq!(minor["value"], "5.153 mm", "{d}");
+    let d = p.ok(&[
+        "hole",
+        "derive",
+        "--spec",
+        "M8 16 DEEP, DRILL 20 DEEP 118DEG",
+        "--fields",
+        r#"{"diameter": "6.9 mm"}"#,
+    ]);
+    assert_eq!(d["spec"], "M8x1.25-6H 16 DEEP, DRILL 6.9 20 DEEP 118DEG");
+    assert_eq!(d["sizes"]["drill"]["source"], "override");
+    let e = p.fails(
+        &["hole", "derive", "--spec", "CBORE ISO4762 M5"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["reason"], "needs_project_table", "{e}");
+    let e = p.fails(&["hole", "derive", "--spec", "M6x"], "invalid_param", 1);
+    assert_eq!(e["details"]["position"], 3);
+}
+
+#[test]
+fn standards_say_what_they_hold_and_where_it_came_from() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let all = p.ok(&["standards", "threads"]);
+    let keys: Vec<&str> = all["standards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["standard"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "iso_metric",
+            "unc",
+            "unf",
+            "unef",
+            "un",
+            "npt",
+            "nptf",
+            "nps",
+            "bspt",
+            "bspp"
+        ]
+    );
+    let m = p.ok(&["standards", "threads", "iso_metric"]);
+    let m6 = m["sizes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["size"] == "M6")
+        .unwrap();
+    assert_eq!(m6["pitches"], json!(["1.0", "0.75"]));
+    let m6 = p.ok(&["standards", "threads", "iso_metric", "M6"]);
+    assert_eq!(m6["major"], json!({"value": "6 mm", "source": "fact"}));
+    let h6 = m6["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["class"] == "6H")
+        .unwrap();
+    assert_eq!(
+        h6["minor"][1],
+        json!({"value": "5.153 mm", "source": "formula: ISO 965-1"}),
+        "{m6}"
+    );
+    assert_eq!(
+        m6["tap_drill"],
+        json!({"value": "5 mm", "source": "rule", "drill": "5"})
+    );
+    let npt = p.ok(&["standards", "threads", "npt", "1/8"]);
+    assert_eq!(
+        npt["tpi"],
+        json!({"value": "27", "source": "fact"}),
+        "{npt}"
+    );
+    assert_eq!(
+        npt["tap_drill"],
+        Value::Null,
+        "a pipe thread's tap drill is a project's"
+    );
+    let f = p.ok(&["standards", "fasteners"]);
+    assert_eq!(f["standards"], json!([]), "no fastener is built in");
+    let e = p.fails(&["standards", "fasteners", "iso4762"], "not_found", 1);
+    assert_eq!(e["details"]["file"], "hole_standards.json");
+    let d = p.ok(&["standards", "drills", "number"]);
+    assert_eq!(
+        d["drills"][6],
+        json!({"name": "#7", "value": "0.201 in", "source": "fact"})
+    );
+    p.fails(
+        &["standards", "threads", "iso_metric", "M6.3"],
+        "not_found",
+        1,
+    );
+}
+
+#[test]
 fn every_protocol_method_has_a_command() {
     let commands: &[(&str, &[&str])] = &[
         ("project.init", &["init"]),
@@ -1122,8 +1235,12 @@ fn every_protocol_method_has_a_command() {
         ("assembly.move", &["assembly", "move"]),
         ("assembly.tree", &["assembly", "tree"]),
         ("assembly.solve", &["assembly", "solve"]),
+        ("assembly.sweep", &["assembly", "sweep"]),
         ("interference", &["interference"]),
         ("measure", &["measure"]),
+        ("hole.derive", &["hole", "derive"]),
+        ("standards.list", &["standards"]),
+        ("holes.list", &["holes"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
         ("feature_faces.get", &["feature-faces"]),
@@ -1188,6 +1305,9 @@ fn every_protocol_method_has_a_command() {
         ("drawing.export", &["drawing", "export"]),
         ("drawing.layout", &["drawing", "layout"]),
         ("explode.list", &["explode", "list"]),
+        ("motion.list", &["motion", "list"]),
+        ("motion.save", &["motion", "save"]),
+        ("motion.delete", &["motion", "delete"]),
         ("explode.save", &["explode", "save"]),
         ("explode.delete", &["explode", "delete"]),
         ("explode.show", &["explode", "show"]),
@@ -3255,6 +3375,320 @@ fn review_against_a_fake_service() {
         serde_json::from_str::<Value>(&posted.body).unwrap(),
         serde_json::json!({"ref": "p/b/0123456789abcdef0123456789abcdef", "body": "too thin here"})
     );
+}
+
+/// #722: a 200 × 200 × 12 mm fixture plate, 100 × M6×1.0-6H THRU on a
+/// 20 mm grid.
+#[test]
+fn the_fixture_plate_of_issue_722() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=200", "--param", "y=200",
+        "--param", "z=12",
+    ]);
+    p.ok(&[
+        "feature", "add", "plate", "sketch", "--id", "pts", "--origin", "0,0,12",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [10, 10]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "plate", "pts", ops]);
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "h",
+        "--spec",
+        "M6x1.0-6H THRU",
+        "--sketch",
+        "pts",
+    ]);
+    assert_eq!(h["feature"]["sizes"]["drill"]["value"], "5 mm", "{h}");
+    assert_eq!(
+        h["feature"]["thread"],
+        json!({"standard": "iso_metric", "size": "M6"})
+    );
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "pattern",
+        "--id",
+        "grid",
+        "--seed",
+        "h",
+        "--direction",
+        "x",
+        "--spacing",
+        "20",
+        "--count",
+        "10",
+        "--direction2",
+        "y",
+        "--spacing2",
+        "20",
+        "--count2",
+        "10",
+    ]);
+    let holes = p.ok(&["holes", "plate"]);
+    let rows = holes["holes"].as_array().unwrap();
+    assert_eq!(rows.len(), 100);
+    for r in rows {
+        assert_eq!(r["spec"], "M6x1.0-6H THRU");
+        assert_eq!(r["sizes"]["drill"]["value"], "5 mm");
+    }
+    // On the 20 mm grid, each with its pattern index.
+    let at = |r: &Value| -> Vec<f64> {
+        r["position"]["m"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect()
+    };
+    let close = |got: Vec<f64>, want: [f64; 3]| {
+        assert!(
+            got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-12),
+            "{got:?} != {want:?}"
+        );
+    };
+    assert_eq!(rows[0]["ref"], "plate/h/p1");
+    close(at(&rows[0]), [0.010, 0.010, 0.012]);
+    let last = rows
+        .iter()
+        .find(|r| r["pattern"]["instance"] == json!([9, 9]))
+        .unwrap();
+    assert_eq!(last["ref"], "plate/grid/h/p1/9,9");
+    close(at(last), [0.190, 0.190, 0.012]);
+    // 99 instances, each index once; the seed is the 100th.
+    let mut seen: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.get("pattern").map(|x| x["instance"].to_string()))
+        .collect();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 99);
+    // The volume: the plate less 100 Ø5.0 bores 12 mm long.
+    let mass = p.ok(&["measure", "plate/b"]);
+    let volume = mass["volume"]["m3"].as_f64().unwrap();
+    let want = 0.2 * 0.2 * 0.012 - 100.0 * core::f64::consts::PI * 0.0025 * 0.0025 * 0.012;
+    assert!(
+        (volume - want).abs() < 1e-6 * want,
+        "{volume} != {want}: {mass}"
+    );
+    let g = p.ok(&["holes", "plate", "--group"]);
+    assert_eq!(g["groups"][0]["count"], 100);
+}
+
+#[test]
+fn holes_as_json_csv_and_groups() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [10, 5]},
+        {"op": "add", "type": "fix", "a": "p1"},
+        {"op": "add", "type": "point", "at": [4, 5]},
+        {"op": "add", "type": "fix", "a": "p2"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--point",
+        "p1",
+        "--point",
+        "p2",
+        "--spec",
+        "M2x0.4-6H THRU",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "pattern",
+        "--id",
+        "row",
+        "--seed",
+        "h",
+        "--direction",
+        "y",
+        "--spacing",
+        "3",
+        "--count",
+        "2",
+    ]);
+    let all = p.ok(&["holes", "p"]);
+    let rows = all["holes"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "{all}");
+    let r = &rows[2];
+    assert_eq!(r["ref"], "p/row/h/p1/1");
+    assert_eq!(r["spec"], "M2x0.4-6H THRU");
+    assert_eq!(r["type"], "tapped");
+    assert_eq!(
+        r["pattern"],
+        json!({"feature": "row", "seed": "h", "instance": [1]})
+    );
+    assert_eq!(r["axis"], json!([0.0, 0.0, -1.0]));
+    assert_eq!(r["position"]["value"], "(10 mm, 8 mm, 5 mm)", "{r}");
+    assert!(r["faces"]["wall"].as_str().unwrap().starts_with("p/b/"));
+    assert_eq!(r["thread"]["designation"], "M2x0.4-6H");
+    assert_eq!(all["gone"], json!([]));
+    let g = p.ok(&["holes", "p", "--group"]);
+    assert_eq!(
+        g["groups"],
+        json!([{"spec": "M2x0.4-6H THRU", "count": 4,
+                "refs": ["p/h/p1", "p/h/p2", "p/row/h/p1/1", "p/row/h/p2/1"]}])
+    );
+    let one = p.ok(&["holes", "p", "--ref", "p/row/h/p2/1"]);
+    assert_eq!(one["holes"].as_array().unwrap().len(), 1);
+    p.fails(&["holes", "p", "--ref", "p/row/h/p9/1"], "not_found", 1);
+    let csv = p.ok(&["holes", "p", "--csv"]);
+    let text = csv["csv"].as_str().unwrap();
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next().unwrap(),
+        "ref,spec,type,x_m,y_m,z_m,axis_x,axis_y,axis_z,drill_m,depth_m,thread_depth_m,feature,pattern,instance,mirror_of,solid"
+    );
+    assert_eq!(
+        lines.nth(2).unwrap(),
+        "p/row/h/p1/1,M2x0.4-6H THRU,tapped,0.01,0.008,0.005,0,0,-1,0.0016,0.005,0.005,h,row,1,,b"
+    );
+}
+
+#[test]
+fn tapped_holes_from_the_cli() {
+    let p = Pair::new();
+    // A 40 × 10 × 5 mm box and a sketch on its top with three points.
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [5, 5]},
+        {"op": "add", "type": "fix", "a": "p1"},
+        {"op": "add", "type": "point", "at": [15, 5]},
+        {"op": "add", "type": "fix", "a": "p2"},
+        {"op": "add", "type": "point", "at": [30, 5]},
+        {"op": "add", "type": "fix", "a": "p3"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--point",
+        "p1",
+        "--spec",
+        "M6x1.0-6H THRU",
+    ]);
+    assert_eq!(h["feature"]["spec"], "M6x1.0-6H THRU");
+    assert_eq!(h["feature"]["sizes"]["drill"]["value"], "5 mm");
+    let h = p.ok(&["feature", "edit", "p", "h", "--class", "5H", "--left-hand"]);
+    assert_eq!(
+        h["feature"]["thread"],
+        json!({"standard": "iso_metric", "size": "M6", "class": "5H", "hand": "left"})
+    );
+    let h = p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "h",
+        "--tap-drill",
+        "engagement:75",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        (&h["dry_run"], &h["feature"]["sizes"]["drill"]["value"]),
+        (&json!(true), &json!("5.2 mm"))
+    );
+    let shown = p.ok(&["feature", "show", "p", "h"]);
+    assert!(
+        shown["feature"]["thread"].get("drill").is_none(),
+        "a dry run writes nothing"
+    );
+    p.fails(
+        &[
+            "feature",
+            "edit",
+            "p",
+            "h",
+            "--spec",
+            "M8 THRU",
+            "--depth",
+            "through_all",
+        ],
+        "usage",
+        2,
+    );
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "k",
+        "--sketch",
+        "s",
+        "--point",
+        "p2",
+        "--thread",
+        "unf:#10",
+        "--depth",
+        "through_all",
+    ]);
+    assert_eq!(h["feature"]["spec"], "#10-32 UNF-2B THRU");
+    let e = p.fails(
+        &["feature", "edit", "p", "k", "--tpi", "24"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["reason"], "pitch_not_standard");
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "f",
+        "--sketch",
+        "s",
+        "--point",
+        "p3",
+        "--diameter",
+        "6",
+        "--fit",
+        "H7",
+        "--depth",
+        "through_all",
+    ]);
+    assert_eq!(h["feature"]["spec"], "DIA 6 H7 THRU");
 }
 
 #[test]
@@ -6669,6 +7103,36 @@ fn mate_limits_from_the_cli() {
 }
 
 #[test]
+fn motions_save_list_and_delete_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let _ = plate_and_bolt(&p);
+    let v = p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "lift",
+        "--drives",
+        r#"[{"instances": ["pin"], "translate": {"direction": "z", "from": "0 mm", "to": "5 mm"}}]"#,
+        "--steps",
+        "6",
+    ]);
+    assert_eq!(v["motion"], "lift", "{v}");
+    let list = p.ok(&["motion", "list", "frame"]);
+    assert_eq!(list["motions"][0]["steps"], 6, "{list}");
+    p.fails(
+        &["motion", "delete", "frame", "nope"],
+        "motion_not_found",
+        1,
+    );
+    p.ok(&["motion", "delete", "frame", "lift"]);
+    assert_eq!(
+        p.ok(&["motion", "list", "frame"])["motions"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
 fn a_failing_mate_warns_from_the_cli() {
     // Issues #155 and #158: the slot grown into a skim over the plate's
     // whole top takes away the face m1 stands on, in frame, which top
@@ -6800,6 +7264,82 @@ fn a_failing_mate_warns_from_the_cli() {
     p.fails(&["check", "top"], "check_failed", 1);
 }
 
+/// External-reference assemblies both ways (design 448, 24.D, #443): an
+/// assembly alone is refused naming its part files; with --search it
+/// imports, its part files stored; a changed part file follows an
+/// update of the assembly.
+#[test]
+fn external_assemblies_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let set = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/external/set");
+    let beside = p.direct.parent().unwrap();
+    fs::create_dir_all(beside.join("alone")).unwrap();
+    fs::copy(set.join("asm.stp"), beside.join("alone/asm.stp")).unwrap();
+    let e = p.fails(
+        &["import", "../alone/asm.stp"],
+        "import_external_missing",
+        1,
+    );
+    let files: Vec<&str> = e["details"]["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, ["box.stp", "cylinder.stp"], "{e}");
+    let (lib, parts) = (
+        set.to_str().unwrap().to_owned(),
+        set.join("parts").to_str().unwrap().to_owned(),
+    );
+    let made = p.ok(&[
+        "import",
+        "../alone/asm.stp",
+        "--search",
+        &lib,
+        "--search",
+        &parts,
+    ]);
+    let kinds: Vec<(&str, &str)> = made["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| (x["part"].as_str().unwrap(), x["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [("asm", "assembly"), ("box", "part"), ("pin", "part")]
+    );
+    assert_eq!(made["external"].as_array().unwrap().len(), 2);
+    // A new version: the same assembly, the box written by OCCT in AP242
+    // (its product named as the AP214 box's is, so it is the same product).
+    fs::create_dir_all(beside.join("v2/parts")).unwrap();
+    fs::copy(set.join("asm.stp"), beside.join("v2/asm.stp")).unwrap();
+    fs::copy(
+        set.join("parts/cylinder.stp"),
+        beside.join("v2/parts/cylinder.stp"),
+    )
+    .unwrap();
+    let ap242 = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt/box_ap242.stp"),
+    )
+    .unwrap();
+    fs::write(
+        beside.join("v2/box.stp"),
+        ap242.replace("PRODUCT('part 1','part 1'", "PRODUCT('part 2','part 2'"),
+    )
+    .unwrap();
+    let v = p.ok(&["import", "../v2/asm.stp", "--update", "imports/asm.step"]);
+    let changed: Vec<&str> = v["external"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(changed, ["imports/box.step"], "{v}");
+    p.ok(&["rebuild", "asm"]);
+}
+
 /// The transfer report both ways (design 448): an import's answer and
 /// `import report` agree, `--detail` lists instances, an assembly of
 /// external parts is refused naming its files, and a STEP export says
@@ -6822,8 +7362,8 @@ fn transfer_reports_from_the_cli() {
     let detail = p.ok(&["import", "report", &stored, "--detail"]);
     assert_eq!(detail["transfer"]["detail"], true);
     assert!(detail["transfer"]["categories"][0]["interpreted"]["names"][0]["instances"].is_array());
-    let e = p.fails(&["import", "../ext.stp"], "import_body_missing", 1);
-    assert_eq!(e["details"]["external"][0]["file"], "bracket.stp", "{e}");
+    let e = p.fails(&["import", "../ext.stp"], "import_external_missing", 1);
+    assert_eq!(e["details"]["missing"][0]["file"], "bracket.stp", "{e}");
     assert!(e["details"]["transfer"]["categories"].is_array());
     p.fails(&["import", "report", "imports/none.step"], "not_found", 1);
     // An export asked to leave a part's colour out says so.
@@ -6928,6 +7468,13 @@ fn flattened_imports_from_the_cli() {
     assert!(features.len() > 1, "{v}");
     assert!(features.iter().all(|f| f["mode"] == "reference"), "{v}");
     let built = p.ok(&["rebuild", "board"]);
+    // Each flattened body's import says so, for the window's one row per
+    // file (ryucad 25.B).
+    let reported = built["parts"][0]["features"].as_array().unwrap();
+    assert!(
+        reported.iter().all(|f| f["import"]["flattened"] == true),
+        "{built}"
+    );
     let solids = built["parts"][0]["solids"].as_array().unwrap();
     assert_eq!(solids.len(), features.len(), "{built}");
     assert!(solids.iter().all(|s| s["ok"] == true), "{built}");
@@ -6958,6 +7505,12 @@ fn reference_imports_from_the_cli() {
     let fid = f["id"].as_str().unwrap().to_owned();
     let built = p.ok(&["rebuild", "r"]);
     assert_eq!(built["parts"][0]["solids"][0]["reference"], true, "{built}");
+    assert!(
+        built["parts"][0]["features"][0]["import"]
+            .get("flattened")
+            .is_none(),
+        "{built}"
+    );
     let body = p.ok(&["inspect", "r", &fid]);
     let edge = body["bodies"][0]["edges"][0]["name"]
         .as_str()
@@ -8783,6 +9336,165 @@ fn properties_in_and_out_from_the_cli() {
             .filter_map(|w| w.as_str())
             .any(|w| w.starts_with("export_metadata_omitted"))
     );
+}
+
+#[test]
+fn a_sweep_from_the_cli_three_ways() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    let short = p.ok(&[
+        "assembly",
+        "sweep",
+        "frame",
+        "--mate",
+        "m1",
+        "--from",
+        "-3deg",
+        "--to",
+        "3deg",
+        "--steps",
+        "7",
+        "--interference",
+    ]);
+    assert_eq!(short["steps"].as_array().unwrap().len(), 7, "{short}");
+    assert_eq!(short["first_collision"], serde_json::Value::Null, "{short}");
+    let inline = p.ok(&[
+        "assembly",
+        "sweep",
+        "frame",
+        "--drives",
+        r#"[{"mate": "m1", "angle": {"from": "-3 deg", "to": "3 deg"}}]"#,
+        "--steps",
+        "7",
+        "--interference",
+    ]);
+    assert_eq!(inline["steps"], short["steps"]);
+    p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "turn",
+        "--drives",
+        r#"[{"mate": "m1", "angle": {"from": "-3 deg", "to": "3 deg"}}]"#,
+        "--steps",
+        "7",
+    ]);
+    let saved = p.ok(&[
+        "assembly",
+        "sweep",
+        "frame",
+        "turn",
+        "--interference",
+        "--poses",
+    ]);
+    assert_eq!(saved["motion"], "turn");
+    assert!(saved["steps"][3]["poses"]["pin"].is_object(), "{saved}");
+    p.fails(
+        &["assembly", "sweep", "frame", "gone"],
+        "motion_not_found",
+        1,
+    );
+}
+
+#[test]
+fn a_motion_against_a_stop_from_the_cli_both_ways_with_undo() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    p.ok(&[
+        "feature",
+        "edit",
+        "frame",
+        "m1",
+        "--angle-min",
+        "-6deg",
+        "--angle-max",
+        "6deg",
+    ]);
+    let saved = p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "swing",
+        "--drives",
+        r#"[{"mate": "m1", "angle": {"from": "0 deg", "to": "10 deg"}}]"#,
+        "--steps",
+        "11",
+    ]);
+    assert_eq!(saved["warnings"][0]["code"], "motion_past_limit", "{saved}");
+    // A sweep lifts its `motion_past_limit` warning into the envelope.
+    let (code, env) = p.both_from("", &["assembly", "sweep", "frame", "swing"]);
+    assert_eq!(code, 0, "{env}");
+    assert!(
+        env["warnings"][0]
+            .as_str()
+            .is_some_and(|w| w.contains("past its max stop")),
+        "{env}"
+    );
+    let swept = env["result"].clone();
+    assert_eq!(swept["first_blocked"]["index"], 7, "{swept}");
+    assert_eq!(swept["first_blocked"]["limit"]["at"], "max");
+    let deg = swept["first_blocked"]["stop"]["values"]["m1"]["angle_deg"]
+        .as_f64()
+        .unwrap();
+    assert!(deg > 6.0 && deg < 6.01, "{deg}");
+    let report = p.ok(&["check", "frame"]);
+    assert_eq!(report["passed"], true, "{report}");
+    let codes: Vec<&str> = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"motion_blocked") && codes.contains(&"motion_past_limit"),
+        "{codes:?}"
+    );
+    // Deleted both ways; undone in the daemon, the file comes back there.
+    p.ok(&["motion", "delete", "frame", "swing"]);
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(p.daemon.join("parts/frame/motions/swing.json").exists());
+    assert!(!p.direct.join("parts/frame/motions/swing.json").exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["motion", "list", "frame"]);
+    assert_eq!(code, 0, "{v}");
 }
 
 /// Design 525: plain `check` leaves interference out and notes where it

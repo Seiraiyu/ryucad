@@ -196,7 +196,7 @@ impl FeatureKind for Instances {
         )?))
     }
 
-    fn report(&self, _part: &Part, f: &Feature) -> Value {
+    fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         f.instance().expect("an instance").fields()
     }
 }
