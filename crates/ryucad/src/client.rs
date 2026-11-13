@@ -105,6 +105,13 @@ pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<
     ryu_session::client::request::<Cad>(root, req, name)
 }
 
+/// A connection to the project's daemon that has said hello as the
+/// agent `name`: `Err` when no daemon could be reached (nothing was
+/// sent), `Ok(Err(..))` when the hello was refused.
+pub fn hello_connection(root: &Path, name: Option<&str>) -> Result<Result<Connection>> {
+    ryu_session::client::hello_connection::<Cad>(root, name)
+}
+
 /// [`request`] with `ask`'s `progress` and `token`, handing each
 /// `progress` notification's params to `note` before the answer.
 pub fn request_noting(

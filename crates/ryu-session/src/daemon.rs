@@ -773,6 +773,28 @@ mod tests {
         c
     }
 
+    /// A client that reads on a thread of its own (ryucad's stdio
+    /// session) says hello, then writes request lines and reads their
+    /// answers on the connection's two halves.
+    #[test]
+    fn a_connection_says_hello_and_splits_into_halves() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = serving(dir.path());
+        let mut c = Connection::connect(&endpoint).unwrap();
+        let hi = c.hello(Some("script")).unwrap().unwrap();
+        assert!(hi["participant"].is_string(), "{hi}");
+        let (mut reader, mut writer) = c.into_halves();
+        writer
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"daemon.status\"}\n")
+            .unwrap();
+        writer.flush().unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["id"], "x");
+        assert!(v["result"]["pid"].is_number(), "{v}");
+    }
+
     /// Starts `method` on its own connection with progress and `token`,
     /// sending each progress line down `notes`; the answer comes back
     /// from the thread.
