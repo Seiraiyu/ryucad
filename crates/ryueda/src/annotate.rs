@@ -187,7 +187,7 @@ fn in_order(p: &Project, design: &Id, order: Order) -> Result<Vec<(Id, Id)>> {
 
 /// The prefix a component is numbered under: its designator's letters,
 /// else its library component's prefix.
-fn prefix_of(p: &Project, c: &Component) -> Option<String> {
+pub(crate) fn prefix_of(p: &Project, c: &Component) -> Option<String> {
     if let Some(r) = &c.refdes {
         let letters = r
             .find(|ch: char| !ch.is_ascii_alphabetic())
@@ -230,7 +230,7 @@ fn locked_clashes(p: &Project) -> Result<()> {
 /// taken, `*n` left past it; `None` once one isn't a designator (a
 /// library prefix like `#PWR`, or too long), since a larger `n` never
 /// makes one again.
-fn next_free(prefix: &str, rest: &str, n: &mut u64, taken: &BTreeSet<String>) -> Option<String> {
+pub(crate) fn next_free(prefix: &str, rest: &str, n: &mut u64, taken: &BTreeSet<String>) -> Option<String> {
     loop {
         let t = format!("{prefix}{n}{rest}");
         if !conn::refdes_ok(&t) {

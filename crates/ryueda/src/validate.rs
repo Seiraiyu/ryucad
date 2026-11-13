@@ -734,6 +734,13 @@ pub(crate) fn settle_record(
     Ok(())
 }
 
+/// Whether item `x` offers `choice`.
+fn offers(x: &Value, choice: &str) -> bool {
+    x["choices"]
+        .as_array()
+        .is_some_and(|c| c.iter().any(|y| y == choice))
+}
+
 /// The item `id` of a status, or `conflict_not_found`.
 fn find<'a>(now: &'a Value, id: &str) -> Result<&'a Value> {
     now["conflicts"]
@@ -765,13 +772,17 @@ fn settle(
     // A block's areas (by number) and what each takes; a stale block's repair.
     let mut areas: BTreeMap<String, BTreeMap<usize, ryusch::merge::Repair>> = BTreeMap::new();
     let mut stale: Vec<(String, String)> = Vec::new();
+    // Semantic items' repairs, applied in order once every one is found.
+    let mut semantic: Vec<(Value, String)> = Vec::new();
     for r in resolutions {
         let found = find(now, &r.conflict)?;
         let kind = found["kind"].as_str().unwrap_or_default();
         let path = found["files"][0].as_str().unwrap_or_default().to_owned();
         let usage = |why: String| Error::new(Code::Usage, why).with("conflict", &r.conflict);
         match (kind, r.choice.as_str()) {
-            ("value" | "delete_edit" | "order" | "id_collision", "ours" | "theirs" | "value") => {
+            ("value" | "delete_edit" | "order" | "id_collision", "ours" | "theirs" | "value")
+                if offers(found, r.choice.as_str()) =>
+            {
                 let x = match r.choice.as_str() {
                     "value" => Some(
                         r.value
@@ -842,6 +853,9 @@ fn settle(
                 let n: usize = n.parse().unwrap_or_default();
                 areas.entry(block.to_owned()).or_default().insert(n, repair);
             }
+            ("refdes_clash" | "name_clash" | "delete_edit" | "id_collision", "repair") => {
+                semantic.push((found.clone(), r.repair.clone().unwrap_or_default()));
+            }
             ("layout_stale", "repair") => {
                 let id = r.repair.clone().unwrap_or_default();
                 if !found["repairs"]
@@ -889,6 +903,12 @@ fn settle(
             }
         }
         resolved.push(r.conflict.clone());
+    }
+    if !semantic.is_empty() {
+        let sides = sides(at.root, at.state)?;
+        for (x, id) in &semantic {
+            crate::clash::repair(at.root, files, x, id, &sides)?;
+        }
     }
     if areas.is_empty() && stale.is_empty() {
         return Ok(resolved);

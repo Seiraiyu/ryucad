@@ -10,12 +10,16 @@
 //! Nothing here reads a side unless the merged project holds an error or
 //! an ERC finding: a clean merge costs one judgement of the merged project.
 
+use crate::conn;
+use crate::design::{Part, part_path};
 use crate::erc::Finding;
-use crate::error::{Code, Result};
+use crate::error::{Code, Error, Result};
 use crate::fault::{Fault, Severity};
 use crate::id::Id;
 use crate::project::Project;
+use crate::validate::{Sides, item, json_of};
 use ryu_git::MergeState;
+use ryu_git::value::Kind;
 use ryu_session::fresh::Files;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -113,6 +117,216 @@ pub(crate) struct Found {
     pub warnings: Vec<Value>,
 }
 
+/// A component of `p` by block and ID, if it reads.
+pub(crate) fn component<'a>(p: &'a Project, b: &Id, c: &Id) -> Option<&'a conn::Component> {
+    p.conn.blocks.get(b)?.components.get(c)?.item.as_ref().ok()
+}
+
+/// The sides that brought component `(b, c)`'s designator into the
+/// merge: each whose designator for it differs from the base's (or the
+/// base has none) and is the merge's.
+fn brought(three: &Three, p: &Project, b: &Id, c: &Id) -> Vec<&'static str> {
+    let refdes = |q: &Project| component(q, b, c).and_then(|x| x.refdes.clone());
+    let now = refdes(p);
+    let was = three.base.and_then(refdes);
+    let mut out = Vec::new();
+    for (name, q) in [("ours", three.ours), ("theirs", three.theirs)] {
+        let it = refdes(q);
+        if it.is_some() && it != was && it == now {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Which side caused an item, from whether each brought part of it.
+fn cause(ours: bool, theirs: bool) -> &'static str {
+    match (ours, theirs) {
+        (true, false) => "ours",
+        (false, true) => "theirs",
+        _ => "both",
+    }
+}
+
+/// What `annotate --reset unannotated` gives a clash's unlocked
+/// components once they are placeholders (`<prefix>?`): their new
+/// designators; `None` when annotate can't (two components locked alike
+/// anywhere in the project, a component with no prefix).
+fn annotated(
+    root: &Path,
+    full: &Files,
+    p: &Project,
+    design: &Id,
+    comps: &BTreeSet<(Id, Id)>,
+) -> Result<Option<Vec<Value>>> {
+    let mut files = full.clone();
+    let mut mine = BTreeSet::new();
+    for (b, c) in comps {
+        let Some(x) = component(p, b, c).filter(|x| !x.refdes_locked) else {
+            continue;
+        };
+        let Some(prefix) = crate::annotate::prefix_of(p, x) else {
+            return Ok(None);
+        };
+        edit(
+            &mut files,
+            &part_path(b, Part::Component, c),
+            "/refdes",
+            Some(json!(format!("{prefix}?"))),
+        )?;
+        mine.insert(format!("{b}/{c}"));
+    }
+    let q = crate::validate::project_over(root, &files)?;
+    let Ok(plan) = crate::annotate::plan(
+        &q,
+        Some(design.as_str()),
+        crate::annotate::Order::Down,
+        crate::annotate::Reset::Unannotated,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        plan.changes
+            .iter()
+            .filter(|c| mine.contains(&c.component))
+            .map(|c| json!({"component": c.component, "refdes": c.to}))
+            .collect(),
+    ))
+}
+
+/// Sets `pointer` of the JSON file `path` in `files` to `x` (`None`
+/// removes it), the file canonical at the lowest format that holds it
+/// (`merge::settle`'s rule).
+pub(crate) fn edit(files: &mut Files, path: &str, pointer: &str, x: Option<Value>) -> Result<()> {
+    let v = files.get(path).and_then(|b| json_of(b)).ok_or_else(|| {
+        Error::new(Code::ConflictNotFound, format!("{path} isn't readable now")).with("path", path)
+    })?;
+    let out = crate::merge::settle(&v, pointer, Kind::Value, x);
+    files.insert(
+        path.to_owned(),
+        crate::canonical::to_string(&out).into_bytes().into(),
+    );
+    Ok(())
+}
+
+/// The `refdes_clash` (or `annotate_conflict`) items: each designator
+/// `refdes_duplicate` finds in the merge and on neither side.
+fn refdes(
+    root: &Path,
+    full: &Files,
+    p: &Project,
+    merged: &Judged,
+    new_erc: &[&Finding],
+    three: &Three,
+) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    // Every designator taken: the components' and the occurrences'.
+    let mut taken: BTreeSet<String> = p
+        .conn
+        .blocks
+        .values()
+        .flat_map(|b| b.components.values())
+        .filter_map(|c| c.item.as_ref().ok()?.refdes.clone())
+        .collect();
+    for n in merged.nets.values() {
+        taken.extend(n.occurrences.iter().filter_map(|o| o.refdes.clone()));
+    }
+    // Each prefix and rest counts from 1, past what is taken, as annotate.
+    let mut next: BTreeMap<(String, String), u64> = BTreeMap::new();
+    for f in new_erc.iter().filter(|f| f.code == Code::RefdesDuplicate) {
+        let r = f.details["refdes"].as_str().unwrap_or_default().to_owned();
+        let Some(n) = merged.nets.get(&f.design) else {
+            continue;
+        };
+        // The clashing components, each once (one placed twice is one).
+        let comps: BTreeSet<(Id, Id)> = n
+            .occurrences
+            .iter()
+            .filter(|o| f.refs.contains(&o.reference))
+            .map(|o| (o.block.clone(), o.component.clone()))
+            .collect();
+        let refs: Vec<String> = comps.iter().map(|(b, c)| format!("{b}/{c}")).collect();
+        let files: Vec<String> = comps
+            .iter()
+            .map(|(b, c)| part_path(b, Part::Component, c))
+            .collect();
+        let (mut by_ours, mut by_theirs) = (false, false);
+        let (mut locked, mut theirs, mut listed) = (Vec::new(), Vec::new(), Vec::new());
+        for (b, c) in &comps {
+            let x = component(p, b, c);
+            let lock = x.is_some_and(|x| x.refdes_locked);
+            let sides = brought(three, p, b, c);
+            by_ours |= sides.contains(&"ours");
+            by_theirs |= sides.contains(&"theirs");
+            if lock {
+                locked.push(format!("{b}/{c}"));
+            } else if sides.contains(&"theirs") {
+                theirs.push((b.clone(), c.clone()));
+            }
+            listed.push(json!({"component": format!("{b}/{c}"), "locked": lock, "brought_by": sides}));
+        }
+        let id = format!("refdes:{}/{r}", f.design);
+        let what = json!({"design": f.design, "refs": refs});
+        if locked.len() > 1 {
+            let mut x = item(
+                id,
+                "annotate_conflict",
+                files,
+                what,
+                cause(by_ours, by_theirs),
+                format!(
+                    "{} are all locked as {r}: unlock all but one (`ryueda component edit <component> --unlock`), then run merge status again",
+                    locked.join(", ")
+                ),
+            );
+            x["refdes"] = json!(r);
+            x["components"] = json!(listed);
+            out.push(x);
+            continue;
+        }
+        let mut repairs = Vec::new();
+        let mut changes = Vec::new();
+        for (b, c) in &theirs {
+            let Some(cur) = component(p, b, c).and_then(|x| x.refdes.clone()) else {
+                continue;
+            };
+            let Some((prefix, _, rest)) = conn::numbered(&cur) else {
+                continue;
+            };
+            let n = next.entry((prefix.to_owned(), rest.to_owned())).or_insert(1);
+            let Some(to) = crate::annotate::next_free(prefix, rest, n, &taken) else {
+                continue;
+            };
+            taken.insert(to.clone());
+            changes.push(json!({"component": format!("{b}/{c}"), "refdes": to}));
+        }
+        if !changes.is_empty() {
+            repairs.push(json!({"id": "renumber", "changes": changes, "summary":
+                "give the components whose designator came from theirs the next free designators; ours' stand"}));
+        }
+        if let Some(changes) = annotated(root, full, p, &f.design, &comps)? {
+            repairs.push(json!({"id": "annotate", "changes": changes, "summary":
+                "make the clashing components placeholders and annotate them in canvas order"}));
+        }
+        let mut x = item(
+            id,
+            "refdes_clash",
+            files,
+            what,
+            cause(by_ours, by_theirs),
+            format!(
+                "{} occurrences share {r} in the merge, and neither side had them share it",
+                f.refs.len()
+            ),
+        );
+        x["refdes"] = json!(r);
+        x["components"] = json!(listed);
+        x["repairs"] = json!(repairs);
+        out.push(x);
+    }
+    Ok(out)
+}
+
 /// The semantic items of the merge `state` for the merged project `p`
 /// over the session's files `full`.
 pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -> Result<Found> {
@@ -140,8 +354,11 @@ pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -
     let mut found = Found::default();
     // Faults an item explains, which `merge_faults` doesn't list again.
     let mut covered: BTreeSet<String> = BTreeSet::new();
+    found
+        .clashes
+        .extend(refdes(root, full, p, &merged, &new_erc, &three)?);
     //CLASH-CALLS
-    let _ = (&new, &new_erc, &three, &files, &mut covered, full);
+    let _ = (&new, &files, &mut covered);
     found.already = merged
         .faults
         .iter()
@@ -162,6 +379,59 @@ pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -
         .map(|f| json!(f))
         .collect();
     Ok(found)
+}
+
+/// Applies repair `id` of status item `x` to `files`: the changes the
+/// status planned for it. `sides` are the merge's files.
+pub(crate) fn repair(
+    root: &Path,
+    files: &mut Files,
+    x: &Value,
+    id: &str,
+    sides: &Sides,
+) -> Result<()> {
+    let planned = x["repairs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r["id"] == id)
+        .cloned()
+        .ok_or_else(|| {
+            Error::new(
+                Code::RepairConflict,
+                format!(
+                    "no repair {id} for {} now: run merge status again",
+                    x["id"].as_str().unwrap_or_default()
+                ),
+            )
+            .with("repair", id)
+        })?;
+    let _ = (root, sides);
+    match (x["kind"].as_str().unwrap_or_default(), id) {
+        ("refdes_clash", "renumber" | "annotate") => {
+            for c in planned["changes"].as_array().into_iter().flatten() {
+                let (b, comp) = c["component"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .split_once('/')
+                    .unwrap_or_default();
+                let path = part_path(
+                    &Id::parse(b, "block")?,
+                    Part::Component,
+                    &Id::parse(comp, "component")?,
+                );
+                edit(files, &path, "/refdes", Some(c["refdes"].clone()))?;
+            }
+        }
+        //REPAIR-ARMS
+        (kind, _) => {
+            return Err(
+                Error::new(Code::RepairConflict, format!("{kind} has no repair {id}"))
+                    .with("repair", id),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -264,5 +534,64 @@ pub(crate) mod tests {
         let side = [f("a", &["d:r1/1", "d:sda"])];
         assert!(erc_on(&side, &f("b", &["d:sda", "d:r2/1"])), "grown, still the side's");
         assert!(!erc_on(&side, &f("c", &["d:r3/1"])));
+    }
+
+    #[test]
+    fn two_branches_taking_one_designator_clash_and_renumber_theirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let on_sda = |d: &str| part(json!({"refdes": d, "pins": {"1": "sda", "2": {"rail": "gnd"}}}));
+        merging(
+            r,
+            &[("blocks/top/components/r2.json", on_sda("R5"))],
+            &[("blocks/top/components/r3.json", on_sda("R5"))],
+        );
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        let c = of_kind(&v, "refdes_clash");
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "refdes:d/R5");
+        assert_eq!(c[0]["cause"], "both");
+        assert_eq!(c[0]["concerns"]["refs"], json!(["top/r2", "top/r3"]));
+        // renumber first: theirs' R5 takes the first free R (R1 and R5
+        // are taken, the channels' U1_A and U1_B are another prefix).
+        assert_eq!(c[0]["repairs"][0]["id"], "renumber");
+        assert_eq!(
+            c[0]["repairs"][0]["changes"],
+            json!([{"component": "top/r3", "refdes": "R2"}])
+        );
+        assert_eq!(c[0]["repairs"][1]["id"], "annotate");
+        let none = BTreeMap::new();
+        let mut fix = crate::proto::Resolution {
+            conflict: "refdes:d/R5".to_owned(),
+            choice: "repair".to_owned(),
+            value: None,
+            repair: Some("renumber".to_owned()),
+        };
+        let out = crate::validate::resolve(&mut s, std::slice::from_ref(&fix), &none).unwrap();
+        assert_eq!(out["status"]["clean"], true, "{out}");
+        let r3: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/components/r3.json")).unwrap()).unwrap();
+        assert_eq!(r3["refdes"], "R2");
+        // Asked again, there is no such clash.
+        fix.repair = Some("annotate".to_owned());
+        let e = crate::validate::resolve(&mut s, &[fix], &none).unwrap_err();
+        assert_eq!(e.code, Code::ConflictNotFound);
+    }
+
+    #[test]
+    fn two_locked_alike_are_an_annotate_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let locked = |d: &str| part(json!({"refdes": d, "refdes_locked": true, "pins": {"1": "sda", "2": {"rail": "gnd"}}}));
+        merging(
+            r,
+            &[("blocks/top/components/r2.json", locked("R5"))],
+            &[("blocks/top/components/r3.json", locked("R5"))],
+        );
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        let c = of_kind(&v, "annotate_conflict");
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!((c[0]["id"].clone(), c[0]["repairs"].clone()), (json!("refdes:d/R5"), json!([])));
     }
 }
