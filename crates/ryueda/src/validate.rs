@@ -173,7 +173,7 @@ pub(crate) fn item(
 }
 
 /// A file's JSON, if it is JSON.
-fn json_of(bytes: &[u8]) -> Option<Value> {
+pub(crate) fn json_of(bytes: &[u8]) -> Option<Value> {
     crate::canonical::parse(std::str::from_utf8(bytes).ok()?).ok()
 }
 
@@ -371,12 +371,7 @@ fn current(root: &Path, files: &Files, id: &Id, layout: &Layout) -> Result<Layou
         crate::schem::layout_path(id),
         crate::schem::layout_text(layout).into_bytes().into(),
     );
-    let manifest = files
-        .get(crate::project::MANIFEST)
-        .map(|b| crate::project::Manifest::read(b))
-        .transpose()?
-        .ok_or_else(|| Error::new(Code::ProjectNotFound, "the merge left no manifest"))?;
-    let p = Project::load_from(root, &files, &crate::project::resolve(root, &manifest))?;
+    let p = project_over(root, &files)?;
     let b = p.conn.blocks.get(id).ok_or_else(|| {
         Error::new(
             Code::NotFound,
@@ -389,6 +384,17 @@ fn current(root: &Path, files: &Files, id: &Id, layout: &Layout) -> Result<Layou
             .outcome
             .layout,
     )
+}
+
+/// The project loaded over `files` (a session's files with a batch's
+/// changes), its aliases resolved as the manifest there names them.
+pub(crate) fn project_over(root: &Path, files: &Files) -> Result<Project> {
+    let manifest = files
+        .get(crate::project::MANIFEST)
+        .map(|b| crate::project::Manifest::read(b))
+        .transpose()?
+        .ok_or_else(|| Error::new(Code::ProjectNotFound, "the merge left no manifest"))?;
+    Project::load_from(root, files, &crate::project::resolve(root, &manifest))
 }
 
 /// What settling a layout needs beyond the files: the project's folder,
@@ -419,7 +425,7 @@ fn pending(working: &Files) -> Vec<Id> {
 /// and everything outside `blocks/` (rails, the library, the style, the
 /// manifest's sheet) but ERC's, lint's and sourcing's settings and the
 /// attributes.
-fn affects(path: &str, block: &str) -> bool {
+pub(crate) fn affects(path: &str, block: &str) -> bool {
     match path.strip_prefix("blocks/") {
         Some(rest) => {
             rest.strip_prefix(block).is_some_and(|r| r.starts_with('/'))
@@ -627,8 +633,9 @@ pub fn status(session: &mut Session) -> Result<Value> {
     }
     let root = session.root().to_path_buf();
     let (repo, state) = merging(&root)?;
-    let working = own(&session.snapshot());
-    let v = findings(&root, &repo, &state, &working, Some(session.project()))?;
+    let full = session.snapshot();
+    let working = own(&full);
+    let v = findings(&root, &repo, &state, &working, &full, Some(session.project()))?;
     if let Some(k) = key {
         session.merge_status = Some((k, v.clone()));
     }
@@ -636,13 +643,15 @@ pub fn status(session: &mut Session) -> Result<Value> {
 }
 
 /// Everything that blocks the merge's commit, from the project's own
-/// working files; `project` is the project loaded over them, `None` when
-/// it doesn't load (its manifest holds a record).
+/// working files (`full`: with its aliases'); `project` is the project
+/// loaded over them, `None` when it doesn't load (its manifest holds a
+/// record).
 fn findings(
     root: &Path,
     repo: &Repo,
     state: &MergeState,
     working: &Files,
+    full: &Files,
     project: Option<&Project>,
 ) -> Result<Value> {
     let paths = repo.unmerged()?;
@@ -655,9 +664,17 @@ fn findings(
     unstaged.sort();
     unstaged.dedup();
     let blocked = !conflicts.is_empty();
-    conflicts.extend(layouts(root, state, working, project, blocked)?);
+    // What the merged project holds that neither side did: judged only
+    // once every file merged and the project loads.
+    let mut found = crate::clash::Found::default();
+    if let (false, Some(p)) = (blocked, project) {
+        found = crate::clash::find(root, state, p, full)?;
+    }
+    let held = blocked || !found.clashes.is_empty();
+    conflicts.extend(std::mem::take(&mut found.clashes));
+    conflicts.extend(std::mem::take(&mut found.faults));
+    conflicts.extend(layouts(root, state, working, project, held)?);
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-    let (already, warnings): (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
         "step": state.step.as_str(),
@@ -666,8 +683,8 @@ fn findings(
         "base": commit(state.base.as_ref()),
         "clean": conflicts.is_empty(),
         "conflicts": conflicts,
-        "already_failing": already,
-        "warnings": warnings,
+        "already_failing": found.already,
+        "warnings": found.warnings,
         "unstaged": unstaged,
         "untracked": untracked,
     }))
@@ -685,7 +702,7 @@ fn file_json(files: &Files, path: &str) -> Result<Value> {
 /// `files`: the value put in place ([`crate::merge::settle`]), the entry
 /// gone from the record (and the record with its last entry), the file
 /// canonical at the lowest format.
-fn settle_record(
+pub(crate) fn settle_record(
     files: &mut Files,
     path: &str,
     pointer: &str,
@@ -1042,7 +1059,7 @@ pub fn unloaded(root: &Path, req: crate::proto::Request) -> Result<Value> {
     }
     let (repo, state) = merging(root)?;
     let working = own(&crate::session::current(root)?);
-    let now = findings(root, &repo, &state, &working, None)?;
+    let now = findings(root, &repo, &state, &working, &working, None)?;
     let crate::proto::Request::MergeResolve { resolutions, .. } = req else {
         return Ok(now);
     };
@@ -1054,13 +1071,8 @@ pub fn unloaded(root: &Path, req: crate::proto::Request) -> Result<Value> {
     };
     let resolved = settle(&repo, &now, &mut files, &resolutions, &at)?;
     let changes = write(root, &working, &files)?;
-    let after = findings(
-        root,
-        &repo,
-        &state,
-        &own(&crate::session::current(root)?),
-        None,
-    )?;
+    let after_files = own(&crate::session::current(root)?);
+    let after = findings(root, &repo, &state, &after_files, &after_files, None)?;
     Ok(json!({"resolved": resolved, "changes": changes, "status": after, "unloaded": true}))
 }
 
