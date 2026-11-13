@@ -3336,6 +3336,112 @@ fn review_against_a_fake_service() {
     );
 }
 
+/// #722: a 200 × 200 × 12 mm fixture plate, 100 × M6×1.0-6H THRU on a
+/// 20 mm grid.
+#[test]
+fn the_fixture_plate_of_issue_722() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=200", "--param", "y=200",
+        "--param", "z=12",
+    ]);
+    p.ok(&[
+        "feature", "add", "plate", "sketch", "--id", "pts", "--origin", "0,0,12",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [10, 10]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "plate", "pts", ops]);
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "h",
+        "--spec",
+        "M6x1.0-6H THRU",
+        "--sketch",
+        "pts",
+    ]);
+    assert_eq!(h["feature"]["sizes"]["drill"]["value"], "5 mm", "{h}");
+    assert_eq!(
+        h["feature"]["thread"],
+        json!({"standard": "iso_metric", "size": "M6"})
+    );
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "pattern",
+        "--id",
+        "grid",
+        "--seed",
+        "h",
+        "--direction",
+        "x",
+        "--spacing",
+        "20",
+        "--count",
+        "10",
+        "--direction2",
+        "y",
+        "--spacing2",
+        "20",
+        "--count2",
+        "10",
+    ]);
+    let holes = p.ok(&["holes", "plate"]);
+    let rows = holes["holes"].as_array().unwrap();
+    assert_eq!(rows.len(), 100);
+    for r in rows {
+        assert_eq!(r["spec"], "M6x1.0-6H THRU");
+        assert_eq!(r["sizes"]["drill"]["value"], "5 mm");
+    }
+    // On the 20 mm grid, each with its pattern index.
+    let at = |r: &Value| -> Vec<f64> {
+        r["position"]["m"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect()
+    };
+    let close = |got: Vec<f64>, want: [f64; 3]| {
+        assert!(
+            got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-12),
+            "{got:?} != {want:?}"
+        );
+    };
+    assert_eq!(rows[0]["ref"], "plate/h/p1");
+    close(at(&rows[0]), [0.010, 0.010, 0.012]);
+    let last = rows
+        .iter()
+        .find(|r| r["pattern"]["instance"] == json!([9, 9]))
+        .unwrap();
+    assert_eq!(last["ref"], "plate/grid/h/p1/9,9");
+    close(at(last), [0.190, 0.190, 0.012]);
+    // 99 instances, each index once; the seed is the 100th.
+    let mut seen: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.get("pattern").map(|x| x["instance"].to_string()))
+        .collect();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 99);
+    // The volume: the plate less 100 Ø5.0 bores 12 mm long.
+    let mass = p.ok(&["measure", "plate/b"]);
+    let volume = mass["volume"]["m3"].as_f64().unwrap();
+    let want = 0.2 * 0.2 * 0.012 - 100.0 * core::f64::consts::PI * 0.0025 * 0.0025 * 0.012;
+    assert!(
+        (volume - want).abs() < 1e-6 * want,
+        "{volume} != {want}: {mass}"
+    );
+    let g = p.ok(&["holes", "plate", "--group"]);
+    assert_eq!(g["groups"][0]["count"], 100);
+}
+
 #[test]
 fn holes_as_json_csv_and_groups() {
     let p = Pair::new();
