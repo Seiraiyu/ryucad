@@ -3,14 +3,12 @@
 use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
 use crate::doc::project::{Part, feature_path};
-use crate::doc::sweep::{Angle, Extent, RevolveAxis};
 use crate::error::{Code, Error, Result};
-use crate::feature::{check_sweep, check_up_to};
+use crate::feature::check_sweep;
 use crate::mesh;
 use crate::param;
 use crate::part::{
-    check_revision, connector_text, feature, feature_id, insert_at, no_feature, order, part_id,
-    part_kind, proposed,
+    check_revision, feature, feature_id, insert_at, no_feature, order, part_id, part_kind, proposed,
 };
 use crate::proto::Position;
 use crate::rebuild;
@@ -21,107 +19,14 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 // The old path, for `route.rs` (design 541, "Paths kept").
 pub(crate) use crate::feature::Given;
-use crate::feature::blend::blend_report;
 use crate::feature::delete_body::check_delete;
-use crate::feature::hole::hole_report;
 use crate::feature::import::import_not_written_here;
 use crate::feature::insert::check_insert;
 use crate::feature::instance::check_instance;
-use crate::feature::pattern::pattern_report;
-use crate::feature::primitive::primitive_report;
-use crate::feature::sketch::sketch_report;
 use crate::feature::{Place, Write};
 
-/// How a feature appears in output: every quantity as written and in
-/// meters, every reference as `<part>/<feature>/<name>`.
-pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
-    let part = &p.id;
-    let mut v = match f {
-        Feature::Primitive(p) => primitive_report(p),
-        Feature::Sketch(s) => sketch_report(part, s),
-        Feature::Extrude(e) => {
-            let mut v = e.fields();
-            match &e.extent {
-                Extent::Blind(q) | Extent::Symmetric(q) => v["extent"]["length"] = q.report(),
-                Extent::ThroughAll { .. } => {}
-                Extent::UpTo { target, offset } => {
-                    v["extent"]["target"] = json!(target.text(part));
-                    if let Some(q) = offset {
-                        v["extent"]["offset"] = q.report();
-                    }
-                }
-            }
-            v
-        }
-        Feature::Boolean(b) => b.fields(),
-        Feature::MoveFace(_)
-        | Feature::ReplaceFace(_)
-        | Feature::Draft(_)
-        | Feature::DeleteFace(_)
-        | Feature::DeleteBlend(_)
-        | Feature::ResizeBlend(_) => crate::tweak::report(part, f),
-        Feature::Datum(d) => crate::datum::report(part, d),
-        Feature::Path(x) => crate::path::report(part, x),
-        Feature::Sweep(w) => crate::along::feature_report(part, w),
-        Feature::Loft(l) => crate::loft::feature_report(part, l),
-        Feature::Planar(x) => {
-            let mut v = x.fields();
-            if let crate::doc::sweep::Source::Face(g) = &x.profile.source {
-                v["profile"]["face"] = json!(g.text(part));
-            }
-            v
-        }
-        Feature::Instance(i) => i.fields(),
-        Feature::Insert(i) => i.fields(),
-        Feature::DeleteBody(d) => d.fields(),
-        Feature::Import(i) => i.fields(),
-        Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => {
-            crate::surface::report(part, f)
-        }
-        Feature::Mate(m) => {
-            let mut v = m.fields();
-            for (side, c) in [("a", &m.a), ("b", &m.b)] {
-                v[side]["text"] = json!(connector_text(part, c));
-            }
-            if let Some(q) = &m.angle {
-                v["angle"] = q.report();
-            }
-            if let Some(q) = &m.distance {
-                v["distance"] = q.report();
-            }
-            v
-        }
-        Feature::InstancePattern(x) => {
-            let mut v = x.fields();
-            for (role, c) in x.connectors() {
-                v[role]["text"] = json!(connector_text(part, c));
-            }
-            v
-        }
-        Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
-        Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
-            crate::body::report(part, f)
-        }
-        Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
-            crate::sheet_metal::report(p, f)
-        }
-        Feature::Hole(h) => hole_report(part, h),
-        Feature::Pattern(x) => pattern_report(part, x),
-        Feature::Revolve(r) => {
-            let mut v = r.fields();
-            if let Angle::Of(q) = &r.angle {
-                v["angle"] = q.report();
-            }
-            if let RevolveAxis::Ref(e) = &r.axis {
-                v["axis"] = json!(e.text(part));
-            }
-            v
-        }
-    };
-    v["id"] = json!(id);
-    v["type"] = json!(f.type_name());
-    v
-}
+// The old path (design 541, "Paths kept"); 27.F removes it if nothing uses it.
+pub use crate::feature::report as feature_report;
 
 /// Refuses a write that would leave a feature acting on what isn't a
 /// solid before it in `q` (the part as the write leaves it): the written
@@ -209,17 +114,13 @@ fn check_references(
             || read
                 .iter()
                 .any(|r| r.want == Some(crate::kind::Want::Sheet)));
-    let planar = matches!(f, Feature::Planar(_));
-    // An unfold's allowance and a refold's unfold are judged against the
-    // rebuild whatever they reference.
-    if f.loft().is_none()
-        && f.unfold().is_none()
-        && f.refold().is_none()
+    // A kind may judge a feature naming nothing against the rebuild: a
+    // loft's sections, an unfold's allowance and a refold's unfold, a
+    // planar face's profile, a split by a body.
+    if !crate::feature::kind_of(f).always_checked(f)
         && f.references().is_empty()
         && f.geometry().is_empty()
         && !reads_bodies
-        && !planar
-        && !matches!(f, Feature::Split(s) if s.plane().is_none())
     {
         return Ok(Vec::new());
     }
@@ -236,7 +137,7 @@ fn check_references(
     Ok(followed)
 }
 
-/// [`check_references`] against `results`.
+/// [`check_references`] against `results`: the kind's own checks.
 fn check_resolved(
     p: &Part,
     order: &[Id],
@@ -244,89 +145,13 @@ fn check_resolved(
     f: &Feature,
     results: &crate::rebuild::PartResult,
 ) -> Result<()> {
-    match f {
-        Feature::Sketch(s) => crate::sketch::context(p, order, id, s, results).map(|_| ()),
-        // What the target is; how far it is only rebuild can tell.
-        Feature::Extrude(e) => match &e.extent {
-            Extent::UpTo { target, .. } => check_up_to(p, order, id, "target", target, results),
-            _ => Ok(()),
-        },
-        Feature::Hole(h) => match &h.depth {
-            crate::doc::hole::Depth::UpTo { target, .. } => {
-                check_up_to(p, order, id, "depth", target, results)
-            }
-            _ => Ok(()),
-        },
-        // What its directions, axis and plane are; where the instances
-        // land only rebuild can tell.
-        Feature::Pattern(x) => {
-            let q = proposed(p, order, &[(id, f)]);
-            crate::pattern::motions(&q, id, x, results).map(|_| ())
-        }
-        // Edges of one solid, a face where a face goes, no edge twice; what
-        // the kernel makes of them only rebuild can tell.
-        Feature::Fillet(_) | Feature::Chamfer(_) => {
-            rebuild::check_blend(&proposed(p, order, &[(id, f)]), id, f, results)
-        }
-        // That it is an axis; whether it lies in the sketch's plane only
-        // rebuild can tell.
-        Feature::Revolve(r) => match &r.axis {
-            RevolveAxis::Ref(g) => {
-                let at = crate::geometry::At {
-                    part: p,
-                    order,
-                    owner: id,
-                    results,
-                };
-                crate::geometry::one(&at, "axis", g, crate::geometry::Want::Axis).map(|_| ())
-            }
-            RevolveAxis::Line(_) => Ok(()),
-        },
-        // That each reference is the kind its field wants; what they make
-        // of each other (parallel, collinear) only rebuild can tell.
-        Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
-        Feature::Path(x) => crate::path::check(p, order, id, x, results),
-        Feature::Sweep(w) => crate::along::check(p, order, id, w, results),
-        Feature::Loft(l) => crate::loft::check(p, order, id, l, results),
-        // A planar face's profile is closed loops: its open curves are
-        // refused when written (what else fails is rebuild's).
-        Feature::Planar(x) => match crate::profile::planar(p, id, x, results) {
-            Err(e) if e.code == Code::ProfileInvalid => Err(e),
-            _ => Ok(()),
-        },
-        // Faces of its target, each once; what the kernel makes of them
-        // only rebuild can tell.
-        Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
-            crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
-        }
-        // Faces of its target, its direction, axis or surfaces their
-        // kinds; what the kernel makes of them only rebuild can tell.
-        Feature::MoveFace(_)
-        | Feature::ReplaceFace(_)
-        | Feature::Draft(_)
-        | Feature::DeleteFace(_)
-        | Feature::DeleteBlend(_)
-        | Feature::ResizeBlend(_) => {
-            crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
-        }
-        Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
-            crate::sheet_metal::check(&proposed(p, order, &[(id, f)]), id, f, results)
-        }
-        // Its sides edges and curves, its faces of one body; whether they
-        // close up, or extract cleanly, only rebuild can tell.
-        Feature::Fill(x) => {
-            crate::surface::check_fill(&proposed(p, order, &[(id, f)]), id, x, results)
-        }
-        Feature::Extract(x) => {
-            crate::surface::check_extract(&proposed(p, order, &[(id, f)]), id, x, results)
-        }
-        // Its sheet or faces; what the kernel makes of them only rebuild
-        // can tell. A sew's sheets are judged by kind and order already.
-        Feature::Thicken(x) => {
-            crate::surface::check_thicken(&proposed(p, order, &[(id, f)]), id, x, results)
-        }
-        _ => Ok(()),
-    }
+    let cx = crate::feature::Check {
+        part: p,
+        order,
+        id,
+        results,
+    };
+    crate::feature::kind_of(f).check(&cx, f)
 }
 
 pub(crate) fn feature_add(

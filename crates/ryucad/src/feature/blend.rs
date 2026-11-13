@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 /// A fillet or chamfer as output reports it: its file's fields, every
 /// size as written and in meters (an angle in radians), every edge and
 /// face as `<part>/<feature>/<name>`.
-pub(crate) fn blend_report(part: &Id, f: &Feature) -> Value {
+fn blend_report(part: &Id, f: &Feature) -> Value {
     use crate::doc::blend::ChamferForm;
     let mut v = match f {
         Feature::Fillet(x) => x.fields(),

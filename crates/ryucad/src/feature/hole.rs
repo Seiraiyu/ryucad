@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 /// A hole as output reports it: its file's fields, every size as written
 /// and in meters (an angle in radians), an up-to target as
 /// `<part>/<feature>/<name>`.
-pub(crate) fn hole_report(part: &Id, h: &crate::doc::hole::Hole) -> Value {
+fn hole_report(part: &Id, h: &crate::doc::hole::Hole) -> Value {
     use crate::doc::hole::{Bottom, Depth, HoleForm};
     let mut v = h.fields();
     v["diameter"] = h.diameter.report();

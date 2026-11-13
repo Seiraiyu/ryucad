@@ -15,7 +15,7 @@ use serde_json::Value;
 
 /// A sketch as output reports it: its file's fields, with every dimension
 /// as written and evaluated.
-pub(crate) fn sketch_report(part: &Id, s: &Sketch) -> Value {
+fn sketch_report(part: &Id, s: &Sketch) -> Value {
     let mut v = s.fields();
     if let Plane::Placement(p) = &s.plane {
         v["placement"] = placement_report(p);

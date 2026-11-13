@@ -243,6 +243,15 @@ impl Check<'_> {
     }
 }
 
+/// How a feature appears in output: every quantity as written and in
+/// meters, every reference as `<part>/<feature>/<name>`.
+pub fn report(p: &Part, id: &Id, f: &Feature) -> Value {
+    let mut v = kind_of(f).report(p, f);
+    v["id"] = json!(id);
+    v["type"] = json!(f.type_name());
+    v
+}
+
 /// A join, cut or intersect, or a kind that acts whatever its operation
 /// (a hole), with no targets acts on the part's one solid; the file names
 /// it all the same.

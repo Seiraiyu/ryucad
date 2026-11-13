@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 /// A pattern as output reports it: its file's fields, every spacing,
 /// count and angle as written and as a value, every reference as
 /// `<part>/<feature>/<name>`.
-pub(crate) fn pattern_report(part: &Id, x: &crate::doc::pattern::Pattern) -> Value {
+fn pattern_report(part: &Id, x: &crate::doc::pattern::Pattern) -> Value {
     use crate::doc::pattern::Kind;
     let mut v = x.fields();
     match &x.kind {

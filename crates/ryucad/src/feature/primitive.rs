@@ -9,7 +9,7 @@ use crate::doc::solid::Combine;
 use crate::error::{Code, Error, Result};
 use serde_json::{Map, Value, json};
 
-pub(crate) fn primitive_report(f: &Primitive) -> Value {
+fn primitive_report(f: &Primitive) -> Value {
     let params: Map<String, Value> = f
         .params
         .iter()
