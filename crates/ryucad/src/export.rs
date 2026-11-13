@@ -807,34 +807,28 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             mesh,
             pipe_tolerance,
         } => {
-            // A reference or a sheet has no BrepArray here: each is
-            // written as its mesh, so an export without meshes would write
-            // nothing of it.
-            let alone: Vec<(String, bool)> = walk
+            // A reference has no BrepArray here: it is written as its mesh,
+            // so an export without meshes would write nothing of it. A sheet
+            // has one (#624).
+            let alone: Vec<String> = walk
                 .scene
                 .products
                 .iter()
                 .flat_map(|p| &p.solids)
-                .filter(|x| {
-                    x.built.reference || x.built.body.kind() == ryukei::topo::BodyKind::Sheet
-                })
-                .map(|x| (format!("{}/{}", x.part, x.founder), x.built.reference))
+                .filter(|x| x.built.reference)
+                .map(|x| format!("{}/{}", x.part, x.founder))
                 .collect();
             if mesh.is_none()
-                && let Some((r, reference)) = alone.first()
+                && let Some(r) = alone.first()
             {
-                let message = if *reference {
+                return Err(Error::new(
+                    Code::InvalidParam,
                     format!(
                         "{r} is a reference import, which USD holds only as a mesh: export with meshes, or convert it to a solid"
-                    )
-                } else {
-                    format!(
-                        "{r} is a sheet, which USD holds only as a mesh here: export with meshes"
-                    )
-                };
-                return Err(Error::new(Code::InvalidParam, message)
-                    .with("param", "mesh")
-                    .with("solid", r));
+                    ),
+                )
+                .with("param", "mesh")
+                .with("solid", r));
             }
             let meshes = mesh
                 .as_ref()
@@ -845,14 +839,9 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                     &mut result,
                     alone
                         .iter()
-                        .map(|(r, reference)| {
-                            if *reference {
-                                json!({"code": "export_reference_mesh_only", "solid": r,
-                                       "message": format!("{r} is a reference import: written as its mesh alone, with no BrepArray")})
-                            } else {
-                                json!({"code": "export_sheet_brep_skipped", "solid": r,
-                                       "message": format!("{r} is a sheet: written as its mesh alone, with no BrepArray")})
-                            }
+                        .map(|r| {
+                            json!({"code": "export_reference_mesh_only", "solid": r,
+                                   "message": format!("{r} is a reference import: written as its mesh alone, with no BrepArray")})
                         })
                         .collect(),
                 );
@@ -890,8 +879,12 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 pipe_tolerance: pipe_tolerance.as_ref().map_or(0.0, Quantity::meters),
                 layer_data: data,
             };
-            let layer = ryuformats::usd::stage::layer(&model, &opts)
+            let (layer, skipped) = ryuformats::usd::stage::layer_skipping(&model, &opts)
                 .map_err(|e| walk.usd_unrepresentable(e))?;
+            warn(
+                &mut result,
+                skipped.iter().map(|x| walk.sheet_brep_skipped(x)).collect(),
+            );
             // A usdz's root layer is named by the part, not the file, so
             // where it is written changes no byte.
             let stem = part.to_string();
@@ -984,8 +977,7 @@ fn usd_model(scene: &Scene, meshes: Option<&ryuformats::Scene>) -> ryuformats::u
                 .iter()
                 .enumerate()
                 .map(|(i, x)| ryuformats::usd::stage::Solid {
-                    brep: !x.built.reference
-                        && x.built.body.kind() != ryukei::topo::BodyKind::Sheet,
+                    brep: !x.built.reference,
                     name: x.founder.to_string(),
                     body: Arc::clone(
                         bodies
@@ -1647,6 +1639,24 @@ impl Walk {
         .with("entity", format!("{}/{}/{}", x.part, x.founder, error.face))
         .with("reason", error.reason)
     }
+
+    /// The warning for a sheet the stage wrote as its mesh alone, its
+    /// BrepArray refused (#624).
+    fn sheet_brep_skipped(&self, x: &ryuformats::usd::stage::Skipped) -> Value {
+        let s = &self.scene.products[x.product].solids[x.solid];
+        sheet_brep_skipped(&format!("{}/{}", s.part, s.founder), &x.error)
+    }
+}
+
+/// `export_sheet_brep_skipped` for sheet `solid` (`<part>/<founder>`),
+/// whose BrepArray the writer refused with `error`: written as its mesh.
+fn sheet_brep_skipped(solid: &str, error: &ryuformats::usd::brep::BrepError) -> Value {
+    json!({"code": "export_sheet_brep_skipped", "solid": solid,
+    "face": error.face.to_string(), "reason": error.reason,
+    "message": format!(
+        "{solid} is a sheet whose face {} can't be written as a BrepArray ({}): written as its mesh alone",
+        error.face, error.reason
+    )})
 }
 
 fn has_face(b: &Body, name: ryukei::name::Name) -> bool {
@@ -2419,7 +2429,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_sheet_is_written_to_usd_as_its_mesh_alone() {
+    fn a_sheet_is_written_to_usd_with_its_breparray() {
         use crate::testing::{call, fresh};
         let (_d, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
@@ -2453,25 +2463,61 @@ pub(crate) mod tests {
         )
         .unwrap();
         let (v, out) = exported(&mut s, json!({"part": "p", "format": "usda"})).unwrap();
-        let warned: Vec<&Value> = v["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|w| w["code"] == "export_sheet_brep_skipped")
-            .collect();
-        assert_eq!(warned.len(), 1, "{v}");
-        assert_eq!(warned[0]["solid"], "p/w");
+        assert!(
+            v["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|w| w["code"] != "export_sheet_brep_skipped"),
+            "{v}"
+        );
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text.matches("BrepArray").count(), 1, "the box's alone");
-        let e = answered(
+        assert_eq!(
+            text.matches("BrepArray").count(),
+            2,
+            "the wall's and the box's"
+        );
+        // Without meshes a sheet is still written: as its BrepArray.
+        let (_, out) = exported(
             &mut s,
             json!({"part": "p", "format": "usda", "mesh": false}),
         )
-        .err()
         .unwrap();
+        let text = String::from_utf8(out).unwrap();
         assert_eq!(
-            (e.code, e.details["solid"].as_str()),
-            (Code::InvalidParam, Some("p/w"))
+            (
+                text.matches("BrepArray").count(),
+                text.matches("def Mesh").count()
+            ),
+            (2, 0)
+        );
+    }
+
+    #[test]
+    fn a_sheet_whose_breparray_is_refused_is_warned_of_by_face() {
+        let e = ryuformats::usd::brep::BrepError {
+            face: ryukei::name::Name::from_u128(0xab),
+            reason: "domain",
+        };
+        let w = sheet_brep_skipped("p/w", &e);
+        assert_eq!(
+            (
+                w["code"].as_str(),
+                w["solid"].as_str(),
+                w["reason"].as_str()
+            ),
+            (
+                Some("export_sheet_brep_skipped"),
+                Some("p/w"),
+                Some("domain")
+            )
+        );
+        assert_eq!(w["face"], json!(e.face.to_string()));
+        assert!(
+            w["message"]
+                .as_str()
+                .unwrap()
+                .ends_with("written as its mesh alone")
         );
     }
 
