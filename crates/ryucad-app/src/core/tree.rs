@@ -238,6 +238,10 @@ pub fn row_text(f: &Feature, faults: usize, holes: usize) -> String {
             }
             s
         }
+        // A cosmetic thread its size and class, as its file says.
+        (Some(t), _, None) if t == "cosmetic_thread" && f.spec.is_some() => {
+            f.spec.clone().unwrap_or_default()
+        }
         // A hole with intent its spec, and how many holes it makes.
         (Some(t), _, None) if t == "hole" && f.spec.is_some() => {
             let spec = f.spec.as_deref().unwrap_or_default();
@@ -415,7 +419,8 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         },
         "fillet" => "fillet",
         "chamfer" => "chamfer",
-        "hole" => "hole",
+        // A cosmetic thread takes the hole's icon: no new one is drawn.
+        "hole" | "cosmetic_thread" => "hole",
         "pattern" | "instance_pattern" => pattern_icon(form),
         "import" => "file-arrow-down",
         "instance" => "cube",
@@ -1793,6 +1798,22 @@ mod tests {
             delete: None,
             spec: None,
         }
+    }
+
+    #[test]
+    fn a_cosmetic_threads_row_gives_its_size_and_class() {
+        let mut t = feature("cosmetic_thread");
+        t.id = "t".into();
+        t.spec = Some("M10 6g".into());
+        assert_eq!(row_text(&t, 0, 0), "t (M10 6g)");
+        t.spec = Some("M10".into());
+        assert_eq!(row_text(&t, 0, 0), "t (M10)");
+        assert_eq!(
+            crate::core::model::cosmetic_label(&serde_json::json!({"type": "cosmetic_thread",
+                    "thread": {"standard": "iso_metric", "size": "M10", "class": "6g"}}))
+            .as_deref(),
+            Some("M10 6g")
+        );
     }
 
     #[test]
