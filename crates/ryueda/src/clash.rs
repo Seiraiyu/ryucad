@@ -756,6 +756,90 @@ fn place(files: &mut Files, x: &Value, node: Option<Value>) -> Result<()> {
     }
 }
 
+/// A library object's folder and ID from its path
+/// (`library/symbols/ldo.json`: `symbols`, `ldo`); `None` for any other.
+pub(crate) fn library_object(path: &str) -> Option<(&str, &str)> {
+    let (folder, file) = path.strip_prefix("library/")?.split_once('/')?;
+    let id = file.strip_suffix(".json").filter(|f| !f.contains('/'))?;
+    matches!(folder, "symbols" | "footprints" | "components").then_some((folder, id))
+}
+
+/// Points `v`'s local references to library object `old` of `folder` at
+/// `to`: a component's `of` (a library component) and `footprint`, a
+/// library component's `symbol` and each footprint's `footprint`.
+/// Whether it changed anything.
+pub(crate) fn rename_refs(v: &mut Value, folder: &str, old: &str, to: &str) -> bool {
+    fn swap(r: &mut Value, old: &str, to: &str) -> bool {
+        let local = r.get("library").is_none_or(Value::is_null);
+        if local && r.get("id").and_then(Value::as_str) == Some(old) {
+            r["id"] = json!(to);
+            return true;
+        }
+        false
+    }
+    let kind = v["kind"].as_str().unwrap_or_default().to_owned();
+    match (kind.as_str(), folder) {
+        (conn::COMPONENT_KIND, "components") => swap(&mut v["of"], old, to),
+        (conn::COMPONENT_KIND, "footprints") if v.get("footprint").is_some() => {
+            swap(&mut v["footprint"], old, to)
+        }
+        (crate::libcomp::KIND, "symbols") => swap(&mut v["symbol"], old, to),
+        (crate::libcomp::KIND, "footprints") => {
+            let mut hit = false;
+            for u in v["footprints"].as_array_mut().into_iter().flatten() {
+                hit |= swap(&mut u["footprint"], old, to);
+            }
+            hit
+        }
+        _ => false,
+    }
+}
+
+/// Theirs' library object of a whole-file `id_collision` takes ID `to`:
+/// the file keeps ours' (its record settled), theirs' is written under
+/// the new ID, and every file the merge took whole from theirs that
+/// names the old ID locally names the new one.
+fn renumber_library(files: &mut Files, x: &Value, planned: &Value, sides: &Sides) -> Result<()> {
+    let path = x["files"][0].as_str().unwrap_or_default().to_owned();
+    let (folder, old) = library_object(&path)
+        .map(|(f, i)| (f.to_owned(), i.to_owned()))
+        .ok_or_else(|| {
+            Error::new(
+                Code::RepairConflict,
+                format!("{path} isn't a library object"),
+            )
+        })?;
+    let to = planned["to"].as_str().unwrap_or_default().to_owned();
+    let new_path = format!("library/{folder}/{to}.json");
+    if files.contains_key(&new_path) {
+        return Err(Error::new(
+            Code::RepairConflict,
+            format!("{new_path} is taken now: run merge status again"),
+        )
+        .with("path", &new_path));
+    }
+    crate::validate::settle_record(files, &path, "", Kind::IdCollision, x.get("ours").cloned())?;
+    files.insert(
+        new_path,
+        crate::canonical::to_string(&x["theirs"]).into_bytes().into(),
+    );
+    let taken: Vec<String> = files
+        .iter()
+        .filter(|(p, b)| sides.theirs.get(*p) == Some(*b) && sides.ours.get(*p) != Some(*b))
+        .map(|(p, _)| p.clone())
+        .collect();
+    for p in taken {
+        let Some(mut v) = files.get(&p).and_then(|b| json_of(b)) else {
+            continue;
+        };
+        if rename_refs(&mut v, &folder, &old, &to) {
+            let out = crate::merge::settle(&v, "", Kind::Value, Some(v.clone()));
+            files.insert(p, crate::canonical::to_string(&out).into_bytes().into());
+        }
+    }
+    Ok(())
+}
+
 /// The semantic items of the merge `state` for the merged project `p`
 /// over the session's files `full`.
 pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -> Result<Found> {
@@ -886,6 +970,7 @@ pub(crate) fn repair(
                 files.insert(f.to_owned(), bytes);
             }
         }
+        ("id_collision", "renumber") => renumber_library(files, x, &planned, sides)?,
         //REPAIR-ARMS
         (kind, _) => {
             return Err(
@@ -1192,5 +1277,51 @@ pub(crate) mod tests {
         crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
         let r3: Value = serde_json::from_slice(&std::fs::read(r.join("blocks/top/components/r3.json")).unwrap()).unwrap();
         assert!(r3["pins"].get("1").is_none(), "{r3}");
+    }
+
+    #[test]
+    fn a_library_object_both_sides_made_is_renumbered() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        // Any merge, then a whole-file record as the driver writes one
+        // for a symbol both sides drew as `x`.
+        crate::validate::tests::erc_conflict(r);
+        let sym = |name: &str| json!({"kind": "ryueda.symbol", "format": 1, "name": name, "units": 1, "pins": {}});
+        let rec = {
+            let mut v = sym("Ours");
+            v["conflicts"] = json!({"": {"kind": "id_collision", "ours": sym("Ours"), "theirs": sym("Theirs")}});
+            v
+        };
+        crate::source::write_atomic(&r.join("library/symbols/x.json"), crate::canonical::to_string(&rec)).unwrap();
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        let c: Vec<Value> = v["conflicts"].as_array().unwrap().iter()
+            .filter(|c| c["id"] == "library/symbols/x.json#").cloned().collect();
+        assert_eq!(c[0]["repairs"][0]["id"], "renumber", "{v}");
+        assert_eq!(c[0]["repairs"][0]["to"], "x-2");
+        let fix = crate::proto::Resolution {
+            conflict: "library/symbols/x.json#".to_owned(),
+            choice: "repair".to_owned(),
+            value: None,
+            repair: Some("renumber".to_owned()),
+        };
+        crate::validate::resolve(&mut s, &[fix], &BTreeMap::new()).unwrap();
+        let read = |p: &str| -> Value { serde_json::from_slice(&std::fs::read(r.join(p)).unwrap()).unwrap() };
+        assert_eq!(read("library/symbols/x.json"), sym("Ours"));
+        assert_eq!(read("library/symbols/x-2.json"), sym("Theirs"));
+    }
+
+    #[test]
+    fn references_taken_from_theirs_follow_the_new_id() {
+        let mut v = json!({"kind": "ryueda.component", "format": 1, "of": {"id": "ldo"}, "footprint": {"id": "ldo"}});
+        assert!(rename_refs(&mut v, "components", "ldo", "ldo-2"));
+        assert_eq!(v["of"], json!({"id": "ldo-2"}));
+        assert_eq!(v["footprint"], json!({"id": "ldo"}), "a footprint's ID is another folder's");
+        let mut lc = json!({"kind": "ryueda.libcomp", "format": 1, "symbol": {"id": "ldo"},
+            "footprints": [{"footprint": {"id": "ldo"}}, {"footprint": {"library": "kicad", "id": "ldo"}}]});
+        assert!(rename_refs(&mut lc, "footprints", "ldo", "ldo-2"));
+        assert_eq!(lc["footprints"][0]["footprint"], json!({"id": "ldo-2"}));
+        assert_eq!(lc["footprints"][1]["footprint"]["id"], "ldo", "another library's");
+        assert_eq!(lc["symbol"], json!({"id": "ldo"}));
     }
 }

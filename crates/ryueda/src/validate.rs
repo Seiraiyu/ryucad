@@ -209,6 +209,19 @@ fn records(working: &Files) -> Vec<Value> {
                 }
             }
             x["choices"] = json!(["ours", "theirs", "value"]);
+            // A library object both sides made under one readable ID:
+            // theirs' can take the next one.
+            if c.kind == Kind::IdCollision
+                && pointer.is_empty()
+                && let Some((folder, id)) = crate::clash::library_object(path)
+            {
+                let to = crate::name::free(id, |s| {
+                    working.contains_key(&format!("library/{folder}/{s}.json"))
+                });
+                x["repairs"] = json!([{"id": "renumber", "to": to.as_str(), "summary": format!(
+                    "theirs' {id} becomes {to}, and what the merge took from theirs that names {id} names {to}"
+                )}]);
+            }
             out.push(x);
         }
     }
