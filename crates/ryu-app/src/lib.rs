@@ -8,3 +8,4 @@
 //! own code keeps its paths.
 
 pub mod fonts;
+pub mod icon;
