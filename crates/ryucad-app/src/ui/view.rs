@@ -32,6 +32,8 @@ pub struct View {
     pub sketches: bool,
     /// Draw datums, paths and helices (`display.datums`).
     pub datums: bool,
+    /// Draw tapped holes' cosmetic threads (`display.threads`).
+    pub threads: bool,
     /// Draw annotations' pins (`display.annotations`).
     pub annotations: bool,
     /// Draw the navigation cube (`display.nav_cube`), the axis triad
@@ -211,10 +213,19 @@ pub fn describe(ws: &Workspace, hit: &Hit) -> String {
         return format!("{} of {} at {rev}, gone", hit.kind.as_str(), hit.feature);
     }
     let from = ws.model.source(&hit.part, &hit.feature);
-    if from.is_empty() {
-        return format!("{} of {}", hit.kind.as_str(), hit.feature);
+    let mut text = if from.is_empty() {
+        format!("{} of {}", hit.kind.as_str(), hit.feature)
+    } else {
+        format!("{} of {} ({from})", hit.kind.as_str(), hit.feature)
+    };
+    // A hole's face: its spec and the hole's reference.
+    if hit.kind == ryucad::entity::Target::Body(ryucad::entity::EntityKind::Face)
+        && let Some(line) = crate::core::threads::line(&ws.model, &hit.entity)
+    {
+        text.push('\n');
+        text.push_str(&line);
     }
-    format!("{} of {} ({from})", hit.kind.as_str(), hit.feature)
+    text
 }
 
 impl View {
@@ -338,6 +349,7 @@ impl View {
             edges: true,
             sketches: true,
             datums: true,
+            threads: true,
             annotations: true,
             cube: true,
             triad: true,
@@ -2212,12 +2224,14 @@ impl View {
                         (None, Target::Datum(_)) => Context::Entity(Pick::Datum),
                         (None, _) => Context::Entity(Pick::Sketch),
                     };
-                    crate::ui::commands::context_menu(
+                    let hole = crate::core::threads::hole(&ws.model, &h.entity).is_some();
+                    crate::ui::commands::context_menu_where(
                         ui,
                         &self.commands,
                         what,
                         Some(&h.entity),
                         None,
+                        |id| crate::core::command::on_hole(id, hole),
                     )
                 }
                 None => crate::ui::commands::context_menu(
@@ -2841,6 +2855,14 @@ impl View {
             Vec::new()
         };
         overlay.extend(datum_lines);
+        if self.threads {
+            overlay.extend(crate::core::threads::overlay(
+                &ws.model,
+                pr,
+                size,
+                f64::from(ppp),
+            ));
+        }
         // Painted edges and vertices, depth-tested so they show only where
         // the entity does (#504); the pre-highlighted one stands out.
         overlay.extend(crate::core::sketch::painted(

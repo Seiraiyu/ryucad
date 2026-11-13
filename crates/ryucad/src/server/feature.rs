@@ -29,7 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// How a feature appears in output: every quantity as written and in
 /// meters, every reference as `<part>/<feature>/<name>`.
-pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
+/// A hole's spec writes bare numbers in `unit`, the project's.
+pub fn feature_report(p: &Part, unit: Unit, id: &Id, f: &Feature) -> Value {
     let part = &p.id;
     let mut v = match f {
         Feature::Primitive(p) => primitive_report(p),
@@ -100,7 +101,7 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
             crate::sheet_metal::report(p, f)
         }
-        Feature::Hole(h) => hole_report(part, h),
+        Feature::Hole(h) => hole_report(part, h, unit, p.hole_standards.as_deref()),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
             let mut v = r.fields();
@@ -160,17 +161,38 @@ fn blend_report(part: &Id, f: &Feature) -> Value {
 /// A hole as output reports it: its file's fields, every size as written
 /// and in meters (an angle in radians), an up-to target as
 /// `<part>/<feature>/<name>`.
-fn hole_report(part: &Id, h: &crate::doc::hole::Hole) -> Value {
+fn hole_report(
+    part: &Id,
+    h: &crate::doc::hole::Hole,
+    unit: Unit,
+    tables: crate::hole::derive::Tables,
+) -> Value {
     use crate::doc::hole::{Bottom, Depth, HoleForm};
     let mut v = h.fields();
-    v["diameter"] = h.diameter.report();
+    v["spec"] = json!(crate::hole::spec::canonical(h, unit));
+    match crate::hole::derive::derive(h, tables) {
+        Ok(s) => v["sizes"] = s.to_json(),
+        Err(e) => v["sizes_error"] = error_json(&e),
+    }
+    if let Some(d) = &h.diameter {
+        v["diameter"] = d.report();
+    }
+    // Each mouth size as written; a derived one isn't in the file.
+    let mouth = |sizes: &[(&str, &Option<crate::units::Quantity>)]| {
+        Value::Object(
+            sizes
+                .iter()
+                .filter_map(|(k, q)| Some(((*k).to_owned(), q.as_ref()?.report())))
+                .collect(),
+        )
+    };
     match &h.form {
         HoleForm::Simple => {}
         HoleForm::Counterbore { diameter, depth } => {
-            v["counterbore"] = json!({"diameter": diameter.report(), "depth": depth.report()});
+            v["counterbore"] = mouth(&[("diameter", diameter), ("depth", depth)]);
         }
         HoleForm::Countersink { diameter, angle } => {
-            v["countersink"] = json!({"diameter": diameter.report(), "angle": angle.report()});
+            v["countersink"] = mouth(&[("diameter", diameter), ("angle", angle)]);
         }
     }
     match &h.depth {
@@ -185,6 +207,17 @@ fn hole_report(part: &Id, h: &crate::doc::hole::Hole) -> Value {
     }
     if let Bottom::Drill(q) = &h.bottom {
         v["bottom"] = json!({"drill": q.report()});
+    }
+    v
+}
+
+/// An error as a report holds it: its code, message and details.
+fn error_json(e: &Error) -> Value {
+    let mut v = json!({"code": e.code, "message": e.message});
+    if let Value::Object(d) = &e.details {
+        for (k, x) in d {
+            v[k] = x.clone();
+        }
     }
     v
 }
@@ -888,7 +921,7 @@ fn pattern_from(
     Ok(Feature::Pattern(p))
 }
 
-const HOLE: [&str; 9] = [
+const HOLE: [&str; 22] = [
     "sketch",
     "points",
     "form",
@@ -898,7 +931,58 @@ const HOLE: [&str; 9] = [
     "depth",
     "bottom",
     "targets",
+    "spec",
+    "thread",
+    "fastener",
+    "fastener_fit",
+    "fit",
+    "tolerance",
+    "pitch",
+    "tpi",
+    "class",
+    "hand",
+    "starts",
+    "thread_depth",
+    "tap_drill",
 ];
+
+/// A hole whose sizes don't derive is refused when written: a project
+/// table it needs names what to add (`needs_project_table`).
+fn refuse_underived(session: &Session, pid: &Id, f: &Feature) -> Result<()> {
+    if let Feature::Hole(h) = f {
+        let p = session.project().part(pid)?;
+        crate::hole::derive::derive(h, p.hole_standards.as_deref())?;
+    }
+    Ok(())
+}
+
+/// A dry run's answer: the feature as it would be, sizes and all, with
+/// nothing written.
+fn dry(session: &Session, pid: &Id, fid: &Id, f: &Feature) -> Result<Value> {
+    let p = session.project().part(pid)?;
+    let unit = session.project().manifest.default_unit;
+    Ok(json!({"dry_run": true, "feature": feature_report(p, unit, fid, f)}))
+}
+
+/// `--tap-drill`'s words as a thread's `drill`: "table" (ryucad's rule,
+/// written as nothing), "roll-form", "engagement:N".
+fn tap_drill_json(s: &str) -> Result<Value> {
+    match s {
+        "table" => Ok(json!("")),
+        "roll-form" => Ok(json!("roll_form")),
+        _ => match s
+            .strip_prefix("engagement:")
+            .and_then(|n| n.parse::<u32>().ok())
+        {
+            Some(n) => Ok(json!({"engagement": n})),
+            None => Err(Error::new(
+                Code::InvalidParam,
+                "tap_drill is table, roll-form or engagement:N",
+            )
+            .with("param", "tap_drill")),
+        },
+    }
+}
 
 /// A hole from `current`'s fields (none for a new one, which is simple)
 /// with what was given laid over them. A counterbore or countersink given
@@ -916,6 +1000,139 @@ fn hole_from(
     let mut v = current.map_or_else(|| json!({"form": "simple"}), Hole::fields);
     let o = v.as_object_mut().expect("an object");
     let f = &given.fields;
+    // both ways is usage.
+    if let Some(text) = &f.spec {
+        let spec = crate::hole::spec::Spec::parse(text)?;
+        let (named, defaults) = spec.apply(unit)?;
+        let beside = f.given();
+        for k in named.keys() {
+            if beside.contains_key(k) && !defaults.contains(&k.as_str()) {
+                return Err(Error::new(
+                    Code::Usage,
+                    format!("{k} is given twice: by the spec, and as {k}"),
+                )
+                .with("param", k.as_str()));
+            }
+        }
+        for (k, x) in named {
+            match (k.as_str(), &x) {
+                (_, Value::String(s)) if s.is_empty() => {
+                    o.remove(&k);
+                }
+                ("bottom", Value::String(s)) if s == "flat" => {
+                    o.remove("bottom");
+                }
+                ("form", Value::String(form)) => {
+                    for m in ["counterbore", "countersink"] {
+                        if form != m {
+                            o.remove(m);
+                        }
+                    }
+                    o.insert(k, x);
+                }
+                _ => {
+                    o.insert(k, x);
+                }
+            }
+        }
+    }
+    // A thread or fastener: a whole object laid over the current one,
+    // "STANDARD:SIZE" for a new one, "" to take it away.
+    for (k, x) in [("thread", &f.thread), ("fastener", &f.fastener)] {
+        match x {
+            None => {}
+            Some(Value::String(s)) if s.is_empty() => {
+                o.remove(k);
+            }
+            Some(Value::String(s)) => {
+                let (standard, size) = s.split_once(':').ok_or_else(|| {
+                    Error::new(
+                        Code::InvalidParam,
+                        format!("{k} is STANDARD:SIZE, such as iso_metric:M6"),
+                    )
+                    .with("param", k)
+                })?;
+                o.insert(k.into(), json!({"standard": standard, "size": size}));
+            }
+            Some(Value::Object(new)) => match o.get_mut(k) {
+                Some(Value::Object(old)) => old.extend(new.clone()),
+                _ => {
+                    o.insert(k.into(), Value::Object(new.clone()));
+                }
+            },
+            Some(_) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{k} is an object, STANDARD:SIZE or \"\""),
+                )
+                .with("param", k));
+            }
+        }
+    }
+    // A thread's own fields, given flat.
+    let flat: [(&str, Option<Value>); 7] = [
+        ("pitch", f.pitch.clone()),
+        ("tpi", f.tpi.clone()),
+        ("class", f.class.clone().map(Value::String)),
+        (
+            "hand",
+            f.hand
+                .clone()
+                .map(|h| if h == "right" { json!("") } else { json!(h) }),
+        ),
+        (
+            "starts",
+            f.starts.map(|n| if n <= 1 { json!("") } else { json!(n) }),
+        ),
+        ("depth", f.thread_depth.clone()),
+        (
+            "drill",
+            f.tap_drill.as_deref().map(tap_drill_json).transpose()?,
+        ),
+    ];
+    for (k, x) in flat {
+        let Some(x) = x else { continue };
+        let Some(Value::Object(t)) = o.get_mut("thread") else {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a hole with no thread has no {k}: give --thread first"),
+            )
+            .with("param", k));
+        };
+        if x == "" {
+            t.remove(k);
+        } else {
+            t.insert(k.into(), x);
+        }
+    }
+    if let Some(fit) = &f.fastener_fit {
+        let Some(Value::Object(x)) = o.get_mut("fastener") else {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a hole with no fastener has no fastener_fit",
+            )
+            .with("param", "fastener_fit"));
+        };
+        x.insert("fit".into(), json!(fit));
+    }
+    match f.fit.as_deref() {
+        Some("") => {
+            o.remove("fit");
+        }
+        Some(c) => {
+            o.insert("fit".into(), json!(c));
+        }
+        None => {}
+    }
+    match &f.tolerance {
+        Some(Value::String(s)) if s.is_empty() => {
+            o.remove("tolerance");
+        }
+        Some(t) => {
+            o.insert("tolerance".into(), t.clone());
+        }
+        None => {}
+    }
     if let Some(form) = &f.form {
         o.insert("form".into(), json!(form));
         for k in ["counterbore", "countersink"] {
@@ -973,7 +1190,7 @@ fn hole_from(
     let mut o = crate::doc::files::Obj::new(&v, "")?;
     let h = Hole::from_fields(&mut o, unit, env)?;
     o.finish()?;
-    Ok(Feature::Hole(h))
+    Ok(Feature::Hole(Box::new(h)))
 }
 
 /// An instance: `current`'s fields (none for a new one), with what was
@@ -2177,6 +2394,7 @@ const FEATURE_TYPES: [&str; 28] = [
     "point",
 ];
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn feature_add(
     session: &mut Session,
     part: &str,
@@ -2185,6 +2403,7 @@ pub(crate) fn feature_add(
     id: Option<&str>,
     position: &Position,
     expected: Option<&str>,
+    dry_run: bool,
 ) -> Result<Value> {
     let pid = part_id(part)?;
     let unit = session.project().manifest.default_unit;
@@ -2448,7 +2667,9 @@ pub(crate) fn feature_add(
         }
         "hole" => {
             given.only(ty, &HOLE)?;
-            hole_from(None, &given, &pid, unit, &env)?
+            let f = hole_from(None, &given, &pid, unit, &env)?;
+            refuse_underived(session, &pid, &f)?;
+            f
         }
         "pattern" => {
             given.only(ty, &PATTERN)?;
@@ -2523,12 +2744,15 @@ pub(crate) fn feature_add(
         let q = proposed(p, &list, &[(&fid, &f)]);
         crate::mate::refuse_overconstrained(session, q)?;
     }
+    if dry_run {
+        return dry(session, &pid, &fid, &f);
+    }
     let assemblies = crate::mate::current(session, &pid)?;
     save(session, &pid, &[(&fid, &f)], list)?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let saved = session.project().part(&pid)?;
     let revision = &saved.revision;
-    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
+    let mut v = json!({"feature": feature_report(saved, session.project().manifest.default_unit, &fid, &f), "revision": revision});
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
     }
@@ -2594,6 +2818,7 @@ pub(crate) fn feature_edit(
     mut given: Given,
     expressions: &Map<String, Value>,
     expected: Option<&str>,
+    dry_run: bool,
 ) -> Result<Value> {
     let (pid, fid) = (part_id(part)?, feature_id(id)?);
     let unit = session.project().manifest.default_unit;
@@ -2706,6 +2931,7 @@ pub(crate) fn feature_edit(
             Feature::Hole(h) => {
                 given.only("hole", &HOLE)?;
                 let f = hole_from(Some(&h), &given, &pid, unit, &p.env)?;
+                refuse_underived(session, &pid, &f)?;
                 check_sweep(p, &list, &fid, &f)?;
                 f
             }
@@ -2855,6 +3081,9 @@ pub(crate) fn feature_edit(
         let q = proposed(p, &list, &[(&fid, &f)]);
         crate::mate::refuse_overconstrained(session, q)?;
     }
+    if dry_run {
+        return dry(session, &pid, &fid, &f);
+    }
     let before = crate::sketch::current(session, &pid)?;
     let assemblies = crate::mate::current(session, &pid)?;
     save(session, &pid, &[(&fid, &f)], list)?;
@@ -2868,7 +3097,7 @@ pub(crate) fn feature_edit(
     warnings.extend(followed);
     let saved = session.project().part(&pid)?;
     let revision = &saved.revision;
-    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
+    let mut v = json!({"feature": feature_report(saved, session.project().manifest.default_unit, &fid, &f), "revision": revision});
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);
     }
@@ -3148,7 +3377,8 @@ pub(crate) fn feature_show(
     let (_, session) = session.at(rev.as_deref())?;
     let (part, fid) = (part_id(&part)?, feature_id(&id)?);
     let p = session.project().part(&part)?;
-    let mut v = feature_report(p, &fid, feature(p, &fid)?);
+    let unit = session.project().manifest.default_unit;
+    let mut v = feature_report(p, unit, &fid, feature(p, &fid)?);
     // The revision it was read at: an edit made from it says so.
     v["revision"] = json!(p.revision);
     Ok(v)

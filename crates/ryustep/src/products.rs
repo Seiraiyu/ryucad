@@ -75,6 +75,12 @@ pub struct External {
     pub format: Option<String>,
     /// The document's instance number.
     pub instance: Id,
+    /// Every instance the document is read through, sorted: itself, its
+    /// type, the references, equivalences and representation types naming
+    /// it, and its property definitions with their representation
+    /// relationships, representations and items. What a transfer report
+    /// marks interpreted once the document resolves (24.D).
+    pub related: Vec<Id>,
 }
 
 /// A representation holding B-rep items, and representations mapped into
@@ -547,7 +553,8 @@ fn documents(e: &Entities, p: &mut Products) {
     let mut digital: BTreeSet<Id> = BTreeSet::new();
     let mut idents: BTreeMap<Id, Box<str>> = BTreeMap::new();
     let mut props: Vec<(Id, Box<str>, Id)> = Vec::new();
-    let mut prop_reps: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    let mut prop_reps: BTreeMap<Id, Vec<(Id, Id)>> = BTreeMap::new();
+    let mut naming: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
     for &id in e.ids() {
         match e.get(id, id) {
             Ok(Entity::Definition {
@@ -564,15 +571,18 @@ fn documents(e: &Entities, p: &mut Products) {
                 formations_of.entry(*product).or_default().push(id);
             }
             Ok(Entity::DocumentReference { document, items }) => {
+                naming.entry(*document).or_default().push(id);
                 refs.push((*document, items.clone()))
             }
             Ok(Entity::DocumentEquivalence { document, product }) => {
+                naming.entry(*document).or_default().push(id);
                 equiv.push((*document, *product))
             }
-            Ok(Entity::DocumentRepresentationType { name, document })
-                if name.eq_ignore_ascii_case("digital") =>
-            {
-                digital.insert(*document);
+            Ok(Entity::DocumentRepresentationType { name, document }) => {
+                naming.entry(*document).or_default().push(id);
+                if name.eq_ignore_ascii_case("digital") {
+                    digital.insert(*document);
+                }
             }
             Ok(Entity::ExternalIdentification {
                 id: assigned,
@@ -595,7 +605,7 @@ fn documents(e: &Entities, p: &mut Products) {
             }) => prop_reps
                 .entry(*definition)
                 .or_default()
-                .push(*representation),
+                .push((id, *representation)),
             _ => {}
         }
     }
@@ -659,16 +669,22 @@ fn documents(e: &Entities, p: &mut Products) {
         if !*file && !digital.contains(&doc) && !cad {
             return None;
         }
+        let mut related: Vec<Id> = vec![doc];
+        related.extend(*kind);
+        related.extend(naming.get(&doc).into_iter().flatten().copied());
         let (mut location, mut format) = (None, None);
         for (pid, pname, def) in &props {
             if *def != doc {
                 continue;
             }
-            for &rep in prop_reps.get(pid).into_iter().flatten() {
+            related.push(*pid);
+            for &(pdr, rep) in prop_reps.get(pid).into_iter().flatten() {
+                related.extend([pdr, rep]);
                 let Ok(Entity::Representation { items, .. }) = e.get(rep, rep) else {
                     continue;
                 };
                 for &it in items {
+                    related.push(it);
                     if let Ok(Entity::Descriptive {
                         name: n,
                         description,
@@ -690,11 +706,14 @@ fn documents(e: &Entities, p: &mut Products) {
             .map(|s| s.to_string())
             .or_else(|| (!id.is_empty()).then(|| id.to_string()))
             .or_else(|| (!name.is_empty()).then(|| name.to_string()))?;
+        related.sort_unstable();
+        related.dedup();
         Some(External {
             name: file_name,
             location,
             format,
             instance: doc,
+            related,
         })
     };
     for d in &mut p.definitions {

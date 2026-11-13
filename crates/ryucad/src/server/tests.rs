@@ -4705,3 +4705,28 @@ fn mesh_get_before_meshes_a_deleted_solid_as_its_delete_read_it() {
         assert_eq!(e.code, code, "{params}: {e:?}");
     }
 }
+
+#[test]
+fn renders_draw_thread_rings_unless_told_not_to() {
+    let (_dir, mut s) = crate::hole::tests::drilled();
+    crate::hole::tests::put(
+        &mut s,
+        "h",
+        json!({"format": 23, "points": ["p1"], "form": "simple",
+               "thread": {"standard": "iso_metric", "size": "M3"}, "depth": "through_all"}),
+    );
+    let png = |s: &mut Session, threads: bool| {
+        let p = json!({"part": "p", "width": 200, "height": 150, "threads": threads});
+        let a = answer_live(s, None, None, Request::from_rpc("render", Some(p)).unwrap()).unwrap();
+        a.binary.unwrap()
+    };
+    let with = png(&mut s, true);
+    assert_ne!(with, png(&mut s, false));
+    // A part with no tapped hole renders the same either way.
+    crate::hole::tests::put(
+        &mut s,
+        "h",
+        json!({"points": ["p1"], "form": "simple", "diameter": 3, "depth": "through_all"}),
+    );
+    assert_eq!(png(&mut s, true), png(&mut s, false));
+}

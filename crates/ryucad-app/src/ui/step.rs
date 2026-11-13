@@ -74,6 +74,12 @@ fn plan(ui: &mut egui::Ui, p: &Plan) {
             ui.label(format!("    {v}"));
         }
     }
+    if !p.external.is_empty() {
+        ui.label("Its parts are in these files, kept too:");
+        for x in &p.external {
+            ui.label(format!("    {x}"));
+        }
+    }
     if !p.transfer.is_empty() {
         ui.label("What the file holds:");
         for t in &p.transfer {

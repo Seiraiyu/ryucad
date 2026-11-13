@@ -63,6 +63,8 @@ pub struct Feature {
     pub insert: Option<InsertInfo>,
     /// A delete_body's solids.
     pub delete: Option<DeleteInfo>,
+    /// A hole's canonical spec (`M6x1.0-6H THRU`), from its report.
+    pub spec: Option<String>,
 }
 
 impl Feature {
@@ -613,6 +615,7 @@ impl Part {
                             solids: texts(&d["solids"]),
                             named: Vec::new(),
                         }),
+                        spec: f["spec"].as_str().map(str::to_owned),
                     })
                     .collect()
             })
@@ -851,6 +854,11 @@ pub struct Model {
     pub paths: BTreeMap<BodyKey, Arc<crate::core::datums::PathDrawing>>,
     /// Paths asked for and not yet answered, by the part revision.
     pub paths_asked: BTreeMap<BodyKey, String>,
+    /// Each shown part's holes (`holes.list`), by part, each for the part
+    /// revision it says ([`crate::core::threads`]).
+    pub holes: BTreeMap<String, Arc<crate::core::threads::HoleTable>>,
+    /// Holes asked for and not yet answered, by the part revision.
+    pub holes_asked: BTreeMap<String, String>,
     /// The part or assembly the window shows, as its participant's focus
     /// says; `None` for the project's model.
     pub focus: Option<String>,
@@ -1150,6 +1158,44 @@ impl Model {
         true
     }
 
+    /// `part`'s revision, if its holes are missing or older than it and
+    /// not already asked for at it, now noted as asked for.
+    pub fn ask_holes(&mut self, part: &str) -> Option<String> {
+        let p = self.parts.get(part)?;
+        let listed = self
+            .holes
+            .get(part)
+            .is_some_and(|t| t.revision == p.revision);
+        if listed || self.holes_asked.get(part) == Some(&p.revision) {
+            return None;
+        }
+        let revision = p.revision.clone();
+        self.holes_asked.insert(part.to_owned(), revision.clone());
+        Some(revision)
+    }
+
+    /// An answer to asking for `part`'s holes at `revision` came, or
+    /// never will.
+    pub fn holes_answered(&mut self, part: &str, revision: &str) {
+        if self.holes_asked.get(part).is_some_and(|r| r == revision) {
+            self.holes_asked.remove(part);
+        }
+    }
+
+    /// Keeps `part`'s holes if they are of the part as it is now, or the
+    /// only ones there are.
+    pub fn take_holes(&mut self, part: &str, t: crate::core::threads::HoleTable) -> bool {
+        let Some(p) = self.parts.get(part) else {
+            return false;
+        };
+        if t.revision != p.revision && self.holes.contains_key(part) {
+            return false;
+        }
+        self.holes.insert(part.to_owned(), Arc::new(t));
+        self.generation += 1;
+        true
+    }
+
     /// Drops every drawing, sketches' and paths': the display quality or
     /// the default unit changed. Returns the parts to ask again.
     pub fn clear_sketches(&mut self) -> Vec<String> {
@@ -1157,6 +1203,8 @@ impl Model {
         self.sketches_asked.clear();
         self.paths.clear();
         self.paths_asked.clear();
+        self.holes.clear();
+        self.holes_asked.clear();
         self.generation += 1;
         self.parts.keys().cloned().collect()
     }
@@ -1172,6 +1220,8 @@ impl Model {
         self.sketches_asked.retain(|(p, _), _| p != id);
         self.paths.retain(|(p, _), _| p != id);
         self.paths_asked.retain(|(p, _), _| p != id);
+        self.holes.remove(id);
+        self.holes_asked.remove(id);
         self.generation += 1;
     }
 
@@ -2316,7 +2366,7 @@ mod tests {
         m.apply_part(&v);
         let b2 = &m.parts["frame"].features[1];
         assert_eq!(b2.instance.as_ref().unwrap().rev, "label B obsolete");
-        let row = crate::ui::tiles::tree::row_text(b2, 0);
+        let row = crate::ui::tiles::tree::row_text(b2, 0, 0);
         assert!(row.contains("bolt @ label B obsolete"), "{row}");
     }
 

@@ -2385,14 +2385,16 @@ case 52aad37c4e5fb644 #303 check/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLI
 case 58092af4996e3117 #303 check/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case 58092af4996e3117 #306 import/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case 58092af4996e3117 #308 volume/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
-case 60f58dc5048702b4 #443 whole_import/import_body_missing
+case 60f58dc5048702b4 limit whole_import/import_external_missing the assembly's part files (top_frame.stp.STEP, bottom_frame.stp.STEP, rubber_foot.stp.STEP, 1X1RJ45_SMT.stp.STEP) aren't beside the case: step-hunt runs each case alone (24.D reads external references)
+case 60f58dc5048702b4 limit whole_ref_import/import_external_missing the assembly's part files (top_frame.stp.STEP, bottom_frame.stp.STEP, rubber_foot.stp.STEP, 1X1RJ45_SMT.stp.STEP) aren't beside the case: step-hunt runs each case alone (24.D reads external references)
 case 6893954066f76f93 #305 whole_import/timeout/faces>=1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+SURFACE_OF_LINEAR_EXTRUSION+TOROIDAL_SURFACE
 case 6b6d5e598ab523b8 #303 check/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
 case 6e8157bd751a2c3c #302 check/timeout/faces<50/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case 7593cc33a98d6a7d #305 whole_import/timeout/faces>=1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+SURFACE_OF_LINEAR_EXTRUSION+SURFACE_OF_REVOLUTION+TOROIDAL_SURFACE
 case 77b3b9028bd2290a #303 check/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case 77b3b9028bd2290a #306 import/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
-case 7b675ebd24073b54 #443 whole_import/import_body_missing
+case 7b675ebd24073b54 limit whole_import/import_external_missing the assembly's part files (NETGEAR_GS308E.stp.STEP) aren't beside the case: step-hunt runs each case alone (24.D reads external references)
+case 7b675ebd24073b54 limit whole_ref_import/import_external_missing the assembly's part files (NETGEAR_GS308E.stp.STEP) aren't beside the case: step-hunt runs each case alone (24.D reads external references)
 case 7d5f691dc22f36db #303 check/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case 7d5f691dc22f36db #306 import/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case 7d5f691dc22f36db #308 volume/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
@@ -2425,7 +2427,8 @@ case ac5b709984651eef file import/import_failed/faces_overlap/PLANE two solids o
 case b0d1744d868d82cb #306 import/timeout/faces<50/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case b8c4764e3c9363b6 #302 check/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
 case b95a40b4692f5f96 #303 check/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
-case bb8d63d646da2abc #443 whole_import/import_body_missing
+case bb8d63d646da2abc limit whole_import/import_external_missing the assembly's part files (92855A425_18-8 Stainless Steel Low-Profile Socket Head Screws_92855A425.STEP, USBDristribBoard.STEP, PiClusterNoPOEBack.STEP, PWSCarrier…) aren't beside the case: step-hunt runs each case alone (24.D reads external references)
+case bb8d63d646da2abc limit whole_ref_import/import_external_missing the assembly's part files (92855A425_18-8 Stainless Steel Low-Profile Socket Head Screws_92855A425.STEP, USBDristribBoard.STEP, PiClusterNoPOEBack.STEP, PWSCarrier…) aren't beside the case: step-hunt runs each case alone (24.D reads external references)
 case bd8ee3dc3b712f69 #303 check/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case bd8ee3dc3b712f69 #306 import/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case bd8ee3dc3b712f69 #308 volume/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
@@ -2456,7 +2459,8 @@ case f65234218d7f87a9 #306 import/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYL
 case f65234218d7f87a9 #308 volume/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case f9737420f59c6724 #302 check/slow/faces>=1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE
 case f9737420f59c6724 #308 volume/slow/faces>=1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE
-case f9dce57625677d93 #443 whole_import/import_body_missing
+case f9dce57625677d93 limit whole_import/import_external_missing the assembly's part files (PWSCarrier.STEP) aren't beside the case: step-hunt runs each case alone (24.D reads external references)
+case f9dce57625677d93 limit whole_ref_import/import_external_missing the assembly's part files (PWSCarrier.STEP) aren't beside the case: step-hunt runs each case alone (24.D reads external references)
 
 # voron: VoronDesign's assemblies (ryucad's pinned corpus, crates/ryucad/tests/corpus/pinned.txt;
 # GPL-3.0, never committed), judged for #240 at main 477fa250 and its fix on cox-worker-3. No

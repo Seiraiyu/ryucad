@@ -29,6 +29,7 @@ resvg = { version = "0.49", default-features = false, features = ["text"] }
 ryu-draw = { path = "../ryu-draw" }
 ryu-math = { path = "../ryu-math" }
 ryu-session = { path = "../ryu-session" }
+ryu-standards = { path = "../ryu-standards" }
 ryucad-doc = { path = "../ryucad-doc" }
 ryuformats = { path = "../ryuformats" }
 ryukei = { path = "../ryukei" }

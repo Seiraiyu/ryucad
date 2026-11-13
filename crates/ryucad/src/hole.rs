@@ -6,10 +6,14 @@
 //! key of its own.
 //!
 //! A segment's key is SipHash of `ryucad.hole\0<part>\0<feature>\0<segment>`
-//! (`top`, `counterbore_wall`, `counterbore_floor`, `countersink`, `wall`,
-//! `bottom`, `tip`, `axis`), never of a size, so resizing a hole renames
+//! (`top`, `counterbore_wall`, `counterbore_floor`, `countersink`, `wall`
+//! (the threaded length, when tapped), `drill_wall` (a blind tapped hole's
+//! drill below its thread), `bottom`, `tip`, `axis`), never of a size, so resizing a hole renames
 //! nothing and switching its form renames only what its new segments
 //! touch. A point's tool key is `ryucad.tool\0<part>\0<feature>\0<point>`.
+
+pub mod derive;
+pub mod spec;
 
 use crate::doc::files::Feature;
 use crate::doc::hole::{Bottom, Depth, Hole, HoleForm};
@@ -21,6 +25,7 @@ use crate::profile::Keys;
 use crate::rebuild::{Built, Results};
 use crate::sketch::Solved;
 use core::f64::consts::TAU;
+use derive::Sizes;
 use ryukei::geom::{Axis, Curve2, Frame, Line2, Point2, Point3, Vector3};
 use ryukei::name::{OpKey, ToolKey};
 use ryukei::sweep::{self, Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
@@ -117,15 +122,31 @@ pub fn points(id: &Id, h: &Hole, solved: &Solved) -> Result<Vec<(Id, Point3)>> {
 
 /// How deep the bore goes from the sketch's plane, in meters: blind,
 /// through all of its targets, or up to its target.
+#[allow(clippy::too_many_arguments)]
 fn depth(
     part: &Part,
     id: &Id,
     h: &Hole,
+    s: &Sizes,
     from: Point3,
     dir: Vector3,
     targets: &[&Built],
     before: &dyn Results,
 ) -> Result<f64> {
+    if let Some(t) = s.thread.as_ref().and_then(|t| t.depth.as_ref())
+        && s.mouth_depth().is_some_and(|m| t.si <= m)
+    {
+        return Err(Error::new(
+            Code::InvalidExtent,
+            format!(
+                "hole {id}: its thread ends at {}, inside its {}",
+                t.text,
+                h.form.type_name()
+            ),
+        )
+        .with("feature", id)
+        .with("pointer", "/thread/depth"));
+    }
     let d = match &h.depth {
         Depth::Blind(q) => return Ok(q.meters()),
         Depth::ThroughAll => crate::rebuild::through_all("hole", id, from, dir, false, targets)?.1,
@@ -139,7 +160,11 @@ fn depth(
         }
         .length(part, id, before)?,
     };
-    if let Some((mouth, at)) = h.mouth_depth()
+    let at = match h.form {
+        HoleForm::Countersink { .. } => "/countersink",
+        _ => "/counterbore/depth",
+    };
+    if let Some(mouth) = s.mouth_depth()
         && mouth >= d
     {
         return Err(Error::new(
@@ -159,22 +184,32 @@ fn depth(
 /// each with the segment that leaves it: out along the mouth, down the
 /// counterbore or countersink and the bore, across the bottom or down the
 /// drill point to the axis, and up the axis.
-fn corners(h: &Hole, depth: f64) -> Vec<((f64, f64), &'static str)> {
-    let r = h.diameter.meters() / 2.0;
+fn corners(h: &Hole, s: &Sizes, depth: f64) -> Vec<((f64, f64), &'static str)> {
+    let r = s.drill.si / 2.0;
     let mut out = vec![((0.0, 0.0), "top")];
-    match &h.form {
-        HoleForm::Simple => out.push(((r, 0.0), "wall")),
-        HoleForm::Counterbore { diameter, depth } => {
-            let rc = diameter.meters() / 2.0;
+    match (&s.counterbore, &s.countersink) {
+        (Some((diameter, depth)), _) => {
+            let rc = diameter.si / 2.0;
             out.push(((rc, 0.0), "counterbore_wall"));
-            out.push(((rc, depth.meters()), "counterbore_floor"));
-            out.push(((r, depth.meters()), "wall"));
+            out.push(((rc, depth.si), "counterbore_floor"));
+            out.push(((r, depth.si), "wall"));
         }
-        HoleForm::Countersink { diameter, .. } => {
-            let (d, _) = h.mouth_depth().expect("a countersink has a depth");
-            out.push(((diameter.meters() / 2.0, 0.0), "countersink"));
+        (None, Some((diameter, _))) => {
+            let d = s.mouth_depth().expect("a countersink has a depth");
+            out.push(((diameter.si / 2.0, 0.0), "countersink"));
             out.push(((r, d), "wall"));
         }
+        (None, None) => out.push(((r, 0.0), "wall")),
+    }
+    // A blind thread that stops short of its drill: the wall ends where
+    // the thread does, and the drill's own wall goes on to the bottom.
+    let mouth = s.mouth_depth().unwrap_or(0.0);
+    if matches!(h.depth, Depth::Blind(_))
+        && let Some(t) = s.thread.as_ref().and_then(|t| t.depth.as_ref())
+        && t.si > mouth
+        && t.si < depth
+    {
+        out.push(((r, t.si), "drill_wall"));
     }
     match &h.bottom {
         Bottom::Flat => {
@@ -193,10 +228,12 @@ fn corners(h: &Hole, depth: f64) -> Vec<((f64, f64), &'static str)> {
 /// The hole's tool: its profile turned all round its axis, at the
 /// sketch's origin, drilling against the sketch's normal; and its frame's
 /// origin, from which each point's tool is placed.
+#[allow(clippy::too_many_arguments)]
 pub fn tool(
     part: &Part,
     id: &Id,
     h: &Hole,
+    s: &Sizes,
     solved: &Solved,
     targets: &[&Built],
     before: &dyn Results,
@@ -205,12 +242,12 @@ pub fn tool(
         Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
     let (origin, down) = (sketch.origin(), -sketch.z().get());
-    let d = depth(part, id, h, origin, down, targets, before)?;
+    let d = depth(part, id, h, s, origin, down, targets, before)?;
     // The profile's plane holds the axis: x across, y down the hole.
     let frame = Frame::new(origin, sketch.y().get(), sketch.x().get()).map_err(|e| {
         Error::new(Code::Internal, "a hole's frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
-    let corners = corners(h, d);
+    let corners = corners(h, s, d);
     let mut keys = Keys::default();
     let segments: Vec<Segment> = corners
         .iter()
@@ -291,6 +328,7 @@ pub(crate) mod tests {
     use crate::units::Unit;
     use core::f64::consts::PI;
     use serde_json::{Value, json};
+    use std::collections::BTreeSet;
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()
@@ -331,7 +369,10 @@ pub(crate) mod tests {
     /// part `p`, as a file would hold it.
     pub(crate) fn put(s: &mut Session, h: &str, fields: Value) {
         let mut v = fields;
-        v["format"] = json!(3);
+        // Format 3, or the one the fields give (23 for intent).
+        if v.get("format").is_none() {
+            v["format"] = json!(3);
+        }
         v["kind"] = json!("ryucad.feature");
         v["type"] = json!("hole");
         v["sketch"] = json!("s");
@@ -366,6 +407,55 @@ pub(crate) mod tests {
 
     fn near(got: f64, want: f64) {
         assert!((got - want).abs() < 2e-4 * want, "{got} mm³ != {want} mm³");
+    }
+
+    #[test]
+    fn a_blind_thread_splits_the_wall_where_it_ends() {
+        let (_dir, mut s) = drilled();
+        let tapped = |thread_depth: &str| {
+            json!({"format": 23, "points": ["p1"], "form": "simple",
+                   "thread": {"standard": "iso_metric", "size": "M3", "depth": thread_depth},
+                   "depth": {"blind": "4 mm"}, "bottom": {"drill": "118 deg"}})
+        };
+        let segments = |b: &Built| -> BTreeSet<String> {
+            b.origins
+                .values()
+                .filter(|o| o["feature"] == "h")
+                .filter_map(|o| o["segment"].as_str().map(str::to_owned))
+                .collect()
+        };
+        put(&mut s, "h", tapped("2.5 mm"));
+        let b = after(&mut s, "h").unwrap();
+        assert_eq!(
+            segments(&b),
+            ["drill_wall", "tip", "wall"].map(String::from).into()
+        );
+        // The same volume as one wall: a 2.5 mm bore (M3's rule) 4 mm
+        // deep, and its point.
+        let tip = 1.25 / ryukei::math::tan(59f64.to_radians());
+        near(
+            volume(&b),
+            1000.0 - PI * 1.25 * 1.25 * 4.0 - PI * 1.25 * 1.25 * tip / 3.0,
+        );
+        let names = |b: &Built| b.origins.keys().cloned().collect::<BTreeSet<_>>();
+        let before = names(&b);
+        put(&mut s, "h", tapped("3 mm"));
+        assert_eq!(
+            names(&after(&mut s, "h").unwrap()),
+            before,
+            "a deeper thread renames nothing"
+        );
+        // Full depth: no split.
+        put(&mut s, "h", tapped("full"));
+        let b = after(&mut s, "h").unwrap();
+        assert!(!segments(&b).contains("drill_wall"));
+        // A thread that ends inside its counterbore is refused.
+        let mut v = tapped("1 mm");
+        v["form"] = json!("counterbore");
+        v["counterbore"] = json!({"diameter": "6 mm", "depth": "1.5 mm"});
+        put(&mut s, "h", v);
+        let e = after(&mut s, "h").unwrap_err();
+        assert_eq!(e.details["pointer"], "/thread/depth", "{e}");
     }
 
     #[test]
@@ -600,5 +690,152 @@ pub(crate) mod tests {
             segments,
             ["counterbore_floor", "counterbore_wall", "wall", "bottom"].into()
         );
+    }
+
+    #[test]
+    fn a_tapped_hole_builds_at_its_tap_drill_and_reports_its_spec() {
+        let (dir, mut s) = drilled();
+        put(
+            &mut s,
+            "h",
+            json!({"format": 23, "points": ["p1"], "form": "simple",
+                                "thread": {"standard": "iso_metric", "size": "M6"},
+                                "depth": "through_all"}),
+        );
+        let b = after(&mut s, "h").unwrap();
+        // A Ø5.0 bore through the 5 mm box.
+        near(volume(&b), 1000.0 - PI * 2.5 * 2.5 * 5.0);
+        // `feature.show` gives the report itself.
+        let shown = call(&mut s, "feature.show", json!({"part": "p", "id": "h"})).unwrap();
+        assert_eq!(shown["spec"], "M6x1.0-6H THRU");
+        assert_eq!(shown["sizes"]["drill"]["value"], "5 mm");
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let entry = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "h")
+            .unwrap();
+        assert_eq!(entry["spec"], "M6x1.0-6H THRU");
+        // A table entry the hole reads moves its hash; one it doesn't, not.
+        let hash = entry["hash"].clone();
+        let write = |t: &Value| {
+            std::fs::write(
+                dir.path().join("hole_standards.json"),
+                crate::doc::canonical::to_string(t),
+            )
+            .unwrap()
+        };
+        let mut t = crate::doc::fixtures::house_standards();
+        t["threads"]["iso_metric"]
+            .as_object_mut()
+            .unwrap()
+            .remove("M6");
+        write(&t);
+        s.reload().unwrap();
+        let again = |s: &mut Session| {
+            let r = call(s, "rebuild", json!({"part": "p"})).unwrap();
+            r["parts"][0]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == "h")
+                .unwrap()["hash"]
+                .clone()
+        };
+        assert_eq!(again(&mut s), hash);
+        write(&crate::doc::fixtures::house_standards()); // M6's house tap drill, 5.1 mm
+        s.reload().unwrap();
+        assert_ne!(again(&mut s), hash);
+        near(
+            volume(&after(&mut s, "h").unwrap()),
+            1000.0 - PI * 2.55 * 2.55 * 5.0,
+        );
+    }
+
+    #[test]
+    fn holes_from_a_spec_and_dry_runs() {
+        let (_dir, mut s) = drilled();
+        let added = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "h",
+            "sketch": "s", "points": ["p1"], "spec": "M6x1.0-6H THRU", "targets": ["b"]}),
+        )
+        .unwrap();
+        let f = &added["feature"];
+        assert_eq!(f["spec"], "M6x1.0-6H THRU");
+        assert_eq!(f["thread"], json!({"standard": "iso_metric", "size": "M6"}));
+        assert_eq!(f["sizes"]["drill"]["value"], "5 mm");
+        assert!(f.get("diameter").is_none());
+        // A field set by the spec and beside it is usage.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "spec": "M8 THRU", "depth": "through_all"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage, "{e}");
+        // A dry run answers and writes nothing.
+        let before = call(&mut s, "feature.show", json!({"part": "p", "id": "h"})).unwrap();
+        let dry = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "spec": "M8x1.25-6H 10 DEEP, DRILL 12 DEEP", "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(dry["dry_run"], true);
+        assert_eq!(dry["feature"]["sizes"]["drill"]["value"], "6.8 mm");
+        assert_eq!(
+            call(&mut s, "feature.show", json!({"part": "p", "id": "h"})).unwrap(),
+            before
+        );
+        // Partial thread fields lay over the current thread.
+        let edited = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "class": "5H"}),
+        )
+        .unwrap();
+        assert_eq!(edited["feature"]["thread"]["class"], "5H");
+        let edited = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "pitch": "0.75 mm"}),
+        )
+        .unwrap();
+        assert_eq!(edited["feature"]["thread"]["pitch"], "0.75 mm");
+        // What a table must give is refused when written, dry run or not.
+        for dry_run in [true, false] {
+            let e = call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "hole", "id": "c",
+                "sketch": "s", "points": ["p2"], "spec": "CBORE HOUSE_CAP M5 THRU",
+                "targets": ["b"], "dry_run": dry_run}),
+            )
+            .unwrap_err();
+            assert_eq!(e.details["reason"], "needs_project_table");
+            assert_eq!(
+                e.details["missing"],
+                json!(["clearance.normal", "counterbore"])
+            );
+        }
+        // "" takes a thread away: the hole needs its diameter again.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "thread": ""}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/diameter");
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "thread": "", "diameter": "5 mm"}),
+        )
+        .unwrap();
     }
 }

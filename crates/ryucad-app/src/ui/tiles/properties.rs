@@ -70,6 +70,14 @@ pub(crate) fn blend(ui: &mut egui::Ui, b: &mut crate::core::edit::BlendForm) -> 
 pub(crate) fn hole(ui: &mut egui::Ui, h: &mut crate::core::edit::HoleForm) -> Keys {
     let keys = form::grid(ui, "hole", |rows| {
         rows.read_only("form", &h.form, false, None);
+        if let Some(spec) = &h.spec {
+            rows.read_only("spec", spec, true, Some(spec));
+        }
+        // What the rebuild worked out, each with where it came from; an
+        // override is a written size, edited below.
+        for (label, value, source) in &h.derived {
+            rows.read_only(label, &format!("{value} ({source})"), false, None);
+        }
         for (_, f) in &mut h.sizes {
             let name = f.name.clone();
             rows.quantity(&name, f);

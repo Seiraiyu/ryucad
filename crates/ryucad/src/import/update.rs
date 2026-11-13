@@ -112,7 +112,7 @@ pub fn plan(
 ) -> Result<Update> {
     let path = file.path.as_str();
     let defs = &opened.products.definitions;
-    let makes = plan::makes(opened);
+    let makes = fresh.makes();
     let (mut features, instances) = made_of(project, path);
     // Flattened parts follow their file apart.
     let flat: BTreeSet<Id> = features
@@ -159,6 +159,12 @@ pub fn plan(
             known.entry(k).or_insert_with(|| p.clone());
             def_of_part.entry(p.clone()).or_insert(k);
         }
+    }
+    // Externally defined definitions place the parts their files made
+    // (design 448, 24.D): an instance of one is that definition's usage.
+    for (&k, p) in &fresh.cross.external {
+        known.entry(k).or_insert_with(|| p.clone());
+        def_of_part.entry(p.clone()).or_insert(k);
     }
     // New products make parts only where the file was imported whole
     // before. A file only ever imported `--into` a part makes none, nor do
@@ -691,9 +697,14 @@ pub fn usage_warnings(project: &Project, part: &Id) -> Vec<Value> {
             owned_product(project, &i.part, &u.file).and_then(|r| usages.products.get(r).copied());
         let found = k.is_some_and(|k| match &u.usage {
             None => usages.bodies[k] > 0,
-            Some(id) => {
-                child.is_some_and(|c| usages.usages[k].contains(&(id.clone(), c, u.ordinal)))
-            }
+            Some(id) => match child {
+                Some(c) => usages.usages[k].contains(&(id.clone(), c, u.ordinal)),
+                // A part made from another file (design 448, 24.D): a usage
+                // of an externally defined child with this id and ordinal.
+                None => usages.usages[k]
+                    .iter()
+                    .any(|(i, c, o)| i == id && *o == u.ordinal && usages.external[*c]),
+            },
         });
         if !found {
             let usage = u.usage.as_deref().unwrap_or("its own bodies");
@@ -718,6 +729,8 @@ struct Usages {
     products: BTreeMap<ProductRef, usize>,
     bodies: Vec<usize>,
     usages: Vec<std::collections::BTreeSet<(String, usize, u32)>>,
+    /// Whether each definition's shape is in another file.
+    external: Vec<bool>,
 }
 
 impl Usages {
@@ -763,6 +776,7 @@ impl Usages {
             products,
             bodies,
             usages,
+            external: defs.iter().map(|d| d.externally_defined()).collect(),
         }
     }
 }
@@ -904,6 +918,141 @@ pub fn products_diff(path: &str, from: Option<&[u8]>, to: Option<&[u8]>) -> Valu
 
 /// A held group's bodies, and the mode its first feature has.
 type Held = (Vec<u32>, Option<crate::doc::import::Mode>);
+
+/// Each externally defined definition of `new` (a file's new version, or
+/// the same bytes) whose product `old`'s usages placed through the
+/// project's instances of `path`: the part those instances place (design
+/// 448, plan 24.D). Derived from files alone: an instance names its usage
+/// (parent product, id, ordinal), whose child in `old` is externally
+/// defined; that child's product is matched with `new`'s as an update
+/// matches products.
+pub fn external_parts(
+    project: &Project,
+    path: &str,
+    old: &Opened,
+    new: &Opened,
+) -> BTreeMap<usize, Id> {
+    let (_, instances) = made_of(project, path);
+    let defs = &old.products.definitions;
+    let refs: Vec<ProductRef> = (0..defs.len()).map(|k| plan::product_of(old, k)).collect();
+    let mut by_ref: BTreeMap<ProductRef, Id> = BTreeMap::new();
+    for (_, _, inst) in &instances {
+        let Some(u) = &inst.import else {
+            continue;
+        };
+        let Some(usage) = &u.usage else {
+            continue;
+        };
+        let Some(kp) = refs.iter().position(|r| *r == u.product) else {
+            continue;
+        };
+        let children = &defs[kp].children;
+        let hits: BTreeSet<usize> = (0..children.len())
+            .filter(|&n| {
+                &*children[n].id == usage.as_str() && plan::usage_ordinal(old, kp, n) == u.ordinal
+            })
+            .map(|n| children[n].definition)
+            .filter(|&c| defs[c].externally_defined())
+            .collect();
+        if hits.len() == 1 {
+            let c = *hits.iter().next().expect("one");
+            by_ref
+                .entry(refs[c].clone())
+                .or_insert_with(|| inst.part.clone());
+        }
+    }
+    let olds: BTreeSet<ProductRef> = by_ref.keys().cloned().collect();
+    match_products(new, &olds)
+        .into_iter()
+        .filter(|(_, k)| new.products.definitions[*k].externally_defined())
+        .filter_map(|(r, k)| Some((k, by_ref.get(&r)?.clone())))
+        .collect()
+}
+
+/// The file `part` was made from: its first import feature's, else its
+/// first imported instance's (an assembly an import made).
+pub fn file_of(project: &Project, part: &Id) -> Option<String> {
+    let p = project.parts.get(part)?;
+    let features = || {
+        p.order()
+            .iter()
+            .filter_map(|f| p.features.get(f)?.as_ref().ok())
+    };
+    features()
+        .find_map(|f| match f {
+            Feature::Import(i) => Some(i.file.path.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            features().find_map(|f| match f {
+                Feature::Instance(i) => i.import.as_ref().map(|u| u.file.clone()),
+                _ => None,
+            })
+        })
+}
+
+/// A part flattened across files (design 448, 24.D) that reads `path`,
+/// with every file it reads: its placed import features name more than
+/// one file, or one's first usage isn't a usage of a root of its own
+/// file (the root is another file no feature names). An update can't
+/// walk it again.
+pub fn cross_flattened(project: &Project, path: &str) -> Option<(Id, Vec<String>)> {
+    use crate::doc::import::Via;
+    fn from_a_root(o: &Opened, v: &Via) -> bool {
+        o.products.roots.iter().any(|&r| {
+            o.products.definitions[r]
+                .children
+                .iter()
+                .enumerate()
+                .any(|(n, c)| {
+                    *c.id == *v.usage
+                        && plan::product_of(o, c.definition) == v.product
+                        && plan::usage_ordinal(o, r, n) == v.ordinal
+                })
+        })
+    }
+    let mut open: BTreeMap<String, Option<std::sync::Arc<Opened>>> = BTreeMap::new();
+    for (pid, p) in &project.parts {
+        let imports: Vec<&Import> = p
+            .order()
+            .iter()
+            .filter_map(|f| match p.features.get(f) {
+                Some(Ok(Feature::Import(i))) => Some(i),
+                _ => None,
+            })
+            .collect();
+        if !imports.iter().any(|i| i.place.is_some())
+            || !imports.iter().any(|i| i.file.path == path)
+        {
+            continue;
+        }
+        let mut files: Vec<String> = imports.iter().map(|i| i.file.path.clone()).collect();
+        files.sort();
+        files.dedup();
+        let mut foreign = files.len() > 1;
+        for i in &imports {
+            if foreign {
+                break;
+            }
+            let Some(first) = i.place.as_ref().and_then(|pl| pl.via.first()) else {
+                continue;
+            };
+            let o = open.entry(i.file.path.clone()).or_insert_with(|| {
+                project
+                    .imports
+                    .get(&i.file.path)
+                    .and_then(|f| super::opened(f).ok())
+            });
+            if let Some(o) = o {
+                foreign = !from_a_root(o, first);
+            }
+        }
+        if foreign {
+            return Some((pid.clone(), files));
+        }
+    }
+    None
+}
 
 #[cfg(test)]
 mod tests {
@@ -1746,6 +1895,37 @@ mod tests {
             .map(|f| (f["id"].as_str().unwrap(), f["ok"] == true))
             .collect();
         assert_eq!(state, [("body", true), ("low", true), ("high", false)]);
+    }
+
+    /// From the files alone (design 448, 24.D): each externally defined
+    /// product of the assembly file is the part its usage's instance
+    /// places, and that part's file is its import features'.
+    #[test]
+    fn each_external_usage_finds_the_part_it_placed() {
+        let (_dir, mut s) = fresh();
+        call(
+            &mut s,
+            "import",
+            json!({"path": crate::import::tests::set_path("asm.stp")}),
+        )
+        .unwrap();
+        let p = s.project();
+        let f = p.imports.get("imports/asm.step").unwrap();
+        let o = crate::import::opened(f).unwrap();
+        let got = super::external_parts(p, "imports/asm.step", &o, &o);
+        let defs = &o.products.definitions;
+        let named: Vec<(&str, &str)> = got
+            .iter()
+            .map(|(k, part)| (&*defs[*k].product_id, part.as_str()))
+            .collect();
+        assert_eq!(named, [("BOX", "box"), ("PIN", "pin")]);
+        let box_ = crate::doc::id::Id::parse("box", "part").unwrap();
+        assert_eq!(
+            super::file_of(p, &box_).as_deref(),
+            Some("imports/box.step")
+        );
+        let asm = crate::doc::id::Id::parse("asm", "part").unwrap();
+        assert_eq!(super::file_of(p, &asm).as_deref(), Some("imports/asm.step"));
     }
 
     /// Design 525: interference runs only when asked. An assembly

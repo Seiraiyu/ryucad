@@ -93,6 +93,8 @@ pub struct Session {
     pub blends: crate::blends::Cache,
     /// Distances between placed solids, for `clearance`.
     pub clearance: crate::clearance::Cache,
+    /// The last sweeps' answers (`assembly.sweep`), by what they swept.
+    pub sweeps: crate::motion::Cache,
     /// A revision's session: its files never change, and it never reads
     /// the disk.
     frozen: bool,
@@ -231,6 +233,7 @@ impl Session {
         self.store.pinned.clear();
         self.store.models.clear();
         self.store.summaries.clear();
+        self.store.holes.clear();
         self.revisions.clear();
     }
 
@@ -271,6 +274,7 @@ impl Session {
             mass: crate::mass::Cache::default(),
             blends: crate::blends::Cache::default(),
             clearance: crate::clearance::Cache::default(),
+            sweeps: crate::motion::Cache::default(),
             frozen: false,
             revisions: Vec::new(),
             merge_status: None,
@@ -466,6 +470,7 @@ impl Session {
                 budget: Default::default(),
                 verified: Default::default(),
                 walked: 0,
+                holes: BTreeMap::new(),
             },
             pinned_parts: from.pinned_parts.clone(),
             deps_cache: from.deps_cache.clone(),
@@ -481,6 +486,7 @@ impl Session {
             mass: from.mass.clone(),
             blends: from.blends.clone(),
             clearance: from.clearance.clone(),
+            sweeps: from.sweeps.clone(),
             frozen: true,
             revisions: Vec::new(),
             merge_status: None,

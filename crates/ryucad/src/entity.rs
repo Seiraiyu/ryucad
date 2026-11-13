@@ -404,7 +404,15 @@ impl Serialize for EntityRef {
 /// Parses every reference, then checks that each resolves: the error lists
 /// every one that doesn't.
 pub fn parse_all(session: &mut Session, refs: &[String]) -> Result<Vec<EntityRef>> {
-    let parsed = refs
+    // A hole's reference (`p/h/p1`) stands for its faces.
+    let mut expanded = Vec::new();
+    for r in refs {
+        match crate::holes::face_refs(session, r)? {
+            Some(faces) => expanded.extend(faces),
+            None => expanded.push(r.clone()),
+        }
+    }
+    let parsed = expanded
         .iter()
         .map(|s| EntityRef::parse(s))
         .collect::<Result<Vec<_>>>()?;

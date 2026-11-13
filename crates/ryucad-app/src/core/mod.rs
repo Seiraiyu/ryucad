@@ -55,6 +55,7 @@ pub mod sketch;
 pub mod start;
 pub mod step;
 pub mod sweeps;
+pub mod threads;
 pub mod thumbs;
 pub mod toast;
 pub mod tree;

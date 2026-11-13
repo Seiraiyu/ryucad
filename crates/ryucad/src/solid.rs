@@ -377,6 +377,7 @@ pub(crate) mod tests {
             parameters: None,
             env: crate::expr::Env::empty(),
             project_reads: BTreeSet::new(),
+            hole_standards: None,
             features: features.into_iter().map(|(i, f)| (id(i), Ok(f))).collect(),
             uses: BTreeMap::<Id, BTreeSet<String>>::new(),
             acts: BTreeMap::new(),
@@ -385,6 +386,8 @@ pub(crate) mod tests {
             appearance: None,
             explodes: Default::default(),
             explode_uses: Default::default(),
+            motions: Default::default(),
+            motion_uses: Default::default(),
             drawings: Default::default(),
             revision: String::new(),
         }
