@@ -1,0 +1,20 @@
+[package]
+name = "ryu-app"
+description = "The desktop shell every ryu product's window shares: fonts, icons, looks, keys, the command registry, the palette, tiles, toasts, people, the daemon link and the 2D canvas"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# eframe 0.37's egui and egui_tiles, so ryucad-app's and ryueda-app's
+# types are these crates' own. No eframe here: a product's app picks the
+# window backend.
+egui = { version = "0.37", default-features = false, features = ["default_fonts"] }
+egui_tiles = "0.18"
+ryu-doc = { path = "../ryu-doc" }
+# Icons, palettes' vision checks and the canvas cut curves by the same
+# functions everywhere.
+ryu-math = { path = "../ryu-math" }
+ryu-session = { path = "../ryu-session" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
