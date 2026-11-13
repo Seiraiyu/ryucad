@@ -7431,6 +7431,13 @@ fn flattened_imports_from_the_cli() {
     assert!(features.len() > 1, "{v}");
     assert!(features.iter().all(|f| f["mode"] == "reference"), "{v}");
     let built = p.ok(&["rebuild", "board"]);
+    // Each flattened body's import says so, for the window's one row per
+    // file (ryucad 25.B).
+    let reported = built["parts"][0]["features"].as_array().unwrap();
+    assert!(
+        reported.iter().all(|f| f["import"]["flattened"] == true),
+        "{built}"
+    );
     let solids = built["parts"][0]["solids"].as_array().unwrap();
     assert_eq!(solids.len(), features.len(), "{built}");
     assert!(solids.iter().all(|s| s["ok"] == true), "{built}");
@@ -7461,6 +7468,12 @@ fn reference_imports_from_the_cli() {
     let fid = f["id"].as_str().unwrap().to_owned();
     let built = p.ok(&["rebuild", "r"]);
     assert_eq!(built["parts"][0]["solids"][0]["reference"], true, "{built}");
+    assert!(
+        built["parts"][0]["features"][0]["import"]
+            .get("flattened")
+            .is_none(),
+        "{built}"
+    );
     let body = p.ok(&["inspect", "r", &fid]);
     let edge = body["bodies"][0]["edges"][0]["name"]
         .as_str()

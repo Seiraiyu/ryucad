@@ -2414,6 +2414,11 @@ pub enum Request {
         /// it out: labelled by the solid, every name the shown body's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         flat: Option<String>,
+        /// Mesh solid `feature` as this feature of the part read it,
+        /// whether or not the model still shows it: what a delete takes
+        /// out, ghosted where it was (ryucad 25.B).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
     },
     /// Draws a part (or the whole project) to a PNG, sent as bytes after
     /// the answer. The view is `camera`, a participant's camera, a standard

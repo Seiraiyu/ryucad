@@ -922,6 +922,15 @@ impl View {
                 }
             }
         }
+        // An insert chosen: every solid it founds, whole (design 521).
+        if let Some(k) = &chosen
+            && let Some(p) = ws.model.parts.get(&k.0)
+        {
+            let c = linear(style::CHOSEN);
+            for key in crate::core::inserts::painted(p, k) {
+                faces.extend((0..picker.faces(&key)).map(|i| (key.clone(), i, c)));
+            }
+        }
         // A compare's new and changed faces, over the chosen feature so
         // choosing one still shows what changed in it.
         if let Some(c) = ws.painted() {
@@ -2827,6 +2836,13 @@ impl View {
         scene.set_looks(&ws.model.looks);
         scene.sync_drawn(&rs.device, drawn, reference);
         scene.sync_ghosts(&rs.device, ws.painted());
+        let chosen = self.chosen.clone();
+        scene.sync_deleted(
+            &rs.device,
+            ws.deleted
+                .as_ref()
+                .filter(|d| chosen.as_ref() == Some(&d.feature)),
+        );
         let size = [f64::from(px[0]), f64::from(px[1])];
         let mut overlay = if self.sketches {
             crate::core::sketch::overlay(

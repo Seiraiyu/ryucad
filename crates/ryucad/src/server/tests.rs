@@ -4612,6 +4612,123 @@ fn subscribers_hear_of_model_changes_once() {
     assert_eq!(got[1].1["removed"], json!(["p"]));
 }
 
+/// ryucad 25.B: the window fetches an inserted solid's mesh by its key,
+/// one body per request as it fetches any solid's.
+#[test]
+fn mesh_get_takes_an_inserted_solids_key() {
+    let (_dir, mut s) = crate::insert::tests::boarded();
+    let all = call(&mut s, "mesh.get", json!({"part": "enclosure"})).unwrap();
+    let u1 = all["bodies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["feature"] == "pcb/u1")
+        .cloned()
+        .unwrap_or_else(|| panic!("{all}"));
+    let one = call(
+        &mut s,
+        "mesh.get",
+        json!({"part": "enclosure", "feature": "pcb/u1"}),
+    )
+    .unwrap();
+    assert_eq!(one["bodies"].as_array().unwrap().len(), 1, "{one}");
+    assert_eq!(one["bodies"][0]["feature"], "pcb/u1");
+    assert_eq!(one["bodies"][0]["hash"], u1["hash"]);
+    // A key below a feature that inserts nothing is refused, by name.
+    let e = call(
+        &mut s,
+        "mesh.get",
+        json!({"part": "enclosure", "feature": "nothing/u1"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::NotFound, "{e:?}");
+}
+
+/// ryucad 25.B: a deleted solid isn't the model's, but `mesh.get` with
+/// `before` meshes it as that feature read it: a delete's ghost.
+#[test]
+fn mesh_get_before_meshes_a_deleted_solid_as_its_delete_read_it() {
+    let (_dir, mut s) = crate::insert::tests::boarded();
+    let shown = call(
+        &mut s,
+        "mesh.get",
+        json!({"part": "enclosure", "feature": "pcb/u1"}),
+    )
+    .unwrap();
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "enclosure", "type": "delete_body", "id": "d", "solids": ["pcb/u1"]}),
+    )
+    .unwrap();
+    let all = call(&mut s, "mesh.get", json!({"part": "enclosure"})).unwrap();
+    assert!(
+        all["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["feature"] != "pcb/u1"),
+        "{all}"
+    );
+    let ghost = call(
+        &mut s,
+        "mesh.get",
+        json!({"part": "enclosure", "feature": "pcb/u1", "before": "d"}),
+    )
+    .unwrap();
+    assert_eq!(ghost["bodies"][0]["feature"], "pcb/u1", "{ghost}");
+    assert_eq!(ghost["bodies"][0]["hash"], shown["bodies"][0]["hash"]);
+    // The window asks for it compact, as bytes.
+    let req = Request::from_rpc(
+        "mesh.get",
+        Some(
+            json!({"part": "enclosure", "feature": "pcb/u1", "before": "d", "transfer": "compact"}),
+        ),
+    )
+    .unwrap();
+    let a = answer_live(&mut s, None, None, req).unwrap();
+    let bodies = mesh::decode(&a.binary.expect("bytes")).unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0].feature, "pcb/u1");
+    // `before` meshes one solid: beside `flat` or `features` it is refused
+    // by name, by JSON and as bytes alike, never ignored.
+    for extra in [json!({"flat": ""}), json!({"features": ["lid"]})] {
+        for transfer in [None, Some("compact")] {
+            let mut params = json!({"part": "enclosure", "feature": "pcb/u1", "before": "d"});
+            for (k, v) in extra.as_object().unwrap() {
+                params[k] = v.clone();
+            }
+            if let Some(t) = transfer {
+                params["transfer"] = json!(t);
+            }
+            let req = Request::from_rpc("mesh.get", Some(params.clone())).unwrap();
+            let e = match answer_live(&mut s, None, None, req) {
+                Err(e) => e,
+                Ok(_) => panic!("{params}: answered"),
+            };
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!("before")),
+                "{params}: {e:?}"
+            );
+        }
+    }
+    // `before` needs the solid it reads, and a feature of the part.
+    for (params, code) in [
+        (
+            json!({"part": "enclosure", "before": "d"}),
+            Code::InvalidParam,
+        ),
+        (
+            json!({"part": "enclosure", "feature": "pcb/u1", "before": "nope"}),
+            Code::NotFound,
+        ),
+    ] {
+        let e = call(&mut s, "mesh.get", params.clone()).unwrap_err();
+        assert_eq!(e.code, code, "{params}: {e:?}");
+    }
+}
+
 #[test]
 fn renders_draw_thread_rings_unless_told_not_to() {
     let (_dir, mut s) = crate::hole::tests::drilled();
