@@ -2581,7 +2581,8 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
     h.get_by_label("base (plate @ working, fixed)");
     h.get_by_label("ring (instance_pattern, 3 copies)");
     h.get_by_label("ring:2/pin");
-    h.get_by_label("m1 (revolute: base → pin)").click();
+    // The tree says where its value stands (ryucad 26.C).
+    h.get_by_label("m1 (revolute: base → pin, 30.0°)").click();
     frames(&mut h, |a| a.opened().ws.form.is_some());
     // Chosen, the mate draws both its connectors' frames: three axes each,
     // from where the report says they are.
@@ -4849,6 +4850,114 @@ fn an_explode_is_chosen_and_played_from_its_tile() {
             .origin[2]
             == before
     });
+}
+
+#[test]
+fn the_motion_tile_scrubs_plays_sweeps_and_shows_a_collision() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "slam",
+        "--steps",
+        "11",
+        "--drives",
+        r#"[{"instances": ["b2"], "translate": {"direction": [-1, 0, 0], "from": "0 mm", "to": "40 mm"}}]"#,
+    ]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    let b2 = ("frame".to_owned(), "b2/shank".to_owned());
+    let x = |h: &Harness<'static, App>| h.state().opened().ws.model.pose(&b2).origin[0];
+    let rest = x(&h);
+    menu(&mut h, "View", "Motion");
+    frames(&mut h, |a| a.opened().ws.motions.list.len() == 1);
+    shown(&mut h, "slam");
+    h.get_by_label("slam").click();
+    frames(&mut h, |a| a.opened().ws.motions.frames_current());
+    // Dragged to its end, b2 is drawn 40 mm along -x; written when let go.
+    shown(&mut h, "motion fraction");
+    let r = h.get_by_label("motion fraction").rect();
+    drag(
+        &mut h,
+        egui::pos2(r.min.x + 2.0, r.center().y),
+        egui::pos2(r.max.x + 10.0, r.center().y),
+        8,
+    );
+    frames(&mut h, |a| {
+        (a.opened()
+            .ws
+            .model
+            .pose(&("frame".into(), "b2/shank".into()))
+            .origin[0]
+            - (rest - 0.04))
+            .abs()
+            < 1e-9
+    });
+    // Play, then Pause (the button says Pause from the next frame).
+    shown(&mut h, "Play");
+    h.get_by_label("Play").click();
+    frames(&mut h, |a| a.opened().ws.motions.playing());
+    shown(&mut h, "Pause");
+    h.get_by_label("Pause").click();
+    frames(&mut h, |a| !a.opened().ws.motions.playing());
+    // Sweep lists the shanks' collision; Show jumps to the contact.
+    shown(&mut h, "Sweep");
+    h.get_by_label("Sweep").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle()
+            && a.opened()
+                .ws
+                .motions
+                .sweep
+                .as_ref()
+                .is_some_and(|w| w.loaded)
+    });
+    shown(&mut h, "Show");
+    h.get_by_label("Show").click();
+    frames(&mut h, |a| a.opened().ws.idle());
+    let f = h
+        .state()
+        .opened()
+        .ws
+        .motions
+        .fraction(Instant::now())
+        .unwrap();
+    assert!((f - 0.85).abs() < 0.02, "{f}");
+    assert!(x(&h) < rest - 0.03, "drawn at the contact");
+}
+
+#[test]
+fn a_mates_limits_show_in_the_property_panel() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = common::mated();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        a.opened().ws.idle()
+            && a.opened()
+                .ws
+                .part("frame")
+                .is_some_and(|f| f.feature("m1").is_some())
+    });
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .open_form(Some(("frame".into(), "m1".into())));
+    show_tab(&mut h, "properties");
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    shown(&mut h, "angle min (empty: none)");
+    shown(&mut h, "angle max (empty: none)");
+    assert!(
+        h.query_by_label("distance min (empty: none)").is_none(),
+        "a revolute slides not"
+    );
 }
 
 #[test]
