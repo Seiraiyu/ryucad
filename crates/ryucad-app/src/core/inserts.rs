@@ -10,11 +10,7 @@ use std::sync::Arc;
 /// The bodies a chosen insert paints whole: every solid it founds that
 /// the model shows. None for any other feature.
 pub fn painted(part: &Part, chosen: &BodyKey) -> Vec<BodyKey> {
-    if chosen.0 != part.id
-        || part
-            .feature(&chosen.1)
-            .is_none_or(|f| f.insert.is_none())
-    {
+    if chosen.0 != part.id || part.feature(&chosen.1).is_none_or(|f| f.insert.is_none()) {
         return Vec::new();
     }
     part.inserted(&chosen.1)
@@ -178,7 +174,9 @@ impl Preview {
     pub fn lines(&self) -> Vec<String> {
         let to = self.to_text();
         match &self.answer {
-            None => vec![format!("Reading what moving the pin to {to} changes\u{2026}")],
+            None => vec![format!(
+                "Reading what moving the pin to {to} changes\u{2026}"
+            )],
             Some(Err(e)) => vec![format!("Moving the pin to {to} is refused: {}", e.message)],
             Some(Ok(m)) => m.lines(&to),
         }

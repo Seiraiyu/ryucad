@@ -526,7 +526,11 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Tool solid, consumed", "cube-focus", Tint::Weak),
             ("Sheet", "sheet", Tint::Plain),
             ("Sheet, consumed (sewn, thickened)", "sheet", Tint::Weak),
-            ("Flattened file (its bodies under one row)", "files", Tint::Plain),
+            (
+                "Flattened file (its bodies under one row)",
+                "files",
+                Tint::Plain,
+            ),
             ("A flattened file\u{2019}s product", "package", Tint::Plain),
             ("Sketch", "pencil-simple-line", Tint::Plain),
             ("Drawing", "drawing", Tint::Plain),
@@ -585,7 +589,11 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Circular pattern", "pattern-circular", Tint::Plain),
             ("Mirror pattern", "flip-horizontal", Tint::Plain),
             ("Import", "file-arrow-down", Tint::Plain),
-            ("Insert (another part\u{2019}s solids)", "arrow-square-in", Tint::Plain),
+            (
+                "Insert (another part\u{2019}s solids)",
+                "arrow-square-in",
+                Tint::Plain,
+            ),
             ("Delete body", "trash", Tint::Plain),
             ("Unknown feature", "question", Tint::Plain),
         ],
@@ -1032,7 +1040,9 @@ impl Builder<'_> {
         }
         let me = self.push(row, Some(parent));
         // Products in the order their first bodies are listed.
-        let mut products: Vec<(Option<(String, String, u64)>, Vec<&Feature>)> = Vec::new();
+        // A product's id, name and ordinal, and the bodies from it.
+        type Product = (String, String, u64);
+        let mut products: Vec<(Option<Product>, Vec<&Feature>)> = Vec::new();
         for f in imports {
             let p = info(f).product;
             match products.iter_mut().find(|(q, _)| *q == p) {
@@ -1050,7 +1060,8 @@ impl Builder<'_> {
             let (under, depth) = match &product {
                 Some((id, name, ordinal)) => {
                     let k = bodies.len();
-                    let text = format!("{id} ({name}, {k} bod{})", if k == 1 { "y" } else { "ies" });
+                    let text =
+                        format!("{id} ({name}, {k} bod{})", if k == 1 { "y" } else { "ies" });
                     let mut r = Row::new(
                         format!("product:{}/{file}/{id}#{ordinal}", part.id),
                         2,
@@ -1900,9 +1911,7 @@ mod tests {
                               "mode": "reference", "flattened": true,
                               "product": {"id": product, "name": name}}})
         };
-        let shown = |id: &str| {
-            json!({"solid": id, "ok": true, "features": [id], "hash": id, "reference": true})
-        };
+        let shown = |id: &str| json!({"solid": id, "ok": true, "features": [id], "hash": id, "reference": true});
         let mut m = Model::default();
         m.apply_part(&json!({"part": "f", "revision": "r", "features": [
             imp("a", "U1", "MCU"), imp("b", "U1", "MCU"), imp("c", "J1", "USB"),

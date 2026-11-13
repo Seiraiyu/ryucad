@@ -358,8 +358,8 @@ impl Project {
             "--param", "z=5",
         ]);
         self.ok(&[
-            "feature", "add", "pcb", "cylinder", "--id", "boss", "--param", "radius=3",
-            "--param", "height=8", "--origin", "10,5,5",
+            "feature", "add", "pcb", "cylinder", "--id", "boss", "--param", "radius=3", "--param",
+            "height=8", "--origin", "10,5,5",
         ]);
         self.ok(&["pdm", "init"]);
         self.ok(&["props", "set", "pcb", "number=P-1"]);
@@ -378,14 +378,39 @@ impl Project {
             "--origin", "0,0,20",
         ]);
         p.ok(&[
-            "feature", "add", "e", "box", "--id", "nub", "--operation", "join", "--target",
-            "brd/base", "--param", "x=2", "--param", "y=2", "--param", "z=2", "--origin", "1,1,25",
+            "feature",
+            "add",
+            "e",
+            "box",
+            "--id",
+            "nub",
+            "--operation",
+            "join",
+            "--target",
+            "brd/base",
+            "--param",
+            "x=2",
+            "--param",
+            "y=2",
+            "--param",
+            "z=2",
+            "--origin",
+            "1,1,25",
         ]);
         p.ok(&[
             "feature", "add", "e", "box", "--id", "lid", "--param", "x=30", "--param", "y=20",
             "--param", "z=2",
         ]);
-        p.ok(&["feature", "add", "e", "delete_body", "--id", "d", "--solid", "brd/boss"]);
+        p.ok(&[
+            "feature",
+            "add",
+            "e",
+            "delete_body",
+            "--id",
+            "d",
+            "--solid",
+            "brd/boss",
+        ]);
         p
     }
 

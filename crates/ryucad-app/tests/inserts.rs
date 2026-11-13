@@ -68,10 +68,11 @@ fn a_chosen_delete_ghosts_the_solid_it_deletes_where_it_was() {
     let p = Project::new().with_inserts();
     let mut ws = open(&p);
     ws.choose(Some(key("d")));
-    assert!(ws.wait_until(WAIT, |ws| ws
-        .deleted
-        .as_ref()
-        .is_some_and(|d| d.ghosts.contains_key(&key("brd/boss")))));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.deleted
+            .as_ref()
+            .is_some_and(|d| d.ghosts.contains_key(&key("brd/boss")))
+    }));
     let ghost = ws.deleted.as_ref().unwrap().ghosts[&key("brd/boss")].clone();
     let m = ghost.mesh.as_ref().unwrap();
     // Raised 20 mm with the insert: the boss's top is at 33 mm.
@@ -108,10 +109,11 @@ fn the_inserts_form_offers_its_labels_previews_a_move_and_applies_it() {
     f.rev.as_mut().unwrap().chosen = "B".into();
     ws.form = Some(f);
     ws.preview_insert();
-    assert!(ws.wait_until(WAIT, |ws| ws
-        .insert_preview
-        .as_ref()
-        .is_some_and(|p| p.answer.is_some())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.insert_preview
+            .as_ref()
+            .is_some_and(|p| p.answer.is_some())
+    }));
     let moved = ws.insert_preview.clone().unwrap().answer.unwrap().unwrap();
     assert_eq!(
         (moved.changed, moved.added, moved.removed),
@@ -130,18 +132,28 @@ fn the_inserts_form_offers_its_labels_previews_a_move_and_applies_it() {
 fn a_deletes_solids_are_taken_out_from_its_form() {
     let p = Project::new().with_inserts();
     p.ok(&[
-        "feature", "add", "e", "box", "--id", "x2", "--param", "x=1", "--param", "y=1",
-        "--param", "z=1", "--origin", "50,0,0",
+        "feature", "add", "e", "box", "--id", "x2", "--param", "x=1", "--param", "y=1", "--param",
+        "z=1", "--origin", "50,0,0",
     ]);
     p.ok(&[
-        "feature", "add", "e", "delete_body", "--id", "d2", "--solid", "x2", "--solid", "lid",
+        "feature",
+        "add",
+        "e",
+        "delete_body",
+        "--id",
+        "d2",
+        "--solid",
+        "x2",
+        "--solid",
+        "lid",
     ]);
     let mut ws = open_without(&p, &["lid", "x2"]);
     ws.open_form(Some(key("d2")));
-    assert!(ws.wait_until(WAIT, |ws| ws
-        .form
-        .as_ref()
-        .is_some_and(|f| f.feature == "d2" && f.solids.is_some())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.form
+            .as_ref()
+            .is_some_and(|f| f.feature == "d2" && f.solids.is_some())
+    }));
     let mut f = ws.form.clone().unwrap();
     let s = f.solids.as_mut().unwrap();
     assert_eq!(s.read, ["x2", "lid"]);

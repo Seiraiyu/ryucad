@@ -1561,8 +1561,7 @@ fn inserted(app: &App) -> bool {
         && o.ws.model.parts.get("e").is_some_and(|p| {
             !p.solids.is_empty()
                 && p.solids.iter().all(|s| {
-                    o.ws
-                        .model
+                    o.ws.model
                         .meshes
                         .contains_key(&("e".to_owned(), s.id.clone()))
                 })

@@ -191,7 +191,10 @@ impl InsertInfo {
     pub fn from_report(f: &Value) -> Option<InsertInfo> {
         let i = f.get("insert")?;
         let of = text(&i["of"]);
-        let part = of.rsplit_once(':').map_or(of.as_str(), |(_, p)| p).to_owned();
+        let part = of
+            .rsplit_once(':')
+            .map_or(of.as_str(), |(_, p)| p)
+            .to_owned();
         Some(InsertInfo {
             part,
             project: i["rev"]["project"].as_str().map(str::to_owned),

@@ -4681,7 +4681,9 @@ fn mesh_get_before_meshes_a_deleted_solid_as_its_delete_read_it() {
     // The window asks for it compact, as bytes.
     let req = Request::from_rpc(
         "mesh.get",
-        Some(json!({"part": "enclosure", "feature": "pcb/u1", "before": "d", "transfer": "compact"})),
+        Some(
+            json!({"part": "enclosure", "feature": "pcb/u1", "before": "d", "transfer": "compact"}),
+        ),
     )
     .unwrap();
     let a = answer_live(&mut s, None, None, req).unwrap();
@@ -4690,7 +4692,10 @@ fn mesh_get_before_meshes_a_deleted_solid_as_its_delete_read_it() {
     assert_eq!(bodies[0].feature, "pcb/u1");
     // `before` needs the solid it reads, and a feature of the part.
     for (params, code) in [
-        (json!({"part": "enclosure", "before": "d"}), Code::InvalidParam),
+        (
+            json!({"part": "enclosure", "before": "d"}),
+            Code::InvalidParam,
+        ),
         (
             json!({"part": "enclosure", "feature": "pcb/u1", "before": "nope"}),
             Code::NotFound,
