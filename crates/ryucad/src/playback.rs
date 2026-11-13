@@ -975,4 +975,74 @@ mod tests {
             Code::MotionNotFound
         );
     }
+
+    #[test]
+    fn a_render_paints_what_collides_at_its_fraction() {
+        let (dir, mut s) = swing(false);
+        call(
+            &mut s,
+            "motion.save",
+            json!({"part": "swing", "motion": "turn", "steps": 46, "drives": turning("45 deg")}),
+        )
+        .unwrap();
+        let swing_id = Id::parse("swing", "part").unwrap();
+        // About 21.43° is contact: at 0.25 (11.25°) clear, at 0.5 (22.5°) in.
+        let clear = drawn(&mut s, &swing_id, "turn", 0.25, true).unwrap();
+        assert!(clear.faces.is_empty(), "{:?}", clear.faces);
+        assert!(!clear.offsets.is_empty());
+        let hit = drawn(&mut s, &swing_id, "turn", 0.5, true).unwrap();
+        assert!(
+            hit.faces.iter().any(|f| f.starts_with("swing/arm/body/")),
+            "{:?}",
+            hit.faces
+        );
+        assert!(
+            hit.faces.iter().any(|f| f.starts_with("swing/block/body/")),
+            "{:?}",
+            hit.faces
+        );
+        // What collides at rest is never painted.
+        let (_d2, mut nubbed) = swing(true);
+        call(
+            &mut nubbed,
+            "motion.save",
+            json!({"part": "swing", "motion": "turn", "steps": 46, "drives": turning("45 deg")}),
+        )
+        .unwrap();
+        let rest = drawn(&mut nubbed, &swing_id, "turn", 0.0, true).unwrap();
+        assert!(
+            rest.faces.is_empty(),
+            "the nub is at rest: {:?}",
+            rest.faces
+        );
+        // The PNG paints them: a render with interference differs from one
+        // without, at 0.5 and not at 0.25.
+        drop(s);
+        let r = dir.path();
+        let px = |v: Value| {
+            crate::testing::render_pixels(r, crate::session::Session::open(r).unwrap(), v)
+        };
+        let at = |f: f64, i: bool| {
+            json!({"part": "swing", "width": 96, "height": 72,
+                   "view": "top", "motion": "turn", "fraction": f,
+                   "interference": i})
+        };
+        assert_ne!(px(at(0.5, true)), px(at(0.5, false)));
+        assert_eq!(px(at(0.25, true)), px(at(0.25, false)));
+        // With no motion to paint, interference is refused.
+        let req = crate::proto::Request::from_rpc(
+            "render",
+            Some(json!({"part": "swing", "width": 64, "height": 48, "interference": true})),
+        )
+        .unwrap();
+        let e = crate::server::handle_safely(
+            &mut Some(crate::session::Session::open(r).unwrap()),
+            None,
+            None,
+            r,
+            req,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+    }
 }
