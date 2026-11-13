@@ -35,6 +35,7 @@ pub mod measure;
 pub mod merge;
 pub mod model;
 pub mod modes;
+pub mod motion;
 pub mod mover;
 pub mod nav;
 pub mod palette;
