@@ -91,6 +91,100 @@ pub fn official_labels(v: &serde_json::Value, part: &str) -> Vec<String> {
         .collect()
 }
 
+/// What moving an insert's pin changes, from `insert.update`'s dry run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Moved {
+    pub added: usize,
+    pub removed: usize,
+    pub changed: usize,
+    /// Each feature that would fail after it, with its code.
+    pub failing: Vec<(String, String)>,
+}
+
+impl Moved {
+    pub fn from_answer(v: &serde_json::Value) -> Moved {
+        let n = |k: &str| v["solids"][k].as_array().map_or(0, Vec::len);
+        Moved {
+            added: n("added"),
+            removed: n("removed"),
+            changed: n("changed"),
+            failing: v["failing"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|f| {
+                    (
+                        f["feature"].as_str().unwrap_or_default().to_owned(),
+                        f["error"]["code"].as_str().unwrap_or("failed").to_owned(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Two lines: what moving the pin to `to` changes of the solids, and
+    /// what would fail after it.
+    pub fn lines(&self, to: &str) -> Vec<String> {
+        let said: Vec<String> = [
+            (self.changed, "changed"),
+            (self.added, "added"),
+            (self.removed, "removed"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, w)| format!("{n} solid{} {w}", if n == 1 { "" } else { "s" }))
+        .collect();
+        let solids = if said.is_empty() {
+            "no solid changes".to_owned()
+        } else {
+            said.join(", ")
+        };
+        let fails = if self.failing.is_empty() {
+            "Nothing fails after it".to_owned()
+        } else {
+            let list: Vec<String> = self
+                .failing
+                .iter()
+                .map(|(f, c)| format!("{f} ({c})"))
+                .collect();
+            format!("Fails after it: {}", list.join(", "))
+        };
+        vec![format!("Moving the pin to {to}: {solids}"), fails]
+    }
+}
+
+/// An insert update's dry run, for a form's chosen pin: its part, insert
+/// and `to` (`working`, `label:B`), and its answer once it came.
+#[derive(Clone, Debug)]
+pub struct Preview {
+    pub key: (String, String, String),
+    pub answer: Option<Result<Moved, ryucad::error::Error>>,
+}
+
+impl Preview {
+    pub fn asked(key: (String, String, String)) -> Preview {
+        Preview { key, answer: None }
+    }
+
+    /// The pin it moves to, for people: `working`, `label B`.
+    pub fn to_text(&self) -> String {
+        match self.key.2.strip_prefix("label:") {
+            Some(l) => format!("label {l}"),
+            None => self.key.2.clone(),
+        }
+    }
+
+    /// What the form shows of it.
+    pub fn lines(&self) -> Vec<String> {
+        let to = self.to_text();
+        match &self.answer {
+            None => vec![format!("Reading what moving the pin to {to} changes\u{2026}")],
+            Some(Err(e)) => vec![format!("Moving the pin to {to} is refused: {}", e.message)],
+            Some(Ok(m)) => m.lines(&to),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +249,45 @@ mod tests {
         assert_eq!(official_labels(&released, "pcb"), ["A", "B"]);
         let deps = json!({"parts": [{"part": "pcb", "labels": [{"label": "B"}, {"label": "A"}]}]});
         assert_eq!(official_labels(&deps, "pcb"), ["B", "A"]);
+    }
+
+    #[test]
+    fn an_updates_preview_says_what_changes_and_what_fails() {
+        let v = json!({"from": {"label": "A"}, "to": {"label": "B"},
+                       "solids": {"added": [], "removed": [], "changed": ["brd/base"]},
+                       "failing": [{"feature": "cut", "error": {"code": "reference_unresolved"}}],
+                       "written": false});
+        let m = Moved::from_answer(&v);
+        assert_eq!((m.changed, m.added, m.removed), (1, 0, 0));
+        assert_eq!(
+            m.lines("label B"),
+            [
+                "Moving the pin to label B: 1 solid changed",
+                "Fails after it: cut (reference_unresolved)"
+            ]
+        );
+        let none = Moved::from_answer(
+            &json!({"solids": {"added": [], "removed": [], "changed": []}, "failing": []}),
+        );
+        assert_eq!(
+            none.lines("working"),
+            [
+                "Moving the pin to working: no solid changes",
+                "Nothing fails after it"
+            ]
+        );
+        let mut p = Preview::asked(("e".into(), "brd".into(), "label:B".into()));
+        assert_eq!(
+            p.lines(),
+            ["Reading what moving the pin to label B changes\u{2026}"]
+        );
+        p.answer = Some(Err(ryucad::error::Error::new(
+            ryucad::error::Code::LabelNotFound,
+            "pcb has no label Z",
+        )));
+        assert_eq!(
+            p.lines(),
+            ["Moving the pin to label B is refused: pcb has no label Z"]
+        );
     }
 }

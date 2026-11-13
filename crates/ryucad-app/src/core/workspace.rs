@@ -132,6 +132,8 @@ enum Pending {
     Ghost(BodyKey, String),
     /// A chosen delete's ghost: the delete it was asked for.
     Deleted(BodyKey),
+    /// An insert update's dry run for the form: part, insert and `to`.
+    InsertPreview((String, String, String)),
     /// The model's solids, read for the faces a feature made, at this
     /// part revision.
     Made(BodyKey, String),
@@ -449,6 +451,8 @@ pub struct Workspace {
     made_for: Option<BodyKey>,
     /// The chosen delete's ghosts, as they come.
     pub deleted: Option<crate::core::inserts::Deleted>,
+    /// What moving the insert form's chosen pin changes, once asked.
+    pub insert_preview: Option<crate::core::inserts::Preview>,
     /// The sweep or loft chosen in the tree as `sweep.get` drew it: its
     /// profile and path, or its sections with their starts.
     pub swept: Option<crate::core::sweeps::SweepDrawing>,
@@ -685,6 +689,7 @@ impl Workspace {
             form: None,
             made: None,
             deleted: None,
+            insert_preview: None,
             made_for: None,
             swept: None,
             swept_at: None,
@@ -3587,6 +3592,36 @@ impl Workspace {
     }
 
     /// Saves what was typed into the form.
+    /// While an insert's form has a pin chosen other than the one read,
+    /// asks once what moving it there changes (`insert.update`'s dry run;
+    /// its `expected_revision` is the project's, so none is sent).
+    pub fn preview_insert(&mut self) {
+        let chosen = self.form.as_ref().and_then(|f| {
+            let r = f.rev.as_ref().filter(|r| f.ty == "insert" && r.dirty())?;
+            let to = match r.chosen.as_str() {
+                "working" => "working".to_owned(),
+                l => format!("label:{l}"),
+            };
+            Some((f.part.clone(), f.feature.clone(), to))
+        });
+        let Some(key) = chosen else {
+            self.insert_preview = None;
+            return;
+        };
+        if self.insert_preview.as_ref().is_some_and(|p| p.key == key) {
+            return;
+        }
+        self.insert_preview = Some(crate::core::inserts::Preview::asked(key.clone()));
+        let req = Request::InsertUpdate {
+            part: key.0.clone(),
+            feature: key.1.clone(),
+            to: Some(key.2.clone()),
+            dry_run: true,
+            expected_revision: None,
+        };
+        self.send(req, Pending::InsertPreview(key));
+    }
+
     pub fn save_form(&mut self) {
         let Some(form) = &mut self.form else { return };
         match form.request() {
@@ -4268,6 +4303,11 @@ impl Workspace {
                     Ok(None) => {
                         self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
                     }
+                }
+            }
+            (Pending::InsertPreview(key), a) => {
+                if let Some(p) = self.insert_preview.as_mut().filter(|p| p.key == key) {
+                    p.answer = Some(a.map(|a| crate::core::inserts::Moved::from_answer(&a.result)));
                 }
             }
             (Pending::Quiet, Ok(_)) => {}

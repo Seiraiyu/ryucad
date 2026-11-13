@@ -849,6 +849,18 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         })
         .map(|t| t.angles.clone())
         .unwrap_or_default();
+    // An insert's source's newest official label, and what moving its pin
+    // changes (design 521).
+    let newest = ws
+        .form
+        .as_ref()
+        .filter(|f| f.foreign.is_none())
+        .and_then(|f| f.of.as_ref())
+        .and_then(|of| ws.states.by_part.get(of))
+        .filter(|s| matches!(s["state"].as_str(), Some("released" | "modified")))
+        .and_then(|s| s["label"].as_str())
+        .map(str::to_owned);
+    let preview = ws.insert_preview.clone();
     let Some(form) = &mut ws.form else {
         crate::ui::tiles::empty(
             ui,
@@ -946,6 +958,25 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         form::grid(ui, "insert", |rows| {
             rows.read_only("inserts", &shown, false, None);
         });
+        if let (Some(n), Some(rev)) = (&newest, form.rev.as_mut())
+            && rev.chosen != *n
+            && ui
+                .button(format!("Update to {n}"))
+                .on_hover_text(
+                    "Choose its source\u{2019}s newest official release: what moving the pin changes shows before you apply it",
+                )
+                .clicked()
+        {
+            rev.chosen = n.clone();
+        }
+        if let Some(p) = preview
+            .as_ref()
+            .filter(|p| p.key.0 == form.part && p.key.1 == form.feature)
+        {
+            for line in p.lines() {
+                ui.weak(line);
+            }
+        }
     }
     if let Some(i) = form.import.clone() {
         let key = (form.part.clone(), form.feature.clone());
@@ -1002,6 +1033,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     if let Some(e) = card {
         ws.open_card(e);
     }
+    ws.preview_insert();
     names(ui, ws, &key);
 }
 
