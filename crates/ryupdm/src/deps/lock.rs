@@ -31,6 +31,15 @@ pub fn wanted(project: &Project) -> BTreeSet<Wanted> {
                 out.insert((project, o.part, label));
             }
         }
+        // Another project's part inserted (design 521) is locked as a
+        // placed one is: never a component, but read at its label.
+        for f in p.features.values() {
+            if let Ok(ryucad_doc::doc::files::Feature::Insert(i)) = f
+                && let Rev::Foreign { project, label } = &i.rev
+            {
+                out.insert((project.clone(), i.part.clone(), label.clone()));
+            }
+        }
     }
     out
 }
@@ -719,5 +728,29 @@ mod tests {
         let j = judge(&mut bare, Some(&me), &deps, &more, &full);
         assert_eq!(j.unlocked, [(sub, id("asm"), "B".to_owned())]);
         assert!(j.unused.is_empty());
+    }
+
+    #[test]
+    fn another_projects_part_inserted_is_wanted() {
+        // A part (not an assembly) inserting the library's p at A.
+        let mut files = project();
+        files.insert(
+            "parts/enc/part.json".into(),
+            canonical::to_string(&json!({"features": ["b"], "format": 1, "kind": "ryucad.part"}))
+                .into_bytes(),
+        );
+        files.insert(
+            "parts/enc/features/b.json".into(),
+            canonical::to_string(
+                &json!({"format": 21, "kind": "ryucad.feature", "type": "insert",
+                "project": lib(), "part": "p", "rev": {"label": "A"}}),
+            )
+            .into_bytes(),
+        );
+        let p = Project::load_from(Path::new(""), &files).unwrap();
+        assert_eq!(
+            wanted(&p),
+            BTreeSet::from([(lib(), id("p"), "A".to_owned())])
+        );
     }
 }

@@ -46,7 +46,7 @@ pub fn read_layout(bytes: &[u8], path: &str) -> Result<Layout> {
     doc::read::<Layout>(bytes, path, LAYOUT_KIND, LAYOUT_FORMAT)
         .map(|l| l.absolute())
         .map_err(|e| {
-            let code = if e.code == Code::FormatTooNew {
+            let code = if matches!(e.code, Code::FormatTooNew | Code::MergeConflict) {
                 e.code
             } else {
                 Code::LayoutInvalid
@@ -59,6 +59,37 @@ pub fn read_layout(bytes: &[u8], path: &str) -> Result<Layout> {
 /// each region's parts placed relative to its origin.
 pub fn layout_text(l: &Layout) -> String {
     doc::to_string(&l.relative(), LAYOUT_KIND, l.format())
+}
+
+/// What a part's layout key names: its component for a unit
+/// (`<component>:<n>`), else the key itself.
+pub(crate) fn part_of(key: &str) -> &str {
+    const KEEP: [&str; 6] = ["instance:", "port:", "rail:", "bus:", "region:", "note:"];
+    if KEEP.iter().any(|p| key.starts_with(p)) {
+        return key;
+    }
+    match key.split_once(':') {
+        Some((c, u)) if !u.is_empty() && u.bytes().all(|b| b.is_ascii_digit()) => c,
+        _ => key,
+    }
+}
+
+/// The reference path of what layout key `key` draws in block `block`
+/// (designs 518 and 519): `<block>/<component>` for a component's part (a
+/// unit's too), `<block>/instance:<id>`, `<block>/port:<id>`,
+/// `<block>/<net>`, `<block>/rail:<id>`, `<block>/bus:<id>`,
+/// `<block>/region:<id>`, `<block>/note:<id>`, and a label
+/// (`label:<net>@<part>/<pin>`, `ryusch::paint`'s owner) as
+/// `<block>/label:<net>@<component>/<pin>`. Diff entries, compare renders'
+/// `data-ref` and stage 3's scene all name things so.
+pub fn ref_path(block: &Id, key: &str) -> String {
+    if let Some(rest) = key.strip_prefix("label:")
+        && let Some((net, on)) = rest.rsplit_once('@')
+    {
+        let (part, pin) = on.rsplit_once('/').unwrap_or((on, ""));
+        return format!("{block}/label:{net}@{}/{pin}", part_of(part));
+    }
+    format!("{block}/{}", part_of(key))
 }
 
 fn pin_kind(t: PinType) -> PinKind {
@@ -327,9 +358,12 @@ pub fn layers(p: &Project, block: &Id) -> Vec<Layer> {
         stack: &str,
         want: &Id,
         found: &mut Vec<(Vec<Id>, String)>,
+        within: &mut Vec<Id>,
     ) {
-        // A block holding itself is a fault the files report; stop there.
-        if path.len() > 64 {
+        // A block holding itself is a fault the files report; stop there,
+        // at the cycle (a cap on depth alone walks 2^64 paths when a
+        // block places itself twice).
+        if path.len() > 64 || within.contains(at) {
             return;
         }
         if at == want {
@@ -350,7 +384,9 @@ pub fn layers(p: &Project, block: &Id) -> Vec<Layer> {
                 stack.to_owned()
             };
             path.push(iid.clone());
-            walk(p, &i.of, path, &s, want, found);
+            within.push(at.clone());
+            walk(p, &i.of, path, &s, want, found, within);
+            within.pop();
             path.pop();
         }
     }
@@ -360,7 +396,15 @@ pub fn layers(p: &Project, block: &Id) -> Vec<Layer> {
             continue;
         };
         let mut found = Vec::new();
-        walk(p, &root, &mut Vec::new(), "", block, &mut found);
+        walk(
+            p,
+            &root,
+            &mut Vec::new(),
+            "",
+            block,
+            &mut found,
+            &mut Vec::new(),
+        );
         if found.is_empty() {
             continue;
         }
@@ -1127,6 +1171,49 @@ pub fn alias(c: &crate::conn::Component) -> &str {
 mod tests {
     use super::*;
     use crate::netlist::tests::project;
+
+    #[test]
+    fn a_block_placing_itself_is_walked_once() {
+        use crate::project::ProjectKind;
+        use crate::project::tests::{design_in, library_in, manifest};
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        library_in(&board);
+        design_in(&board);
+        // The root places itself twice (the eda fuzz target's input):
+        // every path through it is a cycle, 2^64 of them before a cap.
+        for i in ["self_a", "self_b"] {
+            let text = br#"{"format": 1, "kind": "ryueda.instance", "of": "top", "ports": {}}"#;
+            std::fs::write(board.join(format!("blocks/top/instances/{i}.json")), text).unwrap();
+        }
+        let p = Project::load(&board).unwrap();
+        let top = Id::parse("top", "b").unwrap();
+        let s = Id::parse("s", "b").unwrap();
+        assert_eq!(layers(&p, &top).len(), 1);
+        let paths: Vec<String> = layers(&p, &s).iter().map(Layer::path_text).collect();
+        assert_eq!(paths, ["ch_a", "ch_b"]);
+    }
+
+    #[test]
+    fn layout_keys_have_reference_paths() {
+        let b = Id::parse("breakout", "test").unwrap();
+        for (key, path) in [
+            ("r1", "breakout/r1"),
+            ("u1:2", "breakout/u1"),
+            ("instance:s1", "breakout/instance:s1"),
+            ("port:sda", "breakout/port:sda"),
+            ("rail:3", "breakout/rail:3"),
+            ("bus:q", "breakout/bus:q"),
+            ("region:r2", "breakout/region:r2"),
+            ("note:i4", "breakout/note:i4"),
+            ("sda", "breakout/sda"),
+            ("label:sda@u1:2/5", "breakout/label:sda@u1/5"),
+            ("label:rail:gnd@r1/2", "breakout/label:rail:gnd@r1/2"),
+        ] {
+            assert_eq!(ref_path(&b, key), path, "{key}");
+        }
+    }
 
     #[test]
     fn a_layout_file_places_region_parts_relative_to_their_region() {

@@ -1074,6 +1074,75 @@ pub(crate) fn split_tool(
     }
 }
 
+/// A `delete_body`: each solid it names must be a solid of the part as
+/// it sees it (`not_found`), not consumed (`body_consumed`) nor deleted
+/// already (`body_deleted`). It builds to no solids: [`Solids`] ends the
+/// chains, so what follows can't read them and what came before reads
+/// them as it did. An insert's ID names every solid it founded.
+pub fn delete_body(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    d: &crate::doc::body::DeleteBody,
+    before: &dyn Results,
+) -> Result<Made> {
+    for (i, t) in d.solids.iter().enumerate() {
+        let at = format!("/solids/{i}");
+        if let Some(by) = solids.consumed_by(t, id) {
+            return Err(crate::rebuild::consumed(id, t, by).with("pointer", at));
+        }
+        // Deleted by an earlier delete: this one records its own list at
+        // its own place, so it is never before itself.
+        if let Some(by) = solids.deleted_by(t, id).filter(|by| *by != id) {
+            return Err(crate::rebuild::deleted(id, t, by).with("pointer", at));
+        }
+        let is_insert = part
+            .features
+            .get(t)
+            .is_some_and(|f| f.as_ref().is_ok_and(Feature::inserts));
+        if !(solids.is_solid(t) || is_insert) {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("{id} deletes {t}, which is no solid of {}", part.id),
+            )
+            .with("feature", id)
+            .with("solid", t)
+            .with("pointer", at));
+        }
+        // A key below an insert must be one its source shows.
+        if t.is_path()
+            && let Some(view) = solids.view(t, id)
+            && let Ok(out) = crate::graph::input(part, id, view, before)
+            && out.solid(t).is_none()
+        {
+            return Err(crate::rebuild::not_inserted(
+                id,
+                "solids",
+                t,
+                &t.founder(),
+                out.solids().iter().map(|(k, _)| k).collect(),
+            )
+            .with("pointer", at));
+        }
+    }
+    Ok(Made::new(Vec::new()))
+}
+
+/// A delete's report: `solids` as written, an insert's ID expanded to the
+/// keys it founded (design 521).
+pub fn delete_report(d: &crate::doc::body::DeleteBody, results: &dyn Results) -> Value {
+    let mut out = Vec::new();
+    for t in &d.solids {
+        match results.result(t).and_then(|r| r.as_ref().ok()) {
+            Some(o) if o.inserted().is_some() => {
+                out.extend(o.solids().iter().map(|(k, _)| json!(k)));
+            }
+            _ => out.push(json!(t)),
+        }
+    }
+    json!({"solids": out})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1733,5 +1802,133 @@ mod tests {
             (Code::ReferenceWrongKind, Some("plane")),
             "{e}"
         );
+    }
+
+    #[test]
+    fn a_delete_takes_solids_out_and_what_follows_cant_name_them() {
+        use crate::testing::{call, fresh};
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for (id_, x) in [("a", "0 mm"), ("c", "5 mm")] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": id_,
+                "params": {"x": "1 mm", "y": "1 mm", "z": "1 mm"},
+                "placement": {"origin": [x, "0 mm", "0 mm"]}}),
+            )
+            .unwrap();
+        }
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "delete_body", "id": "d", "solids": ["c"]}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let p = &r["parts"][0];
+        assert_eq!(p["solids"].as_array().unwrap().len(), 1, "{p}");
+        assert_eq!(p["features"][2]["delete_body"]["solids"], json!(["c"]));
+        // After it, c can't be named.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "j", "operation": "join",
+            "targets": ["c"], "params": {"x": "1 mm", "y": "1 mm", "z": "1 mm"}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::BodyDeleted, "{e:?}");
+        assert_eq!(e.details["by"], "d");
+        // Deleting it twice, or what isn't there, is refused.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "delete_body", "solids": ["c"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::BodyDeleted, "{e:?}");
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "delete_body", "solids": ["zz"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e:?}");
+        // Deleting the founder it names is has_dependents; deleting the
+        // delete puts c back.
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "c"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e:?}");
+        call(&mut s, "feature.delete", json!({"part": "p", "id": "d"})).unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        assert_eq!(r["parts"][0]["solids"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deleting_a_body_rebuilds_nothing_else() {
+        use crate::testing::{call, fresh};
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for id_ in ["a", "c"] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": id_,
+                "params": {"x": "1 mm", "y": "1 mm", "z": "1 mm"}}),
+            )
+            .unwrap();
+        }
+        s.rebuilt(&id("p")).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "delete_body", "id": "d", "solids": ["c"]}),
+        )
+        .unwrap();
+        let r = s.rebuilt(&id("p")).unwrap();
+        assert_eq!(r.built, [id("d")]);
+    }
+
+    #[test]
+    fn a_deletes_solids_are_edited_whole() {
+        use crate::testing::{call, fresh};
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for id_ in ["a", "b", "c"] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": id_,
+                "params": {"x": "1 mm", "y": "1 mm", "z": "1 mm"}}),
+            )
+            .unwrap();
+        }
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "delete_body", "id": "d", "solids": ["b", "c"]}),
+        )
+        .unwrap();
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "solids": ["c"]}),
+        )
+        .unwrap();
+        assert_eq!(v["feature"]["solids"], json!(["c"]));
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "solids": []}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        // One solid, as the CLI sends a lone --solid.
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "solid": "b"}),
+        )
+        .unwrap();
+        assert_eq!(v["feature"]["solids"], json!(["b"]));
     }
 }

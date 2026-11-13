@@ -321,7 +321,7 @@ pub fn plan(
         let is_part = project
             .parts
             .get(p)
-            .is_some_and(|x| crate::server::part_kind(x) == PartKind::Part);
+            .is_some_and(|x| crate::part::part_kind(x) == PartKind::Part);
         if is_part && plan::is_assembly(opened, &makes, k) {
             warnings.push(format!(
                 "import_kind_changed: product {:?} of {path} has children now; part {p} can't place them: delete it and import the file again to make an assembly of it",
@@ -909,7 +909,7 @@ type Held = (Vec<u32>, Option<crate::doc::import::Mode>);
 mod tests {
     use crate::error::Code;
     use crate::import::tests::{frame_version, listed, occt};
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::{Value, json};
 
     /// `bytes` written outside the project, as an agent would have them.
@@ -1433,8 +1433,7 @@ mod tests {
         assert_eq!(r["parts"][0]["failed"], 0, "{r}");
         // Undone, it is the first version again.
         let mut live = crate::live::Live::new();
-        crate::server::tests::call_live(&mut s, &mut live, None, "undo", json!({}))
-            .unwrap_or_default();
+        crate::testing::call_live(&mut s, &mut live, None, "undo", json!({})).unwrap_or_default();
     }
 
     #[test]
@@ -1504,7 +1503,7 @@ mod tests {
     #[test]
     fn an_update_is_one_change_undone_whole() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = imported();
         let before = s.snapshot();
         let (_src, path) = outside(&frame_version(2));
@@ -1747,5 +1746,23 @@ mod tests {
             .map(|f| (f["id"].as_str().unwrap(), f["ok"] == true))
             .collect();
         assert_eq!(state, [("body", true), ("low", true), ("high", false)]);
+    }
+
+    /// Design 525: interference runs only when asked. An assembly
+    /// imported as references, rebuilt, updated to a new version and
+    /// rebuilt again leaves the session's interference cache empty.
+    #[test]
+    fn import_and_update_never_run_interference() {
+        let (src, path) = outside(&frame_version(1));
+        let (_dir, mut s) = fresh();
+        call(&mut s, "import", json!({"path": path})).unwrap();
+        drop(src);
+        // A part of the second version may fail (its product is gone):
+        // what the rebuild answers doesn't matter here, only that it ran.
+        let _ = call(&mut s, "rebuild", json!({}));
+        assert!(s.interference.is_empty(), "the import ran interference");
+        update(&mut s, &frame_version(2), json!({"solid": false})).unwrap();
+        let _ = call(&mut s, "rebuild", json!({}));
+        assert!(s.interference.is_empty(), "the update ran interference");
     }
 }

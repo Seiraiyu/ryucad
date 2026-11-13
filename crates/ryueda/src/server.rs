@@ -13,7 +13,7 @@ use crate::source::write_atomic;
 use crate::units::Unit;
 use crate::{Eda, activity, libcmd, partcmd, topcmd};
 use ryu_session::activity::EntryKind;
-use ryu_session::live::{self, Live};
+use ryu_session::live::{self, Live, SelectMode};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -136,6 +136,10 @@ pub fn answer(
     if let Some(l) = live.as_deref_mut() {
         if !external.is_empty() {
             ryu_session::activity::record_external(l, external);
+            // What a change from outside took away leaves every
+            // selection, highlight and status before the request reads
+            // them (plan 3.B).
+            l.prune(|r| crate::refs::resolve(session.project(), r).is_ok());
         }
         if let Some(me) = me {
             l.touch(me);
@@ -144,6 +148,7 @@ pub fn answer(
     // A daemon keeps what its writes change, for the log and for undo;
     // undo and redo log themselves.
     let (method, params) = (req.method(), req.params());
+    let writes = req.mutates();
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
     let files_before = match (&live, req.mutates() && !logs_itself) {
         (Some(_), true) => Some(session.files()),
@@ -187,6 +192,11 @@ pub fn answer(
         }
     }
     if let (Some(l), Some(before)) = (live, before) {
+        // References a write took away drop out of every selection,
+        // highlight and status (plan 3.B).
+        if writes {
+            l.prune(|r| crate::refs::resolve(session.project(), r).is_ok());
+        }
         l.announce(&before);
         publish(l, session);
     }
@@ -202,6 +212,34 @@ fn working(
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
     match req {
+        Request::Render {
+            design,
+            block,
+            sheet,
+            layer,
+            format,
+            scale,
+            fit,
+            theme,
+            compare: Some(rev),
+            ..
+        } => {
+            let (commit, then) = session.at(&rev)?;
+            crate::compare::render(
+                session.project(),
+                &then,
+                &rev,
+                &commit,
+                design.as_deref(),
+                block.as_deref(),
+                sheet.as_deref(),
+                layer.as_deref(),
+                format.unwrap_or(crate::schemcmd::Format::Svg),
+                scale,
+                fit,
+                theme.unwrap_or_default(),
+            )
+        }
         Request::Render {
             design,
             block,
@@ -267,12 +305,48 @@ fn working(
             symbol.as_deref(),
             &crate::symlint::Listing { summary, codes },
         ),
+        Request::Output {
+            design,
+            layers,
+            compare: Some(rev),
+            ..
+        } => {
+            let (commit, then) = session.at(&rev)?;
+            let (mut v, bytes) = crate::output::compare(
+                session.project(),
+                &then,
+                &rev,
+                design.as_deref(),
+                layers.unwrap_or_default(),
+            )?;
+            v["compare"] = json!({"rev": rev, "commit": commit});
+            Ok(match bytes {
+                Some(b) => Answer::bytes(v, "application/pdf", b),
+                None => Answer::json(v),
+            })
+        }
         Request::Output { design, layers, .. } => crate::output::output(
             session.project(),
             design.as_deref(),
             layers.unwrap_or_default(),
         )
         .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes)),
+        Request::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+        } => crate::scene::answer(
+            session,
+            &crate::scene::Ask {
+                design,
+                block,
+                sheet,
+                layer,
+                theme: theme.unwrap_or_default(),
+            },
+        ),
         req => dispatch(session, live, me, req, job).map(Answer::json),
     }
 }
@@ -284,6 +358,13 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             crate::netlist::netlist(p, design.as_deref()).map(Answer::json)
         }
         Request::Erc { design, .. } => crate::erc::erc(p, design.as_deref()).map(Answer::json),
+        Request::Check {
+            against: Some(_), ..
+        } => Err(Error::new(
+            Code::InvalidParam,
+            "--against compares the working files with a revision; leave out --rev",
+        )
+        .with("param", "against")),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
             crate::erc::check_project(p, &cats, &[]).map(Answer::json)
@@ -295,6 +376,16 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             ..
         } => crate::schemcmd::describe(p, design.as_deref(), block.as_deref(), sheet.as_deref())
             .map(Answer::json),
+        Request::Render {
+            compare: Some(_), ..
+        }
+        | Request::Output {
+            compare: Some(_), ..
+        } => Err(Error::new(
+            Code::InvalidParam,
+            "--compare draws the working files against a revision; leave out --rev",
+        )
+        .with("param", "compare")),
         Request::Render {
             design,
             block,
@@ -931,9 +1022,53 @@ fn dispatch(
             severity,
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
-        Request::Check { .. } => {
+        Request::Diff {
+            from,
+            to,
+            design,
+            block,
+            netlist,
+            layout,
+            library,
+            all,
+        } => crate::diff::between(
+            session,
+            from.as_deref().unwrap_or("HEAD"),
+            to.as_deref().unwrap_or("working"),
+            &crate::diff::Options {
+                design,
+                block,
+                netlist,
+                layout,
+                library,
+                all,
+            },
+        ),
+        Request::Check { against, .. } => {
+            let diff = match &against {
+                Some(rev) => Some(crate::diff::between(
+                    session,
+                    rev,
+                    "working",
+                    &crate::diff::Options {
+                        netlist: true,
+                        ..crate::diff::Options::default()
+                    },
+                )?),
+                None => None,
+            };
             let cats = session.catalogues()?;
-            crate::erc::check(session.root(), &cats)
+            match (crate::erc::check(session.root(), &cats), diff) {
+                (Ok(mut v), Some(d)) => {
+                    v["against"] = d;
+                    Ok(v)
+                }
+                (Err(mut e), Some(d)) if e.code == Code::CheckFailed => {
+                    e.details["report"]["against"] = d;
+                    Err(e)
+                }
+                (r, _) => r,
+            }
         }
         Request::LintGet { explain } => crate::lint::get(session.project(), explain.as_deref()),
         Request::LintConfigure {
@@ -1042,6 +1177,7 @@ fn dispatch(
         ),
         Request::Render { .. }
         | Request::Output { .. }
+        | Request::Scene { .. }
         | Request::LibCheck { .. }
         | Request::LayoutPlace { .. }
         | Request::Layout { .. } => {
@@ -1073,6 +1209,217 @@ fn dispatch(
         // With no daemon, nobody is attached.
         Request::ParticipantList {} => {
             Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        }
+        Request::CompareGet { participant } => {
+            // Whose compare.set would change: `participant`, else the one
+            // human, else the caller.
+            let target = match live {
+                Some(l) => {
+                    let id = l.compare_target(participant.as_deref(), me)?;
+                    let rev = l.get(&id)?.view.compare.clone();
+                    Some((id, rev))
+                }
+                None => None,
+            };
+            let Some((id, rev)) = target else {
+                return Ok(json!({"participant": null, "compare": null}));
+            };
+            // The commit the revision names now; none if it names none.
+            let compare = rev.map(|rev| {
+                let commit = crate::git::key(session.root(), &rev).ok().map(|(c, _)| c);
+                json!({"rev": rev, "commit": commit})
+            });
+            Ok(json!({"participant": id, "compare": compare}))
+        }
+        Request::CompareSet {
+            rev,
+            off,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("compare.set"))?;
+            let rev = match (rev, off) {
+                (Some(r), false) => Some(r),
+                (None, true) => None,
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give a revision to compare with, or --off, not both",
+                    ));
+                }
+            };
+            if rev.as_deref() == Some("working") {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "a compare is against a Git revision: the working files are what it compares",
+                )
+                .with("rev", "working"));
+            }
+            let id = live.compare_target(participant.as_deref(), me)?;
+            // Refused unless the revision holds the project; read now, it
+            // is ready for the renders asked next.
+            let commit = match &rev {
+                Some(r) => Some(session.at(r)?.0),
+                None => None,
+            };
+            live.get_mut(&id)?.view.compare = rev.clone();
+            let compare = rev.map(|rev| json!({"rev": rev, "commit": commit}));
+            Ok(json!({"participant": id, "compare": compare}))
+        }
+        Request::SelectionGet { participant } => {
+            let live = live.ok_or_else(|| live::no_live_session("selection.get"))?;
+            Ok(match live.target(participant.as_deref())? {
+                Some(p) => json!({
+                    "participant": p.id,
+                    "selection": p.selection,
+                    "objects": crate::refs::objects(session.project(), &p.selection),
+                }),
+                None => json!({"participant": null, "selection": [], "objects": []}),
+            })
+        }
+        Request::SelectionSet { refs, mode } => {
+            let live = live.ok_or_else(|| live::no_live_session("selection.set"))?;
+            // What is taken out may be gone already.
+            if mode != SelectMode::Remove {
+                crate::refs::resolve_all(session.project(), &refs)?;
+            }
+            let id = live.caller(me);
+            let selection = live.select(&id, refs, mode)?.to_vec();
+            Ok(json!({"participant": id, "selection": selection}))
+        }
+        Request::HighlightSet { refs, style, label } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.set"))?;
+            crate::refs::resolve_all(session.project(), &refs)?;
+            let id = live.caller(me);
+            let highlights = live.highlight(&id, style, label, refs)?.to_vec();
+            Ok(json!({"participant": id, "highlights": highlights}))
+        }
+        Request::HighlightClear { style } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.clear"))?;
+            let id = live.caller(me);
+            let highlights = live.clear_highlights(&id, style)?.to_vec();
+            Ok(json!({"participant": id, "highlights": highlights}))
+        }
+        Request::ActivitySet { status, refs } => {
+            let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
+            crate::refs::resolve_all(session.project(), &refs)?;
+            let id = live.caller(me);
+            live.set_status(&id, &status, refs)?;
+            Ok(json!({"participant": id, "status": live.get(&id)?.status}))
+        }
+        Request::ViewGet { participant } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.get"))?;
+            Ok(match live.target(participant.as_deref())? {
+                Some(p) => json!({"participant": p.id, "view": crate::view::to_json(&p.view)}),
+                None => json!({"participant": null, "view": null}),
+            })
+        }
+        Request::ViewSet {
+            design,
+            block,
+            sheet,
+            layer,
+            camera,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.set"))?;
+            if let Some(c) = &camera {
+                c.check()?;
+            }
+            let id = live.caller(me);
+            let now = live.get(&id)?.view.clone();
+            // A camera moving on the sheet shown is looked up no further.
+            let same = block.is_some()
+                && block == now.block
+                && layer == now.layer
+                && design
+                    .as_ref()
+                    .is_none_or(|d| now.design.as_ref() == Some(d))
+                && sheet.as_ref().is_none_or(|s| now.sheet.as_ref() == Some(s));
+            let shown = match (same, now.block, now.sheet) {
+                (true, Some(block), Some(sheet)) => crate::scene::Shown {
+                    design: now.design,
+                    block,
+                    sheet,
+                    layer: now.layer,
+                },
+                _ => crate::scene::place(
+                    session.project(),
+                    design.as_deref(),
+                    block.as_deref(),
+                    sheet.as_deref(),
+                    layer.as_deref(),
+                )?,
+            };
+            let v = &mut live.get_mut(&id)?.view;
+            v.design = shown.design;
+            v.block = Some(shown.block);
+            v.sheet = Some(shown.sheet);
+            v.layer = shown.layer;
+            v.camera = camera;
+            v.shown_by = Some(id.clone());
+            Ok(json!({"participant": id, "view": crate::view::to_json(v)}))
+        }
+        Request::ViewShow {
+            reference,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.show"))?;
+            let p = session.project();
+            let r = crate::refs::resolve(p, &reference)?;
+            let by = live.caller(me);
+            let who: Vec<String> = match &participant {
+                Some(id) => vec![live.get(id)?.id.clone()],
+                None => live.humans().map(|h| h.id.clone()).collect(),
+            };
+            // Where it is for no one in particular: the answer's, and a
+            // refusal before anyone's view moves if it is drawn nowhere.
+            let at = crate::scene::locate(p, &r, &reference, &crate::view::View::default())?;
+            // Where it is for each, all worked out before anyone's view
+            // moves. A viewer's own sheet or layer changes the answer only
+            // on the ref's block; laying a block out is the costly part
+            // (#802), so each (layer, sheet) is located once, and a
+            // viewer whose layer or sheet no longer reads gets `at`.
+            let mut located: BTreeMap<(Option<String>, Option<String>), crate::scene::Found> =
+                BTreeMap::new();
+            let mut found: Vec<(String, crate::scene::Found)> = Vec::new();
+            for id in &who {
+                let now = live.get(id)?.view.clone();
+                let own = now.block.as_deref() == Some(r.block.as_str())
+                    && (now.layer.is_some()
+                        || now.sheet.as_ref().is_some_and(|s| *s != at.shown.sheet));
+                let f = if own {
+                    let key = (now.layer.clone(), now.sheet.clone());
+                    match located.get(&key) {
+                        Some(f) => f.clone(),
+                        None => {
+                            let f = crate::scene::locate(p, &r, &reference, &now)
+                                .unwrap_or_else(|_| at.clone());
+                            located.insert(key, f.clone());
+                            f
+                        }
+                    }
+                } else {
+                    at.clone()
+                };
+                found.push((id.clone(), f));
+            }
+            for (id, f) in found {
+                live.select(&id, vec![reference.clone()], SelectMode::Replace)?;
+                let v = &mut live.get_mut(&id)?.view;
+                v.design = f.shown.design;
+                v.block = Some(f.shown.block);
+                v.sheet = Some(f.shown.sheet);
+                v.layer = f.shown.layer;
+                v.camera = Some(f.camera);
+                v.shown_by = Some(by.clone());
+            }
+            Ok(json!({
+                "ref": reference,
+                "shown": who,
+                "block": at.shown.block,
+                "sheet": at.shown.sheet,
+                "box": [at.boxed.min, at.boxed.max],
+                "camera": at.camera,
+            }))
         }
         Request::Subscribe { .. } => match live {
             None => Err(live::no_live_session("subscribe")),
@@ -1332,6 +1679,7 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
         let external = s.refresh_changes()?;
         if !external.is_empty() {
             ryu_session::activity::record_external(live, external);
+            live.prune(|r| crate::refs::resolve(s.project(), r).is_ok());
         }
         live.announce(&before);
         publish(live, s);

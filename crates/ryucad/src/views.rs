@@ -7,7 +7,7 @@ use crate::doc::id::Id;
 use crate::doc::project::part_dir;
 use crate::doc::views::{VIEWS, check_id};
 use crate::error::{Code, Error, Result};
-use crate::server::{check_revision, part_id};
+use crate::part::{check_revision, part_id};
 use crate::session::Session;
 use crate::view::Camera;
 use serde_json::{Value, json};
@@ -291,7 +291,7 @@ pub fn rename(
 #[cfg(test)]
 mod tests {
     use crate::error::Code;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     fn camera() -> serde_json::Value {
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn a_named_view_keeps_and_restores_its_sections_and_explode() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = crate::explode::tests::project();
         let r = dir.path();
         crate::explode::tests::write(
@@ -481,7 +481,7 @@ mod tests {
         // A render of it cuts and explodes as saved, unless told otherwise.
         drop(s);
         let px = |v: serde_json::Value| {
-            crate::server::tests::render_pixels(r, crate::session::Session::open(r).unwrap(), v)
+            crate::testing::render_pixels(r, crate::session::Session::open(r).unwrap(), v)
         };
         let base = json!({"part": "frame", "width": 64, "height": 48, "view": "cut"});
         let mut by_hand = base.clone();

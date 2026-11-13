@@ -17,8 +17,8 @@ use crate::assembly::{Pin, Pinned};
 use crate::doc::assembly::Rev;
 use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
+use crate::part::{check_revision, part_id};
 use crate::proto::VersionInfo;
-use crate::server::{check_revision, part_id};
 use crate::session::Session;
 use ryupdm::approvals::Rule;
 use ryupdm::attest::Verdict;
@@ -127,6 +127,81 @@ pub(crate) fn pinned(session: &mut Session, part: &Id, label: &str) -> Result<Pi
     })
 }
 
+/// The newest official release label of `part`, in the revision scheme's
+/// order, that no obsolete record names: what a new insert pins by
+/// default (design 521, question 624) and what `insert_behind` compares
+/// with. For another project's part (`project`), the newest label the
+/// lock holds for it. `None` outside a repository or with no such label.
+pub(crate) fn newest_official(
+    session: &mut Session,
+    part: &Id,
+    project: Option<&crate::doc::id::ProjectId>,
+) -> Result<Option<String>> {
+    let config = Config::read(&*session)?;
+    let order = |l: &String| ryupdm::bom::rev_order(config.revisions, &Rev::Label(l.clone()));
+    if let Some(project) = project {
+        let locked = match &session.project().lock {
+            Some(Ok(l)) => l.projects.get(project).map(|p| {
+                p.labels
+                    .keys()
+                    .filter(|(p, _)| p == part)
+                    .map(|(_, l)| l.clone())
+                    .collect::<Vec<_>>()
+            }),
+            _ => None,
+        };
+        if let Some(l) = locked.unwrap_or_default().into_iter().max_by_key(order) {
+            return Ok(Some(l));
+        }
+        // Nothing of it locked yet: its releases as the dependency's
+        // fetched history has them, as `deps update` reads them.
+        let Some(d) = session.project().manifest.dependencies.get(project) else {
+            return Ok(None);
+        };
+        let (url, path) = (d.url.clone(), d.path.clone());
+        let (_, _, list) =
+            ryupdm::deps::parts::parts(session.deps_reader()?, project, &url, &path)?;
+        return Ok(list
+            .into_iter()
+            .find(|r| r.part == *part)
+            .and_then(|r| r.labels.into_iter().find(|l| l.state == "released"))
+            .map(|l| l.label));
+    }
+    let releases = match history(session) {
+        Ok((_, r)) => r,
+        Err(e) if e.code == Code::NotAGitRepo => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut released = Vec::new();
+    let mut obsolete = std::collections::BTreeSet::new();
+    for path in releases.official.keys() {
+        let Some((p, label, kind)) = ryupdm::history::record_at(path) else {
+            continue;
+        };
+        if p != *part {
+            continue;
+        }
+        match kind {
+            ryupdm::record::Kind::Release => released.push(label),
+            ryupdm::record::Kind::Obsolete => {
+                obsolete.insert(label);
+            }
+        }
+    }
+    Ok(released
+        .into_iter()
+        .filter(|l| !obsolete.contains(l))
+        .max_by_key(order))
+}
+
+/// Whether label `a` comes after label `b` in the project's revision
+/// scheme.
+pub(crate) fn is_newer(session: &Session, a: &str, b: &str) -> Result<bool> {
+    let config = Config::read(session)?;
+    let order = |l: &str| ryupdm::bom::rev_order(config.revisions, &Rev::Label(l.to_owned()));
+    Ok(order(a) > order(b))
+}
+
 /// Who is writing a record: Git's author identity, and the participant.
 fn released_by(repo: &crate::git::Repo, participant: &str) -> ReleasedBy {
     let author = repo.gix().author().and_then(|a| a.ok());
@@ -197,6 +272,9 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
     {
         problems.extend(unreleased(session, &p, &[])?.into_iter().map(|e| json!(e)));
     }
+    // A part releases its inserts pinned: each at an official label that
+    // isn't obsolete (design 521).
+    problems.extend(uninserted(session, &p)?.into_iter().map(|e| json!(e)));
     // Its item numbers, which the release pins: complete and unique.
     problems.extend(
         ryupdm::items::faults(part, &p)
@@ -205,6 +283,54 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
             .map(|e| json!(e)),
     );
     Ok(problems)
+}
+
+/// `insert_not_released` for each insert of `p` that a release can't pin:
+/// at `working`, at a label that doesn't resolve or isn't official, or at
+/// an obsolete one (design 521).
+fn uninserted(session: &mut Session, p: &crate::doc::project::Part) -> Result<Vec<Error>> {
+    let mut out = Vec::new();
+    for fid in p.order() {
+        let Some(Ok(crate::doc::files::Feature::Insert(i))) = p.features.get(fid) else {
+            continue;
+        };
+        let at = format!("{}/{fid}", p.id);
+        let refuse = |why: String| {
+            Error::new(Code::InsertNotReleased, format!("insert {at} {why}"))
+                .with("insert", &at)
+                .with("part", &i.part)
+                .with("rev", i.rev.to_json())
+        };
+        let l = match &i.rev {
+            Rev::Working => {
+                out.push(refuse(format!(
+                    "inserts {} as it is (working); pin it to an official release",
+                    i.part
+                )));
+                continue;
+            }
+            Rev::Label(l) => l.clone(),
+            Rev::Foreign { project, label } => format!("{label} of {project}"),
+        };
+        match pinned_rev(session, &i.part, &i.rev) {
+            // Another project's label that can't be read says why itself.
+            Err(e) if i.rev.project().is_some() => out.push(
+                e.with("insert", &at)
+                    .with("part", &i.part)
+                    .with("rev", i.rev.to_json()),
+            ),
+            Err(e) => out.push(refuse(format!("inserts {}@{l}: {}", i.part, e.message))),
+            Ok(pin) if pin.pin.commit.is_none() => out.push(refuse(format!(
+                "inserts {}@{l}, which isn't official yet",
+                i.part
+            ))),
+            Ok(pin) if pin.pin.obsolete => {
+                out.push(refuse(format!("inserts {}@{l}, which is obsolete", i.part)))
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(out)
 }
 
 /// `instance_not_released` for each instance of assembly `p` (reached
@@ -904,8 +1030,7 @@ pub fn sync(session: &mut Session) -> Result<Value> {
 /// Rebuilds released content for `release_result_changed`, once per
 /// content hash in a session.
 struct Rebuilds<'a> {
-    root: std::path::PathBuf,
-    cache: &'a mut std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    session: &'a mut Session,
 }
 
 impl ryupdm::check::Results for Rebuilds<'_> {
@@ -915,17 +1040,22 @@ impl ryupdm::check::Results for Rebuilds<'_> {
         part: &Id,
         content: &str,
     ) -> Result<std::collections::BTreeMap<String, String>> {
-        if let Some(b) = self.cache.get(content) {
+        if let Some(b) = self.session.release_results.get(content) {
             return Ok(b.clone());
         }
-        let project = crate::doc::project::Project::load_from(&self.root, src)?;
-        let built = crate::rebuild::rebuild_part(project.part(part)?);
+        let project = crate::doc::project::Project::load_from(self.session.root(), src)?;
+        // Through the session, as `propose` rebuilt it: an insert's pin is
+        // looked up and its source built, where a part rebuilt alone has
+        // no children and every insert would fail.
+        let built = self.session.rebuilt_as(project.part(part)?.clone())?;
         let bodies: std::collections::BTreeMap<String, String> = built
             .features
             .iter()
             .filter_map(|(fid, r)| Some((fid.to_string(), r.as_ref().ok()?.body()?.hash.clone())))
             .collect();
-        self.cache.insert(content.to_owned(), bodies.clone());
+        self.session
+            .release_results
+            .insert(content.to_owned(), bodies.clone());
         Ok(bodies)
     }
 }
@@ -941,11 +1071,7 @@ pub(crate) fn findings(session: &mut Session, results: bool) -> Result<Vec<Value
                 prefix: repo.prefix(),
                 releases: &releases,
             };
-            let root = session.root().to_path_buf();
-            let mut rebuilds = Rebuilds {
-                root,
-                cache: &mut session.release_results,
-            };
+            let mut rebuilds = Rebuilds { session };
             let r: Option<&mut dyn ryupdm::check::Results> =
                 if results { Some(&mut rebuilds) } else { None };
             ryupdm::check::run(&files, Some(h), r)?
@@ -982,7 +1108,7 @@ pub fn check(session: &mut Session, results: bool) -> Result<Value> {
 pub(crate) mod tests {
     use super::*;
     use crate::git::tests::git;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     /// A project in a repository on `main` with a part `p` holding a box,
     /// numbered, committed.
@@ -1281,6 +1407,48 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_released_insert_rebuilds_as_it_was_proposed() {
+        // The insert is pinned at A: rebuilt for `results`, it reads that
+        // pin, so its body and its readers' are what the record says.
+        let (dir, mut s) = crate::insert::tests::released_board();
+        // A reader of an inserted key, which has a body of its own: the lid,
+        // cut by the chip.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "enclosure", "type": "box", "id": "lid",
+            "params": {"x": "12 mm", "y": "12 mm", "z": "1 mm"},
+            "placement": {"origin": ["-1 mm", "-1 mm", "3 mm"]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "enclosure", "type": "boolean", "id": "b",
+            "op": "subtract", "target": "lid", "tools": ["pcb/u1"]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "enclosure", "properties": {"number": "200-0001"}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "release.propose", json!({"part": "enclosure"})).unwrap();
+        assert!(v["record"]["results"]["b"].is_string(), "{v}");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "enclosure A"]);
+        let v = call(&mut s, "release.check", json!({"results": true})).unwrap();
+        let changed: Vec<&Value> = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "release_result_changed")
+            .collect();
+        assert!(changed.is_empty(), "{v}");
+    }
+
+    #[test]
     fn the_checks_report_and_fail_as_check_does() {
         let (dir, mut s) = released_project();
         let root = dir.path();
@@ -1391,7 +1559,7 @@ pub(crate) mod tests {
     #[test]
     fn writes_are_logged_and_only_files_are_undone() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = released_project();
         let root = dir.path();
         let mut live = Live::new();
@@ -1863,5 +2031,42 @@ pub(crate) mod tests {
         git(root, &["tag", "-d", "ryupdm/p/A"]);
         attest(root, "releases/p/A.json", Kind::Release, &official, true);
         assert_eq!(status(&mut s), "approved");
+    }
+
+    #[test]
+    fn a_part_releases_only_with_its_inserts_at_official_labels() {
+        // Enclosure inserts pcb at A; A and B are official.
+        let (dir, mut s) = crate::insert::tests::released_board();
+        let commit = |s: &mut Session, m: &str| {
+            crate::git::tests::git(dir.path(), &["add", "-A"]);
+            crate::git::tests::git(dir.path(), &["commit", "-q", "-m", m]);
+            s.reload().unwrap();
+        };
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "enclosure", "properties": {"number": "100-0002"}}),
+        )
+        .unwrap();
+        commit(&mut s, "numbered");
+        let dry = |s: &mut Session| {
+            call(
+                s,
+                "release.propose",
+                json!({"part": "enclosure", "dry_run": true}),
+            )
+            .unwrap()
+        };
+        assert_eq!(dry(&mut s)["problems"], json!([]));
+        call(
+            &mut s,
+            "insert.update",
+            json!({"part": "enclosure", "feature": "pcb", "to": "working"}),
+        )
+        .unwrap();
+        commit(&mut s, "working");
+        let v = dry(&mut s);
+        assert_eq!(v["problems"][0]["code"], "insert_not_released", "{v}");
+        assert_eq!(v["problems"][0]["details"]["insert"], "enclosure/pcb");
     }
 }

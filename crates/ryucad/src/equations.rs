@@ -11,7 +11,7 @@ use crate::doc::id::Id;
 use crate::doc::project::{Part, feature_path, relative};
 use crate::error::Result;
 use crate::expr::{Expr, Val};
-use crate::server::part_id;
+use crate::part::part_id;
 use crate::session::Session;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
@@ -143,7 +143,7 @@ fn feature_json(session: &Session, part: &Part, fid: &Id) -> Option<Value> {
 mod tests {
     use super::*;
     use crate::error::Code;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     /// Project parameter `wall`; part `p` with parameter `r` (`wall / 2`),
     /// a ball of radius `r` and a box of plain sizes but one; part `q`.
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn what_fails_says_why_and_a_sketchs_dimensions_are_marked() {
-        use crate::server::tests::with_sketch;
+        use crate::testing::with_sketch;
         let (dir, mut s) = with_sketch();
         s.refresh().unwrap();
         let v = list(&mut s, &Ask::default(), None).unwrap();

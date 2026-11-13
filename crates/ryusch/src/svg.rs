@@ -299,12 +299,35 @@ pub fn draw_looks(
     fit: bool,
     look_of: &dyn Fn(&str) -> Look,
 ) -> String {
+    draw_with(
+        block,
+        layout,
+        which,
+        fit,
+        look_of,
+        &|sid, look| crate::paint::sheet_in(block, layout, sid, look),
+        None,
+    )
+}
+
+/// [`draw_looks`], each sheet painted by `paint_of` (a compare's marked
+/// painting), and with `data_ref` each owner's items in a
+/// `<g data-ref="…">` of its reference path (plan 4.B).
+pub fn draw_with(
+    block: &Block,
+    layout: &Layout,
+    which: &[&str],
+    fit: bool,
+    look_of: &dyn Fn(&str) -> Look,
+    paint_of: &dyn Fn(&str, &Look) -> crate::paint::Painted,
+    data_ref: Option<&dyn Fn(&str) -> String>,
+) -> String {
     let view = if fit {
         drawn(block, layout, which)
     } else {
         None
     };
-    draw_in(block, layout, which, view, look_of)
+    draw_in(block, layout, which, view, look_of, paint_of, data_ref)
 }
 
 /// Where the sheets `which` (all when empty) draw anything, on the
@@ -360,6 +383,8 @@ fn draw_in(
     which: &[&str],
     view: Option<Rect>,
     look_of: &dyn Fn(&str) -> Look,
+    paint_of: &dyn Fn(&str, &Look) -> crate::paint::Painted,
+    data_ref: Option<&dyn Fn(&str) -> String>,
 ) -> String {
     let sheets: Vec<(&String, &crate::layout::Sheet)> = layout
         .sheets
@@ -436,11 +461,80 @@ fn draw_in(
             look.role(Role::Name),
             false,
         );
-        for it in &crate::paint::sheet_in(block, layout, sid, &look).items {
-            item(&mut out, &f, it);
+        let painted = paint_of(sid, &look);
+        match data_ref {
+            None => {
+                for it in &painted.items {
+                    item(&mut out, &f, it);
+                }
+            }
+            Some(r) => {
+                let mut open: Option<&str> = None;
+                for (it, o) in painted.items.iter().zip(&painted.owners) {
+                    let want = match it {
+                        Item::Begin(_) | Item::End => None,
+                        _ => o.as_deref(),
+                    };
+                    if want != open {
+                        if open.is_some() {
+                            out.push_str("</g>\n");
+                        }
+                        if let Some(k) = want {
+                            let _ = writeln!(out, "<g data-ref=\"{}\">", esc(&r(k)));
+                        }
+                        open = want;
+                    }
+                    item(&mut out, &f, it);
+                }
+                if open.is_some() {
+                    out.push_str("</g>\n");
+                }
+            }
         }
         let _ = writeln!(out, "</g>");
     }
     let _ = writeln!(out, "</svg>");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_refs_group_items_by_owner_and_change_nothing_else() {
+        let b = crate::testing::seeded(2, 4);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let plain = draw(&b, &out.layout, &[]);
+        let same = draw_with(
+            &b,
+            &out.layout,
+            &[],
+            false,
+            &|_| Look::default(),
+            &|sid, look| crate::paint::sheet_in(&b, &out.layout, sid, look),
+            None,
+        );
+        assert_eq!(plain, same, "without refs, the same bytes");
+        let r = |k: &str| format!("blk/{k}");
+        let refs = draw_with(
+            &b,
+            &out.layout,
+            &[],
+            false,
+            &|_| Look::default(),
+            &|sid, look| crate::paint::sheet_in(&b, &out.layout, sid, look),
+            Some(&r as &dyn Fn(&str) -> String),
+        );
+        let key = out.layout.placed.keys().next().unwrap();
+        assert!(
+            refs.contains(&format!("<g data-ref=\"blk/{key}\">")),
+            "{refs}"
+        );
+        assert_eq!(
+            refs.matches("<g").count(),
+            refs.matches("</g>").count(),
+            "balanced"
+        );
+    }
 }

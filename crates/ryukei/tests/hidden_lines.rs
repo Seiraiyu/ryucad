@@ -10,7 +10,8 @@ use ryukei::project::{
     Class, Piece, Placed, Projection, Source, View, ViewOptions, Visibility, view,
 };
 use ryukei::topo::Body;
-use ryukei::{primitive, sheet};
+use ryukei::{Error, ViewError, primitive, sheet};
+use ryukei_testkit::projection::{Oracle, judge, placed_bodies, size};
 
 fn look(t: Vector3) -> View {
     let up = if t.cross(Vector3::new(0.0, 0.0, 1.0)).length() > 0.1 {
@@ -460,5 +461,208 @@ fn visibility_changes_at_silhouette_ends_and_cusps() {
         let o = Oracle::new(&bodies, &v, size(&bodies) * 1e-3).unwrap();
         let j = judge(&p, &bodies, &o);
         assert!(j.wrong.is_empty(), "race {n} {t:?}: {:?}", j.wrong);
+    }
+}
+
+/// #643's edge (design 484, plan 17.B): ryucad's radial engine crankcase
+/// in small, its 60 mm case with bosses (22 mm) joined and bored through
+/// along the given angles. Seen from ryucad's isometric corner with all
+/// nine bosses, a boss's saddle with the case is a NURBS whose image
+/// cusps, which was refused `ViewError::Image` (the fifth boss alone
+/// drew).
+fn crankcase_twin(bosses: &[f64]) -> Body {
+    let case = primitive::cylinder(
+        OpKey(0x6430),
+        0.06,
+        0.08,
+        &Rigid::translation(Vector3::new(0.0, 0.0, -0.04)),
+    )
+    .unwrap()
+    .0;
+    let mut body = case;
+    for (k, &deg) in bosses.iter().enumerate() {
+        let (s, c) = ryukei::math::sin_cos(deg.to_radians());
+        let along = Vector3::new(c, s, 0.0);
+        let place = |r: f64| {
+            Rigid::from_frame(
+                &Frame::new(
+                    Point3::new(r * c, r * s, 0.0),
+                    along,
+                    Vector3::new(0.0, 0.0, 1.0),
+                )
+                .unwrap(),
+            )
+        };
+        let boss = primitive::cylinder(OpKey(0x6431), 0.022, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let bore = primitive::cylinder(OpKey(0x6432), 0.015, 0.04, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        body = boolean(
+            OpKey(0x6440 + k as u128),
+            BooleanOp::Unite,
+            &body,
+            &[Tool {
+                key: ToolKey(1),
+                body: &boss,
+                place: place(0.05),
+            }],
+        )
+        .unwrap()
+        .0;
+        body = boolean(
+            OpKey(0x6460 + k as u128),
+            BooleanOp::Subtract,
+            &body,
+            &[Tool {
+                key: ToolKey(1),
+                body: &bore,
+                place: place(0.04),
+            }],
+        )
+        .unwrap()
+        .0;
+    }
+    body
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: booleans of a saddle")]
+fn the_crankcases_boss_saddle_draws_from_the_corner() {
+    let body = crankcase_twin(&[0.0, 40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0]);
+    let v = look(Vector3::new(1.0, -1.0, 1.0));
+    let p = view(&[at(&body)], &v, &ViewOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+    let uncertain = p
+        .pieces
+        .iter()
+        .filter(|q| q.visibility == Visibility::Uncertain)
+        .count();
+    assert!(
+        uncertain * 10 <= p.pieces.len(),
+        "{uncertain} of {}",
+        p.pieces.len()
+    );
+}
+
+/// A torus from the front (design 484): its view draws, the radial
+/// engine's exhaust ring's case, with at most a tenth of its pieces
+/// uncertain.
+#[test]
+fn a_torus_from_the_front_draws() {
+    let (b, _) = primitive::torus(OpKey(0x6470), 0.03, 0.01, &Rigid::IDENTITY).unwrap();
+    for t in [Vector3::new(0.0, -1.0, 0.0), Vector3::new(1.0, 0.0, 0.0)] {
+        let p = view(&[at(&b)], &look(t), &ViewOptions::default())
+            .unwrap_or_else(|e| panic!("{t:?}: {e:?}"));
+        let uncertain = p
+            .pieces
+            .iter()
+            .filter(|q| q.visibility == Visibility::Uncertain)
+            .count();
+        assert!(
+            uncertain * 10 <= p.pieces.len(),
+            "{uncertain} of {}",
+            p.pieces.len()
+        );
+    }
+}
+
+/// The kind of surface of the face a refusal names, or of the edge's
+/// first face.
+fn refused_at(body: &Body, e: &Error) -> String {
+    let at = match e {
+        Error::InvalidView(ViewError::Uncertain { at } | ViewError::Image { at }) => *at,
+        _ => return format!("{e:?}"),
+    };
+    for f in body.faces() {
+        let face = body.face(f).unwrap();
+        if face.name == at {
+            let s = format!("{:?}", body.surface(face.surface).unwrap());
+            return format!("face {at:?}: {}", s.split('(').next().unwrap_or(""));
+        }
+    }
+    format!("edge {at:?}")
+}
+
+/// The race bodies' isometric views on one thread (design 484's bar):
+/// every refusal takes at most 10 s with `RYUKEI_BARS=1` on the bar
+/// machine (cox-worker-2), 100 s otherwise; each is printed with what it
+/// refused on and its time, and the total. Minutes: plan 17.B's bars
+/// run it with `--ignored`.
+#[test]
+#[ignore = "minutes: the bars run it"]
+fn race_views_refuse_quickly() {
+    let bar = if std::env::var("RYUKEI_BARS").as_deref() == Ok("1") {
+        10.0
+    } else {
+        100.0
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let v = look(Vector3::new(1.0, -1.0, 1.0));
+    let (mut drawn, mut total, mut slow) = (0, 0.0, Vec::new());
+    pool.install(|| {
+        for (i, body) in ryukei_testkit::race::bodies(200).iter().enumerate() {
+            let start = std::time::Instant::now();
+            let r = view(&[at(body)], &v, &ViewOptions::default());
+            let secs = start.elapsed().as_secs_f64();
+            total += secs;
+            if secs > 10.0 {
+                eprintln!(
+                    "race {i}: {} in {secs:.2} s",
+                    if r.is_ok() { "drawn" } else { "refused" }
+                );
+            }
+            match r {
+                Ok(_) => drawn += 1,
+                Err(e) => {
+                    eprintln!(
+                        "race {i}: refused on {} in {secs:.2} s",
+                        refused_at(body, &e)
+                    );
+                    if secs > bar {
+                        slow.push((i, secs));
+                    }
+                }
+            }
+        }
+    });
+    eprintln!("race bodies iso, one thread: {drawn} drawn, {total:.1} s in all");
+    assert!(slow.is_empty(), "refusals past {bar} s: {slow:?}");
+}
+
+/// The crankcase twin with all nine bosses from the drawing's front, top
+/// and right (design 484): no piece the mesh contradicts. Design 484's
+/// bar, at most a tenth of the pieces uncertain, isn't met (#643): the
+/// bosses come in pairs mirrored in the plane of the view and the axis
+/// (40° and 320°, …), so a ray from a piece meets its twin's edge exactly
+/// and `point_in_face` puts the hit on that edge (`OnEdge`); every ray of
+/// those pieces is unsure. Plan 17.B's count on cox-worker-4: 656 of
+/// 1,571 pieces uncertain from the front, 1,701 of 2,023 from the top,
+/// 131 of 1,163 from the right, as many as the crankcase's own views.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: booleans of saddles")]
+fn the_crankcase_twins_views_agree_with_the_mesh() {
+    let body = crankcase_twin(&[0.0, 40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0]);
+    for (t, up) in [
+        (Vector3::new(0.0, -1.0, 0.0), Vector3::new(0.0, 0.0, 1.0)),
+        (Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 1.0, 0.0)),
+        (Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0)),
+    ] {
+        let v = View::new(t, up).unwrap();
+        let placed = [at(&body)];
+        let p = view(&placed, &v, &ViewOptions::default()).unwrap();
+        let uncertain = p
+            .pieces
+            .iter()
+            .filter(|q| q.visibility == Visibility::Uncertain)
+            .count();
+        eprintln!("{t:?}: {uncertain} of {} pieces uncertain", p.pieces.len());
+        let bodies = placed_bodies(&placed);
+        let o = Oracle::new(&bodies, &v, size(&bodies) * 1e-3).unwrap();
+        let j = judge(&p, &bodies, &o);
+        assert!(j.wrong.is_empty(), "{t:?}: {:?}", j.wrong);
     }
 }

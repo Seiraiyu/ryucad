@@ -165,7 +165,7 @@ pub fn history(root: &Path, files: &Files, part: Option<&str>, limit: usize) -> 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     #[test]
     fn github_remotes() {
@@ -442,7 +442,7 @@ pub(crate) mod tests {
         // The files load as the project did then.
         let then = crate::doc::project::Project::load_from(&root, &r.files).unwrap();
         assert!(
-            then.parts[&crate::server::part_id("a").unwrap()]
+            then.parts[&crate::part::part_id("a").unwrap()]
                 .features
                 .is_empty()
         );

@@ -18,7 +18,6 @@ use crate::doc::sweep::RevolveAxis;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::rebuild::{Results, placement};
-use crate::server;
 use crate::session::Session;
 use crate::units::{Field, Quantity, Unit};
 use ryukei::geom::{Point3, Rigid};
@@ -1092,7 +1091,7 @@ fn set(
 /// The sketch feature `id` of a part.
 fn sketch_of(session: &Session, part: &Id, id: &Id) -> Result<Sketch> {
     let p = session.project().part(part)?;
-    match server::feature(p, id)? {
+    match crate::part::feature(p, id)? {
         Feature::Sketch(s) => Ok(s.clone()),
         f => Err(Error::new(
             Code::InvalidParam,
@@ -1111,16 +1110,19 @@ pub fn edit(
     ops: &[Value],
     expected: Option<&str>,
 ) -> Result<Value> {
-    let (pid, fid) = (server::part_id(part)?, server::feature_id(sketch)?);
+    let (pid, fid) = (
+        crate::part::part_id(part)?,
+        crate::part::feature_id(sketch)?,
+    );
     let unit = session.project().manifest.default_unit;
     let p = session.project().part(&pid)?;
-    server::check_revision(p, expected)?;
-    let list = server::order(p)?;
+    crate::part::check_revision(p, expected)?;
+    let list = crate::part::order(p)?;
     let env = p.env.clone();
     let mut s = sketch_of(session, &pid, &fid)?;
     let applied = apply(&mut s, &pid, ops, unit, &env)?;
     // What sweeps and holes name must stay.
-    for f in server::sweeps_of(p, &fid) {
+    for f in crate::part::sweeps_of(p, &fid) {
         let names = match p.features[&f].as_ref().expect("a loaded sweep") {
             Feature::Extrude(e) => e.loops.clone(),
             Feature::Revolve(r) => match &r.axis {
@@ -1177,7 +1179,7 @@ pub fn edit(
     let f = Feature::Sketch(solved);
     let before = current(session, &pid)?;
     let assemblies = crate::mate::current(session, &pid)?;
-    server::save(session, &pid, &[(&fid, &f)], list)?;
+    crate::save::save(session, &pid, &[(&fid, &f)], list)?;
     let sketches = keep_current(session, &pid, &before)?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let revision = &session.project().part(&pid)?.revision;
@@ -1200,7 +1202,10 @@ pub fn solve_request(
     sketch: &str,
     ops: &[Value],
 ) -> Result<Value> {
-    let (pid, fid) = (server::part_id(part)?, server::feature_id(sketch)?);
+    let (pid, fid) = (
+        crate::part::part_id(part)?,
+        crate::part::feature_id(sketch)?,
+    );
     let unit = session.project().manifest.default_unit;
     let env = session.project().part(&pid)?.env.clone();
     let mut s = sketch_of(session, &pid, &fid)?;
@@ -1224,7 +1229,10 @@ pub fn get(
     sketch: &str,
     quality: crate::mesh::Quality,
 ) -> Result<Value> {
-    let (pid, fid) = (server::part_id(part)?, server::feature_id(sketch)?);
+    let (pid, fid) = (
+        crate::part::part_id(part)?,
+        crate::part::feature_id(sketch)?,
+    );
     let unit = session.project().manifest.default_unit;
     let stored = sketch_of(session, &pid, &fid)?;
     let ctx = context_now(session, &pid, &fid, &stored)?;
@@ -1297,7 +1305,7 @@ pub fn get(
         "revision": session.project().part(&pid)?.revision,
     });
     let mut fields = solved.fields();
-    server::reference_texts(&pid, solved, &mut fields);
+    crate::part::reference_texts(&pid, solved, &mut fields);
     for k in ["plane", "placement", "face", "origin", "x"] {
         if let Some(x) = fields.get(k) {
             v[k] = x.clone();
@@ -1388,9 +1396,9 @@ pub fn keep_current(session: &mut Session, part: &Id, before: &BTreeSet<Id>) -> 
         }
     }
     if !writes.is_empty() {
-        let list = server::order(session.project().part(part)?)?;
+        let list = crate::part::order(session.project().part(part)?)?;
         let refs: Vec<(&Id, &Feature)> = writes.iter().map(|(id, f)| (id, f)).collect();
-        server::save(session, part, &refs, list)?;
+        crate::save::save(session, part, &refs, list)?;
     }
     Ok(out)
 }
@@ -1544,7 +1552,7 @@ pub(crate) mod tests {
         assert_eq!(e.details["report"]["converged"], false);
     }
 
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     /// Part `p` with an empty sketch `s` on xy.
     pub(crate) fn with_sketch() -> (tempfile::TempDir, Session) {
@@ -1814,7 +1822,7 @@ pub(crate) mod tests {
     #[test]
     fn an_edit_is_one_change_and_undoes_as_one() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (_dir, mut s) = with_sketch();
         let mut live = Live::new();
         call_live(
@@ -2234,7 +2242,7 @@ pub(crate) mod tests {
     #[test]
     fn writes_keep_projecting_sketches_current() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = with_sketch();
         let mut live = Live::new();
         edit(&mut s, rectangle_ops()).unwrap();

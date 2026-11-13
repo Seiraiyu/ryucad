@@ -6,7 +6,9 @@
 //! refusal or a projection that is the same twice, whose pieces the
 //! mesh oracle doesn't contradict and whose silhouettes are square to
 //! the view; every section is a typed refusal or a body that passes the
-//! checker with caps on the plane. Calls share one
+//! checker with caps on the plane. A first byte of `0xc0` or more turns
+//! the view square to the body's first torus face's axis, where it has
+//! one. Calls share one
 //! [`ryukei_testkit::FUZZ_BUDGET`] and are cancelled at
 //! [`ryukei_testkit::FUZZ_DEADLINE`]. Any panic, and any other error, is
 //! a bug.

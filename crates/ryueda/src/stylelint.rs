@@ -70,7 +70,7 @@ pub struct Raw {
 }
 
 /// The roles drawn on paper, over a symbol's body, over a port's flag.
-const ON_PAPER: [Role; 8] = [
+const ON_PAPER: [Role; 11] = [
     Role::Ink,
     Role::Wire,
     Role::Label,
@@ -79,6 +79,9 @@ const ON_PAPER: [Role; 8] = [
     Role::PinNumber,
     Role::Frame,
     Role::Name,
+    Role::DiffAdded,
+    Role::DiffChanged,
+    Role::DiffRemoved,
 ];
 const ON_BODY: [Role; 3] = [Role::Ink, Role::Text, Role::PinNumber];
 const ON_PORT: [Role; 2] = [Role::Ink, Role::Text];

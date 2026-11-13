@@ -1,7 +1,8 @@
 //! `doctor` (design 518): what a ryueda project folder needs that no one
 //! file says. Git's setup (`gitattributes_missing`, `git_drivers_missing`),
 //! paths Git left unmerged (`unmerged_path`), files not written
-//! canonically (`non_canonical`), files no kind holds (`unknown_file`,
+//! canonically (`non_canonical`), files holding a merge's conflict record
+//! (`merge_conflict`), files no kind holds (`unknown_file`,
 //! the loader's own warnings) and model files no footprint names
 //! (`model_orphaned`: "model files a re-import no longer names stay until
 //! doctor"). Each issue comes with its repairs; doctor never changes
@@ -32,6 +33,7 @@ impl Issue {
             Code::NonCanonical => "non_canonical",
             Code::UnknownFile => "unknown_file",
             Code::ModelOrphaned => "model_orphaned",
+            Code::MergeConflict => "merge_conflict",
             _ => "unknown",
         }
     }
@@ -131,6 +133,7 @@ pub fn diagnose(root: &Path, p: &Project) -> Vec<Issue> {
     let mut out = Vec::new();
     git_issues(root, &mut out);
     canonical_issues(root, &mut out);
+    conflict_issues(root, &mut out);
     for f in p
         .faults()
         .iter()
@@ -218,6 +221,34 @@ fn git_issues(root: &Path, out: &mut Vec<Issue>) {
                 "error",
                 vec![path.clone()],
                 format!("Git left {path} unmerged: settle it and `git add` it"),
+                Vec::new(),
+            ));
+        }
+    }
+}
+
+/// The project's own JSON files holding a conflict record: a merge left
+/// unfinished (4.C's `merge status` settles them).
+fn conflict_issues(root: &Path, out: &mut Vec<Issue>) {
+    let Ok(files) = crate::session::current(root) else {
+        return;
+    };
+    for (path, bytes) in files
+        .iter()
+        .filter(|(p, _)| !p.starts_with("../") && p.ends_with(".json"))
+    {
+        let Some(v) = std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|t| crate::canonical::parse(t).ok())
+        else {
+            continue;
+        };
+        if matches!(v.get(crate::doc::CONFLICTS), Some(Value::Object(_))) {
+            out.push(issue(
+                Code::MergeConflict,
+                "error",
+                vec![path.clone()],
+                format!("{path} has unresolved merge conflicts: settle them, then commit"),
                 Vec::new(),
             ));
         }

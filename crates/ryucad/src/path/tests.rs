@@ -1,7 +1,7 @@
 use super::*;
-use crate::server::tests::call;
 use crate::session::Session;
 use crate::sketch::tests::{edge_between, face_along, vertex_at, with_box};
+use crate::testing::call;
 use core::f64::consts::{PI, TAU};
 use serde_json::json;
 

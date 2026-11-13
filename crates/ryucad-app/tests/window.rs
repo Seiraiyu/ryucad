@@ -1343,9 +1343,19 @@ fn new_project_and_open_sample_from_the_start_window() {
         .unwrap();
     let checked: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(checked["ok"], true, "{checked}");
-    assert_eq!(
-        checked["result"]["findings"],
-        serde_json::json!([]),
+    // Interference isn't run unasked (design 525): the sample's assembly
+    // says so, and nothing else is found.
+    let findings = checked["result"]["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["code"] == "interference_not_checked"),
+        "{checked}"
+    );
+    assert!(
+        findings
+            .iter()
+            .all(|f| f["code"] == "interference_not_checked" && f["severity"] == "info"),
         "{checked}"
     );
 }

@@ -1276,7 +1276,7 @@ fn section_json(given: &Value, part: &Id, k: usize) -> Result<Value> {
         [p, s] if *p == part.as_str() => json!({"sketch": s}),
         [_, _] => return Err(bad("a section's sketch is one of this part's")),
         [_, _, _] => {
-            json!({"face": crate::server::geom_json(&text, part, &format!("/sections/{k}/face"))?})
+            json!({"face": crate::geometry::geom_json(&text, part, &format!("/sections/{k}/face"))?})
         }
         _ => {
             return Err(bad(
@@ -1345,7 +1345,7 @@ pub fn from_given(
                 let d = if d == "normal" {
                     json!("normal")
                 } else {
-                    crate::server::geom_json(d, pid, &format!("/{key}/direction"))?
+                    crate::geometry::geom_json(d, pid, &format!("/{key}/direction"))?
                 };
                 let mut t = o.get(key).cloned().unwrap_or_else(|| json!({}));
                 t["direction"] = d;

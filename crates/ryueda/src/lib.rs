@@ -12,10 +12,12 @@ pub mod activity;
 pub mod annotate;
 pub mod cascade;
 pub mod client;
+pub mod compare;
 pub mod conn;
 pub mod coord;
 pub mod daemon;
 pub mod design;
+pub mod diff;
 pub mod distributors;
 pub mod doc;
 pub mod doctor;
@@ -41,6 +43,8 @@ pub mod pdf;
 pub mod project;
 pub mod props;
 pub mod proto;
+pub mod refs;
+pub mod scene;
 pub mod schem;
 pub mod schemcmd;
 pub mod server;
@@ -55,6 +59,7 @@ pub mod symlint;
 pub mod template;
 pub mod textconv;
 pub mod topcmd;
+pub mod view;
 pub mod vocab;
 pub mod write;
 
@@ -70,13 +75,19 @@ impl ryu_session::Product for Eda {
     /// Participants point at objects by reference path
     /// (`lib/self/symbol/r`); ryueda uses selections from stage 3.
     type Target = String;
-    /// Nothing else is shown until there is an app (stage 3).
-    type View = ();
+    /// What a participant shows besides its selection: its compare (plan
+    /// 4.B), and its sheet, layer and camera (plan 3.B).
+    type View = view::View;
     /// The revisions subscribers were last told of.
     type Seen = notify::Seen;
     type Topic = notify::Topic;
 
-    fn view_json(_: &(), _: &mut serde_json::Map<String, serde_json::Value>) {}
+    fn view_json(v: &view::View, into: &mut serde_json::Map<String, serde_json::Value>) {
+        into.insert("compare".into(), serde_json::json!(v.compare));
+        if let serde_json::Value::Object(shown) = view::to_json(v) {
+            into.extend(shown);
+        }
+    }
 }
 
 impl ryu_session::prefs::Schema for Eda {

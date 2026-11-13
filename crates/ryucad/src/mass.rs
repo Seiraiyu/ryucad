@@ -132,9 +132,9 @@ pub fn run(
         }
         (l[0].kind, l)
     } else {
-        let id = crate::server::part_id(of)?;
+        let id = crate::part::part_id(of)?;
         let p = s.project().part(&id)?;
-        let kind = match crate::server::part_kind(p) {
+        let kind = match crate::part::part_kind(p) {
             PartKind::Assembly => "assembly",
             _ => "part",
         };
@@ -390,7 +390,7 @@ fn combine(shares: &[Share], unit: crate::units::Unit) -> Value {
 mod tests {
     use crate::assembly::tests::{place_in, project};
     use crate::error::Code;
-    use crate::server::tests::call;
+    use crate::testing::call;
     use serde_json::json;
 
     fn steel(s: &mut crate::session::Session) {

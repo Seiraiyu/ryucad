@@ -366,7 +366,7 @@ pub fn build(
             }
             Format::Bom => {}
             Format::Render => {
-                let r = crate::server::render_for_package(session, part, &commit);
+                let r = crate::scene::render_for_package(session, part, &commit);
                 keep(
                     "render/iso.png".to_owned(),
                     r,
@@ -457,7 +457,7 @@ pub fn package(session: &mut Session, ask: Ask) -> Result<Answer> {
 /// [`package`] naming `built` as the ryucad that built it: the goldens
 /// pin a package's bytes the same in a release and a development build.
 pub fn package_stamped(session: &mut Session, ask: Ask, built: &BuiltWith) -> Result<Answer> {
-    let part = crate::server::part_id(&ask.part)?;
+    let part = crate::part::part_id(&ask.part)?;
     if ask.out.is_some() && ask.into.is_some() {
         return Err(Error::new(Code::Usage, "give out or into, not both"));
     }
@@ -661,7 +661,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::git::tests::git;
     use crate::release::tests::released_project;
-    use crate::server::tests::call;
+    use crate::testing::call;
 
     /// A fixed ryucad, so the tests' packages don't follow the build.
     pub(crate) fn stamp() -> BuiltWith {

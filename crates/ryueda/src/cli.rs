@@ -2,6 +2,7 @@
 //! meaningful exit code, as ryucad's is.
 
 use clap::{Args, Parser, Subcommand};
+use ryu_session::live::SelectMode;
 use ryueda::error::{Code, Error, Result};
 use ryueda::project::find_root;
 use ryueda::proto::{Answer, Request, VersionInfo};
@@ -221,8 +222,40 @@ enum Command {
         /// Stay off the network (check never fetches).
         #[arg(long)]
         offline: bool,
+        /// Also say what changed electrically since this revision
+        /// (diff --netlist from it to the working files).
+        #[arg(long, value_name = "REV")]
+        against: Option<String>,
         #[command(flatten)]
         rev: Rev,
+    },
+    /// What changed between two revisions, as values (HEAD and the
+    /// working files by default): files by JSON pointer, each block's
+    /// components, nets, instances, ports and buses by reference path,
+    /// layouts and the library counted (--layout, --library for each
+    /// key), and with --netlist each design flattened and compared.
+    Diff {
+        /// The older revision (HEAD by default; `working` is the files on disk).
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// The newer revision (`working` by default).
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
+        /// Only this design's netlist.
+        #[arg(long)]
+        design: Option<String>,
+        /// Only this block.
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long)]
+        netlist: bool,
+        #[arg(long)]
+        layout: bool,
+        #[arg(long)]
+        library: bool,
+        /// List what is the same too.
+        #[arg(long)]
+        all: bool,
     },
     /// Lay out a design's schematics (the project's one design, or
     /// --design), or one --block, over their layout files, writing those
@@ -343,6 +376,10 @@ enum Command {
         /// light (the default) or dark.
         #[arg(long, value_parser = ["light", "dark"])]
         theme: Option<String>,
+        /// Mark what changed since this Git revision (new, changed,
+        /// moved, gone), each item keyed by its reference path.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         #[command(flatten)]
@@ -357,10 +394,34 @@ enum Command {
         /// listed.
         #[arg(long)]
         layers: Option<String>,
+        /// Page only the sheets that changed since this Git revision,
+        /// each marked (new, changed, moved, gone).
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         #[command(flatten)]
         rev: Rev,
+    },
+    /// One sheet as the app draws it, for a window or an agent: items
+    /// with their owners' reference paths, boxes and hashes, pins and the
+    /// sheet's findings (a design's root block and its first sheet by
+    /// default).
+    Scene {
+        #[arg(long)]
+        design: Option<String>,
+        #[arg(long)]
+        block: Option<String>,
+        /// A sheet's ID or name.
+        #[arg(long)]
+        sheet: Option<String>,
+        /// Draw that occurrence's designators: an instance path or a
+        /// stack path; the first when left out.
+        #[arg(long)]
+        layer: Option<String>,
+        /// light (the default) or dark.
+        #[arg(long, value_parser = ["light", "dark"])]
+        theme: Option<String>,
     },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
@@ -385,6 +446,68 @@ enum Command {
     },
     /// Who is attached to the project's daemon.
     Participants,
+    /// Show a participant the working files against a Git revision (the
+    /// one person attached, else you), or with --off stop; with neither,
+    /// what it compares against now. Through the daemon.
+    Compare {
+        rev: Option<String>,
+        #[arg(long)]
+        off: bool,
+        /// A participant's ID (`participants` lists them).
+        #[arg(long)]
+        participant: Option<String>,
+    },
+    /// Select by reference path (<block>/<component>, <block>/<net>,
+    /// <block>/<component>/<pin>, <block>/port:<id>…), replacing your
+    /// selection, or with --add or --remove changing it; --clear empties
+    /// it. Through the daemon.
+    Select {
+        refs: Vec<String>,
+        #[arg(long, conflicts_with_all = ["remove", "clear"])]
+        add: bool,
+        #[arg(long, conflicts_with = "clear")]
+        remove: bool,
+        #[arg(long)]
+        clear: bool,
+    },
+    /// What a participant has selected (the one person attached by
+    /// default), each reference with what it names. Through the daemon.
+    Selection {
+        /// A participant's ID (`participants` lists them).
+        #[arg(long)]
+        of: Option<String>,
+    },
+    /// Highlight references in every window watching, in your colour:
+    /// pending (about to change), changed, or note (the default), under a
+    /// --label; --clear takes yours away (only --style's, if given).
+    /// Through the daemon.
+    Highlight {
+        refs: Vec<String>,
+        #[arg(long)]
+        style: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long, conflicts_with = "label")]
+        clear: bool,
+    },
+    /// Say what you are doing, in one line under every window's People
+    /// strip, with --ref for what you are working on; "" clears it.
+    /// Through the daemon.
+    Status {
+        text: String,
+        #[arg(long = "ref", value_name = "REF")]
+        refs: Vec<String>,
+    },
+    /// What a window shows (the one person attached by default); `view
+    /// set` sets yours, `view show` shows a person a reference. Through
+    /// the daemon.
+    View {
+        #[command(subcommand)]
+        cmd: Option<ViewCmd>,
+        /// A participant's ID (`participants` lists them).
+        #[arg(long)]
+        of: Option<String>,
+    },
     /// Undo your latest change, or the entry given.
     Undo { entry: Option<u64> },
     /// Redo your latest undo, or the entry given.
@@ -416,6 +539,47 @@ enum Command {
     },
     #[command(subcommand)]
     Daemon(DaemonCmd),
+}
+
+#[derive(Subcommand)]
+enum ViewCmd {
+    /// Set your own view, as a window does while it navigates: a block's
+    /// sheet (the first unless --sheet), its layer, and the camera
+    /// (--centre X,Y and --zoom, nanometres, as the app sends them).
+    Set {
+        #[arg(long)]
+        design: Option<String>,
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long)]
+        layer: Option<String>,
+        #[arg(long, value_name = "X,Y", requires = "zoom")]
+        centre: Option<String>,
+        /// Nanometres a point.
+        #[arg(long, value_name = "NM", requires = "centre")]
+        zoom: Option<i64>,
+    },
+    /// Show a reference to a participant (every person attached by
+    /// default): their windows open its sheet, select it and frame it.
+    Show {
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// A participant's ID (`participants` lists them).
+        #[arg(long = "for", value_name = "PARTICIPANT")]
+        participant: Option<String>,
+    },
+}
+
+/// `X,Y` in nanometres.
+fn point_nm(text: &str) -> Result<[i64; 2]> {
+    let bad = || Error::new(Code::Usage, format!("{text} isn't X,Y in nanometres"));
+    let (x, y) = text.split_once(',').ok_or_else(bad)?;
+    Ok([
+        x.trim().parse().map_err(|_| bad())?,
+        y.trim().parse().map_err(|_| bad())?,
+    ])
 }
 
 #[derive(Subcommand)]
@@ -1720,6 +1884,107 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             before: *before,
         },
         Command::Participants => Request::ParticipantList {},
+        Command::Compare { rev: None, off: false, participant } => Request::CompareGet {
+            participant: participant.clone(),
+        },
+        Command::Compare { rev, off, participant } => Request::CompareSet {
+            rev: rev.clone(),
+            off: *off,
+            participant: participant.clone(),
+        },
+        Command::Select {
+            refs,
+            add,
+            remove,
+            clear,
+        } => {
+            if refs.is_empty() != *clear {
+                return Err(Error::new(
+                    Code::Usage,
+                    "name references to select, or --clear, not both",
+                ));
+            }
+            Request::SelectionSet {
+                refs: refs.clone(),
+                mode: if *add {
+                    SelectMode::Add
+                } else if *remove {
+                    SelectMode::Remove
+                } else {
+                    SelectMode::Replace
+                },
+            }
+        }
+        Command::Selection { of } => Request::SelectionGet {
+            participant: of.clone(),
+        },
+        Command::Highlight {
+            refs,
+            style,
+            label,
+            clear,
+        } => {
+            let style = style
+                .as_deref()
+                .map(|s| named("style", s, "pending, changed, note"))
+                .transpose()?;
+            match (*clear, refs.is_empty()) {
+                (true, true) => Request::HighlightClear { style },
+                (false, false) => Request::HighlightSet {
+                    refs: refs.clone(),
+                    style: style.unwrap_or_default(),
+                    label: label.clone(),
+                },
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "name references to highlight, or --clear, not both",
+                    ));
+                }
+            }
+        }
+        Command::Status { text, refs } => Request::ActivitySet {
+            status: text.clone(),
+            refs: refs.clone(),
+        },
+        Command::View { cmd: None, of } => Request::ViewGet {
+            participant: of.clone(),
+        },
+        Command::View {
+            cmd:
+                Some(ViewCmd::Set {
+                    design,
+                    block,
+                    sheet,
+                    layer,
+                    centre,
+                    zoom,
+                }),
+            ..
+        } => Request::ViewSet {
+            design: design.clone(),
+            block: block.clone(),
+            sheet: sheet.clone(),
+            layer: layer.clone(),
+            camera: match (centre, zoom) {
+                (Some(c), Some(z)) => Some(ryueda::view::Camera {
+                    centre_nm: point_nm(c)?,
+                    zoom_nm_per_pt: *z,
+                }),
+                _ => None,
+            },
+        },
+        Command::View {
+            cmd:
+                Some(ViewCmd::Show {
+                    reference,
+                    participant,
+                }),
+            ..
+        } => Request::ViewShow {
+            reference: reference.clone(),
+            participant: participant.clone(),
+        },
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },
         Command::Footprint(FootprintCmd::Show { footprint }) => Request::FootprintShow {
@@ -2260,9 +2525,24 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .collect(),
             expected_revision: expect.expect.clone(),
         },
-        Command::Check { offline, rev } => Request::Check {
+        Command::Check {
+            offline,
+            against,
+            rev,
+        } => Request::Check {
             offline: *offline,
+            against: against.clone(),
             rev: rev.rev.clone(),
+        },
+        Command::Diff { from, to, design, block, netlist, layout, library, all } => Request::Diff {
+            from: from.clone(),
+            to: to.clone(),
+            design: design.clone(),
+            block: block.clone(),
+            netlist: *netlist,
+            layout: *layout,
+            library: *library,
+            all: *all,
         },
         Command::Layout {
             design,
@@ -2344,11 +2624,13 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             scale,
             fit,
             theme,
+            compare,
             out,
             rev,
         } => {
             let format = picture_format(format.as_deref(), out)?;
             Request::Render {
+                compare: compare.clone(),
                 design: design.clone(),
                 block: block.clone(),
                 sheet: sheet.clone(),
@@ -2366,10 +2648,12 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Output {
             design,
             layers,
+            compare,
             out: _,
             rev,
         } => Request::Output {
             design: design.clone(),
+            compare: compare.clone(),
             rev: rev.rev.clone(),
             layers: match layers.as_deref() {
                 None => None,
@@ -2382,6 +2666,22 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                     ));
                 }
             },
+        },
+        Command::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+        } => Request::Scene {
+            design: design.clone(),
+            block: block.clone(),
+            sheet: sheet.clone(),
+            layer: layer.clone(),
+            theme: theme
+                .as_deref()
+                .map(|t| named("theme", t, "light, dark"))
+                .transpose()?,
         },
         Command::Rail(RailCmd::Add {
             name,

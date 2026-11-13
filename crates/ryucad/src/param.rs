@@ -17,7 +17,7 @@ use crate::doc::id::Id;
 use crate::doc::project::{Part, Project, feature_path, parameters_path, project_parameters_path};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env};
-use crate::server::{check_revision, part_id};
+use crate::part::{check_revision, part_id};
 use crate::session::Session;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
@@ -659,7 +659,7 @@ pub fn rename_project(
 #[cfg(test)]
 mod tests {
     use crate::error::Code;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
     use std::fs;
 
@@ -961,7 +961,7 @@ mod tests {
     #[test]
     fn a_rename_is_one_change_and_undoes_as_one() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (_dir, mut s) = with_part();
         let mut live = Live::new();
         let mut go = |s: &mut crate::session::Session, method: &str, params| {
@@ -1020,7 +1020,7 @@ mod tests {
     #[test]
     fn sketches_follow_their_parameters_in_the_same_change() {
         use crate::live::Live;
-        use crate::server::tests::{call_live, with_sketch};
+        use crate::testing::{call_live, with_sketch};
         let (dir, mut s) = with_sketch();
         let mut live = Live::new();
         let r = call_live(
@@ -1256,7 +1256,7 @@ mod tests {
     #[test]
     fn a_project_rename_rewrites_every_part_as_one_change() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = with_project_parameter();
         // `p` reads it through a parameter of its own too.
         call(
@@ -1312,7 +1312,7 @@ mod tests {
 
     #[test]
     fn project_parameters_keep_every_sketch_reading_them_current() {
-        use crate::server::tests::with_sketch;
+        use crate::testing::with_sketch;
         let (dir, mut s) = with_sketch();
         // The sketch's `width` becomes the project's.
         fs::remove_file(dir.path().join("parts/p/parameters.json")).unwrap();

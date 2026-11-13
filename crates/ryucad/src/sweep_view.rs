@@ -119,8 +119,8 @@ pub fn get(
     quality: crate::mesh::Quality,
 ) -> Result<Value> {
     let (pid, fid) = (
-        crate::server::part_id(part)?,
-        crate::server::feature_id(feature)?,
+        crate::part::part_id(part)?,
+        crate::part::feature_id(feature)?,
     );
     let p: Part = session.project().part(&pid)?.clone();
     let revision = p.revision.clone();

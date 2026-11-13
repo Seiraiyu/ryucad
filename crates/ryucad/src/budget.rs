@@ -20,6 +20,7 @@
 //! and the verdicts kept. At design 192's 10,000 parts that is about
 //! 0.7 GiB, which the budget didn't count until #236.
 
+use crate::config;
 use crate::doc::id::Id;
 use crate::rebuild::{Built, Cache, Made, Output, PartResult};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -374,6 +375,30 @@ fn measured<'h, 'i>(
         while h.next_if(|(k, _)| *k < id).is_some() {}
         h.peek().filter(|(k, _)| *k == id).map(|&(_, v)| v)
     })
+}
+
+/// The display mesh cache's budget in bytes.
+pub(crate) fn mesh_budget() -> usize {
+    config::user("display.mesh_cache_mib")
+        .as_u64()
+        .unwrap_or(256) as usize
+        * 1024
+        * 1024
+}
+
+/// A render's share of the session's memory budget: a quarter of
+/// `session.max_memory`, at least 64 MiB (#400). A render of a large
+/// assembly copies each occurrence's placed mesh into its geometry, so it
+/// must stop before it holds more than the session may.
+pub(crate) fn render_budget() -> usize {
+    #[cfg(test)]
+    if let Some(b) = crate::testing::RENDER_BUDGET.with(|b| b.get()) {
+        return b;
+    }
+    let max = config::user("session.max_memory")
+        .as_u64()
+        .unwrap_or_else(crate::budget::default_max);
+    usize::try_from(max / 4).unwrap_or(usize::MAX).max(64 << 20)
 }
 
 #[cfg(test)]

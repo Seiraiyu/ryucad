@@ -160,7 +160,7 @@ fn the_tree_says_what_mates_leave_and_a_mate_paints_its_faces() {
 }
 
 #[test]
-fn the_window_finds_which_instances_interfere_and_follows_edits() {
+fn the_window_finds_which_instances_interfere_and_goes_stale_on_edits() {
     let p = assembled();
     // A third bolt 4 mm from the first: their shanks, 3 mm in radius,
     // overlap.
@@ -181,10 +181,24 @@ fn the_window_finds_which_instances_interfere_and_follows_edits() {
         ("frame/b1/shank", "frame/b3/shank")
     );
     assert!(i.faces().all(|f| f.starts_with("frame/b")));
-    // Moved clear, it is checked again and found clear.
+    // Moved clear, the list goes stale and paints nothing. It isn't asked
+    // again on its own (design 525): the old answer stays listed.
     p.ok(&["assembly", "move", "frame", "b3", "--translate", "20mm,0,0"]);
-    assert!(ws.wait_until(WAIT, |ws| loaded(ws)
-        && ws.interference.as_ref().is_some_and(|i| i.pairs.is_empty())));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.interference.as_ref().is_some_and(|i| i.stale)));
+    let i = ws.interference.as_ref().unwrap();
+    assert!(i.loaded, "{i:?}");
+    assert_eq!(i.pairs.len(), 1, "{i:?}");
+    assert_eq!(i.faces().count(), 0, "{i:?}");
+    // Check again asks anew, and finds it clear.
+    ws.check_interference();
+    assert!(ws.wait_until(WAIT, |ws| {
+        loaded(ws)
+            && ws
+                .interference
+                .as_ref()
+                .is_some_and(|i| !i.stale && i.pairs.is_empty())
+    }));
 }
 
 #[test]
