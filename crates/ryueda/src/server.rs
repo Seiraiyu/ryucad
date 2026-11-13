@@ -1373,19 +1373,43 @@ fn dispatch(
             // Where it is for no one in particular: the answer's, and a
             // refusal before anyone's view moves if it is drawn nowhere.
             let at = crate::scene::locate(p, &r, &reference, &crate::view::View::default())?;
+            // Where it is for each, all worked out before anyone's view
+            // moves. A viewer's own sheet or layer changes the answer only
+            // on the ref's block; laying a block out is the costly part
+            // (#802), so each (layer, sheet) is located once, and a
+            // viewer whose layer or sheet no longer reads gets `at`.
+            let mut located: BTreeMap<(Option<String>, Option<String>), crate::scene::Found> =
+                BTreeMap::new();
+            let mut found: Vec<(String, crate::scene::Found)> = Vec::new();
             for id in &who {
                 let now = live.get(id)?.view.clone();
-                let found = match now.block.as_deref() == Some(r.block.as_str()) {
-                    true => crate::scene::locate(p, &r, &reference, &now)?,
-                    false => at.clone(),
+                let own = now.block.as_deref() == Some(r.block.as_str())
+                    && (now.layer.is_some()
+                        || now.sheet.as_ref().is_some_and(|s| *s != at.shown.sheet));
+                let f = if own {
+                    let key = (now.layer.clone(), now.sheet.clone());
+                    match located.get(&key) {
+                        Some(f) => f.clone(),
+                        None => {
+                            let f = crate::scene::locate(p, &r, &reference, &now)
+                                .unwrap_or_else(|_| at.clone());
+                            located.insert(key, f.clone());
+                            f
+                        }
+                    }
+                } else {
+                    at.clone()
                 };
-                live.select(id, vec![reference.clone()], SelectMode::Replace)?;
-                let v = &mut live.get_mut(id)?.view;
-                v.design = found.shown.design;
-                v.block = Some(found.shown.block);
-                v.sheet = Some(found.shown.sheet);
-                v.layer = found.shown.layer;
-                v.camera = Some(found.camera);
+                found.push((id.clone(), f));
+            }
+            for (id, f) in found {
+                live.select(&id, vec![reference.clone()], SelectMode::Replace)?;
+                let v = &mut live.get_mut(&id)?.view;
+                v.design = f.shown.design;
+                v.block = Some(f.shown.block);
+                v.sheet = Some(f.shown.sheet);
+                v.layer = f.shown.layer;
+                v.camera = Some(f.camera);
                 v.shown_by = Some(by.clone());
             }
             Ok(json!({

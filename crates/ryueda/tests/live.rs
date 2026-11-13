@@ -414,3 +414,46 @@ fn what_is_deleted_leaves_every_selection() {
         .unwrap();
     assert_eq!(got["selection"], json!(["breakout/sda"]));
 }
+
+#[test]
+fn a_viewer_whose_layer_is_gone_is_shown_all_the_same() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = breakout(dir.path());
+    let mut h = Here::open(&board);
+    let erin = h.human("Erin");
+    let dana = h.human("Dana");
+    // Dana looks at the sensor as the breakout's instance s1 places it.
+    let v = h
+        .ask(
+            Some(&dana),
+            "view.set",
+            json!({"block": "sensor", "layer": "s1"}),
+        )
+        .unwrap();
+    assert_eq!(v["view"]["layer"], "s1");
+    h.ask(Some(&erin), "view.set", json!({"block": "breakout"}))
+        .unwrap();
+    // The instance goes: no layer s1 is left to lay Dana's view out in.
+    std::fs::remove_file(board.join("blocks/breakout/instances/s1.json")).unwrap();
+    let v = h
+        .ask(None, "view.show", json!({"ref": "sensor/c1"}))
+        .unwrap();
+    let mut shown: Vec<String> = v["shown"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_owned())
+        .collect();
+    shown.sort();
+    let mut both = vec![erin.clone(), dana.clone()];
+    both.sort();
+    assert_eq!(shown, both);
+    // Everyone moved, Dana to where it is for no one in particular.
+    for id in [&erin, &dana] {
+        let seen = h.live.get(id).unwrap().clone();
+        assert_eq!(seen.selection, vec!["sensor/c1".to_owned()], "{id}");
+        assert_eq!(seen.view.block.as_deref(), Some("sensor"), "{id}");
+        assert_eq!(seen.view.sheet.as_deref(), v["sheet"].as_str(), "{id}");
+        assert_eq!(seen.view.layer, None, "{id}");
+    }
+}

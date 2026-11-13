@@ -650,9 +650,6 @@ fn protocol_methods() -> Vec<String> {
         .collect()
 }
 
-/// Parity: nothing an agent can't do. Every protocol method has a CLI
-/// command, and each command exists.
-
 #[test]
 fn watchers_hear_of_pointing() {
     let p = Pair::breakout();
@@ -713,6 +710,9 @@ fn watchers_hear_of_pointing() {
         assert!(who.get(k).is_some(), "{k}: {who}");
     }
 }
+
+/// Parity: nothing an agent can't do. Every protocol method has a CLI
+/// command, and each command exists.
 #[test]
 fn every_protocol_method_has_a_command() {
     let commands: &[(&str, &[&str])] = &[
