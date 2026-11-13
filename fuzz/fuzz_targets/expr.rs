@@ -20,6 +20,7 @@ fn lookup(name: &str) -> Result<Val> {
 }
 
 fuzz_target!(|data: &[u8]| {
+    assert!(data.len() < 4, "scratch: 30.A's test of the issues job (reverted)");
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
