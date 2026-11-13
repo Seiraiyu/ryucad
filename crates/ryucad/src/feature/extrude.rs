@@ -201,6 +201,23 @@ impl FeatureKind for Extrusions {
             _ => unreachable!("an extrude or a revolve"),
         }
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        crate::rebuild::body_step(cx, f)
+    }
+
+    fn own_body(
+        &self,
+        cx: &super::RebuildCx<'_>,
+        f: &Feature,
+        targets: &[&crate::rebuild::Built],
+    ) -> Result<crate::rebuild::Built> {
+        build_sweep(cx.part, cx.id, f, targets, cx.before)
+    }
+
+    fn alone(&self, _part: &Id, id: &Id, f: &Feature) -> Result<crate::rebuild::Built> {
+        Err(super::built_elsewhere(id, f, "is built from its sketch"))
+    }
 }
 
 /// An extrude or a revolve, from its sketch's result; `targets` are the

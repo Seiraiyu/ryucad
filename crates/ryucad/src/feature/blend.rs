@@ -236,6 +236,14 @@ impl FeatureKind for Blends {
     fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
         crate::rebuild::check_blend(&cx.proposed(f), cx.id, f, cx.results)
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        super::made(build_blend(cx.part, cx.solids, cx.id, f, cx.before, cx.run))
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        crate::kind::targets(f, "targets", None, None)
+    }
 }
 
 /// One group of a fillet or chamfer: what it does to each edge, and the

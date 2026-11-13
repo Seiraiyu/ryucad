@@ -290,6 +290,19 @@ impl FeatureKind for Patterns {
         let x = f.pattern().expect("a pattern");
         crate::pattern::motions(&cx.proposed(f), cx.id, x, cx.results).map(|_| ())
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::Pattern(p) = f else {
+            unreachable!("a pattern")
+        };
+        super::made(build_pattern(
+            cx.part, cx.solids, cx.id, f, p, cx.before, cx.run,
+        ))
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        crate::kind::targets(f, "targets", None, None)
+    }
 }
 
 /// A pattern: its targets as it sees them, with every instance of every

@@ -165,6 +165,31 @@ impl FeatureKind for Primitives {
         };
         primitive_report(p)
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        crate::rebuild::body_step(cx, f)
+    }
+
+    fn own_body(
+        &self,
+        cx: &super::RebuildCx<'_>,
+        f: &Feature,
+        _targets: &[&crate::rebuild::Built],
+    ) -> Result<crate::rebuild::Built> {
+        self.alone(&cx.part.id, cx.id, f)
+    }
+
+    fn alone(
+        &self,
+        part: &crate::doc::id::Id,
+        id: &crate::doc::id::Id,
+        f: &Feature,
+    ) -> Result<crate::rebuild::Built> {
+        let Feature::Primitive(p) = f else {
+            unreachable!("a primitive")
+        };
+        build_primitive(part, id, p)
+    }
 }
 
 pub(crate) fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {

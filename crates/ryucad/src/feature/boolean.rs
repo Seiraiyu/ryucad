@@ -86,6 +86,36 @@ impl FeatureKind for Booleans {
     fn report(&self, _part: &Part, _unit: crate::units::Unit, f: &Feature) -> Value {
         f.boolean().expect("a boolean").fields()
     }
+
+    fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
+        let Feature::Boolean(b) = f else {
+            unreachable!("a boolean")
+        };
+        super::made(build_boolean(
+            cx.part, cx.solids, cx.id, f, b, cx.before, cx.run,
+        ))
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        use crate::kind as k;
+        let Feature::Boolean(b) = f else {
+            unreachable!("a boolean")
+        };
+        let unite = matches!(b.op, crate::doc::solid::BooleanOp::Unite);
+        let target = k::read(
+            "target",
+            &b.target,
+            unite.then_some(k::Want::Solid),
+            unite.then_some(k::JOIN),
+        );
+        std::iter::once(target)
+            .chain(
+                b.tools
+                    .iter()
+                    .map(|t| k::read("tools", t, Some(k::Want::Solid), Some(k::TOOL))),
+            )
+            .collect()
+    }
 }
 
 /// A `boolean` feature: its target as it sees it, with its tools as it
