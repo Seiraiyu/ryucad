@@ -35,7 +35,6 @@ use ryukei::geom::{Axis, Circle2, Curve2, Frame, Frame2, Line2, Point2, Point3, 
 use ryukei::name::{OpKey, ToolKey};
 use ryukei::sweep::{self, Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
 use serde_json::json;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// The key of one of a hole's profile segments.
