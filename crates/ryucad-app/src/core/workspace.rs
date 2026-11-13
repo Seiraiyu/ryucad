@@ -2979,9 +2979,11 @@ impl Workspace {
         self.card = Some(self.errors.len() - 1);
     }
 
-    /// A drawing's tree row chosen: the Drawings tile opens on it, its
-    /// first sheet shown.
+    /// A drawing chosen from its tree row or the palette: its part shown
+    /// if it isn't (#780), so File > Export… offers the drawing on
+    /// screen, and the Drawings tile opened on it, its first sheet shown.
     pub fn open_drawing(&mut self, part: &str, drawing: &str) {
+        self.show_part(part);
         self.show_drawings(Some(part));
         self.drawings.chosen = None;
         self.drawings.sheet = None;

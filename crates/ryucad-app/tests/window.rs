@@ -6756,6 +6756,41 @@ fn a_drawing_opens_from_its_row_its_dimension_is_edited_and_a_view_dragged() {
     assert!((x - 130.0).abs() < 0.5, "{file}");
 }
 
+/// #780: choosing `@part/drawing` in the palette shows its part as well
+/// as opening the drawing, so File > Export… is about that part.
+#[test]
+fn the_palette_shows_the_part_of_a_drawing_it_opens() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_drawing();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&[
+        "feature", "add", "q", "box", "--id", "qb", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10", "--origin", "500,0,0",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    p.ok(&["focus", "q"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("q")
+    });
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.get_by_label("Search commands").click();
+    h.run_steps(2);
+    h.get_by_label("Search commands").type_text("@p/d");
+    h.run_steps(2);
+    h.get_by_label("p/d (drawing, Block)");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle() && ws.model.focus.as_deref() == Some("p") && ws.drawings.sheet.is_some()
+    });
+    assert_eq!(h.state().opened().ws.drawings.part.as_deref(), Some("p"));
+}
+
 #[test]
 fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     use ryucad_app::core::markup::Tool;
