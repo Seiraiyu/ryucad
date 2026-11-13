@@ -409,6 +409,8 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "delete_face" => "delete-face",
         "delete_blend" => "delete-blend",
         "resize_blend" => "resize-blend",
+        "insert" => "arrow-square-in",
+        "delete_body" => "trash",
         _ => "question",
     }
 }
@@ -508,6 +510,8 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Tool solid, consumed", "cube-focus", Tint::Weak),
             ("Sheet", "sheet", Tint::Plain),
             ("Sheet, consumed (sewn, thickened)", "sheet", Tint::Weak),
+            ("Flattened file (its bodies under one row)", "files", Tint::Plain),
+            ("A flattened file\u{2019}s product", "package", Tint::Plain),
             ("Sketch", "pencil-simple-line", Tint::Plain),
             ("Drawing", "drawing", Tint::Plain),
             (
@@ -565,6 +569,8 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Circular pattern", "pattern-circular", Tint::Plain),
             ("Mirror pattern", "flip-horizontal", Tint::Plain),
             ("Import", "file-arrow-down", Tint::Plain),
+            ("Insert (another part\u{2019}s solids)", "arrow-square-in", Tint::Plain),
+            ("Delete body", "trash", Tint::Plain),
             ("Unknown feature", "question", Tint::Plain),
         ],
     ),
@@ -611,6 +617,11 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
                 Tint::Weak,
             ),
             ("Reference import", "file-lock", Tint::Info),
+            (
+                "Insert behind its source\u{2019}s newest release",
+                "warning-circle",
+                Tint::Warn,
+            ),
             ("Surface: a sweep that makes a sheet", "sheet", Tint::Info),
             ("Instance fixed", "push-pin", Tint::Plain),
             ("Mate redundant", "warning-circle", Tint::Warn),
@@ -2264,6 +2275,8 @@ mod tests {
             "delete_face",
             "delete_blend",
             "resize_blend",
+            "insert",
+            "delete_body",
             "mystery",
         ] {
             for op in [
@@ -2300,6 +2313,8 @@ mod tests {
             "stethoscope",
             "spinner-gap",
             "link-simple",
+            "files",
+            "package",
         ]);
         for c in cases {
             assert!(names.contains(&c), "{c}");
@@ -2336,6 +2351,8 @@ mod tests {
         let mut p = feature("pattern");
         p.form = Some("mirror".into());
         assert_eq!(feature_icon(&p, no).0, "flip-horizontal");
+        assert_eq!(feature_icon(&feature("insert"), no).0, "arrow-square-in");
+        assert_eq!(feature_icon(&feature("delete_body"), no).0, "trash");
     }
 
     #[test]
