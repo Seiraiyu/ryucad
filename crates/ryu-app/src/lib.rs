@@ -11,5 +11,7 @@ pub mod command;
 pub mod fonts;
 pub mod icon;
 pub mod keys;
+pub mod layout;
 pub mod palette;
+pub mod shell;
 pub mod style;
