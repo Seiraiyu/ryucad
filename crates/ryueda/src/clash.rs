@@ -840,6 +840,104 @@ fn renumber_library(files: &mut Files, x: &Value, planned: &Value, sides: &Sides
     Ok(())
 }
 
+/// Which sides' changes reached `paths`: each side with a file that
+/// differs from the base's and can move what a path names (for a block's
+/// file, what `validate::affects` says moves the block; for any other,
+/// everything outside `blocks/`), and those files. `both` when both did,
+/// or neither.
+pub(crate) fn blame(paths: &[String], sides: &Sides) -> (&'static str, Vec<String>) {
+    let reach = |q: &str| {
+        paths.iter().any(
+            |p| match p.strip_prefix("blocks/").and_then(|r| r.split('/').next()) {
+                Some(b) => crate::validate::affects(q, b),
+                None => !q.starts_with("blocks/"),
+            },
+        )
+    };
+    let changed = |side: &Files| -> BTreeSet<String> {
+        side.keys()
+            .chain(sides.base.keys())
+            .filter(|q| reach(q) && side.get(*q) != sides.base.get(*q))
+            .cloned()
+            .collect()
+    };
+    let (o, t) = (changed(&sides.ours), changed(&sides.theirs));
+    let who = cause(!o.is_empty(), !t.is_empty());
+    let touched: BTreeSet<String> = o.into_iter().chain(t).collect();
+    (who, touched.into_iter().collect())
+}
+
+/// The `merge_faults` items: error faults new in the merge that no item
+/// explains, and ERC errors new in the merge but designators (those are
+/// `refdes_clash`'s).
+fn broke(
+    merged: &Judged,
+    new: &[&Fault],
+    new_erc: &[&Finding],
+    sides: &Sides,
+    covered: &BTreeSet<String>,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for f in new.iter().filter(|f| !covered.contains(&key(f))) {
+        let (path, pointer) = (detail(f, "path"), detail(f, "pointer"));
+        let (who, touched) = blame(std::slice::from_ref(&path), sides);
+        let mut x = item(
+            format!("faults:{path}#{pointer}"),
+            "merge_faults",
+            vec![path.clone()],
+            concerns(&path, &pointer),
+            who,
+            format!(
+                "the merge leaves a fault neither side had: {}",
+                f.error.message
+            ),
+        );
+        x["fault"] = f.to_json();
+        x["touched"] = json!(touched);
+        out.push(x);
+    }
+    for f in new_erc
+        .iter()
+        .filter(|f| f.severity == Severity::Error && f.code != Code::RefdesDuplicate)
+    {
+        let occ: Vec<&crate::netlist::Occurrence> = merged
+            .nets
+            .get(&f.design)
+            .map(|n| {
+                n.occurrences
+                    .iter()
+                    .filter(|o| f.refs.contains(&o.reference))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let paths: Vec<String> = occ
+            .iter()
+            .map(|o| part_path(&o.block, Part::Component, &o.component))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let refs: Vec<String> = occ
+            .iter()
+            .map(|o| format!("{}/{}", o.block, o.component))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let (who, touched) = blame(&paths, sides);
+        let mut x = item(
+            format!("faults:erc:{}", f.id),
+            "merge_faults",
+            paths,
+            json!({"design": f.design, "refs": refs}),
+            who,
+            format!("ERC finds what neither side had: {}", f.message),
+        );
+        x["finding"] = json!(f);
+        x["touched"] = json!(touched);
+        out.push(x);
+    }
+    out
+}
+
 /// The semantic items of the merge `state` for the merged project `p`
 /// over the session's files `full`.
 pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -> Result<Found> {
@@ -874,8 +972,7 @@ pub(crate) fn find(root: &Path, state: &MergeState, p: &Project, full: &Files) -
     found
         .clashes
         .extend(deleted(p, &new, &three, full, &files, &mut covered));
-    //CLASH-CALLS
-    let _ = &covered;
+    found.faults = broke(&merged, &new, &new_erc, &files, &covered);
     found.already = merged
         .faults
         .iter()
@@ -971,7 +1068,6 @@ pub(crate) fn repair(
             }
         }
         ("id_collision", "renumber") => renumber_library(files, x, &planned, sides)?,
-        //REPAIR-ARMS
         (kind, _) => {
             return Err(
                 Error::new(Code::RepairConflict, format!("{kind} has no repair {id}"))
@@ -1323,5 +1419,63 @@ pub(crate) mod tests {
         assert_eq!(lc["footprints"][0]["footprint"], json!({"id": "ldo-2"}));
         assert_eq!(lc["footprints"][1]["footprint"]["id"], "ldo", "another library's");
         assert_eq!(lc["symbol"], json!({"id": "ldo"}));
+    }
+
+    #[test]
+    fn a_fault_neither_side_had_is_blamed() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        // Theirs deletes class Power, which nothing used; ours gives SDA it.
+        merging(
+            r,
+            &[("blocks/top/nets/sda.json", Some(json!({"kind": "ryueda.net", "format": 1, "name": "SDA", "class": "power"})))],
+            &[("classes/power.json", None)],
+        );
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        let c = of_kind(&v, "merge_faults");
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "faults:blocks/top/nets/sda.json#/class");
+        assert_eq!(c[0]["cause"], "both", "ours changed the net, theirs the class");
+        assert_eq!(c[0]["touched"], json!(["blocks/top/nets/sda.json", "classes/power.json"]));
+        assert_eq!((c[0]["choices"].clone(), c[0]["repairs"].clone()), (json!([]), json!([])));
+        assert_eq!(c[0]["fault"]["code"], "not_found");
+        // It blocks the commit, not the layouts: nothing here is pending.
+        assert_eq!(v["clean"], false);
+    }
+
+    #[test]
+    fn what_a_side_broke_already_doesnt_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        // Ours breaks R1 (a library component that isn't there); theirs
+        // edits something else.
+        merging(
+            r,
+            &[("blocks/top/components/r1.json", Some(json!({"kind": "ryueda.component", "format": 1,
+                "of": {"id": "nope"}, "refdes": "R1", "pins": {"1": "sda", "2": {"rail": "v3v3"}}})))],
+            &[("rails/gnd.json", Some(json!({"kind": "ryueda.rail", "format": 1, "name": "GND", "voltage": "0 V"})))],
+        );
+        let mut s = Session::open(r).unwrap();
+        let v = crate::validate::status(&mut s).unwrap();
+        assert_eq!(v["clean"], true, "{v}");
+        let codes: Vec<&str> = v["already_failing"].as_array().unwrap().iter()
+            .filter_map(|f| f["code"].as_str()).collect();
+        assert!(codes.contains(&"not_found"), "{v}");
+    }
+
+    #[test]
+    fn blame_reaches_through_what_a_blocks_drawing_reads() {
+        let f = |pairs: &[(&str, &str)]| -> Files {
+            pairs.iter().map(|(p, b)| (p.to_string(), std::sync::Arc::from(b.as_bytes()))).collect()
+        };
+        let sides = Sides {
+            base: f(&[("blocks/b/nets/n.json", "1"), ("rails/gnd.json", "1"), ("blocks/c/nets/m.json", "1")]),
+            ours: f(&[("blocks/b/nets/n.json", "2"), ("rails/gnd.json", "1"), ("blocks/c/nets/m.json", "1")]),
+            theirs: f(&[("blocks/b/nets/n.json", "1"), ("rails/gnd.json", "1"), ("blocks/c/nets/m.json", "2")]),
+        };
+        assert_eq!(blame(&["blocks/b/components/r1.json".to_owned()], &sides),
+            ("ours", vec!["blocks/b/nets/n.json".to_owned()]));
+        assert_eq!(blame(&["rails/gnd.json".to_owned()], &sides).0, "both", "neither reached it");
     }
 }
