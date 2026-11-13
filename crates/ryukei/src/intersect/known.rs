@@ -151,11 +151,7 @@ fn branch(s: &Seam, surfaces: [&Surface; 2], region: &Box3, m: &Meter) -> Option
 /// over a whole period from the interval's start. Anything else, or a
 /// line missing the region, keeps the interval.
 fn run_on(s: &Seam, region: &Box3) -> [f64; 2] {
-    if !s
-        .pcurves
-        .iter()
-        .all(|(c, _)| matches!(c, Curve2::Line2(_)))
-    {
+    if !s.pcurves.iter().all(|(c, _)| matches!(c, Curve2::Line2(_))) {
         return s.interval;
     }
     match &s.curve {
@@ -257,7 +253,11 @@ mod tests {
         let (a, b, seam) = plane_and_cylinder(0.0, 0.0);
         let m = Meter::free(); // unmetered: a test
         let meet = known_seam((&a, only(&a)), (&b, only(&b)), &[seam], &m).unwrap();
-        let FaceMeet::Meet { stretches, contacts } = meet else {
+        let FaceMeet::Meet {
+            stretches,
+            contacts,
+        } = meet
+        else {
             panic!("not coincident")
         };
         assert!(contacts.is_empty(), "{contacts:?}");
@@ -316,8 +316,10 @@ mod tests {
         const KNOWN_SEAMS_HASH: u64 = 0x7c00_c46b_b666_9f22;
         let (a, b, seam) = plane_and_cylinder(0.0, 0.0);
         let m = Meter::free(); // unmetered: a test
-        let FaceMeet::Meet { stretches, contacts } =
-            known_seam((&a, only(&a)), (&b, only(&b)), &[seam], &m).unwrap()
+        let FaceMeet::Meet {
+            stretches,
+            contacts,
+        } = known_seam((&a, only(&a)), (&b, only(&b)), &[seam], &m).unwrap()
         else {
             panic!("not coincident")
         };

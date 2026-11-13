@@ -6,9 +6,9 @@
 
 use super::region::Region;
 use super::working::Working;
+use crate::geom::Box3;
 use crate::geom::Vector2;
 use crate::intersect::{Seam, Seams};
-use crate::geom::Box3;
 use crate::layout::{self, Boundary, Layout};
 use crate::name::{BooleanRole, EditRole, Name, OpKey, Role};
 use crate::topo::{Body, EdgeId, EntityId, FaceId, Sense};
@@ -336,7 +336,12 @@ mod tests {
         let ws: BTreeMap<FaceId, Working> = r
             .faces
             .iter()
-            .map(|&f| (f, working(&b, f, None, b.faces[f].sense, true, &bx).unwrap()))
+            .map(|&f| {
+                (
+                    f,
+                    working(&b, f, None, b.faces[f].sense, true, &bx).unwrap(),
+                )
+            })
             .collect();
         // unmetered: a unit test.
         let w = work_body(K, &b, &r, &ws, &crate::work::Meter::free()).unwrap();

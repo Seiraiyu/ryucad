@@ -108,7 +108,10 @@ impl FaceMeet {
     /// places, each contact's places and each rim's owner swapped.
     pub(crate) fn swapped(self) -> Self {
         match self {
-            FaceMeet::Meet { stretches, contacts } => FaceMeet::Meet {
+            FaceMeet::Meet {
+                stretches,
+                contacts,
+            } => FaceMeet::Meet {
                 stretches: stretches
                     .into_iter()
                     .map(|mut s| {
@@ -2191,11 +2194,16 @@ mod swap_tests {
 
     #[test]
     fn a_meeting_swapped_twice_is_itself_and_swaps_each_faces_half() {
-        let line = Curve2::Line2(Line2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0)).unwrap());
-        let other = Curve2::Line2(Line2::new(Point2::new(1.0, 0.0), Vector2::new(0.0, 1.0)).unwrap());
+        let line =
+            Curve2::Line2(Line2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0)).unwrap());
+        let other =
+            Curve2::Line2(Line2::new(Point2::new(1.0, 0.0), Vector2::new(0.0, 1.0)).unwrap());
         let meet = FaceMeet::Meet {
             stretches: vec![Stretch {
-                curve: Curve::Line(crate::geom::Line::from_unit(Point3::ORIGIN, crate::geom::UnitVector3::X).unwrap()),
+                curve: Curve::Line(
+                    crate::geom::Line::from_unit(Point3::ORIGIN, crate::geom::UnitVector3::X)
+                        .unwrap(),
+                ),
                 range: [0.0, 1.0],
                 tangent: true,
                 tolerance: 1e-8,
@@ -2210,7 +2218,13 @@ mod swap_tests {
             }],
         };
         let s = meet.clone().swapped();
-        let FaceMeet::Meet { stretches, contacts } = &s else { unreachable!() };
+        let FaceMeet::Meet {
+            stretches,
+            contacts,
+        } = &s
+        else {
+            unreachable!()
+        };
         assert_eq!(stretches[0].pcurves[0].0, other);
         assert_eq!(stretches[0].places, [Place::Outside, Place::Inside]);
         // `ends` are the stretch's ends, not the faces': unchanged.

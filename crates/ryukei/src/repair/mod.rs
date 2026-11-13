@@ -156,7 +156,15 @@ pub(crate) fn resolve(
     alone: &(dyn Fn(FaceId) -> bool + Sync),
     m: &Meter,
 ) -> Result<Option<(Body, Journal)>, Fail> {
-    resolve_seamed(key, body, pairs, &crate::intersect::Seams::new(), select, alone, m)
+    resolve_seamed(
+        key,
+        body,
+        pairs,
+        &crate::intersect::Seams::new(),
+        select,
+        alone,
+        m,
+    )
 }
 
 /// [`resolve`], the pairs in `seams` known to meet along them (the

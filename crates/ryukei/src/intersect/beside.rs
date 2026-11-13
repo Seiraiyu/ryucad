@@ -1422,7 +1422,15 @@ mod rails_tests {
         let rail = rail();
         let strip = 0.05 * MM;
         let m = Meter::free(); // unmetered: a test
-        let r = face_beside_rails(&b, f, &cyl, &[(&rail, [-2.0 * MM, 2.0 * MM])], strip, CELLS, &m);
+        let r = face_beside_rails(
+            &b,
+            f,
+            &cyl,
+            &[(&rail, [-2.0 * MM, 2.0 * MM])],
+            strip,
+            CELLS,
+            &m,
+        );
         // Outside the strip the plane lies outside the cylinder only.
         assert_eq!(r, Ok([false, true]));
         // No rail, no strip: refused.
@@ -1437,8 +1445,15 @@ mod rails_tests {
         let f = b.faces().next().unwrap();
         let rail = rail();
         let m = Meter::free(); // unmetered: a test
-        let r =
-            face_beside_rails(&b, f, &cyl, &[(&rail, [-2.0 * MM, 2.0 * MM])], 0.05 * MM, CELLS, &m);
+        let r = face_beside_rails(
+            &b,
+            f,
+            &cyl,
+            &[(&rail, [-2.0 * MM, 2.0 * MM])],
+            0.05 * MM,
+            CELLS,
+            &m,
+        );
         assert!(r.is_err(), "{r:?}");
     }
 }

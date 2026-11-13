@@ -26,12 +26,12 @@
 
 use super::{EdgeRef, FaceRef, Fail, VertexRef, face_tolerance};
 use crate::geom::{Box3, Curve, Curve2, Point2, Point3};
+use crate::intersect::Seams;
 use crate::intersect::broad::BoxTree;
 use crate::intersect::{
     CurveHit, FaceMeet, Failure, Place, curve_surface_in, face_box, face_face_in, point_in_face,
 };
 use crate::tol::LINEAR_RESOLUTION;
-use crate::intersect::Seams;
 use crate::topo::{Body, FaceId, Sense};
 use crate::work::Meter;
 use std::collections::{BTreeMap, BTreeSet};
@@ -349,9 +349,7 @@ pub(crate) fn build_capped(
             let meet = |m: &Meter| -> Result<FaceMeet, Failure> {
                 let trace = |m: &Meter| face_face_in((&ops[a.op], a.face), (&ops[b.op], b.face), m);
                 let key = (a.face.min(b.face), a.face.max(b.face));
-                let known = seams
-                    .filter(|_| a.op == b.op)
-                    .and_then(|s| s.get(&key));
+                let known = seams.filter(|_| a.op == b.op).and_then(|s| s.get(&key));
                 let Some(known) = known else {
                     return trace(m);
                 };
