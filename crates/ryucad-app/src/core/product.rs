@@ -46,3 +46,25 @@ impl ryu_app::toast::Words for Ryucad {
         crate::core::activity::can_undo(entry)
     }
 }
+
+impl ryu_app::link::Client for Ryucad {
+    type Product = ryucad::Cad;
+    const PROGRAM: &'static str = "ryucad";
+    fn hello(
+        kind: ryucad::live::Kind,
+        name: Option<String>,
+        participant: Option<String>,
+    ) -> ryucad::proto::Request {
+        ryucad::proto::Request::SessionHello {
+            kind,
+            name,
+            participant,
+        }
+    }
+    fn cancel(token: String) -> ryucad::proto::Request {
+        ryucad::proto::Request::RequestCancel { token, name: None }
+    }
+    fn build(v: &ryucad::proto::VersionInfo) -> String {
+        format!("ryucad {} ({})", v.ryucad, v.commit)
+    }
+}
