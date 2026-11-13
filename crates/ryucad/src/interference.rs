@@ -463,7 +463,8 @@ fn unchecked_entry(a: &str, b: &str, kernel: &str, spent: Option<u64>) -> Value 
 }
 
 /// [`find`] for a request's `job`: each pair it intersects is a
-/// boundary. Cancelled, it keeps the verdicts it reached and answers
+/// boundary; a solid pair the boolean leaves `Uncertain` is then judged
+/// on meshes (#436), in a second stage. Cancelled, it keeps the verdicts it reached and answers
 /// `cancelled`.
 pub fn find_for(
     asm: &Id,
@@ -562,9 +563,9 @@ pub fn find_for(
         prepared.insert(k, r);
     }
     let stage = job.begin(Phase::Intersect, "pairs", missing.len());
-    let worked: Vec<Result<(String, Verdict)>> = missing
-        .into_par_iter()
-        .map(|(k, (a, b, rel))| {
+    let first: Vec<Result<(String, Exact)>> = missing
+        .par_iter()
+        .map(|(&k, &(a, b, rel))| {
             let (x, y) = (&pieces[a].1, &pieces[b].1);
             stage.step(|| {
                 let at = |p: &Piece| format!("{}/{}", path_text(&p.occurrence.path), p.founder);
@@ -572,20 +573,22 @@ pub fn find_for(
             })?;
             let v = if x.built.reference || y.built.reference {
                 let get = |b: &Built| prepared[&(b as *const Built as usize)].clone();
-                on_meshes(&get(x.built), &get(y.built), &rel, job)?
+                Exact::Decided(on_meshes(&get(x.built), &get(y.built), &rel, job)?)
             } else {
-                verdict_for(&x.built.body, &y.built.body, rel, job)?
+                exact_for(&x.built.body, &y.built.body, rel, job)?
             };
             Ok((k.to_owned(), v))
         })
         .collect();
     drop(stage);
     let mut stopped = None;
-    for r in worked {
+    let mut undecided: Vec<String> = Vec::new();
+    for r in first {
         match r {
-            Ok((k, v)) => {
+            Ok((k, Exact::Decided(v))) => {
                 cache.verdicts.insert(k, Arc::new(v));
             }
+            Ok((k, Exact::Uncertain(_))) => undecided.push(k),
             Err(e) => {
                 stopped.get_or_insert(e);
             }
@@ -593,6 +596,64 @@ pub fn find_for(
     }
     if let Some(e) = stopped {
         return Err(e);
+    }
+    // Solid pairs the boolean left Uncertain, judged on both meshes as
+    // reference pairs are (design 551, #436), each body meshed once.
+    if !undecided.is_empty() {
+        let mut more: BTreeMap<usize, &Built> = BTreeMap::new();
+        for k in &undecided {
+            let (a, b, _) = missing[k.as_str()];
+            for x in [pieces[a].1.built, pieces[b].1.built] {
+                let at = x as *const Built as usize;
+                if !prepared.contains_key(&at) {
+                    more.insert(at, x);
+                }
+            }
+        }
+        let meshed: Vec<(usize, std::result::Result<Arc<Prepared>, ryukei::Error>)> = more
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|(k, b)| (k, Prepared::new_for(&b.body, &work).map(Arc::new)))
+            .collect();
+        for (k, r) in meshed {
+            let r = match r {
+                Ok(p) => Ok(p),
+                Err(e) => match crate::work::stopped(&e, job) {
+                    Some(stop) => return Err(stop),
+                    None => Err(format!("{e:?}")),
+                },
+            };
+            prepared.insert(k, r);
+        }
+        let stage = job.begin(Phase::Intersect, "pairs on meshes", undecided.len());
+        let second: Vec<Result<(String, Verdict)>> = undecided
+            .into_par_iter()
+            .map(|k| {
+                let (a, b, rel) = missing[k.as_str()];
+                let (x, y) = (&pieces[a].1, &pieces[b].1);
+                stage.step(|| {
+                    let at = |p: &Piece| format!("{}/{}", path_text(&p.occurrence.path), p.founder);
+                    format!("{} {}", at(x), at(y))
+                })?;
+                let get = |b: &Built| prepared[&(b as *const Built as usize)].clone();
+                Ok((k, on_meshes(&get(x.built), &get(y.built), &rel, job)?))
+            })
+            .collect();
+        drop(stage);
+        for r in second {
+            match r {
+                Ok((k, v)) => {
+                    cache.verdicts.insert(k, Arc::new(v));
+                }
+                Err(e) => {
+                    stopped.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = stopped {
+            return Err(e);
+        }
     }
     let solid = |p: &Piece| format!("{asm}/{}/{}", path_text(&p.occurrence.path), p.founder);
     let (mut interferences, mut touching, mut unchecked) = (Vec::new(), Vec::new(), Vec::new());

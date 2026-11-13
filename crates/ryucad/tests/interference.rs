@@ -524,3 +524,35 @@ fn a_decided_pair_reads_the_same_through_solid_verdict() {
         assert_eq!(solid_verdict(&a, &a, rel), v, "{x}");
     }
 }
+
+/// A 50 µm bar standing in a 1 mm cube's side by a rounding's depth,
+/// placed in single precision: whatever the exact boolean says, the pair
+/// is decided (#436), never unchecked.
+#[test]
+fn a_bar_in_a_cubes_side_by_a_rounding_is_decided() {
+    let (_dir, mut s) = project(3.0);
+    for (part, x, y, z) in [("cube", 1.0, 1.0, 1.0), ("bar", 0.05, 0.05, 2.0)] {
+        must(&mut s, "part.create", json!({"part": part}));
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": part, "type": "box", "id": "b",
+                   "params": {"x": x, "y": y, "z": z}}),
+        );
+    }
+    place(&mut s, "asm", "c", "cube", [0.0; 3], Z, X);
+    // The bar's -x side 1.02e-4 mm inside the cube's +x face, its pose
+    // turned by single precision's π about z.
+    place(
+        &mut s,
+        "asm",
+        "b",
+        "bar",
+        [1.0 - 1.02e-4, 0.4, -0.5],
+        Z,
+        [1.0, 8.742277657348e-08, 0.0],
+    );
+    let v = must(&mut s, "interference", json!({"part": "asm"}));
+    assert_eq!(v["pairs"], 1, "{v}");
+    assert_eq!(v["unchecked"], json!([]), "{v}");
+}
