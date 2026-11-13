@@ -10,4 +10,5 @@
 pub mod command;
 pub mod fonts;
 pub mod icon;
+pub mod keys;
 pub mod style;
