@@ -829,6 +829,23 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// One sheet as a window draws it (design 519): its items with their
+    /// owners' reference paths, boxes and hashes, the paper, pins and the
+    /// sheet's findings; a design's root block and its first sheet unless
+    /// named. Answered as JSON text.
+    #[serde(rename = "scene")]
+    Scene {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme: Option<ryusch::style::Theme>,
+    },
     /// A design's designators numbered in canvas order (plan 2.F): the
     /// unannotated ones (`unannotated`, by default) or every unlocked one
     /// (`all`), down each column (`down`, by default) or across each row.
@@ -966,6 +983,83 @@ pub enum Request {
     /// What a participant compares against, and the commit it names now.
     #[serde(rename = "compare.get")]
     CompareGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// A participant's selection by reference path, and what each names:
+    /// `participant`, else the one human (an agent asks what the person
+    /// points at). Needs the daemon.
+    #[serde(rename = "selection.get")]
+    SelectionGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// The caller's selection: `refs` replace it, or with `mode` are added
+    /// or taken out; none clears it. Needs the daemon.
+    #[serde(rename = "selection.set")]
+    SelectionSet {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        refs: Vec<String>,
+        #[serde(default)]
+        mode: ryu_session::live::SelectMode,
+    },
+    /// Paints references in every window, in the caller's colour and
+    /// `style` (`pending`, `changed`, `note`), replacing its highlight of
+    /// the same style and label. Needs the daemon.
+    #[serde(rename = "highlight.set")]
+    HighlightSet {
+        refs: Vec<String>,
+        #[serde(default)]
+        style: ryu_session::live::Style,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Takes away the caller's highlights of `style`, or all of them.
+    #[serde(rename = "highlight.clear")]
+    HighlightClear {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<ryu_session::live::Style>,
+    },
+    /// The caller's one-line status (at most 200 characters; empty clears
+    /// it) and the references it is working on, shown under every
+    /// window's People strip. Needs the daemon.
+    #[serde(rename = "activity.set")]
+    ActivitySet {
+        status: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        refs: Vec<String>,
+    },
+    /// What a participant's window shows (`design`, `block`, `sheet`,
+    /// `layer`, `camera`, `shown_by`): `participant`, else the one human.
+    /// Needs the daemon.
+    #[serde(rename = "view.get")]
+    ViewGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// The caller's window's view as it navigates: a block (a design's
+    /// root unless named), its sheet (the first unless named), the layer
+    /// and the camera. Needs the daemon.
+    #[serde(rename = "view.set")]
+    ViewSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        camera: Option<crate::view::Camera>,
+    },
+    /// Shows a reference to `participant`, else to every person attached:
+    /// their views move to its sheet and frame it, and their selection
+    /// becomes it. Needs the daemon.
+    #[serde(rename = "view.show")]
+    ViewShow {
+        #[serde(rename = "ref")]
+        reference: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },

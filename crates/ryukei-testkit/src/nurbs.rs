@@ -7,6 +7,7 @@ use ryukei::euler;
 use ryukei::geom::{
     Curve, KnotVector, NurbsCurve, NurbsCurve2, NurbsSurface, Point2, Point3, Surface,
 };
+use ryukei::name::OpKey;
 use ryukei::topo::{Body, EdgeId, FaceId};
 use std::sync::Arc;
 
@@ -150,6 +151,17 @@ pub fn convert_body(b: &mut Body) -> Result<(), Error> {
 /// edges those faces use; everything else is left as it is (a block whose
 /// edge rounds are splines, standing on its planes, as files write them).
 pub fn convert_where(b: &mut Body, which: impl Fn(&Surface) -> bool) -> Result<(), Error> {
+    convert_where_with(b, which, true)
+}
+
+/// [`convert_where`], each face's surface over its own parameter box
+/// padded (as files write them) or not: unpadded, an edge along the
+/// box's side is an isoline of the spline (KiCad's MSOP-8-1EP, #303).
+pub fn convert_where_with(
+    b: &mut Body,
+    which: impl Fn(&Surface) -> bool,
+    padded: bool,
+) -> Result<(), Error> {
     let chosen: Vec<FaceId> = b
         .faces()
         .filter(|&f| {
@@ -206,7 +218,11 @@ pub fn convert_where(b: &mut Body, which: impl Fn(&Surface) -> bool) -> Result<(
         }
         let domain = surface.domain();
         let ranges: [[f64; 2]; 2] = core::array::from_fn(|k| {
-            let pad = 1e-3 * (hi[k] - lo[k]).max(0.0) + 1e-6;
+            let pad = if padded {
+                1e-3 * (hi[k] - lo[k]).max(0.0) + 1e-6
+            } else {
+                0.0
+            };
             [
                 (lo[k] - pad).max(domain[k][0]),
                 (hi[k] + pad).min(domain[k][1]),
@@ -217,4 +233,56 @@ pub fn convert_where(b: &mut Body, which: impl Fn(&Surface) -> bool) -> Result<(
         euler::set_surface(b, f, id, sense)?;
     }
     ryukei::pcurve::fill(b)
+}
+
+/// A prism 5 mm tall over the triangle with corners `(0, 0)`, `(10, 0)`
+/// and `10 (cos α, sin α)` mm, every face and edge its exact NURBS form
+/// over the face's own parameters (no pad): the long sides cross at
+/// `angle` along the apex edge, an isoline of both splines, as KiCad's
+/// MSOP-8-1EP's NURBS pairs share theirs (#303).
+pub fn isoline_wedge(angle: f64) -> Body {
+    use ryukei::geom::{Curve2, Frame, Line2, Point2, Point3, Vector3};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    let mm = 1e-3;
+    let (s, c) = ryukei::math::sin_cos(angle);
+    let pts = [
+        Point2::new(0.0, 0.0),
+        Point2::new(10.0 * mm, 0.0),
+        Point2::new(10.0 * mm * c, 10.0 * mm * s),
+    ];
+    let segments = (0..3)
+        .map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % 3]);
+            Segment {
+                key: SegmentKey(10 + i as u128),
+                curve: Curve2::Line2(Line2::through(p, q).expect("a side")),
+                t0: 0.0,
+                t1: p.distance(q),
+            }
+        })
+        .collect();
+    let frame = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .expect("a frame");
+    let profile = ValidProfile::new(Profile {
+        frame,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .expect("a triangle");
+    let (mut b, _) = extrude(
+        OpKey(0x15),
+        &profile,
+        Vector3::new(0.0, 0.0, 1.0),
+        0.0,
+        5.0 * mm,
+    )
+    .expect("a prism");
+    convert_where_with(&mut b, |_| true, false).expect("NURBS forms");
+    b
 }

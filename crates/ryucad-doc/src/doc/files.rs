@@ -80,7 +80,8 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// tweaks (ryucad 17), 17 a flattened import's place (ryucad 21.D), 18
 /// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C), 20 direct edits (ryucad 22), 21
 /// inserts, deletes of bodies and solid paths (ryucad 25), 22 a mate's
-/// limits (ryucad 26). A
+/// limits (ryucad 26), 23 a hole's
+/// thread, fastener, fit and tolerance (ryucad 28). A
 /// feature is written at the lowest format that holds it, so one with
 /// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
@@ -95,6 +96,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::tweak::DRAFT_FORMAT,
         super::body::TOOL_FORMAT,
         super::edit::FORMAT,
+        super::hole::INTENT_FORMAT,
         super::insert::FORMAT,
         super::mate::LIMITS_FORMAT,
     ];
@@ -205,7 +207,7 @@ pub enum Feature {
     Boolean(Boolean),
     Fillet(Fillet),
     Chamfer(Chamfer),
-    Hole(Hole),
+    Hole(Box<Hole>),
     Pattern(Pattern),
     Instance(Instance),
     Mate(Box<Mate>),
@@ -641,8 +643,12 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                     out.push(s);
                 }
             }
-            (k @ ("counterbore" | "countersink" | "depth" | "bottom"), x) => {
+            (k @ ("counterbore" | "countersink" | "depth" | "bottom" | "thread"), x) => {
                 out.extend(super::hole::expression_strings(k, x));
+            }
+            // A hole's tolerance is an object; a fill's or a sew's a string.
+            ("tolerance", x @ Value::Object(_)) => {
+                out.extend(super::hole::expression_strings("tolerance", x));
             }
             (k @ ("spacing" | "spacing2" | "count" | "count2"), x) => {
                 out.extend(super::pattern::expression_strings(k, x));
@@ -754,7 +760,16 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
-    // Highest first: a mate with limits that names a solid path needs 22.
+    // Highest first: a hole with intent is 23, whatever else it names.
+    let ty = v.get("type").and_then(Value::as_str);
+    if ty == Some("hole")
+        && ["thread", "fastener", "fit", "tolerance"]
+            .iter()
+            .any(|k| v.get(*k).is_some())
+    {
+        return super::hole::INTENT_FORMAT;
+    }
+    // A mate with limits that names a solid path needs 22.
     if v.get("type").and_then(Value::as_str) == Some("mate") && v.get("limits").is_some() {
         return super::mate::LIMITS_FORMAT;
     }
@@ -765,7 +780,6 @@ pub fn feature_format(v: &Value) -> u64 {
     {
         return super::insert::FORMAT;
     }
-    let ty = v.get("type").and_then(Value::as_str);
     let retrims = v.get("topology").and_then(Value::as_str) == Some("change")
         || v.get("blends").and_then(Value::as_str) == Some("rebuild");
     if ty.is_some_and(|t| super::edit::TYPES.contains(&t))
@@ -1164,6 +1178,11 @@ impl Feature {
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
         // Highest first, as `feature_format`.
+        if let Feature::Hole(h) = self
+            && h.has_intent()
+        {
+            return super::hole::INTENT_FORMAT;
+        }
         if let Feature::Mate(m) = self
             && m.limits.is_some()
         {
@@ -1354,7 +1373,7 @@ impl Feature {
             "flange" => Feature::Flange(Box::new(Flange::from_fields(&mut o, default, env)?)),
             "unfold" => Feature::Unfold(Box::new(Unfold::from_fields(&mut o, default, env)?)),
             "refold" => Feature::Refold(Box::new(Refold::from_fields(&mut o)?)),
-            "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
+            "hole" => Feature::Hole(Box::new(Hole::from_fields(&mut o, default, env)?)),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
             "insert" => Feature::Insert(Box::new(super::insert::Insert::from_fields(
@@ -2995,6 +3014,32 @@ mod tests {
                 .code,
             Code::FormatTooNew
         );
+    }
+
+    #[test]
+    fn a_hole_with_intent_is_format_23_and_one_without_keeps_its_own() {
+        const { assert!(FEATURE_FORMAT >= super::super::hole::INTENT_FORMAT) };
+        let plain = json!({"format": 3, "kind": FEATURE_KIND, "type": "hole", "sketch": "s",
+                           "form": "simple", "diameter": "5 mm", "depth": "through_all",
+                           "targets": ["b"]});
+        let f = Feature::from_json(&plain, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.format(), feature_format(&plain)), (3, 3));
+        assert_eq!(
+            canonical::to_string(&f.to_json()),
+            canonical::to_string(&plain)
+        );
+        for (k, x) in [
+            ("thread", json!({"standard": "iso_metric", "size": "M6"})),
+            ("fastener", json!({"standard": "house_cap", "size": "M5"})),
+            ("fit", json!("H7")),
+            ("tolerance", json!({"symmetric": "0.01 mm"})),
+        ] {
+            let mut v = plain.clone();
+            v[k] = x;
+            v["format"] = json!(super::super::hole::INTENT_FORMAT);
+            let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+            assert_eq!((f.format(), feature_format(&v)), (23, 23), "{k}");
+        }
     }
 
     #[test]

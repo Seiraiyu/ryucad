@@ -672,8 +672,9 @@ pub(crate) fn inspect(
             (given.to_owned(), None)
         };
         // Just the one entity, wherever it is. A reference names its
-        // solid.
-        for b in &bodies {
+        // solid. A hole's face says which hole.
+        let mut found = None;
+        'bodies: for b in &bodies {
             if in_feature
                 .as_ref()
                 .is_some_and(|f| b["solid"] != f.as_str())
@@ -687,10 +688,25 @@ pub(crate) fn inspect(
                     .iter()
                     .find(|e| e["name"] == name.as_str())
                 {
-                    return Ok(json!({"feature": b["feature"], "solid": b["solid"],
-                                     "kind": kind, "entity": e}));
+                    found = Some(json!({"feature": b["feature"], "solid": b["solid"],
+                                        "kind": kind, "entity": e}));
+                    break 'bodies;
                 }
             }
+        }
+        if let Some(mut v) = found {
+            if v["kind"] == "face"
+                && let (Some(solid), Some(name)) =
+                    (v["solid"].as_str(), v["entity"]["name"].as_str())
+                && let Some(note) = crate::holes::face_note(session, &pid, solid, name)
+            {
+                for k in ["hole", "thread"] {
+                    if let Some(x) = note.get(k) {
+                        v["entity"][k] = x.clone();
+                    }
+                }
+            }
+            return Ok(v);
         }
         return Err(
             Error::new(Code::NotFound, format!("no entity {given} in part {pid}"))

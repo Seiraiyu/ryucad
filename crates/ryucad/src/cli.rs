@@ -86,6 +86,37 @@ enum Command {
     /// Inserts of other parts' solids: move one's pin.
     #[command(subcommand)]
     Insert(InsertCmd),
+    /// Hole tools that need no model.
+    #[command(subcommand)]
+    Hole(HoleCmd),
+    /// Every hole of a part, patterns and mirrors expanded: its ref, spec, type,
+    /// position, axis, sizes, depths, thread, faces and feature.
+    Holes {
+        part: String,
+        /// Only this solid's holes.
+        solid: Option<String>,
+        /// One row per hole as CSV.
+        #[arg(long)]
+        csv: bool,
+        /// Holes of one spec together, with their count.
+        #[arg(long, conflicts_with = "csv")]
+        group: bool,
+        /// One hole by its reference (p/h/p1, p/row/h/p1/1).
+        #[arg(long = "ref", value_name = "REF")]
+        reference: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
+    /// What the hole standards hold, built in and the project's, each value with its
+    /// source: ryucad standards threads|fasteners|drills [STANDARD] [SIZE].
+    Standards {
+        #[arg(value_parser = ["threads", "fasteners", "drills"])]
+        table: String,
+        /// A standard's key (iso_metric, unc, npt, ...), or a drill series
+        /// (metric, fractional, number, letter).
+        standard: Option<String>,
+        size: Option<String>,
+    },
     /// The project's material library: densities (and colours) that mass properties read,
     /// each part's named by its PDM `material` property.
     #[command(subcommand)]
@@ -102,6 +133,10 @@ enum Command {
     /// participant's window, part of the way through with --fraction.
     #[command(subcommand)]
     Explode(ExplodeCmd),
+    /// An assembly's motions: list, save or delete one. Sweep one with
+    /// `assembly sweep`.
+    #[command(subcommand)]
+    Motion(MotionCmd),
     /// A part's 2D drawings: sheets on a template with a title block, and
     /// views projected with exact hidden lines, written as PDF, SVG and
     /// PNG. Every value a sheet shows comes from the model.
@@ -745,6 +780,9 @@ enum Command {
         /// Leave out datum planes, axes and points.
         #[arg(long)]
         no_datums: bool,
+        /// Leave out tapped holes' cosmetic thread rings.
+        #[arg(long)]
+        no_threads: bool,
         #[command(flatten)]
         rev: RevArg,
         /// Frame this revision's model too (repeatable; `working` for the
@@ -1236,6 +1274,59 @@ enum AssemblyCmd {
         #[arg(long = "mate", value_name = "JSON", value_parser = json_object)]
         mates: Vec<Value>,
     },
+    /// Sweep a motion, writing nothing: step its drives from start to
+    /// end, each step solved from the last, and report where it is
+    /// blocked, where anything collides that doesn't at rest
+    /// (--interference, the first contact refined), and how close the
+    /// moving parts come (--clearance). A saved motion, one mate's angle
+    /// (a slider's distance) with --mate --from --to, or --drives.
+    Sweep {
+        part: String,
+        /// A saved motion of the assembly.
+        #[arg(conflicts_with_all = ["mate", "drives"], required_unless_present_any = ["mate", "drives"])]
+        motion: Option<String>,
+        /// Drive this mate's angle (a slider's distance) from --from to --to.
+        #[arg(long, requires_all = ["from", "to"], conflicts_with = "drives")]
+        mate: Option<String>,
+        #[arg(
+            long,
+            value_name = "QUANTITY",
+            allow_hyphen_values = true,
+            requires = "mate"
+        )]
+        from: Option<String>,
+        #[arg(
+            long,
+            value_name = "QUANTITY",
+            allow_hyphen_values = true,
+            requires = "mate"
+        )]
+        to: Option<String>,
+        /// Drives, as a motion file writes them.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        drives: Option<Value>,
+        /// Steps from start to end, 2 to 1,000 (11 when left out; a saved
+        /// motion has its own).
+        #[arg(long, conflicts_with = "motion")]
+        steps: Option<u32>,
+        /// Check each step for instances that collide and don't at rest.
+        #[arg(long)]
+        interference: bool,
+        /// Report each step's closest moving pair.
+        #[arg(long)]
+        clearance: bool,
+        /// How far clearance looks (a length; by default a hundredth of
+        /// the assembly's diagonal).
+        #[arg(long, value_name = "LENGTH", requires = "clearance")]
+        below: Option<String>,
+        /// Give each step's moved instances' poses.
+        #[arg(long)]
+        poses: bool,
+        /// Bisections of the first collision and the first stop (10; 0
+        /// for none).
+        #[arg(long, value_name = "N")]
+        refine: Option<u32>,
+    },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
     Tree {
@@ -1299,7 +1390,9 @@ enum FeatureCmd {
     /// sheets into one body; a thicken (--sheet, or --face repeated;
     /// --front, --back, --face-sides, --operation and --target) of a sheet
     /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
-    /// countersink, --bottom) cut from solids (--target); or a pattern of
+    /// countersink, --bottom; or --spec, --thread with --pitch, --tpi, --class,
+    /// --left-hand, --starts, --thread-depth and --tap-drill, --fastener with
+    /// --fastener-fit, --fit) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
     /// --angle) or mirror (--plane), skipping instances (--skip); an insert of
@@ -1329,6 +1422,9 @@ enum FeatureCmd {
         fields: FieldArgs,
         #[command(flatten)]
         expect: Expect,
+        /// Check and derive the feature, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Change some of a feature's parameters or placement, a sketch's
     /// plane, what an extrude or revolve sweeps and how far, a fillet's or
@@ -1354,6 +1450,9 @@ enum FeatureCmd {
         expressions: Vec<(String, String)>,
         #[command(flatten)]
         expect: Expect,
+        /// Check and derive the feature, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     Delete {
         part: String,
@@ -1565,6 +1664,23 @@ enum InsertCmd {
         /// Fail with `conflict` unless the project is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum HoleCmd {
+    /// Every size, limit and source a spec derives, and its canonical spec: what
+    /// `feature add <part> hole --spec` would build, without a model.
+    Derive {
+        /// The hole's callout, such as "M6x1.0-6H THRU" or "CBORE ISO4762 M5".
+        #[arg(long, value_name = "SPEC")]
+        spec: String,
+        /// Hole fields as JSON, laid over the spec's ('{"diameter": "6.9 mm"}').
+        #[arg(long, value_name = "JSON", value_parser = json_object)]
+        fields: Option<Value>,
+        /// Read this part's parameters.
+        #[arg(long)]
+        part: Option<String>,
     },
 }
 
@@ -1966,6 +2082,37 @@ enum ExplodeCmd {
         off: bool,
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MotionCmd {
+    /// The motions of an assembly, or of every assembly: each one's steps
+    /// and drives as written and as they resolve, with each assembly's
+    /// revision.
+    List { part: Option<String> },
+    /// Save a motion of an assembly, replacing one of that name.
+    Save {
+        part: String,
+        motion: String,
+        /// The drives, as the file writes them:
+        /// '[{"mate": "hinge", "angle": {"from": "-6 deg", "to": "6 deg"}}]' or
+        /// '[{"instances": ["p1"], "rotate": {"axis": {"origin": [0, 0, 0],
+        /// "direction": "z"}, "from": "0 deg", "to": "90 deg"}}]'.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        drives: Value,
+        /// Steps from start to end, 2 to 1,000 (11 when left out).
+        #[arg(long)]
+        steps: Option<u32>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a motion.
+    Delete {
+        part: String,
+        motion: String,
+        #[command(flatten)]
+        expect: Expect,
     },
 }
 
@@ -2683,6 +2830,10 @@ struct ImportArgs {
     /// part of references.
     #[arg(long)]
     flatten: bool,
+    /// A folder to look in for the files an assembly's parts are kept in, after the
+    /// folder of the file naming each (repeatable, in order).
+    #[arg(long, value_name = "DIR")]
+    search: Vec<std::path::PathBuf>,
     /// Write nothing: say what it would store and make, and what each body would be
     /// (a reference, or with --solid how it heals).
     #[arg(long)]
@@ -2959,6 +3110,45 @@ struct FieldArgs {
     /// A hole's bottom: flat (the default), or a drill point's included angle: 118.
     #[arg(long, value_name = "BOTTOM")]
     bottom: Option<String>,
+    /// A hole's spec: "M6x1.0-6H THRU", "1/4-20 UNC-2B .5 DEEP, DRILL .625 DEEP",
+    /// "CBORE ISO4762 M5", "DIA 6 H7 THRU".
+    #[arg(long, value_name = "SPEC")]
+    spec: Option<String>,
+    /// A tapped hole's thread, STANDARD:SIZE: iso_metric:M6, unc:1/4, npt:1/8, bspp:G1/4,
+    /// or a project standard's; "" takes it away.
+    #[arg(long, value_name = "STANDARD:SIZE")]
+    thread: Option<String>,
+    /// A tapped hole's threads per inch, when not the series' own.
+    #[arg(long, value_name = "NUMBER")]
+    tpi: Option<String>,
+    /// A tapped hole's class: 6H, 5G, 2B.
+    #[arg(long = "class", value_name = "CLASS")]
+    thread_class: Option<String>,
+    /// A left-hand thread (--right-hand takes it back).
+    #[arg(long, conflicts_with = "right_hand")]
+    left_hand: bool,
+    #[arg(long)]
+    right_hand: bool,
+    /// A multi-start thread's starts.
+    #[arg(long, value_name = "N")]
+    starts: Option<u32>,
+    /// How deep the thread runs from the mouth: a length, or "full".
+    #[arg(long, value_name = "QUANTITY")]
+    thread_depth: Option<String>,
+    /// The tap drill: table (ryucad's rule, or the project's tap drill), roll-form, or
+    /// engagement:N (percent).
+    #[arg(long, value_name = "table|roll-form|engagement:N")]
+    tap_drill: Option<String>,
+    /// A clearance hole's screw, STANDARD:SIZE from the project's hole_standards.json;
+    /// "" takes it away.
+    #[arg(long, value_name = "STANDARD:SIZE")]
+    fastener: Option<String>,
+    /// The clearance's fit: close, normal or loose.
+    #[arg(long, value_name = "FIT")]
+    fastener_fit: Option<String>,
+    /// The bore's ISO 286 class: H7; "" takes it away.
+    #[arg(long, value_name = "CLASS")]
+    fit: Option<String>,
     /// A join, cut or hole a pattern repeats, or a delete_face's seed: one face of a
     /// hole, boss or pocket, deleted whole. Repeat for several.
     #[arg(long = "seed", value_name = "FEATURE")]
@@ -3154,7 +3344,7 @@ struct FieldArgs {
     /// --radius).
     #[arg(long, value_name = "POINT")]
     start: Option<String>,
-    /// A helix's rise per turn.
+    /// A helix's rise per turn, or a tapped hole's pitch.
     #[arg(long, value_name = "QUANTITY")]
     pitch: Option<String>,
     /// A helix's number of turns.
@@ -3596,6 +3786,16 @@ impl FieldArgs {
             extent.insert("both".into(), json!(b));
         }
         FeatureFields {
+            spec: self.spec.clone(),
+            thread: self.thread.clone().map(Value::String),
+            fastener: self.fastener.clone().map(Value::String),
+            fastener_fit: self.fastener_fit.clone(),
+            fit: self.fit.clone(),
+            tpi: self.tpi.clone().map(Value::String),
+            class: self.thread_class.clone(),
+            starts: self.starts,
+            thread_depth: self.thread_depth.clone().map(Value::String),
+            tap_drill: self.tap_drill.clone(),
             plane: self.plane.clone(),
             neutral: self.neutral.clone(),
             parting: (!self.parting.is_empty()).then(|| self.parting.clone()),
@@ -3795,7 +3995,14 @@ impl FieldArgs {
             pitch: self.pitch.clone().map(Value::String),
             turns: self.turns.clone().map(Value::String),
             height: self.height.clone().map(Value::String),
-            hand: self.hand.clone(),
+            // A helix's --hand, or a tapped hole's --left-hand/--right-hand.
+            hand: if self.left_hand {
+                Some("left".into())
+            } else if self.right_hand {
+                Some("right".into())
+            } else {
+                self.hand.clone()
+            },
             taper: self.taper.clone().map(Value::String),
             path: self.path.clone(),
             law: self.law.clone(),
@@ -4323,6 +4530,33 @@ fn request(cmd: &Command) -> Option<Request> {
                 })
                 .collect(),
         },
+        Command::Assembly(AssemblyCmd::Sweep {
+            part,
+            motion,
+            mate,
+            from,
+            to,
+            drives,
+            steps,
+            interference,
+            clearance,
+            below,
+            poses,
+            refine,
+        }) => Request::AssemblySweep {
+            part: part.clone(),
+            motion: motion.clone(),
+            drives: drives.clone(),
+            mate: mate.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            steps: *steps,
+            interference: *interference,
+            clearance: *clearance,
+            below: below.clone(),
+            poses: *poses,
+            refine: *refine,
+        },
         Command::Feature(FeatureCmd::Add {
             part,
             ty,
@@ -4332,6 +4566,7 @@ fn request(cmd: &Command) -> Option<Request> {
             placement,
             fields,
             expect,
+            dry_run,
         }) => Request::FeatureAdd {
             part: part.clone(),
             ty: ty.clone(),
@@ -4341,6 +4576,7 @@ fn request(cmd: &Command) -> Option<Request> {
             id: id.clone(),
             position: position.to_position(),
             expected_revision: expect.revision.clone(),
+            dry_run: *dry_run,
         },
         Command::Feature(FeatureCmd::Edit {
             part,
@@ -4351,6 +4587,7 @@ fn request(cmd: &Command) -> Option<Request> {
             fields,
             expressions,
             expect,
+            dry_run,
         }) => {
             let mut params = params.to_map();
             params.extend(unset.iter().map(|k| (k.clone(), Value::Null)));
@@ -4365,6 +4602,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     .map(|(k, v)| (k.clone(), json!(v)))
                     .collect(),
                 expected_revision: expect.revision.clone(),
+                dry_run: *dry_run,
             }
         }
         Command::Feature(FeatureCmd::Delete { part, id, expect }) => Request::FeatureDelete {
@@ -4484,6 +4722,35 @@ fn request(cmd: &Command) -> Option<Request> {
             offline: *offline,
             dry_run: *dry_run,
             expected_revision: expect.clone(),
+        },
+        Command::Holes {
+            part,
+            solid,
+            csv,
+            group,
+            reference,
+            rev,
+        } => Request::HolesList {
+            part: part.clone(),
+            solid: solid.clone(),
+            csv: *csv,
+            group: *group,
+            reference: reference.clone(),
+            rev: rev.rev.clone(),
+        },
+        Command::Standards {
+            table,
+            standard,
+            size,
+        } => Request::StandardsList {
+            table: table.clone(),
+            standard: standard.clone(),
+            size: size.clone(),
+        },
+        Command::Hole(HoleCmd::Derive { spec, fields, part }) => Request::HoleDerive {
+            spec: Some(spec.clone()),
+            fields: fields.clone(),
+            part: part.clone(),
         },
         Command::Insert(InsertCmd::Update {
             part,
@@ -4670,6 +4937,29 @@ fn request(cmd: &Command) -> Option<Request> {
             fraction: *fraction,
             off: *off,
             participant: of.clone(),
+        },
+        Command::Motion(MotionCmd::List { part }) => Request::MotionList { part: part.clone() },
+        Command::Motion(MotionCmd::Save {
+            part,
+            motion,
+            drives,
+            steps,
+            expect,
+        }) => Request::MotionSave {
+            part: part.clone(),
+            motion: motion.clone(),
+            drives: drives.clone(),
+            steps: *steps,
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Motion(MotionCmd::Delete {
+            part,
+            motion,
+            expect,
+        }) => Request::MotionDelete {
+            part: part.clone(),
+            motion: motion.clone(),
+            expected_revision: expect.revision.clone(),
         },
         Command::View(ViewCmd::Save {
             part,
@@ -4937,6 +5227,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     product,
                     solid,
                     flatten,
+                    search,
                     dry_run,
                     expect,
                 },
@@ -4956,6 +5247,16 @@ fn request(cmd: &Command) -> Option<Request> {
                 update: update.clone(),
                 solid: *solid,
                 flatten: *flatten,
+                // The daemon's folder isn't the caller's.
+                search: search
+                    .iter()
+                    .map(|d| {
+                        std::path::absolute(d)
+                            .unwrap_or_else(|_| d.clone())
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect(),
             }
         }
         Command::Export {
@@ -5297,6 +5598,7 @@ fn request(cmd: &Command) -> Option<Request> {
             no_edges,
             no_sketches,
             no_datums,
+            no_threads,
             rev,
             frame,
             compare,
@@ -5322,6 +5624,7 @@ fn request(cmd: &Command) -> Option<Request> {
             labels: Some(*labels),
             sketches: Some(!no_sketches),
             datums: Some(!no_datums),
+            threads: Some(!no_threads),
             rev: rev.rev.clone(),
             frame: frame.clone(),
             compare: compare.clone(),
@@ -5951,6 +6254,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Mass { .. }
             | Command::Feature(FeatureCmd::Edit { .. })
             | Command::Assembly(AssemblyCmd::Tree { .. })
+            | Command::Assembly(AssemblyCmd::Sweep { .. })
             | Command::Interference { .. }
             | Command::Appearance { .. }
             | Command::Render { .. }

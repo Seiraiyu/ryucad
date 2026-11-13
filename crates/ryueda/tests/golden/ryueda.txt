@@ -24,6 +24,8 @@ schematic.breakout.breakout.dark.svg d89fdb704c6ccc3317683981d3967648
 schematic.breakout.breakout.describe 8c14feaa57bba1b38fcd8f471706107e
 schematic.breakout.breakout.explain 48c8716d6565d33a9dadea9c66b50250
 schematic.breakout.breakout.layout ceb86c11bc236b70940d1a342d64921b
+schematic.breakout.breakout.s1.scene.dark cf9de439cc202adca0195586efc1912b
+schematic.breakout.breakout.s1.scene.light ab6c8cb116f2639cd8a3255f505fed62
 schematic.breakout.breakout.svg 1c4c931aebc4ecb1b111a843932efac1
 schematic.breakout.compare.breakout.svg 74dca7833f77dcbbab3e634c46acd45b
 schematic.breakout.compare.pdf 3b37ce3e0c4310c4b35ed7436c1906cc
@@ -33,6 +35,8 @@ schematic.breakout.sensor.dark.svg 0d0459f0ad2d4cbd499ea115ccb6db86
 schematic.breakout.sensor.describe b316f637ec47f0d96f875f264869ab50
 schematic.breakout.sensor.explain dc8f9a8a230655adaf3e9450354478dd
 schematic.breakout.sensor.layout ff2770c0dff9d189e55c5df53fc7d976
+schematic.breakout.sensor.s1.scene.dark 8f25bb3e553de5c3c5f1a033ef004cb1
+schematic.breakout.sensor.s1.scene.light d7d441248b0b2f2997f948709dcff13a
 schematic.breakout.sensor.svg 8319ce4a4917c940e955ce0e725a042d
 schematic.breakout.styled.breakout.dark.svg e43bc883311b161a54d260a1b04d7de2
 schematic.breakout.styled.breakout.layout ceb86c11bc236b70940d1a342d64921b
@@ -44,6 +48,8 @@ schematic.buck.buck.dark.svg 1cfcee30459220f67cdb7712e9de314b
 schematic.buck.buck.describe 9361b638a02c837e46898c2e4a381c5b
 schematic.buck.buck.explain df83a1118c0e3fa3120d12f80696d444
 schematic.buck.buck.layout 8d8a1347deee1ba6511d091071bea834
+schematic.buck.buck.s1.scene.dark 6e0a2544739cd038e11fc4961ed607d0
+schematic.buck.buck.s1.scene.light f5346ed60d6847a6296ee42b9f95b952
 schematic.buck.buck.svg cbd3f14cd00a0ea3ed01dd6757f895be
 schematic.buck.pdf 2174adf4047b6ffa8ca7bd10f4b9aaa0
 schematic.ethernet.annotate.across 3e37c20215db0a0a99935fad9f564914
@@ -52,6 +58,8 @@ schematic.ethernet.eth.dark.svg fb151c872231b4d9fe6bb5fddc3073ad
 schematic.ethernet.eth.describe 5489c4ed5e19a8a37832ab0a9291eba8
 schematic.ethernet.eth.explain dc9129b090d2a52b9e39402312458e10
 schematic.ethernet.eth.layout b2c4d606d84c64e3b163bce25b8cee58
+schematic.ethernet.eth.s1.scene.dark 8a25620c362c0ed0c274865b77c31505
+schematic.ethernet.eth.s1.scene.light 8fd54c6648ddecaac8f7366eec47c4ed
 schematic.ethernet.eth.svg 4ea6b74e7529b6534f71c7524745cb01
 schematic.ethernet.pdf b21ca79d40c73704c8422b97b279c6e7
 schematic.ethernet.status_led.dark.svg bc85c437b4a5c513034fbecee856f473
@@ -60,11 +68,15 @@ schematic.ethernet.status_led.explain 8faeb19600b07e1986388ade7190b748
 schematic.ethernet.status_led.layout 25a1e0f3976a8b9cdcaf45124b5dac11
 schematic.ethernet.status_led.led_act.svg b21097e2d0e4ecc03ff7d0b78f852f13
 schematic.ethernet.status_led.led_lnk.svg 72e69f6d5c2ec3618e2a237f629ac7be
+schematic.ethernet.status_led.s1.scene.dark dd0d040da1d7b71b8e32e744960e7a2e
+schematic.ethernet.status_led.s1.scene.light fd8ddaeaba98148680882a3a15579a13
 schematic.ethernet.status_led.svg b21097e2d0e4ecc03ff7d0b78f852f13
 schematic.frontend.amp.dark.svg 43dd9f58e2d213554485875734618d37
 schematic.frontend.amp.describe 55f52c03c5d535a13e0c9caad634962b
 schematic.frontend.amp.explain 1cf2a520ca572c2ba29caed32caacb5c
 schematic.frontend.amp.layout bcb783ee4a9e72189c56b5a579df36ba
+schematic.frontend.amp.s1.scene.dark 06dd42f0f67fcce8e88ad1e7c0aa658c
+schematic.frontend.amp.s1.scene.light 6f164c12df6884d62768979001ee4195
 schematic.frontend.amp.svg 47fad886876623dd79265815cda7e87c
 schematic.frontend.annotate.across 798b6f9cd5cad9bf8c13e6d397a9ff26
 schematic.frontend.annotate.down ab7081edd30db079ddf37ebcc2cd1e84
@@ -74,6 +86,8 @@ schematic.frontend.baldiff.dark.svg 064056e99efb37d0cfeb37787fee3795
 schematic.frontend.baldiff.describe 1fba9799ea60811c183d9309a2d3ab4f
 schematic.frontend.baldiff.explain 3b685f4298ce65a8408429d9b3f7d214
 schematic.frontend.baldiff.layout 8e2fae799de6d66b9234ed12acb1ea57
+schematic.frontend.baldiff.s1.scene.dark c1abe9aacaf490b16c98b1f42f5bc981
+schematic.frontend.baldiff.s1.scene.light 72e7698f3bf08024b88d8145e9c5c32f
 schematic.frontend.baldiff.svg 0a0b399e8794d902b760e6b23cd39da6
 schematic.frontend.ivconv.dark.svg 16781ce7aaa29f0273daf57ed773c0e2
 schematic.frontend.ivconv.describe 1712088fd05728fe42a56df4fc64dee3
@@ -81,6 +95,8 @@ schematic.frontend.ivconv.explain 6c6d3d0d62650617f23e23d95f4b2a64
 schematic.frontend.ivconv.iv_l.svg fc9ac37f1c525d80076dfecd53dd1dde
 schematic.frontend.ivconv.iv_r.svg a6412b28beb7e0a4587d6409ff1cf942
 schematic.frontend.ivconv.layout 5300e78df0b5c2f588efab9c7d52ffa9
+schematic.frontend.ivconv.s1.scene.dark 6fb6686820f04f4267d91b4adf8220b8
+schematic.frontend.ivconv.s1.scene.light e34e5d8824052eaee7b97cd9cc4e2ec4
 schematic.frontend.ivconv.svg fc9ac37f1c525d80076dfecd53dd1dde
 schematic.frontend.pdf bbe3465b84781a5d47bfda406a0b0b4b
 schematic.rp2040.annotate.across 36073b870adb5b768ccbe3c413bb8770
@@ -89,6 +105,12 @@ schematic.rp2040.mitayi.dark.svg 02d47ce37dde5e77370060cef694496c
 schematic.rp2040.mitayi.describe 145da93e74938e2d53a8fb1e653ae1f4
 schematic.rp2040.mitayi.explain 16cb1458d0f830d4d3405620deb0dcf0
 schematic.rp2040.mitayi.layout ee0308138d0608c3c79012cb95120b0a
+schematic.rp2040.mitayi.s1.scene.dark 891abf3fa008a5519b18cea0919acede
+schematic.rp2040.mitayi.s1.scene.light 2e492d920591536793bea41b6ad336ff
+schematic.rp2040.mitayi.s2.scene.dark 440a119114b9ff98472522e35a984ae6
+schematic.rp2040.mitayi.s2.scene.light 23bae9bbe83ff96bd8a86b7b26d75c31
+schematic.rp2040.mitayi.s3.scene.dark 3085e6cb19a716f71e8c311ec10cb3d7
+schematic.rp2040.mitayi.s3.scene.light d7912d3f997660197cd1d7d75e551e2d
 schematic.rp2040.mitayi.svg 95f834e451b72c7e5b09f0414a0ff084
 schematic.rp2040.pdf 7ca7387de8e824e1ec5540fd76e34476
 symbols.lint 674b164854a974b7bb718d051e7a1109

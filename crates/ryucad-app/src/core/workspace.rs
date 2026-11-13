@@ -68,6 +68,8 @@ enum Pending {
     Sketch(BodyKey, String),
     /// A path's or helix's drawing, asked for at this part revision.
     Path(BodyKey, String),
+    /// A part's holes, at its revision.
+    Holes(String, String),
     /// The chosen sweep's or loft's drawing, asked for at this part
     /// revision.
     Sweep(BodyKey, String),
@@ -1934,6 +1936,7 @@ impl Workspace {
             id: None,
             position: Default::default(),
             expected_revision: expected,
+            dry_run: false,
         };
         self.send(req, Pending::DepsPlace);
     }
@@ -4912,6 +4915,16 @@ impl Workspace {
                     Err(e) => self.fail(e),
                 }
             }
+            // A part that doesn't rebuild has no holes to show.
+            (Pending::Holes(part, revision), a) => {
+                self.model.holes_answered(&part, &revision);
+                let mut t = match a {
+                    Ok(a) => crate::core::threads::HoleTable::from_list(&a.result),
+                    Err(_) => crate::core::threads::HoleTable::default(),
+                };
+                t.revision = revision;
+                self.model.take_holes(&part, t);
+            }
             (Pending::Sweep(key, _), a) => {
                 if self.made_for.as_ref() == Some(&key) {
                     match a {
@@ -5423,6 +5436,17 @@ impl Workspace {
             };
             self.send(req, Pending::Path(key, revision));
         }
+        if let Some(revision) = self.model.ask_holes(part) {
+            let req = Request::HolesList {
+                part: part.to_owned(),
+                solid: None,
+                csv: false,
+                group: false,
+                reference: None,
+                rev: self.model_rev(),
+            };
+            self.send(req, Pending::Holes(part.to_owned(), revision));
+        }
     }
 
     /// Fetches display meshes, one body per request (an assembly's by the
@@ -5563,6 +5587,7 @@ fn import_request(path: &str, update: Option<String>, dry_run: bool, solid: bool
         update,
         solid,
         flatten: false,
+        search: Vec::new(),
     }
 }
 

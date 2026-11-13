@@ -269,6 +269,16 @@ pub enum Code {
     ImportProductMissing,
     /// An import feature names a body its product doesn't have.
     ImportBodyMissing,
+    /// An assembly whose products' shapes are in other files that weren't
+    /// found (design 448, plan 24.D): every document that didn't resolve
+    /// is in the details (`missing`: file, products, referenced_by,
+    /// searched, reason `not_found` or `format`). Nothing was written.
+    ImportExternalMissing,
+    /// An external file that doesn't say which of its roots a referencing
+    /// product is: several roots and none alone has its id or name, or no
+    /// root that makes anything. The file, the referencing file, the
+    /// product and the roots are in the details.
+    ImportExternalAmbiguous,
     /// A body of an imported file that can't be read or healed. Its
     /// reason and the STEP instances involved are in the details.
     ImportFailed,
@@ -315,6 +325,24 @@ pub enum Code {
     /// An explode's step names an instance path the assembly no longer
     /// places (a warning: the step moves the rest).
     ExplodeUnresolved,
+    /// An assembly has no motion by that ID (`motion.delete`,
+    /// `assembly.sweep` with `motion`); the details name the assembly and
+    /// the motions it has.
+    MotionNotFound,
+    /// A motion's drive names a mate or an instance the assembly doesn't
+    /// have, or a mate whose form has no such value: `motion.save`
+    /// refuses it, and a saved file that comes to it shows it in
+    /// `motion.list`, `doctor` and `check` (a warning there).
+    MotionUnresolved,
+    /// A mate drive's range goes past that mate's own limits (a warning:
+    /// the sweep reports those steps blocked).
+    MotionPastLimit,
+    /// `check`: a saved motion's sweep is blocked at some step (its
+    /// mates can't hold there, or a drive is past a stop).
+    MotionBlocked,
+    /// `check --interference`: a saved motion makes instances collide
+    /// that don't at rest; the first collision, refined.
+    MotionInterferes,
     /// A ryueda library alias whose path holds no library project: no
     /// project there, not a library, or outside the repository.
     LibraryMissing,
@@ -979,6 +1007,13 @@ pub enum Code {
     /// A layout both sides of a merge changed, which `ryueda merge status`
     /// merges once the merged connectivity reads (design 518).
     LayoutPending,
+    /// ryueda: a `scene` or a view naming a sheet its block's layout
+    /// doesn't have; `details.sheets` lists the block's (plan 3.B).
+    SheetNotFound,
+    /// ryueda: a selection, highlight, status or `view.show` naming
+    /// nothing in the project; `details.ref`, and `details.closest`, the
+    /// nearest reference paths (plan 3.B).
+    RefUnresolved,
 }
 
 impl Code {
@@ -1051,6 +1086,17 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_reference_codes() {
+        for (c, name) in [
+            (Code::ImportExternalMissing, "import_external_missing"),
+            (Code::ImportExternalAmbiguous, "import_external_ambiguous"),
+        ] {
+            assert_eq!(json!(c), json!(name));
+            assert_eq!(c.exit_code(), 1, "{name}");
+        }
+    }
 
     #[test]
     fn part_data_codes() {
@@ -1262,6 +1308,11 @@ mod tests {
         );
         assert_eq!(json!(Code::ExplodeNotFound), json!("explode_not_found"));
         assert_eq!(json!(Code::ExplodeUnresolved), json!("explode_unresolved"));
+        assert_eq!(json!(Code::MotionNotFound), json!("motion_not_found"));
+        assert_eq!(json!(Code::MotionUnresolved), json!("motion_unresolved"));
+        assert_eq!(json!(Code::MotionPastLimit), json!("motion_past_limit"));
+        assert_eq!(json!(Code::MotionBlocked), json!("motion_blocked"));
+        assert_eq!(json!(Code::MotionInterferes), json!("motion_interferes"));
         assert_eq!(json!(Code::LibraryMissing), json!("library_missing"));
         assert_eq!(
             json!(Code::LibraryCourtyardMissing),
@@ -1425,6 +1476,17 @@ mod tests {
     }
 
     #[test]
+    fn eda_live_codes() {
+        for (c, s) in [
+            (Code::SheetNotFound, "sheet_not_found"),
+            (Code::RefUnresolved, "ref_unresolved"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+        }
+    }
+
+    #[test]
     fn exit_codes() {
         assert_eq!(Code::InvalidParam.exit_code(), 1);
         assert_eq!(Code::ExportFailed.exit_code(), 1);
@@ -1434,6 +1496,15 @@ mod tests {
         assert_eq!(Code::AppearanceUnresolved.exit_code(), 1);
         assert_eq!(Code::ExplodeNotFound.exit_code(), 1);
         assert_eq!(Code::ExplodeUnresolved.exit_code(), 1);
+        for c in [
+            Code::MotionNotFound,
+            Code::MotionUnresolved,
+            Code::MotionPastLimit,
+            Code::MotionBlocked,
+            Code::MotionInterferes,
+        ] {
+            assert_eq!(c.exit_code(), 1, "{c:?}");
+        }
         assert_eq!(Code::ExportMeshFaults.exit_code(), 1);
         assert_eq!(Code::ExportTooLarge.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);

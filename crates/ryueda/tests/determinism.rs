@@ -435,6 +435,35 @@ fn schematic(golden: &mut Golden, dir: &Path, name: &str) {
         );
         let d = ryueda(dir, 1, &["describe", "--block", &b]);
         golden.json(&format!("schematic.{name}.{b}.describe"), &d);
+        // Each sheet as a window draws it (plan 3.B), light and dark,
+        // alike on one thread and eight. Its revisions hash the manifest,
+        // whose project ID `init` draws at random, so they are left out.
+        let first = ryueda(dir, 1, &["scene", "--block", &b]);
+        let sheets: Vec<String> = first["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["sheet"].as_str().unwrap().to_owned())
+            .collect();
+        for s in &sheets {
+            for theme in ["light", "dark"] {
+                let args = [
+                    "scene",
+                    "--block",
+                    b.as_str(),
+                    "--sheet",
+                    s.as_str(),
+                    "--theme",
+                    theme,
+                ];
+                let mut one = ryueda(dir, 1, &args);
+                assert_eq!(ryueda(dir, 8, &args), one, "{name} {b} {s} {theme}");
+                let o = one.as_object_mut().unwrap();
+                o.remove("revision");
+                o.remove("revisions");
+                golden.json(&format!("schematic.{name}.{b}.{s}.scene.{theme}"), &one);
+            }
+        }
         // A stacked block: each layer drawn with its own designators.
         let layers = d["blocks"][0]["layers"]
             .as_array()

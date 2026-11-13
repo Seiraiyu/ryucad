@@ -29,6 +29,10 @@ pub struct Plan {
     /// What the file holds and what the import made of it, a line per
     /// category (design 448): the answer's `transfer` summaries.
     pub transfer: Vec<String>,
+    /// The other files an assembly's parts are kept in (design 448,
+    /// 24.D): where each is kept, the names the assembly gave it, and
+    /// whether it is new, kept already or updated.
+    pub external: Vec<String>,
 }
 
 fn text(v: &Value) -> &str {
@@ -180,6 +184,25 @@ impl Plan {
                 .flatten()
                 .filter_map(|c| c["summary"].as_str().map(str::to_owned))
                 .collect(),
+            external: v["external"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|x| {
+                    let how = if x.get("from").is_some() {
+                        "updated"
+                    } else if x["reused"] == true {
+                        "kept already"
+                    } else {
+                        "new"
+                    };
+                    format!(
+                        "{}, from {} ({how})",
+                        text(&x["path"]),
+                        strings(&x["documents"]).join(", ")
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -236,6 +259,25 @@ impl Import {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answer_across_files_lists_the_other_files() {
+        let v = serde_json::json!({
+            "file": {"path": "imports/asm.step", "reused": false},
+            "parts": [],
+            "external": [
+                {"path": "imports/box.step", "documents": ["box.stp"], "reused": false, "stored": true},
+                {"path": "imports/pin.step", "documents": ["pin.stp"], "from": "ab", "stored": true},
+            ],
+        });
+        assert_eq!(
+            Plan::from_answer(&v).external,
+            [
+                "imports/box.step, from box.stp (new)",
+                "imports/pin.step, from pin.stp (updated)"
+            ]
+        );
+    }
     use serde_json::json;
 
     #[test]

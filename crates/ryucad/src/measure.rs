@@ -676,6 +676,21 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
     let (commit, s) = session.at(rev)?;
     let unit = s.project().manifest.default_unit;
     let refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+    // A hole's reference, alone, is measured as its row.
+    if let [one] = refs.as_slice()
+        && let Some(pid) = crate::holes::is_ref(s, one)
+    {
+        let holes = crate::holes::list(s, &pid, None)?;
+        let row = holes.by_ref(one).ok_or_else(|| {
+            Error::new(Code::NotFound, format!("{pid} has no hole {one}")).with("ref", *one)
+        })?;
+        let mut v = json!({"entity": one, "kind": "hole", "hole": row.to_json(unit),
+                           "unit": unit.as_str()});
+        if let Some(c) = commit {
+            v["commit"] = json!(c);
+        }
+        return Ok(v);
+    }
     if let Some(mut v) = path_measure(s, &refs, unit)? {
         if let Some(c) = commit {
             v["commit"] = json!(c);
@@ -762,6 +777,14 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
         }
         _ => unreachable!("one or two"),
     };
+    // A face of a hole says which.
+    if let [one] = refs.as_slice()
+        && v["kind"] == "face"
+        && let Ok(r) = crate::entity::EntityRef::parse(one)
+        && let Some(note) = crate::holes::face_note(s, &r.part, r.feature.as_str(), &r.name)
+    {
+        v["hole"] = note["hole"].clone();
+    }
     if let Some(c) = commit {
         v["commit"] = json!(c);
     }
