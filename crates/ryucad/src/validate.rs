@@ -20,6 +20,8 @@ use crate::git::{MergeState, Repo, Unmerged};
 use crate::merge::{Conflict, Kind};
 use crate::rebuild::Output;
 use crate::session::Session;
+pub(crate) use ryu_git::value::put;
+use ryu_git::value::set_at;
 use ryu_session::job::Phase;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -114,6 +116,7 @@ fn record_message(path: &str, pointer: &str, c: &Conflict) -> String {
         }
         Kind::Order => format!("{at}: each side puts this feature somewhere else"),
         Kind::IdCollision => format!("{at}: each side added something different under this ID"),
+        Kind::LayoutPending => format!("{at}: a layout both sides changed"),
     }
 }
 
@@ -1619,56 +1622,6 @@ pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
     session.previews.insert(0, (key, v.clone()));
     session.previews.truncate(PREVIEWS);
     Ok(v)
-}
-
-/// Puts `x` at `pointer` in `v`, making the objects on the way; `None`
-/// removes what is there.
-fn set_at(v: &mut Value, pointer: &str, x: Option<Value>) {
-    if pointer.is_empty() {
-        if let Some(x) = x {
-            *v = x;
-        }
-        return;
-    }
-    let mut seg: Vec<String> = pointer
-        .split('/')
-        .skip(1)
-        .map(crate::merge::unescape)
-        .collect();
-    let last = seg.pop().expect("a pointer below the root has a segment");
-    let mut at = v;
-    for k in seg {
-        if !at.get(&k).is_some_and(Value::is_object) {
-            at[&k] = json!({});
-        }
-        at = at.get_mut(&k).expect("just made");
-    }
-    let Some(o) = at.as_object_mut() else { return };
-    match x {
-        Some(x) => {
-            o.insert(last, x);
-        }
-        None => {
-            o.remove(&last);
-        }
-    }
-}
-
-/// Puts feature `id` in `list` where `place` says ([`crate::merge::place`]'s
-/// form: first, or after a feature), or takes it out for `None`. After a
-/// feature the list doesn't have, or anywhere else, it goes last.
-pub(crate) fn put(list: &mut Vec<String>, id: &str, place: Option<&Value>) {
-    list.retain(|f| f != id);
-    let Some(p) = place else { return };
-    let at = match (p.get("first"), p.get("after").and_then(Value::as_str)) {
-        (Some(Value::Bool(true)), _) => 0,
-        (_, Some(after)) => list
-            .iter()
-            .position(|f| f == after)
-            .map_or(list.len(), |i| i + 1),
-        _ => list.len(),
-    };
-    list.insert(at, id.to_owned());
 }
 
 /// A file's JSON from the files being written.
