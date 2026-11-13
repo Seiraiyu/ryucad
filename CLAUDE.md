@@ -200,6 +200,7 @@ What each phase decided is recorded per area under `docs/claude/`. Read the guid
 - `docs/claude/ryucad-surfaces.md` — sheets in the model, surface sweeps, planar faces
 - `docs/claude/ryucad-annotations.md` — annotations: files, proposed changes and their capture, annotation revisions, apply, the lifecycle, participant modes
 - `docs/claude/ryucad-drawings.md` — drawings: ryu-draw, drawing and template files, views through ryukei's projection, layout, PDF, SVG and PNG
+- `docs/claude/ryucad-scripting.md` — scripting: `ryucad session --stdio`, paths made absolute, the in-process fallback, cancel
 - `docs/claude/ryupdm.md` — the PDM data model and local PDM
 - `docs/claude/ryupdm-review.md` — hosted review
 - `docs/claude/shared-crates.md` — ryu-math, ryu-doc, ryu-session
