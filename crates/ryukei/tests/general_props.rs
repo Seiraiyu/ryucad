@@ -307,9 +307,13 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(24))]
 
     /// NURBS sides crossing along an isoline edge at a random angle
-    /// (#303's crossing certificate): the prism is convex, so sampling any
-    /// pair of its faces finds them meeting only along the edge they
-    /// share, and the check must say so.
+    /// (#303's shape): the prism is convex, so sampling any pair of its
+    /// faces finds them meeting only along the edge they share, and the
+    /// check must say so. Its traces settle these pairs before the
+    /// crossing certificate is reached, so this guards the check's order
+    /// (the certificate only where a pair was `CannotCheck`) and its
+    /// verdicts, not the certificate itself; `check::intersect`'s unit
+    /// tests call that directly.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "slow in a debug build: CI runs it in release")]
     fn nurbs_sides_crossing_at_any_angle_check_clean(deg in 2.0f64..178.0) {

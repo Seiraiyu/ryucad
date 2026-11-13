@@ -506,21 +506,30 @@ fn trace_boxes(body: &Body, a: FaceId, b: FaceId, boxes: Vec<Box3>, m: &Meter) -
 /// certified.
 ///
 /// **Inside a strip of width `w`** round the edges the faces meet only
-/// along them ([`crossing_pieces`]). Take `p` in both faces within `w`
-/// of an edge, and `x` the nearest point to it of the curve the surfaces
-/// share there, within the edge's tolerance of the edge, at `d = |p - x|
-/// ≤ w + tol`. Within the pieces' grown boxes each face bends away from
+/// along them ([`crossing_pieces`]). Take `p` in both faces near an
+/// edge, and `x` the nearest point to it of the curve the surfaces share
+/// there, within the edge's tolerance of the edge, at `d = |p - x|`.
+/// Within the pieces' grown boxes each face bends away from
 /// its tangent plane at `x` by at most `K d²`, so `p - x` lies within an
 /// angle whose sine is `K d` of both tangent planes. It is also square to
 /// the shared curve, whose tangent is along `n_a × n_b`, so it lies in the
 /// plane of the two normals. A unit vector in that plane within that
 /// angle of both tangent planes needs `sin θ ≤ 2 K d`, where `θ` is the
-/// angle between the normals. With `4 K (w + tol) ≤ sin θ`, `d` is zero.
+/// angle between the normals. With `4 K (w + tol) ≤ sin θ`, then, no
+/// common `p` has `0 < d < 2 (w + tol)`: the pieces' boxes grown by
+/// `3 w + 2 tol` hold the ball of that radius round every such `x`, since
+/// `tol ≤ w / 4`.
 ///
 /// **Outside the strip**, either face keeping off the other's surface
 /// ([`face_beside`], strip `w`) settles the pair as apart. Failing that,
 /// the pair is traced over its region less the pieces' boxes, each
-/// grown by `w` ([`trace_boxes`]), and judged as a trace is.
+/// grown by `w / 2` ([`trace_boxes`]), and judged as a trace is. The
+/// boxes left out must lie within the radius the certificate covers,
+/// `2 (w + tol)`: a point of a piece's box grown by `w / 2` on each axis
+/// is within `w √3 / 2` of the box, which is no wider than `w`, so within
+/// `(1 + √3 / 2) w ≈ 1.87 w < 2 w` of the edge. Grown by `w`, a corner
+/// would be `(1 + √3) w ≈ 2.73 w` away, and a crossing there neither
+/// certified nor traced.
 ///
 /// `w` starts at `sqrt(2 × size × reach)`, the width the touch rule
 /// already allows a tangent wedge at a shared vertex, so nothing new is
@@ -581,9 +590,10 @@ fn crossing_beside(
     Some(fault(a, b, &prune(body, a, b, meet)))
 }
 
-/// The boxes of pieces of `shared`'s curves, each grown by `w`, within
-/// which the faces are certified to meet only along those edges
-/// ([`crossing_beside`]): each edge's range halved (20 times at most)
+/// The boxes of pieces of `shared`'s curves, each grown by `w / 2` (so
+/// within `2 w` of the curves, inside the radius certified; see
+/// [`crossing_beside`]), within which the faces are certified to meet
+/// only along those edges: each edge's range halved (20 times at most)
 /// until its piece's box ([`crate::geom::Curve::piece_bounds`]) is no
 /// wider than `w`, then both faces' cones ([`normal_cones`]) over the box
 /// grown by `3 w + 2 tol` (which holds every `x` and the ball of radius `d`
@@ -636,7 +646,7 @@ fn crossing_pieces(
             return None;
         }
     }
-    Some(boxes.into_iter().map(|bx| bx.grow(w)).collect())
+    Some(boxes.into_iter().map(|bx| bx.grow(w / 2.0)).collect())
 }
 
 /// The edges two faces both use, each once.
@@ -1409,27 +1419,94 @@ mod tests {
         }
     }
 
-    /// A folded bipyramid's faces cross elsewhere than along the edges they
-    /// share: the certificate never calls such a pair clean.
-    #[test]
-    fn a_crossing_away_from_the_edge_is_not_certified_away() {
-        let m = Meter::free();
-        let folded = bipyramid(Point3::new(0.5, 0.5, 1.0), Point3::new(1.5, 1.5, 2.0));
-        let crossing: Vec<(FaceId, FaceId)> = check_intersections(&folded)
-            .into_iter()
-            .filter_map(|f| match f {
-                Fault::FacesCross { a, b } => Some((a, b)),
-                _ => None,
-            })
-            .collect();
-        assert!(!crossing.is_empty());
-        for (a, b) in crossing {
-            let shared = shared_edges(&folded, a, b);
-            if shared.is_empty() {
-                continue;
-            }
-            assert_ne!(crossing_beside(&folded, a, b, &shared, &m), Some(None));
+    /// `body` with every edge's tolerance loosened to `t`, so that
+    /// [`crossing_beside`]'s strip, `sqrt(2 × size × 100 t)`, is wide and
+    /// its edges need few pieces.
+    fn loosened(mut body: Body, t: f64) -> Body {
+        let t = crate::tol::Tolerance::new(t).unwrap();
+        let edges: Vec<EdgeId> = body.edges().collect();
+        for e in edges {
+            body.edges[e].tolerance = t;
         }
+        body
+    }
+
+    /// A curved face and a plane crossing at 90° along the circle they
+    /// share, a cylinder's side and each cap, are certified beside it: the
+    /// side's normal cones bend at `1 / r`, well under `sin θ / (4 (w +
+    /// tol))`, and outside the strip the cap keeps off the cylinder.
+    #[test]
+    fn a_curved_face_crossing_at_an_edge_is_certified_beside_it() {
+        let m = Meter::free();
+        let k = OpKey(1);
+        let body = loosened(
+            primitive::cylinder(k, 1.0, 2.0, &Rigid::IDENTITY)
+                .unwrap()
+                .0,
+            1e-5,
+        );
+        let side = body
+            .faces()
+            .find(|&f| matches!(body.surfaces[body.faces[f].surface], Surface::Cylinder(_)))
+            .unwrap();
+        let mut tried = 0;
+        for cap in body.faces().filter(|&f| f != side) {
+            let shared = shared_edges(&body, side, cap);
+            assert!(!shared.is_empty());
+            tried += 1;
+            assert_eq!(
+                crossing_beside(&body, side, cap, &shared, &m),
+                Some(None),
+                "{cap:?}"
+            );
+        }
+        assert_eq!(tried, 2);
+    }
+
+    /// Faces sharing an edge that also cross well outside the strip: two
+    /// notched planar faces, one in `z = 0` and one in `y = 0`, sharing
+    /// the edge from `(0, 0, 0)` to `(1, 0, 0)` and both holding the line
+    /// past their notches, from `x = 2` to `3`, where they cross. The
+    /// certificate holds beside the edge (planes don't bend) and
+    /// `face_beside` fails, so the pair is traced over its region less the
+    /// pieces' boxes, which finds the crossing: `FacesCross`, never clean.
+    #[test]
+    fn a_crossing_outside_the_strip_is_traced() {
+        let m = Meter::free();
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let body = loosened(
+            polyhedron(
+                &[
+                    p(0.0, 0.0, 0.0),
+                    p(1.0, 0.0, 0.0),
+                    // The face in z = 0.
+                    p(1.0, 0.5, 0.0),
+                    p(2.0, 0.5, 0.0),
+                    p(2.0, -1.0, 0.0),
+                    p(3.0, -1.0, 0.0),
+                    p(3.0, 1.0, 0.0),
+                    p(0.0, 1.0, 0.0),
+                    // The face in y = 0.
+                    p(0.0, 0.0, 1.0),
+                    p(3.0, 0.0, 1.0),
+                    p(3.0, 0.0, -1.0),
+                    p(2.0, 0.0, -1.0),
+                    p(2.0, 0.0, 0.5),
+                    p(1.0, 0.0, 0.5),
+                ],
+                &[&[0, 1, 2, 3, 4, 5, 6, 7], &[1, 0, 8, 9, 10, 11, 12, 13]],
+            ),
+            1e-4,
+        );
+        let faces: Vec<FaceId> = body.faces().collect();
+        let (a, b) = (faces[0], faces[1]);
+        let shared = shared_edges(&body, a, b);
+        assert_eq!(shared.len(), 1);
+        let found = crossing_beside(&body, a, b, &shared, &m);
+        assert!(
+            matches!(found, Some(Some(Fault::FacesCross { .. }))),
+            "{found:?}"
+        );
     }
 
     /// #264: NIST CTC 02's AP242 cylinder and cone (public domain), tangent
