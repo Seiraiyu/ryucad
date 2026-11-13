@@ -5274,6 +5274,131 @@ fn drilled_section(golden: &mut Golden, name: &str, holes_only: bool) {
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
 }
 
+/// Part `hs`: holes with intent in a 60 × 40 × 16 mm plate at x 0 to
+/// 60: tapped through, blind with a split wall, unified left-hand; a
+/// clearance hole from a made-up house table; a fitted bore; a 3 × 3
+/// pattern of the first; and the plate's mirror image about yz, a solid
+/// of its own.
+fn hole_specs_project() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    // Made-up house values.
+    ryucad::doc::project::write_json(
+        &dir.path().join("hole_standards.json"),
+        &json!({
+            "format": 1, "kind": "ryucad.hole_standards",
+            "fasteners": {
+                "house_cap": {"M5": {"clearance": {"close": "5.4 mm", "normal": "5.6 mm",
+                                                   "loose": "6.1 mm"},
+                                     "counterbore": {"diameter": "9.7 mm", "depth": "5.3 mm"}}}
+            }
+        }),
+    )
+    .unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(&mut s, "part.create", json!({"part": "hs"}));
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("hs");
+        call(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "plate", "params": {"x": "60 mm", "y": "40 mm", "z": "16 mm"},
+               "placement": {"origin": ["0 mm", "-20 mm", "0 mm"]}}),
+    );
+    let top =
+        call(&mut s, "inspect", json!({"part": "hs", "feature": "plate"}))["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+            })
+            .map(|f| format!("hs/plate/{}", f["name"].as_str().unwrap()))
+            .unwrap();
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "spots", "face": top}),
+    );
+    let mut ops = Vec::new();
+    for (i, at) in [[6, -16], [30, -12], [45, -12], [20, 10], [45, 10]]
+        .iter()
+        .enumerate()
+    {
+        ops.push(json!({"op": "add", "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "hs", "sketch": "spots", "ops": ops}),
+    );
+    for (id, point, spec) in [
+        ("m6", "p1", "M6x1.0-6H THRU"),
+        ("m8", "p2", "M8x1.0-5H 10 DEEP, DRILL 14 DEEP 118DEG"),
+        ("unc", "p3", "1/4-20 UNC-2B-LH THRU"),
+        ("cap", "p4", "CBORE HOUSE_CAP M5 THRU"),
+        ("fit", "p5", "DIA 6 H7 THRU"),
+    ] {
+        add(
+            &mut s,
+            json!({"type": "hole", "id": id, "sketch": "spots", "points": [point],
+                   "spec": spec}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "grid", "features": ["m6"], "direction": "x",
+               "spacing": "6 mm", "count": 3, "direction2": "y", "spacing2": "6 mm",
+               "count2": 3}),
+    );
+    add(
+        &mut s,
+        json!({"type": "mirror", "id": "m", "solid": "plate", "plane": "yz",
+               "operation": "new"}),
+    );
+    (dir, s)
+}
+
+/// Holes with intent: their bodies bit for bit, the part's hash, every
+/// hole's JSON and every cosmetic thread.
+fn hole_specs_section(golden: &mut Golden) {
+    let mut s = golden.section("hole_specs");
+    let (_dir, mut session) = hole_specs_project();
+    let part = Id::parse("hs", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (id, o) in &result.features {
+        let o = o.as_ref().unwrap();
+        s.str(id.as_str());
+        for (solid, b) in o.solids() {
+            s.str(solid.as_str());
+            s.str(&b.body.dump());
+        }
+        if o.solids().is_empty() {
+            s.str(o.hash());
+        }
+    }
+    s.str(&result.hash);
+    let holes = ryucad::holes::list(&mut session, &part, None).unwrap();
+    // Five holes, eight more from the grid, and the copy's 13.
+    assert_eq!(holes.rows.len(), 26);
+    for r in &holes.rows {
+        s.str(&ryucad::doc::canonical::to_string(&r.to_json(Unit::Mm)));
+    }
+    for t in ryucad::thread::of(&holes) {
+        s.str(&ryucad::doc::canonical::to_string(&t.to_json()));
+    }
+}
+
 #[test]
 fn drilled_solids_are_sound() {
     let (_dir, mut session) = drilled(false);
@@ -6680,6 +6805,7 @@ sections! {
     sheet_metal_flat => sheet_metal_flat_section(&mut golden),
     holes => drilled_section(&mut golden, "holes", true),
     patterns => drilled_section(&mut golden, "patterns", false),
+    hole_specs => hole_specs_section(&mut golden),
     sketch_drawing => sketch_drawing_section(&mut golden),
     diff => diff_section(&mut golden),
     merge => merge_section(&mut golden),
