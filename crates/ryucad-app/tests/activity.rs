@@ -6,7 +6,6 @@ mod common;
 use common::{Project, ryucad};
 use ryucad_app::core::activity::can_undo;
 use ryucad_app::core::workspace::Workspace;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -1336,7 +1336,7 @@ fn new_project_and_open_sample_from_the_start_window() {
             .is_some_and(|p| p.assembly)
     );
     // It rebuilds clean and checks clean, as an agent finds it.
-    let out = common::bin(&ryucad().exe)
+    let out = common::ryucad_cmd(&ryucad().exe)
         .arg("check")
         .current_dir(&sample)
         .output()
@@ -3857,7 +3857,7 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
     ]);
     let arm = std::path::PathBuf::from(v["path"].as_str().unwrap());
     // Both set the box's length: merging arm in would conflict.
-    let out = common::bin(&ryucad().exe)
+    let out = common::ryucad_cmd(&ryucad().exe)
         .args(["feature", "edit", "p", "base", "--param", "x=15"])
         .current_dir(&arm)
         // In process: a daemon there would say who is attached.
@@ -4051,7 +4051,9 @@ fn a_part_shown_empty_is_framed_as_its_first_geometry_comes() {
         let o = a.opened();
         o.ws.idle()
             && o.ws.model.focus.as_deref() == Some("bracket")
-            && ryucad_app::core::pick::Picker::new(&o.ws.model).bounds().is_none()
+            && ryucad_app::core::pick::Picker::new(&o.ws.model)
+                .bounds()
+                .is_none()
     });
     h.run_steps(2);
     // The agent builds it a step at a time: a fixed point at the origin...
@@ -4112,7 +4114,9 @@ fn a_part_shown_empty_is_framed_as_its_first_geometry_comes() {
         modifiers: egui::Modifiers::NONE,
     });
     for i in 1..6 {
-        h.event(egui::Event::PointerMoved(c + egui::vec2(10.0 * i as f32, 0.0)));
+        h.event(egui::Event::PointerMoved(
+            c + egui::vec2(10.0 * i as f32, 0.0),
+        ));
         h.step();
     }
     h.event(egui::Event::PointerButton {
@@ -6457,24 +6461,53 @@ fn choosing_an_annotation_on_another_part_shows_it_from_its_view() {
         "z=5",
     ]);
     p.ok(&[
-        "view", "save", "p", "above", "--eye", "10,5,1000", "--target", "10,5,2.5", "--up",
-        "0,1,0", "--ortho", "30 mm",
+        "view",
+        "save",
+        "p",
+        "above",
+        "--eye",
+        "10,5,1000",
+        "--target",
+        "10,5,2.5",
+        "--up",
+        "0,1,0",
+        "--ortho",
+        "30 mm",
     ]);
     let stroke = r#"{"part": "p", "list": [{"kind": "stroke", "in": "face", "on": "p/base",
         "points_m": [[0.012, 0.002, 0.005], [0.018, 0.006, 0.005]]}]}"#;
     p.ok(&[
-        "annotations", "add", "--comment", "here", "--model", "p", "--of", "above", "--marks",
+        "annotations",
+        "add",
+        "--comment",
+        "here",
+        "--model",
+        "p",
+        "--of",
+        "above",
+        "--marks",
         stroke,
     ]);
     let mut h = window(&p);
-    frames(&mut h, |a| a.opened().ws.idle() && a.opened().ws.annotations.loaded);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.annotations.loaded
+    });
     p.ok(&["focus", "q"]);
     frames(&mut h, |a| {
         a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("q")
     });
     menu(&mut h, "Tools", "Annotations");
     h.run_steps(2);
-    let e = h.state().opened().ws.annotations.all.values().next().unwrap().clone();
+    let e = h
+        .state()
+        .opened()
+        .ws
+        .annotations
+        .all
+        .values()
+        .next()
+        .unwrap()
+        .clone();
     let row = e.spoken(Some(1));
     shown(&mut h, &row);
     h.get_by_label(&row).click();
@@ -6494,7 +6527,11 @@ fn choosing_an_annotation_on_another_part_shows_it_from_its_view() {
     });
     // Nothing frames it again after.
     h.run_steps(10);
-    assert!(from_above(h.state()), "re-framed: {:?}", h.state().opened().view.nav.camera);
+    assert!(
+        from_above(h.state()),
+        "re-framed: {:?}",
+        h.state().opened().view.nav.camera
+    );
 }
 
 /// #782: choosing a row from the palette scrolls the tree to it.
@@ -6590,7 +6627,9 @@ fn the_tree_shows_the_part_of_a_feature_row_it_chooses() {
     frames(&mut h, |a| {
         a.opened().view.chosen == Some(("far".to_owned(), "fb".to_owned()))
     });
-    frames(&mut h, |a| a.opened().ws.model.focus.as_deref() == Some("far"));
+    frames(&mut h, |a| {
+        a.opened().ws.model.focus.as_deref() == Some("far")
+    });
 }
 
 /// #736: a search after scrolling the tree down shows its rows.
@@ -6784,9 +6823,24 @@ fn an_annotations_reply_box_is_named() {
     h.get_by_role_and_label(Role::TextInput, "Reply to #1")
         .type_text("Which edge?");
     h.run_steps(2);
-    let id = h.state().opened().ws.annotations.all.keys().next().unwrap().clone();
+    let id = h
+        .state()
+        .opened()
+        .ws
+        .annotations
+        .all
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
     assert_eq!(
-        h.state().opened().ws.annotation_ui.replies.get(&id).map(String::as_str),
+        h.state()
+            .opened()
+            .ws
+            .annotation_ui
+            .replies
+            .get(&id)
+            .map(String::as_str),
         Some("Which edge?")
     );
 }

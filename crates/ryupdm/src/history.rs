@@ -692,7 +692,6 @@ impl Releases {
 pub(crate) mod tests {
     use super::*;
     use std::path::Path;
-    use std::process::Command;
 
     /// Runs git in `dir` with a fixed identity, and returns what it printed.
     pub(crate) fn git(dir: &Path, args: &[&str]) -> String {

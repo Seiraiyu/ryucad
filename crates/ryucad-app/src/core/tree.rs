@@ -2505,11 +2505,8 @@ mod tests {
         let (states, pdm) = (States::default(), BTreeMap::new());
         let rows = rows(&source(&m, &states, &pdm));
         let none = |_: &BodyKey, _: &str| false;
-        let drawn = |t: &Tree, id: &str| {
-            t.shown(&rows, &none)
-                .iter()
-                .any(|s| rows[s.index].id == id)
-        };
+        let drawn =
+            |t: &Tree, id: &str| t.shown(&rows, &none).iter().any(|s| rows[s.index].id == id);
         let mut tree = Tree::default();
         tree.collapse(&rows, None);
         assert!(!drawn(&tree, "feature:bracket/e1"));

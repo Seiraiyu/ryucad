@@ -65,7 +65,11 @@ mod tests {
         for v in super::LOCATION {
             git.env_remove(v);
         }
-        let st = git.args(["init", "-q"]).current_dir(work.path()).status().unwrap();
+        let st = git
+            .args(["init", "-q"])
+            .current_dir(work.path())
+            .status()
+            .unwrap();
         assert!(st.success());
         assert!(work.path().join(".git").is_dir());
         assert!(std::fs::read_dir(decoy.path()).unwrap().next().is_none());

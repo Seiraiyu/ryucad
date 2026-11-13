@@ -387,14 +387,17 @@ fn an_inherited_git_dir_is_left_alone() {
         .env("GIT_INDEX_FILE", decoy.path().join("index"))
         .output()
         .unwrap();
-    let said = String::from_utf8_lossy(&out.stdout).into_owned()
-        + &String::from_utf8_lossy(&out.stderr);
+    let said =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         String::from_utf8_lossy(&fs::read(decoy.path().join("config")).unwrap()),
         String::from_utf8_lossy(&config),
         "the decoy's config changed: {said}"
     );
-    assert!(!decoy.path().join("index").exists(), "a test wrote the decoy's index: {said}");
+    assert!(
+        !decoy.path().join("index").exists(),
+        "a test wrote the decoy's index: {said}"
+    );
     assert!(out.status.success(), "{said}");
 }
 

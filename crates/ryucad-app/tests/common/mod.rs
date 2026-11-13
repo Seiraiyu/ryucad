@@ -101,9 +101,12 @@ pub fn ryucad() -> &'static Daemon {
         // in its config, so doctor finds the same Git setup whether the
         // target folder sits inside a checkout (as in CI) or not.
         let dir = shared();
-        let init = ryupdm::git_env::isolated().args(["init", "-q"]).arg(dir).status();
+        let init = ryupdm::git_env::isolated()
+            .args(["init", "-q"])
+            .arg(dir)
+            .status();
         assert!(init.unwrap().success(), "git init");
-        let install = bin(&path)
+        let install = ryucad_cmd(&path)
             .args(["git", "install"])
             .current_dir(dir)
             .status();
@@ -115,7 +118,7 @@ pub fn ryucad() -> &'static Daemon {
 /// The `ryucad` binary at `path`, with no `GIT_` variable inherited: a
 /// `GIT_DIR` from `git bisect run` or a hook would point its Git at
 /// another repository (#721).
-pub fn bin(path: impl AsRef<std::ffi::OsStr>) -> Command {
+pub fn ryucad_cmd(path: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(path);
     for v in ryupdm::git_env::inherited() {
         cmd.env_remove(v);
@@ -164,7 +167,7 @@ impl Project {
 
     /// Runs the CLI in the project as the agent `agent`; returns its JSON.
     pub fn cli(&self, args: &[&str]) -> Value {
-        let out = bin(&ryucad().exe)
+        let out = ryucad_cmd(&ryucad().exe)
             .args(args)
             .current_dir(&self.root)
             .output()
@@ -729,7 +732,7 @@ impl Project {
 
 impl Drop for Project {
     fn drop(&mut self) {
-        let _ = bin(&ryucad().exe)
+        let _ = ryucad_cmd(&ryucad().exe)
             .args(["daemon", "stop"])
             .current_dir(&self.root)
             .output();

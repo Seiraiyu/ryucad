@@ -1308,7 +1308,11 @@ impl Scene {
             return;
         };
         if self.ghosts_at == c.generation
-            && self.ghosts_over.iter().map(String::as_str).eq(shown.iter().copied())
+            && self
+                .ghosts_over
+                .iter()
+                .map(String::as_str)
+                .eq(shown.iter().copied())
         {
             return;
         }

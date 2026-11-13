@@ -17,7 +17,6 @@ use ryupdm::state;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 
 const PROJECT: &str = "0123456789abcdef0123456789abcdef";
 
