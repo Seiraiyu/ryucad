@@ -999,7 +999,10 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     // What it acts on: none for a new solid, nor a surface.
     let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new")
         || form.surface.as_ref().is_some_and(|f| f.chosen);
-    for p in [&mut form.targets, &mut form.tools].into_iter().flatten() {
+    for p in [&mut form.targets, &mut form.tools, &mut form.solids]
+        .into_iter()
+        .flatten()
+    {
         if !new {
             picks(ui, p);
         }

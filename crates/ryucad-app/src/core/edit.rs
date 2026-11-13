@@ -1325,6 +1325,9 @@ pub struct Form {
     pub op: Option<Choice>,
     pub target: Option<Choice>,
     pub tools: Option<Picks>,
+    /// A delete_body's solids, each to take out (adding one is an agent's
+    /// work).
+    pub solids: Option<Picks>,
     /// A fillet's or chamfer's groups.
     pub blend: Option<BlendForm>,
     /// A hole's sizes, depth and points.
@@ -1546,6 +1549,7 @@ impl Form {
                 .then(|| Choice::new("op", &["unite", "subtract", "intersect"], text(&v["op"]))),
             target: boolean.then(|| Choice::new("target", &[], text(&v["target"]))),
             tools: boolean.then(|| Picks::new("tools", strings(&v["tools"]))),
+            solids: (ty == "delete_body").then(|| Picks::new("solids", strings(&v["solids"]))),
             blend,
             hole,
             pattern,
@@ -1812,7 +1816,7 @@ impl Form {
                 .flatten()
                 .any(Choice::dirty)
             || self.fixed.as_ref().is_some_and(Flag::dirty)
-            || [&self.targets, &self.tools]
+            || [&self.targets, &self.tools, &self.solids]
                 .into_iter()
                 .flatten()
                 .any(Picks::dirty)
@@ -1858,7 +1862,10 @@ impl Form {
         if let Some(f) = &mut self.fixed {
             f.chosen = f.read;
         }
-        for p in [&mut self.targets, &mut self.tools].into_iter().flatten() {
+        for p in [&mut self.targets, &mut self.tools, &mut self.solids]
+            .into_iter()
+            .flatten()
+        {
             p.chosen.clone_from(&p.read);
         }
         if let Some(e) = &mut self.extent {
@@ -1953,6 +1960,7 @@ impl Form {
             op: chosen(&self.op),
             target: chosen(&self.target),
             tools: picked(&self.tools),
+            solids: picked(&self.solids),
             groups: blend
                 .filter(|b| b.groups_dirty())
                 .map(BlendForm::groups_json),
@@ -2202,6 +2210,23 @@ impl DimForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deletes_solids_are_taken_out_one_by_one() {
+        let shown = json!({"id": "d", "type": "delete_body", "revision": "r1",
+                           "solids": ["brd/boss", "lid"]});
+        let mut f = Form::from_show_in("e", &shown, Unit::Mm);
+        let s = f.solids.as_mut().unwrap();
+        assert_eq!(s.read, ["brd/boss", "lid"]);
+        s.toggle("lid");
+        assert!(f.dirty());
+        let Request::FeatureEdit { fields, .. } = f.request().unwrap() else {
+            panic!("an edit")
+        };
+        assert_eq!(fields.solids, Some(vec!["brd/boss".to_owned()]));
+        f.revert();
+        assert!(!f.dirty());
+    }
 
     #[test]
     fn an_inserts_form_edits_its_pin_and_its_placement_from_the_identity() {
