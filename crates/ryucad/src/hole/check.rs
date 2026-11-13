@@ -116,10 +116,116 @@ pub(crate) struct Ctx<'a> {
     pub job: &'a ryu_session::job::Job,
 }
 
+/// Rows of one feature with one value of `key`, in order, as one finding's
+/// holes (a pattern's hundred rows are one finding).
+fn grouped<'a, K: PartialEq>(
+    rows: &[&'a Row],
+    key: impl Fn(&Row) -> Option<K>,
+) -> Vec<(K, Vec<&'a Row>)> {
+    let mut out: Vec<(K, Vec<&Row>)> = Vec::new();
+    for r in rows {
+        let Some(k) = key(r) else { continue };
+        match out
+            .iter_mut()
+            .find(|(k2, g)| *k2 == k && g[0].feature == r.feature)
+        {
+            Some((_, g)) => g.push(r),
+            None => out.push((k, vec![r])),
+        }
+    }
+    out
+}
+
+fn refs(g: &[&Row]) -> Vec<String> {
+    g.iter().map(|r| r.reference.clone()).collect()
+}
+
+/// `hole_tap_drill_nonstandard`: a tapped hole's drill that is no standard
+/// drill (an override, or an engagement rule's result), with the nearest.
+fn tap_drills(part: &Id, rows: &[&Row]) -> Vec<Finding> {
+    grouped(rows, |r| {
+        let t = r.sizes.thread.as_ref()?;
+        (!r.sizes.drill_standard).then(|| (r.sizes.drill.to_nm(), t.tpi.is_some()))
+    })
+    .into_iter()
+    .map(|((nm, inch), g)| {
+        let d = ryu_standards::drill::nearest(nm, inch);
+        let text = if inch {
+            ryu_standards::in_decimal(d.nm).map_or_else(
+                || format!("{} mm", ryu_standards::mm_decimal(d.nm)),
+                |t| format!("{t} in"),
+            )
+        } else {
+            format!("{} mm", ryu_standards::mm_decimal(d.nm))
+        };
+        Finding {
+            code: "hole_tap_drill_nonstandard",
+            holes: refs(&g),
+            message: format!(
+                "{}: tap drill {} is no standard drill; the nearest is {} ({})",
+                g[0].feature, g[0].sizes.drill.text, d.name, text
+            ),
+            details: json!({"drill": g[0].sizes.drill.text, "nearest": text, "name": d.name,
+                            "source": g[0].sizes.drill.source.kind()}),
+            fixes: vec![edit(part, &g[0].feature, json!({"diameter": text}))],
+        }
+    })
+    .collect()
+}
+
+/// `hole_thread_engagement`: threaded length under `k × D`.
+fn engagement(part: &Id, rows: &[&Row], k: f64) -> Vec<Finding> {
+    grouped(rows, |r| {
+        let t = r.sizes.thread.as_ref()?;
+        let d = t.major.as_ref().map_or(r.sizes.drill.si, |m| m.si);
+        let start = r.sizes.thread_start();
+        let end = r.depth.2.filter(|x| x.is_finite())?;
+        let len = end - start;
+        (len < k * d - ryukei::tol::LINEAR_RESOLUTION)
+            .then(|| ((len * 1e9).round() as i64, (d * 1e9).round() as i64))
+    })
+    .into_iter()
+    .map(|((len_nm, d_nm), g)| {
+        let (len, d) = (len_nm as f64 / 1e9, d_nm as f64 / 1e9);
+        let r = g[0];
+        let want = r.sizes.thread_start() + k * d;
+        // A blind thread may go deeper, its drill with it (3 pitches more);
+        // a through one runs the material already.
+        let blind =
+            r.depth.0.is_finite() && r.sizes.thread.as_ref().is_some_and(|t| t.depth.is_some());
+        let fixes = if blind {
+            let mut f = json!({"thread_depth": mm_ceil(want)});
+            let pitch = r.sizes.thread.as_ref().map_or(0.0, |t| t.pitch.si);
+            if want > r.depth.0 {
+                f["depth"] = json!({"blind": mm_ceil(want + 3.0 * pitch)});
+            }
+            vec![edit(part, &r.feature, f)]
+        } else {
+            Vec::new()
+        };
+        Finding {
+            code: "hole_thread_engagement",
+            holes: refs(&g),
+            message: format!(
+                "{}: {} of thread engages {}, under {k} x its {} diameter ({})",
+                r.feature,
+                crate::hole::check::mm_floor(len),
+                r.spec,
+                mm_floor(d),
+                mm_ceil(k * d)
+            ),
+            details: json!({"length_m": len, "diameter_m": d, "factor": k, "needed_m": k * d}),
+            fixes,
+        }
+    })
+    .collect()
+}
+
 fn solid_findings(cx: &Ctx, rows: &[&Row]) -> Result<Vec<Finding>> {
     let mut out: Vec<Finding> = Vec::new();
-    // Tasks 28 to 31 add their checks here, each `out.extend(…)`.
-    let _ = (cx, rows);
+    let part = &cx.session_part.id;
+    out.extend(tap_drills(part, rows));
+    out.extend(engagement(part, rows, cx.opts.min_engagement));
     Ok(out)
 }
 
@@ -231,5 +337,71 @@ pub(crate) mod tests {
             v["options"],
             json!({"edge_factor": 1.0, "min_engagement": 1.0})
         );
+    }
+
+    #[test]
+    fn tap_drills_and_engagement() {
+        let (_dir, mut s) = drilled();
+        // An override of 2.52 mm is no standard drill; 2.5 mm is the nearest.
+        put(
+            &mut s,
+            "h",
+            json!({"format": 23, "points": ["p1", "p2"], "form": "simple",
+            "thread": {"standard": "iso_metric", "size": "M3", "depth": "2 mm"},
+            "diameter": "2.52 mm", "depth": {"blind": "4 mm"}}),
+        );
+        let v = call(&mut s, "holes.check", json!({"part": "p"})).unwrap();
+        let f = &v["findings"];
+        let drill = f
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["code"] == "hole_tap_drill_nonstandard")
+            .unwrap();
+        assert_eq!(drill["severity"], "info");
+        assert_eq!(drill["holes"], json!(["p/h/p1", "p/h/p2"]));
+        assert_eq!(drill["details"]["nearest"], "2.5 mm");
+        assert_eq!(drill["fixes"][0]["params"]["diameter"], "2.5 mm");
+        // 2 mm of M3 is under 1 x D.
+        let eng = f
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["code"] == "hole_thread_engagement")
+            .unwrap();
+        assert_eq!(eng["severity"], "warning");
+        assert_eq!(eng["fixes"][0]["params"]["thread_depth"], "3 mm");
+        // At --min-engagement 0.5 it passes.
+        let v = call(
+            &mut s,
+            "holes.check",
+            json!({"part": "p", "min_engagement": 0.5}),
+        )
+        .unwrap();
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["code"] == "hole_thread_engagement")
+        );
+        // Applying the fixes clears both.
+        for fix in [drill["fixes"][0].clone(), eng["fixes"][0].clone()] {
+            call(
+                &mut s,
+                fix["method"].as_str().unwrap(),
+                fix["params"].clone(),
+            )
+            .unwrap();
+        }
+        // (p2's bore is 2.74 mm from the box's end: under 1 x M3's 3 mm,
+        // so the edge check is eased here.)
+        let v = call(
+            &mut s,
+            "holes.check",
+            json!({"part": "p", "edge_factor": 0.5}),
+        )
+        .unwrap();
+        assert_eq!(v["findings"], json!([]), "{v}");
     }
 }
