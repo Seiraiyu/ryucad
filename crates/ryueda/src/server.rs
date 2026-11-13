@@ -204,6 +204,7 @@ pub fn answer(
     if let (Some(l), Some(before)) = (live, before) {
         l.announce(&before);
         publish(l, session);
+        publish_merge(l, session);
     }
     result
 }
@@ -1508,6 +1509,46 @@ pub fn publish(live: &mut Live<Eda>, session: &Session) {
     live.seen.revisions = Some(now);
 }
 
+/// Tells `merge` subscribers when a merge starts, ends, or what it leaves
+/// to settle changes (`merge.changed`): `{merging: false}`, or `{merging:
+/// true, status}`, or `{merging: true, error}` when the status fails,
+/// said again once Git's waiting files move. Read only while someone
+/// watches.
+pub fn publish_merge(live: &mut Live<Eda>, session: &mut Session) {
+    if !live.hub.is_watched() {
+        live.seen.merge = None;
+        live.seen.merge_failed = None;
+        return;
+    }
+    let key = crate::validate::key(session);
+    let retry = live
+        .seen
+        .merge_failed
+        .is_some()
+        .then(|| crate::validate::retry_stamp(session));
+    let failed_moved = retry.is_some() && retry != live.seen.merge_failed;
+    if live.seen.merge == key && !failed_moved {
+        return;
+    }
+    let mut failed = None;
+    let params = match &key {
+        None => json!({"merging": false}),
+        Some(_) => match crate::validate::status(session) {
+            Ok(s) => json!({"merging": true, "status": s}),
+            Err(e) => {
+                failed = Some(retry.unwrap_or_else(|| crate::validate::retry_stamp(session)));
+                json!({"merging": true, "error": e})
+            }
+        },
+    };
+    // A first look outside a merge tells nobody anything new.
+    if key.is_some() || live.seen.merge.is_some() {
+        live.hub.send(Topic::Merge, "merge.changed", &params);
+    }
+    live.seen.merge = key;
+    live.seen.merge_failed = failed;
+}
+
 /// Brings the session and what subscribers know up to date with the
 /// files: before a subscription, and while anyone watches.
 pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
@@ -1519,6 +1560,28 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
         }
         live.announce(&before);
         publish(live, s);
+        publish_merge(live, s);
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_merge_is_told_to_merge_subscribers() {
+        use ryu_session::notify::Topics;
+        assert!(crate::notify::Topic::ALL.contains(&crate::notify::Topic::Merge));
+        let topics =
+            ryu_session::notify::topics::<crate::notify::Topic>(&["merge".to_owned()]).unwrap();
+        assert_eq!(topics, [crate::notify::Topic::Merge]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::validate::tests::erc_conflict(dir.path());
+        let mut s = Session::open(dir.path()).unwrap();
+        let mut live = Live::<Eda>::default();
+        // Nobody watches: nothing read, nothing told.
+        publish_merge(&mut live, &mut s);
+        assert_eq!(live.seen.merge, None);
+    }
 }
