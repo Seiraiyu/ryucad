@@ -1612,15 +1612,86 @@ fn build_pattern(
         .with("feature", id)
         .with("pointer", "/skip"));
     }
+    // A hole seed whose tool depends on its exit (a far side,
+    // through_next): its sizes and sketch read again, and its tools by
+    // exit, shared by every instance with the same exit.
+    let target_bodies: Vec<&Built> = targets.iter().map(|(_, b)| *b).collect();
+    let work = crate::work::work(run.job);
+    let mut inputs: BTreeMap<
+        &Id,
+        (
+            crate::hole::derive::Sizes,
+            &crate::sketch::Solved,
+            &crate::doc::hole::Hole,
+        ),
+    > = BTreeMap::new();
+    for (seed, _) in &seeds {
+        if let Some(Ok(Feature::Hole(h))) = part.features.get(*seed)
+            && crate::hole::needs_exits(h)
+        {
+            let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref())
+                .map_err(crate::hole::derive::at_rebuild)?;
+            let solved = sketch_input(part, seed, &h.sketch, before)?;
+            inputs.insert(*seed, (sizes, solved, h));
+        }
+    }
+    let mut exit_tools: BTreeMap<&Id, crate::hole::ExitTools> = BTreeMap::new();
+    for (seed, (sizes, solved, h)) in &inputs {
+        let t = crate::hole::ExitTools::new(part, seed, h, sizes, solved, &target_bodies, before)?;
+        exit_tools.insert(*seed, t);
+    }
+    // Each instance's own tool where its exit gives it one, in the order
+    // of motions, seeds and places: measured where the instance puts the
+    // seed's axis (a mirror's along the reflected axis).
+    let mut by_exit: Vec<Option<Arc<Built>>> = Vec::new();
+    for ([i, j], m) in &motions {
+        let instance = instance_json(p, [*i, *j]);
+        for (seed, a) in &seeds {
+            for (_, place) in &a.places {
+                let Some(t) = exit_tools.get_mut(*seed) else {
+                    by_exit.push(None);
+                    continue;
+                };
+                let (at, axis) = match m {
+                    Motion::Rigid(r) => {
+                        let full = r.then_after(place);
+                        (full.apply_point(t.origin()), full.apply_vector(t.down()))
+                    }
+                    Motion::Mirror(plane) => {
+                        let mirror = ryukei::geom::Mirror::in_plane_of(plane.frame());
+                        (
+                            mirror.apply_point(place.apply_point(t.origin())),
+                            mirror.apply_vector(place.apply_vector(t.down())),
+                        )
+                    }
+                };
+                let label = format!("{id}[{instance}]");
+                let e = t.exit(id, &label, at, axis, &work)?;
+                let k = t.tool(e)?;
+                by_exit.push(Some(Arc::clone(&t.tools[k].1)));
+            }
+        }
+    }
+    // A seed's tool at its place `k`, or the instance's own by its exit.
+    let tool_of = |n: usize, a: &'_ Applied, k: usize| -> Arc<Built> {
+        by_exit[n]
+            .clone()
+            .unwrap_or_else(|| Arc::clone(a.body_at(k)))
+    };
     // A mirror image is a body of its own: each seed's, at each place,
     // reflected.
     let mut mirrored: Vec<Built> = Vec::new();
+    let mut n = 0;
     for (_, m) in &motions {
-        let Motion::Mirror(plane) = m else { continue };
+        let Motion::Mirror(plane) = m else {
+            n += seeds.iter().map(|(_, a)| a.places.len()).sum::<usize>();
+            continue;
+        };
         for (seed, a) in &seeds {
-            for (_, place) in &a.places {
-                let body = a
-                    .body
+            for (k, (_, place)) in a.places.iter().enumerate() {
+                let own = tool_of(n, a, k);
+                n += 1;
+                let body = own
                     .body
                     .transformed(place)
                     .and_then(|b| b.mirrored(plane))
@@ -1633,24 +1704,30 @@ fn build_pattern(
                         .with("seed", *seed)
                         .with("kernel", format!("{e:?}"))
                     })?;
-                let journal = a.body.journal.clone();
-                let origins = (*a.body.origins).clone();
+                let journal = own.journal.clone();
+                let origins = (*own.origins).clone();
                 mirrored.push(finish(id, "pattern", (body, journal), origins)?);
             }
         }
     }
     let mut images = mirrored.iter();
     let mut tools: Vec<ToolBody> = Vec::new();
+    let mut n = 0;
     for ([i, j], m) in &motions {
         let instance = instance_json(p, [*i, *j]);
         for (seed, a) in &seeds {
-            for (point, place) in &a.places {
+            for (k, (point, place)) in a.places.iter().enumerate() {
                 let mut label = json!({"feature": id, "seed": seed, "instance": instance});
                 if let Some(pt) = point {
                     label["point"] = json!(pt);
                 }
+                let own: &Built = match &by_exit[n] {
+                    Some(b) => b.as_ref(),
+                    None => a.body_at(k).as_ref(),
+                };
+                n += 1;
                 let (built, place) = match m {
-                    Motion::Rigid(r) => (a.body.as_ref(), r.then_after(place)),
+                    Motion::Rigid(r) => (own, r.then_after(place)),
                     Motion::Mirror(_) => {
                         (images.next().expect("an image per place"), Rigid::IDENTITY)
                     }

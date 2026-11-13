@@ -1351,4 +1351,32 @@ pub(crate) mod tests {
         crate::save::save(&mut s, &id("p"), &[(&id("n"), &f)], list).unwrap();
         near(volume(&after(&mut s, "n").unwrap()), before - PI * 8.0);
     }
+
+    #[test]
+    fn a_pattern_of_a_far_sided_hole_measures_each_instance() {
+        let (_dir, mut s) = stepped();
+        // The seed at p5 (16, 5) leaves at 5 mm; its copy 12 mm along -x,
+        // at (4, 5), at 10 mm; its mirror in x = 10 mm, at (4, 5) too.
+        put(
+            &mut s,
+            "h",
+            json!({"format": 24, "points": ["p5"], "form": "simple",
+            "diameter": 2, "depth": "through_all",
+            "far": {"counterbore": {"diameter": 4, "depth": 1}}}),
+        );
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "pattern", "id": "row",
+            "features": ["h"], "direction": "x", "reverse": true, "spacing": 12, "count": 2}),
+        )
+        .unwrap();
+        let r = s.rebuilt(&id("p")).unwrap();
+        let (_, out) = r.features.iter().find(|(f, _)| *f == id("row")).unwrap();
+        let b = out.as_ref().unwrap().solid(&id("b")).unwrap();
+        near(
+            volume(b),
+            1500.0 - (PI * 4.0 + PI * 4.0) - (PI * 9.0 + PI * 4.0),
+        );
+    }
 }
