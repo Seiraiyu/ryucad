@@ -725,6 +725,22 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     }
 }
 
+/// A pattern instance as its origins name it: `[i, j]` for a linear
+/// pattern in two directions, else `[i]`.
+pub(crate) fn instance_json(p: &crate::doc::pattern::Pattern, [i, j]: [u32; 2]) -> Value {
+    if matches!(
+        &p.kind,
+        crate::doc::pattern::Kind::Linear {
+            second: Some(_),
+            ..
+        }
+    ) {
+        json!([i, j])
+    } else {
+        json!([i])
+    }
+}
+
 /// The solved sketch a sweep reads: listed before it, a sketch, and
 /// rebuilt.
 pub(crate) fn sketch_input<'a>(
@@ -1400,8 +1416,12 @@ fn build_body(
     // body moved from there to the point.
     let holes = match f {
         Feature::Hole(h) => {
-            let points = sketch_input(part, id, &h.sketch, before)
-                .and_then(|s| Ok((s, crate::hole::points(id, h, s)?)));
+            let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref())
+                .map_err(crate::hole::derive::at_rebuild);
+            let points = sizes.and_then(|sizes| {
+                let s = sketch_input(part, id, &h.sketch, before)?;
+                Ok((s, crate::hole::points(id, h, s)?, sizes))
+            });
             match points {
                 Ok(p) => Some((h, p)),
                 Err(e) => return (Err(e), None),
@@ -1418,8 +1438,8 @@ fn build_body(
             (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
             (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
             (Feature::Thicken(x), _) => crate::surface::thicken(part, solids, id, x, before, run),
-            (_, Some((h, (solved, _)))) => {
-                crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
+            (_, Some((h, (solved, _, sizes)))) => {
+                crate::hole::tool(part, id, h, sizes, solved, &bodies, before).map(|(b, _)| b)
             }
             _ => build_sweep(part, id, f, &bodies, before),
         }
@@ -1440,7 +1460,7 @@ fn build_body(
         Operation::New => unreachable!("a new solid acts on nothing"),
     };
     let places: Vec<(Option<Id>, Rigid)> = match &holes {
-        Some((_, (solved, points))) => {
+        Some((_, (solved, points, _))) => {
             let origin = solved.frame.apply_point(Point3::ORIGIN);
             points
                 .iter()
@@ -1537,17 +1557,7 @@ fn build_pattern(
     let mut images = mirrored.iter();
     let mut tools: Vec<ToolBody> = Vec::new();
     for ([i, j], m) in &motions {
-        let instance = if matches!(
-            &p.kind,
-            crate::doc::pattern::Kind::Linear {
-                second: Some(_),
-                ..
-            }
-        ) {
-            json!([i, j])
-        } else {
-            json!([i])
-        };
+        let instance = instance_json(p, [*i, *j]);
         for (seed, a) in &seeds {
             for (point, place) in &a.places {
                 let mut label = json!({"feature": id, "seed": seed, "instance": instance});
@@ -2894,6 +2904,9 @@ pub(crate) fn input_hash(
         x.update(crate::doc::canonical::to_string(&s).as_bytes());
         h = x.finalize();
     }
+    // A hole with intent: its derived sizes, so a corrected table rebuilds
+    // exactly the holes it changes. A plain hole hashes as before.
+    h = hole_sizes(part, f, h);
     // A pattern reads its seeds' own bodies and places too.
     if !f.seeds().is_empty() {
         let mut x = blake3::Hasher::new();
@@ -2946,7 +2959,25 @@ fn tool_hash(
             reads.push(read);
         }
     }
-    hash_of(part, id, &v, &reads, before)
+    // A hole's tool is shaped by its sizes.
+    hole_sizes(part, f, hash_of(part, id, &v, &reads, before))
+}
+
+/// `h`, and a hole with intent's derived sizes (or why they don't
+/// derive); a plain hole's `h` unchanged.
+fn hole_sizes(part: &Part, f: &Feature, h: blake3::Hash) -> blake3::Hash {
+    let Feature::Hole(hole) = f else { return h };
+    if !hole.has_intent() {
+        return h;
+    }
+    let mut x = blake3::Hasher::new();
+    x.update(h.as_bytes());
+    x.update(b"ryucad.hole_sizes\0");
+    match crate::hole::derive::derive(hole, part.hole_standards.as_deref()) {
+        Ok(s) => x.update(crate::doc::canonical::to_string(&s.to_json()).as_bytes()),
+        Err(e) => x.update(format!("{:?}", e.code).as_bytes()),
+    };
+    x.finalize()
 }
 
 /// The hash of a feature's versions, JSON, parameters and reads.

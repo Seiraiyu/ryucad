@@ -541,6 +541,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     diagnose_deps(builds, manifest.as_ref(), &mut issues);
     diagnose_materials(root, &part_ids, &mut issues);
     diagnose_drawing_lint(root, &mut issues);
+    diagnose_hole_standards(root, &mut issues);
     diagnose_releases(root, &mut issues);
     diagnose_git(root, &mut issues);
     issues
@@ -986,6 +987,29 @@ fn diagnose_drawing_lint(root: &Path, issues: &mut Vec<Issue>) {
             Ok(_) if !canonical => issues.push(non_canonical(DRAWING_LINT)),
             Ok(_) => {}
             Err(e) => issues.push(document_issue(DRAWING_LINT, &e)),
+        },
+    }
+}
+
+/// The project's hole standards: a table that doesn't read (a value it
+/// restates from a built-in is `invalid_document` with `reason:
+/// shadows_builtin`) or isn't canonical.
+fn diagnose_hole_standards(root: &Path, issues: &mut Vec<Issue>) {
+    use crate::doc::hole_standards::{HOLE_STANDARDS, HoleStandards};
+    match read(root, HOLE_STANDARDS) {
+        Read::Missing => {}
+        Read::Bad(i) => issues.push(i),
+        Read::Json(v, canonical) => match HoleStandards::from_json(&v) {
+            Ok(_) if !canonical => issues.push(non_canonical(HOLE_STANDARDS)),
+            Ok(_) => {}
+            Err(e) => {
+                let mut i = document_issue(HOLE_STANDARDS, &e);
+                // `shadows_builtin` names what to take out.
+                if let Some(r) = e.details.get("reason") {
+                    i.details.insert("reason".into(), r.clone());
+                }
+                issues.push(i);
+            }
         },
     }
 }
@@ -2845,6 +2869,33 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(bad.len(), 1, "{issues:?}");
         assert_eq!(bad[0].files, ["drawing_lint.json"]);
+    }
+
+    #[test]
+    fn a_hole_standards_table_that_restates_a_built_in_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::server::init(root, None).unwrap();
+        let mut v = crate::doc::fixtures::house_standards();
+        v["threads"]["iso_metric"]["M6"]["pitch"] = json!("1 mm");
+        std::fs::write(
+            root.join("hole_standards.json"),
+            crate::doc::canonical::to_string(&v),
+        )
+        .unwrap();
+        let issues = diagnose(root);
+        let i = issues
+            .iter()
+            .find(|i| i.files == ["hole_standards.json"])
+            .unwrap();
+        assert_eq!(i.code, "invalid_document");
+        assert_eq!(i.details["reason"], "shadows_builtin");
+        std::fs::write(
+            root.join("hole_standards.json"),
+            "{\"kind\": \"ryucad.hole_standards\",\"format\":1}",
+        )
+        .unwrap();
+        assert!(diagnose(root).iter().any(|i| i.code == "non_canonical"));
     }
 
     #[test]

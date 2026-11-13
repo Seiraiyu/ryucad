@@ -138,6 +138,56 @@ fn every_form_against_its_volume() {
     assert!(v.is_ok(), "{v:?}");
 }
 
+/// Made-up house fastener values, as the PDM fixtures have them; no
+/// thread entries, so built-in threads keep ryucad's drills.
+fn house_fasteners() -> Value {
+    json!({
+        "format": 1, "kind": "ryucad.hole_standards",
+        "fasteners": {
+            "house_cap": {"M5": {"clearance": {"close": "5.4 mm", "normal": "5.6 mm",
+                                               "loose": "6.1 mm"},
+                                 "counterbore": {"diameter": "9.7 mm", "depth": "5.3 mm"}}},
+            "house_flat": {"M5": {"clearance": {"normal": "5.6 mm"},
+                                  "countersink": {"diameter": "10.6 mm", "angle": "90 deg"}}}
+        }
+    })
+}
+
+#[test]
+fn tapped_fastener_and_fitted_holes_against_their_volumes() {
+    let (dir, mut s) = plate(&[[8.0, 8.0], [20.0, 15.0], [32.0, 22.0]]);
+    let plate = 40.0 * 30.0 * 10.0;
+    let add = |s: &mut Session, id: &str, point: &str, spec: &str| {
+        must(
+            s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "sketch": "s", "id": id, "points": [point],
+                   "spec": spec}),
+        )
+    };
+    // M8 tapped 6 deep in an 8 mm drill with a 118° point, in the 10 mm
+    // plate: the rule's 6.8 mm drill, a cylinder and a cone.
+    let a = add(&mut s, "a", "p1", "M8x1.25-6H 6 DEEP, DRILL 8 DEEP 118DEG");
+    assert_eq!(a["feature"]["sizes"]["drill"]["value"], "6.8 mm", "{a}");
+    let tip = 3.4 / ryukei::math::tan(59f64.to_radians());
+    let mut removed = PI * 3.4 * 3.4 * 8.0 + PI * 3.4 * 3.4 * tip / 3.0;
+    near(volume(&mut s), plate - removed);
+    // A house cap screw's clearance, counterbored, from the project's
+    // table: a 5.6 mm bore under a 9.7 × 5.3 mm counterbore.
+    ryucad::doc::project::write_json(&dir.path().join("hole_standards.json"), &house_fasteners())
+        .unwrap();
+    s.refresh().unwrap();
+    add(&mut s, "c", "p2", "CBORE HOUSE_CAP M5 THRU");
+    removed += PI * 4.85 * 4.85 * 5.3 + PI * 2.8 * 2.8 * 4.7;
+    near(volume(&mut s), plate - removed);
+    // A fitted bore is built at its nominal size.
+    add(&mut s, "f", "p3", "DIA 6 H7 THRU");
+    removed += PI * 3.0 * 3.0 * 10.0;
+    near(volume(&mut s), plate - removed);
+    let v = call(&mut s, "check", json!({"part": "p"}));
+    assert!(v.is_ok(), "{v:?}");
+}
+
 #[test]
 fn resizing_a_hole_renames_nothing() {
     let (_dir, mut s) = plate(&[[10.0, 10.0]]);

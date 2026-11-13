@@ -575,6 +575,25 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A hole's thread and fastener are a line each, as a spec says
+        // them.
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("hole") => {
+            type Line = fn(&Value) -> Option<String>;
+            let each: [(&str, Line); 2] = [
+                ("thread", crate::hole::spec::thread_line),
+                ("fastener", crate::hole::spec::fastener_line),
+            ];
+            for (key, line) in each {
+                if let Some(x) = rest.remove(key) {
+                    match line(&x) {
+                        Some(l) => lines.push(format!("{key} = {l}")),
+                        None => {
+                            rest.insert(key.to_owned(), x);
+                        }
+                    }
+                }
+            }
+        }
         Some(crate::doc::materials::KIND) => {
             if let Some(Value::Object(materials)) = rest.remove("materials") {
                 for (name, m) in &materials {
@@ -587,6 +606,26 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                         line.push_str(&format!(", colour {c}"));
                     }
                     lines.push(line);
+                }
+            }
+        }
+        // One line per size: its fields, flattened, in key order.
+        Some(crate::doc::hole_standards::KIND) => {
+            for table in ["fasteners", "threads"] {
+                let Some(Value::Object(standards)) = rest.remove(table) else {
+                    continue;
+                };
+                for (std, sizes) in &standards {
+                    let Value::Object(sizes) = sizes else {
+                        continue;
+                    };
+                    for (size, entry) in sizes {
+                        let mut flat = Vec::new();
+                        flatten("", entry, &mut flat);
+                        let fields: Vec<String> =
+                            flat.iter().map(|l| l.replacen(" = ", " ", 1)).collect();
+                        lines.push(format!("{table}.{std}.{size} = {}", fields.join(", ")));
+                    }
                 }
             }
         }
@@ -1423,6 +1462,18 @@ pub struct Options {
     pub all: bool,
 }
 
+/// A revision's default unit, from its manifest (millimetres when it
+/// has none that reads).
+fn unit(files: &Files) -> crate::units::Unit {
+    json_at(files, crate::doc::project::MANIFEST)
+        .and_then(|m| {
+            m["default_unit"]
+                .as_str()
+                .and_then(crate::units::Unit::parse)
+        })
+        .unwrap_or(crate::units::Unit::Mm)
+}
+
 /// A file's JSON, or `None` when it is missing or unreadable.
 fn json_at(files: &Files, path: &str) -> Option<Value> {
     let text = std::str::from_utf8(files.get(path)?).ok()?;
@@ -1951,7 +2002,19 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
                 .map(|(side, _, _)| side)
                 .collect();
             let v = if bad.is_empty() {
-                feature(va.as_ref(), vb.as_ref(), opts)
+                let mut v = feature(va.as_ref(), vb.as_ref(), opts);
+                // A hole whose spec changed says so, as its callout.
+                if let (Some(a), Some(b)) = (&va, &vb)
+                    && a != b
+                    && let (Some(sa), Some(sb)) = (
+                        crate::hole::spec::of_json(a, unit(from)),
+                        crate::hole::spec::of_json(b, unit(to)),
+                    )
+                    && sa != sb
+                {
+                    v["spec"] = json!({"from": sa, "to": sb});
+                }
+                v
             } else {
                 let st = status(
                     from.contains_key(&path),
@@ -4002,6 +4065,19 @@ mod tests {
     }
 
     #[test]
+    fn hole_standards_are_one_line_per_size() {
+        let t = text(crate::doc::fixtures::house_standards());
+        assert!(
+            t.contains(
+                "fasteners.house_cap.M5 = clearance.close 5.4 mm, clearance.loose 6.1 mm, \
+                 clearance.normal 5.6 mm, counterbore.depth 5.3 mm, counterbore.diameter 9.7 mm\n"
+            ),
+            "{t}"
+        );
+        assert!(t.contains("threads.npt.1/8 = tap_drill 8.7 mm\n"), "{t}");
+    }
+
+    #[test]
     fn holes_and_patterns_are_one_line_per_value() {
         let hole = json!({
             "format": 3, "kind": "ryucad.feature", "type": "hole", "sketch": "s",
@@ -4751,6 +4827,70 @@ mod tests {
             v["entities"]["l2"] = json!({"end": "p2", "start": "p1", "type": "line"});
         }
         v
+    }
+
+    #[test]
+    fn a_holes_thread_and_fastener_are_one_line_each() {
+        let hole = |fields: Value| {
+            let mut v = json!({"format": 23, "kind": "ryucad.feature", "type": "hole",
+                               "sketch": "s", "form": "simple", "depth": "through_all",
+                               "targets": ["b"]});
+            for (k, x) in fields.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let t = text(hole(
+            json!({"thread": {"standard": "iso_metric", "size": "M6"}}),
+        ));
+        assert!(t.contains("\nthread = M6x1.0-6H, full\n"), "{t}");
+        let t = text(hole(
+            json!({"thread": {"standard": "iso_metric", "size": "M8",
+                    "depth": "12 mm", "hand": "left", "drill": {"engagement": 70}},
+                    "depth": {"blind": "20 mm"}}),
+        ));
+        assert!(
+            t.contains("\nthread = M8x1.25-6H-LH, 12 mm, engagement 70%\n"),
+            "{t}"
+        );
+        let t = text(hole(
+            json!({"fastener": {"standard": "house_cap", "size": "M5",
+                    "fit": "close"}, "fit": "H7"}),
+        ));
+        assert!(
+            t.contains("\nfastener = HOUSE_CAP M5, close\n") && t.contains("\nfit = H7\n"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn a_spec_change_is_reported_as_a_spec() {
+        let manifest = json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"});
+        let part = json!({"features": ["h"], "format": 1, "kind": "ryucad.part"});
+        let side = |size: &str| {
+            files(&[
+                ("ryucad.json", manifest.clone()),
+                ("parts/p/part.json", part.clone()),
+                (
+                    "parts/p/features/h.json",
+                    json!({"format": 23, "kind": "ryucad.feature", "type": "hole",
+                           "sketch": "s", "form": "simple", "depth": "through_all",
+                           "targets": ["b"],
+                           "thread": {"standard": "iso_metric", "size": size}}),
+                ),
+            ])
+        };
+        let v = structural(
+            &side("M6"),
+            &side("M8"),
+            &Options::default(),
+            &Releases::default(),
+        );
+        assert_eq!(
+            v["parts"]["p"]["features"]["h"]["spec"],
+            json!({"from": "M6x1.0-6H THRU", "to": "M8x1.25-6H THRU"}),
+            "{v}"
+        );
     }
 
     #[test]

@@ -786,6 +786,8 @@ pub struct Store {
     pub verified: Verified,
     /// How many times an assembly's children were walked for its key.
     pub walked: u64,
+    /// Each part's holes, by the rebuild hash they were listed from.
+    pub holes: BTreeMap<Id, (String, Arc<crate::holes::Holes>)>,
 }
 
 /// The parts a session's rebuild found current, and when: at the

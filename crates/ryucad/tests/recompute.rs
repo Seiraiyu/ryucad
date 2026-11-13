@@ -1089,6 +1089,140 @@ fn unfold_cut_and_refold_recompute_as_from_nothing() {
     }
 }
 
+/// Part `p`: a plate `b` 60 × 60 × 8 mm; a sketch `s` on its top, a box
+/// `k` after it (that holes don't read), an M6 hole `h` at one point and a
+/// 4 × 4 pattern `grid` of it, a house cap screw's counterbored hole `c`
+/// at another, and a pattern `row` of that.
+fn drilled() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    ryucad::doc::project::write_json(
+        &dir.path().join("hole_standards.json"),
+        &json!({
+            "format": 1, "kind": "ryucad.hole_standards",
+            "fasteners": {
+                "house_cap": {"M5": {"clearance": {"normal": "5.6 mm"},
+                                     "counterbore": {"diameter": "9.7 mm", "depth": "5.3 mm"}}},
+                "house_flat": {"M5": {"clearance": {"normal": "5.6 mm"},
+                                      "countersink": {"diameter": "10.6 mm", "angle": "90 deg"}}}
+            }
+        }),
+    )
+    .unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b", "params": {"x": 60, "y": 60, "z": 8}}),
+    );
+    let top = face(&mut s, "b", [0.0, 0.0, 1.0]);
+    for f in [
+        json!({"type": "sketch", "id": "s", "face": top}),
+        json!({"type": "box", "id": "k", "params": {"x": 5, "y": 5, "z": 5},
+               "placement": {"origin": [70, 0, 0]}}),
+    ] {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(&mut s, "feature.add", f);
+    }
+    let ops = json!([
+        {"op": "add", "type": "point", "at": [6, 6]},
+        {"op": "add", "type": "fix", "a": "p1"},
+        {"op": "add", "type": "point", "at": [38, 50]},
+        {"op": "add", "type": "fix", "a": "p2"}
+    ]);
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": ops}),
+    );
+    for f in [
+        json!({"type": "hole", "id": "h", "sketch": "s", "points": ["p1"],
+               "spec": "M6x1.0-6H THRU", "targets": ["b"]}),
+        json!({"type": "pattern", "id": "grid", "features": ["h"],
+               "direction": "x", "spacing": "10 mm", "count": 4,
+               "direction2": "y", "spacing2": "10 mm", "count2": 4}),
+        json!({"type": "hole", "id": "c", "sketch": "s", "points": ["p2"],
+               "spec": "CBORE HOUSE_CAP M5 THRU", "targets": ["b"]}),
+        json!({"type": "pattern", "id": "row", "features": ["c"],
+               "direction": "x", "spacing": "12 mm", "count": 2}),
+    ] {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(&mut s, "feature.add", f);
+    }
+    (dir, s)
+}
+
+/// The rebuild after an edit: what it built, and that it equals one from
+/// nothing on 1 and 8 threads.
+fn rebuilt_after(s: &mut Session, what: &str) -> Vec<String> {
+    let part = Id::parse("p", "part").unwrap();
+    let (one, eight) = (full(s, 1), full(s, 8));
+    let r = s.rebuilt(&part).unwrap();
+    assert_eq!(r.failed(), 0, "{what}: {:?}", summary(r));
+    let incremental = (r.hash.clone(), summary(r));
+    assert_eq!(incremental, one, "{what}");
+    assert_eq!(incremental, eight, "{what}");
+    r.built.iter().map(|id| id.as_str().to_owned()).collect()
+}
+
+#[test]
+fn a_spec_edit_recomputes_its_hole_and_pattern_only() {
+    let (_dir, mut s) = drilled();
+    let part = Id::parse("p", "part").unwrap();
+    assert_eq!(s.rebuilt(&part).unwrap().failed(), 0);
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "h", "spec": "M8x1.25-6H THRU"}),
+    );
+    let built = rebuilt_after(&mut s, "M6 to M8");
+    assert!(
+        built.contains(&"h".to_owned()) && built.contains(&"grid".to_owned()),
+        "{built:?}"
+    );
+    for before in ["b", "s", "k"] {
+        assert!(!built.contains(&before.to_owned()), "{before}: {built:?}");
+    }
+}
+
+#[test]
+fn a_table_edit_recomputes_the_holes_that_read_it() {
+    let (dir, mut s) = drilled();
+    let part = Id::parse("p", "part").unwrap();
+    assert_eq!(s.rebuilt(&part).unwrap().failed(), 0);
+    let path = dir.path().join("hole_standards.json");
+    let mut t: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    // The entry `c` reads: `c` and its pattern, nothing before.
+    t["fasteners"]["house_cap"]["M5"]["counterbore"]["depth"] = json!("5 mm");
+    ryucad::doc::project::write_json(&path, &t).unwrap();
+    s.refresh().unwrap();
+    let built = rebuilt_after(&mut s, "house_cap");
+    assert!(
+        built.contains(&"c".to_owned()) && built.contains(&"row".to_owned()),
+        "{built:?}"
+    );
+    for before in ["b", "s", "k", "h", "grid"] {
+        assert!(!built.contains(&before.to_owned()), "{before}: {built:?}");
+    }
+    // An entry no hole reads: the part's revision stays, so nothing
+    // rebuilds and the session keeps its result (`built` is still the
+    // last rebuild's).
+    let revision = s.project().part(&part).unwrap().revision.clone();
+    let kept = s.rebuilt(&part).unwrap() as *const ryucad::rebuild::PartResult;
+    t["fasteners"]["house_flat"]["M5"]["clearance"]["normal"] = json!("5.5 mm");
+    ryucad::doc::project::write_json(&path, &t).unwrap();
+    s.refresh().unwrap();
+    assert_eq!(s.project().part(&part).unwrap().revision, revision);
+    assert_eq!(
+        s.rebuilt(&part).unwrap() as *const ryucad::rebuild::PartResult,
+        kept,
+        "nothing rebuilt"
+    );
+}
+
 #[test]
 fn an_edit_at_a_long_solids_end_rebuilds_one_feature_and_at_its_founder_the_chain_once() {
     // A plate and 49 pockets cut along it: one solid of 50 features.

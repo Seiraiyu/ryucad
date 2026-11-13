@@ -228,6 +228,8 @@ pub(crate) struct RenderAsk {
     pub(crate) sketches: bool,
     /// Draw the shown parts' datums.
     pub(crate) datums: bool,
+    /// Draw tapped holes' cosmetic threads, a ring at each end.
+    pub(crate) threads: bool,
     pub(crate) rev: Option<String>,
     pub(crate) frame: Vec<String>,
     pub(crate) compare: Option<String>,
@@ -277,6 +279,7 @@ impl RenderAsk {
             labels: false,
             sketches: true,
             datums: false,
+            threads: false,
             rev: None,
             frame: Vec::new(),
             compare: None,
@@ -518,6 +521,7 @@ pub(crate) fn render_for_package(session: &mut Session, part: &Id, commit: &str)
         labels: false,
         sketches: true,
         datums: true,
+        threads: true,
         rev: Some(commit.to_owned()),
         frame: Vec::new(),
         compare: None,
@@ -835,6 +839,20 @@ pub(crate) fn render_scene(
                     continue;
                 }
                 g.add_path(&key, &m.chain(), span, marks.get(&key).map(|m| m.0));
+            }
+        }
+        if ask.threads
+            && let Ok(holes) = crate::holes::list(session, part, None)
+        {
+            for t in crate::thread::of(&holes) {
+                // A hidden solid's holes go with it.
+                let solid = t.faces.first().and_then(|f| f.split('/').nth(1));
+                if solid.is_some_and(|s| ask.hidden.contains(&format!("{part}/{s}"))) {
+                    continue;
+                }
+                for centre in [t.mouth, t.end] {
+                    g.add_ring(centre, t.axis, t.major / 2.0, None);
+                }
             }
         }
     }

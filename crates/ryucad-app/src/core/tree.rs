@@ -157,7 +157,10 @@ impl Row {
 
 /// A feature's line in the tree: its ID and type, a sketch's solve state,
 /// and why it failed or how many faces weren't meshed.
-pub fn row_text(f: &Feature, faults: usize) -> String {
+/// `holes` is how many holes the feature makes, as its part's
+/// `holes.list` counts them: a hole with a spec gives it after the spec
+/// when more than one.
+pub fn row_text(f: &Feature, faults: usize, holes: usize) -> String {
     let ty = match (&f.ty, &f.operation, &f.instance) {
         // An instance says what it places, and what its mates leave it.
         (_, _, Some(i)) => {
@@ -210,6 +213,15 @@ pub fn row_text(f: &Feature, faults: usize) -> String {
                 s.push_str(", reference");
             }
             s
+        }
+        // A hole with intent its spec, and how many holes it makes.
+        (Some(t), _, None) if t == "hole" && f.spec.is_some() => {
+            let spec = f.spec.as_deref().unwrap_or_default();
+            if holes > 1 {
+                format!("{spec}, {holes}×")
+            } else {
+                spec.to_owned()
+            }
         }
         // An instance pattern how many copies it places.
         (Some(t), _, None) if t == "instance_pattern" && f.error.is_none() => {
@@ -720,7 +732,13 @@ impl Builder<'_> {
                 mark_badges(m, &mark_text(m, &c.rev)),
             ))
         });
-        let mut text = row_text(f, 0);
+        let holes = self
+            .src
+            .model
+            .holes
+            .get(&part.id)
+            .map_or(0, |t| t.count(&f.id));
+        let mut text = row_text(f, 0, holes);
         let (icon, intersects) = feature_icon(f, |p| self.is_assembly(p));
         let reference = format!("{}/{}", part.id, f.id);
         let mut row = Row::new(format!("feature:{reference}"), depth, icon, String::new());
@@ -931,7 +949,8 @@ impl Builder<'_> {
         for f in &sub.features {
             let (icon, _) = feature_icon(f, |p| self.is_assembly(p));
             let path = format!("{at}/{}", f.id);
-            let mut r = Row::new(format!("placed:{path}"), depth, icon, row_text(f, 0));
+            let holes = model.holes.get(&sub.id).map_or(0, |t| t.count(&f.id));
+            let mut r = Row::new(format!("placed:{path}"), depth, icon, row_text(f, 0, holes));
             r.weak = true;
             r.tint = Tint::Weak;
             let me = self.push(r, Some(parent));
@@ -1555,7 +1574,22 @@ mod tests {
             body: None,
             sheet: None,
             tweak: None,
+            spec: None,
         }
+    }
+
+    #[test]
+    fn a_holes_row_gives_its_spec_and_count() {
+        let mut h = feature("hole");
+        h.id = "h1".into();
+        h.spec = Some("M6x1.0-6H THRU".into());
+        assert_eq!(row_text(&h, 0, 100), "h1 (M6x1.0-6H THRU, 100×)");
+        assert_eq!(row_text(&h, 0, 1), "h1 (M6x1.0-6H THRU)");
+        assert_eq!(row_text(&h, 0, 0), "h1 (M6x1.0-6H THRU)");
+        // A hole with no spec, and everything else, read as before.
+        h.spec = None;
+        assert_eq!(row_text(&h, 0, 3), "h1 (hole)");
+        assert_eq!(row_text(&feature("box"), 0, 0), "f (box)");
     }
 
     #[test]
@@ -1574,15 +1608,15 @@ mod tests {
             outdated: Some("C".into()),
         });
         assert_eq!(
-            row_text(&b, 0),
+            row_text(&b, 0, 0),
             "b1 (fasteners:m6-bolt @ label B, outdated)"
         );
         b.instance.as_mut().unwrap().outdated = None;
-        assert_eq!(row_text(&b, 0), "b1 (fasteners:m6-bolt @ label B)");
+        assert_eq!(row_text(&b, 0, 0), "b1 (fasteners:m6-bolt @ label B)");
         // The project's own part at an old label says so too.
         let i = b.instance.as_mut().unwrap();
         (i.project, i.dependency, i.outdated) = (None, None, Some("C".into()));
-        assert_eq!(row_text(&b, 0), "b1 (m6-bolt @ label B, outdated)");
+        assert_eq!(row_text(&b, 0, 0), "b1 (m6-bolt @ label B, outdated)");
     }
 
     /// A part with a solid built by a box, a sketch, an extrude cutting it,
