@@ -175,14 +175,8 @@ fn drawings(s: &mut Session) -> Value {
     Value::Object(out)
 }
 
-/// Views of the committed drawings past design 484's bar, each with its
-/// issue: the crankcase's, whose rays meet mirrored bosses' edges exactly
-/// (plan 17.B's tally).
-const KNOWN_UNCERTAIN: &[(&str, &str)] = &[
-    ("radial-engine/crankcase/main/v1", "#643"),
-    ("radial-engine/crankcase/main/v2", "#643"),
-    ("radial-engine/crankcase/main/v3", "#643"),
-];
+/// Views of the committed drawings past design 484's bar, each with its issue.
+const KNOWN_UNCERTAIN: &[(&str, &str)] = &[];
 
 /// Every view of every committed drawing draws, with at most a tenth of
 /// its pieces uncertain (design 484, plan 17.B), unless it is in

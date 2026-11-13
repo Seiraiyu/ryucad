@@ -634,14 +634,17 @@ fn race_views_refuse_quickly() {
 }
 
 /// The crankcase twin with all nine bosses from the drawing's front, top
-/// and right (design 484): no piece the mesh contradicts. Design 484's
-/// bar, at most a tenth of the pieces uncertain, isn't met (#643): the
-/// bosses come in pairs mirrored in the plane of the view and the axis
-/// (40° and 320°, …), so a ray from a piece meets its twin's edge exactly
-/// and `point_in_face` puts the hit on that edge (`OnEdge`); every ray of
-/// those pieces is unsure. Plan 17.B's count on cox-worker-4: 656 of
-/// 1,571 pieces uncertain from the front, 1,701 of 2,023 from the top,
-/// 131 of 1,163 from the right, as many as the crankcase's own views.
+/// and right (design 484): no piece the mesh contradicts, and at most a
+/// tenth of the pieces uncertain in each view (#643). The bosses come in
+/// pairs mirrored in the plane of the view and the axis (40° and 320°,
+/// …), so a ray from a piece meets its twin's edge exactly: plan 17.C
+/// settles such a ray by the edge's two faces' crossings, and certifies a
+/// saddle's spline image lying on the rim's circle as an overlap. Plan
+/// 17.B's count on cox-worker-4 was 656 of 1,571 pieces uncertain from
+/// the front, 1,701 of 2,023 from the top, 131 of 1,163 from the right;
+/// plan 17.C's is 37 of 1,571, 13 of 1,786 and 49 of 1,061. What remains
+/// is mostly rays through edges in a pattern the two-face rule leaves
+/// unsure (Task 10's tally on #643).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release only: booleans of saddles")]
 fn the_crankcase_twins_views_agree_with_the_mesh() {
@@ -660,6 +663,11 @@ fn the_crankcase_twins_views_agree_with_the_mesh() {
             .filter(|q| q.visibility == Visibility::Uncertain)
             .count();
         eprintln!("{t:?}: {uncertain} of {} pieces uncertain", p.pieces.len());
+        assert!(
+            uncertain * 10 <= p.pieces.len(),
+            "{t:?}: {uncertain} of {}",
+            p.pieces.len()
+        );
         let bodies = placed_bodies(&placed);
         let o = Oracle::new(&bodies, &v, size(&bodies) * 1e-3).unwrap();
         let j = judge(&p, &bodies, &o);
