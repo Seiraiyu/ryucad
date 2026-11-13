@@ -47,6 +47,10 @@ pub struct Hole {
     pub fastener: Option<Fastener>,
     /// The bore's tolerance (`fit` or `tolerance` in the file).
     pub bore: Option<BoreTolerance>,
+    /// A chamfer at the top of the bore.
+    pub near: Option<Near>,
+    /// A through hole's back-side treatment.
+    pub far: Option<Far>,
 }
 
 /// A tapped hole's thread: what it is, never its sizes (`hole::derive`
@@ -364,6 +368,113 @@ impl BoreTolerance {
                 v["tolerance"] = json!({"deviation": [u.text(), l.text()]});
             }
         }
+    }
+}
+
+/// A chamfer or countersink at the very top of the bore (a tap's lead-in):
+/// at the part's face for a simple hole, a counterbore or a counterdrill;
+/// at the floor for a spotface.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Near {
+    pub diameter: Quantity,
+    /// Included; 90 deg when left out.
+    pub angle: Option<Quantity>,
+}
+
+/// A back-side treatment where a through bore leaves its target.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Far {
+    Countersink { diameter: Quantity, angle: Quantity },
+    Counterbore { diameter: Quantity, depth: Quantity },
+}
+
+impl Near {
+    fn to_json(&self) -> Value {
+        let mut v = json!({"diameter": self.diameter.text()});
+        if let Some(a) = &self.angle {
+            v["angle"] = json!(a.text());
+        }
+        v
+    }
+
+    fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Near> {
+        let mut o = Obj::new(v, "/near")?;
+        let diameter = size(
+            &o.take("diameter")?,
+            Field::Length(default),
+            env,
+            "/near/diameter",
+            "a near chamfer's diameter",
+        )?;
+        let angle = o
+            .take_opt("angle")
+            .map(|a| angle(&a, env, "/near/angle", "a near chamfer"))
+            .transpose()?;
+        o.finish()?;
+        Ok(Near { diameter, angle })
+    }
+}
+
+impl Far {
+    fn to_json(&self) -> Value {
+        match self {
+            Far::Countersink { diameter, angle } => json!({"countersink":
+                {"diameter": diameter.text(), "angle": angle.text()}}),
+            Far::Counterbore { diameter, depth } => json!({"counterbore":
+                {"diameter": diameter.text(), "depth": depth.text()}}),
+        }
+    }
+
+    fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Far> {
+        let Some((k, x)) = v
+            .as_object()
+            .filter(|o| o.len() == 1)
+            .and_then(|o| o.iter().next())
+        else {
+            return Err(invalid(
+                "/far",
+                "far is {\"countersink\": {diameter, angle}} or {\"counterbore\": {diameter, depth}}",
+            ));
+        };
+        let at = format!("/far/{k}");
+        let mut o = Obj::new(x, &at)?;
+        let len = Field::Length(default);
+        let diameter = size(
+            &o.take("diameter")?,
+            len,
+            env,
+            &format!("{at}/diameter"),
+            "a far side's diameter",
+        )?;
+        let far = match k.as_str() {
+            "countersink" => Far::Countersink {
+                diameter,
+                angle: angle(
+                    &o.take("angle")?,
+                    env,
+                    &format!("{at}/angle"),
+                    "a far countersink",
+                )?,
+            },
+            "counterbore" => Far::Counterbore {
+                diameter,
+                depth: size(
+                    &o.take("depth")?,
+                    len,
+                    env,
+                    &format!("{at}/depth"),
+                    "a far counterbore's depth",
+                )?,
+            },
+            _ => {
+                return Err(invalid(
+                    "/far",
+                    "far is {\"countersink\": {diameter, angle}} or {\"counterbore\": {diameter, depth}}",
+                ));
+            }
+        };
+        o.finish()?;
+        Ok(far)
     }
 }
 
@@ -729,6 +840,12 @@ impl Hole {
         if let Some(b) = &self.bore {
             b.write(&mut v);
         }
+        if let Some(n) = &self.near {
+            v["near"] = n.to_json();
+        }
+        if let Some(f) = &self.far {
+            v["far"] = f.to_json();
+        }
         v
     }
 
@@ -744,7 +861,8 @@ impl Hole {
         matches!(
             self.form,
             HoleForm::Counterdrill { .. } | HoleForm::Spotface { .. }
-        )
+        ) || self.near.is_some()
+            || self.far.is_some()
     }
 
     /// Whether its JSON holds anything [`Hole::has_geometry`] counts.
@@ -779,6 +897,14 @@ impl Hole {
             .transpose()?;
         let bore =
             BoreTolerance::from_json(o.take_opt("fit"), o.take_opt("tolerance"), default, env)?;
+        let near = o
+            .take_opt("near")
+            .map(|n| Near::from_json(&n, default, env))
+            .transpose()?;
+        let far = o
+            .take_opt("far")
+            .map(|f| Far::from_json(&f, default, env))
+            .transpose()?;
         let derived = thread.is_some() || fastener.is_some();
         let diameter = match o.take_opt("diameter") {
             Some(d) => Some(size(&d, length, env, "/diameter", "a hole's diameter")?),
@@ -932,7 +1058,27 @@ impl Hole {
             thread,
             fastener,
             bore,
+            near,
+            far,
         };
+        if hole.near.is_some() && matches!(hole.form, HoleForm::Countersink { .. }) {
+            return Err(refuse(
+                "/near",
+                "near_on_countersink",
+                "a countersink is its own near chamfer: take near out, or make the hole simple"
+                    .into(),
+            ));
+        }
+        if hole.far.is_some() && !matches!(hole.depth, Depth::ThroughAll) {
+            return Err(refuse(
+                "/far",
+                "far_needs_through",
+                format!(
+                    "a far side is where the bore leaves its target: give a through depth, not {}",
+                    hole.depth.type_name()
+                ),
+            ));
+        }
         if let (Depth::Blind(d), Some((mouth, at))) = (&hole.depth, hole.mouth_depth())
             && mouth >= d.meters()
         {
@@ -1117,6 +1263,24 @@ pub fn expression_strings<'a>(k: &str, field: &'a mut Value) -> Vec<&'a mut Stri
             for x in o.values_mut() {
                 if let Value::String(s) = x {
                     out.push(s);
+                }
+            }
+        }
+        ("near", Value::Object(o)) => {
+            for x in o.values_mut() {
+                if let Value::String(s) = x {
+                    out.push(s);
+                }
+            }
+        }
+        ("far", Value::Object(o)) => {
+            for inner in o.values_mut() {
+                if let Value::Object(i) = inner {
+                    for x in i.values_mut() {
+                        if let Value::String(s) = x {
+                            out.push(s);
+                        }
+                    }
                 }
             }
         }
@@ -1607,5 +1771,48 @@ mod tests {
         v["form"] = json!("simple");
         v["spotface"] = json!({"diameter": "12 mm"});
         assert_eq!(read(&v).unwrap_err().details["pointer"], "/form");
+    }
+
+    #[test]
+    fn near_and_far_round_trip_and_refuse() {
+        let mut v = hole();
+        v["format"] = json!(24);
+        // Through: no bottom of its own.
+        v.as_object_mut().unwrap().remove("bottom");
+        v["depth"] = json!("through_all");
+        v["near"] = json!({"diameter": "7 mm"});
+        v["far"] = json!({"countersink": {"diameter": "8 mm", "angle": "90 deg"}});
+        let f = read(&v).unwrap();
+        assert_eq!(f.to_json(), v);
+        v["near"] = json!({"diameter": "7 mm", "angle": "120 deg"});
+        v["far"] = json!({"counterbore": {"diameter": "8 mm", "depth": "2 mm"}});
+        assert_eq!(read(&v).unwrap().to_json(), v);
+        // A far side is where the bore leaves its target: through only.
+        v["depth"] = json!({"blind": "3 mm"});
+        let e = read(&v).unwrap_err();
+        assert_eq!(
+            (e.details["pointer"].as_str(), e.details["reason"].as_str()),
+            (Some("/far"), Some("far_needs_through"))
+        );
+        // No near chamfer on a countersink: it is one.
+        let mut v = hole();
+        v["format"] = json!(24);
+        v.as_object_mut().unwrap().remove("counterbore");
+        v["form"] = json!("countersink");
+        v["countersink"] = json!({"diameter": "8 mm", "angle": "90 deg"});
+        v["near"] = json!({"diameter": "9 mm"});
+        let e = read(&v).unwrap_err();
+        assert_eq!(e.details["reason"], "near_on_countersink");
+        // One far treatment, whole.
+        let mut v = hole();
+        v["depth"] = json!("through_all");
+        v["far"] = json!({"countersink": {"diameter": "8 mm"}});
+        assert_eq!(
+            read(&v).unwrap_err().details["pointer"],
+            "/far/countersink/angle"
+        );
+        v["far"] = json!({"countersink": {"diameter": "8 mm", "angle": "90 deg"},
+                          "counterbore": {"diameter": "8 mm", "depth": "1 mm"}});
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/far");
     }
 }
