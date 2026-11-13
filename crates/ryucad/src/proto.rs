@@ -1258,6 +1258,21 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// The hole checks, only when asked (`holes --check`): breakout, edge
+    /// distance, blind holes that broke through, threads past the material,
+    /// short engagement and non-standard tap drills, each with its fixes.
+    #[serde(rename = "holes.check")]
+    HolesCheck {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge_factor: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_engagement: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// What the hole standards hold: `threads`, `fasteners` or `drills`,
     /// optionally one standard (or drill series) and size, each value
     /// with its source.

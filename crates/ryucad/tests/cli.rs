@@ -9837,3 +9837,39 @@ fn cosmetic_threads_from_the_cli() {
     let types = p.ok(&["feature", "types", "cosmetic_thread"]);
     assert!(types.to_string().contains("thread_depth"), "{types}");
 }
+
+#[test]
+fn holes_check_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [10, 5]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--diameter",
+        "2",
+        "--depth",
+        "through_all",
+    ]);
+    let v = p.ok(&["holes", "p", "--check"]);
+    assert_eq!(v["passed"], true, "{v}");
+    assert_eq!(v["checked"], 1);
+    // The options only with --check.
+    p.fails(&["holes", "p", "--edge-factor", "2"], "usage", 2);
+}

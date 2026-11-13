@@ -104,6 +104,16 @@ enum Command {
         /// One hole by its reference (p/h/p1, p/row/h/p1/1).
         #[arg(long = "ref", value_name = "REF")]
         reference: Option<String>,
+        /// Run the hole checks (breakout, edge distance, break-through, threads past
+        /// the material, engagement, tap drills); only ever when asked.
+        #[arg(long, conflicts_with_all = ["csv", "group", "reference"])]
+        check: bool,
+        /// With --check: a bore's least distance to another face, times its diameter.
+        #[arg(long, requires = "check", value_name = "K")]
+        edge_factor: Option<f64>,
+        /// With --check: a thread's least engagement, times its diameter (1.5 for soft materials).
+        #[arg(long, requires = "check", value_name = "K")]
+        min_engagement: Option<f64>,
         #[command(flatten)]
         rev: RevArg,
     },
@@ -4869,10 +4879,26 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Holes {
             part,
             solid,
+            check: true,
+            edge_factor,
+            min_engagement,
+            rev,
+            ..
+        } => Request::HolesCheck {
+            part: part.clone(),
+            solid: solid.clone(),
+            edge_factor: *edge_factor,
+            min_engagement: *min_engagement,
+            rev: rev.rev.clone(),
+        },
+        Command::Holes {
+            part,
+            solid,
             csv,
             group,
             reference,
             rev,
+            ..
         } => Request::HolesList {
             part: part.clone(),
             solid: solid.clone(),

@@ -15,6 +15,7 @@
 //! nothing and switching its form renames only what its new segments
 //! touch. A point's tool key is `ryucad.tool\0<part>\0<feature>\0<point>`.
 
+pub mod check;
 pub mod derive;
 pub mod exits;
 pub mod spec;

@@ -265,6 +265,20 @@ pub(crate) fn dispatch(
         Request::AssemblyTree { part, path, depth } => {
             crate::assembly::tree(session, &part, path.as_deref(), depth)
         }
+        Request::HolesCheck {
+            part,
+            solid,
+            edge_factor,
+            min_engagement,
+            rev,
+        } => crate::hole::check::request(
+            session,
+            &part,
+            solid.as_deref(),
+            edge_factor,
+            min_engagement,
+            rev.as_deref(),
+        ),
         Request::HolesList {
             part,
             solid,
