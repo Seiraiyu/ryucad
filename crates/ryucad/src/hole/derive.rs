@@ -120,6 +120,9 @@ pub struct ThreadSizes {
     /// None is full depth.
     pub depth: Option<Size>,
     pub taper: Option<(u32, u32)>,
+    /// A tapered wall's gauge plane: its diameter, and its depth from
+    /// the mouth (the project's `gauge_diameter`, `gauge_length`).
+    pub gauge: Option<(Size, Size)>,
 }
 
 /// The bore's tolerance, worked out.
@@ -300,6 +303,9 @@ impl Sizes {
             x["depth"] = t.depth.as_ref().map_or(json!("full"), Size::to_json);
             if let Some((a, b)) = t.taper {
                 x["taper"] = json!(format!("{a}:{b}"));
+            }
+            if let Some((d, l)) = &t.gauge {
+                x["gauge"] = json!({"diameter": d.to_json(), "depth": l.to_json()});
             }
             v.insert("thread".into(), x);
         }
@@ -717,6 +723,25 @@ fn thread_sizes(
             vec![missing.into()],
         ));
     }
+    let gauge = if t.taper_wall {
+        let e = entry.and_then(|e| e.gauge_diameter.as_ref().zip(e.gauge_length.as_ref()));
+        match e {
+            Some((d, l)) => Some((
+                Size::quantity(d, Source::Project),
+                Size::quantity(l, Source::Project),
+            )),
+            None => {
+                return Err(needs_table(
+                    Kind::Thread,
+                    &t.standard,
+                    &t.size,
+                    vec!["gauge_diameter".into(), "gauge_length".into()],
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let class_shown = class.as_deref();
     let sizes = ThreadSizes {
         standard: t.standard.clone(),
@@ -739,6 +764,7 @@ fn thread_sizes(
         starts,
         depth,
         taper,
+        gauge,
     };
     Ok((sizes, drill))
 }

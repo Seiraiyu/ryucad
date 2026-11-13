@@ -225,8 +225,51 @@ fn line(at: (f64, f64), name: &'static str) -> Corner {
 /// or down the point or round the ball to the axis, and up the axis.
 /// `depth` is the bore's shoulder; `up` how far a spotface's wall reaches
 /// back above the mouth.
-fn corners(h: &Hole, s: &Sizes, depth: f64, up: f64, exit: Option<f64>) -> Vec<Corner> {
+fn corners(
+    id: &Id,
+    h: &Hole,
+    s: &Sizes,
+    depth: f64,
+    up: f64,
+    exit: Option<f64>,
+) -> Result<Vec<Corner>> {
     let r = s.drill.si / 2.0;
+    // A tapered thread's wall is a cone, 1:16 on the diameter through the
+    // gauge plane, to the thread's end; then an annulus in to the drill.
+    let taper = s
+        .thread
+        .as_ref()
+        .and_then(|t| Some((t.gauge.as_ref()?, t.taper?, t.depth.as_ref()?)));
+    let radius_at = |z: f64| -> f64 {
+        match taper {
+            Some(((gd, gl), (a, b), _)) => {
+                (gd.si - (z - gl.si) * f64::from(a) / f64::from(b)) / 2.0
+            }
+            None => r,
+        }
+    };
+    let wall = |out: &mut Vec<Corner>, z: f64| {
+        out.push(line((radius_at(z), z), "wall"));
+        if let Some((_, _, end)) = taper {
+            let re = radius_at(end.si);
+            if re - r > ryukei::tol::LINEAR_RESOLUTION {
+                out.push(line((re, end.si), "taper_end"));
+            }
+        }
+    };
+    if let Some((_, _, end)) = taper
+        && radius_at(end.si) < r
+    {
+        return Err(Error::new(
+            Code::InvalidExtent,
+            format!(
+                "hole {id}: its tapered wall narrows inside its drill at {} from the mouth",
+                end.text
+            ),
+        )
+        .with("feature", id)
+        .with("pointer", "/thread/depth"));
+    }
     let tan = |a: &derive::Size| ryukei::math::tan(a.si / 2.0);
     let top = if s.spotface.is_some() { -up } else { 0.0 };
     let mut out = vec![line((0.0, top), "top")];
@@ -246,26 +289,26 @@ fn corners(h: &Hole, s: &Sizes, depth: f64, up: f64, exit: Option<f64>) -> Vec<C
         let z = near(&mut out, 0.0, rc);
         out.push(line((rc, z), "counterbore_wall"));
         out.push(line((rc, cdepth.si), "counterbore_floor"));
-        out.push(line((r, cdepth.si), "wall"));
+        wall(&mut out, cdepth.si);
     } else if let Some((d, _)) = &s.countersink {
         let z = s.mouth_depth().expect("a countersink has a depth");
         out.push(line((d.si / 2.0, 0.0), "countersink"));
-        out.push(line((r, z), "wall"));
+        wall(&mut out, z);
     } else if let Some((d, cdepth, a)) = &s.counterdrill {
         let rc = d.si / 2.0;
         let z = near(&mut out, 0.0, rc);
         out.push(line((rc, z), "counterdrill_wall"));
         out.push(line((rc, cdepth.si), "counterdrill_floor"));
-        out.push(line((r, cdepth.si + (rc - r) / tan(a)), "wall"));
+        wall(&mut out, cdepth.si + (rc - r) / tan(a));
     } else if let Some((d, sdepth)) = &s.spotface {
         let rs = d.si / 2.0;
         out.push(line((rs, -up), "spotface_wall"));
         out.push(line((rs, sdepth.si), "spotface_floor"));
-        let z = near(&mut out, sdepth.si, r);
-        out.push(line((r, z), "wall"));
+        let z = near(&mut out, sdepth.si, radius_at(sdepth.si));
+        wall(&mut out, z);
     } else {
-        let z = near(&mut out, 0.0, r);
-        out.push(line((r, z), "wall"));
+        let z = near(&mut out, 0.0, radius_at(0.0));
+        wall(&mut out, z);
     }
     // A blind thread that stops short of its drill: the wall ends where
     // the thread does, and the drill's own wall goes on to the bottom.
@@ -313,7 +356,7 @@ fn corners(h: &Hole, s: &Sizes, depth: f64, up: f64, exit: Option<f64>) -> Vec<C
             out.push(line((0.0, depth + r), "axis"));
         }
     }
-    out
+    Ok(out)
 }
 
 /// How far a spotface's wall reaches back from `from` against `down`:
@@ -397,7 +440,7 @@ fn build_tool(
     } else {
         0.0
     };
-    let corners = corners(h, s, d, up, exit);
+    let corners = corners(id, h, s, d, up, exit)?;
     let mut keys = Keys::default();
     let segments: Vec<Segment> = corners
         .iter()
@@ -1377,6 +1420,92 @@ pub(crate) mod tests {
         near(
             volume(b),
             1500.0 - (PI * 4.0 + PI * 4.0) - (PI * 9.0 + PI * 4.0),
+        );
+    }
+
+    #[test]
+    fn a_tapered_pipe_wall_is_a_cone_from_the_gauge_plane() {
+        let (dir, mut s) = drilled();
+        // House values, made up for this test: never a standard's.
+        std::fs::write(
+            dir.path().join("hole_standards.json"),
+            crate::doc::canonical::to_string(&json!({
+                "format": 1, "kind": "ryucad.hole_standards",
+                "threads": {"npt": {"1/8": {"tap_drill": "8.7 mm",
+                    "gauge_diameter": "10.2 mm", "gauge_length": "4 mm"}}}})),
+        )
+        .unwrap();
+        s.reload().unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "t",
+            "params": {"x": 30, "y": 30, "z": 20}, "placement": {"origin": [40, 0, 0]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "u",
+            "placement": {"origin": [0, 0, 20]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "u", "ops": [
+            {"op": "add", "type": "point", "at": [55, 15]},
+            {"op": "add", "type": "fix", "a": "p1"}]}),
+        )
+        .unwrap();
+        let v = json!({"format": 24, "kind": "ryucad.feature", "type": "hole", "sketch": "u",
+            "form": "simple", "targets": ["t"], "depth": {"blind": "12 mm"},
+            "thread": {"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"}});
+        let f = Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap();
+        let mut list = crate::part::order(s.project().part(&id("p")).unwrap()).unwrap();
+        list.push(id("n"));
+        crate::save::save(&mut s, &id("p"), &[(&id("n"), &f)], list).unwrap();
+        let r = s.rebuilt(&id("p")).unwrap();
+        let (_, out) = r.features.iter().find(|(f, _)| *f == id("n")).unwrap();
+        let b = out
+            .as_ref()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .solid(&id("t"))
+            .unwrap();
+        // 1:16 on the diameter: 10.45 mm at the mouth, 9.95 mm at 8 mm,
+        // then the annulus in to the 8.7 mm drill, 4 mm more of it.
+        let frustum = |a: f64, c: f64, h: f64| PI * h * (a * a + a * c + c * c) / 3.0;
+        near(
+            volume(b),
+            18000.0 - frustum(5.225, 4.975, 8.0) - PI * 4.35 * 4.35 * 4.0,
+        );
+        let segs: BTreeSet<&str> = b
+            .origins
+            .values()
+            .filter(|o| o["feature"] == "n")
+            .filter_map(|o| o["segment"].as_str())
+            .collect();
+        assert!(
+            segs.contains("taper_end") && segs.contains("drill_wall"),
+            "{segs:?}"
+        );
+        // No gauge values: needs_project_table names them.
+        std::fs::write(
+            dir.path().join("hole_standards.json"),
+            crate::doc::canonical::to_string(&json!({"format": 1, "kind": "ryucad.hole_standards",
+                "threads": {"npt": {"1/8": {"tap_drill": "8.7 mm"}}}})),
+        )
+        .unwrap();
+        s.reload().unwrap();
+        // hole.derive takes a hole's fields, not the file's header.
+        let mut fields = v.clone();
+        for k in ["format", "kind", "type"] {
+            fields.as_object_mut().unwrap().remove(k);
+        }
+        let e = call(&mut s, "hole.derive", json!({"fields": fields})).unwrap_err();
+        assert_eq!(
+            e.details["missing"],
+            json!(["gauge_diameter", "gauge_length"])
         );
     }
 }
