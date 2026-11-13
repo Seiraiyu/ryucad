@@ -2,13 +2,21 @@
 //! diameters.
 //!
 //! Sources:
-//! - Nominal sizes and their coarse and fine pitches are facts. Every
-//!   combination FED-STD-H28/21B (28 November 1984, public domain) lists
-//!   in Table XXI.1, its standard fastener series, is here, checked by
-//!   `tests/h28_21.rs`. That table is printed for the MJ profile, whose
-//!   sizes and pitches are the M profile's. Sizes above M64 have only the
-//!   pitches it prints. H28/21B's Table XXI.2 (fine-pitch screw threads
-//!   such as M15×1, M25×1.5) is not built in: a project's table adds them.
+//! - Nominal sizes and their coarse and fine pitches are facts. To M64
+//!   they are ISO 261's general-purpose selection, common knowledge as
+//!   Wikipedia's "ISO metric screw thread" tabulates it (first, second and
+//!   third choice sizes, each with its coarse pitch and its fine ones):
+//!   so M1, M1.2, M1.4, M1.8, M2.2 and M4.5, and fine pitches such as
+//!   M8×0.75, M10×1 and ×0.75, M12×1.5 and ×1, M14×1.25 and ×1, M16×1,
+//!   M18×2 and ×1, up to M64×4, ×3 and ×1.5. Cross-checked against
+//!   FED-STD-H28/21B (28 November 1984, public domain) Table XXI.1, its
+//!   standard fastener series: every size and pitch it lists is here
+//!   (`tests/h28_21.rs`); the rest of the selection it doesn't print, and
+//!   was checked against the tabulation alone. Table XXI.1 is printed for
+//!   the MJ profile, whose sizes and pitches are the M profile's. Sizes
+//!   above M64 are XXI.1's, with only the pitches it prints. Fine pitches
+//!   outside ISO 261's selection (H28/21B's Table XXI.2, such as M15×1)
+//!   are not built in: a project's table adds them.
 //! - Basic diameters are formulas: ISO 68-1 and ISO 724's basic profile,
 //!   H = √3/2 · P, so D1 = D − 2 · 5H/8 = D − 5√3/8 · P. The result is
 //!   rounded to the micrometre.
@@ -30,8 +38,8 @@ const fn mm(whole: i64, thousandths: i64) -> Nm {
     whole * 1_000_000 + thousandths * 1_000
 }
 
-/// Every size, by major diameter: ISO's coarse and fine series to M64,
-/// and H28/21B Table XXI.1's sizes above it.
+/// Every size, by major diameter: ISO 261's selection, coarse and fine,
+/// to M64, and H28/21B Table XXI.1's sizes above it.
 pub const SIZES: &[Size] = &[
     Size {
         name: "M1",
