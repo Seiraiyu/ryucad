@@ -250,6 +250,21 @@ pub fn absolute(req: Request, here: &Path) -> Result<Request> {
     Request::from_rpc(&method, Some(params))
 }
 
+/// An annotation request's author with no daemon: the agent `me`
+/// (`--as`, `RYUCAD_PARTICIPANT`). A daemon takes the connection's
+/// participant instead.
+pub fn with_author(req: Request, me: Option<&str>) -> Request {
+    let Some(me) = me else { return req };
+    if !(req.annotates() || matches!(req, Request::AnnotationApply { .. })) {
+        return req;
+    }
+    let mut params = req.params();
+    if let Some(p) = params.as_object_mut() {
+        p.entry("as").or_insert_with(|| json!(me));
+    }
+    Request::from_rpc(&req.method(), Some(params)).unwrap_or(req)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

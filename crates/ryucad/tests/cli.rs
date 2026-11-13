@@ -206,6 +206,27 @@ fn an_agent_session() {
     assert_eq!(p.ok(&["part", "list"])["parts"][0]["features"], 1);
 }
 
+/// Relative paths mean the folder the command runs as: `-C`'s, as
+/// worktree revisions already did (#447), whichever process writes
+/// the file (design 603, 31.A).
+#[test]
+fn relative_paths_mean_dash_cs_folder() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "plate", "--param", "x=10", "--param", "y=20",
+        "--param", "z=5",
+    ]);
+    fs::create_dir(p.direct.join("out")).unwrap();
+    fs::create_dir(p.daemon.join("out")).unwrap();
+    p.ok(&["-C", "out", "export", "p", "--out", "p.stl"]);
+    for root in [&p.direct, &p.daemon] {
+        assert!(root.join("out/p.stl").is_file(), "{}", root.display());
+        assert!(!root.join("p.stl").exists(), "{}", root.display());
+    }
+}
+
 #[test]
 fn parameters_drive_features() {
     let p = Pair::new();
