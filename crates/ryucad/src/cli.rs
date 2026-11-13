@@ -2771,6 +2771,10 @@ struct ImportArgs {
     /// part of references.
     #[arg(long)]
     flatten: bool,
+    /// A folder to look in for the files an assembly's parts are kept in, after the
+    /// folder of the file naming each (repeatable, in order).
+    #[arg(long, value_name = "DIR")]
+    search: Vec<std::path::PathBuf>,
     /// Write nothing: say what it would store and make, and what each body would be
     /// (a reference, or with --solid how it heals).
     #[arg(long)]
@@ -5075,6 +5079,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     product,
                     solid,
                     flatten,
+                    search,
                     dry_run,
                     expect,
                 },
@@ -5094,6 +5099,16 @@ fn request(cmd: &Command) -> Option<Request> {
                 update: update.clone(),
                 solid: *solid,
                 flatten: *flatten,
+                // The daemon's folder isn't the caller's.
+                search: search
+                    .iter()
+                    .map(|d| {
+                        std::path::absolute(d)
+                            .unwrap_or_else(|_| d.clone())
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect(),
             }
         }
         Command::Export {

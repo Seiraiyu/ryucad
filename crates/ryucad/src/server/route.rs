@@ -481,6 +481,7 @@ pub(crate) fn dispatch(
             update,
             solid,
             flatten,
+            search,
         } => crate::import::import(
             session,
             crate::import::Ask {
@@ -493,6 +494,7 @@ pub(crate) fn dispatch(
                 update,
                 solid,
                 flatten,
+                search,
             },
         ),
         Request::ImportReport { file, detail } => {

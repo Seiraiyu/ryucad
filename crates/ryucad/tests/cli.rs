@@ -6797,6 +6797,82 @@ fn a_failing_mate_warns_from_the_cli() {
     p.fails(&["check", "top"], "check_failed", 1);
 }
 
+/// External-reference assemblies both ways (design 448, 24.D, #443): an
+/// assembly alone is refused naming its part files; with --search it
+/// imports, its part files stored; a changed part file follows an
+/// update of the assembly.
+#[test]
+fn external_assemblies_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let set = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/external/set");
+    let beside = p.direct.parent().unwrap();
+    fs::create_dir_all(beside.join("alone")).unwrap();
+    fs::copy(set.join("asm.stp"), beside.join("alone/asm.stp")).unwrap();
+    let e = p.fails(
+        &["import", "../alone/asm.stp"],
+        "import_external_missing",
+        1,
+    );
+    let files: Vec<&str> = e["details"]["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, ["box.stp", "cylinder.stp"], "{e}");
+    let (lib, parts) = (
+        set.to_str().unwrap().to_owned(),
+        set.join("parts").to_str().unwrap().to_owned(),
+    );
+    let made = p.ok(&[
+        "import",
+        "../alone/asm.stp",
+        "--search",
+        &lib,
+        "--search",
+        &parts,
+    ]);
+    let kinds: Vec<(&str, &str)> = made["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| (x["part"].as_str().unwrap(), x["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [("asm", "assembly"), ("box", "part"), ("pin", "part")]
+    );
+    assert_eq!(made["external"].as_array().unwrap().len(), 2);
+    // A new version: the same assembly, the box written by OCCT in AP242
+    // (its product named as the AP214 box's is, so it is the same product).
+    fs::create_dir_all(beside.join("v2/parts")).unwrap();
+    fs::copy(set.join("asm.stp"), beside.join("v2/asm.stp")).unwrap();
+    fs::copy(
+        set.join("parts/cylinder.stp"),
+        beside.join("v2/parts/cylinder.stp"),
+    )
+    .unwrap();
+    let ap242 = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt/box_ap242.stp"),
+    )
+    .unwrap();
+    fs::write(
+        beside.join("v2/box.stp"),
+        ap242.replace("PRODUCT('part 1','part 1'", "PRODUCT('part 2','part 2'"),
+    )
+    .unwrap();
+    let v = p.ok(&["import", "../v2/asm.stp", "--update", "imports/asm.step"]);
+    let changed: Vec<&str> = v["external"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(changed, ["imports/box.step"], "{v}");
+    p.ok(&["rebuild", "asm"]);
+}
+
 /// The transfer report both ways (design 448): an import's answer and
 /// `import report` agree, `--detail` lists instances, an assembly of
 /// external parts is refused naming its files, and a STEP export says
@@ -6819,8 +6895,8 @@ fn transfer_reports_from_the_cli() {
     let detail = p.ok(&["import", "report", &stored, "--detail"]);
     assert_eq!(detail["transfer"]["detail"], true);
     assert!(detail["transfer"]["categories"][0]["interpreted"]["names"][0]["instances"].is_array());
-    let e = p.fails(&["import", "../ext.stp"], "import_body_missing", 1);
-    assert_eq!(e["details"]["external"][0]["file"], "bracket.stp", "{e}");
+    let e = p.fails(&["import", "../ext.stp"], "import_external_missing", 1);
+    assert_eq!(e["details"]["missing"][0]["file"], "bracket.stp", "{e}");
     assert!(e["details"]["transfer"]["categories"].is_array());
     p.fails(&["import", "report", "imports/none.step"], "not_found", 1);
     // An export asked to leave a part's colour out says so.

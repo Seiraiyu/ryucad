@@ -6399,6 +6399,10 @@ fn transfer_section(golden: &mut Golden) {
         let mut details = e.details.clone();
         details["path"] = serde_json::json!("occt_style.stp");
         details["transfer"]["file"] = serde_json::json!("occt_style.stp");
+        for m in details["missing"].as_array_mut().into_iter().flatten() {
+            m["referenced_by"] = serde_json::json!("occt_style.stp");
+            m["searched"] = serde_json::json!(["."]);
+        }
         out.push(ryucad::doc::canonical::to_string(&details));
         let params = serde_json::json!({"part": root.expect("an assembly"),
                                         "time_stamp": "2026-10-27T00:00:00", "file_name": "a.step"});
@@ -6407,6 +6411,60 @@ fn transfer_section(golden: &mut Golden) {
             .install(|| ryucad::server::answer_live(&mut session, None, None, req))
             .unwrap();
         out.push(ryucad::doc::canonical::to_string(&a.result["transfer"]));
+        runs.push(out);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for x in &runs[0] {
+        s.str(x);
+    }
+}
+
+/// External-reference assemblies (design 448, plan 24.D): the committed
+/// set imported as references (an agent's default) and flattened; each
+/// answer's parts, instances and `external` lines without the machine's
+/// paths, and every body's hash. One thread and four.
+fn external_imports_section(golden: &mut Golden) {
+    let mut s = golden.section("external_imports");
+    let set = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ryustep/tests/data/external/set/asm.stp");
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+        let mut out = Vec::new();
+        for params in [
+            serde_json::json!({"path": set}),
+            serde_json::json!({"path": set, "flatten": true, "part": "rig"}),
+        ] {
+            let req = ryucad::proto::Request::from_rpc("import", Some(params)).unwrap();
+            let mut v = pool
+                .install(|| ryucad::server::handle(&mut session, req))
+                .unwrap();
+            for x in v["external"].as_array_mut().unwrap() {
+                x["source"] = serde_json::json!("…");
+            }
+            out.push(ryucad::doc::canonical::to_string(&v["parts"]));
+            out.push(ryucad::doc::canonical::to_string(&v["external"]));
+            out.push(ryucad::doc::canonical::to_string(&v["file"]));
+        }
+        let parts: Vec<ryucad::doc::id::Id> = session.project().parts.keys().cloned().collect();
+        for part in &parts {
+            let r = pool.install(|| session.rebuilt(part).unwrap().clone());
+            assert_eq!(r.failed(), 0, "{part}: {:?}", r.features);
+            out.push(part.to_string());
+            for (id, o) in &r.features {
+                out.push(id.to_string());
+                for (solid, b) in o.as_ref().unwrap().solids() {
+                    out.push(solid.to_string());
+                    out.push(b.body.dump());
+                }
+            }
+        }
         runs.push(out);
     }
     assert_eq!(runs[0], runs[1], "one thread and four");
@@ -6736,6 +6794,7 @@ sections! {
     flatten => flatten_section(&mut golden),
     exports => exports_section(&mut golden),
     transfer => transfer_section(&mut golden),
+    external_imports => external_imports_section(&mut golden),
     styles => styles_section(&mut golden),
     properties => properties_section(&mut golden),
     formats => formats_section(&mut golden),
