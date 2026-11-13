@@ -6285,6 +6285,45 @@ fn the_palette_shows_the_part_of_a_feature_it_goes_to() {
     );
 }
 
+/// #778: choosing a feature row of a part that isn't shown, in the tree,
+/// shows its part, as the palette does (#737).
+#[test]
+fn the_tree_shows_the_part_of_a_feature_row_it_chooses() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    for (part, id, at) in [("near", "nb", "0,0,0"), ("far", "fb", "1000,0,0")] {
+        p.ok(&["part", "create", part]);
+        p.ok(&[
+            "feature", "add", part, "box", "--id", id, "--param", "x=10", "--param", "y=10",
+            "--param", "z=10", "--origin", at,
+        ]);
+    }
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    p.ok(&["focus", "far"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("far")
+    });
+    h.step();
+    h.get_by_label("nb (box)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("near")
+    });
+    assert_eq!(
+        h.state().opened().view.chosen,
+        Some(("near".to_owned(), "nb".to_owned()))
+    );
+    // A row of the part not shown again shows it again.
+    h.get_by_label("fb (box)").click();
+    frames(&mut h, |a| {
+        a.opened().view.chosen == Some(("far".to_owned(), "fb".to_owned()))
+    });
+    frames(&mut h, |a| a.opened().ws.model.focus.as_deref() == Some("far"));
+}
+
 /// #736: a search after scrolling the tree down shows its rows.
 #[test]
 fn a_search_after_scrolling_the_tree_shows_its_rows() {

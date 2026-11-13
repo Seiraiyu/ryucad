@@ -1937,6 +1937,17 @@ impl Workspace {
         self.send(req, Pending::Quiet);
     }
 
+    /// Shows `part` if the window doesn't already (#737, #778, #780):
+    /// what is chosen from the tree or the palette is shown with its
+    /// part, so the viewport, `ryucad focus` and File > Export… are about
+    /// what the person chose. A part a shown assembly places counts as
+    /// not shown: choosing its feature shows the part itself.
+    pub fn show_part(&mut self, part: &str) {
+        if !self.model.shown().contains(&part) {
+            self.set_focus(Some(part.to_owned()));
+        }
+    }
+
     /// Cuts with the planes this window's participant has; the scene and
     /// picking read them from [`Workspace::sections`].
     fn follow_sections(&mut self) {

@@ -486,6 +486,15 @@ pub(crate) fn choose(
     }
 }
 
+/// Goes to `key` from the tree or the palette (#737, #778): shows its
+/// part if the window doesn't, then chooses and frames it as a click on
+/// its row does. The viewport's picks call [`choose`]: what they pick is
+/// shown already.
+pub(crate) fn go_to(ws: &mut Workspace, view: &mut View, key: BodyKey, gone: bool) {
+    ws.show_part(&key.0);
+    choose(ws, view, Some(key), gone, true);
+}
+
 /// The keys the tree takes this frame, while it has the keyboard.
 fn keys(ui: &egui::Ui) -> Vec<Key> {
     // By each press's own modifiers, as the window's keymap reads them.
@@ -678,10 +687,9 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     ws.load_wanted();
     for a in acts {
         match a {
-            Act::Choose { key, gone } => {
-                let key = (!key.0.is_empty()).then_some(key);
-                choose(ws, view, key, gone, true);
-            }
+            // An empty key unchooses (Ctrl/Cmd+click on the chosen row).
+            Act::Choose { key, gone } if key.0.is_empty() => choose(ws, view, None, gone, true),
+            Act::Choose { key, gone } => go_to(ws, view, key, gone),
             Act::Hide(r) => ws.set_visibility(vec![r], Vec::new(), Vec::new(), false),
             Act::Show(r) => ws.set_visibility(Vec::new(), vec![r], Vec::new(), false),
             Act::Menu(_) => {}
