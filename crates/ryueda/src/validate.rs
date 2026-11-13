@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Every kind `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 9] = [
+pub const KINDS: [&str; 13] = [
     "value",
     "delete_edit",
     "order",
@@ -33,6 +33,10 @@ pub const KINDS: [&str; 9] = [
     "layout_pending",
     "layout_conflict",
     "layout_stale",
+    "refdes_clash",
+    "annotate_conflict",
+    "name_clash",
+    "merge_faults",
 ];
 
 /// The error for a request that needs a merge when there is none.
@@ -113,8 +117,21 @@ pub fn concerns(path: &str, pointer: &str) -> Value {
 }
 
 /// What `--expect` guards for a conflict ID: its block (`blocks/<b>/…`,
-/// `<b>#…`), else the project.
+/// `<b>#…`, `name:<b>/…`), else the project (`refdes:…`, `name:/…`,
+/// `faults:erc:…`, and every file outside `blocks/`).
 pub fn scope(conflict: &str) -> String {
+    if let Some(rest) = conflict.strip_prefix("name:") {
+        let block = rest.split('/').next().unwrap_or_default();
+        return if block.is_empty() {
+            "project".to_owned()
+        } else {
+            block.to_owned()
+        };
+    }
+    if conflict.starts_with("refdes:") || conflict.starts_with("faults:erc:") {
+        return "project".to_owned();
+    }
+    let conflict = conflict.strip_prefix("faults:").unwrap_or(conflict);
     let path = conflict.split('#').next().unwrap_or_default();
     match path.strip_prefix("blocks/") {
         Some(rest) => rest.split('/').next().unwrap_or_default().to_owned(),
@@ -640,6 +657,7 @@ fn findings(
     let blocked = !conflicts.is_empty();
     conflicts.extend(layouts(root, state, working, project, blocked)?);
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let (already, warnings): (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
         "step": state.step.as_str(),
@@ -648,6 +666,8 @@ fn findings(
         "base": commit(state.base.as_ref()),
         "clean": conflicts.is_empty(),
         "conflicts": conflicts,
+        "already_failing": already,
+        "warnings": warnings,
         "unstaged": unstaged,
         "untracked": untracked,
     }))
@@ -1068,6 +1088,18 @@ pub(crate) mod tests {
         assert_eq!(scope("blocks/b/nets/n.json#/name"), "b");
         assert_eq!(scope("b#area:2"), "b");
         assert_eq!(scope("erc.json#/severity/x"), "project");
+        // Plan 4.D's items: a designator crosses blocks (the project's
+        // revision), a name its block's (the project's for rails), what
+        // the merge broke its file's.
+        assert_eq!(scope("refdes:board/R5"), "project");
+        assert_eq!(scope("name:breakout/AUX"), "breakout");
+        assert_eq!(scope("name:/GND"), "project");
+        assert_eq!(scope("faults:blocks/b/nets/n.json#/class"), "b");
+        assert_eq!(scope("faults:erc:0123456789abcdef"), "project");
+        assert_eq!(scope("faults:rails/gnd.json#/name"), "project");
+        for k in ["refdes_clash", "annotate_conflict", "name_clash", "merge_faults"] {
+            assert!(KINDS.contains(&k), "{k}");
+        }
     }
 
     /// `erc.json` at a severity, as ryueda writes it.
@@ -1109,6 +1141,10 @@ pub(crate) mod tests {
         erc_conflict(r);
         let mut s = Session::open(r).unwrap();
         let v = status(&mut s).unwrap();
+        assert_eq!(
+            (v["already_failing"].clone(), v["warnings"].clone()),
+            (json!([]), json!([]))
+        );
         assert_eq!(
             (v["step"].as_str(), v["clean"].as_bool()),
             (Some("merge"), Some(false))

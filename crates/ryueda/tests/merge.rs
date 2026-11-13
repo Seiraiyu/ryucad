@@ -100,6 +100,11 @@ fn layouts_merge_at_status_time_and_relayout_settles_them() {
         .unwrap();
         assert_eq!(r1["value"], "47k", "{r1}");
         let list = items(&board, &run, daemon);
+        let whole = ok(&board, &run, daemon, &["merge", "status"]);
+        assert!(
+            whole["already_failing"].is_array() && whole["warnings"].is_array(),
+            "{whole}"
+        );
         let areas: Vec<&Value> = list
             .iter()
             .filter(|c| c["kind"] == "layout_conflict")
