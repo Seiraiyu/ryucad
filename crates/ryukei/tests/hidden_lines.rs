@@ -666,3 +666,33 @@ fn the_crankcase_twins_views_agree_with_the_mesh() {
         assert!(j.wrong.is_empty(), "{t:?}: {:?}", j.wrong);
     }
 }
+
+/// #643 (plan 17.C): the crankcase twin seen from the drawing's front,
+/// where the bosses at 40° and 320° (and each such pair) are mirror
+/// images in a plane square to the view, so their saddles' images
+/// coincide and a ray from the back saddle leaves through the front
+/// saddle's edge. At most a tenth of its pieces uncertain, none the mesh
+/// contradicts.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: booleans of saddles")]
+fn the_crankcase_twins_front_view_mostly_certifies() {
+    let body = crankcase_twin(&[0.0, 40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0]);
+    let v = View::new(Vector3::new(0.0, -1.0, 0.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let placed = [at(&body)];
+    let p = view(&placed, &v, &ViewOptions::default()).unwrap();
+    let uncertain = p
+        .pieces
+        .iter()
+        .filter(|q| q.visibility == Visibility::Uncertain)
+        .count();
+    eprintln!("front: {uncertain} of {} pieces uncertain", p.pieces.len());
+    assert!(
+        uncertain * 10 <= p.pieces.len(),
+        "{uncertain} of {}",
+        p.pieces.len()
+    );
+    let bodies = placed_bodies(&placed);
+    let o = Oracle::new(&bodies, &v, size(&bodies) * 1e-3).unwrap();
+    let j = judge(&p, &bodies, &o);
+    assert!(j.wrong.is_empty(), "{:?}", j.wrong);
+}
