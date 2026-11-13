@@ -456,6 +456,9 @@ enum Command {
     /// Register ryueda with Git: `git install`.
     #[command(subcommand)]
     Git(GitCmd),
+    /// What a merge in progress leaves to settle, and settling it.
+    #[command(subcommand)]
+    Merge(MergeCmd),
     /// What the project folder needs that no one file says (Git's setup,
     /// files Git left unmerged, hand-written files, files no kind holds,
     /// model files no footprint names), and with --repair those fixes.
@@ -1589,6 +1592,20 @@ enum GitCmd {
 }
 
 #[derive(Subcommand)]
+enum MergeCmd {
+    /// Everything that blocks the merge's commit: conflicts in files'
+    /// records, paths Git left unmerged and layouts to merge, each with the
+    /// side that caused it, its choices and its repairs.
+    Status {
+        /// As Git's hooks run it: check every ryueda project the merge
+        /// concerns, print what is unresolved for people, and exit 1 if
+        /// anything is. Outside a merge it exits 0 at once.
+        #[arg(long)]
+        hook: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum DaemonCmd {
     /// Serve the project (the CLI starts this itself).
     Run {
@@ -2628,6 +2645,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         },
         Command::Design(DesignCmd::List) => Request::DesignList {},
         Command::Doctor { repairs } if repairs.is_empty() => Request::Doctor {},
+        Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
         Command::Doctor { repairs } => Request::DoctorRepair {
             repairs: repairs.clone(),
         },

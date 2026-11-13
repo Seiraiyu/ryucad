@@ -477,6 +477,11 @@ fn dispatch(
         Request::ProjectInfo {} => Ok(info(session.project())),
         Request::Doctor {} => Ok(crate::doctor::report(session.root(), session.project())),
         Request::DoctorRepair { repairs } => doctor_repair(session, &repairs),
+        Request::MergeStatus {} => crate::validate::status(session),
+        Request::MergeResolve { .. } => Err(Error::new(
+            Code::Usage,
+            "merge.resolve arrives with Task 10",
+        )),
         Request::LibAdd {
             alias,
             path,

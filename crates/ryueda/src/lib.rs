@@ -58,6 +58,7 @@ pub mod symlint;
 pub mod template;
 pub mod textconv;
 pub mod topcmd;
+pub mod validate;
 pub mod view;
 pub mod vocab;
 pub mod write;

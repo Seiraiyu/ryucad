@@ -42,6 +42,20 @@ impl VersionInfo {
     }
 }
 
+/// One conflict settled by `merge.resolve`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resolution {
+    /// The conflict's ID, as `merge.status` gives it.
+    pub conflict: String,
+    /// `ours`, `theirs`, `value` (with `value`) or `repair` (with `repair`).
+    pub choice: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<String>,
+}
+
 /// Every request a session answers, by JSON-RPC method name.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", deny_unknown_fields)]
@@ -898,6 +912,18 @@ pub enum Request {
     /// Applies doctor's repairs by ID, in order, as one change.
     #[serde(rename = "doctor.repair")]
     DoctorRepair { repairs: Vec<String> },
+    /// What the merge in progress leaves to settle: conflict records, paths
+    /// Git left unmerged, and layouts to merge (design 518).
+    #[serde(rename = "merge.status")]
+    MergeStatus {},
+    /// Settles conflicts as asked, in order, as one logged change; guarded
+    /// by block revisions (`<block>`) and the project's (`project`).
+    #[serde(rename = "merge.resolve")]
+    MergeResolve {
+        resolutions: Vec<Resolution>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        expected_revisions: std::collections::BTreeMap<String, String>,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1019,6 +1045,7 @@ impl Request {
             self,
             Request::LibAdd { .. }
                 | Request::DoctorRepair { .. }
+                | Request::MergeResolve { .. }
                 | Request::ProjectEdit { .. }
                 | Request::SymbolCreate { .. }
                 | Request::SymbolEdit { .. }

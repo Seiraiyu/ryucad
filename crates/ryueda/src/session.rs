@@ -24,6 +24,9 @@ pub struct Session {
     /// The last [`REVISIONS`] revisions read ([`Session::at`]), by what
     /// they read, most recently used first.
     pub(crate) revisions: Vec<(String, std::sync::Arc<Project>)>,
+    /// The last `merge.status` answer, by the key it was read at
+    /// ([`crate::validate::key`]).
+    pub(crate) merge_status: Option<(String, serde_json::Value)>,
 }
 
 /// `rel` (relative to the project, with `/`) as a path under `root`.
@@ -53,6 +56,7 @@ impl Session {
             prepared: None,
             catalogues: None,
             revisions: Vec::new(),
+            merge_status: None,
         })
     }
 
@@ -91,6 +95,11 @@ impl Session {
         };
         self.catalogues = Some(c.clone());
         Ok(c)
+    }
+
+    /// A hash of every file the project's state depends on, as last read.
+    pub fn digest(&self) -> String {
+        self.stamps.digest()
     }
 
     pub fn root(&self) -> &Path {
