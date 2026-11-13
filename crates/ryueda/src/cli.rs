@@ -1574,6 +1574,18 @@ enum GitCmd {
     /// Print a ryueda file as one line per value, for `git diff` (Git's
     /// textconv): plain text, not JSON.
     Textconv { file: PathBuf },
+    /// Merge three versions of a ryueda file value by value, for Git's
+    /// merge (`merge.ryueda.driver`): writes the result over OURS and exits
+    /// 0, or 1 when conflicts are left in it. Prints nothing.
+    MergeDriver {
+        /// The common ancestor's version (empty when both sides added it).
+        base: PathBuf,
+        /// Ours, which the result replaces.
+        ours: PathBuf,
+        theirs: PathBuf,
+        /// The file's path in the repository, as Git names it.
+        path: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2661,6 +2673,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
         Command::Git(GitCmd::Textconv { .. }) => unreachable!("answered in main"),
+        Command::Git(GitCmd::MergeDriver { .. }) => unreachable!("answered in main"),
         // Keys go straight to the user's config folder: never through a
         // daemon, a request or a log.
         Command::Parts(PartsCmd::Login { distributor }) => {
@@ -2879,9 +2892,49 @@ pub fn main() -> ExitCode {
             Err(e) => finish(Err(Error::io(file, &e)), Vec::new(), cli.pretty),
         };
     }
+    // Git calls the merge driver: its answer is the file and the exit code.
+    if let Command::Git(GitCmd::MergeDriver {
+        base,
+        ours,
+        theirs,
+        path,
+    }) = &cli.command
+    {
+        return merge_driver(base, ours, theirs, path.as_deref());
+    }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);
     finish(outcome, warnings, cli.pretty)
+}
+
+/// `ryueda git merge-driver`: merges, writes over `ours`, and exits 0 when
+/// nothing is left to resolve, 1 when conflicts are (in the file's record,
+/// or as Git's markers when it fell back to merging lines), 4 when a file
+/// can't be read or written. Failures go to stderr: Git shows them.
+fn merge_driver(
+    base: &std::path::Path,
+    ours: &std::path::Path,
+    theirs: &std::path::Path,
+    path: Option<&str>,
+) -> ExitCode {
+    let read = |p: &std::path::Path| std::fs::read(p).map_err(|e| Error::io(p, &e));
+    let merged = (|| -> Result<ryueda::merge::Outcome> {
+        let (out, outcome) = ryueda::merge::bytes(&read(base)?, &read(ours)?, &read(theirs)?);
+        std::fs::write(ours, out).map_err(|e| Error::io(ours, &e))?;
+        Ok(outcome)
+    })();
+    match merged {
+        Ok(ryueda::merge::Outcome::Clean) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!(
+                "ryueda: merging {}: {}",
+                path.unwrap_or(&ours.to_string_lossy()),
+                e.message
+            );
+            ExitCode::from(Code::Io.exit_code())
+        }
+    }
 }
 
 fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCode {

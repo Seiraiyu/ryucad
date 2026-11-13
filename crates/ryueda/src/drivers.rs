@@ -1,10 +1,7 @@
 //! Registering ryueda with Git (design 518), through `ryu-git`: the
 //! project's `.gitattributes`, which hands ryueda's files to it, and the
-//! textconv entry in Git's config with `merge.renames=false` in the
-//! clone. The merge driver's entry and the hook's line come with the
-//! merge driver (plan 4.C); until then the `merge=ryueda` attribute names
-//! a driver Git's config doesn't define, so Git merges the files as text,
-//! as it always did.
+//! textconv and merge driver entries in Git's config with
+//! `merge.renames=false` in the clone (design 518; plan 4.C).
 
 use crate::error::{Error, Result};
 use serde_json::Value;
@@ -42,12 +39,16 @@ const ATTRS: ryu_git::drivers::Attributes = ryu_git::drivers::Attributes {
 /// The textconv entry.
 pub const TEXTCONV: &str = "diff.ryueda.textconv";
 
-/// What ryueda registers with Git: textconv, and from plan 4.C its merge
-/// driver and hook line.
+/// The merge driver's name and command entries.
+pub const MERGE_NAME: &str = "merge.ryueda.name";
+pub const MERGE_DRIVER: &str = "merge.ryueda.driver";
+
+/// What ryueda registers with Git: textconv and its merge driver, and
+/// from Task 12 its hook line.
 pub const DRIVERS: ryu_git::drivers::Drivers = ryu_git::drivers::Drivers {
     product: "ryueda",
     textconv: TEXTCONV,
-    merge: None,
+    merge: Some((MERGE_NAME, MERGE_DRIVER)),
     hook: false,
 };
 

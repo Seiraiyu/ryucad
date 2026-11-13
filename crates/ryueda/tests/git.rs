@@ -192,8 +192,8 @@ fn init_in_a_repository_sets_the_clone_up_and_install_is_idempotent() {
         "{config}"
     );
     assert!(
-        !config.contains("merge-driver"),
-        "no merge driver before plan 4.C"
+        config.contains("' git merge-driver %O %A %B %P") && config.contains("[merge \"ryueda\"]"),
+        "{config}"
     );
     assert!(
         !top.join(".git/hooks/pre-merge-commit").exists(),
@@ -213,6 +213,7 @@ fn init_in_a_repository_sets_the_clone_up_and_install_is_idempotent() {
         global.contains("textconv") && !global.contains("renames"),
         "{global}"
     );
+    assert!(global.contains("git merge-driver"), "{global}");
 }
 
 #[test]
@@ -839,4 +840,42 @@ fn a_compare_is_set_on_a_participant() {
     let (_, off) = ryueda(&board, &run, true, &["compare", "--off"]);
     assert_eq!(off["result"]["compare"], Value::Null);
     ryueda(&board, &run, true, &["daemon", "stop"]);
+}
+
+#[test]
+fn the_merge_driver_writes_over_ours_and_exits_by_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let comp = |refdes: &str, value: &str| {
+        format!(
+            "{{\n  \"format\": 1,\n  \"kind\": \"ryueda.component\",\n  \"of\": {{\n    \"id\": \"r\"\n  }},\n  \"refdes\": \"{refdes}\",\n  \"value\": \"{value}\"\n}}\n"
+        )
+    };
+    let write = |name: &str, text: &str| {
+        let p = dir.path().join(name);
+        std::fs::write(&p, text).unwrap();
+        p
+    };
+    let (b, o, t) = (
+        write("b", &comp("R1", "1k")),
+        write("o", &comp("R2", "1k")),
+        write("t", &comp("R1", "2k")),
+    );
+    let out = ryueda_cmd(dir.path(), &run, false, &["git", "merge-driver"])
+        .args([&b, &o, &t])
+        .arg("blocks/x/components/r1.json")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty(), "prints nothing");
+    assert_eq!(std::fs::read_to_string(&o).unwrap(), comp("R2", "2k"));
+    // Both sides changed one value: exit 1, the record in ours' file.
+    let o = write("o", &comp("R1", "3k"));
+    let out = ryueda_cmd(dir.path(), &run, false, &["git", "merge-driver"])
+        .args([&b, &o, &t])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: Value = serde_json::from_slice(&std::fs::read(&o).unwrap()).unwrap();
+    assert_eq!(v["conflicts"]["/value"]["theirs"], "2k");
 }
