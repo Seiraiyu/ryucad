@@ -150,7 +150,7 @@ pub fn of(
         "bends": bends,
     })
     .to_string();
-    if let Some(f) = s.caches.flats.get(&key) {
+    if let Some(f) = s.caches_mut().flats_mut().get(&key) {
         return Ok((commit, f));
     }
     let options = SheetOptions::default();
@@ -319,7 +319,7 @@ pub fn of(
         }
     };
     let f = Arc::new(f);
-    s.caches.flats.put(key, Arc::clone(&f));
+    s.caches_mut().flats_mut().put(key, Arc::clone(&f));
     Ok((commit, f))
 }
 

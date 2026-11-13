@@ -70,8 +70,8 @@ pub fn meshes(
         .collect();
     let job = session.job.clone();
     let mut made = session
-        .caches
-        .meshes
+        .caches_mut()
+        .meshes_mut()
         .get_all_for(&ok, quality, budget, &job)?
         .into_iter();
     Ok(built
@@ -126,8 +126,8 @@ pub fn mesh_before(
     let b = b.as_ref().clone();
     let job = session.job.clone();
     let mesh = session
-        .caches
-        .meshes
+        .caches_mut()
+        .meshes_mut()
         .get_all_for(&[(&features[&f], &b)], quality, mesh_budget(), &job)?
         .pop()
         .expect("one mesh for one body");
@@ -264,8 +264,8 @@ pub fn occurrence_meshes(
         .collect();
     let job = session.job.clone();
     session
-        .caches
-        .meshes
+        .caches_mut()
+        .meshes_mut()
         .get_all_for(&items, quality, budget, &job)
 }
 
@@ -618,10 +618,10 @@ pub(crate) fn render_noting(
     shown: Vec<live::Highlight>,
     ask: RenderAsk,
 ) -> Result<Answer> {
-    session.caches.meshes.note();
+    session.caches_mut().meshes_mut().note();
     let r = render(session, target, shown, ask);
     let refused = matches!(&r, Err(e) if e.code == Code::RenderTooLarge);
-    session.caches.meshes.end_note(refused);
+    session.caches_mut().meshes_mut().end_note(refused);
     r
 }
 
@@ -846,7 +846,7 @@ pub(crate) fn render_scene(
             }
             let total = model.occurrences.len();
             for (drawn, o) in model.occurrences.iter().enumerate() {
-                let bytes = g.bytes_with(&mut tally) + session.caches.meshes.noted_bytes();
+                let bytes = g.bytes_with(&mut tally) + session.caches().meshes().noted_bytes();
                 if bytes > budget {
                     return Err(render_past_budget(part, drawn, total, bytes, budget));
                 }
@@ -896,7 +896,7 @@ pub(crate) fn render_scene(
                     seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
                 }
             }
-            let bytes = g.bytes_with(&mut tally) + session.caches.meshes.noted_bytes();
+            let bytes = g.bytes_with(&mut tally) + session.caches().meshes().noted_bytes();
             if bytes > budget {
                 return Err(render_past_budget(part, total, total, bytes, budget));
             }
@@ -924,7 +924,7 @@ pub(crate) fn render_scene(
                 (whole, &faces, look(fid.as_str())),
                 (ask.labels, ask.edges),
             );
-            let bytes = g.bytes_with(&mut tally) + session.caches.meshes.noted_bytes();
+            let bytes = g.bytes_with(&mut tally) + session.caches().meshes().noted_bytes();
             if bytes > budget {
                 return Err(render_past_budget(part, 1, 1, bytes, budget));
             }

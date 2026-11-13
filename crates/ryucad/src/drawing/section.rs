@@ -505,7 +505,7 @@ pub(super) fn cut_all(session: &mut Session, plans: &mut [(super::Plan, Source)]
     let mut found: Vec<Option<Arc<Cut1>>> = jobs
         .iter()
         .map(|j| {
-            session.caches.sections.get(&j.key).or_else(|| {
+            session.caches_mut().sections_mut().get(&j.key).or_else(|| {
                 let d = disk.as_ref()?;
                 let bytes = d.get(crate::cache::Kind::Section, j.key.as_bytes())?;
                 let origins = plans[j.plan].1[j.solid].0.origins.clone();
@@ -560,7 +560,10 @@ pub(super) fn cut_all(session: &mut Session, plans: &mut [(super::Plan, Source)]
                 if let Some(d) = &disk {
                     d.put(crate::cache::Kind::Section, j.key.as_bytes(), &encode(&c));
                 }
-                session.caches.sections.put(j.key.clone(), c.clone());
+                session
+                    .caches_mut()
+                    .sections_mut()
+                    .put(j.key.clone(), c.clone());
                 c
             }
             Some(Err(e)) => {

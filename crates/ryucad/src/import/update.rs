@@ -1941,13 +1941,13 @@ mod tests {
         // what the rebuild answers doesn't matter here, only that it ran.
         let _ = call(&mut s, "rebuild", json!({}));
         assert!(
-            s.caches.interference.is_empty(),
+            s.caches().interference().is_empty(),
             "the import ran interference"
         );
         update(&mut s, &frame_version(2), json!({"solid": false})).unwrap();
         let _ = call(&mut s, "rebuild", json!({}));
         assert!(
-            s.caches.interference.is_empty(),
+            s.caches().interference().is_empty(),
             "the update ran interference"
         );
     }

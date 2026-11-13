@@ -38,6 +38,7 @@ use std::time::{Duration, Instant};
 mod caches;
 
 pub use caches::Caches;
+pub(crate) use caches::Moved;
 
 /// Set, a daemon doesn't watch its folder and checks every file on every
 /// request (tests compare both ways; a filesystem whose events lie can be
@@ -201,6 +202,7 @@ impl Session {
         self.store.summaries.clear();
         self.store.holes.clear();
         self.revisions.clear();
+        self.caches.changed(Moved::Budget);
     }
 
     /// Loads the project at `root`.
@@ -300,7 +302,7 @@ impl Session {
             return;
         }
         self.note_fixed();
-        let meshes = self.caches.meshes.bytes() as u64;
+        let meshes = self.caches.mesh_bytes();
         if self.store.held(&self.project, meshes) > self.store.budget.max {
             for (_, r) in &mut self.revisions {
                 let project = &r.project;
@@ -324,10 +326,7 @@ impl Session {
             self.known.len() as u64,
             self.known.values().map(|n| n.len() as u64).sum(),
             self.store.models.len() as u64,
-            (self.caches.interference.len()
-                + self.caches.clearance.len()
-                + self.caches.mass.len()
-                + self.caches.blends.len()) as u64,
+            self.caches.verdicts(),
             crate::import::opened_bytes(),
             self.store.results.len() as u64,
         ];
@@ -359,9 +358,7 @@ impl Session {
     /// The budget's state for `daemon status`: its bound, what it holds,
     /// how many parts' rebuilds it has let go, and how many it holds.
     pub fn budget_status(&self) -> Value {
-        let held = self
-            .store
-            .held(&self.project, self.caches.meshes.bytes() as u64);
+        let held = self.store.held(&self.project, self.caches.mesh_bytes());
         let mut v = self.store.budget.to_json(held);
         v["parts_held"] = json!(
             self.store
@@ -370,7 +367,7 @@ impl Session {
                 .filter(|id| crate::assembly::is_leaf(&self.project, id))
                 .count()
         );
-        v["meshes_bytes"] = json!(self.caches.meshes.bytes());
+        v["meshes_bytes"] = json!(self.caches.meshes().bytes());
         v
     }
 
@@ -391,7 +388,7 @@ impl Session {
     /// The session with `disk` beneath its caches: results it doesn't
     /// hold are read from it, and what it builds is written to it.
     pub fn with_disk(mut self, disk: Option<Arc<crate::cache::Disk>>) -> Session {
-        self.caches.meshes.disk = disk.clone();
+        self.caches.set_disk(disk.clone());
         self.store.disk = disk;
         self
     }
@@ -460,7 +457,7 @@ impl Session {
         }
         if let Some((_, files, stale)) = self.annotation_files(rev)? {
             if !stale.is_empty() {
-                self.caches.rev_warnings.push(stale_warning(rev, &stale));
+                self.caches.note_rev_warning(stale_warning(rev, &stale));
             }
             return self.at_files(rev, files);
         }
@@ -867,11 +864,22 @@ impl Session {
             .summaries
             .retain(|id, (key, ..)| current(id, key));
         self.store.budget.retain(|id| live.contains_key(id));
+        self.caches.changed(Moved::Files);
     }
 
     /// How many times the files have changed under this session.
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// What the session keeps only to answer faster (see [`Caches`]).
+    pub fn caches(&self) -> &Caches {
+        &self.caches
+    }
+
+    /// [`Session::caches`], to fill or let go of.
+    pub fn caches_mut(&mut self) -> &mut Caches {
+        &mut self.caches
     }
 
     /// Each assembly's (and each part inserting another's) key for
@@ -1303,9 +1311,7 @@ impl Session {
     pub(crate) fn deps_fetched(&mut self) {
         self.deps_reader = None;
         self.foreign_pins.clear();
-        self.caches
-            .structure
-            .retain(|(project, _, _), _| project.is_none());
+        self.caches.changed(Moved::Fetched);
     }
 
     /// The rebuild of `part` this session holds, if it holds one: what
@@ -2734,7 +2740,7 @@ mod tests {
         fn a_change_of_files_keeps_what_is_kept_by_content() {
             with_config(|_| {
                 let (dir, mut s) = two_spheres();
-                assert_eq!(s.caches.meshes.len(), 2);
+                assert_eq!(s.caches().meshes().len(), 2);
                 let epoch = s.epoch();
                 // Behind the session's back, as an editor writes.
                 let mut other = Session::open(dir.path()).unwrap();
@@ -2746,7 +2752,11 @@ mod tests {
                 .unwrap();
                 assert!(s.refresh().unwrap());
                 assert!(s.epoch() > epoch);
-                assert_eq!(s.caches.meshes.len(), 2, "a change of files let a mesh go");
+                assert_eq!(
+                    s.caches().meshes().len(),
+                    2,
+                    "a change of files let a mesh go"
+                );
                 assert!(s.cached(&p()).is_none(), "the stale rebuild stayed");
             });
         }
@@ -2757,7 +2767,7 @@ mod tests {
                 let (_dir, mut s) = two_spheres();
                 assert!(s.cached(&p()).is_some());
                 s.set_heal_budget(s.heal_budget + 1);
-                assert_eq!(s.caches.meshes.len(), 2, "a new budget let a mesh go");
+                assert_eq!(s.caches().meshes().len(), 2, "a new budget let a mesh go");
                 assert!(s.cached(&p()).is_none(), "the rebuild stayed");
             });
         }
@@ -2781,10 +2791,10 @@ mod tests {
                     json!({"part": "p", "quality": "coarse"}),
                 )
                 .unwrap();
-                let meshes = s.caches.meshes.len();
+                let meshes = s.caches().meshes().len();
                 assert!(meshes > 0);
                 s.trim();
-                assert_eq!(s.caches.meshes.len(), meshes, "a trim let a mesh go");
+                assert_eq!(s.caches().meshes().len(), meshes, "a trim let a mesh go");
                 assert!(s.cached(&p()).is_none(), "the trim kept the rebuild");
             });
         }
@@ -2794,12 +2804,16 @@ mod tests {
             with_config(|_| {
                 let (_dir, mut s) = two_spheres();
                 call(&mut s, "blends.get", json!({"part": "p", "solid": "a"})).unwrap();
-                let blends = s.caches.blends.len();
+                let blends = s.caches().blends().len();
                 assert!(blends > 0);
                 let r = s.over(s.snapshot()).unwrap();
-                assert_eq!(r.caches.blends.len(), blends, "the verdicts weren't shared");
-                assert_eq!(r.caches.meshes.len(), 0, "a revision meshes afresh");
-                assert!(r.caches.merge_status.is_none() && r.caches.previews.is_empty());
+                assert_eq!(
+                    r.caches().blends().len(),
+                    blends,
+                    "the verdicts weren't shared"
+                );
+                assert_eq!(r.caches().meshes().len(), 0, "a revision meshes afresh");
+                assert!(!r.caches().has_state());
             });
         }
     }
@@ -2817,10 +2831,19 @@ mod tests {
             .collect()
     }
 
-    /// `Session` shows no field (ryucad 27.E): other modules reach what
-    /// they mean to through its methods.
+    /// `Session` and `Caches` show no field (ryucad 27.E): other modules
+    /// reach what they mean to through their methods.
     #[test]
     fn the_session_and_its_caches_show_no_field() {
+        let shown = shown_fields(
+            "session/caches.rs",
+            include_str!("session/caches.rs"),
+            "\npub struct Caches {",
+        );
+        assert!(
+            shown.is_empty(),
+            "session/caches.rs: fields other modules reach: {shown:?}"
+        );
         let shown = shown_fields(
             "session.rs",
             include_str!("session.rs"),

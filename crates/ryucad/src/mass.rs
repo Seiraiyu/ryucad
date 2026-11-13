@@ -188,7 +188,7 @@ pub fn run(
         .collect();
     let mut missing: Vec<&(String, &Located, f64)> = wanted
         .iter()
-        .filter(|(k, _, _)| !s.caches.mass.found.contains_key(k))
+        .filter(|(k, _, _)| !s.caches_mut().mass_mut().found.contains_key(k))
         .collect();
     missing.sort_by(|a, b| a.0.cmp(&b.0));
     missing.dedup_by(|a, b| a.0 == b.0);
@@ -213,7 +213,7 @@ pub fn run(
             .collect()
     };
     for (k, r) in made {
-        s.caches.mass.found.insert(k, Arc::new(r?));
+        s.caches_mut().mass_mut().found.insert(k, Arc::new(r?));
     }
     let references: std::collections::BTreeSet<&Id> = located
         .iter()
@@ -225,7 +225,7 @@ pub fn run(
         .map(|(k, l, _)| Share {
             part: l.part.clone(),
             density: dens[&l.part].1,
-            props: s.caches.mass.found[k].clone(),
+            props: s.caches_mut().mass_mut().found[k].clone(),
             pose: l.pose,
         })
         .collect();
@@ -429,12 +429,12 @@ mod tests {
         );
         assert_eq!(v["parts"][0]["material"], "steel");
         // The same again comes from the cache.
-        let n = s.caches.mass.len();
+        let n = s.caches().mass().len();
         assert_eq!(
             call(&mut s, "mass", json!({"of": "plate/slab"})).unwrap()["mass"],
             v["mass"]
         );
-        assert_eq!(s.caches.mass.len(), n);
+        assert_eq!(s.caches().mass().len(), n);
     }
 
     #[test]

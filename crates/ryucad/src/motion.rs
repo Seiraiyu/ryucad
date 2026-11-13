@@ -1407,7 +1407,7 @@ pub fn sweep_request(session: &mut Session, ask: SweepAsk) -> Result<Value> {
         &opts.to_json(),
         motion_id.as_ref(),
     );
-    if let Some(v) = session.caches.sweeps.get(&key) {
+    if let Some(v) = session.caches_mut().sweeps_mut().get(&key) {
         return Ok((*v).clone());
     }
     let job = session.job.clone();
@@ -1418,17 +1418,14 @@ pub fn sweep_request(session: &mut Session, ask: SweepAsk) -> Result<Value> {
         model: &model,
         unit,
     };
-    let caches = Caches {
-        interference: &mut session.caches.interference,
-        clearance: &mut session.caches.clearance,
-    };
+    let caches = session.caches_mut().verdicts_mut();
     let mut v = sweep(&input, motion_id.as_ref(), &resolved, &opts, caches, &job)?;
     v["part"] = json!(pid);
     v["revision"] = json!(part.revision);
     v["warnings"] = json!(resolved.warnings);
     session
-        .caches
-        .sweeps
+        .caches_mut()
+        .sweeps_mut()
         .put(key, std::sync::Arc::new(v.clone()));
     Ok(v)
 }
@@ -2053,10 +2050,7 @@ pub(crate) mod tests {
             model: &model,
             unit,
         };
-        let caches = Caches {
-            interference: &mut s.caches.interference,
-            clearance: &mut s.caches.clearance,
-        };
+        let caches = s.caches_mut().verdicts_mut();
         sweep(&input, None, &r, opts, caches, &Job::default()).unwrap()
     }
 
@@ -2106,16 +2100,16 @@ pub(crate) mod tests {
         // Asked again with what it cached: the same answer, and the
         // pairs whose relative pose didn't change were never intersected
         // again (the cache holds one verdict per distinct pose).
-        let cached = s.caches.interference.len();
+        let cached = s.caches().interference().len();
         assert_eq!(swept(&mut s, "swing", turning("45 deg"), 46, &opts), v);
-        assert_eq!(s.caches.interference.len(), cached);
+        assert_eq!(s.caches().interference().len(), cached);
     }
 
     #[test]
     fn without_interference_nothing_is_intersected() {
         let (_dir, mut s) = swing(true);
         let v = swept(&mut s, "swing", turning("45 deg"), 46, &Options::default());
-        assert!(s.caches.interference.is_empty());
+        assert!(s.caches().interference().is_empty());
         assert!(
             v.get("at_rest").is_none() && v["first_collision"].is_null(),
             "{v}"
@@ -2157,10 +2151,7 @@ pub(crate) mod tests {
             model: &model,
             unit: crate::units::Unit::Mm,
         };
-        let caches = Caches {
-            interference: &mut s.caches.interference,
-            clearance: &mut s.caches.clearance,
-        };
+        let caches = s.caches_mut().verdicts_mut();
         let e = sweep(
             &input,
             None,
@@ -2276,7 +2267,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(short["steps"], saved["steps"]);
         // Asked again: from the session's cache.
-        assert_eq!(s.caches.sweeps.len(), 2);
+        assert_eq!(s.caches().sweeps().len(), 2);
         let again = call(
             &mut s,
             "assembly.sweep",
@@ -2284,7 +2275,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(again, saved);
-        assert_eq!(s.caches.sweeps.len(), 2);
+        assert_eq!(s.caches().sweeps().len(), 2);
         // Refusals.
         for (p, code) in [
             (json!({"part": "frame"}), Code::InvalidParam),
@@ -2508,7 +2499,7 @@ pub(crate) mod tests {
                          "interference": true, "refine": 0});
         let before = call(&mut s, "assembly.sweep", ask.clone()).unwrap();
         assert_eq!(before["first_collision"]["index"], 22, "{before}");
-        assert_eq!(s.caches.sweeps.len(), 1);
+        assert_eq!(s.caches().sweeps().len(), 1);
         // The block made shorter: the assembly's own files are unchanged,
         // but the arm now meets the block's corner at (35, 20) mm, sooner.
         call(
@@ -2518,7 +2509,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let after = call(&mut s, "assembly.sweep", ask).unwrap();
-        assert_eq!(s.caches.sweeps.len(), 2, "a stale answer was given");
+        assert_eq!(s.caches().sweeps().len(), 2, "a stale answer was given");
         assert_ne!(
             after["first_collision"], before["first_collision"],
             "{after}"

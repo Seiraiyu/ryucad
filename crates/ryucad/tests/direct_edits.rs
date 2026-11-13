@@ -1258,11 +1258,11 @@ fn the_blends_query_lists_what_delete_blend_takes() {
     assert_eq!(faces(&listed), faces(&rep));
     // Cached by body and tolerance: the delete shows b anew (one more
     // body recognised), and asking again recognises nothing.
-    let n = s.caches.blends.len();
+    let n = s.caches().blends().len();
     must(&mut s, "blends.get", json!({"part": "p", "solid": "b"}));
-    assert_eq!(s.caches.blends.len(), n + 1);
+    assert_eq!(s.caches().blends().len(), n + 1);
     must(&mut s, "blends.get", json!({"part": "p", "solid": "b"}));
-    assert_eq!(s.caches.blends.len(), n + 1);
+    assert_eq!(s.caches().blends().len(), n + 1);
     // A tolerance outside the kernel's range is its refusal.
     let e = call(
         &mut s,

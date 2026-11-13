@@ -1055,7 +1055,7 @@ fn meshed_with(
         .collect();
     let builts: Vec<&Built> = solids.iter().map(|(_, x)| x.built.as_ref()).collect();
     let job = s.job.clone();
-    let made = s.caches.meshes.export_all_for(
+    let made = s.caches_mut().meshes_mut().export_all_for(
         &builts,
         &opts.params,
         crate::budget::mesh_budget(),
@@ -2971,7 +2971,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             // A fresh mesh cache each time, so every boundary is reached.
-            slot.as_mut().unwrap().caches.meshes = Default::default();
+            *slot.as_mut().unwrap().caches_mut().meshes_mut() = Default::default();
             match crate::server::handle_job(
                 &mut slot,
                 None,

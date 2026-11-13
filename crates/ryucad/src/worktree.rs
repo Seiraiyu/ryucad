@@ -55,11 +55,11 @@ pub fn list(session: &mut Session, live: Option<&Live>) -> Result<Value> {
         v["ahead"] = json!(ahead);
         v["behind"] = json!(behind);
         let key = format!("{}\0{digest}", w.head.as_deref().unwrap_or_default());
-        let changes = match session.caches.worktree_changes.get(&key) {
-            Some(n) => *n,
+        let changes = match session.caches().worktree_changes(&key) {
+            Some(n) => n,
             None => {
                 let n = repo.changed_since(w.head.as_deref(), &files)?.len();
-                session.caches.worktree_changes.insert(key.clone(), n);
+                session.caches_mut().put_worktree_changes(key.clone(), n);
                 n
             }
         };
@@ -86,9 +86,8 @@ pub fn list(session: &mut Session, live: Option<&Live>) -> Result<Value> {
     }
     let current = out.iter().find(|w| w["current"] == true).cloned();
     session
-        .caches
-        .worktree_changes
-        .retain(|k, _| seen.contains(k));
+        .caches_mut()
+        .changed(crate::session::Moved::Worktrees(&seen));
     Ok(json!({
         "path": session.root(),
         "branch": current.as_ref().map(|c| c["branch"].clone()),
