@@ -3,6 +3,9 @@
 //! and a part's official labels. No egui.
 
 use crate::core::model::{BodyKey, Part};
+use ryucad::mesh::WireBody;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// The bodies a chosen insert paints whole: every solid it founds that
 /// the model shows. None for any other feature.
@@ -18,6 +21,47 @@ pub fn painted(part: &Part, chosen: &BodyKey) -> Vec<BodyKey> {
         .into_iter()
         .map(|s| (part.id.clone(), s.id.clone()))
         .collect()
+}
+
+/// What a chosen delete_body ghosts: each solid it takes out, as the
+/// delete read it (`mesh.get` with `before`), where it was.
+#[derive(Clone, Debug, Default)]
+pub struct Deleted {
+    /// The delete: its part and ID.
+    pub feature: BodyKey,
+    /// Each solid's mesh as it came, by its key.
+    pub ghosts: BTreeMap<BodyKey, Arc<WireBody>>,
+    /// Bumped as each comes, for the scene to upload them again.
+    pub generation: u64,
+}
+
+impl Deleted {
+    /// For delete `feature` of `part`, with the solids to ask for; `None`
+    /// for a feature that isn't a delete.
+    pub fn of(part: &Part, feature: &str) -> Option<(Deleted, Vec<BodyKey>)> {
+        let d = part.feature(feature)?.delete.as_ref()?;
+        let asked = d
+            .solids
+            .iter()
+            .map(|s| (part.id.clone(), s.clone()))
+            .collect();
+        let me = Deleted {
+            feature: (part.id.clone(), feature.to_owned()),
+            ..Deleted::default()
+        };
+        Some((me, asked))
+    }
+
+    /// Keeps a ghost that came for this delete; false for another's.
+    pub fn take(&mut self, feature: &BodyKey, body: WireBody) -> bool {
+        if *feature != self.feature {
+            return false;
+        }
+        let key = (self.feature.0.clone(), body.feature.clone());
+        self.ghosts.insert(key, Arc::new(body));
+        self.generation += 1;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -51,5 +95,26 @@ mod tests {
         assert_eq!(painted(p, &key("brd")), [key("brd/base")]);
         assert!(painted(p, &key("lid")).is_empty());
         assert!(painted(p, &("other".to_owned(), "brd".to_owned())).is_empty());
+    }
+
+    #[test]
+    fn a_chosen_delete_asks_for_each_solid_and_keeps_only_its_ghosts() {
+        let m = inserted();
+        let p = &m.parts["e"];
+        assert!(Deleted::of(p, "lid").is_none());
+        let (mut d, asked) = Deleted::of(p, "d").unwrap();
+        assert_eq!(asked, [key("brd/boss")]);
+        let body = |f: &str| ryucad::mesh::WireBody {
+            feature: f.to_owned(),
+            hash: "h".to_owned(),
+            mesh: Err(json!(null)),
+        };
+        assert!(d.take(&key("d"), body("brd/boss")));
+        assert!(!d.take(&key("other"), body("brd/boss")));
+        assert_eq!(
+            d.ghosts.keys().cloned().collect::<Vec<_>>(),
+            [key("brd/boss")]
+        );
+        assert_eq!(d.generation, 1);
     }
 }

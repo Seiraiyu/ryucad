@@ -2822,6 +2822,13 @@ impl View {
         scene.set_looks(&ws.model.looks);
         scene.sync_drawn(&rs.device, drawn, reference);
         scene.sync_ghosts(&rs.device, ws.painted());
+        let chosen = self.chosen.clone();
+        scene.sync_deleted(
+            &rs.device,
+            ws.deleted
+                .as_ref()
+                .filter(|d| chosen.as_ref() == Some(&d.feature)),
+        );
         let size = [f64::from(px[0]), f64::from(px[1])];
         let mut overlay = if self.sketches {
             crate::core::sketch::overlay(

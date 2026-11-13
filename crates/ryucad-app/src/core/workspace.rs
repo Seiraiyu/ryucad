@@ -130,6 +130,8 @@ enum Pending {
     Compare(u64),
     /// A ghost's mesh, asked for at this hash.
     Ghost(BodyKey, String),
+    /// A chosen delete's ghost: the delete it was asked for.
+    Deleted(BodyKey),
     /// The model's solids, read for the faces a feature made, at this
     /// part revision.
     Made(BodyKey, String),
@@ -445,6 +447,8 @@ pub struct Workspace {
     /// shows them; and the feature, once asked for.
     pub made: Option<Made>,
     made_for: Option<BodyKey>,
+    /// The chosen delete's ghosts, as they come.
+    pub deleted: Option<crate::core::inserts::Deleted>,
     /// The sweep or loft chosen in the tree as `sweep.get` drew it: its
     /// profile and path, or its sections with their starts.
     pub swept: Option<crate::core::sweeps::SweepDrawing>,
@@ -680,6 +684,7 @@ impl Workspace {
             following: None,
             form: None,
             made: None,
+            deleted: None,
             made_for: None,
             swept: None,
             swept_at: None,
@@ -2670,10 +2675,12 @@ impl Workspace {
     /// be painted.
     pub fn choose(&mut self, feature: Option<BodyKey>) {
         self.made = None;
+        self.deleted = None;
         self.swept = None;
         self.swept_at = None;
         self.made_for.clone_from(&feature);
         if let Some(key) = feature {
+            self.ask_deleted(&key);
             self.ask_swept(&key);
             self.ask_sheet_paint(&key);
             self.ask_made(key);
@@ -2910,6 +2917,33 @@ impl Workspace {
 
     /// Reads the faces `key` made, unless it is a sketch: it makes none. A
     /// mate's are the faces its connectors are on, known already.
+    /// What a chosen delete ghosts: each solid it takes out, meshed as it
+    /// read them.
+    fn ask_deleted(&mut self, key: &BodyKey) {
+        let Some((d, asked)) = self
+            .model
+            .parts
+            .get(&key.0)
+            .and_then(|p| crate::core::inserts::Deleted::of(p, &key.1))
+        else {
+            return;
+        };
+        self.deleted = Some(d);
+        for (part, solid) in asked {
+            let req = Request::MeshGet {
+                part,
+                feature: Some(solid),
+                features: Vec::new(),
+                quality: None,
+                transfer: Some(Transfer::Compact),
+                rev: self.model_rev(),
+                flat: None,
+                before: Some(key.1.clone()),
+            };
+            self.send(req, Pending::Deleted(key.clone()));
+        }
+    }
+
     fn ask_made(&mut self, key: BodyKey) {
         let Some(p) = self.model.parts.get(&key.0) else {
             return;
@@ -4211,6 +4245,21 @@ impl Workspace {
                         }
                         for b in bodies {
                             if c.take_ghost(&key.0, b) {
+                                self.model.generation += 1;
+                            }
+                        }
+                    }
+                    Ok(Some(Err(e))) | Err(e) => self.fail(e),
+                    Ok(None) => {
+                        self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
+                    }
+                }
+            }
+            (Pending::Deleted(key), a) => {
+                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(bodies))) => {
+                        for b in bodies {
+                            if self.deleted.as_mut().is_some_and(|d| d.take(&key, b)) {
                                 self.model.generation += 1;
                             }
                         }
