@@ -729,6 +729,22 @@ pub(crate) fn dispatch(
         ),
         Request::ExplodeList { part } => crate::explode::list(session, part.as_deref()),
         Request::MotionList { part } => crate::motion::list(session, part.as_deref()),
+        Request::MotionFrames {
+            part,
+            motion,
+            drives,
+            steps,
+            frames,
+        } => crate::playback::frames(
+            session,
+            crate::playback::FramesAsk {
+                part,
+                motion,
+                drives,
+                steps,
+                frames,
+            },
+        ),
         Request::MotionSave {
             part,
             motion,

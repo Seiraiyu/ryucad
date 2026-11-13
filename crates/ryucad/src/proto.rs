@@ -1896,6 +1896,25 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Where a motion of assembly `part` (a saved `motion`, or inline
+    /// `drives` and `steps`) puts each moved body at `frames` even
+    /// fractions (120 by default, at most 1,000): each frame's state,
+    /// drive values, the moved instances' poses and each moved body's
+    /// offset (by instance, or copy and seed). Solved by continuation as
+    /// a sweep is; nothing is intersected. A window fetches them once and
+    /// plays locally.
+    #[serde(rename = "motion.frames")]
+    MotionFrames {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drives: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frames: Option<u32>,
+    },
     /// A part's drawings, or every part's (design 417).
     #[serde(rename = "drawing.list")]
     DrawingList {

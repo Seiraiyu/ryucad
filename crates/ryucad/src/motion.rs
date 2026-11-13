@@ -1299,6 +1299,31 @@ fn bad(message: &str) -> Error {
     Error::new(Code::InvalidParam, message)
 }
 
+/// The key a sweep's or frames' answer is kept under in the session's
+/// cache: `what` (`sweep`, `frames`), the assembly's revision and its
+/// model's hash (a placed part edited leaves the assembly's revision as
+/// it was), the resolved drives and steps, the options, and the saved
+/// motion's ID.
+pub(crate) fn answer_key(
+    what: &str,
+    revision: &str,
+    model_hash: &str,
+    resolved: &Resolved,
+    opts: &Value,
+    motion: Option<&Id>,
+) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(what.as_bytes());
+    h.update(&[0]);
+    h.update(revision.as_bytes());
+    h.update(model_hash.as_bytes());
+    h.update(crate::doc::canonical::to_string(&resolved.to_json()).as_bytes());
+    h.update(&(resolved.steps as u64).to_le_bytes());
+    h.update(crate::doc::canonical::to_string(opts).as_bytes());
+    h.update(crate::doc::canonical::to_string(&json!(motion)).as_bytes());
+    h.finalize().to_hex().to_string()
+}
+
 /// `assembly.sweep`: the motion asked for, swept over the working files'
 /// rebuild with the session's caches; asked again, from the session's
 /// last answers.
@@ -1374,16 +1399,14 @@ pub fn sweep_request(session: &mut Session, ask: SweepAsk) -> Result<Value> {
     // The model's hash covers what the assembly places (a placed part
     // edited leaves the assembly's own revision as it was).
     let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
-    let key = {
-        let mut h = blake3::Hasher::new();
-        h.update(part.revision.as_bytes());
-        h.update(model.hash.as_bytes());
-        h.update(crate::doc::canonical::to_string(&resolved.to_json()).as_bytes());
-        h.update(&(resolved.steps as u64).to_le_bytes());
-        h.update(crate::doc::canonical::to_string(&opts.to_json()).as_bytes());
-        h.update(crate::doc::canonical::to_string(&json!(motion_id)).as_bytes());
-        h.finalize().to_hex().to_string()
-    };
+    let key = answer_key(
+        "sweep",
+        &part.revision,
+        &model.hash,
+        &resolved,
+        &opts.to_json(),
+        motion_id.as_ref(),
+    );
     if let Some(v) = session.sweeps.get(&key) {
         return Ok((*v).clone());
     }

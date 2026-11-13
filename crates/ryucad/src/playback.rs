@@ -261,6 +261,103 @@ pub fn frames_of(
     Ok(out)
 }
 
+use crate::doc::assembly::Rev;
+use crate::doc::motion::MotionFile;
+
+/// Frames `motion.frames` gives by default, and at most.
+pub const FRAMES: u32 = 120;
+pub const MAX_FRAMES: u32 = 1000;
+
+/// What `motion.frames` asks: a saved `motion`, or inline `drives` and
+/// `steps`, of assembly `part`, at `frames` even fractions.
+#[derive(Clone, Debug, Default)]
+pub struct FramesAsk {
+    pub part: String,
+    pub motion: Option<String>,
+    pub drives: Option<Value>,
+    pub steps: Option<u32>,
+    pub frames: Option<u32>,
+}
+
+/// `motion.frames`: where the motion puts each moved body at `frames`
+/// even fractions of the way, from the working files' rebuild; asked
+/// again, from the session's cache. It only solves.
+pub fn frames(session: &mut Session, ask: FramesAsk) -> Result<Value> {
+    let pid = crate::motion::assembly(session, &ask.part, None)?;
+    let part = session.project().part(&pid)?.clone();
+    let unit = session.project().manifest.default_unit;
+    let n = ask.frames.unwrap_or(FRAMES);
+    if !(2..=MAX_FRAMES).contains(&n) {
+        return Err(
+            Error::new(Code::InvalidParam, format!("frames is 2 to {MAX_FRAMES}"))
+                .with("frames", n),
+        );
+    }
+    let file = match (&ask.motion, &ask.drives) {
+        (Some(m), None) if ask.steps.is_none() => crate::motion::file_of(session, &pid, m)?,
+        (None, Some(d)) => {
+            let doc = json!({"format": crate::doc::motion::FORMAT,
+                             "kind": crate::doc::motion::KIND,
+                             "steps": ask.steps.unwrap_or(crate::doc::motion::STEPS),
+                             "drives": d});
+            MotionFile::from_json(&doc, unit, &part.env).map_err(crate::motion::as_param)?
+        }
+        _ => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "frames of a saved motion or of inline drives: exactly one of motion and drives (steps goes with drives)",
+            ));
+        }
+    };
+    let result = session.rebuilt(&pid)?.clone();
+    let rest = Rest::of(&result);
+    if !rest.holds {
+        return Err(crate::motion::unsolved(&pid));
+    }
+    let motion_id = ask
+        .motion
+        .as_deref()
+        .map(|m| Id::parse(m, "motion"))
+        .transpose()?;
+    let resolved = crate::motion::resolve(
+        &pid,
+        &part,
+        &rest,
+        ask.motion.as_deref().unwrap_or("(inline)"),
+        &file,
+    )?;
+    let model = session.model(&pid, &Rev::Working)?;
+    let key = crate::motion::answer_key(
+        "frames",
+        &part.revision,
+        &model.hash,
+        &resolved,
+        &json!({"frames": n}),
+        motion_id.as_ref(),
+    );
+    if let Some(v) = session.sweeps.get(&key) {
+        return Ok((*v).clone());
+    }
+    let job = session.job.clone();
+    let ts: Vec<f64> = (0..n as usize)
+        .map(|k| crate::motion::t_of(k, n as usize))
+        .collect();
+    let frames = frames_of(&rest, &model, &resolved, &ts, unit, &job)?;
+    let v = json!({
+        "part": pid,
+        "motion": motion_id,
+        "revision": part.revision,
+        "frames": frames
+            .iter()
+            .enumerate()
+            .map(|(k, (f, poses))| f.to_json(k, poses.clone()))
+            .collect::<Vec<_>>(),
+        "warnings": resolved.warnings,
+    });
+    session.sweeps.put(key, std::sync::Arc::new(v.clone()));
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +596,119 @@ mod tests {
         // Its values still say where the drive is.
         let deg = frames[10].0.values["m1"]["angle_deg"].as_f64().unwrap();
         assert!((deg - 10.0).abs() < 1e-12, "{deg}");
+    }
+
+    #[test]
+    fn motion_frames_answers_saved_and_inline_alike_and_caches() {
+        let (_dir, mut s) = swing(false);
+        call(
+            &mut s,
+            "motion.save",
+            json!({"part": "swing", "motion": "turn", "steps": 46, "drives": turning("45 deg")}),
+        )
+        .unwrap();
+        let saved = call(
+            &mut s,
+            "motion.frames",
+            json!({"part": "swing", "motion": "turn", "frames": 5}),
+        )
+        .unwrap();
+        assert_eq!(saved["part"], "swing");
+        assert_eq!(saved["motion"], "turn");
+        assert!(saved["revision"].is_string());
+        let frames = saved["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 5);
+        assert_eq!(frames[2]["t"], 0.5);
+        assert_eq!(frames[0]["offsets"], json!({}));
+        assert!(
+            frames[4]["offsets"]["arm"]["origin_m"].is_array(),
+            "{}",
+            frames[4]
+        );
+        // Inline drives give the same frames; 120 by default.
+        let inline = call(
+            &mut s,
+            "motion.frames",
+            json!({"part": "swing", "drives": turning("45 deg"), "steps": 46, "frames": 5}),
+        )
+        .unwrap();
+        assert_eq!(inline["motion"], Value::Null);
+        assert_eq!(inline["frames"], saved["frames"]);
+        let plain = call(
+            &mut s,
+            "motion.frames",
+            json!({"part": "swing", "motion": "turn"}),
+        )
+        .unwrap();
+        assert_eq!(plain["frames"].as_array().unwrap().len(), FRAMES as usize);
+        // Asked again: from the session's cache; nothing intersected.
+        let kept = s.sweeps.len();
+        let again = call(
+            &mut s,
+            "motion.frames",
+            json!({"part": "swing", "motion": "turn", "frames": 5}),
+        )
+        .unwrap();
+        assert_eq!(again, saved);
+        assert_eq!(s.sweeps.len(), kept);
+        assert!(s.interference.is_empty());
+        // Refusals.
+        for (p, code) in [
+            (json!({"part": "swing"}), Code::InvalidParam),
+            (
+                json!({"part": "swing", "motion": "turn", "frames": 1}),
+                Code::InvalidParam,
+            ),
+            (
+                json!({"part": "swing", "motion": "turn", "frames": 1001}),
+                Code::InvalidParam,
+            ),
+            (
+                json!({"part": "swing", "motion": "turn", "drives": turning("1 deg")}),
+                Code::InvalidParam,
+            ),
+            (
+                json!({"part": "swing", "motion": "nope"}),
+                Code::MotionNotFound,
+            ),
+            (
+                json!({"part": "arm", "drives": turning("1 deg")}),
+                Code::WrongPartKind,
+            ),
+        ] {
+            assert_eq!(
+                call(&mut s, "motion.frames", p.clone()).unwrap_err().code,
+                code,
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_of_an_assembly_that_does_not_hold_is_refused() {
+        // As 26.B's sweep test: a second mate fastening the pin 20 mm from
+        // the hinge's axis, so the two can't both hold.
+        let (dir, mut s) = swinging();
+        let top = crate::mate::tests::face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+        let foot = crate::mate::tests::face(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+        crate::mate::tests::add_in(
+            dir.path(),
+            "frame",
+            "m2",
+            "mate",
+            json!({"form": "fastened",
+                   "a": {"instance": ["base"], "at": {"feature": "slab", "name": top},
+                         "offset": {"origin": ["40 mm", "10 mm", "0 mm"]}},
+                   "b": {"instance": ["pin"], "at": {"feature": "shank", "name": foot},
+                         "offset": {"flip": true}}}),
+        );
+        s.refresh().unwrap();
+        let e = call(
+            &mut s,
+            "motion.frames",
+            json!({"part": "frame", "motion": "swing"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::AssemblyUnsolved, "{e:?}");
     }
 }
