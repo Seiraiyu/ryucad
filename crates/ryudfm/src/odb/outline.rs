@@ -175,7 +175,10 @@ mod tests {
         let r = o.finish(5).unwrap();
         let inch = 25_400_000;
         let ends: Vec<Point> = r[0].outer.edges().iter().map(Edge::end).collect();
-        assert_eq!(ends, [Point::new(inch, 0), Point::new(0, 0), Point::new(0, 0)]);
+        assert_eq!(
+            ends,
+            [Point::new(inch, 0), Point::new(0, 0), Point::new(0, 0)]
+        );
         // Read back as written, it turns back to the file's order.
         assert_eq!(r[0].outer.reversed().edges()[0].end(), Point::new(0, 0));
     }

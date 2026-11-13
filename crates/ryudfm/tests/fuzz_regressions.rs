@@ -28,8 +28,17 @@ fn goes_round(hex: &str) {
     let text = decode(rest);
     let decls = Decls::default();
     let user = BTreeSet::from(["user_pad".to_string()]);
-    let units = if mode & 0x80 == 0 { Units::Inch } else { Units::Mm };
-    let cx = Context { path: "f", units, decls: &decls, user: &user };
+    let units = if mode & 0x80 == 0 {
+        Units::Inch
+    } else {
+        Units::Mm
+    };
+    let cx = Context {
+        path: "f",
+        units,
+        decls: &decls,
+        user: &user,
+    };
     let p = features(&text, &cx).expect("the input reads");
     let writable = p
         .symbols
@@ -44,7 +53,9 @@ fn goes_round(hex: &str) {
         });
     assert!(writable, "the target writes it");
     let again = write_features(&p.into_features());
-    let back = features(&again, &cx).expect("written features read").into_features();
+    let back = features(&again, &cx)
+        .expect("written features read")
+        .into_features();
     assert_eq!(write_features(&back), again);
 }
 
