@@ -10,7 +10,7 @@
 //! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation (marks on either side, design 423), `0xf0` a base
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
 //! unfold or refold, `0xed` a face tweak, `0xec` a thicken or a fill (by the
-//! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool, `0xe8` a delete_face or a tweak's topology and blends, `0xe7` a blend edit, `0xe6` an insert or a delete of bodies (by
+//! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool, `0xe8` a delete_face or a tweak's topology and blends, each at the format a build writes, `0xe7` a blend edit, `0xe6` an insert or a delete of bodies (by
 //! the parity of the edit bytes). Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
@@ -1352,7 +1352,11 @@ fn edit_blends(v: &mut Value, op: u8, arg: u8) {
     let resize = o.get("type").and_then(Value::as_str) == Some("resize_blend");
     match op % 5 {
         0 if !resize => {
-            let mut list: Vec<Value> = o.get("faces").and_then(Value::as_array).cloned().unwrap_or_default();
+            let mut list: Vec<Value> = o
+                .get("faces")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             let f = face(arg);
             match list.iter().position(|x| *x == f) {
                 Some(i) => {
@@ -1407,7 +1411,10 @@ fn edit_blends(v: &mut Value, op: u8, arg: u8) {
                 o.insert("below".into(), json!("2 mm"));
             } else {
                 o.insert("type".into(), json!("resize_blend"));
-                o.insert("groups".into(), json!([{"radius": "3 mm", "faces": [face(arg)]}]));
+                o.insert(
+                    "groups".into(),
+                    json!([{"radius": "3 mm", "faces": [face(arg)]}]),
+                );
             }
         }
     }
@@ -1468,61 +1475,78 @@ fn edit_insert(v: &mut Value, op: u8, arg: u8) {
 /// move_face with topology and blends set and cleared.
 fn edit_direct(v: &mut Value, op: u8, arg: u8) {
     let face = |a: u8| json!({"feature": "b", "name": format!("{:032x}", a % 5)});
-    let o = v.as_object_mut().unwrap();
-    let toggle = |o: &mut serde_json::Map<String, Value>, key: &str, a: u8| {
-        let mut list: Vec<Value> = o.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
-        let f = face(a);
-        match list.iter().position(|x| *x == f) {
-            Some(i) => {
-                list.remove(i);
-            }
-            None => list.push(f),
-        }
-        if list.is_empty() {
-            o.remove(key);
-        } else {
-            o.insert(key.into(), json!(list));
-        }
-    };
-    match op % 5 {
-        0 => toggle(o, "faces", arg),
-        1 => toggle(o, "seeds", arg),
-        2 => match arg % 3 {
-            0 => {
-                o.remove("heal");
-            }
-            1 => {
-                o.insert("heal".into(), json!("cap"));
-            }
-            _ => {
-                o.insert("heal".into(), json!("grow"));
-            }
-        },
-        3 => {
-            let key = if arg % 2 == 0 { "topology" } else { "blends" };
-            let set = if key == "topology" { "change" } else { "rebuild" };
-            if o.get("type").and_then(Value::as_str) != Some("move_face") {
-                for k in ["faces", "seeds", "heal"] {
-                    o.remove(k);
+    {
+        let o = v.as_object_mut().unwrap();
+        let deleting = o.get("type").and_then(Value::as_str) == Some("delete_face");
+        let toggle = |o: &mut serde_json::Map<String, Value>, key: &str, a: u8| {
+            let mut list: Vec<Value> = o
+                .get(key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let f = face(a);
+            match list.iter().position(|x| *x == f) {
+                Some(i) => {
+                    list.remove(i);
                 }
-                o.insert("type".into(), json!("move_face"));
-                o.insert("by".into(), json!("translate"));
-                o.insert("direction".into(), json!("z"));
-                o.insert("distance".into(), json!("2 mm"));
-                o.insert("faces".into(), json!([face(arg)]));
+                None => list.push(f),
             }
-            if o.contains_key(key) {
+            if list.is_empty() {
                 o.remove(key);
             } else {
-                o.insert(key.into(), json!(set));
+                o.insert(key.into(), json!(list));
             }
-        }
-        _ => {
-            if o.get("type").and_then(Value::as_str) == Some("move_face") {
-                o.insert("distance".into(), json!(format!("{} mm", 1 + arg % 6)));
+        };
+        match op % 5 {
+            0 => toggle(o, "faces", arg),
+            // Seeds and heal are a delete_face's only (#788).
+            1 if deleting => toggle(o, "seeds", arg),
+            2 if deleting => match arg % 3 {
+                0 => {
+                    o.remove("heal");
+                }
+                1 => {
+                    o.insert("heal".into(), json!("cap"));
+                }
+                _ => {
+                    o.insert("heal".into(), json!("grow"));
+                }
+            },
+            1 | 2 => {}
+            3 => {
+                let key = if arg % 2 == 0 { "topology" } else { "blends" };
+                let set = if key == "topology" {
+                    "change"
+                } else {
+                    "rebuild"
+                };
+                if o.get("type").and_then(Value::as_str) != Some("move_face") {
+                    for k in ["faces", "seeds", "heal"] {
+                        o.remove(k);
+                    }
+                    o.insert("type".into(), json!("move_face"));
+                    o.insert("by".into(), json!("translate"));
+                    o.insert("direction".into(), json!("z"));
+                    o.insert("distance".into(), json!("2 mm"));
+                    o.insert("faces".into(), json!([face(arg)]));
+                }
+                if o.contains_key(key) {
+                    o.remove(key);
+                } else {
+                    o.insert(key.into(), json!(set));
+                }
+            }
+            _ => {
+                if o.get("type").and_then(Value::as_str) == Some("move_face") {
+                    o.insert("distance".into(), json!(format!("{} mm", 1 + arg % 6)));
+                }
             }
         }
     }
+    // A file is written at the lowest format that holds it (#788): 20 for
+    // a delete or a re-trimming tweak, ryucad 17's 16 for a plain tweak.
+    let format = ryucad::doc::files::feature_format(v);
+    v["format"] = json!(format);
 }
 
 fuzz_target!(|data: &[u8]| {
