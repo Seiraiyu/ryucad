@@ -26,6 +26,7 @@
 pub(crate) mod build;
 pub(crate) mod classify;
 mod divide;
+pub(crate) mod flat;
 mod merge;
 mod names;
 mod place;

@@ -221,20 +221,38 @@ fn general(a: &Surface, b: &Surface) -> Option<bool> {
 /// then lie within it too). `None` for a spline that isn't flat.
 pub(crate) fn planar(n: &NurbsSurface) -> Option<Surface> {
     let [nu, nv] = n.counts();
-    let c = [
-        n.control_point(0, 0),
-        n.control_point(nu - 1, 0),
-        n.control_point(0, nv - 1),
-        n.control_point(nu - 1, nv - 1),
-    ];
+    planar_grid(nu, nv, |i, j| n.control_point(i, j))
+}
+
+/// [`planar`]'s rule applied to the control rows `rows` alone: along `dir`
+/// the rows of those `u` indices ([`Direction::U`]) or `v` indices
+/// ([`Direction::V`]), every point across them. A flat Bézier span's plane
+/// (design 551, #585). `None` where they aren't flat.
+pub(crate) fn planar_rows(
+    n: &NurbsSurface,
+    dir: Direction,
+    rows: core::ops::RangeInclusive<usize>,
+) -> Option<Surface> {
+    let [nu, nv] = n.counts();
+    let (r0, r1) = (*rows.start(), *rows.end());
+    match dir {
+        Direction::U => planar_grid(r1 - r0 + 1, nv, |i, j| n.control_point(r0 + i, j)),
+        Direction::V => planar_grid(nu, r1 - r0 + 1, |i, j| n.control_point(i, r0 + j)),
+    }
+}
+
+/// The plane through a grid of `nu × nv` points, `at(i, j)`, by
+/// [`planar`]'s rule.
+fn planar_grid(nu: usize, nv: usize, at: impl Fn(usize, usize) -> Point3) -> Option<Surface> {
+    let c = [at(0, 0), at(nu - 1, 0), at(0, nv - 1), at(nu - 1, nv - 1)];
     let normal = (c[3] - c[0]).cross(c[2] - c[1]).normalize()?;
     let along = (c[1] - c[0])
         .normalize()
         .or_else(|| (c[3] - c[0]).normalize())?;
     let frame = Frame::new(c[0], normal.get(), along.get()).ok()?;
-    let flat = n
-        .control_points()
-        .all(|p| (p - c[0]).dot(normal.get()).abs() <= LINEAR_RESOLUTION / 2.0);
+    let flat = (0..nu)
+        .flat_map(|i| (0..nv).map(move |j| (i, j)))
+        .all(|(i, j)| (at(i, j) - c[0]).dot(normal.get()).abs() <= LINEAR_RESOLUTION / 2.0);
     flat.then(|| Surface::Plane(crate::geom::Plane::new(frame)))
 }
 
