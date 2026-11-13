@@ -109,6 +109,7 @@ pub mod part;
 pub mod path;
 pub mod pattern;
 pub mod pdm;
+pub mod places;
 pub mod process;
 pub mod profile;
 pub mod proto;
