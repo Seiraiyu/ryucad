@@ -298,17 +298,133 @@ pub enum Ended {
     Interrupted,
 }
 
+/// What answers the session's requests.
+enum Via {
+    /// The project's daemon. `None` once it closed the connection, until
+    /// the next request opens another.
+    Daemon(Option<Link>),
+    /// A session in this process.
+    Local(Option<Session>),
+}
+
+/// A request's fate through the daemon.
+enum Sent {
+    /// Its answer is out, a result or not.
+    Answered(bool),
+    /// It never reached a daemon: the line, and why.
+    Undelivered(Line, String),
+}
+
+/// The session's connection to the daemon: what it writes requests to,
+/// and the answers its reader thread has copied to stdout.
+struct Link {
+    writer: SendHalf,
+    answers: mpsc::Receiver<Event>,
+}
+
+/// What the reader thread tells the loop.
+enum Event {
+    /// An answer is out, a result or not.
+    Answered(bool),
+    /// The daemon closed the connection (stopped, idle, replaced).
+    Closed,
+}
+
+impl Link {
+    /// Connects (starting the daemon if none runs), says hello as `name`,
+    /// and starts the thread that copies what the daemon sends to `out`.
+    /// `Err`: no daemon to be had, and nothing was sent. `Ok(Err(..))`:
+    /// the hello was refused.
+    fn open<W: Write + Send + 'static>(
+        root: &Path,
+        name: Option<&str>,
+        out: &Out<W>,
+    ) -> Result<Result<Link>> {
+        let conn = match client::hello_connection(root, name)? {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(e)),
+        };
+        let (reader, writer) = conn.into_halves();
+        let (tx, answers) = mpsc::channel();
+        let out = Arc::clone(out);
+        std::thread::spawn(move || copy(reader, &out, &tx));
+        Ok(Ok(Link { writer, answers }))
+    }
+
+    /// Whether the daemon closed the connection since the last answer.
+    fn closed(&self) -> bool {
+        !matches!(self.answers.try_recv(), Err(mpsc::TryRecvError::Empty))
+    }
+
+    /// Sends `line` and waits until its answer is out. `Err`: it was
+    /// never sent. `Ok(None)`: the connection closed before its answer,
+    /// and it may have been applied.
+    fn ask(&mut self, line: &Line) -> std::io::Result<Option<bool>> {
+        self.writer.write_all(line.text().as_bytes())?;
+        self.writer.flush()?;
+        Ok(match self.answers.recv() {
+            Ok(Event::Answered(ok)) => Some(ok),
+            Ok(Event::Closed) | Err(_) => None,
+        })
+    }
+}
+
+/// Copies what the daemon sends to `out`, each line with the bytes it
+/// announces, until it closes, and tells the loop of each answer. If
+/// stdout is gone, nothing more can be said, so the process exits.
+fn copy<W: Write>(mut reader: BufReader<RecvHalf>, out: &Out<W>, tx: &mpsc::Sender<Event>) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let frame = Frame::of(line.trim_end());
+        let mut bytes = vec![0; frame.binary.unwrap_or(0)];
+        if std::io::Read::read_exact(&mut reader, &mut bytes).is_err() {
+            break;
+        }
+        if put(&mut *lock(out), line.as_bytes(), &bytes).is_err() {
+            std::process::exit(i32::from(crate::error::Code::Io.exit_code()));
+        }
+        if frame.answer && tx.send(Event::Answered(frame.ok)).is_err() {
+            return;
+        }
+    }
+    let _ = tx.send(Event::Closed);
+}
+
+/// A line as the daemon wrote it (its break included), then its bytes.
+fn put(w: &mut impl Write, line: &[u8], bytes: &[u8]) -> std::io::Result<()> {
+    w.write_all(line)?;
+    w.write_all(bytes)?;
+    w.flush()
+}
+
 /// Answers each request line of `input` in order, writing each answer to
 /// `out`, until `input` ends or a Ctrl+C (`stop`) has had its answer.
-/// `Err`: stdin or stdout failed.
+/// `Err`: stdin or stdout failed, or the daemon refused the session's
+/// hello.
 pub fn serve<R: BufRead, W: Write + Send + 'static>(
     mut input: R,
     out: &Out<W>,
     opts: &Options,
     stop: &Stop,
 ) -> Result<Ended> {
-    let me = opts.name.clone();
-    let mut slot = None;
+    let mut me = opts.name.clone();
+    let mut via = match opts.no_daemon {
+        true => Via::Local(None),
+        false => match Link::open(&opts.root, me.as_deref(), out) {
+            Ok(Ok(link)) => Via::Daemon(Some(link)),
+            // A refused hello is the script's to fix (its --as).
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                warn(&format!("{}; running in process", e.message));
+                Via::Local(None)
+            }
+        },
+    };
     let mut text = String::new();
     let ended = loop {
         text.clear();
@@ -322,16 +438,56 @@ pub fn serve<R: BufRead, W: Write + Send + 'static>(
         if text.trim().is_empty() {
             continue;
         }
-        let wrote = match Line::read(text.trim_end(), &opts.here) {
-            Err((id, e)) => write_answer(out, &id, Err(e)),
-            Ok(line) => answer_local(&mut slot, opts, me.as_deref(), line, out, stop),
+        let line = match Line::read(text.trim_end(), &opts.here) {
+            Ok(l) => l,
+            Err((id, e)) => {
+                stdout(write_answer(out, &id, Err(e)))?;
+                continue;
+            }
         };
-        stdout(wrote)?;
+        let hello = line.hello_name();
+        let sent = match &mut via {
+            Via::Local(slot) => Sent::Answered(stdout(answer_local(
+                slot,
+                opts,
+                me.as_deref(),
+                line,
+                out,
+                stop,
+            ))?),
+            Via::Daemon(link) => answer_daemon(link, opts, me.as_deref(), line, out, stop)?,
+        };
+        let ok = match sent {
+            Sent::Answered(ok) => ok,
+            // Never delivered: this request, and the rest of the run, in
+            // this process (decision 3).
+            Sent::Undelivered(line, why) => {
+                warn(&format!("{why}; running in process"));
+                let mut slot = None;
+                let ok = stdout(answer_local(
+                    &mut slot,
+                    opts,
+                    me.as_deref(),
+                    line,
+                    out,
+                    stop,
+                ))?;
+                via = Via::Local(slot);
+                ok
+            }
+        };
+        // A hello the daemon took renames the session's agent: its
+        // cancels and reconnections say the new name.
+        if ok && let Some(name) = hello {
+            me = name;
+        }
         if stop.stopping() {
             break Ended::Interrupted;
         }
     };
-    flush_remote(&slot);
+    if let Via::Local(slot) = &via {
+        flush_remote(slot);
+    }
     Ok(ended)
 }
 
@@ -388,6 +544,57 @@ fn answer_local<W: Write + Send + 'static>(
     write_answer(out, &line.id, answer)
 }
 
+/// Answers `line` through the daemon. If the daemon closed the
+/// connection (an idle daemon exits; `daemon stop`), a new one is opened
+/// first. A daemon that can't be had, or a line that can't be sent, is
+/// `Undelivered`.
+fn answer_daemon<W: Write + Send + 'static>(
+    link: &mut Option<Link>,
+    opts: &Options,
+    me: Option<&str>,
+    mut line: Line,
+    out: &Out<W>,
+    stop: &Stop,
+) -> Result<Sent> {
+    if link.as_ref().is_none_or(Link::closed) {
+        *link = None;
+        match Link::open(&opts.root, me, out) {
+            Ok(Ok(l)) => *link = Some(l),
+            Ok(Err(e)) => {
+                return Ok(Sent::Answered(stdout(write_answer(out, &line.id, Err(e)))?));
+            }
+            Err(e) => return Ok(Sent::Undelivered(line, e.message)),
+        }
+    }
+    let l = link.as_mut().expect("opened above");
+    stop.begin(match line.token() {
+        Some(token) => Running::Daemon {
+            root: opts.root.clone(),
+            name: me.map(str::to_owned),
+            token,
+        },
+        None => Running::Plain,
+    });
+    let asked = l.ask(&line);
+    stop.end();
+    match asked {
+        Ok(Some(ok)) => Ok(Sent::Answered(ok)),
+        Ok(None) => {
+            *link = None;
+            let e = Error::new(
+                crate::error::Code::Daemon,
+                "the daemon stopped answering; the request may have been applied",
+            );
+            Ok(Sent::Answered(stdout(write_answer(out, &line.id, Err(e)))?))
+        }
+        Err(e) => {
+            *link = None;
+            let why = format!("the daemon couldn't be sent the request ({e})");
+            Ok(Sent::Undelivered(line, why))
+        }
+    }
+}
+
 /// What a session in this process built goes to the shared cache before
 /// the process exits, as the CLI's in-process requests do.
 fn flush_remote(slot: &Option<Session>) {
@@ -399,6 +606,49 @@ fn flush_remote(slot: &Option<Session>) {
 /// An answer's write, as the session's error: stdout is gone.
 fn stdout(r: std::io::Result<bool>) -> Result<bool> {
     r.map_err(|e| Error::io(Path::new("<stdout>"), &e))
+}
+
+fn warn(message: &str) {
+    eprintln!("ryucad: warning: {message}");
+}
+
+/// `ryucad session --stdio`: serves stdin and stdout until stdin ends
+/// (exit 0) or a Ctrl+C (130, a shell's for an interrupt). A session that
+/// can't start (no project, a refused hello) or whose stdin or stdout
+/// fails writes one refusal with a null id and exits with its code, as
+/// the CLI would.
+pub fn main(here: PathBuf, name: Option<String>, no_daemon: bool) -> std::process::ExitCode {
+    let out: Out<std::io::Stdout> = Arc::new(Mutex::new(std::io::stdout()));
+    let failed = |e: Error| {
+        let code = e.code.exit_code();
+        let _ = write_answer(&out, &Value::Null, Err(e));
+        std::process::ExitCode::from(code)
+    };
+    let root = match crate::doc::project::find_root(&here) {
+        Ok(r) => r,
+        Err(e) => return failed(e),
+    };
+    let stop = Arc::new(Stop::default());
+    let fired = Arc::clone(&stop);
+    // Once per process: this process runs only the session.
+    let _ = ctrlc::set_handler(move || {
+        if fired.fire() == Fired::Exit {
+            std::process::exit(cancel::INTERRUPTED);
+        }
+    });
+    let opts = Options {
+        root,
+        here,
+        name,
+        no_daemon,
+    };
+    match serve(std::io::stdin().lock(), &out, &opts, &stop) {
+        Ok(Ended::Eof) => std::process::ExitCode::SUCCESS,
+        Ok(Ended::Interrupted) => {
+            std::process::ExitCode::from(u8::try_from(cancel::INTERRUPTED).unwrap_or(1))
+        }
+        Err(e) => failed(e),
+    }
 }
 
 #[cfg(test)]

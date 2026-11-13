@@ -898,6 +898,16 @@ enum Command {
         #[arg(long = "entity", value_name = "REF")]
         entities: Vec<String>,
     },
+    /// Answer JSON-RPC requests for a script: one request a line on
+    /// stdin, each answer a line on stdout (and the bytes it announces),
+    /// in order, over one connection to the project's daemon that says
+    /// hello once. --pretty and --progress don't apply: a request asks
+    /// for its own progress.
+    Session {
+        /// Read requests on stdin and answer on stdout.
+        #[arg(long)]
+        stdio: bool,
+    },
     /// Run, query or stop the project's session daemon.
     #[command(subcommand)]
     Daemon(DaemonCmd),
@@ -4522,6 +4532,7 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Init { .. }
         | Command::Version
         | Command::Daemon(_)
+        | Command::Session { .. }
         | Command::Git(_)
         | Command::Review(_)
         | Command::Cache(CacheCmd::Push { .. })
@@ -5975,14 +5986,21 @@ fn participant(cli: &Cli) -> Option<String> {
         .or_else(|| std::env::var("RYUCAD_PARTICIPANT").ok())
 }
 
+/// The folder the command runs as: `-C`'s, else the current one.
+fn here(cli: &Cli) -> Result<PathBuf> {
+    match &cli.dir {
+        Some(d) => Ok(d.clone()),
+        None => std::env::current_dir().map_err(|e| Error::io(std::path::Path::new("."), &e)),
+    }
+}
+
 /// Runs the command, collecting warnings for the output.
 fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
-    let here = match &cli.dir {
-        Some(d) => d.clone(),
-        None => std::env::current_dir().map_err(|e| Error::io(std::path::Path::new("."), &e))?,
-    };
+    let here = here(cli)?;
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        // `main` serves a session before `run`.
+        Command::Session { .. } => Err(Error::new(Code::Internal, "a session isn't a command")),
         Command::Init { unit } => {
             let mut v = server::init(&here, *unit)?;
             // In a repository, the clone is set up for ryucad too; the
@@ -6943,6 +6961,20 @@ pub fn main() -> ExitCode {
             None => std::env::current_dir().unwrap_or_default(),
         };
         return hook_check(&here);
+    }
+    // A script's session answers in JSON-RPC lines, not the envelope.
+    if let Command::Session { stdio } = &cli.command {
+        if !stdio {
+            let e = Error::new(
+                Code::Usage,
+                "`ryucad session` needs --stdio: requests on stdin, answers on stdout",
+            );
+            return finish(Err(e), Vec::new(), cli.pretty);
+        }
+        return match here(&cli) {
+            Ok(h) => ryucad::stdio::main(h, participant(&cli), no_daemon(&cli)),
+            Err(e) => finish(Err(e), Vec::new(), cli.pretty),
+        };
     }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);
