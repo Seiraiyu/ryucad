@@ -576,8 +576,13 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
             }
         }
         // A hole's thread, fastener, near chamfer and far side are a line
-        // each, as a spec says them.
-        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("hole") => {
+        // each, as a spec says them; so is a cosmetic thread's thread.
+        Some("ryucad.feature")
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("hole" | "cosmetic_thread")
+            ) =>
+        {
             type Line = fn(&Value) -> Option<String>;
             let each: [(&str, Line); 4] = [
                 ("thread", crate::hole::spec::thread_line),
@@ -5639,5 +5644,18 @@ mod tests {
             "thread": {"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"}}),
         );
         assert!(t.contains(", 8 mm, taper\n"), "{t}");
+    }
+
+    #[test]
+    fn a_cosmetic_threads_thread_is_one_line() {
+        let face = |k: u8| json!({"feature": "shaft", "name": format!("{k:032x}")});
+        let t = text(
+            json!({"format": 24, "kind": "ryucad.feature", "type": "cosmetic_thread",
+            "faces": [face(1), face(2)], "from": face(3), "depth": "12 mm",
+            "thread": {"standard": "iso_metric", "size": "M10", "class": "6g"}}),
+        );
+        assert!(t.contains("\nthread = M10x1.5-6g, full\n"), "{t}");
+        assert!(t.contains("\ndepth = 12 mm\n"), "{t}");
+        assert!(!t.contains("thread.size"), "{t}");
     }
 }

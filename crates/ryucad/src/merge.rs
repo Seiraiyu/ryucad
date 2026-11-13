@@ -239,6 +239,11 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             theirs,
             &["thread", "fastener", "fit", "tolerance", "near", "far"],
         ),
+        // A cosmetic thread's thread is one value, as a hole's is, and so is
+        // its start.
+        Some(b) if same_type && ty(b).0 == Some(json!("cosmetic_thread")) => {
+            atomic(walk, b, ours, theirs, &["thread", "from"])
+        }
         Some(b)
             if same_type
                 && matches!(
@@ -3256,5 +3261,31 @@ mod tests {
             &json!({"kind": "ryucad.test", "format": 1, "x": {"feature": "f0", "name": "e2"}}),
         );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/x"]);
+    }
+
+    #[test]
+    fn a_cosmetic_threads_thread_merges_as_one_value() {
+        let face = |k: u8| json!({"feature": "shaft", "name": format!("{k:032x}")});
+        let base = json!({"format": 24, "kind": "ryucad.feature", "type": "cosmetic_thread",
+            "faces": [face(1)], "thread": {"standard": "iso_metric", "size": "M10"}});
+        let mut ours = base.clone();
+        ours["thread"]["class"] = json!("4h");
+        let mut theirs = base.clone();
+        theirs["thread"]["size"] = json!("M12");
+        let m = merge(Some(&base), &ours, &theirs);
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(at, ["/thread"]);
+        // A depth on one side and a face added on the other: both kept.
+        let mut ours = base.clone();
+        ours["depth"] = json!("12 mm");
+        ours["from"] = face(3);
+        let mut theirs = base.clone();
+        theirs["faces"] = json!([face(1), face(2)]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["depth"], &m.value["faces"]),
+            (&json!("12 mm"), &json!([face(1), face(2)]))
+        );
     }
 }
