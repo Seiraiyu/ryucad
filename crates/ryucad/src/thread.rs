@@ -56,7 +56,7 @@ pub fn of(holes: &Holes) -> Vec<Thread> {
 /// A row's thread, if it is tapped.
 pub fn of_row(r: &Row) -> Option<Thread> {
     let t = r.sizes.thread.as_ref()?;
-    let start = r.sizes.mouth_depth().unwrap_or(0.0);
+    let start = r.sizes.thread_start();
     let length = r.depth.2.unwrap_or(r.depth.0);
     Some(Thread {
         hole: r.reference.clone(),

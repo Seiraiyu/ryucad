@@ -362,7 +362,7 @@ impl Row {
     pub fn kind(&self) -> &'static str {
         if self.sizes.thread.is_some() {
             "tapped"
-        } else if ["CBORE ", "CSK ", "CLEAR "]
+        } else if ["CBORE ", "CSK ", "CDRILL ", "SPOTFACE ", "CLEAR "]
             .iter()
             .any(|w| self.spec.starts_with(w))
         {
@@ -762,15 +762,16 @@ fn own(
     let solved = crate::rebuild::sketch_input(p, fid, &h.sketch, result)?;
     let axis = -solved.frame.apply_vector(Vector3::new(0.0, 0.0, 1.0));
     let spec = crate::hole::spec::canonical(h, unit);
-    let shoulder = match &h.depth {
-        Depth::Blind(q) => q.meters(),
-        // Through and up-to: measured from the faces.
+    let r = sizes.drill.si / 2.0;
+    let shoulder = match (&h.depth, &h.bottom) {
+        (Depth::Blind(q), _) => q.meters(),
+        (Depth::Tip(q), Bottom::Drill(a)) => q.meters() - r / ryukei::math::tan(a.radians() / 2.0),
+        // Through, through_next and up-to: measured from the faces.
         _ => f64::NAN,
     };
     let tip = match (&h.bottom, shoulder.is_finite()) {
-        (Bottom::Drill(a), true) => {
-            shoulder + sizes.drill.si / 2.0 / ryukei::math::tan(a.radians() / 2.0)
-        }
+        (Bottom::Drill(a), true) => shoulder + r / ryukei::math::tan(a.radians() / 2.0),
+        (Bottom::Ball, true) => shoulder + r,
         _ => shoulder,
     };
     let thread = sizes
@@ -1066,5 +1067,49 @@ mod tests {
             .find(|g| g.reference == "p/m/h/p1")
             .unwrap();
         assert_eq!(gone.removed_by.as_ref().map(Id::as_str), Some("cut"));
+    }
+
+    #[test]
+    fn rows_of_the_new_geometry() {
+        let (_dir, mut s) = drilled();
+        put(
+            &mut s,
+            "h",
+            json!({"format": 24, "points": ["p1"], "form": "simple",
+            "diameter": "2 mm", "depth": {"tip": "3 mm"}, "bottom": {"drill": "90 deg"}}),
+        );
+        let holes = list(&mut s, &id("p"), None).unwrap();
+        let r = &holes.rows[0];
+        // To the tip 3 mm; the shoulder 1 mm above it (a 90 deg point of radius 1 mm).
+        assert!(
+            (r.depth.0 - 0.002).abs() < 1e-12 && (r.depth.1 - 0.003).abs() < 1e-12,
+            "{:?}",
+            r.depth
+        );
+        put(
+            &mut s,
+            "h",
+            json!({"format": 24, "points": ["p1"], "form": "simple",
+            "diameter": "2 mm", "depth": {"blind": "2 mm"}, "bottom": "ball"}),
+        );
+        let r = &list(&mut s, &id("p"), None).unwrap().rows[0];
+        assert!(
+            (r.depth.1 - 0.003).abs() < 1e-12,
+            "a ball's tip is a radius past its shoulder"
+        );
+        assert!(r.faces.contains_key("ball"));
+        // A tapped hole under a near chamfer: its thread starts below it.
+        put(
+            &mut s,
+            "h",
+            json!({"format": 24, "points": ["p1"], "form": "simple",
+            "thread": {"standard": "iso_metric", "size": "M3"}, "depth": "through_all",
+            "near": {"diameter": "3.5 mm"}}),
+        );
+        let holes = list(&mut s, &id("p"), None).unwrap();
+        let t = crate::thread::of_row(&holes.rows[0]).unwrap();
+        // M3's 2.5 mm drill: the chamfer ends 0.5 mm down at 90 deg.
+        assert!((t.mouth.z - 0.0045).abs() < 1e-12, "{:?}", t.mouth);
+        assert_eq!(holes.rows[0].kind(), "tapped");
     }
 }
