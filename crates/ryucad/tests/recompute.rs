@@ -1431,15 +1431,31 @@ fn mm_num(g: &mut Lcg, lo: u64, hi: u64) -> u64 {
 /// frame/base/layout.
 fn followed() -> (tempfile::TempDir, Session) {
     let (dir, mut s) = assembled();
-    must(&mut s, "feature.add", json!({"part": "plate", "type": "sketch", "id": "layout", "plane": "xy"}));
-    must(&mut s, "sketch.edit", json!({"part": "plate", "sketch": "layout", "ops": [
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "plate", "type": "sketch", "id": "layout", "plane": "xy"}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "plate", "sketch": "layout", "ops": [
         {"op": "add", "id": "p1", "type": "point", "at": [10, 5]},
         {"op": "add", "id": "p2", "type": "point", "at": [30, 5]},
-        {"op": "add", "id": "p3", "type": "point", "at": [50, 5]}]}));
-    must(&mut s, "feature.add", json!({"part": "frame", "type": "instance", "id": "screw",
-         "of": "bolt", "placement": {"origin": [10, 5, 6]}}));
-    must(&mut s, "feature.add", json!({"part": "frame", "type": "instance_pattern",
-         "id": "screws", "instances": ["screw"], "form": "points", "on": "frame/base/layout"}));
+        {"op": "add", "id": "p3", "type": "point", "at": [50, 5]}]}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "frame", "type": "instance", "id": "screw",
+         "of": "bolt", "placement": {"origin": [10, 5, 6]}}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "frame", "type": "instance_pattern",
+         "id": "screws", "instances": ["screw"], "form": "points", "on": "frame/base/layout"}),
+    );
     (dir, s)
 }
 
@@ -1454,7 +1470,11 @@ fn followed_edit(g: &mut Lcg, s: &mut Session) {
         7 => json!({"op": "add", "id": "p9", "type": "point", "at": [40, 15]}),
         _ => json!({"op": "remove", "id": "p9"}),
     };
-    let _ = call(s, "sketch.edit", json!({"part": "plate", "sketch": "layout", "ops": [op]}));
+    let _ = call(
+        s,
+        "sketch.edit",
+        json!({"part": "plate", "sketch": "layout", "ops": [op]}),
+    );
 }
 
 #[test]
@@ -1479,8 +1499,16 @@ fn following_patterns_recompute_as_from_nothing() {
             tight.refresh().unwrap();
             assert_eq!(hashes(&mut tight), incremental, "seed {seed}, step {step}");
             tight.trim();
-            assert_eq!(incremental, assembly_full(&s, 1), "seed {seed}, step {step}");
-            assert_eq!(incremental, assembly_full(&s, 8), "seed {seed}, step {step}");
+            assert_eq!(
+                incremental,
+                assembly_full(&s, 1),
+                "seed {seed}, step {step}"
+            );
+            assert_eq!(
+                incremental,
+                assembly_full(&s, 8),
+                "seed {seed}, step {step}"
+            );
         }
     }
 }
