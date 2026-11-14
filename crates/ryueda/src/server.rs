@@ -679,6 +679,43 @@ fn dispatch(
                 crate::parts::show_finish(pl, &cats, job)
             }
         },
+        Request::ReleasePropose {
+            parts,
+            all,
+            note,
+            expected_revision,
+            dry_run,
+        } => {
+            let who = caller_name(live, me);
+            crate::pdm::release::propose(
+                session,
+                &who,
+                &parts,
+                all,
+                note,
+                expected_revision.as_deref(),
+                dry_run,
+            )
+        }
+        Request::ReleaseObsolete {
+            part,
+            label,
+            note,
+            expected_revision,
+        } => {
+            let who = caller_name(live, me);
+            crate::pdm::release::obsolete(
+                session,
+                &who,
+                &part,
+                &label,
+                note,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::ReleaseList { part } => crate::pdm::release::list(session, part.as_deref()),
+        Request::ReleaseCheck { results } => crate::pdm::release::check(session, results),
+        Request::ReleaseSync {} => crate::pdm::release::sync(session),
         Request::PdmInit {} => crate::pdm::cmd::init(session),
         Request::PdmNewId { expected_revision } => {
             crate::pdm::cmd::new_id(session, expected_revision.as_deref())

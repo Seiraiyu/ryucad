@@ -104,6 +104,10 @@ enum Command {
     /// project.
     #[command(subcommand)]
     Props(PropsCmd),
+    /// Release designs or library components: records proposed, made
+    /// obsolete, listed, checked and tagged.
+    #[command(subcommand)]
+    Release(ReleaseCmd),
     /// Create, edit, show, list or delete functional blocks: their
     /// names, ports and buses.
     #[command(subcommand)]
@@ -955,6 +959,53 @@ enum PdmCmd {
         #[command(flatten)]
         expect: Expect,
     },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCmd {
+    /// Write the record of each part's next revision (a design's in a
+    /// design project, a library component's in a library project): its
+    /// content hash, revising properties and results. A proposal until the
+    /// release branch holds it; nothing is committed.
+    Propose {
+        parts: Vec<String>,
+        /// Every part in work or modified; those not ready are listed with
+        /// their problems.
+        #[arg(long)]
+        all: bool,
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+        /// Write nothing: say the label each would take and every reason it
+        /// would be refused.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Write an obsolete record for a part's latest official revision.
+    Obsolete {
+        part: String,
+        label: String,
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Every release record (or one part's): official at which commit or
+    /// still proposed, its tag, and each part's state.
+    List { part: Option<String> },
+    /// Check every record against the parts, the release branch and the
+    /// tags; fails (exit 1) on any error.
+    Check {
+        /// Also work official releases' netlists and ERC out again and
+        /// compare.
+        #[arg(long)]
+        results: bool,
+    },
+    /// Create the local tag ryupdm/<part>/<label> of every official
+    /// release that has none, and move those that point elsewhere.
+    /// Nothing is pushed or deleted.
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -2181,6 +2232,35 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         },
         Command::Parts(PartsCmd::Sources) => Request::PartsSources {},
         Command::Parts(PartsCmd::Refresh { force, .. }) => Request::PartsRefresh { force: *force },
+        Command::Release(ReleaseCmd::Propose {
+            parts,
+            all,
+            note,
+            dry_run,
+            expect,
+        }) => Request::ReleasePropose {
+            parts: parts.clone(),
+            all: *all,
+            note: note.clone(),
+            expected_revision: expect.expect.clone(),
+            dry_run: *dry_run,
+        },
+        Command::Release(ReleaseCmd::Obsolete {
+            part,
+            label,
+            note,
+            expect,
+        }) => Request::ReleaseObsolete {
+            part: part.clone(),
+            label: label.clone(),
+            note: note.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Release(ReleaseCmd::List { part }) => Request::ReleaseList { part: part.clone() },
+        Command::Release(ReleaseCmd::Check { results }) => {
+            Request::ReleaseCheck { results: *results }
+        }
+        Command::Release(ReleaseCmd::Sync) => Request::ReleaseSync {},
         Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
         Command::Pdm(PdmCmd::NewId { expect }) => Request::PdmNewId {
             expected_revision: expect.expect.clone(),

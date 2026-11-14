@@ -306,6 +306,49 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Writes the record of each named part's next revision (or every part
+    /// in work or modified, with `all`), as proposals, in one change.
+    #[serde(rename = "release.propose")]
+    ReleasePropose {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+    },
+    /// Writes an obsolete record for a part's latest official revision.
+    #[serde(rename = "release.obsolete")]
+    ReleaseObsolete {
+        part: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Release records (or one part's), where each became official, their
+    /// tags and approvals, and each part's state.
+    #[serde(rename = "release.list")]
+    ReleaseList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// The release checks; with `results`, official releases' netlists
+    /// and ERC are worked out again.
+    #[serde(rename = "release.check")]
+    ReleaseCheck {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        results: bool,
+    },
+    /// Creates the local `ryupdm/` tag of every official release that has
+    /// none and moves those that point elsewhere.
+    #[serde(rename = "release.sync")]
+    ReleaseSync {},
     /// The records a key names (`lcsc:C1525`, `mpn:<part number>`,
     /// `library:<reference>`). Catalogues never fetch per part, so
     /// `refresh` says how to refresh one and `offline` changes nothing.
@@ -1235,6 +1278,8 @@ impl Request {
                 | Request::PdmNewId { .. }
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
+                | Request::ReleasePropose { .. }
+                | Request::ReleaseObsolete { .. }
                 | Request::Layout { .. }
                 | Request::LayoutPlace { .. }
                 | Request::Undo { .. }
@@ -1317,6 +1362,22 @@ mod tests {
                 expected_revision: None,
             },
             Request::PropsGet { part: "d".into() },
+            Request::ReleasePropose {
+                parts: vec!["d".into()],
+                all: false,
+                note: Some("first".into()),
+                expected_revision: None,
+                dry_run: true,
+            },
+            Request::ReleaseObsolete {
+                part: "d".into(),
+                label: "A".into(),
+                note: None,
+                expected_revision: Some("r".into()),
+            },
+            Request::ReleaseList { part: None },
+            Request::ReleaseCheck { results: true },
+            Request::ReleaseSync {},
             Request::PropsSet {
                 part: "d".into(),
                 properties: [("number".to_owned(), json!("100-0001"))]
