@@ -31,6 +31,8 @@
 pub mod approvals;
 pub mod attest;
 pub mod bom;
+#[cfg(feature = "cad")]
+pub mod cad;
 pub mod check;
 pub mod config;
 pub mod content;
