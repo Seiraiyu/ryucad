@@ -27,7 +27,9 @@
 //! withholds the rule: the caller traces the pair as before.
 
 use super::Failure;
-use super::beside::{face_beside_rails, face_beside_rails_near, opposite_sides, section_plane};
+use super::beside::{
+    face_beside_rails, face_beside_rails_near, face_boxes, opposite_sides, section_plane,
+};
 use super::face::{FaceMeet, face_box, max_tolerance, overlap, placed, shifted, surface_of};
 use super::fit::{fit_pcurve_within, pcurve_certified};
 use super::ss::Branch;
@@ -106,7 +108,7 @@ fn section_apart(
     seams: &[Seam],
     rails: [&[(&Curve2, [f64; 2])]; 2],
     strip: f64,
-    near: Option<[Box3; 2]>,
+    near: Option<[Vec<Box3>; 2]>,
     m: &Meter,
 ) -> bool {
     let Some((first, rest)) = seams.split_first() else {
@@ -125,12 +127,12 @@ fn section_apart(
         return false;
     };
     LADDER.into_iter().any(|cells| {
-        let side = |f: (&Body, FaceId), r: &[(&Curve2, [f64; 2])], n: Option<&Box3>| match n {
+        let side = |f: (&Body, FaceId), r: &[(&Curve2, [f64; 2])], n: Option<&[Box3]>| match n {
             Some(n) => face_beside_rails_near(f.0, f.1, &plane, n, r, strip, cells, m).ok(),
             None => face_beside_rails(f.0, f.1, &plane, r, strip, cells, m).ok(),
         };
         let (na, nb) = match &near {
-            Some([x, y]) => (Some(x), Some(y)),
+            Some([x, y]) => (Some(&x[..]), Some(&y[..])),
             None => (None, None),
         };
         match (side(a, rails[0], na), side(b, rails[1], nb)) {
@@ -184,11 +186,20 @@ pub(crate) fn known_seam(
     };
     let (ra, rb) = (rails(0), rails(1));
     // A stopped pair's parts apart from the other face's box have no
-    // say in the section plane (plan 19.B, Decision 1).
-    let near = seams
-        .iter()
-        .any(|s| s.stopped)
-        .then(|| [bb.grow(slack), ba.grow(slack)]);
+    // say in the section plane (plan 19.B, Decision 1): its certified
+    // boxes over a grid of its parameters, which a stop's rim past a
+    // part-rim seam lies outside where `face_box` holds it.
+    // Each face's box the tighter certified one where it has one.
+    let near = seams.iter().any(|s| s.stopped).then(|| {
+        let boxes = |f: (&Body, FaceId), loose: &Box3| -> Vec<Box3> {
+            face_boxes(f.0, f.1, m)
+                .unwrap_or_else(|| vec![*loose])
+                .iter()
+                .map(|x| x.grow(slack))
+                .collect()
+        };
+        [boxes(b, &bb), boxes(a, &ba)]
+    });
     let keeps_off = |f: (&Body, FaceId), other: &Surface, r: &[(&Curve2, [f64; 2])], cells| {
         face_beside_rails(f.0, f.1, other, r, strip, cells, m).is_ok()
     };

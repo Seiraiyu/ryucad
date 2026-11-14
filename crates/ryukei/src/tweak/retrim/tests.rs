@@ -331,13 +331,15 @@ fn ftc_07s_seam_pair_crossing_past_its_seam_is_withheld() {
 /// circle's plane outside the strip, the torus on the other: met along
 /// the circle by the section plane.
 ///
-/// Not yet (plan 19.A, Task 11): the run is a whole turn (its own pcurves
-/// span 2π, so `delete_turn` leaves it whole) and its seam with this torus
-/// a quarter of its end circle. Stopped half a strip past the seam, the
-/// rest of its rim lies past the circle's plane outside the seam's strip,
-/// so the run is on both sides of it (the torus on one): 19.B's plane stop.
+/// The run is a whole turn and the seam a quarter of its end circle, so
+/// the rest of the stopped rim lies past the circle's plane, but apart
+/// from the torus face: the section plane leaves those parts out on a
+/// stopped pair (plan 19.B, Decision 1).
 #[test]
-#[ignore = "#652: a whole-turn run stopped past a quarter-arc seam crosses its plane; 19.B's plane stop"]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
 fn ftc_07s_seam_pair_is_met_once_its_run_stops() {
     use crate::codec::decode_body;
     use crate::geom::Surface;
@@ -383,7 +385,9 @@ fn ftc_07s_seam_pair_is_met_once_its_run_stops() {
     } else {
         (torus, (&sheet, sf))
     };
-    let seam = super::body::seam_for(&input, e, x, y, SeamKind::Frontier).expect("pcurves");
+    let mut seam = super::body::seam_for(&input, e, x, y, SeamKind::Frontier).expect("pcurves");
+    // As the stopped build marks it (plan 19.B, Decision 1).
+    seam.stopped = true;
     // unmetered: a unit test.
     let m = crate::work::Meter::free();
     assert!(known_seam(x, y, &[seam], &m).is_ok());
