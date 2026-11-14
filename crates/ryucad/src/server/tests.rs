@@ -4832,3 +4832,59 @@ fn part_create_and_delete_run_captured() {
     let names: Vec<&str> = c.project().parts.keys().map(|i| i.as_str()).collect();
     assert_eq!(names, ["q"]);
 }
+
+/// What `feature::built` makes is what `feature.add` writes (plan 31.C).
+#[test]
+fn feature_adds_build_is_what_it_writes() {
+    let (_dir, mut s) = crate::annotation::propose::tests::twin();
+    let rig = crate::part::part_id("rig").unwrap();
+    let pin = crate::part::part_id("pin").unwrap();
+    for (pid, v) in [
+        (
+            &pin,
+            json!({"part": "pin", "type": "box", "id": "b", "params": {"x": 3, "y": "4 mm", "z": 1}}),
+        ),
+        (
+            &pin,
+            json!({"part": "pin", "type": "cylinder", "id": "c", "params": {"radius": 1, "height": 2},
+                   "placement": {"origin": [1, 2, 3]}}),
+        ),
+        (
+            &pin,
+            json!({"part": "pin", "type": "sketch", "id": "k", "plane": "yz"}),
+        ),
+        (
+            &rig,
+            json!({"part": "rig", "type": "instance", "id": "p2", "of": "pin",
+                   "placement": {"origin": [0, 20, 0]}}),
+        ),
+    ] {
+        let Request::FeatureAdd {
+            ty,
+            params,
+            placement,
+            fields,
+            id,
+            ..
+        } = Request::from_rpc("feature.add", Some(v.clone())).unwrap()
+        else {
+            unreachable!()
+        };
+        let list = crate::part::order(s.project().part(pid).unwrap()).unwrap();
+        let at = list.len();
+        let given = crate::feature::Given {
+            params,
+            placement,
+            fields,
+        };
+        let (f, _) =
+            super::feature::built(&mut s, pid, &ty, given, id.as_deref(), &list, at).unwrap();
+        call(&mut s, "feature.add", v).unwrap();
+        let fid = crate::part::feature_id(id.as_deref().unwrap()).unwrap();
+        let written = s.project().part(pid).unwrap().features[&fid]
+            .as_ref()
+            .unwrap()
+            .to_json();
+        assert_eq!(f.to_json(), written, "{ty}");
+    }
+}
