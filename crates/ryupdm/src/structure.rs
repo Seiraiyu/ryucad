@@ -577,6 +577,13 @@ pub fn driven_keys(
     };
     let points: Vec<Id> = match (at.features.get(&on.feature), listed) {
         (Some(Ok(Feature::Pattern(x))), None) => {
+            // A fill's copies only a rebuild knows (ryucad 28.C).
+            if matches!(x.kind, ryucad_doc::doc::pattern::Kind::Fill { .. }) {
+                return Err(missing(format!(
+                    "{} of {} is a fill, whose copies only a rebuild knows",
+                    on.feature, at.id
+                )));
+            }
             if matches!(x.kind, ryucad_doc::doc::pattern::Kind::Mirror { .. }) {
                 return Err(
                     Error::new(Code::InvalidParam, "an instance can't be mirrored")
@@ -878,6 +885,61 @@ pub(crate) mod tests {
             assert_eq!(occ.len(), 2);
             assert_eq!(problems[0].code, Code::DependencyFailed);
         }
+    }
+
+    #[test]
+    fn a_following_pattern_on_a_fill_is_a_problem() {
+        use ryu_doc::canonical;
+        use serde_json::json;
+        let p = json!({"type": "instance_pattern", "form": "feature", "instances": ["s0"],
+                       "on": {"instance": ["lid"], "feature": "fl"}});
+        let mut f = files(&[
+            ("screw", &[("b", block())]),
+            ("lid", &[("b", block())]),
+            (
+                "pack",
+                &[
+                    ("lid", instance("lid", json!("working"))),
+                    ("s0", instance("screw", json!("working"))),
+                    ("p", p),
+                ],
+            ),
+        ]);
+        let mut put = |path: &str, v: serde_json::Value| {
+            f.insert(path.to_owned(), canonical::to_string(&v).into_bytes());
+        };
+        put(
+            "parts/lid/part.json",
+            json!({"features": ["b", "h", "fl"], "format": 1, "kind": "ryucad.part"}),
+        );
+        put(
+            "parts/lid/features/h.json",
+            json!({"format": 26, "kind": "ryucad.feature", "type": "hole", "form": "simple",
+                   "places": {"a": {"at": "origin"}}, "diameter": "3 mm",
+                   "depth": "through_all", "targets": ["b"]}),
+        );
+        put(
+            "parts/lid/features/fl.json",
+            json!({"format": 26, "kind": "ryucad.feature", "type": "pattern", "form": "fill",
+                   "features": ["h"], "targets": ["b"], "spacing": "10 mm",
+                   "face": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}}),
+        );
+        let mut pv: serde_json::Value =
+            serde_json::from_slice(&f["parts/pack/features/p.json"]).unwrap();
+        pv["format"] = json!(24);
+        f.insert(
+            "parts/pack/features/p.json".into(),
+            canonical::to_string(&pv).into_bytes(),
+        );
+        let project = Project::load_from(Path::new(""), &f).unwrap();
+        let pack = project.part(&id("pack")).unwrap();
+        let mut cache = Cache::new();
+        let mut reader = Reader::new(&f, &project, None, None, &mut cache);
+        let (occ, problems) = occurrences_with(pack, &mut |_, x| driven_keys(&mut reader, pack, x));
+        // Its copies aren't counted: the fill is named as the problem.
+        assert_eq!(occ.len(), 2, "{occ:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("is a fill"), "{problems:?}");
     }
 
     /// A library (`[1; 16]`, named `lib`) whose `kit` places two of its own

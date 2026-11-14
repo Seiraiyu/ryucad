@@ -28,6 +28,9 @@ pub enum Driver {
     Hole(Vec<(Id, Point3)>),
     /// A sketch as solved: its points are read when a pattern names them.
     Sketch(Arc<Solved>),
+    /// A fill pattern (ryucad 28.C): its signed indices don't fit a copy
+    /// key, so nothing follows it yet.
+    Fill,
 }
 
 /// A part's drivers by feature, those that built, and their hash (empty
@@ -47,6 +50,11 @@ impl Places {
                 continue;
             };
             let d = match (f, out) {
+                (Feature::Pattern(p), Output::Solids(_))
+                    if matches!(p.kind, crate::doc::pattern::Kind::Fill { .. }) =>
+                {
+                    Driver::Fill
+                }
                 (Feature::Pattern(p), Output::Solids(_)) => {
                     match crate::pattern::motions(part, fid, p, result) {
                         Ok(m) => Driver::Pattern(
@@ -121,6 +129,9 @@ fn hash_of(by: &BTreeMap<Id, Driver>) -> String {
             }
             Driver::Sketch(s) => {
                 h.update(s.hash.as_bytes());
+            }
+            Driver::Fill => {
+                h.update(b" fill");
             }
         }
     }
@@ -200,6 +211,19 @@ pub fn resolve(id: &Id, p: &InstancePattern, scope: &dyn Scope) -> Result<Resolv
         )));
     };
     let motions: Vec<(CopyKey, Rigid)> = match (d, listed) {
+        (Driver::Fill, _) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{id}: fill pattern {}'s copies can't be followed yet: follow its seed hole, or a linear pattern",
+                    on.feature
+                ),
+            )
+            .with("feature", id)
+            .with("on", &on.feature)
+            .with("reason", "fill_not_followed")
+            .with("pointer", "/on"));
+        }
         (Driver::Pattern(list), None) => {
             if from.is_some() {
                 return Err(Error::new(
@@ -326,6 +350,50 @@ pub(crate) mod tests {
     use crate::doc::assembly::Rev;
     use crate::session::Session;
     use serde_json::{Value, json};
+
+    /// Part `tray`'s plate's top face's name.
+    fn top_of(s: &mut Session) -> String {
+        let body =
+            must(s, "inspect", json!({"part": "tray", "feature": "plate"}))["bodies"][0].clone();
+        body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+            })
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .unwrap()
+    }
+
+    #[test]
+    fn an_instance_pattern_on_a_fill_is_refused() {
+        let (_dir, mut s) = tray();
+        // tray's hole h, filled over its plate's top.
+        let top = top_of(&mut s);
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "tray", "type": "pattern", "id": "fill",
+                   "features": ["h"], "form": "fill", "face": format!("tray/plate/{top}"),
+                   "spacing": 20}),
+        );
+        let e = crate::testing::call(
+            &mut s,
+            "feature.add",
+            json!({"part": "pack", "type": "instance_pattern",
+                   "id": "screws", "form": "feature", "instances": ["screw-0"],
+                   "on": "pack/lid/fill"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::InvalidParam, Some("fill_not_followed")),
+            "{e:?}"
+        );
+    }
 
     #[test]
     fn a_hole_at_places_drives_by_its_places() {
