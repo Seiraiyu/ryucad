@@ -807,6 +807,8 @@ fn every_protocol_method_has_a_command() {
         ("release.list", &["release", "list"]),
         ("release.check", &["release", "check"]),
         ("release.sync", &["release", "sync"]),
+        ("bom.get", &["bom"]),
+        ("bom.diff", &["bom", "diff"]),
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
@@ -4380,4 +4382,30 @@ fn place_help_lists_every_form() {
             assert!(flat.contains(&head), "place --help lacks {head:?} ({form})");
         }
     }
+}
+
+#[test]
+fn bom_answers_lines_and_writes_csv_to_out() {
+    let p = Pair::breakout();
+    let v = p.ok(&["bom"]);
+    assert_eq!(v["schema"], 1);
+    assert!(!v["lines"].as_array().unwrap().is_empty(), "{v}");
+    let v = p.ok(&["bom", "--out", "bom.csv"]);
+    assert_eq!(v["out"], "bom.csv");
+    assert!(v.get("csv").is_none());
+    for top in [&p.direct, &p.daemon] {
+        let text = fs::read_to_string(top.join("board/bom.csv")).unwrap();
+        assert!(
+            text.starts_with("number,name,description,part,revision,quantity,uom,make_buy,refdes,"),
+            "{text}"
+        );
+    }
+    let v = p.ok(&["bom", "--by-block"]);
+    assert!(v["blocks"].is_array());
+    p.fails(&["bom", "--format", "xml"], "invalid_param", 1);
+    p.fails(
+        &["bom", "--out", "x.csv", "--format", "json"],
+        "invalid_param",
+        1,
+    );
 }

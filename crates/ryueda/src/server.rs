@@ -578,6 +578,25 @@ fn dispatch(
         Request::LibOutdated {} => crate::libdeps::outdated(session),
         Request::LibUses { rev } => crate::libdeps::uses(session, rev.as_deref()),
         Request::LibParts { alias } => crate::libdeps::parts(session, &alias),
+        Request::BomGet {
+            design,
+            rev,
+            format,
+            build,
+            by_block,
+        } => crate::pdm::bom::get(
+            session,
+            &crate::pdm::bom::Ask {
+                design: design.as_deref(),
+                rev: rev.as_deref(),
+                format: format.as_deref(),
+                build,
+                by_block,
+            },
+        ),
+        Request::BomDiff { design, from, to } => {
+            crate::pdm::bom::diff(session, design.as_deref(), from.as_deref(), to.as_deref())
+        }
         Request::LibPin {
             components,
             label,
