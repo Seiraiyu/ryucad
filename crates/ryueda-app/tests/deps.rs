@@ -29,7 +29,6 @@ fn depends_on_ryueda_and_the_shell_and_never_on_ryucad_or_the_engine() {
     }
     for section in [
         "[dependencies]",
-        "[dev-dependencies]",
         "[target.'cfg(all(unix, not(target_os = \"macos\")))'.dependencies]",
     ] {
         for name in names(MANIFEST, section) {
@@ -48,5 +47,23 @@ fn depends_on_ryueda_and_the_shell_and_never_on_ryucad_or_the_engine() {
                 "{section} names {name}"
             );
         }
+    }
+    // The tests alone may take the engine, and only for the fixtures they
+    // share with ryueda's own tests (`tests/support/draw.rs` measures pin
+    // names with its font): never ryucad or the kernel.
+    for name in names(MANIFEST, "[dev-dependencies]") {
+        assert!(
+            ![
+                "ryukei",
+                "ryucad",
+                "ryucad-doc",
+                "ryucad-app",
+                "ryustep",
+                "ryupdm",
+                "ryudfm"
+            ]
+            .contains(&name),
+            "[dev-dependencies] names {name}"
+        );
     }
 }

@@ -99,14 +99,21 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
         r.clone().on_hover_text(tip);
     }
     // The cut outlines for this scene and band.
+    // Sheet ids repeat across blocks (`s1`), so the block and design are in
+    // the key; a cut of another length is never reused.
     let key = (
         format!(
-            "{}\u{0}{}\u{0}{:?}\u{0}{}",
-            sc.revision, sc.sheet, sc.layer, sc.theme
+            "{:?}\u{0}{}\u{0}{}\u{0}{}\u{0}{:?}\u{0}{}",
+            sc.design, sc.block, sc.revision, sc.sheet, sc.layer, sc.theme
         ),
         band(cam.zoom),
     );
-    if kept.key.as_ref() != Some(&key) {
+    if kept.key.as_ref() != Some(&key)
+        || kept
+            .cut
+            .as_ref()
+            .is_none_or(|c| c.lines.len() != sc.items.len())
+    {
         kept.cut = Some(Cut::of(sc, cam.zoom));
         kept.key = Some(key);
     }

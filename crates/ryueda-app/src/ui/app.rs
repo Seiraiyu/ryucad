@@ -319,7 +319,17 @@ impl App {
                                     act = Some(a.clone());
                                 }
                             }
-                            if ui.small_button("✕").on_hover_text("Close").clicked() {
+                            if ryu_app::icon::button(
+                                ui,
+                                ryu_app::icon::Icon::X,
+                                12.0,
+                                "Close",
+                                "Close",
+                                false,
+                                Ok(()),
+                            )
+                            .clicked()
+                            {
                                 w.toasts.close(t.id);
                             }
                         });

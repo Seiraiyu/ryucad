@@ -223,7 +223,15 @@ fn properties(ui: &mut egui::Ui, w: &mut Window, copy: &mut Option<String>) {
 }
 
 fn show_button(ui: &mut egui::Ui, w: &mut Window, refs: &[String], label: &str) {
-    if !refs.is_empty() && ui.small_button("Show").on_hover_text(label).clicked() {
+    // Always drawn, so a list's Show buttons line up with its rows; with
+    // nothing to show, disabled.
+    let b = ui.add_enabled(!refs.is_empty(), egui::Button::new("Show").small());
+    let b = if refs.is_empty() {
+        b.on_disabled_hover_text("nothing to show")
+    } else {
+        b.on_hover_text(label)
+    };
+    if b.clicked() {
         w.go_to(&refs[0]);
         w.selection = refs.to_vec();
     }

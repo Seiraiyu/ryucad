@@ -28,6 +28,9 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
 
 [dev-dependencies]
+# Only for the breakout fixture shared with ryueda's tests
+# (`tests/support/draw.rs` measures pin names with the engine's font).
+ryusch = { path = "../ryusch" }
 egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"
