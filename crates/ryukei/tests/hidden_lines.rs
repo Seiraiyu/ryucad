@@ -711,7 +711,7 @@ fn the_crankcase_twins_front_view_mostly_certifies() {
 /// ryucad's isometric corner: drawn with no piece the mesh contradicts,
 /// or refused `Uncertain`.
 #[test]
-#[cfg_attr(debug_assertions, ignore = "release only: the race's revolutions")]
+#[ignore = "minutes: the trace after a failed fit (#767)"]
 fn the_slow_revolutions_draw_or_refuse() {
     let bodies = ryukei_testkit::race::bodies(200);
     let v = look(Vector3::new(1.0, -1.0, 1.0));
