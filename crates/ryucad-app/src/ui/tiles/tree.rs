@@ -239,10 +239,10 @@ pub fn rows(ws: &Workspace) -> (Vec<Row>, bool) {
         compare: ws.comparing.compare.as_ref(),
         states: &ws.pdm.states,
         doctor: ws.session.doctor.as_ref(),
-        merge: ws.merge.as_ref().map(|m| &m.status),
+        merge: ws.branches.merge.as_ref().map(|m| &m.status),
         pdm: &pdm,
         whole,
-        drawings: &ws.drawing_rows,
+        drawings: &ws.drawings.drawing_rows,
     };
     (crate::core::tree::rows(&src), whole)
 }

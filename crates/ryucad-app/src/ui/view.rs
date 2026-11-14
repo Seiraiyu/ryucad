@@ -885,6 +885,7 @@ impl View {
         // What the chosen feature made, in the solids that show it; of a
         // thicken, its walls.
         if let Some(made) = ws
+            .model
             .made
             .as_ref()
             .filter(|m| chosen.as_ref() == Some(&m.feature))
@@ -991,7 +992,7 @@ impl View {
             .unwrap_or_default();
         for (refs, c) in [
             (sheet.0, style::CHOSEN),
-            (ws.sheet_hover.clone(), style::HOVER),
+            (ws.model.sheet_hover.clone(), style::HOVER),
         ] {
             for r in refs {
                 if let Some(Place::Face(k, i)) = picker.place(&r) {
@@ -1067,6 +1068,7 @@ impl View {
         };
         let size = [f64::from(px[0]), f64::from(px[1])];
         if let Some(made) = ws
+            .model
             .made
             .as_ref()
             .filter(|m| m.feature == (part.clone(), id.clone()) && !m.lines.is_empty())
@@ -1114,6 +1116,7 @@ impl View {
         };
         if b.kind == "shell"
             && let Some(made) = ws
+                .model
                 .made
                 .as_ref()
                 .filter(|m| m.feature == (part.clone(), id.clone()))
@@ -1321,7 +1324,7 @@ impl View {
                 continue;
             }
             let colour = style::color32(style::participant(&m.by));
-            let picked = ws.chosen_annotation.as_deref() == Some(m.id.as_str());
+            let picked = ws.annotations.chosen_annotation.as_deref() == Some(m.id.as_str());
             let id = ui.scope_id().with(("annotation", &m.id, m.pin));
             egui::Area::new(id)
                 .fixed_pos(s)
@@ -1453,6 +1456,7 @@ impl View {
     /// writes them.
     fn bend_notes(&mut self, ui: &egui::Ui, ws: &Workspace, rect: egui::Rect, pr: &Projector) {
         let Some(l) = ws
+            .model
             .flat_view
             .as_ref()
             .and_then(|v| v.lines.as_ref())
@@ -1499,7 +1503,7 @@ impl View {
         self.now = ui.input(|i| i.time);
         // The Markup bar holds the camera at its view (design 423): every
         // view mark lies in that view's plane.
-        match ws.markup.as_ref() {
+        match ws.annotations.markup.as_ref() {
             Some(m) if !self.nav.locked || self.nav.camera != m.camera => {
                 self.nav.lock(m.camera.clone());
                 ws.share_camera(&self.nav.camera);
@@ -1615,7 +1619,7 @@ impl View {
         let length = self.handle_length(ws);
         // While the Markup bar is open the left button draws marks: it
         // picks, selects and moves nothing.
-        let marking = ws.markup.is_some();
+        let marking = ws.annotations.markup.is_some();
         if marking {
             self.markup_input(ui, ws, &response, &pr, rect, modifiers.shift);
         }
@@ -2139,6 +2143,7 @@ impl View {
         }
         let (_, frame_names) = self.mate_frames(ws);
         let swept = ws
+            .model
             .swept
             .as_ref()
             .filter(|d| self.chosen.as_ref() == Some(&d.feature))
@@ -2377,7 +2382,11 @@ impl View {
             }
         }
         // The text being typed, in place: Enter makes it a mark.
-        let typing = ws.markup.as_ref().and_then(|m| m.typing.clone());
+        let typing = ws
+            .annotations
+            .markup
+            .as_ref()
+            .and_then(|m| m.typing.clone());
         if let Some((xy, mut text)) = typing
             && let Some(p) = at(xy)
         {
@@ -2401,7 +2410,7 @@ impl View {
                     }
                     done = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 });
-            if let Some(m) = ws.markup.as_mut() {
+            if let Some(m) = ws.annotations.markup.as_mut() {
                 if let Some(t) = m.typing.as_mut() {
                     t.1 = text;
                 }
@@ -2428,7 +2437,7 @@ impl View {
         let size = [f64::from(rect.width()), f64::from(rect.height())];
         let local = |p: egui::Pos2| [f64::from(p.x - rect.min.x), f64::from(p.y - rect.min.y)];
         let primary = ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released());
-        let Some(tool) = ws.markup.as_ref().map(|m| m.tool) else {
+        let Some(tool) = ws.annotations.markup.as_ref().map(|m| m.tool) else {
             return;
         };
         // The solid under a pixel and the point there in its part's frame.
@@ -2451,17 +2460,17 @@ impl View {
                 match on_solid(self, ws, at) {
                     Some((key, point)) => {
                         let on = ws.model.on_of(&key);
-                        if let Some(m) = ws.markup.as_mut() {
+                        if let Some(m) = ws.annotations.markup.as_mut() {
                             m.press_face(key, on, point);
                         }
                     }
                     None => {
-                        if let Some(m) = ws.markup.as_mut() {
+                        if let Some(m) = ws.annotations.markup.as_mut() {
                             m.note = Some("Press on a face of the model to draw on it.".into());
                         }
                     }
                 }
-            } else if let Some(m) = ws.markup.as_mut() {
+            } else if let Some(m) = ws.annotations.markup.as_mut() {
                 m.press(plane_at(pr, size, at));
             }
         }
@@ -2472,17 +2481,17 @@ impl View {
             let at = local(p);
             if tool == Tool::PenFaces {
                 let under = on_solid(self, ws, at);
-                if let Some(m) = ws.markup.as_mut() {
+                if let Some(m) = ws.annotations.markup.as_mut() {
                     m.drag_face(under);
                 }
-            } else if let Some(m) = ws.markup.as_mut() {
+            } else if let Some(m) = ws.annotations.markup.as_mut() {
                 m.drag(plane_at(pr, size, at), shift);
             }
             ui.ctx().request_repaint();
         }
         if response.drag_stopped() {
             let pixel = pr.pixel(pr.camera.target, size[1]);
-            if let Some(m) = ws.markup.as_mut() {
+            if let Some(m) = ws.annotations.markup.as_mut() {
                 m.release(pixel);
             }
         }
@@ -2490,7 +2499,7 @@ impl View {
         if response.clicked()
             && tool == Tool::Text
             && let Some(p) = response.interact_pointer_pos()
-            && let Some(m) = ws.markup.as_mut()
+            && let Some(m) = ws.annotations.markup.as_mut()
         {
             m.press(plane_at(pr, size, local(p)));
             self.markup_text_focus = true;
@@ -2530,7 +2539,7 @@ impl View {
         };
         // With the Markup bar open, the pin goes with its marks (design
         // 423, Posting).
-        if let Some(m) = ws.markup.as_mut() {
+        if let Some(m) = ws.annotations.markup.as_mut() {
             m.pins.push(pin);
             return;
         }
@@ -2879,7 +2888,8 @@ impl View {
         let chosen = self.chosen.clone();
         scene.sync_deleted(
             &rs.device,
-            ws.deleted
+            ws.model
+                .deleted
                 .as_ref()
                 .filter(|d| chosen.as_ref() == Some(&d.feature)),
         );
@@ -2914,6 +2924,7 @@ impl View {
         // A sweep or loft chosen in the tree: its profile and path, or
         // its sections with a square where each loop starts.
         if let Some(d) = ws
+            .model
             .swept
             .as_ref()
             .filter(|d| self.chosen.as_ref() == Some(&d.feature))
@@ -2949,6 +2960,7 @@ impl View {
         }
         // The flat view's bend lines, dashed in their direction's colour.
         if let Some(l) = ws
+            .model
             .flat_view
             .as_ref()
             .and_then(|v| v.lines.as_ref())

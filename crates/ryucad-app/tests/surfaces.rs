@@ -73,26 +73,35 @@ fn sheets_are_known_and_what_surfaces_made_is_found() {
     // A chosen fill: its face, and its four sides to dash.
     ws.choose(Some(key("f")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.feature == key("f"))
+        ws.model
+            .made
+            .as_ref()
+            .is_some_and(|m| m.feature == key("f"))
     }));
-    let made = ws.made.clone().unwrap();
+    let made = ws.model.made.clone().unwrap();
     assert!(!made.faces[&key("f")].is_empty());
     assert_eq!(made.lines[&key("f")].len(), 4, "{made:?}");
     // A chosen sew: no face of its own, the twelve edges it sewed.
     ws.choose(Some(key("sw")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.feature == key("sw"))
+        ws.model
+            .made
+            .as_ref()
+            .is_some_and(|m| m.feature == key("sw"))
     }));
-    let made = ws.made.clone().unwrap();
+    let made = ws.model.made.clone().unwrap();
     assert!(made.faces.is_empty(), "{made:?}");
     assert_eq!(made.lines[&key("sw")].len(), 12, "{made:?}");
     // A chosen thicken: its four walls among the faces it made (its front
     // and walls; its back, at zero, keeps the sheet's face and name).
     ws.choose(Some(key("t")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.feature == key("t"))
+        ws.model
+            .made
+            .as_ref()
+            .is_some_and(|m| m.feature == key("t"))
     }));
-    let made = ws.made.clone().unwrap();
+    let made = ws.model.made.clone().unwrap();
     assert_eq!(made.walls[&key("t")].len(), 4, "{made:?}");
     assert_eq!(made.faces[&key("t")].len(), 5, "{made:?}");
 }

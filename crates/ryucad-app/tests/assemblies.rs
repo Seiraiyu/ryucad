@@ -62,7 +62,7 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
     let at = |k: &str| ws.model.pose(&key("frame", k)).origin;
     let (a, b) = (at("b1/shank"), at("b2/shank"));
     assert!((b[0] - a[0] - 0.04).abs() < 1e-9, "{a:?} {b:?}");
-    let fetched = ws.fetched;
+    let fetched = ws.model.fetched;
     // The frame is the one root: it is what the window draws.
     assert_eq!(ws.model.shown(), ["frame"]);
     let drawn: Vec<_> = ws.model.drawn().map(|(k, ..)| k.clone()).collect();
@@ -76,7 +76,7 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
     let drawn: Vec<_> = ws.model.drawn().map(|(k, ..)| k.clone()).collect();
     assert_eq!(drawn, [key("bolt", "shank")]);
     assert_eq!(
-        ws.fetched, fetched,
+        ws.model.fetched, fetched,
         "the bolt's own mesh is the same body's"
     );
     // A move fetches nothing: the bolt is drawn where it is now.
@@ -87,7 +87,7 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
             && ws.model.focus.is_none()
             && (ws.model.pose(&key("frame", "b2/shank")).origin[1] - 0.01).abs() < 1e-9
     }));
-    assert_eq!(ws.fetched, fetched);
+    assert_eq!(ws.model.fetched, fetched);
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn the_tree_says_what_mates_leave_and_a_mate_paints_its_faces() {
     }));
     // Chosen, the mate paints the faces its connectors are on.
     ws.choose(Some(key("frame", "m1")));
-    let made = ws.made.as_ref().expect("the mate's faces");
+    let made = ws.model.made.as_ref().expect("the mate's faces");
     let bodies: Vec<&String> = made.faces.keys().map(|(_, b)| b).collect();
     assert_eq!(bodies, ["base/slab", "pin/shank"]);
 }

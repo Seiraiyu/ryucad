@@ -75,8 +75,8 @@ fn the_window_shows_solids() {
     // Choosing the slot paints the faces it made: its walls and floor, in
     // the base.
     ws.choose(Some(key("slot")));
-    assert!(ws.wait_until(WAIT, |ws| ws.made.is_some()));
-    let made = ws.made.clone().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.model.made.is_some()));
+    let made = ws.model.made.clone().unwrap();
     assert_eq!(made.feature, key("slot"));
     let faces = &made.faces[&key("base")];
     assert_eq!(faces.len(), 3, "{faces:?}");
@@ -86,12 +86,12 @@ fn the_window_shows_solids() {
     ]);
     let before = made.revision.clone();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.revision != before)
+        ws.model.made.as_ref().is_some_and(|m| m.revision != before)
     }));
     // Through the slot: its floor is gone, its walls go right through.
-    assert_eq!(ws.made.as_ref().unwrap().faces[&key("base")].len(), 2);
+    assert_eq!(ws.model.made.as_ref().unwrap().faces[&key("base")].len(), 2);
     ws.choose(None);
-    assert!(ws.made.is_none());
+    assert!(ws.model.made.is_none());
 }
 
 #[test]
@@ -189,8 +189,8 @@ fn a_fillet_is_painted_and_its_form_edits_it() {
     assert_eq!(ws.model.solid_of(&key("round")), Some(key("base")));
     // Choosing the fillet paints the faces that took its edges' places.
     ws.choose(Some(key("round")));
-    assert!(ws.wait_until(WAIT, |ws| ws.made.is_some()));
-    assert_eq!(ws.made.as_ref().unwrap().faces[&key("base")].len(), 2);
+    assert!(ws.wait_until(WAIT, |ws| ws.model.made.is_some()));
+    assert_eq!(ws.model.made.as_ref().unwrap().faces[&key("base")].len(), 2);
     // Its form: the radius as written, the edges it rounds.
     ws.open_form(Some(key("round")));
     assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
@@ -214,7 +214,8 @@ fn a_fillet_is_painted_and_its_form_edits_it() {
     assert_eq!(shown["groups"][0]["edges"], serde_json::json!([near]));
     // And what it made follows: one face now.
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made
+        ws.model
+            .made
             .as_ref()
             .is_some_and(|m| m.faces.get(&key("base")).is_some_and(|f| f.len() == 1))
     }));
@@ -269,8 +270,8 @@ fn a_pattern_of_holes_is_painted_and_its_forms_edit_it() {
     // Choosing the pattern paints what its two instances made: a wall
     // and a floor each.
     ws.choose(Some(key("row")));
-    assert!(ws.wait_until(WAIT, |ws| ws.made.is_some()));
-    assert_eq!(ws.made.as_ref().unwrap().faces[&key("base")].len(), 4);
+    assert!(ws.wait_until(WAIT, |ws| ws.model.made.is_some()));
+    assert_eq!(ws.model.made.as_ref().unwrap().faces[&key("base")].len(), 4);
     // The hole's form: a person makes it wider.
     ws.open_form(Some(key("h")));
     assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
@@ -307,7 +308,8 @@ fn a_pattern_of_holes_is_painted_and_its_forms_edit_it() {
     assert_eq!(shown["count"]["value"], "4");
     assert_eq!(shown["skip"], serde_json::json!([2]));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made
+        ws.model
+            .made
             .as_ref()
             .is_some_and(|m| m.faces.get(&key("base")).is_some_and(|f| f.len() == 4))
     }));

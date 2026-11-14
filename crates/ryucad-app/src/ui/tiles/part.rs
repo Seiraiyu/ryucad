@@ -84,7 +84,7 @@ pub(crate) fn prop_control(
 /// sheet metal features has no section.
 pub fn sheet_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) -> bool {
     use crate::core::sheet::Shown;
-    ws.sheet_hover.clear();
+    ws.model.sheet_hover.clear();
     let Some(part) = section_part(ws, view) else {
         return false;
     };
@@ -98,7 +98,7 @@ pub fn sheet_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) -> bool
     let unit =
         ryucad::units::Unit::parse(&ws.model.default_unit).unwrap_or(ryucad::units::Unit::Mm);
     let (mut hover, mut select) = (None, None);
-    match ws.sheets.table(&key, &revision) {
+    match ws.model.sheets.table(&key, &revision) {
         None => {
             ui.weak("Reading the sheet metal…");
         }
@@ -141,7 +141,7 @@ pub fn sheet_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) -> bool
         }
     }
     if let Some(h) = hover {
-        ws.sheet_hover = h;
+        ws.model.sheet_hover = h;
     }
     if let Some(s) = select {
         ws.select(s, ryucad::live::SelectMode::Replace);

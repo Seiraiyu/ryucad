@@ -76,7 +76,7 @@ fn draft_toggle(ui: &mut egui::Ui, ws: &mut Workspace) {
         ui.weak("Comparing: stop comparing to see your suggestions");
         return;
     }
-    let (text, to) = if ws.show_agent {
+    let (text, to) = if ws.annotations.show_agent {
         ("Show my suggestions", false)
     } else {
         ("Show agent's model", true)

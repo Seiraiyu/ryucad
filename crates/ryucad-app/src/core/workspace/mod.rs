@@ -27,7 +27,7 @@ use ryucad::live::SelectMode;
 use ryucad::proto::{Answer, Request, Transfer};
 use ryucad::view::{Camera, CameraArg, Projection, ProjectionArg};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -439,17 +439,6 @@ pub struct Workspace {
     /// The project's annotations (design 374), read when the window opens
     /// and followed from `annotation.changed`.
     pub annotations: crate::core::annotations::Annotations,
-    /// The annotation chosen in the tile or by its marker.
-    pub chosen_annotation: Option<String>,
-    /// Annotate's Show agent's model: the working files drawn though the
-    /// person has a draft.
-    pub show_agent: bool,
-    /// What the model was last read at: its revision and the draft's
-    /// suggestions laid.
-    drawn: (Option<String>, Vec<String>),
-    /// The Annotations tile's filter and what is typed in it.
-    pub annotation_filter: crate::core::annotations::Filter,
-    pub annotation_ui: crate::core::annotations::Typed,
     pub model: Model,
     /// The property panel's forms (design 541's sub-states, 27.F).
     pub forms: forms::Forms,
@@ -467,65 +456,16 @@ pub struct Workspace {
     pub view: view::View,
     /// Import and export.
     pub exchange: exchange::Exchange,
-    /// Parts whose reports are asked for and not yet answered.
-    pub loading: BTreeSet<String>,
-    /// The revision each part in `loading` was last asked for at.
-    asked_at: BTreeMap<String, Option<String>>,
-    /// Parts the tree, as it draws, found it wants loaded (its rows
-    /// opened): loaded once it is drawn ([`Workspace::load_wanted`]).
-    pub wanted: std::sync::Mutex<BTreeSet<String>>,
-    /// The faces the feature chosen in the tree made, by the solid that
-    /// shows them; and the feature, once asked for.
-    pub made: Option<Made>,
-    made_for: Option<BodyKey>,
-    /// The chosen delete's ghosts, as they come.
-    pub deleted: Option<crate::core::inserts::Deleted>,
-    /// The sweep or loft chosen in the tree as `sweep.get` drew it: its
-    /// profile and path, or its sections with their starts.
-    pub swept: Option<crate::core::sweeps::SweepDrawing>,
-    /// The part revision the chosen feature was last looked at for a
-    /// sweep's or loft's drawing.
-    swept_at: Option<String>,
-    /// Sheet metal solids' tables and flats, as read (design 346, The
-    /// app): the Part tile's sheet metal section and what a chosen unfold
-    /// or refold paints.
-    pub sheets: crate::core::sheet::Cache,
-    /// The flat view (View > Flat pattern), while on.
-    pub flat_view: Option<crate::core::flat::FlatView>,
-    /// The faces of the bend under the pointer in the Part tile's bend
-    /// table, painted in the hover colour.
-    pub sheet_hover: Vec<String>,
     /// The Drawings tile (see `show_drawings`).
     pub drawings: crate::core::drawings::Tile,
-    /// Every part's drawings, for the tree: ID, name, and whether its
-    /// file doesn't read (`drawing.list` of the project).
-    pub drawing_rows: BTreeMap<String, Vec<(String, String, bool)>>,
     pub activity: Activity,
-    /// The project's Git history (`history.log`), once asked for.
-    pub history: Option<Value>,
-    /// When it was last asked for, whether an answer is on its way, and
-    /// whether it was wanted again meanwhile.
-    history_at: Option<Instant>,
-    history_waiting: bool,
-    history_again: bool,
     /// The Branches tab: the worktrees and their merge previews, once
     /// asked for; when they were last read and whether a reading is on its
     /// way.
     pub branches: Branches,
-    branches_at: Option<Instant>,
-    branches_waiting: bool,
     /// The project's dependencies, the lock's labels and what is
     /// outdated: the Dependencies tab's, and the marks' in the tree.
     pub deps: Deps,
-    deps_waiting: bool,
-    deps_again: bool,
-    /// Place from dependency…, while open.
-    pub picker: Option<Picker>,
-    /// The merge Git is in the middle of, while it is in one: what is left
-    /// to settle.
-    pub merge: Option<Merge>,
-    /// The Markup bar, while it is open (design 423).
-    pub markup: Option<crate::core::markup::Markup>,
     /// A tile the window should open (the app opens it next frame): the
     /// Annotations tile after a rough drag's proposal.
     pub wants_tile: Option<&'static str>,
@@ -554,14 +494,6 @@ pub struct Workspace {
     /// Whether the window has the system's focus: a long request of its
     /// own that finishes while it hasn't gets a toast.
     pub focused: bool,
-    /// The activity feed's filter: one participant's ID, `external`, or
-    /// everyone.
-    pub feed_only: Option<String>,
-    /// How many meshes were fetched: an unchanged body is never fetched
-    /// twice.
-    pub fetched: u64,
-    /// How many bytes answers brought after their lines: meshes, mostly.
-    pub received: u64,
     pending: HashMap<u64, Pending>,
     /// The camera to share, and when one was last shared.
     camera_due: Option<Camera>,
@@ -586,11 +518,6 @@ impl Workspace {
             root: root.to_path_buf(),
             link,
             annotations: Default::default(),
-            chosen_annotation: None,
-            show_agent: false,
-            drawn: Default::default(),
-            annotation_filter: Default::default(),
-            annotation_ui: Default::default(),
             model: Model::default(),
             forms: Default::default(),
             parameters: Default::default(),
@@ -603,33 +530,10 @@ impl Workspace {
             assembly: Default::default(),
             view: Default::default(),
             exchange: Default::default(),
-            loading: BTreeSet::new(),
-            asked_at: BTreeMap::new(),
-            wanted: Default::default(),
-            made: None,
-            deleted: None,
-            made_for: None,
-            swept: None,
-            swept_at: None,
-            sheets: Default::default(),
-            flat_view: None,
-            sheet_hover: Vec::new(),
             drawings: Default::default(),
-            drawing_rows: BTreeMap::new(),
             activity: Activity::default(),
-            history: None,
-            history_at: None,
-            history_waiting: false,
-            history_again: false,
             branches: Branches::default(),
-            branches_at: None,
-            branches_waiting: false,
             deps: Deps::default(),
-            deps_waiting: false,
-            deps_again: false,
-            picker: None,
-            merge: None,
-            markup: None,
             wants_tile: None,
             deaf: false,
             raised: false,
@@ -644,9 +548,6 @@ impl Workspace {
             toasts: Toasts::default(),
             card: None,
             focused: true,
-            feed_only: None,
-            fetched: 0,
-            received: 0,
             pending: HashMap::new(),
             daemon: daemon.clone(),
             name: name.to_owned(),
@@ -660,8 +561,8 @@ impl Workspace {
     /// Asks for everything again: on opening, and after `resync`.
     fn load(&mut self) {
         // What was asked for before a resync may never be answered.
-        self.loading.clear();
-        self.asked_at.clear();
+        self.model.loading.clear();
+        self.model.asked_at.clear();
         self.send(Request::ProjectInfo {}, Pending::Info);
         self.send(Request::PartList {}, Pending::Parts);
         self.read_drawn();
@@ -1343,7 +1244,7 @@ impl Workspace {
         // One tool at a time.
         self.cancel_move();
         self.close_mate();
-        self.markup = Some(crate::core::markup::Markup::new(&part, camera));
+        self.annotations.markup = Some(crate::core::markup::Markup::new(&part, camera));
         Ok(())
     }
 
@@ -1360,14 +1261,14 @@ impl Workspace {
         if !self.model.shown().contains(&m.part.as_str()) {
             self.set_focus(Some(m.part.clone()));
         }
-        self.markup = Some(m);
+        self.annotations.markup = Some(m);
         Ok(())
     }
 
     /// Post: the marks and the comment as one annotation, or the edited
     /// one's; the bar stays open, its marks kept, until the daemon answers.
     pub fn post_markup(&mut self) {
-        let Some(m) = self.markup.as_mut() else {
+        let Some(m) = self.annotations.markup.as_mut() else {
             return;
         };
         m.commit_text();
@@ -1387,7 +1288,7 @@ impl Workspace {
     /// marks seen from another view mislead.
     pub fn view_marks(&self) -> Option<crate::core::markup::ViewMarks> {
         use crate::core::markup::ViewMarks;
-        if let Some(m) = &self.markup {
+        if let Some(m) = &self.annotations.markup {
             let mut marks = m.marks.clone();
             marks.extend(m.under_way());
             return Some(ViewMarks {
@@ -1397,7 +1298,10 @@ impl Workspace {
                 alpha: 1.0,
             });
         }
-        let e = self.annotations.all.get(self.chosen_annotation.as_ref()?)?;
+        let e = self
+            .annotations
+            .all
+            .get(self.annotations.chosen_annotation.as_ref()?)?;
         let marks = e.marks.as_ref()?;
         // Drawn only over the part they were made on (#730), as pins are.
         if !self.model.shown().contains(&marks.part.as_str()) {
@@ -1418,7 +1322,10 @@ impl Workspace {
     /// The annotation the Markup bar edits, if it edits one: the bar
     /// draws its marks, so the listing's are left out.
     pub fn markup_editing(&self) -> Option<&str> {
-        self.markup.as_ref().and_then(|m| m.editing.as_deref())
+        self.annotations
+            .markup
+            .as_ref()
+            .and_then(|m| m.editing.as_deref())
     }
 
     /// The face strokes the window draws (design 423): open annotations'
@@ -1433,7 +1340,7 @@ impl Workspace {
         } else {
             Vec::new()
         };
-        if let Some(m) = &self.markup {
+        if let Some(m) = &self.annotations.markup {
             let mut marks = m.marks.clone();
             marks.extend(m.under_way());
             let marks = ryucad::redline::Marks {
@@ -1452,7 +1359,7 @@ impl Workspace {
     /// Cancel (or Esc with nothing under way): the bar closes and its
     /// marks go.
     pub fn cancel_markup(&mut self) {
-        self.markup = None;
+        self.annotations.markup = None;
     }
 
     /// Asks what importing the open import's file would do: `import` as
@@ -1584,8 +1491,8 @@ impl Workspace {
 
     /// Reads the project's Git history again.
     pub fn load_history(&mut self) {
-        self.history_at = Some(Instant::now());
-        self.history_waiting = true;
+        self.activity.history_at = Some(Instant::now());
+        self.activity.history_waiting = true;
         let req = Request::HistoryLog {
             part: None,
             limit: Some(100),
@@ -1596,9 +1503,9 @@ impl Workspace {
     /// Reads the history again after the project changed, once it was
     /// asked for: at most one reading on its way, and one more after it.
     fn reload_history(&mut self) {
-        if self.history_waiting {
-            self.history_again = true;
-        } else if self.history.is_some() {
+        if self.activity.history_waiting {
+            self.activity.history_again = true;
+        } else if self.activity.history.is_some() {
             self.load_history();
         }
     }
@@ -1606,8 +1513,8 @@ impl Workspace {
     /// The History tab is shown: read the history again when the last
     /// reading is older than [`HISTORY_EVERY`]. Returns when to look again.
     pub fn history_shown(&mut self, now: Instant) -> Duration {
-        let due = self.history_at.map_or(now, |t| t + HISTORY_EVERY);
-        if now >= due && !self.history_waiting {
+        let due = self.activity.history_at.map_or(now, |t| t + HISTORY_EVERY);
+        if now >= due && !self.activity.history_waiting {
             self.load_history();
             return HISTORY_EVERY;
         }
@@ -1619,8 +1526,8 @@ impl Workspace {
     /// (`worktree.list`) again; the worktrees' previews follow, one at a
     /// time.
     pub fn load_branches(&mut self) {
-        self.branches_at = Some(Instant::now());
-        self.branches_waiting = true;
+        self.branches.branches_at = Some(Instant::now());
+        self.branches.branches_waiting = true;
         self.send(Request::BranchList {}, Pending::BranchList);
         self.send(Request::WorktreeList {}, Pending::Branches);
     }
@@ -1629,7 +1536,7 @@ impl Workspace {
     /// has read them: this worktree's state moved, so its previews are
     /// made again.
     fn reload_branches(&mut self) {
-        if self.branches.list.is_some() && !self.branches_waiting {
+        if self.branches.list.is_some() && !self.branches.branches_waiting {
             self.load_branches();
         }
     }
@@ -1639,8 +1546,8 @@ impl Workspace {
     /// Returns when to look again.
     pub fn branches_shown(&mut self, now: Instant) -> Duration {
         let every = crate::core::branches::BRANCHES_EVERY;
-        let due = self.branches_at.map_or(now, |t| t + every);
-        if now >= due && !self.branches_waiting {
+        let due = self.branches.branches_at.map_or(now, |t| t + every);
+        if now >= due && !self.branches.branches_waiting {
             self.load_branches();
             return every;
         }
@@ -1701,11 +1608,11 @@ impl Workspace {
     /// Reads the dependencies and what is outdated again, once at a time:
     /// one asked for meanwhile follows.
     pub fn load_deps(&mut self) {
-        if self.deps_waiting {
-            self.deps_again = true;
+        if self.deps.deps_waiting {
+            self.deps.deps_again = true;
             return;
         }
-        self.deps_waiting = true;
+        self.deps.deps_waiting = true;
         self.send(Request::DepsList {}, Pending::DepsList);
         self.send(Request::DepsOutdated {}, Pending::DepsOutdated);
     }
@@ -1782,12 +1689,12 @@ impl Workspace {
         let Some(asm) = self.shown_assembly() else {
             return;
         };
-        self.picker = Some(Picker::new(&asm));
+        self.deps.picker = Some(Picker::new(&asm));
     }
 
     /// The picker's dependency chosen: its released parts are read.
     pub fn pick_dependency(&mut self, name: &str) {
-        let Some(p) = self.picker.as_mut() else {
+        let Some(p) = self.deps.picker.as_mut() else {
             return;
         };
         p.dependency = Some(name.to_owned());
@@ -1802,7 +1709,7 @@ impl Workspace {
 
     /// Places the picker's part at its label, at the assembly's origin.
     pub fn place_picked(&mut self) {
-        let Some(p) = self.picker.as_ref() else {
+        let Some(p) = self.deps.picker.as_ref() else {
             return;
         };
         let (Some(of), Some(rev)) = (p.of(), p.label.clone()) else {
@@ -1810,7 +1717,7 @@ impl Workspace {
         };
         let asm = p.assembly.clone();
         let expected = self.part(&asm).map(|x| x.revision.clone());
-        let Some(p) = self.picker.as_mut() else {
+        let Some(p) = self.deps.picker.as_mut() else {
             return;
         };
         p.placing = true;
@@ -1838,7 +1745,9 @@ impl Workspace {
     /// saw. The answer brings the new status; a failure is kept in the
     /// merge's `failed`.
     pub fn resolve(&mut self, conflict: &str, choice: &str, repair: Option<&str>) {
-        let Some(m) = &mut self.merge else { return };
+        let Some(m) = &mut self.branches.merge else {
+            return;
+        };
         let Some(c) = m.conflict(conflict) else {
             return;
         };
@@ -2571,7 +2480,7 @@ impl Workspace {
         let was = std::mem::replace(&mut self.session.mode, mode);
         self.send(Request::ParticipantMode { mode }, Pending::Mode(was));
         if mode != crate::core::modes::Mode::Annotate {
-            self.show_agent = false;
+            self.annotations.show_agent = false;
         }
         self.model.generation += 1;
         self.follow_draft();
@@ -2595,7 +2504,8 @@ impl Workspace {
             return self.comparing.blink.of.clone();
         }
         let comparing = self.myself().is_some_and(|m| m.compare.is_some());
-        self.draft_rev().filter(|_| !self.show_agent && !comparing)
+        self.draft_rev()
+            .filter(|_| !self.annotations.show_agent && !comparing)
     }
 
     /// The revision forms read at: the draft whenever there is one, since
@@ -2606,7 +2516,7 @@ impl Workspace {
 
     /// Annotate's Show agent's model (`true`), or the person's suggestions.
     pub fn set_show_agent(&mut self, on: bool) {
-        self.show_agent = on;
+        self.annotations.show_agent = on;
         self.follow_draft();
     }
 
@@ -2621,13 +2531,13 @@ impl Workspace {
             self.model.generation += 1;
         }
         let now = (self.model_rev(), self.annotations.draft(&self.name));
-        if now != self.drawn {
-            let rev_moved = now.0 != self.drawn.0 || now.0.is_some();
-            self.drawn = now;
+        if now != self.model.drawn {
+            let rev_moved = now.0 != self.model.drawn.0 || now.0.is_some();
+            self.model.drawn = now;
             if rev_moved {
                 let loaded: Vec<String> = self.model.parts.keys().cloned().collect();
                 for id in loaded {
-                    self.loading.remove(&id);
+                    self.model.loading.remove(&id);
                     self.ask_part(&id);
                 }
                 for part in self.model.clear_sketches() {
@@ -2714,7 +2624,7 @@ impl Workspace {
     /// change, a compare against `annotation:<id>`; leaving one compared
     /// stops that compare.
     pub fn choose_annotation(&mut self, id: Option<&str>) {
-        self.chosen_annotation = id.map(str::to_owned);
+        self.annotations.chosen_annotation = id.map(str::to_owned);
         let entry = id.and_then(|i| self.annotations.all.get(i)).cloned();
         let comparing_one = self
             .comparing
@@ -2771,11 +2681,11 @@ impl Workspace {
     /// Chooses a feature in the tree (or none): what it made is read, to
     /// be painted.
     pub fn choose(&mut self, feature: Option<BodyKey>) {
-        self.made = None;
-        self.deleted = None;
-        self.swept = None;
-        self.swept_at = None;
-        self.made_for.clone_from(&feature);
+        self.model.made = None;
+        self.model.deleted = None;
+        self.model.swept = None;
+        self.model.swept_at = None;
+        self.model.made_for.clone_from(&feature);
         if let Some(key) = feature {
             self.ask_deleted(&key);
             self.ask_swept(&key);
@@ -2792,7 +2702,7 @@ impl Workspace {
         let Some(revision) = self.revision_of(&key.0) else {
             return;
         };
-        if self.sheets.want_table(key, &revision) {
+        if self.model.sheets.want_table(key, &revision) {
             let req = Request::SheetGet {
                 part: key.0.clone(),
                 solid: (!key.1.is_empty()).then(|| key.1.clone()),
@@ -2832,7 +2742,7 @@ impl Workspace {
         let Some(revision) = self.revision_of(&key.0) else {
             return;
         };
-        if self.sheets.want_flat(key, &revision) {
+        if self.model.sheets.want_flat(key, &revision) {
             let req = Request::FlatGet {
                 part: key.0.clone(),
                 solid: (!key.1.is_empty()).then(|| key.1.clone()),
@@ -2885,11 +2795,12 @@ impl Workspace {
             return none;
         };
         let solid = (key.0.clone(), target.clone());
-        let table = match self.sheets.table(&solid, &p.revision) {
+        let table = match self.model.sheets.table(&solid, &p.revision) {
             Some(crate::core::sheet::Shown::Table(t)) => Some(t),
             _ => None,
         };
         let flat = self
+            .model
             .sheets
             .flat(&solid, &p.revision)
             .and_then(|f| f.as_ref().ok());
@@ -2907,14 +2818,14 @@ impl Workspace {
     /// the part's one sheet metal solid), or off.
     pub fn show_flat_view(&mut self, solid: Option<BodyKey>) {
         self.model.show_flat(None);
-        self.flat_view = None;
+        self.model.flat_view = None;
         let Some(key) = solid else {
             return;
         };
         let Some(revision) = self.revision_of(&key.0) else {
             return;
         };
-        self.flat_view = Some(crate::core::flat::FlatView {
+        self.model.flat_view = Some(crate::core::flat::FlatView {
             part: key.0.clone(),
             solid: key.1.clone(),
             revision: revision.clone(),
@@ -2928,7 +2839,7 @@ impl Workspace {
     /// Reads the flat view's bend lines and body again, at its part's
     /// revision.
     fn read_flat_view(&mut self) {
-        let Some(v) = &self.flat_view else {
+        let Some(v) = &self.model.flat_view else {
             return;
         };
         let key = (v.part.clone(), v.solid.clone());
@@ -2951,7 +2862,7 @@ impl Workspace {
     /// come: along the pattern's `z`, from its viewer side (where its bend
     /// lines lie), as `render --flat` looks at it; the view frames it.
     fn turn_to_flat(&mut self) {
-        let Some(v) = self.flat_view.as_mut().filter(|v| !v.turned) else {
+        let Some(v) = self.model.flat_view.as_mut().filter(|v| !v.turned) else {
             return;
         };
         let (Some(l), Some((_, body))) = (&v.lines, &self.model.flat) else {
@@ -2995,7 +2906,7 @@ impl Workspace {
         let Some(p) = self.model.parts.get(&key.0) else {
             return;
         };
-        self.swept_at = Some(p.revision.clone());
+        self.model.swept_at = Some(p.revision.clone());
         let Some(f) = p.feature(&key.1) else {
             return;
         };
@@ -3025,7 +2936,7 @@ impl Workspace {
         else {
             return;
         };
-        self.deleted = Some(d);
+        self.model.deleted = Some(d);
         for (part, solid) in asked {
             let req = Request::MeshGet {
                 part,
@@ -3053,7 +2964,7 @@ impl Workspace {
                     faces.entry((key.0.clone(), body)).or_default().insert(name);
                 }
             }
-            self.made = Some(Made {
+            self.model.made = Some(Made {
                 feature: key.clone(),
                 revision: p.revision.clone(),
                 faces,
@@ -4043,9 +3954,9 @@ impl Workspace {
                 self.comparing.compare_waiting = false;
                 self.session.doctor_waiting = false;
                 self.session.doctor_again = false;
-                self.history_waiting = false;
-                self.history_again = false;
-                self.branches_waiting = false;
+                self.activity.history_waiting = false;
+                self.activity.history_again = false;
+                self.branches.branches_waiting = false;
                 self.branches.previewing = None;
                 if let Some(c) = &mut self.comparing.compare {
                     c.asked.clear();
@@ -4065,7 +3976,7 @@ impl Workspace {
             binary: Some(b), ..
         }) = &answer
         {
-            self.received += b.len() as u64;
+            self.model.received += b.len() as u64;
         }
         let (doctor, history) = (
             matches!(why, Pending::Doctor),
@@ -4079,8 +3990,8 @@ impl Workspace {
             }
         }
         if history {
-            self.history_waiting = false;
-            if std::mem::take(&mut self.history_again) {
+            self.activity.history_waiting = false;
+            if std::mem::take(&mut self.activity.history_again) {
                 self.load_history();
             }
         }
@@ -4101,7 +4012,7 @@ impl Workspace {
                         .unwrap_or(ROUGH_COMMENT)
                         .to_owned();
                     self.choose_annotation(Some(&id));
-                    self.annotation_ui.editing = Some((id, comment));
+                    self.annotations.annotation_ui.editing = Some((id, comment));
                     self.wants_tile = Some("annotations");
                 }
                 let r = r.map(|a| Answer {
@@ -4183,14 +4094,14 @@ impl Workspace {
                 // loaded when the revision moved isn't asked again then).
                 let now = self.model_rev();
                 if rev != now {
-                    if self.asked_at.get(&id) != Some(&now) {
-                        self.loading.remove(&id);
+                    if self.model.asked_at.get(&id) != Some(&now) {
+                        self.model.loading.remove(&id);
                         self.ask_part(&id);
                     }
                     return;
                 }
-                self.loading.remove(&id);
-                self.asked_at.remove(&id);
+                self.model.loading.remove(&id);
+                self.model.asked_at.remove(&id);
                 // A failed feature fails the rebuild; the report is in the details.
                 let report = match r {
                     Ok(a) => a.result["parts"][0].clone(),
@@ -4373,18 +4284,18 @@ impl Workspace {
             }
             (Pending::Merge, Ok(a)) => {
                 // A failure read again after keeps saying why.
-                let failed = self.merge.as_mut().and_then(|m| m.failed.take());
+                let failed = self.branches.merge.as_mut().and_then(|m| m.failed.take());
                 let mut m = Merge::of(a.result);
                 m.failed = failed;
-                self.merge = Some(m);
+                self.branches.merge = Some(m);
             }
             // No merge: nothing to show.
             (Pending::Merge, Err(e)) if matches!(e.code, Code::NotMerging | Code::NotAGitRepo) => {
-                self.merge = None;
+                self.branches.merge = None;
             }
-            (Pending::Merge, Err(e)) => self.merge = Some(Merge::broken(e)),
+            (Pending::Merge, Err(e)) => self.branches.merge = Some(Merge::broken(e)),
             (Pending::Resolve, Ok(a)) => {
-                if let Some(m) = &mut self.merge {
+                if let Some(m) = &mut self.branches.merge {
                     m.resolving = false;
                     m.status = a.result["status"].clone();
                 }
@@ -4392,7 +4303,7 @@ impl Workspace {
             (Pending::Resolve, Err(e)) => {
                 // Changed underneath: read the status again.
                 let again = matches!(e.code, Code::Conflict | Code::RepairConflict);
-                if let Some(m) = &mut self.merge {
+                if let Some(m) = &mut self.branches.merge {
                     m.resolving = false;
                     m.failed = Some(e);
                 }
@@ -4425,12 +4336,12 @@ impl Workspace {
             // A delete chosen before this one answers too late to matter:
             // its ghosts and its failures alike are dropped.
             (Pending::Deleted(key), _)
-                if !self.deleted.as_ref().is_some_and(|d| d.is_for(&key)) => {}
+                if !self.model.deleted.as_ref().is_some_and(|d| d.is_for(&key)) => {}
             (Pending::Deleted(key), a) => {
                 match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
                     Ok(Some(Ok(bodies))) => {
                         for b in bodies {
-                            if self.deleted.as_mut().is_some_and(|d| d.take(&key, b)) {
+                            if self.model.deleted.as_mut().is_some_and(|d| d.take(&key, b)) {
                                 self.model.generation += 1;
                             }
                         }
@@ -4463,9 +4374,9 @@ impl Workspace {
                 self.follow_focus();
             }
             (Pending::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
-            (Pending::History, Ok(a)) => self.history = Some(a.result),
+            (Pending::History, Ok(a)) => self.activity.history = Some(a.result),
             (Pending::Branches, a) => {
-                self.branches_waiting = false;
+                self.branches.branches_waiting = false;
                 match a {
                     Ok(a) => {
                         self.branches.listed(a.result);
@@ -4507,12 +4418,12 @@ impl Workspace {
                 self.model.set_marks(self.deps.marks());
             }
             (Pending::DepsOutdated, a) => {
-                self.deps_waiting = false;
+                self.deps.deps_waiting = false;
                 if let Ok(a) = a {
                     self.deps.outdated(&a.result);
                     self.model.set_marks(self.deps.marks());
                 }
-                if std::mem::take(&mut self.deps_again) {
+                if std::mem::take(&mut self.deps.deps_again) {
                     self.load_deps();
                 }
             }
@@ -4560,6 +4471,7 @@ impl Workspace {
             }
             (Pending::DepsParts(name), a) => {
                 if let Some(p) = self
+                    .deps
                     .picker
                     .as_mut()
                     .filter(|p| p.dependency.as_deref() == Some(name.as_str()))
@@ -4574,9 +4486,9 @@ impl Workspace {
                 }
             }
             (Pending::DepsPlace, a) => match a {
-                Ok(_) => self.picker = None,
+                Ok(_) => self.deps.picker = None,
                 Err(e) => {
-                    if let Some(p) = self.picker.as_mut() {
+                    if let Some(p) = self.deps.picker.as_mut() {
                         p.placing = false;
                         p.error = Some(e);
                     }
@@ -4588,7 +4500,7 @@ impl Workspace {
             }
             // Said in the tab, not left spinning.
             (Pending::History, Err(e)) => {
-                self.history = Some(json!({"error": e.message}));
+                self.activity.history = Some(json!({"error": e.message}));
                 self.fail(e);
             }
             (Pending::Cache, Ok(a)) => self.session.cache = Some(a.result),
@@ -4689,14 +4601,14 @@ impl Workspace {
                 // Posted: the bar closes, and the annotation is chosen, so
                 // its marks are drawn in its view.
                 Ok(a) => {
-                    self.markup = None;
+                    self.annotations.markup = None;
                     if let Some(id) = a.result["annotation"]["id"].as_str() {
                         let id = id.to_owned();
                         self.choose_annotation(Some(&id));
                     }
                 }
                 // Refused: said on the bar, the marks kept.
-                Err(e) => match self.markup.as_mut() {
+                Err(e) => match self.annotations.markup.as_mut() {
                     Some(m) => {
                         m.posting = false;
                         m.note = Some(e.message.clone());
@@ -5082,8 +4994,8 @@ impl Workspace {
                         d.get("error").is_some(),
                     ));
                 }
-                if drawn != self.drawing_rows {
-                    self.drawing_rows = drawn;
+                if drawn != self.drawings.drawing_rows {
+                    self.drawings.drawing_rows = drawn;
                     self.model.generation += 1;
                 }
             }
@@ -5242,10 +5154,10 @@ impl Workspace {
                 self.model.take_holes(&part, t);
             }
             (Pending::Sweep(key, _), a) => {
-                if self.made_for.as_ref() == Some(&key) {
+                if self.model.made_for.as_ref() == Some(&key) {
                     match a {
                         Ok(a) => {
-                            self.swept =
+                            self.model.swept =
                                 Some(crate::core::sweeps::SweepDrawing::from_get(key, &a.result));
                         }
                         Err(e) => self.fail(e),
@@ -5259,15 +5171,15 @@ impl Workspace {
                     Ok(a) => Shown::Table(SheetTable::from_answer(&revision, &a.result)),
                     Err(e) => Shown::Failed(e),
                 };
-                self.sheets.take_table(key, revision, t);
+                self.model.sheets.take_table(key, revision, t);
                 self.model.generation += 1;
             }
             (Pending::FlatLines(key, revision), a) => {
                 let f = a.map(|a| crate::core::flat::FlatLines::from_answer(&a.result));
-                if let Some(v) = self
-                    .flat_view
-                    .as_mut()
-                    .filter(|v| (v.part.clone(), v.solid.clone()) == key && v.revision == revision)
+                if let Some(v) =
+                    self.model.flat_view.as_mut().filter(|v| {
+                        (v.part.clone(), v.solid.clone()) == key && v.revision == revision
+                    })
                 {
                     match &f {
                         Ok(l) => v.lines = Some(l.clone()),
@@ -5280,12 +5192,12 @@ impl Workspace {
                         }
                     }
                 }
-                self.sheets.take_flat(key, revision, f);
+                self.model.sheets.take_flat(key, revision, f);
                 self.turn_to_flat();
                 self.model.generation += 1;
             }
             (Pending::FlatMesh(key, revision), a) => {
-                let wanted = self.flat_view.as_ref().is_some_and(|v| {
+                let wanted = self.model.flat_view.as_ref().is_some_and(|v| {
                     (v.part.clone(), v.solid.clone()) == key && v.revision == revision
                 });
                 if !wanted {
@@ -5296,7 +5208,7 @@ impl Workspace {
                         let body = bodies.remove(0);
                         // The solid it is, named now the daemon has chosen it.
                         let solid = (key.0.clone(), body.feature.clone());
-                        if let Some(v) = &mut self.flat_view {
+                        if let Some(v) = &mut self.model.flat_view {
                             v.solid.clone_from(&body.feature);
                         }
                         self.model.show_flat(Some((solid, body)));
@@ -5306,7 +5218,7 @@ impl Workspace {
                         // Refused (an edit left the solid unfolding no
                         // more): the folded body is drawn again, and the
                         // view keeps the refusal, not the stale flat.
-                        if let Some(v) = &mut self.flat_view {
+                        if let Some(v) = &mut self.model.flat_view {
                             v.lines = None;
                             v.error = Some(e.clone());
                         }
@@ -5320,9 +5232,11 @@ impl Workspace {
                 }
             }
             (Pending::Made(key, revision), a) => {
-                if self.made_for.as_ref() == Some(&key) {
+                if self.model.made_for.as_ref() == Some(&key) {
                     match a {
-                        Ok(a) => self.made = Some(Made::from_inspect(&key, &revision, &a.result)),
+                        Ok(a) => {
+                            self.model.made = Some(Made::from_inspect(&key, &revision, &a.result))
+                        }
                         Err(e) => self.fail(e),
                     }
                     self.model.generation += 1;
@@ -5408,6 +5322,7 @@ impl Workspace {
                     self.toasts.annotation(&by, true, &text, &note, id, now);
                 }
                 if self
+                    .annotations
                     .chosen_annotation
                     .as_ref()
                     .is_some_and(|c| !self.annotations.all.contains_key(c))
@@ -5461,7 +5376,7 @@ impl Workspace {
                     if report["kind"] == "assembly" && report["occurrences"].is_null() {
                         self.ask_part(id);
                     } else if self.model_rev().is_some() {
-                        self.loading.remove(id);
+                        self.model.loading.remove(id);
                         self.ask_part(id);
                     } else {
                         self.part_changed(report);
@@ -5535,9 +5450,9 @@ impl Workspace {
             "merge.changed" => {
                 // A resolution in hand, and why the last one failed, outlast
                 // a status the files' moving made.
-                self.merge = match (params["merging"].as_bool(), params.get("status")) {
+                self.branches.merge = match (params["merging"].as_bool(), params.get("status")) {
                     (Some(true), Some(s)) => {
-                        Some(Merge::of(s.clone()).keeping(self.merge.as_ref()))
+                        Some(Merge::of(s.clone()).keeping(self.branches.merge.as_ref()))
                     }
                     (Some(true), None) => Some(Merge::broken(
                         serde_json::from_value(params["error"].clone())
@@ -5718,9 +5633,10 @@ impl Workspace {
         let wanted = self.model.apply_part(report);
         self.fetch(wanted);
         // What the chosen feature made moves with its part.
-        if let Some(key) = self.made_for.clone()
+        if let Some(key) = self.model.made_for.clone()
             && report["part"] == key.0.as_str()
             && self
+                .model
                 .made
                 .as_ref()
                 .is_none_or(|m| report["revision"] != m.revision.as_str())
@@ -5728,13 +5644,13 @@ impl Workspace {
             self.ask_made(key);
         }
         // So does what a chosen unfold or refold paints.
-        if let Some(key) = self.made_for.clone()
+        if let Some(key) = self.model.made_for.clone()
             && report["part"] == key.0.as_str()
         {
             self.ask_sheet_paint(&key);
         }
         // And the flat view, read again at the part's new revision.
-        if let Some(v) = &mut self.flat_view
+        if let Some(v) = &mut self.model.flat_view
             && report["part"] == v.part.as_str()
             && let Some(r) = report["revision"].as_str()
             && r != v.revision
@@ -5745,11 +5661,11 @@ impl Workspace {
             self.read_flat_view();
         }
         // So does how the chosen sweep or loft is drawn.
-        if let Some(key) = self.made_for.clone()
+        if let Some(key) = self.model.made_for.clone()
             && report["part"] == key.0.as_str()
-            && self.swept_at.as_deref() != report["revision"].as_str()
+            && self.model.swept_at.as_deref() != report["revision"].as_str()
         {
-            self.swept = None;
+            self.model.swept = None;
             self.ask_swept(&key);
         }
         if let Some(part) = report["part"].as_str() {
@@ -5801,7 +5717,7 @@ impl Workspace {
         let quality = (level != self.model.base).then(|| level.as_str().to_owned());
         let mut batches: BTreeMap<String, Vec<(BodyKey, String)>> = BTreeMap::new();
         for (key, hash) in self.model.ask(bodies) {
-            self.fetched += 1;
+            self.model.fetched += 1;
             // An assembly's bodies come by occurrence, many to a request,
             // meshed side by side: an assembly may place 10,000.
             let assembly = self.model.parts.get(&key.0).is_some_and(|p| p.assembly);
@@ -5855,7 +5771,7 @@ impl Workspace {
     /// in the order given (nearest first), each body and level once.
     pub fn fetch_levels(&mut self, wanted: Vec<(BodyKey, ryucad::mesh::Quality)>) {
         for (key, hash, level) in self.model.ask_levels(wanted) {
-            self.fetched += 1;
+            self.model.fetched += 1;
             let assembly = self.model.parts.get(&key.0).is_some_and(|p| p.assembly);
             let feature = match key.1.rsplit_once('/') {
                 Some((path, _)) if assembly => path.to_owned(),
@@ -5892,7 +5808,8 @@ impl Workspace {
     /// Notes, while the tree draws, that `id` should be loaded.
     pub fn want(&self, id: &str) {
         if !self.model.parts.contains_key(id) {
-            self.wanted
+            self.model
+                .wanted
                 .lock()
                 .expect("never poisoned")
                 .insert(id.to_owned());
@@ -5901,7 +5818,7 @@ impl Workspace {
 
     /// Loads what the tree wanted as it drew.
     pub fn load_wanted(&mut self) {
-        let wanted = std::mem::take(&mut *self.wanted.lock().expect("never poisoned"));
+        let wanted = std::mem::take(&mut *self.model.wanted.lock().expect("never poisoned"));
         for id in wanted {
             self.load_part(&id);
         }
@@ -5909,11 +5826,11 @@ impl Workspace {
 
     /// Asks for `id`'s report again, unless it is being asked for.
     fn ask_part(&mut self, id: &str) {
-        if !self.loading.insert(id.to_owned()) {
+        if !self.model.loading.insert(id.to_owned()) {
             return;
         }
         let rev = self.model_rev();
-        self.asked_at.insert(id.to_owned(), rev.clone());
+        self.model.asked_at.insert(id.to_owned(), rev.clone());
         let req = Request::Rebuild {
             part: Some(id.to_owned()),
             rev: rev.clone(),

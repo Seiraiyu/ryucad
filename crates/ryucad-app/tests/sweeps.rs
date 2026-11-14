@@ -45,11 +45,12 @@ fn a_chosen_loft_is_painted_and_drawn_by_its_sections() {
     assert_eq!(part.feature("l").unwrap().ty.as_deref(), Some("loft"));
     // Choosing it paints the faces it made: four sides and two caps.
     ws.choose(Some(key("l")));
-    assert!(ws.wait_until(WAIT, |ws| ws.made.is_some() && ws.swept.is_some()));
-    assert_eq!(ws.made.as_ref().unwrap().faces[&key("l")].len(), 6);
+    assert!(ws.wait_until(WAIT, |ws| ws.model.made.is_some()
+        && ws.model.swept.is_some()));
+    assert_eq!(ws.model.made.as_ref().unwrap().faces[&key("l")].len(), 6);
     // And draws its sections in order, each loop from its start, the
     // second starting nearest where the first does.
-    let d = ws.swept.clone().unwrap();
+    let d = ws.model.swept.clone().unwrap();
     assert_eq!((d.kind.as_str(), d.sections.len()), ("loft", 2));
     assert_eq!(d.dots().len(), 2);
     near(d.dots()[0], [-0.005, -0.005, 0.0]);
@@ -67,12 +68,18 @@ fn a_chosen_loft_is_painted_and_drawn_by_its_sections() {
     ]);
     let before = d.revision.clone();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.swept.as_ref().is_some_and(|d| d.revision != before)
+        ws.model
+            .swept
+            .as_ref()
+            .is_some_and(|d| d.revision != before)
     }));
-    near(ws.swept.as_ref().unwrap().dots()[1], [-0.002, -0.002, 0.01]);
+    near(
+        ws.model.swept.as_ref().unwrap().dots()[1],
+        [-0.002, -0.002, 0.01],
+    );
     // Choosing something else draws nothing of it.
     ws.choose(Some(key("s1")));
-    assert!(ws.swept.is_none());
+    assert!(ws.model.swept.is_none());
 }
 
 #[test]
@@ -80,8 +87,9 @@ fn a_chosen_sweep_is_drawn_by_its_profile_and_path() {
     let p = Project::new().with_loft();
     let mut ws = open(&p);
     ws.choose(Some(key("w")));
-    assert!(ws.wait_until(WAIT, |ws| ws.swept.is_some() && ws.made.is_some()));
-    let d = ws.swept.clone().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.model.swept.is_some()
+        && ws.model.made.is_some()));
+    let d = ws.model.swept.clone().unwrap();
     assert_eq!(d.kind, "sweep");
     let path = d.path.clone().unwrap();
     near(path[0], [0.02, 0.0, 0.0]);
@@ -94,7 +102,7 @@ fn a_chosen_sweep_is_drawn_by_its_profile_and_path() {
     }
     assert!(d.dots().is_empty() && d.labels().is_empty());
     // Its side and its caps.
-    assert_eq!(ws.made.as_ref().unwrap().faces[&key("w")].len(), 3);
+    assert_eq!(ws.model.made.as_ref().unwrap().faces[&key("w")].len(), 3);
 }
 
 #[test]

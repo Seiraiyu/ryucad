@@ -367,7 +367,7 @@ fn the_tree_groups_features_by_solid() {
     h.get_by_label("boss (tool, consumed)");
     h.get_by_label("slot (box, cut)").click();
     frames(&mut h, |a| {
-        a.opened().ws.made.is_some() && a.opened().ws.forms.form.is_some()
+        a.opened().ws.model.made.is_some() && a.opened().ws.forms.form.is_some()
     });
     assert_eq!(
         h.state().opened().view.chosen,
@@ -749,7 +749,7 @@ fn the_history_tab_keeps_the_view_its_size() {
     // Whatever the history holds (here, the commits of the checkout the
     // tests run in, if any), the view stays as it was.
     h.get_by_label("History").click();
-    frames(&mut h, |a| a.opened().ws.history.is_some());
+    frames(&mut h, |a| a.opened().ws.activity.history.is_some());
     h.run_steps(2);
     assert_eq!(h.state().opened().view.rect, before);
 }
@@ -2025,7 +2025,7 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
     h.get_by_label("base (box)");
     // A commit in the history is compared with by its button.
     h.get_by_label("History").click();
-    frames(&mut h, |a| a.opened().ws.history.is_some());
+    frames(&mut h, |a| a.opened().ws.activity.history.is_some());
     h.step();
     h.get_by_label("Compare").click();
     frames(&mut h, compared);
@@ -2149,7 +2149,7 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     frames(&mut h, |a| {
         let o = a.opened();
         // The conflicted box fails in its place; the cylinder builds.
-        o.ws.idle() && o.ws.merge.is_some() && o.ws.model.meshes.len() == 1
+        o.ws.idle() && o.ws.branches.merge.is_some() && o.ws.model.meshes.len() == 1
     });
     h.step();
     assert!(h.state().title().contains("(merge in progress)"));
@@ -2169,6 +2169,7 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .branches
             .merge
             .as_ref()
             .is_some_and(|m| m.clean() && !m.resolving)
@@ -2184,7 +2185,7 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     // Once committed, the panel goes.
     p.git(&["add", "."]);
     p.git(&["commit", "-q", "--no-edit"]);
-    frames(&mut h, |a| a.opened().ws.merge.is_none());
+    frames(&mut h, |a| a.opened().ws.branches.merge.is_none());
     h.step();
     // The tile closed itself with the merge.
     assert!(!ryucad_app::ui::shell::is_open(
@@ -5857,6 +5858,7 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .deps
             .picker
             .as_ref()
             .is_some_and(|p| !p.parts.is_empty())
@@ -5865,7 +5867,7 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
     h.get_by_label("B-6 (p): A released").click();
     h.run_steps(2);
     h.get_by_label("Place").click();
-    frames(&mut h, |a| a.opened().ws.picker.is_none());
+    frames(&mut h, |a| a.opened().ws.deps.picker.is_none());
     // The tree marks it as the dependency's.
     frames(&mut h, |a| {
         a.opened()
@@ -6249,7 +6251,7 @@ fn a_lofts_weight_and_a_sweeps_twist_are_edited_from_their_forms() {
     h.get_by_label("l (loft)").click();
     frames(&mut h, |a| {
         let ws = &a.opened().ws;
-        ws.forms.form.as_ref().is_some_and(|f| f.loft.is_some()) && ws.swept.is_some()
+        ws.forms.form.as_ref().is_some_and(|f| f.loft.is_some()) && ws.model.swept.is_some()
     });
     h.step();
     h.get_by_label("sketch s2");
@@ -6510,7 +6512,12 @@ fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat
     menu(&mut h, "View", "Flat pattern");
     frames(&mut h, |a| {
         let ws = &a.opened().ws;
-        ws.model.flat.is_some() && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+        ws.model.flat.is_some()
+            && ws
+                .model
+                .flat_view
+                .as_ref()
+                .is_some_and(|v| v.lines.is_some())
     });
     menu(&mut h, "View", "Flat pattern");
     h.step();
@@ -6818,7 +6825,7 @@ fn tab_reaches_an_annotations_row_with_the_pointer_over_the_viewport() {
     assert!(reached, "Tab never reached {row}");
     hooked(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
     frames(&mut h, |a| {
-        a.opened().ws.chosen_annotation.as_deref() == Some(e.id.as_str())
+        a.opened().ws.annotations.chosen_annotation.as_deref() == Some(e.id.as_str())
     });
 }
 
@@ -6874,7 +6881,9 @@ fn the_markup_bar_fits_a_narrow_viewport() {
     frames(&mut h, loaded);
     h.step();
     h.get_by_label("Markup").click();
-    waited(&mut h, "the bar", |a| a.opened().ws.markup.is_some());
+    waited(&mut h, "the bar", |a| {
+        a.opened().ws.annotations.markup.is_some()
+    });
     shown(&mut h, "Pen on faces");
     h.run_steps(3);
     let view = h.state().opened().view.rect;
@@ -7062,7 +7071,7 @@ fn the_annotations_tile_lists_an_agents_reply() {
     // alike, and comes after the tile's in the tree).
     h.get_all_by_label("#1").next().unwrap().click();
     frames(&mut h, |a| {
-        a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
+        a.opened().ws.annotations.chosen_annotation.as_deref() == Some(id.as_str())
     });
 }
 
@@ -7089,7 +7098,7 @@ fn a_pins_marker_is_drawn_and_chooses_its_annotation() {
     h.run_steps(3);
     h.get_by_label("#1").click();
     frames(&mut h, |a| {
-        a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
+        a.opened().ws.annotations.chosen_annotation.as_deref() == Some(id.as_str())
     });
     h.run_steps(3);
     let tags: Vec<egui::Rect> = h.query_all_by_label("#1").map(|n| n.rect()).collect();
@@ -7388,7 +7397,9 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     frames(&mut h, loaded);
     h.step();
     h.get_by_label("Markup").click();
-    waited(&mut h, "the bar", |a| a.opened().ws.markup.is_some());
+    waited(&mut h, "the bar", |a| {
+        a.opened().ws.annotations.markup.is_some()
+    });
     shown(&mut h, "Pen on faces");
     h.run_steps(2);
     let held = h.state().opened().view.nav.camera.clone();
@@ -7398,7 +7409,15 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     let from = rect.center() + egui::vec2(-80.0, 60.0);
     drag(&mut h, from, from + egui::vec2(120.0, 40.0), 6);
     waited(&mut h, "an arrow", |a| {
-        a.opened().ws.markup.as_ref().unwrap().marks.len() == 1
+        a.opened()
+            .ws
+            .annotations
+            .markup
+            .as_ref()
+            .unwrap()
+            .marks
+            .len()
+            == 1
     });
     // The wheel zooms nothing.
     h.event(egui::Event::PointerMoved(rect.center()));
@@ -7419,12 +7438,27 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     hooked(&mut h, egui::Key::E, egui::Modifiers::NONE);
     h.run_steps(2);
     assert_eq!(
-        h.state().opened().ws.markup.as_ref().unwrap().tool,
+        h.state()
+            .opened()
+            .ws
+            .annotations
+            .markup
+            .as_ref()
+            .unwrap()
+            .tool,
         Tool::Ellipse
     );
     drag(&mut h, from, from + egui::vec2(60.0, 30.0), 4);
     waited(&mut h, "an ellipse", |a| {
-        a.opened().ws.markup.as_ref().unwrap().marks.len() == 2
+        a.opened()
+            .ws
+            .annotations
+            .markup
+            .as_ref()
+            .unwrap()
+            .marks
+            .len()
+            == 2
     });
     // Ctrl on Linux and Windows is the platform's Mod, as winit sends it.
     let ctrl = egui::Modifiers {
@@ -7436,7 +7470,15 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     hooked(&mut h, egui::Key::Z, ctrl);
     h.run_steps(2);
     assert_eq!(
-        h.state().opened().ws.markup.as_ref().unwrap().marks.len(),
+        h.state()
+            .opened()
+            .ws
+            .annotations
+            .markup
+            .as_ref()
+            .unwrap()
+            .marks
+            .len(),
         1
     );
     // The camera's own commands say why they are off.
@@ -7452,7 +7494,7 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     h.run_steps(2);
     h.get_by_label("Post").click();
     waited(&mut h, "posted", |a| {
-        a.opened().ws.markup.is_none() && a.opened().ws.annotations.all.len() == 1
+        a.opened().ws.annotations.markup.is_none() && a.opened().ws.annotations.all.len() == 1
     });
     h.run_steps(2);
     assert!(!h.state().opened().view.nav.locked);
@@ -7502,6 +7544,7 @@ fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_i
         h.state()
             .opened()
             .ws
+            .annotations
             .markup
             .as_ref()
             .unwrap()
@@ -7512,11 +7555,11 @@ fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_i
     h.run_steps(2);
     press(&h, at + egui::vec2(40.0, 0.0), false);
     h.run_steps(2);
-    let m = h.state().opened().ws.markup.clone().unwrap();
+    let m = h.state().opened().ws.annotations.markup.clone().unwrap();
     assert!(m.drawing.is_none() && m.marks.is_empty());
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
-    assert!(h.state().opened().ws.markup.is_none());
+    assert!(h.state().opened().ws.annotations.markup.is_none());
     assert!(!h.state().opened().view.nav.locked);
     // In View the tool is off, and says why.
     h.state_mut()

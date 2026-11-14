@@ -97,9 +97,12 @@ fn direct_edits_are_read_and_a_chosen_one_paints_what_it_modified_and_made() {
     // Chosen, the delete paints the top it healed, not the bore it took.
     ws.choose(Some(key("x")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.feature == key("x"))
+        ws.model
+            .made
+            .as_ref()
+            .is_some_and(|m| m.feature == key("x"))
     }));
-    let made = ws.made.clone().unwrap();
+    let made = ws.model.made.clone().unwrap();
     let painted = &made.faces[&key("b")];
     assert!(painted.contains(&hex(&top)), "{painted:?}");
     for f in &bore {
@@ -108,9 +111,12 @@ fn direct_edits_are_read_and_a_chosen_one_paints_what_it_modified_and_made() {
     // Chosen, the resize paints the fillet it remade.
     ws.choose(Some(key("r")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.feature == key("r"))
+        ws.model
+            .made
+            .as_ref()
+            .is_some_and(|m| m.feature == key("r"))
     }));
-    let made = ws.made.clone().unwrap();
+    let made = ws.model.made.clone().unwrap();
     assert!(made.faces[&key("b")].contains(&hex(&round)), "{made:?}");
 }
 

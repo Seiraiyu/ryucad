@@ -49,7 +49,7 @@ fn a_large_project_loads_what_the_window_shows() {
         made.parts,
         made.occurrences,
         t.elapsed().as_secs_f64(),
-        ws.received as f64 / 1e6
+        ws.model.received as f64 / 1e6
     );
     // Coarse first: every mesh the window holds is coarse.
     let base = ws.model.base;

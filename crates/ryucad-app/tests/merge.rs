@@ -22,21 +22,24 @@ fn the_window_follows_a_merge_and_settles_it() {
     let p = Project::new().with_part().committed().diverged();
     let mut ws = open(&p);
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.len() == 2));
-    assert!(ws.merge.is_none());
+    assert!(ws.branches.merge.is_none());
     // Git stops the merge for the conflict; the window hears of it.
     assert!(!p.try_git(&["merge", "--no-edit", "theirs"]));
     let heard = ws.wait_until(WAIT, |ws| {
-        ws.merge.as_ref().is_some_and(|m| m.conflicts().len() == 1)
+        ws.branches
+            .merge
+            .as_ref()
+            .is_some_and(|m| m.conflicts().len() == 1)
     });
     // Rarely seen in CI and never reproduced: say whether the daemon or
     // the window is the one behind.
     assert!(
         heard,
         "the window holds {:?}; the daemon answers {}",
-        ws.merge,
+        ws.branches.merge,
         p.cli(&["merge", "status"])
     );
-    let m = ws.merge.as_ref().unwrap();
+    let m = ws.branches.merge.as_ref().unwrap();
     assert_eq!(m.summary(), "merge: 1 conflict");
     let c = m.conflict(CONFLICT).unwrap();
     assert_eq!(
@@ -48,10 +51,16 @@ fn the_window_follows_a_merge_and_settles_it() {
     let now = p.ok(&["part", "list"])["parts"][0]["revision"].clone();
     assert!(ws.wait_until(WAIT, |ws| ws.part("p").is_some_and(|p| p.revision == now)));
     ws.resolve(CONFLICT, "theirs", None);
-    assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.merge.as_ref().is_some_and(|m| m.clean() && !m.resolving)));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .branches
+                .merge
+                .as_ref()
+                .is_some_and(|m| m.clean() && !m.resolving)
+    }));
     assert_eq!(
-        ws.merge.as_ref().unwrap().unstaged(),
+        ws.branches.merge.as_ref().unwrap().unstaged(),
         ["parts/p/features/base.json"]
     );
     let shown = p.ok(&["feature", "show", "p", "base"]);
@@ -59,7 +68,7 @@ fn the_window_follows_a_merge_and_settles_it() {
     // Committed, the merge is over.
     p.git(&["add", "."]);
     p.git(&["commit", "-q", "--no-edit"]);
-    assert!(ws.wait_until(WAIT, |ws| ws.merge.is_none()));
+    assert!(ws.wait_until(WAIT, |ws| ws.branches.merge.is_none()));
 }
 
 #[test]
@@ -67,17 +76,23 @@ fn a_window_opened_during_a_merge_sees_it() {
     let p = Project::new().with_part().committed().diverged();
     assert!(!p.try_git(&["merge", "--no-edit", "theirs"]));
     let mut ws = open(&p);
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.merge.is_some()));
-    assert_eq!(ws.merge.as_ref().unwrap().conflicts().len(), 1);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.branches.merge.is_some()));
+    assert_eq!(ws.branches.merge.as_ref().unwrap().conflicts().len(), 1);
     // A resolution against a revision that moved is refused and the
     // status read again.
     p.ok(&["feature", "edit", "p", "boss", "--param", "radius=2"]);
     let stale = ws.model.parts["p"].revision.clone();
     ws.model.parts.get_mut("p").unwrap().revision = "0".repeat(stale.len());
     ws.resolve(CONFLICT, "ours", None);
-    assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.merge.as_ref().is_some_and(|m| m.failed.is_some())));
-    let m = ws.merge.as_ref().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .branches
+                .merge
+                .as_ref()
+                .is_some_and(|m| m.failed.is_some())
+    }));
+    let m = ws.branches.merge.as_ref().unwrap();
     assert_eq!(
         m.failed.as_ref().unwrap().code,
         ryucad::error::Code::Conflict
@@ -111,7 +126,8 @@ fn doctor_badges_follow_a_conflict_record_settled() {
     // settles only a conflict its merge status holds, which may come after
     // the badge: wait for it, or `resolve` sends nothing.
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.merge
+        ws.branches
+            .merge
             .as_ref()
             .is_some_and(|m| m.conflict(CONFLICT).is_some())
     }));
@@ -119,6 +135,6 @@ fn doctor_badges_follow_a_conflict_record_settled() {
     assert!(ws.wait_until(WAIT, |ws| ws.part("p").is_some_and(|p| p.revision == now)));
     ws.resolve(CONFLICT, "theirs", None);
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.merge.as_ref().is_some_and(|m| m.clean())
+        && ws.branches.merge.as_ref().is_some_and(|m| m.clean())
         && !diagnosed(ws, "merge_conflict")));
 }

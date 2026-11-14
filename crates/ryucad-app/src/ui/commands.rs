@@ -55,12 +55,12 @@ pub fn state(o: &mut Opened) -> State {
         )),
         mode: o.ws.session.mode,
         annotations: o.view.annotations,
-        flat: o.ws.flat_view.is_some(),
+        flat: o.ws.model.flat_view.is_some(),
         flattenable: o.ws.flat_candidate(o.view.chosen.as_ref()).is_some(),
         movable: move_target(&o.ws, o.view.chosen.as_ref()),
         moving: o.ws.assembly.mover.is_some(),
         mating: o.ws.assembly.mating.is_some(),
-        marking: o.ws.markup.as_ref().map(|m| m.tool),
+        marking: o.ws.annotations.markup.as_ref().map(|m| m.tool),
     }
 }
 
@@ -300,7 +300,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         // tree's choice with it.
         "edit.clear_selection" => {
             // The Markup bar: the mark under way goes, then the tool.
-            if let Some(m) = o.ws.markup.as_mut() {
+            if let Some(m) = o.ws.annotations.markup.as_mut() {
                 if !m.escape() {
                     o.ws.cancel_markup();
                 }
@@ -355,7 +355,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         // A sheet metal solid laid flat where its fixed flange lies, or
         // folded again.
         "view.flat" => {
-            let solid = match o.ws.flat_view {
+            let solid = match o.ws.model.flat_view {
                 Some(_) => None,
                 None => o.ws.flat_candidate(o.view.chosen.as_ref()),
             };
@@ -467,7 +467,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         // row, or an occurrence's entity (the first pick, too).
         // Markup (design 423): the bar opens on the shown model, locking
         // the camera where it is; again, it closes and its marks go.
-        "annotation.markup" if o.ws.markup.is_some() => o.ws.cancel_markup(),
+        "annotation.markup" if o.ws.annotations.markup.is_some() => o.ws.cancel_markup(),
         "annotation.markup" => {
             let camera = o.view.nav.camera.clone();
             if let Err(why) = o.ws.open_markup(camera) {
@@ -475,14 +475,14 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             }
         }
         "markup.undo" => {
-            if let Some(m) = o.ws.markup.as_mut() {
+            if let Some(m) = o.ws.annotations.markup.as_mut() {
                 m.undo();
             }
         }
         "markup.post" => o.ws.post_markup(),
         id if id.starts_with("markup.") => {
             if let (Some(m), Some(t)) = (
-                o.ws.markup.as_mut(),
+                o.ws.annotations.markup.as_mut(),
                 crate::core::markup::Tool::of_command(id),
             ) {
                 m.choose(t);

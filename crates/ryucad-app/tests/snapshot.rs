@@ -654,7 +654,7 @@ fn a_chosen_loft_looks_as_it_did() {
     assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     ws.choose(Some(("p".to_owned(), "l".to_owned())));
-    assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.swept.is_some()));
+    assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.model.swept.is_some()));
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -663,7 +663,7 @@ fn a_chosen_loft_looks_as_it_did() {
     let mut scene = Scene::new(&device, &adapter);
     scene.sync(&device, &ws.model, centre);
     let overlay = ryucad_app::core::sweeps::overlay(
-        ws.swept.as_ref().unwrap(),
+        ws.model.swept.as_ref().unwrap(),
         style::CHOSEN,
         &pr,
         [f64::from(W), f64::from(H)],
@@ -754,7 +754,7 @@ fn a_chosen_draft_looks_as_it_did() {
         && ws.model.meshes.len() == 1));
     ws.choose(Some(("p".to_owned(), "d".to_owned())));
     assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
-        && ws.made.is_some()));
+        && ws.model.made.is_some()));
     let t = ws.model.parts["p"]
         .feature("d")
         .unwrap()
@@ -773,6 +773,7 @@ fn a_chosen_draft_looks_as_it_did() {
     scene.sync(&device, &ws.model, centre);
     let c = scene::linear(style::CHOSEN);
     let faces: Vec<scene::PaintedFace> = ws
+        .model
         .made
         .as_ref()
         .unwrap()
@@ -831,7 +832,7 @@ fn a_chosen_delete_looks_as_it_did() {
         && ws.model.meshes.len() == 1));
     ws.choose(Some(("p".to_owned(), "x".to_owned())));
     assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
-        && ws.made.is_some()));
+        && ws.model.made.is_some()));
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -844,6 +845,7 @@ fn a_chosen_delete_looks_as_it_did() {
     scene.sync(&device, &ws.model, centre);
     let c = scene::linear(style::CHOSEN);
     let faces: Vec<scene::PaintedFace> = ws
+        .model
         .made
         .as_ref()
         .unwrap()
@@ -893,12 +895,16 @@ fn a_flat_pattern_looks_as_it_did() {
     assert!(ws.wait_until(Duration::from_secs(120), |ws| {
         ws.idle()
             && ws.model.flat.is_some()
-            && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+            && ws
+                .model
+                .flat_view
+                .as_ref()
+                .is_some_and(|v| v.lines.is_some())
     }));
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
-    let lines = ws.flat_view.as_ref().unwrap().lines.as_ref().unwrap();
+    let lines = ws.model.flat_view.as_ref().unwrap().lines.as_ref().unwrap();
     // As the window turns to it: from the pattern's viewer side.
     let camera = lines.camera(&picker.points(None), f64::from(W) / f64::from(H));
     let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);

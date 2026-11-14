@@ -47,7 +47,7 @@ fn the_window_loads_the_model_and_its_meshes() {
     let mesh = base.mesh.as_ref().unwrap();
     assert_eq!(mesh.faces.len(), 6);
     assert_eq!(mesh.edges.len(), 12);
-    assert_eq!(ws.fetched, 2);
+    assert_eq!(ws.model.fetched, 2);
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn an_edit_refetches_one_body() {
         mesh_hash(ws, "boss").is_some_and(|h| Some(h) != boss)
     }));
     assert_eq!(mesh_hash(&ws, "base"), base);
-    assert_eq!(ws.fetched, 3);
+    assert_eq!(ws.model.fetched, 3);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn a_burst_of_edits_fetches_each_body_once() {
         WAIT,
         |ws| ws.part("p").is_some_and(|p| p.features.len() == 7) && ws.idle() && meshed(ws)
     ));
-    assert_eq!(ws.fetched, 2 + 5);
+    assert_eq!(ws.model.fetched, 2 + 5);
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn the_display_quality_refetches_every_mesh() {
         .triangles
         .len();
     p.ok(&["config", "set", "display.quality", "fine"]);
-    assert!(ws.wait_until(WAIT, |ws| ws.fetched == 4 && ws.idle() && meshed(ws)));
+    assert!(ws.wait_until(WAIT, |ws| ws.model.fetched == 4 && ws.idle() && meshed(ws)));
     let after = ws.model.meshes[&("p".to_owned(), "boss".to_owned())]
         .mesh
         .as_ref()
@@ -161,13 +161,14 @@ fn the_history_follows_changes_and_commits() {
     let p = Project::new().with_part().committed();
     let mut ws = open(&p);
     let count = |ws: &Workspace, key: &str| {
-        ws.history
+        ws.activity
+            .history
             .as_ref()
             .and_then(|h| h[key].as_array().map(Vec::len))
     };
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && meshed(ws)));
     ws.load_history();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.history.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.activity.history.is_some()));
     assert_eq!(count(&ws, "uncommitted"), Some(0));
     let before = count(&ws, "commits").unwrap();
     // An edit reads it again: the change is uncommitted.

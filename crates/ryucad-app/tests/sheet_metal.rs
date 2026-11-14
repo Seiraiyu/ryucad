@@ -65,8 +65,10 @@ fn a_sheet_metal_part_is_listed_tabled_painted_and_laid_flat() {
     assert_eq!(solid, key("plate"));
     ws.show_sheet(&solid);
     let revision = part.revision.clone();
-    assert!(ws.wait_until(WAIT, |ws| ws.sheets.table(&solid, &revision).is_some()));
-    let Some(Shown::Table(t)) = ws.sheets.table(&solid, &revision).cloned() else {
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.model.sheets.table(&solid, &revision).is_some()
+    }));
+    let Some(Shown::Table(t)) = ws.model.sheets.table(&solid, &revision).cloned() else {
         panic!("a table")
     };
     assert_eq!((t.state.as_str(), t.thickness_m), ("flat", 0.0015));
@@ -85,12 +87,17 @@ fn a_sheet_metal_part_is_listed_tabled_painted_and_laid_flat() {
     assert_eq!(candidate, key(""));
     ws.show_flat_view(Some(candidate));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.model.flat.is_some() && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+        ws.model.flat.is_some()
+            && ws
+                .model
+                .flat_view
+                .as_ref()
+                .is_some_and(|v| v.lines.is_some())
     }));
     let (k, body) = ws.model.flat.clone().unwrap();
     assert_eq!(k, key("plate"));
     assert_eq!(ws.model.mesh_of(&k).unwrap().hash, body.hash);
-    let v = ws.flat_view.clone().unwrap();
+    let v = ws.model.flat_view.clone().unwrap();
     assert_eq!(v.solid, "plate");
     let lines = v.lines.unwrap();
     assert_eq!(
@@ -115,18 +122,26 @@ fn a_flat_view_refused_at_a_new_revision_draws_the_folded_body_again() {
     let candidate = ws.flat_candidate(None).unwrap();
     ws.show_flat_view(Some(candidate));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.model.flat.is_some() && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+        ws.model.flat.is_some()
+            && ws
+                .model
+                .flat_view
+                .as_ref()
+                .is_some_and(|v| v.lines.is_some())
     }));
     let (k, flat) = ws.model.flat.clone().unwrap();
     // A deduction longer than the bend: the solid lays flat no more, so
     // the view's re-read at the new revision is refused.
     p.ok(&["feature", "edit", "p", "plate", "--deduction", "100mm"]);
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.flat_view.as_ref().is_some_and(|v| v.error.is_some())
+        ws.model
+            .flat_view
+            .as_ref()
+            .is_some_and(|v| v.error.is_some())
     }));
     // The stale flat is gone, body and bend lines, and the folded body is
     // drawn in its place.
-    let v = ws.flat_view.clone().unwrap();
+    let v = ws.model.flat_view.clone().unwrap();
     assert!(v.lines.is_none(), "{:?}", v.lines);
     assert!(ws.model.flat.is_none());
     assert!(ws.wait_until(WAIT, |ws| {

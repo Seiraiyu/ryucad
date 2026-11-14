@@ -15,9 +15,9 @@ use eframe::egui::{self, RichText};
 pub fn activity(ui: &mut egui::Ui, o: &mut Opened) {
     let (mut undo, mut redo, mut show) = (None, None, None);
     let now = std::time::Instant::now();
-    let runs = feed::runs(&o.ws.activity.entries, o.ws.feed_only.as_deref());
+    let runs = feed::runs(&o.ws.activity.entries, o.ws.activity.feed_only.as_deref());
     // The filter: everyone, or one participant (or outside changes).
-    let mut only = o.ws.feed_only.clone();
+    let mut only = o.ws.activity.feed_only.clone();
     ui.horizontal(|ui| {
         egui::ComboBox::from_label("Who")
             .selected_text(match &only {
@@ -38,7 +38,7 @@ pub fn activity(ui: &mut egui::Ui, o: &mut Opened) {
                 ui.selectable_value(&mut only, Some("external".to_owned()), "outside ryucad");
             });
     });
-    o.ws.feed_only = only;
+    o.ws.activity.feed_only = only;
     let (undo_gate, redo_gate) = (o.ws.control("undo"), o.ws.control("redo"));
     egui::ScrollArea::vertical()
         .auto_shrink(false)

@@ -181,7 +181,7 @@ pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, view: &crate::ui::view::Vie
             if crate::ui::platform::software() {
                 ui.weak("Software rendering");
             }
-            if let Some(m) = &ws.merge {
+            if let Some(m) = &ws.branches.merge {
                 ui.colored_label(ui.visuals().warn_fg_color, m.summary());
             }
             // What can't move, said before a drag or Move is tried (#731).

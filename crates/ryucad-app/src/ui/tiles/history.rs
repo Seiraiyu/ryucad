@@ -12,7 +12,7 @@ pub fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
     // shows, it reads the history again now and then.
     let next = ws.history_shown(std::time::Instant::now());
     ui.ctx().request_repaint_after(next);
-    let Some(h) = &ws.history else {
+    let Some(h) = &ws.activity.history else {
         ui.spinner();
         return;
     };

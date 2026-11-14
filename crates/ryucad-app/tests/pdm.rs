@@ -265,8 +265,8 @@ fn a_number_a_merge_duplicated_reaches_the_conflict_panel() {
     p.git(&["commit", "-q", "-m", "ours: s is 300"]);
     assert!(p.try_git(&["merge", "--no-commit", "--no-ff", "theirs"]));
     let mut ws = open(&p);
-    assert!(ws.wait_until(WAIT, |ws| ws.merge.is_some()));
-    let m = ws.merge.as_ref().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.branches.merge.is_some()));
+    let m = ws.branches.merge.as_ref().unwrap();
     let titles: Vec<String> = m
         .conflicts()
         .iter()
@@ -283,7 +283,9 @@ fn a_number_a_merge_duplicated_reaches_the_conflict_panel() {
     assert!(ws.wait_until(WAIT, |ws| ws.pdm.props.is_some()));
     field(&mut ws, "number").text = "301".into();
     ws.save_props();
-    assert!(ws.wait_until(WAIT, |ws| ws.merge.as_ref().is_some_and(|m| m.clean())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.branches.merge.as_ref().is_some_and(|m| m.clean())
+    }));
 }
 
 #[test]

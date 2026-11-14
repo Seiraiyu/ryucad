@@ -22,7 +22,7 @@ pub fn annotations(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     let numbers = ws.annotations.numbers();
     let shown: Vec<Entry> = ws
         .annotations
-        .shown(&ws.annotation_filter, &me)
+        .shown(&ws.annotations.annotation_filter, &me)
         .into_iter()
         .cloned()
         .collect();
@@ -44,7 +44,7 @@ pub fn annotations(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
 
 fn filters(ui: &mut egui::Ui, ws: &mut Workspace) {
     ui.horizontal_wrapped(|ui| {
-        let f = &mut ws.annotation_filter;
+        let f = &mut ws.annotations.annotation_filter;
         egui::ComboBox::from_label("Show")
             .selected_text(match f.show {
                 Show::Open => "Open",
@@ -83,7 +83,7 @@ fn one(
     number: Option<usize>,
     me: &str,
 ) {
-    let chosen = ws.chosen_annotation.as_deref() == Some(e.id.as_str());
+    let chosen = ws.annotations.chosen_annotation.as_deref() == Some(e.id.as_str());
     let colour = style::color32(style::participant(&e.by));
     ui.horizontal_wrapped(|ui| {
         let tag = number.map_or_else(|| "·".to_owned(), |n| format!("#{n}"));
@@ -138,6 +138,7 @@ fn one(
         }
     });
     let editing = ws
+        .annotations
         .annotation_ui
         .editing
         .as_ref()
@@ -149,11 +150,11 @@ fn one(
             ui.horizontal(|ui| {
                 if modes::button(ui, ws, "annotation.edit", "Save").clicked() {
                     ws.edit_annotation(&id, text.clone());
-                    ws.annotation_ui.editing = None;
+                    ws.annotations.annotation_ui.editing = None;
                 } else if ui.button("Cancel").clicked() {
-                    ws.annotation_ui.editing = None;
+                    ws.annotations.annotation_ui.editing = None;
                 } else {
-                    ws.annotation_ui.editing = Some((id, text));
+                    ws.annotations.annotation_ui.editing = Some((id, text));
                 }
             });
         }
@@ -228,7 +229,12 @@ fn one(
     // The reply box fills a row of its own and the buttons wrap beneath
     // it: one over-wide row widens every row after it (#733).
     if e.is_open() {
-        let typed = ws.annotation_ui.replies.entry(e.id.clone()).or_default();
+        let typed = ws
+            .annotations
+            .annotation_ui
+            .replies
+            .entry(e.id.clone())
+            .or_default();
         ui.add(
             egui::TextEdit::singleline(typed)
                 .hint_text("Reply")
@@ -238,6 +244,7 @@ fn one(
     ui.horizontal_wrapped(|ui| {
         if e.is_open() {
             let text = ws
+                .annotations
                 .annotation_ui
                 .replies
                 .get(&e.id)
@@ -247,11 +254,11 @@ fn one(
                 && !text.trim().is_empty()
             {
                 ws.reply_annotation(&e.id, text);
-                ws.annotation_ui.replies.remove(&e.id);
+                ws.annotations.annotation_ui.replies.remove(&e.id);
             }
         }
         if open_mine
-            && ws.annotation_ui.editing.is_none()
+            && ws.annotations.annotation_ui.editing.is_none()
             && modes::button(ui, ws, "annotation.edit", "Edit").clicked()
         {
             // With marks, the Markup bar reopens at its view with them.
@@ -260,7 +267,7 @@ fn one(
                     ws.assembly.drag_note = Some(why);
                 }
             } else {
-                ws.annotation_ui.editing = Some((e.id.clone(), e.comment.clone()));
+                ws.annotations.annotation_ui.editing = Some((e.id.clone(), e.comment.clone()));
             }
         }
         if (open_mine || !e.is_open())

@@ -96,9 +96,12 @@ fn tweaks_are_read_and_a_chosen_one_paints_what_it_modified() {
     // Chosen, the draft paints both walls it drafted, by their names.
     ws.choose(Some(key("d")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.feature == key("d"))
+        ws.model
+            .made
+            .as_ref()
+            .is_some_and(|m| m.feature == key("d"))
     }));
-    let made = ws.made.clone().unwrap();
+    let made = ws.model.made.clone().unwrap();
     let walls = &made.faces[&key("b")];
     assert_eq!(walls.len(), 2, "{walls:?}");
     assert!(walls.contains(east.rsplit('/').next().unwrap()));

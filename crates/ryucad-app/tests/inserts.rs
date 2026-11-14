@@ -75,11 +75,12 @@ fn a_chosen_delete_ghosts_the_solid_it_deletes_where_it_was() {
     let mut ws = open(&p);
     ws.choose(Some(key("d")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.deleted
+        ws.model
+            .deleted
             .as_ref()
             .is_some_and(|d| d.ghosts.contains_key(&key("brd/boss")))
     }));
-    let ghost = ws.deleted.as_ref().unwrap().ghosts[&key("brd/boss")].clone();
+    let ghost = ws.model.deleted.as_ref().unwrap().ghosts[&key("brd/boss")].clone();
     let m = ghost.mesh.as_ref().unwrap();
     // Raised 20 mm with the insert: the boss's top is at 33 mm.
     let top = m
@@ -89,7 +90,7 @@ fn a_chosen_delete_ghosts_the_solid_it_deletes_where_it_was() {
         .fold(f64::MIN, f64::max);
     assert!((top - 0.033).abs() < 1e-6, "{top}");
     ws.choose(None);
-    assert!(ws.deleted.is_none());
+    assert!(ws.model.deleted.is_none());
 }
 
 #[test]

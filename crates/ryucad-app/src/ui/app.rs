@@ -326,7 +326,7 @@ impl App {
         };
         match &self.screen {
             Screen::Start(_) => "ryucad".to_owned(),
-            Screen::Opened(o) => match &o.ws.merge {
+            Screen::Opened(o) => match &o.ws.branches.merge {
                 Some(m) => format!("{} ({} in progress) — ryucad", name(&o.ws.root), m.step()),
                 None => format!("{} — ryucad", name(&o.ws.root)),
             },
@@ -585,7 +585,7 @@ impl Opened {
         for id in marked {
             action = action.or(commands::run(self, &ctx, id, None));
         }
-        self.view.marking = self.ws.markup.is_some();
+        self.view.marking = self.ws.annotations.markup.is_some();
         if let Some(tile) = self.ws.wants_tile.take() {
             crate::ui::shell::open(&mut self.tiles, tile);
             self.layout_dirty = true;
@@ -640,7 +640,7 @@ impl Opened {
     /// The Conflicts tile opens, as the first tab on the right, when a
     /// merge starts, and closes itself when it ends.
     fn follow_merge(&mut self) {
-        let merging = self.ws.merge.is_some();
+        let merging = self.ws.branches.merge.is_some();
         if merging && !self.merging {
             crate::ui::shell::open_first(&mut self.tiles, "conflicts");
         } else if !merging && self.merging {
