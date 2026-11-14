@@ -670,7 +670,9 @@ impl Session {
         match &mut self.sink {
             // no session: the session's own write to the folder
             Sink::Disk => crate::doc::source::write_atomic(path, bytes),
-            Sink::Capture { writes, pending, .. } => {
+            Sink::Capture {
+                writes, pending, ..
+            } => {
                 writes.insert(rel.clone(), Some(Bytes::from(bytes)));
                 pending.push(rel);
                 Ok(())
@@ -690,7 +692,9 @@ impl Session {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(Error::io(path, &e)),
             },
-            Sink::Capture { writes, pending, .. } => {
+            Sink::Capture {
+                writes, pending, ..
+            } => {
                 writes.insert(rel.clone(), None);
                 pending.push(rel);
                 Ok(())
@@ -827,7 +831,10 @@ impl Session {
     /// [`Session::refresh`], returning the files that changed (relative,
     /// with `/`) and how: `created`, `modified` or `deleted`.
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
-        if let Sink::Capture { writes, pending, .. } = &mut self.sink {
+        if let Sink::Capture {
+            writes, pending, ..
+        } = &mut self.sink
+        {
             let mut paths = std::mem::take(pending);
             if paths.is_empty() {
                 return Ok(Vec::new());

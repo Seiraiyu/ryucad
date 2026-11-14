@@ -1540,6 +1540,20 @@ pub fn keep_current(session: &mut crate::session::Session, before: &[Id]) -> Res
     Ok(out)
 }
 
+/// `assembly_overconstrained` for assembly `id` as `r` solves it, when
+/// its mates can't all hold: what a batch's end says (plan 31.C).
+pub(crate) fn overconstrained(id: &Id, r: &crate::rebuild::PartResult) -> Option<Error> {
+    let s = r.solve.as_ref()?;
+    (!s.report.converged).then(|| {
+        Error::new(
+            Code::AssemblyOverconstrained,
+            format!("the batch would leave {id}'s mates unable to all hold"),
+        )
+        .with("part", id)
+        .with("conflicting", s.mate_ids(&s.report.conflicting))
+    })
+}
+
 /// Refuses a write that would leave assembly `proposed`'s mates unable to
 /// all hold, where they hold now: `assembly_overconstrained`, with the
 /// conflicting mates. One that fails already is left to fail.

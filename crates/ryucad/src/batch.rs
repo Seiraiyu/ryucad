@@ -35,6 +35,8 @@ pub fn run(
     session.check_project_revision(ask.expect.as_deref())?;
     let working = session.snapshot();
     let mut capture = session.capturing(working.clone())?;
+    // Each assembly is solved once, at the end (plan 31.C).
+    capture.defer_solves();
     let mut answers = Vec::with_capacity(requests.len());
     let mut named = BTreeSet::new();
     for (i, (op, req)) in ask.ops.iter().zip(requests).enumerate() {
@@ -53,6 +55,7 @@ pub fn run(
             .map_err(|e| at_op(e, i, &op.method))?;
         answers.push(json!({"method": op.method, "result": result}));
     }
+    let (assemblies, warnings) = solve_deferred(session, &mut capture)?;
     session.job().check()?;
     let writes = changed(&working, capture.captured());
     let parts = statuses(&named, &working, &writes);
@@ -67,12 +70,73 @@ pub fn run(
     };
     let mut answer = json!({"ops": answers, "parts": parts_now, "written": written,
                             "revision": revision});
+    if !assemblies.is_empty() {
+        answer["assemblies"] = json!(assemblies);
+    }
+    if !warnings.is_empty() {
+        answer["warnings"] = json!(warnings);
+    }
     if ask.dry_run {
         answer["dry_run"] = json!(true);
     } else if ask.rebuild {
         answer["rebuild"] = rebuild(session, &parts);
     }
     Ok(answer)
+}
+
+/// The solves the ops deferred (plan 31.C), each assembly once: every
+/// assembly the written parts reach whose poses held in the working files
+/// (converged, not stale), or that the batch made, is solved as the files
+/// now are and its poses written in the capture, as `mate::keep_current`
+/// writes them after a single write. An assembly the batch wrote
+/// instances or mates to, whose mates held and now can't, refuses the
+/// batch, as `mate::refuse_overconstrained` refuses that write alone.
+/// Answers the solves' reports and the failing mates' warnings.
+fn solve_deferred(
+    working: &mut Session,
+    capture: &mut Session,
+) -> Result<(Vec<Value>, Vec<Value>)> {
+    let Some(d) = capture.take_deferred() else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let mut reached: Vec<Id> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for p in d.parts.iter().chain(&d.assembled) {
+        if !capture.project().parts.contains_key(p) {
+            continue;
+        }
+        for a in crate::mate::reached(capture.project(), p) {
+            if seen.insert(a.clone()) {
+                reached.push(a);
+            }
+        }
+    }
+    let held_before = |w: &mut Session, a: &Id, stale_too: bool| -> Result<bool> {
+        if !w.project().parts.contains_key(a) {
+            return Ok(true); // made by the batch
+        }
+        Ok(w.rebuilt(a)?
+            .solve
+            .as_ref()
+            .is_none_or(|s| s.report.converged && (stale_too || !s.stale())))
+    };
+    for a in &d.assembled {
+        if !capture.project().parts.contains_key(a) || !held_before(working, a, true)? {
+            continue;
+        }
+        if let Some(e) = crate::mate::overconstrained(a, capture.rebuilt(a)?) {
+            return Err(e);
+        }
+    }
+    let mut held = Vec::new();
+    for a in &reached {
+        if held_before(working, a, false)? {
+            held.push(a.clone());
+        }
+    }
+    let solved = crate::mate::keep_current(capture, &held)?;
+    let warnings = crate::mate::failing_warnings(capture, &reached, "");
+    Ok((solved, warnings))
 }
 
 /// The requests a batch may hold: the model edits a person may propose
@@ -895,7 +959,10 @@ mod tests {
         assert!(!c.defers_solves());
         c.defer_solves();
         assert!(c.defers_solves());
-        assert_eq!(crate::mate::current(&mut c, &bolt).unwrap(), Vec::<Id>::new());
+        assert_eq!(
+            crate::mate::current(&mut c, &bolt).unwrap(),
+            Vec::<Id>::new()
+        );
         let p = c.project().part(&frame).unwrap().clone();
         crate::mate::refuse_overconstrained(&mut c, p).unwrap();
         assert_eq!(
@@ -912,6 +979,76 @@ mod tests {
         let mut d = s;
         d.defer_solves();
         assert!(!d.defers_solves());
+    }
+
+    /// One op that moves a mated assembly writes in a batch what it writes
+    /// alone, solved once at the batch's end, and its answer moves the
+    /// solve's report to the batch's.
+    #[test]
+    fn a_batch_solves_its_assemblies_once_at_its_end() {
+        // A revolute standing the pin on the plate, its poses written, as
+        // mate's `writes_keep_assemblies_current` makes it.
+        let current = || {
+            let (dir, mut s, a, b) = crate::mate::current_tests::placed();
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "mate", "id": "m1", "form": "revolute",
+                       "a": a, "b": b, "a_offset": {"origin": ["20 mm", 0, 0]},
+                       "b_offset": {"flip": true}}),
+            )
+            .unwrap();
+            (dir, s)
+        };
+        // The plate's top rises, so the pin standing on it must move.
+        let edit = json!({"part": "plate", "id": "slab", "params": {"z": 8}});
+        let (a_dir, mut a) = current();
+        let (b_dir, mut b) = current();
+        let (a0, b0) = (on_disk(a_dir.path()), on_disk(b_dir.path()));
+        let v = call(
+            &mut a,
+            "batch",
+            json!({"ops": [{"method": "feature.edit", "params": edit}], "rebuild": false}),
+        )
+        .unwrap();
+        let alone = call(&mut b, "feature.edit", edit.clone()).unwrap();
+        same(
+            change(&a0, &on_disk(a_dir.path())),
+            change(&b0, &on_disk(b_dir.path())),
+            "solved",
+        );
+        assert!(
+            alone.get("assemblies").is_some(),
+            "the example moves the pin: {alone}"
+        );
+        assert!(v["ops"][0]["result"].get("assemblies").is_none(), "{v}");
+        assert_eq!(v.get("assemblies"), alone.get("assemblies"), "{v}\n{alone}");
+    }
+
+    /// An instance or mate write that would leave mates that held unable
+    /// to hold refuses the batch at its end, as it refuses alone.
+    #[test]
+    fn an_overconstraining_batch_is_refused_at_its_end() {
+        let (dir, mut s) = crate::mate::tests::hinged();
+        let top = crate::mate::tests::face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+        let foot = crate::mate::tests::face(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+        // Fastened at the plate's origin, against the revolute's 20 × 10 mm.
+        let mate = json!({"part": "frame", "type": "mate", "id": "m2", "form": "fastened",
+            "a": format!("frame/base/slab/{top}"), "b": format!("frame/pin/shank/{foot}"),
+            "b_offset": {"flip": true}});
+        let before = on_disk(dir.path());
+        let e = call(
+            &mut s,
+            "batch",
+            json!({"ops": [{"method": "feature.add", "params": mate}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::AssemblyOverconstrained, "{e:?}");
+        assert_eq!(e.details["part"], "frame");
+        assert_eq!(on_disk(dir.path()), before);
+        // The example is a real conflict: alone it is refused too.
+        let e = call(&mut s, "feature.add", mate).unwrap_err();
+        assert_eq!(e.code, Code::AssemblyOverconstrained, "{e:?}");
     }
 
     #[test]
