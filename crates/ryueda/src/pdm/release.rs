@@ -28,9 +28,7 @@ pub struct Readiness {
 
 /// The PDM properties' problems: each fault, then each property a
 /// release needs that neither the file nor a default sets.
-fn property_problems(session: &Session, part: &Id, config: &Config) -> Vec<Value> {
-    let files = session.snapshot();
-    let pdm = super::cmd::pdm_of(&files, session.project().manifest.default_unit);
+fn property_problems(pdm: &ryupdm::props::Pdm, part: &Id, config: &Config) -> Vec<Value> {
     let Some(pp) = pdm.parts.get(part) else {
         return Vec::new();
     };
@@ -56,12 +54,12 @@ fn property_problems(session: &Session, part: &Id, config: &Config) -> Vec<Value
 
 /// A library component's own errors: its file's, its symbol's and its
 /// footprints', as the library judges them.
-fn component_problems(session: &Session, part: &Id) -> Vec<Value> {
+fn component_problems(shared: &Shared, part: &Id) -> Vec<Value> {
     let mut paths = vec![super::content::object_path(
         crate::library::COMPONENTS,
         part,
     )];
-    if let Ok(c) = super::content::libcomp(&session.snapshot(), part) {
+    if let Ok(c) = super::content::libcomp(&shared.files, part) {
         if c.symbol.library.is_none() {
             paths.push(super::content::object_path(
                 crate::library::SYMBOLS,
@@ -79,31 +77,92 @@ fn component_problems(session: &Session, part: &Id) -> Vec<Value> {
             ));
         }
     }
-    session
-        .project()
-        .faults()
+    // In the project's fault order, each once, as a filter over every
+    // fault gave them.
+    let found: std::collections::BTreeMap<usize, &Value> = paths
         .iter()
-        .filter(|f| f.is_error())
-        .filter(|f| {
-            f.error.details["path"]
-                .as_str()
-                .is_some_and(|x| paths.iter().any(|p| p == x))
-        })
-        .map(crate::fault::Fault::to_json)
-        .collect()
+        .flat_map(|p| shared.errors.get(p).into_iter().flatten())
+        .map(|(i, v)| (*i, v))
+        .collect();
+    found.into_values().cloned().collect()
+}
+
+/// What every part's readiness and proposal read alike, read once per
+/// request rather than once per part (design 629's bar: `release propose
+/// --all` of 10,000 components): the files, the settings and records (or
+/// why they don't read), every part's properties judged, and the
+/// project's error faults by path, each with its place in `faults()`'s
+/// order so a part's are listed as they always were.
+pub(crate) struct Shared {
+    files: ryu_session::fresh::Files,
+    config: Result<Config>,
+    records: Result<Records>,
+    pdm: ryupdm::props::Pdm,
+    errors: std::collections::BTreeMap<String, Vec<(usize, Value)>>,
+}
+
+impl Shared {
+    pub(crate) fn read(session: &Session) -> Shared {
+        let files = session.snapshot();
+        let config = Config::read_in(&files, NAME);
+        let records = Records::read_in(&files, NAME);
+        let pdm = super::cmd::pdm_of(&files, session.project().manifest.default_unit);
+        let mut errors: std::collections::BTreeMap<String, Vec<(usize, Value)>> =
+            std::collections::BTreeMap::new();
+        if session.project().manifest.project_kind == ProjectKind::Library {
+            for (i, f) in session
+                .project()
+                .faults()
+                .iter()
+                .filter(|f| f.is_error())
+                .enumerate()
+            {
+                if let Some(path) = f.error.details["path"].as_str() {
+                    errors
+                        .entry(path.to_owned())
+                        .or_default()
+                        .push((i, f.to_json()));
+                }
+            }
+        }
+        Shared {
+            files,
+            config,
+            records,
+            pdm,
+            errors,
+        }
+    }
+
+    /// A part's state from the settings and records read once.
+    fn state(&self, part: &Id, releases: &Releases) -> ryupdm::state::State {
+        match (&self.config, &self.records) {
+            (Ok(c), Ok(r)) => {
+                ryupdm::state::of_for::<crate::Eda>(&self.files, c, r, part, releases)
+            }
+            (Err(e), _) | (_, Err(e)) => ryupdm::state::unknown(e.clone()),
+        }
+    }
 }
 
 /// Every reason `part` can't be released as it is (design 629): for a
 /// library component, the library's judgement of it and its properties;
 /// for a design, its check, ERC and identification, and its properties.
 pub fn readiness(session: &mut Session, part: &Id) -> Result<Readiness> {
-    let config = Config::read_in(&session.snapshot(), NAME)?;
+    let shared = Shared::read(session);
+    readiness_in(session, part, &shared)
+}
+
+/// [`readiness`] over what [`Shared`] read.
+fn readiness_in(session: &mut Session, part: &Id, shared: &Shared) -> Result<Readiness> {
+    let config = shared.config.clone()?;
     let mut r = Readiness::default();
     match session.project().manifest.project_kind {
-        ProjectKind::Library => r.problems.extend(component_problems(session, part)),
+        ProjectKind::Library => r.problems.extend(component_problems(shared, part)),
         ProjectKind::Design => design_problems(session, part, &mut r)?,
     }
-    r.problems.extend(property_problems(session, part, &config));
+    r.problems
+        .extend(property_problems(&shared.pdm, part, &config));
     Ok(r)
 }
 
@@ -346,21 +405,44 @@ fn prepare(
     part: &Id,
     releases: &Releases,
     supply: &mut Vec<Value>,
+    shared: &Shared,
+    library_results: &mut Option<Result<std::collections::BTreeMap<String, String>>>,
 ) -> Result<Proposal> {
-    let files = session.snapshot();
-    let config = Config::read_in(&files, NAME)?;
-    let records = Records::read_in(&files, NAME)?;
-    let next = ryupdm::release::next_for::<crate::Eda>(&files, &config, &records, releases, part)?;
-    let r = readiness(session, part)?;
+    let files = &shared.files;
+    let config = shared.config.clone()?;
+    let records = shared.records.clone()?;
+    let next = ryupdm::release::next_for::<crate::Eda>(files, &config, &records, releases, part)?;
+    let r = readiness_in(session, part, shared)?;
     if supply.is_empty() {
         *supply = r.supply.clone();
     }
     if !r.problems.is_empty() {
         return Err(not_ready(part, r.problems));
     }
-    let src = part_source(&files, part);
-    let content = <crate::Eda as Product>::content(&src, part)?;
-    let results = results(session.root(), &src, part, &*session.pins)?;
+    let (content, results) = match session.project().manifest.project_kind {
+        // A component's hash reads its own objects and the manifest, all
+        // in the files; its results are none, the library loading alike
+        // for every component (only `properties/<c>.json` differs, which
+        // loading doesn't read): worked out once.
+        ProjectKind::Library => {
+            let content = <crate::Eda as Product>::content(files, part)?;
+            let results = library_results
+                .get_or_insert_with(|| {
+                    let src = part_source(files, part);
+                    results(session.root(), &src, part, &*session.pins)
+                })
+                .clone()?;
+            (content, results)
+        }
+        ProjectKind::Design => {
+            let src = part_source(files, part);
+            let content = <crate::Eda as Product>::content(&src, part)?;
+            (
+                content,
+                results(session.root(), &src, part, &*session.pins)?,
+            )
+        }
+    };
     Ok(Proposal {
         part: part.clone(),
         next,
@@ -417,8 +499,17 @@ pub fn propose(
     let alone = ids.len() == 1 && !all;
     let mut supply = Vec::new();
     let (mut ready, mut refused) = (Vec::new(), Vec::new());
+    let shared = Shared::read(session);
+    let mut library_results = None;
     for id in &ids {
-        match prepare(session, id, &releases, &mut supply) {
+        match prepare(
+            session,
+            id,
+            &releases,
+            &mut supply,
+            &shared,
+            &mut library_results,
+        ) {
             Ok(p) => ready.push(p),
             Err(e) if alone && !dry_run => return Err(e),
             Err(e) => refused.push((id.clone(), e)),
@@ -429,7 +520,6 @@ pub fn propose(
         .filter_map(|id| super::cmd::notice(session, id))
         .collect();
     if dry_run {
-        let files = session.snapshot();
         let mut out: Vec<Value> = ready
             .iter()
             .map(|p| {
@@ -445,7 +535,7 @@ pub fn propose(
                     .unwrap_or_default(),
                 _ => vec![json!(e)],
             };
-            let next = ryupdm::state::derive_for::<crate::Eda>(&files, id, &releases).next;
+            let next = shared.state(id, &releases).next;
             out.push(
                 json!({"part": id, "label": next, "supersedes": null, "ready": false,
                             "problems": problems}),
@@ -498,11 +588,11 @@ pub fn propose(
         )?;
     }
     let (_, releases) = super::history(session)?;
-    let files = session.snapshot();
+    let after = Shared::read(session);
     let proposed: Vec<Value> = records
         .iter()
         .map(|r| {
-            let s = ryupdm::state::derive_for::<crate::Eda>(&files, r.part(), &releases);
+            let s = after.state(r.part(), &releases);
             let mut v = json!({"part": r.part(), "label": r.label(), "path": r.path(),
                                "record": r.to_json(), "state": s.to_json()});
             if let Some(a) = ryupdm::release::required(r.part(), &releases) {
