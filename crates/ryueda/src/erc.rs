@@ -502,19 +502,14 @@ fn refdes_checks(f: &mut Found, n: &Netlist) {
 fn library_errors(p: &Project, of: &str) -> (Vec<Fault>, Vec<Fault>) {
     let mut pads = Vec::new();
     let mut other = Vec::new();
-    let Some((alias, id)) = of
-        .strip_prefix("lib/")
-        .and_then(|s| s.split_once("/libcomp/"))
-    else {
+    let Some(r) = of_ref(of) else {
         return (pads, other);
     };
-    let Ok(lib) = p.library(alias) else {
+    // A pinned component's own library, as its label has it.
+    let Ok(lib) = p.home(&r) else {
         return (pads, other);
     };
-    let Some(l) = Id::parse(id, "libcomp")
-        .ok()
-        .and_then(|i| lib.components.get(&i))
-    else {
+    let Some(l) = lib.components.get(&r.id) else {
         return (pads, other);
     };
     for x in l.faults.iter().filter(|x| x.is_error()) {
@@ -524,7 +519,6 @@ fn library_errors(p: &Project, of: &str) -> (Vec<Fault>, Vec<Fault>) {
         }
     }
     if let Ok(c) = &l.item {
-        let alias = if alias == SELF { SELF } else { alias };
         let symbol_faults = c
             .symbol
             .library
@@ -536,7 +530,7 @@ fn library_errors(p: &Project, of: &str) -> (Vec<Fault>, Vec<Fault>) {
         other.extend(symbol_faults.into_iter().filter(Fault::is_error));
         for u in &c.footprints {
             let fp_lib = match &u.footprint.library {
-                None => p.library(alias).ok(),
+                None => Some(lib),
                 Some(a) => p.library(a.as_str()).ok(),
             };
             if let Some(fl) = fp_lib.and_then(|l| l.footprints.get(&u.footprint.id)) {
@@ -595,11 +589,23 @@ pub(crate) fn placed_libcomp<'a>(
     p: &'a Project,
     of: &str,
 ) -> Option<&'a crate::library::Loaded<crate::libcomp::LibComp>> {
+    let r = of_ref(of)?;
+    p.home(&r).ok()?.components.get(&r.id)
+}
+
+/// The placement reference an occurrence's `of`
+/// (`lib/<alias>/libcomp/<id>`) is.
+pub(crate) fn of_ref(of: &str) -> Option<crate::libcomp::LibRef> {
     let (alias, id) = of.strip_prefix("lib/")?.split_once("/libcomp/")?;
-    p.library(alias)
-        .ok()?
-        .components
-        .get(&Id::parse(id, "libcomp").ok()?)
+    let library = if alias == SELF {
+        None
+    } else {
+        Some(Id::parse(alias, "alias").ok()?)
+    };
+    Some(crate::libcomp::LibRef {
+        library,
+        id: Id::parse(id, "libcomp").ok()?,
+    })
 }
 
 /// A placed component's own parameters, if its file reads.

@@ -607,9 +607,9 @@ fn component(
 ) -> (Occurrence, Vec<Option<Key>>) {
     let alias = c.of.library.as_ref().map_or(SELF, Id::as_str);
     let lc = p.libcomp(SELF, &c.of).ok();
-    let symbol = lc.map(|lc| p.symbol(alias, &lc.symbol));
+    let symbol = lc.map(|lc| p.placed_symbol(&c.of, &lc.symbol));
     let libcomp_faults = p
-        .library(alias)
+        .home(&c.of)
         .ok()
         .and_then(|l| l.components.get(&c.of.id))
         .map(|l| l.faults.clone())
@@ -787,6 +787,40 @@ pub fn one_design(p: &Project, design: Option<&str>) -> Result<Id> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    #[test]
+    fn a_netlist_reads_a_pinned_components_objects() {
+        use crate::project::{Manifest, Project, resolve};
+        let (_d, board, fake) = crate::project::tests::pinned_board();
+        let m =
+            Manifest::read(&std::fs::read(board.join(crate::project::MANIFEST)).unwrap()).unwrap();
+        let load = |pins: &dyn crate::pin::Resolve| {
+            Project::load_from(
+                &board,
+                &crate::source::Folder(&board),
+                &resolve(&board, &m),
+                pins,
+            )
+            .unwrap()
+        };
+        let p = load(&fake);
+        let n = flatten(&p, &Id::parse("d", "d").unwrap()).unwrap();
+        let o = n
+            .occurrences
+            .iter()
+            .find(|o| o.of == "lib/passives/libcomp/r_100k")
+            .expect("a pinned placement");
+        assert!(o.library.is_none(), "{:?}", o.library);
+        assert!(o.pins.iter().all(|x| x.in_symbol));
+        // ERC judges the pinned library, not the working one.
+        assert!(crate::erc::placed_libcomp(&p, &o.of).is_some());
+        // A pin that doesn't resolve is its placement's fault, as a
+        // working library that doesn't is.
+        let q = load(&crate::pin::NoPins);
+        let e = flatten(&q, &Id::parse("d", "d").unwrap()).unwrap_err();
+        assert_eq!(e.details["faults"][0]["code"], "not_a_git_repo", "{e:?}");
+        assert!(crate::erc::placed_libcomp(&q, "lib/passives/libcomp/r_100k").is_none());
+    }
     use super::*;
     use crate::project::ProjectKind;
     use crate::project::tests::{design_in, library_in, manifest};
