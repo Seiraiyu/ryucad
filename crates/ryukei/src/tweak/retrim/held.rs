@@ -6,10 +6,11 @@
 //! can't move (`iso_stops`).
 
 use super::region::Region;
-use crate::geom::Curve2;
+use crate::geom::{Curve2, Surface};
 use crate::intersect::SeamKind;
 use crate::topo::{Body, EdgeId, FaceId, FinId};
 use crate::{Error, TweakCase, TweakError};
+use std::collections::BTreeMap;
 
 /// A held seam: an input edge, the faces of its two fins in that order,
 /// and whether its ends can move.
@@ -97,7 +98,6 @@ fn ends_stay(body: &Body, e: EdgeId, stays: &dyn Fn(FaceId) -> bool) -> bool {
 /// or a `Nurbs2` whose control points all have that coordinate bit for
 /// bit (so it lies on the iso-line, inside their hull; STEP files often
 /// write iso pcurves as B-splines). `None` for anything else.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn iso(c: &Curve2) -> Option<(usize, f64)> {
     match c {
         Curve2::Line2(l) => {
@@ -127,6 +127,111 @@ pub(crate) fn iso(c: &Curve2) -> Option<(usize, f64)> {
             }
         }
         Curve2::Circle2(_) | Curve2::Ellipse2(_) => None,
+    }
+}
+
+/// The margin a stop leaves past held seam `h` (design 642, Decision 5):
+/// half of `known_seam`'s strip ([`crate::intersect::seam_strip`]) from
+/// the two input faces' box and the edge's tolerance, no more than the
+/// working faces' box and the tolerance `known_seam` takes, so the sliver
+/// between the seam and the stop lies within its strip.
+pub(crate) fn margin(body: &Body, h: &Held) -> f64 {
+    let bx = crate::intersect::face_box(body, h.faces[0])
+        .union(&crate::intersect::face_box(body, h.faces[1]));
+    let size = (bx.max() - bx.min()).length();
+    let tol = body.edges[h.edge]
+        .tolerance
+        .get()
+        .max(crate::tol::LINEAR_RESOLUTION);
+    0.5 * crate::intersect::seam_strip(size, tol)
+}
+
+/// Working face `f`'s parameter box `rect` on `surface` with its iso stops
+/// (design 642). For each of `held` with fixed ends (`Frontier` or
+/// `Fixed`) on `f` whose pcurve on `f` is iso ([`iso`]) at an end of
+/// `f`'s own parameter box (its pcurves' span, `working::own_span`, within
+/// the margin in parameters), where every fin of `f` whose pcurve runs
+/// along that end (its span across lies within the margin of it) is such
+/// a seam, the box ends the margin past the seam: `margin / L`, `L` the
+/// certified bound on `|P_u|` or `|P_v|` over `rect`
+/// ([`crate::intersect::first_bound`]), so the stop lies at most the
+/// margin past it in model space. A box ending nearer keeps its end. A
+/// periodic direction is stopped only where `rect` spans less than a
+/// period (`delete_turn` narrowed it): a whole period has no end.
+pub(crate) fn iso_stops(
+    body: &Body,
+    f: FaceId,
+    held: &[Held],
+    surface: &Surface,
+    rect: [[f64; 2]; 2],
+) -> [[f64; 2]; 2] {
+    let stopping: BTreeMap<EdgeId, &Held> = held
+        .iter()
+        .filter(|h| h.kind != SeamKind::Running && h.faces.contains(&f))
+        .map(|h| (h.edge, h))
+        .collect();
+    if stopping.is_empty() {
+        return rect;
+    }
+    let (pu, pv) = surface.periods();
+    let periods = [pu, pv];
+    let (lu, lv) = crate::intersect::first_bound(surface, rect);
+    let bound = [lu, lv];
+    // `f`'s fins: each one's edge and fin.
+    let fins: Vec<(EdgeId, FinId)> = body
+        .face_loops(f)
+        .flat_map(|l| body.loop_fins(l))
+        .map(|fin| (body.fins[fin].edge, fin))
+        .collect();
+    let mut out = rect;
+    for (&e, h) in &stopping {
+        let Some(&(_, fin)) = fins.iter().find(|(x, _)| *x == e) else {
+            continue;
+        };
+        let Some(pc) = body.fins[fin].pcurve else {
+            continue;
+        };
+        let Some((k, c)) = iso(&body.curves2[pc.curve]) else {
+            continue;
+        };
+        if periods[k].is_some_and(|p| rect[k][1] - rect[k][0] >= p) {
+            continue;
+        }
+        if !(bound[k].is_finite() && bound[k] > 0.0) {
+            continue;
+        }
+        let Some([lo, hi]) = super::working::own_span(body, f, k) else {
+            continue;
+        };
+        let d = margin(body, h) / bound[k];
+        let (high, low) = ((c - hi).abs() <= d, (c - lo).abs() <= d);
+        // Neither end, or a box too thin to tell which.
+        if high == low {
+            continue;
+        }
+        // Every fin running along that end is a seam that stops.
+        let whole = fins
+            .iter()
+            .all(|&(x, g)| match super::working::fin_span(body, g, k) {
+                Some([a, b]) if (a - c).abs() <= d && (b - c).abs() <= d => {
+                    stopping.contains_key(&x)
+                }
+                Some(_) => true,
+                None => false,
+            });
+        if !whole {
+            continue;
+        }
+        if high {
+            out[k][1] = out[k][1].min(c + d);
+        } else {
+            out[k][0] = out[k][0].max(c - d);
+        }
+    }
+    if (0..2).all(|k| out[k][0] < out[k][1]) {
+        out
+    } else {
+        rect
     }
 }
 
@@ -270,5 +375,85 @@ mod tests {
             Point2::new(1.0, v),
         ]);
         assert_eq!(iso(&off), None);
+    }
+    /// The rod's run as its working face, and its held seam with the
+    /// bend: as a rung's first build sees them.
+    fn run_working() -> (
+        Body,
+        FaceId,
+        Vec<Held>,
+        crate::tweak::retrim::working::Working,
+    ) {
+        use crate::tweak::engine::Changes;
+        use crate::tweak::retrim::body::region_box;
+        use crate::tweak::retrim::working::{delete_turn, working};
+        let (rod, rim) = crate::testing::bent_rod();
+        let r = region(&rod, &BTreeSet::from([rim]));
+        let (run, _) = runs(&rod, rim);
+        let h = held(&rod, &r, &|f| r.faces.contains(&f) && f != rim);
+        let changes = Changes {
+            deleted: BTreeSet::from([rim]),
+            ..Changes::default()
+        };
+        let reach = {
+            let g = crate::intersect::face_box(&rod, rim);
+            g.min().distance(g.max())
+        };
+        let bx = region_box(&rod, &r, reach);
+        let mut w = working(&rod, run, None, rod.faces[run].sense, true, &bx).unwrap();
+        for (k, t) in delete_turn(&rod, &changes, run, &w.surface)
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(t) = t {
+                w.rect[k] = t;
+            }
+        }
+        (rod, run, h, w)
+    }
+
+    #[test]
+    fn an_iso_stop_ends_the_run_half_a_strip_past_its_seam() {
+        let (rod, run, h, w) = run_working();
+        let stopped = iso_stops(&rod, run, &h, &w.surface, w.rect);
+        // One end moved: the run's end at the bend, along its axis.
+        let moved: Vec<(usize, usize)> = (0..2)
+            .flat_map(|k| (0..2).map(move |j| (k, j)))
+            .filter(|&(k, j)| stopped[k][j] != w.rect[k][j])
+            .collect();
+        assert_eq!(moved.len(), 1, "{stopped:?} {:?}", w.rect);
+        let (k, j) = moved[0];
+        // The seam's iso value on the run.
+        let fin = rod
+            .edge_fins(h[0].edge)
+            .find(|&x| rod.loops[rod.fins[x].loop_].face == run)
+            .unwrap();
+        let pc = rod.fins[fin].pcurve.unwrap();
+        let (dir, c) = iso(&rod.curves2[pc.curve]).expect("iso on the run");
+        assert_eq!(dir, k);
+        // In model space, past the seam by no more than the margin, and
+        // by more than half of it (the run's |P_v| is 1).
+        let margin = margin(&rod, &h[0]);
+        let u = 0.5 * (stopped[1 - k][0] + stopped[1 - k][1]);
+        let at = |t: f64| {
+            if k == 0 {
+                w.surface.point(t, u)
+            } else {
+                w.surface.point(u, t)
+            }
+        };
+        let d = at(c).distance(at(stopped[k][j]));
+        assert!(d > 0.5 * margin && d <= margin, "{d} {margin}");
+        // And short of where the unstopped run reached.
+        assert!(at(c).distance(at(w.rect[k][j])) > d);
+    }
+
+    #[test]
+    fn a_seam_whose_ends_may_move_stops_nothing() {
+        let (rod, run, mut h, w) = run_working();
+        h[0].kind = SeamKind::Running;
+        assert_eq!(iso_stops(&rod, run, &h, &w.surface, w.rect), w.rect);
+        // No held seam on that end: nothing either.
+        assert_eq!(iso_stops(&rod, run, &[], &w.surface, w.rect), w.rect);
     }
 }
