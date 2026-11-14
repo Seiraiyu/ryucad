@@ -126,13 +126,136 @@ pub fn hash(src: &dyn Source, part: &Id) -> Result<String> {
     Ok(h.finish())
 }
 
-/// A design's pieces: Task 10.
+/// The blocks a design reaches from its root block through instances,
+/// in ID order: what its content hash and readiness read.
+pub(crate) fn reached(
+    conn: &crate::design::Connectivity,
+    root: &Id,
+) -> std::collections::BTreeSet<Id> {
+    let mut reached = std::collections::BTreeSet::new();
+    let mut todo = vec![root.clone()];
+    while let Some(b) = todo.pop() {
+        if !reached.insert(b.clone()) {
+            continue;
+        }
+        if let Some(files) = conn.blocks.get(&b) {
+            todo.extend(
+                files
+                    .instances
+                    .values()
+                    .filter_map(|i| i.item.as_ref().ok())
+                    .map(|i| i.of.clone()),
+            );
+        }
+    }
+    reached
+}
+
+/// The design `part`'s file, read.
+pub(crate) fn design_of(src: &dyn Source, part: &Id) -> Result<(String, crate::conn::Design)> {
+    use crate::conn::{DESIGN_KIND, DESIGNS};
+    let at = crate::design::top_path(DESIGNS, part);
+    let bytes = src
+        .read(&at)?
+        .ok_or_else(|| Error::new(Code::NotFound, format!("no design {part}")).with("path", &at))?;
+    let d = crate::doc::read(&bytes, &at, DESIGN_KIND, crate::conn::newest(DESIGN_KIND))?;
+    Ok((at, d))
+}
+
+/// A design's pieces (design 629's "Content hashes"): the manifest's
+/// properties and schematic settings, the design file, each block it
+/// reaches from its root in ID order (`block.json`, its components,
+/// nets and instances by name, `layout.json`), the rails and classes
+/// those name, `erc.json`, then each `self` library component placed,
+/// in the order first placed, with its symbol and footprints.
 fn design(h: &mut Pieces, src: &dyn Source, m: &Manifest, part: &Id) -> Result<()> {
-    let _ = (h, src, m);
-    Err(Error::new(
-        Code::Internal,
-        format!("no content hash for design {part} yet"),
-    ))
+    use crate::conn::{BLOCK_FILE, BLOCKS, CLASSES, COMPONENTS, INSTANCES, NETS, Node, RAILS};
+    use std::collections::BTreeSet;
+    h.piece(
+        crate::canonical::to_string(&serde_json::json!({
+            "properties": m.properties, "schematic": m.schematic,
+        }))
+        .as_bytes(),
+    );
+    let (at, d) = design_of(src, part)?;
+    h.needed(src, &at)?;
+    let conn = crate::design::load(src)?;
+    let reached = reached(&conn, &d.root);
+    let (mut rails, mut classes) = (BTreeSet::new(), BTreeSet::new());
+    let mut placed: Vec<Id> = Vec::new();
+    let what = format!("design {part}");
+    let mut rail = |n: &Node| {
+        if let Node::Rail(r) = n {
+            rails.insert(r.clone());
+        }
+    };
+    for b in &reached {
+        let dir = format!("{BLOCKS}/{b}");
+        h.needed(src, &format!("{dir}/{BLOCK_FILE}"))?;
+        for sub in [COMPONENTS, NETS, INSTANCES] {
+            let at = format!("{dir}/{sub}");
+            let mut names: Vec<String> = src
+                .list(&at)?
+                .into_iter()
+                .filter(|(n, k)| *k == crate::source::Kind::File && n.ends_with(".json"))
+                .map(|(n, _)| n)
+                .collect();
+            names.sort();
+            for n in names {
+                h.needed(src, &format!("{at}/{n}"))?;
+            }
+        }
+        h.file(src, &format!("{dir}/{}", crate::schem::LAYOUT))?;
+        let Some(files) = conn.blocks.get(b) else {
+            continue;
+        };
+        for c in files
+            .components
+            .values()
+            .filter_map(|c| c.item.as_ref().ok())
+        {
+            c.pins.values().for_each(&mut rail);
+            match &c.of.library {
+                None if !placed.contains(&c.of.id) => placed.push(c.of.id.clone()),
+                None => {}
+                Some(alias) => return Err(not_released(alias, &c.of.id, &what)),
+            }
+        }
+        for i in files
+            .instances
+            .values()
+            .filter_map(|i| i.item.as_ref().ok())
+        {
+            i.ports.values().for_each(&mut rail);
+        }
+        for n in files.nets.values().filter_map(|n| n.item.as_ref().ok()) {
+            if let Some(c) = &n.class {
+                classes.insert(c.clone());
+            }
+        }
+    }
+    for r in &rails {
+        if let Some(Ok(rail)) = conn.rails.get(r).map(|l| l.item.as_ref())
+            && let Some(c) = &rail.class
+        {
+            classes.insert(c.clone());
+        }
+    }
+    // A missing rail or class is no piece: a dangling name is ERC's fault,
+    // and the name is in the bytes of what names it.
+    for r in &rails {
+        h.file(src, &crate::design::top_path(RAILS, r))?;
+    }
+    for c in &classes {
+        h.file(src, &crate::design::top_path(CLASSES, c))?;
+    }
+    h.file(src, crate::project::ERC)?;
+    for id in &placed {
+        let c = libcomp(src, id)?;
+        h.needed(src, &object_path(crate::library::COMPONENTS, id))?;
+        objects(h, src, id, &c)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -175,5 +298,62 @@ mod tests {
         inch.insert("ryueda.json".into(), m.to_text().into_bytes());
         assert_ne!(hash(&inch, &id("r_100k")).unwrap(), h);
         assert_eq!(hash(&l, &id("nope")).unwrap_err().code, Code::NotFound);
+    }
+
+    #[test]
+    fn a_designs_hash_covers_what_it_reaches_and_not_style_or_sourcing() {
+        let f = board(ProjectKind::Design);
+        let h = hash(&f, &id("d")).unwrap();
+        assert_eq!(hash(&f, &id("d")).unwrap(), h);
+        let with = |path: &str, bytes: &[u8]| {
+            let mut g = f.clone();
+            g.insert(path.into(), bytes.to_vec());
+            hash(&g, &id("d")).unwrap()
+        };
+        let edit = |path: &str, key: &str, value: serde_json::Value| {
+            let mut v: serde_json::Value = serde_json::from_slice(&f[path]).unwrap();
+            v[key] = value;
+            with(path, crate::canonical::to_string(&v).as_bytes())
+        };
+        // What the design is: its file, its blocks' files, the rails and
+        // classes they name, the self objects placed, erc.json.
+        assert_ne!(edit("designs/d.json", "name", "Other".into()), h);
+        assert_ne!(
+            edit("blocks/top/components/r1.json", "refdes", "R9".into()),
+            h
+        );
+        assert_ne!(edit("rails/v3v3.json", "voltage", "5 V".into()), h);
+        assert_ne!(
+            edit("library/components/r_100k.json", "value", "99k".into()),
+            h
+        );
+        assert_ne!(
+            with("erc.json", b"{\"format\": 1, \"kind\": \"ryueda.erc\"}\n"),
+            h
+        );
+        // A rail no block names, style, sourcing and lint don't move it.
+        assert_eq!(
+            with(
+                "rails/spare.json",
+                b"{\"format\": 1, \"kind\": \"ryueda.rail\", \"name\": \"SPARE\"}\n"
+            ),
+            h
+        );
+        assert_eq!(with("style.json", b"{}\n"), h);
+        assert_eq!(with("parts.json", b"{}\n"), h);
+        assert_eq!(with("lint.json", b"{}\n"), h);
+        // Another project's component at working has no hash.
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&f["blocks/top/components/r1.json"]).unwrap();
+        v["of"] = serde_json::json!({"library": "passives", "id": "r_100k"});
+        let mut g = f.clone();
+        g.insert(
+            "blocks/top/components/r1.json".into(),
+            crate::canonical::to_string(&v).into_bytes(),
+        );
+        assert_eq!(
+            hash(&g, &id("d")).unwrap_err().code,
+            Code::ComponentNotReleased
+        );
     }
 }
