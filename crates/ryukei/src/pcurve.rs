@@ -86,8 +86,6 @@ pub fn fill(body: &mut Body) -> Result<(), Error> {
     Ok(())
 }
 
-/// A planar curve in a plane's frame, with the same parameter. The curve
-/// is assumed to lie in the plane; [`fits`] confirms it.
 /// A straight edge's pcurve on a plane it lies near but not within its
 /// tolerance of: its projection, at the projection's speed (the cosine of
 /// its slope to the plane), and how far the edge is from the plane, which
@@ -114,6 +112,8 @@ pub(crate) fn line_near_plane(
     Some(((c2, [0.0, along.length()]), gap))
 }
 
+/// A planar curve in a plane's frame, with the same parameter. The curve
+/// is assumed to lie in the plane; [`fits`] confirms it.
 fn on_plane(frame: &Frame, curve: &Curve) -> Option<(Curve2, [f64; 2])> {
     let local = |p: Point3| {
         let v = frame.to_local(p);
