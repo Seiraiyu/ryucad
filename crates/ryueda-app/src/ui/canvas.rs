@@ -96,7 +96,11 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
             ),
             None => h.clone(),
         };
-        r.clone().on_hover_text(tip);
+        // At the pointer: the canvas is one large widget, so a tooltip
+        // placed by its rect lands at a corner, far from what it names.
+        r.clone().on_hover_ui_at_pointer(|ui| {
+            ui.label(tip);
+        });
     }
     // The cut outlines for this scene and band.
     // Sheet ids repeat across blocks (`s1`), so the block and design are in
@@ -169,7 +173,7 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
                 {
                     painter.add(egui::Shape::convex_polygon(
                         pts.clone(),
-                        over.unwrap_or(*f),
+                        over.map_or(*f, |c| tint(*f, c)),
                         Stroke::NONE,
                     ));
                 }
@@ -198,7 +202,7 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
                 if let Some(f) = fill {
                     painter.add(egui::Shape::convex_polygon(
                         pts.clone(),
-                        over.unwrap_or(*f),
+                        over.map_or(*f, |c| tint(*f, c)),
                         Stroke::NONE,
                     ));
                 }
@@ -343,4 +347,17 @@ pub fn code_word(code: ryu_doc::error::Code) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_default()
+}
+
+/// A body's fill under a mark: a third of the way to the mark's colour,
+/// so the text drawn over it (pin names, values), which takes the mark's
+/// colour, stays readable.
+fn tint(fill: Color32, mark: Color32) -> Color32 {
+    let mix = |a: u8, b: u8| ((u16::from(a) * 2 + u16::from(b)) / 3) as u8;
+    Color32::from_rgba_unmultiplied(
+        mix(fill.r(), mark.r()),
+        mix(fill.g(), mark.g()),
+        mix(fill.b(), mark.b()),
+        fill.a().max(mark.a()),
+    )
 }

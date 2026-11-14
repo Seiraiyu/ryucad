@@ -335,7 +335,8 @@ fn the_devcontainers_debs_are_cached_from_main() {
 /// job finds it.
 #[test]
 fn ryuedas_release_carries_the_app() {
-    let text = std::fs::read_to_string(root().join(".github/workflows/ryueda-release.yml")).unwrap();
+    let text =
+        std::fs::read_to_string(root().join(".github/workflows/ryueda-release.yml")).unwrap();
     for want in [
         "app: x86_64-unknown-linux-gnu",
         "app: aarch64-unknown-linux-gnu",
@@ -350,7 +351,11 @@ fn ryuedas_release_carries_the_app() {
     ] {
         assert!(text.contains(want), "ryueda-release.yml lacks {want}");
     }
-    for file in ["packaging/linux/ryueda.desktop", "packaging/linux/ryueda.xml", "packaging/macos/ryueda.applescript"] {
+    for file in [
+        "packaging/linux/ryueda.desktop",
+        "packaging/linux/ryueda.xml",
+        "packaging/macos/ryueda.applescript",
+    ] {
         assert!(root().join(file).is_file(), "{file}");
     }
 }

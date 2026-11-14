@@ -399,8 +399,21 @@ impl Window {
             self.props = None;
             return;
         };
-        self.props = Some(Properties::new(&r));
-        match lists::subject(&r, &self.kind_of(&r)) {
+        let kind = self.kind_of(&r);
+        let mut props = Properties::new(&r);
+        props.rows.push(("Kind".into(), kind.clone()));
+        self.props = Some(props);
+        // A label, port flag or rail symbol names its net in the scene;
+        // its reference holds IDs (`label:port:<id>@u4/10`), not the net.
+        let drawn_net = self
+            .scene
+            .as_ref()
+            .and_then(|sc| sc.owner(&r).and_then(|i| sc.owners[i].net.clone()));
+        let subject = match (kind.as_str(), drawn_net) {
+            ("label" | "port" | "rail", Some(net)) => Subject::Net(net),
+            _ => lists::subject(&r, &kind),
+        };
+        match subject {
             Subject::Component(c) => {
                 self.send(
                     req("component.show", json!({"component": c})),

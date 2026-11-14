@@ -199,12 +199,12 @@ fn properties(ui: &mut egui::Ui, w: &mut Window, copy: &mut Option<String>) {
         ui.weak("Nothing selected. Click a part, pin, net or region.");
         return;
     };
-    ui.horizontal(|ui| {
-        ui.monospace(&p.reference);
-        if ui.button("Copy reference").clicked() {
-            *copy = Some(p.reference.clone());
-        }
-    });
+    // The reference wraps, and its button sits under it, so neither is
+    // cut off in a narrow tile.
+    ui.add(egui::Label::new(egui::RichText::new(&p.reference).monospace()).wrap());
+    if ui.button("Copy reference").clicked() {
+        *copy = Some(p.reference.clone());
+    }
     egui::Grid::new("properties").striped(true).show(ui, |ui| {
         for (k, v) in &p.rows {
             ui.label(k);

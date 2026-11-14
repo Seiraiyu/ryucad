@@ -75,8 +75,13 @@ pub fn open(dir: &Path) -> Result<Value> {
     };
     let app = app.ok_or_else(missing)?;
     let mut cmd = Command::new(&app);
-    cmd.arg(dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     ryu_session::client::detach(&mut cmd);
-    let child = cmd.spawn().map_err(|e| missing().with("path", &app).with("why", e.to_string()))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| missing().with("path", &app).with("why", e.to_string()))?;
     Ok(serde_json::json!({"opened": "new", "app": app, "pid": child.id(), "dir": dir}))
 }

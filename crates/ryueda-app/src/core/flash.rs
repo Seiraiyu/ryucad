@@ -18,11 +18,16 @@ pub struct Flash {
 
 impl Flash {
     /// A scene arrived; `old` is the one it replaces. Another sheet (or
-    /// block, or layer) clears what glowed.
+    /// block, or layer, or theme: a theme recolours every owner, so every
+    /// hash moves) clears what glowed.
     pub fn arrived(&mut self, old: Option<&Scene>, new: &Scene, now: Instant) {
-        let Some(old) =
-            old.filter(|o| o.block == new.block && o.sheet == new.sheet && o.layer == new.layer)
-        else {
+        let Some(old) = old.filter(|o| {
+            o.design == new.design
+                && o.block == new.block
+                && o.sheet == new.sheet
+                && o.layer == new.layer
+                && o.theme == new.theme
+        }) else {
             self.started.clear();
             return;
         };
@@ -111,6 +116,27 @@ mod tests {
         let b = Scene::from_json(&v).unwrap();
         let mut f = Flash::default();
         f.arrived(Some(&a), &b, t0);
+        assert!(f.glowing().next().is_none());
+    }
+
+    #[test]
+    fn another_theme_starts_afresh() {
+        // A theme recolours every owner, so every hash moves: none of it
+        // is a change to flash.
+        let t0 = Instant::now();
+        let light = Scene::from_json(&small()).unwrap();
+        let mut v = small();
+        v["theme"] = json!(if light.theme == "dark" {
+            "light"
+        } else {
+            "dark"
+        });
+        for o in v["owners"].as_array_mut().unwrap() {
+            o["hash"] = json!("recoloured");
+        }
+        let dark = Scene::from_json(&v).unwrap();
+        let mut f = Flash::default();
+        f.arrived(Some(&light), &dark, t0);
         assert!(f.glowing().next().is_none());
     }
 }

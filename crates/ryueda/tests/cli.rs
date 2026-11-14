@@ -173,7 +173,14 @@ fn open_starts_the_app_named_by_ryueda_app() {
     #[cfg(unix)]
     let app = {
         let p = dir.path().join("fake-app");
-        std::fs::write(&p, format!("#!/bin/sh\necho \"$1\" > '{}'\n", dir.path().join("opened").display())).unwrap();
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\necho \"$1\" > '{}'\n",
+                dir.path().join("opened").display()
+            ),
+        )
+        .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
@@ -181,10 +188,19 @@ fn open_starts_the_app_named_by_ryueda_app() {
     #[cfg(windows)]
     let app = {
         let p = dir.path().join("fake-app.cmd");
-        std::fs::write(&p, format!("@echo %1> \"{}\"\r\n", dir.path().join("opened").display())).unwrap();
+        std::fs::write(
+            &p,
+            format!("@echo %1> \"{}\"\r\n", dir.path().join("opened").display()),
+        )
+        .unwrap();
         p
     };
-    let out = ryueda(&run).current_dir(dir.path()).env("RYUEDA_APP", &app).args(["open"]).output().unwrap();
+    let out = ryueda(&run)
+        .current_dir(dir.path())
+        .env("RYUEDA_APP", &app)
+        .args(["open"])
+        .output()
+        .unwrap();
     let (code, v) = parse(out, dir.path());
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["result"]["opened"], "new");

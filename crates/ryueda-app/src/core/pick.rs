@@ -149,7 +149,15 @@ pub fn pick(scene: &Scene, p: P, reach: f64, alt: bool) -> Option<String> {
             (Some(net), true) => net.as_str(),
             _ => pin.reference.as_str(),
         };
-        offer((rank("pin"), d), r);
+        // A pin is in front only on its line (a third of the reach, 2
+        // screen points); farther off it is a part's, nearest winning, so
+        // a small part's body can be clicked between its pins.
+        let rank = if d <= reach / 3.0 {
+            rank("pin")
+        } else {
+            rank("component")
+        };
+        offer((rank, d), r);
     }
     for it in &scene.items {
         let Some(o) = it.owner.and_then(|i| scene.owners.get(i)) else {
@@ -188,6 +196,17 @@ mod tests {
         assert_eq!(
             pick(&s, [5.0, 0.0], reach, false).as_deref(),
             Some("top/r1")
+        );
+        // On the body near pin 2's root: within reach of the pin, but on
+        // the part, which wins (a two-pin part's body can be clicked).
+        assert_eq!(
+            pick(&s, [7.3, 0.0], reach, false).as_deref(),
+            Some("top/r1")
+        );
+        // On pin 2's line: the pin.
+        assert_eq!(
+            pick(&s, [8.9, 0.0], reach, false).as_deref(),
+            Some("top/r1/2")
         );
         // On the wire, away from the pin.
         assert_eq!(
