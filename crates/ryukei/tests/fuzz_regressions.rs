@@ -14,9 +14,11 @@ use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
 use ryukei::offset::{offset_body_with, shell_with};
 use ryukei_testkit::boolean_bytes::boolean_case;
+use ryukei_testkit::crossing::{SelfUnionRun, self_union_run};
 use ryukei_testkit::heal_bytes::heal_case;
 use ryukei_testkit::offset_bytes::{Op, offset_case_past};
 use ryukei_testkit::sweep_bytes::sweep;
+use ryukei_testkit::tolerant_bytes::{TolerantRun, tolerant_run};
 
 fn bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
@@ -803,4 +805,84 @@ fn the_edit_targets_inward_region_find_answers() {
         Err(Error::InvalidTweak(_)) => {}
         Err(e) => panic!("unexpected {e:?}"),
     }
+}
+
+/// What a fuzz case ended as, for the tables below.
+fn ended(refused: Option<&Error>, built: bool) -> &'static str {
+    use ryukei::Error as E;
+    match (refused, built) {
+        (None, true) => "built",
+        (None, false) => "no case",
+        (Some(E::InvalidHeal(_)), _) => "heal",
+        (Some(E::InvalidRepair(_)), _) => "repair",
+        (Some(E::InvalidBoolean(_)), _) => "boolean",
+        (Some(E::InvalidBlend(_)), _) => "blend",
+        (Some(E::BudgetExceeded { .. }), _) => "budget",
+        (Some(E::Cancelled), _) => "cancelled",
+        (Some(_), _) => "other",
+    }
+}
+
+/// The `self_union` target's out-of-memory units: #832 (`840a`), its
+/// comment's 1,151 s input (`f52b`), the nightly OOMs of 2026-11-14
+/// (`ac0a25`, `9e`, `c6310a2b`) and #884's runaway (`ff`). Each first
+/// byte has its top bit set, so each case holds the flat-span twin's
+/// spline prism among primitives. Under ASan each passed 2 GB (`ff` ran
+/// 1,129 s); in release at 3fafe85e each builds a sound body in 19 to
+/// 31 s (`840a` refused with `FacesOverlap` in 2.6 s when #832 was filed),
+/// under the fuzz case's budget, well inside the target's timeout (plan
+/// 30.C, measured on cox-worker-4 at a load of 10 to 12).
+const SELF_UNION_OOMS: [(&str, &str); 6] = [
+    ("840a", "built"),
+    ("f52b", "built"),
+    ("ac0a25", "built"),
+    ("9e", "built"),
+    ("c6310a2b", "built"),
+    ("ff", "built"),
+];
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn self_unions_that_ran_out_of_memory_end_typed() {
+    let _timed = timed();
+    for (hex, want) in SELF_UNION_OOMS {
+        let t = std::time::Instant::now();
+        let out = self_union_run(&bytes(hex));
+        let s = t.elapsed().as_secs_f64();
+        let got = match &out {
+            SelfUnionRun::NoCase => ended(None, false),
+            SelfUnionRun::Refused(e) => ended(Some(e), false),
+            SelfUnionRun::Built => ended(None, true),
+        };
+        eprintln!("{hex}: {out:?} ({got}) in {s:.1} s");
+        assert_eq!(got, want, "{hex}");
+        assert!(s < RUNAWAY, "{hex}: {s} s");
+    }
+}
+
+/// The `tolerant` target's out-of-memory unit of 2026-11-14 (dispatch
+/// 43587881903, `oom-7b0210a2…`): an even first byte, so a tolerant
+/// boolean. Under ASan it passed 2 GB; in release it refuses as
+/// non-manifold in under a second.
+const TOLERANT_OOM: (&str, &str) = (
+    "0a27626666303030303931346238323033612c626666303030303931346238323033612c626666303030303931346238323033610a05ff1f",
+    "boolean",
+);
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_tolerant_boolean_that_ran_out_of_memory_ends_typed() {
+    let _timed = timed();
+    let (hex, want) = TOLERANT_OOM;
+    let t = std::time::Instant::now();
+    let out = tolerant_run(&bytes(hex));
+    let s = t.elapsed().as_secs_f64();
+    let got = match &out {
+        TolerantRun::NoCase => ended(None, false),
+        TolerantRun::Refused(e) => ended(Some(e), false),
+        TolerantRun::Built => ended(None, true),
+    };
+    eprintln!("{}…: {out:?} ({got}) in {s:.1} s", &hex[..8]);
+    assert_eq!(got, want);
+    assert!(s < RUNAWAY, "{s} s");
 }
