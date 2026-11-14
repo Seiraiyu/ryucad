@@ -1214,8 +1214,11 @@ fn build_body(
         _ => match &holes {
             Some((h, (solved, points, sizes))) if crate::hole::needs_exits(h) => {
                 let work = crate::work::work(run.job);
-                crate::hole::ExitTools::new(part, id, h, sizes, solved, &bodies, before).and_then(
-                    |mut t| {
+                crate::hole::Drill::of_sketch(solved)
+                    .and_then(|drill| {
+                        crate::hole::ExitTools::new(part, id, h, sizes, drill, &bodies, before)
+                    })
+                    .and_then(|mut t| {
                         let mut index = Vec::with_capacity(points.len());
                         for (p, at) in points.iter() {
                             let e = t.exit(id, p.as_str(), *at, t.down(), &work)?;
@@ -1235,8 +1238,7 @@ fn build_body(
                             )
                             .with("feature", id)),
                         }
-                    },
-                )
+                    })
             }
             Some((h, (solved, _, sizes))) => {
                 crate::hole::tool(part, id, h, sizes, solved, &bodies, before)

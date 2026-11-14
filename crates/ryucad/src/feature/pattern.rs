@@ -362,7 +362,15 @@ pub(crate) fn build_pattern(
     }
     let mut exit_tools: BTreeMap<&Id, crate::hole::ExitTools> = BTreeMap::new();
     for (seed, (sizes, solved, h)) in &inputs {
-        let t = crate::hole::ExitTools::new(part, seed, h, sizes, solved, &target_bodies, before)?;
+        let t = crate::hole::ExitTools::new(
+            part,
+            seed,
+            h,
+            sizes,
+            crate::hole::Drill::of_sketch(solved)?,
+            &target_bodies,
+            before,
+        )?;
         exit_tools.insert(*seed, t);
     }
     // Each instance's own tool where its exit gives it one, in the order
