@@ -121,7 +121,7 @@ fn a_render_past_its_budget_is_refused_and_one_within_it_draws() {
     let e = ask(&mut slot, 64 * 1024).unwrap_err();
     // The meshes it made count against its budget, and a refused
     // render leaves none of them in the session's mesh cache (#407).
-    let held = &slot.as_ref().unwrap().meshes;
+    let held = slot.as_ref().unwrap().caches().meshes();
     assert_eq!((held.len(), held.bytes()), (0, 0), "{e}");
     assert_eq!(e.code, Code::RenderTooLarge, "{e}");
     assert_eq!(e.details["occurrences"], 200);
@@ -131,7 +131,7 @@ fn a_render_past_its_budget_is_refused_and_one_within_it_draws() {
     let a = ask(&mut slot, 1 << 30).unwrap();
     assert!(a.binary.is_some());
     // One that draws keeps what it meshed (the plate, once).
-    assert_eq!(slot.as_ref().unwrap().meshes.len(), 1);
+    assert_eq!(slot.as_ref().unwrap().caches().meshes().len(), 1);
     drop(s);
 }
 
@@ -4356,7 +4356,7 @@ fn editing_one_feature_meshes_one_body() {
         .unwrap();
         assert_eq!(m["quality"], "coarse");
         assert_eq!(m["bodies"][1]["feature"], "b");
-        assert_eq!(s.meshes.len(), 2);
+        assert_eq!(s.caches().meshes().len(), 2);
         call(
             &mut s,
             "feature.edit",
@@ -4369,7 +4369,7 @@ fn editing_one_feature_meshes_one_body() {
             json!({"part": "p", "quality": "coarse"}),
         )
         .unwrap();
-        assert_eq!(s.meshes.len(), 3);
+        assert_eq!(s.caches().meshes().len(), 3);
         assert_eq!(again["bodies"][1], m["bodies"][1]);
         assert_ne!(again["bodies"][0]["hash"], m["bodies"][0]["hash"]);
         // The user's display quality is the default.
@@ -4411,14 +4411,14 @@ fn meshes_are_made_before_the_lock_is_taken() {
         let job = prepare(&mut slot, &req(None)).expect("two meshes to make");
         let put = job();
         let s = slot.as_mut().unwrap();
-        assert_eq!(s.meshes.len(), 0);
+        assert_eq!(s.caches().meshes().len(), 0);
         put(s);
-        assert_eq!(s.meshes.len(), 2);
+        assert_eq!(s.caches().meshes().len(), 2);
         assert!(prepare(&mut slot, &req(Some("working"))).is_none());
         // The answer is the one a session that meshed itself gives.
         let mut a = handle_safely(&mut slot, None, None, dir.path(), req(None)).unwrap();
-        assert_eq!(slot.as_ref().unwrap().meshes.len(), 2);
-        slot.as_mut().unwrap().meshes = mesh::Cache::default();
+        assert_eq!(slot.as_ref().unwrap().caches().meshes().len(), 2);
+        *slot.as_mut().unwrap().caches_mut().meshes_mut() = mesh::Cache::default();
         let mut b = handle_safely(&mut slot, None, None, dir.path(), req(None)).unwrap();
         assert_eq!(a.result["binary"]["encoding"], mesh::ENCODING);
         let bytes = a.binary.take().unwrap();

@@ -208,7 +208,7 @@ pub(crate) fn rebuild(
     text.push_str(r#""parts":["#);
     let mut warnings = Vec::new();
     let mut failed = 0;
-    let job = session.job.clone();
+    let job = session.job().clone();
     let stage = job.begin(Phase::Rebuild, "parts", ids.len());
     for (i, id) in ids.into_iter().enumerate() {
         stage.step(|| id.to_string())?;
