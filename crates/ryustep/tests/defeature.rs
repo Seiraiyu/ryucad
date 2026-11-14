@@ -607,6 +607,32 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     }
 }
 
+/// Pinned editions that must defeature and check clean, by file and
+/// representation: every edition plan 18.C saw defeatured (16.C's 17). A
+/// refusal or a deadline for any of them fails. Design 551 expected #652's
+/// AP242 twins (STC 07 #11020, STC 10 #3044, FTC 07 #13541) here too; their
+/// seams lie on the frontier or are only partly smooth, so the known seams
+/// don't settle them (#652, #658: ryukei 19 adds them when they build).
+const PINNED_DEFEATURED: &[(&str, u64)] = &[
+    ("nist_ctc_01_asme1_ap203.stp", 148),
+    ("nist_ctc_01_asme1_rd.stp", 13),
+    ("nist_ctc_03_asme1_ap203.stp", 154),
+    ("nist_ctc_03_asme1_rc.stp", 13),
+    ("nist_ctc_04_asme1_ap203.stp", 559),
+    ("nist_ctc_04_asme1_rd.stp", 14149),
+    ("nist_ctc_05_asme1_ap203.stp", 91),
+    ("nist_ctc_05_asme1_ap242-e1.stp", 1177),
+    ("nist_ctc_05_asme1_rd.stp", 6603),
+    ("nist_ftc_06_asme1_ap242-e2.stp", 2155),
+    ("nist_ftc_06_asme1_rd.stp", 13),
+    ("nist_ftc_08_asme1_ap242-e2.stp", 1711),
+    ("nist_ftc_08_asme1_rc.stp", 7969),
+    ("nist_ftc_09_asme1_rd.stp", 5785),
+    ("nist_stc_06_asme1_ap242-e3.stp", 5079),
+    ("nist_stc_08_asme1_ap242-e3.stp", 1781),
+    ("nist_stc_09_asme1_ap242-e3.stp", 4622),
+];
+
 /// Where `scripts/fetch-corpus.sh` keeps the pinned corpus.
 fn pinned_dir() -> PathBuf {
     match std::env::var_os("RYUCAD_CORPUS") {
@@ -719,7 +745,11 @@ fn pinned_bodies_defeature() {
                 }
                 Err(e) => panic!("{name} #{rep}: {e:?}"),
             };
+            let must = PINNED_DEFEATURED
+                .iter()
+                .any(|(f, r)| name.ends_with(f) && *r == rep);
             if blends == 0 {
+                assert!(!must, "{name} #{rep}: must defeature (plan 18.C)");
                 none += 1;
                 continue;
             }
@@ -750,6 +780,7 @@ fn pinned_bodies_defeature() {
                     defeatured += 1;
                 }
                 Err(Error::InvalidTweak(e)) => {
+                    assert!(!must, "{name} #{rep}: must defeature (plan 18.C): {e:?}");
                     println!(
                         "{name} #{rep}: {blends} blends, refused {e:?} in {:.2} s",
                         t.elapsed().as_secs_f64()
@@ -757,6 +788,10 @@ fn pinned_bodies_defeature() {
                     refused += 1;
                 }
                 Err(Error::Cancelled) => {
+                    assert!(
+                        !must,
+                        "{name} #{rep}: must defeature (plan 18.C), past the deadline"
+                    );
                     println!(
                         "{name} #{rep}: {blends} blends, past the deadline ({:.2} s)",
                         t.elapsed().as_secs_f64()
