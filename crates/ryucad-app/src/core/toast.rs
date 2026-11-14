@@ -2,333 +2,17 @@
 //! failures, the daemon lost and found again, and a long request of the
 //! window's finishing while it isn't focused. At most [`SHOWN`] at once,
 //! newest at the bottom; each goes after [`LIFE`] unless hovered, and
-//! errors stay until closed. `ui.notify` says which show. Pure: `ui::
-//! feedback` draws them.
+//! errors stay until closed. `ui.notify` says which show. They are
+//! `ryu_app::toast`'s (ryueda 3.C); here are ryucad's words for a change.
+//! Pure: `ui::feedback` draws them.
 
-use ryucad::error::Error;
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
 
-/// The most toasts shown at once.
-pub const SHOWN: usize = 4;
-/// How long a toast stays, unhovered; errors stay until closed.
-pub const LIFE: Duration = Duration::from_secs(6);
-/// One participant's changes this close together are one toast.
-pub const BATCH: Duration = Duration::from_secs(1);
+pub use ryu_app::toast::{Action, BATCH, Kind, LIFE, LOST, Notify, SHOWN, Toast};
 
-/// The lost daemon's toast: an error, kept until the window is connected
-/// again (#732).
-pub const LOST: &str = "Lost the daemon: reconnecting";
-
-/// `ui.notify`: which toasts show.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Notify {
-    #[default]
-    All,
-    Errors,
-    Off,
-}
-
-impl Notify {
-    /// The preference's value; anything else is the default.
-    pub fn parse(v: &Value) -> Notify {
-        match v.as_str() {
-            Some("errors") => Notify::Errors,
-            Some("off") => Notify::Off,
-            _ => Notify::All,
-        }
-    }
-}
-
-/// What a toast says it is about, for its icon and its stripe.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// Another participant's change: an agent's (robot) or a person's.
-    Change { participant: String, agent: bool },
-    /// A failure: it stays until closed.
-    Error,
-    /// The daemon lost (a failure) or found again, or a request done.
-    Note,
-}
-
-/// What a toast's links do.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Action {
-    /// Choose and frame these features (`<part>/<feature>`).
-    Show(Vec<String>),
-    /// Undo these activity entries, newest first.
-    Undo(Vec<u64>),
-    /// Open the error card of the window's failure at this index.
-    Details(usize),
-    /// Choose this annotation and open the Annotations tile.
-    Annotation(String),
-}
-
-impl Action {
-    pub fn title(&self) -> &'static str {
-        match self {
-            Action::Show(_) => "Show",
-            Action::Undo(_) => "Undo",
-            Action::Details(_) => "Details",
-            Action::Annotation(_) => "Show",
-        }
-    }
-}
-
-/// One toast.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Toast {
-    pub id: u64,
-    pub kind: Kind,
-    /// Who, in bold, before `text`; `None` for a title alone.
-    pub who: Option<String>,
-    /// The line: `edited 3 features in bracket`, or a title.
-    pub text: String,
-    /// A second, weaker line: an error's message.
-    pub detail: Option<String>,
-    pub actions: Vec<Action>,
-    at: Instant,
-    /// A batch of changes, still taking more for [`BATCH`].
-    batch: Option<Batch>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct Batch {
-    started: Instant,
-    verbs: BTreeSet<String>,
-    features: BTreeSet<String>,
-    parts: BTreeSet<String>,
-    entries: Vec<u64>,
-    undoable: Vec<u64>,
-}
-
-/// Every toast the window holds.
-#[derive(Clone, Debug, Default)]
-pub struct Toasts {
-    list: Vec<Toast>,
-    next: u64,
-    pub notify: Notify,
-}
-
-impl Toasts {
-    /// The toasts to draw, oldest first.
-    pub fn shown(&self) -> &[Toast] {
-        let n = self.list.len();
-        &self.list[n.saturating_sub(SHOWN)..]
-    }
-
-    fn push(&mut self, mut t: Toast) {
-        self.next += 1;
-        t.id = self.next;
-        self.list.push(t);
-    }
-
-    fn wants(&self, kind: &Kind) -> bool {
-        match self.notify {
-            Notify::All => true,
-            Notify::Errors => *kind == Kind::Error,
-            Notify::Off => false,
-        }
-    }
-
-    /// Someone's reply on, or closing of, one of this window's person's
-    /// annotations.
-    pub fn annotation(
-        &mut self,
-        who: &str,
-        agent: bool,
-        text: &str,
-        detail: &str,
-        id: &str,
-        now: Instant,
-    ) {
-        let kind = Kind::Change {
-            participant: who.to_owned(),
-            agent,
-        };
-        if !self.wants(&kind) {
-            return;
-        }
-        self.push(Toast {
-            id: 0,
-            kind,
-            who: Some(who.to_owned()),
-            text: text.to_owned(),
-            detail: (!detail.is_empty()).then(|| detail.to_owned()),
-            actions: vec![Action::Annotation(id.to_owned())],
-            at: now,
-            batch: None,
-        });
-    }
-
-    /// An `activity.appended` entry: a change another participant made,
-    /// batched with their changes of the last [`BATCH`]. The window's own
-    /// and changes from outside ryucad make none.
-    pub fn activity(&mut self, entry: &Value, me: &str, now: Instant) {
-        // Annotations' own writes make toasts of their own (`annotation`)
-        // for their authors and show in the tile; applying one writes the
-        // model, and is a change like any.
-        if entry["method"]
-            .as_str()
-            .is_some_and(|m| m.starts_with("annotation.") && m != "annotation.apply")
-        {
-            return;
-        }
-        let p = &entry["participant"];
-        let (Some(id), Some(name)) = (p["id"].as_str(), p["name"].as_str()) else {
-            return;
-        };
-        if id == me {
-            return;
-        }
-        let kind = Kind::Change {
-            participant: id.to_owned(),
-            agent: p["kind"] == "agent",
-        };
-        if !self.wants(&kind) {
-            return;
-        }
-        let seq = entry["seq"].as_u64().unwrap_or_default();
-        let verb = verb(entry["method"].as_str().unwrap_or_default(), &entry["kind"]);
-        let undoable = crate::core::activity::can_undo(entry);
-        let touched = features_of(entry);
-        let in_parts = parts_of(entry);
-        let open = self.list.iter().rposition(|t| {
-            t.kind == kind
-                && t.batch
-                    .as_ref()
-                    .is_some_and(|b| now.saturating_duration_since(b.started) < BATCH)
-        });
-        let i = match open {
-            Some(i) => i,
-            None => {
-                self.push(Toast {
-                    id: 0,
-                    kind,
-                    who: Some(name.to_owned()),
-                    text: String::new(),
-                    detail: None,
-                    actions: Vec::new(),
-                    at: now,
-                    batch: Some(Batch {
-                        started: now,
-                        verbs: BTreeSet::new(),
-                        features: BTreeSet::new(),
-                        parts: BTreeSet::new(),
-                        entries: Vec::new(),
-                        undoable: Vec::new(),
-                    }),
-                });
-                self.list.len() - 1
-            }
-        };
-        let t = &mut self.list[i];
-        let b = t.batch.as_mut().expect("a batch");
-        b.verbs.insert(verb);
-        for (part, feature) in touched {
-            b.parts.insert(part.clone());
-            b.features.insert(format!("{part}/{feature}"));
-        }
-        // A change of no feature still names its part (#426: an agent's
-        // `part create` read "agent created").
-        b.parts.extend(in_parts);
-        b.entries.push(seq);
-        if undoable {
-            b.undoable.insert(0, seq);
-        }
-        t.at = now;
-        t.text = batch_text(b);
-        t.actions.clear();
-        if !b.features.is_empty() {
-            t.actions
-                .push(Action::Show(b.features.iter().cloned().collect()));
-        }
-        if !b.undoable.is_empty() {
-            t.actions.push(Action::Undo(b.undoable.clone()));
-        }
-    }
-
-    /// The window's failure `index` (in its list of failures), `e`: its
-    /// title and message, with Details for its card. Stays until closed.
-    pub fn error(&mut self, title: &str, e: &Error, index: usize, now: Instant) {
-        if !self.wants(&Kind::Error) {
-            return;
-        }
-        self.push(Toast {
-            id: 0,
-            kind: Kind::Error,
-            who: None,
-            text: title.to_owned(),
-            detail: Some(e.message.clone()),
-            actions: vec![Action::Details(index)],
-            at: now,
-            batch: None,
-        });
-    }
-
-    /// A note: the daemon lost (an error, kept until closed) or found
-    /// again, or a long request done while the window wasn't focused.
-    pub fn note(&mut self, text: &str, failure: bool, now: Instant) {
-        let kind = if failure { Kind::Error } else { Kind::Note };
-        if !self.wants(&kind) {
-            return;
-        }
-        self.push(Toast {
-            id: 0,
-            kind,
-            who: None,
-            text: text.to_owned(),
-            detail: None,
-            actions: Vec::new(),
-            at: now,
-            batch: None,
-        });
-    }
-
-    /// The daemon lost: a failure, kept until [`Toasts::found`].
-    pub fn lost(&mut self, now: Instant) {
-        self.note(LOST, true, now);
-    }
-
-    /// Connected again: every lost toast goes, and a note says so.
-    pub fn found(&mut self, now: Instant) {
-        self.list
-            .retain(|t| !(t.kind == Kind::Error && t.text == LOST));
-        self.note("Connected to the daemon again", false, now);
-    }
-
-    /// The pointer is over toast `id`: it stays a [`LIFE`] from now.
-    pub fn hover(&mut self, id: u64, now: Instant) {
-        if let Some(t) = self.list.iter_mut().find(|t| t.id == id) {
-            t.at = now;
-        }
-    }
-
-    pub fn close(&mut self, id: u64) {
-        self.list.retain(|t| t.id != id);
-    }
-
-    /// Drops what has had its [`LIFE`] (never an error), and what no
-    /// longer fits.
-    pub fn expire(&mut self, now: Instant) {
-        self.list
-            .retain(|t| t.kind == Kind::Error || now.saturating_duration_since(t.at) < LIFE);
-        if self.list.len() > 16 {
-            let extra = self.list.len() - 16;
-            self.list.drain(..extra);
-        }
-    }
-
-    /// When the next toast goes: to repaint then.
-    pub fn due(&self, now: Instant) -> Option<Duration> {
-        self.shown()
-            .iter()
-            .filter(|t| t.kind != Kind::Error)
-            .map(|t| LIFE.saturating_sub(now.saturating_duration_since(t.at)))
-            .min()
-    }
-}
+/// ryucad's toasts, in its words ([`crate::core::product::Ryucad`]).
+pub type Toasts = ryu_app::toast::Toasts<crate::core::product::Ryucad>;
 
 /// An activity method in words: `feature.edit` is `edited`.
 pub fn verb(method: &str, kind: &Value) -> String {
@@ -388,37 +72,12 @@ pub fn parts_of(entry: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-/// `edited 3 features in bracket`, `moved pin in frame`, `made 4 changes
-/// in 2 parts`.
-fn batch_text(b: &Batch) -> String {
-    let verb = match (b.verbs.len(), b.verbs.first()) {
-        (1, Some(v)) => v.clone(),
-        _ => "changed".into(),
-    };
-    let n = b.features.len();
-    let parts: Vec<&String> = b.parts.iter().collect();
-    match (n, parts.as_slice()) {
-        (0, _) => match (b.entries.len(), parts.as_slice()) {
-            (1, []) => verb,
-            (1, [part]) => format!("{verb} {part}"),
-            (1, ps) => format!("{verb} {} parts", ps.len()),
-            (k, _) => format!("made {k} changes"),
-        },
-        (1, [part]) => {
-            let f = b.features.first().expect("one");
-            let name = f.rsplit('/').next().unwrap_or(f);
-            format!("{verb} {name} in {part}")
-        }
-        (n, [part]) => format!("{verb} {n} features in {part}"),
-        (n, ps) => format!("{verb} {n} features in {} parts", ps.len()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryucad::error::Code;
+    use ryucad::error::{Code, Error};
     use serde_json::json;
+    use std::time::{Duration, Instant};
 
     fn entry(seq: u64, who: &str, method: &str, files: &[&str]) -> Value {
         let files: Vec<Value> = files.iter().map(|p| json!({"path": p})).collect();
@@ -443,10 +102,7 @@ mod tests {
             assert_eq!(texts.first(), Some(&"Unit mismatch"));
             assert_eq!(texts.last(), Some(&"Connected to the daemon again"));
         }
-        let mut quiet = Toasts {
-            notify: Notify::Errors,
-            ..Toasts::default()
-        };
+        let mut quiet = Toasts::with(Notify::Errors);
         quiet.lost(t0);
         quiet.found(t0);
         assert!(quiet.shown().iter().all(|t| t.text != LOST));
@@ -474,10 +130,7 @@ mod tests {
             vec![Action::Annotation("aaaaaaaaaa".into())]
         );
         // ui.notify = errors keeps them out.
-        let mut quiet = Toasts {
-            notify: Notify::Errors,
-            ..Toasts::default()
-        };
+        let mut quiet = Toasts::with(Notify::Errors);
         quiet.annotation("agent", true, "replied on #2", "x", "aaaaaaaaaa", now);
         assert!(quiet.shown().is_empty());
     }
@@ -578,10 +231,7 @@ mod tests {
         }
         let texts: Vec<&str> = t.shown().iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, ["n2", "n3", "n4", "n5"]);
-        let mut t = Toasts {
-            notify: Notify::Errors,
-            ..Default::default()
-        };
+        let mut t = Toasts::with(Notify::Errors);
         t.activity(&entry(1, "p-2", "feature.edit", &[]), "p-1", t0);
         t.note("Connected", false, t0);
         t.note("Lost the daemon", true, t0);

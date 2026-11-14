@@ -137,8 +137,8 @@ jobs:
           cp "target/$TARGET/release/ryucad$x" "target/$APP/release/ryucad-app$x" README.md LICENSE NOTICE "dist/$NAME/"
           # The app's embedded fonts' and icons' licences (design 199).
           mkdir -p "dist/$NAME/licenses"
-          cp crates/ryucad-app/fonts/LICENSES.md crates/ryucad-app/fonts/Inter-LICENSE.txt \
-            crates/ryucad-app/fonts/JetBrainsMono-OFL.txt crates/ryucad-app/fonts/Phosphor-LICENSE.txt \
+          cp crates/ryu-app/fonts/LICENSES.md crates/ryu-app/fonts/Inter-LICENSE.txt \
+            crates/ryu-app/fonts/JetBrainsMono-OFL.txt crates/ryu-app/fonts/Phosphor-LICENSE.txt \
             "dist/$NAME/licenses/"
           case "$RUNNER_OS" in
             Linux) mkdir -p "dist/$NAME/share" && cp packaging/linux/ryucad.desktop packaging/linux/ryucad.xml "dist/$NAME/share/" ;;

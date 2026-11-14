@@ -44,6 +44,7 @@ pub mod params;
 pub mod pdm;
 pub mod people;
 pub mod pick;
+pub mod product;
 pub mod progress;
 pub mod props;
 pub mod recent;
