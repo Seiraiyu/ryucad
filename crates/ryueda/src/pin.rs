@@ -71,6 +71,33 @@ pub trait Resolve: Sync {
         let _ = (root, a, commit, rel);
         Ok(None)
     }
+
+    /// Lends `f` the reader of this machine's dependency cache.
+    fn with_reader_dyn(
+        &self,
+        f: &mut dyn FnMut(&mut ryupdm::deps::read::Reader) -> Result<()>,
+    ) -> Result<()> {
+        let _ = f;
+        Err(Error::new(
+            Code::DependencyNotFetched,
+            "no dependency cache: run `ryueda lib fetch`",
+        ))
+    }
+}
+
+/// Lends `f` the reader of `pins`' dependency cache.
+pub fn with_reader<T>(
+    pins: &dyn Resolve,
+    f: impl FnOnce(&mut ryupdm::deps::read::Reader) -> Result<T>,
+) -> Result<T> {
+    let mut f = Some(f);
+    let mut out = None;
+    pins.with_reader_dyn(&mut |r| {
+        let f = f.take().expect("lent once");
+        out = Some(f(r)?);
+        Ok(())
+    })?;
+    Ok(out.expect("lent"))
 }
 
 /// Resolves no pin: for projects read outside a repository, and tests.
@@ -111,6 +138,22 @@ struct Inner {
     /// release branch read at it.
     releases: BTreeMap<String, (String, Arc<Releases>)>,
     read: BTreeMap<ReadKey, Arc<Pinned>>,
+    /// The dependency cache this resolver reads, when not this machine's
+    /// (`crate::libdeps::cache`): tests'.
+    cache: Option<ryupdm::deps::Cache>,
+    /// Other repositories, through the dependency cache: opened on first
+    /// use.
+    deps: Option<ryupdm::deps::read::Reader>,
+}
+
+impl Pins {
+    /// A resolver reading other repositories from `cache`.
+    pub fn with_cache(cache: ryupdm::deps::Cache) -> Pins {
+        Pins(Mutex::new(Inner {
+            cache: Some(cache),
+            ..Inner::default()
+        }))
+    }
 }
 
 /// The work-tree path, ending in `/`, of the folder `rel` relative to the
@@ -273,6 +316,14 @@ impl Resolve for Pins {
         }
     }
 
+    fn with_reader_dyn(
+        &self,
+        f: &mut dyn FnMut(&mut ryupdm::deps::read::Reader) -> Result<()>,
+    ) -> Result<()> {
+        let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        f(inner.reader()?)
+    }
+
     fn file_at(&self, root: &Path, a: &Alias, commit: &str, rel: &str) -> Result<Option<Vec<u8>>> {
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         match &a.url {
@@ -389,34 +440,120 @@ impl Inner {
         Ok(p)
     }
 
+    fn reader(&mut self) -> Result<&mut ryupdm::deps::read::Reader> {
+        if self.deps.is_none() {
+            let cache = match &self.cache {
+                Some(c) => c.clone(),
+                None => crate::libdeps::cache()?,
+            };
+            self.deps = Some(ryupdm::deps::read::Reader::new(cache));
+        }
+        Ok(self.deps.as_mut().expect("just set"))
+    }
+
+    /// A url alias's URL and project.
+    fn place(a: &Alias) -> Result<(String, ProjectId)> {
+        match (&a.url, &a.project) {
+            (Some(u), Some(p)) => Ok((u.clone(), p.clone())),
+            _ => Err(Error::new(
+                Code::InvalidDocument,
+                "a library in another repository names its url and project",
+            )),
+        }
+    }
+
     fn foreign_releases(&mut self, a: &Alias) -> Result<(ryupdm::config::Config, Arc<Releases>)> {
-        let _ = a;
-        Err(Error::new(
-            Code::DependencyNotFetched,
-            "run `ryueda lib fetch`",
-        ))
+        let (url, project) = Inner::place(a)?;
+        let reader = self.reader()?;
+        let not_fetched = || {
+            ryupdm::deps::read::not_fetched_with(
+                &project,
+                &url,
+                &format!("project {project}"),
+                &crate::libdeps::EDA,
+            )
+        };
+        let repo = reader.repo(&url)?.ok_or_else(not_fetched)?;
+        let config = ryupdm::deps::config_at(&repo, ryupdm::deps::HEAD_REF, &a.path)?;
+        let releases = reader
+            .releases(&project, &url, &a.path, &config.release_branch)?
+            .cloned()
+            .ok_or_else(not_fetched)?;
+        Ok((config, Arc::new(releases)))
     }
 
     fn foreign_file_at(&mut self, a: &Alias, commit: &str, rel: &str) -> Result<Option<Vec<u8>>> {
-        let _ = (a, commit, rel);
-        Ok(None)
+        let (url, _) = Inner::place(a)?;
+        let Some(repo) = self.reader()?.repo(&url)? else {
+            return Ok(None);
+        };
+        ryupdm::history::file_at(&repo, commit, &ryupdm::deps::prefix_of(&a.path), rel)
     }
 
     fn foreign(
         &mut self,
         alias: &Id,
-        _: &Alias,
+        a: &Alias,
         component: &Id,
         label: &str,
-        _: Option<&Lock>,
+        lock: Option<&Lock>,
     ) -> Result<Arc<Pinned>> {
-        Err(Error::new(
-            Code::DependencyNotFetched,
-            format!("{alias}/{component}@{label}: run `ryueda lib fetch`"),
-        )
-        .with("alias", alias)
-        .with("component", component)
-        .with("label", label))
+        let (url, project) = Inner::place(a)?;
+        let empty = ryu_doc::lock::Locked {
+            url: url.clone(),
+            path: a.path.clone(),
+            ..Default::default()
+        };
+        let locked = lock
+            .and_then(|l| l.projects.get(&project))
+            .unwrap_or(&empty);
+        let v = self.reader()?.verify_for::<crate::Eda>(
+            &project,
+            locked,
+            component,
+            label,
+            &crate::libdeps::EDA,
+        )?;
+        let prefix = ryupdm::deps::prefix_of(&a.path);
+        let key = (
+            url.clone(),
+            prefix.clone(),
+            component.clone(),
+            v.commit.clone(),
+            alias.clone(),
+            label.to_owned(),
+        );
+        if let Some(p) = self.read.get(&key)
+            && p.obsolete == v.obsolete
+        {
+            return Ok(p.clone());
+        }
+        let repo = self.reader()?.repo(&url)?.ok_or_else(|| {
+            ryupdm::deps::read::not_fetched_with(
+                &project,
+                &url,
+                alias.as_str(),
+                &crate::libdeps::EDA,
+            )
+        })?;
+        let at = |rel: &str| {
+            ryupdm::history::file_at(&repo, &v.commit, &prefix, rel)
+                .ok()
+                .flatten()
+        };
+        let library = from_reader(&at, alias, &format!("@{alias}/{label}"), component)?;
+        let p = Arc::new(Pinned {
+            alias: alias.clone(),
+            component: component.clone(),
+            label: label.to_owned(),
+            project,
+            commit: v.commit,
+            content: v.content,
+            obsolete: v.obsolete,
+            library,
+        });
+        self.read.insert(key, p.clone());
+        Ok(p)
     }
 }
 
@@ -601,6 +738,117 @@ pub(crate) mod tests {
             .pin(&board, &id("passives"), a, &id("r_100k"), "A", None)
             .unwrap();
         assert!(p.obsolete);
+    }
+
+    /// A library repository of its own: `lib/` (library project 2, the
+    /// test library with `c_100n` too, `r_100k` released at A on `main`).
+    /// (its folder, its URL, the project, the release's commit).
+    pub(crate) fn foreign_library() -> (tempfile::TempDir, String, ProjectId, String) {
+        use crate::git::tests::git;
+        use crate::project::{MANIFEST, Manifest, ProjectKind};
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().join("libs");
+        std::fs::create_dir_all(top.join("lib")).unwrap();
+        git(&top, &["init", "-q", "-b", "main"]);
+        let m = Manifest::new(
+            crate::project::tests::pid(2),
+            crate::units::Unit::Mm,
+            ProjectKind::Library,
+        );
+        std::fs::write(top.join("lib").join(MANIFEST), m.to_text()).unwrap();
+        for (p, b) in crate::project::tests::pinned_files(None) {
+            let at = crate::session::path_of(&top.join("lib"), &p);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, b).unwrap();
+        }
+        commit_record(&top, "lib", "r_100k", "A", Kind::Release);
+        let commit = head(&top);
+        let url = format!("file://{}", top.display());
+        (d, url, crate::project::tests::pid(2), commit)
+    }
+
+    /// The commit `HEAD` names in `dir`.
+    pub(crate) fn head(dir: &Path) -> String {
+        let out = crate::git::tests::git_command()
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// The foreign library releases `c` at `label` (its footprint edited
+    /// first, so the release differs).
+    pub(crate) fn release_again(
+        t: &(tempfile::TempDir, String, ProjectId, String),
+        c: &str,
+        label: &str,
+    ) {
+        let top = t.0.path().join("libs");
+        let fp = top.join("lib/library/footprints/r_0402_1005metric.json");
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fp).unwrap()).unwrap();
+        v["description"] = format!("at {label}").into();
+        std::fs::write(&fp, crate::canonical::to_string(&v)).unwrap();
+        commit_record(&top, "lib", c, label, Kind::Release);
+    }
+
+    #[test]
+    fn a_foreign_pin_reads_through_the_lock() {
+        let t = foreign_library();
+        let pins = Pins::with_cache(ryupdm::deps::Cache::new(t.0.path().join("cache")));
+        let mut a = Alias::local("lib");
+        a.url = Some(t.1.clone());
+        a.project = Some(t.2.clone());
+        a.labels.insert(id("r_100k"), "A".into());
+        let mut m = crate::project::Manifest::new(
+            ProjectId::parse(&"9".repeat(32)).unwrap(),
+            crate::units::Unit::Mm,
+            crate::project::ProjectKind::Design,
+        );
+        m.libraries.insert(id("passives"), a.clone());
+        // Not fetched: dependency_not_fetched.
+        let lock = |pins: &Pins| {
+            with_reader(pins, |r| {
+                crate::libdeps::relock(r, &m, None, &Default::default())
+            })
+        };
+        assert_eq!(lock(&pins).unwrap_err().code, Code::DependencyNotFetched);
+        with_reader(&pins, |r| r.cache.fetch(&t.1, &["lib"]).map(drop)).unwrap();
+        // No lock: dependency_unlocked.
+        let e = pins
+            .pin(
+                Path::new("/"),
+                &id("passives"),
+                &a,
+                &id("r_100k"),
+                "A",
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(e.code, Code::DependencyUnlocked);
+        let lock = lock(&pins).unwrap();
+        let p = pins
+            .pin(
+                Path::new("/"),
+                &id("passives"),
+                &a,
+                &id("r_100k"),
+                "A",
+                Some(&lock),
+            )
+            .unwrap();
+        assert_eq!(p.commit, t.3);
+        assert!(p.library.components.contains_key(&id("r_100k")));
+        assert_eq!(p.library.base, "@passives/A");
+        // Its releases and files, from the cache.
+        let (config, releases) = pins.releases_of(Path::new("/"), &a).unwrap();
+        assert_eq!(config.release_branch, "main");
+        assert!(releases.official.contains_key("releases/r_100k/A.json"));
+        let f = pins
+            .file_at(Path::new("/"), &a, &t.3, "library/components/r_100k.json")
+            .unwrap();
+        assert!(f.is_some());
     }
 
     pub(crate) fn id(s: &str) -> Id {

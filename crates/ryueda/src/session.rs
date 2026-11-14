@@ -43,6 +43,9 @@ pub struct Session {
     /// The refs the pinned libraries' release branches were read at
     /// ([`pins_key`]): when they move, the project is read again.
     pins_key: String,
+    /// What a long request's lock-free fetches got
+    /// ([`crate::libdeps::prepare`]), taken by its answer.
+    pub(crate) fetched: Option<crate::libdeps::Prefetched>,
 }
 
 /// The refs every same-repository pinned library's release branch is
@@ -132,6 +135,7 @@ impl Session {
             pdm: None,
             pins,
             pins_key,
+            fetched: None,
         })
     }
 
@@ -207,6 +211,14 @@ impl Session {
         Ok(changes)
     }
 
+    /// Reads the project again over the same files: what resolves its
+    /// pins may have changed (a fetch into the dependency cache).
+    pub(crate) fn reload_pins(&mut self) -> Result<()> {
+        self.project = load(&self.root, &self.stamps, &*self.pins)?;
+        self.pins_key = pins_key(&self.root, &self.project.manifest);
+        Ok(())
+    }
+
     /// Takes in what this session just wrote.
     pub fn reload(&mut self) -> Result<()> {
         self.refresh_changes().map(drop)
@@ -224,6 +236,15 @@ impl Session {
         }
         self.pins_key = pins_key(&self.root, &self.project.manifest);
         Ok(())
+    }
+
+    /// `ryueda.lock` as the working files hold it, if it reads.
+    pub fn lock(&self) -> Option<ryu_doc::lock::Lock> {
+        self.files()
+            .get(crate::project::LOCK)
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(|t| crate::canonical::parse(t).ok())
+            .and_then(|v| ryu_doc::lock::Lock::from_json_as(&v, crate::project::LOCK_KIND).ok())
     }
 
     /// Every file the project's state depends on, as last read.

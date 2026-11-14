@@ -31,6 +31,7 @@ pub mod git;
 pub mod kicad;
 pub mod libcmd;
 pub mod libcomp;
+pub mod libdeps;
 pub mod library;
 pub mod lint;
 pub mod merge;

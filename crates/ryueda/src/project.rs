@@ -43,7 +43,7 @@ pub const ATTRIBUTES: &str = ".gitattributes";
 pub const LOCK: &str = "ryueda.lock";
 pub const LOCK_KIND: &str = "ryueda.lock";
 /// The files at a project's root that it is made of.
-pub const ROOT_FILES: [&str; 7] = [
+pub const ROOT_FILES: [&str; 8] = [
     MANIFEST,
     ATTRIBUTES,
     ERC,
@@ -51,6 +51,7 @@ pub const ROOT_FILES: [&str; 7] = [
     PARTS,
     STYLE,
     crate::pdm::PDM_CONFIG,
+    LOCK,
 ];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1192,7 +1193,7 @@ impl Project {
             return out;
         };
         out.push((MANIFEST.to_owned(), meta));
-        for file in [ERC, LINT, PARTS, STYLE, crate::pdm::PDM_CONFIG] {
+        for file in [ERC, LINT, PARTS, STYLE, crate::pdm::PDM_CONFIG, LOCK] {
             if let Ok(meta) = std::fs::metadata(root.join(file))
                 && meta.is_file()
             {
@@ -1818,6 +1819,24 @@ pub(crate) mod tests {
                 .get(&(c.to_string(), label.to_owned()))
                 .cloned()
                 .ok_or_else(|| Error::new(Code::LabelNotFound, format!("{alias}/{c}@{label}")))
+        }
+
+        fn releases_of(
+            &self,
+            _: &Path,
+            _: &Alias,
+        ) -> Result<(
+            ryupdm::config::Config,
+            std::sync::Arc<ryupdm::history::Releases>,
+        )> {
+            Ok((
+                ryupdm::config::Config::default(),
+                std::sync::Arc::new(self.releases.clone()),
+            ))
+        }
+
+        fn file_at(&self, _: &Path, _: &Alias, _: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+            Ok(pinned_files(None).get(rel).cloned())
         }
     }
 

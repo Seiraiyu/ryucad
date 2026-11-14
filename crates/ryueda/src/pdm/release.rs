@@ -128,7 +128,15 @@ fn design_problems(session: &mut Session, part: &Id, r: &mut Readiness) -> Resul
     r.problems.extend(errors(
         crate::doctor::diagnose(&root, p)
             .iter()
-            .filter(|i| !matches!(i.code, Code::UnknownFile | Code::MergeConflict))
+            .filter(|i| {
+                !matches!(
+                    i.code,
+                    Code::UnknownFile
+                        | Code::MergeConflict
+                        | Code::DependencyUnlocked
+                        | Code::LockUnused
+                )
+            })
             .map(crate::doctor::Issue::fault)
             .collect(),
     ));

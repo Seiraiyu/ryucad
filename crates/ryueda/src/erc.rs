@@ -648,6 +648,15 @@ fn by_libcomp(n: &Netlist) -> BTreeMap<&str, Vec<&crate::netlist::Occurrence>> {
     by
 }
 
+/// Whether occurrence `o` is marked `dnp` (itself or its library
+/// component, when that loads).
+pub(crate) fn occurrence_dnp(p: &Project, o: &crate::netlist::Occurrence) -> bool {
+    match placed_libcomp(p, &o.of).and_then(|l| l.item.as_ref().ok()) {
+        Some(c) => is_dnp(p, o, c),
+        None => dnp([component_parameters(p, o), None]),
+    }
+}
+
 /// Whether occurrence `o` of library component `c` is marked `dnp`.
 fn is_dnp(p: &Project, o: &crate::netlist::Occurrence, c: &crate::libcomp::LibComp) -> bool {
     dnp([component_parameters(p, o), Some(&c.parameters)])
@@ -1079,26 +1088,37 @@ pub fn check(
     root: &std::path::Path,
     cats: &crate::parts::Catalogues,
     release: &[Value],
+    deps: &[Value],
 ) -> Result<Value> {
     let p = Project::load(root)?;
     let doctor: Vec<Fault> = crate::doctor::diagnose(root, &p)
         .iter()
-        .filter(|i| !matches!(i.code, Code::UnknownFile | Code::MergeConflict))
+        .filter(|i| {
+            !matches!(
+                i.code,
+                Code::UnknownFile
+                    | Code::MergeConflict
+                    | Code::DependencyUnlocked
+                    | Code::LockUnused
+            )
+        })
         .map(crate::doctor::Issue::fault)
         .collect();
-    check_project(&p, cats, &doctor, release)
+    check_project(&p, cats, &doctor, release, deps)
 }
 
 /// `check` of a loaded project, with doctor's issues `doctor`: the working
 /// files' (from [`check`]) or a revision's (none: no folder to doctor),
 /// and the release findings `release` (each with its `severity`), in a
 /// `release` section only when there are any: a project without PDM
-/// reports as it always has.
+/// reports as it always has. `deps`, the library labels' findings
+/// (`crate::libdeps::findings`), are a `deps` section likewise.
 pub fn check_project(
     p: &Project,
     cats: &crate::parts::Catalogues,
     doctor: &[Fault],
     release: &[Value],
+    deps: &[Value],
 ) -> Result<Value> {
     let faults = p.faults();
     let erc = erc(p, None)?;
@@ -1108,6 +1128,7 @@ pub fn check_project(
     let supply = crate::supply::findings(p, cats)?;
     let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
     let release_errors = release.iter().filter(|f| f["severity"] == "error").count() as u64;
+    let deps_errors = deps.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| f.is_error()).count() as u64
@@ -1115,7 +1136,8 @@ pub fn check_project(
         + style.iter().filter(|f| f.is_error()).count() as u64
         + doctor.iter().filter(|f| f.is_error()).count() as u64
         + supply_errors
-        + release_errors;
+        + release_errors
+        + deps_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| !f.is_error()).count() as u64
@@ -1123,7 +1145,8 @@ pub fn check_project(
         + style.iter().filter(|f| !f.is_error()).count() as u64
         + doctor.iter().filter(|f| !f.is_error()).count() as u64
         + (supply.len() as u64 - supply_errors)
-        + (release.len() as u64 - release_errors);
+        + (release.len() as u64 - release_errors)
+        + (deps.len() as u64 - deps_errors);
     let mut report = json!({
         "faults": fault::list(&faults),
         "erc": erc,
@@ -1137,6 +1160,9 @@ pub fn check_project(
     });
     if !release.is_empty() {
         report["release"] = json!(release);
+    }
+    if !deps.is_empty() {
+        report["deps"] = json!(deps);
     }
     if errors > 0 {
         return Err(crate::error::Error::new(

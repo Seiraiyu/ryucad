@@ -635,12 +635,65 @@ enum LibCmd {
     /// project, inside the same repository.
     Add {
         alias: String,
-        path: String,
+        /// The library project's folder, relative to this project.
+        #[arg(required_unless_present = "url", conflicts_with = "url")]
+        path: Option<String>,
+        /// A library in another repository: its URL (fetched into the
+        /// dependency cache).
+        #[arg(long)]
+        url: Option<String>,
+        /// With --url, the library project's folder in that repository
+        /// (its root by default).
+        #[arg(long = "path", requires = "url", value_name = "FOLDER")]
+        in_repo: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
     /// Every library with its revision, what it holds and its faults.
     List,
+    /// Fetch the repositories of libraries in other repositories (all, or
+    /// the aliases named) into the dependency cache.
+    Fetch { aliases: Vec<String> },
+    /// Move pins (of the aliases named, or all) to each component's latest
+    /// official label, or --to a label, and write ryueda.lock again.
+    Update {
+        aliases: Vec<String>,
+        #[arg(long)]
+        to: Option<String>,
+        /// From the dependency cache as fetched: no fetch.
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Each pinned component with a newer official label than its pin.
+    Outdated,
+    /// What each design places from other projects (alias, component,
+    /// label, counts), at --rev and in each official release.
+    Uses {
+        #[command(flatten)]
+        rev: Rev,
+    },
+    /// What a library alias's project has released, by component, with
+    /// each one's labels latest first.
+    Parts { alias: String },
+    /// Pin library components (<alias>/<component>) at a release label,
+    /// each one's latest official label, or back to working (a library
+    /// in this repository only).
+    Pin {
+        #[arg(required = true)]
+        components: Vec<String>,
+        #[arg(long, conflicts_with_all = ["latest", "working"])]
+        label: Option<String>,
+        #[arg(long, conflicts_with = "working")]
+        latest: bool,
+        #[arg(long)]
+        working: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
     /// Judge a library's symbols by the standards that apply to it
     /// (`ryueda standards`): each symbol's class, score and findings, with
     /// symbol edit ops that fix them. This project's own library by
@@ -2017,13 +2070,52 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Lib(LibCmd::Add {
             alias,
             path,
+            url,
+            in_repo,
             expect,
         }) => Request::LibAdd {
             alias: alias.clone(),
-            path: path.clone(),
+            path: path.clone().or_else(|| in_repo.clone()).unwrap_or_default(),
+            url: url.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Lib(LibCmd::Fetch { aliases }) => Request::LibFetch {
+            aliases: aliases.clone(),
+        },
+        Command::Lib(LibCmd::Update {
+            aliases,
+            to,
+            offline,
+            dry_run,
+            expect,
+        }) => Request::LibUpdate {
+            aliases: aliases.clone(),
+            to: to.clone(),
+            offline: *offline,
+            dry_run: *dry_run,
             expected_revision: expect.expect.clone(),
         },
         Command::Lib(LibCmd::List) => Request::LibList {},
+        Command::Lib(LibCmd::Outdated) => Request::LibOutdated {},
+        Command::Lib(LibCmd::Uses { rev }) => Request::LibUses {
+            rev: rev.rev.clone(),
+        },
+        Command::Lib(LibCmd::Parts { alias }) => Request::LibParts {
+            alias: alias.clone(),
+        },
+        Command::Lib(LibCmd::Pin {
+            components,
+            label,
+            latest,
+            working,
+            expect,
+        }) => Request::LibPin {
+            components: components.clone(),
+            label: label.clone(),
+            latest: *latest,
+            working: *working,
+            expected_revision: expect.expect.clone(),
+        },
         Command::Lib(LibCmd::Check {
             library,
             symbol,
