@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod command;
+pub mod flash;
 pub mod link;
 pub mod people;
 pub mod prefs;
