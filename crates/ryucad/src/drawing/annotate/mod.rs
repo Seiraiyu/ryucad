@@ -7,6 +7,7 @@
 //! doesn't define) likewise.
 
 pub mod feat;
+pub mod hole;
 pub mod text;
 pub mod value;
 
@@ -997,7 +998,7 @@ fn measure(
     }
 }
 
-fn plain(runs: &[Run]) -> String {
+pub(super) fn plain(runs: &[Run]) -> String {
     text::Shown {
         runs: runs.to_vec(),
         ..text::Shown::default()
