@@ -161,6 +161,7 @@ pub mod euler_script;
 pub mod exact;
 mod golden;
 pub mod heal_bytes;
+pub mod held_seams;
 mod lcg;
 pub mod mesh;
 pub mod nurbs;

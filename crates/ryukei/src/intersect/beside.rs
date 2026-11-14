@@ -273,6 +273,17 @@ pub(crate) fn section_plane(
     Some(Surface::Plane(Plane::new(frame)))
 }
 
+/// Whether two faces' sides of a plane (`[negative, positive]` seen, each
+/// from [`face_beside`] or [`face_beside_rails`] against the plane) put
+/// them on opposite sides: each on one side only, on different ones, or
+/// one wholly within the strip. The self-intersection check's rule for
+/// blends across a section, and the re-trim's second certificate for a
+/// held seam (design 642).
+pub(crate) fn opposite_sides(sa: [bool; 2], sb: [bool; 2]) -> bool {
+    let one = |s: [bool; 2]| s != [true, true];
+    one(sa) && one(sb) && (sa[0] && sb[1] || sa[1] && sb[0] || sa == [false; 2] || sb == [false; 2])
+}
+
 /// Whether a face of a body is certified to keep at least `r` from `q`:
 /// every part of its parameter box that isn't certified outside the face
 /// ([`outside`]) has the sphere of radius `r` about `q`'s implicit form
