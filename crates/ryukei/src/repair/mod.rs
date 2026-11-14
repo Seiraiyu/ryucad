@@ -156,8 +156,34 @@ pub(crate) fn resolve(
     alone: &(dyn Fn(FaceId) -> bool + Sync),
     m: &Meter,
 ) -> Result<Option<(Body, Journal)>, Fail> {
+    resolve_seamed(
+        key,
+        body,
+        pairs,
+        &crate::intersect::Seams::new(),
+        select,
+        alone,
+        m,
+    )
+}
+
+/// [`resolve`], the pairs in `seams` known to meet along them (the
+/// re-trim's kept faces tangent along an input edge, #652).
+pub(crate) fn resolve_seamed(
+    key: OpKey,
+    body: &Body,
+    pairs: &BTreeSet<(FaceId, FaceId)>,
+    seams: &crate::intersect::Seams,
+    select: &Select<'_>,
+    alone: &(dyn Fn(FaceId) -> bool + Sync),
+    m: &Meter,
+) -> Result<Option<(Body, Journal)>, Fail> {
     let ops = [body.clone()];
-    let table = build_in(&ops, Scope::Pairs(pairs), m)?;
+    let table = if seams.is_empty() {
+        build_in(&ops, Scope::Pairs(pairs), m)?
+    } else {
+        crate::boolean::table::build_seamed(&ops, Scope::Pairs(pairs), seams, m)?
+    };
     let pieces = split_all(&ops, &table, m)?;
     let groups = groups(body, &table, &pieces, alone);
     let kept = select(&ops, &table, &pieces, &groups, m)?;

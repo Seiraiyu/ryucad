@@ -7,6 +7,8 @@
 use super::region::Region;
 use super::working::Working;
 use crate::geom::Box3;
+use crate::geom::Vector2;
+use crate::intersect::{Seam, Seams};
 use crate::layout::{self, Boundary, Layout};
 use crate::name::{BooleanRole, EditRole, Name, OpKey, Role};
 use crate::topo::{Body, EdgeId, EntityId, FaceId, Sense};
@@ -206,6 +208,85 @@ impl WorkBody {
         }
         out
     }
+
+    /// The seams kept faces were tangent along in the input (design 551,
+    /// #652): each input edge whose two faces are working faces here,
+    /// both `still` (on the surfaces the input had them on, with the same
+    /// parameters) and tangent along it ([`crate::tweak::classify::tangent`]),
+    /// as its curve, interval, tolerance and the two fins' pcurves, each
+    /// moved by whole periods into its working face's parameter box; by
+    /// the working faces' pair, in face order. A working surface holds its
+    /// face's surface, carried past its domain with the same parameters,
+    /// so it holds the edge's curve and pcurve.
+    pub(crate) fn seams(&self, input: &Body, still: &dyn Fn(FaceId) -> bool) -> Seams {
+        let back: BTreeMap<FaceId, FaceId> =
+            self.working.iter().map(|&w| (self.origin[&w], w)).collect();
+        let mut out = Seams::new();
+        for e in input.edges() {
+            let fins: Vec<_> = input.edge_fins(e).collect();
+            let [fa, fb] = fins[..] else { continue };
+            let face = |fin| input.loops[input.fins[fin].loop_].face;
+            let (ia, ib) = (face(fa), face(fb));
+            if ia == ib || !still(ia) || !still(ib) {
+                continue;
+            }
+            let (Some(&wa), Some(&wb)) = (back.get(&ia), back.get(&ib)) else {
+                continue;
+            };
+            let Some(mut seam) = seam_for(input, e, (&self.body, wa), (&self.body, wb)) else {
+                continue;
+            };
+            let key = if wa < wb {
+                (wa, wb)
+            } else {
+                seam.pcurves.swap(0, 1);
+                (wb, wa)
+            };
+            out.entry(key).or_default().push(seam);
+        }
+        out
+    }
+}
+
+/// The seam input edge `e` makes between working faces `wa` (standing
+/// for the face of `e`'s first fin) and `wb` (its second), pcurves in that
+/// order: `None` unless `e` has two fins, both with pcurves, and its faces
+/// are tangent all along it ([`crate::tweak::classify::tangent`]). Each
+/// pcurve is moved by whole periods so its middle lies in its working
+/// face's parameter box. Task 20's guard builds FTC 07's seam with it.
+pub(crate) fn seam_for(
+    input: &Body,
+    e: EdgeId,
+    wa: (&Body, FaceId),
+    wb: (&Body, FaceId),
+) -> Option<Seam> {
+    let fins: Vec<_> = input.edge_fins(e).collect();
+    let [fa, fb] = fins[..] else { return None };
+    if !matches!(crate::tweak::classify::tangent(input, e), Ok(true)) {
+        return None;
+    }
+    let (pa, pb) = (input.fins[fa].pcurve?, input.fins[fb].pcurve?);
+    let x = &input.edges[e];
+    let mid = 0.5 * (x.interval[0] + x.interval[1]);
+    let lift = |(body, w): (&Body, FaceId), pc: crate::topo::Pcurve| {
+        let s = &body.surfaces[body.faces[w].surface];
+        let (pu, pv) = s.periods();
+        let rect = crate::intersect::parameter_box(body, w);
+        let c2 = input.curves2[pc.curve].clone();
+        let at = c2.point(pc.param(mid));
+        let shift = |k: usize, p: Option<f64>, c: f64| match p {
+            Some(p) => -((c - rect[k][0]) / p).floor() * p,
+            None => 0.0,
+        };
+        let d = Vector2::new(shift(0, pu, at.x), shift(1, pv, at.y));
+        crate::intersect::shifted(&c2, d).map(|c| (c, pc.map))
+    };
+    Some(Seam {
+        curve: input.curves[x.curve].clone(),
+        interval: x.interval,
+        tolerance: x.tolerance.get(),
+        pcurves: [lift(wa, pa)?, lift(wb, pb)?],
+    })
 }
 
 /// Face `f`'s box grown by its tolerance, as `face_face` grows the boxes
@@ -224,6 +305,60 @@ mod tests {
     use super::*;
     use crate::geom::Point3;
     use crate::name::FaceRole;
+
+    #[test]
+    fn kept_faces_tangent_along_a_round_record_their_seams() {
+        use crate::blend::{BlendKind, EdgeBlend, blend};
+        let b0 = block();
+        let (px, py) = (face_of(&b0, FaceRole::PlusX), face_of(&b0, FaceRole::PlusY));
+        let edge = b0
+            .edges()
+            .find(|&e| {
+                let fs: Vec<FaceId> = b0
+                    .edge_fins(e)
+                    .map(|fin| b0.loops[b0.fins[fin].loop_].face)
+                    .collect();
+                fs.contains(&px) && fs.contains(&py)
+            })
+            .unwrap();
+        let (b, _) = blend(
+            K,
+            &b0,
+            &[EdgeBlend {
+                edge: b0.edges[edge].name,
+                kind: BlendKind::Fillet { radius: 0.1 },
+            }],
+        )
+        .unwrap();
+        let top = face_of(&b, FaceRole::PlusZ);
+        let r = region(&b, &BTreeSet::from([top]));
+        let bx = Box3::new(Point3::new(-0.2, -0.2, -0.2), Point3::new(1.2, 0.8, 0.6));
+        let ws: BTreeMap<FaceId, Working> = r
+            .faces
+            .iter()
+            .map(|&f| {
+                (
+                    f,
+                    working(&b, f, None, b.faces[f].sense, true, &bx).unwrap(),
+                )
+            })
+            .collect();
+        // unmetered: a unit test.
+        let w = work_body(K, &b, &r, &ws, &crate::work::Meter::free()).unwrap();
+        let seams = w.seams(&b, &|f| f != top);
+        // The round is tangent to the two sides it joins, each along a
+        // line; no other kept pair is tangent along an edge.
+        assert_eq!(seams.len(), 2, "{seams:?}");
+        for ((x, y), list) in &seams {
+            assert!(x < y);
+            assert!(w.working.contains(x) && w.working.contains(y));
+            assert_eq!(list.len(), 1);
+            assert!(matches!(list[0].curve, crate::geom::Curve::Line(_)));
+        }
+        // The top, changed, records none.
+        let none = w.seams(&b, &|_| false);
+        assert!(none.is_empty());
+    }
 
     #[test]
     fn a_raised_top_works_on_its_bottom_and_five_working_faces() {

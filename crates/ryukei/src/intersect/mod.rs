@@ -23,6 +23,8 @@ mod fit;
 mod general;
 pub(crate) mod implicit;
 mod inface;
+mod known;
+pub(crate) use known::{Seam, Seams, known_seam};
 mod pipe;
 mod pipe_cs;
 mod seam;

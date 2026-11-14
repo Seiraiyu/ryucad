@@ -291,7 +291,22 @@ fn attempt(
         }
     };
     let pairs = w.pairs();
-    let resolved = crate::repair::resolve(key, &w.body, &pairs, &select, &|_| false, m);
+    // Kept faces tangent along an input edge meet along it (#652): those
+    // left as they are, on their own surfaces, standing for themselves.
+    let still = |f: FaceId| {
+        region.faces.contains(&f)
+            && !changes.deleted.contains(&f)
+            && !changes.motion.contains_key(&f)
+            && !changes.surface.contains_key(&f)
+            && !absorbed.contains_key(&f)
+    };
+    let seams: crate::intersect::Seams = w
+        .seams(body, &still)
+        .into_iter()
+        .filter(|(k, _)| pairs.contains(k))
+        .collect();
+    let resolved =
+        crate::repair::resolve_seamed(key, &w.body, &pairs, &seams, &select, &|_| false, m);
     let name_of = |f: FaceId| w.body.faces[f].name;
     let (out, journal) = match (resolved, walked.lock().expect("unpoisoned").take()) {
         // A halt answers at once (`work::run` reports it); every other

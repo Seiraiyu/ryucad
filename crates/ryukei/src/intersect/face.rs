@@ -103,6 +103,44 @@ impl FaceMeet {
             contacts: Vec::new(),
         }
     }
+
+    /// The meeting seen from the other face: each stretch's pcurves and
+    /// places, each contact's places and each rim's owner swapped.
+    pub(crate) fn swapped(self) -> Self {
+        match self {
+            FaceMeet::Meet {
+                stretches,
+                contacts,
+            } => FaceMeet::Meet {
+                stretches: stretches
+                    .into_iter()
+                    .map(|mut s| {
+                        s.pcurves.swap(0, 1);
+                        s.places.swap(0, 1);
+                        s
+                    })
+                    .collect(),
+                contacts: contacts
+                    .into_iter()
+                    .map(|mut c| {
+                        c.places.swap(0, 1);
+                        c
+                    })
+                    .collect(),
+            },
+            FaceMeet::Coincident { same, rims, whole } => FaceMeet::Coincident {
+                same,
+                rims: rims
+                    .into_iter()
+                    .map(|mut r| {
+                        r.of = 1 - r.of;
+                        r
+                    })
+                    .collect(),
+                whole,
+            },
+        }
+    }
 }
 
 /// How face `a.1` of body `a.0` and face `b.1` of body `b.0` meet.
@@ -288,6 +326,24 @@ pub(crate) fn face_face_over(
         SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same, m),
         SurfaceHit::Meet { branches, points } => (branches, points),
     };
+    placed(faces, [sa, sb], branches, points, slack, m)
+}
+
+/// Branches and points where two faces' surfaces meet, cut wherever an
+/// edge of either face meets the other's surface and placed in both
+/// faces: the stretches and contacts the faces share. A traced meeting
+/// ([`face_face_over`]) and a known seam's ([`super::known`]) both end
+/// here, so a known stretch is cut, placed and filtered exactly as a
+/// traced one is.
+pub(super) fn placed(
+    faces: [(&Body, FaceId); 2],
+    [sa, sb]: [&Surface; 2],
+    branches: Vec<super::ss::Branch>,
+    points: Vec<Point3>,
+    slack: f64,
+    m: &Meter,
+) -> Result<FaceMeet, Failure> {
+    let [a, b] = faces;
     // Surfaces that don't meet in the region: nothing for edges to cut.
     if branches.is_empty() && points.is_empty() {
         return Ok(FaceMeet::apart());
@@ -809,7 +865,7 @@ fn within_reach(
     true
 }
 
-fn surface_of((body, face): (&Body, FaceId)) -> Result<&Surface, Failure> {
+pub(super) fn surface_of((body, face): (&Body, FaceId)) -> Result<&Surface, Failure> {
     let f = body.face(face).ok_or(Failure::Uncertain)?;
     body.surface(f.surface).ok_or(Failure::Uncertain)
 }
@@ -929,7 +985,7 @@ fn edges((body, face): (&Body, FaceId)) -> Vec<EdgeId> {
 }
 
 /// The overlap of two boxes grown by `slack`, if they meet.
-fn overlap(a: &Box3, b: &Box3, slack: f64) -> Option<Box3> {
+pub(super) fn overlap(a: &Box3, b: &Box3, slack: f64) -> Option<Box3> {
     let (a, b) = (a.grow(slack), b.grow(slack));
     a.intersects(&b)
         .then(|| Box3::new(a.min().max(b.min()), a.max().min(b.max())))
@@ -2129,5 +2185,51 @@ mod tests {
             format!("{:?}", region_outside(&region, &[q], half)),
             format!("{:?}", region_outside_boxes(&region, &[cube]))
         );
+    }
+}
+
+#[cfg(test)]
+mod swap_tests {
+    use super::*;
+
+    #[test]
+    fn a_meeting_swapped_twice_is_itself_and_swaps_each_faces_half() {
+        let line =
+            Curve2::Line2(Line2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0)).unwrap());
+        let other =
+            Curve2::Line2(Line2::new(Point2::new(1.0, 0.0), Vector2::new(0.0, 1.0)).unwrap());
+        let meet = FaceMeet::Meet {
+            stretches: vec![Stretch {
+                curve: Curve::Line(
+                    crate::geom::Line::from_unit(Point3::ORIGIN, crate::geom::UnitVector3::X)
+                        .unwrap(),
+                ),
+                range: [0.0, 1.0],
+                tangent: true,
+                tolerance: 1e-8,
+                pcurves: [(line.clone(), [0.0, 1.0]), (other.clone(), [0.0, 1.0])],
+                places: [Place::Inside, Place::Outside],
+                ends: [0.0, 2e-9],
+            }],
+            contacts: vec![Contact {
+                point: Point3::ORIGIN,
+                places: [Place::Inside, Place::Outside],
+                reach: 0.0,
+            }],
+        };
+        let s = meet.clone().swapped();
+        let FaceMeet::Meet {
+            stretches,
+            contacts,
+        } = &s
+        else {
+            unreachable!()
+        };
+        assert_eq!(stretches[0].pcurves[0].0, other);
+        assert_eq!(stretches[0].places, [Place::Outside, Place::Inside]);
+        // `ends` are the stretch's ends, not the faces': unchanged.
+        assert_eq!(stretches[0].ends, [0.0, 2e-9]);
+        assert_eq!(contacts[0].places, [Place::Outside, Place::Inside]);
+        assert_eq!(s.swapped(), meet);
     }
 }
