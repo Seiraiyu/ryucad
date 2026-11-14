@@ -23,6 +23,9 @@ pub const KIND: &str = "ryueda.project";
 pub const FORMAT: u64 = 1;
 /// A manifest with properties or schematic settings.
 pub const FORMAT_2: u64 = 2;
+/// A manifest naming the project it was forked from (`pdm new-id`;
+/// design 629); 10.C's library pins and URLs are format 3 too.
+pub const FORMAT_3: u64 = 3;
 /// The alias of a project's own library, never written.
 pub const SELF: &str = "self";
 /// ERC's severities and waivers, beside the manifest.
@@ -80,6 +83,19 @@ pub struct Manifest {
     /// How schematics are drawn (format 2): the sheet's paper.
     #[serde(default, skip_serializing_if = "Schematic::is_default")]
     pub schematic: Schematic,
+    /// The project this one was copied from, once `pdm new-id` gave it an
+    /// ID of its own (format 3): its records naming that ID are the
+    /// upstream's history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkedFrom>,
+}
+
+/// The project a fork's ID replaced, and the commit it was at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkedFrom {
+    pub project: ProjectId,
+    pub commit: String,
 }
 
 /// A project's schematic settings.
@@ -276,6 +292,7 @@ impl Manifest {
             libraries: BTreeMap::new(),
             properties: BTreeMap::new(),
             schematic: Schematic::default(),
+            forked_from: None,
         }
     }
 
@@ -283,7 +300,7 @@ impl Manifest {
     /// in for the project's own library, so writes would land in another
     /// project, outside the activity log.
     pub fn read(bytes: &[u8]) -> Result<Manifest> {
-        let m: Manifest = doc::read(bytes, MANIFEST, KIND, FORMAT_2)?;
+        let m: Manifest = doc::read(bytes, MANIFEST, KIND, FORMAT_3)?;
         if let Some(f) = crate::props::faults(&m.properties, "/properties").first() {
             return Err(f.error.clone().with("path", MANIFEST));
         }
@@ -301,8 +318,14 @@ impl Manifest {
     /// Its canonical text: format 2 only when it holds what format 1
     /// can't.
     pub fn to_text(&self) -> String {
-        let newer = !self.properties.is_empty() || self.schematic != Schematic::default();
-        doc::to_string(self, KIND, if newer { FORMAT_2 } else { FORMAT })
+        let format = if self.forked_from.is_some() {
+            FORMAT_3
+        } else if !self.properties.is_empty() || self.schematic != Schematic::default() {
+            FORMAT_2
+        } else {
+            FORMAT
+        };
+        doc::to_string(self, KIND, format)
     }
 }
 
@@ -1156,6 +1179,31 @@ pub(crate) mod tests {
         for (p, b) in files(STEP) {
             write_atomic(&dir.join(p), b).unwrap();
         }
+    }
+
+    #[test]
+    fn a_fork_names_where_it_came_from_at_format_3() {
+        let mut m = Manifest::new(pid(7), Unit::Mm, ProjectKind::Design);
+        assert!(m.to_text().contains("\"format\": 1"));
+        m.forked_from = Some(ForkedFrom {
+            project: pid(6),
+            commit: "a".repeat(40),
+        });
+        let text = m.to_text();
+        assert!(text.contains("\"format\": 3"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "\"forked_from\": {{\n    \"commit\": \"{}\",\n    \"project\": \"{}\"",
+                "a".repeat(40),
+                "06".repeat(16)
+            )),
+            "{text}"
+        );
+        assert_eq!(Manifest::read(text.as_bytes()).unwrap(), m);
+        // An older ryueda refuses it as too new rather than misreading it.
+        let e = crate::doc::read::<serde_json::Value>(text.as_bytes(), MANIFEST, KIND, FORMAT_2)
+            .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::FormatTooNew);
     }
 
     #[test]

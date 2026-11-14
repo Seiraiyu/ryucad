@@ -258,7 +258,9 @@ fn format_of(kind: &str, v: &Value, ours: &Value, theirs: &Value) -> u64 {
             }
         }
         crate::project::KIND => {
-            if v["properties"].as_object().is_some_and(|o| !o.is_empty())
+            if v.get("forked_from").is_some_and(|f| !f.is_null()) {
+                crate::project::FORMAT_3
+            } else if v["properties"].as_object().is_some_and(|o| !o.is_empty())
                 || v.get("schematic").is_some()
             {
                 crate::project::FORMAT_2
@@ -322,7 +324,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         | conn::INSTANCE_KIND
         | conn::RAIL_KIND
         | conn::CLASS_KIND => conn::newest(kind),
-        crate::project::KIND => crate::project::FORMAT_2,
+        crate::project::KIND => crate::project::FORMAT_3,
         crate::erc::KIND => crate::erc::FORMAT,
         crate::lint::KIND => crate::lint::FORMAT,
         crate::style::KIND => crate::style::FORMAT,
