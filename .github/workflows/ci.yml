@@ -93,11 +93,11 @@ jobs:
             example: 1
           - name: ubuntu-24.04-arm
             os: ubuntu-24.04-arm
-            tests: --workspace --lib --bins --test determinism
+            tests: --workspace --lib --bins --test determinism --test exits
             save: true
           - name: macos-latest
             os: macos-latest
-            tests: --workspace --lib --bins --test determinism
+            tests: --workspace --lib --bins --test determinism --test exits
             save: true
           - name: windows-latest (1/3)
             os: windows-latest
