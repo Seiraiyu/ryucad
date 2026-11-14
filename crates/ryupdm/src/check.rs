@@ -178,7 +178,7 @@ pub fn run_for<P: Product>(
     let project: Option<ProjectId> = identity.as_ref().and_then(|i| i.project.clone());
     // Records naming the ID a fork had are its upstream's history.
     let inherited = identity.and_then(|i| i.forked_from);
-    let parts: Vec<Id> = P::parts(src)?;
+    let parts: Vec<Id> = crate::product::part_ids::<P>(src)?;
     let official = |e: &Entry| releases.official.get(&e.path);
     let mut out = Vec::new();
     for part in records.parts() {
