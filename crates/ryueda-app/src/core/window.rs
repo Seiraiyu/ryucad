@@ -62,7 +62,10 @@ impl Throttle {
     }
     /// Whether to send now; if so, it counts as sent.
     pub fn ready(&mut self, now: Instant) -> bool {
-        let ok = self.due && self.sent.is_none_or(|t| now.saturating_duration_since(t) >= SELECT_EVERY);
+        let ok = self.due
+            && self
+                .sent
+                .is_none_or(|t| now.saturating_duration_since(t) >= SELECT_EVERY);
         if ok {
             self.due = false;
             self.sent = Some(now);
@@ -155,6 +158,9 @@ pub struct Window {
     pub camera: Option<Camera>,
     /// A box to frame at the next frame (a show, a finding's Show).
     pub frame: Option<[P; 2]>,
+    /// A reference to frame once the scene now asked for arrives (a
+    /// link followed to another sheet).
+    pub frame_ref: Option<String>,
     pub selection: Vec<String>,
     pub hover: Option<String>,
     select: Throttle,
@@ -178,7 +184,13 @@ pub struct Window {
 impl Window {
     /// Connects to the daemon of the project at `root` as the human
     /// `name`, and asks for everything the window shows.
-    pub fn open(root: &Path, daemon: &Daemon, name: &str, wake: Wake, dark: bool) -> Result<Window> {
+    pub fn open(
+        root: &Path,
+        daemon: &Daemon,
+        name: &str,
+        wake: Wake,
+        dark: bool,
+    ) -> Result<Window> {
         let link = Link::open(root, daemon, name, wake.clone())?;
         let mut people = People::default();
         people.reset(&link.session["participants"]);
@@ -193,7 +205,9 @@ impl Window {
             retry: None,
             pending: BTreeMap::new(),
             people,
-            toasts: Toasts::with(ryu_app::toast::Notify::parse(&crate::core::prefs::get("ui.notify"))),
+            toasts: Toasts::with(ryu_app::toast::Notify::parse(&crate::core::prefs::get(
+                "ui.notify",
+            ))),
             nav: Navigator::default(),
             shown: Shown::default(),
             scene: None,
@@ -201,6 +215,7 @@ impl Window {
             dark,
             camera: None,
             frame: None,
+            frame_ref: None,
             selection: Vec::new(),
             hover: None,
             select: Throttle::default(),
@@ -242,7 +257,10 @@ impl Window {
         self.send(req("libcomp.list", json!({})), Why::Libcomps);
         self.send(req("lint.get", json!({})), Why::Rules);
         self.send(req("erc", json!({})), Why::Erc);
-        self.send(req("activity.log", json!({"limit": ACTIVITY})), Why::Activity);
+        self.send(
+            req("activity.log", json!({"limit": ACTIVITY})),
+            Why::Activity,
+        );
     }
 
     fn scene_params(&self, sheet: Option<&str>) -> Value {
@@ -269,7 +287,12 @@ impl Window {
     /// Asks the shown block's other sheets, aside.
     fn ask_other_sheets(&mut self) {
         let Some(sc) = &self.scene else { return };
-        let others: Vec<String> = sc.sheets.iter().map(|(s, _)| s.clone()).filter(|s| *s != sc.sheet).collect();
+        let others: Vec<String> = sc
+            .sheets
+            .iter()
+            .map(|(s, _)| s.clone())
+            .filter(|s| *s != sc.sheet)
+            .collect();
         for s in others {
             let p = self.scene_params(Some(&s));
             self.send_aside(req("scene", p), Why::OtherSheet);
@@ -292,7 +315,9 @@ impl Window {
     /// The next (or previous) sheet in canvas order.
     pub fn step_sheet(&mut self, by: isize) {
         let Some(sc) = &self.scene else { return };
-        let Some(i) = sc.sheets.iter().position(|(s, _)| *s == sc.sheet) else { return };
+        let Some(i) = sc.sheets.iter().position(|(s, _)| *s == sc.sheet) else {
+            return;
+        };
         let n = sc.sheets.len() as isize;
         let j = (i as isize + by).rem_euclid(n) as usize;
         let next = sc.sheets[j].0.clone();
@@ -310,7 +335,10 @@ impl Window {
             return;
         }
         let me = self.me().to_owned();
-        self.send(req("view.show", json!({"ref": reference, "participant": me})), Why::Write("Show"));
+        self.send(
+            req("view.show", json!({"ref": reference, "participant": me})),
+            Why::Write("Show"),
+        );
     }
 
     /// The person picked `reference` (or nothing): one, or with `add`
@@ -353,7 +381,17 @@ impl Window {
         }
         // From a list: nets are listed by the navigator's net rows.
         let block = reference.split('/').next().unwrap_or_default();
-        if self.nav.nets(block, "").iter().any(|n| n.reference == reference) { "net" } else { "component" }.into()
+        if self
+            .nav
+            .nets(block, "")
+            .iter()
+            .any(|n| n.reference == reference)
+        {
+            "net"
+        } else {
+            "component"
+        }
+        .into()
     }
 
     fn ask_props(&mut self) {
@@ -364,7 +402,10 @@ impl Window {
         self.props = Some(Properties::new(&r));
         match lists::subject(&r, &self.kind_of(&r)) {
             Subject::Component(c) => {
-                self.send(req("component.show", json!({"component": c})), Why::Component(r.clone()));
+                self.send(
+                    req("component.show", json!({"component": c})),
+                    Why::Component(r.clone()),
+                );
             }
             Subject::Net(n) => {
                 self.send(req("net.show", json!({"net": n})), Why::Net(r.clone()));
@@ -372,7 +413,10 @@ impl Window {
             Subject::Other => {}
         }
         if let Some(block) = r.split('/').next() {
-            self.send(req("layout.instructions", json!({"block": block})), Why::PropsInstructions(r.clone()));
+            self.send(
+                req("layout.instructions", json!({"block": block})),
+                Why::PropsInstructions(r.clone()),
+            );
         }
     }
 
@@ -381,13 +425,21 @@ impl Window {
     /// `undo` without an entry would take only this window's own, and a
     /// window makes none.
     pub fn undo(&mut self) {
-        let p = self.activity.iter().find(|e| e.undo).map_or_else(|| json!({}), |e| json!({"entry": e.seq}));
+        let p = self
+            .activity
+            .iter()
+            .find(|e| e.undo)
+            .map_or_else(|| json!({}), |e| json!({"entry": e.seq}));
         self.send(req("undo", p), Why::Write("Undo"));
     }
 
     /// Redoes the newest undo not redone yet.
     pub fn redo(&mut self) {
-        let p = self.activity.iter().find(|e| e.redo).map_or_else(|| json!({}), |e| json!({"entry": e.seq}));
+        let p = self
+            .activity
+            .iter()
+            .find(|e| e.redo)
+            .map_or_else(|| json!({}), |e| json!({"entry": e.seq}));
         self.send(req("redo", p), Why::Write("Redo"));
     }
 
@@ -399,7 +451,11 @@ impl Window {
     /// Follows `who` (or stops): their sheet and camera as they move.
     pub fn follow(&mut self, who: Option<String>) {
         self.following = who;
-        if let Some(p) = self.following.clone().and_then(|id| self.people.get(&id).map(|p| p.view.clone())) {
+        if let Some(p) = self
+            .following
+            .clone()
+            .and_then(|id| self.people.get(&id).map(|p| p.view.clone()))
+        {
             self.adopt(&p, false);
         }
     }
@@ -424,6 +480,30 @@ impl Window {
         any
     }
 
+    /// A label's or port flag's link: the next sheet (in canvas order,
+    /// after this one) that draws its net, framing the net there.
+    pub fn follow_link(&mut self, net: &str) {
+        let (Some(block), Some(here)) = (self.shown.block.clone(), self.shown.sheet.clone()) else {
+            return;
+        };
+        let reach = self.nav.reach(&block, net);
+        let sheets: Vec<String> = self
+            .nav
+            .sheets(&block)
+            .iter()
+            .map(|(s, _)| s.clone())
+            .collect();
+        let at = sheets.iter().position(|s| *s == here).unwrap_or(0);
+        let next = (1..=sheets.len())
+            .map(|k| &sheets[(at + k) % sheets.len()])
+            .find(|s| **s != here && reach.contains(s));
+        if let Some(s) = next.cloned() {
+            self.frame_ref = Some(net.to_owned());
+            let layer = self.shown.layer.clone();
+            self.show(Some(block), Some(s), layer);
+        }
+    }
+
     /// Waits up to `timeout` for `done`, taking events: for tests and
     /// `--smoke`.
     pub fn wait_until(&mut self, timeout: Duration, mut done: impl FnMut(&Window) -> bool) -> bool {
@@ -445,7 +525,9 @@ impl Window {
 
     /// Whether nothing is waiting on the daemon.
     pub fn idle(&self) -> bool {
-        self.pending.values().all(|w| matches!(w, Why::OtherSheet | Why::Check))
+        self.pending
+            .values()
+            .all(|w| matches!(w, Why::OtherSheet | Why::Check))
     }
 
     fn handle(&mut self, e: Event) {
@@ -461,7 +543,11 @@ impl Window {
                 self.lost = true;
                 self.pending.clear();
                 self.toasts.lost(Instant::now());
-                self.retry = Some(Retry { at: Instant::now() + RETRY_FIRST, delay: RETRY_FIRST, trying: None });
+                self.retry = Some(Retry {
+                    at: Instant::now() + RETRY_FIRST,
+                    delay: RETRY_FIRST,
+                    trying: None,
+                });
             }
             Event::Lost => {}
         }
@@ -483,7 +569,9 @@ impl Window {
         };
         match why {
             Why::Scene => {
-                let Some(sc) = Scene::from_json(&v) else { return };
+                let Some(sc) = Scene::from_json(&v) else {
+                    return;
+                };
                 self.scene_error = None;
                 let moved = self.scene.as_ref().is_none_or(|o| o.block != sc.block);
                 if self.flash_on {
@@ -491,6 +579,19 @@ impl Window {
                 }
                 self.nav.scene(&sc);
                 self.findings.sheet(&sc.findings);
+                if let Some(r) = self.frame_ref.take() {
+                    let boxes = sc
+                        .owners
+                        .iter()
+                        .filter(|o| o.reference == r || o.net.as_deref() == Some(r.as_str()))
+                        .filter_map(|o| o.boxed);
+                    self.frame = boxes.reduce(|a, b| {
+                        [
+                            [a[0][0].min(b[0][0]), a[0][1].min(b[0][1])],
+                            [a[1][0].max(b[1][0]), a[1][1].max(b[1][1])],
+                        ]
+                    });
+                }
                 if self.shown.design.is_none() {
                     self.shown.design = sc.design.clone();
                 }
@@ -501,7 +602,10 @@ impl Window {
                 self.view.due();
                 self.ask_other_sheets();
                 if moved {
-                    self.send(req("layout.instructions", json!({"block": block})), Why::Instructions(block.clone()));
+                    self.send(
+                        req("layout.instructions", json!({"block": block})),
+                        Why::Instructions(block.clone()),
+                    );
                     self.send(req("block.show", json!({"block": block})), Why::Block);
                 }
             }
@@ -514,7 +618,10 @@ impl Window {
                 self.nav.designs(&v);
                 let ids: Vec<String> = self.nav.design_ids().map(str::to_owned).collect();
                 for d in ids {
-                    self.send(req("netlist", json!({"design": d})), Why::Netlist(d.clone()));
+                    self.send(
+                        req("netlist", json!({"design": d})),
+                        Why::Netlist(d.clone()),
+                    );
                 }
             }
             Why::Netlist(d) => {
@@ -586,9 +693,17 @@ impl Window {
                 self.send(req("design.list", json!({})), Why::Designs);
                 self.send(req("erc", json!({})), Why::Erc);
                 if let Some(b) = self.shown.block.clone() {
-                    self.send(req("layout.instructions", json!({"block": b})), Why::Instructions(b));
+                    self.send(
+                        req("layout.instructions", json!({"block": b})),
+                        Why::Instructions(b),
+                    );
                 }
-                if changed.as_array().into_iter().flatten().any(|k| k.as_str().is_some_and(|k| k.starts_with("lib/"))) {
+                if changed
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|k| k.as_str().is_some_and(|k| k.starts_with("lib/")))
+                {
                     self.send(req("libcomp.list", json!({})), Why::Libcomps);
                 }
             }
@@ -598,7 +713,11 @@ impl Window {
                 if let Some(mine) = self.people.get(&me).map(|p| p.view.clone())
                     && adopts(&mine, self.sent_view.as_ref(), &me, self.follow_shows)
                 {
-                    let selection = self.people.get(&me).map(|p| p.selection.clone()).unwrap_or_default();
+                    let selection = self
+                        .people
+                        .get(&me)
+                        .map(|p| p.selection.clone())
+                        .unwrap_or_default();
                     self.adopt(&mine, true);
                     self.selection = selection;
                     self.ask_props();
@@ -613,7 +732,10 @@ impl Window {
             "activity.appended" => {
                 let me = self.me().to_owned();
                 self.toasts.activity(params, &me, now);
-                self.send(req("activity.log", json!({"limit": ACTIVITY})), Why::Activity);
+                self.send(
+                    req("activity.log", json!({"limit": ACTIVITY})),
+                    Why::Activity,
+                );
             }
             "resync" => {
                 self.send(req("participant.list", json!({})), Why::People);
@@ -629,7 +751,9 @@ impl Window {
         if v.block.is_none() {
             return;
         }
-        let place_moved = self.shown.block != v.block || self.shown.sheet != v.sheet || self.shown.layer != v.layer;
+        let place_moved = self.shown.block != v.block
+            || self.shown.sheet != v.sheet
+            || self.shown.layer != v.layer;
         self.shown.design = v.design.clone().or(self.shown.design.take());
         self.shown.block = v.block.clone();
         self.shown.sheet = v.sheet.clone();
@@ -650,7 +774,11 @@ impl Window {
         self.flash.expire(now);
         if self.lost {
             self.reconnect(now);
-            return Some(self.retry.as_ref().map_or(RETRY_FIRST, |r| r.at.saturating_duration_since(now)));
+            return Some(
+                self.retry
+                    .as_ref()
+                    .map_or(RETRY_FIRST, |r| r.at.saturating_duration_since(now)),
+            );
         }
         if self.select.ready(now) {
             let refs = self.selection.clone();
@@ -659,7 +787,12 @@ impl Window {
         if self.view.ready(now) && self.following.is_none() {
             let v = self.view_now();
             let mut p = json!({});
-            for (k, x) in [("design", &v.design), ("block", &v.block), ("sheet", &v.sheet), ("layer", &v.layer)] {
+            for (k, x) in [
+                ("design", &v.design),
+                ("block", &v.block),
+                ("sheet", &v.sheet),
+                ("layer", &v.layer),
+            ] {
                 if let Some(x) = x {
                     p[k] = json!(x);
                 }
@@ -671,7 +804,10 @@ impl Window {
             self.send(req("view.set", p), Why::Quiet);
         }
         let flash = self.flash.due().then_some(Duration::from_millis(33));
-        [self.select.wait(now), self.view.wait(now), flash].into_iter().flatten().min()
+        [self.select.wait(now), self.view.wait(now), flash]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn view_now(&self) -> SheetView {
@@ -683,7 +819,10 @@ impl Window {
             camera: self.camera.as_ref().map(|c| {
                 let v = to_nm(c);
                 (
-                    [v["centre_nm"][0].as_i64().unwrap_or(0), v["centre_nm"][1].as_i64().unwrap_or(0)],
+                    [
+                        v["centre_nm"][0].as_i64().unwrap_or(0),
+                        v["centre_nm"][1].as_i64().unwrap_or(0),
+                    ],
                     v["zoom_nm_per_pt"].as_i64().unwrap_or(1),
                 )
             }),
@@ -713,7 +852,12 @@ impl Window {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let (root, daemon, name, wake) = (self.root.clone(), self.daemon.clone(), self.name.clone(), self.wake.clone());
+        let (root, daemon, name, wake) = (
+            self.root.clone(),
+            self.daemon.clone(),
+            self.name.clone(),
+            self.wake.clone(),
+        );
         std::thread::spawn(move || {
             let _ = tx.send(Link::open(&root, &daemon, &name, wake.clone()));
             wake();
@@ -755,9 +899,15 @@ mod tests {
             ("component.show", json!({"component": "top/r1"})),
             ("libcomp.show", json!({"libcomp": "r_100k"})),
             ("net.show", json!({"net": "top/sda"})),
-            ("scene", json!({"block": "top", "sheet": "s1", "theme": "dark"})),
+            (
+                "scene",
+                json!({"block": "top", "sheet": "s1", "theme": "dark"}),
+            ),
             ("selection.set", json!({"refs": ["top/r1"]})),
-            ("view.set", json!({"block": "top", "sheet": "s1", "camera": {"centre_nm": [0, 0], "zoom_nm_per_pt": 10000}})),
+            (
+                "view.set",
+                json!({"block": "top", "sheet": "s1", "camera": {"centre_nm": [0, 0], "zoom_nm_per_pt": 10000}}),
+            ),
             ("view.show", json!({"ref": "top/r1", "participant": "p-1"})),
             ("undo", json!({})),
             ("redo", json!({})),
@@ -769,9 +919,15 @@ mod tests {
 
     #[test]
     fn cameras_turn_between_millimetres_and_nanometres() {
-        let c = Camera { centre: [12.5, -3.0], zoom: 4.0 };
+        let c = Camera {
+            centre: [12.5, -3.0],
+            zoom: 4.0,
+        };
         let n = to_nm(&c);
-        assert_eq!(n, json!({"centre_nm": [12_500_000, -3_000_000], "zoom_nm_per_pt": 250_000}));
+        assert_eq!(
+            n,
+            json!({"centre_nm": [12_500_000, -3_000_000], "zoom_nm_per_pt": 250_000})
+        );
         assert_eq!(from_nm(([12_500_000, -3_000_000], 250_000)), c);
     }
 
@@ -787,21 +943,40 @@ mod tests {
         assert!(t.ready(t0 + SELECT_EVERY));
         assert_eq!(t.wait(t0 + SELECT_EVERY), None);
         t.due();
-        assert_eq!(t.wait(t0 + SELECT_EVERY + Duration::from_millis(50)), Some(Duration::from_millis(100)));
+        assert_eq!(
+            t.wait(t0 + SELECT_EVERY + Duration::from_millis(50)),
+            Some(Duration::from_millis(100))
+        );
     }
 
     #[test]
     fn a_window_adopts_shows_it_didn_t_send() {
-        let sent = SheetView { block: Some("top".into()), sheet: Some("s1".into()), ..Default::default() };
+        let sent = SheetView {
+            block: Some("top".into()),
+            sheet: Some("s1".into()),
+            ..Default::default()
+        };
         let mut shown = sent.clone();
-        assert!(!adopts(&shown, Some(&sent), "me", true), "its own view comes back");
+        assert!(
+            !adopts(&shown, Some(&sent), "me", true),
+            "its own view comes back"
+        );
         shown.sheet = Some("s2".into());
         shown.shown_by = Some("me".into());
-        assert!(adopts(&shown, Some(&sent), "me", false), "its own Go to, always");
+        assert!(
+            adopts(&shown, Some(&sent), "me", false),
+            "its own Go to, always"
+        );
         shown.shown_by = Some("agent".into());
         assert!(adopts(&shown, Some(&sent), "me", true));
-        assert!(!adopts(&shown, Some(&sent), "me", false), "ui.follow_shows off");
+        assert!(
+            !adopts(&shown, Some(&sent), "me", false),
+            "ui.follow_shows off"
+        );
         let empty = SheetView::default();
-        assert!(!adopts(&empty, Some(&sent), "me", true), "a view that shows nothing");
+        assert!(
+            !adopts(&empty, Some(&sent), "me", true),
+            "a view that shows nothing"
+        );
     }
 }

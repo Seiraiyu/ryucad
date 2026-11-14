@@ -30,9 +30,15 @@ pub fn text_box(at: P, size: f64, width: f64, anchor: Anchor, vertical: bool) ->
     };
     let (lo, hi) = ([x0, -0.25 * size], [x0 + width, 0.75 * size]);
     if vertical {
-        [[at[0] - hi[1], at[1] + lo[0]], [at[0] - lo[1], at[1] + hi[0]]]
+        [
+            [at[0] - hi[1], at[1] + lo[0]],
+            [at[0] - lo[1], at[1] + hi[0]],
+        ]
     } else {
-        [[at[0] + lo[0], at[1] + lo[1]], [at[0] + hi[0], at[1] + hi[1]]]
+        [
+            [at[0] + lo[0], at[1] + lo[1]],
+            [at[0] + hi[0], at[1] + hi[1]],
+        ]
     }
 }
 
@@ -46,7 +52,10 @@ pub fn box_distance(p: P, b: [P; 2]) -> f64 {
 fn bounds(pts: &[P]) -> Option<[P; 2]> {
     let first = *pts.first()?;
     Some(pts.iter().fold([first, first], |[lo, hi], p| {
-        [[lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]]
+        [
+            [lo[0].min(p[0]), lo[1].min(p[1])],
+            [hi[0].max(p[0]), hi[1].max(p[1])],
+        ]
     }))
 }
 
@@ -59,14 +68,25 @@ fn rect_edges(r: [P; 2]) -> [P; 5] {
 pub fn distance(shape: &Shape, p: P) -> f64 {
     let pen = |d: f64, w: f64| (d - w / 2.0).max(0.0);
     match shape {
-        Shape::Polyline { points, fill, width, .. } => {
+        Shape::Polyline {
+            points,
+            fill,
+            width,
+            ..
+        } => {
             if fill.is_some() && bounds(points).is_some_and(|b| inside(p, b, 0.0)) {
                 return 0.0;
             }
             pen(polyline_distance(p, points), *width)
         }
         Shape::Bus { points, width, .. } => pen(polyline_distance(p, points), *width),
-        Shape::Circle { center, radius, fill, width, .. } => {
+        Shape::Circle {
+            center,
+            radius,
+            fill,
+            width,
+            ..
+        } => {
             let d = ryu_math::hypot(p[0] - center[0], p[1] - center[1]);
             if fill.is_some() && d <= *radius {
                 0.0
@@ -74,21 +94,39 @@ pub fn distance(shape: &Shape, p: P) -> f64 {
                 pen((d - radius).abs(), *width)
             }
         }
-        Shape::Arc { start, mid, end, width, .. } => pen(polyline_distance(p, &[*start, *mid, *end]), *width),
+        Shape::Arc {
+            start,
+            mid,
+            end,
+            width,
+            ..
+        } => pen(polyline_distance(p, &[*start, *mid, *end]), *width),
         Shape::Bezier { points, width, .. } => {
             let w = vec![1.0; points.len()];
-            let line: Vec<P> = (0..=16).map(|i| bezier_at(points, &w, f64::from(i) / 16.0)).collect();
+            let line: Vec<P> = (0..=16)
+                .map(|i| bezier_at(points, &w, f64::from(i) / 16.0))
+                .collect();
             pen(polyline_distance(p, &line), *width)
         }
-        Shape::Frame { rect, title_tab, width, .. } => {
+        Shape::Frame {
+            rect,
+            title_tab,
+            width,
+            ..
+        } => {
             if title_tab.is_some_and(|t| inside(p, t, 0.0)) {
                 return 0.0;
             }
             pen(polyline_distance(p, &rect_edges(*rect)), *width)
         }
-        Shape::Text { at, size, anchor, vertical, width, .. } => {
-            box_distance(p, text_box(*at, *size, *width, *anchor, *vertical))
-        }
+        Shape::Text {
+            at,
+            size,
+            anchor,
+            vertical,
+            width,
+            ..
+        } => box_distance(p, text_box(*at, *size, *width, *anchor, *vertical)),
     }
 }
 
@@ -97,7 +135,11 @@ pub fn distance(shape: &Shape, p: P) -> f64 {
 pub fn pick(scene: &Scene, p: P, reach: f64, alt: bool) -> Option<String> {
     let mut best: Option<((u8, f64), String)> = None;
     let mut offer = |key: (u8, f64), r: &str| {
-        if key.1 <= reach && best.as_ref().is_none_or(|(b, _)| key.0 < b.0 || (key.0 == b.0 && key.1 < b.1)) {
+        if key.1 <= reach
+            && best
+                .as_ref()
+                .is_none_or(|(b, _)| key.0 < b.0 || (key.0 == b.0 && key.1 < b.1))
+        {
             best = Some((key, r.to_owned()));
         }
     };
@@ -110,7 +152,9 @@ pub fn pick(scene: &Scene, p: P, reach: f64, alt: bool) -> Option<String> {
         offer((rank("pin"), d), r);
     }
     for it in &scene.items {
-        let Some(o) = it.owner.and_then(|i| scene.owners.get(i)) else { continue };
+        let Some(o) = it.owner.and_then(|i| scene.owners.get(i)) else {
+            continue;
+        };
         if let Some(b) = o.boxed
             && !inside(p, b, reach)
         {
@@ -131,18 +175,39 @@ mod tests {
         let s = Scene::from_json(&small()).unwrap();
         let reach = 0.5;
         // On pin 1's end, which the wire and its junction also touch.
-        assert_eq!(pick(&s, [0.0, 0.0], reach, false).as_deref(), Some("top/r1/1"));
+        assert_eq!(
+            pick(&s, [0.0, 0.0], reach, false).as_deref(),
+            Some("top/r1/1")
+        );
         // Alt: the pin's net instead.
-        assert_eq!(pick(&s, [0.0, 0.0], reach, true).as_deref(), Some("top/sda"));
+        assert_eq!(
+            pick(&s, [0.0, 0.0], reach, true).as_deref(),
+            Some("top/sda")
+        );
         // Inside the resistor's filled body.
-        assert_eq!(pick(&s, [5.0, 0.0], reach, false).as_deref(), Some("top/r1"));
+        assert_eq!(
+            pick(&s, [5.0, 0.0], reach, false).as_deref(),
+            Some("top/r1")
+        );
         // On the wire, away from the pin.
-        assert_eq!(pick(&s, [-3.0, 0.1], reach, false).as_deref(), Some("top/sda"));
+        assert_eq!(
+            pick(&s, [-3.0, 0.1], reach, false).as_deref(),
+            Some("top/sda")
+        );
         // On the label's text.
-        assert_eq!(pick(&s, [-6.0, 0.9], reach, false).as_deref(), Some("top/label:sda@1"));
+        assert_eq!(
+            pick(&s, [-6.0, 0.9], reach, false).as_deref(),
+            Some("top/label:sda@1")
+        );
         // On the region's frame edge, and on its title tab.
-        assert_eq!(pick(&s, [20.0, 5.0], reach, false).as_deref(), Some("top/region:power"));
-        assert_eq!(pick(&s, [-10.0, 11.5], reach, false).as_deref(), Some("top/region:power"));
+        assert_eq!(
+            pick(&s, [20.0, 5.0], reach, false).as_deref(),
+            Some("top/region:power")
+        );
+        assert_eq!(
+            pick(&s, [-10.0, 11.5], reach, false).as_deref(),
+            Some("top/region:power")
+        );
         // Empty paper inside the region: nothing.
         assert_eq!(pick(&s, [15.0, -7.0], reach, false), None);
         // The paper's border is owned by no one.

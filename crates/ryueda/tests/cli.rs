@@ -2954,7 +2954,11 @@ fn schematics_from_the_cli() {
         json!(["breakout/j1", "breakout/r1"]),
         "{list}"
     );
-    assert_eq!(list["instructions"][1]["refs"], json!(["breakout/sda"]), "{list}");
+    assert_eq!(
+        list["instructions"][1]["refs"],
+        json!(["breakout/sda"]),
+        "{list}"
+    );
     // Every part crowded beside J1 (design 519): left of it they come
     // nearer but not within the reach, so it is pulled and says how far is
     // left; below it nothing comes nearer, so it is laid out without, moves

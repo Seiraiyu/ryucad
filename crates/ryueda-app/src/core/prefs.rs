@@ -16,7 +16,9 @@ pub fn get(name: &str) -> Value {
 
 /// Sets one; a failure is the window's toast, never a crash.
 pub fn set(name: &str, value: Value) -> ryu_doc::error::Result<()> {
-    ryu_session::prefs::locked::<ryueda::Eda, _>(|| Preferences::<ryueda::Eda>::load()?.set(name, value))
+    ryu_session::prefs::locked::<ryueda::Eda, _>(|| {
+        Preferences::<ryueda::Eda>::load()?.set(name, value)
+    })
 }
 
 pub fn look() -> Look {

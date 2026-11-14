@@ -16,8 +16,16 @@ pub struct Eda;
 impl ryu_app::link::Client for Eda {
     type Product = ryueda::Eda;
     const PROGRAM: &'static str = "ryueda";
-    fn hello(kind: ryu_session::live::Kind, name: Option<String>, participant: Option<String>) -> Request {
-        Request::SessionHello { kind, name, participant }
+    fn hello(
+        kind: ryu_session::live::Kind,
+        name: Option<String>,
+        participant: Option<String>,
+    ) -> Request {
+        Request::SessionHello {
+            kind,
+            name,
+            participant,
+        }
     }
     fn cancel(token: String) -> Request {
         Request::RequestCancel { token, name: None }
@@ -71,7 +79,9 @@ impl ryu_app::toast::Words for Eda {
         }
         match method {
             m if m.ends_with(".add") || m.ends_with(".create") => "added",
-            m if m.ends_with(".edit") || m == "connect" || m == "disconnect" || m == "nc" => "edited",
+            m if m.ends_with(".edit") || m == "connect" || m == "disconnect" || m == "nc" => {
+                "edited"
+            }
             m if m.ends_with(".delete") => "deleted",
             "net.rename" => "renamed",
             "net.join" => "joined",

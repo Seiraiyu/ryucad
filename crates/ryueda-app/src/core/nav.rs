@@ -69,7 +69,14 @@ impl Navigator {
             .as_array()
             .into_iter()
             .flatten()
-            .map(|d| (s(&d["id"]), d["name"].as_str().map_or_else(|| s(&d["id"]), str::to_owned)))
+            .map(|d| {
+                (
+                    s(&d["id"]),
+                    d["name"]
+                        .as_str()
+                        .map_or_else(|| s(&d["id"]), str::to_owned),
+                )
+            })
             .collect();
     }
 
@@ -117,7 +124,11 @@ impl Navigator {
     /// `block.show`: a block's instances and nets.
     pub fn block(&mut self, v: &Value) {
         let pairs = |list: &Value, a: &str, b: &str| -> Vec<(String, String)> {
-            list.as_array().into_iter().flatten().map(|x| (s(&x[a]), s(&x[b]))).collect()
+            list.as_array()
+                .into_iter()
+                .flatten()
+                .map(|x| (s(&x[a]), s(&x[b])))
+                .collect()
         };
         self.blocks.insert(
             s(&v["reference"]),
@@ -135,7 +146,9 @@ impl Navigator {
         for b in self.blocks.values() {
             want.extend(b.instances.iter().map(|(_, of)| of.clone()));
         }
-        want.into_iter().filter(|b| !b.is_empty() && !self.blocks.contains_key(b)).collect()
+        want.into_iter()
+            .filter(|b| !b.is_empty() && !self.blocks.contains_key(b))
+            .collect()
     }
 
     /// A scene seen: its block's sheets, this sheet's regions and what it
@@ -158,7 +171,11 @@ impl Navigator {
 
     /// The design's hierarchy from its root.
     pub fn tree(&self, design: &str) -> Node {
-        let name = self.designs.iter().find(|(id, _)| id == design).map_or(design, |(_, n)| n.as_str());
+        let name = self
+            .designs
+            .iter()
+            .find(|(id, _)| id == design)
+            .map_or(design, |(_, n)| n.as_str());
         let root = self.roots.get(design).cloned().unwrap_or_default();
         let mut node = Node {
             label: format!("{name} ({root})"),
@@ -172,9 +189,15 @@ impl Navigator {
 
     fn grow(&self, node: &mut Node, path: &str, depth: usize) {
         // A cycle is a fault the daemon reports; the tree stops at 32.
-        let Some(b) = self.blocks.get(&node.block).filter(|_| depth < 32) else { return };
+        let Some(b) = self.blocks.get(&node.block).filter(|_| depth < 32) else {
+            return;
+        };
         for (id, of) in &b.instances {
-            let layer = if path.is_empty() { id.clone() } else { format!("{path}/{id}") };
+            let layer = if path.is_empty() {
+                id.clone()
+            } else {
+                format!("{path}/{id}")
+            };
             let mut child = Node {
                 label: format!("{id} ({of})"),
                 block: of.clone(),
@@ -192,7 +215,9 @@ impl Navigator {
     }
 
     pub fn regions(&self, block: &str, sheet: &str) -> &[String] {
-        self.regions.get(&(block.to_owned(), sheet.to_owned())).map_or(&[], Vec::as_slice)
+        self.regions
+            .get(&(block.to_owned(), sheet.to_owned()))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// The sheets of `block` that draw `reference` (a net through its
@@ -226,7 +251,9 @@ impl Navigator {
             })
             .filter(|r| {
                 q.is_empty()
-                    || [&r.refdes, &r.value, &r.mpn].iter().any(|c| c.to_lowercase().contains(&q))
+                    || [&r.refdes, &r.value, &r.mpn]
+                        .iter()
+                        .any(|c| c.to_lowercase().contains(&q))
             })
             .collect();
         rows.sort_by(|a, b| a.refdes.cmp(&b.refdes).then(a.reference.cmp(&b.reference)));
@@ -287,7 +314,10 @@ mod tests {
     fn components_and_nets_filter_by_any_column() {
         let n = nav();
         let all = n.components("d", "");
-        assert_eq!(all.iter().map(|r| r.refdes.as_str()).collect::<Vec<_>>(), ["R1", "U1"]);
+        assert_eq!(
+            all.iter().map(|r| r.refdes.as_str()).collect::<Vec<_>>(),
+            ["R1", "U1"]
+        );
         assert_eq!(all[1].mpn, "BME280");
         assert_eq!(all[1].reference, "sensor/u1");
         assert_eq!(n.components("d", "bme").len(), 1);
@@ -297,7 +327,13 @@ mod tests {
         assert_eq!(n.local("d:s1/u1/3"), "sensor/u1/3");
         assert_eq!(n.local("waiver/w1"), "waiver/w1");
         let nets = n.nets("top", "s");
-        assert_eq!(nets, [NetRow { name: "SDA".into(), reference: "top/sda".into() }]);
+        assert_eq!(
+            nets,
+            [NetRow {
+                name: "SDA".into(),
+                reference: "top/sda".into()
+            }]
+        );
     }
 
     #[test]
@@ -310,7 +346,13 @@ mod tests {
         let s2 = Scene::from_json(&v).unwrap();
         n.scene(&s1);
         n.scene(&s2);
-        assert_eq!(n.sheets("top"), [("s1".to_owned(), "Power".to_owned()), ("s2".to_owned(), "IO".to_owned())]);
+        assert_eq!(
+            n.sheets("top"),
+            [
+                ("s1".to_owned(), "Power".to_owned()),
+                ("s2".to_owned(), "IO".to_owned())
+            ]
+        );
         assert_eq!(n.regions("top", "s1"), ["top/region:power"]);
         // The net on s1 and, through its label, on s2.
         assert_eq!(n.reach("top", "top/sda"), ["s1", "s2"]);

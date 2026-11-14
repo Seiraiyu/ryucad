@@ -33,13 +33,18 @@ pub enum Subject {
 pub fn subject(reference: &str, kind: &str) -> Subject {
     let (block, rest) = reference.split_once('/').unwrap_or((reference, ""));
     match kind {
-        "pin" => Subject::Component(format!("{block}/{}", rest.split('/').next().unwrap_or(rest))),
+        "pin" => Subject::Component(format!(
+            "{block}/{}",
+            rest.split('/').next().unwrap_or(rest)
+        )),
         "component" => Subject::Component(reference.to_owned()),
         "net" | "bus" => Subject::Net(reference.to_owned()),
         "label" => rest
             .strip_prefix("label:")
             .and_then(|r| r.rsplit_once('@'))
-            .map_or(Subject::Other, |(net, _)| Subject::Net(format!("{block}/{net}"))),
+            .map_or(Subject::Other, |(net, _)| {
+                Subject::Net(format!("{block}/{net}"))
+            }),
         _ => Subject::Other,
     }
 }
@@ -68,7 +73,10 @@ pub struct Properties {
 
 impl Properties {
     pub fn new(reference: &str) -> Properties {
-        Properties { reference: reference.to_owned(), ..Default::default() }
+        Properties {
+            reference: reference.to_owned(),
+            ..Default::default()
+        }
     }
 
     fn row(&mut self, k: &str, v: &Value) {
@@ -135,7 +143,11 @@ impl Properties {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|i| strings(&i["refs"]).iter().any(|r| *r == me || me.starts_with(&format!("{r}/"))))
+            .filter(|i| {
+                strings(&i["refs"])
+                    .iter()
+                    .any(|r| *r == me || me.starts_with(&format!("{r}/")))
+            })
             .map(|i| s(&i["text"]))
             .collect();
     }
@@ -188,7 +200,8 @@ impl Findings {
     /// `lint.get`: every rule's what, why and fix.
     pub fn rules(&mut self, v: &Value) {
         for r in v["rules"].as_array().into_iter().flatten() {
-            self.rules.insert(s(&r["code"]), (s(&r["what"]), s(&r["why"]), s(&r["fix"])));
+            self.rules
+                .insert(s(&r["code"]), (s(&r["what"]), s(&r["why"]), s(&r["fix"])));
         }
     }
 
@@ -314,7 +327,7 @@ pub fn activity(v: &Value) -> Vec<Entry> {
             redo: can_redo(e),
         })
         .collect();
-    out.sort_by(|a, b| b.seq.cmp(&a.seq));
+    out.sort_by_key(|e| std::cmp::Reverse(e.seq));
     out
 }
 
@@ -325,29 +338,56 @@ mod tests {
 
     #[test]
     fn what_properties_ask_and_show() {
-        assert_eq!(subject("top/r1/2", "pin"), Subject::Component("top/r1".into()));
-        assert_eq!(subject("top/r1", "component"), Subject::Component("top/r1".into()));
-        assert_eq!(subject("top/label:sda@r1/1", "label"), Subject::Net("top/sda".into()));
+        assert_eq!(
+            subject("top/r1/2", "pin"),
+            Subject::Component("top/r1".into())
+        );
+        assert_eq!(
+            subject("top/r1", "component"),
+            Subject::Component("top/r1".into())
+        );
+        assert_eq!(
+            subject("top/label:sda@r1/1", "label"),
+            Subject::Net("top/sda".into())
+        );
         assert_eq!(subject("top/sda", "net"), Subject::Net("top/sda".into()));
         assert_eq!(subject("top/region:power", "region"), Subject::Other);
         let mut p = Properties::new("top/r1");
         p.component(&json!({"reference": "top/r1", "component": {"of": {"id": "r_100k"}, "refdes": "R1", "value": "100k",
             "parameters": {"tolerance": "1%"}}, "connections": {"1": "sda", "2": "rail:v3v3"}}));
-        p.libcomp(&json!({"libcomp": {"manufacturer": "Yageo", "mpn": "RC0402FR-07100KL",
-            "offers": [{"supplier": "LCSC", "sku": "C1"}]}}));
+        p.libcomp(
+            &json!({"libcomp": {"manufacturer": "Yageo", "mpn": "RC0402FR-07100KL",
+            "offers": [{"supplier": "LCSC", "sku": "C1"}]}}),
+        );
         p.instructions(&json!({"instructions": [
             {"id": "i1", "text": "beside R1 J1 right", "state": "held", "refs": ["top/j1", "top/r1"]},
             {"id": "i2", "text": "net SDA label", "state": "held", "refs": ["top/sda"]}]}));
-        let rows: Vec<(&str, &str)> = p.rows.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let rows: Vec<(&str, &str)> = p
+            .rows
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         assert!(rows.contains(&("Designator", "R1")));
         assert!(rows.contains(&("Value", "100k")));
         assert!(rows.contains(&("tolerance", "1%")));
         assert!(rows.contains(&("MPN", "RC0402FR-07100KL")));
         assert!(rows.contains(&("Offers", "LCSC C1")));
-        assert_eq!(p.pins, [("1".to_owned(), "sda".to_owned()), ("2".to_owned(), "rail:v3v3".to_owned())]);
+        assert_eq!(
+            p.pins,
+            [
+                ("1".to_owned(), "sda".to_owned()),
+                ("2".to_owned(), "rail:v3v3".to_owned())
+            ]
+        );
         assert_eq!(p.naming, ["beside R1 J1 right"]);
-        assert_eq!(libcomp_of(&json!({"component": {"of": {"id": "r_100k"}}})).as_deref(), Some("r_100k"));
-        assert_eq!(libcomp_of(&json!({"component": {"of": {"lib": "parts", "id": "x"}}})).as_deref(), Some("lib/parts/libcomp/x"));
+        assert_eq!(
+            libcomp_of(&json!({"component": {"of": {"id": "r_100k"}}})).as_deref(),
+            Some("r_100k")
+        );
+        assert_eq!(
+            libcomp_of(&json!({"component": {"of": {"lib": "parts", "id": "x"}}})).as_deref(),
+            Some("lib/parts/libcomp/x")
+        );
     }
 
     #[test]
@@ -355,7 +395,11 @@ mod tests {
         let mut f = Findings::default();
         f.rules(&json!({"rules": [{"code": "sch_crossing", "what": "W", "why": "Y", "fix": "F"}]}));
         f.sheet(&[crate::core::scene::Finding {
-            code: "sch_crossing".into(), severity: "warning".into(), message: "m".into(), refs: vec!["top/r1".into()] }]);
+            code: "sch_crossing".into(),
+            severity: "warning".into(),
+            message: "m".into(),
+            refs: vec!["top/r1".into()],
+        }]);
         f.erc(&json!({"designs": [{"design": "d", "findings": [
             {"code": "net_single_pin", "severity": "error", "message": "one pin", "refs": ["top/sda"], "waived": null},
             {"code": "x", "severity": "warning", "message": "waived", "refs": [], "waived": {"reason": "ok"}}]}],
@@ -365,7 +409,14 @@ mod tests {
         let all = f.all();
         assert_eq!(all.len(), 4, "{all:?}");
         assert_eq!(all[0].source, "lint");
-        assert_eq!((all[0].what.as_str(), all[0].why.as_str(), all[0].fix.as_str()), ("W", "Y", "F"));
+        assert_eq!(
+            (
+                all[0].what.as_str(),
+                all[0].why.as_str(),
+                all[0].fix.as_str()
+            ),
+            ("W", "Y", "F")
+        );
         assert_eq!(all[1].source, "erc");
         assert_eq!(all[1].refs, ["top/sda"]);
         assert_eq!(all[3].source, "check");

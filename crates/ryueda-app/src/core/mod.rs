@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod command;
 pub mod flash;
+pub mod geom;
 pub mod keys;
 pub mod link;
 pub mod lists;

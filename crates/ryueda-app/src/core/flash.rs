@@ -20,13 +20,17 @@ impl Flash {
     /// A scene arrived; `old` is the one it replaces. Another sheet (or
     /// block, or layer) clears what glowed.
     pub fn arrived(&mut self, old: Option<&Scene>, new: &Scene, now: Instant) {
-        let Some(old) = old.filter(|o| o.block == new.block && o.sheet == new.sheet && o.layer == new.layer) else {
+        let Some(old) =
+            old.filter(|o| o.block == new.block && o.sheet == new.sheet && o.layer == new.layer)
+        else {
             self.started.clear();
             return;
         };
         self.started.retain(|r, _| new.owner(r).is_some());
         for o in &new.owners {
-            let same = old.owner(&o.reference).is_some_and(|i| old.owners[i].hash == o.hash);
+            let same = old
+                .owner(&o.reference)
+                .is_some_and(|i| old.owners[i].hash == o.hash);
             if !same {
                 self.started.insert(o.reference.clone(), now);
             }
@@ -48,7 +52,8 @@ impl Flash {
 
     /// Drops what has stopped glowing.
     pub fn expire(&mut self, now: Instant) {
-        self.started.retain(|_, t| now.saturating_duration_since(*t) < GLOW);
+        self.started
+            .retain(|_, t| now.saturating_duration_since(*t) < GLOW);
     }
 
     /// Whether the window must keep drawing to fade.
@@ -79,7 +84,10 @@ mod tests {
         let new = Scene::from_json(&v).unwrap();
         let mut f = Flash::default();
         f.arrived(None, &old, t0);
-        assert!(f.glowing().next().is_none(), "the first scene glows nothing");
+        assert!(
+            f.glowing().next().is_none(),
+            "the first scene glows nothing"
+        );
         f.arrived(Some(&old), &new, t0);
         let mut on: Vec<&str> = f.glowing().collect();
         on.sort();

@@ -34,8 +34,17 @@ fn depends_on_ryueda_and_the_shell_and_never_on_ryucad_or_the_engine() {
     ] {
         for name in names(MANIFEST, section) {
             assert!(
-                !["ryukei", "ryucad", "ryucad-doc", "ryucad-app", "ryusch", "ryustep", "ryupdm", "ryudfm"]
-                    .contains(&name),
+                ![
+                    "ryukei",
+                    "ryucad",
+                    "ryucad-doc",
+                    "ryucad-app",
+                    "ryusch",
+                    "ryustep",
+                    "ryupdm",
+                    "ryudfm"
+                ]
+                .contains(&name),
                 "{section} names {name}"
             );
         }

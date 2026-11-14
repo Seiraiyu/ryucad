@@ -24,15 +24,57 @@ pub enum Anchor {
 /// One drawn thing, in millimetres.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
-    Polyline { points: Vec<P>, stroke: Color32, fill: Option<Color32>, width: f64, dash: bool },
-    Circle { center: P, radius: f64, stroke: Option<Color32>, fill: Option<Color32>, width: f64 },
-    Arc { start: P, mid: P, end: P, stroke: Color32, width: f64 },
-    Bezier { points: Vec<P>, stroke: Color32, width: f64 },
+    Polyline {
+        points: Vec<P>,
+        stroke: Color32,
+        fill: Option<Color32>,
+        width: f64,
+        dash: bool,
+    },
+    Circle {
+        center: P,
+        radius: f64,
+        stroke: Option<Color32>,
+        fill: Option<Color32>,
+        width: f64,
+    },
+    Arc {
+        start: P,
+        mid: P,
+        end: P,
+        stroke: Color32,
+        width: f64,
+    },
+    Bezier {
+        points: Vec<P>,
+        stroke: Color32,
+        width: f64,
+    },
     /// A region's frame (dashed unless `frame` is false) and its title's tab.
-    Frame { rect: [P; 2], title_tab: Option<[P; 2]>, stroke: Color32, paper: Color32, width: f64, frame: bool },
-    Bus { points: Vec<P>, stroke: Color32, width: f64 },
+    Frame {
+        rect: [P; 2],
+        title_tab: Option<[P; 2]>,
+        stroke: Color32,
+        paper: Color32,
+        width: f64,
+        frame: bool,
+    },
+    Bus {
+        points: Vec<P>,
+        stroke: Color32,
+        width: f64,
+    },
     /// `width` is the width SVG stretches the text to (`textLength`).
-    Text { text: String, at: P, size: f64, anchor: Anchor, vertical: bool, colour: Color32, bold: bool, width: f64 },
+    Text {
+        text: String,
+        at: P,
+        size: f64,
+        anchor: Anchor,
+        vertical: bool,
+        colour: Color32,
+        bold: bool,
+        width: f64,
+    },
 }
 
 /// An item with its owner's index and the PDF layer it is in, if any.
@@ -170,8 +212,16 @@ fn shape(v: &Value) -> Option<Shape> {
             stroke: stroke()?,
             width: width()?,
         },
-        "bezier" => Shape::Bezier { points: points(&v["points"])?, stroke: stroke()?, width: width()? },
-        "bus" => Shape::Bus { points: points(&v["points"])?, stroke: stroke()?, width: width()? },
+        "bezier" => Shape::Bezier {
+            points: points(&v["points"])?,
+            stroke: stroke()?,
+            width: width()?,
+        },
+        "bus" => Shape::Bus {
+            points: points(&v["points"])?,
+            stroke: stroke()?,
+            width: width()?,
+        },
         "frame" => Shape::Frame {
             rect: rect(&v["rect"])?,
             title_tab: rect(&v["title_tab"]),
@@ -227,7 +277,11 @@ impl Scene {
                 })
             })
             .collect::<Option<_>>()?;
-        let index = owners.iter().enumerate().map(|(i, o)| (o.reference.clone(), i)).collect();
+        let index = owners
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.reference.clone(), i))
+            .collect();
         let pins = v["pins"]
             .as_array()?
             .iter()
@@ -275,7 +329,10 @@ impl Scene {
                 .collect(),
             theme: text(&v["theme"]).unwrap_or_default(),
             revision: text(&v["revision"]).unwrap_or_default(),
-            revisions: v["revisions"].as_object().map(|m| m.clone().into_iter().collect()).unwrap_or_default(),
+            revisions: v["revisions"]
+                .as_object()
+                .map(|m| m.clone().into_iter().collect())
+                .unwrap_or_default(),
             paper: Paper {
                 size: point(&p["size"])?,
                 rect: rect(&p["rect"])?,
@@ -355,13 +412,24 @@ pub(crate) mod tests {
     #[test]
     fn a_scene_reads_in_millimetres_with_owners_layers_and_pins() {
         let s = Scene::from_json(&small()).unwrap();
-        assert_eq!((s.block.as_str(), s.sheet.as_str(), s.name.as_str()), ("top", "s1", "Power"));
+        assert_eq!(
+            (s.block.as_str(), s.sheet.as_str(), s.name.as_str()),
+            ("top", "s1", "Power")
+        );
         assert_eq!(s.sheets.len(), 2);
         assert_eq!(s.paper.size, [297.0, 210.0]);
         assert_eq!(s.paper.rect, [[-10.0, -20.0], [287.0, 190.0]]);
         assert_eq!(s.items.len(), 9, "begin and end become layers, not items");
         assert_eq!(s.items[0].owner, None);
-        let Shape::Polyline { points, fill, width, .. } = &s.items[1].shape else { panic!() };
+        let Shape::Polyline {
+            points,
+            fill,
+            width,
+            ..
+        } = &s.items[1].shape
+        else {
+            panic!()
+        };
         assert_eq!(points[1], [7.62, -1.0]);
         assert!(fill.is_some());
         assert!((width - 0.25).abs() < 1e-12);
@@ -373,7 +441,9 @@ pub(crate) mod tests {
         assert_eq!(s.pins[0].net.as_deref(), Some("top/sda"));
         assert_eq!(s.findings[0].refs, ["top/r1"]);
         assert_eq!(s.score, Some(912));
-        let Shape::Text { anchor, width, .. } = &s.items[2].shape else { panic!() };
+        let Shape::Text { anchor, width, .. } = &s.items[2].shape else {
+            panic!()
+        };
         assert_eq!(*anchor, Anchor::Middle);
         assert!((width - 1.6).abs() < 1e-12);
     }

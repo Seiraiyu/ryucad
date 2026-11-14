@@ -155,6 +155,9 @@ mod tests {
         assert!(!super::Eda::accepts("ui.theme", &json!("blue")));
         assert!(!super::Eda::accepts("ui.flash_changes", &json!("yes")));
         assert_eq!(super::Eda::default_of("ui.theme"), Some(json!("system")));
-        assert_eq!(super::Eda::default_of("ui.flash_changes"), Some(json!(true)));
+        assert_eq!(
+            super::Eda::default_of("ui.flash_changes"),
+            Some(json!(true))
+        );
     }
 }

@@ -76,7 +76,10 @@ pub fn marks(
     }
     let paint = |m: &mut Marks, r: &str, c: Color32| {
         for i in owners_of(scene, r) {
-            m.owners[i] = Some(Mark { fill: c, edge: None });
+            m.owners[i] = Some(Mark {
+                fill: c,
+                edge: None,
+            });
         }
         for (k, pin) in scene.pins.iter().enumerate() {
             if pin.reference == r {
@@ -125,16 +128,35 @@ mod tests {
         assert_eq!(m.owners[1].map(|x| x.fill), Some(sel));
         assert_eq!(m.owners[2].map(|x| x.fill), Some(sel));
         // The agent's selection, in its colour.
-        assert_eq!(m.owners[0].map(|x| x.fill), Some(color32(participant("a-1"))));
+        assert_eq!(
+            m.owners[0].map(|x| x.fill),
+            Some(color32(participant("a-1")))
+        );
         // The agent's highlight, in its style's colour, edged in its own.
         let h = m.owners[3].unwrap();
         assert_eq!(h.fill, color32(highlight(Style::Pending)));
         assert_eq!(h.edge, Some(color32(participant("a-1"))));
         // Hovering the region: hover is over another's highlight.
-        let m = marks(&s, "me", &[], Some("top/region:power"), &people, &flash, now);
+        let m = marks(
+            &s,
+            "me",
+            &[],
+            Some("top/region:power"),
+            &people,
+            &flash,
+            now,
+        );
         assert_eq!(m.owners[3].map(|x| x.fill), Some(color32(HOVER)));
         // A selected pin rings its pin.
-        let m = marks(&s, "me", &["top/r1/2".to_owned()], None, &people, &flash, now);
+        let m = marks(
+            &s,
+            "me",
+            &["top/r1/2".to_owned()],
+            None,
+            &people,
+            &flash,
+            now,
+        );
         assert_eq!(m.pins, [(1, sel)]);
     }
 
@@ -149,9 +171,14 @@ mod tests {
         let now = std::time::Instant::now();
         flash.arrived(Some(&s), &new, now);
         let m = marks(&new, "me", &[], None, &people, &flash, now);
-        assert_eq!(m.owners[0].unwrap().fill, color32(highlight(Style::Changed)));
+        assert_eq!(
+            m.owners[0].unwrap().fill,
+            color32(highlight(Style::Changed))
+        );
         let later = now + std::time::Duration::from_secs(1);
-        let faded = marks(&new, "me", &[], None, &people, &flash, later).owners[0].unwrap().fill;
+        let faded = marks(&new, "me", &[], None, &people, &flash, later).owners[0]
+            .unwrap()
+            .fill;
         assert!(faded.a() < 255 && faded.a() > 0, "{faded:?}");
     }
 }
