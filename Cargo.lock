@@ -5083,6 +5083,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryueda-app"
+version = "0.0.0"
+dependencies = [
+ "eframe",
+ "egui_kittest",
+ "egui_tiles",
+ "image",
+ "pollster 0.4.0",
+ "rfd",
+ "ryu-app",
+ "ryu-doc",
+ "ryu-math",
+ "ryu-session",
+ "ryueda",
+ "serde_json",
+ "tempfile",
+ "winit",
+]
+
+[[package]]
 name = "ryueda-parts"
 version = "0.0.0"
 dependencies = [

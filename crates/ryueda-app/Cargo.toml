@@ -1,0 +1,33 @@
+[package]
+name = "ryueda-app"
+description = "The ryueda desktop app: watch agents draw schematics, point at what you mean, and judge"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# egui on winit and wgpu, as ryucad-app's: all Rust, no C.
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "wayland", "wgpu", "x11"] }
+egui_tiles = "0.18"
+pollster = "0.4"
+# A dialog when the window can't start (no ryueda, another build, no
+# display): the XDG portal on Linux (all Rust), AppKit, Win32, as
+# ryucad-app's.
+rfd = "0.17"
+# The shell both apps share (design 519).
+ryu-app = { path = "../ryu-app" }
+ryu-doc = { path = "../ryu-doc" }
+ryu-math = { path = "../ryu-math" }
+ryu-session = { path = "../ryu-session" }
+# proto, client and the Eda marker: the daemon's requests and answers.
+ryueda = { path = "../ryueda" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+tempfile = "3"
