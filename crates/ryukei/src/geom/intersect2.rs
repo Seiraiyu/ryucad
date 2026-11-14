@@ -1563,6 +1563,7 @@ mod tests {
         b: (&Curve2, [f64; 2]),
         tol: f64,
     ) -> Option<Vec<Meet2>> {
+        // unmetered: a test's reference, the subdivision as it was
         let m = Meter::free();
         let ca = Chain2::new(a.0, a.1[0], a.1[1]);
         let cb = Chain2::new(b.0, b.1[0], b.1[1]);
