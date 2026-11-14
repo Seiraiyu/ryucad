@@ -388,7 +388,7 @@ pub(crate) mod tests {
         let d = <crate::Eda as Product>::defaults(&l, &id("r_100k")).unwrap();
         let c = content::libcomp(&l, &id("r_100k")).unwrap();
         assert_eq!(d["name"], serde_json::json!(c.value));
-        assert_eq!(d.get("description").is_some(), !c.description.is_empty());
+        assert_eq!(d.contains_key("description"), !c.description.is_empty());
         assert_eq!(d["make_buy"], "buy");
         let f = board(ProjectKind::Design);
         let d = <crate::Eda as Product>::defaults(&f, &id("d")).unwrap();
