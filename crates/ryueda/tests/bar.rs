@@ -117,8 +117,6 @@ fn annotating_ten_thousand_occurrences_is_within_its_bar() {
     assert!(took < bar(Duration::from_secs(1)), "{took:?}");
 }
 
-/// Design 347's bar: a search over 10,000 library components takes under
-/// 50 ms on one thread (the project already loaded).
 /// Design 518's bars: on the 10,000-occurrence design in a repository,
 /// `diff --netlist` from HEAD (read from Git's objects) within 1 s, and
 /// `merge status` of a clean merge (two branches renaming a net each)
@@ -202,6 +200,8 @@ fn a_netlist_diff_and_a_clean_merges_status_are_within_their_bars() {
     assert!(status < bar(Duration::from_secs(2)), "{status:?}");
 }
 
+/// Design 347's bar: a search over 10,000 library components takes under
+/// 50 ms on one thread (the project already loaded).
 #[test]
 #[cfg_attr(
     debug_assertions,

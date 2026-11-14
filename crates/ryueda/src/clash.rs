@@ -825,7 +825,12 @@ pub(crate) fn rename_refs(v: &mut Value, folder: &str, old: &str, to: &str) -> b
 /// Theirs' library object of a whole-file `id_collision` takes ID `to`:
 /// the file keeps ours' (its record settled), theirs' is written under
 /// the new ID, and every file the merge took whole from theirs that
-/// names the old ID locally names the new one.
+/// names a renumbered ID locally names the new one. Renumbers this
+/// repair didn't make count too, in this batch or an earlier one: each
+/// is a library object in neither side whose bytes are theirs' object
+/// under another ID that ours made differently ([`renumbered`]). So
+/// theirs' copies follow each other: a library component renumbered
+/// with its symbol names theirs' symbol, in either order.
 fn renumber_library(files: &mut Files, x: &Value, planned: &Value, sides: &Sides) -> Result<()> {
     let path = x["files"][0].as_str().unwrap_or_default().to_owned();
     let (folder, old) = library_object(&path)
@@ -846,27 +851,91 @@ fn renumber_library(files: &mut Files, x: &Value, planned: &Value, sides: &Sides
         .with("path", &new_path));
     }
     crate::validate::settle_record(files, &path, "", Kind::IdCollision, x.get("ours").cloned())?;
+    let mut renames = renumbered(files, sides);
+    renames.push((folder, old, to));
+    let follow = |v: &mut Value| {
+        let mut hit = false;
+        for (f, o, t) in &renames {
+            hit |= rename_refs(v, f, o, t);
+        }
+        hit
+    };
+    let mut copy = x["theirs"].clone();
+    follow(&mut copy);
     files.insert(
         new_path,
-        crate::canonical::to_string(&x["theirs"])
-            .into_bytes()
-            .into(),
+        crate::canonical::to_string(&copy).into_bytes().into(),
     );
-    let taken: Vec<String> = files
+    // Taken from theirs: a file ours has otherwise whose JSON is theirs'
+    // once both follow every renumber (an earlier one may have rewritten
+    // it), and every renumbered copy.
+    let copies: BTreeSet<&String> = renames
         .iter()
-        .filter(|(p, b)| sides.theirs.get(*p) == Some(*b) && sides.ours.get(*p) != Some(*b))
-        .map(|(p, _)| p.clone())
+        .map(|(f, _, t)| format!("library/{f}/{t}.json"))
+        .filter_map(|p| files.get_key_value(&p).map(|(k, _)| k))
         .collect();
-    for p in taken {
-        let Some(mut v) = files.get(&p).and_then(|b| json_of(b)) else {
-            continue;
-        };
-        if rename_refs(&mut v, &folder, &old, &to) {
-            let out = crate::merge::settle(&v, "", Kind::Value, Some(v.clone()));
-            files.insert(p, crate::canonical::to_string(&out).into_bytes().into());
+    let mut taken = Vec::new();
+    for (p, b) in files.iter() {
+        let Some(mut v) = json_of(b) else { continue };
+        let theirs = copies.contains(p)
+            || sides.theirs.get(p).is_some_and(|t| {
+                sides.ours.get(p) != Some(t)
+                    && json_of(t).is_some_and(|mut t| {
+                        follow(&mut t);
+                        let mut now = v.clone();
+                        follow(&mut now);
+                        t == now
+                    })
+            });
+        if theirs && follow(&mut v) {
+            taken.push((p.clone(), v));
         }
     }
+    for (p, v) in taken {
+        let out = crate::merge::settle(&v, "", Kind::Value, Some(v.clone()));
+        files.insert(p, crate::canonical::to_string(&out).into_bytes().into());
+    }
     Ok(())
+}
+
+/// The renumbers repairs already made in `files`, as `(folder, old,
+/// new)`: each library object in neither side whose JSON is theirs'
+/// object of the same folder under another ID, one ours has otherwise.
+/// Symbols and footprints first, since a library component's copy names
+/// them and matches theirs' only once it follows them.
+fn renumbered(files: &Files, sides: &Sides) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for want in ["symbols", "footprints", "components"] {
+        let mut found = Vec::new();
+        for (p, b) in files {
+            let Some((folder, new)) = library_object(p).filter(|(f, _)| *f == want) else {
+                continue;
+            };
+            if sides.ours.contains_key(p) || sides.theirs.contains_key(p) {
+                continue;
+            }
+            let Some(now) = json_of(b) else { continue };
+            for (q, t) in &sides.theirs {
+                let Some((_, old)) = library_object(q).filter(|(f, i)| *f == folder && i != &new)
+                else {
+                    continue;
+                };
+                if sides.ours.get(q).is_none_or(|o| o == t) {
+                    continue;
+                }
+                let Some(mut t) = json_of(t) else { continue };
+                for (f, o, n) in &out {
+                    rename_refs(&mut t, f, o, n);
+                }
+                if t == now {
+                    found.push((folder.to_owned(), old.to_owned(), new.to_owned()));
+                    break;
+                }
+            }
+        }
+        out.extend(found);
+    }
+    out
 }
 
 /// Which sides' changes reached `paths`: each side with a file that

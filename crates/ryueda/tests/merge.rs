@@ -724,6 +724,100 @@ fn a_library_component_both_sides_made_is_renumbered_with_its_users() {
     );
 }
 
+/// Both branches draw a symbol `vreg` and make a library component `vreg`
+/// of it, so the symbol and the component collide together: once both
+/// are renumbered, theirs' component names theirs' symbol, whether one
+/// `merge resolve` renumbers both or the symbol's comes first. (The
+/// component's alone first is refused: its users would name a symbol
+/// whose record is still unsettled.)
+#[test]
+fn a_symbol_and_its_library_component_renumbered_together_stay_wired() {
+    let make = |pins: &'static str, mpn: &'static str| {
+        vec![
+            vec![
+                "symbol",
+                "create",
+                "vreg",
+                "--template",
+                "ic",
+                "--pins",
+                pins,
+            ],
+            vec![
+                "libcomp",
+                "create",
+                "VREG",
+                "--symbol",
+                "vreg",
+                "--prefix",
+                "U",
+                "--value",
+                "vreg",
+                "--footprint",
+                "r_0402",
+                "--mpn",
+                mpn,
+            ],
+        ]
+    };
+    let sym = "library/symbols/vreg.json#";
+    let comp = "library/components/vreg.json#";
+    for batches in [vec![vec![sym, comp]], vec![vec![sym], vec![comp]]] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = branches(
+            &top,
+            &run,
+            &make(
+                r#"[{"number":"1","name":"A","type":"passive"},{"number":"2","name":"B","type":"passive"}]"#,
+                "OURS",
+            ),
+            &make(
+                r#"[{"number":"1","name":"IN","type":"passive"},{"number":"2","name":"OUT","type":"passive"}]"#,
+                "THEIRS",
+            ),
+        );
+        let list = items(&board, &run, false);
+        for id in [sym, comp] {
+            let c = list
+                .iter()
+                .find(|c| c["id"] == id)
+                .unwrap_or_else(|| panic!("{id}: {list:?}"));
+            assert_eq!(c["kind"], "id_collision");
+            assert_eq!(c["repairs"][0]["to"], "vreg-2");
+        }
+        for batch in &batches {
+            let mut args = vec!["merge", "resolve"];
+            args.extend(batch.iter().copied());
+            args.extend(["--repair", "renumber"]);
+            ok(&board, &run, false, &args);
+        }
+        let read = |p: &str| -> Value {
+            serde_json::from_slice(&std::fs::read(board.join(p)).unwrap()).unwrap()
+        };
+        let (ours, theirs) = (
+            read("library/components/vreg.json"),
+            read("library/components/vreg-2.json"),
+        );
+        assert_eq!(
+            (&ours["mpn"], &ours["symbol"]),
+            (&json!("OURS"), &json!({"id": "vreg"})),
+            "{batches:?}"
+        );
+        assert_eq!(
+            (&theirs["mpn"], &theirs["symbol"]),
+            (&json!("THEIRS"), &json!({"id": "vreg-2"})),
+            "{batches:?}"
+        );
+        assert_ne!(
+            read("library/symbols/vreg.json"),
+            read("library/symbols/vreg-2.json")
+        );
+    }
+}
+
 #[test]
 fn a_library_component_deleted_under_a_placement_is_restored() {
     let dir = tempfile::tempdir().unwrap();

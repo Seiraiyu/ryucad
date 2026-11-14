@@ -883,7 +883,8 @@ fn clashes(golden: &mut Golden, repo: &Path) {
         for side in ["ours", "theirs", "base"] {
             status[side]["commit"] = Value::Null;
         }
-        loop {
+        let mut settled = false;
+        for _ in 0..8 {
             let now = ryueda(&board, threads, &["merge", "status"]);
             let Some(c) = now["conflicts"]
                 .as_array()
@@ -892,6 +893,7 @@ fn clashes(golden: &mut Golden, repo: &Path) {
                 .find(|c| c["repairs"].as_array().is_some_and(|r| !r.is_empty()))
                 .cloned()
             else {
+                settled = true;
                 break;
             };
             let repair = c["repairs"][0]["id"].as_str().unwrap().to_owned();
@@ -907,6 +909,11 @@ fn clashes(golden: &mut Golden, repo: &Path) {
                 ],
             );
         }
+        assert!(
+            settled,
+            "not settled in eight rounds: {}",
+            ryueda(&board, threads, &["merge", "status"])["conflicts"]
+        );
         let mut h = blake3::Hasher::new();
         for (path, bytes) in files_of(&board) {
             h.update(path.as_bytes());
