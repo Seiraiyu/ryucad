@@ -650,38 +650,38 @@ pub(crate) enum Asked {
     MotionSwept(String, String),
 }
 
-impl Workspace {
-    pub(super) fn answer_assembly(&mut self, why: Asked, answer: Result<Answer>) {
+impl Assembly {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::DragSolve(part), a) => {
                 let mut again = false;
-                if let Some(d) = self.assembly.drag.as_mut().filter(|d| d.part == part) {
+                if let Some(d) = self.drag.as_mut().filter(|d| d.part == part) {
                     d.waiting = false;
                     again = d.asked.is_some_and(|(_, t)| t != d.translate);
                 }
                 match a {
                     // Only while it is still dragged: a late answer after
                     // the drop would undo the written move's look.
-                    Ok(a) if self.assembly.drag.is_some() => {
-                        self.model.preview_poses(&part, &a.result)
-                    }
+                    Ok(a) if self.drag.is_some() => fx.preview_poses(&part, &a.result),
                     Ok(_) => {}
-                    Err(e) => self.fail(e),
+                    Err(e) => fx.fail(e),
                 }
                 if again {
-                    self.ask_drag();
+                    fx.then(Then::AskDrag);
                 }
             }
             (Asked::MoveSolve(part), a) => {
-                self.assembly.mover_waiting = false;
-                let on = self.assembly.mover.as_ref().is_some_and(|m| m.part == part);
+                self.mover_waiting = false;
+                let on = self.mover.as_ref().is_some_and(|m| m.part == part);
                 match a {
                     // A late answer after the tool went would undo the
                     // written move's look.
-                    Ok(a) if on => self.model.preview_poses(&part, &a.result),
+                    Ok(a) if on => fx.preview_poses(&part, &a.result),
                     Ok(_) => {}
                     Err(e) => {
-                        if let Some(m) = self.assembly.mover.as_mut().filter(|_| on) {
+                        if let Some(m) = self.mover.as_mut().filter(|_| on) {
                             m.error = Some(e.message.clone());
                         }
                     }
@@ -689,7 +689,6 @@ impl Workspace {
             }
             (Asked::MatePreview(part, asked), a) => {
                 let Some(d) = self
-                    .assembly
                     .mating
                     .as_mut()
                     .filter(|d| d.part == part && d.asked == asked)
@@ -699,77 +698,72 @@ impl Workspace {
                 match a {
                     Ok(a) => {
                         d.previewed(Ok(a.result["converged"].as_bool().unwrap_or(false)));
-                        self.model.preview.retain(|(p, _), _| *p != part);
-                        self.model.preview_poses(&part, &a.result);
+                        fx.drop_preview(&part);
+                        fx.preview_poses(&part, &a.result);
                     }
                     Err(e) => {
                         let code = serde_json::to_value(e.code)
                             .ok()
                             .and_then(|v| v.as_str().map(str::to_owned));
                         d.previewed(Err((code.unwrap_or_default(), e.message.clone())));
-                        self.model.preview.retain(|(p, _), _| *p != part);
-                        self.model.generation += 1;
+                        fx.drop_preview(&part);
+                        fx.redraw();
                     }
                 }
             }
-            (Asked::MateAdd(_), Err(e)) => self.fail(e),
+            (Asked::MateAdd(_), Err(e)) => fx.fail(e),
             (Asked::MateAdd(_), Ok(_)) => {}
             (Asked::MoveWrite(part), a) => {
-                self.model.preview.retain(|(p, _), _| *p != part);
-                self.model.generation += 1;
+                fx.drop_preview(&part);
+                fx.redraw();
                 if let Err(e) = a {
-                    self.fail(e);
+                    fx.fail(e);
                 }
             }
             (Asked::DragMove(part), a) => {
                 if let Err(e) = a {
-                    self.model.preview.retain(|(p, _), _| *p != part);
-                    self.model.generation += 1;
-                    self.fail(e);
+                    fx.drop_preview(&part);
+                    fx.redraw();
+                    fx.fail(e);
                 }
             }
             (Asked::Explodes(part), Ok(a)) => {
-                if self.assembly.explodes.part.as_deref() == Some(part.as_str()) {
-                    self.assembly.explodes.listed(&part, &a.result);
-                    self.sync_explode();
+                if self.explodes.part.as_deref() == Some(part.as_str()) {
+                    self.explodes.listed(&part, &a.result);
+                    fx.then(Then::SyncExplode);
                 }
             }
             (Asked::Motions(part), Ok(a)) => {
-                if self.assembly.motions.part.as_deref() == Some(part.as_str()) {
-                    self.assembly.motions.listed(&part, &a.result);
-                    if self.assembly.motions.shown.is_some()
-                        && !self.assembly.motions.frames_current()
-                    {
-                        self.read_frames();
+                if self.motions.part.as_deref() == Some(part.as_str()) {
+                    self.motions.listed(&part, &a.result);
+                    if self.motions.shown.is_some() && !self.motions.frames_current() {
+                        fx.then(Then::ReadFrames);
                     }
-                    self.sync_moved();
+                    fx.then(Then::SyncMoved);
                 }
             }
             (Asked::MotionFrames(part, id), Ok(a)) => {
                 let wanted = self
-                    .assembly
                     .motions
                     .shown
                     .as_ref()
                     .is_some_and(|s| s.part == part && s.motion == id);
                 if wanted {
-                    self.assembly.motions.frames =
-                        crate::core::motion::Frames::from_json(&a.result);
-                    self.sync_moved();
+                    self.motions.frames = crate::core::motion::Frames::from_json(&a.result);
+                    fx.then(Then::SyncMoved);
                 }
             }
             (Asked::MotionSaved(part), r) => match r {
                 Ok(_) => {
-                    if self.assembly.motions.part.as_deref() == Some(part.as_str()) {
-                        self.assembly.motions.editing = None;
-                        self.read_motions();
+                    if self.motions.part.as_deref() == Some(part.as_str()) {
+                        self.motions.editing = None;
+                        fx.then(Then::ReadMotions);
                     }
                 }
-                Err(e) => self.fail(e),
+                Err(e) => fx.fail(e),
             },
             (Asked::MotionSwept(part, id), r) => {
                 let Some(w) = self
-                    .assembly
                     .motions
                     .sweep
                     .as_mut()
@@ -784,58 +778,48 @@ impl Workspace {
                         w.error = Some(e.message.clone());
                     }
                 }
-                self.model.generation += 1;
+                fx.redraw();
             }
             (Asked::ExplodeSaved(part, show), r) => match r {
                 Ok(a) => {
-                    if self.assembly.explodes.part.as_deref() == Some(part.as_str()) {
-                        self.read_explodes();
+                    if self.explodes.part.as_deref() == Some(part.as_str()) {
+                        fx.then(Then::ReadExplodes);
                     }
                     // A new explode, or one still there, is shown.
                     if let Some(id) = show
                         && a.result.get("steps").is_some()
-                        && self
-                            .assembly
-                            .explodes
-                            .shown
-                            .as_ref()
-                            .is_none_or(|s| s.explode != id)
+                        && self.explodes.shown.as_ref().is_none_or(|s| s.explode != id)
                     {
-                        self.show_explode(Some(&id), Some(1.0), false);
+                        fx.then(Then::ShowExplode(id));
                     }
-                    self.assembly.explodes.name.clear();
+                    self.explodes.name.clear();
                 }
                 Err(e) => {
-                    self.sync_explode();
-                    self.fail(e);
+                    fx.then(Then::SyncExplode);
+                    fx.fail(e);
                 }
             },
             (Asked::Clearance(part), a) => {
-                let Some(c) = self.assembly.clearance.as_mut().filter(|c| c.part == part) else {
+                let Some(c) = self.clearance.as_mut().filter(|c| c.part == part) else {
                     return;
                 };
                 match a {
                     Ok(a) => c.take(&a.result),
                     Err(e) => c.failed(e),
                 }
-                self.model.generation += 1;
+                fx.redraw();
             }
             (Asked::Interference(part), a) => {
-                let Some(i) = self
-                    .assembly
-                    .interference
-                    .as_mut()
-                    .filter(|i| i.part == part)
-                else {
+                let Some(i) = self.interference.as_mut().filter(|i| i.part == part) else {
                     return;
                 };
                 match a {
                     Ok(a) => i.take(&a.result),
                     Err(e) => i.failed(e),
                 }
-                self.model.generation += 1;
+                fx.redraw();
             }
-            (_, Err(e)) => self.fail(e),
+            (_, Err(e)) => fx.fail(e),
         }
     }
 }

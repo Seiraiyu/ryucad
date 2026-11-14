@@ -255,8 +255,7 @@ impl Workspace {
 
     /// The user's display quality, as the settings say.
     pub(super) fn display_quality(&self) -> ryucad::mesh::Quality {
-        ryucad::mesh::Quality::parse(self.session.settings.text("display.quality", "normal"))
-            .unwrap_or_default()
+        self.session.display_quality()
     }
 }
 
@@ -284,87 +283,109 @@ pub(crate) enum Asked {
     MotionShown,
 }
 
-impl Workspace {
-    pub(super) fn answer_session(&mut self, why: Asked, answer: Result<Answer>) {
+impl Session {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(
+        &mut self,
+        why: Asked,
+        answer: Result<Answer>,
+        me: &str,
+        fx: &mut Effects,
+    ) {
+        let doctor = matches!(why, Asked::Doctor);
         match (why, answer) {
             (Asked::Mode(_), Ok(_)) => {}
             (Asked::Mode(was), Err(e)) => {
-                self.session.mode = was;
-                self.fail(e);
+                self.mode = was;
+                fx.fail(e);
             }
             (Asked::People, Ok(a)) => {
-                self.session.people.reset(&a.result["participants"]);
-                self.follow_draft();
-                self.follow_focus();
+                self.people.reset(&a.result["participants"]);
+                fx.then(Then::FollowDraft);
+                fx.then(Then::FollowFocus);
             }
             // Drawn as its own request answers, not only when the
             // notification comes (#143).
             (Asked::Hidden, Ok(a)) => {
-                let me = self.link.participant.clone();
-                if let Some(p) = self.session.people.all.get_mut(&me) {
+                if let Some(p) = self.people.all.get_mut(me) {
                     p.hidden = a.result["hidden"]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .filter_map(|s| s.as_str().map(str::to_owned))
                         .collect();
-                    self.session.people.generation += 1;
+                    self.people.generation += 1;
                 }
-                self.follow_focus();
+                fx.then(Then::FollowFocus);
             }
-            (Asked::Cache, Ok(a)) => self.session.cache = Some(a.result),
+            (Asked::Cache, Ok(a)) => self.cache = Some(a.result),
             (Asked::CacheToken, Ok(a)) => {
-                self.session.cache_token = Some(a.result);
-                self.read_cache();
+                self.cache_token = Some(a.result);
+                fx.then(Then::ReadCache);
             }
             // Said beside the field, not only in the status line.
-            (Asked::CacheToken, Err(e)) => self.session.cache_token = Some(json!({"error": e})),
+            (Asked::CacheToken, Err(e)) => self.cache_token = Some(json!({"error": e})),
             (Asked::Sections, Ok(a)) => {
-                let me = self.link.participant.clone();
-                if let Some(p) = self.session.people.all.get_mut(&me) {
+                if let Some(p) = self.people.all.get_mut(me) {
                     p.sections =
                         serde_json::from_value(a.result["sections"].clone()).unwrap_or_default();
-                    self.session.people.generation += 1;
+                    self.people.generation += 1;
                 }
-                self.follow_sections();
+                fx.then(Then::FollowSections);
             }
             (Asked::ExplodeShown, Ok(a)) => {
-                let me = self.link.participant.clone();
-                if let Some(p) = self.session.people.all.get_mut(&me) {
+                if let Some(p) = self.people.all.get_mut(me) {
                     p.explode = crate::core::explode::Shown::from_json(&a.result["explode"]);
                     if p.explode.is_some() {
                         p.motion = None;
                     }
-                    self.session.people.generation += 1;
+                    self.people.generation += 1;
                 }
-                self.assembly.explodes.sliding = None;
-                self.follow_explode();
-                self.follow_motion();
+                fx.then(Then::ExplodeShown);
             }
             (Asked::MotionShown, Ok(a)) => {
-                let me = self.link.participant.clone();
-                if let Some(p) = self.session.people.all.get_mut(&me) {
+                if let Some(p) = self.people.all.get_mut(me) {
                     p.motion = crate::core::motion::Shown::from_json(&a.result["motion"]);
                     if p.motion.is_some() {
                         p.explode = None;
                     }
-                    self.session.people.generation += 1;
+                    self.people.generation += 1;
                 }
-                self.assembly.motions.sliding = None;
-                self.follow_explode();
-                self.follow_motion();
+                fx.then(Then::MotionShown);
             }
-            (Asked::Doctor, Ok(a)) => {
-                self.session.doctor = Some(crate::core::doctor::report_of(&a.result))
-            }
+            (Asked::Doctor, Ok(a)) => self.doctor = Some(crate::core::doctor::report_of(&a.result)),
             // A whole reading, or one changed setting: read them all again,
             // which also brings the project revision up to date.
             (Asked::Config, Ok(a)) if a.result.get("settings").is_some() => {
-                self.session.settings.reset(&a.result);
-                self.model.base = self.display_quality();
+                self.settings.reset(&a.result);
+                fx.base(self.display_quality());
             }
-            (Asked::Config, Ok(_)) => self.load_settings(),
-            (_, Err(e)) => self.fail(e),
+            (Asked::Config, Ok(_)) => fx.then(Then::LoadSettings),
+            (_, Err(e)) => fx.fail(e),
         }
+        // A report wanted while this one was on its way asks again
+        // (`Workspace::answered` did this after `answer` before 27.F).
+        if doctor {
+            self.doctor_waiting = false;
+            if std::mem::take(&mut self.doctor_again) {
+                fx.then(Then::Diagnose);
+            }
+        }
+    }
+}
+
+impl Session {
+    /// The user's display quality, as the settings say.
+    pub(super) fn display_quality(&self) -> ryucad::mesh::Quality {
+        ryucad::mesh::Quality::parse(self.settings.text("display.quality", "normal"))
+            .unwrap_or_default()
+    }
+}
+
+impl Session {
+    pub(super) fn on_lost(&mut self) {
+        self.doctor_waiting = false;
+        self.doctor_again = false;
     }
 }

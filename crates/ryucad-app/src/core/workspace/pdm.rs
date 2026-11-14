@@ -569,3 +569,15 @@ impl Pdm {
         }
     }
 }
+
+impl Pdm {
+    pub(super) fn on_lost(&mut self) {
+        if let Some(p) = &mut self.props {
+            p.saving = false;
+        }
+        self.releases.busy = false;
+        self.bom_waiting = false;
+        self.bom_again = false;
+        self.bom.saving = false;
+    }
+}

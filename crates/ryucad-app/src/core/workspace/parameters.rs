@@ -209,3 +209,14 @@ impl Parameters {
         }
     }
 }
+
+impl Parameters {
+    pub(super) fn on_lost(&mut self) {
+        if let Some(p) = &mut self.params {
+            p.saving = false;
+        }
+        if let Some(e) = &mut self.equations {
+            e.saving = None;
+        }
+    }
+}

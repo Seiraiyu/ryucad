@@ -1018,38 +1018,16 @@ impl Workspace {
                 self.pending.clear();
                 self.progress.lost();
                 self.toasts.lost(Instant::now());
-                // Saves that went unanswered can be tried again.
-                if let Some(f) = &mut self.forms.form {
-                    f.saving = false;
-                }
-                if let Some(f) = &mut self.forms.dimension {
-                    f.saving = false;
-                }
-                if let Some(p) = &mut self.parameters.params {
-                    p.saving = false;
-                }
-                if let Some(e) = &mut self.parameters.equations {
-                    e.saving = None;
-                }
-                if let Some(p) = &mut self.pdm.props {
-                    p.saving = false;
-                }
-                self.pdm.releases.busy = false;
-                self.pdm.bom_waiting = false;
-                self.pdm.bom_again = false;
-                self.pdm.bom.saving = false;
-                self.model.asked.clear();
-                self.model.sketches_asked.clear();
-                self.comparing.compare_waiting = false;
-                self.session.doctor_waiting = false;
-                self.session.doctor_again = false;
-                self.activity.history_waiting = false;
-                self.activity.history_again = false;
-                self.branches.branches_waiting = false;
-                self.branches.previewing = None;
-                if let Some(c) = &mut self.comparing.compare {
-                    c.asked.clear();
-                }
+                // Saves that went unanswered can be tried again, and what
+                // was asked for asked again.
+                self.forms.on_lost();
+                self.parameters.on_lost();
+                self.pdm.on_lost();
+                self.model.on_lost();
+                self.comparing.on_lost();
+                self.session.on_lost();
+                self.activity.on_lost();
+                self.branches.on_lost();
                 self.retry = Some(Retry {
                     at: Instant::now() + RETRY_FIRST,
                     delay: RETRY_FIRST,
@@ -1067,23 +1045,7 @@ impl Workspace {
         {
             self.model.received += b.len() as u64;
         }
-        let (doctor, history) = (
-            matches!(why, Pending::Session(session::Asked::Doctor)),
-            matches!(why, Pending::Activity(activity::Asked::History)),
-        );
         self.answer(why, answer);
-        if doctor {
-            self.session.doctor_waiting = false;
-            if std::mem::take(&mut self.session.doctor_again) {
-                self.diagnose();
-            }
-        }
-        if history {
-            self.activity.history_waiting = false;
-            if std::mem::take(&mut self.activity.history_again) {
-                self.load_history();
-            }
-        }
     }
 
     fn answer(&mut self, why: Pending, answer: Result<Answer>) {
@@ -1140,19 +1102,51 @@ impl Workspace {
                 self.drawings.answer(a, r, &mut fx);
                 self.apply(fx);
             }
-            (Pending::Activity(a), r) => self.answer_activity(a, r),
-            (Pending::Branches(a), r) => self.answer_branches(a, r),
-            (Pending::Deps(a), r) => self.answer_deps(a, r),
+            (Pending::Activity(a), r) => {
+                let mut fx = Effects::default();
+                self.activity.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
+            (Pending::Branches(a), r) => {
+                let mut fx = Effects::default();
+                self.branches.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
+            (Pending::Deps(a), r) => {
+                let mut fx = Effects::default();
+                self.deps.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
             (Pending::Pdm(a), r) => {
                 let mut fx = Effects::default();
                 self.pdm.answer(a, r, &mut fx);
                 self.apply(fx);
             }
-            (Pending::Annotations(a), r) => self.answer_annotations(a, r),
-            (Pending::Comparing(a), r) => self.answer_comparing(a, r),
-            (Pending::Session(a), r) => self.answer_session(a, r),
-            (Pending::Assembly(a), r) => self.answer_assembly(a, r),
-            (Pending::View(a), r) => self.answer_view(a, r),
+            (Pending::Annotations(a), r) => {
+                let mut fx = Effects::default();
+                self.annotations.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
+            (Pending::Comparing(a), r) => {
+                let mut fx = Effects::default();
+                self.comparing.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
+            (Pending::Session(a), r) => {
+                let mut fx = Effects::default();
+                self.session.answer(a, r, &self.link.participant, &mut fx);
+                self.apply(fx);
+            }
+            (Pending::Assembly(a), r) => {
+                let mut fx = Effects::default();
+                self.assembly.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
+            (Pending::View(a), r) => {
+                let mut fx = Effects::default();
+                self.view.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
             (Pending::Exchange(a), r) => {
                 let mut fx = Effects::default();
                 self.exchange.answer(a, r, &mut fx);

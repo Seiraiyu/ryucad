@@ -260,35 +260,37 @@ pub(crate) enum Asked {
     MarkupPost,
 }
 
-impl Workspace {
-    pub(super) fn answer_annotations(&mut self, why: Asked, answer: Result<Answer>) {
+impl crate::core::annotations::Annotations {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::Annotations, Ok(a)) => {
-                self.annotations.reset(&a.result);
-                self.model.generation += 1;
-                self.follow_draft();
+                self.reset(&a.result);
+                fx.redraw();
+                fx.then(Then::FollowDraft);
             }
             (Asked::AnnotationWrite, Ok(_)) => {}
             (Asked::MarkupPost, a) => match a {
                 // Posted: the bar closes, and the annotation is chosen, so
                 // its marks are drawn in its view.
                 Ok(a) => {
-                    self.annotations.markup = None;
+                    self.markup = None;
                     if let Some(id) = a.result["annotation"]["id"].as_str() {
                         let id = id.to_owned();
-                        self.choose_annotation(Some(&id));
+                        fx.then(Then::ChooseAnnotation(id));
                     }
                 }
                 // Refused: said on the bar, the marks kept.
-                Err(e) => match self.annotations.markup.as_mut() {
+                Err(e) => match self.markup.as_mut() {
                     Some(m) => {
                         m.posting = false;
                         m.note = Some(e.message.clone());
                     }
-                    None => self.fail(e),
+                    None => fx.fail(e),
                 },
             },
-            (_, Err(e)) => self.fail(e),
+            (_, Err(e)) => fx.fail(e),
         }
     }
 }

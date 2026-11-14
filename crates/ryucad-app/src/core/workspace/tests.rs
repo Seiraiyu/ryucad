@@ -188,3 +188,27 @@ fn a_stale_rebuild_answer_asks_the_part_again() {
         fx.recorded()
     );
 }
+
+/// The doctor's report, answered while another was wanted, asks again
+/// once taken: the session records it, as `answered` did after `answer`.
+#[test]
+fn a_doctor_answer_wanted_again_asks_again() {
+    let mut session = session::Session {
+        doctor_waiting: true,
+        doctor_again: true,
+        ..Default::default()
+    };
+    let mut fx = Effects::default();
+    session.answer(
+        session::Asked::Doctor,
+        answered(json!({"findings": []})),
+        "me",
+        &mut fx,
+    );
+    assert!(!session.doctor_waiting && !session.doctor_again);
+    assert!(
+        matches!(fx.recorded(), [Effect::Then(Then::Diagnose)]),
+        "{:?}",
+        fx.recorded()
+    );
+}

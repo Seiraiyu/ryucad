@@ -179,23 +179,7 @@ impl Workspace {
     /// How `target` (a reference) is drawn now: its face, else its first
     /// body's base.
     pub fn look_of(&self, target: Option<&str>) -> crate::core::appearance::Face {
-        let Some(t) = target else {
-            return Default::default();
-        };
-        let (part, rest) = t.split_once('/').unwrap_or((t, ""));
-        let is_name = |s: &str| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit());
-        let (prefix, face) = match rest.rsplit_once('/') {
-            Some((s, n)) if is_name(n) => (s, Some(n)),
-            _ => (rest, None),
-        };
-        let found = self.view.looks_read.iter().find(|((p, k), _)| {
-            p == part && (prefix.is_empty() || k == prefix || k.starts_with(&format!("{prefix}/")))
-        });
-        match (found, face) {
-            (Some((_, l)), Some(n)) => l.face(n),
-            (Some((_, l)), None) => l.base,
-            (None, _) => Default::default(),
-        }
+        self.view.look_of(target)
     }
 
     /// Shows `preview` over what the Appearance window colours, until it
@@ -318,67 +302,93 @@ pub(crate) enum Asked {
     AppearanceWritten,
 }
 
-impl Workspace {
-    pub(super) fn answer_view(&mut self, why: Asked, answer: Result<Answer>) {
+impl View {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::Views(part), Ok(a)) => {
-                if self.view.views.part.as_deref() == Some(part.as_str()) {
-                    self.view.views = crate::core::views::NamedViews::of(&part, &a.result);
+                if self.views.part.as_deref() == Some(part.as_str()) {
+                    self.views = crate::core::views::NamedViews::of(&part, &a.result);
                 }
             }
             (Asked::ViewSaved(part), a) => match a {
                 Ok(_) => {
-                    if self.view.views.part.as_deref() == Some(part.as_str()) {
-                        self.read_views();
+                    if self.views.part.as_deref() == Some(part.as_str()) {
+                        fx.then(Then::ReadViews);
                     }
                 }
                 Err(e) => {
-                    self.view.views.error = Some(e.clone());
-                    self.fail(e);
+                    self.views.error = Some(e.clone());
+                    fx.fail(e);
                 }
             },
             (Asked::Appearance(n), Ok(a)) => {
-                if n == self.view.looks_asked {
-                    self.view.looks_read = crate::core::appearance::read(&a.result);
-                    self.refresh_looks();
+                if n == self.looks_asked {
+                    self.looks_read = crate::core::appearance::read(&a.result);
+                    fx.then(Then::RefreshLooks);
                     // An open window shows its target as it is now.
-                    let now = self.look_of(self.view.appearance.target());
-                    self.view.appearance.reread(now, ryucad::render::SURFACE);
+                    let now = self.look_of(self.appearance.target());
+                    self.appearance.reread(now, ryucad::render::SURFACE);
                 }
             }
             (Asked::AppearanceWritten, a) => {
                 // What was dragged stays drawn until the new reading.
-                self.view.appearance.dragging = None;
+                self.appearance.dragging = None;
                 match a {
-                    Ok(_) => self.read_appearance(),
+                    Ok(_) => fx.then(Then::ReadAppearance),
                     Err(e) => {
-                        self.view.appearance.error = Some(e.clone());
-                        self.refresh_looks();
-                        self.fail(e);
+                        self.appearance.error = Some(e.clone());
+                        fx.then(Then::RefreshLooks);
+                        fx.fail(e);
                     }
                 }
             }
             (Asked::NormalTo, Ok(a)) => {
-                self.view.looked = serde_json::from_value(a.result["camera"].clone()).ok();
+                self.looked = serde_json::from_value(a.result["camera"].clone()).ok();
             }
             (Asked::Measure(picks), a) => {
                 match a {
-                    Ok(a) => self.view.measure.take(&picks, &a.result),
-                    Err(e) => self.view.measure.failed(&picks, e),
+                    Ok(a) => self.measure.take(&picks, &a.result),
+                    Err(e) => self.measure.failed(&picks, e),
                 }
-                self.model.generation += 1;
+                fx.redraw();
             }
             (Asked::Mass(of), a) => {
-                let Some(m) = self.view.mass.as_mut().filter(|m| m.of == of) else {
+                let Some(m) = self.mass.as_mut().filter(|m| m.of == of) else {
                     return;
                 };
                 match a {
                     Ok(a) => m.take(&a.result),
                     Err(e) => m.failed(e),
                 }
-                self.model.generation += 1;
+                fx.redraw();
             }
-            (_, Err(e)) => self.fail(e),
+            (_, Err(e)) => fx.fail(e),
+        }
+    }
+}
+
+impl View {
+    /// How `target` (a reference) is drawn now: its face, else its first
+    /// body's base.
+    pub fn look_of(&self, target: Option<&str>) -> crate::core::appearance::Face {
+        let Some(t) = target else {
+            return Default::default();
+        };
+        let (part, rest) = t.split_once('/').unwrap_or((t, ""));
+        let is_name = |s: &str| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        let (prefix, face) = match rest.rsplit_once('/') {
+            Some((s, n)) if is_name(n) => (s, Some(n)),
+            _ => (rest, None),
+        };
+        let found = self.looks_read.iter().find(|((p, k), _)| {
+            p == part && (prefix.is_empty() || k == prefix || k.starts_with(&format!("{prefix}/")))
+        });
+        match (found, face) {
+            (Some((_, l)), Some(n)) => l.face(n),
+            (Some((_, l)), None) => l.base,
+            (None, _) => Default::default(),
         }
     }
 }

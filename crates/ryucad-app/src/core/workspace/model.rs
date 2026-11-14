@@ -823,3 +823,11 @@ impl Model {
         self.generation += 1;
     }
 }
+
+impl Model {
+    /// What was asked for may never be answered: ask again.
+    pub(super) fn on_lost(&mut self) {
+        self.asked.clear();
+        self.sketches_asked.clear();
+    }
+}

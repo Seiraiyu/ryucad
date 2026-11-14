@@ -47,17 +47,34 @@ pub(crate) enum Asked {
     History,
 }
 
-impl Workspace {
-    pub(super) fn answer_activity(&mut self, why: Asked, answer: Result<Answer>) {
+impl Activity {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
+        let history = matches!(why, Asked::History);
         match (why, answer) {
-            (Asked::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
-            (Asked::History, Ok(a)) => self.activity.history = Some(a.result),
+            (Asked::Activity, Ok(a)) => self.reset(&a.result["entries"]),
+            (Asked::History, Ok(a)) => self.history = Some(a.result),
             // Said in the tab, not left spinning.
             (Asked::History, Err(e)) => {
-                self.activity.history = Some(json!({"error": e.message}));
-                self.fail(e);
+                self.history = Some(json!({"error": e.message}));
+                fx.fail(e);
             }
-            (_, Err(e)) => self.fail(e),
+            (_, Err(e)) => fx.fail(e),
         }
+        // The history wanted again while this reading was on its way.
+        if history {
+            self.history_waiting = false;
+            if std::mem::take(&mut self.history_again) {
+                fx.then(Then::LoadHistory);
+            }
+        }
+    }
+}
+
+impl Activity {
+    pub(super) fn on_lost(&mut self) {
+        self.history_waiting = false;
+        self.history_again = false;
     }
 }

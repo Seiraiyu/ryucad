@@ -333,3 +333,15 @@ impl Forms {
         }
     }
 }
+
+impl Forms {
+    /// Saves that went unanswered can be tried again.
+    pub(super) fn on_lost(&mut self) {
+        if let Some(f) = &mut self.form {
+            f.saving = false;
+        }
+        if let Some(f) = &mut self.dimension {
+            f.saving = false;
+        }
+    }
+}

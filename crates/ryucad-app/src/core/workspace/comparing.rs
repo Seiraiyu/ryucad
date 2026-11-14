@@ -170,32 +170,29 @@ pub(crate) enum Asked {
     Ghost(BodyKey, String),
 }
 
-impl Workspace {
-    pub(super) fn answer_comparing(&mut self, why: Asked, answer: Result<Answer>) {
+impl Comparing {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::Compare(n), r) => {
-                if n == self.comparing.compare_asked {
-                    self.comparing.compare_waiting = false;
+                if n == self.compare_asked {
+                    self.compare_waiting = false;
                 }
-                if let Some(c) = self
-                    .comparing
-                    .compare
-                    .as_mut()
-                    .filter(|_| n == self.comparing.compare_asked)
-                {
+                if let Some(c) = self.compare.as_mut().filter(|_| n == self.compare_asked) {
                     match r {
                         Ok(a) => c.take_diff(&a.result),
                         Err(e) => c.failed(e),
                     }
-                    self.model.generation += 1;
-                    self.fetch_ghosts();
+                    fx.redraw();
+                    fx.then(Then::FetchGhosts);
                 }
-                if std::mem::take(&mut self.comparing.compare_again) {
-                    self.ask_diff();
+                if std::mem::take(&mut self.compare_again) {
+                    fx.then(Then::AskDiff);
                 }
             }
             (Asked::Ghost(key, hash), a) => {
-                let Some(c) = &mut self.comparing.compare else {
+                let Some(c) = &mut self.compare else {
                     return;
                 };
                 c.answered(&key, &hash);
@@ -206,16 +203,25 @@ impl Workspace {
                         }
                         for b in bodies {
                             if c.take_ghost(&key.0, b) {
-                                self.model.generation += 1;
+                                fx.redraw();
                             }
                         }
                     }
-                    Ok(Some(Err(e))) | Err(e) => self.fail(e),
+                    Ok(Some(Err(e))) | Err(e) => fx.fail(e),
                     Ok(None) => {
-                        self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
+                        fx.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
                     }
                 }
             }
+        }
+    }
+}
+
+impl Comparing {
+    pub(super) fn on_lost(&mut self) {
+        self.compare_waiting = false;
+        if let Some(c) = &mut self.compare {
+            c.asked.clear();
         }
     }
 }

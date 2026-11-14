@@ -132,23 +132,25 @@ pub(crate) enum Asked {
     Resolve,
 }
 
-impl Workspace {
-    pub(super) fn answer_branches(&mut self, why: Asked, answer: Result<Answer>) {
+impl Branches {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::Merge, Ok(a)) => {
                 // A failure read again after keeps saying why.
-                let failed = self.branches.merge.as_mut().and_then(|m| m.failed.take());
+                let failed = self.merge.as_mut().and_then(|m| m.failed.take());
                 let mut m = Merge::of(a.result);
                 m.failed = failed;
-                self.branches.merge = Some(m);
+                self.merge = Some(m);
             }
             // No merge: nothing to show.
             (Asked::Merge, Err(e)) if matches!(e.code, Code::NotMerging | Code::NotAGitRepo) => {
-                self.branches.merge = None;
+                self.merge = None;
             }
-            (Asked::Merge, Err(e)) => self.branches.merge = Some(Merge::broken(e)),
+            (Asked::Merge, Err(e)) => self.merge = Some(Merge::broken(e)),
             (Asked::Resolve, Ok(a)) => {
-                if let Some(m) = &mut self.branches.merge {
+                if let Some(m) = &mut self.merge {
                     m.resolving = false;
                     m.status = a.result["status"].clone();
                 }
@@ -156,38 +158,38 @@ impl Workspace {
             (Asked::Resolve, Err(e)) => {
                 // Changed underneath: read the status again.
                 let again = matches!(e.code, Code::Conflict | Code::RepairConflict);
-                if let Some(m) = &mut self.branches.merge {
+                if let Some(m) = &mut self.merge {
                     m.resolving = false;
                     m.failed = Some(e);
                 }
                 if again {
-                    self.send(Request::MergeStatus {}, Pending::Branches(Asked::Merge));
+                    fx.send(Request::MergeStatus {}, Pending::Branches(Asked::Merge));
                 }
             }
             (Asked::Branches, a) => {
-                self.branches.branches_waiting = false;
+                self.branches_waiting = false;
                 match a {
                     Ok(a) => {
-                        self.branches.listed(a.result);
-                        self.ask_preview();
+                        self.listed(a.result);
+                        fx.then(Then::AskPreview);
                     }
                     // Said in the tab: outside a repository, there are none.
-                    Err(e) => self.branches.error = Some(e),
+                    Err(e) => self.error = Some(e),
                 }
             }
             (Asked::BranchList, a) => match a {
                 Ok(a) => {
-                    self.branches.branch_list = Some(a.result);
-                    self.branches.branch_error = None;
+                    self.branch_list = Some(a.result);
+                    self.branch_error = None;
                 }
                 // Said in the tab: outside a repository, there are none.
-                Err(e) => self.branches.branch_error = Some(e),
+                Err(e) => self.branch_error = Some(e),
             },
             (Asked::Switch, a) => {
                 match a {
-                    Ok(_) => self.branches.checkout = None,
+                    Ok(_) => self.checkout = None,
                     Err(e) => {
-                        if let Some(c) = self.branches.checkout.as_mut() {
+                        if let Some(c) = self.checkout.as_mut() {
                             c.busy = false;
                             c.refused = Some(e);
                         }
@@ -196,13 +198,20 @@ impl Workspace {
                 // The head moved, or the list was stale: read both again.
                 // The files' changes come as model.changed and
                 // project.changed, as an outside change's do.
-                self.load_branches();
-                self.reload_history();
+                fx.then(Then::LoadBranches);
+                fx.then(Then::ReloadHistory);
             }
             (Asked::Preview(path, key), a) => {
-                self.branches.previewed(path, key, a.map(|a| a.result));
-                self.ask_preview();
+                self.previewed(path, key, a.map(|a| a.result));
+                fx.then(Then::AskPreview);
             }
         }
+    }
+}
+
+impl Branches {
+    pub(super) fn on_lost(&mut self) {
+        self.branches_waiting = false;
+        self.previewing = None;
     }
 }

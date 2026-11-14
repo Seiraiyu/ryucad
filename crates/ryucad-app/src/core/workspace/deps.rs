@@ -166,28 +166,30 @@ pub(crate) enum Asked {
     DepsPlace,
 }
 
-impl Workspace {
-    pub(super) fn answer_deps(&mut self, why: Asked, answer: Result<Answer>) {
+impl Deps {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::DepsList, a) => {
                 match a {
-                    Ok(a) => self.deps.listed(&a.result),
-                    Err(e) => self.deps.error = Some(e),
+                    Ok(a) => self.listed(&a.result),
+                    Err(e) => self.error = Some(e),
                 }
-                self.model.set_marks(self.deps.marks());
+                fx.marks(self.marks());
             }
             (Asked::DepsOutdated, a) => {
-                self.deps.deps_waiting = false;
+                self.deps_waiting = false;
                 if let Ok(a) = a {
-                    self.deps.outdated(&a.result);
-                    self.model.set_marks(self.deps.marks());
+                    self.outdated(&a.result);
+                    fx.marks(self.marks());
                 }
-                if std::mem::take(&mut self.deps.deps_again) {
-                    self.load_deps();
+                if std::mem::take(&mut self.deps_again) {
+                    fx.then(Then::LoadDeps);
                 }
             }
             (Asked::DepsWrite, a) => {
-                self.deps.busy = false;
+                self.busy = false;
                 match a {
                     Ok(a) => {
                         if let Some(f) = a.result["fetched"].as_array() {
@@ -201,36 +203,35 @@ impl Workspace {
                             } else {
                                 "repositories"
                             };
-                            self.deps.fetched =
+                            self.fetched =
                                 Some(format!("fetched {} {what}, {changed} changed", f.len()));
                         }
                         if a.result["dependency"].is_object() {
-                            self.deps.add_url.clear();
-                            self.deps.add_path.clear();
-                            self.deps.add_name.clear();
+                            self.add_url.clear();
+                            self.add_path.clear();
+                            self.add_name.clear();
                         }
                     }
-                    Err(e) => self.deps.failed = Some(e),
+                    Err(e) => self.failed = Some(e),
                 }
                 // A fetch writes no project file: nothing else says so.
-                self.load_deps();
+                fx.then(Then::LoadDeps);
             }
             (Asked::DepsDry(names, part), a) => {
-                self.deps.busy = false;
+                self.busy = false;
                 match a {
                     Ok(a) => {
                         let mut u = Update::from_answer(&a.result);
                         u.names = names;
                         u.part = part;
-                        self.deps.update = Some(u);
+                        self.update = Some(u);
                     }
-                    Err(e) => self.deps.failed = Some(e),
+                    Err(e) => self.failed = Some(e),
                 }
-                self.load_deps();
+                fx.then(Then::LoadDeps);
             }
             (Asked::DepsParts(name), a) => {
                 if let Some(p) = self
-                    .deps
                     .picker
                     .as_mut()
                     .filter(|p| p.dependency.as_deref() == Some(name.as_str()))
@@ -245,9 +246,9 @@ impl Workspace {
                 }
             }
             (Asked::DepsPlace, a) => match a {
-                Ok(_) => self.deps.picker = None,
+                Ok(_) => self.picker = None,
                 Err(e) => {
-                    if let Some(p) = self.deps.picker.as_mut() {
+                    if let Some(p) = self.picker.as_mut() {
                         p.placing = false;
                         p.error = Some(e);
                     }
