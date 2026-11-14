@@ -377,6 +377,28 @@ mod tests {
     use crate::NurbsError;
     use core::f64::consts::FRAC_1_SQRT_2;
 
+    /// A linear rational segment with weights a hundredfold apart, seen
+    /// from a kilometre away: the foot is inside it, near the light end,
+    /// not at that end (the `nurbs` fuzz target, 2026-11-04).
+    #[test]
+    fn a_segment_crushed_by_its_weights() {
+        let k = KnotVector::clamped(1, &[3.0, 5.0], &[2, 2]).unwrap();
+        let c = NurbsCurve::new(
+            k,
+            vec![
+                Point3::new(6.0, 6.0, 5.952941176470588),
+                Point3::new(5.952941176470588, 6.0, 6.0),
+            ],
+            Some(vec![5.0, 0.05]),
+        )
+        .unwrap();
+        let p = Point3::new(-600.0, -600.0, -600.0);
+        let foot = c.project(p);
+        let end = c.point(5.0).distance(p);
+        assert!(foot.param < 4.99 && foot.param > 4.97, "{foot:?}");
+        assert!(foot.distance < end - 4e-7, "{foot:?} against {end}");
+    }
+
     fn close(a: Vector3, b: Vector3, tol: f64) -> bool {
         (a - b).length() <= tol
     }

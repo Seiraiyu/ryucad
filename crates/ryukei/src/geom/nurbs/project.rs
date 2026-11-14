@@ -24,8 +24,11 @@ const MAX_SPLITS: u32 = 48;
 /// Newton or bisection steps per root.
 const MAX_STEPS: u32 = 64;
 
-/// Below this fraction of the largest product term a coefficient counts
-/// as zero: rounding can't decide its sign.
+/// A coefficient whose size is below this fraction of the sizes of the
+/// terms that make it (before they cancel) counts as zero: rounding can't
+/// decide its sign. Each coefficient has its own threshold
+/// ([`curve_poly`]), so a light end of a rational piece isn't judged by
+/// its heavy end's terms.
 const ZERO: f64 = 1e-12;
 
 /// `C(n, k)` in f64, by the multiplicative formula (exact while the
@@ -42,19 +45,44 @@ pub(crate) fn deriv<T: Copy + Sub<Output = T> + Mul<f64, Output = T>>(c: &[T]) -
 }
 
 /// The product of a vector-valued and a scalar Bernstein polynomial, and
-/// the size of its largest term.
-pub(crate) fn mul_by<V: Coords>(a: &[V], w: &[f64]) -> (Vec<V>, f64) {
+/// each coefficient's size before its terms cancel, from the sizes of the
+/// factors' coefficients (`a_size`, `w_size`).
+pub(crate) fn mul_by<V: Coords>(
+    a: &[V],
+    a_size: &[f64],
+    w: &[f64],
+    w_size: &[f64],
+) -> (Vec<V>, Vec<f64>) {
     let (m, n) = (a.len() - 1, w.len() - 1);
     let mut c = vec![V::ZERO; m + n + 1];
-    let mut big: f64 = 0.0;
+    let mut size = vec![0.0; m + n + 1];
     for (i, &ai) in a.iter().enumerate() {
         for (j, &wj) in w.iter().enumerate() {
             let k = binom(m, i) * binom(n, j) / binom(m + n, i + j);
             c[i + j] = c[i + j] + ai * (wj * k);
-            big = big.max(math::sqrt(ai.dot(ai)) * wj * k);
+            size[i + j] += a_size[i] * w_size[j] * k;
         }
     }
-    (c, big)
+    (c, size)
+}
+
+/// The sizes of a derivative's coefficients before they cancel: `n (c[i+1]
+/// - c[i])` from coefficients of sizes `s[i]` and `s[i+1]`.
+fn deriv_sizes(s: &[f64]) -> Vec<f64> {
+    let n = (s.len() - 1) as f64;
+    s.windows(2).map(|w| (w[0] + w[1]) * n).collect()
+}
+
+/// The sizes of a product's coefficients, from the sizes of its factors'.
+fn mul_sizes(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let (m, n) = (a.len() - 1, b.len() - 1);
+    let mut c = vec![0.0; m + n + 1];
+    for (i, &ai) in a.iter().enumerate() {
+        for (j, &bj) in b.iter().enumerate() {
+            c[i + j] += ai * bj * (binom(m, i) * binom(n, j) / binom(m + n, i + j));
+        }
+    }
+    c
 }
 
 /// The dot product of two vector-valued Bernstein polynomials.
@@ -107,12 +135,13 @@ pub(crate) enum Signs {
     Unknown,
 }
 
-/// The signs of a polynomial's coefficients, in one pass.
-pub(crate) fn signs(c: impl IntoIterator<Item = f64>, zero: f64) -> Signs {
+/// The signs of a polynomial's coefficients, each judged against its own
+/// zero threshold, in one pass.
+pub(crate) fn signs_each(c: impl IntoIterator<Item = (f64, f64)>) -> Signs {
     let (mut all_pos, mut all_neg, mut nonzero) = (true, true, false);
     let (mut first, mut last, mut prev, mut changes) = (None, 0i8, 0i8, 0);
     let mut first_sig = 0i8;
-    for x in c {
+    for (x, zero) in c {
         let s: i8 = if x > zero {
             1
         } else if x < -zero {
@@ -151,27 +180,52 @@ pub(crate) fn signs(c: impl IntoIterator<Item = f64>, zero: f64) -> Signs {
     }
 }
 
+/// The signs of a polynomial's coefficients against one zero threshold.
+pub(crate) fn signs(c: impl IntoIterator<Item = f64>, zero: f64) -> Signs {
+    signs_each(c.into_iter().map(|x| (x, zero)))
+}
+
 /// The sign of the first coefficient rounding can sign, or 0 if none.
-fn lead(c: impl IntoIterator<Item = f64>, zero: f64) -> i8 {
+fn lead(c: impl IntoIterator<Item = (f64, f64)>) -> i8 {
     c.into_iter()
-        .find(|x| x.abs() > zero)
-        .map_or(0, |x| if x > 0.0 { 1 } else { -1 })
+        .find(|(x, zero)| x.abs() > *zero)
+        .map_or(0, |(x, _)| if x > 0.0 { 1 } else { -1 })
+}
+
+/// Coefficients paired with their thresholds.
+fn paired<'a>(g: &'a [f64], z: &'a [f64]) -> impl DoubleEndedIterator<Item = (f64, f64)> + 'a {
+    g.iter().copied().zip(z.iter().copied())
 }
 
 /// The Bernstein coefficients of `(A - pW)·(A'W - AW')` on a piece, and
-/// the size below which a coefficient counts as zero. Writing the second
-/// factor with `A - pW` in place of `A` gives the same polynomial with
-/// smaller terms. The threshold scales with the terms before they cancel:
-/// where the curve stands still (a collapsed control polygon), `A'W - AW'`
-/// is rounding noise however small it is.
-fn curve_poly<V: Coords>(pts: &[Hom<V>], p: V) -> (Vec<f64>, f64) {
+/// each coefficient's zero threshold. Writing the second factor with
+/// `A - pW` in place of `A` gives the same polynomial with smaller terms.
+/// Each threshold scales with the terms that make that coefficient
+/// before they cancel (the control point and `p` too, not only their
+/// difference): where the curve stands still (a collapsed control
+/// polygon), `A'W - AW'` is rounding noise however small it is; where
+/// the weights are far apart, a light end's coefficient is as small as
+/// its own terms, not the heavy end's.
+fn curve_poly<V: Coords>(pts: &[Hom<V>], p: V) -> (Vec<f64>, Vec<f64>) {
     let a: Vec<V> = pts.iter().map(|h| (h.p - p) * h.w).collect();
     let w: Vec<f64> = pts.iter().map(|h| h.w).collect();
-    let (da, big_da) = mul_by(&deriv(&a), &w);
-    let (dw, big_dw) = mul_by(&a, &deriv(&w));
+    // `A - pW` carries the rounding of the point and of `p` before they
+    // cancel: near a foot it is far smaller than its own error.
+    let p_size = math::sqrt(p.dot(p));
+    let a_size: Vec<f64> = pts
+        .iter()
+        .map(|h| (math::sqrt(h.p.dot(h.p)) + p_size) * h.w.abs())
+        .collect();
+    let w_size: Vec<f64> = w.iter().map(|x| x.abs()).collect();
+    let (da, da_size) = mul_by(&deriv(&a), &deriv_sizes(&a_size), &w, &w_size);
+    let (dw, dw_size) = mul_by(&a, &a_size, &deriv(&w), &deriv_sizes(&w_size));
     let b: Vec<V> = da.iter().zip(&dw).map(|(&x, &y)| x - y).collect();
-    let size = a.iter().map(|&x| math::sqrt(x.dot(x))).fold(0.0, f64::max);
-    (mul_dot(&a, &b), ZERO * size * big_da.max(big_dw))
+    let b_size: Vec<f64> = da_size.iter().zip(&dw_size).map(|(x, y)| x + y).collect();
+    let zeros = mul_sizes(&a_size, &b_size)
+        .into_iter()
+        .map(|s| ZERO * s)
+        .collect();
+    (mul_dot(&a, &b), zeros)
 }
 
 /// The knots where a spline may have a kink: interior knots of
@@ -278,7 +332,7 @@ impl<V: Coords> Spline<V> {
         &self,
         p: V,
         [a, b]: [f64; 2],
-        (g, zero): (&[f64], f64),
+        (g, z): (&[f64], &[f64]),
         depth: u32,
         all: bool,
         out: &mut Vec<f64>,
@@ -292,7 +346,7 @@ impl<V: Coords> Spline<V> {
                 out.push(self.solve(p, a, b, false));
             }
         };
-        match signs(g.iter().copied(), zero) {
+        match signs_each(paired(g, z)) {
             Signs::Excluded => {}
             // The distance is constant: every point is a minimum.
             Signs::Zero if depth == 0 => out.push(a),
@@ -304,9 +358,7 @@ impl<V: Coords> Spline<V> {
             // or none.
             Signs::One { rising: false } if all => out.push(self.solve(p, a, b, false)),
             Signs::Edge { rising: false }
-                if all
-                    && lead(g.iter().copied(), zero) > 0
-                    && lead(g.iter().rev().copied(), zero) < 0 =>
+                if all && lead(paired(g, z)) > 0 && lead(paired(g, z).rev()) < 0 =>
             {
                 out.push(self.solve(p, a, b, false))
             }
@@ -314,20 +366,18 @@ impl<V: Coords> Spline<V> {
             Signs::Unknown if depth >= MAX_SPLITS => leaf(out),
             Signs::Unknown => {
                 let (l, r) = split_scalar(g, 0.5);
+                let (zl, zr) = split_scalar(z, 0.5);
                 let m = a + (b - a) * 0.5;
-                self.isolate(p, [a, m], (&l, zero), depth + 1, all, out);
+                self.isolate(p, [a, m], (&l, &zl), depth + 1, all, out);
                 // A root on the split itself is no root of either half: it
                 // shows as a zero at their shared end.
-                let (before, after) = (
-                    lead(l.iter().rev().copied(), zero),
-                    lead(r.iter().copied(), zero),
-                );
-                if l[l.len() - 1].abs() <= zero
+                let (before, after) = (lead(paired(&l, &zl).rev()), lead(paired(&r, &zr)));
+                if l[l.len() - 1].abs() <= zl[zl.len() - 1]
                     && ((before < 0 && after > 0) || (all && before > 0 && after < 0))
                 {
                     out.push(m);
                 }
-                self.isolate(p, [m, b], (&r, zero), depth + 1, all, out);
+                self.isolate(p, [m, b], (&r, &zr), depth + 1, all, out);
             }
         }
     }
@@ -341,12 +391,9 @@ impl<V: Coords> Spline<V> {
         let mut ts = Vec::new();
         let mut ends = Vec::with_capacity(pieces.len());
         for piece in pieces {
-            let (g, zero) = curve_poly(&piece.pts, p);
-            self.isolate(p, piece.range, (&g, zero), 0, true, &mut ts);
-            ends.push((
-                lead(g.iter().copied(), zero),
-                lead(g.iter().rev().copied(), zero),
-            ));
+            let (g, z) = curve_poly(&piece.pts, p);
+            self.isolate(p, piece.range, (&g, &z), 0, true, &mut ts);
+            ends.push((lead(paired(&g, &z)), lead(paired(&g, &z).rev())));
         }
         let n = pieces.len();
         for i in 0..n {
@@ -389,7 +436,7 @@ impl<V: Coords> Spline<V> {
             .flat_map(|x| [x.pts[0].p, x.pts[x.pts.len() - 1].p])
             .map(dist)
             .fold(f64::INFINITY, f64::min);
-        // Each piece's polynomial and zero threshold; `None` where pruned.
+        // Each piece's polynomial and zero thresholds; `None` where pruned.
         let mut polys = Vec::with_capacity(pieces.len());
         for piece in pieces {
             if prune {
@@ -399,13 +446,13 @@ impl<V: Coords> Spline<V> {
                     continue;
                 }
             }
-            let (g, zero) = curve_poly(&piece.pts, p);
+            let (g, z) = curve_poly(&piece.pts, p);
             let before = ts.len();
-            self.isolate(p, piece.range, (&g, zero), 0, false, &mut ts);
+            self.isolate(p, piece.range, (&g, &z), 0, false, &mut ts);
             for &t in &ts[before..] {
                 bound = bound.min(dist(self.eval(t)[0]));
             }
-            polys.push(Some((g, zero)));
+            polys.push(Some((g, z)));
         }
         // A minimum can also sit on a piece boundary: where `f` turns from
         // negative to positive at the knot itself (a root there, or a kink
@@ -414,11 +461,11 @@ impl<V: Coords> Spline<V> {
         // coefficient at that end, or of the nearest one rounding can sign:
         // where `C'` vanishes, `f` itself is only rounding there.
         let side = |i: usize, from_end: bool| {
-            polys[i].as_ref().map(|(g, zero): &(Vec<f64>, f64)| {
+            polys[i].as_ref().map(|(g, z)| {
                 if from_end {
-                    lead(g.iter().rev().copied(), *zero)
+                    lead(paired(g, z).rev())
                 } else {
-                    lead(g.iter().copied(), *zero)
+                    lead(paired(g, z))
                 }
             })
         };

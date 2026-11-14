@@ -6,9 +6,9 @@
 //! into the body they were written from.
 
 use ryukei::Error;
-use ryukei::geom::{KnotVector, NurbsSurface, Point3};
 use ryukei::boolean::boolean;
 use ryukei::check::{check, check_intersections};
+use ryukei::geom::{KnotVector, NurbsSurface, Point3};
 use ryukei::heal::{HealOptions, heal};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
