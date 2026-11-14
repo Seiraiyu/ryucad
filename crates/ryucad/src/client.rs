@@ -186,6 +186,23 @@ pub fn absolute_params(method: &str, params: &mut Value, here: &Path) {
     let Some(map) = params.as_object_mut() else {
         return;
     };
+    // A batch's ops are requests of their own (design 603): each op's
+    // params by its own method.
+    if method == "batch" {
+        if let Some(Value::Array(ops)) = map.get_mut("ops") {
+            for op in ops {
+                let m = op
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                if let Some(p) = op.get_mut("params") {
+                    absolute_params(&m, p, here);
+                }
+            }
+        }
+        return;
+    }
     let paths = PATH_PARAMS
         .iter()
         .find(|(m, _)| *m == method)
@@ -407,5 +424,25 @@ mod tests {
         }
         // SAFETY: a plain Win32 call with no arguments.
         assert!(unsafe { GetConsoleWindow() }.is_null());
+    }
+
+    #[test]
+    fn a_batchs_ops_are_made_absolute_by_their_own_methods() {
+        let here = Path::new("work");
+        let mut params = json!({"ops": [
+            {"method": "feature.add", "params": {"part": "a", "type": "instance", "of": "p",
+                                                 "rev": "worktree:../arm"}},
+            {"method": "export", "params": {"part": "a", "out": "a.step"}},
+            {"method": "materials.set"}
+        ]});
+        absolute_params("batch", &mut params, here);
+        assert_eq!(
+            params["ops"][0]["params"]["rev"],
+            format!("{}{}", crate::session::WORKTREE, abs(here, "../arm"))
+        );
+        // The batch refuses an unbatchable op; its paths are made absolute
+        // all the same, as the request's own would be.
+        assert_eq!(params["ops"][1]["params"]["out"], abs(here, "a.step"));
+        assert!(params["ops"][2].get("params").is_none());
     }
 }
