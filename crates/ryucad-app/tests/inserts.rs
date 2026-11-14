@@ -35,8 +35,14 @@ fn open(p: &Project) -> Workspace {
 /// Saves the form and waits for the window to settle.
 fn saved(ws: &mut Workspace) {
     ws.save_form();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .forms
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+    }));
 }
 
 #[test]
@@ -91,13 +97,15 @@ fn the_inserts_form_offers_its_labels_previews_a_move_and_applies_it() {
     let p = Project::new().with_inserts();
     let mut ws = open(&p);
     ws.open_form(Some(key("brd")));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.as_ref().is_some_and(|f| {
-        f.feature == "brd"
-            && f.rev
-                .as_ref()
-                .is_some_and(|r| r.options.contains(&"B".to_owned()))
-    })));
-    let mut f = ws.form.clone().unwrap();
+    assert!(
+        ws.wait_until(WAIT, |ws| ws.forms.form.as_ref().is_some_and(|f| {
+            f.feature == "brd"
+                && f.rev
+                    .as_ref()
+                    .is_some_and(|r| r.options.contains(&"B".to_owned()))
+        }))
+    );
+    let mut f = ws.forms.form.clone().unwrap();
     assert_eq!(f.of.as_deref(), Some("pcb"));
     let rev = f.rev.as_ref().unwrap();
     assert_eq!(rev.read, "A");
@@ -107,14 +115,22 @@ fn the_inserts_form_offers_its_labels_previews_a_move_and_applies_it() {
     assert!(f.origin[2].read.starts_with("20"), "{:?}", f.origin[2]);
     // Choosing B previews what moving the pin changes, writing nothing.
     f.rev.as_mut().unwrap().chosen = "B".into();
-    ws.form = Some(f);
+    ws.forms.form = Some(f);
     ws.preview_insert();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.insert_preview
+        ws.forms
+            .insert_preview
             .as_ref()
             .is_some_and(|p| p.answer.is_some())
     }));
-    let moved = ws.insert_preview.clone().unwrap().answer.unwrap().unwrap();
+    let moved = ws
+        .forms
+        .insert_preview
+        .clone()
+        .unwrap()
+        .answer
+        .unwrap()
+        .unwrap();
     assert_eq!(
         (moved.changed, moved.added, moved.removed),
         (1, 0, 0),
@@ -125,7 +141,7 @@ fn the_inserts_form_offers_its_labels_previews_a_move_and_applies_it() {
     saved(&mut ws);
     assert_eq!(p.ok(&["feature", "show", "e", "brd"])["rev"]["label"], "B");
     ws.preview_insert();
-    assert!(ws.insert_preview.is_none());
+    assert!(ws.forms.insert_preview.is_none());
 }
 
 #[test]
@@ -150,15 +166,16 @@ fn a_deletes_solids_are_taken_out_from_its_form() {
     let mut ws = open_without(&p, &["lid", "x2"]);
     ws.open_form(Some(key("d2")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form
+        ws.forms
+            .form
             .as_ref()
             .is_some_and(|f| f.feature == "d2" && f.solids.is_some())
     }));
-    let mut f = ws.form.clone().unwrap();
+    let mut f = ws.forms.form.clone().unwrap();
     let s = f.solids.as_mut().unwrap();
     assert_eq!(s.read, ["x2", "lid"]);
     s.toggle("lid");
-    ws.form = Some(f);
+    ws.forms.form = Some(f);
     saved(&mut ws);
     assert_eq!(
         p.ok(&["feature", "show", "e", "d2"])["solids"],

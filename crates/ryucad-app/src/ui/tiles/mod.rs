@@ -99,6 +99,7 @@ pub fn show(
             // Not over a draft: the mode bar says what is drawn.
             if o.compare_with.is_some()
                 || o.ws
+                    .comparing
                     .compare
                     .as_ref()
                     .is_some_and(|c| c.to.is_none() || c.swapped.is_some())
@@ -123,7 +124,7 @@ pub fn show(
         }),
         "conflicts" => scroll(ui, &mut |ui| conflicts::merge(ui, &mut o.ws, &mut o.view)),
         "changes" => scroll(ui, &mut |ui| {
-            if o.ws.compare.is_none() {
+            if o.ws.comparing.compare.is_none() {
                 empty(
                     ui,
                     Icon::GIT_DIFF,

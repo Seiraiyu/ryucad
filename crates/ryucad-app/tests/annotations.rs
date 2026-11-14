@@ -64,7 +64,7 @@ fn drawn(ws: &Workspace) -> Option<String> {
 }
 
 fn set(ws: &mut Workspace, name: &str, text: &str) {
-    let f = ws.form.as_mut().unwrap();
+    let f = ws.forms.form.as_mut().unwrap();
     f.params.iter_mut().find(|x| x.name == name).unwrap().text = text.into();
 }
 
@@ -74,15 +74,17 @@ fn the_window_draws_and_reads_its_persons_draft() {
     let mut ws = open(&p, Mode::Annotate);
     let working = drawn(&ws).unwrap();
     ws.open_form(Some(("p".into(), "boss".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
     set(&mut ws, "radius", "4 mm");
     ws.save_form();
     // The draft is drawn: the boss as suggested, the files as they were.
     assert!(ws.wait_until(WAIT, |ws| ws.model_rev().is_some() && ws.idle()));
     assert!(ws.wait_until(WAIT, |ws| drawn(ws).is_some_and(|h| h != working)));
     // The draft is painted as a compare against the agent's model.
-    assert!(ws.wait_until(WAIT, |ws| ws.compare.as_ref().is_some_and(|c| c.loaded)));
-    let c = ws.compare.as_ref().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.comparing.compare.as_ref().is_some_and(|c| c.loaded)
+    }));
+    let c = ws.comparing.compare.as_ref().unwrap();
     assert_eq!(c.rev, "working");
     assert_eq!(c.to.as_deref(), Some("draft:Dana"));
     assert!(
@@ -93,7 +95,7 @@ fn the_window_draws_and_reads_its_persons_draft() {
     );
     // A second suggestion stands on the first: the form read the draft.
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.form.as_ref().is_some_and(|f| {
+        && ws.forms.form.as_ref().is_some_and(|f| {
             f.params
                 .iter()
                 .any(|x| x.name == "radius" && x.read == "4 mm")
@@ -114,13 +116,20 @@ fn the_window_draws_and_reads_its_persons_draft() {
     assert!(ws.wait_until(WAIT, |ws| {
         ws.model_rev().is_none()
             && ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.rev == format!("annotation:{first}"))
     }));
     ws.choose_annotation(None);
-    assert!(ws.wait_until(WAIT, |ws| ws.model_rev().is_some()
-        && ws.compare.as_ref().is_some_and(|c| c.to.is_some())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.model_rev().is_some()
+            && ws
+                .comparing
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.to.is_some())
+    }));
 }
 
 #[test]
@@ -129,7 +138,7 @@ fn a_part_asked_for_as_the_drawn_revision_moves_is_asked_for_again() {
     let mut ws = open(&p, Mode::Annotate);
     let working = drawn(&ws).unwrap();
     ws.open_form(Some(("p".into(), "boss".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
     set(&mut ws, "radius", "4 mm");
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
@@ -183,7 +192,7 @@ fn a_person_annotates_and_the_agent_works_through_it() {
     );
     // A radius suggested from the form.
     ws.open_form(Some(("p".into(), "boss".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
     set(&mut ws, "radius", "2 mm");
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| ws.annotations.all.len() == 2 && ws.idle()));
@@ -246,11 +255,14 @@ fn view_refuses_and_direct_edit_writes() {
     );
     ws.set_mode(Mode::Edit);
     ws.open_form(Some(("p".into(), "boss".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
     set(&mut ws, "radius", "5 mm");
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+        ws.forms
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
     }));
     assert_eq!(radius_on_disk(&p), "5 mm");
 }
@@ -270,7 +282,7 @@ fn a_reconnected_window_is_in_view_again() {
         ws.tick(std::time::Instant::now());
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(ws.mode, Mode::View);
+    assert_eq!(ws.session.mode, Mode::View);
     // And the daemon says so.
     assert!(ws.wait_until(WAIT, |ws| ws.myself().is_some_and(|m| m.mode == Mode::View)));
 }

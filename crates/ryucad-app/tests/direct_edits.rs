@@ -39,16 +39,24 @@ fn open(p: &Project) -> Workspace {
 /// The form of `id`, once `feature.show` has answered.
 fn form(ws: &mut Workspace, id: &str) -> Form {
     ws.open_form(Some(key(id)));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.as_ref().is_some_and(|f| f.feature == id)));
-    ws.form.clone().unwrap()
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.forms.form.as_ref().is_some_and(|f| f.feature == id)
+    }));
+    ws.forms.form.clone().unwrap()
 }
 
 /// Saves `f` and waits for the window to settle.
 fn save(ws: &mut Workspace, f: Form) {
-    ws.form = Some(f);
+    ws.forms.form = Some(f);
     ws.save_form();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .forms
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+    }));
 }
 
 #[test]

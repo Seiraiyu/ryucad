@@ -13,7 +13,7 @@ pub fn equations(ui: &mut egui::Ui, ws: &mut Workspace) {
     ws.show_equations();
     let parts: Vec<String> = ws.model.parts.keys().cloned().collect();
     let gate = ws.control("param.set");
-    let Some(e) = &mut ws.equations else {
+    let Some(e) = &mut ws.parameters.equations else {
         ui.spinner();
         return;
     };

@@ -219,7 +219,7 @@ fn the_window_follows_appearance_and_previews_before_it_writes() {
     // The Appearance window on the part: a dragged opacity previews,
     // writing nothing, and is written when let go.
     ws.open_appearance();
-    assert_eq!(ws.appearance.target(), Some("p"));
+    assert_eq!(ws.view.appearance.target(), Some("p"));
     ws.preview_appearance(Preview {
         colour: None,
         opacity: Some(0.5),
@@ -227,9 +227,10 @@ fn the_window_follows_appearance_and_previews_before_it_writes() {
     assert!(ws.model.looks.values().all(|l| l.translucent()));
     let file = p.root.join("parts/p/appearance.json");
     assert!(!std::fs::read_to_string(&file).unwrap().contains("opacity"));
-    ws.appearance.opacity = 0.5;
+    ws.view.appearance.opacity = 0.5;
     ws.write_appearance("opacity");
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.appearance.dragging.is_none()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.view.appearance.dragging.is_none()));
     assert!(
         std::fs::read_to_string(&file)
             .unwrap()
@@ -237,15 +238,15 @@ fn the_window_follows_appearance_and_previews_before_it_writes() {
     );
     assert!(ws.model.looks.values().all(|l| l.translucent()));
     // A refusal stays in the window, and the preview goes.
-    ws.appearance.targets = vec!["p/nothing".to_owned()];
+    ws.view.appearance.targets = vec!["p/nothing".to_owned()];
     ws.preview_appearance(Preview {
         colour: Some([0.0, 0.0, 1.0]),
         opacity: None,
     });
     ws.write_appearance("colour");
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.appearance.error.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.view.appearance.error.is_some()));
     assert_eq!(
-        ws.appearance.error.as_ref().unwrap().code,
+        ws.view.appearance.error.as_ref().unwrap().code,
         ryucad::error::Code::NotFound
     );
     ws.clear_appearance();
@@ -276,11 +277,11 @@ fn the_window_cuts_and_explodes_as_its_participant_does() {
     // An agent's plane goes to the window's human, and the window cuts.
     p.ok(&["section", "xy", "--offset", "3"]);
     let xy = Plane::new([0.0, 0.0, 0.003], [0.0, 0.0, 1.0]).unwrap();
-    assert!(ws.wait_until(WAIT, |ws| ws.sections.planes == [xy]));
+    assert!(ws.wait_until(WAIT, |ws| ws.view.sections.planes == [xy]));
     // The window's own: drawn at once, and the session's after.
     let lower = xy.moved(-0.001);
     ws.set_sections(vec![lower]);
-    assert_eq!(ws.sections.planes, [lower]);
+    assert_eq!(ws.view.sections.planes, [lower]);
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
     assert_eq!(ws.myself().unwrap().sections, [lower]);
     let got = p.ok(&["section"]);
@@ -319,7 +320,12 @@ fn the_window_cuts_and_explodes_as_its_participant_does() {
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
         && ws.myself().is_some_and(|m| m.selection == ["asm/one"])));
     ws.start_step();
-    let adding = ws.explodes.adding.as_mut().expect("one is selected");
+    let adding = ws
+        .assembly
+        .explodes
+        .adding
+        .as_mut()
+        .expect("one is selected");
     assert_eq!(adding.instances, ["one"]);
     adding.axis = Some(0);
     adding.distance = -0.02;
@@ -328,7 +334,8 @@ fn the_window_cuts_and_explodes_as_its_participant_does() {
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
         && std::fs::read_to_string(&file).unwrap().contains("-20 mm")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.explodes
+        ws.assembly
+            .explodes
             .list
             .first()
             .is_some_and(|e| e.resolved.len() == 2)
@@ -338,7 +345,8 @@ fn the_window_cuts_and_explodes_as_its_participant_does() {
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
         && !std::fs::read_to_string(&file).unwrap().contains("-20 mm")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.explodes
+        ws.assembly
+            .explodes
             .list
             .first()
             .is_some_and(|e| e.resolved.len() == 1)
@@ -432,7 +440,7 @@ fn the_windows_long_request_reports_progress_and_cancels() {
     // Asked again, it runs to the end: the cancel left nothing behind.
     ws.diagnose();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
-    assert!(ws.doctor.is_some());
+    assert!(ws.session.doctor.is_some());
 }
 
 #[test]
@@ -479,10 +487,10 @@ fn a_window_opens_in_view_and_its_mode_is_its_participants() {
     use ryucad_app::core::modes::Mode;
     let p = Project::new().with_part();
     let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
-    assert_eq!(ws.mode, Mode::View);
+    assert_eq!(ws.session.mode, Mode::View);
     assert!(ws.wait_until(WAIT, |ws| ws.myself().is_some_and(|m| m.mode == Mode::View)));
     ws.set_mode(Mode::Annotate);
-    assert_eq!(ws.mode, Mode::Annotate);
+    assert_eq!(ws.session.mode, Mode::Annotate);
     assert!(ws.wait_until(WAIT, |ws| {
         ws.myself().is_some_and(|m| m.mode == Mode::Annotate)
     }));
@@ -506,12 +514,12 @@ fn the_move_tool_previews_and_writes_a_typed_move() {
     assert!(ws.wait_until(WAIT, |w| w.idle()
         && w.model.middles("frame").contains_key("b2")));
     ws.start_move("frame", "b2").expect("b2 is free");
-    ws.mover.as_mut().unwrap().grip = Some(Grip::Arrow(0));
+    ws.assembly.mover.as_mut().unwrap().grip = Some(Grip::Arrow(0));
     ws.type_move("20");
     ws.preview_move();
     assert!(ws.wait_until(WAIT, |w| !w.model.preview.is_empty()));
     ws.send_move();
-    assert!(ws.mover.is_none());
+    assert!(ws.assembly.mover.is_none());
     let moved = |p: &Project| {
         let shown = p.ok(&["feature", "show", "frame", "b2"]);
         shown["pose"]["origin_m"][0].as_f64().unwrap()
@@ -529,12 +537,12 @@ fn the_move_tool_previews_and_writes_a_typed_move() {
     );
     // Cancelling draws it where it is again.
     ws.start_move("frame", "b2").unwrap();
-    ws.mover.as_mut().unwrap().grip = Some(Grip::Ring(2));
+    ws.assembly.mover.as_mut().unwrap().grip = Some(Grip::Ring(2));
     ws.type_move("90");
     ws.preview_move();
     assert!(ws.wait_until(WAIT, |w| !w.model.preview.is_empty()));
     ws.cancel_move();
-    assert!(ws.model.preview.is_empty() && ws.mover.is_none());
+    assert!(ws.model.preview.is_empty() && ws.assembly.mover.is_none());
 }
 
 #[test]
@@ -547,15 +555,17 @@ fn the_mate_dialog_previews_and_adds_a_mate() {
     ws.mate_pick(&foot).unwrap();
     // Both picks on one instance are refused in the dialog.
     assert!(ws.mate_pick(&foot).is_err());
-    assert!(ws.mating.as_ref().unwrap().note.is_some());
+    assert!(ws.assembly.mating.as_ref().unwrap().note.is_some());
     ws.mate_pick(&top).unwrap();
     {
-        let d = ws.mating.as_mut().unwrap();
+        let d = ws.assembly.mating.as_mut().unwrap();
         d.form = Form::Revolute;
         d.flip = true;
     }
     ws.preview_mate();
-    assert!(ws.wait_until(WAIT, |w| w.mating.as_ref().is_some_and(|d| d.addable())));
+    assert!(ws.wait_until(WAIT, |w| {
+        w.assembly.mating.as_ref().is_some_and(|d| d.addable())
+    }));
     assert!(
         !ws.model.preview.is_empty(),
         "the pin drawn where the mate puts it"
@@ -567,7 +577,7 @@ fn the_mate_dialog_previews_and_adds_a_mate() {
             .contains("\"mate\"")
     );
     ws.add_mate();
-    assert!(ws.mating.is_none());
+    assert!(ws.assembly.mating.is_none());
     let t = Instant::now();
     while !p
         .ok(&["feature", "list", "frame"])
@@ -582,9 +592,11 @@ fn the_mate_dialog_previews_and_adds_a_mate() {
     ws.mate_pick(&foot).unwrap();
     ws.mate_pick(&foot.replace("frame/pin/", "frame/base/"))
         .ok();
-    assert!(ws.wait_until(WAIT, |w| w.mating.as_ref().is_some_and(|d| !d.waiting)));
-    let d = ws.mating.as_ref().unwrap();
+    assert!(ws.wait_until(WAIT, |w| {
+        w.assembly.mating.as_ref().is_some_and(|d| !d.waiting)
+    }));
+    let d = ws.assembly.mating.as_ref().unwrap();
     assert!(d.refusal.is_some() && !d.addable(), "{d:?}");
     ws.close_mate();
-    assert!(ws.mating.is_none());
+    assert!(ws.assembly.mating.is_none());
 }

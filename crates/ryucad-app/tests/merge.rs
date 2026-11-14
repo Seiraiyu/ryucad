@@ -87,7 +87,7 @@ fn a_window_opened_during_a_merge_sees_it() {
 
 /// Whether the window's last doctor report has an issue `code`.
 fn diagnosed(ws: &Workspace, code: &str) -> bool {
-    ws.doctor.as_ref().is_some_and(|d| {
+    ws.session.doctor.as_ref().is_some_and(|d| {
         d["issues"]
             .as_array()
             .into_iter()
@@ -102,7 +102,7 @@ fn doctor_badges_follow_a_conflict_record_settled() {
     let mut ws = open(&p);
     // The window diagnoses once when it opens.
     ws.diagnose();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.doctor.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.session.doctor.is_some()));
     assert!(!diagnosed(&ws, "merge_conflict"));
     // The merge writes a conflict record: its badge comes with it.
     assert!(!p.try_git(&["merge", "--no-edit", "theirs"]));

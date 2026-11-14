@@ -57,7 +57,7 @@ fn rows(o: &Opened, query: &str) -> Rows {
     }
     match query.strip_prefix('@') {
         Some(q) => {
-            let pdm = palette::pdm_names(&o.ws.bom);
+            let pdm = palette::pdm_names(&o.ws.pdm.bom);
             Rows::Places(palette::places(q, &o.ws.model, &pdm, &o.ws.drawing_rows))
         }
         None => Rows::Commands(palette::commands(query, &o.recent_commands)),

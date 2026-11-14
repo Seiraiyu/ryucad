@@ -37,8 +37,8 @@ fn open(p: &Project) -> Workspace {
 /// The form of `id`, once `feature.show` has answered.
 fn form(ws: &mut Workspace, id: &str) -> Form {
     ws.open_form(Some(key(id)));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
-    ws.form.clone().unwrap()
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
+    ws.forms.form.clone().unwrap()
 }
 
 #[test]
@@ -145,10 +145,16 @@ fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_from_their_forms() {
     assert!(x.inherits("radius"));
     assert_eq!(x.angle.read, "90 deg");
     x.angle.text = "100 deg".into();
-    ws.form = Some(f);
+    ws.forms.form = Some(f);
     ws.save_form();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .forms
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+    }));
     let shown = p.ok(&["feature", "show", "p", "f"]);
     assert_eq!(shown["angle"]["value"], "100 deg", "{shown}");
     let mut b = form(&mut ws, "plate");
@@ -156,10 +162,16 @@ fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_from_their_forms() {
         panic!("a base flange's form")
     };
     x.allowance.value.text = "0.5".into();
-    ws.form = Some(b);
+    ws.forms.form = Some(b);
     ws.save_form();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .forms
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+    }));
     let shown = p.ok(&["feature", "show", "p", "plate"]);
     assert_eq!(shown["allowance"]["k_factor"]["value"], "0.5", "{shown}");
 }

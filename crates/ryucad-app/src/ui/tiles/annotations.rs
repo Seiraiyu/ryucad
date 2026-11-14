@@ -257,7 +257,7 @@ fn one(
             // With marks, the Markup bar reopens at its view with them.
             if e.mark_count() > 0 {
                 if let Err(why) = ws.edit_markup(&e.id) {
-                    ws.drag_note = Some(why);
+                    ws.assembly.drag_note = Some(why);
                 }
             } else {
                 ws.annotation_ui.editing = Some((e.id.clone(), e.comment.clone()));
@@ -268,7 +268,7 @@ fn one(
         {
             ws.delete_annotation(&e.id);
         }
-        if ws.mode == Mode::Edit
+        if ws.session.mode == Mode::Edit
             && e.change.is_some()
             && !e.applied
             && e.is_open()

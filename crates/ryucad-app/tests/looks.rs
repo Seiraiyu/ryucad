@@ -201,8 +201,8 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
                 Screen::Opened(o) => {
                     o.ws.idle()
                         && o.ws.model.meshes.len() >= 2
-                        && o.ws.settings.text("ui.style", "") == look
-                        && o.ws.settings.text("ui.contrast", "") == contrast
+                        && o.ws.session.settings.text("ui.style", "") == look
+                        && o.ws.session.settings.text("ui.contrast", "") == contrast
                 }
                 _ => false,
             },
@@ -211,8 +211,8 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
                     "idle {}, {} meshes, style {:?}, contrast {:?}",
                     o.ws.idle(),
                     o.ws.model.meshes.len(),
-                    o.ws.settings.get("ui.style"),
-                    o.ws.settings.get("ui.contrast")
+                    o.ws.session.settings.get("ui.style"),
+                    o.ws.session.settings.get("ui.contrast")
                 ),
                 _ => "no project open".to_owned(),
             },

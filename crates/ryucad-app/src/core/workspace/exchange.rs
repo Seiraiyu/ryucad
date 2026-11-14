@@ -3,4 +3,11 @@
 
 /// The import and export dialogs.
 #[derive(Default)]
-pub struct Exchange {}
+pub struct Exchange {
+    /// File > Import STEP… or Update import…, while open.
+    pub import: Option<crate::core::step::Import>,
+    /// File > Export…, while open.
+    pub export: Option<crate::core::export::Export>,
+    /// What the last export chose, which the next one starts from.
+    pub export_choices: crate::core::export::Choices,
+}

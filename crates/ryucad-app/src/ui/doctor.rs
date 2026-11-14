@@ -187,7 +187,7 @@ pub fn dialog(
             ui.separator();
             egui::ScrollArea::vertical()
                 .max_height(480.0)
-                .show(ui, |ui| match &ws.doctor {
+                .show(ui, |ui| match &ws.session.doctor {
                     Some(report) => {
                         // Repairs write the project's files: Direct edit's.
                         let editing = ws.control("doctor.repair") == Gate::Send;

@@ -232,13 +232,13 @@ struct Did {
 /// small enough to load whole (at most `LOAD_WHOLE` parts), so Expand all
 /// may load what it opens.
 pub fn rows(ws: &Workspace) -> (Vec<Row>, bool) {
-    let pdm = crate::core::palette::pdm_names(&ws.bom);
+    let pdm = crate::core::palette::pdm_names(&ws.pdm.bom);
     let whole = ws.model.listed.len() <= crate::core::workspace::LOAD_WHOLE;
     let src = Source {
         model: &ws.model,
-        compare: ws.compare.as_ref(),
-        states: &ws.states,
-        doctor: ws.doctor.as_ref(),
+        compare: ws.comparing.compare.as_ref(),
+        states: &ws.pdm.states,
+        doctor: ws.session.doctor.as_ref(),
         merge: ws.merge.as_ref().map(|m| &m.status),
         pdm: &pdm,
         whole,

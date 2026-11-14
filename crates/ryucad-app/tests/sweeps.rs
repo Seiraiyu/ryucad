@@ -104,9 +104,9 @@ fn the_forms_edit_a_sweeps_twist_and_a_lofts_weight() {
     // The loft's start weight.
     ws.open_form(Some(key("l")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form.as_ref().is_some_and(|f| f.loft.is_some())
+        ws.forms.form.as_ref().is_some_and(|f| f.loft.is_some())
     }));
-    let form = ws.form.as_mut().unwrap();
+    let form = ws.forms.form.as_mut().unwrap();
     let l = form.loft.as_mut().unwrap();
     assert_eq!(l.sections, ["sketch s1", "sketch s2"]);
     let start = l.start.as_mut().unwrap();
@@ -117,7 +117,10 @@ fn the_forms_edit_a_sweeps_twist_and_a_lofts_weight() {
     start.weight.text = "2".into();
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+        ws.forms
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
     }));
     let shown = p.ok(&["feature", "show", "p", "l"]);
     assert_eq!(shown["start_tangent"]["weight"]["value"], "2", "{shown}");
@@ -125,26 +128,38 @@ fn the_forms_edit_a_sweeps_twist_and_a_lofts_weight() {
     // so it is refused and what was chosen kept.
     ws.open_form(Some(key("w")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form.as_ref().is_some_and(|f| f.sweep.is_some())
+        ws.forms.form.as_ref().is_some_and(|f| f.sweep.is_some())
     }));
-    let form = ws.form.as_mut().unwrap();
+    let form = ws.forms.form.as_mut().unwrap();
     let w = form.sweep.as_mut().unwrap();
     assert_eq!((w.twist.read.as_str(), w.path.as_str()), ("", "p/s4/l1"));
     assert_eq!(w.law.read, "minimal");
     w.law.chosen = "binormal".into();
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form
+        ws.forms
+            .form
             .as_ref()
             .is_some_and(|f| !f.saving && f.error.is_some())
     }));
-    assert!(ws.form.as_ref().unwrap().dirty());
+    assert!(ws.forms.form.as_ref().unwrap().dirty());
     // Its twist, last: a twisted sweep rebuilds slowly in a debug build.
-    ws.form.as_mut().unwrap().revert();
-    ws.form.as_mut().unwrap().sweep.as_mut().unwrap().twist.text = "90 deg".into();
+    ws.forms.form.as_mut().unwrap().revert();
+    ws.forms
+        .form
+        .as_mut()
+        .unwrap()
+        .sweep
+        .as_mut()
+        .unwrap()
+        .twist
+        .text = "90 deg".into();
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+        ws.forms
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
     }));
     let shown = p.ok(&["feature", "show", "p", "w"]);
     assert_eq!(shown["twist"]["value"], "90 deg", "{shown}");

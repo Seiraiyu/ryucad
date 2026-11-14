@@ -23,11 +23,16 @@ pub fn activity(ui: &mut egui::Ui, o: &mut Opened) {
             .selected_text(match &only {
                 None => "everyone".to_owned(),
                 Some(id) if id == "external" => "outside ryucad".to_owned(),
-                Some(id) => o.ws.people.get(id).map_or(id.clone(), |p| p.name.clone()),
+                Some(id) => {
+                    o.ws.session
+                        .people
+                        .get(id)
+                        .map_or(id.clone(), |p| p.name.clone())
+                }
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut only, None, "everyone");
-                for p in o.ws.people.all.values() {
+                for p in o.ws.session.people.all.values() {
                     ui.selectable_value(&mut only, Some(p.id.clone()), &p.name);
                 }
                 ui.selectable_value(&mut only, Some("external".to_owned()), "outside ryucad");
@@ -67,7 +72,8 @@ pub fn activity(ui: &mut egui::Ui, o: &mut Opened) {
                     ui.label(RichText::new(run.who.name()).strong());
                     if let Some(id) = run.who.id() {
                         let said =
-                            o.ws.people
+                            o.ws.session
+                                .people
                                 .get(id)
                                 .and_then(|p| p.status.as_ref().map(|(s, _)| s.clone()));
                         let running =

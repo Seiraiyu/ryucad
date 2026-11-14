@@ -436,9 +436,6 @@ pub fn camera_arg(c: &Camera) -> CameraArg {
 pub struct Workspace {
     pub root: PathBuf,
     pub link: Link,
-    /// The window's mode (design 374): View when it opens and whenever it
-    /// connects again; Annotate and Direct edit by the person's choice.
-    pub mode: crate::core::modes::Mode,
     /// The project's annotations (design 374), read when the window opens
     /// and followed from `annotation.changed`.
     pub annotations: crate::core::annotations::Annotations,
@@ -477,19 +474,12 @@ pub struct Workspace {
     /// Parts the tree, as it draws, found it wants loaded (its rows
     /// opened): loaded once it is drawn ([`Workspace::load_wanted`]).
     pub wanted: std::cell::RefCell<BTreeSet<String>>,
-    pub people: People,
-    /// The participant whose camera this window follows.
-    pub following: Option<String>,
-    /// The property panel's form, for the feature chosen in the tree.
-    pub form: Option<Form>,
     /// The faces the feature chosen in the tree made, by the solid that
     /// shows them; and the feature, once asked for.
     pub made: Option<Made>,
     made_for: Option<BodyKey>,
     /// The chosen delete's ghosts, as they come.
     pub deleted: Option<crate::core::inserts::Deleted>,
-    /// What moving the insert form's chosen pin changes, once asked.
-    pub insert_preview: Option<crate::core::inserts::Preview>,
     /// The sweep or loft chosen in the tree as `sweep.get` drew it: its
     /// profile and path, or its sections with their starts.
     pub swept: Option<crate::core::sweeps::SweepDrawing>,
@@ -505,19 +495,6 @@ pub struct Workspace {
     /// The faces of the bend under the pointer in the Part tile's bend
     /// table, painted in the hover colour.
     pub sheet_hover: Vec<String>,
-    /// The property panel's form for a dimension chosen by its label;
-    /// shown instead of `form`.
-    pub dimension: Option<DimForm>,
-    /// What the property panel was last asked to show, a feature or a
-    /// dimension: only its answer opens a form.
-    form_for: Option<(String, String)>,
-    dimension_for: Option<(String, String, String)>,
-    /// The parameter panel, for the part it shows (see `show_params`).
-    pub params: Option<Params>,
-    params_part: Option<String>,
-    /// The Equations tile's table, once it is open (see `show_equations`).
-    pub equations: Option<Equations>,
-    equations_open: bool,
     /// The Drawings tile (see `show_drawings`).
     pub drawings: crate::core::drawings::Tile,
     /// Every part's drawings, for the tree: ID, name, and whether its
@@ -544,123 +521,18 @@ pub struct Workspace {
     deps_again: bool,
     /// Place from dependency…, while open.
     pub picker: Option<Picker>,
-    /// The review service's organization-wide where-used on its way, for
-    /// this part; and one that came before `bom.where_used` answered.
-    org: Option<(String, std::sync::mpsc::Receiver<Result<Value>>)>,
-    org_early: Option<(String, Result<Vec<crate::core::where_used::Use>>)>,
-    /// This window's compare with a Git revision, while it is in one: it
-    /// follows the window's participant's compare state.
-    pub compare: Option<Compare>,
-    /// Which side of the compare is drawn, and whether the other is too:
-    /// the window's own, never the session's (design 447).
-    pub blink: Blink,
-    /// How many diffs were asked for, and whether one is on its way; one
-    /// asked for meanwhile waits for it (`compare_again`).
-    compare_asked: u64,
-    compare_waiting: bool,
-    compare_again: bool,
     /// The merge Git is in the middle of, while it is in one: what is left
     /// to settle.
     pub merge: Option<Merge>,
-    /// Every part's release state (ryupdm), for the tree's badges.
-    pub states: States,
-    /// ryupdm's settings (`pdm.config`): `project` is null until PDM is
-    /// set up.
-    pub pdm_config: Option<Value>,
-    /// The Part section's form, for the part it shows (see `show_props`).
-    pub props: Option<PartProps>,
-    props_part: Option<String>,
-    /// The Releases tab, and whether it was opened (it follows changes
-    /// from then on).
-    pub releases: ReleaseTab,
-    releases_open: bool,
-    /// The BOM tab, whether it was opened (it follows changes from then
-    /// on), and whether a reading is on its way and another wanted after.
-    pub bom: BomTab,
-    bom_open: bool,
-    bom_waiting: bool,
-    bom_again: bool,
-    /// The BOM tab's Export CSV…, while open.
-    pub bom_export: Option<crate::core::bom::BomExport>,
-    /// Where the Part section's part is used, once read, and its part.
-    pub where_used: Option<crate::core::where_used::WhereUsed>,
-    where_used_part: Option<String>,
-    pub settings: Settings,
-    /// The last doctor report, once asked for.
-    pub doctor: Option<Value>,
-    /// The shown assembly's interference, once asked for (Tools > Check
-    /// interference); marked stale when the assembly changes, and asked
-    /// again only by Check again (design 525).
-    pub interference: Option<Interference>,
-    /// Tools > Measure: on or off, its picks and what they measured.
-    pub measure: Tool,
-    /// Tools > Mass properties, once asked for.
-    pub mass: Option<Mass>,
-    /// Tools > Clearance, once asked for: the shown assembly's.
-    pub clearance: Option<Clearance>,
-    /// What the disk cache held when last asked (`cache.stats`), for the
-    /// Preferences window.
-    pub cache: Option<Value>,
-    /// The last answer to storing or removing the shared cache's token
-    /// (`cache.login`, `cache.logout`), or its error as `{"error": …}`.
-    pub cache_token: Option<Value>,
-    /// File > Import STEP… or Update import…, while open.
-    pub import: Option<crate::core::step::Import>,
-    /// File > Export…, while open.
-    pub export: Option<crate::core::export::Export>,
-    /// What the last export chose, which the next one starts from.
-    pub export_choices: crate::core::export::Choices,
-    /// The instance being dragged, if any.
-    pub drag: Option<Drag>,
-    /// The Move tool, while it is on one instance.
-    pub mover: Option<crate::core::mover::Mover>,
-    /// When the Move tool's preview was last asked and for which value,
-    /// and whether one is on its way.
-    mover_asked: Option<(Instant, Option<crate::core::mover::Grip>, f64)>,
-    mover_waiting: bool,
-    /// The Mate dialog, while it is open.
-    pub mating: Option<crate::core::mating::Mating>,
     /// The Markup bar, while it is open (design 423).
     pub markup: Option<crate::core::markup::Markup>,
-    /// How many mate previews the window has asked for.
-    mate_previews: u64,
     /// A tile the window should open (the app opens it next frame): the
     /// Annotations tile after a rough drag's proposal.
     pub wants_tile: Option<&'static str>,
-    /// The named views of the part the window shows, for the cube's menu
-    /// and the view selector.
-    pub views: crate::core::views::NamedViews,
-    /// A camera normal to a face, come from the daemon, for the view to
-    /// turn to.
-    pub looked: Option<Camera>,
-    /// What the window shows changed (View > Show, or an agent's
-    /// `ryucad focus`): the view frames it again, as it frames the first
-    /// view (issue #211).
-    pub refocused: bool,
-    /// The Appearance window.
-    pub appearance: crate::core::appearance::Editor,
-    /// The planes this window cuts with, and the gizmo's drag.
-    pub sections: crate::core::section::Sections,
-    /// The shown assembly's explodes, the one shown, and a step being
-    /// made.
-    pub explodes: crate::core::explode::Explodes,
-    /// The shown assembly's motions, the one shown, its frames, Play and
-    /// the last sweep.
-    pub motions: crate::core::motion::Motions,
-    /// How the shown bodies look, as the daemon last said.
-    looks_read: BTreeMap<BodyKey, Arc<crate::core::appearance::Look>>,
-    /// The last appearance reading asked for: an older answer is dropped.
-    looks_asked: u64,
     /// Tests only: notifications are dropped as they arrive, as if lost,
     /// to see what the window does from its answers alone.
     #[doc(hidden)]
     pub deaf: bool,
-    /// Why the last drag moved nothing, for the status line.
-    pub drag_note: Option<String>,
-    /// Whether a report is on its way, and whether the project changed
-    /// meanwhile, so the badges need another.
-    doctor_waiting: bool,
-    doctor_again: bool,
     /// Someone asked for this window (`ryucad open`): bring it forward.
     pub raised: bool,
     /// Requests of the window's that failed, newest last.
@@ -713,7 +585,6 @@ impl Workspace {
         let mut ws = Workspace {
             root: root.to_path_buf(),
             link,
-            mode: Default::default(),
             annotations: Default::default(),
             chosen_annotation: None,
             show_agent: false,
@@ -725,32 +596,24 @@ impl Workspace {
             parameters: Default::default(),
             pdm: Default::default(),
             comparing: Default::default(),
-            session: Default::default(),
+            session: session::Session {
+                people,
+                ..Default::default()
+            },
             assembly: Default::default(),
             view: Default::default(),
             exchange: Default::default(),
             loading: BTreeSet::new(),
             asked_at: BTreeMap::new(),
             wanted: Default::default(),
-            people,
-            following: None,
-            form: None,
             made: None,
             deleted: None,
-            insert_preview: None,
             made_for: None,
             swept: None,
             swept_at: None,
             sheets: Default::default(),
             flat_view: None,
             sheet_hover: Vec::new(),
-            dimension: None,
-            form_for: None,
-            dimension_for: None,
-            params: None,
-            params_part: None,
-            equations: None,
-            equations_open: false,
             drawings: Default::default(),
             drawing_rows: BTreeMap::new(),
             activity: Activity::default(),
@@ -765,59 +628,10 @@ impl Workspace {
             deps_waiting: false,
             deps_again: false,
             picker: None,
-            org: None,
-            org_early: None,
-            compare: None,
-            blink: Blink::default(),
-            compare_asked: 0,
-            compare_waiting: false,
-            compare_again: false,
             merge: None,
-            states: States::default(),
-            pdm_config: None,
-            props: None,
-            props_part: None,
-            releases: ReleaseTab::default(),
-            releases_open: false,
-            bom: BomTab::default(),
-            bom_open: false,
-            bom_waiting: false,
-            bom_again: false,
-            bom_export: None,
-            where_used: None,
-            where_used_part: None,
-            settings: Settings::default(),
-            doctor: None,
-            interference: None,
-            measure: Tool::default(),
-            mass: None,
-            clearance: None,
-            cache: None,
-            cache_token: None,
-            import: None,
-            export: None,
-            export_choices: Default::default(),
-            drag: None,
-            mover: None,
-            mover_asked: None,
-            mover_waiting: false,
-            mating: None,
             markup: None,
-            mate_previews: 0,
             wants_tile: None,
-            views: Default::default(),
-            sections: Default::default(),
-            explodes: Default::default(),
-            motions: Default::default(),
-            looked: None,
-            refocused: false,
-            appearance: Default::default(),
-            looks_read: BTreeMap::new(),
-            looks_asked: 0,
             deaf: false,
-            drag_note: None,
-            doctor_waiting: false,
-            doctor_again: false,
             raised: false,
             camera_due: None,
             camera_sent: None,
@@ -898,6 +712,7 @@ impl Workspace {
 
     fn config_request(&self, key: &str, value: Value) -> Request {
         let project = self
+            .session
             .settings
             .all
             .iter()
@@ -906,7 +721,7 @@ impl Workspace {
             key: key.to_owned(),
             value,
             scope: None,
-            expected_revision: project.then(|| self.settings.project_revision.clone()),
+            expected_revision: project.then(|| self.session.settings.project_revision.clone()),
         }
     }
 
@@ -937,7 +752,7 @@ impl Workspace {
         let Some(part) = self.shown_assembly() else {
             return;
         };
-        self.interference = Some(Interference::asked(&part));
+        self.assembly.interference = Some(Interference::asked(&part));
         let req = Request::Interference {
             part: part.clone(),
             instances: Vec::new(),
@@ -956,8 +771,8 @@ impl Workspace {
     /// Reads the named views of the part shown, when that changed.
     fn follow_views(&mut self) {
         let part = self.views_part();
-        if part != self.views.part {
-            self.views = crate::core::views::NamedViews {
+        if part != self.view.views.part {
+            self.view.views = crate::core::views::NamedViews {
                 part,
                 ..Default::default()
             };
@@ -966,7 +781,7 @@ impl Workspace {
     }
 
     fn read_views(&mut self) {
-        if let Some(p) = self.views.part.clone() {
+        if let Some(p) = self.view.views.part.clone() {
             let req = Request::ViewList {
                 part: Some(p.clone()),
             };
@@ -978,10 +793,10 @@ impl Workspace {
     /// with this window's section planes and explode: the camera is shared
     /// at once, then saved from this window's participant (#576).
     pub fn save_view(&mut self, id: &str, camera: &Camera) {
-        let Some(part) = self.views.part.clone() else {
+        let Some(part) = self.view.views.part.clone() else {
             return;
         };
-        self.views.error = None;
+        self.view.views.error = None;
         // The saved camera must be exactly this one, not the last shared.
         self.camera_due = None;
         self.camera_sent = Some(Instant::now());
@@ -1009,7 +824,7 @@ impl Workspace {
     /// camera, section planes and explode, which reach the window as they
     /// reach an agent's (#576).
     pub fn restore_named_view(&mut self, id: &str) {
-        let Some(part) = self.views.part.clone() else {
+        let Some(part) = self.view.views.part.clone() else {
             return;
         };
         let req = Request::CameraSet {
@@ -1037,23 +852,23 @@ impl Workspace {
 
     /// Reads how the bodies the window shows look (`appearance.get`).
     fn read_appearance(&mut self) {
-        self.looks_asked += 1;
+        self.view.looks_asked += 1;
         let req = Request::AppearanceGet {
             part: self.model.focus.clone(),
             participant: None,
             rev: self.model_rev(),
         };
-        self.send(req, Pending::Appearance(self.looks_asked));
+        self.send(req, Pending::Appearance(self.view.looks_asked));
     }
 
     /// Lays what the Appearance window drags over the daemon's looks.
     fn refresh_looks(&mut self) {
         use crate::core::appearance::previewed;
-        let looks = match (self.appearance.dragging, self.appearance.target()) {
-            (Some(p), Some(t)) if self.appearance.open => {
-                previewed(&self.looks_read, self.model.meshes.keys(), t, p)
+        let looks = match (self.view.appearance.dragging, self.view.appearance.target()) {
+            (Some(p), Some(t)) if self.view.appearance.open => {
+                previewed(&self.view.looks_read, self.model.meshes.keys(), t, p)
             }
-            _ => self.looks_read.clone(),
+            _ => self.view.looks_read.clone(),
         };
         if *self.model.looks != looks {
             self.model.looks = Arc::new(looks);
@@ -1081,7 +896,8 @@ impl Workspace {
             },
         };
         let now = self.look_of(targets.first().map(String::as_str));
-        self.appearance
+        self.view
+            .appearance
             .open_on(targets, now, ryucad::render::SURFACE);
     }
 
@@ -1097,7 +913,7 @@ impl Workspace {
             Some((s, n)) if is_name(n) => (s, Some(n)),
             _ => (rest, None),
         };
-        let found = self.looks_read.iter().find(|((p, k), _)| {
+        let found = self.view.looks_read.iter().find(|((p, k), _)| {
             p == part && (prefix.is_empty() || k == prefix || k.starts_with(&format!("{prefix}/")))
         });
         match (found, face) {
@@ -1110,7 +926,7 @@ impl Workspace {
     /// Shows `preview` over what the Appearance window colours, until it
     /// is written.
     pub fn preview_appearance(&mut self, preview: crate::core::appearance::Preview) {
-        self.appearance.dragging = Some(preview);
+        self.view.appearance.dragging = Some(preview);
         self.refresh_looks();
     }
 
@@ -1118,17 +934,17 @@ impl Workspace {
     /// (`colour`), its material's colour (`material`) or its opacity
     /// (`opacity`), one undoable change (`appearance.set`).
     pub fn write_appearance(&mut self, field: &str) {
-        let Some(target) = self.appearance.target().map(str::to_owned) else {
+        let Some(target) = self.view.appearance.target().map(str::to_owned) else {
             return;
         };
-        self.appearance.error = None;
+        self.view.appearance.error = None;
         let req = Request::AppearanceSet {
             entities: vec![target],
-            colour: (field == "colour").then(|| self.appearance.hex()),
+            colour: (field == "colour").then(|| self.view.appearance.hex()),
             material: field == "material",
             // To a thousandth: the slider's f32 isn't the decimal it shows.
             opacity: (field == "opacity")
-                .then_some((f64::from(self.appearance.opacity) * 1000.0).round() / 1000.0),
+                .then_some((f64::from(self.view.appearance.opacity) * 1000.0).round() / 1000.0),
             unset: Vec::new(),
             file_styles: None,
             expected_revision: None,
@@ -1139,11 +955,11 @@ impl Workspace {
     /// Takes the Appearance window's target's entry out
     /// (`appearance.clear`).
     pub fn clear_appearance(&mut self) {
-        let Some(target) = self.appearance.target().map(str::to_owned) else {
+        let Some(target) = self.view.appearance.target().map(str::to_owned) else {
             return;
         };
-        self.appearance.error = None;
-        self.appearance.dragging = None;
+        self.view.appearance.error = None;
+        self.view.appearance.dragging = None;
         let req = Request::AppearanceClear {
             entities: vec![target],
             expected_revision: None,
@@ -1153,14 +969,14 @@ impl Workspace {
 
     /// Closes the Appearance window, dropping anything dragged.
     pub fn close_appearance(&mut self) {
-        self.appearance.open = false;
-        self.appearance.dragging = None;
+        self.view.appearance.open = false;
+        self.view.appearance.dragging = None;
         self.refresh_looks();
     }
 
     /// Takes a pick of the Measure tool and measures what it now holds.
     pub fn measure_pick(&mut self, entity: &str) {
-        let picks = self.measure.pick(entity);
+        let picks = self.view.measure.pick(entity);
         let req = Request::Measure {
             entities: picks.clone(),
             rev: None,
@@ -1170,7 +986,7 @@ impl Workspace {
 
     /// Measures the Measure tool's picks again: what they name changed.
     fn measure_again(&mut self) {
-        let picks = self.measure.picks.clone();
+        let picks = self.view.measure.picks.clone();
         if picks.is_empty() {
             return;
         }
@@ -1197,7 +1013,7 @@ impl Workspace {
 
     /// Weighs `of` (`mass`) for the Mass properties panel.
     pub fn weigh(&mut self, of: &str) {
-        self.mass = Some(Mass::asked(of));
+        self.view.mass = Some(Mass::asked(of));
         let req = Request::Mass {
             of: of.to_owned(),
             tolerance: None,
@@ -1212,7 +1028,7 @@ impl Workspace {
         let Some(part) = self.shown_assembly() else {
             return;
         };
-        self.clearance = Some(Clearance::asked(&part));
+        self.assembly.clearance = Some(Clearance::asked(&part));
         let req = Request::Clearance {
             part: part.clone(),
             instances: Vec::new(),
@@ -1223,7 +1039,7 @@ impl Workspace {
 
     /// Diagnoses the project (`doctor`).
     pub fn diagnose(&mut self) {
-        self.doctor_waiting = true;
+        self.session.doctor_waiting = true;
         self.send(Request::Doctor {}, Pending::Doctor);
     }
 
@@ -1237,11 +1053,12 @@ impl Workspace {
     /// [`DRAG_EVERY`], and the window draws where it puts them.
     pub fn drag_to(&mut self, part: &str, instance: &str, translate: [f64; 3]) {
         let same = self
+            .assembly
             .drag
             .as_ref()
             .is_some_and(|d| d.part == part && d.instance == instance);
         if !same {
-            self.drag = Some(Drag {
+            self.assembly.drag = Some(Drag {
                 part: part.to_owned(),
                 instance: instance.to_owned(),
                 translate,
@@ -1249,7 +1066,7 @@ impl Workspace {
                 waiting: false,
             });
         }
-        let d = self.drag.as_mut().expect("just set");
+        let d = self.assembly.drag.as_mut().expect("just set");
         d.translate = translate;
         let due = d.asked.is_none_or(|(at, _)| at.elapsed() >= DRAG_EVERY);
         if !d.waiting && due {
@@ -1258,7 +1075,9 @@ impl Workspace {
     }
 
     fn ask_drag(&mut self) {
-        let Some(d) = self.drag.as_mut() else { return };
+        let Some(d) = self.assembly.drag.as_mut() else {
+            return;
+        };
         d.asked = Some((Instant::now(), d.translate));
         d.waiting = true;
         let req = Request::AssemblySolve {
@@ -1300,7 +1119,9 @@ impl Workspace {
     /// `assembly.move` (logged and undoable, as an agent's), against the
     /// assembly's revision as the window last saw it.
     pub fn drop_drag(&mut self) {
-        let Some(d) = self.drag.take() else { return };
+        let Some(d) = self.assembly.drag.take() else {
+            return;
+        };
         if d.translate == [0.0; 3] {
             self.model.preview.retain(|(p, _), _| *p != d.part);
             // Picking and drawing read poses through the picker, made
@@ -1335,7 +1156,7 @@ impl Workspace {
     /// `part`, at the middle of its drawn boxes, or says why it can't
     /// move (fixed, a pattern's copy, no freedom left).
     pub fn start_move(&mut self, part: &str, instance: &str) -> Result<(), String> {
-        if self.blink.draws_rev() {
+        if self.comparing.blink.draws_rev() {
             return Err(crate::core::compare::SWAPPED.to_owned());
         }
         let key = (part.to_owned(), format!("{instance}/"));
@@ -1353,9 +1174,9 @@ impl Workspace {
             .find(|k| k.0 == part && k.1.split('/').next() == Some(instance))
             .cloned();
         let pose = body.map_or(crate::core::model::Pose::IDENTITY, |k| self.model.pose(&k));
-        let own = self.mover.as_ref().is_some_and(|m| m.own);
+        let own = self.assembly.mover.as_ref().is_some_and(|m| m.own);
         self.cancel_move();
-        self.mover = Some(crate::core::mover::Mover::new(
+        self.assembly.mover = Some(crate::core::mover::Mover::new(
             part, instance, middle, pose, own,
         ));
         Ok(())
@@ -1369,7 +1190,7 @@ impl Workspace {
     /// Reads the Move tool's value field.
     pub fn type_move(&mut self, text: &str) {
         let unit = self.unit();
-        if let Some(m) = self.mover.as_mut() {
+        if let Some(m) = self.assembly.mover.as_mut() {
             m.typed(text, unit);
         }
     }
@@ -1379,12 +1200,15 @@ impl Workspace {
     /// last asked, one at a time, at most every [`DRAG_EVERY`]. The view
     /// calls it every frame the tool is on.
     pub fn preview_move(&mut self) {
-        let Some(m) = &self.mover else { return };
-        if self.mover_waiting {
+        let Some(m) = &self.assembly.mover else {
+            return;
+        };
+        if self.assembly.mover_waiting {
             return;
         }
         let asked = (m.grip, m.value);
         if self
+            .assembly
             .mover_asked
             .is_some_and(|(at, g, v)| (g, v) == asked || at.elapsed() < DRAG_EVERY)
         {
@@ -1393,7 +1217,7 @@ impl Workspace {
         let part = m.part.clone();
         if m.grip.is_none() || m.value == 0.0 || m.error.is_some() {
             // Nothing to move: drawn where it is.
-            self.mover_asked = Some((Instant::now(), asked.0, asked.1));
+            self.assembly.mover_asked = Some((Instant::now(), asked.0, asked.1));
             if self.model.preview.keys().any(|(p, _)| *p == part) {
                 self.model.preview.retain(|(p, _), _| *p != part);
                 self.model.generation += 1;
@@ -1401,8 +1225,8 @@ impl Workspace {
             return;
         }
         let req = m.preview(self.model_rev());
-        self.mover_asked = Some((Instant::now(), asked.0, asked.1));
-        self.mover_waiting = true;
+        self.assembly.mover_asked = Some((Instant::now(), asked.0, asked.1));
+        self.assembly.mover_waiting = true;
         self.send(req, Pending::MoveSolve(part));
     }
 
@@ -1410,21 +1234,25 @@ impl Workspace {
     /// Annotate) against the assembly's revision as the window last saw
     /// it; the handles go.
     pub fn send_move(&mut self) {
-        let Some(m) = self.mover.take() else { return };
+        let Some(m) = self.assembly.mover.take() else {
+            return;
+        };
         if !m.ready() {
-            self.mover = Some(m);
+            self.assembly.mover = Some(m);
             return;
         }
         let revision = self.model.parts.get(&m.part).map(|p| p.revision.clone());
         let part = m.part.clone();
-        self.mover_asked = None;
-        self.mover_waiting = false;
+        self.assembly.mover_asked = None;
+        self.assembly.mover_waiting = false;
         self.send(m.request(revision), Pending::MoveWrite(part));
     }
 
     /// Drops the Move tool's value and its preview; the handles stay.
     pub fn clear_move(&mut self) {
-        let Some(m) = self.mover.as_mut() else { return };
+        let Some(m) = self.assembly.mover.as_mut() else {
+            return;
+        };
         m.clear();
         let part = m.part.clone();
         self.model.preview.retain(|(p, _), _| *p != part);
@@ -1433,24 +1261,24 @@ impl Workspace {
 
     /// Drops the Move tool and its preview.
     pub fn cancel_move(&mut self) {
-        if let Some(m) = self.mover.take() {
+        if let Some(m) = self.assembly.mover.take() {
             self.model.preview.retain(|(p, _), _| *p != m.part);
             self.model.generation += 1;
         }
-        self.mover_asked = None;
-        self.mover_waiting = false;
+        self.assembly.mover_asked = None;
+        self.assembly.mover_waiting = false;
     }
 
     /// Opens the Mate dialog on assembly `part`, from instance `from`.
     pub fn open_mate(&mut self, part: &str, from: Option<&str>) {
         self.close_mate();
-        self.mating = Some(crate::core::mating::Mating::new(part, from));
+        self.assembly.mating = Some(crate::core::mating::Mating::new(part, from));
     }
 
     /// Takes a pick for the dialog's next side, previewing once both are
     /// in; a pick it refuses is said in the dialog.
     pub fn mate_pick(&mut self, entity: &str) -> std::result::Result<(), String> {
-        let d = self.mating.as_mut().ok_or("no Mate dialog")?;
+        let d = self.assembly.mating.as_mut().ok_or("no Mate dialog")?;
         match d.pick(entity) {
             Ok(_) => d.note = None,
             Err(why) => {
@@ -1466,12 +1294,12 @@ impl Workspace {
     /// revision, writing nothing.
     pub fn preview_mate(&mut self) {
         let rev = self.model_rev();
-        let Some(d) = self.mating.as_mut() else {
+        let Some(d) = self.assembly.mating.as_mut() else {
             return;
         };
         let Some(req) = d.preview(rev) else { return };
-        self.mate_previews += 1;
-        d.asked = self.mate_previews;
+        self.assembly.mate_previews += 1;
+        d.asked = self.assembly.mate_previews;
         d.waiting = true;
         let part = d.part.clone();
         let asked = d.asked;
@@ -1481,9 +1309,11 @@ impl Workspace {
     /// Sends the dialog's mate (`feature.add`; proposed in Annotate)
     /// against the assembly's revision as the window last saw it.
     pub fn add_mate(&mut self) {
-        let Some(d) = self.mating.take() else { return };
+        let Some(d) = self.assembly.mating.take() else {
+            return;
+        };
         if !d.addable() {
-            self.mating = Some(d);
+            self.assembly.mating = Some(d);
             return;
         }
         let revision = self.model.parts.get(&d.part).map(|p| p.revision.clone());
@@ -1496,7 +1326,7 @@ impl Workspace {
 
     /// Closes the Mate dialog and drops its preview.
     pub fn close_mate(&mut self) {
-        if let Some(d) = self.mating.take() {
+        if let Some(d) = self.assembly.mating.take() {
             self.model.preview.retain(|(p, _), _| *p != d.part);
             self.model.generation += 1;
         }
@@ -1628,7 +1458,7 @@ impl Workspace {
     /// Asks what importing the open import's file would do: `import` as
     /// a dry run, an update's when it replaces a file the project holds.
     pub fn plan_import(&mut self) {
-        let Some(i) = self.import.as_mut() else {
+        let Some(i) = self.exchange.import.as_mut() else {
             return;
         };
         let key = i.key();
@@ -1645,7 +1475,7 @@ impl Workspace {
     /// Imports the open import's file, as its plan said: the same
     /// `import` an agent sends, one logged, undoable change.
     pub fn run_import(&mut self) {
-        let Some(i) = self.import.as_mut() else {
+        let Some(i) = self.exchange.import.as_mut() else {
             return;
         };
         let key = i.key();
@@ -1674,7 +1504,7 @@ impl Workspace {
 
     /// Opens File > Export… on `part`, with the last export's choices.
     pub fn open_export(&mut self, part: &str) {
-        let mut e = crate::core::export::Export::new(part, self.export_choices.clone());
+        let mut e = crate::core::export::Export::new(part, self.exchange.export_choices.clone());
         // DXF only for sheet metal; the last export's DXF doesn't carry
         // over to a part with none.
         e.sheet = self.sheet_solid(part, None).map(|k| k.1);
@@ -1691,14 +1521,14 @@ impl Workspace {
         if e.drawing.is_none() && e.choices.format == crate::core::export::Format::Drawing {
             e.choices.format = crate::core::export::Format::Step;
         }
-        self.export = Some(e);
+        self.exchange.export = Some(e);
     }
 
     /// Exports the open export's part: the daemon, on this machine,
     /// writes the file where the dialog says. The choices are kept for
     /// the next export.
     pub fn run_export(&mut self) {
-        let Some(e) = self.export.as_mut() else {
+        let Some(e) = self.exchange.export.as_mut() else {
             return;
         };
         // The format's extension, where the typed path lacks it (#388).
@@ -1708,7 +1538,7 @@ impl Workspace {
         e.error = None;
         e.done = None;
         e.faults.clear();
-        self.export_choices = e.choices.clone();
+        self.exchange.export_choices = e.choices.clone();
         let req = e.request(&path);
         self.send(req, Pending::Export);
     }
@@ -1738,9 +1568,9 @@ impl Workspace {
     }
 
     fn rediagnose(&mut self) {
-        if self.doctor_waiting {
-            self.doctor_again = true;
-        } else if self.doctor.is_some() {
+        if self.session.doctor_waiting {
+            self.session.doctor_again = true;
+        } else if self.session.doctor.is_some() {
             self.diagnose();
         }
     }
@@ -1748,7 +1578,7 @@ impl Workspace {
     /// Applies repairs from the last report (`doctor.repair`); the answer
     /// brings the new report.
     pub fn repair(&mut self, repairs: Vec<String>, params: serde_json::Map<String, Value>) {
-        self.doctor_waiting = true;
+        self.session.doctor_waiting = true;
         self.send(Request::DoctorRepair { repairs, params }, Pending::Doctor);
     }
 
@@ -1843,7 +1673,12 @@ impl Workspace {
     /// participant attached to this daemon (question 436).
     pub fn ask_checkout(&mut self, branch: &str) {
         let me = self.link.participant.clone();
-        let attached = self.people.others(&me).map(|p| p.name.clone()).collect();
+        let attached = self
+            .session
+            .people
+            .others(&me)
+            .map(|p| p.name.clone())
+            .collect();
         self.branches.checkout = self.branches.checkout_of(branch, attached);
     }
 
@@ -2044,7 +1879,7 @@ impl Workspace {
             .myself()
             .map(|m| m.sections.clone())
             .unwrap_or_default();
-        if self.sections.follow(&planes) {
+        if self.view.sections.follow(&planes) {
             self.model.generation += 1;
         }
     }
@@ -2053,7 +1888,7 @@ impl Workspace {
     /// once, as a drag left them, and written for the session.
     pub fn set_sections(&mut self, planes: Vec<ryucad::section::Plane>) {
         let req = crate::core::section::request(&planes, &self.link.participant);
-        self.sections.planes = planes;
+        self.view.sections.planes = planes;
         self.model.generation += 1;
         self.send(req, Pending::Sections);
     }
@@ -2069,19 +1904,20 @@ impl Workspace {
     /// is another assembly's, and where it moves occurrences.
     fn follow_explode(&mut self) {
         let shown = self.myself().and_then(|m| m.explode.clone());
-        if self.explodes.shown != shown {
-            self.explodes.shown = shown;
-            self.explodes.sliding = None;
+        if self.assembly.explodes.shown != shown {
+            self.assembly.explodes.shown = shown;
+            self.assembly.explodes.sliding = None;
         }
         let part = self
+            .assembly
             .explodes
             .shown
             .as_ref()
             .map(|s| s.part.clone())
             .or_else(|| self.shown_assembly());
-        if part.is_some() && part != self.explodes.part {
-            self.explodes.part = part;
-            self.explodes.list.clear();
+        if part.is_some() && part != self.assembly.explodes.part {
+            self.assembly.explodes.part = part;
+            self.assembly.explodes.list.clear();
             self.read_explodes();
         }
         self.sync_explode();
@@ -2089,7 +1925,7 @@ impl Workspace {
 
     /// Reads the explodes of the assembly they are of (`explode.list`).
     pub fn read_explodes(&mut self) {
-        if let Some(p) = self.explodes.part.clone() {
+        if let Some(p) = self.assembly.explodes.part.clone() {
             let req = Request::ExplodeList {
                 part: Some(p.clone()),
             };
@@ -2107,7 +1943,7 @@ impl Workspace {
     /// one shown; `off` shows none.
     pub fn show_explode(&mut self, explode: Option<&str>, fraction: Option<f64>, off: bool) {
         let req = Request::ExplodeShow {
-            part: explode.and(self.explodes.part.clone()),
+            part: explode.and(self.assembly.explodes.part.clone()),
             explode: explode.map(str::to_owned),
             fraction,
             off,
@@ -2119,14 +1955,14 @@ impl Workspace {
     /// Draws the explode `fraction` of the way while the slider moves;
     /// written when let go ([`Workspace::show_explode`]).
     pub fn slide_explode(&mut self, fraction: f64) {
-        self.explodes.sliding = Some(fraction.clamp(0.0, 1.0));
+        self.assembly.explodes.sliding = Some(fraction.clamp(0.0, 1.0));
         self.sync_explode();
     }
 
     /// Starts a new step of the selected occurrences: their arrows show
     /// at their middle, to drag.
     pub fn start_step(&mut self) {
-        let Some(part) = self.explodes.part.clone() else {
+        let Some(part) = self.assembly.explodes.part.clone() else {
             return;
         };
         let selection = self
@@ -2146,7 +1982,7 @@ impl Workspace {
             return;
         }
         let middles = self.model.middles(&part);
-        let offsets = self.explodes.offsets(&part);
+        let offsets = self.assembly.explodes.offsets(&part);
         let at: Vec<[f64; 3]> = instances
             .iter()
             .filter_map(|p| {
@@ -2156,7 +1992,7 @@ impl Workspace {
             .collect();
         let n = at.len().max(1) as f64;
         let centre = [0, 1, 2].map(|k| at.iter().map(|p| p[k]).sum::<f64>() / n);
-        self.explodes.adding = Some(crate::core::explode::Adding {
+        self.assembly.explodes.adding = Some(crate::core::explode::Adding {
             instances,
             centre,
             axis: None,
@@ -2168,20 +2004,24 @@ impl Workspace {
     /// Writes the step being made after the shown explode's steps, or as
     /// the first of a new explode named [`Explodes::name`].
     pub fn finish_step(&mut self) {
-        let Some(a) = self.explodes.adding.take() else {
+        let Some(a) = self.assembly.explodes.adding.take() else {
             return;
         };
-        let Some(part) = self.explodes.part.clone() else {
+        let Some(part) = self.assembly.explodes.part.clone() else {
             return;
         };
         let unit = self.unit();
         let Some(step) = a.written(unit.as_str(), unit.factor()) else {
             return;
         };
-        let current = self.explodes.current(&part).map(|(e, _)| e.clone());
+        let current = self
+            .assembly
+            .explodes
+            .current(&part)
+            .map(|(e, _)| e.clone());
         let id = match &current {
             Some(e) => e.id.clone(),
-            None if !self.explodes.name.is_empty() => self.explodes.name.clone(),
+            None if !self.assembly.explodes.name.is_empty() => self.assembly.explodes.name.clone(),
             None => return,
         };
         let req = crate::core::explode::save_with(
@@ -2189,7 +2029,7 @@ impl Workspace {
             &id,
             current.as_ref(),
             step,
-            self.explodes.revision.clone(),
+            self.assembly.explodes.revision.clone(),
         );
         self.sync_explode();
         self.send(req, Pending::ExplodeSaved(part, Some(id)));
@@ -2198,10 +2038,10 @@ impl Workspace {
     /// Takes step `k` out of the shown explode, or deletes the explode
     /// with its last step.
     pub fn remove_step(&mut self, k: usize) {
-        let Some(part) = self.explodes.part.clone() else {
+        let Some(part) = self.assembly.explodes.part.clone() else {
             return;
         };
-        let Some((e, _)) = self.explodes.current(&part) else {
+        let Some((e, _)) = self.assembly.explodes.current(&part) else {
             return;
         };
         let e = e.clone();
@@ -2209,10 +2049,15 @@ impl Workspace {
             Request::ExplodeDelete {
                 part: part.clone(),
                 explode: e.id.clone(),
-                expected_revision: self.explodes.revision.clone(),
+                expected_revision: self.assembly.explodes.revision.clone(),
             }
         } else {
-            crate::core::explode::save_without(&part, &e, k, self.explodes.revision.clone())
+            crate::core::explode::save_without(
+                &part,
+                &e,
+                k,
+                self.assembly.explodes.revision.clone(),
+            )
         };
         self.send(req, Pending::ExplodeSaved(part, Some(e.id)));
     }
@@ -2223,29 +2068,34 @@ impl Workspace {
     /// says, and where it moves occurrences.
     fn follow_motion(&mut self) {
         let shown = self.myself().and_then(|m| m.motion.clone());
-        if self.motions.shown != shown {
-            let was_playing = self.motions.shown.as_ref().is_some_and(|s| s.playing);
-            self.motions.shown = shown.clone();
-            self.motions.sliding = None;
+        if self.assembly.motions.shown != shown {
+            let was_playing = self
+                .assembly
+                .motions
+                .shown
+                .as_ref()
+                .is_some_and(|s| s.playing);
+            self.assembly.motions.shown = shown.clone();
+            self.assembly.motions.sliding = None;
             match &shown {
                 Some(s) if s.playing && !was_playing => {
-                    self.motions.started = Some((Instant::now(), s.fraction));
+                    self.assembly.motions.started = Some((Instant::now(), s.fraction));
                 }
                 Some(s) if s.playing => {}
-                _ => self.motions.started = None,
+                _ => self.assembly.motions.started = None,
             }
         }
         let part = shown
             .as_ref()
             .map(|s| s.part.clone())
             .or_else(|| self.shown_assembly());
-        if part.is_some() && part != self.motions.part {
-            self.motions.part = part;
-            self.motions.list.clear();
-            self.motions.frames = None;
+        if part.is_some() && part != self.assembly.motions.part {
+            self.assembly.motions.part = part;
+            self.assembly.motions.list.clear();
+            self.assembly.motions.frames = None;
             self.read_motions();
         }
-        if shown.is_some() && !self.motions.frames_current() {
+        if shown.is_some() && !self.assembly.motions.frames_current() {
             self.read_frames();
         }
         self.sync_moved();
@@ -2253,7 +2103,7 @@ impl Workspace {
 
     /// Reads the motions of the assembly they are of (`motion.list`).
     pub fn read_motions(&mut self) {
-        if let Some(p) = self.motions.part.clone() {
+        if let Some(p) = self.assembly.motions.part.clone() {
             self.send(
                 Request::MotionList {
                     part: Some(p.clone()),
@@ -2265,7 +2115,7 @@ impl Workspace {
 
     /// Fetches the shown motion's frames (`motion.frames`, 120 of them).
     fn read_frames(&mut self) {
-        if let Some(s) = self.motions.shown.clone() {
+        if let Some(s) = self.assembly.motions.shown.clone() {
             let req = Request::MotionFrames {
                 part: s.part.clone(),
                 motion: Some(s.motion.clone()),
@@ -2288,7 +2138,7 @@ impl Workspace {
         off: bool,
     ) {
         let req = Request::MotionShow {
-            part: motion.and(self.motions.part.clone()),
+            part: motion.and(self.assembly.motions.part.clone()),
             motion: motion.map(str::to_owned),
             fraction,
             playing,
@@ -2301,19 +2151,19 @@ impl Workspace {
     /// Draws the motion `fraction` of the way while the slider moves
     /// (Play stops); written when let go.
     pub fn slide_motion(&mut self, fraction: f64) {
-        self.motions.started = None;
-        self.motions.sliding = Some(fraction.clamp(0.0, 1.0));
+        self.assembly.motions.started = None;
+        self.assembly.motions.sliding = Some(fraction.clamp(0.0, 1.0));
         self.sync_moved();
     }
 
     /// Plays the shown motion from where it is, or pauses it there.
     pub fn play_motion(&mut self, play: bool) {
-        let at = self.motions.fraction(Instant::now());
+        let at = self.assembly.motions.fraction(Instant::now());
         if play {
-            self.motions.started = Some((Instant::now(), at.unwrap_or(0.0)));
+            self.assembly.motions.started = Some((Instant::now(), at.unwrap_or(0.0)));
         } else {
-            self.motions.started = None;
-            self.motions.sliding = at;
+            self.assembly.motions.started = None;
+            self.assembly.motions.sliding = at;
         }
         self.show_motion(None, at, Some(play), false);
     }
@@ -2321,10 +2171,10 @@ impl Workspace {
     /// Sweeps the shown motion with interference (`assembly.sweep`): its
     /// collisions marked on the slider and listed.
     pub fn sweep_motion(&mut self) {
-        let Some(s) = self.motions.shown.clone() else {
+        let Some(s) = self.assembly.motions.shown.clone() else {
             return;
         };
-        self.motions.sweep = Some(crate::core::motion::Sweep::asked(&s.part, &s.motion));
+        self.assembly.motions.sweep = Some(crate::core::motion::Sweep::asked(&s.part, &s.motion));
         let req = Request::AssemblySweep {
             part: s.part.clone(),
             motion: Some(s.motion.clone()),
@@ -2351,12 +2201,20 @@ impl Workspace {
     /// Writes the shown motion's ranges and steps as edited
     /// (`motion.save`); a refusal is the daemon's, shown as any.
     pub fn save_motion(&mut self) {
-        let (Some(part), Some((id, ranges, steps))) =
-            (self.motions.part.clone(), self.motions.editing.clone())
-        else {
+        let (Some(part), Some((id, ranges, steps))) = (
+            self.assembly.motions.part.clone(),
+            self.assembly.motions.editing.clone(),
+        ) else {
             return;
         };
-        let Some(entry) = self.motions.list.iter().find(|e| e.id == id).cloned() else {
+        let Some(entry) = self
+            .assembly
+            .motions
+            .list
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+        else {
             return;
         };
         match crate::core::motion::save(
@@ -2365,7 +2223,7 @@ impl Workspace {
             &entry.drives,
             &ranges,
             &steps,
-            self.motions.revision.clone(),
+            self.assembly.motions.revision.clone(),
         ) {
             Ok(req) => self.send(req, Pending::MotionSaved(part)),
             Err(why) => self.fail(Error::new(Code::InvalidParam, why)),
@@ -2376,18 +2234,19 @@ impl Workspace {
     /// else where the motion drawn does: a window shows one or neither.
     fn sync_moved(&mut self) {
         let explode = self
+            .assembly
             .explodes
             .part
             .clone()
             .map(|p| {
-                let o = self.explodes.offsets(&p);
+                let o = self.assembly.explodes.offsets(&p);
                 (p, o)
             })
             .filter(|(_, o)| !o.is_empty());
         let moved = explode.or_else(|| {
-            let p = self.motions.part.clone()?;
+            let p = self.assembly.motions.part.clone()?;
             let part = self.model.parts.get(&p)?;
-            let offsets = self.motions.offsets(
+            let offsets = self.assembly.motions.offsets(
                 &p,
                 part.occurrences.iter().map(|o| o.path.as_str()),
                 Instant::now(),
@@ -2408,7 +2267,7 @@ impl Workspace {
             }
             self.model.focus = want;
             self.model.generation += 1;
-            self.refocused = true;
+            self.view.refocused = true;
             // The BOM tab shows what the window shows, and so does the
             // appearance.
             self.reload_bom();
@@ -2454,18 +2313,18 @@ impl Workspace {
         // model. Neither of the last two is sent to the session.
         let compared = self.myself().and_then(|m| m.compare.clone());
         let want = match (compared, self.model_rev()) {
-            (Some(rev), Some(at)) if self.blink.draws_rev() => {
+            (Some(rev), Some(at)) if self.comparing.blink.draws_rev() => {
                 Some(("working".to_owned(), Some(at), Some(rev)))
             }
             (Some(rev), _) => Some((rev, None, None)),
             (None, Some(draft)) => Some(("working".to_owned(), Some(draft), None)),
             (None, None) => None,
         };
-        match (&self.compare, want) {
+        match (&self.comparing.compare, want) {
             (Some(c), Some((rev, to, swapped)))
                 if c.rev == rev && c.to == to && c.swapped == swapped => {}
             (_, Some((rev, to, swapped))) => {
-                self.compare = Some(Compare {
+                self.comparing.compare = Some(Compare {
                     swapped,
                     ..Compare::between(&rev, to)
                 });
@@ -2474,7 +2333,7 @@ impl Workspace {
                 self.reload_bom();
             }
             (Some(_), None) => {
-                self.compare = None;
+                self.comparing.compare = None;
                 self.model.generation += 1;
                 self.reload_bom();
             }
@@ -2484,19 +2343,19 @@ impl Workspace {
 
     /// Swaps the compare's sides (View > Swap compared sides, `B`).
     pub fn swap_compare(&mut self) {
-        self.blink.swap();
+        self.comparing.blink.swap();
         self.blinked();
     }
 
     /// Shows one side of the compare alone, or both again when it is.
     pub fn compare_only(&mut self, front: Front) {
-        self.blink.only(front);
+        self.comparing.blink.only(front);
         self.blinked();
     }
 
     /// Shows both sides of the compare again.
     pub fn compare_both(&mut self) {
-        self.blink.both();
+        self.comparing.blink.both();
         self.blinked();
     }
 
@@ -2510,15 +2369,20 @@ impl Workspace {
     /// The compare as the viewport paints and ghosts it: none while one
     /// side is shown alone.
     pub fn painted(&self) -> Option<&Compare> {
-        self.compare.as_ref().filter(|_| !self.blink.alone)
+        self.comparing
+            .compare
+            .as_ref()
+            .filter(|_| !self.comparing.blink.alone)
     }
 
     /// Asks for the compare's diff, from its revision to the working
     /// files; with one on its way, once that one comes.
     fn ask_diff(&mut self) {
-        let Some(c) = &self.compare else { return };
-        if self.compare_waiting {
-            self.compare_again = true;
+        let Some(c) = &self.comparing.compare else {
+            return;
+        };
+        if self.comparing.compare_waiting {
+            self.comparing.compare_again = true;
             return;
         }
         let req = Request::Diff {
@@ -2529,17 +2393,19 @@ impl Workspace {
             positions: false,
             all: false,
         };
-        self.compare_asked += 1;
-        self.compare_waiting = true;
-        self.compare_again = false;
-        let n = self.compare_asked;
+        self.comparing.compare_asked += 1;
+        self.comparing.compare_waiting = true;
+        self.comparing.compare_again = false;
+        let n = self.comparing.compare_asked;
         self.send(req, Pending::Compare(n));
     }
 
     /// Fetches the ghosts the compare wants and doesn't have, one body
     /// per request, at the commit the diff was made from.
     fn fetch_ghosts(&mut self) {
-        let Some(c) = &mut self.compare else { return };
+        let Some(c) = &mut self.comparing.compare else {
+            return;
+        };
         let rev = c.commit.clone().unwrap_or_else(|| c.rev.clone());
         let asked: Vec<(BodyKey, String, String)> = c
             .ask()
@@ -2578,18 +2444,18 @@ impl Workspace {
         use crate::core::modes::{Gate, gate};
         // While the compared revision is drawn, nothing writes: the model
         // on screen isn't the files (design 447).
-        if self.blink.draws_rev() && req.needs().is_some() {
+        if self.comparing.blink.draws_rev() && req.needs().is_some() {
             let method = req.method();
             let e = Error::new(
                 Code::ParticipantMode,
                 format!("{method}: {}", crate::core::compare::SWAPPED),
             )
-            .with("showing", &self.blink.of)
+            .with("showing", &self.comparing.blink.of)
             .with("method", &method);
             self.answer(why, Err(e));
             return;
         }
-        match gate(self.mode, &req) {
+        match gate(self.session.mode, &req) {
             Gate::Send => self.send_now(req, why),
             Gate::Propose => {
                 let request = json!({"method": req.method(), "params": req.params()});
@@ -2606,7 +2472,7 @@ impl Workspace {
             Gate::Refuse(because) => {
                 let method = req.method();
                 let e = Error::new(Code::ParticipantMode, format!("{method}: {because}"))
-                    .with("mode", self.mode.as_str())
+                    .with("mode", self.session.mode.as_str())
                     .with("method", &method);
                 self.answer(why, Err(e));
             }
@@ -2617,10 +2483,10 @@ impl Workspace {
     /// (see `core::modes::control`); nothing while the compared revision
     /// is drawn.
     pub fn control(&self, method: &str) -> crate::core::modes::Gate {
-        if self.blink.draws_rev() {
+        if self.comparing.blink.draws_rev() {
             return crate::core::modes::Gate::Refuse(crate::core::compare::SWAPPED);
         }
-        crate::core::modes::control(self.mode, method)
+        crate::core::modes::control(self.session.mode, method)
     }
 
     fn send_now(&mut self, req: Request, why: Pending) {
@@ -2699,10 +2565,10 @@ impl Workspace {
     /// refuses a human's writes their mode doesn't allow. Sent on the
     /// request connection, so every request after it is judged in it.
     pub fn set_mode(&mut self, mode: crate::core::modes::Mode) {
-        if mode == self.mode {
+        if mode == self.session.mode {
             return;
         }
-        let was = std::mem::replace(&mut self.mode, mode);
+        let was = std::mem::replace(&mut self.session.mode, mode);
         self.send(Request::ParticipantMode { mode }, Pending::Mode(was));
         if mode != crate::core::modes::Mode::Annotate {
             self.show_agent = false;
@@ -2714,7 +2580,7 @@ impl Workspace {
     /// This window's person's draft as a revision, while they have one in
     /// Annotate: `draft:<name>`.
     fn draft_rev(&self) -> Option<String> {
-        (self.mode == crate::core::modes::Mode::Annotate
+        (self.session.mode == crate::core::modes::Mode::Annotate
             && !self.annotations.draft(&self.name).is_empty())
         .then(|| format!("{}{}", ryucad::session::DRAFT, self.name))
     }
@@ -2725,8 +2591,8 @@ impl Workspace {
     /// working files.
     pub fn model_rev(&self) -> Option<String> {
         // Swapped: the compared revision, as the participant gave it.
-        if self.blink.draws_rev() {
-            return self.blink.of.clone();
+        if self.comparing.blink.draws_rev() {
+            return self.comparing.blink.of.clone();
         }
         let comparing = self.myself().is_some_and(|m| m.compare.is_some());
         self.draft_rev().filter(|_| !self.show_agent && !comparing)
@@ -2751,7 +2617,7 @@ impl Workspace {
         // A compare that changed or ended starts the blink again: both
         // sides, the working files in front.
         let compared = self.myself().and_then(|m| m.compare.clone());
-        if self.blink.follow(compared.as_deref()) {
+        if self.comparing.blink.follow(compared.as_deref()) {
             self.model.generation += 1;
         }
         let now = (self.model_rev(), self.annotations.draft(&self.name));
@@ -2769,7 +2635,7 @@ impl Workspace {
                 }
                 self.read_appearance();
             }
-            if let Some(f) = &self.form {
+            if let Some(f) = &self.forms.form {
                 let (part, id) = (f.part.clone(), f.feature.clone());
                 self.read_form(part, id, None);
             }
@@ -2851,13 +2717,14 @@ impl Workspace {
         self.chosen_annotation = id.map(str::to_owned);
         let entry = id.and_then(|i| self.annotations.all.get(i)).cloned();
         let comparing_one = self
+            .comparing
             .compare
             .as_ref()
             .is_some_and(|c| c.rev.starts_with(ryucad::session::ANNOTATION));
         match entry {
             Some(e) => {
                 if let Some(c) = e.view {
-                    self.looked = Some(c);
+                    self.view.looked = Some(c);
                 }
                 match e.change {
                     Some(_) => {
@@ -2875,14 +2742,14 @@ impl Workspace {
 
     /// This window as the session knows it.
     pub fn myself(&self) -> Option<&Person> {
-        self.people.get(&self.link.participant)
+        self.session.people.get(&self.link.participant)
     }
 
     /// Changes this window's selection. It shows at once; the daemon's
     /// answer (and everyone else's view of it) follows.
     pub fn select(&mut self, entities: Vec<String>, mode: SelectMode) {
         let me = self.link.participant.clone();
-        if let Some(p) = self.people.all.get_mut(&me) {
+        if let Some(p) = self.session.people.all.get_mut(&me) {
             match mode {
                 SelectMode::Replace => p.selection.clone_from(&entities),
                 SelectMode::Add => {
@@ -2894,7 +2761,7 @@ impl Workspace {
                 }
                 SelectMode::Remove => p.selection.retain(|e| !entities.contains(e)),
             }
-            self.people.generation += 1;
+            self.session.people.generation += 1;
         }
         self.send(Request::SelectionSet { entities, mode }, Pending::Quiet);
     }
@@ -3099,7 +2966,7 @@ impl Workspace {
             Err(_) => l.lines.iter().flat_map(|b| [b.from, b.to]).collect(),
         };
         v.turned = true;
-        self.looked = Some(l.camera(&points, 1.0));
+        self.view.looked = Some(l.camera(&points, 1.0));
     }
 
     /// The solid View > Flat pattern lays flat: the chosen feature's
@@ -3217,10 +3084,10 @@ impl Workspace {
     }
 
     pub fn open_form(&mut self, feature: Option<(String, String)>) {
-        self.form = None;
-        self.dimension = None;
-        self.dimension_for = None;
-        self.form_for.clone_from(&feature);
+        self.forms.form = None;
+        self.forms.dimension = None;
+        self.forms.dimension_for = None;
+        self.forms.form_for.clone_from(&feature);
         if let Some((part, id)) = feature {
             self.read_form(part, id, None);
         }
@@ -3238,11 +3105,11 @@ impl Workspace {
     /// Opens the form for a sketch's dimension (or closes it, with
     /// `None`); the feature's form closes.
     pub fn open_dimension(&mut self, dimension: Option<(String, String, String)>) {
-        self.dimension = None;
-        self.dimension_for.clone_from(&dimension);
+        self.forms.dimension = None;
+        self.forms.dimension_for.clone_from(&dimension);
         if let Some((part, sketch, constraint)) = dimension {
-            self.form = None;
-            self.form_for = None;
+            self.forms.form = None;
+            self.forms.form_for = None;
             self.read_dimension(part, sketch, constraint, None);
         }
     }
@@ -3265,11 +3132,11 @@ impl Workspace {
 
     /// Shows `part`'s parameters in the panel, read if they aren't yet.
     pub fn show_params(&mut self, part: Option<&str>) {
-        if self.params_part.as_deref() == part {
+        if self.parameters.params_part.as_deref() == part {
             return;
         }
-        self.params_part = part.map(str::to_owned);
-        self.params = None;
+        self.parameters.params_part = part.map(str::to_owned);
+        self.parameters.params = None;
         if let Some(p) = part {
             self.read_params(p.to_owned(), None);
         }
@@ -3286,8 +3153,8 @@ impl Workspace {
 
     /// Shows the Equations tile's table, read the first time.
     pub fn show_equations(&mut self) {
-        if !self.equations_open {
-            self.equations_open = true;
+        if !self.parameters.equations_open {
+            self.parameters.equations_open = true;
             self.read_equations(false);
         }
     }
@@ -3304,10 +3171,15 @@ impl Workspace {
     /// Reads the table again if it is open and nothing is being written,
     /// keeping its filter and what was typed.
     fn reload_equations(&mut self) {
-        if !self.equations_open {
+        if !self.parameters.equations_open {
             return;
         }
-        if !self.equations.as_ref().is_some_and(|e| e.saving.is_some()) {
+        if !self
+            .parameters
+            .equations
+            .as_ref()
+            .is_some_and(|e| e.saving.is_some())
+        {
             self.read_equations(false);
         }
     }
@@ -3448,7 +3320,9 @@ impl Workspace {
 
     /// Writes row `i` of the Equations tile as typed, where it lives.
     pub fn save_equation(&mut self, i: usize) {
-        let Some(e) = &mut self.equations else { return };
+        let Some(e) = &mut self.parameters.equations else {
+            return;
+        };
         let Some(req) = e.request(i) else { return };
         e.saving = Some(Some(i));
         e.error = None;
@@ -3457,7 +3331,9 @@ impl Workspace {
 
     /// Adds the Equations tile's new parameter, to the project or a part.
     pub fn add_equation(&mut self) {
-        let Some(e) = &mut self.equations else { return };
+        let Some(e) = &mut self.parameters.equations else {
+            return;
+        };
         let Some(req) = e.add_request() else { return };
         e.saving = Some(None);
         e.error = None;
@@ -3466,7 +3342,9 @@ impl Workspace {
 
     /// Saves what was typed into the parameter panel.
     pub fn save_params(&mut self) {
-        let Some(p) = &mut self.params else { return };
+        let Some(p) = &mut self.parameters.params else {
+            return;
+        };
         p.saving = true;
         p.error = None;
         let req = p.request();
@@ -3476,11 +3354,11 @@ impl Workspace {
     /// Shows `part`'s properties in the Part section, read if they aren't
     /// yet.
     pub fn show_props(&mut self, part: Option<&str>) {
-        if self.props_part.as_deref() == part {
+        if self.pdm.props_part.as_deref() == part {
             return;
         }
-        self.props_part = part.map(str::to_owned);
-        self.props = None;
+        self.pdm.props_part = part.map(str::to_owned);
+        self.pdm.props = None;
         if let Some(p) = part {
             self.read_props(p.to_owned(), None);
         }
@@ -3496,7 +3374,7 @@ impl Workspace {
 
     /// Saves what was typed into the Part section.
     pub fn save_props(&mut self) {
-        let Some(p) = &mut self.props else { return };
+        let Some(p) = &mut self.pdm.props else { return };
         p.saving = true;
         p.error = None;
         let req = p.request();
@@ -3505,14 +3383,14 @@ impl Workspace {
 
     /// Reads the release records the first time the Releases tile shows.
     pub fn open_releases(&mut self) {
-        if !self.releases_open {
+        if !self.pdm.releases_open {
             self.load_releases();
         }
     }
 
     /// Reads the BOM the first time the BOM tile shows.
     pub fn open_bom(&mut self) {
-        if !self.bom_open {
+        if !self.pdm.bom_open {
             self.load_bom();
         }
     }
@@ -3520,7 +3398,7 @@ impl Workspace {
     /// Reads the Releases tab: every record and the release checks; from
     /// now on they are read again as they change.
     pub fn load_releases(&mut self) {
-        self.releases_open = true;
+        self.pdm.releases_open = true;
         self.send(Request::ReleaseList { part: None }, Pending::States);
         let req = Request::ReleaseCheck { results: false };
         self.send(req, Pending::ReleaseCheck);
@@ -3529,7 +3407,7 @@ impl Workspace {
     /// The dry run of proposing `part`, for its Propose dialog: the label
     /// it takes and every reason it can't yet.
     pub fn propose_dry(&mut self, part: &str) {
-        self.releases.proposal = None;
+        self.pdm.releases.proposal = None;
         let req = Request::ReleasePropose {
             part: part.to_owned(),
             note: None,
@@ -3573,9 +3451,9 @@ impl Workspace {
     }
 
     fn release_write(&mut self, req: Request) {
-        self.releases.busy = true;
-        self.releases.error = None;
-        self.releases.done = None;
+        self.pdm.releases.busy = true;
+        self.pdm.releases.error = None;
+        self.pdm.releases.done = None;
         self.send(req, Pending::ReleaseWrite);
     }
 
@@ -3591,12 +3469,12 @@ impl Workspace {
     /// reads changes; at most one reading is on its way, and one more
     /// after it.
     pub fn load_bom(&mut self) {
-        self.bom_open = true;
-        if self.bom_waiting {
-            self.bom_again = true;
+        self.pdm.bom_open = true;
+        if self.pdm.bom_waiting {
+            self.pdm.bom_again = true;
             return;
         }
-        self.bom_waiting = true;
+        self.pdm.bom_waiting = true;
         self.ask_bom(false);
     }
 
@@ -3614,7 +3492,7 @@ impl Workspace {
     /// While the window compares, asks for the BOM's diff from the
     /// compared revision to the working files; else drops any.
     fn ask_bom_diff(&mut self) {
-        match (&self.compare, &self.bom.root) {
+        match (&self.comparing.compare, &self.pdm.bom.root) {
             (Some(c), Some(root)) => {
                 let req = Request::BomDiff {
                     part: Some(root.clone()),
@@ -3624,7 +3502,7 @@ impl Workspace {
                 self.send(req, Pending::BomDiff);
             }
             _ => {
-                self.bom.take_diff(None);
+                self.pdm.bom.take_diff(None);
                 self.bom_read();
             }
         }
@@ -3632,32 +3510,32 @@ impl Workspace {
 
     /// A reading is done: the next one, if it was wanted meanwhile.
     fn bom_read(&mut self) {
-        self.bom_waiting = false;
-        if std::mem::take(&mut self.bom_again) {
+        self.pdm.bom_waiting = false;
+        if std::mem::take(&mut self.pdm.bom_again) {
             self.load_bom();
         }
     }
 
     /// Shows the flat BOM, or the indented one.
     pub fn set_bom_flat(&mut self, flat: bool) {
-        self.bom.flat = flat;
+        self.pdm.bom.flat = flat;
         self.load_bom();
     }
 
     /// Shows where `part` is used in the Part section (`bom.where_used`),
     /// read if it isn't yet.
     pub fn show_where_used(&mut self, part: Option<&str>) {
-        if self.where_used_part.as_deref() == part {
+        if self.pdm.where_used_part.as_deref() == part {
             return;
         }
-        self.where_used_part = part.map(str::to_owned);
-        self.where_used = None;
+        self.pdm.where_used_part = part.map(str::to_owned);
+        self.pdm.where_used = None;
         self.read_where_used();
     }
 
     /// Reads where the Part section's part is used again, if it shows one.
     fn read_where_used(&mut self) {
-        if let Some(part) = self.where_used_part.clone() {
+        if let Some(part) = self.pdm.where_used_part.clone() {
             let req = Request::BomWhereUsed {
                 part: part.clone(),
                 label: None,
@@ -3677,6 +3555,7 @@ impl Workspace {
     /// its lock is never held on the network.
     fn ask_org(&mut self, part: &str) {
         let Some(project) = self
+            .pdm
             .pdm_config
             .as_ref()
             .and_then(|c| c["project"].as_str())
@@ -3705,32 +3584,32 @@ impl Workspace {
             let _ = tx.send(answer);
             wake();
         });
-        self.org = Some((part.to_owned(), rx));
-        self.org_early = None;
+        self.pdm.org = Some((part.to_owned(), rx));
+        self.pdm.org_early = None;
     }
 
     /// The organization's answer, once the thread has it: into the Part
     /// section's where-used if that is still the part's, else kept for it.
     fn take_org(&mut self) {
-        let Some((part, rx)) = &self.org else {
+        let Some((part, rx)) = &self.pdm.org else {
             return;
         };
         let Ok(answer) = rx.try_recv() else {
             return;
         };
         let part = part.clone();
-        self.org = None;
+        self.pdm.org = None;
         let rows = answer.map(|v| crate::core::where_used::WhereUsed::org_rows(&v));
-        match self.where_used.as_mut().filter(|w| w.part == part) {
+        match self.pdm.where_used.as_mut().filter(|w| w.part == part) {
             Some(w) => w.org = Some(rows),
-            None => self.org_early = Some((part, rows)),
+            None => self.pdm.org_early = Some((part, rows)),
         }
     }
 
     /// Opens Export CSV… for the BOM as the tab shows it.
     pub fn open_bom_export(&mut self) {
-        self.bom_export = Some(crate::core::bom::BomExport {
-            flat: self.bom.flat,
+        self.pdm.bom_export = Some(crate::core::bom::BomExport {
+            flat: self.pdm.bom.flat,
             ..Default::default()
         });
     }
@@ -3738,8 +3617,8 @@ impl Workspace {
     /// Writes the open export's CSV: `bom.get` with `format: csv`, the
     /// bytes written atomically where it says.
     pub fn run_bom_export(&mut self) {
-        let part = self.bom.root.clone().or_else(|| self.bom_root());
-        let Some(e) = self.bom_export.as_mut() else {
+        let part = self.pdm.bom.root.clone().or_else(|| self.bom_root());
+        let Some(e) = self.pdm.bom_export.as_mut() else {
             return;
         };
         let path = absolute(e.path.trim());
@@ -3760,18 +3639,18 @@ impl Workspace {
     /// against the revision of its assembly the window last saw. Text
     /// that isn't an item number is refused here, and kept.
     pub fn save_item(&mut self) {
-        let Some(e) = self.bom.editing.clone() else {
+        let Some(e) = self.pdm.bom.editing.clone() else {
             return;
         };
         let n = match crate::core::bom::item_number(&e.text) {
             Ok(n) => n,
             Err(why) => {
-                self.bom.edit_error = Some(why);
+                self.pdm.bom.edit_error = Some(why);
                 return;
             }
         };
         if Some(n) == e.was {
-            self.bom.editing = None;
+            self.pdm.bom.editing = None;
             return;
         }
         let mut items = serde_json::Map::new();
@@ -3782,21 +3661,22 @@ impl Workspace {
             compact: false,
             expected_revision: self.part(&e.parent).map(|p| p.revision.clone()),
         };
-        self.bom.saving = true;
-        self.bom.edit_error = None;
+        self.pdm.bom.saving = true;
+        self.pdm.bom.edit_error = None;
         self.send(req, Pending::BomRenumber(e));
     }
 
     /// Reads the BOM again if the tab was opened.
     fn reload_bom(&mut self) {
-        if self.bom_open {
+        if self.pdm.bom_open {
             self.load_bom();
         }
     }
 
     /// Whether ryupdm is set up: the project has its ID.
     pub fn pdm_ready(&self) -> bool {
-        self.pdm_config
+        self.pdm
+            .pdm_config
             .as_ref()
             .is_some_and(|c| c["project"].is_string())
     }
@@ -3809,7 +3689,9 @@ impl Workspace {
 
     /// Saves the value typed into the dimension's form.
     pub fn save_dimension(&mut self) {
-        let Some(f) = &mut self.dimension else { return };
+        let Some(f) = &mut self.forms.dimension else {
+            return;
+        };
         f.saving = true;
         f.error = None;
         let req = f.request();
@@ -3821,7 +3703,7 @@ impl Workspace {
     /// asks once what moving it there changes (`insert.update`'s dry run;
     /// its `expected_revision` is the project's, so none is sent).
     pub fn preview_insert(&mut self) {
-        let chosen = self.form.as_ref().and_then(|f| {
+        let chosen = self.forms.form.as_ref().and_then(|f| {
             let r = f.rev.as_ref().filter(|r| f.ty == "insert" && r.dirty())?;
             let to = match r.chosen.as_str() {
                 "working" => "working".to_owned(),
@@ -3830,13 +3712,18 @@ impl Workspace {
             Some((f.part.clone(), f.feature.clone(), to))
         });
         let Some(key) = chosen else {
-            self.insert_preview = None;
+            self.forms.insert_preview = None;
             return;
         };
-        if self.insert_preview.as_ref().is_some_and(|p| p.key == key) {
+        if self
+            .forms
+            .insert_preview
+            .as_ref()
+            .is_some_and(|p| p.key == key)
+        {
             return;
         }
-        self.insert_preview = Some(crate::core::inserts::Preview::asked(key.clone()));
+        self.forms.insert_preview = Some(crate::core::inserts::Preview::asked(key.clone()));
         let req = Request::InsertUpdate {
             part: key.0.clone(),
             feature: key.1.clone(),
@@ -3848,7 +3735,9 @@ impl Workspace {
     }
 
     pub fn save_form(&mut self) {
-        let Some(form) = &mut self.form else { return };
+        let Some(form) = &mut self.forms.form else {
+            return;
+        };
         match form.request() {
             Err(e) => form.error = Some(e),
             Ok(req) => {
@@ -3906,7 +3795,7 @@ impl Workspace {
         }
         self.follow_views();
         // Play moves the model on every frame.
-        if self.motions.playing() {
+        if self.assembly.motions.playing() {
             self.sync_moved();
         }
         let ready = self
@@ -3972,11 +3861,11 @@ impl Workspace {
     /// A new link after a lost one: everything is fetched again; meshes of
     /// bodies that didn't change are kept.
     fn reconnected(&mut self, link: Link) {
-        self.people.reset(&link.session["participants"]);
+        self.session.people.reset(&link.session["participants"]);
         self.link = link;
         // A reconnected window starts in View, as the daemon starts every
         // participant: Direct edit isn't kept across a daemon's restart.
-        self.mode = Default::default();
+        self.session.mode = Default::default();
         self.lost = false;
         self.lost_why = None;
         self.toasts.found(Instant::now());
@@ -3986,11 +3875,12 @@ impl Workspace {
         }
         self.camera_sent = None;
         if self
+            .session
             .following
             .as_ref()
-            .is_some_and(|f| self.people.get(f).is_none())
+            .is_some_and(|f| self.session.people.get(f).is_none())
         {
-            self.following = None;
+            self.session.following = None;
         }
         self.load();
         // A new session knows nothing of this window's compare or focus
@@ -3998,6 +3888,7 @@ impl Workspace {
         // (A draft's compare is the window's own: the window is in View
         // again, so it goes.)
         if let Some(rev) = self
+            .comparing
             .compare
             .as_ref()
             .filter(|c| c.to.is_none())
@@ -4013,33 +3904,33 @@ impl Workspace {
         self.rediagnose();
         self.reload_history();
         // Panels asked for whose answers were lost are asked for again.
-        if let Some(part) = self.params_part.clone()
-            && self.params.is_none()
+        if let Some(part) = self.parameters.params_part.clone()
+            && self.parameters.params.is_none()
         {
             self.read_params(part, None);
         }
-        if self.equations_open && self.equations.is_none() {
+        if self.parameters.equations_open && self.parameters.equations.is_none() {
             self.read_equations(false);
         }
-        if let Some((part, id)) = self.form_for.clone()
-            && self.form.is_none()
+        if let Some((part, id)) = self.forms.form_for.clone()
+            && self.forms.form.is_none()
         {
             self.read_form(part, id, None);
         }
-        if let Some(part) = self.props_part.clone()
-            && self.props.is_none()
+        if let Some(part) = self.pdm.props_part.clone()
+            && self.pdm.props.is_none()
         {
             self.read_props(part, None);
         }
-        if self.releases_open {
+        if self.pdm.releases_open {
             self.load_releases();
         }
         self.reload_bom();
-        if self.where_used.is_none() {
+        if self.pdm.where_used.is_none() {
             self.read_where_used();
         }
-        if let Some((part, sketch, constraint)) = self.dimension_for.clone()
-            && self.dimension.is_none()
+        if let Some((part, sketch, constraint)) = self.forms.dimension_for.clone()
+            && self.forms.dimension.is_none()
         {
             self.read_dimension(part, sketch, constraint, None);
         }
@@ -4052,7 +3943,11 @@ impl Workspace {
 
     /// The camera of the participant this window follows, if they have one.
     pub fn followed_camera(&self) -> Option<&Camera> {
-        self.people.get(self.following.as_deref()?)?.camera.as_ref()
+        self.session
+            .people
+            .get(self.session.following.as_deref()?)?
+            .camera
+            .as_ref()
     }
 
     /// Handles every event that has arrived. Returns whether there were any.
@@ -4124,35 +4019,35 @@ impl Workspace {
                 self.progress.lost();
                 self.toasts.lost(Instant::now());
                 // Saves that went unanswered can be tried again.
-                if let Some(f) = &mut self.form {
+                if let Some(f) = &mut self.forms.form {
                     f.saving = false;
                 }
-                if let Some(f) = &mut self.dimension {
+                if let Some(f) = &mut self.forms.dimension {
                     f.saving = false;
                 }
-                if let Some(p) = &mut self.params {
+                if let Some(p) = &mut self.parameters.params {
                     p.saving = false;
                 }
-                if let Some(e) = &mut self.equations {
+                if let Some(e) = &mut self.parameters.equations {
                     e.saving = None;
                 }
-                if let Some(p) = &mut self.props {
+                if let Some(p) = &mut self.pdm.props {
                     p.saving = false;
                 }
-                self.releases.busy = false;
-                self.bom_waiting = false;
-                self.bom_again = false;
-                self.bom.saving = false;
+                self.pdm.releases.busy = false;
+                self.pdm.bom_waiting = false;
+                self.pdm.bom_again = false;
+                self.pdm.bom.saving = false;
                 self.model.asked.clear();
                 self.model.sketches_asked.clear();
-                self.compare_waiting = false;
-                self.doctor_waiting = false;
-                self.doctor_again = false;
+                self.comparing.compare_waiting = false;
+                self.session.doctor_waiting = false;
+                self.session.doctor_again = false;
                 self.history_waiting = false;
                 self.history_again = false;
                 self.branches_waiting = false;
                 self.branches.previewing = None;
-                if let Some(c) = &mut self.compare {
+                if let Some(c) = &mut self.comparing.compare {
                     c.asked.clear();
                 }
                 self.retry = Some(Retry {
@@ -4178,8 +4073,8 @@ impl Workspace {
         );
         self.answer(why, answer);
         if doctor {
-            self.doctor_waiting = false;
-            if std::mem::take(&mut self.doctor_again) {
+            self.session.doctor_waiting = false;
+            if std::mem::take(&mut self.session.doctor_again) {
                 self.diagnose();
             }
         }
@@ -4228,7 +4123,7 @@ impl Workspace {
             (Pending::AnnotationWrite, Ok(_)) => {}
             (Pending::Mode(_), Ok(_)) => {}
             (Pending::Mode(was), Err(e)) => {
-                self.mode = was;
+                self.session.mode = was;
                 self.fail(e);
             }
             (Pending::Info, Ok(a)) => {
@@ -4305,15 +4200,20 @@ impl Workspace {
                 self.part_changed(&report);
             }
             (Pending::People, Ok(a)) => {
-                self.people.reset(&a.result["participants"]);
+                self.session.people.reset(&a.result["participants"]);
                 self.follow_draft();
                 self.follow_focus();
             }
             (Pending::Compare(n), r) => {
-                if n == self.compare_asked {
-                    self.compare_waiting = false;
+                if n == self.comparing.compare_asked {
+                    self.comparing.compare_waiting = false;
                 }
-                if let Some(c) = self.compare.as_mut().filter(|_| n == self.compare_asked) {
+                if let Some(c) = self
+                    .comparing
+                    .compare
+                    .as_mut()
+                    .filter(|_| n == self.comparing.compare_asked)
+                {
                     match r {
                         Ok(a) => c.take_diff(&a.result),
                         Err(e) => c.failed(e),
@@ -4321,50 +4221,50 @@ impl Workspace {
                     self.model.generation += 1;
                     self.fetch_ghosts();
                 }
-                if std::mem::take(&mut self.compare_again) {
+                if std::mem::take(&mut self.comparing.compare_again) {
                     self.ask_diff();
                 }
             }
             (Pending::States, Ok(a)) => {
-                self.states.reset(&a.result);
-                self.releases.list = Some(a.result);
+                self.pdm.states.reset(&a.result);
+                self.pdm.releases.list = Some(a.result);
             }
             (Pending::ReleaseCheck, r) => match r {
-                Ok(a) => self.releases.findings = findings(&a.result),
+                Ok(a) => self.pdm.releases.findings = findings(&a.result),
                 // A failing check is still a report.
                 Err(e) if e.code == Code::CheckFailed => {
-                    self.releases.findings = findings(&e.details);
+                    self.pdm.releases.findings = findings(&e.details);
                 }
-                Err(e) => self.releases.error = Some(e),
+                Err(e) => self.pdm.releases.error = Some(e),
             },
             (Pending::ProposeDry(part), r) => match r {
-                Ok(a) => self.releases.proposal = Some((part, a.result)),
-                Err(e) => self.releases.error = Some(e),
+                Ok(a) => self.pdm.releases.proposal = Some((part, a.result)),
+                Err(e) => self.pdm.releases.error = Some(e),
             },
             (Pending::ReleaseWrite, r) => {
-                self.releases.busy = false;
+                self.pdm.releases.busy = false;
                 match r {
                     Ok(a) => {
-                        self.releases.proposal = None;
-                        self.releases.confirm = None;
-                        self.releases.note.clear();
-                        self.releases.done = Some(match a.result.get("path") {
+                        self.pdm.releases.proposal = None;
+                        self.pdm.releases.confirm = None;
+                        self.pdm.releases.note.clear();
+                        self.pdm.releases.done = Some(match a.result.get("path") {
                             Some(p) => format!("wrote {}", p.as_str().unwrap_or_default()),
                             None => crate::core::releases::synced(&a.result),
                         });
                         self.load_releases();
                     }
-                    Err(e) => self.releases.error = Some(e),
+                    Err(e) => self.pdm.releases.error = Some(e),
                 }
             }
             (Pending::Bom { flat }, r) => {
                 match r {
-                    Ok(a) => self.bom.take(&a.result),
-                    Err(e) => self.bom.failed(e),
+                    Ok(a) => self.pdm.bom.take(&a.result),
+                    Err(e) => self.pdm.bom.failed(e),
                 }
                 // The flat BOM follows the indented one, whose lines give
                 // it its occurrences, and a compare's diff follows both.
-                if !flat && self.bom.flat && self.bom.error.is_none() {
+                if !flat && self.pdm.bom.flat && self.pdm.bom.error.is_none() {
                     self.ask_bom(true);
                 } else {
                     self.ask_bom_diff();
@@ -4372,13 +4272,13 @@ impl Workspace {
             }
             (Pending::BomDiff, r) => {
                 match r {
-                    Ok(a) => self.bom.take_diff(Some(&a.result)),
-                    Err(e) => self.bom.diff_failed(e),
+                    Ok(a) => self.pdm.bom.take_diff(Some(&a.result)),
+                    Err(e) => self.pdm.bom.diff_failed(e),
                 }
                 self.bom_read();
             }
             (Pending::WhereUsed(part), r) => {
-                if self.where_used_part.as_deref() == Some(part.as_str()) {
+                if self.pdm.where_used_part.as_deref() == Some(part.as_str()) {
                     use crate::core::where_used::WhereUsed;
                     let mut w = match r {
                         Ok(a) => WhereUsed::from_answer(&part, &a.result),
@@ -4386,21 +4286,22 @@ impl Workspace {
                     };
                     // The organization's answer may have come first; else
                     // the last one stands until the new one comes.
-                    match self.org_early.take() {
+                    match self.pdm.org_early.take() {
                         Some((p, rows)) if p == part => w.org = Some(rows),
                         _ => {
                             w.org = self
+                                .pdm
                                 .where_used
                                 .take()
                                 .filter(|old| old.part == part)
                                 .and_then(|old| old.org);
                         }
                     }
-                    self.where_used = Some(w);
+                    self.pdm.where_used = Some(w);
                 }
             }
             (Pending::BomExport(path), a) => {
-                let Some(e) = self.bom_export.as_mut() else {
+                let Some(e) = self.pdm.bom_export.as_mut() else {
                     return;
                 };
                 e.waiting = false;
@@ -4417,33 +4318,33 @@ impl Workspace {
                 }
             }
             (Pending::BomRenumber(edit), r) => {
-                self.bom.saving = false;
+                self.pdm.bom.saving = false;
                 match r {
-                    Ok(_) => self.bom.editing = None,
+                    Ok(_) => self.pdm.bom.editing = None,
                     // Someone renumbered first: read again, and say what
                     // changed.
                     Err(e) if e.code == Code::Conflict => {
-                        self.bom.editing = None;
-                        self.bom.conflict = Some(edit);
+                        self.pdm.bom.editing = None;
+                        self.pdm.bom.conflict = Some(edit);
                     }
-                    Err(e) => self.bom.edit_error = Some(e.message),
+                    Err(e) => self.pdm.bom.edit_error = Some(e.message),
                 }
                 self.load_bom();
             }
             (Pending::PdmConfig, Ok(a)) => {
                 let was = self.pdm_ready();
-                self.pdm_config = Some(a.result);
+                self.pdm.pdm_config = Some(a.result);
                 // Set up just now: the properties' faults may have moved.
                 if !was
                     && self.pdm_ready()
-                    && let Some(part) = self.props_part.clone()
+                    && let Some(part) = self.pdm.props_part.clone()
                 {
                     self.read_props(part, None);
                 }
             }
             (Pending::Props(part, before), Ok(a)) => {
-                if self.props_part.as_deref() == Some(part.as_str()) {
-                    self.props = Some(match (before, &self.props) {
+                if self.pdm.props_part.as_deref() == Some(part.as_str()) {
+                    self.pdm.props = Some(match (before, &self.pdm.props) {
                         (Some(b), _) => b.reloaded(&a.result),
                         // Read again under someone typing (after Set up
                         // PDM): what they typed stays.
@@ -4453,13 +4354,13 @@ impl Workspace {
                 }
             }
             (Pending::PropsSave, Ok(_)) => {
-                if let Some(p) = &self.props {
+                if let Some(p) = &self.pdm.props {
                     let part = p.part.clone();
                     self.read_props(part, None);
                 }
             }
             (Pending::PropsSave, Err(e)) => {
-                if let Some(p) = &mut self.props {
+                if let Some(p) = &mut self.pdm.props {
                     p.saving = false;
                     if e.code == Code::Conflict {
                         let before = Box::new(p.clone());
@@ -4500,7 +4401,9 @@ impl Workspace {
                 }
             }
             (Pending::Ghost(key, hash), a) => {
-                let Some(c) = &mut self.compare else { return };
+                let Some(c) = &mut self.comparing.compare else {
+                    return;
+                };
                 c.answered(&key, &hash);
                 match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
                     Ok(Some(Ok(bodies))) => {
@@ -4539,7 +4442,7 @@ impl Workspace {
                 }
             }
             (Pending::InsertPreview(key), a) => {
-                if let Some(p) = self.insert_preview.as_mut().filter(|p| p.key == key) {
+                if let Some(p) = self.forms.insert_preview.as_mut().filter(|p| p.key == key) {
                     p.answer = Some(a.map(|a| crate::core::inserts::Moved::from_answer(&a.result)));
                 }
             }
@@ -4548,14 +4451,14 @@ impl Workspace {
             // notification comes (#143).
             (Pending::Hidden, Ok(a)) => {
                 let me = self.link.participant.clone();
-                if let Some(p) = self.people.all.get_mut(&me) {
+                if let Some(p) = self.session.people.all.get_mut(&me) {
                     p.hidden = a.result["hidden"]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .filter_map(|s| s.as_str().map(str::to_owned))
                         .collect();
-                    self.people.generation += 1;
+                    self.session.people.generation += 1;
                 }
                 self.follow_focus();
             }
@@ -4688,17 +4591,17 @@ impl Workspace {
                 self.history = Some(json!({"error": e.message}));
                 self.fail(e);
             }
-            (Pending::Cache, Ok(a)) => self.cache = Some(a.result),
+            (Pending::Cache, Ok(a)) => self.session.cache = Some(a.result),
             (Pending::CacheToken, Ok(a)) => {
-                self.cache_token = Some(a.result);
+                self.session.cache_token = Some(a.result);
                 self.read_cache();
             }
             // Said beside the field, not only in the status line.
-            (Pending::CacheToken, Err(e)) => self.cache_token = Some(json!({"error": e})),
+            (Pending::CacheToken, Err(e)) => self.session.cache_token = Some(json!({"error": e})),
             // Only the dialog for that file takes an answer: one opened
             // since asks again.
             (Pending::ImportPlan(key), a) => {
-                let Some(i) = self.import.as_mut().filter(|i| i.key() == key) else {
+                let Some(i) = self.exchange.import.as_mut().filter(|i| i.key() == key) else {
                     return;
                 };
                 i.waiting = false;
@@ -4708,7 +4611,7 @@ impl Workspace {
                 }
             }
             (Pending::Import(key), a) => {
-                let Some(i) = self.import.as_mut().filter(|i| i.key() == key) else {
+                let Some(i) = self.exchange.import.as_mut().filter(|i| i.key() == key) else {
                     return;
                 };
                 i.waiting = false;
@@ -4721,20 +4624,20 @@ impl Workspace {
                 }
             }
             (Pending::Export, a) => {
-                if let Some(e) = self.export.as_mut() {
+                if let Some(e) = self.exchange.export.as_mut() {
                     e.answered(a.map(|a| a.result));
                 }
             }
             (Pending::DragSolve(part), a) => {
                 let mut again = false;
-                if let Some(d) = self.drag.as_mut().filter(|d| d.part == part) {
+                if let Some(d) = self.assembly.drag.as_mut().filter(|d| d.part == part) {
                     d.waiting = false;
                     again = d.asked.is_some_and(|(_, t)| t != d.translate);
                 }
                 match a {
                     // Only while it is still dragged: a late answer after
                     // the drop would undo the written move's look.
-                    Ok(a) if self.drag.is_some() => self.preview_poses(&part, &a.result),
+                    Ok(a) if self.assembly.drag.is_some() => self.preview_poses(&part, &a.result),
                     Ok(_) => {}
                     Err(e) => self.fail(e),
                 }
@@ -4743,15 +4646,15 @@ impl Workspace {
                 }
             }
             (Pending::MoveSolve(part), a) => {
-                self.mover_waiting = false;
-                let on = self.mover.as_ref().is_some_and(|m| m.part == part);
+                self.assembly.mover_waiting = false;
+                let on = self.assembly.mover.as_ref().is_some_and(|m| m.part == part);
                 match a {
                     // A late answer after the tool went would undo the
                     // written move's look.
                     Ok(a) if on => self.preview_poses(&part, &a.result),
                     Ok(_) => {}
                     Err(e) => {
-                        if let Some(m) = self.mover.as_mut().filter(|_| on) {
+                        if let Some(m) = self.assembly.mover.as_mut().filter(|_| on) {
                             m.error = Some(e.message.clone());
                         }
                     }
@@ -4759,6 +4662,7 @@ impl Workspace {
             }
             (Pending::MatePreview(part, asked), a) => {
                 let Some(d) = self
+                    .assembly
                     .mating
                     .as_mut()
                     .filter(|d| d.part == part && d.asked == asked)
@@ -4818,36 +4722,38 @@ impl Workspace {
             }
             (Pending::Sections, Ok(a)) => {
                 let me = self.link.participant.clone();
-                if let Some(p) = self.people.all.get_mut(&me) {
+                if let Some(p) = self.session.people.all.get_mut(&me) {
                     p.sections =
                         serde_json::from_value(a.result["sections"].clone()).unwrap_or_default();
-                    self.people.generation += 1;
+                    self.session.people.generation += 1;
                 }
                 self.follow_sections();
             }
             (Pending::Explodes(part), Ok(a)) => {
-                if self.explodes.part.as_deref() == Some(part.as_str()) {
-                    self.explodes.listed(&part, &a.result);
+                if self.assembly.explodes.part.as_deref() == Some(part.as_str()) {
+                    self.assembly.explodes.listed(&part, &a.result);
                     self.sync_explode();
                 }
             }
             (Pending::ExplodeShown, Ok(a)) => {
                 let me = self.link.participant.clone();
-                if let Some(p) = self.people.all.get_mut(&me) {
+                if let Some(p) = self.session.people.all.get_mut(&me) {
                     p.explode = crate::core::explode::Shown::from_json(&a.result["explode"]);
                     if p.explode.is_some() {
                         p.motion = None;
                     }
-                    self.people.generation += 1;
+                    self.session.people.generation += 1;
                 }
-                self.explodes.sliding = None;
+                self.assembly.explodes.sliding = None;
                 self.follow_explode();
                 self.follow_motion();
             }
             (Pending::Motions(part), Ok(a)) => {
-                if self.motions.part.as_deref() == Some(part.as_str()) {
-                    self.motions.listed(&part, &a.result);
-                    if self.motions.shown.is_some() && !self.motions.frames_current() {
+                if self.assembly.motions.part.as_deref() == Some(part.as_str()) {
+                    self.assembly.motions.listed(&part, &a.result);
+                    if self.assembly.motions.shown.is_some()
+                        && !self.assembly.motions.frames_current()
+                    {
                         self.read_frames();
                     }
                     self.sync_moved();
@@ -4855,32 +4761,34 @@ impl Workspace {
             }
             (Pending::MotionFrames(part, id), Ok(a)) => {
                 let wanted = self
+                    .assembly
                     .motions
                     .shown
                     .as_ref()
                     .is_some_and(|s| s.part == part && s.motion == id);
                 if wanted {
-                    self.motions.frames = crate::core::motion::Frames::from_json(&a.result);
+                    self.assembly.motions.frames =
+                        crate::core::motion::Frames::from_json(&a.result);
                     self.sync_moved();
                 }
             }
             (Pending::MotionShown, Ok(a)) => {
                 let me = self.link.participant.clone();
-                if let Some(p) = self.people.all.get_mut(&me) {
+                if let Some(p) = self.session.people.all.get_mut(&me) {
                     p.motion = crate::core::motion::Shown::from_json(&a.result["motion"]);
                     if p.motion.is_some() {
                         p.explode = None;
                     }
-                    self.people.generation += 1;
+                    self.session.people.generation += 1;
                 }
-                self.motions.sliding = None;
+                self.assembly.motions.sliding = None;
                 self.follow_explode();
                 self.follow_motion();
             }
             (Pending::MotionSaved(part), r) => match r {
                 Ok(_) => {
-                    if self.motions.part.as_deref() == Some(part.as_str()) {
-                        self.motions.editing = None;
+                    if self.assembly.motions.part.as_deref() == Some(part.as_str()) {
+                        self.assembly.motions.editing = None;
                         self.read_motions();
                     }
                 }
@@ -4888,6 +4796,7 @@ impl Workspace {
             },
             (Pending::MotionSwept(part, id), r) => {
                 let Some(w) = self
+                    .assembly
                     .motions
                     .sweep
                     .as_mut()
@@ -4906,17 +4815,22 @@ impl Workspace {
             }
             (Pending::ExplodeSaved(part, show), r) => match r {
                 Ok(a) => {
-                    if self.explodes.part.as_deref() == Some(part.as_str()) {
+                    if self.assembly.explodes.part.as_deref() == Some(part.as_str()) {
                         self.read_explodes();
                     }
                     // A new explode, or one still there, is shown.
                     if let Some(id) = show
                         && a.result.get("steps").is_some()
-                        && self.explodes.shown.as_ref().is_none_or(|s| s.explode != id)
+                        && self
+                            .assembly
+                            .explodes
+                            .shown
+                            .as_ref()
+                            .is_none_or(|s| s.explode != id)
                     {
                         self.show_explode(Some(&id), Some(1.0), false);
                     }
-                    self.explodes.name.clear();
+                    self.assembly.explodes.name.clear();
                 }
                 Err(e) => {
                     self.sync_explode();
@@ -4924,28 +4838,28 @@ impl Workspace {
                 }
             },
             (Pending::Views(part), Ok(a)) => {
-                if self.views.part.as_deref() == Some(part.as_str()) {
-                    self.views = crate::core::views::NamedViews::of(&part, &a.result);
+                if self.view.views.part.as_deref() == Some(part.as_str()) {
+                    self.view.views = crate::core::views::NamedViews::of(&part, &a.result);
                 }
             }
             (Pending::ViewSaved(part), a) => match a {
                 Ok(_) => {
-                    if self.views.part.as_deref() == Some(part.as_str()) {
+                    if self.view.views.part.as_deref() == Some(part.as_str()) {
                         self.read_views();
                     }
                 }
                 Err(e) => {
-                    self.views.error = Some(e.clone());
+                    self.view.views.error = Some(e.clone());
                     self.fail(e);
                 }
             },
             (Pending::Appearance(n), Ok(a)) => {
-                if n == self.looks_asked {
-                    self.looks_read = crate::core::appearance::read(&a.result);
+                if n == self.view.looks_asked {
+                    self.view.looks_read = crate::core::appearance::read(&a.result);
                     self.refresh_looks();
                     // An open window shows its target as it is now.
-                    let now = self.look_of(self.appearance.target());
-                    self.appearance.reread(now, ryucad::render::SURFACE);
+                    let now = self.look_of(self.view.appearance.target());
+                    self.view.appearance.reread(now, ryucad::render::SURFACE);
                 }
             }
             // The rebuild follows as `model.changed`; an open form on the
@@ -4953,7 +4867,7 @@ impl Workspace {
             (Pending::ImportConvert(part, feature), a) => match a {
                 Ok(_) => {
                     let key = (part, feature);
-                    if self.form_for.as_ref() == Some(&key) {
+                    if self.forms.form_for.as_ref() == Some(&key) {
                         self.open_form(Some(key));
                     }
                 }
@@ -4961,28 +4875,28 @@ impl Workspace {
             },
             (Pending::AppearanceWritten, a) => {
                 // What was dragged stays drawn until the new reading.
-                self.appearance.dragging = None;
+                self.view.appearance.dragging = None;
                 match a {
                     Ok(_) => self.read_appearance(),
                     Err(e) => {
-                        self.appearance.error = Some(e.clone());
+                        self.view.appearance.error = Some(e.clone());
                         self.refresh_looks();
                         self.fail(e);
                     }
                 }
             }
             (Pending::NormalTo, Ok(a)) => {
-                self.looked = serde_json::from_value(a.result["camera"].clone()).ok();
+                self.view.looked = serde_json::from_value(a.result["camera"].clone()).ok();
             }
             (Pending::Measure(picks), a) => {
                 match a {
-                    Ok(a) => self.measure.take(&picks, &a.result),
-                    Err(e) => self.measure.failed(&picks, e),
+                    Ok(a) => self.view.measure.take(&picks, &a.result),
+                    Err(e) => self.view.measure.failed(&picks, e),
                 }
                 self.model.generation += 1;
             }
             (Pending::Mass(of), a) => {
-                let Some(m) = self.mass.as_mut().filter(|m| m.of == of) else {
+                let Some(m) = self.view.mass.as_mut().filter(|m| m.of == of) else {
                     return;
                 };
                 match a {
@@ -4992,7 +4906,7 @@ impl Workspace {
                 self.model.generation += 1;
             }
             (Pending::Clearance(part), a) => {
-                let Some(c) = self.clearance.as_mut().filter(|c| c.part == part) else {
+                let Some(c) = self.assembly.clearance.as_mut().filter(|c| c.part == part) else {
                     return;
                 };
                 match a {
@@ -5002,7 +4916,12 @@ impl Workspace {
                 self.model.generation += 1;
             }
             (Pending::Interference(part), a) => {
-                let Some(i) = self.interference.as_mut().filter(|i| i.part == part) else {
+                let Some(i) = self
+                    .assembly
+                    .interference
+                    .as_mut()
+                    .filter(|i| i.part == part)
+                else {
                     return;
                 };
                 match a {
@@ -5012,12 +4931,12 @@ impl Workspace {
                 self.model.generation += 1;
             }
             (Pending::Doctor, Ok(a)) => {
-                self.doctor = Some(crate::core::doctor::report_of(&a.result))
+                self.session.doctor = Some(crate::core::doctor::report_of(&a.result))
             }
             // A whole reading, or one changed setting: read them all again,
             // which also brings the project revision up to date.
             (Pending::Config, Ok(a)) if a.result.get("settings").is_some() => {
-                self.settings.reset(&a.result);
+                self.session.settings.reset(&a.result);
                 self.model.base = self.display_quality();
             }
             (Pending::Config, Ok(_)) => self.load_settings(),
@@ -5025,9 +4944,9 @@ impl Workspace {
                 // Only the form last asked for opens (a dimension may have
                 // been chosen since); a reload after a conflict only if
                 // that form is still open.
-                let asked = self.form_for.as_ref() == Some(&(part.clone(), id));
+                let asked = self.forms.form_for.as_ref() == Some(&(part.clone(), id));
                 let wanted = asked
-                    && match (&before, &self.form) {
+                    && match (&before, &self.forms.form) {
                         (Some(b), Some(f)) => b.feature == f.feature && b.part == f.part,
                         (None, _) => true,
                         (Some(_), None) => false,
@@ -5054,6 +4973,7 @@ impl Workspace {
                         let why = Pending::FormLabels(part.clone(), form.feature.clone());
                         self.send(req, why);
                     } else if let Some(l) = self
+                        .pdm
                         .states
                         .by_part
                         .get(placed)
@@ -5069,11 +4989,12 @@ impl Workspace {
                         };
                         self.send(req, Pending::FormLabels(part.clone(), form.feature.clone()));
                     }
-                    self.form = Some(form);
+                    self.forms.form = Some(form);
                 }
             }
             (Pending::FormLabels(part, id), Ok(a)) => {
                 if let Some(f) = self
+                    .forms
                     .form
                     .as_mut()
                     .filter(|f| f.part == part && f.feature == id)
@@ -5090,45 +5011,45 @@ impl Workspace {
             (Pending::Dim(part, sketch, constraint, before), Ok(a)) => {
                 // Only the dimension last asked for opens, as for features.
                 let key = (part.clone(), sketch.clone(), constraint.clone());
-                let wanted = self.dimension_for.as_ref() == Some(&key)
-                    && match (&before, &self.dimension) {
+                let wanted = self.forms.dimension_for.as_ref() == Some(&key)
+                    && match (&before, &self.forms.dimension) {
                         (Some(_), Some(_)) | (None, _) => true,
                         (Some(_), None) => false,
                     };
                 if wanted {
-                    self.dimension = match before {
+                    self.forms.dimension = match before {
                         Some(b) => b.reloaded(&a.result),
                         None => DimForm::from_get(&part, &sketch, &constraint, &a.result),
                     };
                 }
             }
             (Pending::Params(part, before), Ok(a)) => {
-                if self.params_part.as_deref() == Some(part.as_str()) {
+                if self.parameters.params_part.as_deref() == Some(part.as_str()) {
                     let unit = self.model.default_unit.clone();
-                    self.params = Some(match before {
+                    self.parameters.params = Some(match before {
                         Some(b) => b.reloaded(&a.result, &unit),
                         None => Params::from_list(&a.result, &unit),
                     });
                 }
             }
             (Pending::ParamSave, Ok(_)) => {
-                if let Some(p) = &self.params {
+                if let Some(p) = &self.parameters.params {
                     let part = p.part.clone();
                     self.read_params(part, None);
                 }
             }
             (Pending::Equations(conflicted), Ok(a)) => {
                 let unit = self.model.default_unit.clone();
-                self.equations = Some(match &self.equations {
+                self.parameters.equations = Some(match &self.parameters.equations {
                     Some(now) => now.reloaded(&a.result, &unit, conflicted),
                     None => Equations::from_list(&a.result, &unit),
                 });
             }
             (Pending::Equations(_), Err(e)) => {
-                let mut table = self.equations.take().unwrap_or_default();
+                let mut table = self.parameters.equations.take().unwrap_or_default();
                 table.saving = None;
                 table.error = Some(e);
-                self.equations = Some(table);
+                self.parameters.equations = Some(table);
             }
             (Pending::DrawingList(part), Ok(a)) => {
                 if self.drawings.part.as_deref() == Some(&part) {
@@ -5207,7 +5128,7 @@ impl Workspace {
                 }
             }
             (Pending::EquationSave, Ok(_)) => {
-                if let Some(e) = &mut self.equations {
+                if let Some(e) = &mut self.parameters.equations {
                     // What was written reads back as written.
                     match e.saving.take() {
                         Some(Some(i)) => {
@@ -5225,7 +5146,7 @@ impl Workspace {
                 }
             }
             (Pending::EquationSave, Err(err)) => {
-                if let Some(e) = &mut self.equations {
+                if let Some(e) = &mut self.parameters.equations {
                     e.saving = None;
                     if err.code == Code::Conflict {
                         self.read_equations(true);
@@ -5235,7 +5156,7 @@ impl Workspace {
                 }
             }
             (Pending::ParamSave, Err(e)) => {
-                if let Some(p) = &mut self.params {
+                if let Some(p) = &mut self.parameters.params {
                     p.saving = false;
                     if e.code == Code::Conflict {
                         let before = Box::new(p.clone());
@@ -5248,13 +5169,13 @@ impl Workspace {
             }
             (Pending::DimSave, Ok(_)) => {
                 // Read it back as the files now have it.
-                if let Some(f) = &self.dimension {
+                if let Some(f) = &self.forms.dimension {
                     let (p, s, c) = (f.part.clone(), f.sketch.clone(), f.constraint.clone());
                     self.read_dimension(p, s, c, None);
                 }
             }
             (Pending::DimSave, Err(e)) => {
-                if let Some(f) = &mut self.dimension {
+                if let Some(f) = &mut self.forms.dimension {
                     f.saving = false;
                     if e.code == Code::Conflict {
                         let before = Box::new(f.clone());
@@ -5266,10 +5187,10 @@ impl Workspace {
                 }
             }
             (Pending::Save, Ok(a)) => {
-                if let Some(f) = &self.form {
+                if let Some(f) = &self.forms.form {
                     let mut v = a.result["feature"].clone();
                     v["revision"] = a.result["revision"].clone();
-                    self.form = Some(Form::from_show_in(&f.part, &v, self.unit()));
+                    self.forms.form = Some(Form::from_show_in(&f.part, &v, self.unit()));
                 }
             }
             (Pending::Save, Err(e)) => {
@@ -5278,7 +5199,7 @@ impl Workspace {
                 if e.code == Code::ReferenceBody {
                     self.fail(e.clone());
                 }
-                if let Some(f) = &mut self.form {
+                if let Some(f) = &mut self.forms.form {
                     f.saving = false;
                     if e.code == Code::Conflict {
                         // Read it again and show what changed underneath.
@@ -5501,9 +5422,9 @@ impl Workspace {
                 let parts = params["parts"].as_array().into_iter().flatten();
                 if parts
                     .filter_map(|r| r["part"].as_str())
-                    .any(|p| self.bom.reads(p))
+                    .any(|p| self.pdm.bom.reads(p))
                     || params["removed"].as_array().is_some_and(|r| !r.is_empty())
-                    || self.bom.root.is_none()
+                    || self.pdm.bom.root.is_none()
                 {
                     self.reload_bom();
                 }
@@ -5554,7 +5475,7 @@ impl Workspace {
                 // with a file) and the history's uncommitted changes.
                 self.ask_diff();
                 // A proposal may be stale now.
-                if self.releases_open {
+                if self.pdm.releases_open {
                     let req = Request::ReleaseCheck { results: false };
                     self.send(req, Pending::ReleaseCheck);
                 }
@@ -5594,7 +5515,7 @@ impl Workspace {
                 }
             }
             "config.changed" => {
-                self.settings.changed(params);
+                self.session.settings.changed(params);
                 if params["key"] == "display.quality" {
                     self.model.base = self.display_quality();
                     let all = self.model.clear_meshes();
@@ -5602,7 +5523,7 @@ impl Workspace {
                     for part in self.model.clear_sketches() {
                         self.fetch_sketches(&part);
                     }
-                    if let Some(c) = &mut self.compare {
+                    if let Some(c) = &mut self.comparing.compare {
                         c.clear_ghosts();
                         self.fetch_ghosts();
                     }
@@ -5627,8 +5548,8 @@ impl Workspace {
                 self.rediagnose();
             }
             "pdm.changed" => {
-                self.states.changed(params);
-                if self.releases_open {
+                self.pdm.states.changed(params);
+                if self.pdm.releases_open {
                     self.load_releases();
                 }
                 // Labels resolve differently, and rows' states moved; a
@@ -5660,7 +5581,7 @@ impl Workspace {
             }
             "app.open" => self.raised = true,
             "participant.changed" => {
-                self.people.changed(params);
+                self.session.people.changed(params);
                 self.follow_draft();
                 self.follow_focus();
                 self.follow_sections();
@@ -5668,11 +5589,12 @@ impl Workspace {
                 self.follow_motion();
                 // Following someone who left ends.
                 if self
+                    .session
                     .following
                     .as_ref()
-                    .is_some_and(|f| self.people.get(f).is_none())
+                    .is_some_and(|f| self.session.people.get(f).is_none())
                 {
-                    self.following = None;
+                    self.session.following = None;
                 }
             }
             // Too much was missed: start again from the daemon's state.
@@ -5687,6 +5609,7 @@ impl Workspace {
     fn part_changed(&mut self, report: &Value) {
         // Its explodes may have changed with it.
         if self
+            .assembly
             .explodes
             .part
             .as_deref()
@@ -5697,19 +5620,21 @@ impl Workspace {
         // Its motions and their frames may have changed with it; the last
         // sweep goes stale (asked again only when someone asks).
         if self
+            .assembly
             .motions
             .part
             .as_deref()
             .is_some_and(|p| report["part"] == p)
         {
-            self.motions.frames = None;
+            self.assembly.motions.frames = None;
             self.read_motions();
-            if let Some(w) = self.motions.sweep.as_mut() {
+            if let Some(w) = self.assembly.motions.sweep.as_mut() {
                 w.stale = true;
             }
         }
         // Its named views may have changed with it.
         if self
+            .view
             .views
             .part
             .as_deref()
@@ -5720,6 +5645,7 @@ impl Workspace {
         // Interference found for this assembly goes stale: it is asked
         // again only when someone asks (design 525).
         if let Some(i) = self
+            .assembly
             .interference
             .as_mut()
             .filter(|i| report["part"] == i.part.as_str())
@@ -5731,10 +5657,16 @@ impl Workspace {
         // read the part.
         let changed = report["part"].as_str().unwrap_or_default();
         let reads = |r: &str| r == changed || r.starts_with(&format!("{changed}/"));
-        if self.clearance.as_ref().is_some_and(|c| c.part == changed) {
+        if self
+            .assembly
+            .clearance
+            .as_ref()
+            .is_some_and(|c| c.part == changed)
+        {
             self.check_clearance();
         }
         if let Some(of) = self
+            .view
             .mass
             .as_ref()
             .map(|m| m.of.clone())
@@ -5742,11 +5674,11 @@ impl Workspace {
         {
             self.weigh(&of);
         }
-        if self.measure.picks.iter().any(|p| reads(p)) {
+        if self.view.measure.picks.iter().any(|p| reads(p)) {
             self.measure_again();
         }
         // A form nobody is typing in follows the files.
-        if let Some(f) = &self.form
+        if let Some(f) = &self.forms.form
             && report["part"] == f.part.as_str()
             && report["revision"] != f.revision.as_str()
             && !f.dirty()
@@ -5756,7 +5688,7 @@ impl Workspace {
             self.read_form(part, id, None);
         }
         // So do the parameters, and a dimension's form.
-        if let Some(p) = &self.params
+        if let Some(p) = &self.parameters.params
             && report["part"] == p.part.as_str()
             && report["revision"] != p.revision.as_str()
             && !p.dirty()
@@ -5765,7 +5697,7 @@ impl Workspace {
             let part = p.part.clone();
             self.read_params(part, None);
         }
-        if let Some(p) = &self.props
+        if let Some(p) = &self.pdm.props
             && report["part"] == p.part.as_str()
             && report["revision"] != p.revision.as_str()
             && !p.dirty()
@@ -5774,7 +5706,7 @@ impl Workspace {
             let part = p.part.clone();
             self.read_props(part, None);
         }
-        if let Some(f) = &self.dimension
+        if let Some(f) = &self.forms.dimension
             && report["part"] == f.part.as_str()
             && report["revision"] != f.revision.as_str()
             && !f.dirty()
@@ -5915,7 +5847,7 @@ impl Workspace {
 
     /// The user's display quality, as the settings say.
     fn display_quality(&self) -> ryucad::mesh::Quality {
-        ryucad::mesh::Quality::parse(self.settings.text("display.quality", "normal"))
+        ryucad::mesh::Quality::parse(self.session.settings.text("display.quality", "normal"))
             .unwrap_or_default()
     }
 

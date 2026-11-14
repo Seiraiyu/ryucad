@@ -83,10 +83,16 @@ fn a_dependency_is_added_placed_marked_and_updated() {
     );
     // The BOM names its dependency.
     ws.open_bom();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.bom.tree.is_empty()));
-    let at = ws.bom.columns.iter().position(|c| c == "project").unwrap();
-    assert_eq!(ws.bom.tree[0].cells[at], "fasteners");
-    assert_eq!(ws.bom.tree[0].part, "fasteners:p");
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.pdm.bom.tree.is_empty()));
+    let at = ws
+        .pdm
+        .bom
+        .columns
+        .iter()
+        .position(|c| c == "project")
+        .unwrap();
+    assert_eq!(ws.pdm.bom.tree[0].cells[at], "fasteners");
+    assert_eq!(ws.pdm.bom.tree[0].part, "fasteners:p");
     // Removing it while something places it is refused, in the tab.
     ws.remove_dep("fasteners");
     assert!(ws.wait_until(WAIT, |ws| ws.deps.failed.is_some()));

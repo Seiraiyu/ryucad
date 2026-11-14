@@ -163,21 +163,21 @@ pub fn section_part(ws: &Workspace, view: &View) -> Option<String> {
 pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     let part = section_part(ws, view);
     ws.show_props(part.as_deref());
-    if ws.pdm_config.is_some() && !ws.pdm_ready() {
+    if ws.pdm.pdm_config.is_some() && !ws.pdm_ready() {
         ui.weak("PDM isn't set up: the project has no ID for release records yet.");
         if crate::ui::modes::button(ui, ws, "pdm.init", "Set up PDM").clicked() {
             ws.pdm_init();
         }
     }
     let badge = part.as_deref().and_then(|p| {
-        let b = ws.states.badge(p)?;
-        Some(match ws.releases.approved_by(p) {
+        let b = ws.pdm.states.badge(p)?;
+        Some(match ws.pdm.releases.approved_by(p) {
             Some(a) => format!("{b}, {a}"),
             None => b,
         })
     });
     let gate = ws.control("props.set");
-    let Some(p) = &mut ws.props else {
+    let Some(p) = &mut ws.pdm.props else {
         return;
     };
     form::heading(
