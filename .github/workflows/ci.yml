@@ -171,3 +171,30 @@ jobs:
           shared-key: test
           save-if: false
       - run: cargo test --profile ci --workspace --doc
+
+  fuzz-check:
+    # Every fuzz target type-checked on every pull request, so a change to
+    # a type the targets build (a field added to `Part`, a renamed path)
+    # fails here, not at 03:17 the next night (#188, ryucad plan 30.A).
+    # A check, not a sanitizer build: the pinned stable toolchain does it,
+    # since only cargo-fuzz's sanitizer flags need nightly. fuzz/ stays
+    # outside the workspace, with its own lock file and target folder.
+    # Measured (30.A Task 3): 61 s cold (43 s of it the check), with no
+    # cache, beside the PR's slowest job, windows-latest (1/3), at 32 min;
+    # warm from main's cache: measured after merge.
+    name: fuzz targets build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # As the other jobs: the toolchain is pinned by
+          # rust-toolchain.toml, which the key covers anyway.
+          add-rust-environment-hash-key: false
+          workspaces: fuzz -> target
+          shared-key: fuzz-check
+          # Pull requests read main's cache; only main saves it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --manifest-path fuzz/Cargo.toml --bins

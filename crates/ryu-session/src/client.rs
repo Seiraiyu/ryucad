@@ -80,6 +80,20 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Says `session.hello` as the agent `name` (`agent` when `None`).
+    /// The outer error means the connection failed; the inner result is
+    /// the daemon's answer (a refused name is the caller's to fix).
+    pub fn hello(&mut self, name: Option<&str>) -> std::io::Result<Result<Value>> {
+        self.call(&hello(name))
+    }
+
+    /// The connection's two halves: what it reads (answers, and the
+    /// bytes they announce) and what it writes. For a client that reads
+    /// on a thread of its own while it writes (`ryucad session --stdio`).
+    pub fn into_halves(self) -> (BufReader<RecvHalf>, SendHalf) {
+        (self.reader, self.writer)
+    }
+
     pub fn connect<P>(endpoint: &Endpoint<P>) -> std::io::Result<Connection> {
         let (recv, send) = Stream::connect(endpoint.name()?)?.split();
         Ok(Connection {
@@ -346,6 +360,16 @@ pub fn request<P: Serve>(
     request_noting::<P>(root, req, name, &Ask::default(), &mut |_| {})
 }
 
+/// A connection to the project's daemon (started if none is running,
+/// replaced if it is of another build) that has said `session.hello` as
+/// the agent `name`. `Err` means no daemon could be reached and nothing
+/// was sent, so running in process instead is safe. `Ok(Err(..))` means
+/// the daemon refused the hello (a bad name), which is the caller's to fix.
+pub fn hello_connection<P: Serve>(root: &Path, name: Option<&str>) -> Result<Result<Connection>> {
+    let mut conn = Daemon::<P>::this()?.connect(root)?;
+    Ok(conn.hello(name).map_err(unavailable)?.map(|_| conn))
+}
+
 /// [`request`] with `ask`'s `progress` and `token`, handing each
 /// `progress` notification's params to `note` before the answer.
 pub fn request_noting<P: Serve>(
@@ -355,11 +379,11 @@ pub fn request_noting<P: Serve>(
     ask: &Ask,
     note: &mut dyn FnMut(&Value),
 ) -> Result<Result<Answer>> {
-    let mut conn = Daemon::<P>::this()?.connect(root)?;
-    // A refused hello (a bad name) is the agent's to fix; nothing else ran.
-    if let Err(e) = conn.call(&hello(name)).map_err(unavailable)? {
-        return Ok(Err(e));
-    }
+    let mut conn = match hello_connection::<P>(root, name)? {
+        Ok(c) => c,
+        // A refused hello (a bad name) is the agent's to fix; nothing else ran.
+        Err(e) => return Ok(Err(e)),
+    };
     Ok(conn.call_noting(req, ask, note).unwrap_or_else(|e| {
         Err(Error::new(
             Code::Daemon,

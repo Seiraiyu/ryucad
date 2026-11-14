@@ -77,7 +77,9 @@ The design is document 213 in the Coxswain planning project `ryucad-ryukei`; thi
   - An empty `START_NAME` or `END_NAME` is the first or last copper layer, not the first board layer the specification names, so a through drill classes as through.
 - **Records.**
   - Pads, text and step repeats turn clockwise and then mirror. A mirrored angle `a` is `Mdeg::new(a)`, an unmirrored one `Mdeg::from_clockwise(a)`.
-  - Polygons are turned to the model's orientation (`odb::outline`): islands counterclockwise, holes clockwise.
+  - Polygons are turned to the model's orientation (`odb::outline`): islands counterclockwise, holes clockwise. A polygon with no area (its sign exact when every edge is straight) is taken as written ODB++'s way and reversed like the rest, as the test writer reverses every polygon; before ryucad plan 30.A an island with no area was kept as read and turned over on every round trip (the `odb` fuzz target's finds of 2026-11-05 and 2026-11-12).
+  - The test writer (`testing::write_features`) writes millimetre files, so a user or unknown symbol whose name is a standard symbol in microns is written with ` I`: the reader keeps such a name only when it read it in mils (the `odb` target's find of 2026-11-09, `rect106.2992x459267717`).
+  - Regression tests: `tests/fuzz_regressions.rs` (the three inputs, byte for byte; also in `fuzz/corpus/odb`).
   - A text's width factor is in 12-mil units whatever the file's units.
   - Not taken, each with `odb_ignored`:
     - pad resize factors (`-1 sym resize`);

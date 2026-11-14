@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Targets to run, a JSON list such as ["odb","merge"]; empty runs every one'
+        required: false
+        default: ""
+      file_issues:
+        description: "File issues for red targets off main too (to test the issues job)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,15 +24,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [predicates, interval, euler, nurbs, mesh, feature, merge, sweep, intersect, general, boolean, blend, offset, tweak, edit, heal, tolerant, self_union, expr, sketch, step, measure, eda, kicad, odb, shapes, export, schematic, parts, sheet, sheet_metal, projection, drawing, style, hole_spec]
+        # Every target the nightly runs; a dispatch may name fewer.
+        target: ${{ fromJSON(inputs.targets || '["predicates", "interval", "euler", "nurbs", "mesh", "feature", "merge", "sweep", "intersect", "general", "boolean", "blend", "offset", "tweak", "edit", "heal", "tolerant", "self_union", "expr", "sketch", "step", "measure", "eda", "kicad", "odb", "shapes", "export", "schematic", "parts", "sheet", "sheet_metal", "projection", "drawing", "style", "hole_spec"]') }}
     steps:
       - uses: actions/checkout@v4
       # cargo-fuzz needs nightly; the pinned stable toolchain stays the
       # default everywhere else.
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo install cargo-fuzz --locked
-      - name: Fuzz for 10 minutes
+      # Built apart from the run, so a build failure is told from a find.
+      - name: Build
+        id: build
         working-directory: fuzz
+        run: cargo +nightly fuzz build ${{ matrix.target }}
+      - name: Fuzz for 10 minutes
+        id: fuzz
+        working-directory: fuzz
+        # bash, for pipefail: the log is kept for the report below.
+        shell: bash
         # ASan's quarantine (256 MB by default) held most of the offset
         # target's gigabyte a case (#746: 41 MB without the sanitizer, 199
         # MB with a 16 MB quarantine): it runs with a 64 MB one.
@@ -41,9 +59,110 @@ jobs:
           cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
           ${{ (matrix.target == 'boolean' || matrix.target == 'blend' || matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak' || matrix.target == 'edit' || matrix.target == 'export' || matrix.target == 'sheet' || matrix.target == 'sheet_metal' || matrix.target == 'projection') && '-rss_limit_mb=6144' || '' }}
           ${{ (matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak' || matrix.target == 'edit') && '-timeout=600' || '' }}
+          2>&1 | tee "$RUNNER_TEMP/fuzz.log"
       - name: Upload crashes
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-${{ matrix.target }}-artifacts
           path: fuzz/artifacts/${{ matrix.target }}
+      # One line for the issues job: target, kind, libFuzzer's summary.
+      - name: What went wrong
+        if: failure()
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BUILD: ${{ steps.build.outcome }}
+          FUZZ: ${{ steps.fuzz.outcome }}
+        run: |
+          mkdir -p report
+          summary=""
+          if [ "$BUILD" = failure ]; then
+            kind="build failure"
+          elif [ "$FUZZ" = failure ]; then
+            summary=$(grep -m1 'SUMMARY: ' "$RUNNER_TEMP/fuzz.log" | sed 's/.*SUMMARY: //' | tr '\t' ' ' || true)
+            case "$summary" in
+              *out-of-memory*|*malloc*) kind="out of memory" ;;
+              *timeout*) kind="timeout" ;;
+              "") kind="failure without a libFuzzer summary" ;;
+              *) kind="crash" ;;
+            esac
+          else
+            kind="setup failure"
+          fi
+          printf '%s\t%s\t%s\n' "$TARGET" "$kind" "$summary" > "report/$TARGET.tsv"
+          cat "report/$TARGET.tsv"
+      - name: Upload the report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-report-${{ matrix.target }}
+          path: report/${{ matrix.target }}.tsv
+
+  issues:
+    # A red night files itself (design 600, question 779): one open issue
+    # per red target, titled `fuzz nightly: <target> red`, labelled fuzz
+    # and bug; a later red night comments on it instead. It never closes
+    # one: the fix does. Off main only when a dispatch asks (to test it).
+    name: file issues for red targets
+    needs: fuzz
+    if: failure() && (github.ref == 'refs/heads/main' || inputs.file_issues)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fuzz-report-*
+          merge-multiple: true
+          path: reports
+      - name: One open issue per red target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          gh label create fuzz --color 5319e7 --description "Found by the fuzz nightly" --force
+          shopt -s nullglob
+          # A job whose runner died (lost communication, out of disk)
+          # leaves no report: it is filed as one too, from the run's jobs.
+          mkdir -p reports
+          gh run view "$GITHUB_RUN_ID" --json jobs \
+            --jq '.jobs[] | select(.conclusion == "failure") | .name' |
+            while read -r target; do
+              if [ ! -f "reports/$target.tsv" ]; then
+                printf '%s\t%s\t\n' "$target" "runner lost, no report" > "reports/$target.tsv"
+              fi
+            done
+          for f in reports/*.tsv; do
+            IFS=$'\t' read -r target kind summary < "$f"
+            title="fuzz nightly: $target red"
+            body="Run: $RUN_URL ($EVENT on $REF at $SHA)
+          Kind: $kind"
+            if [ -n "$summary" ]; then
+              body="$body
+          libFuzzer: \`$summary\`"
+            fi
+            # Only a run that fuzzed leaves an artifact.
+            case "$kind" in
+              "build failure" | "setup failure" | "runner lost"*) ;;
+              *)
+              body="$body
+          Artifact: \`fuzz-$target-artifacts\`, kept 90 days: \`gh run download $GITHUB_RUN_ID -n fuzz-$target-artifacts -R $GH_REPO\`"
+              ;;
+            esac
+            n=$(gh issue list --state open --label fuzz --search "\"$title\" in:title" --json number,title \
+              --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+            if [ -n "$n" ]; then
+              gh issue comment "$n" --body "$body"
+              echo "commented on #$n: $title"
+            else
+              gh issue create --title "$title" --label fuzz --label bug --body "$body"
+            fi
+          done
