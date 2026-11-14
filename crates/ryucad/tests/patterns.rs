@@ -204,3 +204,119 @@ fn a_pocket_mirrored() {
     near(by_pattern, by_hand);
     assert_eq!(counts, hand_counts);
 }
+
+/// The name of solid `b`'s top face (its outward normal up z).
+fn top_of(s: &mut Session) -> String {
+    let body = must(s, "inspect", json!({"part": "p", "feature": "b"}))["bodies"][0].clone();
+    body["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+        })
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap()
+}
+
+#[test]
+fn a_fill_against_its_holes_one_by_one() {
+    // A Ø2 hole 5 mm in from the plate's corner, filled at 10 mm with a
+    // 3 mm margin: every instance needs 1 + 3 mm from each edge, and the
+    // last column and row (5 mm from theirs) keep it, so 4 × 3 in all.
+    let (_dir, mut s) = plate(&[[-15.0, -10.0]]);
+    let top = top_of(&mut s);
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "s", "points": ["p1"], "diameter": 2,
+               "depth": "through_all"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "f", "features": ["h"], "form": "fill",
+               "face": top, "direction": "x", "spacing": 10, "margin": 3}),
+    );
+    let (filled, counts) = shown(&mut s);
+    let rows = must(&mut s, "holes.list", json!({"part": "p"}));
+    let mut kept: Vec<Value> = rows["holes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.get("pattern").map(|p| p["instance"].clone()))
+        .collect();
+    kept.sort_by_key(|v| v.to_string());
+    let mut want: Vec<Value> = (0..3)
+        .flat_map(|j| (0..4).map(move |i| json!([i, j])))
+        .filter(|x| x != &json!([0, 0]))
+        .collect();
+    want.sort_by_key(|v| v.to_string());
+    assert_eq!(kept, want);
+    // The same twelve drilled one at a time.
+    let (_dir2, mut t) = plate(
+        &(0..3)
+            .flat_map(|j| {
+                (0..4).map(move |i| [-15.0 + 10.0 * f64::from(i), -10.0 + 10.0 * f64::from(j)])
+            })
+            .collect::<Vec<_>>(),
+    );
+    add(
+        &mut t,
+        json!({"type": "hole", "id": "h", "sketch": "s", "diameter": 2,
+               "depth": "through_all"}),
+    );
+    let (alone, alone_counts) = shown(&mut t);
+    near(filled, alone);
+    near(filled, 40.0 * 30.0 * 10.0 - 12.0 * PI * 10.0);
+    assert_eq!(counts, alone_counts);
+}
+
+/// Part `p`: a plate 400 × 400 × 10 mm with a Ø2 hole at (5, 5) mm.
+fn big_plate() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 400, "y": 400, "z": 10}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "s", "placement": {"origin": [0, 0, 10]}}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [
+            {"op": "add", "type": "point", "at": [5, 5]},
+            {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "s", "diameter": 2,
+               "depth": "through_all"}),
+    );
+    (dir, s)
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow in debug builds")]
+fn a_thousand_place_fill_clips_quickly() {
+    // 28.D's bar is 10,000 places in 0.5 s; this is a guard on the way.
+    let (_dir, mut s) = big_plate();
+    let top = top_of(&mut s);
+    let t = std::time::Instant::now();
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "f", "features": ["h"], "form": "fill",
+               "face": top, "spacing": 12.5}),
+    );
+    let n = must(&mut s, "holes.list", json!({"part": "p"}))["holes"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(n >= 1000, "{n}");
+    eprintln!("a {n}-place fill built and listed in {:?}", t.elapsed());
+}

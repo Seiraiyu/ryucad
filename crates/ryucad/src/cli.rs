@@ -1491,7 +1491,9 @@ enum FeatureCmd {
     /// a sheet; a sew (--sheet, repeated, --tolerance, --no-solid) of
     /// sheets into one body; a thicken (--sheet, or --face repeated;
     /// --front, --back, --face-sides, --operation and --target) of a sheet
-    /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore,
+    /// or a body's faces into a solid; or a hole (--sketch, --point, or at
+    /// places: --at REF (repeat), --face, --from-edge REF=LENGTH (twice),
+    /// --coaxial REF, --direction, --reverse; --diameter, --depth, --form counterbore,
     /// countersink, counterdrill or spotface, --bottom, --near-diameter and
     /// --near-angle, a far side --far-countersink-* or --far-counterbore-*;
     /// or --spec, --thread with --pitch, --tpi, --class,
@@ -1499,7 +1501,9 @@ enum FeatureCmd {
     /// --fastener-fit, --fit) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
-    /// --angle) or mirror (--plane), skipping instances (--skip); an insert of
+    /// --angle), mirror (--plane) or a fill of hole seeds (--form fill,
+    /// --fill-face, --spacing, --spacing2, --direction, --margin), skipping
+    /// instances (--skip, i,j for a fill, signed); an insert of
     /// another part's solids (--of <part>, --rev working|label:L, --origin,
     /// --z, --x); a delete_body (--solid, repeated) taking solids out of the
     /// part's result; or, in an assembly, an instance (--of, --rev, --origin, --z,
@@ -3372,7 +3376,7 @@ struct FieldArgs {
     reverse2: Option<bool>,
     /// An instance a pattern leaves out: i, or i,j with two directions; repeat for
     /// several.
-    #[arg(long = "skip", value_name = "INDEX", value_parser = instance)]
+    #[arg(long = "skip", value_name = "INDEX", value_parser = instance, allow_hyphen_values = true)]
     skip: Vec<Value>,
     /// Leave no instance out again, when editing.
     #[arg(long, conflicts_with = "skip")]
@@ -3479,9 +3483,25 @@ struct FieldArgs {
     /// Give no face of a thicken a front and back of its own.
     #[arg(long, conflicts_with = "face_sides")]
     no_face_sides: bool,
-    /// Where on its curve a normal_to plane is: start, end or a point.
-    #[arg(long, value_name = "POINT")]
-    at: Option<String>,
+    /// Where on its curve a normal_to plane is: start, end or a point. A
+    /// hole's place at a point (repeat for several, keyed a, b, … in
+    /// order), with --face naming the face it is on, or the cylindrical or
+    /// conical face it drills radially.
+    #[arg(long = "at", value_name = "REFERENCE")]
+    at: Vec<String>,
+    /// A fill pattern's face: a planar face <part>/<feature>/<name>.
+    #[arg(long, value_name = "REFERENCE")]
+    fill_face: Option<String>,
+    /// A fill pattern's margin from its face's boundary.
+    #[arg(long, value_name = "LENGTH")]
+    margin: Option<String>,
+    /// A hole's place from an edge of --face: REFERENCE=LENGTH; give two.
+    #[arg(long = "from-edge", value_name = "REFERENCE=LENGTH", value_parser = param)]
+    from_edge: Vec<(String, String)>,
+    /// A hole's place on the axis of a cylindrical or conical face, a
+    /// circular edge or any axis.
+    #[arg(long, value_name = "REFERENCE")]
+    coaxial: Option<String>,
     /// A plane a midplane or a planes axis is between, or what an intersection point
     /// meets; repeat for the second.
     #[arg(long = "between", value_name = "REFERENCE")]
@@ -3937,7 +3957,50 @@ fn json_object(s: &str) -> core::result::Result<Value, String> {
 }
 
 impl FieldArgs {
-    fn to_fields(&self) -> FeatureFields {
+    fn to_fields(&self, ty: Option<&str>) -> FeatureFields {
+        // A hole's places (ryucad 28.C): a hole's flags, or on an edit
+        // (whose type the CLI doesn't know) --from-edge, --coaxial, several
+        // --at, or one with no --by (a datum's --at comes with its
+        // construction).
+        let hole_places = ty == Some("hole")
+            || !self.from_edge.is_empty()
+            || self.coaxial.is_some()
+            || self.at.len() > 1
+            || (self.at.len() == 1 && self.by.is_none() && ty.is_none());
+        let shared = |mut p: Value| -> Value {
+            if let Some(d) = &self.direction {
+                p["direction"] = json!(d);
+            }
+            if self.reverse == Some(true) {
+                p["reverse"] = json!(true);
+            }
+            p
+        };
+        let places = if !hole_places {
+            None
+        } else if let Some(c) = &self.coaxial {
+            Some(json!({"a": shared(json!({"coaxial": c}))}))
+        } else if !self.from_edge.is_empty() {
+            let from: Vec<Value> = self
+                .from_edge
+                .iter()
+                .map(|(e, d)| json!({"edge": e, "distance": d}))
+                .collect();
+            Some(json!({"a": shared(json!({"face": self.face.first(), "from": from}))}))
+        } else if !self.at.is_empty() {
+            let mut m = Map::new();
+            for (i, a) in self.at.iter().enumerate() {
+                let mut p = json!({"at": a});
+                if let Some(f) = self.face.first() {
+                    p["face"] = json!(f);
+                }
+                m.insert(place_key(i), shared(p));
+            }
+            Some(Value::Object(m))
+        } else {
+            None
+        };
+        let built = places.is_some();
         // A fill's sides given in order (--tangent after an --edge, several
         // --curve, or --curve beside --edge) go as sides; a lone --curve is
         // a datum's, --edge alone a blend's edges.
@@ -4007,8 +4070,11 @@ impl FieldArgs {
             // One --face is a chamfer's, a sketch's or a sweep's `face`;
             // several are a move's `faces`, beside any --face-distance
             // groups; with --with they are a replacement's groups.
-            face: (self.with_groups.is_empty() && self.face.len() == 1)
-                .then(|| self.face[0].clone()),
+            face: self.fill_face.clone().or_else(|| {
+                (!built && self.with_groups.is_empty() && self.face.len() == 1)
+                    .then(|| self.face[0].clone())
+            }),
+            margin: self.margin.clone().map(Value::String),
             face_list: None,
             tolerance: self.tolerance.clone().map(Value::String),
             sheets: (!self.sheets.is_empty()).then(|| self.sheets.clone()),
@@ -4056,7 +4122,7 @@ impl FieldArgs {
                 (!self.loops.is_empty()).then(|| self.loops.clone())
             },
             extent: (!extent.is_empty()).then_some(Value::Object(extent)),
-            reverse: self.reverse,
+            reverse: if built { None } else { self.reverse },
             surface: self.surface,
             axis: self.axis.clone(),
             angle: self.angle.clone().map(Value::String),
@@ -4152,6 +4218,8 @@ impl FieldArgs {
             features: (!self.seeds.is_empty()).then(|| self.seeds.clone()),
             direction: if self.outward {
                 Some("outward".to_owned())
+            } else if built {
+                None
             } else {
                 self.direction.clone()
             },
@@ -4204,7 +4272,12 @@ impl FieldArgs {
             about: self.about.clone(),
             through: self.through.clone(),
             curve: (self.curve.len() == 1 && !ordered).then(|| self.curve[0].clone()),
-            at: self.at.clone(),
+            at: if built {
+                None
+            } else {
+                self.at.first().cloned()
+            },
+            places,
             between: (!self.between.is_empty()).then(|| self.between.clone()),
             coordinates: self
                 .coordinates
@@ -4584,6 +4657,15 @@ fn bend_override(s: &str) -> core::result::Result<Value, String> {
     }
 }
 
+/// The CLI's key for its `i`th place: a, b, … z, a1, b1, … z1, a2, …
+fn place_key(i: usize) -> String {
+    let letter = (b'a' + (i % 26) as u8) as char;
+    match i / 26 {
+        0 => letter.to_string(),
+        n => format!("{letter}{n}"),
+    }
+}
+
 fn param(s: &str) -> core::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
@@ -4621,9 +4703,10 @@ fn triple(s: &str) -> core::result::Result<[String; 3], String> {
 
 /// A pattern instance's index: `i`, or `i,j` along two directions.
 fn instance(s: &str) -> core::result::Result<Value, String> {
+    // Signed: a fill's lattice runs both ways from its seed (ryucad 28.C).
     let n = |x: &str| {
         x.trim()
-            .parse::<u32>()
+            .parse::<i32>()
             .map_err(|_| format!("{x:?} is not an instance's index"))
     };
     match s.split_once(',') {
@@ -4813,7 +4896,7 @@ fn request(cmd: &Command) -> Option<Request> {
             ty: ty.clone(),
             params: params.to_map(),
             placement: placement.to_arg(),
-            fields: placement.frame(fields.to_fields()),
+            fields: placement.frame(fields.to_fields(Some(ty.as_str()))),
             id: id.clone(),
             position: position.to_position(),
             expected_revision: expect.revision.clone(),
@@ -4837,7 +4920,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 id: id.clone(),
                 params,
                 placement: placement.to_arg(),
-                fields: placement.frame(fields.to_fields()),
+                fields: placement.frame(fields.to_fields(None)),
                 expressions: expressions
                     .iter()
                     .map(|(k, v)| (k.clone(), json!(v)))
@@ -7745,7 +7828,7 @@ mod tests {
             let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
                 panic!()
             };
-            let f = fields.to_fields();
+            let f = fields.to_fields(None);
             assert_eq!(f.faces, Some(json!(["p/b/aa", "p/b/bb"])));
             assert_eq!(f.front, Some(json!("2mm")));
             assert_eq!(
@@ -7770,7 +7853,7 @@ mod tests {
             let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
                 panic!()
             };
-            let f = fields.to_fields();
+            let f = fields.to_fields(None);
             assert_eq!(
                 f.sheets.as_deref(),
                 Some(&["a".to_owned(), "b".to_owned()][..])
@@ -8054,7 +8137,7 @@ mod tests {
             let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
                 panic!()
             };
-            let f = fields.to_fields();
+            let f = fields.to_fields(None);
             assert_eq!(
                 (f.topology.as_deref(), f.blends.as_deref()),
                 (Some("change"), Some("rebuild"))
