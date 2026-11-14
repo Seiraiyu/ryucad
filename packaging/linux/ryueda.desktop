@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ryueda
+GenericName=Electronics CAD
+Comment=Watch agents draw schematics, point at what you mean, and judge
+Exec=@EXEC@ %f
+Terminal=false
+Categories=Development;Electronics;Engineering;
+MimeType=application/x-ryueda-project;
+Keywords=EDA;schematic;electronics;agent;

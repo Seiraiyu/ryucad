@@ -328,3 +328,29 @@ fn the_devcontainers_debs_are_cached_from_main() {
         "a cache's version includes its compression: save it on full.yml's runner"
     );
 }
+
+/// ryueda's archives carry the app (plan 3.D): built for the app's
+/// target, staged beside the CLI with the fonts' licences and, on Linux
+/// and macOS, share/; its smoke frame must draw; and the installers'
+/// job finds it.
+#[test]
+fn ryuedas_release_carries_the_app() {
+    let text = std::fs::read_to_string(root().join(".github/workflows/ryueda-release.yml")).unwrap();
+    for want in [
+        "app: x86_64-unknown-linux-gnu",
+        "app: aarch64-unknown-linux-gnu",
+        "cargo build --locked --release -p ryueda-app --target \"$APP\"",
+        "\"target/$APP/release/ryueda-app$x\"",
+        "crates/ryu-app/fonts/LICENSES.md",
+        "packaging/linux/ryueda.desktop packaging/linux/ryueda.xml",
+        "packaging/macos/ryueda.applescript",
+        "RYUEDA_REQUIRE_GPU: \"1\"",
+        "mesa-vulkan-drivers",
+        "ryueda-app --version",
+    ] {
+        assert!(text.contains(want), "ryueda-release.yml lacks {want}");
+    }
+    for file in ["packaging/linux/ryueda.desktop", "packaging/linux/ryueda.xml", "packaging/macos/ryueda.applescript"] {
+        assert!(root().join(file).is_file(), "{file}");
+    }
+}

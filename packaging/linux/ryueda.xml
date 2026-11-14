@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A ryueda project is a folder; its ryueda.json marks it. Opening that
+     file opens the project. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-ryueda-project">
+    <comment>ryueda project</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="ryueda.json" weight="90" case-sensitive="true"/>
+  </mime-type>
+</mime-info>
