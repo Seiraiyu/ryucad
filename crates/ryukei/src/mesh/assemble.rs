@@ -85,6 +85,9 @@ pub(super) fn assemble(
             // Wound as the loop runs: counterclockwise seen from outside.
             mesh.triangles
                 .extend(s.triangles.iter().map(|t| t.map(|c| corner_start + c)));
+            // A strip's triangles keep no turn: mass bounds each itself
+            // (#308's turns, in `mesh.triangles`' order).
+            turns.extend(std::iter::repeat_n(f64::NAN, s.triangles.len()));
             mesh.faces.push(FaceMesh {
                 face: f,
                 corners: corner_start..mesh.corners.len() as u32,

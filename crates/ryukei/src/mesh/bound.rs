@@ -307,7 +307,6 @@ pub(crate) fn triangle_ok(
 }
 
 /// [`triangle_ok`], saying which test failed.
-#[cfg(test)]
 pub(crate) fn triangle_test(
     surface: &Surface,
     metric: Metric,

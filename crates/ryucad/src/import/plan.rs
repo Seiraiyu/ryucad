@@ -747,6 +747,7 @@ mod flat_tests {
             taken: &taken,
             pdm: false,
             mode: None,
+            cross: Cross::default(),
         }
         .plan()
         .unwrap();
@@ -765,6 +766,7 @@ mod flat_tests {
             taken: &taken,
             pdm: false,
             mode: None,
+            cross: None,
         }
         .plan()
         .unwrap();

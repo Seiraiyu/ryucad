@@ -2354,7 +2354,7 @@ pub(crate) mod tests {
         for mode in [None, Some(Mode::Reference)] {
             let (dir, mut s) = with_import_as(&bytes, Some(("part 2", "part 2")), mode);
             let bounds = |s: &mut crate::session::Session| {
-                let v = crate::server::tests::call(s, "inspect", json!({"part": "p"})).unwrap();
+                let v = crate::testing::call(s, "inspect", json!({"part": "p"})).unwrap();
                 let b = &v["bodies"][0]["bounds"];
                 [0, 1, 2].map(|k| b["min"][k].as_f64().unwrap())
             };

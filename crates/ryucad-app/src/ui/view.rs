@@ -1544,7 +1544,7 @@ impl View {
         // person's own camera (`moved`, `turn`, Zoom to fit) ends it, and
         // following another's camera holds it.
         if !self.framed
-            && ws.following.is_none()
+            && ws.session.following.is_none()
             && let Some(b) = self.bounds(ws)
         {
             if self.framing != Some(b) {

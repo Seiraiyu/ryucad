@@ -7504,6 +7504,7 @@ fn an_annotations_reply_box_is_named() {
         h.state()
             .opened()
             .ws
+            .annotations
             .annotation_ui
             .replies
             .get(&id)
