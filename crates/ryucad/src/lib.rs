@@ -132,6 +132,7 @@ pub mod sketch;
 pub mod sketch_view;
 pub mod solid;
 pub mod standards;
+pub mod stdio;
 pub mod surface;
 pub mod sweep_view;
 #[cfg(test)]

@@ -145,6 +145,67 @@ impl Drop for Pair {
     }
 }
 
+/// What a stdio session wrote: each line as JSON, with the bytes it
+/// announces.
+fn frames(mut b: &[u8]) -> Vec<(Value, Vec<u8>)> {
+    let mut v = Vec::new();
+    while !b.is_empty() {
+        let end = b.iter().position(|&c| c == b'\n').expect("a line break");
+        let line: Value = serde_json::from_slice(&b[..end]).unwrap();
+        let n = line
+            .pointer("/result/binary/length")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        v.push((line, b[end + 1..end + 1 + n].to_vec()));
+        b = &b[end + 1 + n..];
+    }
+    v
+}
+
+impl Pair {
+    /// `ryucad session --stdio` from `sub` of `root`, its stdin, stdout
+    /// and stderr piped, in process for `direct`.
+    fn session(&self, root: &Path, sub: &str) -> std::process::Child {
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"));
+        cmd.current_dir(root.join(sub))
+            .args(["session", "--stdio"])
+            .env("RYUCAD_RUNTIME_DIR", &self.run)
+            .env("RYUCAD_IDLE_TIMEOUT", "60")
+            .env("RYUCAD_ID_SEED", "cli")
+            .env("RYUCAD_NOW", "2026-11-05T14:02:11Z")
+            .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
+            .env("RYUCAD_CACHE_DIR", root.with_extension("cache"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if root == self.direct {
+            cmd.env("RYUCAD_NO_DAEMON", "1");
+        }
+        cmd.spawn().unwrap()
+    }
+
+    /// A whole stdio session: `lines` in, then EOF. Its exit code and
+    /// what it wrote, with the root replaced by `<root>`.
+    fn script(&self, root: &Path, sub: &str, lines: &[&str]) -> (i32, Vec<(Value, Vec<u8>)>) {
+        use std::io::Write;
+        let mut child = self.session(root, sub);
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            for l in lines {
+                writeln!(stdin, "{l}").unwrap();
+            }
+        }
+        let out = child.wait_with_output().unwrap();
+        let mut got = frames(&out.stdout);
+        let r = root.to_str().unwrap();
+        let plain = r.strip_prefix(r"\\?\").unwrap_or(r);
+        for (v, _) in &mut got {
+            replace_root(v, &[r, plain]);
+        }
+        (out.status.code().unwrap(), got)
+    }
+}
+
 #[test]
 fn version_reports_every_component() {
     let p = Pair::new();
@@ -204,6 +265,169 @@ fn an_agent_session() {
     );
     assert_eq!(shown["placement"]["origin"][2]["value"], "5 mm");
     assert_eq!(p.ok(&["part", "list"])["parts"][0]["features"], 1);
+}
+
+/// Relative paths mean the folder the command runs as: `-C`'s, as
+/// worktree revisions already did (#447), whichever process writes
+/// the file (design 603, 31.A).
+#[test]
+fn relative_paths_mean_dash_cs_folder() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "plate", "--param", "x=10", "--param", "y=20",
+        "--param", "z=5",
+    ]);
+    fs::create_dir(p.direct.join("out")).unwrap();
+    fs::create_dir(p.daemon.join("out")).unwrap();
+    p.ok(&["-C", "out", "export", "p", "--out", "p.stl"]);
+    for root in [&p.direct, &p.daemon] {
+        assert!(root.join("out/p.stl").is_file(), "{}", root.display());
+        assert!(!root.join("p.stl").exists(), "{}", root.display());
+    }
+}
+
+/// #810: a script's one session answers every line in order, the same
+/// both ways: a refusal per bad line, bytes after the answer that
+/// announces them, a long request with its own token (design 603, 31.A).
+#[test]
+fn stdio_session() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let lines = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"part.create","params":{"part":"p"}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"feature.add","params":{"part":"p","type":"box","id":"plate","params":{"x":"10","y":"20","z":"5"}}}"#,
+        "{nope",
+        r#"{"jsonrpc":"2.0","id":"m","method":"mesh.get","params":{"part":"p","transfer":"binary"}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"no.such"}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"rebuild","params":{"token":"mine"}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"part.list"}"#,
+    ];
+    let (a_code, a) = p.script(&p.direct, "", &lines);
+    let (b_code, b) = p.script(&p.daemon, "", &lines);
+    assert_eq!((a_code, b_code), (0, 0));
+    assert_eq!(a, b, "in process vs daemon");
+    let ids: Vec<Value> = a.iter().map(|(v, _)| v["id"].clone()).collect();
+    assert_eq!(
+        ids,
+        [
+            json!(1),
+            json!(2),
+            Value::Null,
+            json!("m"),
+            json!(3),
+            json!(4),
+            json!(5)
+        ]
+    );
+    assert_eq!(a[2].0["error"]["data"]["code"], "invalid_json");
+    let n = a[3].0["result"]["binary"]["length"].as_u64().unwrap();
+    assert!(n > 0 && a[3].1.len() as u64 == n);
+    assert_eq!(a[4].0["error"]["data"]["code"], "usage");
+    assert_eq!(a[5].0["result"]["parts"][0]["failed"], 0, "{}", a[5].0);
+    assert_eq!(a[6].0["result"]["parts"][0]["part"], "p");
+}
+
+/// Through the daemon a session is one participant whose writes undo,
+/// renamed by its own hello, and relative paths mean the script's folder,
+/// not the daemon's.
+#[test]
+fn stdio_session_through_the_daemon() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "plate", "--param", "x=10", "--param", "y=20",
+        "--param", "z=5",
+    ]);
+    fs::create_dir(p.daemon.join("out")).unwrap();
+    let (code, got) = p.script(
+        &p.daemon,
+        "out",
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"export","params":{"part":"p","out":"p.stl"}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"session.hello","params":{"kind":"agent","name":"builder"}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"feature.show","params":{"part":"p","id":"plate"}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"feature.edit","params":{"part":"p","id":"plate","params":{"x":"12"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"undo"}"#,
+            r#"{"jsonrpc":"2.0","id":6,"method":"feature.show","params":{"part":"p","id":"plate"}}"#,
+        ],
+    );
+    assert_eq!(code, 0);
+    for (v, _) in &got {
+        assert!(v.get("result").is_some(), "{v}");
+    }
+    assert!(p.daemon.join("out/p.stl").is_file());
+    assert!(!p.daemon.join("p.stl").exists());
+    // builder's own edit, undone by builder.
+    assert_eq!(got[2].0["result"], got[5].0["result"]);
+}
+
+/// A daemon that stops between requests is started again for the next
+/// (decision 3).
+#[test]
+fn stdio_session_outlives_its_daemon() {
+    use std::io::{BufRead, BufReader, Write};
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let mut child = p.session(&p.daemon, "");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut ask = |line: &str| -> Value {
+        writeln!(stdin, "{line}").unwrap();
+        let mut answer = String::new();
+        stdout.read_line(&mut answer).unwrap();
+        serde_json::from_str(&answer).unwrap()
+    };
+    let list = r#"{"jsonrpc":"2.0","id":1,"method":"part.list"}"#;
+    assert!(ask(list).get("result").is_some());
+    let (_, stopped) = p.run_in(&p.daemon, "", &["daemon", "stop"]);
+    assert_eq!(stopped["result"]["stopped"], true, "{stopped}");
+    // The session saw it go, or finds out by sending: either way it answers.
+    let next = ask(list);
+    assert!(
+        next.get("result").is_some() || next["error"]["data"]["code"] == "daemon",
+        "{next}"
+    );
+    assert!(ask(list).get("result").is_some());
+    drop(ask);
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
+/// Ctrl+C with nothing running ends the session at once, with a shell's
+/// code for an interrupt.
+#[cfg(unix)]
+#[test]
+fn stdio_session_ends_on_ctrl_c() {
+    use std::io::{BufRead, BufReader, Write};
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let mut child = p.session(&p.daemon, "");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"part.list"}}"#).unwrap();
+    let mut answer = String::new();
+    stdout.read_line(&mut answer).unwrap();
+    let kill = std::process::Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success());
+    assert_eq!(child.wait().unwrap().code(), Some(130));
+}
+
+/// Outside a project a session says why in one refusal and exits as the
+/// CLI would.
+#[test]
+fn stdio_session_outside_a_project() {
+    let p = Pair::new();
+    let (code, got) = p.script(&p.direct, "", &[]);
+    assert_eq!(code, 3);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].0["id"], Value::Null);
+    assert_eq!(got[0].0["error"]["data"]["code"], "project_not_found");
 }
 
 #[test]
