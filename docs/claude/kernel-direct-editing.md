@@ -160,6 +160,52 @@ The design is document 444 in the Coxswain planning project `ryucad-ryukei`; thi
   - The pinned corpus (`pinned_bodies_defeature`, tightening on): `pinned corpus: 17 defeatured, 9 refused, 2 past the deadline, 5 with no blend under 2 mm, in 642.3 s` (load 3.2 before, 4.6 after, beside other builds). Defeatured: CTC 01, 03, 04 and 05, FTC 06, 08 and 09 in their AP203 editions, CTC 01 and 03 to 05 with PMI, and the AP242 CTC 05, FTC 06, FTC 08, STC 06, STC 08 and STC 09 (0.14 to 5.4 s). Refused: FTC 07 and 10, and STC 07 and 10, their AP242 twins (`Uncertain`, 30 to 97 s; FTC 07's AP242 edition past the deadline: #652's tangent seams); CTC 02 in two editions (`Uncertain`, 2.9 and 67 s); FTC 09's AP242 edition (`Uncertain`, 1.1 s); FTC 11's AP242 edition (`GapNotHealed`, 0.8 s); OCCT's `linkrods.step` past the deadline (#658 holds each).
   - #647's bytes refuse `Uncertain` in 3.5 s (3,489,400 units); `edit_props`' seed 76 refuses `RegionTooSmall` in 24.0 s; `edit_props` builds 40 of 78 edits, none past the deadline.
 - **Limits.**
-  - FTC 07 and FTC 10 (#652): every refusal is a pair of kept region faces tangent along a shared edge (a pipe-like round's straight run against its corner torus; cylinders and spheres against a NURBS), whose working faces, carried past that seam, meet tangentially along it; the trace can't certify that within its cap. It needs a rule for kept faces tangent along a seam.
+  - FTC 07 and FTC 10 (#652): see Known seams (phase 18).
   - A hole whose wall is two half cylinders can't have its rim filleted or chamfered (`blend` refuses `Topology(Inconsistent)`, #723).
 - **Testing.** `blend_recognition.rs`' `a_ribs_full_round_is_no_fillet`; `delete_faces.rs`' `far_apart_sets_grow_as_one_after_another` and `deleting_a_drilled_plates_side_is_refused`; `retrim.rs`' `an_offset_past_the_opposite_side_collapses` and the groove's names; `drafts.rs`' `a_wall_drafted_past_its_neighbour_keeping_topology_loses_an_edge`; `fuzz_regressions.rs`' `the_edit_targets_first_find_answers`; unit tests in `tweak::retrim::{walk, working, body}`, `work` and `check`; ryustep's `defeature.rs`: `ftc_09s_split_holes_lose_their_countersinks`, `a_delete_checks_only_its_own_pairs`, `ftc_08s_pocket_floor_loses_its_fillets`, `ftc_07s_and_ftc_10s_blends_are_deleted` (ignored, #652), the committed corpus's bar with `KNOWN_REFUSED`, and `pinned_bodies_defeature` (ignored until the corpus is fetched).
+
+## Known seams (decided in ryukei phase 18)
+
+The design is document 551 in the Coxswain planning project `ryucad-ryukei`; this is its plan 18.C (#652, #658).
+
+- **The case.** Two kept region faces tangent along an edge of the input have working faces that, carried past the edge, meet tangentially along its curve. No trace can certify a crossing there.
+- **The rule** (`intersect::known`, `WorkBody::seams`, `table::build_seamed`).
+  - **What is recorded.** The re-trim records each input edge whose two faces are kept, unchanged working faces (`still`) tangent along it (`classify::tangent` is `Ok(true)`). Each seam carries both fins' pcurves, moved by whole periods into the working faces' boxes (`retrim::body::seam_for`).
+  - **The order.** The table first traces such a pair under `SEAM_TRACE_FIRST` (`1 << 16`) units, so a pair that settles there settles as before. Failing that, it meets the pair along its seams (`known_seam`). Failing that, it traces the pair whole.
+  - **Running on.** A seam is run on along its own curve where both pcurves are lines in the parameter plane: a line over the faces' shared box, a circle or an ellipse a whole period.
+  - **What it needs.** It is certified within `SEAM_SLACK` (10) edge tolerances of both surfaces through its pcurves (`pcurve_certified`). It is taken only where one face keeps off the other's surface outside the tangent strip `sqrt(2 × size × 100 tol)` (`beside::face_beside_rails`, the check's ladder `1 << 9`, `1 << 12`, `CELLS`).
+  - **Placing.** The branch is then cut and placed as a traced one is (`face::placed`, split out of `face_face_over`). Nothing else is traced: a trace over the region less the strip would end short of the seam, and its boxes would hold points the strip doesn't certify.
+  - Booleans, self-unions and global offsets don't change (`repair::resolve` passes no seams; `boolean::table::build_capped` takes `None`).
+- **Withheld:**
+  - pcurves other than lines past the edge's own interval;
+  - a seam not certified within ten tolerances;
+  - faces neither of which keeps off the other beside the seam. A pipe-like round's straight run carried past the circle where it meets its corner torus enters the tube on the bend's inner side and leaves it on the outer, so the two cross along curves from the circle. FTC 07's torus pair is that case, committed as a NIST cut.
+- **What it doesn't reach: FTC 07 and FTC 10** (#652's census, Task 1). Design 551's premise, two kept region faces tangent along an edge with line pcurves, describes none of their failing pairs.
+  - In FTC 07, four of seven failing pairs have one face outside the region, across a frontier edge (the torus pairs are tangent and cross past the seam).
+  - Every pair against a NURBS face is tangent only partly along its edge (`classify::tangent` refuses `PartlySmooth`), with NURBS pcurves.
+  - With all of them set aside, a non-tangent plane/plane pair at the frontier refuses behind them in both bodies.
+  - So `KNOWN_REFUSED` keeps both, and question 820's carry-stop trial was skipped with the coxswain's agreement: settling FTC 07's torus pairs would leave its five partly smooth pairs, and FTC 10's four are all partly smooth. Frontier and partly smooth seams are ryukei 19's.
+- **The pinned editions** (#658, Tasks 11–13): `17 defeatured, 9 refused, 2 past the deadline, 5 with no blend under 2 mm`, 16.C's tally exactly. `PINNED_DEFEATURED` asserts that those 17 stay defeatured. Design 551 expected #652's AP242 twins there, but they don't build. The causes still standing:
+  - **Frontier and partly smooth seams:** STC 07, STC 10, FTC 07 and FTC 10 in their AP242 editions, CTC 02 in both AP203 editions, and linkrods. CTC 02 with PMI is a single frontier seam, a closed ellipse tangent all along; with that one pair set aside, the delete builds.
+  - **FTC 09 AP242:** the split of a cone face that runs down to its own apex fails (`split::split`, a pole).
+  - **FTC 11 AP242:** the walk is ambiguous in the delete's second re-trim, then `Clipped` (`GapNotHealed`).
+  - **linkrods:** every one of its eight chains runs past 150 s. A rung's cap bounds each parallel task of its table (`Meter::par_map` gives each the room left), not their sum, and chain 6's rung spent 84.4M units under `RUNG`'s 16.8M.
+- **What moved.** Golden section `known_seams` was added: a block's rounded vertical edge, the top edges' tangent chain filleted, and the small fillets deleted. Its delete records two seams of sixteen pairs. The meeting's bits are pinned in the crate (`known::tests::known_seams_hash`). No other ryukei or ryucad golden line moved, and checks and deletes ran the same on main and the branch (none more than 5% apart).
+- **Measured** (cox-worker-2, AMD Ryzen 7 9700X, one thread, 2026-11-14, load 0.7–3.5; branch `ea1dcb8a` against main `0d7ec782`):
+
+  | Bar | Result |
+  |---|---|
+  | Check, MSOP-8-1EP (#303) | 45.1 s, 8,215,098 units. Unmet (30 s); the test holds 60 s |
+  | Check, no undecided pinned pair (#264) | CTC 02 AP242 #1341's `cannot_check` pair stays. Unmet |
+  | Check, the thread (#698) | ryucad's sweep 14.5 s, ryukei's twin 6.4 s, no `CannotCheck`. Met |
+  | No check or delete slower | identical results; largest move −5%. Met |
+  | Self-union, molex (#585) | `PiecesTouch` beside the split span in 9.2 s (main 9.1 s, the same refusal). Unmet |
+  | PCBA interference (#436) | 0 unchecked of 1,214, byte for byte with main; interference 95.3 s (main 92.6 s, four threads). Met |
+  | Blend deletes, committed (#652) | FTC 07 refused in 85.1 s, FTC 10 in 50.9 s (`KNOWN_REFUSED`). Unmet → ryukei 19 |
+  | Blend deletes, pinned (#658) | 17 / 9 / 2 / 5 in 666 s; FTC 07 AP242 and linkrods past the deadline. Unmet |
+
+  step-hunt over `committed` and `nist` (four jobs, `--stages ref`): 90 cases, no slow or timeout finding (the slowest stage 3.31 s), and the two known failures, as in 18.B's run. Fuzzing (`edit`, `boolean`, `self_union`, 30 min each under ASan, cox-worker-4 at load 15–19): no crash, timeout or OOM, nothing in the re-trim or `known`.
+- **Testing.**
+  - Unit tests: `intersect::known`'s (a plane tangent to a cylinder met along the line to the faces' ends; turned 0.3 rad, and 10 µm into the tube, withheld; a cylinder carried past its torus seam withheld), `known_seams_hash`, `beside::rails_tests`, `face::swap_tests`, `retrim::body`'s `kept_faces_tangent_along_a_round_record_their_seams`, and `flat`'s `a_middle_flat_span_is_never_split`.
+  - The NIST cut: `retrim::tests::ftc_07s_seam_pair_crossing_past_its_seam_is_withheld` (`nist_ftc_07_seam_input.body` and `nist_ftc_07_seam_work.body`).
+  - ryustep's `defeature.rs`: `ftc_07s_and_ftc_10s_blends_are_deleted` (ignored: frontier and partly smooth seams), `KNOWN_REFUSED`, and `pinned_bodies_defeature` with `PINNED_DEFEATURED`.
