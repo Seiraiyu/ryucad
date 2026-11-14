@@ -86,7 +86,7 @@ pub fn proposed(session: &Session, writes: &Writes) -> Result<Project> {
         }
     }
     let aliases = resolve(session.root(), &session.project().manifest);
-    Project::load_from(session.root(), &files, &aliases, &crate::pin::NoPins)
+    Project::load_from(session.root(), &files, &aliases, &*session.pins)
 }
 
 /// Puts `writes` on disk if they add no error to the project, and takes

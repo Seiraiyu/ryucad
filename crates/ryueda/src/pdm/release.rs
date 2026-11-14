@@ -242,13 +242,10 @@ pub fn results(
     root: &std::path::Path,
     src: &dyn crate::source::Source,
     part: &Id,
+    pins: &dyn crate::pin::Resolve,
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    let p = crate::project::Project::load_from(
-        root,
-        src,
-        &std::collections::BTreeMap::new(),
-        &crate::pin::NoPins,
-    )?;
+    let p =
+        crate::project::Project::load_from(root, src, &std::collections::BTreeMap::new(), pins)?;
     let mut out = std::collections::BTreeMap::new();
     if p.manifest.project_kind == ProjectKind::Design {
         let n = crate::netlist::flatten(&p, part)?;
@@ -264,6 +261,8 @@ pub fn results(
 /// Works results out again for `release_result_changed`.
 pub(crate) struct Again {
     pub(crate) root: std::path::PathBuf,
+    /// Resolves the pins of the designs checked.
+    pub(crate) pins: crate::pin::Pins,
 }
 
 impl ryupdm::check::Results for Again {
@@ -273,7 +272,7 @@ impl ryupdm::check::Results for Again {
         part: &Id,
         _content: &str,
     ) -> Result<std::collections::BTreeMap<String, String>> {
-        results(&self.root, src, part)
+        results(&self.root, src, part, &self.pins)
     }
 }
 
@@ -323,7 +322,7 @@ fn prepare(
     }
     let src = part_source(&files, part);
     let content = <crate::Eda as Product>::content(&src, part)?;
-    let results = results(session.root(), &src, part)?;
+    let results = results(session.root(), &src, part, &*session.pins)?;
     Ok(Proposal {
         part: part.clone(),
         next,
@@ -606,7 +605,10 @@ pub fn findings(session: &mut Session, again: bool) -> Result<Vec<Value>> {
                 prefix: repo.prefix(),
                 releases: &releases,
             };
-            let mut a = Again { root };
+            let mut a = Again {
+                root,
+                pins: crate::pin::Pins::default(),
+            };
             let r: Option<&mut dyn ryupdm::check::Results> =
                 if again { Some(&mut a) } else { None };
             ryupdm::check::run_for::<crate::Eda>(&files, Some(h), r)?
@@ -773,20 +775,20 @@ mod tests {
     fn a_designs_results_are_its_netlists_and_ercs_hashes_and_a_components_none() {
         let (_d, s) = session(ProjectKind::Design);
         let files = s.snapshot();
-        let r = results(s.root(), &files, &id("d")).unwrap();
+        let r = results(s.root(), &files, &id("d"), &*s.pins).unwrap();
         assert_eq!(r.keys().collect::<Vec<_>>(), ["erc", "netlist"]);
         assert!(r.values().all(|h| h.len() == 64));
         assert_eq!(
-            results(s.root(), &files, &id("d")).unwrap(),
+            results(s.root(), &files, &id("d"), &*s.pins).unwrap(),
             r,
             "deterministic"
         );
         // A part's own files give the same results.
         let own = part_source(&files, &id("d"));
-        assert_eq!(results(s.root(), &own, &id("d")).unwrap(), r);
+        assert_eq!(results(s.root(), &own, &id("d"), &*s.pins).unwrap(), r);
         let (_l, l) = session(ProjectKind::Library);
         assert!(
-            results(l.root(), &l.snapshot(), &id("r_100k"))
+            results(l.root(), &l.snapshot(), &id("r_100k"), &*l.pins)
                 .unwrap()
                 .is_empty()
         );
@@ -907,7 +909,7 @@ mod tests {
         assert!(r["netlist"].is_string() && r["erc"].is_string(), "{v}");
         // What it records is what a check at the commit works out again.
         let files = s.snapshot();
-        let again = results(s.root(), &part_source(&files, &id("d")), &id("d")).unwrap();
+        let again = results(s.root(), &part_source(&files, &id("d")), &id("d"), &*s.pins).unwrap();
         assert_eq!(r, &json!(again));
     }
 

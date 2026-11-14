@@ -451,7 +451,7 @@ pub(crate) fn project_over(root: &Path, files: &Files) -> Result<Project> {
         root,
         files,
         &crate::project::resolve(root, &manifest),
-        &crate::pin::NoPins,
+        &crate::pin::Pins::default(),
     )
 }
 

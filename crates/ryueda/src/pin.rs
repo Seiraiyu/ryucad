@@ -51,6 +51,26 @@ pub trait Resolve: Sync {
         label: &str,
         lock: Option<&Lock>,
     ) -> Result<Arc<Pinned>>;
+
+    /// Alias `a`'s library's PDM settings and its release branch, as read
+    /// (for the project at `root`).
+    fn releases_of(
+        &self,
+        root: &Path,
+        a: &Alias,
+    ) -> Result<(ryupdm::config::Config, Arc<Releases>)> {
+        let _ = (root, a);
+        Err(Error::new(
+            Code::NotAGitRepo,
+            "a library's releases are read only in a Git repository",
+        ))
+    }
+
+    /// The file `rel` of alias `a`'s library project at `commit`.
+    fn file_at(&self, root: &Path, a: &Alias, commit: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+        let _ = (root, a, commit, rel);
+        Ok(None)
+    }
 }
 
 /// Resolves no pin: for projects read outside a repository, and tests.
@@ -238,24 +258,31 @@ impl Resolve for Pins {
             Some(_) => inner.foreign(alias, a, component, label, lock),
         }
     }
-}
 
-impl Pins {
-    /// A same-repository alias's library: the repository, its prefix
-    /// there, its PDM settings and its release branch as read (memoised
-    /// by refs key).
-    pub(crate) fn local_releases(
+    fn releases_of(
         &self,
         root: &Path,
         a: &Alias,
-    ) -> Result<(
-        crate::git::Repo,
-        String,
-        ryupdm::config::Config,
-        Arc<Releases>,
-    )> {
+    ) -> Result<(ryupdm::config::Config, Arc<Releases>)> {
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        inner.local_releases(root, a)
+        match &a.url {
+            None => inner
+                .local_releases(root, a)
+                .map(|(_, _, config, releases)| (config, releases)),
+            Some(_) => inner.foreign_releases(a),
+        }
+    }
+
+    fn file_at(&self, root: &Path, a: &Alias, commit: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+        let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        match &a.url {
+            None => {
+                let repo: crate::git::Repo = ryu_git::repo::repo(root)?;
+                let prefix = within(repo.prefix(), &a.path)?;
+                ryupdm::history::file_at(repo.gix(), commit, &prefix, rel)
+            }
+            Some(_) => inner.foreign_file_at(a, commit, rel),
+        }
     }
 }
 
@@ -362,6 +389,19 @@ impl Inner {
         Ok(p)
     }
 
+    fn foreign_releases(&mut self, a: &Alias) -> Result<(ryupdm::config::Config, Arc<Releases>)> {
+        let _ = a;
+        Err(Error::new(
+            Code::DependencyNotFetched,
+            "run `ryueda lib fetch`",
+        ))
+    }
+
+    fn foreign_file_at(&mut self, a: &Alias, commit: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+        let _ = (a, commit, rel);
+        Ok(None)
+    }
+
     fn foreign(
         &mut self,
         alias: &Id,
@@ -431,6 +471,136 @@ pub(crate) mod tests {
         assert!(lib.faults.is_empty(), "{:?}", lib.faults);
         let e = from_files(&files, &id("passives"), "B", &id("c_1u")).unwrap_err();
         assert_eq!(e.code, Code::NotFound);
+    }
+
+    /// A release (or obsolete) record of library project 2's `c` at
+    /// `label`, as ryueda writes it.
+    pub(crate) fn record(c: &str, label: &str, kind: Kind) -> String {
+        use ryupdm::record::{BuiltWith, Obsolete, Record, Release, ReleasedBy};
+        let project = crate::project::tests::pid(2);
+        let part = id(c);
+        let by = ReleasedBy {
+            name: None,
+            email: None,
+            participant: "agent".into(),
+        };
+        let r = match kind {
+            Kind::Release => Record::Release(Release {
+                project,
+                part,
+                label: label.into(),
+                content: format!("{:0>64}", label.to_ascii_lowercase()),
+                properties: BTreeMap::new(),
+                results: BTreeMap::new(),
+                built_with: BuiltWith {
+                    ryucad: "0".into(),
+                    ryukei: "0".into(),
+                    commit: "c".into(),
+                    product: None,
+                },
+                released_by: by,
+                supersedes: None,
+                note: None,
+            }),
+            Kind::Obsolete => Record::Obsolete(Obsolete {
+                project,
+                part,
+                label: label.into(),
+                released_by: by,
+                note: None,
+            }),
+        };
+        crate::canonical::to_string(&r.to_json())
+    }
+
+    /// Writes `c`'s record of `kind` at `label` into the library project
+    /// at `top/lib` and commits it on `main`.
+    pub(crate) fn commit_record(top: &Path, lib: &str, c: &str, label: &str, kind: Kind) {
+        use crate::git::tests::git;
+        let path = ryupdm::record::path(&id(c), label, kind);
+        let at = crate::session::path_of(&top.join(lib), &path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, record(c, label, kind)).unwrap();
+        git(top, &["add", "-A"]);
+        git(top, &["commit", "-q", "-m", &format!("{c} {label}")]);
+    }
+
+    /// `c`'s `label` made obsolete on the library's release branch.
+    pub(crate) fn obsolete(top: &Path, lib: &str, c: &str, label: &str) {
+        commit_record(top, lib, c, label, Kind::Obsolete);
+    }
+
+    /// A repository holding `lib/` (library project 2, the test library,
+    /// `r_100k` released at A on `main`) and `board/` (the breakout,
+    /// naming `lib` as `passives`, its `r1` placing `passives/r_100k`
+    /// pinned at A).
+    pub(crate) fn released_library_and_board() -> (tempfile::TempDir, std::path::PathBuf) {
+        use crate::git::tests::git;
+        use crate::project::tests::{design_in, library_in, manifest, pid};
+        use crate::project::{MANIFEST, Manifest, ProjectKind};
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().to_path_buf();
+        git(&top, &["init", "-q", "-b", "main"]);
+        let (lib, board) = (top.join("lib"), top.join("board"));
+        std::fs::create_dir_all(&lib).unwrap();
+        let m = Manifest::new(pid(2), crate::units::Unit::Mm, ProjectKind::Library);
+        std::fs::write(lib.join(MANIFEST), m.to_text()).unwrap();
+        library_in(&lib);
+        manifest(&board, ProjectKind::Design, &[]);
+        library_in(&board);
+        design_in(&board);
+        let mut m = Manifest::read(&std::fs::read(board.join(MANIFEST)).unwrap()).unwrap();
+        let mut a = Alias::local("../lib");
+        a.project = Some(pid(2));
+        a.labels.insert(id("r_100k"), "A".into());
+        m.libraries.insert(id("passives"), a);
+        std::fs::write(board.join(MANIFEST), m.to_text()).unwrap();
+        let r1 = board.join("blocks/top/components/r1.json");
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&r1).unwrap()).unwrap();
+        v["of"] = serde_json::json!({"library": "passives", "id": "r_100k"});
+        std::fs::write(&r1, crate::canonical::to_string(&v)).unwrap();
+        commit_record(&top, "lib", "r_100k", "A", Kind::Release);
+        (d, board)
+    }
+
+    #[test]
+    fn a_pin_in_the_repository_reads_its_label_official_commit() {
+        let (d, board) = released_library_and_board();
+        let pins = Pins::default();
+        let m = crate::project::Manifest::read(
+            &std::fs::read(board.join(crate::project::MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        let a = &m.libraries[&id("passives")];
+        let p = pins
+            .pin(&board, &id("passives"), a, &id("r_100k"), "A", None)
+            .unwrap();
+        assert_eq!(p.project, crate::project::tests::pid(2));
+        assert!(!p.obsolete);
+        assert!(p.library.components.contains_key(&id("r_100k")));
+        let e = pins
+            .pin(&board, &id("passives"), a, &id("r_100k"), "B", None)
+            .unwrap_err();
+        assert_eq!(e.code, Code::LabelNotFound);
+        // Another project named: refused.
+        let mut other = a.clone();
+        other.project = Some(crate::project::tests::pid(3));
+        let e = pins
+            .pin(&board, &id("passives"), &other, &id("r_100k"), "A", None)
+            .unwrap_err();
+        assert_eq!(e.code, Code::DependencyProjectMismatch);
+        let (config, releases) = pins.releases_of(&board, a).unwrap();
+        assert_eq!(config.release_branch, "main");
+        assert_eq!(
+            ryupdm::deps::parts::latest(&releases, config.revisions)[&id("r_100k")],
+            "A"
+        );
+        obsolete(d.path(), "lib", "r_100k", "A");
+        let p = pins
+            .pin(&board, &id("passives"), a, &id("r_100k"), "A", None)
+            .unwrap();
+        assert!(p.obsolete);
     }
 
     pub(crate) fn id(s: &str) -> Id {
