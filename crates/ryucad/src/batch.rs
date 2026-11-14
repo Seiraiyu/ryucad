@@ -22,6 +22,8 @@ pub struct Ask {
     pub expect: Option<String>,
     pub dry_run: bool,
     pub rebuild: bool,
+    /// Delete every part no `part.ensure` or `part.create` op named.
+    pub prune: bool,
 }
 
 /// `batch`.
@@ -143,9 +145,10 @@ fn solve_deferred(
 /// (`annotation::PROPOSABLE`), and making and deleting parts. Undo,
 /// releases, PDM settings, dependencies, imports, branch switches,
 /// doctor's repairs, merge resolutions and another batch can't be.
-pub const BATCHABLE: [&str; 27] = [
+pub const BATCHABLE: [&str; 28] = [
     "part.create",
     "part.delete",
+    "part.ensure",
     "feature.add",
     "feature.edit",
     "feature.delete",
@@ -184,7 +187,7 @@ pub fn requests(ops: &[BatchOp]) -> Result<Vec<Request>> {
                 return Err(Error::new(
                     Code::InvalidParam,
                     format!(
-                        "op {i}: {:?} can't be batched: only model edits and part.create and part.delete can (batch::BATCHABLE)",
+                        "op {i}: {:?} can't be batched: only model edits and part.create, part.delete and part.ensure can (batch::BATCHABLE)",
                         op.method
                     ),
                 )
@@ -464,7 +467,7 @@ mod tests {
         let want: BTreeSet<&str> = PROPOSABLE
             .iter()
             .copied()
-            .chain(["part.create", "part.delete"])
+            .chain(["part.create", "part.delete", "part.ensure"])
             .collect();
         assert_eq!(BATCHABLE.iter().copied().collect::<BTreeSet<_>>(), want);
         assert_eq!(BATCHABLE.len(), want.len(), "no method twice");
@@ -601,6 +604,11 @@ mod tests {
         let mut asks = proposable_requests();
         asks.push(("part.create", json!({"part": "bolt", "kind": "assembly"})));
         asks.push(("part.delete", json!({"part": "rig"})));
+        asks.push((
+            "part.ensure",
+            json!({"part": "pin", "features": [
+                {"id": "shank", "type": "cylinder", "params": {"radius": 3, "height": 10}}]}),
+        ));
         let methods: BTreeSet<&str> = asks.iter().map(|(m, _)| *m).collect();
         assert_eq!(methods, BATCHABLE.iter().copied().collect::<BTreeSet<_>>());
         for (method, params) in asks {
