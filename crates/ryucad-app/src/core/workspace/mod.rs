@@ -21,6 +21,7 @@ use crate::core::props::PartProps;
 use crate::core::releases::ReleaseTab;
 use crate::core::settings::Settings;
 use crate::core::toast::Toasts;
+use route::{Effects, Then};
 use ryucad::client::{Ask, Daemon};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::SelectMode;
@@ -435,7 +436,7 @@ impl Workspace {
 
     /// The project's default unit.
     pub fn unit(&self) -> ryucad::units::Unit {
-        ryucad::units::Unit::parse(&self.model.default_unit).unwrap_or(ryucad::units::Unit::Mm)
+        self.model.unit()
     }
 
     /// Shows `part` in this window, or (with `None`) the project's model,
@@ -1116,19 +1117,41 @@ impl Workspace {
             }
             (Pending::Quiet, Ok(_)) => {}
             (Pending::Model(a), r) => self.answer_model(a, r),
-            (Pending::Forms(a), r) => self.answer_forms(a, r),
-            (Pending::Parameters(a), r) => self.answer_parameters(a, r),
-            (Pending::Drawings(a), r) => self.answer_drawings(a, r),
+            (Pending::Forms(a), r) => {
+                let mut fx = Effects::default();
+                self.forms
+                    .answer(a, r, &self.model, &self.pdm.states, &mut fx);
+                self.apply(fx);
+            }
+            (Pending::Parameters(a), r) => {
+                let mut fx = Effects::default();
+                self.parameters
+                    .answer(a, r, &self.model.default_unit, &mut fx);
+                self.apply(fx);
+            }
+            (Pending::Drawings(a), r) => {
+                let mut fx = Effects::default();
+                self.drawings.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
             (Pending::Activity(a), r) => self.answer_activity(a, r),
             (Pending::Branches(a), r) => self.answer_branches(a, r),
             (Pending::Deps(a), r) => self.answer_deps(a, r),
-            (Pending::Pdm(a), r) => self.answer_pdm(a, r),
+            (Pending::Pdm(a), r) => {
+                let mut fx = Effects::default();
+                self.pdm.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
             (Pending::Annotations(a), r) => self.answer_annotations(a, r),
             (Pending::Comparing(a), r) => self.answer_comparing(a, r),
             (Pending::Session(a), r) => self.answer_session(a, r),
             (Pending::Assembly(a), r) => self.answer_assembly(a, r),
             (Pending::View(a), r) => self.answer_view(a, r),
-            (Pending::Exchange(a), r) => self.answer_exchange(a, r),
+            (Pending::Exchange(a), r) => {
+                let mut fx = Effects::default();
+                self.exchange.answer(a, r, &mut fx);
+                self.apply(fx);
+            }
             (_, Err(e)) => self.fail(e),
         }
     }

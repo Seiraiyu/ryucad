@@ -152,28 +152,30 @@ pub(crate) enum Asked {
     DrawingWrite,
 }
 
-impl Workspace {
-    pub(super) fn answer_drawings(&mut self, why: Asked, answer: Result<Answer>) {
+impl crate::core::drawings::Tile {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::DrawingList(part), Ok(a)) => {
-                if self.drawings.part.as_deref() == Some(&part) {
+                if self.part.as_deref() == Some(&part) {
                     let list = crate::core::drawings::List::from_answer(&part, &a.result);
                     // A drawing or sheet that went: the first left.
-                    if let Some((d, k)) = &self.drawings.chosen
+                    if let Some((d, k)) = &self.chosen
                         && !list
                             .entries
                             .iter()
                             .any(|e| &e.drawing == d && e.sheets.iter().any(|(s, _)| s == k))
                     {
-                        self.drawings.chosen = None;
-                        self.drawings.sheet = None;
-                        self.drawings.camera = None;
+                        self.chosen = None;
+                        self.sheet = None;
+                        self.camera = None;
                     }
-                    self.drawings.list = Some(list);
-                    self.read_drawing_sheet();
+                    self.list = Some(list);
+                    fx.then(Then::ReadDrawingSheet);
                 }
             }
-            (Asked::DrawingList(_), Err(e)) => self.drawings.error = Some(e),
+            (Asked::DrawingList(_), Err(e)) => self.error = Some(e),
             (Asked::DrawingsAll, Ok(a)) => {
                 let mut drawn: BTreeMap<String, Vec<(String, String, bool)>> = BTreeMap::new();
                 for d in a.result["drawings"].as_array().into_iter().flatten() {
@@ -186,49 +188,48 @@ impl Workspace {
                         d.get("error").is_some(),
                     ));
                 }
-                if drawn != self.drawings.drawing_rows {
-                    self.drawings.drawing_rows = drawn;
-                    self.model.generation += 1;
+                if drawn != self.drawing_rows {
+                    self.drawing_rows = drawn;
+                    fx.redraw();
                 }
             }
             (Asked::DrawingsAll, Err(_)) => {}
             (Asked::DrawingSheet(part, drawing, sheet), r) => {
-                let current = self.drawings.part.as_deref() == Some(&part)
-                    && self.drawings.chosen == Some((drawing, sheet));
+                let current =
+                    self.part.as_deref() == Some(&part) && self.chosen == Some((drawing, sheet));
                 if current {
-                    self.drawings.loading = false;
+                    self.loading = false;
                     match r {
                         Ok(a) => {
-                            self.drawings.sheet =
-                                crate::core::drawings::Sheet::from_answer(&a.result);
+                            self.sheet = crate::core::drawings::Sheet::from_answer(&a.result);
                             // What was chosen, chosen again in what was read:
                             // a form reads the file as it is now.
-                            let keep = self.drawings.selected.take();
-                            if !self.drawings.form.as_ref().is_some_and(|f| f.dirty()) {
-                                self.drawings.choose(keep);
+                            let keep = self.selected.take();
+                            if !self.form.as_ref().is_some_and(|f| f.dirty()) {
+                                self.choose(keep);
                             } else {
-                                self.drawings.selected = keep;
+                                self.selected = keep;
                             }
                         }
-                        Err(e) => self.drawings.error = Some(e),
+                        Err(e) => self.error = Some(e),
                     }
                 }
             }
             (Asked::DrawingWrite, r) => {
-                self.drawings.saving = false;
+                self.saving = false;
                 match r {
                     Ok(_) => {
-                        self.drawings.form = None;
-                        self.read_drawing_sheet();
+                        self.form = None;
+                        fx.then(Then::ReadDrawingSheet);
                     }
                     Err(e) if e.code == Code::Conflict => {
-                        self.drawings.note = Some(
+                        self.note = Some(
                             "Someone changed the drawing while you edited it: read again".into(),
                         );
-                        self.drawings.form = None;
-                        self.read_drawing_list();
+                        self.form = None;
+                        fx.then(Then::ReadDrawingList);
                     }
-                    Err(e) => self.drawings.error = Some(e),
+                    Err(e) => self.error = Some(e),
                 }
             }
         }

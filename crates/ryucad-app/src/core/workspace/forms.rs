@@ -175,11 +175,20 @@ pub(crate) enum Asked {
     ImportConvert(String, String),
 }
 
-impl Workspace {
-    pub(super) fn answer_forms(&mut self, why: Asked, answer: Result<Answer>) {
+impl Forms {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(
+        &mut self,
+        why: Asked,
+        answer: Result<Answer>,
+        model: &Model,
+        states: &crate::core::pdm::States,
+        fx: &mut Effects,
+    ) {
         match (why, answer) {
             (Asked::InsertPreview(key), a) => {
-                if let Some(p) = self.forms.insert_preview.as_mut().filter(|p| p.key == key) {
+                if let Some(p) = self.insert_preview.as_mut().filter(|p| p.key == key) {
                     p.answer = Some(a.map(|a| crate::core::inserts::Moved::from_answer(&a.result)));
                 }
             }
@@ -188,19 +197,19 @@ impl Workspace {
             (Asked::ImportConvert(part, feature), a) => match a {
                 Ok(_) => {
                     let key = (part, feature);
-                    if self.forms.form_for.as_ref() == Some(&key) {
-                        self.open_form(Some(key));
+                    if self.form_for.as_ref() == Some(&key) {
+                        fx.then(Then::OpenForm(key));
                     }
                 }
-                Err(e) => self.fail(e),
+                Err(e) => fx.fail(e),
             },
             (Asked::Form(part, id, before), Ok(a)) => {
                 // Only the form last asked for opens (a dimension may have
                 // been chosen since); a reload after a conflict only if
                 // that form is still open.
-                let asked = self.forms.form_for.as_ref() == Some(&(part.clone(), id));
+                let asked = self.form_for.as_ref() == Some(&(part.clone(), id));
                 let wanted = asked
-                    && match (&before, &self.forms.form) {
+                    && match (&before, &self.form) {
                         (Some(b), Some(f)) => b.feature == f.feature && b.part == f.part,
                         (None, _) => true,
                         (Some(_), None) => false,
@@ -208,9 +217,9 @@ impl Workspace {
                 if wanted {
                     let mut form = match before {
                         Some(b) => b.reloaded(&a.result),
-                        None => Form::from_show_in(&part, &a.result, self.unit()),
+                        None => Form::from_show_in(&part, &a.result, model.unit()),
                     };
-                    if let Some(p) = self.model.parts.get(&part) {
+                    if let Some(p) = model.parts.get(&part) {
                         // A reference import's solid is never offered to
                         // act on (design 364).
                         form.offer(&p.modellable());
@@ -219,20 +228,16 @@ impl Workspace {
                     // project's, any of its dependency's official labels.
                     let placed = a.result["part"].as_str().unwrap_or_default();
                     if let Some(project) = form.foreign.clone() {
-                        let name = self.model.marks.name(&project);
+                        let name = model.marks.name(&project);
                         let req = Request::DepsParts {
                             name,
                             part: Some(placed.to_owned()),
                         };
                         let why =
                             Pending::Forms(Asked::FormLabels(part.clone(), form.feature.clone()));
-                        self.send(req, why);
-                    } else if let Some(l) = self
-                        .pdm
-                        .states
-                        .by_part
-                        .get(placed)
-                        .and_then(|s| s["label"].as_str())
+                        fx.send(req, why);
+                    } else if let Some(l) =
+                        states.by_part.get(placed).and_then(|s| s["label"].as_str())
                     {
                         form.offer_revs(&[l.to_owned()]);
                     }
@@ -242,17 +247,16 @@ impl Workspace {
                         let req = Request::ReleaseList {
                             part: Some(placed.to_owned()),
                         };
-                        self.send(
+                        fx.send(
                             req,
                             Pending::Forms(Asked::FormLabels(part.clone(), form.feature.clone())),
                         );
                     }
-                    self.forms.form = Some(form);
+                    self.form = Some(form);
                 }
             }
             (Asked::FormLabels(part, id), Ok(a)) => {
                 if let Some(f) = self
-                    .forms
                     .form
                     .as_mut()
                     .filter(|f| f.part == part && f.feature == id)
@@ -269,13 +273,13 @@ impl Workspace {
             (Asked::Dim(part, sketch, constraint, before), Ok(a)) => {
                 // Only the dimension last asked for opens, as for features.
                 let key = (part.clone(), sketch.clone(), constraint.clone());
-                let wanted = self.forms.dimension_for.as_ref() == Some(&key)
-                    && match (&before, &self.forms.dimension) {
+                let wanted = self.dimension_for.as_ref() == Some(&key)
+                    && match (&before, &self.dimension) {
                         (Some(_), Some(_)) | (None, _) => true,
                         (Some(_), None) => false,
                     };
                 if wanted {
-                    self.forms.dimension = match before {
+                    self.dimension = match before {
                         Some(b) => b.reloaded(&a.result),
                         None => DimForm::from_get(&part, &sketch, &constraint, &a.result),
                     };
@@ -283,49 +287,49 @@ impl Workspace {
             }
             (Asked::DimSave, Ok(_)) => {
                 // Read it back as the files now have it.
-                if let Some(f) = &self.forms.dimension {
+                if let Some(f) = &self.dimension {
                     let (p, s, c) = (f.part.clone(), f.sketch.clone(), f.constraint.clone());
-                    self.read_dimension(p, s, c, None);
+                    fx.then(Then::ReadDimension(p, s, c, None));
                 }
             }
             (Asked::DimSave, Err(e)) => {
-                if let Some(f) = &mut self.forms.dimension {
+                if let Some(f) = &mut self.dimension {
                     f.saving = false;
                     if e.code == Code::Conflict {
                         let before = Box::new(f.clone());
                         let (p, s, c) = (f.part.clone(), f.sketch.clone(), f.constraint.clone());
-                        self.read_dimension(p, s, c, Some(before));
+                        fx.then(Then::ReadDimension(p, s, c, Some(before)));
                     } else {
                         f.error = Some(e);
                     }
                 }
             }
             (Asked::Save, Ok(a)) => {
-                if let Some(f) = &self.forms.form {
+                if let Some(f) = &self.form {
                     let mut v = a.result["feature"].clone();
                     v["revision"] = a.result["revision"].clone();
-                    self.forms.form = Some(Form::from_show_in(&f.part, &v, self.unit()));
+                    self.form = Some(Form::from_show_in(&f.part, &v, model.unit()));
                 }
             }
             (Asked::Save, Err(e)) => {
                 // A feature that would change a reference import: the
                 // card offers Convert to solid, beside the form's own.
                 if e.code == Code::ReferenceBody {
-                    self.fail(e.clone());
+                    fx.fail(e.clone());
                 }
-                if let Some(f) = &mut self.forms.form {
+                if let Some(f) = &mut self.form {
                     f.saving = false;
                     if e.code == Code::Conflict {
                         // Read it again and show what changed underneath.
                         let (part, id) = (f.part.clone(), f.feature.clone());
                         let before = Box::new(f.clone());
-                        self.read_form(part, id, Some(before));
+                        fx.then(Then::ReadForm(part, id, Some(before)));
                     } else {
                         f.refuse(e);
                     }
                 }
             }
-            (_, Err(e)) => self.fail(e),
+            (_, Err(e)) => fx.fail(e),
         }
     }
 }

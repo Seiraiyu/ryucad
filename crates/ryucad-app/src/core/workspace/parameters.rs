@@ -126,39 +126,47 @@ pub(crate) enum Asked {
     EquationSave,
 }
 
-impl Workspace {
-    pub(super) fn answer_parameters(&mut self, why: Asked, answer: Result<Answer>) {
+impl Parameters {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(
+        &mut self,
+        why: Asked,
+        answer: Result<Answer>,
+        unit: &str,
+        fx: &mut Effects,
+    ) {
         match (why, answer) {
             (Asked::Params(part, before), Ok(a)) => {
-                if self.parameters.params_part.as_deref() == Some(part.as_str()) {
-                    let unit = self.model.default_unit.clone();
-                    self.parameters.params = Some(match before {
+                if self.params_part.as_deref() == Some(part.as_str()) {
+                    let unit = unit.to_owned();
+                    self.params = Some(match before {
                         Some(b) => b.reloaded(&a.result, &unit),
                         None => Params::from_list(&a.result, &unit),
                     });
                 }
             }
             (Asked::ParamSave, Ok(_)) => {
-                if let Some(p) = &self.parameters.params {
+                if let Some(p) = &self.params {
                     let part = p.part.clone();
-                    self.read_params(part, None);
+                    fx.then(Then::ReadParams(part, None));
                 }
             }
             (Asked::Equations(conflicted), Ok(a)) => {
-                let unit = self.model.default_unit.clone();
-                self.parameters.equations = Some(match &self.parameters.equations {
+                let unit = unit.to_owned();
+                self.equations = Some(match &self.equations {
                     Some(now) => now.reloaded(&a.result, &unit, conflicted),
                     None => Equations::from_list(&a.result, &unit),
                 });
             }
             (Asked::Equations(_), Err(e)) => {
-                let mut table = self.parameters.equations.take().unwrap_or_default();
+                let mut table = self.equations.take().unwrap_or_default();
                 table.saving = None;
                 table.error = Some(e);
-                self.parameters.equations = Some(table);
+                self.equations = Some(table);
             }
             (Asked::EquationSave, Ok(_)) => {
-                if let Some(e) = &mut self.parameters.equations {
+                if let Some(e) = &mut self.equations {
                     // What was written reads back as written.
                     match e.saving.take() {
                         Some(Some(i)) => {
@@ -172,32 +180,32 @@ impl Workspace {
                         }
                         None => {}
                     }
-                    self.read_equations(false);
+                    fx.then(Then::ReadEquations(false));
                 }
             }
             (Asked::EquationSave, Err(err)) => {
-                if let Some(e) = &mut self.parameters.equations {
+                if let Some(e) = &mut self.equations {
                     e.saving = None;
                     if err.code == Code::Conflict {
-                        self.read_equations(true);
+                        fx.then(Then::ReadEquations(true));
                     } else {
                         e.error = Some(err);
                     }
                 }
             }
             (Asked::ParamSave, Err(e)) => {
-                if let Some(p) = &mut self.parameters.params {
+                if let Some(p) = &mut self.params {
                     p.saving = false;
                     if e.code == Code::Conflict {
                         let before = Box::new(p.clone());
                         let part = p.part.clone();
-                        self.read_params(part, Some(before));
+                        fx.then(Then::ReadParams(part, Some(before)));
                     } else {
                         p.error = Some(e);
                     }
                 }
             }
-            (_, Err(e)) => self.fail(e),
+            (_, Err(e)) => fx.fail(e),
         }
     }
 }

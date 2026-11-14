@@ -99,13 +99,16 @@ pub(crate) enum Asked {
     Export,
 }
 
-impl Workspace {
-    pub(super) fn answer_exchange(&mut self, why: Asked, answer: Result<Answer>) {
+impl Exchange {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"). Every answer stays in its dialog, so it
+    /// leaves the workspace nothing (`_fx`, kept for the router's one shape).
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, _fx: &mut Effects) {
         match (why, answer) {
             // Only the dialog for that file takes an answer: one opened
             // since asks again.
             (Asked::ImportPlan(key), a) => {
-                let Some(i) = self.exchange.import.as_mut().filter(|i| i.key() == key) else {
+                let Some(i) = self.import.as_mut().filter(|i| i.key() == key) else {
                     return;
                 };
                 i.waiting = false;
@@ -115,7 +118,7 @@ impl Workspace {
                 }
             }
             (Asked::Import(key), a) => {
-                let Some(i) = self.exchange.import.as_mut().filter(|i| i.key() == key) else {
+                let Some(i) = self.import.as_mut().filter(|i| i.key() == key) else {
                     return;
                 };
                 i.waiting = false;
@@ -128,7 +131,7 @@ impl Workspace {
                 }
             }
             (Asked::Export, a) => {
-                if let Some(e) = self.exchange.export.as_mut() {
+                if let Some(e) = self.export.as_mut() {
                     e.answered(a.map(|a| a.result));
                 }
             }

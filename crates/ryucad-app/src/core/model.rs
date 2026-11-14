@@ -1045,6 +1045,12 @@ pub struct Model {
 }
 
 impl Model {
+    /// The project's default unit, as forms show it (millimetres when
+    /// it doesn't parse).
+    pub fn unit(&self) -> ryucad::units::Unit {
+        ryucad::units::Unit::parse(&self.default_unit).unwrap_or(ryucad::units::Unit::Mm)
+    }
+
     /// The part a tree row's reference shows (#541): a part's own
     /// (`bracket`, loaded or only listed), or the part an instance places
     /// (`frame/b1`) when it is this project's.

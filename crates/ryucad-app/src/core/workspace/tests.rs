@@ -131,3 +131,37 @@ fn a_deletes_made_faces_are_the_hosts_it_healed_and_what_it_made() {
     );
     assert!(m.rims.is_empty() && m.lines.is_empty() && m.walls.is_empty());
 }
+
+/// An answer as the link gives one.
+fn answered(result: Value) -> Result<Answer> {
+    Ok(Answer {
+        result,
+        binary: None,
+        raw: None,
+    })
+}
+
+/// Design 541's typed handles: a form answer opens the form it was asked
+/// for, in the forms sub-state, with nothing left for the workspace.
+#[test]
+fn a_form_answer_reaches_the_forms_that_asked() {
+    let mut forms = forms::Forms {
+        form_for: Some(("p".to_owned(), "f1".to_owned())),
+        ..Default::default()
+    };
+    let show = json!({"id": "f1", "type": "box", "revision": "1", "params": {"width": "10 mm"}});
+    let mut fx = Effects::default();
+    forms.answer(
+        forms::Asked::Form("p".to_owned(), "f1".to_owned(), None),
+        answered(show),
+        &Model::default(),
+        &crate::core::pdm::States::default(),
+        &mut fx,
+    );
+    let f = forms.form.expect("the form asked for opens");
+    assert_eq!(
+        (f.part.as_str(), f.feature.as_str(), f.ty.as_str()),
+        ("p", "f1", "box")
+    );
+    assert!(fx.recorded().is_empty(), "{:?}", fx.recorded());
+}

@@ -36,6 +36,15 @@ pub struct Pdm {
     pub(super) org_early: Option<(String, Result<Vec<crate::core::where_used::Use>>)>,
 }
 
+impl Pdm {
+    /// Whether ryupdm is set up: the project has an ID.
+    pub fn ready(&self) -> bool {
+        self.pdm_config
+            .as_ref()
+            .is_some_and(|c| c["project"].is_string())
+    }
+}
+
 impl Workspace {
     /// Shows `part`'s properties in the Part section, read if they aren't
     /// yet.
@@ -364,10 +373,7 @@ impl Workspace {
 
     /// Whether ryupdm is set up: the project has its ID.
     pub fn pdm_ready(&self) -> bool {
-        self.pdm
-            .pdm_config
-            .as_ref()
-            .is_some_and(|c| c["project"].is_string())
+        self.pdm.ready()
     }
 
     /// Sets up ryupdm (`pdm.init`): the project's ID and default
@@ -409,63 +415,65 @@ pub(crate) enum Asked {
     PropsSave,
 }
 
-impl Workspace {
-    pub(super) fn answer_pdm(&mut self, why: Asked, answer: Result<Answer>) {
+impl Pdm {
+    /// Takes the answer to one of this sub-state's requests (design
+    /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
+    pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::States, Ok(a)) => {
-                self.pdm.states.reset(&a.result);
-                self.pdm.releases.list = Some(a.result);
+                self.states.reset(&a.result);
+                self.releases.list = Some(a.result);
             }
             (Asked::ReleaseCheck, r) => match r {
-                Ok(a) => self.pdm.releases.findings = findings(&a.result),
+                Ok(a) => self.releases.findings = findings(&a.result),
                 // A failing check is still a report.
                 Err(e) if e.code == Code::CheckFailed => {
-                    self.pdm.releases.findings = findings(&e.details);
+                    self.releases.findings = findings(&e.details);
                 }
-                Err(e) => self.pdm.releases.error = Some(e),
+                Err(e) => self.releases.error = Some(e),
             },
             (Asked::ProposeDry(part), r) => match r {
-                Ok(a) => self.pdm.releases.proposal = Some((part, a.result)),
-                Err(e) => self.pdm.releases.error = Some(e),
+                Ok(a) => self.releases.proposal = Some((part, a.result)),
+                Err(e) => self.releases.error = Some(e),
             },
             (Asked::ReleaseWrite, r) => {
-                self.pdm.releases.busy = false;
+                self.releases.busy = false;
                 match r {
                     Ok(a) => {
-                        self.pdm.releases.proposal = None;
-                        self.pdm.releases.confirm = None;
-                        self.pdm.releases.note.clear();
-                        self.pdm.releases.done = Some(match a.result.get("path") {
+                        self.releases.proposal = None;
+                        self.releases.confirm = None;
+                        self.releases.note.clear();
+                        self.releases.done = Some(match a.result.get("path") {
                             Some(p) => format!("wrote {}", p.as_str().unwrap_or_default()),
                             None => crate::core::releases::synced(&a.result),
                         });
-                        self.load_releases();
+                        fx.then(Then::LoadReleases);
                     }
-                    Err(e) => self.pdm.releases.error = Some(e),
+                    Err(e) => self.releases.error = Some(e),
                 }
             }
             (Asked::Bom { flat }, r) => {
                 match r {
-                    Ok(a) => self.pdm.bom.take(&a.result),
-                    Err(e) => self.pdm.bom.failed(e),
+                    Ok(a) => self.bom.take(&a.result),
+                    Err(e) => self.bom.failed(e),
                 }
                 // The flat BOM follows the indented one, whose lines give
                 // it its occurrences, and a compare's diff follows both.
-                if !flat && self.pdm.bom.flat && self.pdm.bom.error.is_none() {
-                    self.ask_bom(true);
+                if !flat && self.bom.flat && self.bom.error.is_none() {
+                    fx.then(Then::AskBom(true));
                 } else {
-                    self.ask_bom_diff();
+                    fx.then(Then::AskBomDiff);
                 }
             }
             (Asked::BomDiff, r) => {
                 match r {
-                    Ok(a) => self.pdm.bom.take_diff(Some(&a.result)),
-                    Err(e) => self.pdm.bom.diff_failed(e),
+                    Ok(a) => self.bom.take_diff(Some(&a.result)),
+                    Err(e) => self.bom.diff_failed(e),
                 }
-                self.bom_read();
+                fx.then(Then::BomRead);
             }
             (Asked::WhereUsed(part), r) => {
-                if self.pdm.where_used_part.as_deref() == Some(part.as_str()) {
+                if self.where_used_part.as_deref() == Some(part.as_str()) {
                     use crate::core::where_used::WhereUsed;
                     let mut w = match r {
                         Ok(a) => WhereUsed::from_answer(&part, &a.result),
@@ -473,22 +481,21 @@ impl Workspace {
                     };
                     // The organization's answer may have come first; else
                     // the last one stands until the new one comes.
-                    match self.pdm.org_early.take() {
+                    match self.org_early.take() {
                         Some((p, rows)) if p == part => w.org = Some(rows),
                         _ => {
                             w.org = self
-                                .pdm
                                 .where_used
                                 .take()
                                 .filter(|old| old.part == part)
                                 .and_then(|old| old.org);
                         }
                     }
-                    self.pdm.where_used = Some(w);
+                    self.where_used = Some(w);
                 }
             }
             (Asked::BomExport(path), a) => {
-                let Some(e) = self.pdm.bom_export.as_mut() else {
+                let Some(e) = self.bom_export.as_mut() else {
                     return;
                 };
                 e.waiting = false;
@@ -505,33 +512,33 @@ impl Workspace {
                 }
             }
             (Asked::BomRenumber(edit), r) => {
-                self.pdm.bom.saving = false;
+                self.bom.saving = false;
                 match r {
-                    Ok(_) => self.pdm.bom.editing = None,
+                    Ok(_) => self.bom.editing = None,
                     // Someone renumbered first: read again, and say what
                     // changed.
                     Err(e) if e.code == Code::Conflict => {
-                        self.pdm.bom.editing = None;
-                        self.pdm.bom.conflict = Some(edit);
+                        self.bom.editing = None;
+                        self.bom.conflict = Some(edit);
                     }
-                    Err(e) => self.pdm.bom.edit_error = Some(e.message),
+                    Err(e) => self.bom.edit_error = Some(e.message),
                 }
-                self.load_bom();
+                fx.then(Then::LoadBom);
             }
             (Asked::PdmConfig, Ok(a)) => {
-                let was = self.pdm_ready();
-                self.pdm.pdm_config = Some(a.result);
+                let was = self.ready();
+                self.pdm_config = Some(a.result);
                 // Set up just now: the properties' faults may have moved.
                 if !was
-                    && self.pdm_ready()
-                    && let Some(part) = self.pdm.props_part.clone()
+                    && self.ready()
+                    && let Some(part) = self.props_part.clone()
                 {
-                    self.read_props(part, None);
+                    fx.then(Then::ReadProps(part, None));
                 }
             }
             (Asked::Props(part, before), Ok(a)) => {
-                if self.pdm.props_part.as_deref() == Some(part.as_str()) {
-                    self.pdm.props = Some(match (before, &self.pdm.props) {
+                if self.props_part.as_deref() == Some(part.as_str()) {
+                    self.props = Some(match (before, &self.props) {
                         (Some(b), _) => b.reloaded(&a.result),
                         // Read again under someone typing (after Set up
                         // PDM): what they typed stays.
@@ -541,24 +548,24 @@ impl Workspace {
                 }
             }
             (Asked::PropsSave, Ok(_)) => {
-                if let Some(p) = &self.pdm.props {
+                if let Some(p) = &self.props {
                     let part = p.part.clone();
-                    self.read_props(part, None);
+                    fx.then(Then::ReadProps(part, None));
                 }
             }
             (Asked::PropsSave, Err(e)) => {
-                if let Some(p) = &mut self.pdm.props {
+                if let Some(p) = &mut self.props {
                     p.saving = false;
                     if e.code == Code::Conflict {
                         let before = Box::new(p.clone());
                         let part = p.part.clone();
-                        self.read_props(part, Some(before));
+                        fx.then(Then::ReadProps(part, Some(before)));
                     } else {
                         p.error = Some(e);
                     }
                 }
             }
-            (_, Err(e)) => self.fail(e),
+            (_, Err(e)) => fx.fail(e),
         }
     }
 }
