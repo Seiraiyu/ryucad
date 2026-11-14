@@ -163,7 +163,13 @@ pub fn hook_line(product: &str) -> Result<String> {
 
 /// Runs `git config` with `args` in `dir` (any folder for `--global`).
 fn git_config(dir: Option<&Path>, args: &[&str]) -> Result<()> {
-    let mut git = std::process::Command::new("git");
+    // In a folder: that folder's repository, never one the environment
+    // names (#721).
+    let mut git = if dir.is_some() {
+        crate::git_env::here()
+    } else {
+        std::process::Command::new("git")
+    };
     if let Some(d) = dir {
         git.current_dir(d);
     }

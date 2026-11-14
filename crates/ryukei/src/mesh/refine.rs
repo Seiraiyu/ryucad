@@ -13,7 +13,7 @@
 
 #[cfg(test)]
 use super::bound::triangle_ok;
-use super::bound::{Targets, Verdict, triangle_test};
+use super::bound::{Targets, Verdict, triangle_check};
 use super::cdt::{NONE, next, prev};
 use super::domain::{Anchor, Domain, Side};
 use super::uv::{FaceGeom, U, V};
@@ -42,6 +42,13 @@ pub(crate) struct Refined {
     pub(crate) stop: Option<Stop>,
     /// Slivers split by their other edges so far (see [`SLIVER_SPLITS`]).
     pub(crate) slivers: u32,
+    /// Each triangle's certified normal turn as it last passed, by its
+    /// index in the triangulation (NaN for one never passed). A split
+    /// changes only triangles round the points it makes, which are tested
+    /// again, so once refinement ends with every inside triangle passing
+    /// each one's turn is its own: [`super::bound::triangle_turn`]'s, for
+    /// mass's area bound (#308).
+    pub(crate) turns: Vec<f64>,
 }
 
 /// The most slivers a face's refinement splits by their other edges
@@ -313,17 +320,25 @@ fn refine_pass(
                 && chord_of(d, corners[next(i)], corners[prev(i)])
                     .is_some_and(|c| split.binary_search(&c).is_ok())
         });
-        let verdict = match chord {
-            Some(_) => Verdict::Long,
-            None => match triangle_test(g.surface, g.metric, g.stretched(), uv, xyz, t) {
-                Verdict::Pass => Verdict::Pass,
+        let (verdict, turn) = match chord {
+            Some(_) => (Verdict::Long, f64::NAN),
+            None => match triangle_check(g.surface, g.metric, g.stretched(), uv, xyz, t) {
+                (Verdict::Pass, turn) => (Verdict::Pass, turn),
                 v => match in_tube(d, corners, xyz, t, tube) {
-                    Some(wide) => triangle_test(g.surface, g.metric, g.stretched(), uv, xyz, &wide),
+                    Some(wide) => {
+                        triangle_check(g.surface, g.metric, g.stretched(), uv, xyz, &wide)
+                    }
                     None => v,
                 },
             },
         };
         if verdict == Verdict::Pass {
+            let k = tri as usize;
+            if out.turns.len() <= k {
+                out.turns
+                    .resize(d.cdt.triangle_count().max(k + 1), f64::NAN);
+            }
+            out.turns[k] = turn;
             continue;
         }
         if count > cap {
@@ -627,6 +642,13 @@ mod tests {
                         xyz,
                         &t
                     ));
+                    // The turn kept is the bound's, bit for bit (#308).
+                    if r.stop.is_none() && r.requests.is_empty() {
+                        assert_eq!(
+                            r.turns[tri as usize].to_bits(),
+                            super::super::triangle_turn(geom.surface, uv).to_bits()
+                        );
+                    }
                 }
                 d.cdt.validate();
                 (d, r)
@@ -656,7 +678,7 @@ mod tests {
         ];
         for b in &bodies {
             for (_, r) in refine_all(b, 1e-3, 0.3) {
-                assert_eq!(r, Refined::default());
+                assert_eq!((r.requests, r.stop, r.slivers), (vec![], None, 0));
             }
         }
     }

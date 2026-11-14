@@ -408,6 +408,11 @@ pub enum Entity {
         unit: Id,
         exponent: f64,
     },
+    /// `SHAPE_ASPECT` (only as a simple instance): a part of a product's
+    /// shape, `of_shape`, that properties are given to (#809).
+    ShapeAspect {
+        of_shape: Id,
+    },
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
     Other(Box<str>),
@@ -497,6 +502,7 @@ impl Entity {
             Entity::ValueItem { form, .. } => form.name(),
             Entity::DerivedUnit { .. } => "DERIVED_UNIT",
             Entity::UnitElement { .. } => "DERIVED_UNIT_ELEMENT",
+            Entity::ShapeAspect { .. } => "SHAPE_ASPECT",
             Entity::Other(name) => name,
         }
     }

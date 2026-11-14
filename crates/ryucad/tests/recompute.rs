@@ -2468,3 +2468,95 @@ fn countersink_after_a_two_distance_bevel() {
         }
     }
 }
+
+/// Part `p`: a box `b` 60 × 40 × 10 mm, datum points `q` and `r` on its
+/// top, a hole `a` at `q` and a sketch hole `h` at (5, 5) mm filled over the top
+/// as `f`.
+fn placed() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f)
+    };
+    must(&mut s, "part.create", json!({"part": "p"}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 60, "y": 40, "z": 10}}),
+    );
+    let top = face(&mut s, "b", [0.0, 0.0, 1.0]);
+    for (id, x) in [("q", "52 mm"), ("r", "40 mm")] {
+        add(
+            &mut s,
+            json!({"type": "point", "id": id, "by": "coordinates",
+                   "coordinates": [x, "33 mm", "10 mm"]}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "a", "diameter": 2, "depth": {"blind": 4},
+               "places": {"a": {"at": "p/q"}}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "s", "placement": {"origin": [0, 0, 10]}}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [
+            {"op": "add", "type": "point", "at": [5, 5]},
+            {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "s", "diameter": 2,
+               "depth": "through_all"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "f", "features": ["h"], "form": "fill",
+               "face": top, "direction": "x", "spacing": 10, "margin": 1}),
+    );
+    (dir, s)
+}
+
+#[test]
+fn places_and_fills_recompute_as_from_nothing() {
+    let (_dir, mut s) = placed();
+    let part = Id::parse("p", "part").unwrap();
+    let first = s.rebuilt(&part).unwrap();
+    assert_eq!(first.failed(), 0, "{:?}", summary(first));
+    let edits = [
+        // The hole's point moved.
+        ("q", json!({"coordinates": ["50 mm", "32 mm", "10 mm"]})),
+        // A place added.
+        (
+            "a",
+            json!({"places": {"a": {"at": "p/q"}, "b": {"at": "p/r"}}}),
+        ),
+        ("a", json!({"places": {"a": {"at": "p/q"}}})),
+        // The fill's spacing and margin.
+        ("f", json!({"spacing": 12})),
+        ("f", json!({"margin": 2})),
+        // Its skips.
+        ("f", json!({"skip": [[1, 1], [2, 0]]})),
+        ("f", json!({"skip": []})),
+    ];
+    for (i, (id, e)) in edits.into_iter().enumerate() {
+        let mut e = e;
+        e["part"] = json!("p");
+        e["id"] = json!(id);
+        if let Err(err) = call(&mut s, "feature.edit", e.clone()) {
+            panic!("edit {i} {e}: {err:?}");
+        }
+        let (one, eight) = (full(&s, 1), full(&s, 8));
+        let r = s.rebuilt(&part).unwrap();
+        assert_eq!(r.failed(), 0, "edit {i}: {:?}", summary(r));
+        let incremental = (r.hash.clone(), summary(r));
+        assert_eq!(incremental, one, "edit {i}");
+        assert_eq!(incremental, eight, "edit {i}");
+    }
+}

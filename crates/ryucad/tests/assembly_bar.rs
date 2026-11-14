@@ -309,7 +309,7 @@ fn where_used_over_ten_checkouts_of_a_hundred_releases_within_a_second() {
     use std::collections::BTreeMap;
     let dir = tempfile::tempdir().unwrap();
     let git = |at: &Path, args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)

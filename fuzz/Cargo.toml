@@ -332,3 +332,10 @@ path = "fuzz_targets/hole_spec.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "batch"
+path = "fuzz_targets/batch.rs"
+test = false
+doc = false
+bench = false

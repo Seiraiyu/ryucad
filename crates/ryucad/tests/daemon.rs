@@ -552,7 +552,7 @@ fn an_agent_puts_the_watching_human_into_a_compare() {
     let f = fixture();
     cli(&f, &["part", "create", "p"]);
     let git = |args: &[&str]| {
-        let st = Command::new("git")
+        let st = ryupdm::git_env::isolated()
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
             .current_dir(&f.root)

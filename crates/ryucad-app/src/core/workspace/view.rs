@@ -13,6 +13,9 @@ pub struct View {
     /// A camera normal to a face, come from the daemon, for the view to
     /// turn to.
     pub looked: Option<Camera>,
+    /// A chosen annotation's camera waiting for its part (#776): shown
+    /// first, the part is framed, then the view turns to this.
+    pub looked_on: Option<(String, Camera)>,
     /// What the window shows changed (View > Show, or an agent's
     /// `ryucad focus`): the view frames it again, as it frames the first
     /// view (issue #211).
