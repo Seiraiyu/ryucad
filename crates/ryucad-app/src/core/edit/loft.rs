@@ -87,3 +87,29 @@ impl LoftForm {
         }
     }
 }
+
+impl FeatureForm for LoftForm {
+    fn read(ty: &str, v: &Value) -> Option<LoftForm> {
+        (ty == "loft").then(|| LoftForm::from_show(v))
+    }
+    fn kind_fields(&self) -> Vec<&Field> {
+        self.fields().collect()
+    }
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        self.start
+            .iter_mut()
+            .chain(&mut self.end)
+            .map(|t| &mut t.weight)
+            .collect()
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        self.given(out);
+        Ok(())
+    }
+}

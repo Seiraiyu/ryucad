@@ -222,3 +222,93 @@ impl SplitForm {
         }
     }
 }
+
+impl FeatureForm for ShellForm {
+    fn read(ty: &str, v: &Value) -> Option<ShellForm> {
+        (ty == "shell").then(|| ShellForm::from_show(v))
+    }
+    fn kind_fields(&self) -> Vec<&Field> {
+        self.fields().collect()
+    }
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        let mut out: Vec<&mut Field> = vec![&mut self.thickness];
+        out.extend(self.groups.iter_mut().map(|g| &mut g.quantity));
+        out
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        self.given(out);
+        Ok(())
+    }
+    fn kind_at_pointer(&mut self, steps: &[&str]) -> Option<&mut Field> {
+        let ["faces", i, "thickness"] = steps else {
+            return None;
+        };
+        let i: usize = i.parse().ok()?;
+        Some(&mut self.groups.get_mut(i)?.quantity)
+    }
+}
+
+impl FeatureForm for BodyOffsetForm {
+    fn read(ty: &str, v: &Value) -> Option<BodyOffsetForm> {
+        (ty == "offset").then(|| BodyOffsetForm::from_show(v))
+    }
+    fn kind_fields(&self) -> Vec<&Field> {
+        self.fields().collect()
+    }
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        let mut out: Vec<&mut Field> = vec![&mut self.distance];
+        out.extend(self.groups.iter_mut().map(|g| &mut g.quantity));
+        out
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        self.given(out);
+        Ok(())
+    }
+    fn kind_at_pointer(&mut self, steps: &[&str]) -> Option<&mut Field> {
+        let ["faces", i, "distance"] = steps else {
+            return None;
+        };
+        let i: usize = i.parse().ok()?;
+        Some(&mut self.groups.get_mut(i)?.quantity)
+    }
+}
+
+// A mirror's solid and plane are shown, never edited.
+impl FeatureForm for MirrorForm {
+    fn read(ty: &str, v: &Value) -> Option<MirrorForm> {
+        (ty == "mirror").then(|| MirrorForm {
+            solid: text(&v["solid"]),
+            plane: text(&v["plane"]),
+        })
+    }
+}
+
+// A split's flip and what it keeps are choices: `Form` never listed a
+// field of it.
+impl FeatureForm for SplitForm {
+    fn read(ty: &str, v: &Value) -> Option<SplitForm> {
+        (ty == "split").then(|| SplitForm::from_show(v))
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        self.given(out);
+        Ok(())
+    }
+}

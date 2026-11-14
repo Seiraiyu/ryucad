@@ -118,3 +118,38 @@ impl BlendForm {
         json!(groups)
     }
 }
+
+impl FeatureForm for BlendForm {
+    fn read(ty: &str, v: &Value) -> Option<BlendForm> {
+        matches!(ty, "fillet" | "chamfer").then(|| BlendForm::from_show(v))
+    }
+    fn kind_fields(&self) -> Vec<&Field> {
+        self.sizes().collect()
+    }
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        let mut out: Vec<&mut Field> = Vec::new();
+        for g in &mut self.groups {
+            out.extend(g.sizes.iter_mut().map(|(_, f)| f));
+        }
+        out
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        out.groups = self.groups_dirty().then(|| self.groups_json());
+        out.propagate = self.propagate.dirty().then_some(self.propagate.chosen);
+        Ok(())
+    }
+    fn kind_at_pointer(&mut self, steps: &[&str]) -> Option<&mut Field> {
+        let ["groups", i, k] = steps else {
+            return None;
+        };
+        let i: usize = i.parse().ok()?;
+        let g = self.groups.get_mut(i)?;
+        g.sizes.iter_mut().find(|(key, _)| key == k).map(|(_, f)| f)
+    }
+}

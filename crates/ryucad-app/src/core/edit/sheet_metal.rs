@@ -8,7 +8,8 @@
 //! allowance) reads as the founder's until it is changed here, when the
 //! feature takes its own.
 
-use super::{Choice, Field, Flag, Picks, text, texts};
+use super::{Choice, FeatureForm, Field, Flag, Picks, claimed, text, texts};
+use ryucad::error::Error;
 use ryucad::proto::FeatureFields;
 use serde_json::{Value, json};
 
@@ -627,6 +628,34 @@ impl SheetMetalForm {
                 }
             }
         }
+    }
+}
+
+impl FeatureForm for SheetMetalForm {
+    fn read(ty: &str, v: &Value) -> Option<SheetMetalForm> {
+        SheetMetalForm::from_show(ty, v)
+    }
+    fn kind_fields(&self) -> Vec<&Field> {
+        self.fields()
+    }
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        self.fields_mut()
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        self.given(out);
+        Ok(())
+    }
+    fn kind_at_pointer(&mut self, steps: &[&str]) -> Option<&mut Field> {
+        if claimed(steps) {
+            return None;
+        }
+        self.at_pointer(steps)
     }
 }
 

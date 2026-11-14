@@ -7,7 +7,8 @@
 //! never added here, as a fillet's edges aren't: that is an agent's work.
 //! A thicken's operation and targets are the form's own, as an extrude's.
 
-use super::{Field, Flag, Picks, text, texts};
+use super::{FeatureForm, Field, Flag, Picks, claimed, text, texts};
+use ryucad::error::Error;
 use ryucad::proto::FeatureFields;
 use serde_json::{Value, json};
 
@@ -330,6 +331,34 @@ impl SurfaceForm {
                 }
             }
         }
+    }
+}
+
+impl FeatureForm for SurfaceForm {
+    fn read(ty: &str, v: &Value) -> Option<SurfaceForm> {
+        SurfaceForm::from_show(ty, v)
+    }
+    fn kind_fields(&self) -> Vec<&Field> {
+        self.fields()
+    }
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        self.fields_mut()
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        self.given(out);
+        Ok(())
+    }
+    fn kind_at_pointer(&mut self, steps: &[&str]) -> Option<&mut Field> {
+        if claimed(steps) {
+            return None;
+        }
+        self.at_pointer(steps)
     }
 }
 

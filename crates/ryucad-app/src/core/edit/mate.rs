@@ -197,3 +197,45 @@ impl MateForm {
         }
     }
 }
+
+impl FeatureForm for MateForm {
+    fn read(ty: &str, v: &Value) -> Option<MateForm> {
+        (ty == "mate").then(|| MateForm::from_show(v))
+    }
+    fn kind_fields(&self) -> Vec<&Field> {
+        self.fields().collect()
+    }
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        let mut out: Vec<&mut Field> = vec![&mut self.angle, &mut self.distance];
+        for o in [&mut self.a, &mut self.b] {
+            out.extend(o.origin.iter_mut());
+            out.push(&mut o.rotate);
+        }
+        out
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        self.given(out);
+        Ok(())
+    }
+    fn kind_at_pointer(&mut self, steps: &[&str]) -> Option<&mut Field> {
+        let [side @ ("a" | "b"), "offset", rest @ ..] = steps else {
+            return None;
+        };
+        let o = if *side == "a" {
+            &mut self.a
+        } else {
+            &mut self.b
+        };
+        match rest {
+            ["origin", n] => o.origin.get_mut(n.parse::<usize>().ok()?),
+            ["rotate", ..] => Some(&mut o.rotate),
+            _ => None,
+        }
+    }
+}

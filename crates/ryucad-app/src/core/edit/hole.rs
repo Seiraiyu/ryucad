@@ -173,3 +173,27 @@ impl HoleForm {
         }
     }
 }
+
+impl FeatureForm for HoleForm {
+    fn read(ty: &str, v: &Value) -> Option<HoleForm> {
+        (ty == "hole").then(|| HoleForm::from_show(v))
+    }
+    fn kind_fields(&self) -> Vec<&Field> {
+        self.fields().collect()
+    }
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        let mut out: Vec<&mut Field> = self.sizes.iter_mut().map(|(_, f)| f).collect();
+        out.push(&mut self.length);
+        out
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        self.given(out);
+        Ok(())
+    }
+}

@@ -141,6 +141,51 @@ pub fn field_of(e: &Error) -> Option<String> {
         .find_map(|k| d[*k].as_str().map(str::to_owned))
 }
 
+/// One feature kind's part of the property panel's form (design 541,
+/// "Forms per kind"): read from its `feature.show`, its fields, and what
+/// it gives `feature.edit`. A `Form` holds at most one (its `type`'s) and
+/// asks it.
+pub trait FeatureForm {
+    /// This kind's form from a `feature.show` of type `ty`; `None` for a
+    /// type it doesn't own.
+    fn read(ty: &str, v: &Value) -> Option<Self>
+    where
+        Self: Sized;
+    /// Its fields that `Form`'s checks list (what was typed, its syntax).
+    fn kind_fields(&self) -> Vec<&Field> {
+        Vec::new()
+    }
+    /// Its fields that a refusal lands on and "keep mine" restores.
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        Vec::new()
+    }
+    /// Whether anything of it was typed or chosen.
+    fn kind_dirty(&self) -> bool {
+        false
+    }
+    /// Everything of it back as read.
+    fn kind_revert(&mut self) {}
+    /// What of it changed, written into `feature.edit`'s fields.
+    fn kind_given(&self, _out: &mut FeatureFields) -> Result<(), Error> {
+        Ok(())
+    }
+    /// The field a refusal's pointer (as steps: `["groups", "1",
+    /// "radius"]`) names in it, when the pointer is this kind's.
+    fn kind_at_pointer(&mut self, _steps: &[&str]) -> Option<&mut Field> {
+        None
+    }
+}
+
+/// The pointers only a blend, shell, offset or mate answers: before 27.F
+/// `Form::at_pointer` tried these first whatever the form, so no other
+/// kind is asked for them.
+fn claimed(steps: &[&str]) -> bool {
+    matches!(
+        steps,
+        ["groups", _, _] | ["faces", _, "thickness" | "distance"] | ["a" | "b", "offset", ..]
+    )
+}
+
 /// One of a list: as read, and as chosen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Choice {
