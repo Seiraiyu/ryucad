@@ -130,6 +130,7 @@ fn pdm(golden: &mut Golden, board: &Path) {
     let id = ryueda::id::Id::parse("board", "part").unwrap();
     let content = <ryueda::Eda as Product>::content(&files, &id).unwrap();
     golden.json("pdm.breakout.content", &Value::String(content));
+    pins(golden, &files, &id);
     let defaults = <ryueda::Eda as Product>::defaults(&files, &id).unwrap();
     golden.json(
         "pdm.breakout.defaults",
@@ -148,6 +149,67 @@ fn pdm(golden: &mut Golden, board: &Path) {
     let one = dry(1);
     assert_eq!(dry(8), one, "one thread and eight");
     golden.json("pdm.breakout.dry_run", &one);
+}
+
+/// Library labels (design 629): the breakout's content hash with one
+/// component placed from `passives` pinned at B (project 2…2 in this
+/// repository, so its piece is the project, component and label), at one
+/// thread and at eight; and a `ryueda.lock` of one label as written.
+fn pins(golden: &mut Golden, files: &ryu_session::fresh::Files, id: &ryueda::id::Id) {
+    use ryueda::id::{Id, ProjectId};
+    use ryueda::project::{Alias, MANIFEST, Manifest};
+    use ryupdm::product::Product;
+    let mut f = files.clone();
+    let (path, comp) = f
+        .iter()
+        .filter(|(p, _)| p.starts_with("blocks/") && p.contains("/components/"))
+        .find_map(|(p, b)| {
+            let v: Value = serde_json::from_slice(b).ok()?;
+            v["of"]
+                .get("library")
+                .is_none()
+                .then(|| (p.clone(), v["of"]["id"].as_str().unwrap().to_owned()))
+        })
+        .expect("a component placed from the board's own library");
+    let mut v: Value = serde_json::from_slice(&f[&path]).unwrap();
+    v["of"]["library"] = Value::from("passives");
+    f.insert(path, ryueda::canonical::to_string(&v).into_bytes().into());
+    let mut m = Manifest::read(&f[MANIFEST]).unwrap();
+    let mut a = Alias::local("../passives");
+    a.project = Some(ProjectId::parse(&"2".repeat(32)).unwrap());
+    a.labels.insert(Id::parse(&comp, "c").unwrap(), "B".into());
+    m.libraries.insert(Id::parse("passives", "a").unwrap(), a);
+    f.insert(MANIFEST.to_owned(), m.to_text().into_bytes().into());
+    let hash = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| <ryueda::Eda as Product>::content(&f, id).unwrap())
+    };
+    let one = hash(1);
+    assert_eq!(hash(8), one, "one thread and eight");
+    golden.json("pdm.pins", &Value::String(one));
+    let mut lock = ryu_doc::lock::Lock::default();
+    let mut locked = ryu_doc::lock::Locked {
+        url: "file:///libs".into(),
+        path: "lib".into(),
+        release_branch: "main".into(),
+        ..Default::default()
+    };
+    locked.labels.insert(
+        (Id::parse(&comp, "c").unwrap(), "B".into()),
+        ryu_doc::lock::LockedLabel {
+            commit: "1".repeat(40),
+            content: "2".repeat(64),
+        },
+    );
+    lock.projects
+        .insert(ProjectId::parse(&"2".repeat(32)).unwrap(), locked);
+    golden.json(
+        "pdm.pins.lock",
+        &Value::String(ryueda::libdeps::lock_text(&lock).unwrap()),
+    );
 }
 
 /// The sensor breakout entered by its script in `board` (made by `init`).

@@ -23,6 +23,8 @@ parts.supply dd736c99f67f9b57a7a2ed86738a3270
 pdm.breakout.content 0de905ee04f88155360a37622e31b986
 pdm.breakout.defaults 4b778e7f75f2cc04d01a42e4acfd46eb
 pdm.breakout.dry_run 021ab5c25e70ba8d006443aea23c8146
+pdm.pins cf6d84446e1c3328b546f967dcb23ab8
+pdm.pins.lock 2d176fea988493abd7df18a094197696
 schematic.breakout.annotate.across e2180ca93ea43f4ec2f19b2b55f8ddfe
 schematic.breakout.annotate.down af396a2e4ef7c57c23e39271babf9396
 schematic.breakout.breakout.dark.svg d89fdb704c6ccc3317683981d3967648
