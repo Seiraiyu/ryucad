@@ -348,3 +348,106 @@ fn glued_pieces_touching_along_an_edge_say_so() {
         other => panic!("{:?}", other.map(|x| x.0.counts())),
     }
 }
+
+/// The molex body's case (#585) in small: a prism whose underside is a
+/// rational bicubic-by-linear spline, knots (0, 1, 1.01), its last span
+/// flat on z = 0, standing on a block's top. Its spline face has the
+/// knots and the flat span the twin promises.
+#[test]
+fn the_flat_span_twin_is_what_it_says() {
+    let (prism, slab) = ryukei_testkit::nurbs::flat_span_twin();
+    assert_eq!(check(&prism), []);
+    assert_eq!(check(&slab), []);
+    let splines: Vec<_> = prism
+        .faces()
+        .filter_map(
+            |f| match prism.surface(prism.face(f).unwrap().surface).unwrap() {
+                Surface::Nurbs(n) => Some(n.clone()),
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(splines.len(), 1, "one spline face");
+    let n = &splines[0];
+    assert_eq!(n.knots()[0].knots(), [0.0, 1.0, 1.01]);
+    assert_eq!(n.knots()[0].mults(), [4, 3, 4]);
+    for i in 3..7 {
+        for j in 0..2 {
+            assert!(n.control_point(i, j).z.abs() <= 5e-9, "row {i}");
+        }
+    }
+}
+
+/// #585's case in small: the prism's flat span lies on the block's top,
+/// facing it. Healing joins the two shells into one solid without a
+/// repair (they only touch, and its own tests don't see the touch), so
+/// the body is self-united as the molex body is: the self-union splits the
+/// span off, the flat piece and the block's top cancel, and the result is
+/// the two solids' union, sound. Before 18.B the self-union was refused.
+#[test]
+fn a_spline_with_a_flat_span_on_a_plane_self_unions_to_the_union() {
+    let (prism, slab) = ryukei_testkit::nurbs::flat_span_twin();
+    let sh = one_solid(joined(&shape(&prism), &shape(&slab)));
+    let (h, _, _) = heal(OpKey(7), &sh, &HealOptions::default()).expect("healed");
+    assert!(!check_intersections(&h).is_empty(), "the touch is a fault");
+    let (u, journal) = self_union(OpKey(9), &h).expect("self-united");
+    sound(&u);
+    let (want, got) = (volume(&prism) + volume(&slab), volume(&u));
+    assert!((got - want).abs() <= 1e-3 * want, "{got} against {want}");
+    // The spline face was split: a Split event whose children are two
+    // faces.
+    assert!(
+        journal
+            .events()
+            .iter()
+            .any(|e| matches!(e, Event::Split { children, .. } if children.len() == 2)),
+        "{journal:?}"
+    );
+}
+
+/// The same with the block moved off: the prism alone is valid and its
+/// self-union is itself, bit for bit, with no split.
+#[test]
+fn a_valid_body_with_a_flat_span_comes_back_as_it_was() {
+    let (prism, _) = ryukei_testkit::nurbs::flat_span_twin();
+    let (r, journal) = self_union(OpKey(9), &prism).unwrap();
+    assert_eq!(
+        ryukei::codec::encode_body(&r),
+        ryukei::codec::encode_body(&prism)
+    );
+    assert!(journal.is_empty());
+}
+
+/// #585's molex case in small: the prism's flat span runs on into a plane
+/// face of its own shell (`flat_span_tail_twin`), a pair the check never
+/// meets since they share only an edge, and a block stands through the
+/// curved part of the underside, so the check lists the spline face
+/// against the block's faces only. The span is split off against the face
+/// whose box meets it, though no listed partner is on its plane (without
+/// that rule no split is made here, and the union heals all the same; on
+/// Voron's molex body the self-union stopped `Uncertain` without it), and
+/// the result is the two solids' union, sound.
+#[test]
+fn a_flat_span_running_on_into_its_own_plane_face_is_split_off() {
+    let (prism, block) = ryukei_testkit::nurbs::flat_span_tail_twin();
+    assert_eq!(check(&prism), []);
+    let sh = one_solid(joined(&shape(&prism), &shape(&block)));
+    let (h, journal, _) = heal(OpKey(7), &sh, &HealOptions::default()).expect("healed");
+    let (u, journal) = if check_intersections(&h).is_empty() {
+        (h, journal)
+    } else {
+        self_union(OpKey(9), &h).expect("self-united")
+    };
+    sound(&u);
+    // The union holds the prism and some of the block, and no more than
+    // both.
+    let (lo, hi, got) = (volume(&prism), volume(&prism) + volume(&block), volume(&u));
+    assert!(lo < got && got < hi, "{got} not in ({lo}, {hi})");
+    assert!(
+        journal
+            .events()
+            .iter()
+            .any(|e| matches!(e, Event::Split { children, .. } if children.len() == 2)),
+        "{journal:?}"
+    );
+}

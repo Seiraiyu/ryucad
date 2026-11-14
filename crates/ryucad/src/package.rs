@@ -266,7 +266,7 @@ pub fn build(
     let mut files: Vec<(String, Vec<u8>)> = vec![(RECORD.to_owned(), record_bytes)];
     let mut failures = Vec::new();
     let mut warnings = Vec::new();
-    let job = session.job.clone();
+    let job = session.job().clone();
     let stage = job.begin(ryu_session::job::Phase::Package, "files", formats.len());
     for f in &formats {
         stage.step(|| f.as_str().to_owned())?;
@@ -470,7 +470,7 @@ pub fn package_stamped(session: &mut Session, ask: Ask, built: &BuiltWith) -> Re
         built,
     )?;
     let mut result = described(&b);
-    let job = session.job.clone();
+    let job = session.job().clone();
     let root = session.root().to_owned();
     let target = match (&ask.out, &ask.into) {
         (Some(o), None) => Some(o.clone()),
@@ -592,7 +592,7 @@ pub fn verify(session: &mut Session, file: &str, rebuild: bool) -> Result<Value>
         "key": m.key(),
         "built_with": {"ryucad": m.built_with.ryucad, "commit": m.built_with.commit},
         "files": m.files.len(),
-        "tag": {"name": package::attest::tag_name(&m.part, &m.label), "status": tag.status()},
+        "tag": {"name": releases.name(&package::attest::tag_key(&m.part, &m.label)), "status": tag.status()},
     });
     let verdict = match &tag {
         package::attest::Verdict::Attested { attestation, key } => {
@@ -609,13 +609,13 @@ pub fn verify(session: &mut Session, file: &str, rebuild: bool) -> Result<Value>
             warnings.push(
                 json!({"code": "package_attestation_revoked", "message": format!(
                 "{} is signed by key {key}, revoked on {revoked}: it proves nothing",
-                package::attest::tag_name(&m.part, &m.label))}),
+                releases.name(&package::attest::tag_key(&m.part, &m.label)))}),
             );
             "unattested"
         }
         package::attest::Verdict::Missing => {
             warnings.push(json!({"code": "package_unattested", "message": format!(
-                "{} isn't here: fetch it with {}", package::attest::tag_name(&m.part, &m.label),
+                "{} isn't here: fetch it with {}", releases.name(&package::attest::tag_key(&m.part, &m.label)),
                 ryupdm::check::FETCH_TAGS)}));
             "unattested"
         }

@@ -2490,6 +2490,14 @@ impl FeatureKind for Tweaks {
     fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
         crate::tweak::check(&cx.proposed(f), cx.id, f, cx.results)
     }
+
+    fn rebuild(&self, cx: &crate::feature::RebuildCx<'_>, f: &Feature) -> crate::feature::Outcome {
+        crate::feature::made(build(cx.part, cx.solids, cx.id, f, cx.before, cx.run))
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        crate::kind::targets(f, "target", None, None)
+    }
 }
 
 #[cfg(test)]

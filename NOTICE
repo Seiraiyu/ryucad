@@ -8,10 +8,10 @@ otherwise.
 
 Third-party material kept under its own licence:
 
-- Fonts embedded in ryucad-app and ryueda: Inter (SIL Open Font License
-  1.1), JetBrains Mono (SIL Open Font License 1.1) and Phosphor icons
-  (MIT). See crates/ryucad-app/fonts/LICENSES.md and
-  crates/ryueda/fonts/LICENSES.md.
+- Fonts embedded in ryucad-app, ryueda and the shared shell (ryu-app):
+  Inter (SIL Open Font License 1.1), JetBrains Mono (SIL Open Font
+  License 1.1) and Phosphor icons (MIT). See
+  crates/ryu-app/fonts/LICENSES.md and crates/ryueda/fonts/LICENSES.md.
 - Test corpora: NIST's MBE PMI test models (public domain) in
   crates/ryustep/tests/corpus, and cuts of them in
   crates/ryukei/tests/data/nist_*.body; boards in crates/ryudfm/tests/corpus and

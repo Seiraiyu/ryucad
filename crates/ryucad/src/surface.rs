@@ -1087,6 +1087,63 @@ impl FeatureKind for Surfaces {
             _ => Ok(()),
         }
     }
+
+    fn rebuild(&self, cx: &crate::feature::RebuildCx<'_>, f: &Feature) -> crate::feature::Outcome {
+        use crate::feature::{founded, founded_with_report};
+        match f {
+            Feature::Fill(x) => {
+                founded_with_report(cx.id, fill(cx.part, cx.id, x, cx.before, cx.run))
+            }
+            Feature::Sew(x) => founded(cx.id, sew(cx.part, cx.solids, cx.id, x, cx.before, cx.run)),
+            Feature::Extract(x) => founded(cx.id, extract(cx.part, cx.id, x, cx.before)),
+            // A thicken founds its solid or applies it as an extrude does.
+            _ => crate::rebuild::body_step(cx, f),
+        }
+    }
+
+    fn own_body(
+        &self,
+        cx: &crate::feature::RebuildCx<'_>,
+        f: &Feature,
+        _targets: &[&Built],
+    ) -> Result<Built> {
+        let Feature::Thicken(x) = f else {
+            unreachable!("a thicken is the one body of its own")
+        };
+        thicken(cx.part, cx.solids, cx.id, x, cx.before, cx.run)
+    }
+
+    fn alone(&self, _part: &Id, id: &Id, f: &Feature) -> Result<Built> {
+        Err(crate::feature::built_elsewhere(
+            id,
+            f,
+            "is built from what it names",
+        ))
+    }
+
+    fn reads<'f>(&self, f: &'f Feature) -> Vec<crate::kind::Read<'f>> {
+        use crate::kind as k;
+        match f {
+            Feature::Sew(s) => s
+                .sheets
+                .iter()
+                .map(|t| k::read("sheets", t, Some(k::Want::Sheet), None))
+                .collect(),
+            Feature::Thicken(t) => {
+                let (want, hint) = k::combined(&t.combine);
+                t.combine
+                    .targets
+                    .iter()
+                    .map(|x| k::read("targets", x, want, hint))
+                    .chain(
+                        t.sheet()
+                            .map(|s| k::read("from", s, Some(k::Want::Sheet), None)),
+                    )
+                    .collect()
+            }
+            _ => k::combined_reads(f),
+        }
+    }
 }
 
 #[cfg(test)]

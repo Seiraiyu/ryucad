@@ -45,8 +45,10 @@ pub struct Feature {
     /// What an import reads, whether or not it built.
     pub import: Option<ImportInfo>,
     /// A pattern's or an instance pattern's form: `linear`, `circular`
-    /// or `mirror`.
+    /// or `mirror`; an instance pattern's `feature` or `points` too.
     pub form: Option<String>,
+    /// A following instance pattern's driver: `lid/hole-pattern`.
+    pub driver: Option<String>,
     /// A datum's geometry, when it built.
     pub datum: Option<ryucad::render::DatumShape>,
     /// A shell's, offset's, mirror's or split's report as drawn: its
@@ -711,6 +713,7 @@ impl Part {
                             .collect(),
                         import: f.get("import").map(ImportInfo::from_json),
                         form: f["form"].as_str().map(str::to_owned),
+                        driver: f["driver"].as_str().map(str::to_owned),
                         datum: f
                             .get("datum")
                             .and_then(ryucad::render::DatumShape::from_report),

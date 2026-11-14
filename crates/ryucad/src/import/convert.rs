@@ -19,7 +19,7 @@ pub struct Ask {
 }
 
 pub fn convert(session: &mut Session, ask: Ask) -> Result<Value> {
-    session.job.phase(ryu_session::job::Phase::Heal);
+    session.job().phase(ryu_session::job::Phase::Heal);
     let pid = crate::part::part_id(&ask.part)?;
     let part = session.project().part(&pid)?.clone();
     crate::part::check_revision(&part, ask.expected.as_deref())?;
@@ -99,8 +99,8 @@ pub fn convert(session: &mut Session, ask: Ask) -> Result<Value> {
     }
     let converted: Vec<Id> = changing.iter().map(|(f, _)| f.clone()).collect();
     if !changing.is_empty() {
-        session.job.check()?;
-        session.job.writing();
+        session.job().check()?;
+        session.job().writing();
         let writes: Vec<(&Id, &Feature)> = changing.iter().map(|(f, x)| (f, x)).collect();
         crate::save::save(session, &pid, &writes, order)?;
     }

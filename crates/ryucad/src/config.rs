@@ -429,83 +429,11 @@ impl Key {
 pub const MIN_SCALE: f64 = 0.75;
 pub const MAX_SCALE: f64 = 2.0;
 
-/// The most chords `ui.keys` binds to one command.
-pub const MAX_CHORDS: usize = 8;
-
-/// The modifiers a chord may name, in the order the app writes them: `Mod`
-/// is Cmd on macOS and Ctrl elsewhere, `Ctrl` is Ctrl everywhere.
-pub const MODIFIERS: [&str; 4] = ["Mod", "Ctrl", "Alt", "Shift"];
-
-/// The keys named by more than one character (egui's names for them).
-pub const NAMED_KEYS: [&str; 26] = [
-    "Up",
-    "Down",
-    "Left",
-    "Right",
-    "Escape",
-    "Tab",
-    "Backspace",
-    "Enter",
-    "Insert",
-    "Delete",
-    "Home",
-    "End",
-    "PageUp",
-    "PageDown",
-    "Space",
-    "Comma",
-    "Minus",
-    "Period",
-    "Plus",
-    "Equals",
-    "Semicolon",
-    "Backslash",
-    "Slash",
-    "OpenBracket",
-    "CloseBracket",
-    "Backtick",
-];
-
-/// Every key a chord may end in: A to Z, 0 to 9, F1 to F24 and
-/// [`NAMED_KEYS`].
-pub fn key_names() -> Vec<String> {
-    let mut out: Vec<String> = ('A'..='Z').chain('0'..='9').map(String::from).collect();
-    out.extend((1..=24).map(|n| format!("F{n}")));
-    out.extend(NAMED_KEYS.iter().map(|k| (*k).to_owned()));
-    out
-}
-
-/// A chord's text: modifiers from [`MODIFIERS`], each once and not `Mod`
-/// with `Ctrl` (they are one key off macOS), then one of [`key_names`],
-/// joined by `+`.
-pub fn chord_ok(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('+').collect();
-    let Some((key, mods)) = parts.split_last() else {
-        return false;
-    };
-    let mut seen = [false; 4];
-    for m in mods {
-        let Some(i) = MODIFIERS.iter().position(|x| x == m) else {
-            return false;
-        };
-        if std::mem::replace(&mut seen[i], true) {
-            return false;
-        }
-    }
-    !(seen[0] && seen[1]) && key_names().iter().any(|k| k == key)
-}
-
-/// A command id: dotted lower-case words, at least two (`edit.undo`,
-/// `view.front_top_right`), at most 64 characters.
-pub fn command_id_ok(id: &str) -> bool {
-    id.len() <= 64
-        && id.split('.').count() >= 2
-        && id.split('.').all(|w| {
-            w.starts_with(|c: char| c.is_ascii_lowercase())
-                && w.chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        })
-}
+/// The chord syntax, `ryu_session`'s (ryueda 3.C), here where `ui.keys`
+/// has always been checked.
+pub use ryu_session::chords::{
+    MAX_CHORDS, MODIFIERS, NAMED_KEYS, chord_ok, command_id_ok, key_names,
+};
 
 /// An https URL, or an http one to this machine (for tests and a local
 /// service): a host, no user, no spaces or control characters.

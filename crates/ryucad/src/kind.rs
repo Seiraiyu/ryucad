@@ -141,12 +141,14 @@ pub struct Read<'a> {
     pub hint: Option<&'static str>,
 }
 
-const JOIN: &str = "a sheet has no inside to join: sew sheets into a body, or thicken a sheet";
-const TOOL: &str =
+pub(crate) const JOIN: &str =
+    "a sheet has no inside to join: sew sheets into a body, or thicken a sheet";
+pub(crate) const TOOL: &str =
     "a sheet can't be a boolean's tool: split a body by the sheet instead (split --tool)";
-const SHELL: &str = "a sheet has no inside to hollow: thicken it instead";
-const COPY: &str = "a sheet's mirror image can't be joined, cut or intersected: make it new";
-const SHEET_METAL: &str = "sheet metal is a solid: thicken a sheet into one first";
+pub(crate) const SHELL: &str = "a sheet has no inside to hollow: thicken it instead";
+pub(crate) const COPY: &str =
+    "a sheet's mirror image can't be joined, cut or intersected: make it new";
+pub(crate) const SHEET_METAL: &str = "sheet metal is a solid: thicken a sheet into one first";
 
 /// The bodies feature `f` names, each with what it wants of it: the one
 /// table of design 388's "Sheets through other features". A join's
@@ -156,112 +158,59 @@ const SHEET_METAL: &str = "sheet metal is a solid: thicken a sheet into one firs
 /// mirror's source either when its copy is new, else a solid; sheet
 /// metal solids; a sew's sheets and a thicken's sheet sheets.
 pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
-    use crate::doc::files::Feature as F;
-    use crate::doc::solid::{BooleanOp, Combine, Operation};
-    let read = |role, body, want, hint| Read {
+    crate::feature::kind_of(f).reads(f)
+}
+
+/// A body read in `role`, which the feature changes.
+pub(crate) fn read<'a>(
+    role: &'static str,
+    body: &'a Id,
+    want: Option<Want>,
+    hint: Option<&'static str>,
+) -> Read<'a> {
+    Read {
         role,
         body,
         want,
         changes: true,
         hint,
-    };
-    // A combine's targets: solids to join, either to cut or intersect.
-    let combined = |c: &Combine| -> (Option<Want>, Option<&'static str>) {
-        match c.operation {
-            Operation::Join => (Some(Want::Solid), Some(JOIN)),
-            _ => (None, None),
-        }
-    };
-    match f {
-        F::Boolean(b) => {
-            let unite = matches!(b.op, BooleanOp::Unite);
-            let target = read(
-                "target",
-                &b.target,
-                unite.then_some(Want::Solid),
-                unite.then_some(JOIN),
-            );
-            std::iter::once(target)
-                .chain(
-                    b.tools
-                        .iter()
-                        .map(|t| read("tools", t, Some(Want::Solid), Some(TOOL))),
-                )
-                .collect()
-        }
-        F::Mirror(m) => {
-            let new = m.combine.is_new();
-            let (want, hint) = combined(&m.combine);
-            std::iter::once(read(
-                "solid",
-                &m.solid,
-                (!new).then_some(Want::Solid),
-                (!new).then_some(COPY),
-            ))
-            .chain(
-                m.combine
-                    .targets
-                    .iter()
-                    .map(|t| read("targets", t, want, hint)),
-            )
-            .collect()
-        }
-        F::Shell(s) => vec![read("target", &s.target, Some(Want::Solid), Some(SHELL))],
-        F::Split(s) => {
-            let mut out = vec![read("target", &s.target, None, None)];
-            if let Some(t) = s.tool_body() {
-                out.push(Read {
-                    changes: false,
-                    ..read("tool", t, None, None)
-                });
-            }
-            out
-        }
-        F::Offset(_)
-        | F::MoveFace(_)
-        | F::ReplaceFace(_)
-        | F::Draft(_)
-        | F::DeleteFace(_)
-        | F::DeleteBlend(_)
-        | F::ResizeBlend(_) => f
-            .targets()
-            .into_iter()
-            .map(|t| read("target", t, None, None))
-            .collect(),
-        F::Fillet(_) | F::Chamfer(_) | F::Hole(_) | F::Pattern(_) => f
-            .targets()
-            .into_iter()
-            .map(|t| read("targets", t, None, None))
-            .collect(),
-        F::Flange(_) | F::Unfold(_) | F::Refold(_) => f
-            .targets()
-            .into_iter()
-            .map(|t| read("targets", t, Some(Want::Solid), Some(SHEET_METAL)))
-            .collect(),
-        F::Sew(s) => s
-            .sheets
-            .iter()
-            .map(|t| read("sheets", t, Some(Want::Sheet), None))
-            .collect(),
-        F::Thicken(t) => {
-            let (want, hint) = combined(&t.combine);
-            t.combine
-                .targets
+    }
+}
+
+/// What a combine's targets must be: solids to join, either to cut or
+/// intersect.
+pub(crate) fn combined(c: &crate::doc::solid::Combine) -> (Option<Want>, Option<&'static str>) {
+    match c.operation {
+        crate::doc::solid::Operation::Join => (Some(Want::Solid), Some(JOIN)),
+        _ => (None, None),
+    }
+}
+
+/// `f`'s targets, each read in `role`.
+pub(crate) fn targets<'a>(
+    f: &'a crate::doc::files::Feature,
+    role: &'static str,
+    want: Option<Want>,
+    hint: Option<&'static str>,
+) -> Vec<Read<'a>> {
+    f.targets()
+        .into_iter()
+        .map(|t| read(role, t, want, hint))
+        .collect()
+}
+
+/// A combine's targets, what each must be: what a feature reads when its
+/// kind names nothing else (`FeatureKind::reads`' default).
+pub(crate) fn combined_reads(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
+    match f.combine() {
+        Some(c) => {
+            let (want, hint) = combined(c);
+            c.targets
                 .iter()
-                .map(|x| read("targets", x, want, hint))
-                .chain(t.sheet().map(|s| read("from", s, Some(Want::Sheet), None)))
+                .map(|t| read("targets", t, want, hint))
                 .collect()
         }
-        f => match f.combine() {
-            Some(c) => {
-                let (want, hint) = combined(c);
-                c.targets
-                    .iter()
-                    .map(|t| read("targets", t, want, hint))
-                    .collect()
-            }
-            None => Vec::new(),
-        },
+        None => Vec::new(),
     }
 }
 
@@ -469,5 +418,28 @@ mod tests {
         assert_eq!(e.details["solid"], "w");
         assert_eq!(e.details["role"], "targets");
         assert_eq!(e.details["feature"], "c");
+    }
+
+    /// Where `feature.types`' table says a type needs a solid or a sheet
+    /// (`FeatureKind::body`), every body it reads wants that (ryucad
+    /// 27.D: the table can't replace `bodies_read`, which depends on the
+    /// fields, so the two are held together here).
+    #[test]
+    fn what_each_body_read_wants_agrees_with_the_types_table() {
+        use serde_json::json;
+        for v in [
+            json!({"type": "shell", "target": "w", "thickness": 1}),
+            json!({"type": "sew", "sheets": ["w", "v"], "tolerance": "0.01 mm", "solid": true}),
+        ] {
+            let f = feature(v);
+            let ty = f.type_name();
+            let needs = crate::feature::kind_of(&f).body(ty).needs;
+            assert!(needs.is_some(), "{ty} needs a kind of body");
+            let read = bodies_read(&f);
+            assert!(!read.is_empty(), "{ty} reads a body");
+            for r in read {
+                assert_eq!(r.want, needs, "{ty} {}", r.role);
+            }
+        }
     }
 }

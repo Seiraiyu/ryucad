@@ -51,13 +51,11 @@ pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releas
     let repo = crate::git::repo(session.root())?;
     let config = Config::read(&*session)?;
     let key = refs_key(&repo, &config)?;
-    if let Some((k, r)) = &session.releases
-        && *k == key
-    {
+    if let Some(r) = session.caches().releases(&key) {
         return Ok((repo, r.clone()));
     }
     let releases = Releases::read(repo.gix(), repo.prefix(), &config)?;
-    session.releases = Some((key, releases.clone()));
+    session.caches_mut().put_releases(key, releases.clone());
     Ok((repo, releases))
 }
 
@@ -459,8 +457,9 @@ struct Proposal {
 /// Every check `release.propose` makes of `part`, in order, and what its
 /// record would hold. Writes nothing.
 fn prepare(session: &mut Session, id: &Id, expected: Option<&str>) -> Result<Proposal> {
-    let (_, releases) = history(session)?;
+    let (repo, releases) = history(session)?;
     check_revision(session.project().part(id)?, expected)?;
+    ryupdm::history::check_folder(repo.prefix())?;
     let files = session.snapshot();
     let config = Config::read(&files)?;
     let records = Records::read(&files)?;
@@ -594,6 +593,7 @@ pub fn obsolete(
     if let Ok(p) = session.project().part(&id) {
         check_revision(p, expected)?;
     }
+    ryupdm::history::check_folder(repo.prefix())?;
     let files = session.snapshot();
     let config = Config::read(&files)?;
     let records = Records::read(&files)?;
@@ -657,8 +657,8 @@ pub(crate) fn state_of(session: &mut Session, part: &Id) -> Value {
 /// about 30 ms of every edit (issue #235).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct States {
-    key: String,
-    parts: std::collections::BTreeMap<Id, (Option<String>, Value)>,
+    pub(crate) key: String,
+    pub(crate) parts: std::collections::BTreeMap<Id, (Option<String>, Value)>,
 }
 
 /// What every part's state reads besides its own files, which its
@@ -700,7 +700,7 @@ fn state_value(part: &Id, s: &state::State, releases: &Releases) -> Value {
             let name = path.strip_prefix(&format!("releases/{part}/"))?;
             let (label, kind) = ryupdm::record::parse_name(name)?;
             (kind == Kind::Release).then(|| {
-                json!({"tag": ryupdm::history::tag_name(part, &label),
+                json!({"tag": releases.name_of(part, &label, Kind::Release),
                        "status": releases.tag(part, &label, &o.commit).as_str()})
             })
         })
@@ -713,10 +713,7 @@ fn state_value(part: &Id, s: &state::State, releases: &Releases) -> Value {
 pub(crate) fn summary(session: &mut Session) -> std::collections::BTreeMap<Id, Value> {
     let releases = history(session).map(|(_, r)| r).unwrap_or_default();
     let key = states_key(session);
-    let kept = match session.states.take() {
-        Some(s) if s.key == key => s.parts,
-        _ => Default::default(),
-    };
+    let kept = session.caches_mut().kept_states(&key);
     let config = Config::read(&*session);
     let records = Records::read(&*session);
     let mut parts = std::collections::BTreeMap::new();
@@ -742,7 +739,7 @@ pub(crate) fn summary(session: &mut Session) -> std::collections::BTreeMap<Id, V
         .iter()
         .map(|(id, (_, v))| (id.clone(), v.clone()))
         .collect();
-    session.states = Some(States { key, parts });
+    session.caches_mut().put_states(States { key, parts });
     out
 }
 
@@ -860,7 +857,7 @@ fn listed(
             if entry.kind == Kind::Release || ruled.is_some() {
                 let t = releases.tag_of(&entry.part, &entry.label, entry.kind, &o.commit);
                 let mut tag = json!({
-                    "name": ryupdm::history::tag_name_of(&entry.part, &entry.label, entry.kind),
+                    "name": releases.name_of(&entry.part, &entry.label, entry.kind),
                     "status": t.as_str()});
                 if let ryupdm::history::Tag::Moved(to) = t {
                     tag["points_at"] = json!(to);
@@ -964,6 +961,7 @@ pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
 pub fn sync(session: &mut Session) -> Result<Value> {
     use gix::refs::transaction::{PreviousValue, RefEdit};
     let (repo, releases) = history(session)?;
+    ryupdm::history::check_folder(repo.prefix())?;
     let mut created = Vec::new();
     let mut left = Vec::new();
     let mut moved = Vec::new();
@@ -978,7 +976,7 @@ pub fn sync(session: &mut Session) -> Result<Value> {
         else {
             continue;
         };
-        let name = ryupdm::history::tag_name(&part, &label);
+        let name = releases.name_of(&part, &label, Kind::Release);
         // Under rules the tag is the service's, annotated and signed.
         if releases.approvals.contains_key(path) {
             left.push(json!({"tag": name, "path": path}));
@@ -1019,7 +1017,7 @@ pub fn sync(session: &mut Session) -> Result<Value> {
     let orphaned: Vec<String> = releases
         .orphaned_tags()
         .into_iter()
-        .map(|k| format!("{}{k}", ryupdm::history::TAG_PREFIX))
+        .map(|k| releases.name(k))
         .collect();
     Ok(
         json!({"created": created, "moved": moved, "unchanged": unchanged,
@@ -1040,7 +1038,7 @@ impl ryupdm::check::Results for Rebuilds<'_> {
         part: &Id,
         content: &str,
     ) -> Result<std::collections::BTreeMap<String, String>> {
-        if let Some(b) = self.session.release_results.get(content) {
+        if let Some(b) = self.session.caches().release_result(content) {
             return Ok(b.clone());
         }
         let project = crate::doc::project::Project::load_from(self.session.root(), src)?;
@@ -1054,8 +1052,8 @@ impl ryupdm::check::Results for Rebuilds<'_> {
             .filter_map(|(fid, r)| Some((fid.to_string(), r.as_ref().ok()?.body()?.hash.clone())))
             .collect();
         self.session
-            .release_results
-            .insert(content.to_owned(), bodies.clone());
+            .caches_mut()
+            .put_release_result(content.to_owned(), bodies.clone());
         Ok(bodies)
     }
 }
@@ -1465,7 +1463,7 @@ pub(crate) mod tests {
         // Rebuilt, A's bodies are what the record says, once per content.
         let v = call(&mut s, "release.check", json!({"results": true})).unwrap();
         assert_eq!(v["warnings"], 1);
-        assert_eq!(s.release_results.len(), 1);
+        assert_eq!(s.caches().release_results_len(), 1);
         // A proposal the part has moved on from fails.
         call(
             &mut s,
@@ -1497,12 +1495,12 @@ pub(crate) mod tests {
         let (dir, mut s) = released_project();
         let root = dir.path();
         call(&mut s, "release.list", json!({})).unwrap();
-        let key = s.releases.as_ref().unwrap().0.clone();
+        let key = s.caches().releases_key().unwrap().to_owned();
         call(&mut s, "release.list", json!({})).unwrap();
-        assert_eq!(s.releases.as_ref().unwrap().0, key);
+        assert_eq!(s.caches().releases_key(), Some(key.as_str()));
         git(root, &["commit", "-q", "--allow-empty", "-m", "moves main"]);
         call(&mut s, "release.list", json!({})).unwrap();
-        assert_ne!(s.releases.as_ref().unwrap().0, key);
+        assert_ne!(s.caches().releases_key(), Some(key.as_str()));
     }
 
     fn rev(root: &std::path::Path, what: &str) -> String {
@@ -1554,6 +1552,91 @@ pub(crate) mod tests {
             call(&mut t, "release.sync", json!({})).unwrap_err().code,
             Code::NotAGitRepo
         );
+    }
+
+    /// A repository holding a project in the folder `folder`, with a part
+    /// `p` holding a box, numbered, committed.
+    fn project_in(folder: &str) -> (tempfile::TempDir, std::path::PathBuf, Session) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(folder);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::server::init(&root, None).unwrap();
+        let mut s = Session::open(&root).unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 10, "y": 20, "z": 5}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "start"]);
+        (dir, root, s)
+    }
+
+    #[test]
+    fn a_project_in_a_folder_tags_with_its_folder() {
+        let (dir, _, mut s) = project_in("cad/sub");
+        let top = dir.path();
+        propose(&mut s).unwrap();
+        git(top, &["add", "."]);
+        git(top, &["commit", "-q", "-m", "release A"]);
+        let a = rev(top, "HEAD");
+        git(top, &["commit", "-q", "--allow-empty", "-m", "later"]);
+        // Another project's old-form tag of a part of the same name, and a
+        // root project's: neither is this project's, moved or orphaned.
+        git(top, &["tag", "ryupdm/p/A", "HEAD"]);
+        git(top, &["tag", "ryupdm/q/Z", "HEAD"]);
+        let v = call(&mut s, "release.list", json!({})).unwrap();
+        assert_eq!(
+            v["records"][0]["tag"],
+            json!({"name": "ryupdm/cad/sub/p/A", "status": "missing"})
+        );
+        let v = call(&mut s, "release.sync", json!({})).unwrap();
+        assert_eq!(
+            v,
+            json!({"created": [{"tag": "ryupdm/cad/sub/p/A", "at": a}], "moved": [],
+                   "unchanged": 0, "orphaned": [], "left_to_service": []})
+        );
+        assert_eq!(rev(top, "ryupdm/cad/sub/p/A"), a);
+        let v = call(&mut s, "release.check", json!({})).unwrap();
+        assert_eq!(v["findings"], json!([]), "{v}");
+        // A tag of this project's own that no record accounts for is.
+        git(top, &["tag", "ryupdm/cad/sub/q/Z", "HEAD"]);
+        let v = call(&mut s, "release.sync", json!({})).unwrap();
+        assert_eq!(v["orphaned"], json!(["ryupdm/cad/sub/q/Z"]));
+    }
+
+    #[test]
+    fn a_project_in_a_folder_git_refuses_in_a_ref_is_refused() {
+        let (dir, _, mut s) = project_in("my parts");
+        let top = dir.path();
+        let e = propose(&mut s).unwrap_err();
+        assert_eq!(e.code, Code::ReleaseFolderUnsafe);
+        assert_eq!(e.details["folder"], "my parts");
+        let v = call(
+            &mut s,
+            "release.propose",
+            json!({"part": "p", "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(v["problems"][0]["code"], "release_folder_unsafe");
+        // Nothing is tagged under it either.
+        let e = call(&mut s, "release.sync", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::ReleaseFolderUnsafe);
+        let tags = crate::git::tests::git_command()
+            .args(["tag", "-l"])
+            .current_dir(top)
+            .output()
+            .unwrap();
+        assert!(tags.stdout.is_empty());
     }
 
     #[test]
@@ -1917,7 +2000,7 @@ pub(crate) mod tests {
             rules_at: rev(root, &format!("{commit}^")),
             signed_at: "2026-11-02T09:20:11Z".into(),
         };
-        let name = ryupdm::history::tag_name_of(record.part(), record.label(), kind);
+        let name = ryupdm::history::tag_name_of("", record.part(), record.label(), kind);
         let file = root.join(".git/ATTEST_MSG");
         std::fs::write(&file, sign(&a, &TEST_SEED)).unwrap();
         git(

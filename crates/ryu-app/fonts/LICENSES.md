@@ -1,4 +1,4 @@
-# Fonts and icons in ryucad-app
+# Fonts and icons in ryu-app (ryucad-app's and ryueda-app's shell)
 
 The app embeds these files (design 199, plan 11.B); the mockups in
 `design/app/` read them too. `design/app/fetch-fonts.py` fetches them from

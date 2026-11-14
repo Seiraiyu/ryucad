@@ -20,7 +20,7 @@ import urllib.request
 import zipfile
 
 HERE = pathlib.Path(__file__).resolve().parent
-FONTS = HERE.parent.parent / "crates" / "ryucad-app" / "fonts"
+FONTS = HERE.parent.parent / "crates" / "ryu-app" / "fonts"
 VENDOR = HERE / "vendor"
 
 ARCHIVES = {
@@ -78,10 +78,10 @@ def main():
         if want and sha(b) != want:
             sys.exit(f"{name}: SHA-256 {sha(b)}, expected {want}")
         (FONTS / out).write_bytes(b)
-        print(f"wrote crates/ryucad-app/fonts/{out} ({len(b)} bytes)")
+        print(f"wrote crates/ryu-app/fonts/{out} ({len(b)} bytes)")
     for name, out, ttf in STYLES:
         css = member("phosphor", got["phosphor"], name).decode()
-        css = re.sub(r"src:[^;]*;", f'src: url("../../../crates/ryucad-app/fonts/{ttf}") format("truetype");',
+        css = re.sub(r"src:[^;]*;", f'src: url("../../../crates/ryu-app/fonts/{ttf}") format("truetype");',
                      css, count=1)
         (VENDOR / out).write_text(css)
         print(f"wrote design/app/vendor/{out}")

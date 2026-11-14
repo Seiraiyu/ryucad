@@ -1015,3 +1015,42 @@ fn a_files_solids_unite_as_the_plain_union_does() {
     assert_eq!(cj, pj);
     assert_eq!(w2.spent(), w1.spent());
 }
+
+/// A boolean between the flat-span twin's prism and block (design 551,
+/// #585): the prism's flat span lies on the block's top, so it is split
+/// off and coincident there. The union is sound and holds both volumes,
+/// and the journal has the split.
+#[test]
+fn a_spline_with_a_flat_span_on_a_tool_unites() {
+    use ryukei::boolean::{BooleanOp, Tool, boolean};
+    use ryukei::geom::Rigid;
+    use ryukei::name::{Event, OpKey, ToolKey};
+    let (prism, slab) = ryukei_testkit::nurbs::flat_span_twin();
+    let (u, journal) = boolean(
+        OpKey(51),
+        BooleanOp::Unite,
+        &prism,
+        &[Tool {
+            key: ToolKey(1),
+            body: &slab,
+            place: Rigid::IDENTITY,
+        }],
+    )
+    .expect("united");
+    assert_eq!(ryukei::check::check(&u), []);
+    assert!(ryukei::check::check_intersections(&u).is_empty());
+    let v = |b: &ryukei::topo::Body| {
+        ryukei_testkit::mesh::volume_and_area(
+            &ryukei::mesh::tessellate(b, &ryukei::mesh::MeshParams::new(1e-6, 0.3)).unwrap(),
+        )
+        .0
+    };
+    let (want, got) = (v(&prism) + v(&slab), v(&u));
+    assert!((got - want).abs() <= 1e-3 * want, "{got} against {want}");
+    assert!(
+        journal
+            .events()
+            .iter()
+            .any(|e| matches!(e, Event::Split { children, .. } if children.len() == 2))
+    );
+}

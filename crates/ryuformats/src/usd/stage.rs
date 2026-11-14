@@ -24,7 +24,7 @@ use crate::scene::{Child, Unit};
 use rayon::prelude::*;
 use ryukei::geom::Rigid;
 use ryukei::mesh::BodyMesh;
-use ryukei::topo::Body;
+use ryukei::topo::{Body, BodyKind};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -56,7 +56,8 @@ pub struct Solid {
     pub mesh: Option<Arc<BodyMesh>>,
     /// Whether it gets a BrepArray when the stage writes them: a
     /// reference import's body (ryucad's design 364) is written as its
-    /// mesh alone, which carries its faces' names itself.
+    /// mesh alone, which carries its faces' names itself; a sheet gets its
+    /// BrepArray (#624) unless the writer refuses it ([`mesh_instead`]).
     pub brep: bool,
 }
 
@@ -102,43 +103,80 @@ fn names(e: BadName) -> StageError {
     unreachable!("prim names are made identifiers: {e}")
 }
 
+/// A sheet whose BrepArray the writer refused, written as its mesh alone
+/// ([`mesh_instead`]): the product and solid (by index) and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Skipped {
+    pub product: usize,
+    pub solid: usize,
+    pub error: BrepError,
+}
+
+/// Whether a body whose BrepArray the writer refuses is written as its
+/// mesh alone: a sheet whose mesh the stage writes (#624). A solid's
+/// refusal refuses the stage, as does a sheet's with no mesh to stand in.
+pub fn mesh_instead(solid: &Solid, opts: &Options) -> bool {
+    opts.mesh && solid.mesh.is_some() && solid.body.kind() == BodyKind::Sheet
+}
+
 /// `model` as a layer.
 pub fn layer(model: &Model, opts: &Options) -> Result<Layer, StageError> {
+    layer_skipping(model, opts).map(|(l, _)| l)
+}
+
+/// [`layer`], and each sheet written as its mesh alone because the writer
+/// refused its BrepArray ([`mesh_instead`]), in model order.
+pub fn layer_skipping(model: &Model, opts: &Options) -> Result<(Layer, Vec<Skipped>), StageError> {
     if !opts.brep && !opts.mesh {
         return Err(StageError::Nothing);
     }
-    // Every solid's BrepArray, side by side; the first that fails, in
-    // model order, refuses the stage.
+    /// What one body gets: its BrepArray, none asked for, or its mesh in
+    /// place of a refused one.
+    enum Made {
+        Brep(Box<Prim>),
+        Nothing,
+        Skipped(BrepError),
+    }
+    // Every body's BrepArray, side by side; the first that fails, in
+    // model order, refuses the stage, but for a sheet that stands in as
+    // its mesh.
     let solids: Vec<(usize, usize)> = model
         .products
         .iter()
         .enumerate()
         .flat_map(|(k, p)| (0..p.solids.len()).map(move |s| (k, s)))
         .collect();
-    let breps: Vec<Result<Option<Prim>, StageError>> = solids
+    let breps: Vec<Result<Made, StageError>> = solids
         .par_iter()
         .map(|&(k, s)| {
-            if !opts.brep || !model.products[k].solids[s].brep {
-                return Ok(None);
+            let solid = &model.products[k].solids[s];
+            if !opts.brep || !solid.brep {
+                return Ok(Made::Nothing);
             }
-            brep_array(
-                &model.products[k].solids[s].body,
-                "brep",
-                opts.unit,
-                opts.pipe_tolerance,
-            )
-            .map(Some)
-            .map_err(|error| StageError::Brep {
-                product: k,
-                solid: s,
-                error,
-            })
+            match brep_array(&solid.body, "brep", opts.unit, opts.pipe_tolerance) {
+                Ok(p) => Ok(Made::Brep(Box::new(p))),
+                Err(error) if mesh_instead(solid, opts) => Ok(Made::Skipped(error)),
+                Err(error) => Err(StageError::Brep {
+                    product: k,
+                    solid: s,
+                    error,
+                }),
+            }
         })
         .collect();
     let mut brep: BTreeMap<(usize, usize), Prim> = BTreeMap::new();
-    for (at, b) in solids.iter().zip(breps) {
-        if let Some(p) = b? {
-            brep.insert(*at, p);
+    let mut skipped = Vec::new();
+    for (&(k, s), b) in solids.iter().zip(breps) {
+        match b? {
+            Made::Brep(p) => {
+                brep.insert((k, s), *p);
+            }
+            Made::Skipped(error) => skipped.push(Skipped {
+                product: k,
+                solid: s,
+                error,
+            }),
+            Made::Nothing => {}
         }
     }
     let mut w = Writer {
@@ -177,13 +215,16 @@ pub fn layer(model: &Model, opts: &Options) -> Result<Layer, StageError> {
     }
     let mut data = Dict::default();
     data.dict("ryucad", ryucad);
-    Ok(Layer {
-        default_prim: Some(root_name),
-        meters_per_unit: 1.0 / opts.unit.per_meter(),
-        up_axis: UpAxis::Z,
-        custom_layer_data: data,
-        prims,
-    })
+    Ok((
+        Layer {
+            default_prim: Some(root_name),
+            meters_per_unit: 1.0 / opts.unit.per_meter(),
+            up_axis: UpAxis::Z,
+            custom_layer_data: data,
+            prims,
+        },
+        skipped,
+    ))
 }
 
 /// `model` as usda.
@@ -251,7 +292,7 @@ impl Writer<'_> {
                         &solid.body,
                         m,
                         self.opts.unit,
-                        !self.opts.brep || !solid.brep,
+                        !self.brep.contains_key(&(k, s)),
                     )
                     .map_err(names_error)?,
                 );
@@ -377,6 +418,50 @@ mod tests {
             pipe_tolerance: 1e-6,
             layer_data: vec![("version".into(), "0.0.0".into())],
         }
+    }
+
+    /// A planar 10 mm square sheet, meshed or not.
+    fn sheet(meshed: bool) -> Solid {
+        use ryukei::geom::{Frame, Plane, Surface};
+        let plane = Surface::Plane(Plane::new(Frame::WORLD));
+        let (b, _) =
+            ryukei::sheet::from_surface(OpKey(2), &plane, [[0.0, 0.01], [0.0, 0.01]]).unwrap();
+        let m = meshed.then(|| Arc::new(tessellate(&b, &MeshParams::new(1e-5, 0.26)).unwrap()));
+        Solid {
+            name: "skin".into(),
+            body: Arc::new(b),
+            mesh: m,
+            brep: true,
+        }
+    }
+
+    #[test]
+    fn a_sheet_has_its_breparray_and_only_a_meshed_sheet_stands_in_for_one() {
+        let mut m = frame();
+        m.products.truncate(1);
+        m.products[0].children.clear();
+        m.products[0].solids.push(sheet(true));
+        let (l, skipped) = layer_skipping(&m, &opts()).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let skin = &l.prims[0].children[1];
+        assert_eq!(skin.name, "skin");
+        let kinds: Vec<Option<&str>> = skin
+            .children
+            .iter()
+            .map(|c| c.type_name.as_deref())
+            .collect();
+        assert_eq!(kinds, [Some("BrepArray"), Some("Mesh")]);
+        // Which refused bodies stand in as meshes: a meshed sheet alone.
+        assert!(mesh_instead(&sheet(true), &opts()));
+        assert!(!mesh_instead(&sheet(false), &opts()));
+        assert!(!mesh_instead(
+            &sheet(true),
+            &Options {
+                mesh: false,
+                ..opts()
+            }
+        ));
+        assert!(!mesh_instead(&solid("plate", 0.1), &opts()));
     }
 
     /// A frame placing a pin twice, at the working files and at release

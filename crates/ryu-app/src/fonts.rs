@@ -2,15 +2,15 @@
 //! text, JetBrains Mono for references, revisions and values, and
 //! Phosphor Regular and Fill as an icon font in families of their own.
 //! egui's own fonts stay behind each as fallbacks. Their licences are in
-//! `crates/ryucad-app/fonts/LICENSES.md` and every release archive.
+//! `crates/ryu-app/fonts/LICENSES.md` and every release archive.
 
-use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
+use egui::{FontData, FontDefinitions, FontFamily};
 use std::sync::Arc;
 
-pub const INTER: &[u8] = include_bytes!("../../fonts/InterVariable.ttf");
-pub const MONO: &[u8] = include_bytes!("../../fonts/JetBrainsMono-Regular.ttf");
-pub const PHOSPHOR: &[u8] = include_bytes!("../../fonts/Phosphor.ttf");
-pub const PHOSPHOR_FILL: &[u8] = include_bytes!("../../fonts/Phosphor-Fill.ttf");
+pub const INTER: &[u8] = include_bytes!("../fonts/InterVariable.ttf");
+pub const MONO: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
+pub const PHOSPHOR: &[u8] = include_bytes!("../fonts/Phosphor.ttf");
+pub const PHOSPHOR_FILL: &[u8] = include_bytes!("../fonts/Phosphor-Fill.ttf");
 
 /// The family Phosphor Regular's glyphs are drawn in.
 pub const ICONS: &str = "icons";
@@ -93,7 +93,7 @@ mod tests {
             let name = e.unwrap().file_name().into_string().unwrap();
             if name.ends_with(".txt") || name.ends_with(".md") {
                 assert!(
-                    release.contains(&format!("crates/ryucad-app/fonts/{name}")),
+                    release.contains(&format!("crates/ryu-app/fonts/{name}")),
                     "{name} isn't copied into the archive"
                 );
             }
