@@ -6,8 +6,10 @@
 //! can't move (`iso_stops`).
 
 use super::region::Region;
-use crate::geom::{Curve2, Frame, Plane, Surface};
+use crate::boolean::Tool;
+use crate::geom::{Box3, Curve2, Frame, Plane, Surface};
 use crate::intersect::{BESIDE_CELLS, SeamKind, face_beside, opposite_sides, section_plane};
+use crate::name::{OpKey, ToolKey};
 use crate::topo::{Body, EdgeId, FaceId, FinId};
 use crate::work::Meter;
 use crate::{Error, TweakCase, TweakError};
@@ -194,6 +196,65 @@ pub(crate) fn stop_plane(body: &Body, f: FaceId, h: &Held, m: &Meter) -> Option<
     Frame::new(fr.origin() + n * d, n, fr.x().get())
         .ok()
         .map(Plane::new)
+}
+
+/// A working face's rect sheet on `surface` over `rect`, divided by
+/// `stop` (a plane sheet over `bx`, grown by its diagonal, its normal
+/// the plane's), and its part behind the plane: design 642's plane stop,
+/// by the sheet division ryucad's splits use (`boolean::divide_in`,
+/// under `m`). `None` unless the plane divides the sheet and exactly one
+/// face lies behind it. Every edge of the result is a side of the
+/// working face (clipped, scaffolding), the cut's too.
+pub(crate) fn plane_cut(
+    key: OpKey,
+    surface: &Surface,
+    rect: [[f64; 2]; 2],
+    stop: &Plane,
+    bx: &Box3,
+    m: &Meter,
+) -> Option<Body> {
+    let (sheet, _) = crate::sheet::from_surface_in(key, surface, rect, m).ok()?;
+    divided_behind(key, &sheet, stop, bx, m)
+}
+
+/// One-face sheet `sheet` divided by `stop` (a plane sheet over `bx`,
+/// grown by its diagonal), and its one face behind the plane: `None`
+/// unless something lies in front and exactly one face behind.
+fn divided_behind(key: OpKey, sheet: &Body, stop: &Plane, bx: &Box3, m: &Meter) -> Option<Body> {
+    // The plane sheet: centred on the box's middle's foot, as wide as
+    // twice the box's diagonal each way.
+    let fr = stop.frame();
+    let mid = bx.min() + (bx.max() - bx.min()) * 0.5;
+    let reach = 2.0 * bx.min().distance(bx.max());
+    let (u, v) = {
+        let d = mid - fr.origin();
+        (d.dot(fr.x().get()), d.dot(fr.y().get()))
+    };
+    let (tool, _) = crate::sheet::from_surface_in(
+        OpKey(key.0 ^ 0x19b),
+        &Surface::Plane(stop.clone()),
+        [[u - reach, u + reach], [v - reach, v + reach]],
+        m,
+    )
+    .ok()?;
+    let (d, _) = crate::boolean::divide_in(
+        key,
+        sheet,
+        &[Tool {
+            key: ToolKey(1),
+            body: &tool,
+            place: crate::geom::Rigid::IDENTITY,
+        }],
+        m,
+        true,
+    )
+    .ok()?;
+    // Divided: something in front, one face behind.
+    if d.front.is_empty() {
+        return None;
+    }
+    let [back] = &d.back[..] else { return None };
+    (back.faces().count() == 1).then(|| back.clone())
 }
 
 /// Working face `f`'s parameter box `rect` on `surface` with its iso stops
@@ -516,7 +577,8 @@ mod tests {
     fn oblique_pair() -> (Body, Held) {
         use crate::boolean::{Tool, divide};
         use crate::geom::{Cylinder, Point3, Vector3};
-                let axis = Frame::new(
+        use crate::name::{OpKey, ToolKey};
+        let axis = Frame::new(
             Point3::ORIGIN,
             Vector3::new(0.0, 0.0, 1.0),
             Vector3::new(1.0, 0.0, 0.0),
@@ -628,5 +690,49 @@ mod tests {
         if !RUNNING_PLANE_STOPS {
             assert!(stop_plane(&s, h.faces[0], &h, &m).is_none());
         }
+    }
+
+    #[test]
+    fn a_plane_cut_keeps_the_working_face_behind_its_stop() {
+        use crate::geom::{Cylinder, Point3, Vector3};
+        use core::f64::consts::TAU;
+        let axis = Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let tube = Surface::Cylinder(Cylinder::new(axis, 1.0).unwrap());
+        let stop = Plane::new(
+            Frame::new(
+                Point3::new(0.0, 0.0, 0.25),
+                Vector3::new(-0.5, 0.0, 1.0),
+                Vector3::new(1.0, 0.0, 0.5),
+            )
+            .unwrap(),
+        );
+        let bx = Box3::new(Point3::new(-2.0, -2.0, -3.0), Point3::new(2.0, 2.0, 3.0));
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let rect = [[0.0, TAU], [-2.0, 2.0]];
+        let s = plane_cut(OpKey(0x19b8), &tube, rect, &stop, &bx, &m)
+            .expect("one face behind the plane");
+        assert_eq!(s.faces().count(), 1);
+        // Every vertex of the cut sheet lies behind the plane or on it.
+        let fr = stop.frame();
+        for v in s.vertices() {
+            let p = s.vertices[v].point;
+            assert!((p - fr.origin()).dot(fr.z().get()) <= 1e-9);
+        }
+        // A plane missing the face cuts nothing: no stop.
+        let far = Plane::new(
+            Frame::new(
+                Point3::new(0.0, 0.0, 10.0),
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            )
+            .unwrap(),
+        );
+        assert!(plane_cut(OpKey(0x19b8), &tube, rect, &far, &bx, &m).is_none());
     }
 }
