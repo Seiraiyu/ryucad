@@ -26,10 +26,11 @@
 use crate::approvals::{Approvals, Rule};
 use crate::attest::{self, Verdict};
 use crate::config::Config;
+use crate::product::Product;
 use crate::record::{Kind, parse_name};
-use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::project::{PDM_CONFIG, RELEASES, ROOT_FILES};
-use ryucad_doc::error::{Code, Error, Result};
+use crate::{PDM_CONFIG, RELEASES};
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::Id;
 use std::collections::BTreeMap;
 
 /// The prefix of every tag ryupdm derives from a record.
@@ -326,37 +327,43 @@ fn commit_of(repo: &gix::Repository, rev: &str) -> Result<gix::ObjectId> {
         .id)
 }
 
-/// The project's files in the commit `rev` names, by path relative to
-/// the project (`prefix` is where it sits in the repository, ending in
-/// `/` unless it is the root): the manifest and the other files at its
-/// root, and everything under `parts/` and `releases/`. Works on a bare
-/// repository.
-pub fn files(repo: &gix::Repository, rev: &str, prefix: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+/// The files of the project of `P` in the commit `rev` names, by path
+/// relative to the project (`prefix` is where it sits in the repository,
+/// ending in `/` unless it is the root): its root files and
+/// `ryupdm.json`, and everything under its part folders and `releases/`.
+/// Works on a bare repository.
+pub fn files_for<P: Product>(
+    repo: &gix::Repository,
+    rev: &str,
+    prefix: &str,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     let commit = repo.find_commit(commit_of(repo, rev)?).map_err(git_error)?;
     let tree = commit.tree_id().map_err(git_error)?.detach();
     let mut ids = BTreeMap::new();
-    for name in ROOT_FILES {
+    for name in P::ROOT_FILES.iter().copied().chain([PDM_CONFIG]) {
         if let Some(id) = entry(repo, tree, prefix, name)? {
             ids.insert(name.to_owned(), id);
         }
     }
-    for dir in ["parts", RELEASES] {
+    for dir in P::PART_FOLDERS.iter().copied().chain([RELEASES]) {
         if let Some(id) = entry(repo, tree, prefix, dir)? {
             blobs(repo, id, &format!("{dir}/"), &mut ids)?;
         }
     }
-    ids.into_iter()
-        .map(|(path, id)| {
-            let data = repo.find_object(id).map_err(git_error)?.data.clone();
-            Ok((path, data))
-        })
-        .collect()
+    read_all(repo, ids)
 }
 
-/// The files of the project's part `part` in the commit `rev` names,
-/// with the files at the project's root (the manifest and ryupdm's
-/// settings): what reading that one part needs, without the rest.
-pub fn part_files(
+/// [`files_for`] for ryucad: `ryucad.json` and the other root files, and
+/// everything under `parts/` and `releases/`.
+#[cfg(feature = "cad")]
+pub fn files(repo: &gix::Repository, rev: &str, prefix: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+    files_for::<crate::cad::Cad>(repo, rev, prefix)
+}
+
+/// The files of the part `part` of the project of `P` in the commit `rev`
+/// names, with the files at the project's root and `ryupdm.json`: what
+/// reading that one part needs, without the rest.
+pub fn part_files_for<P: Product>(
     repo: &gix::Repository,
     rev: &str,
     prefix: &str,
@@ -365,15 +372,41 @@ pub fn part_files(
     let commit = repo.find_commit(commit_of(repo, rev)?).map_err(git_error)?;
     let tree = commit.tree_id().map_err(git_error)?.detach();
     let mut ids = BTreeMap::new();
-    for name in ROOT_FILES {
+    let own = P::part_files(part);
+    for name in P::ROOT_FILES.iter().copied().chain([PDM_CONFIG]) {
         if let Some(id) = entry(repo, tree, prefix, name)? {
             ids.insert(name.to_owned(), id);
         }
     }
-    let dir = format!("parts/{part}");
-    if let Some(id) = entry(repo, tree, prefix, &dir)? {
-        blobs(repo, id, &format!("{dir}/"), &mut ids)?;
+    for name in &own.files {
+        if let Some(id) = entry(repo, tree, prefix, name)? {
+            ids.insert(name.clone(), id);
+        }
     }
+    for dir in &own.folders {
+        if let Some(id) = entry(repo, tree, prefix, dir)? {
+            blobs(repo, id, &format!("{dir}/"), &mut ids)?;
+        }
+    }
+    read_all(repo, ids)
+}
+
+/// [`part_files_for`] for ryucad: the root files and `parts/<part>/`.
+#[cfg(feature = "cad")]
+pub fn part_files(
+    repo: &gix::Repository,
+    rev: &str,
+    prefix: &str,
+    part: &Id,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    part_files_for::<crate::cad::Cad>(repo, rev, prefix, part)
+}
+
+/// Each object's bytes, by path.
+fn read_all(
+    repo: &gix::Repository,
+    ids: BTreeMap<String, gix::ObjectId>,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     ids.into_iter()
         .map(|(path, id)| {
             let data = repo.find_object(id).map_err(git_error)?.data.clone();
@@ -525,7 +558,7 @@ fn judged(
         // A record that doesn't read is doctor's; it names no project here.
         let Some(project) = std::str::from_utf8(&bytes)
             .ok()
-            .and_then(|t| ryucad_doc::doc::canonical::parse(t).ok())
+            .and_then(|t| ryu_doc::canonical::parse(t).ok())
             .and_then(|v| crate::record::Record::from_json(&v, kind).ok())
             .map(|r| r.project().clone())
         else {
@@ -630,7 +663,7 @@ fn legacy(
                 let bytes = repo.find_object(o.blob).map_err(git_error)?.data.clone();
                 let Some(project) = std::str::from_utf8(&bytes)
                     .ok()
-                    .and_then(|t| ryucad_doc::doc::canonical::parse(t).ok())
+                    .and_then(|t| ryu_doc::canonical::parse(t).ok())
                     .and_then(|v| crate::record::Record::from_json(&v, kind).ok())
                     .map(|r| r.project().clone())
                 else {
@@ -1179,6 +1212,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(feature = "cad")]
     #[test]
     fn a_project_below_the_root_and_a_bare_repository() {
         let dir = repo();
@@ -1219,7 +1253,7 @@ pub(crate) mod tests {
         put(
             d,
             "ryupdm.json",
-            &ryucad_doc::doc::canonical::to_string(&serde_json::json!({
+            &ryu_doc::canonical::to_string(&serde_json::json!({
                 "approvals": {
                     "keys": {attest::test_key_id(): attest::hex(&public)},
                     "rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]
@@ -1255,7 +1289,7 @@ pub(crate) mod tests {
             missing: vec![],
             outcome: Outcome::Approved,
             part: Id::parse(part, "part").unwrap(),
-            project: ryucad_doc::doc::id::ProjectId::parse(PROJECT).unwrap(),
+            project: ryu_doc::id::ProjectId::parse(PROJECT).unwrap(),
             proposed_by: User {
                 id: 2,
                 login: "dana".into(),
@@ -1298,7 +1332,7 @@ pub(crate) mod tests {
     /// A record of `part`'s `label` that reads, as canonical text.
     pub(crate) fn record_text(part: &str, label: &str, kind: Kind) -> String {
         use crate::record::{BuiltWith, Obsolete, Record, Release, ReleasedBy};
-        let project = ryucad_doc::doc::id::ProjectId::parse(PROJECT).unwrap();
+        let project = ryu_doc::id::ProjectId::parse(PROJECT).unwrap();
         let part = Id::parse(part, "part").unwrap();
         let by = ReleasedBy {
             name: None,
@@ -1317,6 +1351,7 @@ pub(crate) mod tests {
                     ryucad: "0".into(),
                     ryukei: "0".into(),
                     commit: "c".into(),
+                    product: None,
                 },
                 released_by: by,
                 supersedes: None,
@@ -1330,7 +1365,7 @@ pub(crate) mod tests {
                 note: None,
             }),
         };
-        ryucad_doc::doc::canonical::to_string(&r.to_json())
+        ryu_doc::canonical::to_string(&r.to_json())
     }
 
     fn record(part: &str, label: &str) -> String {
@@ -1391,12 +1426,11 @@ pub(crate) mod tests {
         commit(d, "rules and release A at once");
         assert!(read(d).approvals.is_empty());
         // A record with no rule matching it is judged as before.
-        let mut v: serde_json::Value = ryucad_doc::doc::canonical::parse(
-            &std::fs::read_to_string(d.join("ryupdm.json")).unwrap(),
-        )
-        .unwrap();
+        let mut v: serde_json::Value =
+            ryu_doc::canonical::parse(&std::fs::read_to_string(d.join("ryupdm.json")).unwrap())
+                .unwrap();
         v["approvals"]["rules"][0]["parts"] = serde_json::json!(["motor-*"]);
-        put(d, "ryupdm.json", &ryucad_doc::doc::canonical::to_string(&v));
+        put(d, "ryupdm.json", &ryu_doc::canonical::to_string(&v));
         commit(d, "rules for motors");
         put(d, "releases/p/B.json", &record("p", "B"));
         commit(d, "release B");

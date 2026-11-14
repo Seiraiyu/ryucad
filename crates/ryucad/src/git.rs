@@ -20,15 +20,9 @@ impl ryu_git::Layout for crate::Cad {
     const NAME: &'static str = "ryucad";
     const MANIFEST: &'static str = crate::doc::project::MANIFEST;
     const ROOT_FILES: &'static [&'static str] = &crate::doc::project::ROOT_FILES;
-    const FOLDERS: &'static [&'static str] = &[
-        "parts",
-        crate::doc::project::RELEASES,
-        crate::doc::project::IMPORTS,
-        crate::doc::annotation::ANNOTATIONS,
-        crate::doc::drawing_template::TEMPLATES,
-    ];
+    const FOLDERS: &'static [&'static str] = &crate::doc::project::FOLDERS;
     fn project_file(rel: &str) -> bool {
-        project_file(rel)
+        crate::doc::project::project_file(rel)
     }
 }
 
@@ -52,26 +46,6 @@ pub fn repo(root: &Path) -> Result<Repo> {
 /// repository, `rev_not_found` for a revision it doesn't have.
 pub fn revision(root: &Path, rev: &str) -> Result<Revision> {
     ryu_git::repo::revision::<crate::Cad>(root, rev)
-}
-
-/// Whether `rel` (relative to a project) is one of the files its state
-/// depends on, as `session::files` lists them: the files at its root,
-/// files two and three levels under `parts/`, files two levels under
-/// `releases/`, and files under `imports/`, `annotations/` and
-/// `templates/`.
-fn project_file(rel: &str) -> bool {
-    if crate::doc::project::ROOT_FILES.contains(&rel) {
-        return true;
-    }
-    let mut parts = rel.split('/');
-    match parts.next() {
-        Some("parts") => matches!(parts.count(), 2 | 3),
-        Some(crate::doc::project::RELEASES) => parts.count() == 2,
-        Some(crate::doc::project::IMPORTS) => parts.count() == 1,
-        Some(crate::doc::annotation::ANNOTATIONS) => parts.count() == 1,
-        Some(crate::doc::drawing_template::TEMPLATES) => parts.count() == 1,
-        _ => false,
-    }
 }
 
 /// What a commit of the index would get wrong about releases, for every

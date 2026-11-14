@@ -182,12 +182,21 @@ pub struct Applied {
     pub body: Arc<Built>,
     pub operation: Operation,
     pub places: Vec<(Option<Id>, Rigid)>,
+    /// Places whose tool isn't `body`, by their index in `places`: a hole
+    /// whose far side or through_next depends on each place's exit
+    /// (ryucad 28.B). Empty for everything else.
+    pub others: Vec<(usize, Arc<Built>)>,
     /// BLAKE3 of the body's hash and every place, for what reads it.
     pub hash: String,
 }
 
 impl Applied {
-    fn new(body: Arc<Built>, operation: Operation, places: Vec<(Option<Id>, Rigid)>) -> Applied {
+    fn new(
+        body: Arc<Built>,
+        operation: Operation,
+        places: Vec<(Option<Id>, Rigid)>,
+        others: Vec<(usize, Arc<Built>)>,
+    ) -> Applied {
         let mut h = blake3::Hasher::new();
         h.update(body.hash.as_bytes());
         h.update(operation.as_str().as_bytes());
@@ -204,13 +213,29 @@ impl Applied {
                 h.update(&x.to_bits().to_le_bytes());
             }
         }
+        // Only a hole with other tools hashes them: every other Applied
+        // keeps its hash.
+        for (i, b) in &others {
+            h.update(b"other\0");
+            h.update(&(*i as u64).to_le_bytes());
+            h.update(b.hash.as_bytes());
+        }
         let hash = h.finalize().to_hex()[..32].to_owned();
         Applied {
             body,
             operation,
             places,
+            others,
             hash,
         }
+    }
+
+    /// The tool of place `i`.
+    pub fn body_at(&self, i: usize) -> &Arc<Built> {
+        self.others
+            .iter()
+            .find(|(j, _)| *j == i)
+            .map_or(&self.body, |(_, b)| b)
     }
 }
 
@@ -290,6 +315,8 @@ pub enum Output {
     Datum(Arc<crate::datum::Made>),
     /// A path or a helix.
     Path(Arc<crate::path::Made>),
+    /// A cosmetic thread (ryucad 28.B).
+    Thread(Arc<crate::thread::Cosmetic>),
 }
 
 impl Output {
@@ -311,7 +338,8 @@ impl Output {
             | Output::Mate(_)
             | Output::Copies(_)
             | Output::Datum(_)
-            | Output::Path(_) => &[],
+            | Output::Path(_)
+            | Output::Thread(_) => &[],
         }
     }
 
@@ -365,6 +393,7 @@ impl Output {
             Output::Copies(c) => &c.hash,
             Output::Datum(d) => &d.hash,
             Output::Path(p) => &p.hash,
+            Output::Thread(t) => &t.hash,
         }
     }
 
@@ -589,6 +618,9 @@ impl PartResult {
                 if let Some(i) = o.inserted() {
                     return i.warnings.clone();
                 }
+                if let Output::Thread(t) = o {
+                    return t.warnings.clone();
+                }
                 if let Some(s) = o.sketch() {
                     return s
                         .stale
@@ -711,18 +743,9 @@ pub(crate) fn sketch_input<'a>(
     })
 }
 
-/// How far a through-all extrude or hole (`ty`) goes from `from` along
-/// `dir`: a margin past every point of its targets' boxes, both ways if
-/// `both`. Fails as `invalid_extent` when all of them lie behind the
-/// sketch's plane.
-pub(crate) fn through_all(
-    ty: &str,
-    id: &Id,
-    from: Point3,
-    dir: Vector3,
-    both: bool,
-    targets: &[&Built],
-) -> Result<(f64, f64)> {
+/// The least and greatest of `(p - from) · dir` over every corner of the
+/// targets' face boxes.
+pub(crate) fn span(from: Point3, dir: Vector3, targets: &[&Built]) -> (f64, f64) {
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for b in targets {
         for f in b.body.faces() {
@@ -744,6 +767,22 @@ pub(crate) fn through_all(
             }
         }
     }
+    (lo, hi)
+}
+
+/// How far a through-all extrude or hole (`ty`) goes from `from` along
+/// `dir`: a margin past every point of its targets' boxes, both ways if
+/// `both`. Fails as `invalid_extent` when all of them lie behind the
+/// sketch's plane.
+pub(crate) fn through_all(
+    ty: &str,
+    id: &Id,
+    from: Point3,
+    dir: Vector3,
+    both: bool,
+    targets: &[&Built],
+) -> Result<(f64, f64)> {
+    let (lo, hi) = span(from, dir, targets);
     // A hundredth of the targets' depth along the direction, so no end
     // face lies on theirs.
     let margin = (hi - lo).max(1e-6) * 0.01;
@@ -1162,17 +1201,48 @@ fn build_body(
         }
         _ => None,
     };
+    let exit_dependent = matches!(f, Feature::Hole(h) if crate::hole::needs_exits(h));
+    let mut others: Vec<(usize, Arc<Built>)> = Vec::new();
     let own = match tool {
-        Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
-        // A hole's tools are its body at each of its points; any other
-        // kind builds its own (27.D).
+        Some((h, Some((c, b)))) if *c == h && !exit_dependent => Ok(Arc::clone(b)),
+        // A hole's tools are its body at each of its points (one per
+        // distinct exit for a far side or through_next, never from or to
+        // the tool cache); any other kind builds its own (27.D).
         _ => match &holes {
-            Some((h, (solved, _, sizes))) => {
-                crate::hole::tool(part, id, h, sizes, solved, &bodies, before).map(|(b, _)| b)
+            Some((h, (solved, points, sizes))) if crate::hole::needs_exits(h) => {
+                let work = crate::work::work(run.job);
+                crate::hole::ExitTools::new(part, id, h, sizes, solved, &bodies, before).and_then(
+                    |mut t| {
+                        let mut index = Vec::with_capacity(points.len());
+                        for (p, at) in points.iter() {
+                            let e = t.exit(id, p.as_str(), *at, t.down(), &work)?;
+                            index.push(t.tool(e)?);
+                        }
+                        let first = index.first().copied().unwrap_or(0);
+                        for (i, k) in index.iter().enumerate() {
+                            if *k != first {
+                                others.push((i, Arc::clone(&t.tools[*k].1)));
+                            }
+                        }
+                        match t.tools.get(first) {
+                            Some((_, b)) => Ok(Arc::clone(b)),
+                            None => Err(Error::new(
+                                Code::OperationNoEffect,
+                                format!("hole {id}: it has no places"),
+                            )
+                            .with("feature", id)),
+                        }
+                    },
+                )
             }
-            None => crate::feature::kind_of(f).own_body(cx, f, &bodies),
-        }
-        .map(Arc::new),
+            Some((h, (solved, _, sizes))) => {
+                crate::hole::tool(part, id, h, sizes, solved, &bodies, before)
+                    .map(|(b, _)| Arc::new(b))
+            }
+            None => crate::feature::kind_of(f)
+                .own_body(cx, f, &bodies)
+                .map(Arc::new),
+        },
     };
     let own = match own {
         Ok(own) => own,
@@ -1200,10 +1270,14 @@ fn build_body(
     };
     let tools: Vec<ToolBody> = places
         .iter()
-        .map(|(p, place)| match p {
+        .enumerate()
+        .map(|(i, (p, place))| match p {
             Some(p) => ToolBody {
                 key: crate::hole::point_key(&part.id, id, p),
-                built: own.as_ref(),
+                built: others
+                    .iter()
+                    .find(|(j, _)| *j == i)
+                    .map_or(own.as_ref(), |(_, b)| b.as_ref()),
                 place: *place,
                 name: id,
                 label: Some(json!({"point": p})),
@@ -1220,12 +1294,14 @@ fn build_body(
             Ok(((*t).clone(), Arc::new(r)))
         })
         .collect();
-    let applied = Arc::new(Applied::new(Arc::clone(&own), operation, places));
+    let applied = Arc::new(Applied::new(Arc::clone(&own), operation, places, others));
     let made = made.map(|m| Made {
         applied: Some(applied),
         ..Made::new(m)
     });
-    (made, Some(own))
+    // An exit-dependent hole's tools are as many as its exits: none goes
+    // to the tool cache.
+    (made, (!exit_dependent).then_some(own))
 }
 
 /// The rebuild step of a feature that makes a body of its own (its

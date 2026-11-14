@@ -23,6 +23,9 @@ pub struct HoleTable {
     pub revision: String,
     pub rows: Vec<HoleRow>,
     by_face: BTreeMap<String, usize>,
+    /// Each cosmetic thread's feature (`p/t`) and rings: at an internal
+    /// thread's major diameter, an external one's minor.
+    pub threads: Vec<(String, RingAxis)>,
 }
 
 fn point(v: &Value) -> Option<[f64; 3]> {
@@ -70,7 +73,40 @@ impl HoleTable {
                 ring,
             });
         }
+        for c in v["threads"].as_array().into_iter().flatten() {
+            let ring = (|| {
+                let radius = if c["internal"].as_bool()? {
+                    c["major"].as_f64()?
+                } else {
+                    c["minor"][0].as_f64()?
+                } / 2.0;
+                Some((
+                    point(&c["axis"])?,
+                    point(&c["mouth"])?,
+                    point(&c["end"])?,
+                    radius,
+                ))
+            })();
+            if let Some(r) = ring {
+                let feature = c["feature"].as_str().unwrap_or_default().to_owned();
+                t.threads.push((feature, r));
+            }
+        }
         t
+    }
+
+    /// Every ring, labelled: the tapped holes', then the cosmetic threads'.
+    fn labelled(&self) -> Vec<(String, RingAxis)> {
+        self.rows
+            .iter()
+            .filter_map(|r| Some((r.reference.clone(), r.ring?)))
+            .chain(self.threads.iter().cloned())
+            .collect()
+    }
+
+    /// Every ring: the tapped holes', then the cosmetic threads'.
+    pub fn rings(&self) -> Vec<RingAxis> {
+        self.labelled().into_iter().map(|(_, r)| r).collect()
     }
 
     pub fn by_face(&self, face: &str) -> Option<&HoleRow> {
@@ -145,10 +181,7 @@ fn unit(a: [f64; 3]) -> Option<[f64; 3]> {
 /// A ring at each end of each tapped hole's thread, 64 segments each.
 pub fn marks(t: &HoleTable) -> Vec<Ring> {
     let mut out = Vec::new();
-    for r in &t.rows {
-        let Some((axis, mouth, end, radius)) = r.ring else {
-            continue;
-        };
+    for (label, (axis, mouth, end, radius)) in t.labelled() {
         let Some(n) = unit(axis) else {
             continue;
         };
@@ -170,7 +203,7 @@ pub fn marks(t: &HoleTable) -> Vec<Ring> {
                 })
                 .collect();
             out.push(Ring {
-                hole: r.reference.clone(),
+                hole: label.clone(),
                 points,
                 dashed: true,
             });
@@ -268,5 +301,19 @@ mod tests {
         }
         assert_eq!(marks[0].points[0][2], 0.012);
         assert_eq!(marks[1].points[0][2], 0.0);
+    }
+
+    #[test]
+    fn cosmetic_threads_give_rings_at_their_minor_diameter() {
+        let t = HoleTable::from_list(&serde_json::json!({"holes": [], "threads": [{
+            "feature": "p/t", "designation": "M10x1.5-6g", "internal": false,
+            "major": 0.010, "minor": [0.008376, 0.008376],
+            "axis": [0.0, 0.0, -1.0], "mouth": [0.04, 0.0, 0.02], "end": [0.04, 0.0, 0.008],
+            "faces": ["p/shaft/00000000000000000000000000000001"]}]}));
+        let rings = t.rings();
+        assert_eq!(rings.len(), 1);
+        assert!((rings[0].3 - 0.004188).abs() < 1e-12);
+        let m = marks(&t);
+        assert_eq!((m.len(), m[0].hole.as_str()), (2, "p/t"));
     }
 }

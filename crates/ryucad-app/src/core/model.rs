@@ -70,6 +70,20 @@ pub struct Feature {
     pub spec: Option<String>,
 }
 
+/// A cosmetic thread's row label from its report's thread, as its file
+/// says it: `M10 6g`, or `M10` with no class.
+pub(crate) fn cosmetic_label(f: &serde_json::Value) -> Option<String> {
+    if f["type"] != "cosmetic_thread" {
+        return None;
+    }
+    let t = &f["thread"];
+    let size = t["size"].as_str()?;
+    Some(match t["class"].as_str() {
+        Some(c) => format!("{size} {c}"),
+        None => size.to_owned(),
+    })
+}
+
 impl Feature {
     /// Whether it founds the body named by its own ID: its operation is
     /// none, or `new`, as a sew's or a thicken's from a sheet reports it
@@ -726,7 +740,10 @@ impl Part {
                             solids: texts(&d["solids"]),
                             named: Vec::new(),
                         }),
-                        spec: f["spec"].as_str().map(str::to_owned),
+                        spec: f["spec"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .or_else(|| cosmetic_label(f)),
                     })
                     .collect()
             })

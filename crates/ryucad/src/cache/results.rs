@@ -6,7 +6,8 @@
 //! and [`Built`] (the body, the journal, the origins as JSON, the hash),
 //! the hash, what it applied, if anything, a feature's report (an
 //! import's, a fill's, a draft's angles), and an unfold's flat, written only when it has one (so every other entry keeps
-//! its bytes). A tool's entry is its own
+//! its bytes), and a hole's other tools, after its places, only when it
+//! has any. A tool's entry is its own
 //! body's `Built`. Integers are little-endian, byte strings length-first.
 //! Anything that doesn't read back exactly is `None`: a miss.
 
@@ -62,6 +63,12 @@ impl<'a> Reader<'a> {
 
     fn id(&mut self) -> Option<Id> {
         Id::parse(self.str()?, "feature").ok()
+    }
+
+    fn byte(&mut self) -> Option<u8> {
+        let (&b, rest) = self.0.split_first()?;
+        self.0 = rest;
+        Some(b)
     }
 
     fn flag(&mut self) -> Option<bool> {
@@ -203,15 +210,18 @@ pub fn encode_made(m: &Made) -> Vec<u8> {
             w.built(&a.body);
             w.str(a.operation.as_str());
             w.count(a.places.len());
-            for (point, r) in &a.places {
-                match point {
-                    None => w.flag(false),
-                    Some(p) => {
-                        w.flag(true);
-                        w.str(p.as_str());
-                    }
+            for (i, (point, r)) in a.places.iter().enumerate() {
+                // Bit 1: a point follows; bit 2: the place has a tool of
+                // its own, after the places (never set before 28.B).
+                let other = a.others.iter().any(|(j, _)| *j == i);
+                w.0.push(u8::from(point.is_some()) | if other { 2 } else { 0 });
+                if let Some(p) = point {
+                    w.str(p.as_str());
                 }
                 w.bytes(&ryukei::codec::encode_rigid(r));
+            }
+            for (_, b) in &a.others {
+                w.built(b);
             }
             w.str(&a.hash);
         }
@@ -245,16 +255,29 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
         let operation = Operation::parse(r.str()?)?;
         let n = r.count()?;
         let mut places = Vec::with_capacity(n);
-        for _ in 0..n {
-            let point = if r.flag()? { Some(r.id()?) } else { None };
+        let mut marked = Vec::new();
+        for i in 0..n {
+            let byte = r.byte()?;
+            if byte > 3 {
+                return None;
+            }
+            let point = if byte & 1 == 1 { Some(r.id()?) } else { None };
+            if byte & 2 == 2 {
+                marked.push(i);
+            }
             let rigid = ryukei::codec::decode_rigid(r.bytes()?).ok()?;
             places.push((point, rigid));
+        }
+        let mut others = Vec::with_capacity(marked.len());
+        for i in marked {
+            others.push((i, Arc::new(r.built()?)));
         }
         let hash = r.str()?.to_owned();
         Some(Arc::new(Applied {
             body,
             operation,
             places,
+            others,
             hash,
         }))
     } else {
@@ -384,9 +407,50 @@ mod tests {
                 assert_eq!(x.operation, y.operation);
                 assert_eq!(x.places, y.places);
                 assert_eq!(x.hash, y.hash);
+                assert_eq!(x.others.len(), y.others.len());
+                for ((i, a), (j, b)) in x.others.iter().zip(&y.others) {
+                    assert_eq!(i, j);
+                    assert_eq!(a.body.dump(), b.body.dump());
+                    assert_eq!(a.hash, b.hash);
+                }
             }
             _ => panic!("applied differs"),
         }
+    }
+
+    #[test]
+    fn a_holes_other_tools_come_back_and_old_entries_read_as_before() {
+        let made = made();
+        // BLAKE3 of the bytes the writer gave these entries before 28.B:
+        // an Applied with no other tools still writes exactly them, so
+        // every entry written before reads back as it did.
+        const OLD: [&str; 3] = [
+            "9c2ed2263b1174e8830a3d88fb7cc25f4b0dfb2cb71ca1d0d55c7e001c27368b",
+            "5e34c269d35631ce16378ec14dd1e762b219b08382155cddbebb914f63b884e6",
+            "7c803faf03b4e2808624469cb0bc50a5c08efdc8857896ba7d2be0fcb937fbcc",
+        ];
+        for (m, old) in made.iter().zip(OLD) {
+            let bytes = encode_made(m);
+            assert_eq!(blake3::hash(&bytes).to_hex().as_str(), old);
+            let back = decode_made(&bytes).unwrap();
+            assert!(back.applied.as_ref().is_none_or(|a| a.others.is_empty()));
+        }
+        // A hole with a tool of its own at its second place.
+        let mut m = made[1].clone();
+        let a = m.applied.clone().unwrap();
+        let mut places = a.places.clone();
+        places.push(places[0].clone());
+        let other = Arc::clone(&made[0].solids[0].1);
+        m.applied = Some(Arc::new(Applied {
+            places,
+            others: vec![(1, other)],
+            ..(*a).clone()
+        }));
+        let bytes = encode_made(&m);
+        let back = decode_made(&bytes).unwrap();
+        same(&m, &back);
+        assert_eq!(back.applied.as_ref().unwrap().others.len(), 1);
+        assert_eq!(encode_made(&back), bytes);
     }
 
     #[test]

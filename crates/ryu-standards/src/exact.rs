@@ -46,6 +46,47 @@ impl Big {
         Big(out)
     }
 
+    /// `self + other`.
+    pub(crate) fn add(&self, other: &Big) -> Big {
+        let n = self.0.len().max(other.0.len());
+        let mut out = Vec::with_capacity(n + 1);
+        let mut carry = 0u64;
+        for i in 0..n {
+            let s = u64::from(*self.0.get(i).unwrap_or(&0))
+                + u64::from(*other.0.get(i).unwrap_or(&0))
+                + carry;
+            out.push(s as u32);
+            carry = s >> 32;
+        }
+        if carry > 0 {
+            out.push(carry as u32);
+        }
+        Big::trimmed(out)
+    }
+
+    /// `self - other`; `other` is no greater.
+    pub(crate) fn sub(&self, other: &Big) -> Big {
+        debug_assert!(*other <= *self);
+        let mut out = Vec::with_capacity(self.0.len());
+        let mut borrow = 0i64;
+        for i in 0..self.0.len() {
+            let mut d = i64::from(self.0[i]) - i64::from(*other.0.get(i).unwrap_or(&0)) - borrow;
+            borrow = i64::from(d < 0);
+            if d < 0 {
+                d += 1 << 32;
+            }
+            out.push(d as u32);
+        }
+        Big::trimmed(out)
+    }
+
+    fn trimmed(mut v: Vec<u32>) -> Big {
+        while v.last() == Some(&0) {
+            v.pop();
+        }
+        Big(v)
+    }
+
     pub(crate) fn pow(&self, mut e: u32) -> Big {
         let mut base = self.clone();
         let mut acc = Big::from_u128(1);
@@ -185,5 +226,14 @@ mod tests {
         assert_eq!(round_div(5, 2), 3);
         assert_eq!(round_div(-5, 2), -2);
         assert_eq!(round_div(4_917_468, 1_000), 4_917);
+    }
+
+    #[test]
+    fn big_sums_differences_and_products() {
+        let a = prod(&[(10, 30)]);
+        let b = prod(&[(7, 20)]);
+        assert_eq!(a.add(&b).sub(&b), a);
+        assert_eq!(a.mul(&b), prod(&[(10, 30), (7, 20)]));
+        assert!(a.add(&b) > a);
     }
 }

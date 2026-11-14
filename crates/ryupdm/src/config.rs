@@ -21,12 +21,13 @@
 //! with `approvals` (design 261). A key a newer format added is refused in
 //! a file that declares an older one.
 
+use crate::PDM_CONFIG;
 use crate::approvals::Approvals;
-use ryucad_doc::doc::files::{Obj, header, invalid};
-use ryucad_doc::doc::project::PDM_CONFIG;
-use ryucad_doc::doc::source::Source;
-use ryucad_doc::error::{Code, Error, Result};
-use ryucad_doc::units::Dim;
+use crate::header;
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::files::{Obj, invalid};
+use ryu_doc::source::Source;
+use ryu_doc::units::Dim;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 

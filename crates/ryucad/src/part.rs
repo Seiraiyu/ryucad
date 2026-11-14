@@ -479,6 +479,11 @@ pub(crate) fn part_report(
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": d.hash,
                            "datum": d.report()})
                 }
+                // A cosmetic thread: its thread as data.
+                Ok(crate::rebuild::Output::Thread(t)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": t.hash,
+                           "thread": t.thread.to_json()})
+                }
                 Ok(crate::rebuild::Output::Path(m)) => {
                     let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
                                        "hash": m.hash});

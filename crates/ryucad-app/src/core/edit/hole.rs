@@ -200,5 +200,6 @@ impl FeatureForm for HoleForm {
 
 /// The tree's icon of a type this kind owns.
 pub(crate) fn icon(ty: &str, _op: Option<&str>, _form: Option<&str>) -> Option<&'static str> {
-    (ty == "hole").then_some("hole")
+    // A cosmetic thread takes the hole's icon: no new one is drawn.
+    matches!(ty, "hole" | "cosmetic_thread").then_some("hole")
 }

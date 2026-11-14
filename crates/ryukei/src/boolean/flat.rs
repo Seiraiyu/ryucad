@@ -613,6 +613,13 @@ mod tests {
     /// The twin's prism (`ryukei_testkit::nurbs::flat_span_twin`), built
     /// here from its extrusion and its underside set to `patch`'s form.
     fn prism() -> Body {
+        prism_of(&[0.0, 1.0, 1.01], &[4, 3, 4], &END, &W)
+    }
+
+    /// [`prism`] over any profile: the spline `knots`/`mults` through `xz`
+    /// (mm, from `(0, 1)`) with weights `w`, closed up to `z = 1` mm and
+    /// back to its start.
+    fn prism_of(knots: &[f64], mults: &[usize], xz: &[(f64, f64)], w: &[f64]) -> Body {
         use crate::geom::{Curve2, Frame, Line2, NurbsCurve2, Point2, Vector3};
         use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
         let frame = Frame::new(
@@ -621,13 +628,15 @@ mod tests {
             Vector3::new(1.0, 0.0, 0.0),
         )
         .unwrap();
-        let kv = KnotVector::clamped(3, &[0.0, 1.0, 1.01], &[4, 3, 4]).unwrap();
+        let kv = KnotVector::clamped(3, knots, mults).unwrap();
+        let t1 = knots[knots.len() - 1];
+        let (lx, lz) = xz[xz.len() - 1];
         let spline = NurbsCurve2::new(
             kv,
-            END.iter()
+            xz.iter()
                 .map(|&(x, z)| Point2::new(x * MM, z * MM))
                 .collect(),
-            Some(W.to_vec()),
+            Some(w.to_vec()),
         )
         .unwrap();
         let p = |x: f64, z: f64| Point2::new(x * MM, z * MM);
@@ -641,16 +650,20 @@ mod tests {
             frame,
             loops: vec![Loop {
                 key: LoopKey(3),
-                segments: vec![
-                    Segment {
+                segments: {
+                    let mut segs = vec![Segment {
                         key: SegmentKey(30),
                         curve: Curve2::Nurbs2(Arc::new(spline)),
                         t0: 0.0,
-                        t1: 1.01,
-                    },
-                    line(31, p(1.3, 0.0), p(1.3, 1.0)),
-                    line(32, p(1.3, 1.0), p(0.0, 1.0)),
-                ],
+                        t1,
+                    }];
+                    // Up to z = 1 mm, unless the spline ends there.
+                    if lz != 1.0 {
+                        segs.push(line(31, p(lx, lz), p(lx, 1.0)));
+                    }
+                    segs.push(line(32, p(lx, 1.0), p(0.0, 1.0)));
+                    segs
+                },
             }],
         })
         .unwrap();
@@ -662,15 +675,15 @@ mod tests {
             .unwrap();
         let mut pts = Vec::new();
         let mut ws = Vec::new();
-        for (i, &(x, z)) in END.iter().enumerate() {
+        for (i, &(x, z)) in xz.iter().enumerate() {
             for y in [0.0, -MM] {
                 pts.push(Point3::new(x * MM, y, z * MM));
-                ws.push(W[i]);
+                ws.push(w[i]);
             }
         }
         let n = NurbsSurface::new(
             [
-                KnotVector::clamped(3, &[0.0, 1.0, 1.01], &[4, 3, 4]).unwrap(),
+                KnotVector::clamped(3, knots, mults).unwrap(),
                 KnotVector::clamped(1, &[0.0, MM], &[2, 2]).unwrap(),
             ],
             pts,
@@ -683,6 +696,26 @@ mod tests {
         crate::pcurve::fill(&mut b).unwrap();
         assert_eq!(crate::check::check(&b), []);
         b
+    }
+
+    /// A flat span between two curved ones (#843's review): curved on both
+    /// sides of it, it can't be split off along one knot's row, and the
+    /// split is withheld at both knots, the body untouched.
+    #[test]
+    fn a_middle_flat_span_is_never_split() {
+        let mut xz = END.to_vec();
+        xz.extend([(1.4, 0.3), (1.6, 0.6), (1.6, 1.0)]);
+        let w = [1.0; 10];
+        let b = prism_of(&[0.0, 1.0, 1.01, 2.0], &[4, 3, 3, 4], &xz, &w);
+        let f = b
+            .faces()
+            .find(|&f| matches!(b.surfaces[b.faces[f].surface], Surface::Nurbs(_)))
+            .unwrap();
+        let spans = flat_spans(&b, f);
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        for s in &spans {
+            assert!(split_off(&b, OpKey(79), f, s).is_none(), "{s:?}");
+        }
     }
 
     /// The prism cut by a block turned about z, so its flat piece is the

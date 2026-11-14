@@ -264,6 +264,20 @@ pub(crate) fn dispatch(
         Request::AssemblyTree { part, path, depth } => {
             crate::assembly::tree(session, &part, path.as_deref(), depth)
         }
+        Request::HolesCheck {
+            part,
+            solid,
+            edge_factor,
+            min_engagement,
+            rev,
+        } => crate::hole::check::request(
+            session,
+            &part,
+            solid.as_deref(),
+            edge_factor,
+            min_engagement,
+            rev.as_deref(),
+        ),
         Request::HolesList {
             part,
             solid,
@@ -497,6 +511,22 @@ pub(crate) fn dispatch(
             resolutions,
             expected_revisions,
         } => crate::validate::resolve(session, &resolutions, &expected_revisions),
+        Request::Batch {
+            ops,
+            expect,
+            dry_run,
+            rebuild,
+        } => crate::batch::run(
+            session,
+            live,
+            me,
+            crate::batch::Ask {
+                ops,
+                expect,
+                dry_run,
+                rebuild: rebuild.unwrap_or(true),
+            },
+        ),
         Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
             "only a running daemon answers daemon requests",
@@ -561,13 +591,22 @@ pub(crate) fn dispatch(
             against,
             results,
             interference,
-        } => crate::check::run(
-            session,
-            part.as_deref(),
-            against.as_deref(),
-            results,
-            interference,
-        ),
+            holes,
+            edge_factor,
+            min_engagement,
+        } => holes
+            .then(|| crate::hole::check::Options::new(edge_factor, min_engagement))
+            .transpose()
+            .and_then(|holes| {
+                crate::check::run(
+                    session,
+                    part.as_deref(),
+                    against.as_deref(),
+                    results,
+                    interference,
+                    holes,
+                )
+            }),
         Request::Diff {
             from,
             to,

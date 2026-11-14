@@ -77,13 +77,6 @@ fn manifest_atom(at: &str) -> bool {
     matches!(seg.as_slice(), ["", "dependencies", _])
 }
 
-/// A lock's label is one value: two branches locking one label at
-/// different commits conflict there, not in its commit and content apart.
-fn lock_atom(at: &str) -> bool {
-    let seg: Vec<&str> = at.split('/').collect();
-    matches!(seg.as_slice(), ["", "projects", _, "labels", _])
-}
-
 /// The newest format of each file kind this build reads; kinds it doesn't
 /// model (ryupdm's) are merged by the generic rule at any format.
 pub fn newest(kind: &str) -> Option<u64> {
@@ -145,14 +138,14 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
     );
     let mut walk = walk(match kind.as_str() {
         crate::doc::files::PROJECT_KIND => Some(manifest_atom as fn(&str) -> bool),
-        crate::doc::lock::KIND => Some(lock_atom),
+        crate::doc::lock::KIND => Some(ryupdm::git::lock_atom),
         crate::doc::annotation::KIND => Some(annotation_atom),
         crate::doc::drawing::KIND => Some(drawing_atom),
         crate::doc::files::FEATURE_KIND => Some(feature_atom),
         _ => None,
     });
     let mut value = match kind.as_str() {
-        "ryupdm.release" | "ryupdm.obsolete" => walk.whole(b.as_ref(), &o, &t),
+        k if ryupdm::git::whole(k) => walk.whole(b.as_ref(), &o, &t),
         crate::doc::files::FEATURE_KIND => feature(&mut walk, b.as_ref(), &o, &t),
         crate::doc::files::PART_KIND => part(&mut walk, b.as_ref(), &o, &t),
         crate::doc::annotation::KIND => annotation(&mut walk, b.as_ref(), &o, &t),
@@ -231,14 +224,20 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         }
         Some(b) if same_type && ty(b).0 == Some(json!("thicken")) => thicken(walk, b, ours, theirs),
         // A hole's thread is one value (its size and pitch go together),
-        // and so are its fastener, its fit and its tolerance.
+        // and so are its fastener, its fit, its tolerance, its near
+        // chamfer and its far side.
         Some(b) if same_type && ty(b).0 == Some(json!("hole")) => atomic(
             walk,
             b,
             ours,
             theirs,
-            &["thread", "fastener", "fit", "tolerance"],
+            &["thread", "fastener", "fit", "tolerance", "near", "far"],
         ),
+        // A cosmetic thread's thread is one value, as a hole's is, and so is
+        // its start.
+        Some(b) if same_type && ty(b).0 == Some(json!("cosmetic_thread")) => {
+            atomic(walk, b, ours, theirs, &["thread", "from"])
+        }
         Some(b)
             if same_type
                 && matches!(
@@ -3262,6 +3261,28 @@ mod tests {
     }
 
     #[test]
+    fn near_and_far_merge_as_one_value_each() {
+        let base = json!({"format": 25, "kind": "ryucad.feature", "type": "hole", "sketch": "s",
+            "form": "simple", "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
+            "near": {"diameter": "7 mm"}});
+        let mut ours = base.clone();
+        ours["near"]["angle"] = json!("120 deg");
+        let mut theirs = base.clone();
+        theirs["near"]["diameter"] = json!("8 mm");
+        // Both changed the chamfer: a conflict on `near` as a whole.
+        let m = merge(Some(&base), &ours, &theirs);
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(at, ["/near"]);
+        // One adds a far side, the other a near angle: both kept.
+        let mut theirs = base.clone();
+        theirs["far"] = json!({"counterbore": {"diameter": "8 mm", "depth": "1 mm"}});
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["far"], theirs["far"]);
+        assert_eq!(m.value["near"], ours["near"]);
+    }
+
+    #[test]
     fn the_walk_and_the_record_are_ryu_gits() {
         // One record format for every product, under one member name.
         assert_eq!(crate::doc::project::CONFLICTS, ryu_git::value::CONFLICTS);
@@ -3277,5 +3298,31 @@ mod tests {
             &json!({"kind": "ryucad.test", "format": 1, "x": {"feature": "f0", "name": "e2"}}),
         );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/x"]);
+    }
+
+    #[test]
+    fn a_cosmetic_threads_thread_merges_as_one_value() {
+        let face = |k: u8| json!({"feature": "shaft", "name": format!("{k:032x}")});
+        let base = json!({"format": 25, "kind": "ryucad.feature", "type": "cosmetic_thread",
+            "faces": [face(1)], "thread": {"standard": "iso_metric", "size": "M10"}});
+        let mut ours = base.clone();
+        ours["thread"]["class"] = json!("4h");
+        let mut theirs = base.clone();
+        theirs["thread"]["size"] = json!("M12");
+        let m = merge(Some(&base), &ours, &theirs);
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(at, ["/thread"]);
+        // A depth on one side and a face added on the other: both kept.
+        let mut ours = base.clone();
+        ours["depth"] = json!("12 mm");
+        ours["from"] = face(3);
+        let mut theirs = base.clone();
+        theirs["faces"] = json!([face(1), face(2)]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["depth"], &m.value["faces"]),
+            (&json!("12 mm"), &json!([face(1), face(2)]))
+        );
     }
 }
