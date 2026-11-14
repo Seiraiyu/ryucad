@@ -323,6 +323,72 @@ fn ftc_07s_seam_pair_crossing_past_its_seam_is_withheld() {
     assert!(known_seam((&work, wa), (&work, wb), &[seam], &m).is_err());
 }
 
+/// FTC 07's torus/cylinder pair (#652, pairs 3 and 4), from the same
+/// cuts as the guard above, with the run stopped at its seam (design
+/// 642): the torus stays outside the region, so the seam is a frontier
+/// one, and the cylinder's pcurve along it is iso at its own box's end.
+/// Stopped half a strip past the circle, the run lies on its side of the
+/// circle's plane outside the strip, the torus on the other: met along
+/// the circle by the section plane.
+///
+/// Not yet (plan 19.A, Task 11): the run is a whole turn (its own pcurves
+/// span 2π, so `delete_turn` leaves it whole) and its seam with this torus
+/// a quarter of its end circle. Stopped half a strip past the seam, the
+/// rest of its rim lies past the circle's plane outside the seam's strip,
+/// so the run is on both sides of it (the torus on one): 19.B's plane stop.
+#[test]
+#[ignore = "#652: a whole-turn run stopped past a quarter-arc seam crosses its plane; 19.B's plane stop"]
+fn ftc_07s_seam_pair_is_met_once_its_run_stops() {
+    use crate::codec::decode_body;
+    use crate::geom::Surface;
+    use crate::intersect::{SeamKind, known_seam};
+    let input = decode_body(include_bytes!(
+        "../../../tests/data/nist_ftc_07_seam_input.body"
+    ))
+    .unwrap();
+    let work = decode_body(include_bytes!(
+        "../../../tests/data/nist_ftc_07_seam_work.body"
+    ))
+    .unwrap();
+    let e = input
+        .edges()
+        .find(|&e| input.edge_fins(e).count() == 2)
+        .expect("the seam edge");
+    let fins: Vec<_> = input.edge_fins(e).collect();
+    let face = |fin| input.loops[input.fins[fin].loop_].face;
+    let (ia, ib) = (face(fins[0]), face(fins[1]));
+    let working = |f: FaceId| match work.by_name(input.faces[f].name) {
+        Some(EntityId::Face(w)) => w,
+        _ => panic!("no working face for {f:?}"),
+    };
+    let is_run = |f: FaceId| matches!(input.surfaces[input.faces[f].surface], Surface::Cylinder(_));
+    assert!(is_run(ia) != is_run(ib), "a cylinder and a torus");
+    let run = if is_run(ia) { ia } else { ib };
+    let h = super::held::Held {
+        edge: e,
+        faces: [ia, ib],
+        kind: SeamKind::Frontier,
+    };
+    let wr = working(run);
+    let surface = work.surfaces[work.faces[wr].surface].clone();
+    let rect = crate::intersect::parameter_box(&work, wr);
+    let stopped = super::held::iso_stops(&input, run, &[h], &surface, rect);
+    assert_ne!(stopped, rect, "the run is stopped at its seam");
+    let (sheet, _) = crate::sheet::from_surface(K, &surface, stopped).unwrap();
+    let sf = sheet.faces().next().unwrap();
+    let torus = (&work, working(if run == ia { ib } else { ia }));
+    // The pair in the input's fin order, as `seam_for` takes it.
+    let (x, y) = if run == ia {
+        ((&sheet, sf), torus)
+    } else {
+        (torus, (&sheet, sf))
+    };
+    let seam = super::body::seam_for(&input, e, x, y, SeamKind::Frontier).expect("pcurves");
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    assert!(known_seam(x, y, &[seam], &m).is_ok());
+}
+
 /// Meets a committed cut's pair along the edges its two input faces
 /// share: each held (`partly`: tangent only in places), built as the
 /// re-trim builds it (`seam_for`, with `kind`), and met by `known_seam`
