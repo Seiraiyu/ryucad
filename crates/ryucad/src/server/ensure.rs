@@ -139,7 +139,16 @@ fn apply(
     if let Some(params) = &ask.params {
         crate::param::replace(session, &ask.part, params)?;
     }
-    let keep = 0; // Task 8
+    // With the parameters as they were, what already matches stays.
+    let params_moved = ask.params.is_some() && {
+        let rel = format!("parts/{pid}/{}", crate::doc::project::PARAMETERS);
+        status_of(&before, &session.snapshot(), &rel) != "unchanged"
+    };
+    let keep = if params_moved {
+        0
+    } else {
+        kept(session, &pid, &old, &declared)
+    };
     clear(session, &pid, &old[..keep])?;
     let mut warnings = Vec::new();
     for (j, e) in declared.iter().enumerate().skip(keep) {
@@ -226,6 +235,71 @@ fn status_of(before: &Files, after: &Files, rel: &str) -> &'static str {
         (Some(a), Some(b)) if a[..] != b[..] => "updated",
         _ => "unchanged",
     }
+}
+
+/// How many of `old` (the part's list) the declaration keeps as they are:
+/// the longest prefix declared in that order whose files `feature.add`
+/// (and, for a sketch, its ops and solve) would write again byte for
+/// byte. One that doesn't build ends it: adding it again says why.
+fn kept(session: &mut Session, pid: &Id, old: &[Id], declared: &[Entry]) -> usize {
+    let mut k = 0;
+    while k < old.len() && k < declared.len() && old[k] == declared[k].id {
+        let Some(f) = predicted(session, pid, &old[..k], &declared[k]) else {
+            break;
+        };
+        let same = session
+            .project()
+            .part(pid)
+            .ok()
+            .and_then(|p| p.features.get(&old[k]))
+            .and_then(|g| g.as_ref().ok())
+            .is_some_and(|g| g.to_json() == f.to_json());
+        if !same {
+            break;
+        }
+        k += 1;
+    }
+    k
+}
+
+/// The feature `e` would be written as, after `prefix`: what `feature.add`
+/// builds, and a sketch's ops applied and solved as `sketch.edit` would.
+fn predicted(session: &mut Session, pid: &Id, prefix: &[Id], e: &Entry) -> Option<Feature> {
+    let Request::FeatureAdd {
+        ty,
+        params,
+        placement,
+        fields,
+        id,
+        ..
+    } = e.add.clone()
+    else {
+        unreachable!("an entry is a feature add")
+    };
+    let given = crate::feature::Given {
+        params,
+        placement,
+        fields,
+    };
+    let (f, _) = super::feature::built(
+        session,
+        pid,
+        &ty,
+        given,
+        id.as_deref(),
+        prefix,
+        prefix.len(),
+    )
+    .ok()?;
+    let (Some(ops), Feature::Sketch(mut s)) = (&e.ops, f.clone()) else {
+        return Some(f);
+    };
+    let unit = session.project().manifest.default_unit;
+    let env = session.project().part(pid).ok()?.env.clone();
+    let applied = crate::sketch::apply(&mut s, pid, ops, unit, &env).ok()?;
+    let ctx = crate::sketch::context_now(session, pid, &e.id, &s).ok()?;
+    let (solved, report) = crate::sketch::solve_edited(&e.id, &s, &applied.moved, &ctx).ok()?;
+    (report.converged && report.state != ryusketch::State::Over).then_some(Feature::Sketch(solved))
 }
 
 /// Takes `pid`'s features other than `kept` out of its list and its
@@ -546,6 +620,41 @@ mod tests {
             ),
             (json!("deleted"), json!("unchanged"), json!("updated"))
         );
+    }
+
+    #[test]
+    fn an_ensure_keeps_the_prefix_that_already_matches() {
+        let (_dir, mut s) = twin();
+        let pid = crate::part::part_id("plate").unwrap();
+        let kept_of = |s: &mut Session, d: Value| {
+            let old = order(s.project().part(&pid).unwrap()).unwrap();
+            let es = entries("plate", d["features"].as_array().unwrap()).unwrap();
+            kept(s, &pid, &old, &es)
+        };
+        assert_eq!(
+            kept_of(&mut s, plate()),
+            3,
+            "all of it, the empty sketch too"
+        );
+        let mut d = plate();
+        d["features"][1]["params"]["radius"] = json!(3);
+        assert_eq!(kept_of(&mut s, d), 1);
+        let mut d = plate();
+        d["features"][0]["params"]["y"] = json!(21);
+        assert_eq!(kept_of(&mut s, d), 0);
+        let mut d = plate();
+        d["features"] = json!([d["features"][1], d["features"][0], d["features"][2]]);
+        assert_eq!(kept_of(&mut s, d), 0, "another order");
+        // A sketch drawn by ops is predicted through its solve.
+        let draw = json!([{"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                          {"op": "add", "id": "b", "type": "point", "at": [5, 0]},
+                          {"op": "add", "id": "l", "type": "line", "start": "a", "end": "b"}]);
+        let mut d = plate();
+        d["features"][2]["ops"] = draw.clone();
+        ensure(&mut s, d.clone()).unwrap();
+        assert_eq!(kept_of(&mut s, d.clone()), 3);
+        let r = ensure(&mut s, d).unwrap();
+        assert_eq!(r["written"], 0, "{r}");
     }
 
     #[test]
