@@ -797,6 +797,22 @@ fn along_carrier(
     let i = Interval::point;
     let chain = Chain2::new(spline, rs[0], rs[1]);
     let conic = Conic::of(carrier);
+    // The way every piece moves along the carrier (#883): certified the
+    // same for all of them, or the ends' stretch isn't the overlap.
+    let mut way: Option<bool> = None;
+    let mut agree = |rising: Option<bool>| -> bool {
+        match (rising, way) {
+            (None, _) => false,
+            (Some(r), None) => {
+                way = Some(r);
+                true
+            }
+            (Some(r), Some(w)) => r == w,
+        }
+    };
+    // A conic's angle swept by the pieces, each certified under half a
+    // turn, so that the ends' angles say how far it goes.
+    let mut sweep = 0.0;
     for p in &chain.pieces {
         let wmin = p.pts.iter().map(|h| h.w).fold(f64::INFINITY, f64::min);
         if !(wmin > 0.0 && wmin.is_finite()) {
@@ -806,10 +822,24 @@ fn along_carrier(
             (Curve2::Line2(l), _) => {
                 let (o, d) = (l.origin().to_vector(), l.dir());
                 let reach = tol - 4.0 * SLACK_2D;
-                p.pts.iter().all(|h| {
+                let on = p.pts.iter().all(|h| {
                     let off = (i(h.p.x) - i(o.x)) * i(-d.y) + (i(h.p.y) - i(o.y)) * i(d.x);
                     off.mag() <= reach
-                })
+                });
+                // `u / W`, the parameter along the line, moves one way:
+                // the numerator of its derivative, `u' W − u W'`, keeps a
+                // strict sign.
+                let us = Bernstein::new(
+                    p.pts
+                        .iter()
+                        .map(|h| {
+                            ((i(h.p.x) - i(o.x)) * i(d.x) + (i(h.p.y) - i(o.y)) * i(d.y)) * i(h.w)
+                        })
+                        .collect(),
+                );
+                let ws = Bernstein::new(p.pts.iter().map(|h| i(h.w)).collect());
+                let speed = us.deriv().mul(&ws).sub(&us.mul(&ws.deriv()));
+                on && agree(strict_sign(&speed))
             }
             (_, Some(k)) => {
                 let reach = tol - k.slack(p.pts[0].p);
@@ -836,7 +866,18 @@ fn along_carrier(
                     .add(&ys.mul(&ys).scale(a2))
                     .sub(&ws.mul(&ws).scale(a2 * b2));
                 let allowed = (i(reach) * i(wmin).square() * a2 * b2).lo() / k.big();
-                q.range().mag() <= allowed * (1.0 - 1e-12)
+                if q.range().mag() > allowed * (1.0 - 1e-12) {
+                    return None;
+                }
+                // The angle moves one way: `X Y' − Y X'` (the weights
+                // cancel) keeps a strict sign, positive where it turns
+                // from the first axis towards the second.
+                let turning = xs.mul(&ys.deriv()).sub(&ys.mul(&xs.deriv()));
+                if !agree(strict_sign(&turning)) {
+                    return None;
+                }
+                sweep += half_turn(p, k)?;
+                true
             }
             _ => return None,
         };
@@ -893,7 +934,10 @@ fn along_carrier(
             for &a in &ends(c0) {
                 for &b in &ends(c1) {
                     let ordered = (a < mid && mid < b) || (b < mid && mid < a);
-                    if inside(a) && inside(b) && inside(mid) && ordered {
+                    // The ends' stretch is the one the pieces swept, not
+                    // a turn more or less.
+                    let swept = (b - a - sweep).abs() < per / 4.0;
+                    if inside(a) && inside(b) && inside(mid) && ordered && swept {
                         return Some(vec![Meet2::Overlap { ta: rs, tb: [a, b] }]);
                     }
                 }
@@ -901,6 +945,52 @@ fn along_carrier(
             None
         }
     }
+}
+
+/// `Some(true)` when every coefficient is certified positive,
+/// `Some(false)` when every one is certified negative, else `None`.
+fn strict_sign(b: &Bernstein) -> Option<bool> {
+    let c = b.coefficients();
+    if c.iter().all(|x| x.lo() > 0.0) {
+        Some(true)
+    } else if c.iter().all(|x| x.hi() < 0.0) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The angle a piece sweeps about a conic's centre, in the conic's own
+/// parameter, from its start to its end: certified under half a turn by
+/// every control point (weights positive) lying strictly on one side of a
+/// line through the centre, in the frame scaled to a unit circle. `None`
+/// when that can't be certified.
+fn half_turn(p: &Piece2, k: &Conic) -> Option<f64> {
+    let i = Interval::point;
+    let unit = |v: Vector2| {
+        let r = v - k.c;
+        (r.dot(k.x) / k.ax, r.dot(k.y) / k.ay)
+    };
+    let (s, e) = (unit(p.pts[0].p), unit(p.pts[p.pts.len() - 1].p));
+    let (nx, ny) = (s.0 + e.0, s.1 + e.1);
+    let side = p.pts.iter().all(|h| {
+        let r = h.p - k.c;
+        let x = ((i(r.x) * i(k.x.x) + i(r.y) * i(k.x.y)) * i(k.ay)) * i(nx);
+        let y = ((i(r.x) * i(k.y.x) + i(r.y) * i(k.y.y)) * i(k.ax)) * i(ny);
+        (x + y).lo() > 0.0
+    });
+    if !side {
+        return None;
+    }
+    let (a0, a1) = (crate::math::atan2(s.1, s.0), crate::math::atan2(e.1, e.0));
+    let pi = core::f64::consts::PI;
+    let mut d = a1 - a0;
+    if d > pi {
+        d -= 2.0 * pi;
+    } else if d < -pi {
+        d += 2.0 * pi;
+    }
+    Some(d)
 }
 
 /// `A(s) Wb(t) - B(t) Wa(s)`, by component, for two pieces.
@@ -1735,6 +1825,82 @@ mod tests {
         assert!(
             (tb[0] - 1.0).abs() < 1e-12 && (tb[1] - 2.0).abs() < 1e-12,
             "{tb:?}"
+        );
+    }
+    /// A spline that lies on its carrier but doubles back along it isn't
+    /// answered from its ends (#883): a cubic on the x axis out to about
+    /// 2.3 and back to 1.5, against the segment [0, 2]; and two arcs of
+    /// the unit circle, 0° to 100° and back to 80°, the middle sample at
+    /// about 70°.
+    #[test]
+    fn a_spline_doubling_back_on_a_carrier_is_uncertain() {
+        use crate::geom::{KnotVector, NurbsCurve2};
+        use std::sync::Arc;
+        let tol = LINEAR_RESOLUTION;
+        let k3 = KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+        let pts = [(1.0, 0.0), (3.0, 0.0), (3.0, 0.0), (1.5, 0.0)]
+            .map(|(x, y)| Point2::new(x, y))
+            .to_vec();
+        let s = Curve2::Nurbs2(Arc::new(NurbsCurve2::new(k3, pts, None).unwrap()));
+        let l = line((0.0, 0.0), (2.0, 0.0));
+        assert_eq!(on_carrier((&s, [0.0, 1.0]), (&l.0, l.1), tol), None);
+        assert_eq!(on_carrier((&l.0, l.1), (&s, [0.0, 1.0]), tol), None);
+
+        let deg = |a: f64| a * core::f64::consts::PI / 180.0;
+        let on = |a: f64, r: f64| {
+            Point2::new(r * crate::math::cos(deg(a)), r * crate::math::sin(deg(a)))
+        };
+        let (h1, h2) = (deg(50.0), deg(10.0));
+        let k = KnotVector::clamped(2, &[0.0, 0.7, 1.0], &[3, 2, 3]).unwrap();
+        let pts = vec![
+            on(0.0, 1.0),
+            on(50.0, 1.0 / crate::math::cos(h1)),
+            on(100.0, 1.0),
+            on(90.0, 1.0 / crate::math::cos(h2)),
+            on(80.0, 1.0),
+        ];
+        let w = vec![1.0, crate::math::cos(h1), 1.0, crate::math::cos(h2), 1.0];
+        let back = Curve2::Nurbs2(Arc::new(NurbsCurve2::new(k, pts, Some(w)).unwrap()));
+        let c = circle((0.0, 0.0), 1.0, 0.0, TAU);
+        // The middle sample is between the ends, so only the turning
+        // tells.
+        let mid = back.point(0.5);
+        let a = crate::math::atan2(mid.y, mid.x);
+        assert!(a > 0.0 && a < deg(80.0), "{a}");
+        assert_eq!(on_carrier((&back, [0.0, 1.0]), (&c.0, c.1), tol), None);
+    }
+
+    /// A spline on a circle sweeping more than a turn isn't taken for
+    /// the stretch between its ends: five quarter arcs, 0° round to 450°.
+    #[test]
+    fn a_spline_winding_past_a_turn_is_uncertain() {
+        use crate::geom::{KnotVector, NurbsCurve2};
+        use std::sync::Arc;
+        let h = core::f64::consts::FRAC_1_SQRT_2;
+        let k =
+            KnotVector::clamped(2, &[0.0, 0.2, 0.4, 0.6, 0.8, 1.0], &[3, 2, 2, 2, 2, 3]).unwrap();
+        let corner = [
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (-1.0, 0.0),
+            (-1.0, -1.0),
+            (0.0, -1.0),
+            (1.0, -1.0),
+        ];
+        let pts = (0..=10)
+            .map(|i| {
+                let (x, y) = corner[i % 8];
+                Point2::new(x, y)
+            })
+            .collect();
+        let w = (0..=10).map(|i| if i % 2 == 1 { h } else { 1.0 }).collect();
+        let s = Curve2::Nurbs2(Arc::new(NurbsCurve2::new(k, pts, Some(w)).unwrap()));
+        let c = circle((0.0, 0.0), 1.0, 0.0, TAU);
+        assert_eq!(
+            on_carrier((&s, [0.0, 1.0]), (&c.0, c.1), LINEAR_RESOLUTION),
+            None
         );
     }
 }
