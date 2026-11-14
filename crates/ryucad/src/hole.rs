@@ -429,6 +429,10 @@ pub fn tool(
     build_tool(part, id, h, s, &drill, d, up, 0.0, None)
 }
 
+/// What a place's tool depends on: its depth, its exit (a far side or
+/// through_next), and whether its mouth reaches back.
+type Shape = (f64, Option<f64>, bool);
+
 /// A hole at places' tools: the first one's body, each place's motion
 /// from the canonical drill to its mouth, and the places whose tool isn't
 /// the first (as `rebuild::Applied::others`). Places share a tool when
@@ -454,7 +458,7 @@ pub fn at_places(
 ) -> Result<AtPlaces> {
     let next = h.depth == Depth::ThroughNext;
     // Each place's depth, exit, and whether it reaches back.
-    let mut each: Vec<(f64, Option<f64>, bool)> = Vec::with_capacity(mouths.len());
+    let mut each: Vec<Shape> = Vec::with_capacity(mouths.len());
     for (k, m) in mouths {
         let exit = if needs_exits(h) {
             let bodies = targets.iter().map(|b| &b.body);
@@ -505,7 +509,7 @@ pub fn at_places(
         .fold(0.0, f64::max);
     let drill = Drill::canonical();
     let close = |a: f64, b: f64| (a - b).abs() <= ryukei::tol::LINEAR_RESOLUTION;
-    let mut tools: Vec<((f64, Option<f64>, bool), Arc<Built>)> = Vec::new();
+    let mut tools: Vec<(Shape, Arc<Built>)> = Vec::new();
     let mut places = Vec::with_capacity(mouths.len());
     let mut others = Vec::new();
     for (i, ((k, m), e)) in mouths.iter().zip(&each).enumerate() {
