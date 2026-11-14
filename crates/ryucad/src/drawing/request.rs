@@ -1066,7 +1066,7 @@ pub fn export(
         .transpose()?;
     let (did, _) = file_of(session, &pid, drawing)?;
     let b = build(session, &pid, &did)?;
-    let job = session.job.clone();
+    let job = session.job().clone();
     let mut result = json!({"part": pid, "drawing": did, "format": format, "findings": b.findings});
     match format.as_str() {
         "pdf" | "svg" if unit.is_some() => Err(Error::new(

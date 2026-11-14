@@ -335,10 +335,10 @@ pub fn frames(session: &mut Session, ask: FramesAsk) -> Result<Value> {
         &json!({"frames": n}),
         motion_id.as_ref(),
     );
-    if let Some(v) = session.sweeps.get(&key) {
+    if let Some(v) = session.caches_mut().sweeps_mut().get(&key) {
         return Ok((*v).clone());
     }
-    let job = session.job.clone();
+    let job = session.job().clone();
     let ts: Vec<f64> = (0..n as usize)
         .map(|k| crate::motion::t_of(k, n as usize))
         .collect();
@@ -354,7 +354,10 @@ pub fn frames(session: &mut Session, ask: FramesAsk) -> Result<Value> {
             .collect::<Vec<_>>(),
         "warnings": resolved.warnings,
     });
-    session.sweeps.put(key, std::sync::Arc::new(v.clone()));
+    session
+        .caches_mut()
+        .sweeps_mut()
+        .put(key, std::sync::Arc::new(v.clone()));
     Ok(v)
 }
 
@@ -404,7 +407,7 @@ pub fn drawn(
     }
     let resolved = crate::motion::resolve(asm, &part, &rest, motion, &file)?;
     let model = session.model(asm, &Rev::Working)?;
-    let job = session.job.clone();
+    let job = session.job().clone();
     let steps = crate::motion::steps(
         &rest.asm,
         &resolved.drives,
@@ -428,14 +431,19 @@ pub fn drawn(
             asm,
             &model,
             &[],
-            &mut session.interference,
+            session.caches_mut().interference_mut(),
             &job,
         )?)
         .iter()
         .map(crate::motion::pair_key)
         .collect();
-        let found =
-            crate::interference::find_for(asm, &step, &[], &mut session.interference, &job)?;
+        let found = crate::interference::find_for(
+            asm,
+            &step,
+            &[],
+            session.caches_mut().interference_mut(),
+            &job,
+        )?;
         for i in pairs(&found)
             .iter()
             .filter(|i| !at_rest.contains(&crate::motion::pair_key(i)))
@@ -604,7 +612,7 @@ mod tests {
             crate::annotation::propose::tests::on_disk(dir.path()),
             files
         );
-        assert!(s.interference.is_empty(), "nothing intersected");
+        assert!(s.caches().interference().is_empty(), "nothing intersected");
     }
 
     /// `resolved` frames of a saved motion at `n` even fractions.
@@ -736,7 +744,7 @@ mod tests {
         .unwrap();
         assert_eq!(plain["frames"].as_array().unwrap().len(), FRAMES as usize);
         // Asked again: from the session's cache; nothing intersected.
-        let kept = s.sweeps.len();
+        let kept = s.caches().sweeps().len();
         let again = call(
             &mut s,
             "motion.frames",
@@ -744,8 +752,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(again, saved);
-        assert_eq!(s.sweeps.len(), kept);
-        assert!(s.interference.is_empty());
+        assert_eq!(s.caches().sweeps().len(), kept);
+        assert!(s.caches().interference().is_empty());
         // Refusals.
         for (p, code) in [
             (json!({"part": "swing"}), Code::InvalidParam),
@@ -937,7 +945,7 @@ mod tests {
             .result,
             before
         );
-        assert!(slot.as_ref().unwrap().interference.is_empty());
+        assert!(slot.as_ref().unwrap().caches().interference().is_empty());
         // Another part's render never reads the window's motion; one
         // named of a part is wrong_part_kind.
         let mut arm = small.clone();

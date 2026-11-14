@@ -131,7 +131,7 @@ pub(crate) fn pinned_within(
         locked.labels.get(&(part.clone(), label.to_owned()))
     );
     let key = (project.clone(), part.clone(), label.to_owned());
-    if let Some((f, r)) = session.foreign_pins.get(&key)
+    if let Some((f, r)) = session.foreign_pins_mut().get(&key)
         && *f == fingerprint
     {
         return r.clone();
@@ -141,7 +141,9 @@ pub(crate) fn pinned_within(
     // and `--no-daemon` runs fetch into the same machine-wide cache, and
     // this session must see it the next time it asks.
     if !r.as_ref().is_err_and(|e| decided_by_cache(e.code)) {
-        session.foreign_pins.insert(key, (fingerprint, r.clone()));
+        session
+            .foreign_pins_mut()
+            .insert(key, (fingerprint, r.clone()));
     }
     r
 }
@@ -361,7 +363,7 @@ pub(crate) fn prepare(
 ) -> Option<Box<dyn FnOnce() -> Prefetched + Send>> {
     use crate::proto::Request;
     // Nothing an earlier request left is taken for this one's.
-    session.prefetched.clear();
+    session.prefetched_mut().clear();
     let repos: Vec<(String, Vec<String>)> = match req {
         Request::DepsAdd { url, path, .. } => {
             if crate::doc::deps::url_fault(url).is_some()
@@ -582,7 +584,7 @@ pub fn add(
         .with("dependency", &d.name)
         .with("project", id));
     }
-    let mut pre = std::mem::take(&mut session.prefetched);
+    let mut pre = std::mem::take(session.prefetched_mut());
     let cache = session.deps_cache()?;
     let fetched = fetched(&cache, &mut pre, url, &[path])?;
     session.deps_fetched();
@@ -700,7 +702,7 @@ fn repositories(
 /// nothing in the project. `dependency_fetch_failed` (exit 4) for the
 /// first that can't be read.
 pub fn fetch(session: &mut Session, names: &[String]) -> Result<serde_json::Value> {
-    let mut pre = std::mem::take(&mut session.prefetched);
+    let mut pre = std::mem::take(session.prefetched_mut());
     let repos = repositories(session, names)?;
     let cache = session.deps_cache()?;
     let mut out = Vec::new();
@@ -1388,7 +1390,7 @@ pub(crate) mod tests {
         let (lib_dir, lib) = library();
         let (dir, mut s) = project();
         let cache = ryupdm::deps::Cache::new(dir.path().join("cache"));
-        s.deps_cache = Some(cache.clone());
+        *s.deps_cache_slot() = Some(cache.clone());
         depend(&mut s, &lib, lib_dir.path());
         place_foreign(dir.path(), "frame", "b", &lib, "p", "A");
         s.refresh().unwrap();
@@ -1437,7 +1439,7 @@ pub(crate) mod tests {
         let (lib_dir, lib) = library();
         let (dir, mut s) = project();
         let cache = ryupdm::deps::Cache::new(dir.path().join("cache"));
-        s.deps_cache = Some(cache.clone());
+        *s.deps_cache_slot() = Some(cache.clone());
         depend(&mut s, &lib, lib_dir.path());
         place_foreign(dir.path(), "frame", "b", &lib, "p", "A");
         s.refresh().unwrap();
@@ -1499,7 +1501,7 @@ pub(crate) mod tests {
         let (lib_dir, lib) = library();
         let (dir, mut s) = project();
         let cache = ryupdm::deps::Cache::new(dir.path().join("cache"));
-        s.deps_cache = Some(cache.clone());
+        *s.deps_cache_slot() = Some(cache.clone());
         depend(&mut s, &lib, lib_dir.path());
         place_foreign(dir.path(), "frame", "b", &lib, "p", "A");
         s.refresh().unwrap();
@@ -1637,14 +1639,14 @@ pub(crate) mod tests {
         let (dir, s) = crate::testing::fresh();
         let mut slot = Some(s);
         let session = slot.as_mut().unwrap();
-        session.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        *session.deps_cache_slot() = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
         let u = url(lib_dir.path());
         let req: crate::proto::Request =
             serde_json::from_value(json!({"method": "deps.add", "params": {"url": u}})).unwrap();
         let job = crate::server::prepare(&mut slot, &req).expect("a fetch to make");
         let give = job();
         give(slot.as_mut().unwrap());
-        assert_eq!(slot.as_ref().unwrap().prefetched.len(), 1);
+        assert_eq!(slot.as_mut().unwrap().prefetched_mut().len(), 1);
         let fetched_tip = git_out(lib_dir.path(), &["rev-parse", "HEAD"]);
         // The remote moves on after the fetch: the request answers from
         // what was fetched, never fetching again under the lock. (Moving
@@ -1658,7 +1660,7 @@ pub(crate) mod tests {
         let a = call(s, "deps.add", json!({"url": u})).unwrap();
         assert_eq!(a["fetched"]["release_branch"], "main");
         assert_eq!(a["fetched"]["tip"], fetched_tip.as_str(), "{a}");
-        assert!(s.prefetched.is_empty());
+        assert!(s.prefetched_mut().is_empty());
         // Requests that fetch nothing prepare nothing.
         let req: crate::proto::Request =
             serde_json::from_value(json!({"method": "deps.list", "params": {}})).unwrap();
@@ -1674,7 +1676,7 @@ pub(crate) mod tests {
         use std::sync::{Arc, Mutex};
         let (lib_dir, lib) = library();
         let (dir, mut s) = project();
-        s.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        *s.deps_cache_slot() = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
         depend(&mut s, &lib, lib_dir.path());
         let req: crate::proto::Request =
             serde_json::from_value(json!({"method": "deps.fetch", "params": {}})).unwrap();
@@ -1697,7 +1699,7 @@ pub(crate) mod tests {
         let got = fetch();
         let e = got[&url(lib_dir.path())].1.as_ref().unwrap_err();
         assert_eq!(e.code, Code::Cancelled);
-        s.prefetched = got;
+        *s.prefetched_mut() = got;
         let e = call(&mut s, "deps.fetch", json!({})).unwrap_err();
         assert_eq!(e.code, Code::Cancelled);
     }
@@ -1750,7 +1752,7 @@ pub(crate) mod tests {
     fn dependencies_are_added_fetched_and_listed() {
         let (lib_dir, lib) = library();
         let (dir, mut s) = crate::testing::fresh();
-        s.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        *s.deps_cache_slot() = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
         let u = url(lib_dir.path());
         let a = call(&mut s, "deps.add", json!({"url": u})).unwrap();
         // Named after the repository's folder, made an ID.
@@ -1881,7 +1883,7 @@ pub(crate) mod tests {
         let (lib_dir, lib) = library();
         let (dir, mut s) = project();
         let cache = ryupdm::deps::Cache::new(dir.path().join("cache"));
-        s.deps_cache = Some(cache.clone());
+        *s.deps_cache_slot() = Some(cache.clone());
         depend(&mut s, &lib, lib_dir.path());
         let add = |s: &mut Session, rev: &str| {
             call(
@@ -1984,7 +1986,7 @@ pub(crate) mod tests {
         assert_eq!(deps_findings(&mut s), []);
         // A newer release, fetched: outdated, a warning.
         release_again(lib_dir.path());
-        s.deps_cache
+        s.deps_cache_slot()
             .clone()
             .unwrap()
             .fetch(&url(lib_dir.path()), &[""])
@@ -2013,7 +2015,7 @@ pub(crate) mod tests {
             )
         );
         // Fetched again; the lock loses its label by hand: unlocked.
-        s.deps_cache
+        s.deps_cache_slot()
             .clone()
             .unwrap()
             .fetch(&url(lib_dir.path()), &[""])
@@ -2258,7 +2260,7 @@ pub(crate) mod tests {
         let lib = l.project().manifest.project.clone().unwrap();
         let (dir, mut s) = project();
         let cache = ryupdm::deps::Cache::new(dir.path().join("cache"));
-        s.deps_cache = Some(cache.clone());
+        *s.deps_cache_slot() = Some(cache.clone());
         depend(&mut s, &lib, lib_dir.path());
         place_foreign(dir.path(), "frame", "new", &lib, "p", "3");
         place_foreign(dir.path(), "frame", "old", &lib, "p", "1");
