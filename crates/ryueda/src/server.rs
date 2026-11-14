@@ -679,6 +679,39 @@ fn dispatch(
                 crate::parts::show_finish(pl, &cats, job)
             }
         },
+        Request::PdmInit {} => crate::pdm::cmd::init(session),
+        Request::PdmNewId { expected_revision } => {
+            crate::pdm::cmd::new_id(session, expected_revision.as_deref())
+        }
+        Request::PdmConfig {} => crate::pdm::cmd::config(session),
+        Request::PdmConfigure {
+            revisions,
+            release_branch,
+            pattern,
+            properties,
+            approvals,
+            bump,
+            force,
+            expected_revision,
+        } => crate::pdm::cmd::configure(
+            session,
+            crate::pdm::cmd::Change {
+                revisions,
+                release_branch,
+                pattern,
+                properties,
+                approvals,
+                bump,
+                force,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::PropsGet { part } => crate::pdm::cmd::get(session, &part),
+        Request::PropsSet {
+            part,
+            properties,
+            expected_revision,
+        } => crate::pdm::cmd::set(session, &part, properties, expected_revision.as_deref()),
         Request::PartsConfigure {
             assembly,
             build_quantity,

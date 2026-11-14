@@ -95,6 +95,15 @@ enum Command {
     /// project's libraries.
     #[command(subcommand)]
     Parts(PartsCmd),
+    /// Product data management (ryupdm): the settings in ryupdm.json.
+    /// Not `project edit --property`, which sets designator properties.
+    #[command(subcommand)]
+    Pdm(PdmCmd),
+    /// A part's PDM properties (number, name, description, ...): a
+    /// design's in a design project, a library component's in a library
+    /// project.
+    #[command(subcommand)]
+    Props(PropsCmd),
     /// Create, edit, show, list or delete functional blocks: their
     /// names, ports and buses.
     #[command(subcommand)]
@@ -888,6 +897,80 @@ impl CompArgs {
             alternate_offers: (!alternate_offers.is_empty()).then_some(alternate_offers),
         })
     }
+}
+
+#[derive(Subcommand)]
+// Configure's flags, parsed once per run.
+#[allow(clippy::large_enum_variant)]
+enum PdmCmd {
+    /// Write the default settings to ryupdm.json (keeps any it has).
+    Init,
+    /// Give a copied project an ID of its own (a fork): its records under
+    /// the old ID are read as the upstream's history, and its own labels
+    /// continue past them.
+    NewId {
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The settings, with their defaults filled in, and the PDM revision.
+    Config,
+    /// Change the settings; what isn't given stays.
+    Configure {
+        /// How revisions are labelled: letters (A, B, ...), numeric (1, 2,
+        /// ...) or numeric2 (01, 02, ...). Fixed once any part is released.
+        #[arg(long)]
+        revisions: Option<String>,
+        /// The branch whose history makes releases official.
+        #[arg(long, value_name = "BRANCH")]
+        release_branch: Option<String>,
+        /// The pattern every part number must match whole (Rust regex
+        /// syntax), or "" for none.
+        #[arg(long, value_name = "REGEX")]
+        pattern: Option<String>,
+        /// Declare a custom property:
+        /// voltage='{"type":"quantity","dim":"voltage"}'. Types: string,
+        /// text, integer, number, quantity (with "dim"), boolean, enum
+        /// (with "values"); "required" (false) and "revising" (true) are
+        /// optional.
+        #[arg(long = "property", value_name = "NAME=JSON", value_parser = declaration)]
+        properties: Vec<(String, Value)>,
+        /// Remove a custom property's declaration.
+        #[arg(long = "remove-property", value_name = "NAME")]
+        remove: Vec<String>,
+        /// Who must approve releases, as ryupdm.json holds it:
+        /// '{"rules":[{"count":1,"from":["alice","bob"],"parts":["*"]}]}'.
+        #[arg(long, value_name = "JSON", value_parser = json_object, conflicts_with = "no_approvals")]
+        approvals: Option<Value>,
+        /// Remove the approval rules.
+        #[arg(long)]
+        no_approvals: bool,
+        /// What the hosted review service does about newer releases of
+        /// other projects' parts this project places: none (show a notice)
+        /// or pr (also open a pull request moving to them).
+        #[arg(long, value_name = "none|pr")]
+        bump: Option<String>,
+        /// Write even if parts' properties stop fitting the settings.
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum PropsCmd {
+    /// Every PDM property of a part, set or not, with where its value
+    /// comes from (properties/ or the part's own file) and its faults.
+    Show { part: String },
+    /// Set PDM properties: number=100-0042 description="10k 0402"; NAME=
+    /// clears one. Values are read as each property's type.
+    Set {
+        part: String,
+        #[arg(value_name = "NAME=VALUE", value_parser = pair, required = true)]
+        values: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1785,6 +1868,20 @@ fn ops(s: &str) -> core::result::Result<Ops, String> {
     }
 }
 
+/// `NAME=JSON`, the JSON parsed.
+fn declaration(s: &str) -> core::result::Result<(String, Value), String> {
+    let (k, v) = pair(s)?;
+    let v = serde_json::from_str(&v).map_err(|e| format!("not JSON: {e}"))?;
+    Ok((k, v))
+}
+
+fn json_object(s: &str) -> core::result::Result<Value, String> {
+    match serde_json::from_str::<Value>(s) {
+        Ok(v @ Value::Object(_)) => Ok(v),
+        _ => Err("expected a JSON object".to_owned()),
+    }
+}
+
 fn pair(s: &str) -> core::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -2084,6 +2181,56 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         },
         Command::Parts(PartsCmd::Sources) => Request::PartsSources {},
         Command::Parts(PartsCmd::Refresh { force, .. }) => Request::PartsRefresh { force: *force },
+        Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
+        Command::Pdm(PdmCmd::NewId { expect }) => Request::PdmNewId {
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Pdm(PdmCmd::Config) => Request::PdmConfig {},
+        Command::Pdm(PdmCmd::Configure {
+            revisions,
+            release_branch,
+            pattern,
+            properties,
+            remove,
+            approvals,
+            no_approvals,
+            bump,
+            force,
+            expect,
+        }) => Request::PdmConfigure {
+            revisions: revisions.clone(),
+            release_branch: release_branch.clone(),
+            pattern: pattern.clone(),
+            properties: properties
+                .iter()
+                .cloned()
+                .chain(remove.iter().map(|n| (n.clone(), Value::Null)))
+                .collect(),
+            approvals: if *no_approvals {
+                Some(Value::Bool(false))
+            } else {
+                approvals.clone()
+            },
+            bump: bump.clone(),
+            force: *force,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Props(PropsCmd::Show { part }) => Request::PropsGet { part: part.clone() },
+        Command::Props(PropsCmd::Set {
+            part,
+            values,
+            expect,
+        }) => Request::PropsSet {
+            part: part.clone(),
+            properties: values
+                .iter()
+                .map(|(k, v)| {
+                    let v = if v.is_empty() { Value::Null } else { json!(v) };
+                    (k.clone(), v)
+                })
+                .collect(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Parts(PartsCmd::Configure {
             assembly,
             build_quantity,
