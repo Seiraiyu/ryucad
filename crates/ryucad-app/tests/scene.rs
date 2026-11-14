@@ -323,8 +323,14 @@ fn a_compare_ghosts_what_is_gone() {
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 1));
     p.ok(&["compare", "HEAD"]);
-    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
-        && ws.compare.as_ref().is_some_and(|c| c.ghosts.len() == 1)));
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| {
+        ws.idle()
+            && ws
+                .comparing
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.ghosts.len() == 1)
+    }));
     // From the top, over the box and the cylinder that stood on it.
     let (lo, hi) = ([-0.004, -0.004, 0.0], [0.021, 0.011, 0.013]);
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -356,7 +362,7 @@ fn a_compare_ghosts_what_is_gone() {
     );
     let at = |px: &[u8]| px[((y * size + x) * 4) as usize..][..3].to_vec();
     let plain = at(&draw(&mut scene));
-    scene.sync_ghosts(&device, ws.compare.as_ref());
+    scene.sync_ghosts(&device, ws.comparing.compare.as_ref());
     let ghosted = at(&draw(&mut scene));
     let red = |c: &[u8]| i32::from(c[0]) - i32::from(c[1]);
     // The removed colour through the ghost's translucency: redder by

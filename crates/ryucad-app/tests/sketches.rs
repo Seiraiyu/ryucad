@@ -85,7 +85,7 @@ fn dimension_open(p: &Project) -> Workspace {
     let mut ws = open(p);
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && drawn(ws)));
     ws.open_dimension(Some(("p".into(), "s".into(), "d1".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.dimension.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.dimension.is_some()));
     ws
 }
 
@@ -100,12 +100,13 @@ fn width_on_disk(p: &Project) -> String {
 fn a_dimension_saves_through_sketch_edit() {
     let p = Project::new().with_sketch();
     let mut ws = dimension_open(&p);
-    let f = ws.dimension.as_mut().unwrap();
+    let f = ws.forms.dimension.as_mut().unwrap();
     assert_eq!((f.ty.as_str(), f.value.read.as_str()), ("length", "width"));
     f.value.text = "width + 5 mm".into();
     ws.save_dimension();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.dimension
+        ws.forms
+            .dimension
             .as_ref()
             .is_some_and(|f| !f.saving && f.value.read == "width + 5 mm")
     }));
@@ -127,15 +128,18 @@ fn a_dimension_saves_through_sketch_edit() {
 fn a_stale_dimension_save_conflicts() {
     let p = Project::new().with_sketch();
     let mut ws = dimension_open(&p);
-    ws.dimension.as_mut().unwrap().value.text = "30 mm".into();
+    ws.forms.dimension.as_mut().unwrap().value.text = "30 mm".into();
     // An agent edits the same sketch first.
     let ops = r#"[{"op": "set", "id": "d1", "value": "25 mm"}]"#;
     p.ok(&["sketch", "edit", "p", "s", ops]);
     ws.save_dimension();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.dimension.as_ref().is_some_and(|f| f.changed.is_some())
+        ws.forms
+            .dimension
+            .as_ref()
+            .is_some_and(|f| f.changed.is_some())
     }));
-    let f = ws.dimension.as_ref().unwrap();
+    let f = ws.forms.dimension.as_ref().unwrap();
     let c = f.changed.as_ref().unwrap();
     assert_eq!((c.theirs.as_str(), c.yours.as_str()), ("25 mm", "30 mm"));
     assert_eq!(f.value.text, "25 mm");
@@ -146,12 +150,15 @@ fn a_stale_dimension_save_conflicts() {
 fn a_dimension_that_cant_hold_is_refused() {
     let p = Project::new().with_sketch();
     let mut ws = dimension_open(&p);
-    ws.dimension.as_mut().unwrap().value.text = "-3 mm".into();
+    ws.forms.dimension.as_mut().unwrap().value.text = "-3 mm".into();
     ws.save_dimension();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.dimension.as_ref().is_some_and(|f| f.error.is_some())
+        ws.forms
+            .dimension
+            .as_ref()
+            .is_some_and(|f| f.error.is_some())
     }));
-    assert!(ws.dimension.as_ref().unwrap().dirty());
+    assert!(ws.forms.dimension.as_ref().unwrap().dirty());
     assert_eq!(width_on_disk(&p), "width");
 }
 
@@ -164,13 +171,13 @@ fn a_feature_chosen_while_a_dimension_loads_stays_chosen() {
     // the dimension's answer, coming later, doesn't cover the feature.
     ws.open_dimension(Some(("p".into(), "s".into(), "d1".into())));
     ws.open_form(Some(("p".into(), "e".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.form.is_some()));
-    assert!(ws.dimension.is_none());
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.forms.form.is_some()));
+    assert!(ws.forms.dimension.is_none());
     // And the other way round: the feature's form doesn't wait behind it.
     ws.open_form(Some(("p".into(), "e".into())));
     ws.open_dimension(Some(("p".into(), "s".into(), "d1".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.dimension.is_some()));
-    assert!(ws.form.is_none());
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.forms.dimension.is_some()));
+    assert!(ws.forms.form.is_none());
     ws.open_dimension(None);
-    assert!(ws.form.is_none());
+    assert!(ws.forms.form.is_none());
 }

@@ -252,7 +252,7 @@ fn display_section(golden: &mut Golden) {
     let (_dir, mut session) = showcase();
     let part = Id::parse("show", "part").unwrap();
     for q in [Quality::Coarse, Quality::Fine] {
-        let meshes = ryucad::server::meshes(&mut session, &part, None, q).unwrap();
+        let meshes = ryucad::scene::meshes(&mut session, &part, None, q).unwrap();
         s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
     }
 }
@@ -280,7 +280,7 @@ fn cache_section(golden: &mut Golden) {
         .unwrap()
         .with_disk(Some(std::sync::Arc::clone(&disk)));
     let part = Id::parse("show", "part").unwrap();
-    ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+    ryucad::scene::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
     for kind in Kind::ALL.into_iter().filter(|k| k.shared()) {
         let keys = disk.keys_of(kind, &bytes);
         let mut entries: Vec<(u128, usize)> = keys
@@ -2092,7 +2092,7 @@ fn sweeps_section(golden: &mut Golden) {
     }
     s.str(&result.hash);
     let meshes =
-        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+        ryucad::scene::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
 }
 
@@ -2196,7 +2196,7 @@ fn solids_section(golden: &mut Golden) {
     }
     s.str(&result.hash);
     let meshes =
-        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+        ryucad::scene::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
     assert_eq!(meshes.len(), 1);
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
 }
@@ -2410,7 +2410,7 @@ fn blends_section(golden: &mut Golden) {
     }
     s.str(&result.hash);
     let meshes =
-        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+        ryucad::scene::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
     assert_eq!(meshes.len(), 1);
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
 }
@@ -3707,7 +3707,7 @@ fn references_section(golden: &mut Golden) {
     }
     s.str(&result.hash);
     let meshes =
-        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+        ryucad::scene::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
 }
 
@@ -5527,7 +5527,7 @@ fn drilled_section(golden: &mut Golden, name: &str, holes_only: bool) {
     }
     s.str(&result.hash);
     let meshes =
-        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+        ryucad::scene::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
     assert_eq!(meshes.len(), 1);
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
 }

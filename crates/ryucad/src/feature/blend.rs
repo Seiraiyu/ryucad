@@ -234,7 +234,7 @@ impl FeatureKind for Blends {
     // Edges of one solid, a face where a face goes, no edge twice; what
     // the kernel makes of them only rebuild can tell.
     fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
-        crate::rebuild::check_blend(&cx.proposed(f), cx.id, f, cx.results)
+        check_blend(&cx.proposed(f), cx.id, f, cx.results)
     }
 
     fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {

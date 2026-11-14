@@ -62,7 +62,7 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
     let at = |k: &str| ws.model.pose(&key("frame", k)).origin;
     let (a, b) = (at("b1/shank"), at("b2/shank"));
     assert!((b[0] - a[0] - 0.04).abs() < 1e-9, "{a:?} {b:?}");
-    let fetched = ws.fetched;
+    let fetched = ws.model.fetched;
     // The frame is the one root: it is what the window draws.
     assert_eq!(ws.model.shown(), ["frame"]);
     let drawn: Vec<_> = ws.model.drawn().map(|(k, ..)| k.clone()).collect();
@@ -76,7 +76,7 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
     let drawn: Vec<_> = ws.model.drawn().map(|(k, ..)| k.clone()).collect();
     assert_eq!(drawn, [key("bolt", "shank")]);
     assert_eq!(
-        ws.fetched, fetched,
+        ws.model.fetched, fetched,
         "the bolt's own mesh is the same body's"
     );
     // A move fetches nothing: the bolt is drawn where it is now.
@@ -87,7 +87,7 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
             && ws.model.focus.is_none()
             && (ws.model.pose(&key("frame", "b2/shank")).origin[1] - 0.01).abs() < 1e-9
     }));
-    assert_eq!(ws.fetched, fetched);
+    assert_eq!(ws.model.fetched, fetched);
 }
 
 #[test]
@@ -96,8 +96,8 @@ fn the_form_edits_an_instance() {
     let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("frame").is_some()));
     ws.open_form(Some(key("frame", "b2")));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
-    let f = ws.form.as_mut().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
+    let f = ws.forms.form.as_mut().unwrap();
     assert_eq!(f.ty, "instance");
     assert_eq!(f.origin[0].read, "40 mm");
     assert_eq!(f.rev.as_ref().unwrap().read, "working");
@@ -105,7 +105,10 @@ fn the_form_edits_an_instance() {
     f.fixed.as_mut().unwrap().chosen = true;
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+        ws.forms
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
     }));
     let shown = p.ok(&["feature", "show", "frame", "b2"]);
     assert_eq!(
@@ -154,7 +157,7 @@ fn the_tree_says_what_mates_leave_and_a_mate_paints_its_faces() {
     }));
     // Chosen, the mate paints the faces its connectors are on.
     ws.choose(Some(key("frame", "m1")));
-    let made = ws.made.as_ref().expect("the mate's faces");
+    let made = ws.model.made.as_ref().expect("the mate's faces");
     let bodies: Vec<&String> = made.faces.keys().map(|(_, b)| b).collect();
     assert_eq!(bodies, ["base/slab", "pin/shank"]);
 }
@@ -172,9 +175,10 @@ fn the_window_finds_which_instances_interfere_and_goes_stale_on_edits() {
         && ws.model.meshes.contains_key(&key("frame", "b3/shank"))));
     assert_eq!(ws.shown_assembly().as_deref(), Some("frame"));
     ws.check_interference();
-    let loaded = |ws: &Workspace| ws.idle() && ws.interference.as_ref().is_some_and(|i| i.loaded);
+    let loaded =
+        |ws: &Workspace| ws.idle() && ws.assembly.interference.as_ref().is_some_and(|i| i.loaded);
     assert!(ws.wait_until(WAIT, loaded));
-    let i = ws.interference.as_ref().unwrap();
+    let i = ws.assembly.interference.as_ref().unwrap();
     assert_eq!(i.pairs.len(), 1, "{i:?}");
     assert_eq!(
         (i.pairs[0].a.as_str(), i.pairs[0].b.as_str()),
@@ -185,8 +189,8 @@ fn the_window_finds_which_instances_interfere_and_goes_stale_on_edits() {
     // again on its own (design 525): the old answer stays listed.
     p.ok(&["assembly", "move", "frame", "b3", "--translate", "20mm,0,0"]);
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.interference.as_ref().is_some_and(|i| i.stale)));
-    let i = ws.interference.as_ref().unwrap();
+        && ws.assembly.interference.as_ref().is_some_and(|i| i.stale)));
+    let i = ws.assembly.interference.as_ref().unwrap();
     assert!(i.loaded, "{i:?}");
     assert_eq!(i.pairs.len(), 1, "{i:?}");
     assert_eq!(i.faces().count(), 0, "{i:?}");
@@ -195,6 +199,7 @@ fn the_window_finds_which_instances_interfere_and_goes_stale_on_edits() {
     assert!(ws.wait_until(WAIT, |ws| {
         loaded(ws)
             && ws
+                .assembly
                 .interference
                 .as_ref()
                 .is_some_and(|i| !i.stale && i.pairs.is_empty())
@@ -271,8 +276,11 @@ fn the_window_shows_plays_and_follows_a_participants_motion() {
         "1",
     ]);
     assert!(ws.wait_until(WAIT, |ws| (z(ws) - rest - 0.03).abs() < 1e-9));
-    assert_eq!(ws.motions.list.len(), 2);
-    assert_eq!(ws.motions.frames.as_ref().unwrap().frames.len(), 120);
+    assert_eq!(ws.assembly.motions.list.len(), 2);
+    assert_eq!(
+        ws.assembly.motions.frames.as_ref().unwrap().frames.len(),
+        120
+    );
     // The slider moves it at once, to its nearest frame, and is written.
     ws.slide_motion(0.5);
     let want = 0.03 * 60.0 / 119.0;
@@ -294,7 +302,7 @@ fn the_window_shows_plays_and_follows_a_participants_motion() {
     ws.tick(std::time::Instant::now());
     assert_ne!(z(&ws), before, "Play moved it");
     ws.play_motion(false);
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.motions.playing()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.assembly.motions.playing()));
     assert_eq!(shown_of(&p)["playing"], false);
     // An agent's fraction is followed.
     p.ok(&["motion", "show", "--fraction", "0"]);
@@ -333,12 +341,12 @@ fn the_window_shows_plays_and_follows_a_participants_motion() {
     assert!(ws.wait_until(WAIT, |ws| z(ws) > rest + 0.029));
     p.ok(&["explode", "show", "apart"]);
     assert!(ws.wait_until(WAIT, |ws| (z(ws) - rest - 0.01).abs() < 1e-9));
-    assert!(ws.motions.shown.is_none());
+    assert!(ws.assembly.motions.shown.is_none());
     // Edited from the window: the motion's range written.
     p.ok(&["motion", "show", "lift", "--part", "frame"]);
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.motions.current("frame").is_some()));
-    ws.motions.editing = Some((
+        && ws.assembly.motions.current("frame").is_some()));
+    ws.assembly.motions.editing = Some((
         "lift".into(),
         vec![ryucad_app::core::motion::Range {
             drive: 0,
@@ -363,11 +371,11 @@ fn a_sweep_from_the_window_marks_and_lists_what_collides() {
     let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("frame").is_some()));
     p.ok(&["motion", "show", "slam", "--part", "frame"]);
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.motions.frames_current()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.assembly.motions.frames_current()));
     ws.sweep_motion();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.motions.sweep.as_ref().is_some_and(|w| w.loaded)));
-    let w = ws.motions.sweep.clone().unwrap();
+        && ws.assembly.motions.sweep.as_ref().is_some_and(|w| w.loaded)));
+    let w = ws.assembly.motions.sweep.clone().unwrap();
     assert!(w.error.is_none(), "{w:?}");
     assert_eq!(w.pairs.len(), 1, "{w:?}");
     assert_eq!(w.pairs[0].label("frame"), "b1/shank and b2/shank");
@@ -381,24 +389,27 @@ fn a_sweep_from_the_window_marks_and_lists_what_collides() {
     // At the contact the faces are painted; at the start they aren't.
     ws.jump_motion(1.0);
     assert!(
-        !ws.motions
+        !ws.assembly
+            .motions
             .collision_faces(std::time::Instant::now())
             .is_empty()
     );
     ws.jump_motion(0.0);
     assert!(
-        ws.motions
+        ws.assembly
+            .motions
             .collision_faces(std::time::Instant::now())
             .is_empty()
     );
     // A change to the assembly makes it stale: listed, painted no more.
     p.ok(&["assembly", "move", "frame", "b2", "--translate", "0,10,0"]);
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.motions.sweep.as_ref().is_some_and(|w| w.stale)
+        ws.assembly.motions.sweep.as_ref().is_some_and(|w| w.stale)
     }));
     ws.jump_motion(1.0);
     assert!(
-        ws.motions
+        ws.assembly
+            .motions
             .collision_faces(std::time::Instant::now())
             .is_empty()
     );
@@ -426,13 +437,16 @@ fn a_mate_says_its_value_and_its_limits_are_edited_in_the_form() {
     );
     assert_eq!(m1(&ws).limits, Default::default());
     ws.open_form(Some(key("frame", "m1")));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
-    let f = ws.form.as_mut().unwrap().mate.as_mut().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
+    let f = ws.forms.form.as_mut().unwrap().mate.as_mut().unwrap();
     f.limits[0].text = "-10 deg".into();
     f.limits[1].text = "35 deg".into();
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+        ws.forms
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
     }));
     let shown = p.ok(&["feature", "show", "frame", "m1"]);
     assert_eq!(shown["limits"]["angle"]["min"], "-10 deg", "{shown}");

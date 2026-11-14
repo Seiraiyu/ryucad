@@ -30,8 +30,13 @@ pub fn state(o: &mut Opened) -> State {
         assembly_shown: o.ws.shown_assembly().is_some(),
         planar_face: o.view.selected_face(&o.ws).is_some(),
         weighable: o.ws.mass_target().is_some(),
-        comparing: o.ws.compare.as_ref().map(|c| c.named().to_owned()),
-        blink: o.ws.blink.clone(),
+        comparing: o
+            .ws
+            .comparing
+            .compare
+            .as_ref()
+            .map(|c| c.named().to_owned()),
+        blink: o.ws.comparing.blink.clone(),
         edges: o.view.edges,
         sketches: o.view.sketches,
         datums: o.view.datums,
@@ -39,23 +44,23 @@ pub fn state(o: &mut Opened) -> State {
         nav_cube: o.view.cube,
         triad: o.view.triad,
         origin: o.view.origin,
-        measuring: o.ws.measure.on,
+        measuring: o.ws.view.measure.on,
         selector: o.view.selector.is_some() || o.view.others.is_some(),
-        sectioned: !o.ws.sections.planes.is_empty(),
-        exploded: o.ws.explodes.shown.is_some(),
-        motion_shown: o.ws.motions.shown.is_some(),
+        sectioned: !o.ws.view.sections.planes.is_empty(),
+        exploded: o.ws.assembly.explodes.shown.is_some(),
+        motion_shown: o.ws.assembly.motions.shown.is_some(),
         filter: o.view.filter,
         scale: f64::from(crate::ui::app::scale_of(
-            o.ws.settings.get("ui.scale").unwrap_or(&json!(1.0)),
+            o.ws.session.settings.get("ui.scale").unwrap_or(&json!(1.0)),
         )),
-        mode: o.ws.mode,
+        mode: o.ws.session.mode,
         annotations: o.view.annotations,
-        flat: o.ws.flat_view.is_some(),
+        flat: o.ws.model.flat_view.is_some(),
         flattenable: o.ws.flat_candidate(o.view.chosen.as_ref()).is_some(),
         movable: move_target(&o.ws, o.view.chosen.as_ref()),
-        moving: o.ws.mover.is_some(),
-        mating: o.ws.mating.is_some(),
-        marking: o.ws.markup.as_ref().map(|m| m.tool),
+        moving: o.ws.assembly.mover.is_some(),
+        mating: o.ws.assembly.mating.is_some(),
+        marking: o.ws.annotations.markup.as_ref().map(|m| m.tool),
     }
 }
 
@@ -131,7 +136,8 @@ pub fn choices(o: &Opened, id: &str) -> Vec<Choice> {
             .map(|p| choice(p.display().to_string(), p.display().to_string(), false))
             .collect(),
         "view.named" => {
-            o.ws.views
+            o.ws.view
+                .views
                 .views
                 .iter()
                 .map(|v| Choice {
@@ -141,7 +147,7 @@ pub fn choices(o: &Opened, id: &str) -> Vec<Choice> {
                 .collect()
         }
         "view.quality" => {
-            let now = o.ws.settings.text("display.quality", "normal");
+            let now = o.ws.session.settings.text("display.quality", "normal");
             ["coarse", "normal", "fine"]
                 .iter()
                 .map(|q| choice(*q, *q, now == *q))
@@ -170,7 +176,7 @@ pub fn choose(o: &mut Opened, id: &str, key: &str) -> Option<Action> {
         "file.open_recent" => return Some(Action::Open(Some(key.into()))),
         "view.named" => o.view.restore_view(&mut o.ws, key),
         "view.quality" => {
-            if o.ws.settings.text("display.quality", "normal") != key {
+            if o.ws.session.settings.text("display.quality", "normal") != key {
                 o.ws.set_config("display.quality", json!(key));
             }
         }
@@ -212,7 +218,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
     }
     match id {
         "file.open" => return Some(Action::Open(None)),
-        "file.import_step" => o.ws.import = Some(crate::core::step::Import::new()),
+        "file.import_step" => o.ws.exchange.import = Some(crate::core::step::Import::new()),
         "file.update_import" => {
             let file = o.view.chosen.as_ref().and_then(|(p, f)| {
                 Some(
@@ -227,7 +233,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 )
             });
             if let Some(f) = file {
-                o.ws.import = Some(crate::core::step::Import::update(&f));
+                o.ws.exchange.import = Some(crate::core::step::Import::update(&f));
             }
         }
         "file.export" => {
@@ -294,22 +300,28 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         // tree's choice with it.
         "edit.clear_selection" => {
             // The Markup bar: the mark under way goes, then the tool.
-            if let Some(m) = o.ws.markup.as_mut() {
+            if let Some(m) = o.ws.annotations.markup.as_mut() {
                 if !m.escape() {
                     o.ws.cancel_markup();
                 }
-            } else if o.ws.mover.as_ref().is_some_and(|m| m.grip.is_some()) {
+            } else if o
+                .ws
+                .assembly
+                .mover
+                .as_ref()
+                .is_some_and(|m| m.grip.is_some())
+            {
                 o.ws.clear_move();
-            } else if o.ws.mover.is_some() {
+            } else if o.ws.assembly.mover.is_some() {
                 o.ws.cancel_move();
-            } else if o.ws.mating.is_some() {
+            } else if o.ws.assembly.mating.is_some() {
                 o.ws.close_mate();
             } else if o.view.others.is_some() {
                 o.view.others = None;
             } else if o.view.selector.is_some() {
                 o.view.selector = None;
-            } else if o.ws.measure.on {
-                o.ws.measure.set(false);
+            } else if o.ws.view.measure.on {
+                o.ws.view.measure.set(false);
             } else {
                 if o.ws.myself().is_some_and(|m| !m.selection.is_empty()) {
                     o.ws.select(Vec::new(), SelectMode::Replace);
@@ -343,7 +355,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         // A sheet metal solid laid flat where its fixed flange lies, or
         // folded again.
         "view.flat" => {
-            let solid = match o.ws.flat_view {
+            let solid = match o.ws.model.flat_view {
                 Some(_) => None,
                 None => o.ws.flat_candidate(o.view.chosen.as_ref()),
             };
@@ -422,8 +434,8 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "view.compare_only_rev" => o.ws.compare_only(crate::core::compare::Front::Rev),
         "view.compare_only_working" => o.ws.compare_only(crate::core::compare::Front::Working),
         "measure.tool" => {
-            let on = !o.ws.measure.on;
-            o.ws.measure.set(on);
+            let on = !o.ws.view.measure.on;
+            o.ws.view.measure.set(on);
         }
         "measure.mass" => {
             if let Some(of) = o.ws.mass_target() {
@@ -450,27 +462,27 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         }
         "view.annotations" => toggle(o, "display.annotations", o.view.annotations),
         "annotation.add" | "annotation.here" => o.view.compose(&mut o.ws, id, target),
-        "edit.move" if o.ws.mover.is_some() && target.is_none() => o.ws.cancel_move(),
+        "edit.move" if o.ws.assembly.mover.is_some() && target.is_none() => o.ws.cancel_move(),
         // On the shown assembly, from what was right-clicked: an instance's
         // row, or an occurrence's entity (the first pick, too).
         // Markup (design 423): the bar opens on the shown model, locking
         // the camera where it is; again, it closes and its marks go.
-        "annotation.markup" if o.ws.markup.is_some() => o.ws.cancel_markup(),
+        "annotation.markup" if o.ws.annotations.markup.is_some() => o.ws.cancel_markup(),
         "annotation.markup" => {
             let camera = o.view.nav.camera.clone();
             if let Err(why) = o.ws.open_markup(camera) {
-                o.ws.drag_note = Some(why);
+                o.ws.assembly.drag_note = Some(why);
             }
         }
         "markup.undo" => {
-            if let Some(m) = o.ws.markup.as_mut() {
+            if let Some(m) = o.ws.annotations.markup.as_mut() {
                 m.undo();
             }
         }
         "markup.post" => o.ws.post_markup(),
         id if id.starts_with("markup.") => {
             if let (Some(m), Some(t)) = (
-                o.ws.markup.as_mut(),
+                o.ws.annotations.markup.as_mut(),
                 crate::core::markup::Tool::of_command(id),
             ) {
                 m.choose(t);
@@ -496,10 +508,10 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             match movable {
                 Some(Ok((part, instance))) => {
                     if let Err(why) = o.ws.start_move(&part, &instance) {
-                        o.ws.drag_note = Some(why);
+                        o.ws.assembly.drag_note = Some(why);
                     }
                 }
-                Some(Err(why)) => o.ws.drag_note = Some(why),
+                Some(Err(why)) => o.ws.assembly.drag_note = Some(why),
                 None => {}
             }
         }
@@ -509,7 +521,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         }
         // The tiles open where they live; the planes show their handles.
         "section.edit" => {
-            o.ws.sections.handles = true;
+            o.ws.view.sections.handles = true;
             crate::ui::shell::open(&mut o.tiles, "section");
             o.layout_dirty = true;
         }

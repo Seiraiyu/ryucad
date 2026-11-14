@@ -92,15 +92,17 @@ fn the_tab_lists_the_other_worktree_and_previews_merging_it() {
     assert!(ws.wait_until(WAIT, |ws| {
         ws.idle()
             && ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.loaded && !c.wanted.is_empty())
     }));
     let key = ("p".to_owned(), "base".to_owned());
-    let before = ws.compare.as_ref().unwrap().wanted[&key].clone();
+    let before = ws.comparing.compare.as_ref().unwrap().wanted[&key].clone();
     ok_in(&arm, &["feature", "edit", "p", "base", "--param", "x=16"]);
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.compare
+        ws.comparing
+            .compare
             .as_ref()
             .is_some_and(|c| c.wanted.get(&key).is_some_and(|h| *h != before))
     }));
@@ -120,7 +122,12 @@ fn a_branch_is_checked_out_from_the_window_and_refused_while_dirty() {
     p.ok(&["--as", "claude-1", "status", "reviewing"]);
     ws.load_branches();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.branches.branch_list.is_some() && ws.people.others(ws.me()).any(|p| p.name == "claude-1")
+        ws.branches.branch_list.is_some()
+            && ws
+                .session
+                .people
+                .others(ws.me())
+                .any(|p| p.name == "claude-1")
     }));
     assert_eq!(ws.branches.current_branch(), Some("main"));
     // The dialog names who else is attached.
