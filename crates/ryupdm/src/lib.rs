@@ -47,6 +47,8 @@ pub mod props;
 pub mod record;
 pub mod state;
 pub mod structure;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod where_used;
 
 /// ryupdm's settings, beside a project's manifest, in every product.
