@@ -1523,6 +1523,7 @@ fn every_protocol_method_has_a_command() {
         ("project.info", &["version"]),
         ("part.create", &["part", "create"]),
         ("part.delete", &["part", "delete"]),
+        ("part.ensure", &["part", "ensure"]),
         ("part.list", &["part", "list"]),
         ("feature.add", &["feature", "add"]),
         ("feature.edit", &["feature", "edit"]),
@@ -10275,4 +10276,92 @@ fn following_instance_patterns_from_the_cli() {
         .collect();
     assert_eq!(keys, ["screws:p1", "screws:p4"]);
     assert_eq!(f["driver"], "lid/layout");
+}
+
+/// `ryucad part ensure` (plan 31.C), both ways: created, then unchanged;
+/// a feature left out is deleted; a missing id is refused with its
+/// pointer; `batch --prune` deletes what no ensure named; through the
+/// daemon one `undo` takes the prune back.
+#[test]
+fn ensure_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.write(
+        "plate.json",
+        r#"{"params": {"w": "40 mm"}, "features": [
+        {"id": "slab", "type": "box", "params": {"x": "w", "y": 20, "z": 5}},
+        {"id": "knob", "type": "sphere", "params": {"radius": 2}}]}"#,
+    );
+    let v = p.ok(&["part", "ensure", "plate", "--from", "plate.json"]);
+    assert_eq!(
+        (v["status"].clone(), v["params"].clone()),
+        (json!("created"), json!("created")),
+        "{v}"
+    );
+    assert_eq!(v["features"], json!({"slab": "created", "knob": "created"}));
+    let again = p.ok(&["part", "ensure", "plate", "--from", "plate.json"]);
+    assert_eq!(again["status"], "unchanged", "{again}");
+    p.write(
+        "slab.json",
+        r#"{"params": {"w": "40 mm"}, "features": [
+        {"id": "slab", "type": "box", "params": {"x": "w", "y": 20, "z": 5}}]}"#,
+    );
+    let v = p.ok(&["part", "ensure", "plate", "--from", "slab.json"]);
+    assert_eq!(
+        v["features"],
+        json!({"slab": "unchanged", "knob": "deleted"}),
+        "{v}"
+    );
+    p.write("noid.json", r#"{"features": [{"type": "box"}]}"#);
+    let e = p.fails(
+        &["part", "ensure", "plate", "--from", "noid.json"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["pointer"], "/features/0/id", "{e}");
+    p.write("other.json", r#"{"part": "bolt", "features": []}"#);
+    p.fails(
+        &["part", "ensure", "plate", "--from", "other.json"],
+        "usage",
+        2,
+    );
+    p.ok(&["part", "create", "spare"]);
+    p.write(
+        "pruned.json",
+        r#"{"ops": [{"method": "part.ensure", "params": {"part": "plate",
+        "params": {"w": "40 mm"}, "features": [
+        {"id": "slab", "type": "box", "params": {"x": "w", "y": 20, "z": 5}}]}}]}"#,
+    );
+    let v = p.ok(&["batch", "pruned.json", "--prune"]);
+    assert_eq!(v["parts"]["spare"]["status"], "deleted", "{v}");
+    let (code, u) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    let list = p.run_in(&p.daemon, "", &["part", "list"]).1;
+    assert!(list.to_string().contains("\"spare\""), "{list}");
+}
+
+/// An ensure through a stdio session, both ways: created, then unchanged
+/// with nothing written.
+#[test]
+fn ensure_through_a_stdio_session() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let line = r#"{"jsonrpc":"2.0","id":ID,"method":"batch","params":{"ops":[{"method":"part.ensure","params":{"part":"p","features":[{"id":"b","type":"box","params":{"x":"10","y":"20","z":"5"}}]}}],"rebuild":false}}"#;
+    let (one, two) = (line.replace("ID", "1"), line.replace("ID", "2"));
+    let lines = [one.as_str(), two.as_str()];
+    let (a_code, a) = p.script(&p.direct, "", &lines);
+    let (b_code, b) = p.script(&p.daemon, "", &lines);
+    assert_eq!((a_code, b_code), (0, 0));
+    assert_eq!(a, b, "in process vs daemon");
+    assert_eq!(
+        a[0].0["result"]["ops"][0]["result"]["status"], "created",
+        "{}",
+        a[0].0
+    );
+    assert_eq!(
+        a[1].0["result"]["parts"]["p"]["status"], "unchanged",
+        "{}",
+        a[1].0
+    );
+    assert_eq!(a[1].0["result"]["written"], 0);
 }
