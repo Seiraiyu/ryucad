@@ -144,7 +144,7 @@ pub fn project_over_dependency(root: &Path) -> Session {
     let lib = root.join("lib");
     std::fs::create_dir_all(&lib).unwrap();
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)

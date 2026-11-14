@@ -369,58 +369,88 @@ impl Workspace {
         }
     }
 
-    /// Fetches display meshes, one body per request (an assembly's by the
-    /// batch), at [`Model::fetch_level`]: a part with one changed feature
-    /// sends one mesh, and a body already asked for at its current hash
-    /// isn't asked for again.
+    /// Fetches display meshes by the batch (`MESH_BATCH` to a request, a
+    /// part's solids as an assembly's occurrences, #801), at
+    /// [`Model::fetch_level`]: a part with one changed feature sends one
+    /// mesh, and a body already asked for at its current hash isn't asked
+    /// for again.
     pub(super) fn fetch(&mut self, bodies: Vec<BodyKey>) {
         // Coarse first in a large view: finer levels follow where they show.
         let level = self.model.fetch_level();
         let quality = (level != self.model.base).then(|| level.as_str().to_owned());
-        let mut batches: BTreeMap<String, Vec<(BodyKey, String)>> = BTreeMap::new();
+        let mut batches: BTreeMap<String, Vec<(BodyKey, String, String)>> = BTreeMap::new();
         for (key, hash) in self.model.ask(bodies) {
             self.model.fetched += 1;
-            // An assembly's bodies come by occurrence, many to a request,
-            // meshed side by side: an assembly may place 10,000.
             let assembly = self.model.parts.get(&key.0).is_some_and(|p| p.assembly);
-            match key.1.rsplit_once('/') {
-                Some(_) if assembly => {
-                    batches.entry(key.0.clone()).or_default().push((key, hash));
+            // What `mesh.get` names: an occurrence by its path, a solid by
+            // its founder. An assembly's own key without a path goes
+            // alone, as it always did.
+            let label = match key.1.rsplit_once('/') {
+                Some((path, _)) if assembly => path.to_owned(),
+                None if assembly => {
+                    self.fetch_one(&key.0, &key.1, quality.clone(), key.clone(), hash);
+                    continue;
                 }
-                _ => {
-                    let req = Request::MeshGet {
-                        part: key.0.clone(),
-                        feature: Some(key.1.clone()),
-                        features: Vec::new(),
-                        quality: quality.clone(),
-                        transfer: Some(Transfer::Compact),
-                        rev: self.model_rev(),
-                        flat: None,
-                        before: None,
-                    };
-                    self.send(req, Route::Model(model::Asked::Mesh(key, hash)));
-                }
-            }
+                _ => key.1.clone(),
+            };
+            batches
+                .entry(key.0.clone())
+                .or_default()
+                .push((key, hash, label));
         }
+        // By the batch, meshed side by side: an assembly may place 10,000
+        // bodies, and a flattened board's one part holds 4,000 (#801). A
+        // part's lone body keeps its own request.
         for (part, asked) in batches {
+            let assembly = self.model.parts.get(&part).is_some_and(|p| p.assembly);
+            if let [(key, hash, label)] = asked.as_slice()
+                && !assembly
+            {
+                self.fetch_one(&part, label, quality.clone(), key.clone(), hash.clone());
+                continue;
+            }
             for batch in asked.chunks(MESH_BATCH) {
-                let features = batch
-                    .iter()
-                    .filter_map(|(k, _)| Some(k.1.rsplit_once('/')?.0.to_owned()))
-                    .collect();
                 let req = Request::MeshGet {
                     part: part.clone(),
                     feature: None,
-                    features,
+                    features: batch.iter().map(|(_, _, l)| l.clone()).collect(),
                     quality: quality.clone(),
                     transfer: Some(Transfer::Compact),
                     rev: self.model_rev(),
                     flat: None,
                     before: None,
                 };
-                self.send(req, Route::Model(model::Asked::Meshes(batch.to_vec())));
+                self.model.mesh_requests += 1;
+                let asked = batch
+                    .iter()
+                    .map(|(k, h, _)| (k.clone(), h.clone()))
+                    .collect();
+                self.send(req, Route::Model(model::Asked::Meshes(asked)));
             }
         }
+    }
+
+    /// One body's mesh, in a request of its own.
+    fn fetch_one(
+        &mut self,
+        part: &str,
+        label: &str,
+        quality: Option<String>,
+        key: BodyKey,
+        hash: String,
+    ) {
+        let req = Request::MeshGet {
+            part: part.to_owned(),
+            feature: Some(label.to_owned()),
+            features: Vec::new(),
+            quality,
+            transfer: Some(Transfer::Compact),
+            rev: self.model_rev(),
+            flat: None,
+            before: None,
+        };
+        self.model.mesh_requests += 1;
+        self.send(req, Route::Model(model::Asked::Mesh(key, hash)));
     }
 
     /// Fetches bodies' meshes at the levels of detail the view wants,

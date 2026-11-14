@@ -158,24 +158,23 @@ fn dry(session: &Session, pid: &Id, fid: &Id, f: &Feature) -> Result<Value> {
     Ok(json!({"dry_run": true, "feature": feature_report(p, unit, fid, f)}))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn feature_add(
+/// What `feature.add` makes of `given`, placed at `at` in `list`: the
+/// kind's own steps in the order they have always had, nothing checked
+/// against the rest of the part and nothing written. Its `took`, when the
+/// kind reads one. `part.ensure` predicts a feature's file with it (plan
+/// 31.C).
+pub(super) fn built(
     session: &mut Session,
-    part: &str,
+    pid: &Id,
     ty: &str,
     given: Given,
     id: Option<&str>,
-    position: &Position,
-    expected: Option<&str>,
-    dry_run: bool,
-) -> Result<Value> {
-    let pid = part_id(part)?;
+    list: &[Id],
+    at: usize,
+) -> Result<(Feature, Option<Value>)> {
     let unit = session.project().manifest.default_unit;
-    let p = session.project().part(&pid)?;
-    check_revision(p, expected)?;
-    let mut list = order(p)?;
+    let p = session.project().part(pid)?;
     let env = p.env.clone();
-    let at = insert_at(&list, position)?;
     let kind = crate::feature::kind(ty);
     // A feature its part can't hold is refused before its fields are read.
     if kind.is_some() {
@@ -192,12 +191,12 @@ pub(crate) fn feature_add(
     }
     let mut cx = Write {
         session: &mut *session,
-        part: &pid,
+        part: pid,
         unit,
         env: &env,
         given,
         place: Place::New {
-            order: &list,
+            order: list,
             at,
             id,
         },
@@ -221,8 +220,26 @@ pub(crate) fn feature_add(
     k.refuse_others(ty, &cx.given)?;
     let f = k.from_given(ty, None, &mut cx)?;
     let took = cx.took.take();
-    // Its borrows of the session and the list end here.
-    drop(cx);
+    Ok((f, took))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn feature_add(
+    session: &mut Session,
+    part: &str,
+    ty: &str,
+    given: Given,
+    id: Option<&str>,
+    position: &Position,
+    expected: Option<&str>,
+    dry_run: bool,
+) -> Result<Value> {
+    let pid = part_id(part)?;
+    let p = session.project().part(&pid)?;
+    check_revision(p, expected)?;
+    let mut list = order(p)?;
+    let at = insert_at(&list, position)?;
+    let (f, took) = built(session, &pid, ty, given, id, &list, at)?;
     let p = session.project().part(&pid)?;
     let fid = match id {
         Some(id) => feature_id(id)?,

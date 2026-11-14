@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
+    let out = ryupdm::git_env::isolated()
         .args([
             "-c",
             "user.name=Test",

@@ -34,6 +34,9 @@ pub struct Session {
     /// The last [`SCENES`] scenes drawn, by their ask and the revisions
     /// they were drawn from, most recently used first.
     pub(crate) scenes: Vec<(String, std::sync::Arc<String>)>,
+    /// The release branch as last read and the refs it was read at
+    /// ([`crate::pdm::history`]): read again only when they move.
+    pub(crate) pdm: Option<(String, ryupdm::history::Releases)>,
 }
 
 /// `rel` (relative to the project, with `/`) as a path under `root`.
@@ -81,6 +84,7 @@ impl Session {
             revisions: Vec::new(),
             merge_status: None,
             scenes: Vec::new(),
+            pdm: None,
         })
     }
 

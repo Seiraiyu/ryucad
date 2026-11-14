@@ -26,7 +26,6 @@ mod common;
 use common::ryucad;
 use ryucad::bench::scale::{Spec, write};
 use ryucad_app::core::workspace::Workspace;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,7 +51,7 @@ fn opening_ten_thousand_occurrences_stays_within_the_budget() {
     };
     let made = write(&root, &spec, &[]);
     // In process, so no daemon starts before the budget is set.
-    let set = Command::new(&ryucad().exe)
+    let set = common::ryucad_cmd(&ryucad().exe)
         .args([
             "--no-daemon",
             "config",

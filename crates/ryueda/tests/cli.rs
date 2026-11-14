@@ -790,6 +790,17 @@ fn every_protocol_method_has_a_command() {
         ("style.unset", &["style", "unset"]),
         ("style.rule", &["style", "rule", "add"]),
         ("style.palette", &["style", "palette", "set"]),
+        ("pdm.init", &["pdm", "init"]),
+        ("pdm.new_id", &["pdm", "new-id"]),
+        ("pdm.config", &["pdm", "config"]),
+        ("pdm.configure", &["pdm", "configure"]),
+        ("props.get", &["props", "show"]),
+        ("props.set", &["props", "set"]),
+        ("release.propose", &["release", "propose"]),
+        ("release.obsolete", &["release", "obsolete"]),
+        ("release.list", &["release", "list"]),
+        ("release.check", &["release", "check"]),
+        ("release.sync", &["release", "sync"]),
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
@@ -1994,6 +2005,34 @@ impl Pair {
         }
         p
     }
+}
+
+#[test]
+fn pdm_settings_and_properties_answer_alike_in_process_and_through_the_daemon() {
+    let p = Pair::breakout();
+    p.ok(&["pdm", "init"]);
+    let v = p.ok(&["pdm", "configure", "--revisions", "numeric"]);
+    assert_eq!(v["revisions"], "numeric", "{v}");
+    p.ok(&["props", "set", "board", "number=100-0001"]);
+    let v = p.ok(&["props", "show", "board"]);
+    assert_eq!(v["kind"], "design", "{v}");
+    let number = v["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "number")
+        .unwrap();
+    assert_eq!(
+        (&number["value"], &number["from"]),
+        (&json!("100-0001"), &json!("properties")),
+        "{v}"
+    );
+    p.fails(
+        &["props", "set", "board", "colour=red"],
+        "property_unknown",
+        1,
+    );
+    p.fails(&["props", "show", "nope"], "not_found", 1);
 }
 
 #[test]

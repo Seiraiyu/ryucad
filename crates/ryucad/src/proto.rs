@@ -773,6 +773,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Makes part `part` exactly as declared (design 603): its kind, its
+    /// whole parameters file (left out: left alone), its whole ordered
+    /// feature list (each with its `id`; a sketch's `sketch.edit` ops as
+    /// `ops`; one left out is deleted) and, given, its properties, writing
+    /// only what differs. Usually one op of a `batch`.
+    #[serde(rename = "part.ensure")]
+    PartEnsure {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<Map<String, Value>>,
+        features: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        props: Option<Map<String, Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "part.list")]
     PartList {},
     #[serde(rename = "feature.add")]
@@ -1852,6 +1870,9 @@ pub enum Request {
         /// Rebuild what it changed after writing (left out: yes).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rebuild: Option<bool>,
+        /// Delete every part no `part.ensure` or `part.create` op named.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        prune: bool,
     },
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
@@ -2516,8 +2537,9 @@ pub enum Request {
         part: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feature: Option<String>,
-        /// Several of an assembly's occurrences (paths), meshed side by
-        /// side and answered together: a window fetching 10,000 bodies.
+        /// Several solids of a part, or occurrences of an assembly
+        /// (paths), meshed side by side and answered together: a window
+        /// fetching 10,000 bodies (#801: a part's too).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         features: Vec<String>,
         /// coarse, normal or fine; the user's display quality by default.
@@ -2705,6 +2727,7 @@ impl Request {
             Request::ProjectInit { .. }
                 | Request::PartCreate { .. }
                 | Request::PartDelete { .. }
+                | Request::PartEnsure { .. }
                 // A dry run reads the model without taking the write lock.
                 | Request::FeatureAdd { dry_run: false, .. }
                 | Request::FeatureEdit { dry_run: false, .. }
@@ -2846,6 +2869,7 @@ mod tests {
             expect,
             dry_run,
             rebuild,
+            ..
         } = &r
         else {
             panic!("{r:?}")
@@ -2870,6 +2894,40 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidDocument);
         assert_eq!(PROTOCOL_VERSION, 3);
+    }
+
+    #[test]
+    fn part_ensure_is_one_request_of_a_whole_part() {
+        let r = Request::from_rpc(
+            "part.ensure",
+            Some(json!({
+                "part": "p", "kind": "part", "params": {"w": "4 mm"},
+                "features": [{"id": "b", "type": "box", "params": {"x": "w", "y": 1, "z": 1}}],
+                "props": {"name": "P"}, "expected_revision": "r1"})),
+        )
+        .unwrap();
+        let Request::PartEnsure {
+            part,
+            kind,
+            params,
+            features,
+            props,
+            expected_revision,
+        } = &r
+        else {
+            panic!("{r:?}")
+        };
+        assert_eq!((part.as_str(), kind.as_deref()), ("p", Some("part")));
+        assert_eq!(params.as_ref().unwrap()["w"], "4 mm");
+        assert_eq!(features.len(), 1);
+        assert_eq!(props.as_ref().unwrap()["name"], "P");
+        assert_eq!(expected_revision.as_deref(), Some("r1"));
+        assert!(r.mutates());
+        assert_eq!(r.method(), "part.ensure");
+        let e = Request::from_rpc("part.ensure", Some(json!({"part": "p"}))).unwrap_err();
+        assert_eq!(e.code, Code::InvalidDocument, "features are required");
+        let b = Request::from_rpc("batch", Some(json!({"ops": [], "prune": true}))).unwrap();
+        assert!(matches!(b, Request::Batch { prune: true, .. }));
     }
 
     #[test]

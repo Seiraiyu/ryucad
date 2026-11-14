@@ -917,7 +917,9 @@ enum Command {
     /// own answer, each part's status (created, updated, unchanged or
     /// deleted, judged from the bytes) and revision, the files written,
     /// and the project's revision for the next --expect. `undo` takes back
-    /// the whole batch.
+    /// the whole batch. With --prune (or "prune": true), every part no
+    /// part.ensure or part.create op names is deleted, through part
+    /// delete's checks.
     Batch {
         /// The batch's JSON file, or - for stdin.
         #[arg(value_name = "FILE")]
@@ -935,6 +937,9 @@ enum Command {
         /// Write without rebuilding.
         #[arg(long, overrides_with = "rebuild")]
         no_rebuild: bool,
+        /// Delete every part no part.ensure or part.create op names.
+        #[arg(long)]
+        prune: bool,
     },
     /// Undo this agent's latest change, or the activity entry --entry.
     Undo {
@@ -1289,6 +1294,25 @@ enum PartCmd {
         expect: Expect,
     },
     List,
+    /// Make the part exactly as FILE declares it, writing only what
+    /// differs (design 603). FILE (or - for stdin) holds {"kind"?: "part"
+    /// | "assembly", "params"?: {NAME: EXPRESSION}, "features": [{"id":
+    /// ID, "type": TYPE, …feature add's params}, …], "props"?: {…}}: the
+    /// whole ordered feature list (one left out is deleted), each with its
+    /// id, a sketch's sketch-edit ops as "ops"; params the whole
+    /// parameters file (left out: left alone; {}: none); props as `props
+    /// set` takes them. The answer says created, updated, unchanged or
+    /// deleted for the part, each feature, the parameters and the
+    /// properties. Usually an op of `ryucad batch`, where many parts are
+    /// one change.
+    Ensure {
+        part: String,
+        /// The declaration's JSON file, or - for stdin.
+        #[arg(long, value_name = "FILE")]
+        from: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 // Parsed once per run; the size difference costs nothing.
@@ -4679,6 +4703,7 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Watch { .. }
         | Command::Cancel { .. }
         | Command::Batch { .. }
+        | Command::Part(PartCmd::Ensure { .. })
         | Command::Open { .. } => {
             return None;
         }
@@ -6129,21 +6154,12 @@ fn batch_request(cmd: &Command, here: &Path) -> Result<Option<Request>> {
         dry_run,
         rebuild,
         no_rebuild,
+        prune,
     } = cmd
     else {
         return Ok(None);
     };
-    let text = if file == "-" {
-        let mut t = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
-            .map_err(|e| Error::new(Code::Io, format!("stdin: {e}")))?;
-        t
-    } else {
-        let path = here.join(file);
-        std::fs::read_to_string(&path).map_err(|e| Error::io(&path, &e))?
-    };
-    let v: Value = serde_json::from_str(&text)
-        .map_err(|e| Error::new(Code::Usage, format!("the batch isn't JSON: {e}")))?;
+    let v = json_input(file, here, "the batch")?;
     let mut params = match v {
         Value::Array(_) => json!({ "ops": v }),
         Value::Object(_) => v,
@@ -6166,7 +6182,54 @@ fn batch_request(cmd: &Command, here: &Path) -> Result<Option<Request>> {
     if *no_rebuild {
         params["rebuild"] = json!(false);
     }
+    if *prune {
+        params["prune"] = json!(true);
+    }
     Request::from_rpc("batch", Some(params)).map(Some)
+}
+
+/// FILE's JSON, or stdin's for `-`; `usage` when it isn't JSON.
+fn json_input(file: &str, here: &Path, what: &str) -> Result<Value> {
+    let text = if file == "-" {
+        let mut t = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
+            .map_err(|e| Error::new(Code::Io, format!("stdin: {e}")))?;
+        t
+    } else {
+        let path = here.join(file);
+        std::fs::read_to_string(&path).map_err(|e| Error::io(&path, &e))?
+    };
+    serde_json::from_str(&text)
+        .map_err(|e| Error::new(Code::Usage, format!("{what} isn't JSON: {e}")))
+}
+
+/// The request `ryucad part ensure` sends: its file's declaration with
+/// the part (a file naming another is `usage`) and `--expect` over it.
+/// `None` for every other command.
+fn ensure_request(cmd: &Command, here: &Path) -> Result<Option<Request>> {
+    let Command::Part(PartCmd::Ensure { part, from, expect }) = cmd else {
+        return Ok(None);
+    };
+    let mut v = json_input(from, here, "the declaration")?;
+    let Some(o) = v.as_object_mut() else {
+        return Err(Error::new(
+            Code::Usage,
+            "a declaration is an object with features",
+        ));
+    };
+    if let Some(p) = o.get("part").and_then(Value::as_str)
+        && p != part
+    {
+        return Err(Error::new(
+            Code::Usage,
+            format!("the file declares part {p}, not {part}"),
+        ));
+    }
+    o.insert("part".into(), json!(part));
+    if let Some(r) = &expect.revision {
+        o.insert("expected_revision".into(), json!(r));
+    }
+    Request::from_rpc("part.ensure", Some(v)).map(Some)
 }
 
 /// The agent participant to act as.
@@ -6425,7 +6488,10 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             // request names is made absolute against `here` (`-C`'s).
             let req = match batch_request(cmd, &here)? {
                 Some(r) => r,
-                None => request(cmd).expect("every other command is a request"),
+                None => match ensure_request(cmd, &here)? {
+                    Some(r) => r,
+                    None => request(cmd).expect("every other command is a request"),
+                },
             };
             let req = client::absolute(req, &here)?;
             let root = find_root(&here)?;
@@ -8013,6 +8079,7 @@ mod tests {
                 "--no-rebuild",
                 "--expect",
                 "r1",
+                "--prune",
             ])
             .unwrap();
             let r = batch_request(&c.command, dir.path()).unwrap().unwrap();
@@ -8020,7 +8087,7 @@ mod tests {
                 serde_json::to_value(&r).unwrap(),
                 json!({"method": "batch", "params": {
                     "ops": [{"method": "part.create", "params": {"part": "p"}}],
-                    "expect": "r1", "dry_run": true, "rebuild": false}})
+                    "expect": "r1", "dry_run": true, "rebuild": false, "prune": true}})
             );
             std::fs::write(
                 dir.path().join("o.json"),
