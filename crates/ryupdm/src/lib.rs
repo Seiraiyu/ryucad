@@ -40,6 +40,7 @@ pub mod items;
 pub mod label;
 pub mod merge;
 pub mod package;
+pub mod product;
 pub mod props;
 pub mod record;
 pub mod state;
