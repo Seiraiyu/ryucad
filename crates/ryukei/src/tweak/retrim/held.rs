@@ -6,9 +6,10 @@
 //! can't move (`iso_stops`).
 
 use super::region::Region;
-use crate::geom::{Curve2, Surface};
-use crate::intersect::SeamKind;
+use crate::geom::{Curve2, Frame, Plane, Surface};
+use crate::intersect::{BESIDE_CELLS, SeamKind, face_beside, opposite_sides, section_plane};
 use crate::topo::{Body, EdgeId, FaceId, FinId};
+use crate::work::Meter;
 use crate::{Error, TweakCase, TweakError};
 use std::collections::BTreeMap;
 
@@ -144,6 +145,55 @@ pub(crate) fn margin(body: &Body, h: &Held) -> f64 {
         .get()
         .max(crate::tol::LINEAR_RESOLUTION);
     0.5 * crate::intersect::seam_strip(size, tol)
+}
+
+/// Whether running seams take plane stops (plan 19.B, Decision 4;
+/// question 916).
+pub(crate) const RUNNING_PLANE_STOPS: bool = false;
+
+/// Working face `f`'s stop plane at held seam `h` (design 642's plane
+/// stop): the plane `h`'s edge lies on (`section_plane`), where `f`'s
+/// and the other face's input faces are each certified on their own side
+/// of it outside the strip (twice [`margin`]), on opposite sides,
+/// turned so its normal points to the other face's side and moved the
+/// margin that way. `None` where the edge isn't planar, the faces aren't
+/// certified apart by it, `f` isn't one of `h`'s faces, or `h` is a
+/// running seam (unless [`RUNNING_PLANE_STOPS`]).
+pub(crate) fn stop_plane(body: &Body, f: FaceId, h: &Held, m: &Meter) -> Option<Plane> {
+    if h.kind == SeamKind::Running && !RUNNING_PLANE_STOPS {
+        return None;
+    }
+    let g = match h.faces {
+        [a, b] if a == f && b != f => b,
+        [a, b] if b == f && a != f => a,
+        _ => return None,
+    };
+    let x = &body.edges[h.edge];
+    let tol = x.tolerance.get().max(crate::tol::LINEAR_RESOLUTION);
+    let surface = |k: FaceId| &body.surfaces[body.faces[k].surface];
+    let Surface::Plane(p) = section_plane(&body.curves[x.curve], x.interval, tol, surface(f), surface(g))?
+    else {
+        return None;
+    };
+    let d = margin(body, h);
+    let plane = Surface::Plane(p.clone());
+    let side =
+        |k: FaceId| face_beside(body, k, &plane, &[h.edge], &[], 2.0 * d, BESIDE_CELLS, m).ok();
+    let (sf, sg) = (side(f)?, side(g)?);
+    if !opposite_sides(sf, sg) {
+        return None;
+    }
+    // The other face's side: + where it saw only +, or `f` only -.
+    let toward = match (sf, sg) {
+        (_, [false, true]) | ([true, false], _) => 1.0,
+        (_, [true, false]) | ([false, true], _) => -1.0,
+        _ => return None,
+    };
+    let fr = p.frame();
+    let n = fr.z().get() * toward;
+    Frame::new(fr.origin() + n * d, n, fr.x().get())
+        .ok()
+        .map(Plane::new)
 }
 
 /// Working face `f`'s parameter box `rect` on `surface` with its iso stops
@@ -455,5 +505,128 @@ mod tests {
         assert_eq!(iso_stops(&rod, run, &h, &w.surface, w.rect), w.rect);
         // No held seam on that end: nothing either.
         assert_eq!(iso_stops(&rod, run, &[], &w.surface, w.rect), w.rect);
+    }
+
+    /// An input pair cut obliquely across part of a tube (u from 0.3 to
+    /// 2.8, so each face's parameter box is its own): the tube below the
+    /// plane z = x / 2 and the tube above it, sharing the ellipse there, as two
+    /// faces of one sheet. Each lies on its own side of the ellipse's plane,
+    /// so each one's stop plane is that plane moved the margin towards the
+    /// other; a face across the plane outside the strip has none.
+    fn oblique_pair() -> (Body, Held) {
+        use crate::boolean::{Tool, divide};
+        use crate::geom::{Cylinder, Point3, Vector3};
+                let axis = Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let tube = Surface::Cylinder(Cylinder::new(axis, 1.0).unwrap());
+        let (t, _) =
+            crate::sheet::from_surface(OpKey(0x19b4), &tube, [[0.3, 2.8], [-2.0, 2.0]]).unwrap();
+        let cut = Surface::Plane(Plane::new(
+            Frame::new(
+                Point3::ORIGIN,
+                Vector3::new(-0.5, 0.0, 1.0),
+                Vector3::new(1.0, 0.0, 0.5),
+            )
+            .unwrap(),
+        ));
+        let (tool, _) =
+            crate::sheet::from_surface(OpKey(0x19b5), &cut, [[-4.0, 4.0], [-4.0, 4.0]]).unwrap();
+        let (d, _) = divide(
+            OpKey(0x19b6),
+            &t,
+            &[Tool {
+                key: ToolKey(1),
+                body: &tool,
+                place: crate::geom::Rigid::IDENTITY,
+            }],
+        )
+        .unwrap();
+        // Both halves sewn back as one sheet along the ellipse.
+        let (mut s, _) = crate::heal::sew(
+            OpKey(0x19b7),
+            &[d.front[0].clone(), d.back[0].clone()],
+            &crate::heal::SewOptions {
+                tolerance: 1e-6,
+                solid: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.len(), 1, "sewn as one sheet");
+        let mut s = s.remove(0);
+        let e = s
+            .edges()
+            .find(|&e| {
+                s.edge_fins(e).count() == 2
+                    && matches!(s.curves[s.edges[e].curve], crate::geom::Curve::Ellipse(_))
+            })
+            .expect("the ellipse");
+        // A file's tolerance on the seam, as STEP gives one: the strip
+        // round a seam at the resolution (3 mm here) is narrower than
+        // the division's fitted pcurve can be told apart from it.
+        s.edges[e].tolerance = crate::tol::Tolerance::new(1e-6).unwrap();
+        let fins: Vec<_> = s.edge_fins(e).collect();
+        let face = |fin: FinId| s.loops[s.fins[fin].loop_].face;
+        let h = Held {
+            edge: e,
+            faces: [face(fins[0]), face(fins[1])],
+            kind: SeamKind::Fixed,
+        };
+        (s, h)
+    }
+
+    #[test]
+    fn a_stop_plane_lies_the_margin_past_the_seam_towards_the_other_face() {
+        let (s, h) = oblique_pair();
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let d = margin(&s, &h);
+        for (f, g) in [(h.faces[0], h.faces[1]), (h.faces[1], h.faces[0])] {
+            let p = stop_plane(&s, f, &h, &m).expect("opposite sides");
+            let fr = p.frame();
+            let n = fr.z().get();
+            // The seam's points lie the margin behind the plane.
+            let x = &s.edges[h.edge];
+            for k in 0..=8 {
+                let t = x.interval[0] + (x.interval[1] - x.interval[0]) * f64::from(k) / 8.0;
+                let q = s.curves[x.curve].point(t);
+                let off = (q - fr.origin()).dot(n);
+                assert!((off + d).abs() <= 1e-9, "{off} {d}");
+            }
+            // Moved towards the other face: its vertices off the seam lie
+            // in front of the plane, the face's own behind it.
+            let off_seam = |k: FaceId| -> Vec<f64> {
+                s.face_loops(k)
+                    .flat_map(|l| s.loop_fins(l))
+                    .map(|fin| s.fins[fin].edge)
+                    .filter(|&e| e != h.edge)
+                    .flat_map(|e| [s.edges[e].start, s.edges[e].end])
+                    .map(|v| (s.vertices[v].point - fr.origin()).dot(n))
+                    .filter(|x| x.abs() > 2.0 * d)
+                    .collect()
+            };
+            let (own, other) = (off_seam(f), off_seam(g));
+            assert!(!own.is_empty() && own.iter().all(|&x| x < 0.0), "{own:?}");
+            assert!(!other.is_empty() && other.iter().all(|&x| x > 0.0), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_running_seam_or_a_crossing_face_has_no_stop_plane() {
+        let (s, mut h) = oblique_pair();
+        // unmetered: a unit test.
+        let m = Meter::free();
+        // The same face twice has no other face to stop towards.
+        let mut same = h;
+        same.faces = [h.faces[0], h.faces[0]];
+        assert!(stop_plane(&s, h.faces[0], &same, &m).is_none());
+        // Before Task 8, a running seam has none (Decision 4 as designed).
+        h.kind = SeamKind::Running;
+        if !RUNNING_PLANE_STOPS {
+            assert!(stop_plane(&s, h.faces[0], &h, &m).is_none());
+        }
     }
 }
