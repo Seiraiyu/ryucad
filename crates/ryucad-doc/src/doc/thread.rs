@@ -139,7 +139,7 @@ mod tests {
         let f = read(&v).unwrap();
         assert_eq!(f.to_json(), v);
         assert_eq!(f.format(), 25);
-        assert_eq!(crate::doc::files::feature_format(&v), 24);
+        assert_eq!(crate::doc::files::feature_format(&v), 25);
         let mut w = v.clone();
         w["depth"] = json!("12 mm");
         w["from"] = face(2);

@@ -1606,7 +1606,7 @@ mod tests {
 
     #[test]
     fn a_following_patterns_places_merge_as_one_value() {
-        let base = json!({"format": 25, "kind": "ryucad.feature", "type": "instance_pattern",
+        let base = json!({"format": 24, "kind": "ryucad.feature", "type": "instance_pattern",
                           "form": "feature", "instances": ["s0"],
                           "on": {"instance": ["lid"], "feature": "holes"}});
         let mut ours = base.clone();

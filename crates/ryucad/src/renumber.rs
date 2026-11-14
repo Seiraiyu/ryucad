@@ -1596,7 +1596,7 @@ mod tests {
         // `on`'s path follows; its feature is the lid part's `holes`, not
         // this assembly's, and stays.
         let screws = json!({
-            "format": 25, "kind": "ryucad.feature", "type": "instance_pattern",
+            "format": 24, "kind": "ryucad.feature", "type": "instance_pattern",
             "form": "feature", "instances": ["s0"],
             "on": {"instance": ["holes"], "feature": "holes"},
         });

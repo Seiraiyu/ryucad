@@ -3839,7 +3839,7 @@ mod tests {
 
     #[test]
     fn a_following_patterns_places_read_as_one_line() {
-        let v = json!({"format": 25, "kind": "ryucad.feature", "type": "instance_pattern",
+        let v = json!({"format": 24, "kind": "ryucad.feature", "type": "instance_pattern",
                        "form": "points", "instances": ["screw-0"], "from": "p3",
                        "on": {"instance": ["sub", "lid"], "feature": "screw-layout"},
                        "points": ["p3", "p4"]});
