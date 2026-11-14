@@ -33,6 +33,15 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+pub mod assembly;
+pub mod comparing;
+pub mod exchange;
+pub mod forms;
+pub mod parameters;
+pub mod pdm;
+pub mod session;
+pub mod view;
+
 /// Projects of at most this many parts load whole when the window opens;
 /// a larger one loads what the window shows, and each part as its row in
 /// the tree opens or something in it is chosen.
@@ -445,6 +454,22 @@ pub struct Workspace {
     pub annotation_filter: crate::core::annotations::Filter,
     pub annotation_ui: crate::core::annotations::Typed,
     pub model: Model,
+    /// The property panel's forms (design 541's sub-states, 27.F).
+    pub forms: forms::Forms,
+    /// The parameter panel and the Equations tile.
+    pub parameters: parameters::Parameters,
+    /// Releases, PDM settings, properties, where-used and the BOM.
+    pub pdm: pdm::Pdm,
+    /// A compare with a Git revision.
+    pub comparing: comparing::Comparing,
+    /// This window's mode, participants, settings, doctor and cache.
+    pub session: session::Session,
+    /// The shown assembly's tools.
+    pub assembly: assembly::Assembly,
+    /// Named views, appearance, sections, Measure and Mass.
+    pub view: view::View,
+    /// Import and export.
+    pub exchange: exchange::Exchange,
     /// Parts whose reports are asked for and not yet answered.
     pub loading: BTreeSet<String>,
     /// The revision each part in `loading` was last asked for at.
@@ -696,6 +721,14 @@ impl Workspace {
             annotation_filter: Default::default(),
             annotation_ui: Default::default(),
             model: Model::default(),
+            forms: Default::default(),
+            parameters: Default::default(),
+            pdm: Default::default(),
+            comparing: Default::default(),
+            session: Default::default(),
+            assembly: Default::default(),
+            view: Default::default(),
+            exchange: Default::default(),
             loading: BTreeSet::new(),
             asked_at: BTreeMap::new(),
             wanted: Default::default(),
