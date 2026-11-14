@@ -9,6 +9,7 @@
 //! part, when the project loads.
 
 use crate::doc::canonical;
+use crate::doc::lock::CadLock;
 use crate::doc::files::{Feature, Manifest, ParametersFile, PartFile, PartKind};
 use crate::doc::id::Id;
 use crate::doc::id::ProjectId;
