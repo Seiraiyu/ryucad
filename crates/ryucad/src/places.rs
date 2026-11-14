@@ -61,10 +61,13 @@ impl Places {
                     }
                 }
                 (Feature::Hole(h), Output::Solids(_)) => {
-                    let Some(Ok(Output::Sketch(s))) = result.result(&h.sketch) else {
+                    let Some(sk) = &h.sketch else {
                         continue;
                     };
-                    match crate::hole::points(fid, h, s) {
+                    let Some(Ok(Output::Sketch(s))) = result.result(sk) else {
+                        continue;
+                    };
+                    match crate::hole::points(fid, h, sk, s) {
                         Ok(p) => Driver::Hole(p),
                         Err(_) => continue,
                     }

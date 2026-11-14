@@ -1191,8 +1191,11 @@ fn build_body(
             let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref())
                 .map_err(crate::hole::derive::at_rebuild);
             let points = sizes.and_then(|sizes| {
-                let s = sketch_input(part, id, &h.sketch, before)?;
-                Ok((s, crate::hole::points(id, h, s)?, sizes))
+                let Some(sk) = &h.sketch else {
+                    return Err(Error::new(Code::Internal, "places come with Task 7"));
+                };
+                let s = sketch_input(part, id, sk, before)?;
+                Ok((s, crate::hole::points(id, h, sk, s)?, sizes))
             });
             match points {
                 Ok(p) => Some((h, p)),

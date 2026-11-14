@@ -353,7 +353,10 @@ pub(crate) fn build_pattern(
         {
             let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref())
                 .map_err(crate::hole::derive::at_rebuild)?;
-            let solved = crate::rebuild::sketch_input(part, seed, &h.sketch, before)?;
+            let Some(sk) = &h.sketch else {
+                return Err(Error::new(Code::Internal, "places come with Task 8"));
+            };
+            let solved = crate::rebuild::sketch_input(part, seed, sk, before)?;
             inputs.insert(*seed, (sizes, solved, h));
         }
     }

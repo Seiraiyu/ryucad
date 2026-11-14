@@ -83,7 +83,8 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// limits (ryucad 26), 23 a hole's
 /// thread, fastener, fit and tolerance (ryucad 28), 24 an instance
 /// pattern that follows a part's features or a sketch's points (ryucad
-/// 25.C), 25 a hole's new geometry and cosmetic threads (ryucad 28.B). A
+/// 25.C), 25 a hole's new geometry and cosmetic threads (ryucad 28.B), 26
+/// a hole at places and a fill pattern (ryucad 28.C). A
 /// feature is written at the lowest format that holds it, so one with
 /// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
@@ -100,6 +101,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::edit::FORMAT,
         super::hole::INTENT_FORMAT,
         super::hole::GEOMETRY_FORMAT,
+        super::hole::PLACES_FORMAT,
         super::insert::FORMAT,
         super::mate::LIMITS_FORMAT,
         super::mate::DRIVEN_FORMAT,
@@ -771,9 +773,14 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
     let ty = v.get("type").and_then(Value::as_str);
-    // Highest first: a cosmetic thread and a hole's new geometry are 25,
-    // a following instance pattern 24, a hole with intent 23, whatever
-    // else they hold.
+    // Highest first: a hole at places and a fill pattern are 26, a
+    // cosmetic thread and a hole's new geometry 25, a following instance
+    // pattern 24, a hole with intent 23, whatever else they hold.
+    if (ty == Some("hole") && v.get("places").is_some())
+        || (ty == Some("pattern") && v.get("form").and_then(Value::as_str) == Some("fill"))
+    {
+        return super::hole::PLACES_FORMAT;
+    }
     if ty == Some("cosmetic_thread") {
         return super::thread::FORMAT;
     }
@@ -1205,6 +1212,11 @@ impl Feature {
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
         // Highest first, as `feature_format`.
+        if let Feature::Hole(h) = self
+            && h.has_places()
+        {
+            return super::hole::PLACES_FORMAT;
+        }
         if let Feature::CosmeticThread(_) = self {
             return super::thread::FORMAT;
         }
@@ -1799,7 +1811,7 @@ impl Feature {
         match self {
             Feature::Extrude(e) => vec![&e.sketch],
             Feature::Revolve(r) => vec![&r.sketch],
-            Feature::Hole(h) => vec![&h.sketch],
+            Feature::Hole(h) => h.sketch.iter().collect(),
             Feature::Sweep(w) => w.profile.sketch().into_iter().collect(),
             Feature::Loft(l) => l.sketches(),
             Feature::Planar(p) => p.profile.sketch().into_iter().collect(),
@@ -3047,6 +3059,34 @@ mod tests {
             "from": {"feature": "shaft", "name": "fedcba9876543210fedcba9876543210"},
             "depth": "l"});
         assert!(feature_names(&c).contains("l"));
+    }
+
+    #[test]
+    fn a_hole_at_places_is_format_26_and_sketch_holes_keep_theirs() {
+        use crate::units::Unit;
+        let env = crate::expr::Env::empty();
+        const { assert!(FEATURE_FORMAT >= super::super::hole::PLACES_FORMAT) };
+        let v = json!({"kind": "ryucad.feature", "type": "hole", "form": "simple",
+                       "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
+                       "places": {"a": {"at": "origin"}}});
+        assert_eq!(feature_format(&v), super::super::hole::PLACES_FORMAT);
+        let mut w = v.clone();
+        w["format"] = json!(26);
+        let f = Feature::from_json(&w, Unit::Mm, &env).unwrap();
+        assert_eq!(f.format(), 26);
+        // Places win over a hole's geometry and intent: highest first.
+        w["near"] = json!({"diameter": "7 mm"});
+        assert_eq!(feature_format(&w), 26);
+        // A hole at places reads no sketch.
+        assert!(f.profiles().is_empty());
+        // Sketch holes keep 3, 23 and 25.
+        let plain = json!({"kind": "ryucad.feature", "type": "hole", "sketch": "s",
+                           "form": "simple", "diameter": "5 mm", "depth": "through_all",
+                           "targets": ["b"]});
+        assert_eq!(feature_format(&plain), 3);
+        let mut g = plain.clone();
+        g["depth"] = json!("through_next");
+        assert_eq!(feature_format(&g), 25);
     }
 
     #[test]

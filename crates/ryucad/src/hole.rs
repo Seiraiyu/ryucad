@@ -110,14 +110,13 @@ pub fn sketch_points(
 /// that isn't a point of the sketch is `not_found` or
 /// `reference_wrong_kind`; a sketch with no point to drill is
 /// `invalid_param`.
-pub fn points(id: &Id, h: &Hole, solved: &Solved) -> Result<Vec<(Id, Point3)>> {
-    let out = sketch_points(&format!("hole {id}"), id, &h.sketch, &h.points, solved)?;
+pub fn points(id: &Id, h: &Hole, sketch: &Id, solved: &Solved) -> Result<Vec<(Id, Point3)>> {
+    let out = sketch_points(&format!("hole {id}"), id, sketch, &h.points, solved)?;
     if out.is_empty() {
         return Err(Error::new(
             Code::InvalidParam,
             format!(
-                "hole {id}: sketch {} has no point that no curve uses; list the points to drill",
-                h.sketch
+                "hole {id}: sketch {sketch} has no point that no curve uses; list the points to drill"
             ),
         )
         .with("feature", id)
@@ -510,19 +509,20 @@ fn build_tool(
     })?;
     // Origins name the segment, never a sketch: each point adds itself.
     let key = crate::rebuild::op_key(&part.id, id);
-    let origins: crate::rebuild::Origins = crate::profile::origins(key, &h.sketch, &valid, &keys)
-        .into_iter()
-        .map(|(n, o)| {
-            let mut v = json!({"feature": id});
-            if let Some(e) = o.get("entity") {
-                v["segment"] = e.clone();
-            }
-            if let Some(e) = o.get("entities") {
-                v["segments"] = e.clone();
-            }
-            (n, v)
-        })
-        .collect();
+    let origins: crate::rebuild::Origins =
+        crate::profile::origins(key, h.sketch.as_ref().unwrap_or(id), &valid, &keys)
+            .into_iter()
+            .map(|(n, o)| {
+                let mut v = json!({"feature": id});
+                if let Some(e) = o.get("entity") {
+                    v["segment"] = e.clone();
+                }
+                if let Some(e) = o.get("entities") {
+                    v["segments"] = e.clone();
+                }
+                (n, v)
+            })
+            .collect();
     let built = crate::rebuild::finish(id, "hole", made, origins)?;
     Ok((built, origin))
 }

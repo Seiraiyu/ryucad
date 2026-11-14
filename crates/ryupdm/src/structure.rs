@@ -585,11 +585,19 @@ pub fn driven_keys(
             }
             return Ok(x.instances().into_iter().map(CopyKey::Index).collect());
         }
+        (Some(Ok(Feature::Hole(h))), None) if !h.places.is_empty() => {
+            h.places.keys().cloned().collect()
+        }
         (Some(Ok(Feature::Hole(h))), None) if !h.points.is_empty() => h.points.clone(),
-        (Some(Ok(Feature::Hole(h))), None) => match at.features.get(&h.sketch) {
-            Some(Ok(Feature::Sketch(s))) => s.free_points().into_iter().cloned().collect(),
-            _ => return Err(missing(format!("{} has no sketch {}", at.id, h.sketch))),
-        },
+        (Some(Ok(Feature::Hole(h))), None) => {
+            match h.sketch.as_ref().map(|s| (s, at.features.get(s))) {
+                Some((_, Some(Ok(Feature::Sketch(s))))) => {
+                    s.free_points().into_iter().cloned().collect()
+                }
+                Some((sk, _)) => return Err(missing(format!("{} has no sketch {}", at.id, sk))),
+                None => return Err(missing(format!("{} has no sketch", at.id))),
+            }
+        }
         (Some(Ok(Feature::Sketch(s))), Some(listed)) => {
             if listed.is_empty() {
                 s.free_points().into_iter().cloned().collect()

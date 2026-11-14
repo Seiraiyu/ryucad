@@ -860,7 +860,10 @@ fn own(
         crate::hole::derive::derive(h, p.hole_standards.as_deref())
             .map_err(crate::hole::derive::at_rebuild)?,
     );
-    let solved = crate::rebuild::sketch_input(p, fid, &h.sketch, result)?;
+    let Some(sk) = &h.sketch else {
+        return Err(Error::new(Code::Internal, "places come with Task 8"));
+    };
+    let solved = crate::rebuild::sketch_input(p, fid, sk, result)?;
     let axis = -solved.frame.apply_vector(Vector3::new(0.0, 0.0, 1.0));
     let spec = crate::hole::spec::canonical(h, unit);
     let r = sizes.drill.si / 2.0;
@@ -879,7 +882,7 @@ fn own(
         .thread
         .as_ref()
         .map(|t| t.depth.as_ref().map_or(shoulder, |d| d.si));
-    Ok(crate::hole::points(fid, h, solved)?
+    Ok(crate::hole::points(fid, h, sk, solved)?
         .into_iter()
         .map(|(point, at)| Row {
             reference: format!("{}/{fid}/{point}", p.id),
