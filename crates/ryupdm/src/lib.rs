@@ -42,6 +42,8 @@ pub mod content;
 pub mod dependents;
 pub mod deps;
 pub mod git;
+/// Git run with no inherited `GIT_DIR` and kin (#721), now in `ryu-git`.
+pub use ryu_git::git_env;
 pub mod history;
 #[cfg(feature = "cad")]
 pub mod items;

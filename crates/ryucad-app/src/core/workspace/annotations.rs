@@ -207,6 +207,7 @@ impl Workspace {
     /// stops that compare.
     pub fn choose_annotation(&mut self, id: Option<&str>) {
         self.annotations.chosen_annotation = id.map(str::to_owned);
+        self.view.looked_on = None;
         let entry = id.and_then(|i| self.annotations.all.get(i)).cloned();
         let comparing_one = self
             .comparing
@@ -215,8 +216,23 @@ impl Workspace {
             .is_some_and(|c| c.rev.starts_with(ryucad::session::ANNOTATION));
         match entry {
             Some(e) => {
-                if let Some(c) = e.view {
-                    self.view.looked = Some(c);
+                // Made on a part not shown: show it first, as the palette
+                // does a feature's (#737), and its camera waits for it,
+                // else its marks aren't drawn (#730) and its view frames
+                // another part (#776).
+                let away = e
+                    .part()
+                    .filter(|p| {
+                        !self.model.shown().contains(p) && self.model.listed.contains_key(*p)
+                    })
+                    .map(str::to_owned);
+                match (away, e.view) {
+                    (Some(part), view) => {
+                        self.set_focus(Some(part.clone()));
+                        self.view.looked_on = view.map(|c| (part, c));
+                    }
+                    (None, Some(c)) => self.view.looked = Some(c),
+                    (None, None) => {}
                 }
                 match e.change {
                     Some(_) => {

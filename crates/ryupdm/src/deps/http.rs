@@ -271,7 +271,7 @@ pub(crate) mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     /// Serves the repositories under `root` over Git's smart HTTP on a
     /// loopback port, through `git http-backend`, until the test ends;
@@ -324,7 +324,7 @@ pub(crate) mod tests {
                             .map(|(_, v)| v.clone())
                             .unwrap_or_default()
                     };
-                    let mut child = Command::new("git")
+                    let mut child = crate::git_env::isolated()
                         .arg("http-backend")
                         .env("GIT_PROJECT_ROOT", &root)
                         .env("GIT_HTTP_EXPORT_ALL", "1")

@@ -6,7 +6,6 @@ mod common;
 use common::{Project, ryucad};
 use ryucad_app::core::activity::can_undo;
 use ryucad_app::core::workspace::Workspace;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -79,7 +78,7 @@ fn an_undo_that_would_lose_a_later_change_is_refused() {
 }
 
 fn git(p: &Project, args: &[&str]) {
-    let st = Command::new("git")
+    let st = ryupdm::git_env::isolated()
         .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
         .args(args)
         .current_dir(&p.root)

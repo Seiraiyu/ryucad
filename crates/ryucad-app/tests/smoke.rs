@@ -54,6 +54,24 @@ fn version_and_a_folder_that_isnt_a_project() {
     assert!(!out.status.success());
 }
 
+/// #799: the app writes a trace in the runtime folder, from its start to
+/// how it ended, so a window that vanishes says why next time.
+#[test]
+fn the_app_leaves_a_trace() {
+    let run = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ryucad-app"))
+        .env("RYUCAD_RUNTIME_DIR", run.path())
+        .arg("--smoke")
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let trace = std::fs::read_to_string(run.path().join("ryucad-app.log")).unwrap();
+    assert!(trace.contains("started"), "{trace}");
+    assert!(trace.contains("exited: project_not_found"), "{trace}");
+}
+
 #[test]
 fn help_and_unknown_arguments_open_no_window() {
     let run = |args: &[&str]| {
