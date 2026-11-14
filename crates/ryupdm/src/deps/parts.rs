@@ -293,10 +293,12 @@ mod neutral {
         };
         r.official.insert("releases/r/A.json".into(), o("a"));
         r.official.insert("releases/r/B.json".into(), o("b"));
-        r.official.insert("releases/r/B.obsolete.json".into(), o("c"));
+        r.official
+            .insert("releases/r/B.obsolete.json".into(), o("c"));
         r.official.insert("releases/c/A.json".into(), o("d"));
         // Only an obsolete record: no labels.
-        r.official.insert("releases/x/A.obsolete.json".into(), o("e"));
+        r.official
+            .insert("releases/x/A.obsolete.json".into(), o("e"));
         let scheme = crate::config::Config::default().revisions;
         let got = released(&r, scheme);
         let r_id = Id::parse("r", "part").unwrap();

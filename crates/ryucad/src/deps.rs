@@ -4,9 +4,9 @@
 //! fetches); everything here reads what was fetched.
 
 use crate::assembly::{Pin, Pinned};
-use crate::doc::lock::CadLock;
 use crate::doc::files::Feature;
 use crate::doc::id::{Id, ProjectId};
+use crate::doc::lock::CadLock;
 use crate::doc::project::Project;
 use crate::error::{Code, Error, Result};
 use crate::session::Session;
@@ -1268,8 +1268,8 @@ pub(crate) mod tests {
     use crate::doc::assembly::Rev;
     use crate::doc::files::{Manifest, PartFile};
     use crate::doc::id::ProjectId;
-    use crate::doc::project::{MANIFEST, feature_path, part_path, write_json};
     use crate::doc::lock::CadLock;
+    use crate::doc::project::{MANIFEST, feature_path, part_path, write_json};
     use crate::error::Code;
     use crate::git::tests::git;
     use crate::session::Session;

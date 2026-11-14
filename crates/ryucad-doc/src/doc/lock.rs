@@ -34,9 +34,9 @@ impl CadLock for Lock {
 mod tests {
     use super::*;
     use crate::doc::id::{Id, ProjectId};
+    use crate::error::Code;
     use serde_json::json;
     use std::collections::BTreeMap;
-    use crate::error::Code;
 
     fn lock() -> Lock {
         let (a, b) = (

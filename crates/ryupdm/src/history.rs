@@ -974,7 +974,10 @@ pub(crate) mod tests {
             file_at(&repo, &head, "lib/", "library/x.json").unwrap(),
             Some(b"one\n".to_vec())
         );
-        assert_eq!(file_at(&repo, &head, "lib/", "library/y.json").unwrap(), None);
+        assert_eq!(
+            file_at(&repo, &head, "lib/", "library/y.json").unwrap(),
+            None
+        );
         // A folder is no file.
         assert_eq!(file_at(&repo, &head, "lib/", "library").unwrap(), None);
     }

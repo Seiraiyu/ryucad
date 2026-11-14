@@ -380,7 +380,9 @@ impl Reader {
         if found.as_ref() != Some(project) {
             let held = found
                 .as_ref()
-                .map_or("no project with an ID".to_owned(), |p| format!("project {p}"));
+                .map_or("no project with an ID".to_owned(), |p| {
+                    format!("project {p}")
+                });
             return Err(Error::new(
                 Code::DependencyProjectMismatch,
                 format!("{url} holds {held} at {:?}, not {project}", locked.path),
@@ -453,9 +455,10 @@ impl Reader {
                 )));
             }
         }
-        let obsolete = releases
-            .official
-            .contains_key(&crate::record::path(part, label, Kind::Obsolete));
+        let obsolete =
+            releases
+                .official
+                .contains_key(&crate::record::path(part, label, Kind::Obsolete));
         Ok(Verified {
             commit: l.commit,
             content: l.content,
@@ -934,9 +937,7 @@ mod neutral {
         let e = official_with(&mut r, &t.2, &locked, &part, "B", &C).unwrap_err();
         assert_eq!(e.code, Code::LabelNotFound);
         locked.labels.insert((part.clone(), "A".into()), l.clone());
-        let v = r
-            .verify_for::<Toy>(&t.2, &locked, &part, "A", &C)
-            .unwrap();
+        let v = r.verify_for::<Toy>(&t.2, &locked, &part, "A", &C).unwrap();
         assert_eq!((v.commit.as_str(), v.obsolete), (t.3.as_str(), false));
         // Another content hash in the lock: dependency_rewritten.
         locked
