@@ -9,7 +9,10 @@ use crate::id::Id;
 use crate::project::ProjectKind;
 use crate::session::Session;
 use ryupdm::config::Config;
+use ryupdm::history::Releases;
 use ryupdm::product::Product;
+use ryupdm::record::{BuiltWith, Record, Records, Release};
+use ryupdm::state::Status;
 use serde_json::{Value, json};
 
 /// Why a part can't be released, and the supply findings a release
@@ -269,6 +272,215 @@ impl ryupdm::check::Results for Again {
     }
 }
 
+/// What a proposal of `part` would write, every check passed.
+struct Proposal {
+    part: Id,
+    next: ryupdm::release::Next,
+    content: String,
+    results: std::collections::BTreeMap<String, String>,
+}
+
+/// `release_not_ready` for `part` with its problems.
+fn not_ready(part: &Id, problems: Vec<Value>) -> Error {
+    Error::new(
+        Code::ReleaseNotReady,
+        format!(
+            "{part} can't be released as it is: {}",
+            problems
+                .iter()
+                .filter_map(|p| p["message"].as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    )
+    .with("part", part)
+    .with("problems", &problems)
+}
+
+/// Every check `release.propose` makes of `part`, and what its record
+/// would hold. Writes nothing; `supply` collects the supply findings.
+fn prepare(
+    session: &mut Session,
+    part: &Id,
+    releases: &Releases,
+    supply: &mut Vec<Value>,
+) -> Result<Proposal> {
+    let files = session.snapshot();
+    let config = Config::read_in(&files, NAME)?;
+    let records = Records::read_in(&files, NAME)?;
+    let next = ryupdm::release::next_for::<crate::Eda>(&files, &config, &records, releases, part)?;
+    let r = readiness(session, part)?;
+    if supply.is_empty() {
+        *supply = r.supply.clone();
+    }
+    if !r.problems.is_empty() {
+        return Err(not_ready(part, r.problems));
+    }
+    let src = part_source(&files, part);
+    let content = <crate::Eda as Product>::content(&src, part)?;
+    let results = results(session.root(), &src, part)?;
+    Ok(Proposal {
+        part: part.clone(),
+        next,
+        content,
+        results,
+    })
+}
+
+/// The parts `--all` proposes: those in work or modified.
+fn proposable(session: &Session, releases: &Releases) -> Vec<Id> {
+    let files = session.snapshot();
+    let parts = <crate::Eda as Product>::parts(&files).unwrap_or_default();
+    ryupdm::state::derive_all_for::<crate::Eda>(&files, releases)
+        .into_iter()
+        .filter(|(_, s)| matches!(s.status, Status::InWork | Status::Modified(_)))
+        .filter(|(p, _)| parts.contains(p))
+        .map(|(p, _)| p)
+        .collect()
+}
+
+/// `release.propose`: writes the record of each named part's next
+/// revision (every part in work or modified with `all`) as one logged,
+/// undoable change. One part named alone is refused whole as ryucad
+/// refuses it; several or `all` propose every ready one and list the
+/// rest under `refused`, each with its error. With `dry_run`, writes
+/// nothing and answers each part's label, readiness and problems.
+pub fn propose(
+    session: &mut Session,
+    participant: &str,
+    parts: &[String],
+    all: bool,
+    note: Option<String>,
+    expected: Option<&str>,
+    dry_run: bool,
+) -> Result<Value> {
+    super::check_revision(session, expected)?;
+    let (repo, releases) = super::history(session)?;
+    ryupdm::history::check_folder(repo.prefix())?;
+    let mut ids: Vec<Id> = parts
+        .iter()
+        .map(|p| super::cmd::part_id(session, p))
+        .collect::<Result<_>>()?;
+    if all {
+        ids.extend(proposable(session, &releases));
+    }
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() && !all {
+        return Err(Error::new(
+            Code::Usage,
+            "name a part to release, or pass --all",
+        ));
+    }
+    let alone = ids.len() == 1 && !all;
+    let mut supply = Vec::new();
+    let (mut ready, mut refused) = (Vec::new(), Vec::new());
+    for id in &ids {
+        match prepare(session, id, &releases, &mut supply) {
+            Ok(p) => ready.push(p),
+            Err(e) if alone && !dry_run => return Err(e),
+            Err(e) => refused.push((id.clone(), e)),
+        }
+    }
+    let notices: Vec<Value> = ids
+        .iter()
+        .filter_map(|id| super::cmd::notice(session, id))
+        .collect();
+    if dry_run {
+        let files = session.snapshot();
+        let mut out: Vec<Value> = ready
+            .iter()
+            .map(|p| {
+                json!({"part": p.part, "label": p.next.label, "supersedes": p.next.supersedes,
+                       "ready": true, "problems": []})
+            })
+            .collect();
+        for (id, e) in &refused {
+            let problems = match e.code {
+                Code::ReleaseNotReady => e.details["problems"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+                _ => vec![json!(e)],
+            };
+            let next = ryupdm::state::derive_for::<crate::Eda>(&files, id, &releases).next;
+            out.push(
+                json!({"part": id, "label": next, "supersedes": null, "ready": false,
+                            "problems": problems}),
+            );
+        }
+        out.sort_by(|a, b| a["part"].as_str().cmp(&b["part"].as_str()));
+        return Ok(json!({"parts": out, "supply": supply, "notices": notices}));
+    }
+    if ready.is_empty() && !refused.is_empty() && !all {
+        let first = refused.remove(0).1;
+        return Err(first.with(
+            "refused",
+            refused
+                .iter()
+                .map(|(p, e)| json!({"part": p, "error": e}))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    let project = session.project().manifest.project.clone();
+    let v = crate::proto::VersionInfo::current();
+    let by = ryupdm::release::released_by(repo.gix(), participant);
+    let files = session.snapshot();
+    let config = Config::read_in(&files, NAME)?;
+    let records: Vec<Record> = ready
+        .into_iter()
+        .map(|p| {
+            let props = ryupdm::props::read_for::<crate::Eda>(&files, &p.part).unwrap_or_default();
+            Record::Release(Release {
+                project: project.clone(),
+                part: p.part,
+                label: p.next.label,
+                content: p.content,
+                properties: ryupdm::record::revising(&config, &props),
+                results: p.results,
+                built_with: BuiltWith::of_product(NAME, &v.ryueda, &v.commit),
+                released_by: by.clone(),
+                supersedes: p.next.supersedes,
+                note: note.clone(),
+            })
+        })
+        .collect();
+    if !records.is_empty() {
+        super::write(
+            session,
+            "the release",
+            records
+                .iter()
+                .map(|r| (r.path(), Some(crate::canonical::to_string(&r.to_json()))))
+                .collect(),
+        )?;
+    }
+    let (_, releases) = super::history(session)?;
+    let files = session.snapshot();
+    let proposed: Vec<Value> = records
+        .iter()
+        .map(|r| {
+            let s = ryupdm::state::derive_for::<crate::Eda>(&files, r.part(), &releases);
+            let mut v = json!({"part": r.part(), "label": r.label(), "path": r.path(),
+                               "record": r.to_json(), "state": s.to_json()});
+            if let Some(a) = ryupdm::release::required(r.part(), &releases) {
+                v["approval"] = a;
+            }
+            v
+        })
+        .collect();
+    Ok(json!({
+        "proposed": proposed,
+        "refused": refused
+            .iter()
+            .map(|(p, e)| json!({"part": p, "error": e}))
+            .collect::<Vec<_>>(),
+        "supply": supply,
+        "notices": notices,
+        "pdm_revision": super::revision(session),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +587,93 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    pub(crate) fn in_git(s: &mut Session) {
+        let g = |args: &[&str]| crate::git::tests::git(s.root(), args);
+        g(&["init", "-q", "-b", "main"]);
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "start"]);
+    }
+
+    fn number(s: &mut Session, part: &str, n: &str) {
+        let mut m = serde_json::Map::new();
+        m.insert("number".into(), json!(n));
+        crate::pdm::cmd::set(s, part, m, None).unwrap();
+    }
+
+    fn one(part: &str) -> Vec<String> {
+        vec![part.to_owned()]
+    }
+
+    #[test]
+    fn components_are_proposed_one_at_a_time_or_all_at_once() {
+        let (_d, mut s) = session(ProjectKind::Library);
+        crate::pdm::cmd::init(&mut s).unwrap();
+        in_git(&mut s);
+        let dry = propose(&mut s, "agent", &one("r_100k"), false, None, None, true).unwrap();
+        assert_eq!(dry["parts"][0]["ready"], false, "{dry}");
+        assert_eq!(dry["parts"][0]["label"], "A");
+        assert!(
+            !s.root().join("releases").exists(),
+            "a dry run writes nothing"
+        );
+        assert_eq!(
+            propose(&mut s, "agent", &one("r_100k"), false, None, None, false)
+                .unwrap_err()
+                .code,
+            Code::ReleaseNotReady
+        );
+        number(&mut s, "r_100k", "100-0001");
+        let v = propose(
+            &mut s,
+            "agent",
+            &[],
+            true,
+            Some("first".into()),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(v["proposed"][0]["label"], "A", "{v}");
+        let rec = &v["proposed"][0]["record"];
+        assert_eq!(
+            (
+                rec["format"].as_u64(),
+                rec["built_with"]["product"].as_str()
+            ),
+            (Some(2), Some("ryueda"))
+        );
+        assert_eq!(rec["results"], json!({}));
+        assert!(s.root().join("releases/r_100k/A.json").is_file());
+        // Proposed, not official: a second proposal is pending.
+        assert_eq!(
+            propose(&mut s, "agent", &one("r_100k"), false, None, None, false)
+                .unwrap_err()
+                .code,
+            Code::ReleasePending
+        );
+        // --all with nothing in work or modified proposes nothing.
+        crate::git::tests::git(s.root(), &["add", "-A"]);
+        crate::git::tests::git(s.root(), &["commit", "-q", "-m", "A"]);
+        let v = propose(&mut s, "agent", &[], true, None, None, false).unwrap();
+        assert_eq!(v["proposed"], json!([]), "{v}");
+    }
+
+    #[test]
+    fn a_designs_record_holds_its_results() {
+        let (_d, mut s) = session(ProjectKind::Design);
+        crate::pdm::cmd::init(&mut s).unwrap();
+        number(&mut s, "d", "200-0001");
+        in_git(&mut s);
+        let dry = propose(&mut s, "agent", &one("d"), false, None, None, true).unwrap();
+        assert_eq!(dry["parts"][0]["ready"], true, "{dry}");
+        let v = propose(&mut s, "agent", &one("d"), false, None, None, false).unwrap();
+        let r = &v["proposed"][0]["record"]["results"];
+        assert!(r["netlist"].is_string() && r["erc"].is_string(), "{v}");
+        // What it records is what a check at the commit works out again.
+        let files = s.snapshot();
+        let again = results(s.root(), &part_source(&files, &id("d")), &id("d")).unwrap();
+        assert_eq!(r, &json!(again));
     }
 }
