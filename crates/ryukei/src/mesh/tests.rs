@@ -120,6 +120,33 @@ fn faces_off_their_edges_are_reported() {
     );
 }
 
+/// #796's review: only a face of no width may be meshed as no triangles
+/// with its edges left as a slit. A face of a block whose triangles are
+/// dropped (as welding or a pole's clean-up could) is a hole, and
+/// `check_mesh` says so.
+#[test]
+fn a_face_meshed_as_no_triangles_is_a_hole_unless_it_has_no_width() {
+    let b = primitive::block(OpKey(1), 4.0, 3.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut m = tessellate(&b, &MeshParams::new(1e-2, 0.5)).unwrap();
+    assert_eq!(check_mesh(&b, &m), Ok(()));
+    let gone = m.faces[0].triangles.clone();
+    let n = gone.end - gone.start;
+    m.triangles.drain(gone.start as usize..gone.end as usize);
+    m.faces[0].triangles = gone.start..gone.start;
+    for fm in &mut m.faces[1..] {
+        fm.triangles = fm.triangles.start - n..fm.triangles.end - n;
+    }
+    let faults = check_mesh(&b, &m).unwrap_err();
+    assert!(!faults.is_empty());
+    assert!(
+        faults
+            .iter()
+            .all(|f| matches!(f, MeshCheckFault::OpenEdge { .. }))
+    );
+}
+
 #[test]
 fn budgets_and_params() {
     let b = primitive::sphere(OpKey(1), 1.0, &Rigid::IDENTITY)

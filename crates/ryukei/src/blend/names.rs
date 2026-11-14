@@ -9,7 +9,9 @@
 //! - a rail from its blend face and the face it rolls on, an end edge
 //!   from its blend face, the end face and the vertex the blend took away
 //!   there, a section from the two faces either side, sorted: two blend
-//!   faces, or a blend face and a corner face;
+//!   faces, or a blend face and a corner face; where two sections lie
+//!   between the same two blend faces (a closed chain of two), each also
+//!   from the vertex the blend took away there (#723);
 //! - a corner face from the vertex it took away and the faces it touches,
 //!   sorted;
 //! - every vertex on a blend face from the edges meeting there, sorted;
@@ -149,9 +151,24 @@ pub(crate) fn name(body: &mut Body, key: OpKey, made: &Made) -> Journal {
             created.insert(n);
         }
     }
-    for &(e, [a, b]) in &made.sections {
-        let mut parents = [faces[a], faces[b]];
-        parents.sort();
+    // A closed chain of two blend faces meets itself twice, at two
+    // smooth joins between the same faces (a hole's rim of two half
+    // circles, #723): there the vertex the blend took away tells the
+    // sections apart, as it tells ends apart.
+    let pair = |a: usize, b: usize| {
+        let mut p = [faces[a], faces[b]];
+        p.sort();
+        p
+    };
+    let mut pairs: BTreeMap<[Name; 2], usize> = BTreeMap::new();
+    for &(_, [a, b], _) in &made.sections {
+        *pairs.entry(pair(a, b)).or_default() += 1;
+    }
+    for &(e, [a, b], vertex) in &made.sections {
+        let mut parents = pair(a, b).to_vec();
+        if pairs[&pair(a, b)] > 1 {
+            parents.push(vertex);
+        }
         let n = body.derive_name("blend", key, role(BlendRole::Section), &parents);
         body.rename(EntityId::Edge(e), n);
         created.insert(n);
