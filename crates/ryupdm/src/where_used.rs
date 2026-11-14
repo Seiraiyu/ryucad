@@ -12,11 +12,11 @@ use crate::config::Config;
 use crate::label;
 use crate::record::{Kind, parse_name};
 use crate::structure::Reader;
+use ryu_doc::error::Error;
+use ryu_doc::id::{Id, ProjectId};
 use ryucad_doc::doc::assembly::Rev;
 use ryucad_doc::doc::files::{Feature, PartKind};
-use ryucad_doc::doc::id::{Id, ProjectId};
 use ryucad_doc::doc::project::Part;
-use ryucad_doc::error::Error;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -518,10 +518,7 @@ mod tests {
     fn a_part_inserted_is_used_where_it_is_inserted() {
         let mut f = frame();
         let put = |f: &mut std::collections::BTreeMap<String, Vec<u8>>, p: &str, v: Value| {
-            f.insert(
-                p.to_owned(),
-                ryucad_doc::doc::canonical::to_string(&v).into_bytes(),
-            );
+            f.insert(p.to_owned(), ryu_doc::canonical::to_string(&v).into_bytes());
         };
         for (part, rev) in [
             ("enclosure", json!("working")),

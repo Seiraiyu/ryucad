@@ -27,14 +27,13 @@ use crate::attest::Verdict;
 use crate::config::Config;
 use crate::history::{Approval, Releases, Tag};
 use crate::label;
+use crate::product::Product;
 use crate::props;
 use crate::record::{Entry, Kind, Record, Records};
 use crate::state;
-use ryucad_doc::doc::files::Manifest;
-use ryucad_doc::doc::id::{Id, ProjectId};
-use ryucad_doc::doc::project::MANIFEST;
-use ryucad_doc::doc::source::Source;
-use ryucad_doc::error::Result;
+use ryu_doc::error::Result;
+use ryu_doc::id::{Id, ProjectId};
+use ryu_doc::source::Source;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -153,10 +152,20 @@ fn same_text(a: &[u8], b: &[u8]) -> bool {
     a == b || lf(a) == lf(b)
 }
 
-/// Runs every check on the project `src` holds. With no history, only
+/// [`run_for`] for ryucad.
+#[cfg(feature = "cad")]
+pub fn run(
+    src: &dyn Source,
+    history: Option<History<'_>>,
+    results: Option<&mut dyn Results>,
+) -> Result<Vec<Finding>> {
+    run_for::<crate::cad::Cad>(src, history, results)
+}
+
+/// Runs every check on the project `src` of `P` holds. With no history, only
 /// what the files alone show is checked (every record is then proposed);
 /// with `results`, official releases are rebuilt too.
-pub fn run(
+pub fn run_for<P: Product>(
     src: &dyn Source,
     history: Option<History<'_>>,
     mut results: Option<&mut dyn Results>,
@@ -165,19 +174,11 @@ pub fn run(
     let records = Records::read(src)?;
     let none = Releases::default();
     let releases = history.as_ref().map_or(&none, |h| h.releases);
-    let manifest = crate::read_json(src, MANIFEST)
-        .ok()
-        .flatten()
-        .and_then(|v| Manifest::from_json(&ryucad_doc::doc::project::without_conflicts(&v)).ok());
-    let project: Option<ProjectId> = manifest.as_ref().and_then(|m| m.project.clone());
+    let identity = crate::product::identity::<P>(src);
+    let project: Option<ProjectId> = identity.as_ref().and_then(|i| i.project.clone());
     // Records naming the ID a fork had are its upstream's history.
-    let inherited = manifest.and_then(|m| m.forked_from).map(|f| f.project);
-    let parts: Vec<Id> = src
-        .list("parts")?
-        .into_iter()
-        .filter(|(_, k)| *k == ryucad_doc::doc::source::Kind::Dir)
-        .filter_map(|(n, _)| Id::parse(&n, "part").ok())
-        .collect();
+    let inherited = identity.and_then(|i| i.forked_from);
+    let parts: Vec<Id> = P::parts(src)?;
     let official = |e: &Entry| releases.official.get(&e.path);
     let mut out = Vec::new();
     for part in records.parts() {
@@ -215,8 +216,8 @@ pub fn run(
             .filter_map(|(e, r)| Some((*e, r.release()?)))
             .collect();
         // Proposed releases must still be the working part.
-        let content = crate::content::hash(src, &part);
-        let working = props::read(src, &part);
+        let content = P::content(src, &part);
+        let working = props::read_for::<P>(src, &part);
         for (e, r) in releases_of.iter().filter(|(e, _)| official(e).is_none()) {
             let changes = match (&content, &working) {
                 (Ok(c), Ok(p)) => r.changes(c, &config, p),
@@ -257,8 +258,10 @@ pub fn run(
                     &part,
                     Some(&last.label),
                     format!(
-                        "part {part} is deleted, but its revision {} isn't obsolete: make it obsolete (`ryucad release obsolete {part} {}`) or restore it",
-                        last.label, last.label
+                        "part {part} is deleted, but its revision {} isn't obsolete: make it obsolete (`{} release obsolete {part} {}`) or restore it",
+                        last.label,
+                        P::NAME,
+                        last.label
                     ),
                 )
                 .with("path", &last.path),
@@ -299,9 +302,13 @@ pub fn run(
             let Some(o) = official(e) else {
                 continue;
             };
-            let then = crate::history::files(h.repo, &o.commit, h.prefix)?;
-            let content = crate::content::hash(&then, &part);
-            let changes = match (&content, Config::read(&then), props::read(&then, &part)) {
+            let then = crate::history::files_for::<P>(h.repo, &o.commit, h.prefix)?;
+            let content = P::content(&then, &part);
+            let changes = match (
+                &content,
+                Config::read(&then),
+                props::read_for::<P>(&then, &part),
+            ) {
                 (Ok(c), Ok(cfg), Ok(p)) => r.changes(c, &cfg, &p),
                 _ => vec!["content".to_owned()],
             };
@@ -341,7 +348,7 @@ pub fn run(
                 );
             }
             if let Some(a) = releases.approvals.get(&e.path) {
-                out.extend(approval_finding(&part, e, &o.commit, a, releases));
+                out.extend(approval_finding(&part, e, &o.commit, a, releases, P::NAME));
             } else {
                 match releases.tag(&part, &e.label, &o.commit) {
                     Tag::Ok => {}
@@ -351,9 +358,10 @@ pub fn run(
                             &part,
                             Some(&e.label),
                             format!(
-                                "{part} {} has no tag {}: `ryucad release sync` makes it",
+                                "{part} {} has no tag {}: `{} release sync` makes it",
                                 e.label,
-                                releases.name_of(&part, &e.label, Kind::Release)
+                                releases.name_of(&part, &e.label, Kind::Release),
+                                P::NAME
                             ),
                         )
                         .with("tag", releases.name_of(&part, &e.label, Kind::Release))
@@ -365,10 +373,11 @@ pub fn run(
                             &part,
                             Some(&e.label),
                             format!(
-                                "tag {} points away from {}, where {part} {} became official: `ryucad release sync` moves it back",
+                                "tag {} points away from {}, where {part} {} became official: `{} release sync` moves it back",
                                 releases.name_of(&part, &e.label, Kind::Release),
                                 short(&o.commit),
-                                e.label
+                                e.label,
+                                P::NAME
                             ),
                         )
                         .with("tag", releases.name_of(&part, &e.label, Kind::Release))
@@ -411,7 +420,7 @@ pub fn run(
         }
         for (e, _) in entries.iter().filter(|(e, _)| e.kind == Kind::Obsolete) {
             if let (Some(o), Some(a)) = (official(e), releases.approvals.get(&e.path)) {
-                out.extend(approval_finding(&part, e, &o.commit, a, releases));
+                out.extend(approval_finding(&part, e, &o.commit, a, releases, P::NAME));
             }
         }
     }
@@ -482,6 +491,7 @@ fn approval_finding(
     commit: &str,
     a: &Approval,
     releases: &Releases,
+    product: &str,
 ) -> Option<Finding> {
     let tag = releases.name_of(part, &e.label, e.kind);
     let rules: Vec<Value> = a
@@ -522,7 +532,7 @@ fn approval_finding(
         Some(Verdict::Invalid(clause)) => {
             let hint = match clause {
                 crate::attest::Clause::Lightweight => format!(
-                    " (an older ryucad's `release sync` may have made it: delete it with `git tag -d {tag}` and fetch the service's with {FETCH_TAGS})"
+                    " (an older {product}'s `release sync` may have made it: delete it with `git tag -d {tag}` and fetch the service's with {FETCH_TAGS})"
                 ),
                 _ => String::new(),
             };
@@ -564,7 +574,7 @@ fn approval_finding(
             part,
             Some(&e.label),
             format!(
-                "the attestation on {tag} is format {format}, newer than this ryucad reads ({}): upgrade ryucad to judge it",
+                "the attestation on {tag} is format {format}, newer than this {product} reads ({}): upgrade {product} to judge it",
                 crate::attest::FORMAT
             ),
         )
@@ -658,8 +668,8 @@ struct Staged<'a> {
 }
 
 impl Source for Staged<'_> {
-    fn list(&self, dir: &str) -> Result<Vec<(String, ryucad_doc::doc::source::Kind)>> {
-        use ryucad_doc::doc::source::Kind as K;
+    fn list(&self, dir: &str) -> Result<Vec<(String, ryu_doc::source::Kind)>> {
+        use ryu_doc::source::Kind as K;
         let prefix = if dir.is_empty() {
             String::new()
         } else {
@@ -696,6 +706,12 @@ impl Source for Staged<'_> {
     }
 }
 
+/// [`staged_for`] for ryucad.
+#[cfg(feature = "cad")]
+pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
+    staged_for::<crate::cad::Cad>(repo, prefix)
+}
+
 /// The commit guard: what a commit of Git's index would get wrong about
 /// releases, for the project at `prefix`. It reads only the index, `HEAD`
 /// and the release branch's tip, and rebuilds nothing:
@@ -709,9 +725,9 @@ impl Source for Staged<'_> {
 ///
 /// A commit that stages no record and no file of a part with records is
 /// passed at once. Withdrawing a proposal (deleting its record) is fine.
-pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
+pub fn staged_for<P: Product>(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
+    use crate::RELEASES;
     use crate::history::git_error;
-    use ryucad_doc::doc::project::RELEASES;
     let mut index = BTreeMap::new();
     if let Ok(file) = repo.open_index() {
         for e in file.entries() {
@@ -729,8 +745,10 @@ pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
             let mut all = crate::history::records_at(repo, &c.id.to_string(), prefix)?;
             // Part files, to see which parts the commit touches.
             let tree = c.tree_id().map_err(git_error)?.detach();
-            if let Some(parts) = crate::history::entry(repo, tree, prefix, "parts")? {
-                crate::history::blobs(repo, parts, "parts/", &mut all)?;
+            for dir in P::PART_FOLDERS {
+                if let Some(t) = crate::history::entry(repo, tree, prefix, dir)? {
+                    crate::history::blobs(repo, t, &format!("{dir}/"), &mut all)?;
+                }
             }
             all
         }
@@ -754,12 +772,11 @@ pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
                     parts_touched.insert(id);
                 }
             }
-            (Some("parts"), Some(part), Some(_)) => {
-                if let Ok(id) = Id::parse(part, "part") {
+            _ => {
+                if let Some(id) = P::part_of(p) {
                     parts_touched.insert(id);
                 }
             }
-            _ => {}
         }
     }
     let src = Staged { repo, files: index };
@@ -774,12 +791,9 @@ pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
             Some(b) => crate::history::records_at(repo, &b.tip, prefix)?,
             None => BTreeMap::new(),
         };
-    let manifest = crate::read_json(&src, MANIFEST)
-        .ok()
-        .flatten()
-        .and_then(|v| Manifest::from_json(&v).ok());
-    let project = manifest.as_ref().and_then(|m| m.project.clone());
-    let inherited = manifest.and_then(|m| m.forked_from).map(|f| f.project);
+    let identity = crate::product::identity::<P>(&src);
+    let project = identity.as_ref().and_then(|i| i.project.clone());
+    let inherited = identity.and_then(|i| i.forked_from);
     let mut out = Vec::new();
     for path in &records_changed {
         let Some(blob) = official.get(path) else {
@@ -838,8 +852,8 @@ pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
                 .as_str()
                 .is_some_and(|p| records_changed.iter().any(|c| c == p))
         }));
-        let content = crate::content::hash(&src, part);
-        let working = props::read(&src, part);
+        let content = P::content(&src, part);
+        let working = props::read_for::<P>(&src, part);
         for (e, r) in &entries {
             let Some(rel) = r.release() else {
                 continue;
@@ -882,12 +896,14 @@ fn path_part_label(path: &str) -> (Id, String) {
     (part, label)
 }
 
-#[cfg(test)]
+// ryucad's tests: they read ryucad's projects (`cad`); the core's own
+// are in `crate::testing`, over a toy product.
+#[cfg(all(test, feature = "cad"))]
 mod tests {
     use super::*;
     use crate::history::tests::{commit, git, put};
     use crate::state::tests::{add, obsolete, project, release_now};
-    use ryucad_doc::doc::source::Folder;
+    use ryu_doc::source::Folder;
     use std::path::Path;
 
     fn codes(found: &[Finding]) -> Vec<(&'static str, String)> {
@@ -1196,11 +1212,7 @@ mod tests {
             "approvals": {"keys": {attest::test_key_id(): attest::hex(&public)},
                           "rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]},
             "format": 2, "kind": "ryupdm.config"});
-        crate::history::tests::put(
-            d,
-            "ryupdm.json",
-            &ryucad_doc::doc::canonical::to_string(&rules),
-        );
+        crate::history::tests::put(d, "ryupdm.json", &ryu_doc::canonical::to_string(&rules));
         crate::history::tests::commit(d, "rules");
         let text = |l: &str| crate::history::tests::record_text("p", l, Kind::Release);
         crate::history::tests::put(d, "releases/p/A.json", &text("A"));

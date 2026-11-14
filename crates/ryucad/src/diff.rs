@@ -694,48 +694,12 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
-        Some(ryupdm::config::KIND) => {
-            if let Some(Value::Object(decls)) = rest.remove("properties") {
-                for (name, d) in &decls {
-                    lines.push(format!("properties.{name} = {}", declaration(d)));
-                }
-            }
-            if let Some(Value::Object(mut a)) = rest.remove("approvals") {
-                if let Some(Value::Array(rules)) = a.remove("rules") {
-                    for (i, r) in rules.iter().enumerate() {
-                        let line = ryupdm::approvals::Rule::from_json(r, "")
-                            .map_or_else(|_| r.to_string(), |r| r.text());
-                        lines.push(format!("approvals.rules.{i} = {line}"));
-                    }
-                }
-                if let Some(Value::Object(keys)) = a.remove("keys") {
-                    for (id, k) in &keys {
-                        // A key, or `{key, revoked}` for one revoked on a day.
-                        let line = match (k.as_str(), &k["key"], &k["revoked"]) {
-                            (Some(hex), _, _) => hex.to_owned(),
-                            (None, Value::String(hex), Value::String(day)) => {
-                                format!("{hex} (revoked {day})")
-                            }
-                            _ => k.to_string(),
-                        };
-                        lines.push(format!("approvals.keys.{id} = {line}"));
-                    }
-                }
-                // Anything else a newer file holds, field by field.
-                if !a.is_empty() {
-                    flatten("approvals", &Value::Object(a), &mut lines);
-                }
-            }
-        }
-        Some(ryupdm::record::RELEASE_KIND | ryupdm::record::OBSOLETE_KIND) => {
-            if let Some(by) = rest.remove("released_by") {
-                lines.push(format!("released_by = {}", released_by(&by)));
-            }
-            if let Some(Value::Object(results)) = rest.remove("results") {
-                for (f, hash) in &results {
-                    last.push(format!("results.{f} = {}", scalar(hash)));
-                }
-            }
+        Some(
+            k @ (ryupdm::config::KIND
+            | ryupdm::record::RELEASE_KIND
+            | ryupdm::record::OBSOLETE_KIND),
+        ) => {
+            ryupdm::git::textconv(k, &mut rest, &mut lines, &mut last, &flatten);
         }
         Some(crate::doc::annotation::KIND) => {
             let who = |b: &Value| {
@@ -1348,53 +1312,6 @@ fn flatten(path: &str, v: &Value, out: &mut Vec<String>) {
         }
         v => out.push(format!("{path} = {}", scalar(v))),
     }
-}
-
-/// A declared property: `enum anodized, bare (required, revising)`,
-/// `quantity length`, `string`.
-fn declaration(d: &Value) -> String {
-    let mut s = d.get("type").map(scalar).unwrap_or_default();
-    if let Some(Value::Array(values)) = d.get("values") {
-        let list: Vec<String> = values.iter().map(scalar).collect();
-        s.push_str(&format!(" {}", list.join(", ")));
-    }
-    if let Some(dim) = d.get("dim") {
-        s.push_str(&format!(" {}", scalar(dim)));
-    }
-    let flags: Vec<&str> = ["required", "revising"]
-        .into_iter()
-        .filter(|f| d.get(*f) == Some(&Value::Bool(true)))
-        .collect();
-    if !flags.is_empty() {
-        s.push_str(&format!(" ({})", flags.join(", ")));
-    }
-    if let Some(o) = d.as_object() {
-        for (k, v) in o {
-            if !matches!(
-                k.as_str(),
-                "type" | "values" | "dim" | "required" | "revising"
-            ) {
-                s.push_str(&format!(" {k}={}", scalar(v)));
-            }
-        }
-    }
-    s
-}
-
-/// Who wrote a record: `Ada <ada@example.com> as agent`, each part only
-/// when it is there.
-fn released_by(by: &Value) -> String {
-    let mut parts = Vec::new();
-    if let Some(n) = by.get("name") {
-        parts.push(scalar(n));
-    }
-    if let Some(e) = by.get("email") {
-        parts.push(format!("<{}>", scalar(e)));
-    }
-    if let Some(p) = by.get("participant") {
-        parts.push(format!("as {}", scalar(p)));
-    }
-    parts.join(" ")
 }
 
 /// A sketch entity without its position: `line p1 → p2`, `arc p5: p2 → p3`,
@@ -4319,6 +4236,7 @@ mod tests {
                 ryucad: "0".into(),
                 ryukei: "0".into(),
                 commit: "c".into(),
+                product: None,
             },
             released_by: ryupdm::record::ReleasedBy {
                 name: None,

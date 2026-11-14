@@ -2417,6 +2417,7 @@ pub(crate) mod tests {
                 ryucad: "0.0.0".into(),
                 ryukei: "0.0.0".into(),
                 commit: "unknown".into(),
+                product: None,
             },
             released_by: ryupdm::record::ReleasedBy {
                 name: None,

@@ -26,13 +26,13 @@
 use crate::check::sequence;
 use crate::config::Config;
 use crate::history::Releases;
+use crate::product::Product;
 use crate::props::Pdm;
 use crate::record::{Entry, Record, Records};
-use ryucad_doc::doc::files::Manifest;
-use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::project::{MANIFEST, PDM_CONFIG, RELEASES, without_conflicts};
-use ryucad_doc::doc::source::{self, Source, join};
-use ryucad_doc::error::Code;
+use crate::{PDM_CONFIG, RELEASES};
+use ryu_doc::error::Code;
+use ryu_doc::id::Id;
+use ryu_doc::source::{self, Source, join};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -79,6 +79,56 @@ pub struct Broke {
     pub withdraw: bool,
 }
 
+/// How a product's `merge status` lists a [`Broke`]: what `pdm_broke`'s
+/// item says, the same in every product.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plan {
+    /// `<path>#pdm_broke/<code>`, then `/<property>` for a property's.
+    pub id: String,
+    /// `{part, property?, label?, parts?}`.
+    pub concerns: Value,
+    /// `["value"]` for a property's fault: settled with a value.
+    pub choices: Vec<&'static str>,
+    pub message: String,
+    /// For a proposal settled by withdrawing it, the repair's summary;
+    /// the repair deletes `path`.
+    pub withdraw: Option<String>,
+}
+
+impl Broke {
+    /// The item a product's `merge status` lists for this fault.
+    pub fn plan(&self) -> Plan {
+        let mut id = format!("{}#pdm_broke/{}", self.path, self.code);
+        let mut concerns = json!({"part": self.part});
+        if let Some(p) = &self.property {
+            id = format!("{id}/{p}");
+            concerns["property"] = json!(p);
+        }
+        if let Some(l) = &self.label {
+            concerns["label"] = json!(l);
+        }
+        if let Some(others) = self.details.get("parts") {
+            concerns["parts"] = others.clone();
+        }
+        Plan {
+            id,
+            concerns,
+            choices: if self.property.is_some() {
+                vec!["value"]
+            } else {
+                Vec::new()
+            },
+            message: format!("{} (neither side had this)", self.message),
+            withdraw: self.withdraw.then(|| {
+                format!(
+                    "withdraw the proposal {}: delete it, so the merged part can be proposed again",
+                    self.path
+                )
+            }),
+        }
+    }
+}
+
 /// What a faulty file depends on: a file, or every file under a folder.
 enum Dep {
     File(String),
@@ -102,32 +152,18 @@ struct Fault {
 /// and the property or label.
 type Key = (String, Id, String);
 
-/// The parts `src` has folders for.
-fn parts(src: &dyn Source) -> Vec<Id> {
-    src.list("parts")
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(_, k)| *k == source::Kind::Dir)
-        .filter_map(|(n, _)| Id::parse(&n, "part").ok())
-        .collect()
-}
-
 /// Every PDM fault in the project `src` holds that a merge can introduce,
 /// with `releases` saying which records are official. None when the
 /// settings can't be read: a conflicted `ryupdm.json` is a structural
 /// conflict, and nothing can be judged against it.
-fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
+fn faults<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
     let mut out = BTreeMap::new();
     let Ok(config) = Config::read(src) else {
         return out;
     };
-    let unit = crate::read_json(src, MANIFEST)
-        .ok()
-        .flatten()
-        .and_then(|v| Manifest::from_json(&without_conflicts(&v)).ok())
-        .map(|m| m.default_unit);
+    let unit = crate::product::identity::<P>(src).map(|i| i.unit);
     if let Some(unit) = unit {
-        let pdm = Pdm::of(src, parts(src), unit);
+        let pdm = Pdm::of_for::<P>(src, P::parts(src).unwrap_or_default(), unit);
         for (part, pp) in &pdm.parts {
             for e in &pp.faults {
                 let property = e.details["property"].as_str().unwrap_or_default();
@@ -138,12 +174,12 @@ fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
                         .into_iter()
                         .flatten()
                         .filter_map(|p| Id::parse(p.as_str()?, "part").ok())
-                        .map(|p| Dep::File(crate::props::path(&p)))
+                        .map(|p| Dep::File(crate::props::path_for::<P>(&p)))
                         .collect()
                 } else {
                     vec![
                         Dep::File(PDM_CONFIG.to_owned()),
-                        Dep::File(MANIFEST.to_owned()),
+                        Dep::File(P::MANIFEST.to_owned()),
                     ]
                 };
                 out.insert(
@@ -151,7 +187,7 @@ fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
                     Fault {
                         code,
                         part: part.clone(),
-                        path: crate::props::path(part),
+                        path: crate::props::path_for::<P>(part),
                         property: Some(property.to_owned()),
                         label: None,
                         message: e.message.clone(),
@@ -193,8 +229,8 @@ fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
         }
         // A part a merge left unreadable is a structural conflict.
         let (Ok(content), Ok(props)) = (
-            crate::content::hash(src, &part),
-            crate::props::read(src, &part),
+            P::content(src, &part),
+            crate::props::read_for::<P>(src, &part),
         ) else {
             continue;
         };
@@ -223,11 +259,14 @@ fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
                     ),
                     details: json!({"path": e.path, "changes": changes}),
                     withdraw: true,
-                    depends: vec![
-                        Dep::Under(join("parts", part.as_str())),
-                        Dep::File(MANIFEST.to_owned()),
-                        Dep::File(PDM_CONFIG.to_owned()),
-                    ],
+                    depends: {
+                        let own = P::part_files(&part);
+                        let mut d: Vec<Dep> = own.folders.into_iter().map(Dep::Under).collect();
+                        d.extend(own.files.into_iter().map(Dep::File));
+                        d.push(Dep::File(P::MANIFEST.to_owned()));
+                        d.push(Dep::File(PDM_CONFIG.to_owned()));
+                        d
+                    },
                 },
             );
         }
@@ -276,11 +315,8 @@ fn changed(side: &dyn Source, base: &dyn Source, deps: &[Dep], skip: &str) -> Ve
     out
 }
 
-/// The PDM faults of the merge `merged` that neither `ours` nor `theirs`
-/// has, each blamed on the side whose change completes it (see the module
-/// docs). `base` is the merge base (an empty source when there is none);
-/// `releases` the release branch as read, which says which records are
-/// official. In the order of their code, part, and property or label.
+/// [`validate_for`] for ryucad.
+#[cfg(feature = "cad")]
 pub fn validate(
     base: &dyn Source,
     ours: &dyn Source,
@@ -288,9 +324,24 @@ pub fn validate(
     merged: &dyn Source,
     releases: &Releases,
 ) -> Vec<Broke> {
-    let (o, t) = (faults(ours, releases), faults(theirs, releases));
+    validate_for::<crate::cad::Cad>(base, ours, theirs, merged, releases)
+}
+
+/// The PDM faults of the merge `merged` of a project of `P` that neither
+/// `ours` nor `theirs` has, each blamed on the side whose change completes it (see the module
+/// docs). `base` is the merge base (an empty source when there is none);
+/// `releases` the release branch as read, which says which records are
+/// official. In the order of their code, part, and property or label.
+pub fn validate_for<P: Product>(
+    base: &dyn Source,
+    ours: &dyn Source,
+    theirs: &dyn Source,
+    merged: &dyn Source,
+    releases: &Releases,
+) -> Vec<Broke> {
+    let (o, t) = (faults::<P>(ours, releases), faults::<P>(theirs, releases));
     let mut out = Vec::new();
-    for (key, f) in faults(merged, releases) {
+    for (key, f) in faults::<P>(merged, releases) {
         if o.contains_key(&key) || t.contains_key(&key) {
             continue;
         }
@@ -336,11 +387,13 @@ pub fn validate(
     out
 }
 
-#[cfg(test)]
+// ryucad's tests: they read ryucad's projects (`cad`); the core's own
+// are in `crate::testing`, over a toy product.
+#[cfg(all(test, feature = "cad"))]
 mod tests {
     use super::*;
     use crate::state::tests::{add, official, project, release_now};
-    use ryucad_doc::doc::canonical;
+    use ryu_doc::canonical;
 
     type Files = BTreeMap<String, Vec<u8>>;
 
@@ -543,6 +596,63 @@ mod tests {
         assert_eq!(
             validate(&base, &ours, &theirs, &merged, &Releases::default()),
             []
+        );
+    }
+}
+
+// The core's own: no project read, so no `cad`.
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    #[test]
+    fn a_broken_property_takes_a_value_and_a_stale_proposal_is_withdrawn() {
+        let p = Id::parse("q", "part").unwrap();
+        let b = Broke {
+            code: "part_number_duplicate".into(),
+            part: p.clone(),
+            path: "parts/q/properties.json".into(),
+            property: Some("number".into()),
+            label: None,
+            message: "part q: number \"1\" is also part s's".into(),
+            details: json!({"parts": ["s"]}),
+            cause: Cause::Ours,
+            files: vec!["parts/q/properties.json".into()],
+            withdraw: false,
+        };
+        let plan = b.plan();
+        assert_eq!(
+            plan.id,
+            "parts/q/properties.json#pdm_broke/part_number_duplicate/number"
+        );
+        assert_eq!(
+            plan.concerns,
+            json!({"part": "q", "property": "number", "parts": ["s"]})
+        );
+        assert_eq!(plan.choices, ["value"]);
+        assert_eq!(
+            plan.message,
+            "part q: number \"1\" is also part s's (neither side had this)"
+        );
+        assert_eq!(plan.withdraw, None);
+        let s = Broke {
+            code: "release_stale".into(),
+            path: "releases/p/A.json".into(),
+            property: None,
+            label: Some("A".into()),
+            details: json!({}),
+            withdraw: true,
+            ..b
+        };
+        let plan = s.plan();
+        assert_eq!(plan.id, "releases/p/A.json#pdm_broke/release_stale");
+        assert_eq!(plan.concerns, json!({"part": "q", "label": "A"}));
+        assert!(plan.choices.is_empty());
+        assert_eq!(
+            plan.withdraw.as_deref(),
+            Some(
+                "withdraw the proposal releases/p/A.json: delete it, so the merged part can be proposed again"
+            )
         );
     }
 }

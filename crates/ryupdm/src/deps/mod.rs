@@ -6,17 +6,20 @@
 //! default) and the `ryupdm/` tags, and nothing else; nothing is ever
 //! pushed. Everything else here reads what was fetched, offline.
 
+use crate::PDM_CONFIG;
 use crate::config::Config;
 use crate::history::git_error;
-use ryucad_doc::doc::project::PDM_CONFIG;
-use ryucad_doc::error::{Code, Error, Result};
+use ryu_doc::error::{Code, Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod http;
+#[cfg(feature = "cad")]
 pub mod lock;
+#[cfg(feature = "cad")]
 pub mod parts;
+#[cfg(feature = "cad")]
 pub mod read;
 
 /// Where the cache keeps what a fetch found at the remote's `HEAD`.
@@ -85,6 +88,7 @@ impl Cache {
     }
 
     /// A reader of what this cache holds.
+    #[cfg(feature = "cad")]
     pub fn reader(&self) -> read::Reader {
         read::Reader::new(self.clone())
     }
@@ -217,6 +221,7 @@ pub fn config_at(repo: &gix::Repository, rev: &str, prefix: &str) -> Result<Conf
 
 /// The manifest of the project at `prefix` (`""` or `a/b`) in the commit
 /// `rev` names; `None` when there is no project there or it doesn't read.
+#[cfg(feature = "cad")]
 pub fn manifest_at(
     repo: &gix::Repository,
     rev: &str,
@@ -239,7 +244,7 @@ pub fn manifest_at(
     let data = repo.find_object(b).map_err(git_error)?.data.clone();
     Ok(std::str::from_utf8(&data)
         .ok()
-        .and_then(|t| ryucad_doc::doc::canonical::parse(t).ok())
+        .and_then(|t| ryu_doc::canonical::parse(t).ok())
         .and_then(|v| ryucad_doc::doc::files::Manifest::from_json(&v).ok()))
 }
 

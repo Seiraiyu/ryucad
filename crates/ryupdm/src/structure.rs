@@ -8,13 +8,13 @@ use crate::content;
 use crate::history::Releases;
 use crate::props::Properties;
 use crate::record::{Kind, Records};
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::{CopyKey, Id, ProjectId};
+use ryu_doc::source::Source;
 use ryucad_doc::doc::assembly::Rev;
 use ryucad_doc::doc::files::{Feature, PartKind};
-use ryucad_doc::doc::id::{CopyKey, Id, ProjectId};
 use ryucad_doc::doc::mate::{InstancePattern, PatternForm};
 use ryucad_doc::doc::project::{Part, Project};
-use ryucad_doc::doc::source::Source;
-use ryucad_doc::error::{Code, Error, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -647,7 +647,7 @@ pub(crate) mod tests {
     pub(crate) fn files(
         parts: &[(&str, &[(&str, serde_json::Value)])],
     ) -> BTreeMap<String, Vec<u8>> {
-        use ryucad_doc::doc::canonical;
+        use ryu_doc::canonical;
         use serde_json::json;
         let mut f = BTreeMap::new();
         let mut put = |p: &str, v: serde_json::Value| {
@@ -710,7 +710,7 @@ pub(crate) mod tests {
         }
         f.insert(
             "ryucad.json".into(),
-            ryucad_doc::doc::canonical::to_string(&m).into_bytes(),
+            ryu_doc::canonical::to_string(&m).into_bytes(),
         );
         f
     }
@@ -763,7 +763,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_following_patterns_copies_are_counted_from_the_driving_parts_files() {
-        use ryucad_doc::doc::canonical;
+        use ryu_doc::canonical;
         use serde_json::json;
         let pattern = |form: &str, feature: &str, more: serde_json::Value| {
             let mut v = json!({"type": "instance_pattern", "form": form, "instances": ["s0"],

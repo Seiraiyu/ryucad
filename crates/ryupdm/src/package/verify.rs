@@ -4,7 +4,7 @@
 //! against both ([`super::attest::of_release`]).
 
 use super::{MANIFEST, MAX_FILE, MAX_MANIFEST, Manifest, RECORD, zip};
-use ryucad_doc::doc::canonical;
+use ryu_doc::canonical;
 
 /// Why a package doesn't verify. Each has a stable name.
 #[derive(Clone, Debug, PartialEq, Eq)]

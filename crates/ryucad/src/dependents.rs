@@ -24,10 +24,6 @@ use std::path::{Path, PathBuf};
 /// given none.
 pub const PREFERENCE: &str = "pdm.dependents";
 
-/// Folders whose names say they hold no project: Git's, build output,
-/// installed packages.
-const SKIPPED: [&str; 2] = ["target", "node_modules"];
-
 /// The folders a where-used also searches: `within` when it names any,
 /// else the `pdm.dependents` preference unless `skip`; each relative one
 /// taken from `root`.
@@ -49,30 +45,9 @@ pub(crate) fn folders(root: &Path, within: &[String], skip: bool) -> Vec<PathBuf
     listed.iter().map(|f| root.join(f)).collect()
 }
 
-/// The ryucad projects at or under `folder`: the folder itself when it
-/// holds a manifest, else every folder below holding one (never looking
-/// inside a project, a hidden folder, `target` or `node_modules`), sorted.
+/// The ryucad projects at or under `folder` ([`ryupdm::dependents::projects_under`]).
 pub(crate) fn projects_under(folder: &Path) -> std::io::Result<Vec<PathBuf>> {
-    if folder.join(MANIFEST).is_file() {
-        return Ok(vec![folder.to_path_buf()]);
-    }
-    let mut out = Vec::new();
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(folder)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter(|e| {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            !name.starts_with('.') && !SKIPPED.contains(&name.as_ref())
-        })
-        .map(|e| e.path())
-        .collect();
-    entries.sort();
-    for dir in entries {
-        // A folder below that can't be read holds nothing to search.
-        out.extend(projects_under(&dir).unwrap_or_default());
-    }
-    Ok(out)
+    ryupdm::dependents::projects_under(folder, MANIFEST)
 }
 
 /// `q` as the project `theirs` (another project, depending on `own`)

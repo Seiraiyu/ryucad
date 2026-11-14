@@ -59,6 +59,8 @@ jobs:
           # they aren't evicted by one cache per pull request.
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cox/ryucad-fast-ci-2-XS5P5T4M' }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # ryupdm's core without ryucad's half (design 629): what ryueda builds.
+      - run: cargo clippy -p ryupdm --no-default-features --all-targets -- -D warnings
 
   test:
     # Linux x64 runs every test that isn't ignored: the window tests (one
@@ -171,6 +173,24 @@ jobs:
           shared-key: test
           save-if: false
       - run: cargo test --profile ci --workspace --doc
+
+  ryupdm-core:
+    # ryupdm built and tested without its `cad` feature, as ryueda links
+    # it: the proof that the core never reaches ryucad-doc or the kernel
+    # (design 629, plan 10.A). Small: ryupdm and its dependencies only.
+    name: ryupdm without cad
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          add-rust-environment-hash-key: false
+          shared-key: ryupdm-core
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: "! cargo tree -p ryupdm --no-default-features -e normal | grep -E 'ryucad-doc|ryukei'"
+      - run: cargo test --profile ci -p ryupdm --no-default-features --lib
 
   fuzz-check:
     # Every fuzz target type-checked on every pull request, so a change to

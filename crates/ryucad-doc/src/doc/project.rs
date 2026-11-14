@@ -94,13 +94,39 @@ pub const ROOT_FILES: [&str; 8] = [
     super::hole_standards::HOLE_STANDARDS,
 ];
 
+/// The folders below the project a revision holds whole.
+pub const FOLDERS: [&str; 5] = [
+    "parts",
+    RELEASES,
+    IMPORTS,
+    super::annotation::ANNOTATIONS,
+    super::drawing_template::TEMPLATES,
+];
+
+/// Whether `rel` (relative to a project) is one of the files its state
+/// depends on, as a session lists them: the files at its root, files two
+/// and three levels under `parts/`, files two levels under `releases/`,
+/// and files under `imports/`, `annotations/` and `templates/`.
+pub fn project_file(rel: &str) -> bool {
+    if ROOT_FILES.contains(&rel) {
+        return true;
+    }
+    let mut parts = rel.split('/');
+    match parts.next() {
+        Some("parts") => matches!(parts.count(), 2 | 3),
+        Some(RELEASES) => parts.count() == 2,
+        Some(IMPORTS) => parts.count() == 1,
+        Some(super::annotation::ANNOTATIONS) => parts.count() == 1,
+        Some(super::drawing_template::TEMPLATES) => parts.count() == 1,
+        _ => false,
+    }
+}
+
 /// The tag of the piece of a part's revision holding the project
 /// parameters it reads.
 pub const PROJECT_PARAMETERS_TAG: &str = "ryucad.project_parameters";
 
-/// The key under which a file a merge couldn't settle lists its conflicts,
-/// by JSON pointer. No file kind uses it otherwise.
-pub const CONFLICTS: &str = "conflicts";
+pub use ryu_doc::files::CONFLICTS;
 
 #[derive(Clone, Debug)]
 pub struct Project {
@@ -373,41 +399,10 @@ pub use crate::doc::source::relative;
 /// conflicts, naming their pointers, and a feature's `type` where no
 /// conflict is about it, so a failed feature can still say what it is.
 pub fn conflicted(v: &Value, at: &str) -> Option<Error> {
-    let listed = v.as_object()?.get(CONFLICTS)?;
-    let pointers: Vec<&str> = listed
-        .as_object()
-        .map(|o| o.keys().map(String::as_str).collect())
-        .unwrap_or_default();
-    let at_list = if pointers.is_empty() {
-        String::new()
-    } else {
-        format!(" at {}", pointers.join(", "))
-    };
-    let ty = v
-        .get("type")
-        .and_then(Value::as_str)
-        .filter(|_| v.get("kind").and_then(Value::as_str) == Some("ryucad.feature"))
-        .filter(|_| !pointers.iter().any(|p| p.is_empty() || *p == "/type"));
-    let e = Error::new(
-        Code::MergeConflict,
-        format!("{at} has unresolved merge conflicts{at_list}; see `ryucad merge status`"),
-    )
-    .with("path", at)
-    .with("pointers", &pointers);
-    Some(match ty {
-        Some(t) => e.with("type", t),
-        None => e,
-    })
+    ryu_doc::files::conflicted_in(v, at, "ryucad")
 }
 
-/// `v` without its merge conflicts: the values the merge left in place.
-pub fn without_conflicts(v: &Value) -> Value {
-    let mut v = v.clone();
-    if let Some(o) = v.as_object_mut() {
-        o.remove(CONFLICTS);
-    }
-    v
-}
+pub use ryu_doc::files::without_conflicts;
 
 /// Reads and parses the JSON file at `at` (relative to the root); errors
 /// carry that path. A file with merge conflicts is `merge_conflict`.
@@ -1230,6 +1225,35 @@ pub fn write_json(path: &Path, v: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_files_a_revision_holds() {
+        for yes in [
+            "ryucad.json",
+            "ryupdm.json",
+            "parts/p/part.json",
+            "parts/p/features/f.json",
+            "releases/p/A.json",
+            "imports/x.step",
+            "annotations/a.json",
+            "templates/t.json",
+        ] {
+            assert!(project_file(yes), "{yes}");
+        }
+        for no in [
+            "README",
+            "parts/p",
+            "parts/p/a/b/c.json",
+            "releases/p",
+            "imports/a/b",
+        ] {
+            assert!(!project_file(no), "{no}");
+        }
+        assert_eq!(
+            FOLDERS,
+            ["parts", "releases", "imports", "annotations", "templates"]
+        );
+    }
+
     use super::*;
     use crate::doc::files::{Placement, Primitive, PrimitiveType};
     use crate::units::{Quantity, Unit};

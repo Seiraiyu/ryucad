@@ -1094,37 +1094,27 @@ fn pdm(
     ryupdm::merge::validate(&base.files, &ours.files, &theirs.files, working, releases)
         .into_iter()
         .map(|b| {
-            let mut id = format!("{}#pdm_broke/{}", b.path, b.code);
-            let mut concerns = json!({"part": b.part});
-            if let Some(p) = &b.property {
-                id = format!("{id}/{p}");
-                concerns["property"] = json!(p);
-            }
-            if let Some(l) = &b.label {
-                concerns["label"] = json!(l);
-            }
-            if let Some(others) = b.details.get("parts") {
-                concerns["parts"] = others.clone();
-            }
+            let plan = b.plan();
             let mut c = conflict(
-                id.clone(),
+                plan.id.clone(),
                 "pdm_broke",
                 b.files.clone(),
-                concerns,
+                plan.concerns,
                 b.cause.as_str(),
-                format!("{} (neither side had this)", b.message),
+                plan.message,
             );
             c["error"] = json!({"code": b.code, "message": b.message, "details": b.details});
-            if b.property.is_some() {
-                c["choices"] = json!(["value"]);
+            if !plan.choices.is_empty() {
+                c["choices"] = json!(plan.choices);
             }
-            if b.withdraw {
+            if let Some(summary) = plan.withdraw {
                 let repair = crate::doctor::Repair {
-                    id: format!("{id}:withdraw@{}", crate::doctor::basis_of(working, &b.files)),
-                    summary: format!(
-                        "withdraw the proposal {}: delete it, so the merged part can be proposed again",
-                        b.path
+                    id: format!(
+                        "{}:withdraw@{}",
+                        plan.id,
+                        crate::doctor::basis_of(working, &b.files)
                     ),
+                    summary,
                     changes: vec![crate::doctor::Change {
                         path: b.path.clone(),
                         content: None,
