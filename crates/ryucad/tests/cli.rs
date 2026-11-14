@@ -3708,6 +3708,129 @@ fn review_against_a_fake_service() {
     );
 }
 
+/// A body's planar face whose outward normal is `z` along z, as a
+/// reference `<part>/<feature>/<name>`.
+fn plane_face(body: &Value, of: &str, z: f64) -> String {
+    body["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == z
+        })
+        .map(|f| format!("{of}/{}", f["name"].as_str().unwrap()))
+        .unwrap()
+}
+
+/// A body's vertex `name`'s point.
+fn vertex_point(body: &Value, name: &Value) -> [f64; 3] {
+    let v = body["vertices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == *name)
+        .unwrap();
+    [0, 1, 2].map(|k| v["point"][k].as_f64().unwrap())
+}
+
+#[test]
+fn holes_at_places_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=40", "--param", "y=30",
+        "--param", "z=10",
+    ]);
+    let body = p.ok(&["inspect", "plate", "b"])["bodies"][0].clone();
+    let top = plane_face(&body, "plate/b", 1.0);
+    // The top's edges along x = 0 and along y = 0.
+    let edge = |axis: usize| -> String {
+        body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| {
+                let (a, b) = (
+                    vertex_point(&body, &e["start"]),
+                    vertex_point(&body, &e["end"]),
+                );
+                a[2] == 0.01 && b[2] == 0.01 && a[axis] == 0.0 && b[axis] == 0.0
+            })
+            .map(|e| format!("plate/b/{}", e["name"].as_str().unwrap()))
+            .unwrap()
+    };
+    // Two points at once, keyed a and b, then one from two edges.
+    for (id, at) in [("q1", "10mm,10mm,10mm"), ("q2", "30mm,10mm,10mm")] {
+        p.ok(&[
+            "feature",
+            "add",
+            "plate",
+            "point",
+            "--id",
+            id,
+            "--by",
+            "coordinates",
+            "--coordinates",
+            at,
+        ]);
+    }
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "h",
+        "--spec",
+        "M6x1.0-6H THRU",
+        "--at",
+        "plate/q1",
+        "--at",
+        "plate/q2",
+    ]);
+    assert_eq!(
+        h["feature"]["places"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    let e = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "g",
+        "--diameter",
+        "3",
+        "--depth",
+        "4",
+        "--face",
+        &top,
+        "--from-edge",
+        &format!("{}=20", edge(0)),
+        "--from-edge",
+        &format!("{}=15", edge(1)),
+    ]);
+    assert_eq!(
+        e["feature"]["places"]["a"]["from"][1]["distance"]["value"],
+        "15 mm"
+    );
+    let holes = p.ok(&["holes", "plate"]);
+    let refs: Vec<&str> = holes["holes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["ref"].as_str().unwrap())
+        .collect();
+    assert_eq!(refs, ["plate/h/a", "plate/h/b", "plate/g/a"]);
+}
+
 /// #722: a 200 × 200 × 12 mm fixture plate, 100 × M6×1.0-6H THRU on a
 /// 20 mm grid.
 #[test]

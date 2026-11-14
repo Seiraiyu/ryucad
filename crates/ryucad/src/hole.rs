@@ -1161,6 +1161,85 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_hole_at_places_is_added_edited_and_refused() {
+        let (dir, mut s, body) = crate::hole::place::tests::part();
+        let (top, y0, x0) = crate::hole::place::tests::top(&body);
+        let h = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "h",
+                   "diameter": 2, "depth": "through_all", "targets": ["b"],
+                   "places": {"a": {"at": "p/pt"},
+                              "b": {"face": format!("p/b/{top}"),
+                                    "from": [{"edge": format!("p/b/{x0}"), "distance": 15},
+                                             {"edge": format!("p/b/{y0}"), "distance": 5}]}}}),
+        )
+        .unwrap();
+        // Text references come back as files hold them; distances in the unit.
+        assert_eq!(h["feature"]["places"]["a"]["at"], json!({"feature": "pt"}));
+        assert_eq!(
+            h["feature"]["places"]["b"]["from"][0]["distance"]["value"],
+            json!("15 mm")
+        );
+        let file: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("parts/p/features/h.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(file["format"], json!(26));
+        // Places are whole: an edit replaces them.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "places": {"c": {"at": "p/pt"}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            e["feature"]["places"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["c"]
+        );
+        // A sketch and places at once is refused; so is a place off its face.
+        let both = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "sketch": "nope"}),
+        )
+        .unwrap_err();
+        assert_eq!(both.details["pointer"], "/places");
+        let off = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "g",
+                   "diameter": 2, "depth": "through_all", "targets": ["b"],
+                   "places": {"a": {"at": "p/mid", "face": format!("p/b/{top}")}}}),
+        )
+        .unwrap_err();
+        assert_eq!(off.code, Code::HolePlaceOffFace);
+        // Dry run answers the hole and writes nothing (at a point h
+        // doesn't drill).
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "point", "id": "q",
+                   "by": "coordinates", "coordinates": ["12 mm", "7 mm", "5 mm"]}),
+        )
+        .unwrap();
+        let dry = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "g",
+                   "spec": "M3x0.5-6H THRU", "targets": ["b"],
+                   "places": {"a": {"at": "p/q"}}, "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(dry["feature"]["spec"], "M3x0.5-6H THRU");
+        assert!(call(&mut s, "feature.show", json!({"part": "p", "id": "g"})).is_err());
+    }
+
+    #[test]
     fn a_sketch_hole_builds_the_tool_it_always_did() {
         // The refactor's guard: one place per point, translated, one tool.
         let (_dir, mut s) = drilled();

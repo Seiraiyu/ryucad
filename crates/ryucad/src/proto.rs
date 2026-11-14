@@ -162,6 +162,14 @@ pub struct FeatureFields {
     /// at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sketch: Option<String>,
+    /// A hole's places with no sketch (ryucad 28.C): an object by place
+    /// ID, each `{at, face?}`, `{face, from: [{edge, distance}, …]}` or
+    /// `{coaxial}`, with `direction?` and `reverse?`; references as text
+    /// (`<part>/<feature>/<name>`, `<part>/<datum>`, `x`) or as files hold
+    /// them; whole, replacing the hole's places; `{}` or `""` takes them
+    /// away (a sketch must then be given).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub places: Option<Value>,
     /// An entity on each loop to sweep (for a sweep of a face, an edge or
     /// vertex of it by name); empty means every closed loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]

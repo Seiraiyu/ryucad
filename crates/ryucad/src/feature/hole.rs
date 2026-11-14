@@ -1,4 +1,5 @@
-//! Holes drilled at a sketch's points (ryucad 27.C).
+//! Holes drilled at a sketch's points (ryucad 27.C), or at places given
+//! by geometric references (ryucad 28.C).
 
 use super::Given;
 use super::{BodyUse, Check, FeatureKind, Write};
@@ -93,6 +94,20 @@ fn hole_report(
         }
         None => {}
     }
+    // Each place's distances as written and in meters; its references as
+    // the file holds them.
+    if let Some(Value::Object(places)) = v.get_mut("places") {
+        for (k, p) in &h.places {
+            if let crate::doc::hole::PlaceKind::Edges { from, .. } = &p.kind
+                && let Some(Value::Array(a)) =
+                    places.get_mut(k.as_str()).and_then(|x| x.get_mut("from"))
+            {
+                for (e, (_, d)) in a.iter_mut().zip(from) {
+                    e["distance"] = d.report();
+                }
+            }
+        }
+    }
     v
 }
 
@@ -107,9 +122,10 @@ fn error_json(e: &Error) -> Value {
     v
 }
 
-pub(crate) const HOLE: [&str; 27] = [
+pub(crate) const HOLE: [&str; 28] = [
     "sketch",
     "points",
+    "places",
     "form",
     "diameter",
     "counterbore",
@@ -251,6 +267,50 @@ pub(crate) fn thread_given(
         }
     }
     Ok(())
+}
+
+/// A request's places with their text references as files hold them.
+fn places_json(v: &Value, part: &Id) -> Result<Value> {
+    let Value::Object(m) = v else {
+        return Err(
+            Error::new(Code::InvalidParam, "places is an object of places by ID")
+                .with("param", "places"),
+        );
+    };
+    let mut out = serde_json::Map::new();
+    for (k, p) in m {
+        let Value::Object(fields) = p else {
+            return Err(
+                Error::new(Code::InvalidParam, format!("place {k} is an object"))
+                    .with("param", "places"),
+            );
+        };
+        let mut q = serde_json::Map::new();
+        for (f, x) in fields {
+            let at = format!("/places/{k}/{f}");
+            let x = match (f.as_str(), x) {
+                ("at" | "face" | "coaxial" | "direction", Value::String(t)) => {
+                    geom_json(t, part, &at)?
+                }
+                ("from", Value::Array(a)) => Value::Array(
+                    a.iter()
+                        .enumerate()
+                        .map(|(i, e)| {
+                            let mut e = e.clone();
+                            if let Some(Value::String(t)) = e.get("edge") {
+                                e["edge"] = geom_json(t, part, &format!("{at}/{i}/edge"))?;
+                            }
+                            Ok(e)
+                        })
+                        .collect::<Result<_>>()?,
+                ),
+                _ => x.clone(),
+            };
+            q.insert(f.clone(), x);
+        }
+        out.insert(k.clone(), Value::Object(q));
+    }
+    Ok(Value::Object(out))
 }
 
 /// A hole's mouth objects, one per form but simple.
@@ -417,6 +477,22 @@ pub(crate) fn hole_from(
         }
         None => {}
     }
+    // Places are whole: given, they replace the hole's places and its
+    // sketch's points (ryucad 28.C).
+    match &f.places {
+        None => {}
+        Some(Value::String(s)) if s.is_empty() => {
+            o.remove("places");
+        }
+        Some(Value::Object(m)) if m.is_empty() => {
+            o.remove("places");
+        }
+        Some(v) => {
+            o.insert("places".into(), places_json(v, part)?);
+            o.remove("sketch");
+            o.remove("points");
+        }
+    }
     if let Some(d) = &f.diameter {
         o.insert("diameter".into(), d.clone());
     }
@@ -488,14 +564,37 @@ impl FeatureKind for Holes {
         hole_report(&part.id, h, unit, part.hole_standards.as_deref())
     }
 
-    // What the target is; how far it is only rebuild can tell.
+    // What the target is; how far it is only rebuild can tell. Each
+    // place resolves against the part as the write leaves it, so a place
+    // that can't is refused when written (ryucad 28.C).
     fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
-        match &f.hole().expect("a hole").depth {
-            crate::doc::hole::Depth::UpTo { target, .. } => {
-                super::check_up_to(cx.part, cx.order, cx.id, "depth", target, cx.results)
-            }
-            _ => Ok(()),
+        let h = f.hole().expect("a hole");
+        if let crate::doc::hole::Depth::UpTo { target, .. } = &h.depth {
+            super::check_up_to(cx.part, cx.order, cx.id, "depth", target, cx.results)?;
         }
+        if h.places.is_empty() {
+            return Ok(());
+        }
+        let p = cx.proposed(f);
+        let solids = crate::solid::Solids::of(&p);
+        let targets: Vec<&crate::rebuild::Built> = h
+            .targets
+            .iter()
+            .filter_map(|t| {
+                crate::rebuild::read(&p, &solids, cx.id, f, "targets", t, cx.results).ok()
+            })
+            .collect();
+        let at = crate::geometry::At {
+            part: &p,
+            order: cx.order,
+            owner: cx.id,
+            results: cx.results,
+        };
+        let work = ryukei::work::Work::unlimited();
+        for (k, place) in &h.places {
+            crate::hole::place::mouth(&at, k, place, &targets, &work)?;
+        }
+        Ok(())
     }
 
     fn rebuild(&self, cx: &super::RebuildCx<'_>, f: &Feature) -> super::Outcome {
