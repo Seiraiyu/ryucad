@@ -10,6 +10,7 @@ pub use ryupdm::{PDM_CONFIG, RELEASES};
 /// The folder of parts' PDM properties, beside the manifest.
 pub const PROPERTIES: &str = "properties";
 
+pub mod bom;
 pub mod cmd;
 pub mod content;
 pub mod diff;
