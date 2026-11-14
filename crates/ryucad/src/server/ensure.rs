@@ -2,10 +2,14 @@
 //! script declares it, writing only what differs, with what became of
 //! the part, each feature, its parameters and its properties.
 
+use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
+use crate::doc::project::feature_path;
 use crate::error::{Code, Error, Result};
 use crate::live::Live;
+use crate::part::{check_revision, order, part_id, part_kind};
 use crate::proto::Request;
+use crate::server::dispatch;
 use crate::session::Session;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -41,15 +45,163 @@ impl Ask {
     }
 }
 
-/// `part.ensure`.
+/// `part.ensure`: in a capture session (a batch's), the end state built
+/// there.
 pub(crate) fn run(
-    _session: &mut Session,
-    _live: Option<&mut Live>,
-    _me: Option<&str>,
-    _ask: Ask,
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    ask: Ask,
 ) -> Result<Value> {
-    // Tasks 5-9 fill this in.
-    Err(Error::new(Code::Usage, "part.ensure isn't answered yet"))
+    if session.captures() {
+        return apply(session, live, me, ask);
+    }
+    Err(Error::new(
+        Code::Usage,
+        "part.ensure is answered in a batch until Task 9",
+    ))
+}
+
+/// The part made as declared, in a capture session: made if missing; its
+/// parameters file written whole; its features after the kept prefix
+/// taken out unchecked and the declared rest added in order through
+/// `feature.add`, each checked against the declared features before it,
+/// a sketch then drawn by its ops; then its properties.
+fn apply(
+    session: &mut Session,
+    mut live: Option<&mut Live>,
+    me: Option<&str>,
+    ask: Ask,
+) -> Result<Value> {
+    let pid = part_id(&ask.part)?;
+    let kind = ask
+        .kind
+        .as_deref()
+        .map(PartKind::parse)
+        .transpose()
+        .map_err(|e| e.with("pointer", "/kind"))?;
+    let declared = entries(&ask.part, &ask.features)?;
+    let existed = session.project().parts.contains_key(&pid);
+    let old: Vec<Id> = if existed {
+        let p = session.project().part(&pid)?;
+        check_revision(p, ask.expected.as_deref())?;
+        let is = part_kind(p);
+        if let Some(k) = kind
+            && k != is
+        {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{pid} is a {}; ensure doesn't change a part's kind (delete it first)",
+                    is.as_str()
+                ),
+            )
+            .with("part", &pid)
+            .with("pointer", "/kind"));
+        }
+        let list = order(p)?;
+        if let Some(f) = list
+            .iter()
+            .find(|f| matches!(p.features.get(*f), Some(Ok(Feature::Import(_)))))
+        {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{pid} holds the import {f}, which ensure can't write: ensure parts built from feature add's types"
+                ),
+            )
+            .with("part", &pid)
+            .with("feature", f));
+        }
+        list
+    } else {
+        if ask.expected.is_some() {
+            return Err(Error::new(
+                Code::Conflict,
+                format!("part {pid} doesn't exist, so it has no revision to expect"),
+            )
+            .with("part", &pid));
+        }
+        let kind = kind.unwrap_or(PartKind::Part).as_str().to_owned();
+        dispatch(
+            session,
+            live.as_deref_mut(),
+            me,
+            Request::PartCreate {
+                part: ask.part.clone(),
+                kind: Some(kind),
+            },
+        )?;
+        Vec::new()
+    };
+    if let Some(params) = &ask.params {
+        crate::param::replace(session, &ask.part, params)?;
+    }
+    let keep = 0; // Task 8
+    clear(session, &pid, &old[..keep])?;
+    let mut warnings = Vec::new();
+    for (j, e) in declared.iter().enumerate().skip(keep) {
+        let v = dispatch(session, live.as_deref_mut(), me, e.add.clone())
+            .map_err(|x| at_feature(x, j))?;
+        warnings.extend(v["warnings"].as_array().into_iter().flatten().cloned());
+        if let Some(ops) = &e.ops {
+            dispatch(
+                session,
+                live.as_deref_mut(),
+                me,
+                Request::SketchEdit {
+                    part: ask.part.clone(),
+                    sketch: e.id.to_string(),
+                    ops: ops.clone(),
+                    expected_revision: None,
+                },
+            )
+            .map_err(|x| at_feature(x, j))?;
+        }
+    }
+    if let Some(props) = &ask.props {
+        dispatch(
+            session,
+            live.as_deref_mut(),
+            me,
+            Request::PropsSet {
+                part: ask.part.clone(),
+                properties: props.clone(),
+                expected_revision: None,
+            },
+        )
+        .map_err(|e| e.with("pointer", "/props"))?;
+    }
+    let p = session.project().part(&pid)?;
+    let mut v = json!({"part": pid, "kind": part_kind(p).as_str(), "revision": p.revision});
+    if !warnings.is_empty() {
+        v["warnings"] = json!(warnings);
+    }
+    Ok(v)
+}
+
+/// Takes `pid`'s features other than `kept` out of its list and its
+/// folder, unchecked (unlisted files too, so an id declared again is
+/// free): what the declaration adds again is checked as it is added.
+fn clear(session: &mut Session, pid: &Id, kept: &[Id]) -> Result<()> {
+    let p = session.project().part(pid)?;
+    let gone: Vec<Id> = p
+        .features
+        .keys()
+        .filter(|f| !kept.contains(f))
+        .cloned()
+        .collect();
+    if gone.is_empty() && order(p)? == kept {
+        return Ok(());
+    }
+    // The list first: a crash then leaves unlisted files, never a listed
+    // feature with no file (the batch writes lists after content anyway).
+    crate::save::save(session, pid, &[], kept.to_vec())?;
+    for f in &gone {
+        let path = feature_path(session.root(), pid, f);
+        session.remove_file(&path)?;
+    }
+    session.reload()
 }
 
 /// One declared feature: its id, its `feature.add`, and for a sketch the
@@ -149,9 +301,161 @@ fn at_feature(e: Error, j: usize) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::annotation::propose::tests::{on_disk, twin};
+    use crate::testing::call;
 
     fn pointer(e: &Error) -> &str {
         e.details["pointer"].as_str().unwrap()
+    }
+
+    /// The twin's plate as it is, declared.
+    fn plate() -> Value {
+        json!({"part": "plate", "params": {"w": "40 mm", "unused": "1 mm"}, "features": [
+            {"id": "slab", "type": "box", "params": {"x": "w", "y": 20, "z": 5}},
+            {"id": "extra", "type": "sphere", "params": {"radius": 2}, "placement": {"origin": [100, 0, 0]}},
+            {"id": "s", "type": "sketch"}
+        ]})
+    }
+
+    fn ensure(s: &mut Session, params: Value) -> Result<Value> {
+        call(
+            s,
+            "batch",
+            json!({"ops": [{"method": "part.ensure", "params": params}], "rebuild": false}),
+        )
+    }
+
+    fn listed(s: &Session, part: &str) -> Vec<String> {
+        let p = s
+            .project()
+            .part(&crate::part::part_id(part).unwrap())
+            .unwrap();
+        order(p).unwrap().iter().map(|f| f.to_string()).collect()
+    }
+
+    #[test]
+    fn an_ensure_makes_the_part_as_declared() {
+        let (_dir, mut s) = twin();
+        // A new part: made, its parameters written, its features added.
+        ensure(
+            &mut s,
+            json!({"part": "bolt", "params": {"r": "3 mm"}, "features": [
+            {"id": "shank", "type": "cylinder", "params": {"radius": "r", "height": 20}},
+            {"id": "head", "type": "box", "params": {"x": 8, "y": 8, "z": 3}}
+        ], "props": {"name": "Bolt"}}),
+        )
+        .unwrap();
+        assert_eq!(listed(&s, "bolt"), ["shank", "head"]);
+        // Changed, reordered, one gone and one new: the list is the declaration.
+        let mut d = plate();
+        d["features"] = json!([
+            {"id": "s", "type": "sketch"},
+            {"id": "slab", "type": "box", "params": {"x": "w", "y": 30, "z": 5}},
+            {"id": "knob", "type": "sphere", "params": {"radius": 1}}
+        ]);
+        ensure(&mut s, d).unwrap();
+        assert_eq!(listed(&s, "plate"), ["s", "slab", "knob"]);
+        let slab = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "plate", "id": "slab"}),
+        )
+        .unwrap();
+        assert_eq!(slab["params"]["y"]["value"], "30 mm", "{slab}");
+        // An assembly, by its kind.
+        ensure(
+            &mut s,
+            json!({"part": "jig", "kind": "assembly", "features": [
+                {"id": "b", "type": "instance", "of": "bolt", "placement": {"origin": [0, 0, 10]}}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(listed(&s, "jig"), ["b"]);
+    }
+
+    /// The end state is checked, not each step: a feature and the one
+    /// that reads it go together, which `feature.delete` alone refuses.
+    #[test]
+    fn a_feature_and_its_reader_go_together() {
+        let (_dir, mut s) = twin();
+        let mut d = plate();
+        d["features"].as_array_mut().unwrap().extend([
+            json!({"id": "hole", "type": "cylinder", "params": {"radius": 1, "height": 20},
+                   "placement": {"origin": [5, 5, -5]}}),
+            json!({"id": "cut", "type": "boolean", "op": "subtract", "target": "slab", "tools": ["hole"]}),
+        ]);
+        ensure(&mut s, d).unwrap();
+        let e = call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "plate", "id": "hole"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::HasDependents);
+        ensure(&mut s, plate()).unwrap();
+        assert_eq!(listed(&s, "plate"), ["slab", "extra", "s"]);
+    }
+
+    #[test]
+    fn an_ensure_refuses_with_its_own_pointers_and_writes_nothing() {
+        let (dir, mut s) = twin();
+        let before = on_disk(dir.path());
+        let mut d = plate();
+        d["features"][1]["params"]["radius"] = json!("nope");
+        let e = ensure(&mut s, d).unwrap_err();
+        assert!(
+            e.details["pointer"]
+                .as_str()
+                .unwrap()
+                .starts_with("/ops/0/params/features/1"),
+            "{e:?}"
+        );
+        let e = ensure(
+            &mut s,
+            json!({"part": "pin", "kind": "assembly", "features": []}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].clone()),
+            (Code::InvalidParam, json!("/ops/0/params/kind"))
+        );
+        let e = ensure(
+            &mut s,
+            json!({"part": "nobody", "features": [], "expected_revision": "r"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Conflict);
+        let mut d = plate();
+        d["params"] = json!({"w": "40 mm"});
+        d["features"][0]["params"]["x"] = json!("gone");
+        let e = ensure(&mut s, d).unwrap_err();
+        assert!(
+            e.details["pointer"]
+                .as_str()
+                .unwrap()
+                .starts_with("/ops/0/params/features/0"),
+            "{e:?}"
+        );
+        assert_eq!(on_disk(dir.path()), before);
+    }
+
+    #[test]
+    fn a_sketch_is_drawn_by_its_ops() {
+        let (_dir, mut s) = twin();
+        ensure(
+            &mut s,
+            json!({"part": "pin", "features": [
+                {"id": "shank", "type": "cylinder", "params": {"radius": 2, "height": 10}},
+                {"id": "k", "type": "sketch", "ops": [
+                    {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                    {"op": "add", "id": "b", "type": "point", "at": [5, 0]},
+                    {"op": "add", "id": "l", "type": "line", "start": "a", "end": "b"}
+                ]}
+            ]}),
+        )
+        .unwrap();
+        let k = call(&mut s, "sketch.get", json!({"part": "pin", "sketch": "k"})).unwrap();
+        assert!(k.to_string().contains("\"l\""), "{k}");
     }
 
     #[test]
