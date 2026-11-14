@@ -35,7 +35,7 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::Parameters(parameters::Asked::Params(part, before)),
+            Route::Parameters(parameters::Asked::Params(part, before)),
         );
     }
 
@@ -55,7 +55,7 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::Parameters(parameters::Asked::Equations(conflicted)),
+            Route::Parameters(parameters::Asked::Equations(conflicted)),
         );
     }
 
@@ -83,7 +83,7 @@ impl Workspace {
         let Some(req) = e.request(i) else { return };
         e.saving = Some(Some(i));
         e.error = None;
-        self.send(req, Pending::Parameters(parameters::Asked::EquationSave));
+        self.send(req, Route::Parameters(parameters::Asked::EquationSave));
     }
 
     /// Adds the Equations tile's new parameter, to the project or a part.
@@ -94,7 +94,7 @@ impl Workspace {
         let Some(req) = e.add_request() else { return };
         e.saving = Some(None);
         e.error = None;
-        self.send(req, Pending::Parameters(parameters::Asked::EquationSave));
+        self.send(req, Route::Parameters(parameters::Asked::EquationSave));
     }
 
     /// Saves what was typed into the parameter panel.
@@ -105,7 +105,7 @@ impl Workspace {
         p.saving = true;
         p.error = None;
         let req = p.request();
-        self.send(req, Pending::Parameters(parameters::Asked::ParamSave));
+        self.send(req, Route::Parameters(parameters::Asked::ParamSave));
     }
 }
 

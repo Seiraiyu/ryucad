@@ -57,7 +57,7 @@ impl Workspace {
             part: part.clone(),
             instances: Vec::new(),
         };
-        self.send(req, Pending::Assembly(assembly::Asked::Interference(part)));
+        self.send(req, Route::Assembly(assembly::Asked::Interference(part)));
     }
 
     /// Finds the shown assembly's clearances (`clearance`); nothing when it
@@ -72,7 +72,7 @@ impl Workspace {
             instances: Vec::new(),
             below: None,
         };
-        self.send(req, Pending::Assembly(assembly::Asked::Clearance(part)));
+        self.send(req, Route::Assembly(assembly::Asked::Clearance(part)));
     }
 
     /// Diagnoses the project again after it changed, so badges don't
@@ -124,7 +124,7 @@ impl Workspace {
             mates: Vec::new(),
         };
         let part = d.part.clone();
-        self.send(req, Pending::Assembly(assembly::Asked::DragSolve(part)));
+        self.send(req, Route::Assembly(assembly::Asked::DragSolve(part)));
     }
 
     /// Ends a drag, writing where it left the instance with one
@@ -156,7 +156,7 @@ impl Workspace {
         // for the person to say more in.
         self.send_with(
             req,
-            Pending::Assembly(assembly::Asked::DragMove(d.part)),
+            Route::Assembly(assembly::Asked::DragMove(d.part)),
             Proposal {
                 comment: Some(ROUGH_COMMENT.into()),
                 rough: true,
@@ -234,7 +234,7 @@ impl Workspace {
         let req = m.preview(self.model_rev());
         self.assembly.mover_asked = Some((Instant::now(), asked.0, asked.1));
         self.assembly.mover_waiting = true;
-        self.send(req, Pending::Assembly(assembly::Asked::MoveSolve(part)));
+        self.send(req, Route::Assembly(assembly::Asked::MoveSolve(part)));
     }
 
     /// Sends the Move tool's value as `assembly.move` (proposed in
@@ -254,7 +254,7 @@ impl Workspace {
         self.assembly.mover_waiting = false;
         self.send(
             m.request(revision),
-            Pending::Assembly(assembly::Asked::MoveWrite(part)),
+            Route::Assembly(assembly::Asked::MoveWrite(part)),
         );
     }
 
@@ -315,7 +315,7 @@ impl Workspace {
         let asked = d.asked;
         self.send(
             req,
-            Pending::Assembly(assembly::Asked::MatePreview(part, asked)),
+            Route::Assembly(assembly::Asked::MatePreview(part, asked)),
         );
     }
 
@@ -334,7 +334,7 @@ impl Workspace {
         let Some(req) = d.add(revision) else { return };
         self.model.preview.retain(|(p, _), _| *p != part);
         self.model.generation += 1;
-        self.send(req, Pending::Assembly(assembly::Asked::MateAdd(part)));
+        self.send(req, Route::Assembly(assembly::Asked::MateAdd(part)));
     }
 
     /// Closes the Mate dialog and drops its preview.
@@ -351,7 +351,7 @@ impl Workspace {
             let req = Request::ExplodeList {
                 part: Some(p.clone()),
             };
-            self.send(req, Pending::Assembly(assembly::Asked::Explodes(p)));
+            self.send(req, Route::Assembly(assembly::Asked::Explodes(p)));
         }
     }
 
@@ -442,7 +442,7 @@ impl Workspace {
         self.sync_explode();
         self.send(
             req,
-            Pending::Assembly(assembly::Asked::ExplodeSaved(part, Some(id))),
+            Route::Assembly(assembly::Asked::ExplodeSaved(part, Some(id))),
         );
     }
 
@@ -472,7 +472,7 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::Assembly(assembly::Asked::ExplodeSaved(part, Some(e.id))),
+            Route::Assembly(assembly::Asked::ExplodeSaved(part, Some(e.id))),
         );
     }
 
@@ -483,7 +483,7 @@ impl Workspace {
                 Request::MotionList {
                     part: Some(p.clone()),
                 },
-                Pending::Assembly(assembly::Asked::Motions(p)),
+                Route::Assembly(assembly::Asked::Motions(p)),
             );
         }
     }
@@ -500,7 +500,7 @@ impl Workspace {
             };
             self.send(
                 req,
-                Pending::Assembly(assembly::Asked::MotionFrames(s.part, s.motion)),
+                Route::Assembly(assembly::Asked::MotionFrames(s.part, s.motion)),
             );
         }
     }
@@ -548,7 +548,7 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::Assembly(assembly::Asked::MotionSwept(s.part, s.motion)),
+            Route::Assembly(assembly::Asked::MotionSwept(s.part, s.motion)),
         );
     }
 
@@ -585,7 +585,7 @@ impl Workspace {
             &steps,
             self.assembly.motions.revision.clone(),
         ) {
-            Ok(req) => self.send(req, Pending::Assembly(assembly::Asked::MotionSaved(part))),
+            Ok(req) => self.send(req, Route::Assembly(assembly::Asked::MotionSaved(part))),
             Err(why) => self.fail(Error::new(Code::InvalidParam, why)),
         }
     }

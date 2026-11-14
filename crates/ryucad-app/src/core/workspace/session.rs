@@ -35,14 +35,14 @@ impl Workspace {
             key: None,
             scope: None,
         };
-        self.send(req, Pending::Session(session::Asked::Config));
+        self.send(req, Route::Session(session::Asked::Config));
     }
 
     /// Changes a setting through `config.set`: a project setting against
     /// the revision it was read at. A failure lands in `errors`.
     pub fn set_config(&mut self, key: &str, value: Value) {
         let req = self.config_request(key, value);
-        self.send(req, Pending::Session(session::Asked::Config));
+        self.send(req, Route::Session(session::Asked::Config));
     }
 
     /// [`Workspace::set_config`], waiting up to `timeout` for the daemon's
@@ -73,14 +73,14 @@ impl Workspace {
     /// Diagnoses the project (`doctor`).
     pub fn diagnose(&mut self) {
         self.session.doctor_waiting = true;
-        self.send(Request::Doctor {}, Pending::Session(session::Asked::Doctor));
+        self.send(Request::Doctor {}, Route::Session(session::Asked::Doctor));
     }
 
     /// Asks what the disk cache holds.
     pub fn read_cache(&mut self) {
         self.send(
             Request::CacheStats {},
-            Pending::Session(session::Asked::Cache),
+            Route::Session(session::Asked::Cache),
         );
     }
 
@@ -88,7 +88,7 @@ impl Workspace {
     pub fn clear_cache(&mut self) {
         self.send(
             Request::CacheClear {},
-            Pending::Session(session::Asked::Cache),
+            Route::Session(session::Asked::Cache),
         );
     }
 
@@ -98,14 +98,14 @@ impl Workspace {
         let req = Request::CacheLogin {
             token: token.trim().to_owned(),
         };
-        self.send(req, Pending::Session(session::Asked::CacheToken));
+        self.send(req, Route::Session(session::Asked::CacheToken));
     }
 
     /// Removes the stored token (`cache.logout`).
     pub fn logout_cache(&mut self) {
         self.send(
             Request::CacheLogout {},
-            Pending::Session(session::Asked::CacheToken),
+            Route::Session(session::Asked::CacheToken),
         );
     }
 
@@ -123,7 +123,7 @@ impl Workspace {
         self.session.doctor_waiting = true;
         self.send(
             Request::DoctorRepair { repairs, params },
-            Pending::Session(session::Asked::Doctor),
+            Route::Session(session::Asked::Doctor),
         );
     }
 
@@ -133,14 +133,14 @@ impl Workspace {
         let req = crate::core::section::request(&planes, &self.link.participant);
         self.view.sections.planes = planes;
         self.model.generation += 1;
-        self.send(req, Pending::Session(session::Asked::Sections));
+        self.send(req, Route::Session(session::Asked::Sections));
     }
 
     /// Adds the plane `plane` names (`xy`, `yz`, `zx` or a planar face's
     /// reference) to this window's.
     pub fn add_section(&mut self, plane: &str) {
         let req = crate::core::section::add(plane, &self.link.participant);
-        self.send(req, Pending::Session(session::Asked::Sections));
+        self.send(req, Route::Session(session::Asked::Sections));
     }
 
     /// Shows explode `explode` of the explodes' assembly in this window,
@@ -154,7 +154,7 @@ impl Workspace {
             off,
             participant: Some(self.link.participant.clone()),
         };
-        self.send(req, Pending::Session(session::Asked::ExplodeShown));
+        self.send(req, Route::Session(session::Asked::ExplodeShown));
     }
 
     /// Shows motion `motion` of the motions' assembly in this window
@@ -175,7 +175,7 @@ impl Workspace {
             off,
             participant: Some(self.link.participant.clone()),
         };
-        self.send(req, Pending::Session(session::Asked::MotionShown));
+        self.send(req, Route::Session(session::Asked::MotionShown));
     }
 
     /// Changes what this window hides (`visibility.set`): everything
@@ -196,7 +196,7 @@ impl Workspace {
             all,
             participant: Some(self.link.participant.clone()),
         };
-        self.send(req, Pending::Session(session::Asked::Hidden));
+        self.send(req, Route::Session(session::Asked::Hidden));
     }
 
     /// Puts the window in `mode`: at once here, and for the daemon, which
@@ -209,7 +209,7 @@ impl Workspace {
         let was = std::mem::replace(&mut self.session.mode, mode);
         self.send(
             Request::ParticipantMode { mode },
-            Pending::Session(session::Asked::Mode(was)),
+            Route::Session(session::Asked::Mode(was)),
         );
         if mode != crate::core::modes::Mode::Annotate {
             self.annotations.show_agent = false;
@@ -241,7 +241,7 @@ impl Workspace {
             }
             self.session.people.generation += 1;
         }
-        self.send(Request::SelectionSet { entities, mode }, Pending::Quiet);
+        self.send(Request::SelectionSet { entities, mode }, Route::Quiet);
     }
 
     /// The camera of the participant this window follows, if they have one.

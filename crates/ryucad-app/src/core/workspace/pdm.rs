@@ -64,7 +64,7 @@ impl Workspace {
             part: part.clone(),
             rev: self.form_rev(),
         };
-        self.send(req, Pending::Pdm(pdm::Asked::Props(part, before)));
+        self.send(req, Route::Pdm(pdm::Asked::Props(part, before)));
     }
 
     /// Saves what was typed into the Part section.
@@ -73,7 +73,7 @@ impl Workspace {
         p.saving = true;
         p.error = None;
         let req = p.request();
-        self.send(req, Pending::Pdm(pdm::Asked::PropsSave));
+        self.send(req, Route::Pdm(pdm::Asked::PropsSave));
     }
 
     /// Reads the release records the first time the Releases tile shows.
@@ -96,10 +96,10 @@ impl Workspace {
         self.pdm.releases_open = true;
         self.send(
             Request::ReleaseList { part: None },
-            Pending::Pdm(pdm::Asked::States),
+            Route::Pdm(pdm::Asked::States),
         );
         let req = Request::ReleaseCheck { results: false };
-        self.send(req, Pending::Pdm(pdm::Asked::ReleaseCheck));
+        self.send(req, Route::Pdm(pdm::Asked::ReleaseCheck));
     }
 
     /// The dry run of proposing `part`, for its Propose dialog: the label
@@ -112,7 +112,7 @@ impl Workspace {
             expected_revision: None,
             dry_run: true,
         };
-        self.send(req, Pending::Pdm(pdm::Asked::ProposeDry(part.to_owned())));
+        self.send(req, Route::Pdm(pdm::Asked::ProposeDry(part.to_owned())));
     }
 
     /// The revision of `part` the window last saw, to guard a write.
@@ -152,7 +152,7 @@ impl Workspace {
         self.pdm.releases.busy = true;
         self.pdm.releases.error = None;
         self.pdm.releases.done = None;
-        self.send(req, Pending::Pdm(pdm::Asked::ReleaseWrite));
+        self.send(req, Route::Pdm(pdm::Asked::ReleaseWrite));
     }
 
     /// The part whose BOM the BOM tab shows: the window's focus; else
@@ -184,7 +184,7 @@ impl Workspace {
             depth: None,
             format: None,
         };
-        self.send(req, Pending::Pdm(pdm::Asked::Bom { flat }));
+        self.send(req, Route::Pdm(pdm::Asked::Bom { flat }));
     }
 
     /// While the window compares, asks for the BOM's diff from the
@@ -197,7 +197,7 @@ impl Workspace {
                     from: Some(c.named().to_owned()),
                     to: None,
                 };
-                self.send(req, Pending::Pdm(pdm::Asked::BomDiff));
+                self.send(req, Route::Pdm(pdm::Asked::BomDiff));
             }
             _ => {
                 self.pdm.bom.take_diff(None);
@@ -242,7 +242,7 @@ impl Workspace {
                 within: Vec::new(),
                 no_dependents: false,
             };
-            self.send(req, Pending::Pdm(pdm::Asked::WhereUsed(part.clone())));
+            self.send(req, Route::Pdm(pdm::Asked::WhereUsed(part.clone())));
             self.ask_org(&part);
         }
     }
@@ -330,7 +330,7 @@ impl Workspace {
             depth: None,
             format: Some("csv".to_owned()),
         };
-        self.send(req, Pending::Pdm(pdm::Asked::BomExport(path)));
+        self.send(req, Route::Pdm(pdm::Asked::BomExport(path)));
     }
 
     /// Saves the item number being typed in the BOM tab (`bom.renumber`),
@@ -361,7 +361,7 @@ impl Workspace {
         };
         self.pdm.bom.saving = true;
         self.pdm.bom.edit_error = None;
-        self.send(req, Pending::Pdm(pdm::Asked::BomRenumber(e)));
+        self.send(req, Route::Pdm(pdm::Asked::BomRenumber(e)));
     }
 
     /// Reads the BOM again if the tab was opened.
@@ -379,7 +379,7 @@ impl Workspace {
     /// Sets up ryupdm (`pdm.init`): the project's ID and default
     /// settings. The answer is the new settings.
     pub fn pdm_init(&mut self) {
-        self.send(Request::PdmInit {}, Pending::Pdm(pdm::Asked::PdmConfig));
+        self.send(Request::PdmInit {}, Route::Pdm(pdm::Asked::PdmConfig));
     }
 }
 

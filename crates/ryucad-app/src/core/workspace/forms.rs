@@ -35,7 +35,7 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::Forms(forms::Asked::ImportConvert(
+            Route::Forms(forms::Asked::ImportConvert(
                 part.to_owned(),
                 feature.to_owned(),
             )),
@@ -58,7 +58,7 @@ impl Workspace {
             id: id.clone(),
             rev: self.form_rev(),
         };
-        self.send(req, Pending::Forms(forms::Asked::Form(part, id, before)));
+        self.send(req, Route::Forms(forms::Asked::Form(part, id, before)));
     }
 
     /// Opens the form for a sketch's dimension (or closes it, with
@@ -88,7 +88,7 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::Forms(forms::Asked::Dim(part, sketch, constraint, before)),
+            Route::Forms(forms::Asked::Dim(part, sketch, constraint, before)),
         );
     }
 
@@ -100,7 +100,7 @@ impl Workspace {
         f.saving = true;
         f.error = None;
         let req = f.request();
-        self.send(req, Pending::Forms(forms::Asked::DimSave));
+        self.send(req, Route::Forms(forms::Asked::DimSave));
     }
 
     /// Saves what was typed into the form.
@@ -136,7 +136,7 @@ impl Workspace {
             dry_run: true,
             expected_revision: None,
         };
-        self.send(req, Pending::Forms(forms::Asked::InsertPreview(key)));
+        self.send(req, Route::Forms(forms::Asked::InsertPreview(key)));
     }
 
     pub fn save_form(&mut self) {
@@ -148,7 +148,7 @@ impl Workspace {
             Ok(req) => {
                 form.saving = true;
                 form.error = None;
-                self.send(req, Pending::Forms(forms::Asked::Save));
+                self.send(req, Route::Forms(forms::Asked::Save));
             }
         }
     }
@@ -234,7 +234,7 @@ impl Forms {
                             part: Some(placed.to_owned()),
                         };
                         let why =
-                            Pending::Forms(Asked::FormLabels(part.clone(), form.feature.clone()));
+                            Route::Forms(Asked::FormLabels(part.clone(), form.feature.clone()));
                         fx.send(req, why);
                     } else if let Some(l) =
                         states.by_part.get(placed).and_then(|s| s["label"].as_str())
@@ -249,7 +249,7 @@ impl Forms {
                         };
                         fx.send(
                             req,
-                            Pending::Forms(Asked::FormLabels(part.clone(), form.feature.clone())),
+                            Route::Forms(Asked::FormLabels(part.clone(), form.feature.clone())),
                         );
                     }
                     self.form = Some(form);

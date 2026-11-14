@@ -13,10 +13,10 @@ impl Workspace {
             return;
         }
         self.deps.deps_waiting = true;
-        self.send(Request::DepsList {}, Pending::Deps(deps::Asked::DepsList));
+        self.send(Request::DepsList {}, Route::Deps(deps::Asked::DepsList));
         self.send(
             Request::DepsOutdated {},
-            Pending::Deps(deps::Asked::DepsOutdated),
+            Route::Deps(deps::Asked::DepsOutdated),
         );
     }
 
@@ -26,7 +26,7 @@ impl Workspace {
         self.deps.failed = None;
         self.send_aside(
             Request::DepsFetch { names },
-            Pending::Deps(deps::Asked::DepsWrite),
+            Route::Deps(deps::Asked::DepsWrite),
         );
     }
 
@@ -42,7 +42,7 @@ impl Workspace {
         };
         self.deps.busy = true;
         self.deps.failed = None;
-        self.send_aside(req, Pending::Deps(deps::Asked::DepsWrite));
+        self.send_aside(req, Route::Deps(deps::Asked::DepsWrite));
     }
 
     /// Removes dependency `name`.
@@ -53,7 +53,7 @@ impl Workspace {
         };
         self.deps.busy = true;
         self.deps.failed = None;
-        self.send(req, Pending::Deps(deps::Asked::DepsWrite));
+        self.send(req, Route::Deps(deps::Asked::DepsWrite));
     }
 
     /// Update's first step: a dry run (fetching first) that says what
@@ -70,7 +70,7 @@ impl Workspace {
         self.deps.busy = true;
         self.deps.failed = None;
         self.deps.update = None;
-        self.send_aside(req, Pending::Deps(deps::Asked::DepsDry(names, part)));
+        self.send_aside(req, Route::Deps(deps::Asked::DepsDry(names, part)));
     }
 
     /// Writes the update its dry run showed, from what that fetched.
@@ -87,7 +87,7 @@ impl Workspace {
             expected_revision: self.deps.revision.clone(),
         };
         self.deps.busy = true;
-        self.send(req, Pending::Deps(deps::Asked::DepsWrite));
+        self.send(req, Route::Deps(deps::Asked::DepsWrite));
     }
 
     /// Opens Place from dependency… on the shown assembly.
@@ -110,7 +110,7 @@ impl Workspace {
             name: name.to_owned(),
             part: None,
         };
-        self.send(req, Pending::Deps(deps::Asked::DepsParts(name.to_owned())));
+        self.send(req, Route::Deps(deps::Asked::DepsParts(name.to_owned())));
     }
 
     /// Places the picker's part at its label, at the assembly's origin.
@@ -143,14 +143,14 @@ impl Workspace {
             expected_revision: expected,
             dry_run: false,
         };
-        self.send(req, Pending::Deps(deps::Asked::DepsPlace));
+        self.send(req, Route::Deps(deps::Asked::DepsPlace));
     }
 }
 
 /// What one of this sub-state's requests was for (design 541,
 /// "Typed handles"): `Workspace::answer` routes its answer here.
 #[derive(Clone, Debug, PartialEq)]
-// The variants keep the names they had in `Pending`.
+// The variants keep the names they had in `Pending` before 27.F.
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum Asked {
     /// `deps.list` and `deps.outdated`, for the tab and the marks.

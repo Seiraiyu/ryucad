@@ -13,11 +13,11 @@ impl Workspace {
         self.branches.branches_waiting = true;
         self.send(
             Request::BranchList {},
-            Pending::Branches(branches::Asked::BranchList),
+            Route::Branches(branches::Asked::BranchList),
         );
         self.send(
             Request::WorktreeList {},
-            Pending::Branches(branches::Asked::Branches),
+            Route::Branches(branches::Asked::Branches),
         );
     }
 
@@ -54,7 +54,7 @@ impl Workspace {
         let rev = crate::core::branches::compare_rev(&path);
         self.send(
             Request::MergePreview { rev },
-            Pending::Branches(branches::Asked::Preview(path, key)),
+            Route::Branches(branches::Asked::Preview(path, key)),
         );
     }
 
@@ -94,7 +94,7 @@ impl Workspace {
             branch: c.branch.clone(),
             expected_revision: c.expected.clone(),
         };
-        self.send(req, Pending::Branches(branches::Asked::Switch));
+        self.send(req, Route::Branches(branches::Asked::Switch));
     }
 
     /// Settles a merge conflict by `choice` (`ours`, `theirs`, or `repair`
@@ -111,7 +111,7 @@ impl Workspace {
         let req = crate::core::merge::resolution(c, choice, repair, &self.model.parts);
         m.resolving = true;
         m.failed = None;
-        self.send(req, Pending::Branches(branches::Asked::Resolve));
+        self.send(req, Route::Branches(branches::Asked::Resolve));
     }
 }
 
@@ -163,7 +163,7 @@ impl Branches {
                     m.failed = Some(e);
                 }
                 if again {
-                    fx.send(Request::MergeStatus {}, Pending::Branches(Asked::Merge));
+                    fx.send(Request::MergeStatus {}, Route::Branches(Asked::Merge));
                 }
             }
             (Asked::Branches, a) => {

@@ -30,7 +30,7 @@ impl Workspace {
             rev,
             participant: Some(self.link.participant.clone()),
         };
-        self.send(req, Pending::Quiet);
+        self.send(req, Route::Quiet);
     }
 
     /// Starts, changes or ends the compare to match this window's
@@ -126,7 +126,7 @@ impl Workspace {
         self.comparing.compare_waiting = true;
         self.comparing.compare_again = false;
         let n = self.comparing.compare_asked;
-        self.send(req, Pending::Comparing(comparing::Asked::Compare(n)));
+        self.send(req, Route::Comparing(comparing::Asked::Compare(n)));
     }
 
     /// Fetches the ghosts the compare wants and doesn't have, one body
@@ -155,7 +155,7 @@ impl Workspace {
                 flat: None,
                 before: None,
             };
-            self.send(req, Pending::Comparing(comparing::Asked::Ghost(key, hash)));
+            self.send(req, Route::Comparing(comparing::Asked::Ghost(key, hash)));
         }
     }
 }

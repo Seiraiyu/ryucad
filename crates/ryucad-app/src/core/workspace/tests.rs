@@ -212,3 +212,89 @@ fn a_doctor_answer_wanted_again_asks_again() {
         fx.recorded()
     );
 }
+
+/// Design 541: an answer for what a sub-state no longer shows is dropped,
+/// and leaves the workspace nothing to do.
+#[test]
+fn an_answer_for_a_closed_sub_state_is_dropped() {
+    // The panel moved on to another feature before the answer came.
+    let mut forms = forms::Forms {
+        form_for: Some(("p".to_owned(), "f2".to_owned())),
+        ..Default::default()
+    };
+    let show = json!({"id": "f1", "type": "box", "revision": "1"});
+    let mut fx = Effects::default();
+    forms.answer(
+        forms::Asked::Form("p".to_owned(), "f1".to_owned(), None),
+        answered(show),
+        &Model::default(),
+        &crate::core::pdm::States::default(),
+        &mut fx,
+    );
+    assert!(forms.form.is_none());
+    assert!(fx.recorded().is_empty(), "{:?}", fx.recorded());
+    // The parameter panel closed: its part's list is dropped.
+    let mut parameters = parameters::Parameters::default();
+    let mut fx = Effects::default();
+    parameters.answer(
+        parameters::Asked::Params("p".to_owned(), None),
+        answered(json!({"parameters": []})),
+        "mm",
+        &mut fx,
+    );
+    assert!(parameters.params.is_none());
+    assert!(fx.recorded().is_empty(), "{:?}", fx.recorded());
+}
+
+/// A failure no arm of a sub-state takes is the workspace's to show.
+#[test]
+fn a_failure_no_sub_state_takes_is_left_to_the_workspace() {
+    let mut pdm = pdm::Pdm::default();
+    let mut fx = Effects::default();
+    pdm.answer(
+        pdm::Asked::States,
+        Err(Error::new(Code::Daemon, "gone")),
+        &mut fx,
+    );
+    assert!(
+        matches!(fx.recorded(), [Effect::Fail(e)] if e.message == "gone"),
+        "{:?}",
+        fx.recorded()
+    );
+}
+
+/// Design 541: `Workspace::answer` only routes. Every arm but a
+/// proposal's and a quiet request's hands the answer to the sub-state
+/// that asked and does nothing else.
+#[test]
+fn the_workspace_answers_only_by_routing() {
+    let src = include_str!("mod.rs");
+    let start = src
+        .find("    fn answer(&mut self, why: Route, answer: Result<Answer>)")
+        .expect("Workspace::answer");
+    let body = &src[start..];
+    let body = &body[..body.find("\n    }\n").expect("its end")];
+    let mut arms: Vec<String> = Vec::new();
+    for line in body.lines() {
+        // The match ends where `apply` follows it.
+        if line == "        }" {
+            break;
+        }
+        if line.starts_with("            Route::") {
+            arms.push(line.trim().to_owned());
+        } else if let Some(arm) = arms.last_mut() {
+            arm.push_str(line.trim());
+        }
+    }
+    assert_eq!(arms.len(), 16, "{arms:#?}");
+    for arm in arms {
+        if arm.starts_with("Route::Proposal") || arm.starts_with("Route::Quiet") {
+            continue;
+        }
+        let compact: String = arm.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains(".answer(a,answer,") && !compact.contains(';'),
+            "an arm of Workspace::answer that does more than route: {arm}"
+        );
+    }
+}

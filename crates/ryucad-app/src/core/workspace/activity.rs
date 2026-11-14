@@ -13,7 +13,7 @@ impl Workspace {
             part: None,
             limit: Some(100),
         };
-        self.send(req, Pending::Activity(activity::Asked::History));
+        self.send(req, Route::Activity(activity::Asked::History));
     }
 
     /// Reads the history again after the project changed, once it was

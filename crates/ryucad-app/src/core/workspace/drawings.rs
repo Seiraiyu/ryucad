@@ -29,7 +29,7 @@ impl Workspace {
     pub fn read_drawn(&mut self) {
         self.send(
             Request::DrawingList { part: None },
-            Pending::Drawings(drawings::Asked::DrawingsAll),
+            Route::Drawings(drawings::Asked::DrawingsAll),
         );
     }
 
@@ -55,7 +55,7 @@ impl Workspace {
             Request::DrawingList {
                 part: Some(part.clone()),
             },
-            Pending::Drawings(drawings::Asked::DrawingList(part)),
+            Route::Drawings(drawings::Asked::DrawingList(part)),
         );
     }
 
@@ -94,7 +94,7 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::Drawings(drawings::Asked::DrawingSheet(part, drawing, sheet)),
+            Route::Drawings(drawings::Asked::DrawingSheet(part, drawing, sheet)),
         );
     }
 
@@ -113,7 +113,7 @@ impl Workspace {
         self.drawings.saving = true;
         self.drawings.error = None;
         self.drawings.note = None;
-        self.send(req, Pending::Drawings(drawings::Asked::DrawingWrite));
+        self.send(req, Route::Drawings(drawings::Asked::DrawingWrite));
     }
 
     /// A drag of what was picked on the sheet, let go `d` mm from where it

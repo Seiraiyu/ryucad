@@ -3,10 +3,6 @@
 //! records the rest here. `Workspace::apply` carries it out, in the order
 //! recorded, once the answer is taken.
 
-// Used as 27.F's Tasks 9 to 11 move each sub-state's answers here;
-// Task 12 removes this.
-#![allow(dead_code)]
-
 use super::*;
 use crate::core::deps::Marks;
 
@@ -32,7 +28,7 @@ pub(super) enum Effect {
     Base(ryucad::mesh::Quality),
     /// A read the answer asks for next, with its route (boxed: a
     /// `Request` is large).
-    Send(Box<Request>, Pending),
+    Send(Box<Request>, Route),
     /// One of the workspace's own steps.
     Then(Then),
 }
@@ -116,7 +112,7 @@ impl Effects {
         self.0.push(Effect::Base(q));
     }
 
-    pub(super) fn send(&mut self, req: Request, why: Pending) {
+    pub(super) fn send(&mut self, req: Request, why: Route) {
         self.0.push(Effect::Send(Box::new(req), why));
     }
 

@@ -39,7 +39,7 @@ impl Workspace {
             };
             self.send(
                 req,
-                Pending::Model(model::Asked::SheetTable(key.clone(), revision)),
+                Route::Model(model::Asked::SheetTable(key.clone(), revision)),
             );
         }
     }
@@ -84,7 +84,7 @@ impl Workspace {
             };
             self.send(
                 req,
-                Pending::Model(model::Asked::FlatLines(key.clone(), revision)),
+                Route::Model(model::Asked::FlatLines(key.clone(), revision)),
             );
         }
     }
@@ -190,7 +190,7 @@ impl Workspace {
             flat: Some(key.1.clone()),
             before: None,
         };
-        self.send(req, Pending::Model(model::Asked::FlatMesh(key, revision)));
+        self.send(req, Route::Model(model::Asked::FlatMesh(key, revision)));
     }
 
     /// Turns the camera to the flat view, once its body and lines have
@@ -257,7 +257,7 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::Model(model::Asked::Sweep(key.clone(), revision)),
+            Route::Model(model::Asked::Sweep(key.clone(), revision)),
         );
     }
 
@@ -286,7 +286,7 @@ impl Workspace {
                 flat: None,
                 before: Some(key.1.clone()),
             };
-            self.send(req, Pending::Model(model::Asked::Deleted(key.clone())));
+            self.send(req, Route::Model(model::Asked::Deleted(key.clone())));
         }
     }
 
@@ -329,7 +329,7 @@ impl Workspace {
             entity: None,
             rev: self.model_rev(),
         };
-        self.send(req, Pending::Model(model::Asked::Made(key, revision)));
+        self.send(req, Route::Model(model::Asked::Made(key, revision)));
     }
 
     /// Fetches the drawings of `part`'s sketches, paths and helices that
@@ -342,7 +342,7 @@ impl Workspace {
                 quality: None,
                 rev: self.model_rev(),
             };
-            self.send(req, Pending::Model(model::Asked::Sketch(key, revision)));
+            self.send(req, Route::Model(model::Asked::Sketch(key, revision)));
         }
         for (key, revision) in self.model.ask_paths(part) {
             let req = Request::PathGet {
@@ -351,7 +351,7 @@ impl Workspace {
                 quality: None,
                 rev: self.model_rev(),
             };
-            self.send(req, Pending::Model(model::Asked::Path(key, revision)));
+            self.send(req, Route::Model(model::Asked::Path(key, revision)));
         }
         if let Some(revision) = self.model.ask_holes(part) {
             let req = Request::HolesList {
@@ -364,7 +364,7 @@ impl Workspace {
             };
             self.send(
                 req,
-                Pending::Model(model::Asked::Holes(part.to_owned(), revision)),
+                Route::Model(model::Asked::Holes(part.to_owned(), revision)),
             );
         }
     }
@@ -398,7 +398,7 @@ impl Workspace {
                         flat: None,
                         before: None,
                     };
-                    self.send(req, Pending::Model(model::Asked::Mesh(key, hash)));
+                    self.send(req, Route::Model(model::Asked::Mesh(key, hash)));
                 }
             }
         }
@@ -418,7 +418,7 @@ impl Workspace {
                     flat: None,
                     before: None,
                 };
-                self.send(req, Pending::Model(model::Asked::Meshes(batch.to_vec())));
+                self.send(req, Route::Model(model::Asked::Meshes(batch.to_vec())));
             }
         }
     }
@@ -443,7 +443,7 @@ impl Workspace {
                 flat: None,
                 before: None,
             };
-            self.send(req, Pending::Model(model::Asked::Level(hash, level)));
+            self.send(req, Route::Model(model::Asked::Level(hash, level)));
         }
     }
 
@@ -491,10 +491,7 @@ impl Workspace {
             part: Some(id.to_owned()),
             rev: rev.clone(),
         };
-        self.send(
-            req,
-            Pending::Model(model::Asked::Rebuild(id.to_owned(), rev)),
-        );
+        self.send(req, Route::Model(model::Asked::Rebuild(id.to_owned(), rev)));
     }
 }
 

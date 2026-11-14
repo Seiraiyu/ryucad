@@ -57,7 +57,7 @@ impl Workspace {
             let req = Request::ViewList {
                 part: Some(p.clone()),
             };
-            self.send(req, Pending::View(view::Asked::Views(p)));
+            self.send(req, Route::View(view::Asked::Views(p)));
         }
     }
 
@@ -80,7 +80,7 @@ impl Workspace {
             normal_to: None,
             part: None,
         };
-        self.send(share, Pending::Quiet);
+        self.send(share, Route::Quiet);
         let req = Request::ViewSave {
             part: part.clone(),
             view: id.to_owned(),
@@ -88,7 +88,7 @@ impl Workspace {
             participant: Some(self.me().to_owned()),
             expected_revision: None,
         };
-        self.send(req, Pending::View(view::Asked::ViewSaved(part)));
+        self.send(req, Route::View(view::Asked::ViewSaved(part)));
     }
 
     /// Restores named view `id` of the part shown on this window's
@@ -106,7 +106,7 @@ impl Workspace {
             normal_to: None,
             part: Some(part),
         };
-        self.send(req, Pending::Quiet);
+        self.send(req, Route::Quiet);
     }
 
     /// Asks the daemon for a camera normal to `face` (its geometry is the
@@ -119,7 +119,7 @@ impl Workspace {
             normal_to: Some(face.to_owned()),
             part: None,
         };
-        self.send(req, Pending::View(view::Asked::NormalTo));
+        self.send(req, Route::View(view::Asked::NormalTo));
     }
 
     /// Reads how the bodies the window shows look (`appearance.get`).
@@ -132,7 +132,7 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::View(view::Asked::Appearance(self.view.looks_asked)),
+            Route::View(view::Asked::Appearance(self.view.looks_asked)),
         );
     }
 
@@ -208,7 +208,7 @@ impl Workspace {
             file_styles: None,
             expected_revision: None,
         };
-        self.send(req, Pending::View(view::Asked::AppearanceWritten));
+        self.send(req, Route::View(view::Asked::AppearanceWritten));
     }
 
     /// Takes the Appearance window's target's entry out
@@ -223,7 +223,7 @@ impl Workspace {
             entities: vec![target],
             expected_revision: None,
         };
-        self.send(req, Pending::View(view::Asked::AppearanceWritten));
+        self.send(req, Route::View(view::Asked::AppearanceWritten));
     }
 
     /// Closes the Appearance window, dropping anything dragged.
@@ -240,7 +240,7 @@ impl Workspace {
             entities: picks.clone(),
             rev: None,
         };
-        self.send(req, Pending::View(view::Asked::Measure(picks)));
+        self.send(req, Route::View(view::Asked::Measure(picks)));
     }
 
     /// Measures the Measure tool's picks again: what they name changed.
@@ -253,7 +253,7 @@ impl Workspace {
             entities: picks.clone(),
             rev: self.model_rev(),
         };
-        self.send(req, Pending::View(view::Asked::Measure(picks)));
+        self.send(req, Route::View(view::Asked::Measure(picks)));
     }
 
     /// What Tools > Mass properties weighs: the solid or occurrence of the
@@ -278,7 +278,7 @@ impl Workspace {
             tolerance: None,
             rev: self.model_rev(),
         };
-        self.send(req, Pending::View(view::Asked::Mass(of.to_owned())));
+        self.send(req, Route::View(view::Asked::Mass(of.to_owned())));
     }
 }
 

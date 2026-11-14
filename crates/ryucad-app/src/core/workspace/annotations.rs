@@ -50,7 +50,7 @@ impl Workspace {
         };
         m.posting = true;
         m.note = None;
-        self.send(req, Pending::Annotations(annotations::Asked::MarkupPost));
+        self.send(req, Route::Annotations(annotations::Asked::MarkupPost));
     }
 
     /// The view marks the viewport draws on the glass (design 423, When):
@@ -156,10 +156,7 @@ impl Workspace {
             view: None,
             author: None,
         };
-        self.send(
-            req,
-            Pending::Annotations(annotations::Asked::AnnotationWrite),
-        );
+        self.send(req, Route::Annotations(annotations::Asked::AnnotationWrite));
     }
 
     pub fn reply_annotation(&mut self, id: &str, text: String) {
@@ -169,10 +166,7 @@ impl Workspace {
             expect: None,
             author: None,
         };
-        self.send(
-            req,
-            Pending::Annotations(annotations::Asked::AnnotationWrite),
-        );
+        self.send(req, Route::Annotations(annotations::Asked::AnnotationWrite));
     }
 
     pub fn edit_annotation(&mut self, id: &str, comment: String) {
@@ -185,10 +179,7 @@ impl Workspace {
             expect: None,
             author: None,
         };
-        self.send(
-            req,
-            Pending::Annotations(annotations::Asked::AnnotationWrite),
-        );
+        self.send(req, Route::Annotations(annotations::Asked::AnnotationWrite));
     }
 
     pub fn delete_annotation(&mut self, id: &str) {
@@ -197,10 +188,7 @@ impl Workspace {
             expect: None,
             author: None,
         };
-        self.send(
-            req,
-            Pending::Annotations(annotations::Asked::AnnotationWrite),
-        );
+        self.send(req, Route::Annotations(annotations::Asked::AnnotationWrite));
     }
 
     /// Takes an annotation's change into the working files (Direct edit).
@@ -211,10 +199,7 @@ impl Workspace {
             expect: None,
             author: None,
         };
-        self.send(
-            req,
-            Pending::Annotations(annotations::Asked::AnnotationWrite),
-        );
+        self.send(req, Route::Annotations(annotations::Asked::AnnotationWrite));
     }
 
     /// Chooses an annotation (or none): its view restored, and with a

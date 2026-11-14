@@ -29,7 +29,7 @@ impl Workspace {
         i.error = None;
         i.done = None;
         let req = import_request(&key.0, i.update.clone(), true, key.1);
-        self.send(req, Pending::Exchange(exchange::Asked::ImportPlan(key)));
+        self.send(req, Route::Exchange(exchange::Asked::ImportPlan(key)));
     }
 
     /// Imports the open import's file, as its plan said: the same
@@ -42,7 +42,7 @@ impl Workspace {
         i.waiting = true;
         i.error = None;
         let req = import_request(&key.0, i.update.clone(), false, key.1);
-        self.send(req, Pending::Exchange(exchange::Asked::Import(key)));
+        self.send(req, Route::Exchange(exchange::Asked::Import(key)));
     }
 
     /// Opens File > Export… on `part`, with the last export's choices.
@@ -83,7 +83,7 @@ impl Workspace {
         e.faults.clear();
         self.exchange.export_choices = e.choices.clone();
         let req = e.request(&path);
-        self.send(req, Pending::Exchange(exchange::Asked::Export));
+        self.send(req, Route::Exchange(exchange::Asked::Export));
     }
 }
 

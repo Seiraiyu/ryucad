@@ -58,12 +58,14 @@ pub const LOAD_WHOLE: usize = 200;
 /// How many of an assembly's bodies one `mesh.get` asks for.
 const MESH_BATCH: usize = 256;
 
-/// What a request was for, so its answer lands in the right place.
+/// Which sub-state an answer goes to (design 541, "Typed handles"): one
+/// route per sub-state, holding its own `Asked`, plus a proposal (which
+/// wraps any route) and a request whose answer only matters if it fails.
 #[derive(Clone, Debug, PartialEq)]
-enum Pending {
+enum Route {
     /// A model edit sent as a proposal in Annotate: what its own answer
     /// was for.
-    Proposal(Box<Pending>, bool),
+    Proposal(Box<Route>, bool),
     /// Only a failure matters.
     Quiet,
     Model(model::Asked),
@@ -325,7 +327,7 @@ pub struct Workspace {
     /// Whether the window has the system's focus: a long request of its
     /// own that finishes while it hasn't gets a toast.
     pub focused: bool,
-    pending: HashMap<u64, Pending>,
+    pending: HashMap<u64, Route>,
     /// The camera to share, and when one was last shared.
     camera_due: Option<Camera>,
     camera_sent: Option<Instant>,
@@ -394,24 +396,24 @@ impl Workspace {
         // What was asked for before a resync may never be answered.
         self.model.loading.clear();
         self.model.asked_at.clear();
-        self.send(Request::ProjectInfo {}, Pending::Model(model::Asked::Info));
-        self.send(Request::PartList {}, Pending::Model(model::Asked::Parts));
+        self.send(Request::ProjectInfo {}, Route::Model(model::Asked::Info));
+        self.send(Request::PartList {}, Route::Model(model::Asked::Parts));
         self.read_drawn();
         let log = Request::ActivityLog {
             limit: Some(LOADED),
             before: None,
         };
-        self.send(log, Pending::Activity(activity::Asked::Activity));
+        self.send(log, Route::Activity(activity::Asked::Activity));
         self.load_settings();
         self.send(
             Request::MergeStatus {},
-            Pending::Branches(branches::Asked::Merge),
+            Route::Branches(branches::Asked::Merge),
         );
         self.send(
             Request::ReleaseList { part: None },
-            Pending::Pdm(pdm::Asked::States),
+            Route::Pdm(pdm::Asked::States),
         );
-        self.send(Request::PdmConfig {}, Pending::Pdm(pdm::Asked::PdmConfig));
+        self.send(Request::PdmConfig {}, Route::Pdm(pdm::Asked::PdmConfig));
         self.read_appearance();
         self.load_deps();
         let list = Request::AnnotationList {
@@ -420,18 +422,18 @@ impl Workspace {
             by: None,
             open: false,
         };
-        self.send(list, Pending::Annotations(annotations::Asked::Annotations));
+        self.send(list, Route::Annotations(annotations::Asked::Annotations));
     }
 
     /// Undoes an activity entry, or this window's latest change. A failure
     /// (`undo_conflict`, `nothing_to_undo`) lands in `errors`.
     pub fn undo(&mut self, entry: Option<u64>) {
-        self.send(Request::Undo { entry }, Pending::Quiet);
+        self.send(Request::Undo { entry }, Route::Quiet);
     }
 
     /// Redoes an undo, or this window's latest undo.
     pub fn redo(&mut self, entry: Option<u64>) {
-        self.send(Request::Redo { entry }, Pending::Quiet);
+        self.send(Request::Redo { entry }, Route::Quiet);
     }
 
     /// The project's default unit.
@@ -448,7 +450,7 @@ impl Workspace {
             part,
             participant: Some(self.link.participant.clone()),
         };
-        self.send(req, Pending::Quiet);
+        self.send(req, Route::Quiet);
     }
 
     /// Cuts with the planes this window's participant has; the scene and
@@ -556,13 +558,13 @@ impl Workspace {
     /// change (`annotation.propose`, its answer the request's own), or
     /// not at all, its refusal answered where its answer would have gone
     /// (a form's error, else an error card), saying which mode allows it.
-    fn send(&mut self, req: Request, why: Pending) {
+    fn send(&mut self, req: Request, why: Route) {
         self.send_with(req, why, Proposal::default());
     }
 
     /// [`Workspace::send`], with what a proposal of it says: its comment,
     /// and whether it is rough (a freehand drag's).
-    fn send_with(&mut self, req: Request, why: Pending, proposal: Proposal) {
+    fn send_with(&mut self, req: Request, why: Route, proposal: Proposal) {
         use crate::core::modes::{Gate, gate};
         // While the compared revision is drawn, nothing writes: the model
         // on screen isn't the files (design 447).
@@ -589,7 +591,7 @@ impl Workspace {
                     rough,
                     author: None,
                 };
-                self.send_now(wrapped, Pending::Proposal(Box::new(why), rough));
+                self.send_now(wrapped, Route::Proposal(Box::new(why), rough));
             }
             Gate::Refuse(because) => {
                 let method = req.method();
@@ -611,7 +613,7 @@ impl Workspace {
         crate::core::modes::control(self.session.mode, method)
     }
 
-    fn send_now(&mut self, req: Request, why: Pending) {
+    fn send_now(&mut self, req: Request, why: Route) {
         let method = req.method();
         if !ryucad::daemon::LONG.contains(&method.as_str()) {
             let ticket = self.link.send(req);
@@ -636,7 +638,7 @@ impl Workspace {
     /// [`Workspace::send`] on the link's second connection: for requests
     /// that may wait on another repository. Long, so the status line shows
     /// their progress and Cancel.
-    fn send_aside(&mut self, req: Request, why: Pending) {
+    fn send_aside(&mut self, req: Request, why: Route) {
         let method = req.method();
         let token = self.progress.token();
         let ask = Ask {
@@ -820,7 +822,7 @@ impl Workspace {
                 normal_to: None,
                 part: None,
             };
-            self.send(req, Pending::Quiet);
+            self.send(req, Route::Quiet);
         }
     }
 
@@ -1038,7 +1040,7 @@ impl Workspace {
         }
     }
 
-    fn answered(&mut self, why: Pending, answer: Result<Answer>) {
+    fn answered(&mut self, why: Route, answer: Result<Answer>) {
         if let Ok(Answer {
             binary: Some(b), ..
         }) = &answer
@@ -1048,112 +1050,74 @@ impl Workspace {
         self.answer(why, answer);
     }
 
-    fn answer(&mut self, why: Pending, answer: Result<Answer>) {
-        match (why, answer) {
-            (Pending::Proposal(inner, rough), r) => {
-                // A rough suggestion's comment opens to edit, its
-                // annotation chosen in the Annotations tile.
-                if rough
-                    && let Ok(a) = &r
-                    && let Some(id) = a.result["annotation"]["id"].as_str()
-                {
-                    let id = id.to_owned();
-                    let comment = a.result["annotation"]["comment"]
-                        .as_str()
-                        .unwrap_or(ROUGH_COMMENT)
-                        .to_owned();
-                    self.choose_annotation(Some(&id));
-                    self.annotations.annotation_ui.editing = Some((id, comment));
-                    self.wants_tile = Some("annotations");
+    /// Hands an answer to the sub-state that asked (design 541, "Typed
+    /// handles"), then carries out what it left.
+    fn answer(&mut self, why: Route, answer: Result<Answer>) {
+        // Only a rebuild's answer is judged by the revision drawn.
+        let drawn =
+            matches!(why, Route::Model(model::Asked::Rebuild(..))).then(|| self.model_rev());
+        let mut fx = Effects::default();
+        match why {
+            Route::Proposal(inner, rough) => self.proposed(*inner, rough, answer),
+            // Only a failure matters.
+            Route::Quiet => {
+                if let Err(e) = answer {
+                    self.fail(e);
                 }
-                let r = r.map(|a| Answer {
-                    result: a.result["answer"].clone(),
-                    binary: None,
-                    raw: None,
-                });
-                if r.is_ok() {
-                    self.toasts
-                        .note("Suggested: the agent will see it", false, Instant::now());
-                }
-                self.answer(*inner, r);
             }
-            (Pending::Quiet, Ok(_)) => {}
-            (Pending::Model(a), r) => {
-                // Only a rebuild's answer is judged by the revision drawn.
-                let drawn = matches!(a, model::Asked::Rebuild(..)).then(|| self.model_rev());
-                let mut fx = Effects::default();
-                self.model.answer(a, r, drawn, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Forms(a), r) => {
-                let mut fx = Effects::default();
-                self.forms
-                    .answer(a, r, &self.model, &self.pdm.states, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Parameters(a), r) => {
-                let mut fx = Effects::default();
+            Route::Model(a) => self.model.answer(a, answer, drawn, &mut fx),
+            Route::Forms(a) => self
+                .forms
+                .answer(a, answer, &self.model, &self.pdm.states, &mut fx),
+            Route::Parameters(a) => {
                 self.parameters
-                    .answer(a, r, &self.model.default_unit, &mut fx);
-                self.apply(fx);
+                    .answer(a, answer, &self.model.default_unit, &mut fx)
             }
-            (Pending::Drawings(a), r) => {
-                let mut fx = Effects::default();
-                self.drawings.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Activity(a), r) => {
-                let mut fx = Effects::default();
-                self.activity.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Branches(a), r) => {
-                let mut fx = Effects::default();
-                self.branches.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Deps(a), r) => {
-                let mut fx = Effects::default();
-                self.deps.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Pdm(a), r) => {
-                let mut fx = Effects::default();
-                self.pdm.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Annotations(a), r) => {
-                let mut fx = Effects::default();
-                self.annotations.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Comparing(a), r) => {
-                let mut fx = Effects::default();
-                self.comparing.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Session(a), r) => {
-                let mut fx = Effects::default();
-                self.session.answer(a, r, &self.link.participant, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Assembly(a), r) => {
-                let mut fx = Effects::default();
-                self.assembly.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::View(a), r) => {
-                let mut fx = Effects::default();
-                self.view.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (Pending::Exchange(a), r) => {
-                let mut fx = Effects::default();
-                self.exchange.answer(a, r, &mut fx);
-                self.apply(fx);
-            }
-            (_, Err(e)) => self.fail(e),
+            Route::Drawings(a) => self.drawings.answer(a, answer, &mut fx),
+            Route::Activity(a) => self.activity.answer(a, answer, &mut fx),
+            Route::Branches(a) => self.branches.answer(a, answer, &mut fx),
+            Route::Deps(a) => self.deps.answer(a, answer, &mut fx),
+            Route::Pdm(a) => self.pdm.answer(a, answer, &mut fx),
+            Route::Annotations(a) => self.annotations.answer(a, answer, &mut fx),
+            Route::Comparing(a) => self.comparing.answer(a, answer, &mut fx),
+            Route::Session(a) => self
+                .session
+                .answer(a, answer, &self.link.participant, &mut fx),
+            Route::Assembly(a) => self.assembly.answer(a, answer, &mut fx),
+            Route::View(a) => self.view.answer(a, answer, &mut fx),
+            Route::Exchange(a) => self.exchange.answer(a, answer, &mut fx),
         }
+        self.apply(fx);
+    }
+
+    /// A proposal's answer: its own toast and, for a rough one, its
+    /// comment open to edit; then the answer it wraps, routed.
+    fn proposed(&mut self, inner: Route, rough: bool, r: Result<Answer>) {
+        // A rough suggestion's comment opens to edit, its
+        // annotation chosen in the Annotations tile.
+        if rough
+            && let Ok(a) = &r
+            && let Some(id) = a.result["annotation"]["id"].as_str()
+        {
+            let id = id.to_owned();
+            let comment = a.result["annotation"]["comment"]
+                .as_str()
+                .unwrap_or(ROUGH_COMMENT)
+                .to_owned();
+            self.choose_annotation(Some(&id));
+            self.annotations.annotation_ui.editing = Some((id, comment));
+            self.wants_tile = Some("annotations");
+        }
+        let r = r.map(|a| Answer {
+            result: a.result["answer"].clone(),
+            binary: None,
+            raw: None,
+        });
+        if r.is_ok() {
+            self.toasts
+                .note("Suggested: the agent will see it", false, Instant::now());
+        }
+        self.answer(inner, r);
     }
 
     fn noted(&mut self, method: &str, params: &Value) {
@@ -1260,7 +1224,7 @@ impl Workspace {
                 // A proposal may be stale now.
                 if self.pdm.releases_open {
                     let req = Request::ReleaseCheck { results: false };
-                    self.send(req, Pending::Pdm(pdm::Asked::ReleaseCheck));
+                    self.send(req, Route::Pdm(pdm::Asked::ReleaseCheck));
                 }
                 self.rediagnose();
                 self.reload_history();
@@ -1275,9 +1239,9 @@ impl Workspace {
                 // The project's parameters may have changed.
                 self.reload_equations();
                 // Parts came or went: the list, and what the window shows.
-                self.send(Request::PartList {}, Pending::Model(model::Asked::Parts));
+                self.send(Request::PartList {}, Route::Model(model::Asked::Parts));
                 // The manifest may have its ID now, or ryupdm.json changed.
-                self.send(Request::PdmConfig {}, Pending::Pdm(pdm::Asked::PdmConfig));
+                self.send(Request::PdmConfig {}, Route::Pdm(pdm::Asked::PdmConfig));
                 // Parts came or went, or the declared properties changed.
                 self.reload_bom();
                 self.read_where_used();
@@ -1385,7 +1349,7 @@ impl Workspace {
                 self.load();
                 self.send(
                     Request::ParticipantList {},
-                    Pending::Session(session::Asked::People),
+                    Route::Session(session::Asked::People),
                 );
             }
             _ => {}
