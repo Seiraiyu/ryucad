@@ -7,7 +7,8 @@
 //! its bytes up to a zero, over a manifest that reads. The lock reads or
 //! is refused, reads back as written, and is judged with no label both
 //! lacking and unused; the pins and lock diff against the manifest
-//! without them. Any panic is a bug.
+//! without them. And each design's BOM: totals equal the netlist's, a
+//! BOM diffed with itself is empty. Any panic is a bug.
 
 #![no_main]
 
@@ -97,6 +98,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let _ = ryupdm::props::Pdm::of_for::<ryueda::Eda>(&files, parts, ryueda::units::Unit::Mm);
+    bom(&files);
 });
 
 /// The lock read and judged, and the pins and lock diffed against the
@@ -139,4 +141,35 @@ fn lock_and_pins(files: &BTreeMap<String, Vec<u8>>, plain: &ryueda::project::Man
     let _ = ryueda::pdm::diff::pins(&before, &after);
     let _ = ryueda::pdm::diff::lock(&before, &after);
     let _ = ryueda::pdm::diff::lock(&after, &before);
+}
+
+/// Each design's BOM over the project's bytes: lines never panic, their
+/// populated quantities sum to the netlist's populated occurrences, the
+/// BOM diffed with itself changes nothing, and its CSV has a row per line.
+fn bom(files: &BTreeMap<String, Vec<u8>>) {
+    let root = std::path::Path::new("/fuzz");
+    let Ok(p) =
+        ryueda::project::Project::load_from(root, files, &BTreeMap::new(), &ryueda::pin::NoPins)
+    else {
+        return;
+    };
+    let config = ryupdm::config::Config::default();
+    for d in p.conn.designs.keys() {
+        let Ok(n) = ryueda::netlist::flatten(&p, d) else {
+            continue;
+        };
+        let occs: Vec<&ryueda::netlist::Occurrence> = n.occurrences.iter().collect();
+        let lines = ryueda::pdm::bom::lines_of(&p, &occs, 1);
+        let populated = n
+            .occurrences
+            .iter()
+            .filter(|o| ryueda::erc::of_ref(&o.of).is_some() && !ryueda::erc::occurrence_dnp(&p, o))
+            .count() as u64;
+        assert_eq!(lines.iter().map(|l| l.quantity).sum::<u64>(), populated, "BOM totals equal the netlist's");
+        let same = ryupdm::lines::diff(&lines, &lines, &config, &ryueda::pdm::bom::COMPARED);
+        assert_eq!(same["summary"]["changed"], 0);
+        let csv = ryupdm::lines::csv(&lines, &config, &ryueda::pdm::bom::COLUMNS);
+        assert!(csv.lines().count() >= lines.len() + 1 || csv.contains('"'));
+        let _ = ryueda::pdm::bom::unidentified(d, &lines);
+    }
 }
