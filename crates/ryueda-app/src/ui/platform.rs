@@ -10,7 +10,9 @@ pub fn cant_run(error: &str) -> String {
     if lower.contains("adapter") || lower.contains("wgpu") {
         format!("{NO_ADAPTER} ({error})")
     } else if lower.contains("display") || lower.contains("wayland") || lower.contains("x11") {
-        format!("No display to open a window on; `ryueda render` draws sheets without one ({error})")
+        format!(
+            "No display to open a window on; `ryueda render` draws sheets without one ({error})"
+        )
     } else {
         error.to_owned()
     }

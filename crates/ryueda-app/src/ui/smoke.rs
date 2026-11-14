@@ -19,8 +19,10 @@ const WAIT: Duration = Duration::from_secs(60);
 
 /// A headless adapter, its device and queue, if any draws here.
 pub fn headless() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("ryueda-app headless"),
         required_limits: wgpu::Limits::downlevel_defaults(),
@@ -34,28 +36,44 @@ pub fn run(dir: &Path) -> Result<Value> {
     let daemon = find_ryueda()?;
     let ctx = egui::Context::default();
     let mut app = App::open(&ctx, dir, &daemon);
-    let w: &mut Window = app.opened_mut().ok_or_else(|| Error::new(Code::NotFound, "no ryueda project here"))?;
+    let w: &mut Window = app
+        .opened_mut()
+        .ok_or_else(|| Error::new(Code::NotFound, "no ryueda project here"))?;
     if !w.wait_until(WAIT, |w| w.scene.is_some()) {
-        return Err(Error::new(Code::Daemon, "the first sheet wasn't drawn in time"));
+        return Err(Error::new(
+            Code::Daemon,
+            "the first sheet wasn't drawn in time",
+        ));
     }
     let sheet = w.scene.as_ref().map(|s| s.name.clone());
-    let (adapter, device, queue) = headless().ok_or_else(|| Error::new(Code::Internal, NO_ADAPTER))?;
+    let (adapter, device, queue) =
+        headless().ok_or_else(|| Error::new(Code::Internal, NO_ADAPTER))?;
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let input = egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SIZE[0] as f32, SIZE[1] as f32))),
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(SIZE[0] as f32, SIZE[1] as f32),
+        )),
         ..Default::default()
     };
     // Two frames: the second has the tiles' sizes and the canvas's fit.
     let _ = ctx.run_ui(input.clone(), |ui| app.frame(ui));
     let out = ctx.run_ui(input, |ui| app.frame(ui));
     let jobs = ctx.tessellate(out.shapes, 1.0);
-    let mut renderer = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
-    for (id, delta) in &out.textures_delta.set {
-        renderer.update_texture(&device, &queue, *id, delta);
+    let mut renderer =
+        egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
+    for (id, deltas) in &out.textures_delta.set {
+        for delta in deltas {
+            renderer.update_texture(&device, &queue, *id, delta);
+        }
     }
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("smoke"),
-        size: wgpu::Extent3d { width: SIZE[0], height: SIZE[1], depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE[0],
+            height: SIZE[1],
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -64,7 +82,10 @@ pub fn run(dir: &Path) -> Result<Value> {
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
-    let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: SIZE, pixels_per_point: 1.0 };
+    let screen = egui_wgpu::ScreenDescriptor {
+        size_in_pixels: SIZE,
+        pixels_per_point: 1.0,
+    };
     let mut enc = device.create_command_encoder(&Default::default());
     renderer.update_buffers(&device, &queue, &mut enc, &jobs, &screen);
     {
@@ -74,7 +95,10 @@ pub fn run(dir: &Path) -> Result<Value> {
                 view: &view,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             ..Default::default()
         });
@@ -91,9 +115,17 @@ pub fn run(dir: &Path) -> Result<Value> {
         texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(SIZE[1]) },
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(SIZE[1]),
+            },
         },
-        wgpu::Extent3d { width: SIZE[0], height: SIZE[1], depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: SIZE[0],
+            height: SIZE[1],
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit([enc.finish()]);
     let slice = buffer.slice(..);
@@ -101,16 +133,24 @@ pub fn run(dir: &Path) -> Result<Value> {
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    let _ = device.poll(wgpu::PollType::Wait);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv()
         .ok()
         .and_then(|r| r.ok())
         .ok_or_else(|| Error::new(Code::Internal, "the frame couldn't be read back"))?;
-    let px = slice.get_mapped_range();
+    let px = slice.get_mapped_range().map_err(|e| {
+        Error::new(
+            Code::Internal,
+            format!("the frame couldn't be read back: {e:?}"),
+        )
+    })?;
     let mut drawn = 0;
     for y in 0..SIZE[1] as usize {
         let line = &px[y * row as usize..][..SIZE[0] as usize * 4];
-        drawn += line.chunks(4).filter(|c| c[..3].iter().any(|x| *x > 3)).count();
+        drawn += line
+            .chunks(4)
+            .filter(|c| c[..3].iter().any(|x| *x > 3))
+            .count();
     }
     let info = adapter.get_info();
     Ok(json!({
