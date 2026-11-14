@@ -539,7 +539,9 @@ impl Project {
                 .iter()
                 .position(|u| u.split('/').nth(1).is_some_and(|n| n > id.as_str()))
                 .unwrap_or(self.unknown.len());
-            if part_dir(&self.root, &id).is_dir() {
+            // Asked of the source, not the disk: a capture session's files
+            // decide which parts it has (plan 31.B).
+            if src.is_dir(&format!("parts/{id}"))? {
                 let mut unknown = Vec::new();
                 let scope = Scope {
                     file: self.parameters.clone(),

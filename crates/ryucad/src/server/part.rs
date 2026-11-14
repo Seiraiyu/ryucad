@@ -113,12 +113,16 @@ pub(crate) fn part_delete(
             .fold(session.root().to_path_buf(), |p, s| p.join(s));
         session.remove_file(&at)?;
     }
-    if dir.exists() {
-        // no session: what the files leave on disk (empty folders, stray files) goes too
-        fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+    // A capture session (a batch's) keeps only its record of the removals:
+    // the folder is the working files' until the batch writes.
+    if !session.captures() {
+        if dir.exists() {
+            // no session: what the files leave on disk (empty folders, stray files) goes too
+            fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+        }
+        // A daemon sees its own removal whatever file events say (#263).
+        crate::doc::source::note_written(&dir);
     }
-    // A daemon sees its own removal whatever file events say (#263).
-    crate::doc::source::note_written(&dir);
     session.reload()?;
     Ok(json!({"part": id, "deleted": true}))
 }

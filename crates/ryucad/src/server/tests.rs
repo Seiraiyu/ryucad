@@ -4808,3 +4808,27 @@ fn following_patterns_are_written_shown_and_edited() {
         (&json!("points"), &json!("lid/layout"))
     );
 }
+
+/// `part.create` and `part.delete` in a capture session write nothing to
+/// the folder (plan 31.B): a batch runs them captured.
+#[test]
+fn part_create_and_delete_run_captured() {
+    let (dir, s) = with_part();
+    let mut c = s.capturing(s.snapshot()).unwrap();
+    let run = |c: &mut Session, m: &str, p: Value| {
+        dispatch(c, None, None, Request::from_rpc(m, Some(p)).unwrap()).unwrap()
+    };
+    run(&mut c, "part.delete", json!({"part": "p"}));
+    run(&mut c, "part.create", json!({"part": "q"}));
+    assert!(
+        dir.path().join("parts/p/part.json").is_file(),
+        "the folder keeps p"
+    );
+    assert!(!dir.path().join("parts/q").exists());
+    let w = c.captured();
+    assert_eq!(w["parts/p/part.json"], None);
+    assert!(w["parts/q/part.json"].is_some());
+    assert!(c.captures() && !s.captures());
+    let names: Vec<&str> = c.project().parts.keys().map(|i| i.as_str()).collect();
+    assert_eq!(names, ["q"]);
+}

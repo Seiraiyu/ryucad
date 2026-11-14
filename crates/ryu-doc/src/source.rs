@@ -32,6 +32,13 @@ pub trait Source {
     fn read_shared(&self, path: &str) -> Result<Option<Arc<[u8]>>> {
         Ok(self.read(path)?.map(Arc::from))
     }
+    /// Whether the folder `dir` is there. Files in memory hold a folder
+    /// only while some file lies in it (a capture session's deleted part
+    /// is gone, its new one there, whatever the disk holds); on disk an
+    /// empty folder is there too.
+    fn is_dir(&self, dir: &str) -> Result<bool> {
+        Ok(!self.list(dir)?.is_empty())
+    }
 }
 
 /// `dir/name`, or `name` at the root.
@@ -55,6 +62,10 @@ impl Folder<'_> {
 }
 
 impl Source for Folder<'_> {
+    fn is_dir(&self, dir: &str) -> Result<bool> {
+        Ok(self.path(dir).is_dir())
+    }
+
     fn list(&self, dir: &str) -> Result<Vec<(String, Kind)>> {
         let path = self.path(dir);
         let entries = match fs::read_dir(&path) {
@@ -142,6 +153,10 @@ impl<S: Source + ?Sized> Source for Arc<S> {
 
     fn read_shared(&self, path: &str) -> Result<Option<Arc<[u8]>>> {
         (**self).read_shared(path)
+    }
+
+    fn is_dir(&self, dir: &str) -> Result<bool> {
+        (**self).is_dir(dir)
     }
 }
 
