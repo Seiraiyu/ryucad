@@ -89,6 +89,11 @@ jobs:
             tests: -p ryucad-app --test window
             # Its tests find ryucad-test beside them (#555).
             example: 1
+          - name: ubuntu-latest (ryueda window tests)
+            os: ubuntu-latest
+            tests: -p ryueda-app --test window
+            # They find the ryueda built here beside them.
+            ryueda: 1
           - name: ubuntu-24.04-arm
             os: ubuntu-24.04-arm
             tests: --workspace --lib --bins --test determinism
@@ -129,13 +134,15 @@ jobs:
         with:
           tool: nextest
       - if: matrix.os == 'ubuntu-latest'
-        name: a software graphics adapter (lavapipe) for ryucad-app's tests
+        name: a software graphics adapter (lavapipe) for the apps' tests
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
       # The window tests take ryucad-test, built here with their own
       # profile and features, instead of building ryucad again in each
       # test's process (#555, crates/ryucad-app/tests/common/mod.rs).
       - if: matrix.example == 1
         run: cargo build --profile ci -p ryucad-app --example ryucad-test
+      - if: matrix.ryueda == 1
+        run: cargo build --profile ci -p ryueda --bin ryueda
       # The ci profile (Cargo.toml): optimized a little, no debug info.
       - run: cargo nextest run --cargo-profile ci --profile ci ${{ matrix.tests }}
         env:
@@ -144,6 +151,9 @@ jobs:
           # The workspace's tests build ryucad's binary, so the app's tests
           # needn't build it again (tests/common/mod.rs).
           RYUCAD_TEST_PREBUILT: ${{ matrix.prebuilt }}
+          # The workspace's tests (and the ryueda window job) build ryueda,
+          # so the app's tests needn't (crates/ryueda-app/tests/common).
+          RYUEDA_TEST_PREBUILT: ${{ (matrix.prebuilt == 1 || matrix.ryueda == 1) && '1' || '' }}
       - if: failure()
         name: the viewport as drawn, if it no longer matches its snapshot
         uses: actions/upload-artifact@v4

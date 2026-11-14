@@ -57,16 +57,22 @@ pub fn run(dir: &Path) -> Result<Value> {
         ..Default::default()
     };
     // Two frames: the second has the tiles' sizes and the canvas's fit.
-    let _ = ctx.run_ui(input.clone(), |ui| app.frame(ui));
-    let out = ctx.run_ui(input, |ui| app.frame(ui));
-    let jobs = ctx.tessellate(out.shapes, 1.0);
+    // Both frames' textures are applied (the first's hold the fonts): a
+    // delta dropped unapplied is a debug assertion in egui.
+    let mut first = ctx.run_ui(input.clone(), |ui| app.frame(ui));
+    let mut out = ctx.run_ui(input, |ui| app.frame(ui));
+    first
+        .textures_delta
+        .append(std::mem::take(&mut out.textures_delta));
+    let jobs = ctx.tessellate(std::mem::take(&mut out.shapes), 1.0);
     let mut renderer =
         egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
-    for (id, deltas) in &out.textures_delta.set {
+    for (id, deltas) in &first.textures_delta.set {
         for delta in deltas {
             renderer.update_texture(&device, &queue, *id, delta);
         }
     }
+    first.textures_delta.clear();
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("smoke"),
         size: wgpu::Extent3d {

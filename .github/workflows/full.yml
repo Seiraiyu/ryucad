@@ -399,7 +399,7 @@ jobs:
         with:
           # Rare runs: their caches would only evict the fast CI's.
           save-if: false
-      - run: cargo build --locked --release -p ryucad -p ryucad-app -p ryueda -p ryudfm
+      - run: cargo build --locked --release -p ryucad -p ryucad-app -p ryueda -p ryueda-app -p ryudfm
       - if: runner.os == 'Linux'
         run: |
           shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh scripts/export-pcba.sh scripts/fetch-corpus.sh
@@ -411,9 +411,13 @@ jobs:
           sudo apt-get update && sudo apt-get install -y desktop-file-utils libxml2-utils
           desktop-file-validate packaging/linux/ryucad.desktop
           xmllint --noout packaging/linux/ryucad.xml
+          desktop-file-validate packaging/linux/ryueda.desktop
+          xmllint --noout packaging/linux/ryueda.xml
       - if: runner.os == 'macOS'
-        name: the launcher the installer compiles
-        run: osacompile -o "$RUNNER_TEMP/ryucad.app" packaging/macos/ryucad.applescript
+        name: the launchers the installers compile
+        run: |
+          osacompile -o "$RUNNER_TEMP/ryucad.app" packaging/macos/ryucad.applescript
+          osacompile -o "$RUNNER_TEMP/ryueda.app" packaging/macos/ryueda.applescript
       - if: runner.os == 'Linux'
         name: a software graphics adapter for the app's smoke run
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
@@ -430,7 +434,9 @@ jobs:
         run: |
           x=""
           [ "$RUNNER_OS" = Windows ] && x=".exe"
-          sh scripts/smoke-ryueda.sh "target/release/ryueda$x"
+          sh scripts/smoke-ryueda.sh "target/release/ryueda$x" "" "target/release/ryueda-app$x"
+        env:
+          RYUEDA_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
       - name: ryudfm's smoke test
         shell: bash
         run: |
