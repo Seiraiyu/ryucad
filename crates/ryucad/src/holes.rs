@@ -243,6 +243,25 @@ fn inputs(p: &Part) -> String {
     h.finalize().to_hex()[..32].to_owned()
 }
 
+/// The holes of part `p` as `result` built it: what [`list`] caches for
+/// the working files, built for a node the session doesn't cache (a
+/// release's, an export's).
+pub fn of(p: &Part, result: &PartResult, unit: crate::units::Unit) -> Result<Holes> {
+    build(p, result, unit)
+}
+
+/// The part's holes at `rev`, as drawings and exports read them: the
+/// working files' through [`list`] (cached with the rebuild), a release's
+/// or another project's from its node, built again.
+pub fn at(session: &mut Session, part: &Id, rev: &crate::doc::assembly::Rev) -> Result<Arc<Holes>> {
+    if *rev == crate::doc::assembly::Rev::Working {
+        return list(session, part, None);
+    }
+    let unit = session.project().manifest.default_unit;
+    let (p, result, _) = session.node(part, rev)?;
+    Ok(Arc::new(of(&p, &result, unit)?))
+}
+
 fn build(p: &Part, result: &PartResult, unit: crate::units::Unit) -> Result<Holes> {
     let solids = Solids::of(p);
     let mut rows: Vec<Row> = Vec::new();
@@ -1005,6 +1024,30 @@ mod tests {
                    "thread": {"standard": "iso_metric", "size": "M2", "depth": "2 mm"},
                    "depth": {"blind": "3 mm"}, "bottom": {"drill": "118 deg"}}),
         );
+    }
+
+    #[test]
+    fn holes_at_the_working_files_are_the_listed_ones_and_of_builds_them_again() {
+        let (_dir, mut s) = drilled();
+        tapped(&mut s);
+        let p = id("p");
+        let listed = list(&mut s, &p, None).unwrap();
+        let at = super::at(&mut s, &p, &crate::doc::assembly::Rev::Working).unwrap();
+        assert!(
+            Arc::ptr_eq(&listed, &at),
+            "the working files' holes are the cached ones"
+        );
+        let part = s.project().part(&p).unwrap().clone();
+        let result = s.rebuilt(&p).unwrap().clone();
+        let unit = s.project().manifest.default_unit;
+        let again = of(&part, &result, unit).unwrap();
+        let rows = |h: &Holes| -> Vec<(String, String, BTreeMap<String, Vec<String>>)> {
+            h.rows
+                .iter()
+                .map(|r| (r.reference.clone(), r.spec.clone(), r.faces.clone()))
+                .collect()
+        };
+        assert_eq!(rows(&again), rows(&listed));
     }
 
     #[test]
