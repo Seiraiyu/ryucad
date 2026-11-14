@@ -657,7 +657,17 @@ impl NurbsSurface {
                     full = (ne.point - e.point).length();
                 }
                 let nr = ne.point.to_vector() - p;
-                if nr.dot(nr) <= r.dot(r) {
+                let (r2, nr2) = (r.dot(r), nr.dot(nr));
+                // Within the rounding of the squared distance, which a step
+                // near a minimum changes by the square of its length, the
+                // distance can't tell the points apart: the gradient does
+                // (a fold on a split line, the `nurbs` target's find of
+                // 2026-11-06, stalled a nanometre off its foot).
+                let tied = nr2 - r2 <= 4.0 * f64::EPSILON * r2 && {
+                    let (hu, hv) = (nr.dot(ne.du), nr.dot(ne.dv));
+                    hu * hu + hv * hv < gu * gu + gv * gv
+                };
+                if nr2 <= r2 || tied {
                     next = Some((nu, nv, ne, nr));
                     break;
                 }
@@ -1199,6 +1209,30 @@ mod tests {
         let p = Point3::new(6.0, 1.9058823529411768, -6.0);
         let foot = s.project(p);
         assert!(foot.distance <= sampled(&s, p, 300) + 1e-12, "{foot:?}");
+    }
+
+    #[test]
+    fn a_minimum_on_the_fold_at_the_first_split() {
+        // Each row a parabola whose ends coincide: a triangle folded back on
+        // itself along v = 4, the patch's first split line, with the
+        // nearest point an ordinary minimum on the fold. Found by fuzzing
+        // (2026-11-06).
+        let ku = KnotVector::clamped(1, &[3.0, 5.0], &[2, 2]).unwrap();
+        let kv = KnotVector::clamped(2, &[3.0, 5.0], &[3, 3]).unwrap();
+        let q = Point3::new(6.0, 6.0, 6.0);
+        let points = vec![
+            q,
+            Point3::new(6.0, 5.905882352941177, 6.0),
+            q,
+            q,
+            Point3::new(-3.835294117647059, -6.0, -5.576470588235294),
+            q,
+        ];
+        let s = NurbsSurface::new([ku, kv], points, Some(vec![5.0; 6])).unwrap();
+        let p = Point3::new(6.0, -3.835294117647059, 6.0);
+        let foot = s.project(p);
+        assert!(foot.distance <= sampled(&s, p, 400) + 1e-12, "{foot:?}");
+        assert!((foot.param.1 - 4.0).abs() < 1e-6, "{foot:?}");
     }
 
     #[test]
