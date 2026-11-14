@@ -16,6 +16,7 @@ pub mod form;
 pub mod help;
 /// Icons and the glyph table, `ryu_app`'s (ryueda 3.C).
 pub use ryu_app::icon;
+pub mod exits;
 pub mod markup;
 pub mod mate;
 pub mod menu;
