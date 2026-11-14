@@ -662,7 +662,9 @@ impl Workspace {
                 match a {
                     // Only while it is still dragged: a late answer after
                     // the drop would undo the written move's look.
-                    Ok(a) if self.assembly.drag.is_some() => self.preview_poses(&part, &a.result),
+                    Ok(a) if self.assembly.drag.is_some() => {
+                        self.model.preview_poses(&part, &a.result)
+                    }
                     Ok(_) => {}
                     Err(e) => self.fail(e),
                 }
@@ -676,7 +678,7 @@ impl Workspace {
                 match a {
                     // A late answer after the tool went would undo the
                     // written move's look.
-                    Ok(a) if on => self.preview_poses(&part, &a.result),
+                    Ok(a) if on => self.model.preview_poses(&part, &a.result),
                     Ok(_) => {}
                     Err(e) => {
                         if let Some(m) = self.assembly.mover.as_mut().filter(|_| on) {
@@ -698,7 +700,7 @@ impl Workspace {
                     Ok(a) => {
                         d.previewed(Ok(a.result["converged"].as_bool().unwrap_or(false)));
                         self.model.preview.retain(|(p, _), _| *p != part);
-                        self.preview_poses(&part, &a.result);
+                        self.model.preview_poses(&part, &a.result);
                     }
                     Err(e) => {
                         let code = serde_json::to_value(e.code)

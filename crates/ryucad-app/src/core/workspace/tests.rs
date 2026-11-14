@@ -1,3 +1,4 @@
+use super::route::Effect;
 use super::*;
 use std::collections::BTreeSet;
 
@@ -164,4 +165,26 @@ fn a_form_answer_reaches_the_forms_that_asked() {
         ("p", "f1", "box")
     );
     assert!(fx.recorded().is_empty(), "{:?}", fx.recorded());
+}
+
+/// A part's report asked at a revision the window no longer draws is
+/// dropped, and the part asked for again at the one it draws: the model
+/// records the ask, the workspace sends it.
+#[test]
+fn a_stale_rebuild_answer_asks_the_part_again() {
+    let mut model = Model::default();
+    model.loading.insert("p".to_owned());
+    let mut fx = Effects::default();
+    model.answer(
+        model::Asked::Rebuild("p".to_owned(), Some("draft:ann".to_owned())),
+        answered(json!({"parts": [{"part": "p"}]})),
+        Some(None),
+        &mut fx,
+    );
+    assert!(!model.loading.contains("p"));
+    assert!(
+        matches!(fx.recorded(), [Effect::Then(Then::AskPart(p))] if p == "p"),
+        "{:?}",
+        fx.recorded()
+    );
 }

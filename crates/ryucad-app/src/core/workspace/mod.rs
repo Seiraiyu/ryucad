@@ -1116,7 +1116,13 @@ impl Workspace {
                 self.answer(*inner, r);
             }
             (Pending::Quiet, Ok(_)) => {}
-            (Pending::Model(a), r) => self.answer_model(a, r),
+            (Pending::Model(a), r) => {
+                // Only a rebuild's answer is judged by the revision drawn.
+                let drawn = matches!(a, model::Asked::Rebuild(..)).then(|| self.model_rev());
+                let mut fx = Effects::default();
+                self.model.answer(a, r, drawn, &mut fx);
+                self.apply(fx);
+            }
             (Pending::Forms(a), r) => {
                 let mut fx = Effects::default();
                 self.forms
@@ -1153,27 +1159,6 @@ impl Workspace {
                 self.apply(fx);
             }
             (_, Err(e)) => self.fail(e),
-        }
-    }
-
-    /// Takes the meshes a `mesh.get` for `asked` (bodies of one part) brought.
-    fn answered_meshes(&mut self, asked: Vec<(BodyKey, String)>, a: Result<Answer>) {
-        for (key, hash) in &asked {
-            self.model.answered(key, hash);
-        }
-        let Some(part) = asked.first().map(|(k, _)| k.0.clone()) else {
-            return;
-        };
-        match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
-            Ok(Some(Ok(bodies))) => {
-                for b in bodies {
-                    self.model.take_mesh(&part, b);
-                }
-            }
-            Ok(Some(Err(e))) | Err(e) => self.fail(e),
-            Ok(None) => {
-                self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
-            }
         }
     }
 

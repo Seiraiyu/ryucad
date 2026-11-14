@@ -140,7 +140,7 @@ impl Workspace {
                 Effect::Fail(e) => self.fail(e),
                 Effect::Redraw => self.model.generation += 1,
                 Effect::DropPreview(part) => self.model.preview.retain(|(p, _), _| *p != part),
-                Effect::PreviewPoses(part, result) => self.preview_poses(&part, &result),
+                Effect::PreviewPoses(part, result) => self.model.preview_poses(&part, &result),
                 Effect::Marks(marks) => self.model.set_marks(marks),
                 Effect::Base(q) => self.model.base = q,
                 Effect::Send(req, why) => self.send(*req, why),
