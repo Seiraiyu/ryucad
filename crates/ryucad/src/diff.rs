@@ -611,6 +611,17 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                     }
                 }
             }
+            // A hole's places, a line each (ryucad 28.C).
+            if let Some(Value::Object(places)) = rest.remove("places") {
+                let mut keys: Vec<&String> = places.keys().collect();
+                keys.sort_by_key(|k| member_order(k));
+                for k in keys {
+                    match crate::hole::spec::place_line(&places[k]) {
+                        Some(l) => lines.push(format!("places.{k} = {l}")),
+                        None => flatten(&format!("places.{k}"), &places[k], &mut lines),
+                    }
+                }
+            }
         }
         Some(crate::doc::materials::KIND) => {
             if let Some(Value::Object(materials)) = rest.remove("materials") {
@@ -1231,7 +1242,7 @@ fn scalar(v: &Value) -> String {
 /// A reference to another feature's entity, as `<feature>/<name>`; a
 /// whole feature (a datum) as `<feature>`, a sketch's entity as
 /// `<sketch>/<entity>`.
-fn reference(v: &Value) -> Option<String> {
+pub(crate) fn reference(v: &Value) -> Option<String> {
     let o = v.as_object()?;
     let f = o.get("feature")?.as_str()?;
     match o.len() {
@@ -5570,6 +5581,32 @@ mod tests {
         assert_eq!(change["at"], "/rev/label", "{v}");
         assert_eq!((&change["from"], &change["to"]), (&json!("A"), &json!("B")));
         assert!(p["solids"].get("pcb/board").is_some(), "{v}");
+    }
+
+    #[test]
+    fn a_holes_places_are_a_line_each() {
+        let f = "0123456789abcdef0123456789abcdef";
+        let t = text(
+            json!({"format": 26, "kind": "ryucad.feature", "type": "hole",
+            "form": "simple", "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
+            "places": {
+                "a": {"at": {"feature": "pt"}, "direction": "z", "reverse": true},
+                "b": {"face": {"feature": "b", "name": f},
+                      "from": [{"edge": {"feature": "b", "name": f}, "distance": "10 mm"},
+                               {"edge": {"feature": "b", "name": f}, "distance": "5 mm"}]},
+                "c": {"coaxial": {"feature": "b", "name": f}}}}),
+        );
+        assert!(
+            t.contains("\nplaces.a = at pt, direction z, reverse\n"),
+            "{t}"
+        );
+        assert!(
+            t.contains(&format!(
+                "\nplaces.b = face b/{f}, from b/{f} 10 mm, from b/{f} 5 mm\n"
+            )),
+            "{t}"
+        );
+        assert!(t.contains(&format!("\nplaces.c = coaxial b/{f}\n")), "{t}");
     }
 
     #[test]

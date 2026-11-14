@@ -190,8 +190,13 @@ fn transform(
     // A connector's entity is a solid of the part its instance places,
     // not of this one: renumbering here touches only its path's first
     // step, an instance or a pattern's copy (`<pattern>:<i>`).
-    // (A datum's own `at`, at the file's top, is this part's.)
-    if pointer.ends_with("/at") && pointer != "/at" && (is_reference(node) || is_geometry(node)) {
+    // (A datum's own `at`, at the file's top, is this part's, and so is a
+    // hole's place's, ryucad 28.C.)
+    if pointer.ends_with("/at")
+        && pointer != "/at"
+        && !pointer.starts_with("/places/")
+        && (is_reference(node) || is_geometry(node))
+    {
         return None;
     }
     // A whole feature (`{feature}`) or a sketch's entity
@@ -2004,6 +2009,39 @@ mod tests {
             json!({"feature": "board-2", "solid": "u1", "name": n})
         );
         assert_eq!(read("parts/enc/features/m.json")["solid"], "board-2/u1");
+    }
+
+    #[test]
+    fn a_holes_places_follow_renamed_faces_and_features() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let h = json!({"format": 26, "kind": "ryucad.feature", "type": "hole",
+            "form": "simple", "diameter": "5 mm", "depth": "through_all", "targets": ["shaft"],
+            "places": {"a": {"at": {"feature": "pt"},
+                             "face": {"feature": "shaft", "name": old(1)}}}});
+        let f = files(&[("parts/a/features/h.json", h)]);
+        // A face renamed with its feature.
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "shaft".into(),
+            to: "shaft2".into(),
+        };
+        let names = BTreeMap::from([("shaft".to_owned(), BTreeMap::from([(old(1), new(1))]))]);
+        let out = renumbered(&f, &rename, &names);
+        let d = serde_json::from_slice::<Value>(&out["parts/a/features/h.json"]).unwrap();
+        assert_eq!(
+            d["places"]["a"]["face"],
+            json!({"feature": "shaft2", "name": new(1)})
+        );
+        // A datum point renumbered: the place's point follows it.
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "pt".into(),
+            to: "pt2".into(),
+        };
+        let out = renumbered(&f, &rename, &BTreeMap::new());
+        let d = serde_json::from_slice::<Value>(&out["parts/a/features/h.json"]).unwrap();
+        assert_eq!(d["places"]["a"]["at"], json!({"feature": "pt2"}));
     }
 
     #[test]

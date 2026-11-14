@@ -269,7 +269,12 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
 /// conflict.
 fn feature_atom(at: &str) -> bool {
     let seg: Vec<&str> = at.split('/').collect();
-    matches!(seg.as_slice(), ["", "limits", "angle" | "distance"])
+    // A hole's place is one value (ryucad 28.C): its fields mean nothing
+    // apart.
+    matches!(
+        seg.as_slice(),
+        ["", "limits", "angle" | "distance"] | ["", "places", _]
+    )
 }
 
 /// A drawing view's `orient` and `rev` are one value each: a standard
@@ -1628,6 +1633,29 @@ mod tests {
         theirs["from"] = json!("p2");
         let m = merge(Some(&base), &ours, &theirs);
         assert!(!m.is_clean());
+    }
+
+    #[test]
+    fn a_holes_places_merge_per_place() {
+        let base = json!({"format": 26, "kind": "ryucad.feature", "type": "hole",
+            "form": "simple", "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
+            "places": {"a": {"at": {"feature": "p1"}}}});
+        let mut ours = base.clone();
+        ours["places"]["b"] = json!({"at": {"feature": "p2"}});
+        let mut theirs = base.clone();
+        theirs["places"]["c"] = json!({"at": {"feature": "p3"}});
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["places"].as_object().unwrap().len(), 3);
+        // One place changed both ways, field by field, is one conflict at
+        // the place: a place is one value.
+        let mut o = base.clone();
+        o["places"]["a"]["direction"] = json!("x");
+        let mut t = base.clone();
+        t["places"]["a"]["reverse"] = json!(true);
+        let m = merge(Some(&base), &o, &t);
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(at, ["/places/a"]);
     }
 
     #[test]
