@@ -60,18 +60,31 @@ impl Places {
                         Err(_) => continue,
                     }
                 }
-                (Feature::Hole(h), Output::Solids(_)) => {
-                    let Some(sk) = &h.sketch else {
-                        continue;
-                    };
-                    let Some(Ok(Output::Sketch(s))) = result.result(sk) else {
-                        continue;
-                    };
-                    match crate::hole::points(fid, h, sk, s) {
-                        Ok(p) => Driver::Hole(p),
-                        Err(_) => continue,
+                // A hole's driver is its places in the order it drills
+                // them: a sketch's points, or what the rebuild placed
+                // (ryucad 28.C).
+                (Feature::Hole(h), Output::Solids(m)) => match &h.sketch {
+                    Some(sk) => {
+                        let Some(Ok(Output::Sketch(s))) = result.result(sk) else {
+                            continue;
+                        };
+                        match crate::hole::points(fid, h, sk, s) {
+                            Ok(p) => Driver::Hole(p),
+                            Err(_) => continue,
+                        }
                     }
-                }
+                    None => match &m.applied {
+                        Some(a) => Driver::Hole(
+                            a.places
+                                .iter()
+                                .filter_map(|(k, r)| {
+                                    Some((k.clone()?, r.apply_point(Point3::ORIGIN)))
+                                })
+                                .collect(),
+                        ),
+                        None => continue,
+                    },
+                },
                 (Feature::Sketch(_), Output::Sketch(s)) => Driver::Sketch(Arc::clone(s)),
                 _ => continue,
             };
@@ -301,6 +314,27 @@ pub(crate) mod tests {
     use crate::doc::assembly::Rev;
     use crate::session::Session;
     use serde_json::{Value, json};
+
+    #[test]
+    fn a_hole_at_places_drives_by_its_places() {
+        let (_dir, mut s, _) = crate::hole::place::tests::part();
+        crate::hole::tests::put_at(
+            &mut s,
+            "h",
+            json!({"form": "simple", "diameter": "2 mm",
+                   "depth": "through_all", "places": {"a": {"at": {"feature": "pt"}}}}),
+        );
+        let pid = Id::parse("p", "part").unwrap();
+        let r = s.rebuilt(&pid).unwrap().clone();
+        let part = s.project().part(&pid).unwrap().clone();
+        let p = Places::of(&part, &r);
+        let Driver::Hole(at) = &p.by_feature[&Id::parse("h", "feature").unwrap()] else {
+            panic!()
+        };
+        assert_eq!(at.len(), 1);
+        assert_eq!(at[0].0.as_str(), "a");
+        assert!((at[0].1 - Point3::new(0.005, 0.005, 0.005)).length() < 1e-12);
+    }
 
     pub(crate) fn must(s: &mut Session, m: &str, p: Value) -> Value {
         crate::server::handle(s, crate::proto::Request::from_rpc(m, Some(p)).unwrap())

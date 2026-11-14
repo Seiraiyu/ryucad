@@ -736,6 +736,47 @@ fn build_tool(
     Ok((built, origin))
 }
 
+/// Each place of hole `fid` as the rebuild placed it: its key, its
+/// mouth's centre and the way it drills, in the order it drills them.
+pub fn mouths(
+    part: &Part,
+    fid: &Id,
+    h: &Hole,
+    before: &dyn Results,
+) -> Result<Vec<(Id, Point3, Vector3)>> {
+    match &h.sketch {
+        Some(sk) => {
+            let solved = crate::rebuild::sketch_input(part, fid, sk, before)?;
+            let axis = -solved.frame.apply_vector(Vector3::new(0.0, 0.0, 1.0));
+            Ok(points(fid, h, sk, solved)?
+                .into_iter()
+                .map(|(pt, at)| (pt, at, axis))
+                .collect())
+        }
+        None => {
+            let applied = before
+                .result(fid)
+                .and_then(|r| r.as_ref().ok())
+                .and_then(crate::rebuild::Output::applied)
+                .ok_or_else(|| {
+                    Error::new(Code::DependencyFailed, format!("hole {fid} didn't build"))
+                        .with("feature", fid)
+                })?;
+            Ok(applied
+                .places
+                .iter()
+                .filter_map(|(k, m)| {
+                    Some((
+                        k.clone()?,
+                        m.apply_point(Point3::ORIGIN),
+                        m.apply_vector(Vector3::new(0.0, 0.0, -1.0)),
+                    ))
+                })
+                .collect())
+        }
+    }
+}
+
 /// Whether a hole's tool depends on where each place's axis leaves its
 /// targets: a far side, or through_next.
 pub fn needs_exits(h: &Hole) -> bool {
@@ -793,6 +834,32 @@ impl<'a> ExitTools<'a> {
         })
     }
 
+    /// For a hole at places (ryucad 28.C): tools in the canonical frame,
+    /// each bore running a hundredth of the targets' depth past its exit
+    /// (measured along the axis [`ExitTools::exit`] last looked down).
+    pub fn at_places(
+        part: &'a Part,
+        id: &'a Id,
+        h: &'a Hole,
+        s: &'a Sizes,
+        targets: &'a [&'a Built],
+    ) -> ExitTools<'a> {
+        let drill = Drill::canonical();
+        ExitTools {
+            part,
+            id,
+            h,
+            s,
+            drill,
+            targets,
+            origin: drill.origin,
+            down: drill.down,
+            through: None,
+            margin: 0.0,
+            tools: Vec::new(),
+        }
+    }
+
     pub fn origin(&self) -> Point3 {
         self.origin
     }
@@ -805,13 +872,17 @@ impl<'a> ExitTools<'a> {
     /// `at`: the first wall's far side for through_next, the last for
     /// through_all. `place` names the place in refusals.
     pub fn exit(
-        &self,
+        &mut self,
         id: &Id,
         place: &str,
         at: Point3,
         axis: Vector3,
         work: &ryukei::work::Work,
     ) -> Result<f64> {
+        if self.through.is_none() {
+            let (lo, hi) = crate::rebuild::span(at, axis, self.targets);
+            self.margin = (hi - lo).max(1e-6) * 0.01;
+        }
         let next = self.h.depth == Depth::ThroughNext;
         let bodies = self.targets.iter().map(|b| &b.body);
         match exits::over(bodies, at, axis, next, work) {

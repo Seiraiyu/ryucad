@@ -860,11 +860,7 @@ fn own(
         crate::hole::derive::derive(h, p.hole_standards.as_deref())
             .map_err(crate::hole::derive::at_rebuild)?,
     );
-    let Some(sk) = &h.sketch else {
-        return Err(Error::new(Code::Internal, "places come with Task 8"));
-    };
-    let solved = crate::rebuild::sketch_input(p, fid, sk, result)?;
-    let axis = -solved.frame.apply_vector(Vector3::new(0.0, 0.0, 1.0));
+    let places = crate::hole::mouths(p, fid, h, result)?;
     let spec = crate::hole::spec::canonical(h, unit);
     let r = sizes.drill.si / 2.0;
     let shoulder = match (&h.depth, &h.bottom) {
@@ -882,9 +878,9 @@ fn own(
         .thread
         .as_ref()
         .map(|t| t.depth.as_ref().map_or(shoulder, |d| d.si));
-    Ok(crate::hole::points(fid, h, sk, solved)?
+    Ok(places
         .into_iter()
-        .map(|(point, at)| Row {
+        .map(|(point, at, axis)| Row {
             reference: format!("{}/{fid}/{point}", p.id),
             part: p.id.clone(),
             feature: fid.clone(),
@@ -914,6 +910,38 @@ mod tests {
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()
+    }
+
+    #[test]
+    fn holes_at_places_and_their_patterns_are_rows() {
+        let (_dir, mut s, _) = crate::hole::place::tests::part();
+        crate::hole::tests::put_at(
+            &mut s,
+            "h",
+            json!({"form": "simple", "diameter": "2 mm", "depth": "through_next",
+                   "far": {"countersink": {"diameter": "3 mm", "angle": "90 deg"}},
+                   "places": {"a": {"at": {"feature": "pt"}}}}),
+        );
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "pattern", "id": "row",
+                   "features": ["h"], "direction": "x", "spacing": 6, "count": 2}),
+        )
+        .unwrap();
+        let holes = list(&mut s, &id("p"), None).unwrap();
+        let refs: Vec<&str> = holes.rows.iter().map(|r| r.reference.as_str()).collect();
+        assert_eq!(refs, ["p/h/a", "p/row/h/a/1"]);
+        assert!((holes.rows[1].position - Point3::new(0.011, 0.005, 0.005)).length() < 1e-12);
+        assert!((holes.rows[1].axis - Vector3::new(0.0, 0.0, -1.0)).length() < 1e-15);
+        assert!(
+            holes
+                .rows
+                .iter()
+                .all(|r| r.faces.contains_key("far_countersink")),
+            "{:?}",
+            holes.rows.iter().map(|r| &r.faces).collect::<Vec<_>>()
+        );
     }
 
     fn tapped(s: &mut Session) {

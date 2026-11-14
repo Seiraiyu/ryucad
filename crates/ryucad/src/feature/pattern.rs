@@ -343,7 +343,7 @@ pub(crate) fn build_pattern(
         &Id,
         (
             crate::hole::derive::Sizes,
-            &crate::sketch::Solved,
+            Option<&crate::sketch::Solved>,
             &crate::doc::hole::Hole,
         ),
     > = BTreeMap::new();
@@ -353,24 +353,27 @@ pub(crate) fn build_pattern(
         {
             let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref())
                 .map_err(crate::hole::derive::at_rebuild)?;
-            let Some(sk) = &h.sketch else {
-                return Err(Error::new(Code::Internal, "places come with Task 8"));
+            let solved = match &h.sketch {
+                Some(sk) => Some(crate::rebuild::sketch_input(part, seed, sk, before)?),
+                None => None,
             };
-            let solved = crate::rebuild::sketch_input(part, seed, sk, before)?;
             inputs.insert(*seed, (sizes, solved, h));
         }
     }
     let mut exit_tools: BTreeMap<&Id, crate::hole::ExitTools> = BTreeMap::new();
     for (seed, (sizes, solved, h)) in &inputs {
-        let t = crate::hole::ExitTools::new(
-            part,
-            seed,
-            h,
-            sizes,
-            crate::hole::Drill::of_sketch(solved)?,
-            &target_bodies,
-            before,
-        )?;
+        let t = match solved {
+            Some(solved) => crate::hole::ExitTools::new(
+                part,
+                seed,
+                h,
+                sizes,
+                crate::hole::Drill::of_sketch(solved)?,
+                &target_bodies,
+                before,
+            )?,
+            None => crate::hole::ExitTools::at_places(part, seed, h, sizes, &target_bodies),
+        };
         exit_tools.insert(*seed, t);
     }
     // Each instance's own tool where its exit gives it one, in the order
