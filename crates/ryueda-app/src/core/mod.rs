@@ -13,3 +13,4 @@ pub mod pick;
 pub mod prefs;
 pub mod product;
 pub mod scene;
+pub mod window;
