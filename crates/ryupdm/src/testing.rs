@@ -225,4 +225,26 @@ mod tests {
             ["properties/a.json", "things/a.json", "toy.json"]
         );
     }
+
+    #[test]
+    fn a_toys_states() {
+        use crate::history::Releases;
+        use crate::state::{Status, derive_all_for, derive_for};
+        let mut f = project(&[("a", "{}"), ("b", "{}")]);
+        f.insert(
+            "releases/c/A.json".into(),
+            record("c", "A", &"0".repeat(64)),
+        );
+        let all = derive_all_for::<Toy>(&f, &Releases::default());
+        assert_eq!(
+            all.keys().cloned().collect::<Vec<_>>(),
+            [id("a"), id("b"), id("c")]
+        );
+        let a = derive_for::<Toy>(&f, &id("a"), &Releases::default());
+        assert_eq!((a.status, a.next.as_deref()), (Status::InWork, Some("A")));
+        assert_eq!(
+            all[&id("c")].proposed.as_ref().map(|(l, _)| l.as_str()),
+            Some("A")
+        );
+    }
 }
