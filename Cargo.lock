@@ -5062,6 +5062,7 @@ dependencies = [
  "clap",
  "divan",
  "getrandom 0.3.4",
+ "gix",
  "mimalloc",
  "pdf-writer",
  "proptest",

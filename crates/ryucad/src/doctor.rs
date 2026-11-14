@@ -12,6 +12,7 @@ use crate::doc::canonical;
 use crate::doc::files::{Feature, Manifest, ParametersFile, PartFile, PartKind};
 use crate::doc::id::Id;
 use crate::doc::id::ProjectId;
+use crate::doc::lock::CadLock;
 use crate::doc::project::{IMPORTS, MANIFEST, PDM_CONFIG, Project, write_atomic};
 use crate::doc::source::Folder;
 use crate::error::{Code, Error, Result};

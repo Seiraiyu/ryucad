@@ -175,7 +175,12 @@ fn pools() -> &'static (rayon::ThreadPool, rayon::ThreadPool) {
 
 fuzz_target!(|data: &[u8]| {
     let files = project(&mut Bytes(data, 0));
-    let p = Project::load_from(std::path::Path::new("/fuzz"), &files, &BTreeMap::new())
+    let p = Project::load_from(
+        std::path::Path::new("/fuzz"),
+        &files,
+        &BTreeMap::new(),
+        &ryueda::pin::NoPins,
+    )
         .expect("a project whose manifest reads loads");
     let _ = p.faults();
     let d = Id::parse("d", "design").unwrap();

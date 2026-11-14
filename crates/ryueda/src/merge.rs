@@ -89,6 +89,7 @@ fn atoms(kind: &str) -> fn(&str) -> bool {
         crate::symbol::KIND => symbol_atom,
         crate::footprint::KIND => footprint_atom,
         crate::libcomp::KIND => libcomp_atom,
+        crate::project::LOCK_KIND => ryupdm::git::lock_atom,
         _ => no_atom,
     }
 }
@@ -258,7 +259,14 @@ fn format_of(kind: &str, v: &Value, ours: &Value, theirs: &Value) -> u64 {
             }
         }
         crate::project::KIND => {
-            if v.get("forked_from").is_some_and(|f| !f.is_null()) {
+            let pins = v["libraries"].as_object().is_some_and(|o| {
+                o.values().any(|a| {
+                    a.get("url").is_some()
+                        || a.get("project").is_some()
+                        || a["labels"].as_object().is_some_and(|l| !l.is_empty())
+                })
+            });
+            if v.get("forked_from").is_some_and(|f| !f.is_null()) || pins {
                 crate::project::FORMAT_3
             } else if v["properties"].as_object().is_some_and(|o| !o.is_empty())
                 || v.get("schematic").is_some()
@@ -340,6 +348,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         ryupdm::props::KIND => ryupdm::props::FORMAT,
         ryupdm::record::RELEASE_KIND => ryupdm::record::PRODUCT_FORMAT,
         ryupdm::record::OBSOLETE_KIND => ryupdm::record::FORMAT,
+        crate::project::LOCK_KIND => ryu_doc::lock::FORMAT,
         _ => return None,
     })
 }
@@ -473,6 +482,32 @@ pub fn settle(v: &Value, pointer: &str, kind: Kind, x: Option<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_merges_per_label() {
+        let lock = |labels: Value| {
+            json!({"format": 1, "kind": "ryueda.lock", "projects": {
+                "11111111111111111111111111111111": {"labels": labels, "path": "", "release_branch": "main", "url": "file:///l", "via": []}}})
+        };
+        let c = |x: char| json!({"commit": x.to_string().repeat(40), "content": "c".repeat(64)});
+        let base = lock(json!({"r/A": c('a')}));
+        let ours = lock(json!({"r/A": c('a'), "s/A": c('b')}));
+        let theirs = lock(json!({"r/A": c('a'), "t/B": c('d')}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        let labels = &m.value["projects"]["11111111111111111111111111111111"]["labels"];
+        assert_eq!(labels.as_object().unwrap().len(), 3, "{labels}");
+        let read = ryu_doc::lock::Lock::from_json_as(&m.value, crate::project::LOCK_KIND);
+        assert!(read.is_ok(), "{read:?}");
+        // One label moved both ways: one conflict, the label whole.
+        let both = merge(
+            Some(&base),
+            &lock(json!({"r/A": c('e')})),
+            &lock(json!({"r/A": c('f')})),
+        );
+        assert_eq!(both.conflicts.len(), 1, "one label, one conflict");
+        assert_eq!(newest(crate::project::LOCK_KIND), Some(1));
+    }
 
     #[test]
     fn pdm_files_merge_as_ryupdm_says() {

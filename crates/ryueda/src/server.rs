@@ -106,6 +106,12 @@ pub fn prepare(
     job: &ryu_session::job::Job,
 ) -> Option<ryu_session::Prepared<Session>> {
     let session = slot.as_mut()?;
+    if let Some(fetch) = crate::libdeps::prepare(session, req, job) {
+        return Some(Box::new(move || {
+            let made = fetch();
+            Box::new(move |s: &mut Session| s.fetched = Some(made))
+        }));
+    }
     let work = crate::parts::prepare(session, req, job)?;
     Some(Box::new(move || {
         let made = work();
@@ -384,7 +390,7 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
         .with("param", "against")),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
-            crate::erc::check_project(p, &cats, &[], &[]).map(Answer::json)
+            crate::erc::check_project(p, &cats, &[], &[], &[]).map(Answer::json)
         }
         Request::Describe {
             design,
@@ -479,7 +485,7 @@ fn with_commit(mut a: Answer, commit: &str) -> Answer {
 /// entry undo reverts; `git_install` sets the clone up (not a file).
 fn doctor_repair(session: &mut Session, ids: &[String]) -> Result<Value> {
     let root = session.root().to_path_buf();
-    let plan = crate::doctor::planned(&root, session.project(), ids)?;
+    let plan = crate::doctor::planned_with(&root, session.project(), ids, &*session.pins)?;
     let mut changes = Vec::new();
     for r in &plan {
         for c in &r.changes {
@@ -505,7 +511,7 @@ fn doctor_repair(session: &mut Session, ids: &[String]) -> Result<Value> {
     Ok(json!({
         "applied": ids,
         "changes": changes,
-        "report": crate::doctor::report(&root, session.project()),
+        "report": crate::doctor::report_with(&root, session.project(), &*session.pins),
     }))
 }
 
@@ -518,7 +524,11 @@ fn dispatch(
 ) -> Result<Value> {
     match req {
         Request::ProjectInfo {} => Ok(info(session.project())),
-        Request::Doctor {} => Ok(crate::doctor::report(session.root(), session.project())),
+        Request::Doctor {} => Ok(crate::doctor::report_with(
+            session.root(),
+            session.project(),
+            &*session.pins,
+        )),
         Request::DoctorRepair { repairs } => doctor_repair(session, &repairs),
         Request::MergeStatus {} => crate::validate::status(session),
         Request::MergeResolve {
@@ -528,9 +538,67 @@ fn dispatch(
         Request::LibAdd {
             alias,
             path,
+            url: Some(url),
             expected_revision,
-        } => lib_add(session, &alias, &path, expected_revision.as_deref()),
+        } => crate::libdeps::add_url(session, &alias, &url, &path, expected_revision.as_deref()),
+        Request::LibAdd {
+            alias,
+            path,
+            url: None,
+            expected_revision,
+        } => {
+            if path.is_empty() {
+                return Err(Error::new(
+                    Code::Usage,
+                    "lib add takes a library project's folder, or --url",
+                )
+                .with("param", "path"));
+            }
+            lib_add(session, &alias, &path, expected_revision.as_deref())
+        }
+        Request::LibFetch { aliases } => crate::libdeps::fetch(session, &aliases, job),
+        Request::LibUpdate {
+            aliases,
+            to,
+            offline,
+            dry_run,
+            expected_revision,
+        } => crate::libdeps::update(
+            session,
+            crate::libdeps::Update {
+                aliases: &aliases,
+                to: to.as_deref(),
+                offline,
+                dry_run,
+            },
+            expected_revision.as_deref(),
+            job,
+        ),
         Request::LibList {} => Ok(lib_list(session.project())),
+        Request::LibOutdated {} => crate::libdeps::outdated(session),
+        Request::LibUses { rev } => crate::libdeps::uses(session, rev.as_deref()),
+        Request::LibParts { alias } => crate::libdeps::parts(session, &alias),
+        Request::LibPin {
+            components,
+            label,
+            latest,
+            working,
+            expected_revision,
+        } => {
+            use crate::libdeps::Choice;
+            let choice = match (label.as_deref(), latest, working) {
+                (Some(l), false, false) => Choice::Label(l),
+                (None, true, false) => Choice::Latest,
+                (None, false, true) => Choice::Working,
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "lib pin takes one of --label, --latest or --working",
+                    ));
+                }
+            };
+            crate::libdeps::pin(session, &components, choice, expected_revision.as_deref())
+        }
         Request::ProjectEdit {
             properties,
             sheet_size,
@@ -1153,7 +1221,11 @@ fn dispatch(
             // A revision's release findings need its history: `release
             // check` is the command for them; the working files' are here.
             let release = crate::pdm::release::findings(session, false).unwrap_or_default();
-            match (crate::erc::check(session.root(), &cats, &release), diff) {
+            let deps = crate::libdeps::findings(session).unwrap_or_default();
+            match (
+                crate::erc::check(session.root(), &cats, &release, &deps),
+                diff,
+            ) {
                 (Ok(mut v), Some(d)) => {
                     v["against"] = d;
                     Ok(v)
@@ -1723,12 +1795,7 @@ fn lib_add(
     }
     check_revision("the project", &p.revision, expected)?;
     let mut m = p.manifest.clone();
-    m.libraries.insert(
-        id.clone(),
-        Alias {
-            path: path.to_owned(),
-        },
-    );
+    m.libraries.insert(id.clone(), Alias::local(path));
     // Refused now, rather than written to fail on every load.
     project::resolve(session.root(), &m)
         .remove(&id)

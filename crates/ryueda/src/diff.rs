@@ -921,6 +921,13 @@ pub fn between(
     if let Some(d) = crate::pdm::diff::pdm(sa.files, sb.files, &releases) {
         v["pdm"] = d;
     }
+    // Library labels (design 629): only when a pin or the lock moved.
+    if let Some(d) = crate::pdm::diff::lock(sa.files, sb.files) {
+        v["deps"] = d;
+    }
+    if let Some(d) = crate::pdm::diff::pins(sa.files, sb.files) {
+        v["pins"] = d;
+    }
     Ok(v)
 }
 

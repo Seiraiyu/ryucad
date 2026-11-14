@@ -148,8 +148,145 @@ fn part_pdm(
     Some(v)
 }
 
+/// Each pin that moved between `from`'s and `to`'s manifests (`working`
+/// for none), `None` when none did.
+pub fn pins(from: &Files, to: &Files) -> Option<Value> {
+    let read = |f: &Files| -> BTreeMap<(String, String), String> {
+        f.get(crate::project::MANIFEST)
+            .and_then(|b| crate::project::Manifest::read(b).ok())
+            .map(|m| {
+                m.libraries
+                    .iter()
+                    .flat_map(|(a, x)| {
+                        x.labels
+                            .iter()
+                            .map(move |(c, l)| ((a.to_string(), c.to_string()), l.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (a, b) = (read(from), read(to));
+    let keys: BTreeSet<&(String, String)> = a.keys().chain(b.keys()).collect();
+    let moved: Vec<Value> = keys
+        .into_iter()
+        .filter(|k| a.get(*k) != b.get(*k))
+        .map(|k| {
+            json!({
+                "alias": k.0,
+                "component": k.1,
+                "from": a.get(k).map_or("working", String::as_str),
+                "to": b.get(k).map_or("working", String::as_str),
+            })
+        })
+        .collect();
+    (!moved.is_empty()).then(|| json!(moved))
+}
+
+/// The lock's labels `added`, `removed` and `changed` (`commit: {from,
+/// to}`), each `{project, component, label, commit}`; `None` when the
+/// lock didn't move. As ryucad's `deps` block.
+pub fn lock(from: &Files, to: &Files) -> Option<Value> {
+    type Key = (String, String, String);
+    let read = |f: &Files| -> BTreeMap<Key, String> {
+        f.get(crate::project::LOCK)
+            .and_then(|b| crate::libdeps::read_lock(b).ok())
+            .map(|l| {
+                l.projects
+                    .iter()
+                    .flat_map(|(p, x)| {
+                        x.labels.iter().map(move |((c, label), v)| {
+                            (
+                                (p.to_string(), c.to_string(), label.clone()),
+                                v.commit.clone(),
+                            )
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (a, b) = (read(from), read(to));
+    let row = |(p, c, l): &Key, commit: Value| json!({"project": p, "component": c, "label": l, "commit": commit});
+    let added: Vec<Value> = b
+        .iter()
+        .filter(|(k, _)| !a.contains_key(*k))
+        .map(|(k, c)| row(k, json!(c)))
+        .collect();
+    let removed: Vec<Value> = a
+        .iter()
+        .filter(|(k, _)| !b.contains_key(*k))
+        .map(|(k, c)| row(k, json!(c)))
+        .collect();
+    let changed: Vec<Value> = a
+        .iter()
+        .filter_map(|(k, c)| {
+            let n = b.get(k)?;
+            (n != c).then(|| row(k, json!({"from": c, "to": n})))
+        })
+        .collect();
+    (!(added.is_empty() && removed.is_empty() && changed.is_empty()))
+        .then(|| json!({"added": added, "removed": removed, "changed": changed}))
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn moved_pins_and_locked_labels_diff_at_the_top() {
+        let manifest = |label: &str| {
+            let mut m = crate::project::Manifest::new(
+                crate::project::tests::pid(1),
+                crate::units::Unit::Mm,
+                crate::project::ProjectKind::Design,
+            );
+            let mut a = crate::project::Alias::local("../lib");
+            a.project = Some(crate::project::tests::pid(2));
+            a.labels
+                .insert(crate::id::Id::parse("r", "c").unwrap(), label.into());
+            m.libraries
+                .insert(crate::id::Id::parse("passives", "a").unwrap(), a);
+            m.to_text()
+        };
+        let lock_of = |commit: char| {
+            let mut l = ryu_doc::lock::Lock::default();
+            l.projects
+                .entry(crate::project::tests::pid(2))
+                .or_default()
+                .labels
+                .insert(
+                    (crate::id::Id::parse("r", "c").unwrap(), "A".into()),
+                    ryu_doc::lock::LockedLabel {
+                        commit: commit.to_string().repeat(40),
+                        content: "c".repeat(64),
+                    },
+                );
+            crate::libdeps::lock_text(&l).unwrap()
+        };
+        let files = |label: &str, commit: Option<char>| -> Files {
+            let mut f: Files = [(
+                "ryueda.json".to_owned(),
+                manifest(label).into_bytes().into(),
+            )]
+            .into_iter()
+            .collect();
+            if let Some(c) = commit {
+                f.insert("ryueda.lock".into(), lock_of(c).into_bytes().into());
+            }
+            f
+        };
+        let p = pins(&files("A", None), &files("B", None)).unwrap();
+        assert_eq!(
+            p,
+            json!([{"alias": "passives", "component": "r", "from": "A", "to": "B"}])
+        );
+        assert_eq!(pins(&files("A", None), &files("A", None)), None);
+        assert_eq!(lock(&files("A", Some('a')), &files("A", Some('a'))), None);
+        let d = lock(&files("A", None), &files("A", Some('a'))).unwrap();
+        assert_eq!(d["added"][0]["label"], "A");
+        let d = lock(&files("A", Some('a')), &files("A", Some('b'))).unwrap();
+        assert_eq!(d["changed"][0]["commit"]["to"], "b".repeat(40));
+    }
     use super::*;
     use crate::pdm::tests::board;
     use crate::project::ProjectKind;

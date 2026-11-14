@@ -79,11 +79,7 @@ impl ForkedFrom {
 }
 
 /// Whether `s` is a commit's full hex name.
-pub fn is_commit(s: &str) -> bool {
-    s.len() == 40
-        && s.bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-}
+pub use ryu_doc::lock::is_commit;
 
 /// The dependencies as `ryucad.json` holds them, by project ID.
 pub fn to_json(deps: &Dependencies) -> Value {

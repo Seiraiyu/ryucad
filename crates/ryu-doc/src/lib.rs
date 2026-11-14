@@ -9,5 +9,6 @@ pub mod error;
 pub mod expr;
 pub mod files;
 pub mod id;
+pub mod lock;
 pub mod source;
 pub mod units;

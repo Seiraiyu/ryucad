@@ -279,6 +279,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_lock_reads_label_by_label() {
+        let t = conv(
+            r#"{"format": 1, "kind": "ryueda.lock", "projects": {"11111111111111111111111111111111":
+            {"labels": {"r/A": {"commit": "aa", "content": "cc"}}, "path": "", "release_branch": "main", "url": "file:///l", "via": []}}}"#,
+        );
+        assert!(t.starts_with("ryueda.lock format 1\n"), "{t}");
+        assert!(t.contains("r/A"), "{t}");
+        assert!(t.contains("aa"), "{t}");
+    }
+
+    #[test]
     fn release_records_read_as_ryupdm_writes_them() {
         let v = serde_json::json!({"built_with": {"commit": "c", "product": "ryueda", "version": "0.5.0"},
             "content": "ab", "format": 2, "kind": "ryupdm.release", "label": "A", "part": "d",
