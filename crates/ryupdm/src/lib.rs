@@ -8,7 +8,8 @@
 //! in work, released, modified or obsolete ([`state`]), and the records
 //! are checked against the parts, the branch and the tags ([`check`]).
 //! A merge's result is checked against its sides for faults neither had
-//! ([`merge`]).
+//! ([`merge`]), and [`release`] holds the steps of a release every
+//! product's commands share.
 //!
 //! ryupdm reads projects through a [`product::Product`]; ryucad's is
 //! [`cad::Cad`], behind the default `cad` feature. It never calls the kernel,
@@ -50,6 +51,7 @@ pub mod package;
 pub mod product;
 pub mod props;
 pub mod record;
+pub mod release;
 pub mod state;
 #[cfg(feature = "cad")]
 pub mod structure;
