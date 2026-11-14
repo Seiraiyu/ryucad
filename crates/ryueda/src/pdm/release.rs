@@ -196,26 +196,36 @@ fn design_problems(session: &mut Session, part: &Id, r: &mut Readiness) -> Resul
                     r.problems.push(json!(f));
                 }
             }
-            // Every populated line must name its maker part, whatever its
-            // category or the severity erc.json gives `part_unidentified`;
-            // once each, where ERC's configured finding already holds it.
-            for (of, c, placed) in crate::erc::placed_by_libcomp(p, &n) {
-                if !c.mpn.trim().is_empty()
-                    || r.problems
-                        .iter()
-                        .any(|x| x["code"] == "part_unidentified" && x["details"]["libcomp"] == of)
-                {
+            // Every populated BOM line must name its maker part, whatever
+            // its category or the severity erc.json gives
+            // `part_unidentified` (design 629); a line whose component ERC
+            // already reports as an error isn't listed twice.
+            let all: Vec<&crate::netlist::Occurrence> = n.occurrences.iter().collect();
+            for l in crate::pdm::bom::lines_of(p, &all, 1) {
+                if l.quantity == 0 || !l.columns.get("mpn").is_none_or(|m| m.trim().is_empty()) {
                     continue;
                 }
-                let mut refs = vec![of.to_owned()];
-                refs.extend(placed.iter().map(|o| o.reference.clone()));
+                let refdes = l.columns.get("refdes").cloned().unwrap_or_default();
+                let id = l.part.rsplit(['/', ':']).next().unwrap_or_default();
+                let reported = r.problems.iter().any(|x| {
+                    x["code"] == "part_unidentified"
+                        && x["details"]["libcomp"]
+                            .as_str()
+                            .is_some_and(|of| of.ends_with(&format!("/{id}")))
+                });
+                if reported {
+                    continue;
+                }
                 r.problems.push(json!(
                     Error::new(
-                        Code::PartUnidentified,
-                        format!("{of} has no maker part number: a release needs every placed part identified"),
+                        Code::BomUnidentified,
+                        format!(
+                            "{} ({refdes}) has no maker part number: a release needs every placed part identified",
+                            l.part
+                        ),
                     )
-                    .with("libcomp", of)
-                    .with("refs", &refs)
+                    .with("part", &l.part)
+                    .with("refdes", &refdes)
                 ));
             }
         }
@@ -801,9 +811,18 @@ mod tests {
         s.reload().unwrap();
         let r = readiness(&mut s, &id("d")).unwrap();
         assert!(
-            codes(&r.problems).contains(&"part_unidentified".to_owned()),
+            codes(&r.problems).contains(&"bom_unidentified".to_owned()),
             "{:?}",
             r.problems
+        );
+        let x = r
+            .problems
+            .iter()
+            .find(|x| x["code"] == "bom_unidentified")
+            .unwrap();
+        assert!(
+            x["details"]["part"].is_string() && x["details"]["refdes"].is_string(),
+            "{x}"
         );
         // Another project's component at working: not released.
         let c = s.root().join("blocks/top/components/r1.json");
