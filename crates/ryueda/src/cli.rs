@@ -108,6 +108,27 @@ enum Command {
     /// obsolete, listed, checked and tagged.
     #[command(subcommand)]
     Release(ReleaseCmd),
+    /// Where a library component is used (PDM), run in its library
+    /// project: designs of this repository's projects, of other checkouts
+    /// (--in, else the pdm.dependents preference) and their releases.
+    WhereUsed {
+        part: String,
+        /// Only designs placing this release label.
+        #[arg(long, conflicts_with = "working")]
+        label: Option<String>,
+        /// Only designs placing it at working.
+        #[arg(long)]
+        working: bool,
+        /// Only direct placements (every placement in a design is).
+        #[arg(long)]
+        direct: bool,
+        /// Folders of other checkouts to search; repeat for more.
+        #[arg(long = "in", value_name = "FOLDER")]
+        within: Vec<PathBuf>,
+        /// Search no other checkout, the preference's included.
+        #[arg(long)]
+        no_dependents: bool,
+    },
     /// A design's bill of materials (PDM): one line per purchasable
     /// part with designators, maker, part number, alternates and offers;
     /// `bom diff` compares two revisions'.
@@ -2414,6 +2435,21 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             design: design.clone(),
             from: from.clone(),
             to: to.clone(),
+        },
+        Command::WhereUsed {
+            part,
+            label,
+            working,
+            direct,
+            within,
+            no_dependents,
+        } => Request::BomWhereUsed {
+            part: part.clone(),
+            label: label.clone(),
+            working: *working,
+            direct: *direct,
+            within: all(within),
+            no_dependents: *no_dependents,
         },
         Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
         Command::Pdm(PdmCmd::NewId { expect }) => Request::PdmNewId {

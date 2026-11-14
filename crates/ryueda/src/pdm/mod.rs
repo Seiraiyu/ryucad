@@ -15,6 +15,7 @@ pub mod cmd;
 pub mod content;
 pub mod diff;
 pub mod release;
+pub mod where_used;
 
 use crate::conn::{BLOCKS, CLASSES, DESIGNS, RAILS};
 use crate::error::{Code, Error, Result};

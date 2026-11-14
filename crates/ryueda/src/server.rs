@@ -594,6 +594,30 @@ fn dispatch(
                 by_block,
             },
         ),
+        Request::BomWhereUsed {
+            part,
+            label,
+            working,
+            direct,
+            within,
+            no_dependents,
+        } => {
+            let filter = match (label, working) {
+                (Some(l), _) => crate::pdm::where_used::Filter::Label(l),
+                (None, true) => crate::pdm::where_used::Filter::Working,
+                (None, false) => crate::pdm::where_used::Filter::Any,
+            };
+            crate::pdm::where_used::answer(
+                session,
+                &crate::pdm::where_used::Ask {
+                    part: &part,
+                    filter,
+                    direct,
+                    within: &within,
+                    no_dependents,
+                },
+            )
+        }
         Request::BomDiff { design, from, to } => {
             crate::pdm::bom::diff(session, design.as_deref(), from.as_deref(), to.as_deref())
         }

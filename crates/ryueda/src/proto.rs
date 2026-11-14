@@ -164,6 +164,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<String>,
     },
+    /// Where a library project's component is used: by designs in this
+    /// repository, in other checkouts, and in their releases.
+    #[serde(rename = "bom.where_used")]
+    BomWhereUsed {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        working: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        direct: bool,
+        #[serde(default, rename = "in", skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_dependents: bool,
+    },
     /// Pins components of library aliases (`<alias>/<component>`) at a
     /// release label, each one's latest official label (`latest`), or
     /// unpins them (`working`, a library in this repository only).

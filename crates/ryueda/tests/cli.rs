@@ -809,6 +809,7 @@ fn every_protocol_method_has_a_command() {
         ("release.sync", &["release", "sync"]),
         ("bom.get", &["bom"]),
         ("bom.diff", &["bom", "diff"]),
+        ("bom.where_used", &["where-used"]),
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
