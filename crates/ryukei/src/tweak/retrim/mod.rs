@@ -9,6 +9,7 @@
 //! material is guessed: the walk only counts.
 
 pub(crate) mod body;
+pub(crate) mod held;
 pub(crate) mod names;
 pub(crate) mod region;
 pub(crate) mod seeds;
@@ -166,6 +167,18 @@ fn attempt(
     let mut ws = BTreeMap::new();
     let absorbed = absorbed(body, changes, region);
     let absorbing: std::collections::BTreeSet<FaceId> = absorbed.values().copied().collect();
+    // Faces left as they are: on their own surfaces, standing for
+    // themselves.
+    let still = |f: FaceId| {
+        region.faces.contains(&f)
+            && !changes.deleted.contains(&f)
+            && !changes.motion.contains_key(&f)
+            && !changes.surface.contains_key(&f)
+            && !absorbed.contains_key(&f)
+    };
+    // The seams kept faces were tangent along, all along or in places,
+    // across the frontier too (design 642).
+    let held = held::held(body, region, &still);
     for &f in region
         .faces
         .iter()
@@ -292,16 +305,9 @@ fn attempt(
     };
     let pairs = w.pairs();
     // Kept faces tangent along an input edge meet along it (#652): those
-    // left as they are, on their own surfaces, standing for themselves.
-    let still = |f: FaceId| {
-        region.faces.contains(&f)
-            && !changes.deleted.contains(&f)
-            && !changes.motion.contains_key(&f)
-            && !changes.surface.contains_key(&f)
-            && !absorbed.contains_key(&f)
-    };
+    // left as they are, and the faces outside the region, held by `held`.
     let seams: crate::intersect::Seams = w
-        .seams(body, &still)
+        .seams(body, &held)
         .into_iter()
         .filter(|(k, _)| pairs.contains(k))
         .collect();

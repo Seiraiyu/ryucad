@@ -209,37 +209,23 @@ impl WorkBody {
         out
     }
 
-    /// The seams kept faces were tangent along in the input (design 551,
-    /// #652): each input edge whose two faces are working faces here,
-    /// both `still` (on the surfaces the input had them on, with the same
-    /// parameters) and tangent along it ([`crate::tweak::classify::tangent`]),
-    /// as its curve, interval, tolerance and the two fins' pcurves, each
-    /// moved by whole periods into its working face's parameter box; by
-    /// the working faces' pair, in face order. A working surface holds its
-    /// face's surface, carried past its domain with the same parameters,
-    /// so it holds the edge's curve and pcurve.
-    pub(crate) fn seams(&self, input: &Body, still: &dyn Fn(FaceId) -> bool) -> Seams {
-        let back: BTreeMap<FaceId, FaceId> =
-            self.working.iter().map(|&w| (self.origin[&w], w)).collect();
+    /// The held seams (design 642) as the table meets them: each one
+    /// whose two faces have faces here (a working face, or an outside
+    /// face as it is), as its curve, interval, tolerance, kind and the two
+    /// fins' pcurves, moved by whole periods into those faces' parameter
+    /// boxes ([`seam_for`]); by the pair, in face order. A working surface
+    /// holds its face's surface, carried past its domain with the same
+    /// parameters, so it holds the edge's curve and pcurve.
+    pub(crate) fn seams(&self, input: &Body, held: &[super::held::Held]) -> Seams {
+        let back: BTreeMap<FaceId, FaceId> = self.origin.iter().map(|(&w, &i)| (i, w)).collect();
         let mut out = Seams::new();
-        for e in input.edges() {
-            let fins: Vec<_> = input.edge_fins(e).collect();
-            let [fa, fb] = fins[..] else { continue };
-            let face = |fin| input.loops[input.fins[fin].loop_].face;
-            let (ia, ib) = (face(fa), face(fb));
-            if ia == ib || !still(ia) || !still(ib) {
-                continue;
-            }
-            let (Some(&wa), Some(&wb)) = (back.get(&ia), back.get(&ib)) else {
+        for h in held {
+            let (Some(&wa), Some(&wb)) = (back.get(&h.faces[0]), back.get(&h.faces[1])) else {
                 continue;
             };
-            let Some(mut seam) = seam_for(
-                input,
-                e,
-                (&self.body, wa),
-                (&self.body, wb),
-                SeamKind::Running,
-            ) else {
+            let Some(mut seam) =
+                seam_for(input, h.edge, (&self.body, wa), (&self.body, wb), h.kind)
+            else {
                 continue;
             };
             let key = if wa < wb {
@@ -254,12 +240,13 @@ impl WorkBody {
     }
 }
 
-/// The seam input edge `e` makes between working faces `wa` (standing
-/// for the face of `e`'s first fin) and `wb` (its second), pcurves in that
-/// order: `None` unless `e` has two fins, both with pcurves, and its faces
-/// are tangent all along it ([`crate::tweak::classify::tangent`]). Each
-/// pcurve is moved by whole periods so its middle lies in its working
-/// face's parameter box. Task 20's guard builds FTC 07's seam with it.
+/// The seam input edge `e` makes between working-body faces `wa`
+/// (standing for the face of `e`'s first fin) and `wb` (its second),
+/// pcurves in that order, with kind `kind`: `None` unless `e` has two
+/// fins, both with pcurves. The caller has judged the faces tangent along
+/// it (`held::held_tangent`). Each pcurve is moved by whole periods so its
+/// middle lies in its working face's parameter box. Task 20's guard
+/// builds FTC 07's seam with it.
 pub(crate) fn seam_for(
     input: &Body,
     e: EdgeId,
@@ -269,9 +256,6 @@ pub(crate) fn seam_for(
 ) -> Option<Seam> {
     let fins: Vec<_> = input.edge_fins(e).collect();
     let [fa, fb] = fins[..] else { return None };
-    if !matches!(crate::tweak::classify::tangent(input, e), Ok(true)) {
-        return None;
-    }
     let (pa, pb) = (input.fins[fa].pcurve?, input.fins[fb].pcurve?);
     let x = &input.edges[e];
     let mid = 0.5 * (x.interval[0] + x.interval[1]);
@@ -353,7 +337,9 @@ mod tests {
             .collect();
         // unmetered: a unit test.
         let w = work_body(K, &b, &r, &ws, &crate::work::Meter::free()).unwrap();
-        let seams = w.seams(&b, &|f| f != top);
+        let still = |f: FaceId| r.faces.contains(&f) && f != top;
+        let held = super::super::held::held(&b, &r, &still);
+        let seams = w.seams(&b, &held);
         // The round is tangent to the two sides it joins, each along a
         // line; no other kept pair is tangent along an edge.
         assert_eq!(seams.len(), 2, "{seams:?}");
@@ -364,7 +350,7 @@ mod tests {
             assert!(matches!(list[0].curve, crate::geom::Curve::Line(_)));
         }
         // The top, changed, records none.
-        let none = w.seams(&b, &|_| false);
+        let none = w.seams(&b, &super::super::held::held(&b, &r, &|_| false));
         assert!(none.is_empty());
     }
 
