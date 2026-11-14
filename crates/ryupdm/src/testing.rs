@@ -187,4 +187,42 @@ mod tests {
             assert_eq!(pdm.parts[&id(p)].faults[0].code, Code::PartNumberDuplicate);
         }
     }
+
+    #[test]
+    fn a_toys_files_at_a_commit() {
+        use crate::history::tests::{commit, put, repo};
+        let d = repo();
+        let root = d.path();
+        let manifest = project(&[]);
+        for (rel, text) in [
+            (
+                "t/toy.json",
+                std::str::from_utf8(&manifest["toy.json"]).unwrap(),
+            ),
+            ("t/things/a.json", "{}"),
+            ("t/things/b.json", "{}"),
+            ("t/properties/a.json", "{}"),
+            ("t/releases/a/A.json", "{}"),
+            ("t/README", "not the project's"),
+        ] {
+            put(root, rel, text);
+        }
+        let c = commit(root, "toy");
+        let git = gix::open(root).unwrap();
+        let keys = |m: BTreeMap<String, Vec<u8>>| m.into_keys().collect::<Vec<_>>();
+        assert_eq!(
+            keys(crate::history::files_for::<Toy>(&git, &c, "t/").unwrap()),
+            [
+                "properties/a.json",
+                "releases/a/A.json",
+                "things/a.json",
+                "things/b.json",
+                "toy.json"
+            ]
+        );
+        assert_eq!(
+            keys(crate::history::part_files_for::<Toy>(&git, &c, "t/", &id("a")).unwrap()),
+            ["properties/a.json", "things/a.json", "toy.json"]
+        );
+    }
 }

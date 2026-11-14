@@ -26,11 +26,11 @@
 use crate::approvals::{Approvals, Rule};
 use crate::attest::{self, Verdict};
 use crate::config::Config;
+use crate::product::Product;
 use crate::record::{Kind, parse_name};
 use crate::{PDM_CONFIG, RELEASES};
 use ryu_doc::error::{Code, Error, Result};
 use ryu_doc::id::Id;
-use ryucad_doc::doc::project::ROOT_FILES;
 use std::collections::BTreeMap;
 
 /// The prefix of every tag ryupdm derives from a record.
@@ -327,37 +327,43 @@ fn commit_of(repo: &gix::Repository, rev: &str) -> Result<gix::ObjectId> {
         .id)
 }
 
-/// The project's files in the commit `rev` names, by path relative to
-/// the project (`prefix` is where it sits in the repository, ending in
-/// `/` unless it is the root): the manifest and the other files at its
-/// root, and everything under `parts/` and `releases/`. Works on a bare
-/// repository.
-pub fn files(repo: &gix::Repository, rev: &str, prefix: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+/// The files of the project of `P` in the commit `rev` names, by path
+/// relative to the project (`prefix` is where it sits in the repository,
+/// ending in `/` unless it is the root): its root files and
+/// `ryupdm.json`, and everything under its part folders and `releases/`.
+/// Works on a bare repository.
+pub fn files_for<P: Product>(
+    repo: &gix::Repository,
+    rev: &str,
+    prefix: &str,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     let commit = repo.find_commit(commit_of(repo, rev)?).map_err(git_error)?;
     let tree = commit.tree_id().map_err(git_error)?.detach();
     let mut ids = BTreeMap::new();
-    for name in ROOT_FILES {
+    for name in P::ROOT_FILES.iter().copied().chain([PDM_CONFIG]) {
         if let Some(id) = entry(repo, tree, prefix, name)? {
             ids.insert(name.to_owned(), id);
         }
     }
-    for dir in ["parts", RELEASES] {
+    for dir in P::PART_FOLDERS.iter().copied().chain([RELEASES]) {
         if let Some(id) = entry(repo, tree, prefix, dir)? {
             blobs(repo, id, &format!("{dir}/"), &mut ids)?;
         }
     }
-    ids.into_iter()
-        .map(|(path, id)| {
-            let data = repo.find_object(id).map_err(git_error)?.data.clone();
-            Ok((path, data))
-        })
-        .collect()
+    read_all(repo, ids)
 }
 
-/// The files of the project's part `part` in the commit `rev` names,
-/// with the files at the project's root (the manifest and ryupdm's
-/// settings): what reading that one part needs, without the rest.
-pub fn part_files(
+/// [`files_for`] for ryucad: `ryucad.json` and the other root files, and
+/// everything under `parts/` and `releases/`.
+#[cfg(feature = "cad")]
+pub fn files(repo: &gix::Repository, rev: &str, prefix: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+    files_for::<crate::cad::Cad>(repo, rev, prefix)
+}
+
+/// The files of the part `part` of the project of `P` in the commit `rev`
+/// names, with the files at the project's root and `ryupdm.json`: what
+/// reading that one part needs, without the rest.
+pub fn part_files_for<P: Product>(
     repo: &gix::Repository,
     rev: &str,
     prefix: &str,
@@ -366,15 +372,41 @@ pub fn part_files(
     let commit = repo.find_commit(commit_of(repo, rev)?).map_err(git_error)?;
     let tree = commit.tree_id().map_err(git_error)?.detach();
     let mut ids = BTreeMap::new();
-    for name in ROOT_FILES {
+    let own = P::part_files(part);
+    for name in P::ROOT_FILES.iter().copied().chain([PDM_CONFIG]) {
         if let Some(id) = entry(repo, tree, prefix, name)? {
             ids.insert(name.to_owned(), id);
         }
     }
-    let dir = format!("parts/{part}");
-    if let Some(id) = entry(repo, tree, prefix, &dir)? {
-        blobs(repo, id, &format!("{dir}/"), &mut ids)?;
+    for name in &own.files {
+        if let Some(id) = entry(repo, tree, prefix, name)? {
+            ids.insert(name.clone(), id);
+        }
     }
+    for dir in &own.folders {
+        if let Some(id) = entry(repo, tree, prefix, dir)? {
+            blobs(repo, id, &format!("{dir}/"), &mut ids)?;
+        }
+    }
+    read_all(repo, ids)
+}
+
+/// [`part_files_for`] for ryucad: the root files and `parts/<part>/`.
+#[cfg(feature = "cad")]
+pub fn part_files(
+    repo: &gix::Repository,
+    rev: &str,
+    prefix: &str,
+    part: &Id,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    part_files_for::<crate::cad::Cad>(repo, rev, prefix, part)
+}
+
+/// Each object's bytes, by path.
+fn read_all(
+    repo: &gix::Repository,
+    ids: BTreeMap<String, gix::ObjectId>,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     ids.into_iter()
         .map(|(path, id)| {
             let data = repo.find_object(id).map_err(git_error)?.data.clone();
