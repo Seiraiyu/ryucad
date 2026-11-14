@@ -33,9 +33,15 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo install cargo-fuzz --locked
       # Built apart from the run, so a build failure is told from a find.
+      # Two jobs, not the runner's four: 30.A's dispatches lost 4 of about
+      # 38 jobs mid-build, with no log ("lost communication"), and every
+      # one hung in this step, which looks like memory starvation on the
+      # 16 GB runner under ASan. 30.B measured the cap (see its PR).
       - name: Build
         id: build
         working-directory: fuzz
+        env:
+          CARGO_BUILD_JOBS: 2
         run: cargo +nightly fuzz build ${{ matrix.target }}
       - name: Fuzz for 10 minutes
         id: fuzz
