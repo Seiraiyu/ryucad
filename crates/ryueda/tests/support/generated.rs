@@ -198,7 +198,8 @@ pub fn seeded(dir: &Path, seed: u64) {
 }
 
 /// A library project of `n` components (`c00000`…) sharing one symbol
-/// and footprint, each with a maker part number: the bars' library.
+/// and footprint, each with a maker part number and a PDM number: the
+/// bars' library.
 pub fn library(dir: &Path, n: usize) {
     write(dir, 1, 1);
     put(
@@ -220,17 +221,26 @@ pub fn library(dir: &Path, n: usize) {
                    "manufacturer": "Yageo", "mpn": format!("RC-{i:05}"),
                    "footprints": [{"footprint": {"id": "r_0402"}}]}),
         );
+        let props = dir.join(format!("properties/c{i:05}.json"));
+        std::fs::create_dir_all(props.parent().unwrap()).unwrap();
+        std::fs::write(
+            props,
+            ryueda::canonical::to_string(&json!({
+                "format": 1, "kind": "ryupdm.properties", "number": format!("100-{i:05}")
+            })),
+        )
+        .unwrap();
     }
 }
 
 /// Makes every component of `dir`'s design place `component` of the
-/// library at `lib` (alias `alias`, by path, naming its project) instead
-/// of its own `r`.
-pub fn place_from(dir: &Path, alias: &str, lib: &Path, project: &str, component: &str) {
+/// library at `lib` (alias `alias`, by its path relative to `dir`, naming
+/// its project) instead of its own `r`.
+pub fn place_from(dir: &Path, alias: &str, lib: &str, project: &str, component: &str) {
     let path = dir.join("ryueda.json");
     let mut m: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     m["format"] = json!(3);
-    m["libraries"] = json!({alias: {"path": lib.display().to_string(), "project": project}});
+    m["libraries"] = json!({alias: {"path": lib, "project": project}});
     std::fs::write(&path, ryueda::canonical::to_string(&m)).unwrap();
     for f in std::fs::read_dir(dir.join("blocks/ch/components")).unwrap() {
         let f = f.unwrap().path();

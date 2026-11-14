@@ -459,6 +459,10 @@ fn boms_releases_and_where_used_are_within_their_bars() {
     assert!(listed < bar(Duration::from_secs(1)), "{listed:?}");
     // Where-used over 10 checkouts, each a 1,000-occurrence design
     // placing the library's c00000 at working by its project ID.
+    // A folder holding both, as a workspace of checkouts does, so the
+    // library resolves from each (`resolve`'s fence is the nearest folder
+    // with `.git`).
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
     let others = dir.path().join("others");
     for k in 0..10 {
         let b = others.join(format!("b{k}"));
@@ -466,7 +470,7 @@ fn boms_releases_and_where_used_are_within_their_bars() {
         generated::place_from(
             &b,
             "lib",
-            &lib,
+            "../../repo/lib",
             "fedcba9876543210fedcba9876543210",
             "c00000",
         );
