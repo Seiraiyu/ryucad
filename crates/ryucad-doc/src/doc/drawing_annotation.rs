@@ -20,7 +20,7 @@
 //! `<instance>/…/<solid>/<name>` in an assembly's, `<datum>` for a datum
 //! of the view's part; a balloon names an occurrence (`<instance>/…`).
 //! Keys take a letter by type: `d` dimensions and hole callouts, `c`
-//! centre marks and lines, `n` notes, `b` balloons, `t` BOM tables, `g`
+//! centre marks and lines, `n` notes, `b` balloons, `t` BOM and hole tables, `g`
 //! GD&T frames and datum features, `f` surface finish. Every value the
 //! model decides is worked out again when the drawing is built; the file
 //! holds intent and place only. An annotation on a view writes its `at`
@@ -325,6 +325,15 @@ pub enum Kind {
         depth: Option<u32>,
         columns: Vec<String>,
     },
+    /// Holes of the view's part with their places from `origin` (an
+    /// entity: a vertex, or a datum point's ID) in the view's frame,
+    /// grouped by spec (design 533); `holes` keeps those it names (hole
+    /// references, or hole, pattern or mirror feature IDs), none every
+    /// one.
+    HoleTable {
+        origin: String,
+        holes: Vec<String>,
+    },
     FeatureControlFrame {
         characteristic: Characteristic,
         rows: Vec<Row>,
@@ -363,7 +372,7 @@ pub struct Annotation {
 }
 
 /// Every type, its key letter and whether it is a dimension.
-pub const TYPES: [(&str, char, bool); 15] = [
+pub const TYPES: [(&str, char, bool); 16] = [
     ("linear", 'd', true),
     ("angular", 'd', true),
     ("radius", 'd', true),
@@ -376,6 +385,7 @@ pub const TYPES: [(&str, char, bool); 15] = [
     ("note", 'n', false),
     ("balloon", 'b', false),
     ("bom_table", 't', false),
+    ("hole_table", 't', false),
     ("feature_control_frame", 'g', false),
     ("datum_feature", 'g', false),
     ("surface_finish", 'f', false),
@@ -417,6 +427,22 @@ pub fn entity_ok(s: &str) -> bool {
 /// Whether `s` names an occurrence: instance steps.
 pub fn occurrence_ok(s: &str) -> bool {
     !s.is_empty() && s.split('/').all(|x| parse_step(x, "").is_ok())
+}
+
+/// The most holes a hole table names: a pattern's limit.
+pub const MAX_TABLE_HOLES: usize = 100_000;
+
+/// Whether `s` reads as a hole table's hole: a feature's ID or a hole's
+/// reference, `/`-separated steps of letters, digits, `-`, `_`, `,` and
+/// `:` (a fill's `-1,0`, a copy's ID).
+pub fn hole_name_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 256
+        && s.split('/').all(|x| {
+            !x.is_empty()
+                && x.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b',' | b':'))
+        })
 }
 
 fn entity(v: &Value, at: &str) -> Result<String> {
@@ -758,6 +784,7 @@ impl Annotation {
             Kind::Note { .. } => "note",
             Kind::Balloon { .. } => "balloon",
             Kind::BomTable { .. } => "bom_table",
+            Kind::HoleTable { .. } => "hole_table",
             Kind::FeatureControlFrame { .. } => "feature_control_frame",
             Kind::DatumFeature { .. } => "datum_feature",
             Kind::SurfaceFinish { .. } => "surface_finish",
@@ -819,6 +846,7 @@ impl Annotation {
                 }
             }
             Kind::DatumFeature { on, .. } | Kind::SurfaceFinish { on, .. } => out.push(("on", on)),
+            Kind::HoleTable { origin, .. } => out.push(("origin", origin)),
             Kind::Balloon { .. } | Kind::BomTable { .. } => {}
         }
         out
@@ -886,6 +914,12 @@ impl Annotation {
                 }
                 if columns.as_slice() != BOM_COLUMNS {
                     v["columns"] = json!(columns);
+                }
+            }
+            Kind::HoleTable { origin, holes } => {
+                v["origin"] = json!(origin);
+                if !holes.is_empty() {
+                    v["holes"] = json!(holes);
                 }
             }
             Kind::FeatureControlFrame {
@@ -1116,6 +1150,39 @@ impl Annotation {
                     depth,
                     columns,
                 }
+            }
+            "hole_table" => {
+                let origin = take_entity(&mut o, "origin")?;
+                let holes = match o.take_opt("holes") {
+                    None => Vec::new(),
+                    Some(x) => {
+                        let a = x
+                            .as_array()
+                            .filter(|a| !a.is_empty() && a.len() <= MAX_TABLE_HOLES)
+                            .ok_or_else(|| {
+                                invalid(
+                                    &p("holes"),
+                                    "1 to 100000 holes: references or hole, pattern or mirror features",
+                                )
+                            })?;
+                        let mut out: Vec<String> = Vec::new();
+                        for (i, h) in a.iter().enumerate() {
+                            let at = format!("{at}/holes/{i}");
+                            let h = h.as_str().filter(|s| hole_name_ok(s)).ok_or_else(|| {
+                                invalid(
+                                    &at,
+                                    "a hole's reference (<part>/<feature>/<place>, …) or a hole, pattern or mirror feature's ID",
+                                )
+                            })?;
+                            if out.iter().any(|x| x == h) {
+                                return Err(invalid(&at, "a hole named twice"));
+                            }
+                            out.push(h.to_owned());
+                        }
+                        out
+                    }
+                };
+                Kind::HoleTable { origin, holes }
             }
             "feature_control_frame" => {
                 let c = o.take("characteristic")?;
@@ -1352,6 +1419,15 @@ mod tests {
                 json!({"type": "bom_table", "sheet": "s1", "flat": true, "columns": ["item", "name"]}),
             ),
             (
+                "t2",
+                json!({"type": "hole_table", "view": "v1", "origin": e, "at": ["40 mm", "0 mm"],
+                       "holes": ["p/h/a", "f", "p/f/h/p1/-1,0"]}),
+            ),
+            (
+                "t3",
+                json!({"type": "hole_table", "view": "v1", "origin": "o"}),
+            ),
+            (
                 "g1",
                 json!({"type": "feature_control_frame", "view": "v1", "on": e, "characteristic": "position",
                 "rows": [{"tolerance": "0.1 mm", "diameter": true, "condition": "m",
@@ -1459,6 +1535,31 @@ mod tests {
                 "/x/depth",
             ),
             (
+                "t1",
+                json!({"type": "hole_table", "sheet": "s1", "origin": e}),
+                "/x/view",
+            ),
+            (
+                "t1",
+                json!({"type": "hole_table", "view": "v1", "origin": e, "holes": []}),
+                "/x/holes",
+            ),
+            (
+                "t1",
+                json!({"type": "hole_table", "view": "v1", "origin": e, "holes": ["h", "h"]}),
+                "/x/holes/1",
+            ),
+            (
+                "t1",
+                json!({"type": "hole_table", "view": "v1", "origin": e, "holes": ["a b"]}),
+                "/x/holes/0",
+            ),
+            (
+                "d1",
+                json!({"type": "hole_table", "view": "v1", "origin": e}),
+                "/x",
+            ),
+            (
                 "b1",
                 json!({"type": "balloon", "view": "v1", "sheet": "s1", "of": "p1"}),
                 "/x/sheet",
@@ -1469,6 +1570,18 @@ mod tests {
             assert_eq!(e.code, Code::InvalidDocument, "{v}");
             assert_eq!(e.details["pointer"], pointer, "{v}: {e}");
         }
+    }
+
+    #[test]
+    fn a_hole_tables_origin_is_an_entity() {
+        let a = Annotation::from_json(
+            &json!({"type": "hole_table", "view": "v1", "origin": format!("base/{N}")}),
+            "/annotations/t1",
+            k("t1"),
+        )
+        .unwrap();
+        assert_eq!(a.entities(), vec![("origin", format!("base/{N}").as_str())]);
+        assert!(!a.is_dimension());
     }
 
     #[test]

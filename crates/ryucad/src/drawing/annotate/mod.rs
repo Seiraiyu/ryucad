@@ -867,6 +867,10 @@ fn build_one(
             let corner = written.map(|w| addp(vb.at, w));
             bom_table(session, ctx, a, &plan.of, Some(&plan.rev), sheet, corner)
         }
+        Kind::HoleTable { .. } => Err(Error::new(
+            Code::InvalidParam,
+            "hole tables are built from Task 5 of plan 28.D",
+        )),
         Kind::FeatureControlFrame {
             characteristic,
             rows,
