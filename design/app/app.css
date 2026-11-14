@@ -6,8 +6,8 @@
    and dense, Graphite small corners, Studio rounder and roomier; tiles are
    square in every look (no cards, no shadows, no gradients). */
 
-@font-face { font-family: "Inter"; src: url("../../crates/ryucad-app/fonts/InterVariable.ttf"); font-weight: 100 900; }
-@font-face { font-family: "JetBrains Mono"; src: url("../../crates/ryucad-app/fonts/JetBrainsMono-Regular.ttf"); }
+@font-face { font-family: "Inter"; src: url("../../crates/ryu-app/fonts/InterVariable.ttf"); font-weight: 100 900; }
+@font-face { font-family: "JetBrains Mono"; src: url("../../crates/ryu-app/fonts/JetBrainsMono-Regular.ttf"); }
 
 :root { --r: 2px; --pad: 8px; --row: 20px; --ctl: 22px; }
 [data-look="graphite"] { --r: 4px; --ctl: 24px; }

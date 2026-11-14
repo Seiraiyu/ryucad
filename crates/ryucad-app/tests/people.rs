@@ -25,7 +25,11 @@ fn face(ws: &Workspace) -> String {
 }
 
 fn agent(ws: &Workspace) -> Option<&ryucad_app::core::people::Person> {
-    ws.people.all.values().find(|p| p.kind == Kind::Agent)
+    ws.session
+        .people
+        .all
+        .values()
+        .find(|p| p.kind == Kind::Agent)
 }
 
 #[test]
@@ -45,7 +49,7 @@ fn the_window_sees_what_agents_do() {
     assert_eq!(a.selection, [f]);
     // Following the agent shows its camera.
     let (id, camera) = (a.id.clone(), a.camera.clone());
-    ws.following = Some(id);
+    ws.session.following = Some(id);
     assert_eq!(ws.followed_camera(), camera.as_ref());
 }
 
@@ -87,11 +91,11 @@ fn windows_come_and_go() {
     let mut ws = open(&p, "Dana");
     let other = open(&p, "Kai");
     let kai = other.me().to_owned();
-    assert!(ws.wait_until(WAIT, |ws| ws.people.get(&kai).is_some()));
-    ws.following = Some(kai.clone());
+    assert!(ws.wait_until(WAIT, |ws| ws.session.people.get(&kai).is_some()));
+    ws.session.following = Some(kai.clone());
     drop(other);
-    assert!(ws.wait_until(WAIT, |ws| ws.people.get(&kai).is_none()));
-    assert_eq!(ws.following, None);
+    assert!(ws.wait_until(WAIT, |ws| ws.session.people.get(&kai).is_none()));
+    assert_eq!(ws.session.following, None);
 }
 
 #[test]

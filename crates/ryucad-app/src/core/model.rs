@@ -9,6 +9,7 @@
 
 use crate::core::lod;
 use crate::core::sketch::Drawing;
+use crate::core::workspace::Made;
 use ryucad::mesh::{Quality, WireBody};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1022,9 +1023,51 @@ pub struct Model {
     /// [`Model::held_bytes`], and the generation and number of levels it
     /// was worked out at.
     held: std::sync::Mutex<Option<((u64, usize), u64)>>,
+    /// Parts whose reports are asked for and not yet answered.
+    pub loading: BTreeSet<String>,
+    /// The revision each part in `loading` was last asked for at.
+    pub(crate) asked_at: BTreeMap<String, Option<String>>,
+    /// Parts the tree, as it draws, found it wants loaded (its rows
+    /// opened): loaded once it is drawn ([`Workspace::load_wanted`]).
+    pub wanted: std::sync::Mutex<BTreeSet<String>>,
+    /// The faces the feature chosen in the tree made, by the solid that
+    /// shows them; and the feature, once asked for.
+    pub made: Option<Made>,
+    pub(crate) made_for: Option<BodyKey>,
+    /// The chosen delete's ghosts, as they come.
+    pub deleted: Option<crate::core::inserts::Deleted>,
+    /// The sweep or loft chosen in the tree as `sweep.get` drew it: its
+    /// profile and path, or its sections with their starts.
+    pub swept: Option<crate::core::sweeps::SweepDrawing>,
+    /// The part revision the chosen feature was last looked at for a
+    /// sweep's or loft's drawing.
+    pub(crate) swept_at: Option<String>,
+    /// Sheet metal solids' tables and flats, as read (design 346, The
+    /// app): the Part tile's sheet metal section and what a chosen unfold
+    /// or refold paints.
+    pub sheets: crate::core::sheet::Cache,
+    /// The flat view (View > Flat pattern), while on.
+    pub flat_view: Option<crate::core::flat::FlatView>,
+    /// The faces of the bend under the pointer in the Part tile's bend
+    /// table, painted in the hover colour.
+    pub sheet_hover: Vec<String>,
+    /// How many meshes were fetched: an unchanged body is never fetched
+    /// twice.
+    pub fetched: u64,
+    /// How many bytes answers brought after their lines: meshes, mostly.
+    pub received: u64,
+    /// What the model was last read at: its revision and the draft's
+    /// suggestions laid.
+    pub(crate) drawn: (Option<String>, Vec<String>),
 }
 
 impl Model {
+    /// The project's default unit, as forms show it (millimetres when
+    /// it doesn't parse).
+    pub fn unit(&self) -> ryucad::units::Unit {
+        ryucad::units::Unit::parse(&self.default_unit).unwrap_or(ryucad::units::Unit::Mm)
+    }
+
     /// The part a tree row's reference shows (#541): a part's own
     /// (`bracket`, loaded or only listed), or the part an instance places
     /// (`frame/b1`) when it is this project's.

@@ -42,11 +42,11 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
         }
         return;
     };
-    let badge = ws.states.badge(part);
+    let badge = ws.pdm.states.badge(part);
     // Without PDM nothing can be proposed: the empty state offers it.
     let ready = ws.pdm_ready();
     let mut set_up = false;
-    let t = &mut ws.releases;
+    let t = &mut ws.pdm.releases;
     if t.list.is_none() {
         ui.spinner();
         return;
@@ -164,7 +164,7 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
             }
         });
     if dry {
-        ws.releases.note.clear();
+        ws.pdm.releases.note.clear();
         ws.propose_dry(part);
     }
     if set_up {
@@ -177,7 +177,7 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
 /// and Sync tags (what it will write), each confirmed or cancelled.
 pub fn release_dialogs(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
     use crate::core::releases::{Confirm, note};
-    let t = &mut ws.releases;
+    let t = &mut ws.pdm.releases;
     // What a dialog's button asks for: a proposal with its note, or a
     // confirmed obsolete record or sync.
     let mut act: Option<(Confirm, Option<String>)> = None;

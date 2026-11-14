@@ -288,7 +288,7 @@ pub fn run(
         }
         None => session.project().parts.keys().cloned().collect(),
     };
-    let job = session.job.clone();
+    let job = session.job().clone();
     let mut findings: Vec<Value> = crate::doctor::diagnose_for(session.root(), &job)
         .into_iter()
         // Item numbers are the BOM's findings below, with their parts, and
@@ -375,8 +375,8 @@ pub fn run(
     let unit = project.manifest.default_unit;
     let mut from_nothing = Rebuild::new(&project, &pins, Store::default());
     from_nothing.job = job.clone();
-    from_nothing.heal_budget = session.heal_budget;
-    from_nothing.edit_budget = session.edit_budget;
+    from_nothing.heal_budget = session.heal_budget();
+    from_nothing.edit_budget = session.edit_budget();
     let stage = job.begin(Phase::Check, "parts", ids.len());
     for id in &ids {
         stage.step(|| id.to_string())?;

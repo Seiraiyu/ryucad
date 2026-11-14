@@ -395,18 +395,12 @@ pub fn row_of(f: &Feature) -> command::Row {
     }
 }
 
-/// The icon of a pattern by its form.
-fn pattern_icon(form: Option<&str>) -> &'static str {
-    match form {
-        Some("circular") => "pattern-circular",
-        Some("mirror") => "flip-horizontal",
-        _ => "pattern-linear",
-    }
-}
-
 /// The icon of a feature of type `ty` doing `op` (`cut`, `intersect`, a
 /// boolean's `subtract`), a pattern of `form`.
 pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str {
+    if let Some(icon) = crate::core::edit::icon(ty, op, form) {
+        return icon;
+    }
     match ty {
         "box" => "cube-transparent",
         "cylinder" => "cylinder",
@@ -414,48 +408,14 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "sphere" => "sphere",
         "torus" => "torus",
         "sketch" => "pencil-simple-line",
-        "extrude" if op == Some("cut") => "extrude-cut",
-        "extrude" => "extrude",
-        "revolve" if op == Some("cut") => "revolve-cut",
-        "revolve" => "revolve",
         "boolean" => match op {
             Some("subtract") => "subtract",
             Some("intersect") => "intersect",
             _ => "unite",
         },
-        "fillet" => "fillet",
-        "chamfer" => "chamfer",
-        // A cosmetic thread takes the hole's icon: no new one is drawn.
-        "hole" | "cosmetic_thread" => "hole",
-        "pattern" | "instance_pattern" => pattern_icon(form),
         "import" => "file-arrow-down",
         "instance" => "cube",
-        "mate" => "paperclip",
-        "plane" => "datum-plane",
-        "axis" => "datum-axis",
-        "point" => "datum-point",
-        "path" | "helix" => "path",
-        "sweep" => "sweep",
-        "loft" => "loft",
-        "shell" => "shell",
-        "offset" => "offset",
-        "mirror" => "mirror-body",
-        "split" => "split",
-        "base_flange" => "base-flange",
-        "flange" => "edge-flange",
-        "unfold" => "unfold",
-        "refold" => "refold",
         "planar" => "planar-face",
-        "fill" => "fill",
-        "extract" => "extract",
-        "sew" => "sew",
-        "thicken" => "thicken",
-        "draft" => "draft",
-        "move_face" => "move-face",
-        "replace_face" => "replace-face",
-        "delete_face" => "delete-face",
-        "delete_blend" => "delete-blend",
-        "resize_blend" => "resize-blend",
         "insert" => "arrow-square-in",
         "delete_body" => "trash",
         _ => "question",

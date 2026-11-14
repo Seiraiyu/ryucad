@@ -97,10 +97,10 @@ fn the_history_tab_reads_git() {
     git(&p, &["add", "."]);
     git(&p, &["commit", "-q", "-m", "A box and a boss"]);
     p.ok(&["feature", "edit", "p", "boss", "--param", "radius=5"]);
-    ws.history = None;
+    ws.activity.history = None;
     ws.load_history();
-    assert!(ws.wait_until(WAIT, |ws| ws.history.is_some()));
-    let h = ws.history.as_ref().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.activity.history.is_some()));
+    let h = ws.activity.history.as_ref().unwrap();
     assert_eq!(h["commits"][0]["subject"], "A box and a boss");
     assert_eq!(h["uncommitted"][0]["path"], "parts/p/features/boss.json");
 }

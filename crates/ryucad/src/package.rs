@@ -266,7 +266,7 @@ pub fn build(
     let mut files: Vec<(String, Vec<u8>)> = vec![(RECORD.to_owned(), record_bytes)];
     let mut failures = Vec::new();
     let mut warnings = Vec::new();
-    let job = session.job.clone();
+    let job = session.job().clone();
     let stage = job.begin(ryu_session::job::Phase::Package, "files", formats.len());
     for f in &formats {
         stage.step(|| f.as_str().to_owned())?;
@@ -470,7 +470,7 @@ pub fn package_stamped(session: &mut Session, ask: Ask, built: &BuiltWith) -> Re
         built,
     )?;
     let mut result = described(&b);
-    let job = session.job.clone();
+    let job = session.job().clone();
     let root = session.root().to_owned();
     let target = match (&ask.out, &ask.into) {
         (Some(o), None) => Some(o.clone()),

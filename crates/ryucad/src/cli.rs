@@ -918,6 +918,16 @@ enum Command {
         #[arg(long = "entity", value_name = "REF")]
         entities: Vec<String>,
     },
+    /// Answer JSON-RPC requests for a script: one request a line on
+    /// stdin, each answer a line on stdout (and the bytes it announces),
+    /// in order, over one connection to the project's daemon that says
+    /// hello once. --pretty and --progress don't apply: a request asks
+    /// for its own progress.
+    Session {
+        /// Read requests on stdin and answer on stdout.
+        #[arg(long)]
+        stdio: bool,
+    },
     /// Run, query or stop the project's session daemon.
     #[command(subcommand)]
     Daemon(DaemonCmd),
@@ -4626,6 +4636,7 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Init { .. }
         | Command::Version
         | Command::Daemon(_)
+        | Command::Session { .. }
         | Command::Git(_)
         | Command::Review(_)
         | Command::Cache(CacheCmd::Push { .. })
@@ -5296,10 +5307,7 @@ fn request(cmd: &Command) -> Option<Request> {
             cmd: Some(PackageCmd::Verify { file, rebuild }),
             ..
         }) => Request::ReleasePackageVerify {
-            file: std::path::absolute(file)
-                .unwrap_or_else(|_| file.clone())
-                .to_string_lossy()
-                .into_owned(),
+            file: file.to_string_lossy().into_owned(),
             rebuild: *rebuild,
         },
         Command::Release(ReleaseCmd::Package {
@@ -5312,25 +5320,17 @@ fn request(cmd: &Command) -> Option<Request> {
                     formats,
                 },
         }) => {
-            // The daemon's folder isn't the caller's.
-            let abs = |p: &PathBuf| {
-                let a = std::path::absolute(p).unwrap_or_else(|_| p.clone());
-                let mut t = a.to_string_lossy().into_owned();
-                if p.as_os_str().to_string_lossy().ends_with(['/', '\\'])
-                    && !t.ends_with(['/', '\\'])
-                {
-                    t.push('/');
-                }
-                t
-            };
+            // Made absolute with the request's other paths
+            // (`client::absolute`), a trailing separator kept.
+            let text = |p: &PathBuf| p.to_string_lossy().into_owned();
             Request::ReleasePackage {
                 part: part.clone().unwrap_or_default(),
                 label: label.clone(),
                 into: match out {
-                    None => Some(abs(&PathBuf::from("."))),
+                    None => Some(".".to_owned()),
                     Some(_) => None,
                 },
-                out: out.as_ref().map(abs),
+                out: out.as_ref().map(text),
                 formats: formats.clone(),
             }
         }
@@ -5455,11 +5455,7 @@ fn request(cmd: &Command) -> Option<Request> {
         } => {
             let file = file.as_ref().expect("clap requires it");
             Request::Import {
-                // The daemon's folder isn't the caller's.
-                path: std::path::absolute(file)
-                    .unwrap_or_else(|_| file.clone())
-                    .to_string_lossy()
-                    .into_owned(),
+                path: file.to_string_lossy().into_owned(),
                 part: part.clone(),
                 into: into.clone(),
                 product: product.clone(),
@@ -5468,15 +5464,9 @@ fn request(cmd: &Command) -> Option<Request> {
                 update: update.clone(),
                 solid: *solid,
                 flatten: *flatten,
-                // The daemon's folder isn't the caller's.
                 search: search
                     .iter()
-                    .map(|d| {
-                        std::path::absolute(d)
-                            .unwrap_or_else(|_| d.clone())
-                            .to_string_lossy()
-                            .into_owned()
-                    })
+                    .map(|d| d.to_string_lossy().into_owned())
                     .collect(),
             }
         }
@@ -5506,13 +5496,7 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             rev: rev.clone(),
             format: format.clone(),
-            // The daemon's folder isn't the caller's.
-            out: Some(
-                std::path::absolute(out)
-                    .unwrap_or_else(|_| out.clone())
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
+            out: Some(out.to_string_lossy().into_owned()),
             schema: schema.clone(),
             unit: unit.clone(),
             time_stamp: time_stamp.clone(),
@@ -5601,15 +5585,9 @@ fn request(cmd: &Command) -> Option<Request> {
             label: label.clone(),
             working: *working,
             direct: *direct,
-            // The daemon's folder isn't the caller's.
             within: within
                 .iter()
-                .map(|f| {
-                    std::path::absolute(f)
-                        .unwrap_or_else(|_| f.clone())
-                        .to_string_lossy()
-                        .into_owned()
-                })
+                .map(|f| f.to_string_lossy().into_owned())
                 .collect(),
             no_dependents: *no_dependents,
         },
@@ -6100,37 +6078,6 @@ fn request(cmd: &Command) -> Option<Request> {
     })
 }
 
-/// `req` with every revision naming a worktree by a relative path
-/// (`worktree:../arm`) made absolute against `here`, as the daemon takes
-/// it: the daemon runs elsewhere.
-fn absolute_worktrees(req: Request, here: &std::path::Path) -> Result<Request> {
-    const REVISIONS: [&str; 6] = ["rev", "from", "to", "against", "compare", "frame"];
-    let fix = |v: &mut Value| {
-        if let Some(path) = v.as_str().and_then(ryucad::session::worktree_path)
-            && path.is_relative()
-        {
-            let abs = here.join(path);
-            *v = json!(format!("{}{}", ryucad::session::WORKTREE, abs.display()));
-        }
-    };
-    let mut params = req.params();
-    let mut changed = false;
-    for k in REVISIONS {
-        if let Some(v) = params.get_mut(k) {
-            let before = v.clone();
-            match v.as_array_mut() {
-                Some(list) => list.iter_mut().for_each(fix),
-                None => fix(v),
-            }
-            changed |= *v != before;
-        }
-    }
-    if !changed {
-        return Ok(req);
-    }
-    Request::from_rpc(&req.method(), Some(params))
-}
-
 fn no_daemon(cli: &Cli) -> bool {
     cli.no_daemon || std::env::var("RYUCAD_NO_DAEMON").is_ok_and(|v| v == "1")
 }
@@ -6159,35 +6106,27 @@ fn annotations_usage(c: &AnnotationsCmd) -> Result<()> {
     }
 }
 
-/// An annotation request's author with no daemon: the agent `--as` (or
-/// `RYUCAD_PARTICIPANT`) names. A daemon takes the connection's
-/// participant instead.
-fn with_author(req: Request, me: Option<&str>) -> Request {
-    let Some(me) = me else { return req };
-    if !(req.annotates() || matches!(req, Request::AnnotationApply { .. })) {
-        return req;
-    }
-    let mut params = req.params();
-    if let Some(p) = params.as_object_mut() {
-        p.entry("as").or_insert_with(|| json!(me));
-    }
-    Request::from_rpc(&req.method(), Some(params)).unwrap_or(req)
-}
-
 fn participant(cli: &Cli) -> Option<String> {
     cli.as_name
         .clone()
         .or_else(|| std::env::var("RYUCAD_PARTICIPANT").ok())
 }
 
+/// The folder the command runs as: `-C`'s, else the current one.
+fn here(cli: &Cli) -> Result<PathBuf> {
+    match &cli.dir {
+        Some(d) => Ok(d.clone()),
+        None => std::env::current_dir().map_err(|e| Error::io(std::path::Path::new("."), &e)),
+    }
+}
+
 /// Runs the command, collecting warnings for the output.
 fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
-    let here = match &cli.dir {
-        Some(d) => d.clone(),
-        None => std::env::current_dir().map_err(|e| Error::io(std::path::Path::new("."), &e))?,
-    };
+    let here = here(cli)?;
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        // `main` serves a session before `run`.
+        Command::Session { .. } => Err(Error::new(Code::Internal, "a session isn't a command")),
         Command::Init { unit } => {
             let mut v = server::init(&here, *unit)?;
             // In a repository, the clone is set up for ryucad too; the
@@ -6395,13 +6334,15 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             if let Command::Drawing(d) = cmd {
                 drawing_request(d)?;
             }
-            let req = absolute_worktrees(
+            // The daemon's folder isn't the caller's: every path the
+            // request names is made absolute against `here` (`-C`'s).
+            let req = client::absolute(
                 request(cmd).expect("every other command is a request"),
                 &here,
             )?;
             let root = find_root(&here)?;
             let me = participant(cli);
-            let req = with_author(req, me.as_deref());
+            let req = client::with_author(req, me.as_deref());
             let method = req.method();
             // A long request has a token, which Ctrl+C cancels, and its
             // progress on stderr with --progress.
@@ -6476,7 +6417,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
 
 /// How long a request run in this process waits, before it exits, for
 /// what it built to reach the shared cache.
-const REMOTE_FLUSH: Duration = Duration::from_secs(30);
+pub(crate) const REMOTE_FLUSH: Duration = Duration::from_secs(30);
 
 /// The CLI's warnings are all in its envelope: the warnings a request
 /// returns in its result (the protocol has no envelope) move there, as
@@ -6815,12 +6756,7 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
             sheet: sheet.clone(),
             format: format.clone(),
             unit: unit.clone(),
-            out: Some(
-                std::path::absolute(out)
-                    .unwrap_or_else(|_| out.clone())
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
+            out: Some(out.to_string_lossy().into_owned()),
         },
         DrawingCmd::Lint {
             part,
@@ -7151,6 +7087,20 @@ pub fn main() -> ExitCode {
             None => std::env::current_dir().unwrap_or_default(),
         };
         return hook_check(&here);
+    }
+    // A script's session answers in JSON-RPC lines, not the envelope.
+    if let Command::Session { stdio } = &cli.command {
+        if !stdio {
+            let e = Error::new(
+                Code::Usage,
+                "`ryucad session` needs --stdio: requests on stdin, answers on stdout",
+            );
+            return finish(Err(e), Vec::new(), cli.pretty);
+        }
+        return match here(&cli) {
+            Ok(h) => ryucad::stdio::main(h, participant(&cli), no_daemon(&cli)),
+            Err(e) => finish(Err(e), Vec::new(), cli.pretty),
+        };
     }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);

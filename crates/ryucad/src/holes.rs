@@ -217,7 +217,7 @@ pub fn list(session: &mut Session, part: &Id, rev: Option<&str>) -> Result<Arc<H
     // (a through bore made through_all): the key holds both.
     let p = session.project().part(part)?.clone();
     let hash = format!("{}:{}", session.rebuilt(part)?.hash, inputs(&p));
-    if let Some((h, holes)) = session.store.holes.get(part)
+    if let Some((h, holes)) = session.store().holes.get(part)
         && *h == hash
     {
         return Ok(Arc::clone(holes));
@@ -225,10 +225,7 @@ pub fn list(session: &mut Session, part: &Id, rev: Option<&str>) -> Result<Arc<H
     let unit = session.project().manifest.default_unit;
     let result = session.rebuilt(part)?;
     let holes = Arc::new(build(&p, result, unit)?);
-    session
-        .store
-        .holes
-        .insert(part.clone(), (hash, Arc::clone(&holes)));
+    session.put_holes(part.clone(), hash, Arc::clone(&holes));
     Ok(holes)
 }
 

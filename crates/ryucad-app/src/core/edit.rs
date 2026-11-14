@@ -8,12 +8,30 @@
 //! human's stale edit fails with `conflict` like an agent's; the form then
 //! reloads and lists what changed instead of overwriting it.
 
+mod blend;
+mod body;
+mod datum;
+mod extrude;
+mod hole;
+mod loft;
+mod mate;
+mod pattern;
 mod sheet_metal;
+mod sweep;
 mod tweak;
+pub use blend::{BlendForm, GroupForm};
+pub use body::{BodyOffsetForm, FaceGroup, MirrorForm, ShellForm, SplitForm};
+pub use datum::DatumForm;
+pub use extrude::ExtentForm;
+pub use hole::HoleForm;
+pub use loft::{LoftForm, TangentForm};
+pub use mate::{MateForm, OffsetForm};
+pub use pattern::PatternForm;
 pub use sheet_metal::{
     AllowanceForm, BaseFlangeForm, EndForm, FlangeForm, OverrideForm, RefoldForm, ReliefForm,
     SheetMetalForm, UnfoldForm,
 };
+pub use sweep::SweepForm;
 mod surface;
 pub use surface::{ExtractForm, FillForm, FillSide, SewForm, SideGroup, SurfaceForm, ThickenForm};
 pub use tweak::{
@@ -123,6 +141,73 @@ pub fn field_of(e: &Error) -> Option<String> {
         .find_map(|k| d[*k].as_str().map(str::to_owned))
 }
 
+/// One feature kind's part of the property panel's form (design 541,
+/// "Forms per kind"): read from its `feature.show`, its fields, and what
+/// it gives `feature.edit`. A `Form` holds at most one (its `type`'s) and
+/// asks it.
+/// The tree's icon of a feature of type `ty` doing `op`, a pattern of
+/// `form`, when its kind has a form here (design 541: the tree asks the
+/// kinds' modules).
+pub fn icon(ty: &str, op: Option<&str>, form: Option<&str>) -> Option<&'static str> {
+    [
+        extrude::icon,
+        blend::icon,
+        hole::icon,
+        pattern::icon,
+        mate::icon,
+        datum::icon,
+        sweep::icon,
+        loft::icon,
+        body::icon,
+        sheet_metal::icon,
+        surface::icon,
+        tweak::icon,
+    ]
+    .into_iter()
+    .find_map(|f| f(ty, op, form))
+}
+
+pub trait FeatureForm {
+    /// This kind's form from a `feature.show` of type `ty`; `None` for a
+    /// type it doesn't own.
+    fn read(ty: &str, v: &Value) -> Option<Self>
+    where
+        Self: Sized;
+    /// Its fields that `Form`'s checks list (what was typed, its syntax).
+    fn kind_fields(&self) -> Vec<&Field> {
+        Vec::new()
+    }
+    /// Its fields that a refusal lands on and "keep mine" restores.
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        Vec::new()
+    }
+    /// Whether anything of it was typed or chosen.
+    fn kind_dirty(&self) -> bool {
+        false
+    }
+    /// Everything of it back as read.
+    fn kind_revert(&mut self) {}
+    /// What of it changed, written into `feature.edit`'s fields.
+    fn kind_given(&self, _out: &mut FeatureFields) -> Result<(), Error> {
+        Ok(())
+    }
+    /// The field a refusal's pointer (as steps: `["groups", "1",
+    /// "radius"]`) names in it, when the pointer is this kind's.
+    fn kind_at_pointer(&mut self, _steps: &[&str]) -> Option<&mut Field> {
+        None
+    }
+}
+
+/// The pointers only a blend, shell, offset or mate answers: before 27.F
+/// `Form::at_pointer` tried these first whatever the form, so no other
+/// kind is asked for them.
+fn claimed(steps: &[&str]) -> bool {
+    matches!(
+        steps,
+        ["groups", _, _] | ["faces", _, "thickness" | "distance"] | ["a" | "b", "offset", ..]
+    )
+}
+
 /// One of a list: as read, and as chosen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Choice {
@@ -195,682 +280,6 @@ impl Flag {
     }
 }
 
-/// An extrude's extent: its type, its length (blind or symmetric) and
-/// whether through all goes each way.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExtentForm {
-    pub ty: Choice,
-    pub length: Field,
-    pub both: Flag,
-}
-
-impl ExtentForm {
-    pub fn dirty(&self) -> bool {
-        self.ty.dirty() || self.length.dirty() || self.both.dirty()
-    }
-}
-
-/// One group of a fillet's or chamfer's edges: its sizes (a fillet's
-/// radius; a chamfer's `d`, `d1`, `d2` or `angle`, as its form takes), its
-/// form and face as read, and its edges. Edges can be removed, not added:
-/// choosing one is an agent's work.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GroupForm {
-    /// Each size by its key in the file, with its field.
-    pub sizes: Vec<(String, Field)>,
-    /// A chamfer's form: `equal`, `distances` or `distance_angle`.
-    pub form: Option<String>,
-    /// The face a chamfer's first distance runs along.
-    pub face: Option<String>,
-    pub edges: Picks,
-}
-
-/// A fillet's or chamfer's groups, and whether it grows its edges along
-/// tangent chains.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BlendForm {
-    pub groups: Vec<GroupForm>,
-    pub propagate: Flag,
-}
-
-impl BlendForm {
-    /// From a `feature.show` of a fillet or chamfer.
-    fn from_show(v: &Value) -> BlendForm {
-        let groups: Vec<&Value> = v["groups"].as_array().into_iter().flatten().collect();
-        let many = groups.len() > 1;
-        let groups = groups
-            .into_iter()
-            .enumerate()
-            .map(|(i, g)| {
-                let named = |key: &str| {
-                    if many {
-                        format!("{key} (group {})", i + 1)
-                    } else {
-                        key.to_owned()
-                    }
-                };
-                let sizes = ["radius", "d", "d1", "d2", "angle"]
-                    .into_iter()
-                    .filter(|k| !g[*k].is_null())
-                    .map(|k| (k.to_owned(), Field::new(&named(k), text(&g[k]))))
-                    .collect();
-                let edges = g["edges"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(text)
-                    .collect();
-                GroupForm {
-                    sizes,
-                    form: g["form"].as_str().map(str::to_owned),
-                    face: g["face"].as_str().map(str::to_owned),
-                    edges: Picks::new(&named("edges"), edges),
-                }
-            })
-            .collect();
-        let propagate = v["propagate"] != false;
-        BlendForm {
-            groups,
-            propagate: Flag {
-                name: "propagate".to_owned(),
-                read: propagate,
-                chosen: propagate,
-            },
-        }
-    }
-
-    fn sizes(&self) -> impl Iterator<Item = &Field> {
-        self.groups
-            .iter()
-            .flat_map(|g| g.sizes.iter().map(|(_, f)| f))
-    }
-
-    /// Whether a group's sizes or edges changed: then all of them go.
-    fn groups_dirty(&self) -> bool {
-        self.sizes().any(Field::dirty) || self.groups.iter().any(|g| g.edges.dirty())
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.groups_dirty() || self.propagate.dirty()
-    }
-
-    fn revert(&mut self) {
-        for g in &mut self.groups {
-            for (_, f) in &mut g.sizes {
-                f.text.clone_from(&f.read);
-            }
-            g.edges.chosen.clone_from(&g.edges.read);
-        }
-        self.propagate.chosen = self.propagate.read;
-    }
-
-    /// The groups as `feature.edit` takes them: every one, as typed.
-    fn groups_json(&self) -> Value {
-        let groups: Vec<Value> = self
-            .groups
-            .iter()
-            .map(|g| {
-                let mut v = json!({"edges": g.edges.chosen});
-                for (k, f) in &g.sizes {
-                    v[k] = json!(f.text.trim());
-                }
-                if let Some(form) = &g.form {
-                    v["form"] = json!(form);
-                }
-                if let Some(face) = &g.face {
-                    v["face"] = json!(face);
-                }
-                v
-            })
-            .collect();
-        json!(groups)
-    }
-}
-
-/// A hole's sizes (its diameter, its counterbore's or countersink's, a
-/// drill point's angle), its depth (blind and its length, through all, or
-/// up to a target, shown), its form as read, and its points. Points can
-/// be taken out, not added; with none left it drills at every point no
-/// curve uses.
-#[derive(Clone, Debug, PartialEq)]
-pub struct HoleForm {
-    /// `simple`, `counterbore` or `countersink`.
-    pub form: String,
-    /// Each size by its place in the file (`diameter`,
-    /// `counterbore.depth`, `bottom.drill`, …), with its field.
-    pub sizes: Vec<(String, Field)>,
-    /// `blind` or `through_all`; `up_to` as read, to keep.
-    pub depth: Choice,
-    pub length: Field,
-    /// An up-to depth's target.
-    pub target: Option<String>,
-    pub points: Picks,
-    /// The hole's canonical spec, when the rebuild reported one.
-    pub spec: Option<String>,
-    /// Every size the hole is built from, read-only: label, value and
-    /// source (`rule`, `formula`, `override`, a standard, …).
-    pub derived: Vec<(String, String, String)>,
-}
-
-/// A hole's sizes as the rebuild worked them out (`feature.show`'s
-/// `sizes`), in the order the panel lists them.
-fn derived_sizes(s: &Value) -> Vec<(String, String, String)> {
-    let one = |x: &Value| (text(&x["value"]), text(&x["source"]));
-    let mut out = Vec::new();
-    let mut push = |label: &str, x: &Value| {
-        if x.is_object() {
-            let (v, src) = one(x);
-            out.push((label.to_owned(), v, src));
-        } else if let Some([lo, hi]) = x.as_array().map(Vec::as_slice) {
-            // Limits: least and greatest, the greatest open when null.
-            let (a, src) = one(lo);
-            let b = if hi.is_null() {
-                String::new()
-            } else {
-                text(&hi["value"])
-            };
-            out.push((
-                label.to_owned(),
-                format!("{a} – {b}").trim_end().to_owned(),
-                src,
-            ));
-        }
-    };
-    push("drill", &s["drill"]);
-    for (group, keys) in [
-        ("counterbore", ["diameter", "depth"]),
-        ("countersink", ["diameter", "angle"]),
-    ] {
-        for k in keys {
-            push(&format!("{group} {k}"), &s[group][k]);
-        }
-    }
-    push("major", &s["thread"]["major"]);
-    push("pitch", &s["thread"]["pitch"]);
-    push("minor", &s["thread"]["limits"]["minor"]);
-    push("fit", &s["fit"]["limits"]);
-    out
-}
-
-impl HoleForm {
-    /// From a `feature.show` of a hole.
-    fn from_show(v: &Value) -> HoleForm {
-        // A thread or fastener derives the drill: its diameter is an edit
-        // only when written (an override).
-        let intent = !v["thread"].is_null() || !v["fastener"].is_null();
-        let mut sizes = Vec::new();
-        if !intent || !v["diameter"].is_null() {
-            sizes.push((
-                "diameter".to_owned(),
-                Field::new("diameter", text(&v["diameter"])),
-            ));
-        }
-        for (group, keys) in [
-            ("counterbore", ["diameter", "depth"]),
-            ("countersink", ["diameter", "angle"]),
-        ] {
-            for k in keys {
-                let x = &v[group][k];
-                if !x.is_null() {
-                    let name = format!("{group} {k}");
-                    sizes.push((format!("{group}.{k}"), Field::new(&name, text(x))));
-                }
-            }
-        }
-        if !v["bottom"]["drill"].is_null() {
-            let read = text(&v["bottom"]["drill"]);
-            sizes.push(("bottom.drill".to_owned(), Field::new("drill point", read)));
-        }
-        let (kind, length) = match &v["depth"] {
-            Value::String(s) => (s.clone(), String::new()),
-            d if !d["blind"].is_null() => ("blind".to_owned(), text(&d["blind"])),
-            _ => ("up_to".to_owned(), String::new()),
-        };
-        let options: &[&str] = if kind == "up_to" {
-            &["blind", "through_all", "up_to"]
-        } else {
-            &["blind", "through_all"]
-        };
-        let points = v["points"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(text)
-            .collect();
-        HoleForm {
-            form: text(&v["form"]),
-            sizes,
-            depth: Choice::new("depth", options, kind),
-            length: Field::new("depth", length),
-            target: v["depth"]["up_to"]["target"].as_str().map(str::to_owned),
-            points: Picks::new("points", points),
-            spec: v["spec"].as_str().map(str::to_owned),
-            derived: derived_sizes(&v["sizes"]),
-        }
-    }
-
-    fn fields(&self) -> impl Iterator<Item = &Field> {
-        self.sizes.iter().map(|(_, f)| f).chain([&self.length])
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.fields().any(Field::dirty) || self.depth.dirty() || self.points.dirty()
-    }
-
-    fn revert(&mut self) {
-        for (_, f) in &mut self.sizes {
-            f.text.clone_from(&f.read);
-        }
-        self.length.text.clone_from(&self.length.read);
-        self.depth.chosen.clone_from(&self.depth.read);
-        self.points.chosen.clone_from(&self.points.read);
-    }
-
-    /// What changed, as `feature.edit` takes it.
-    fn given(&self, out: &mut FeatureFields) {
-        let typed = |key: &str| {
-            self.sizes
-                .iter()
-                .find(|(k, f)| k == key && f.dirty())
-                .map(|(_, f)| json!(f.text.trim()))
-        };
-        out.diameter = typed("diameter");
-        for (group, keys, slot) in [
-            ("counterbore", ["diameter", "depth"], &mut out.counterbore),
-            ("countersink", ["diameter", "angle"], &mut out.countersink),
-        ] {
-            let m: Map<String, Value> = keys
-                .iter()
-                .filter_map(|k| Some(((*k).to_owned(), typed(&format!("{group}.{k}"))?)))
-                .collect();
-            *slot = (!m.is_empty()).then_some(Value::Object(m));
-        }
-        out.bottom = typed("bottom.drill").map(|a| json!({ "drill": a }));
-        if self.depth.dirty() || self.length.dirty() {
-            out.depth = match self.depth.chosen.as_str() {
-                "blind" => Some(json!({"blind": self.length.text.trim()})),
-                "through_all" => Some(json!("through_all")),
-                _ => None,
-            };
-        }
-        if self.points.dirty() {
-            out.points = Some(self.points.chosen.clone());
-        }
-    }
-}
-
-/// A pattern's spacings, counts and angle, its directions' reversals, its
-/// skips (as JSON: `[2]`, or `[[1, 1]]` with two directions), its seeds,
-/// and its form, directions, axis or plane as read; an instance pattern's
-/// the same, its seeds instances and its directions connectors. Seeds can
-/// be taken out, not added.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PatternForm {
-    /// Whether it is an instance pattern: its seeds are `instances`.
-    pub instances: bool,
-    /// `linear`, `circular` or `mirror`; an instance pattern's `feature`
-    /// or `points` too.
-    pub form: String,
-    /// Each size by its key in the file, with its field.
-    pub sizes: Vec<(String, Field)>,
-    pub reverse: Vec<(String, Flag)>,
-    pub skip: Field,
-    /// Its direction, second direction, axis or plane, by key; a
-    /// following pattern's places (`on`).
-    pub refs: Vec<(String, String)>,
-    pub seeds: Picks,
-    /// A following pattern's seed point (empty for its first).
-    pub from: Field,
-    /// A points pattern's points, comma-separated (empty for every free
-    /// point).
-    pub points: Field,
-}
-
-impl PatternForm {
-    /// From a `feature.show` of a pattern.
-    fn from_show(v: &Value) -> PatternForm {
-        let sizes = ["spacing", "count", "spacing2", "count2", "angle"]
-            .into_iter()
-            .filter(|k| !v[*k].is_null())
-            .map(|k| (k.to_owned(), Field::new(k, text(&v[k]))))
-            .collect();
-        let linear = v["form"] == "linear";
-        let reverse = ["reverse", "reverse2"]
-            .into_iter()
-            .filter(|k| linear && (*k == "reverse" || !v["direction2"].is_null()))
-            .map(|k| {
-                let on = v[k] == true;
-                let flag = Flag {
-                    name: k.to_owned(),
-                    read: on,
-                    chosen: on,
-                };
-                (k.to_owned(), flag)
-            })
-            .collect();
-        let skip = match &v["skip"] {
-            Value::Null => "[]".to_owned(),
-            x => x.to_string(),
-        };
-        // A reference as text; a connector as the text requests give it.
-        let refs = ["direction", "direction2", "axis", "plane", "on"]
-            .into_iter()
-            .filter_map(|k| {
-                let t = v[k].as_str().or_else(|| v[k]["text"].as_str())?;
-                Some((k.to_owned(), t.to_owned()))
-            })
-            .collect();
-        let instances = v["type"] == "instance_pattern";
-        let seeds = v[if instances { "instances" } else { "features" }]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(text)
-            .collect();
-        let ids = |x: &Value| {
-            x.as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let from = Field::new("from", text(&v["from"]));
-        let points = Field::new("points", ids(&v["points"]));
-        PatternForm {
-            instances,
-            form: text(&v["form"]),
-            sizes,
-            reverse,
-            skip: Field::new("skip", skip),
-            refs,
-            seeds: Picks::new("seeds", seeds),
-            from,
-            points,
-        }
-    }
-
-    fn fields(&self) -> impl Iterator<Item = &Field> {
-        self.sizes
-            .iter()
-            .map(|(_, f)| f)
-            .chain([&self.skip, &self.from, &self.points])
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.fields().any(Field::dirty)
-            || self.reverse.iter().any(|(_, f)| f.dirty())
-            || self.seeds.dirty()
-    }
-
-    fn revert(&mut self) {
-        for (_, f) in &mut self.sizes {
-            f.text.clone_from(&f.read);
-        }
-        for (_, f) in &mut self.reverse {
-            f.chosen = f.read;
-        }
-        self.skip.text.clone_from(&self.skip.read);
-        self.from.text.clone_from(&self.from.read);
-        self.points.text.clone_from(&self.points.read);
-        self.seeds.chosen.clone_from(&self.seeds.read);
-    }
-
-    /// What changed, as `feature.edit` takes it; skips that aren't JSON
-    /// are refused before anything is sent.
-    fn given(&self, out: &mut FeatureFields) -> Result<(), Error> {
-        let typed = |key: &str| {
-            self.sizes
-                .iter()
-                .find(|(k, f)| k == key && f.dirty())
-                .map(|(_, f)| json!(f.text.trim()))
-        };
-        out.spacing = typed("spacing");
-        out.count = typed("count");
-        out.spacing2 = typed("spacing2");
-        out.count2 = typed("count2");
-        out.angle = typed("angle");
-        for (k, f) in &self.reverse {
-            if f.dirty() {
-                match k.as_str() {
-                    "reverse" => out.reverse = Some(f.chosen),
-                    _ => out.reverse2 = Some(f.chosen),
-                }
-            }
-        }
-        if self.skip.dirty() {
-            let t = self.skip.text.trim();
-            let v: Value =
-                serde_json::from_str(if t.is_empty() { "[]" } else { t }).map_err(|_| {
-                    Error::new(
-                        ryucad::error::Code::InvalidParam,
-                        format!("skip is a list of instances, such as [2] or [[1, 1]], not {t:?}"),
-                    )
-                })?;
-            out.skip = Some(v);
-        }
-        if self.from.dirty() {
-            out.from = Some(self.from.text.trim().to_owned());
-        }
-        if self.points.dirty() {
-            out.points = Some(
-                self.points
-                    .text
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|p| !p.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-            );
-        }
-        if self.seeds.dirty() {
-            let seeds = Some(self.seeds.chosen.clone());
-            if self.instances {
-                out.instances = seeds;
-            } else {
-                out.features = seeds;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// A connector's offset as typed: its origin's three quantities, its
-/// turn about z and whether it is turned over.
-#[derive(Clone, Debug, PartialEq)]
-pub struct OffsetForm {
-    pub origin: [Field; 3],
-    pub rotate: Field,
-    pub flip: Flag,
-}
-
-impl OffsetForm {
-    /// From a connector as `feature.show` gives it; `side` is `a` or `b`.
-    fn from_connector(side: &str, c: &Value) -> OffsetForm {
-        let o = &c["offset"];
-        OffsetForm {
-            origin: [0, 1, 2].map(|i| {
-                Field::new(
-                    &format!("{side} offset {}", ["x", "y", "z"][i]),
-                    text(&o["origin"][i]),
-                )
-            }),
-            rotate: Field::new(&format!("{side} turn"), text(&o["rotate"])),
-            flip: Flag {
-                name: format!("{side} turned over"),
-                read: o["flip"] == true,
-                chosen: o["flip"] == true,
-            },
-        }
-    }
-
-    fn fields(&self) -> impl Iterator<Item = &Field> {
-        self.origin.iter().chain([&self.rotate])
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.fields().any(Field::dirty) || self.flip.dirty()
-    }
-
-    fn revert(&mut self) {
-        for f in self.origin.iter_mut().chain([&mut self.rotate]) {
-            f.text.clone_from(&f.read);
-        }
-        self.flip.chosen = self.flip.read;
-    }
-
-    /// The whole offset as typed, as `feature.edit` takes it: what is
-    /// left empty is left out (`{}`: none).
-    fn json(&self) -> Value {
-        let mut v = json!({});
-        if self.origin.iter().any(|f| !f.text.trim().is_empty()) {
-            let q = |f: &Field| match f.text.trim() {
-                "" => json!("0 mm"),
-                t => json!(t),
-            };
-            v["origin"] = json!(self.origin.each_ref().map(q));
-        }
-        if !self.rotate.text.trim().is_empty() {
-            v["rotate"] = json!(self.rotate.text.trim());
-        }
-        if self.flip.chosen {
-            v["flip"] = json!(true);
-        }
-        v
-    }
-}
-
-/// A mate's form, its driven angle and distance, each connector's offset,
-/// and its connectors as read (shown, never changed here).
-#[derive(Clone, Debug, PartialEq)]
-pub struct MateForm {
-    pub form: Choice,
-    pub angle: Field,
-    pub distance: Field,
-    /// Its stops as typed: angle min, angle max, distance min, distance
-    /// max; empty for none.
-    pub limits: [Field; 4],
-    pub a: OffsetForm,
-    pub b: OffsetForm,
-    /// Each connector by side, as requests give it.
-    pub connectors: Vec<(String, String)>,
-}
-
-impl MateForm {
-    /// From a `feature.show` of a mate.
-    fn from_show(v: &Value) -> MateForm {
-        MateForm {
-            form: Choice::new(
-                "form",
-                &[
-                    "fastened",
-                    "revolute",
-                    "slider",
-                    "cylindrical",
-                    "planar",
-                    "ball",
-                ],
-                text(&v["form"]),
-            ),
-            angle: Field::new("angle", text(&v["angle"])),
-            distance: Field::new("distance", text(&v["distance"])),
-            limits: [
-                ("angle min", &v["limits"]["angle"]["min"]),
-                ("angle max", &v["limits"]["angle"]["max"]),
-                ("distance min", &v["limits"]["distance"]["min"]),
-                ("distance max", &v["limits"]["distance"]["max"]),
-            ]
-            .map(|(name, x)| Field::new(name, text(x))),
-            a: OffsetForm::from_connector("a", &v["a"]),
-            b: OffsetForm::from_connector("b", &v["b"]),
-            connectors: ["a", "b"]
-                .into_iter()
-                .map(|k| (k.to_owned(), text(&v[k]["text"])))
-                .collect(),
-        }
-    }
-
-    /// Whether the chosen form takes a driven angle, and a distance.
-    pub fn takes(&self) -> (bool, bool) {
-        let f = self.form.chosen.as_str();
-        (
-            matches!(f, "revolute" | "cylindrical" | "planar"),
-            matches!(f, "slider" | "cylindrical" | "planar"),
-        )
-    }
-
-    /// Whether the chosen form may stop its angle, and its distance (a
-    /// planar mate's distance is always driven).
-    pub fn takes_limits(&self) -> (bool, bool) {
-        let f = self.form.chosen.as_str();
-        (
-            matches!(f, "revolute" | "cylindrical" | "planar"),
-            matches!(f, "slider" | "cylindrical"),
-        )
-    }
-
-    fn fields(&self) -> impl Iterator<Item = &Field> {
-        [&self.angle, &self.distance]
-            .into_iter()
-            .chain(self.limits.iter())
-            .chain(self.a.fields())
-            .chain(self.b.fields())
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.form.dirty()
-            || self.angle.dirty()
-            || self.distance.dirty()
-            || self.limits.iter().any(Field::dirty)
-            || self.a.dirty()
-            || self.b.dirty()
-    }
-
-    fn revert(&mut self) {
-        self.form.chosen.clone_from(&self.form.read);
-        for f in [&mut self.angle, &mut self.distance]
-            .into_iter()
-            .chain(self.limits.iter_mut())
-        {
-            f.text.clone_from(&f.read);
-        }
-        self.a.revert();
-        self.b.revert();
-    }
-
-    /// What changed, as `feature.edit` takes it: an angle or distance
-    /// emptied lets it go, an offset goes whole.
-    fn given(&self, out: &mut FeatureFields) {
-        if self.form.dirty() {
-            out.form = Some(self.form.chosen.clone());
-        }
-        if self.angle.dirty() {
-            out.angle = Some(json!(self.angle.text.trim()));
-        }
-        if self.distance.dirty() {
-            out.distance = Some(json!(self.distance.text.trim()));
-        }
-        // Each changed bound, laid over what the mate has ("" clears it).
-        let mut limits = json!({});
-        for (k, f) in self.limits.iter().enumerate() {
-            if f.dirty() {
-                let value = if k < 2 { "angle" } else { "distance" };
-                let bound = if k % 2 == 0 { "min" } else { "max" };
-                limits[value][bound] = json!(f.text.trim());
-            }
-        }
-        if limits.as_object().is_some_and(|o| !o.is_empty()) {
-            out.limits = Some(limits);
-        }
-        if self.a.dirty() {
-            out.a_offset = Some(self.a.json());
-        }
-        if self.b.dirty() {
-            out.b_offset = Some(self.b.json());
-        }
-    }
-}
-
 /// A value someone else changed while the form was being edited.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Changed {
@@ -881,551 +290,9 @@ pub struct Changed {
     pub yours: String,
 }
 
-/// A datum's, path's or helix's form (design 297): how it is built and
-/// what from, shown as requests write it, never changed here (as a
-/// mate's connectors are); its quantities, a point's coordinates, a
-/// plane's or axis's flip, a path's reverse and a helix's hand, edited.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DatumForm {
-    /// `plane`, `axis`, `point`, `path` or `helix`.
-    pub kind: String,
-    /// A datum's construction (`offset`, `angle`, …); empty for a path or
-    /// a helix.
-    pub by: String,
-    /// What it is built from, by field.
-    pub refs: Vec<(String, String)>,
-    /// Its quantities, by field.
-    pub sizes: Vec<Field>,
-    /// A point's coordinates, x, y and z.
-    pub coordinates: Option<[Field; 3]>,
-    /// A plane's or an axis's flip, a path's reverse.
-    pub flag: Option<Flag>,
-    /// A helix's hand.
-    pub hand: Option<Choice>,
-}
-
-/// The quantities a datum, path or helix may have, in the order shown.
-const DATUM_SIZES: [&str; 8] = [
-    "distance", "angle", "fraction", "radius", "pitch", "turns", "height", "taper",
-];
-
-/// What a datum, path or helix may be built from, in the order shown.
-const DATUM_REFS: [&str; 17] = [
-    "from", "about", "through", "axis", "point", "points", "plane", "curve", "at", "between", "of",
-    "in", "onto", "origin", "x", "start", "segments",
-];
-
-impl DatumForm {
-    /// From a `feature.show` of a datum, a path or a helix.
-    fn from_show(v: &Value) -> DatumForm {
-        let kind = text(&v["type"]);
-        let one = |r: &Value| match r {
-            Value::Object(o) if o.contains_key("curve") => match o.get("propagate") {
-                Some(Value::Bool(true)) => format!("{} (propagated)", text(&o["curve"])),
-                _ => text(&o["curve"]),
-            },
-            r => text(r),
-        };
-        // A point's `at` is its coordinates; a plane normal to a curve's
-        // is where along it.
-        let coordinates = v["at"].as_array().map(|at| {
-            [0, 1, 2].map(|i| {
-                Field::new(
-                    &format!("{} coordinate", ["x", "y", "z"][i]),
-                    text(at.get(i).unwrap_or(&Value::Null)),
-                )
-            })
-        });
-        let refs = DATUM_REFS
-            .into_iter()
-            .filter(|k| !(*k == "at" && coordinates.is_some()))
-            .filter_map(|k| {
-                let shown = match &v[k] {
-                    Value::Null => return None,
-                    Value::Array(a) => a.iter().map(one).collect::<Vec<_>>().join(", "),
-                    r => one(r),
-                };
-                Some((k.to_owned(), shown))
-            })
-            .collect();
-        let sizes = DATUM_SIZES
-            .into_iter()
-            .filter(|k| !v[k].is_null())
-            .map(|k| Field::new(k, text(&v[k])))
-            .collect();
-        let flag = match kind.as_str() {
-            "plane" | "axis" => Some("flip"),
-            "path" => Some("reverse"),
-            _ => None,
-        }
-        .map(|name| Flag {
-            name: name.to_owned(),
-            read: v[name] == true,
-            chosen: v[name] == true,
-        });
-        let hand = (kind == "helix").then(|| {
-            let read = v["hand"].as_str().unwrap_or("right");
-            Choice::new("hand", &["right", "left"], read.to_owned())
-        });
-        DatumForm {
-            by: text(&v["by"]),
-            kind,
-            refs,
-            sizes,
-            coordinates,
-            flag,
-            hand,
-        }
-    }
-
-    fn fields(&self) -> impl Iterator<Item = &Field> {
-        self.sizes.iter().chain(self.coordinates.iter().flatten())
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.fields().any(Field::dirty)
-            || self.flag.as_ref().is_some_and(Flag::dirty)
-            || self.hand.as_ref().is_some_and(Choice::dirty)
-    }
-
-    fn revert(&mut self) {
-        for f in self
-            .sizes
-            .iter_mut()
-            .chain(self.coordinates.iter_mut().flatten())
-        {
-            f.text.clone_from(&f.read);
-        }
-        if let Some(f) = &mut self.flag {
-            f.chosen = f.read;
-        }
-        if let Some(h) = &mut self.hand {
-            h.chosen.clone_from(&h.read);
-        }
-    }
-
-    /// What changed, as `feature.edit` takes it: each quantity typed, a
-    /// point's three coordinates together.
-    fn given(&self, out: &mut FeatureFields) {
-        for f in self.sizes.iter().filter(|f| f.dirty()) {
-            let v = Some(json!(f.text.trim()));
-            match f.name.as_str() {
-                "distance" => out.distance = v,
-                "angle" => out.angle = v,
-                "fraction" => out.fraction = v,
-                "radius" => out.radius = v,
-                "pitch" => out.pitch = v,
-                "turns" => out.turns = v,
-                "height" => out.height = v,
-                "taper" => out.taper = v,
-                _ => {}
-            }
-        }
-        if let Some(c) = self
-            .coordinates
-            .as_ref()
-            .filter(|c| c.iter().any(Field::dirty))
-        {
-            out.coordinates = Some(c.iter().map(|f| json!(f.text.trim())).collect());
-        }
-        if let Some(f) = self.flag.as_ref().filter(|f| f.dirty()) {
-            match self.kind.as_str() {
-                "path" => out.reverse = Some(f.chosen),
-                _ => out.flip = Some(f.chosen.into()),
-            }
-        }
-        if let Some(h) = self.hand.as_ref().filter(|h| h.dirty()) {
-            out.hand = Some(h.chosen.clone());
-        }
-    }
-}
-
-/// A sweep's form (design 323): its profile, path and a binormal law's
-/// direction shown as requests write them, never changed here (as a
-/// mate's connectors are); its law, twist and scale edited. Its operation
-/// and targets are the form's own, as an extrude's.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SweepForm {
-    /// What it carries: `sketch s1 (loops p7, l3)` or `face p/base/<hex>`.
-    pub profile: String,
-    /// What it follows, as text.
-    pub path: String,
-    /// `minimal` or `binormal`.
-    pub law: Choice,
-    /// A binormal law's direction, as text.
-    pub direction: Option<String>,
-    pub twist: Field,
-    pub scale: Field,
-}
-
-/// A section or profile as one line: its sketch or face, and the loops it
-/// names (`sketch s1 (loops p7, l3)`).
-fn section_text(v: &Value) -> String {
-    let mut out = match (&v["sketch"], &v["face"]) {
-        (Value::String(s), _) => format!("sketch {s}"),
-        (_, f) if !f.is_null() => format!("face {}", text(f)),
-        _ => String::new(),
-    };
-    if let Some(l) = v["loops"].as_array().filter(|l| !l.is_empty()) {
-        let names: Vec<String> = l.iter().map(text).collect();
-        out.push_str(&format!(" (loops {})", names.join(", ")));
-    }
-    out
-}
-
-impl SweepForm {
-    /// From a `feature.show` of a sweep.
-    fn from_show(v: &Value) -> SweepForm {
-        let law = v["law"].as_str().unwrap_or("minimal").to_owned();
-        SweepForm {
-            profile: section_text(&v["profile"]),
-            path: text(&v["path"]),
-            law: Choice::new("law", &["minimal", "binormal"], law),
-            direction: v["direction"].as_str().map(str::to_owned),
-            twist: Field::new("twist", text(&v["twist"])),
-            scale: Field::new("scale", text(&v["scale"])),
-        }
-    }
-
-    fn fields(&self) -> impl Iterator<Item = &Field> {
-        [&self.twist, &self.scale].into_iter()
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.fields().any(Field::dirty) || self.law.dirty()
-    }
-
-    fn revert(&mut self) {
-        for f in [&mut self.twist, &mut self.scale] {
-            f.text.clone_from(&f.read);
-        }
-        self.law.chosen.clone_from(&self.law.read);
-    }
-
-    /// What changed, as `feature.edit` takes it: a twist or scale typed
-    /// (emptied, `""`: none), and a law chosen.
-    fn given(&self, out: &mut FeatureFields) {
-        if self.twist.dirty() {
-            out.twist = Some(json!(self.twist.text.trim()));
-        }
-        if self.scale.dirty() {
-            out.scale = Some(json!(self.scale.text.trim()));
-        }
-        if self.law.dirty() {
-            out.law = Some(self.law.chosen.clone());
-        }
-    }
-}
-
-/// A loft end's tangent: its direction shown, its weight edited.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TangentForm {
-    /// `normal`, or a reference as text.
-    pub direction: String,
-    pub weight: Field,
-}
-
-/// A loft's form (design 323): its sections, in order, and its tangents'
-/// directions shown, never changed here; whether it closes and its
-/// tangents' weights edited. Its operation and targets are the form's
-/// own, as an extrude's.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LoftForm {
-    /// Each section as one line, in order.
-    pub sections: Vec<String>,
-    pub closed: Flag,
-    pub start: Option<TangentForm>,
-    pub end: Option<TangentForm>,
-}
-
-impl LoftForm {
-    /// From a `feature.show` of a loft. A tangent written without a
-    /// weight weighs 1.
-    fn from_show(v: &Value) -> LoftForm {
-        let tangent = |k: &str, name: &str| {
-            let t = &v[k];
-            t.is_object().then(|| {
-                let w = match &t["weight"] {
-                    Value::Null => "1".to_owned(),
-                    w => text(w),
-                };
-                TangentForm {
-                    direction: text(&t["direction"]),
-                    weight: Field::new(name, w),
-                }
-            })
-        };
-        LoftForm {
-            sections: v["sections"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(section_text)
-                .collect(),
-            closed: Flag {
-                name: "closed".to_owned(),
-                read: v["closed"] == true,
-                chosen: v["closed"] == true,
-            },
-            start: tangent("start_tangent", "start weight"),
-            end: tangent("end_tangent", "end weight"),
-        }
-    }
-
-    fn fields(&self) -> impl Iterator<Item = &Field> {
-        self.start.iter().chain(&self.end).map(|t| &t.weight)
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.fields().any(Field::dirty) || self.closed.dirty()
-    }
-
-    fn revert(&mut self) {
-        for t in self.start.iter_mut().chain(&mut self.end) {
-            t.weight.text.clone_from(&t.weight.read);
-        }
-        self.closed.chosen = self.closed.read;
-    }
-
-    /// What changed, as `feature.edit` takes it: whether it closes, and
-    /// each weight typed.
-    fn given(&self, out: &mut FeatureFields) {
-        if self.closed.dirty() {
-            out.closed = Some(self.closed.chosen);
-        }
-        if let Some(t) = self.start.as_ref().filter(|t| t.weight.dirty()) {
-            out.start_weight = Some(json!(t.weight.text.trim()));
-        }
-        if let Some(t) = self.end.as_ref().filter(|t| t.weight.dirty()) {
-            out.end_weight = Some(json!(t.weight.text.trim()));
-        }
-    }
-}
-
 /// Strings of a list as `feature.show` gives them.
 fn texts(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().map(text).collect()
-}
-
-/// One group of a shell's or offset's faces: its own thickness or
-/// distance, and its faces, each one a checkbox to take it out (adding
-/// one is an agent's work), as a fillet's edges are.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FaceGroup {
-    pub quantity: Field,
-    pub faces: Picks,
-}
-
-/// A shell's or offset's groups as `feature.show` gives them, each
-/// group's quantity under `key` (`thickness` or `distance`).
-fn face_groups(v: &Value, key: &str) -> Vec<FaceGroup> {
-    v["faces"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .map(|(i, g)| FaceGroup {
-            quantity: Field::new(&format!("{key} (group {})", i + 1), text(&g[key])),
-            faces: Picks::new(&format!("faces (group {})", i + 1), texts(&g["faces"])),
-        })
-        .collect()
-}
-
-fn groups_dirty(groups: &[FaceGroup]) -> bool {
-    groups.iter().any(|g| g.quantity.dirty() || g.faces.dirty())
-}
-
-fn revert_groups(groups: &mut [FaceGroup]) {
-    for g in groups {
-        g.quantity.text.clone_from(&g.quantity.read);
-        g.faces.chosen.clone_from(&g.faces.read);
-    }
-}
-
-/// The groups as `feature.edit` takes them: every one, whole, as typed; a
-/// group left with no faces goes.
-fn groups_json(groups: &[FaceGroup], key: &str) -> Value {
-    let out: Vec<Value> = groups
-        .iter()
-        .filter(|g| !g.faces.chosen.is_empty())
-        .map(|g| {
-            let mut v = json!({"faces": g.faces.chosen});
-            v[key] = json!(g.quantity.text.trim());
-            v
-        })
-        .collect();
-    json!(out)
-}
-
-/// A shell's form (design 327): its target shown; its thickness and
-/// direction edited; its open faces and its groups' faces each a checkbox
-/// to take out, its groups' thicknesses edited.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ShellForm {
-    pub target: String,
-    pub thickness: Field,
-    /// `inward` or `outward`.
-    pub direction: Choice,
-    pub open: Picks,
-    pub groups: Vec<FaceGroup>,
-}
-
-impl ShellForm {
-    /// From a `feature.show` of a shell.
-    fn from_show(v: &Value) -> ShellForm {
-        let direction = v["direction"].as_str().unwrap_or("inward").to_owned();
-        ShellForm {
-            target: text(&v["target"]),
-            thickness: Field::new("thickness", text(&v["thickness"])),
-            direction: Choice::new("direction", &["inward", "outward"], direction),
-            open: Picks::new("open faces", texts(&v["open"])),
-            groups: face_groups(v, "thickness"),
-        }
-    }
-
-    fn fields(&self) -> impl Iterator<Item = &Field> {
-        std::iter::once(&self.thickness).chain(self.groups.iter().map(|g| &g.quantity))
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.thickness.dirty()
-            || self.direction.dirty()
-            || self.open.dirty()
-            || groups_dirty(&self.groups)
-    }
-
-    fn revert(&mut self) {
-        self.thickness.text.clone_from(&self.thickness.read);
-        self.direction.chosen.clone_from(&self.direction.read);
-        self.open.chosen.clone_from(&self.open.read);
-        revert_groups(&mut self.groups);
-    }
-
-    /// What changed, as `feature.edit` takes it: the thickness typed, the
-    /// direction chosen, the open faces left (none: `[]`), the groups
-    /// whole.
-    fn given(&self, out: &mut FeatureFields) {
-        if self.thickness.dirty() {
-            out.thickness = Some(json!(self.thickness.text.trim()));
-        }
-        if self.direction.dirty() {
-            out.direction = Some(self.direction.chosen.clone());
-        }
-        if self.open.dirty() {
-            out.open = Some(self.open.chosen.clone());
-        }
-        if groups_dirty(&self.groups) {
-            out.faces = Some(groups_json(&self.groups, "thickness"));
-        }
-    }
-}
-
-/// An offset's form (design 327): its target shown; its distance edited;
-/// its groups' distances edited and their faces each a checkbox to take
-/// out. `OffsetForm` is a mate connector's (question 148).
-#[derive(Clone, Debug, PartialEq)]
-pub struct BodyOffsetForm {
-    pub target: String,
-    pub distance: Field,
-    pub groups: Vec<FaceGroup>,
-}
-
-impl BodyOffsetForm {
-    /// From a `feature.show` of an offset.
-    fn from_show(v: &Value) -> BodyOffsetForm {
-        BodyOffsetForm {
-            target: text(&v["target"]),
-            distance: Field::new("distance", text(&v["distance"])),
-            groups: face_groups(v, "distance"),
-        }
-    }
-
-    fn fields(&self) -> impl Iterator<Item = &Field> {
-        std::iter::once(&self.distance).chain(self.groups.iter().map(|g| &g.quantity))
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.distance.dirty() || groups_dirty(&self.groups)
-    }
-
-    fn revert(&mut self) {
-        self.distance.text.clone_from(&self.distance.read);
-        revert_groups(&mut self.groups);
-    }
-
-    fn given(&self, out: &mut FeatureFields) {
-        if self.distance.dirty() {
-            out.distance = Some(json!(self.distance.text.trim()));
-        }
-        if groups_dirty(&self.groups) {
-            out.faces = Some(groups_json(&self.groups, "distance"));
-        }
-    }
-}
-
-/// A mirror's form (design 327): the solid it copies and its plane shown,
-/// never changed here; its operation and targets are the form's own, as
-/// an extrude's.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MirrorForm {
-    pub solid: String,
-    pub plane: String,
-}
-
-/// A split's form (design 327): its target and plane or tool shown;
-/// whether it is flipped and which sides it keeps edited.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SplitForm {
-    pub target: String,
-    pub plane: String,
-    /// A split by a tool (ryucad 18): `body parting`, or `faces …`; none
-    /// for a split by a plane.
-    pub tool: Option<String>,
-    pub flip: Flag,
-    /// `both` or `behind`.
-    pub keep: Choice,
-}
-
-impl SplitForm {
-    fn from_show(v: &Value) -> SplitForm {
-        let flip = v["flip"] == true;
-        let keep = v["keep"].as_str().unwrap_or("both").to_owned();
-        let tool = &v["tool"];
-        let tool = match (tool["body"].as_str(), tool["faces"].as_array()) {
-            (Some(b), _) => Some(format!("body {b}")),
-            (None, Some(fs)) => Some(format!("faces {}", texts(&json!(fs)).join(", "))),
-            (None, None) => None,
-        };
-        SplitForm {
-            target: text(&v["target"]),
-            plane: text(&v["plane"]),
-            tool,
-            flip: Flag {
-                name: "flip".to_owned(),
-                read: flip,
-                chosen: flip,
-            },
-            keep: Choice::new("keep", &["both", "behind"], keep),
-        }
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.flip.dirty() || self.keep.dirty()
-    }
-
-    fn revert(&mut self) {
-        self.flip.chosen = self.flip.read;
-        self.keep.chosen.clone_from(&self.keep.read);
-    }
-
-    fn given(&self, out: &mut FeatureFields) {
-        if self.flip.dirty() {
-            out.flip = Some(self.flip.chosen.into());
-        }
-        if self.keep.dirty() {
-            out.keep = Some(self.keep.chosen.clone());
-        }
-    }
 }
 
 /// The form for one feature.
@@ -1618,39 +485,20 @@ impl Form {
         // what their seeds do.
         let repeats = matches!(ty.as_str(), "hole" | "pattern");
         let targets = (acts || repeats).then(|| Picks::new("targets", strings(&v["targets"])));
-        let extent = (ty == "extrude").then(|| {
-            let e = &v["extent"];
-            ExtentForm {
-                ty: Choice::new(
-                    "extent",
-                    &["blind", "symmetric", "up_to", "through_all"],
-                    text(&e["type"]),
-                ),
-                length: Field::new("length", text(&e["length"])),
-                both: Flag {
-                    name: "both ways".to_owned(),
-                    read: e["both"] == true,
-                    chosen: e["both"] == true,
-                },
-            }
-        });
+        let extent = ExtentForm::read(&ty, v);
         let boolean = ty == "boolean";
-        let blend = matches!(ty.as_str(), "fillet" | "chamfer").then(|| BlendForm::from_show(v));
-        let hole = (ty == "hole").then(|| HoleForm::from_show(v));
-        let pattern = matches!(ty.as_str(), "pattern" | "instance_pattern")
-            .then(|| PatternForm::from_show(v));
-        let mate = (ty == "mate").then(|| MateForm::from_show(v));
-        let datum = crate::core::datums::kind_of(&ty).map(|_| DatumForm::from_show(v));
-        let sweep = (ty == "sweep").then(|| SweepForm::from_show(v));
-        let loft = (ty == "loft").then(|| LoftForm::from_show(v));
-        let shell = (ty == "shell").then(|| ShellForm::from_show(v));
-        let offset = (ty == "offset").then(|| BodyOffsetForm::from_show(v));
-        let mirror = (ty == "mirror").then(|| MirrorForm {
-            solid: text(&v["solid"]),
-            plane: text(&v["plane"]),
-        });
-        let split = (ty == "split").then(|| SplitForm::from_show(v));
-        let sheet = SheetMetalForm::from_show(&ty, v);
+        let blend = BlendForm::read(&ty, v);
+        let hole = HoleForm::read(&ty, v);
+        let pattern = PatternForm::read(&ty, v);
+        let mate = MateForm::read(&ty, v);
+        let datum = DatumForm::read(&ty, v);
+        let sweep = SweepForm::read(&ty, v);
+        let loft = LoftForm::read(&ty, v);
+        let shell = ShellForm::read(&ty, v);
+        let offset = BodyOffsetForm::read(&ty, v);
+        let mirror = MirrorForm::read(&ty, v);
+        let split = SplitForm::read(&ty, v);
+        let sheet = SheetMetalForm::read(&ty, v);
         let surface = matches!(ty.as_str(), "extrude" | "revolve" | "sweep" | "loft").then(|| {
             let on = v["surface"] == true;
             Flag {
@@ -1659,8 +507,8 @@ impl Form {
                 chosen: on,
             }
         });
-        let surface_form = SurfaceForm::from_show(&ty, v);
-        let tweak = TweakForm::from_show(&ty, v);
+        let surface_form = SurfaceForm::read(&ty, v);
+        let tweak = TweakForm::read(&ty, v);
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -1763,84 +611,109 @@ impl Form {
         self.origin.iter().any(|f| !f.read.is_empty())
     }
 
+    /// The one kind's form this feature has, if any (a `type` reads at
+    /// most one: `every_type_reads_at_most_one_kinds_form`).
+    fn kind(&self) -> Option<&dyn FeatureForm> {
+        self.kinds().into_iter().next()
+    }
+
+    /// Every kind's form this feature has: never more than one.
+    fn kinds(&self) -> Vec<&dyn FeatureForm> {
+        fn k<T: FeatureForm>(f: &Option<T>) -> Option<&dyn FeatureForm> {
+            f.as_ref().map(|f| f as &dyn FeatureForm)
+        }
+        [
+            k(&self.extent),
+            k(&self.blend),
+            k(&self.hole),
+            k(&self.pattern),
+            k(&self.mate),
+            k(&self.datum),
+            k(&self.sweep),
+            k(&self.loft),
+            k(&self.shell),
+            k(&self.offset),
+            k(&self.mirror),
+            k(&self.split),
+            k(&self.sheet),
+            k(&self.surface_form),
+            k(&self.tweak),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The parameters' and placement's fields, and the kind's form,
+    /// borrowed apart so both can be written.
+    fn parts_mut(&mut self) -> (Vec<&mut Field>, Option<&mut dyn FeatureForm>) {
+        fn k<T: FeatureForm>(f: &mut Option<T>) -> Option<&mut dyn FeatureForm> {
+            f.as_mut().map(|f| f as &mut dyn FeatureForm)
+        }
+        let Form {
+            params,
+            origin,
+            z,
+            x,
+            extent,
+            blend,
+            hole,
+            pattern,
+            mate,
+            datum,
+            sweep,
+            loft,
+            shell,
+            offset,
+            mirror,
+            split,
+            sheet,
+            surface_form,
+            tweak,
+            ..
+        } = self;
+        let mut base: Vec<&mut Field> = Vec::new();
+        base.extend(params.iter_mut());
+        base.extend(origin.iter_mut());
+        base.extend(z.iter_mut());
+        base.extend(x.iter_mut());
+        let kind = [
+            k(extent),
+            k(blend),
+            k(hole),
+            k(pattern),
+            k(mate),
+            k(datum),
+            k(sweep),
+            k(loft),
+            k(shell),
+            k(offset),
+            k(mirror),
+            k(split),
+            k(sheet),
+            k(surface_form),
+            k(tweak),
+        ]
+        .into_iter()
+        .flatten()
+        .next();
+        (base, kind)
+    }
+
     fn fields(&self) -> impl Iterator<Item = &Field> {
         self.params
             .iter()
             .chain(&self.origin)
             .chain(&self.z)
             .chain(&self.x)
-            .chain(self.blend.iter().flat_map(BlendForm::sizes))
-            .chain(self.hole.iter().flat_map(HoleForm::fields))
-            .chain(self.pattern.iter().flat_map(PatternForm::fields))
-            .chain(self.mate.iter().flat_map(MateForm::fields))
-            .chain(self.datum.iter().flat_map(DatumForm::fields))
-            .chain(self.sweep.iter().flat_map(SweepForm::fields))
-            .chain(self.loft.iter().flat_map(LoftForm::fields))
-            .chain(self.shell.iter().flat_map(ShellForm::fields))
-            .chain(self.offset.iter().flat_map(BodyOffsetForm::fields))
-            .chain(self.sheet.iter().flat_map(SheetMetalForm::fields))
-            .chain(self.surface_form.iter().flat_map(SurfaceForm::fields))
-            .chain(self.tweak.iter().flat_map(TweakForm::fields))
+            .chain(self.kind().into_iter().flat_map(|k| k.kind_fields()))
     }
 
     /// Every field, to place errors and keep what was typed.
     fn fields_mut(&mut self) -> Vec<&mut Field> {
-        let mut out: Vec<&mut Field> = Vec::new();
-        out.extend(self.params.iter_mut());
-        out.extend(self.origin.iter_mut());
-        out.extend(self.z.iter_mut());
-        out.extend(self.x.iter_mut());
-        if let Some(e) = &mut self.extent {
-            out.push(&mut e.length);
-        }
-        if let Some(b) = &mut self.blend {
-            for g in &mut b.groups {
-                out.extend(g.sizes.iter_mut().map(|(_, f)| f));
-            }
-        }
-        if let Some(h) = &mut self.hole {
-            out.extend(h.sizes.iter_mut().map(|(_, f)| f));
-            out.push(&mut h.length);
-        }
-        if let Some(p) = &mut self.pattern {
-            out.extend(p.sizes.iter_mut().map(|(_, f)| f));
-            out.push(&mut p.skip);
-        }
-        if let Some(m) = &mut self.mate {
-            out.push(&mut m.angle);
-            out.push(&mut m.distance);
-            for o in [&mut m.a, &mut m.b] {
-                out.extend(o.origin.iter_mut());
-                out.push(&mut o.rotate);
-            }
-        }
-        if let Some(d) = &mut self.datum {
-            out.extend(d.sizes.iter_mut());
-            out.extend(d.coordinates.iter_mut().flatten());
-        }
-        if let Some(w) = &mut self.sweep {
-            out.push(&mut w.twist);
-            out.push(&mut w.scale);
-        }
-        if let Some(l) = &mut self.loft {
-            out.extend(l.start.iter_mut().chain(&mut l.end).map(|t| &mut t.weight));
-        }
-        if let Some(s) = &mut self.shell {
-            out.push(&mut s.thickness);
-            out.extend(s.groups.iter_mut().map(|g| &mut g.quantity));
-        }
-        if let Some(o) = &mut self.offset {
-            out.push(&mut o.distance);
-            out.extend(o.groups.iter_mut().map(|g| &mut g.quantity));
-        }
-        if let Some(s) = &mut self.sheet {
-            out.extend(s.fields_mut());
-        }
-        if let Some(s) = &mut self.surface_form {
-            out.extend(s.fields_mut());
-        }
-        if let Some(t) = &mut self.tweak {
-            out.extend(t.fields_mut());
+        let (mut out, kind) = self.parts_mut();
+        if let Some(k) = kind {
+            out.extend(k.kind_fields_mut());
         }
         out
     }
@@ -1872,43 +745,12 @@ impl Form {
         self.error = (!placed).then_some(e);
     }
 
-    /// The field at a pointer into a blend's groups or a mate's offsets.
+    /// The field at a pointer into the kind's form: a blend's groups, a
+    /// shell's or offset's faces, a mate's offsets, a tweak's, sheet
+    /// metal's or a surface's own.
     fn at_pointer(&mut self, pointer: &str) -> Option<&mut Field> {
         let steps: Vec<&str> = pointer.strip_prefix('/')?.split('/').collect();
-        match steps.as_slice() {
-            // A draft's or move's group's angle or distance.
-            ["groups", ..] if self.tweak.is_some() => {
-                self.tweak.as_mut()?.at_pointer(steps.as_slice())
-            }
-            ["groups", i, k] => {
-                let i: usize = i.parse().ok()?;
-                let g = self.blend.as_mut()?.groups.get_mut(i)?;
-                g.sizes.iter_mut().find(|(key, _)| key == k).map(|(_, f)| f)
-            }
-            // A shell's or offset's group by its whole pointer, since the
-            // top-level `thickness` and `distance` share the last step.
-            ["faces", i, "thickness"] => {
-                let i: usize = i.parse().ok()?;
-                Some(&mut self.shell.as_mut()?.groups.get_mut(i)?.quantity)
-            }
-            ["faces", i, "distance"] => {
-                let i: usize = i.parse().ok()?;
-                Some(&mut self.offset.as_mut()?.groups.get_mut(i)?.quantity)
-            }
-            [side @ ("a" | "b"), "offset", rest @ ..] => {
-                let m = self.mate.as_mut()?;
-                let o = if *side == "a" { &mut m.a } else { &mut m.b };
-                match rest {
-                    ["origin", n] => o.origin.get_mut(n.parse::<usize>().ok()?),
-                    ["rotate", ..] => Some(&mut o.rotate),
-                    _ => None,
-                }
-            }
-            // A thicken's group's side.
-            steps if self.surface_form.is_some() => self.surface_form.as_mut()?.at_pointer(steps),
-            // A sheet metal feature's end, override or relief size.
-            steps => self.sheet.as_mut()?.at_pointer(steps),
-        }
+        self.parts_mut().1?.kind_at_pointer(&steps)
     }
 
     /// After a conflict, what this window typed goes back over the values
@@ -1948,21 +790,8 @@ impl Form {
                 .into_iter()
                 .flatten()
                 .any(Picks::dirty)
-            || self.extent.as_ref().is_some_and(ExtentForm::dirty)
-            || self.blend.as_ref().is_some_and(BlendForm::dirty)
-            || self.hole.as_ref().is_some_and(HoleForm::dirty)
-            || self.pattern.as_ref().is_some_and(PatternForm::dirty)
-            || self.mate.as_ref().is_some_and(MateForm::dirty)
-            || self.datum.as_ref().is_some_and(DatumForm::dirty)
-            || self.sweep.as_ref().is_some_and(SweepForm::dirty)
-            || self.loft.as_ref().is_some_and(LoftForm::dirty)
-            || self.shell.as_ref().is_some_and(ShellForm::dirty)
-            || self.offset.as_ref().is_some_and(BodyOffsetForm::dirty)
-            || self.split.as_ref().is_some_and(SplitForm::dirty)
-            || self.sheet.as_ref().is_some_and(SheetMetalForm::dirty)
+            || self.kind().is_some_and(|k| k.kind_dirty())
             || self.surface.as_ref().is_some_and(Flag::dirty)
-            || self.surface_form.as_ref().is_some_and(SurfaceForm::dirty)
-            || self.tweak.as_ref().is_some_and(TweakForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -1996,52 +825,11 @@ impl Form {
         {
             p.chosen.clone_from(&p.read);
         }
-        if let Some(e) = &mut self.extent {
-            e.ty.chosen.clone_from(&e.ty.read);
-            e.length.text.clone_from(&e.length.read);
-            e.both.chosen = e.both.read;
-        }
-        if let Some(b) = &mut self.blend {
-            b.revert();
-        }
-        if let Some(h) = &mut self.hole {
-            h.revert();
-        }
-        if let Some(p) = &mut self.pattern {
-            p.revert();
-        }
-        if let Some(m) = &mut self.mate {
-            m.revert();
-        }
-        if let Some(d) = &mut self.datum {
-            d.revert();
-        }
-        if let Some(w) = &mut self.sweep {
-            w.revert();
-        }
-        if let Some(l) = &mut self.loft {
-            l.revert();
-        }
-        if let Some(s) = &mut self.shell {
-            s.revert();
-        }
-        if let Some(o) = &mut self.offset {
-            o.revert();
-        }
-        if let Some(s) = &mut self.split {
-            s.revert();
-        }
-        if let Some(t) = &mut self.tweak {
-            t.revert();
-        }
-        if let Some(s) = &mut self.sheet {
-            s.revert();
+        if let Some(k) = self.parts_mut().1 {
+            k.kind_revert();
         }
         if let Some(f) = &mut self.surface {
             f.chosen = f.read;
-        }
-        if let Some(s) = &mut self.surface_form {
-            s.revert();
         }
         // A refusal was about a value now put back (#532).
         for f in self.fields_mut() {
@@ -2071,70 +859,20 @@ impl Form {
             Some("new") => None,
             _ => picked(&self.targets),
         };
-        let extent = self.extent.as_ref().filter(|e| e.dirty()).map(|e| {
-            let mut v = json!({"type": e.ty.chosen});
-            match e.ty.chosen.as_str() {
-                "blind" | "symmetric" => v["length"] = json!(e.length.text.trim()),
-                "through_all" => v["both"] = json!(e.both.chosen),
-                _ => {}
-            }
-            v
-        });
-        let blend = self.blend.as_ref();
         let mut out = FeatureFields {
             operation,
             targets,
-            extent,
             op: chosen(&self.op),
             target: chosen(&self.target),
             tools: picked(&self.tools),
             solids: picked(&self.solids),
-            groups: blend
-                .filter(|b| b.groups_dirty())
-                .map(BlendForm::groups_json),
-            propagate: blend
-                .filter(|b| b.propagate.dirty())
-                .map(|b| b.propagate.chosen),
             rev: chosen(&self.rev),
             fixed: self.fixed.as_ref().filter(|f| f.dirty()).map(|f| f.chosen),
             surface: surfaced,
             ..FeatureFields::default()
         };
-        if let Some(s) = &self.surface_form {
-            s.given(&mut out);
-        }
-        if let Some(h) = &self.hole {
-            h.given(&mut out);
-        }
-        if let Some(p) = &self.pattern {
-            p.given(&mut out)?;
-        }
-        if let Some(m) = &self.mate {
-            m.given(&mut out);
-        }
-        if let Some(d) = &self.datum {
-            d.given(&mut out);
-        }
-        if let Some(w) = &self.sweep {
-            w.given(&mut out);
-        }
-        if let Some(l) = &self.loft {
-            l.given(&mut out);
-        }
-        if let Some(s) = &self.shell {
-            s.given(&mut out);
-        }
-        if let Some(o) = &self.offset {
-            o.given(&mut out);
-        }
-        if let Some(s) = &self.split {
-            s.given(&mut out);
-        }
-        if let Some(s) = &self.sheet {
-            s.given(&mut out);
-        }
-        if let Some(t) = &self.tweak {
-            t.given(&mut out);
+        if let Some(k) = self.kind() {
+            k.kind_given(&mut out)?;
         }
         Ok(out)
     }
@@ -2339,6 +1077,67 @@ impl DimForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Design 541's forms per kind: a `Form` asks its one kind's form, so no
+    /// type may read two.
+    #[test]
+    fn every_type_reads_at_most_one_kinds_form() {
+        let types = [
+            "box",
+            "cylinder",
+            "cone",
+            "sphere",
+            "torus",
+            "sketch",
+            "extrude",
+            "revolve",
+            "boolean",
+            "fillet",
+            "chamfer",
+            "hole",
+            "pattern",
+            "instance_pattern",
+            "import",
+            "instance",
+            "mate",
+            "plane",
+            "axis",
+            "point",
+            "path",
+            "helix",
+            "sweep",
+            "loft",
+            "shell",
+            "offset",
+            "mirror",
+            "split",
+            "base_flange",
+            "flange",
+            "unfold",
+            "refold",
+            "planar",
+            "fill",
+            "extract",
+            "sew",
+            "thicken",
+            "draft",
+            "move_face",
+            "replace_face",
+            "delete_face",
+            "delete_blend",
+            "resize_blend",
+            "insert",
+            "delete_body",
+        ];
+        for ty in types {
+            let f = Form::from_show("p", &json!({"id": "f", "type": ty, "revision": "1"}));
+            assert!(
+                f.kinds().len() <= 1,
+                "{ty} reads {} kinds' forms",
+                f.kinds().len()
+            );
+        }
+    }
 
     #[test]
     fn a_deletes_solids_are_taken_out_one_by_one() {

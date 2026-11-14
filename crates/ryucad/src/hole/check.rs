@@ -719,7 +719,7 @@ pub fn check(
     let (_, at) = session.at(rev)?;
     let p = at.project().part(part)?.clone();
     let result = at.rebuilt(part)?.clone();
-    let job = at.job.clone();
+    let job = at.job().clone();
     let cx = Ctx {
         session_part: &p,
         result: &result,
@@ -1132,7 +1132,7 @@ pub(crate) mod tests {
         );
         crate::holes::list(&mut s, &Id::parse("p", "part").unwrap(), None).unwrap();
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        s.job = ryu_session::job::Job::new("t", "p", "holes.check", flag);
+        s.set_job(ryu_session::job::Job::new("t", "p", "holes.check", flag));
         let e = request(&mut s, "p", None, None, None, None).unwrap_err();
         assert_eq!(e.code, crate::error::Code::Cancelled, "{e}");
     }

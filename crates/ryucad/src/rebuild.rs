@@ -24,8 +24,6 @@ use ryukei::topo::{Body, EntityId};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-// The old public path (design 541, "Paths kept"); 27.F removes it.
-pub use crate::feature::blend::check_blend;
 
 /// A solid as a feature leaves it.
 #[derive(Clone, Debug)]

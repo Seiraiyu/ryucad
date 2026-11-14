@@ -397,7 +397,7 @@ impl<'a> Builds<'a> {
     /// The request's job: the live session's, else the one given.
     fn job(&self) -> Job {
         match &self.live {
-            Some(s) => s.job.clone(),
+            Some(s) => s.job().clone(),
             None => self.job.clone(),
         }
     }
@@ -432,7 +432,7 @@ impl<'a> Builds<'a> {
                 if let Some(d) = deps {
                     s.set_deps_cache(d);
                 }
-                s.job = job.clone();
+                s.set_job(job.clone());
                 Some(s)
             })
             .as_mut()

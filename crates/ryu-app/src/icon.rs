@@ -1,11 +1,12 @@
 //! Icons (design 199, Fonts and icons): Phosphor Regular's glyphs by code
-//! point, and ryucad's own 42 CAD glyphs as stroke tables
+//! point, and ryucad's 42 CAD glyphs (ryu-app's first table; ryueda's
+//! join it in 3.D) as stroke tables
 //! ([`glyphs`], ported stroke for stroke from `design/app/glyphs.js`),
 //! drawn alike at any size and tinted by state. An icon never stands
 //! alone: [`button`] gives every icon button its command's title as its
 //! accesskit name and tooltip.
 
-use eframe::egui::{self, Color32, FontFamily, FontId, Pos2, Rect, Vec2};
+use egui::{Color32, FontFamily, FontId, Pos2, Rect, Vec2};
 
 /// Every icon the window draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -167,10 +168,7 @@ impl Icon {
 pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, colour: Color32) {
     match icon {
         Icon::Ph(_, cp) => {
-            let font = FontId::new(
-                rect.height(),
-                FontFamily::Name(crate::ui::fonts::ICONS.into()),
-            );
+            let font = FontId::new(rect.height(), FontFamily::Name(crate::fonts::ICONS.into()));
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, cp, font, colour);
         }
         Icon::Glyph(g) => glyphs::paint(painter, rect, g, colour),
@@ -956,7 +954,7 @@ pub mod glyphs {
         /// The glyphs are `glyphs.js`'s, by name, and no other.
         #[test]
         fn every_glyph_of_the_mockups_is_ported() {
-            let js = include_str!("../../../../design/app/glyphs.js");
+            let js = include_str!("../../../design/app/glyphs.js");
             let table = &js[js.find("const GLYPHS = {").unwrap()..];
             let table = &table[..table.find("\n};").unwrap()];
             let named: Vec<&str> = table
@@ -995,9 +993,9 @@ mod tests {
     /// sheet gives its name, and the embedded font has it.
     #[test]
     fn phosphor_code_points_are_the_style_sheet_s() {
-        let css = include_str!("../../../../design/app/vendor/phosphor.css");
+        let css = include_str!("../../../design/app/vendor/phosphor.css");
         let ctx = egui::Context::default();
-        crate::ui::fonts::install(&ctx);
+        crate::fonts::install(&ctx);
         let mut out = ctx.run_pass(egui::RawInput::default(), |ctx| {
             for icon in Icon::PHOSPHOR {
                 let Icon::Ph(name, cp) = *icon else {
@@ -1013,7 +1011,7 @@ mod tests {
                     u32::from_str_radix(hex, 16).unwrap(),
                     "{name}"
                 );
-                let font = FontId::new(16.0, FontFamily::Name(crate::ui::fonts::ICONS.into()));
+                let font = FontId::new(16.0, FontFamily::Name(crate::fonts::ICONS.into()));
                 assert!(ctx.fonts_mut(|f| f.has_glyph(&font, cp)), "{name}");
             }
         });

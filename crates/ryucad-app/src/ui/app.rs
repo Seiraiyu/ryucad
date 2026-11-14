@@ -326,7 +326,7 @@ impl App {
         };
         match &self.screen {
             Screen::Start(_) => "ryucad".to_owned(),
-            Screen::Opened(o) => match &o.ws.merge {
+            Screen::Opened(o) => match &o.ws.branches.merge {
                 Some(m) => format!("{} ({} in progress) — ryucad", name(&o.ws.root), m.step()),
                 None => format!("{} — ryucad", name(&o.ws.root)),
             },
@@ -460,7 +460,7 @@ impl Opened {
             ctx.request_repaint_after(crate::core::workspace::CAMERA_EVERY);
         }
         // Play draws a frame each refresh.
-        if self.ws.motions.playing() {
+        if self.ws.assembly.motions.playing() {
             ctx.request_repaint();
         }
         // An error leaves the status line on time, mouse or not.
@@ -502,7 +502,7 @@ impl Opened {
                     crate::ui::feedback::disconnected(ui, &mut self.ws, &p)
                 });
         }
-        if let Some(c) = crate::ui::modes::colour(self.ws.mode, &p) {
+        if let Some(c) = crate::ui::modes::colour(self.ws.session.mode, &p) {
             egui::Panel::top("mode")
                 .frame(
                     egui::Frame::new()
@@ -585,7 +585,7 @@ impl Opened {
         for id in marked {
             action = action.or(commands::run(self, &ctx, id, None));
         }
-        self.view.marking = self.ws.markup.is_some();
+        self.view.marking = self.ws.annotations.markup.is_some();
         if let Some(tile) = self.ws.wants_tile.take() {
             crate::ui::shell::open(&mut self.tiles, tile);
             self.layout_dirty = true;
@@ -597,13 +597,13 @@ impl Opened {
         };
         // Closing the dialog ends what it paints (#138).
         if !self.dialogs.interference {
-            self.ws.interference = None;
+            self.ws.assembly.interference = None;
         }
         if !self.dialogs.mass {
-            self.ws.mass = None;
+            self.ws.view.mass = None;
         }
         if !self.dialogs.clearance {
-            self.ws.clearance = None;
+            self.ws.assembly.clearance = None;
         }
         self.typing = ctx.text_edit_focused();
         action
@@ -640,7 +640,7 @@ impl Opened {
     /// The Conflicts tile opens, as the first tab on the right, when a
     /// merge starts, and closes itself when it ends.
     fn follow_merge(&mut self) {
-        let merging = self.ws.merge.is_some();
+        let merging = self.ws.branches.merge.is_some();
         if merging && !self.merging {
             crate::ui::shell::open_first(&mut self.tiles, "conflicts");
         } else if !merging && self.merging {
@@ -723,7 +723,7 @@ impl Opened {
     /// The recent projects, as the daemon last reported them: it puts
     /// this project first when the window says hello.
     fn read_recent(&mut self) {
-        if let Some(v) = self.ws.settings.get("app.recent_projects") {
+        if let Some(v) = self.ws.session.settings.get("app.recent_projects") {
             self.recent = crate::core::recent::parse(v);
         }
     }
@@ -731,7 +731,7 @@ impl Opened {
     /// The user's preferences, as they stand: the daemon announces every
     /// change, whoever makes it.
     fn apply_preferences(&mut self, ctx: &egui::Context) {
-        let theme = match self.ws.settings.text("ui.theme", "system") {
+        let theme = match self.ws.session.settings.text("ui.theme", "system") {
             "dark" => egui::ThemePreference::Dark,
             "light" => egui::ThemePreference::Light,
             _ => egui::ThemePreference::System,
@@ -741,6 +741,7 @@ impl Opened {
         }
         let text = |key| {
             self.ws
+                .session
                 .settings
                 .get(key)
                 .and_then(serde_json::Value::as_str)
@@ -752,21 +753,29 @@ impl Opened {
             self.view.look = look;
             self.view.contrast = contrast;
         }
-        if let Some(s) = self.ws.settings.get("ui.scale") {
+        if let Some(s) = self.ws.session.settings.get("ui.scale") {
             apply_scale(ctx, scale_of(s));
         }
-        self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
+        self.view.nav.style =
+            Navigation::parse(self.ws.session.settings.text("ui.navigation", "ryucad"));
         // Turns and glides, unless motion is reduced.
-        self.view.nav.animate = self.ws.settings.text("ui.motion", "animate") != "reduce";
+        self.view.nav.animate = self.ws.session.settings.text("ui.motion", "animate") != "reduce";
         // Which toasts show.
         let notify = self
             .ws
+            .session
             .settings
             .get("ui.notify")
             .cloned()
             .unwrap_or_default();
         self.ws.toasts.notify = crate::core::toast::Notify::parse(&notify);
-        let keys = self.ws.settings.get("ui.keys").cloned().unwrap_or_default();
+        let keys = self
+            .ws
+            .session
+            .settings
+            .get("ui.keys")
+            .cloned()
+            .unwrap_or_default();
         if self.keymap_from.0 != self.view.nav.style || self.keymap_from.1 != keys {
             self.keymap = crate::core::keys::Keymap::new(self.view.nav.style, &keys);
             self.keymap_from = (self.view.nav.style, keys);
@@ -794,6 +803,7 @@ impl Opened {
             .collect();
         let on = |key| {
             self.ws
+                .session
                 .settings
                 .get(key)
                 .and_then(serde_json::Value::as_bool)
@@ -808,6 +818,7 @@ impl Opened {
         self.view.triad = on("display.triad");
         self.view.origin = self
             .ws
+            .session
             .settings
             .get("display.origin")
             .and_then(serde_json::Value::as_bool)
@@ -923,18 +934,18 @@ impl eframe::App for App {
                 let path = path.display().to_string();
                 match how {
                     Browse::Open => {
-                        if let Some(i) = &mut o.ws.import {
+                        if let Some(i) = &mut o.ws.exchange.import {
                             i.path = path;
                         }
                         o.ws.plan_import();
                     }
                     Browse::Save => {
-                        if let Some(e) = &mut o.ws.export {
+                        if let Some(e) = &mut o.ws.exchange.export {
                             e.path = path;
                         }
                     }
                     Browse::SaveCsv => {
-                        if let Some(e) = &mut o.ws.bom_export {
+                        if let Some(e) = &mut o.ws.pdm.bom_export {
                             e.path = path;
                         }
                     }

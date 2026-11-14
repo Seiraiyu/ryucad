@@ -764,8 +764,14 @@ pub fn run(
     let only = instance_paths(&pid, instances)?;
     let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
     let revision = session.project().part(&pid)?.revision.clone();
-    let job = session.job.clone();
-    let mut v = find_for(&pid, &model, &only, &mut session.interference, &job)?;
+    let job = session.job().clone();
+    let mut v = find_for(
+        &pid,
+        &model,
+        &only,
+        session.caches_mut().interference_mut(),
+        &job,
+    )?;
     v["revision"] = json!(revision);
     // Poses a failed mate left where a solve without it put them make
     // clashes that aren't the design's (issue #155).
@@ -829,9 +835,9 @@ mod tests {
     /// with how many pairs it intersected (`computed`).
     fn find_in(s: &mut crate::session::Session, part: &str, only: &[String]) -> Result<Value> {
         s.refresh()?;
-        let before = s.interference.len();
+        let before = s.caches().interference().len();
         let mut v = run(s, part, only)?;
-        v["computed"] = json!(s.interference.len() - before);
+        v["computed"] = json!(s.caches().interference().len() - before);
         Ok(v)
     }
 

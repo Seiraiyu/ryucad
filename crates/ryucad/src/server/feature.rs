@@ -5,6 +5,12 @@ use crate::doc::id::Id;
 use crate::doc::project::{Part, feature_path};
 use crate::error::{Code, Error, Result};
 use crate::feature::check_sweep;
+use crate::feature::delete_body::check_delete;
+use crate::feature::import::import_not_written_here;
+use crate::feature::insert::check_insert;
+use crate::feature::instance::check_instance;
+use crate::feature::report as feature_report;
+use crate::feature::{Given, Place, Write};
 use crate::mesh;
 use crate::param;
 use crate::part::{
@@ -17,16 +23,6 @@ use crate::session::Session;
 use crate::solid::Solids;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
-// The old path, for `route.rs` (design 541, "Paths kept").
-pub(crate) use crate::feature::Given;
-use crate::feature::delete_body::check_delete;
-use crate::feature::import::import_not_written_here;
-use crate::feature::insert::check_insert;
-use crate::feature::instance::check_instance;
-use crate::feature::{Place, Write};
-
-// The old path (design 541, "Paths kept"); 27.F removes it if nothing uses it.
-pub use crate::feature::report as feature_report;
 
 /// Refuses a write that would leave a feature acting on what isn't a
 /// solid before it in `q` (the part as the write leaves it): the written

@@ -26,7 +26,7 @@ pub fn bar(
     at: egui::Rect,
 ) -> Vec<&'static str> {
     let mut ran = Vec::new();
-    let Some(m) = ws.markup.as_ref() else {
+    let Some(m) = ws.annotations.markup.as_ref() else {
         return ran;
     };
     let shown = view.commands.clone();
@@ -78,7 +78,7 @@ pub fn bar(
                         ran.push("markup.undo");
                     }
                     if ui.button("Clear").clicked()
-                        && let Some(m) = ws.markup.as_mut()
+                        && let Some(m) = ws.annotations.markup.as_mut()
                     {
                         m.clear();
                     }
@@ -114,7 +114,7 @@ pub fn bar(
                 });
             });
         });
-    if let Some(m) = ws.markup.as_mut() {
+    if let Some(m) = ws.annotations.markup.as_mut() {
         m.comment = comment;
     }
     ran

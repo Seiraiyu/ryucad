@@ -20,6 +20,9 @@ pollster = "0.4"
 rayon = "1"
 # Native Open dialogs: the XDG portal on Linux (all Rust), AppKit, Win32.
 rfd = "0.17"
+# The shell both apps share (design 519): fonts, icons, looks, keys,
+# tiles, toasts, people, the link and the 2D canvas.
+ryu-app = { path = "../ryu-app" }
 # The Drawings tile cuts arcs and ellipses, and Markup snaps its angles,
 # by the same functions everywhere.
 ryu-math = { path = "../ryu-math" }

@@ -1024,6 +1024,17 @@ pub enum Code {
     /// nothing in the project; `details.ref`, and `details.closest`, the
     /// nearest reference paths (plan 3.B).
     RefUnresolved,
+    /// ryueda: a designator two occurrences share in a merge's netlist
+    /// that neither side shared (design 518); `merge status`'s kind, with
+    /// the repairs `renumber` and `annotate`.
+    RefdesClash,
+    /// ryueda: two nets, ports or rails of one scope that took one name
+    /// on different sides of a merge; `merge status`'s kind, with the
+    /// repairs `join` and `rename`.
+    NameClash,
+    /// ryueda: an error the merged project holds that neither side did
+    /// and no other item explains, blamed on a side; `merge status`'s kind.
+    MergeFaults,
 }
 
 impl Code {
@@ -1484,6 +1495,18 @@ mod tests {
             (Code::GitHookMissing, "git_hook_missing"),
             (Code::GitHookForeign, "git_hook_foreign"),
             (Code::LayoutPending, "layout_pending"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+        }
+    }
+
+    #[test]
+    fn eda_merge_codes() {
+        for (c, s) in [
+            (Code::RefdesClash, "refdes_clash"),
+            (Code::NameClash, "name_clash"),
+            (Code::MergeFaults, "merge_faults"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);

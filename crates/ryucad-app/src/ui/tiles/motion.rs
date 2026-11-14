@@ -20,18 +20,24 @@ fn mark_x(r: egui::Rect, f: f64) -> f32 {
 /// Draws the tile.
 pub fn motion(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     let save_gate = ws.control("motion.save");
-    let Some(part) = ws.motions.part.clone().or_else(|| ws.shown_assembly()) else {
+    let Some(part) = ws
+        .assembly
+        .motions
+        .part
+        .clone()
+        .or_else(|| ws.shown_assembly())
+    else {
         ui.weak("Show an assembly to play its motions (View > Show).");
         return;
     };
-    if ws.motions.part.as_deref() != Some(part.as_str()) {
-        ws.motions.part = Some(part.clone());
+    if ws.assembly.motions.part.as_deref() != Some(part.as_str()) {
+        ws.assembly.motions.part = Some(part.clone());
         ws.read_motions();
     }
     ui.label(format!("Motions of {part}"));
-    let shown = ws.motions.current(&part).map(|e| e.id.clone());
+    let shown = ws.assembly.motions.current(&part).map(|e| e.id.clone());
     let mut choose = None;
-    for e in &ws.motions.list {
+    for e in &ws.assembly.motions.list {
         let on = shown.as_deref() == Some(e.id.as_str());
         let text = match &e.error {
             Some(_) => format!("{} (doesn't resolve)", e.id),
@@ -46,7 +52,7 @@ pub fn motion(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             choose = Some(e.id.clone());
         }
     }
-    if ws.motions.list.is_empty() {
+    if ws.assembly.motions.list.is_empty() {
         ui.weak("None yet: an agent saves motions (ryucad motion save).");
     }
     if let Some(id) = choose {
@@ -56,12 +62,13 @@ pub fn motion(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         return;
     };
     let now = Instant::now();
-    let mut f = ws.motions.fraction(now).unwrap_or(0.0);
+    let mut f = ws.assembly.motions.fraction(now).unwrap_or(0.0);
     let frames = ws
+        .assembly
         .motions
         .frames
         .clone()
-        .filter(|_| ws.motions.frames_current());
+        .filter(|_| ws.assembly.motions.frames_current());
     // The slider, with the sweep's marks painted over it.
     let r = ui
         .horizontal_wrapped(|ui| {
@@ -73,6 +80,7 @@ pub fn motion(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         .inner;
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "motion fraction"));
     if let Some(w) = ws
+        .assembly
         .motions
         .sweep
         .as_ref()
@@ -98,7 +106,7 @@ pub fn motion(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         ws.show_motion(None, Some(f), Some(false), false);
     }
     ui.horizontal_wrapped(|ui| {
-        let playing = ws.motions.playing();
+        let playing = ws.assembly.motions.playing();
         if ui
             .button(if playing { "Pause" } else { "Play" })
             .on_hover_text("Play it back and forth, or stop where it is")
@@ -136,6 +144,7 @@ pub fn motion(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             ws.sweep_motion();
         }
         if ws
+            .assembly
             .motions
             .sweep
             .as_ref()
@@ -147,7 +156,7 @@ pub fn motion(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             );
         }
     });
-    if let Some(w) = ws.motions.sweep.clone().filter(|w| w.motion == id) {
+    if let Some(w) = ws.assembly.motions.sweep.clone().filter(|w| w.motion == id) {
         if !w.loaded {
             ui.spinner();
         } else if let Some(e) = &w.error {
@@ -170,18 +179,31 @@ pub fn motion(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
     ui.separator();
     // Each drive's range, and the steps, edited.
-    let Some(entry) = ws.motions.list.iter().find(|e| e.id == id).cloned() else {
+    let Some(entry) = ws
+        .assembly
+        .motions
+        .list
+        .iter()
+        .find(|e| e.id == id)
+        .cloned()
+    else {
         return;
     };
-    if ws.motions.editing.as_ref().is_none_or(|(e, ..)| *e != id) {
-        ws.motions.editing = Some((
+    if ws
+        .assembly
+        .motions
+        .editing
+        .as_ref()
+        .is_none_or(|(e, ..)| *e != id)
+    {
+        ws.assembly.motions.editing = Some((
             id.clone(),
             crate::core::motion::ranges(&entry.drives),
             entry.steps.to_string(),
         ));
     }
     let mut save = false;
-    if let Some((_, ranges, steps)) = ws.motions.editing.as_mut() {
+    if let Some((_, ranges, steps)) = ws.assembly.motions.editing.as_mut() {
         egui::Grid::new("motion-ranges")
             .num_columns(3)
             .show(ui, |ui| {
