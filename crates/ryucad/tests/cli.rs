@@ -3831,6 +3831,115 @@ fn holes_at_places_from_the_cli() {
     assert_eq!(refs, ["plate/h/a", "plate/h/b", "plate/g/a"]);
 }
 
+/// #722's plate again, with one hole and a fill: 100 × M6 on the 20 mm
+/// grid, the seed at (10, 10) mm and the lattice running up and right.
+#[test]
+fn the_fixture_plate_of_issue_722_by_a_fill() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=200", "--param", "y=200",
+        "--param", "z=12",
+    ]);
+    let body = p.ok(&["inspect", "plate", "b"])["bodies"][0].clone();
+    let top = plane_face(&body, "plate/b", 1.0);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "point",
+        "--id",
+        "c",
+        "--by",
+        "coordinates",
+        "--coordinates",
+        "10mm,10mm,12mm",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "h",
+        "--spec",
+        "M6x1.0-6H THRU",
+        "--at",
+        "plate/c",
+    ]);
+    let f = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "pattern",
+        "--id",
+        "grid",
+        "--seed",
+        "h",
+        "--form",
+        "fill",
+        "--fill-face",
+        &top,
+        "--direction",
+        "x",
+        "--spacing",
+        "20",
+        "--margin",
+        "2",
+    ]);
+    assert_eq!(f["feature"]["form"], "fill");
+    assert_eq!(f["feature"]["margin"]["value"], "2 mm");
+    let holes = p.ok(&["holes", "plate"]);
+    let rows = holes["holes"].as_array().unwrap();
+    assert_eq!(rows.len(), 100);
+    assert!(rows.iter().all(|r| r["spec"] == "M6x1.0-6H THRU"));
+    let last = rows
+        .iter()
+        .find(|r| r["pattern"]["instance"] == json!([9, 9]))
+        .unwrap();
+    assert_eq!(last["ref"], "plate/grid/h/a/9,9");
+    // A dowel where one hole of the grid was: skipped there, drilled alone.
+    p.ok(&["feature", "edit", "plate", "grid", "--skip", "4,4"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "point",
+        "--id",
+        "d",
+        "--by",
+        "coordinates",
+        "--coordinates",
+        "90mm,90mm,12mm",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "dowel",
+        "--spec",
+        "DIA 6 H7 THRU",
+        "--at",
+        "plate/d",
+    ]);
+    let holes = p.ok(&["holes", "plate", "--group"]);
+    let groups = holes["groups"].as_array().unwrap();
+    let count = |spec: &str| {
+        groups
+            .iter()
+            .find(|g| g["spec"] == spec)
+            .unwrap_or_else(|| panic!("{spec} in {holes}"))["count"]
+            .clone()
+    };
+    assert_eq!(
+        (count("M6x1.0-6H THRU"), count("DIA 6 H7 THRU")),
+        (json!(99), json!(1))
+    );
+}
+
 /// #722: a 200 × 200 × 12 mm fixture plate, 100 × M6×1.0-6H THRU on a
 /// 20 mm grid.
 #[test]

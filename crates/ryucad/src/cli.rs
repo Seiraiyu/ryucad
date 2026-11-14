@@ -1477,7 +1477,9 @@ enum FeatureCmd {
     /// --fastener-fit, --fit) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
-    /// --angle) or mirror (--plane), skipping instances (--skip); an insert of
+    /// --angle), mirror (--plane) or a fill of hole seeds (--form fill,
+    /// --fill-face, --spacing, --spacing2, --direction, --margin), skipping
+    /// instances (--skip, i,j for a fill, signed); an insert of
     /// another part's solids (--of <part>, --rev working|label:L, --origin,
     /// --z, --x); a delete_body (--solid, repeated) taking solids out of the
     /// part's result; or, in an assembly, an instance (--of, --rev, --origin, --z,
@@ -3463,6 +3465,12 @@ struct FieldArgs {
     /// conical face it drills radially.
     #[arg(long = "at", value_name = "REFERENCE")]
     at: Vec<String>,
+    /// A fill pattern's face: a planar face <part>/<feature>/<name>.
+    #[arg(long, value_name = "REFERENCE")]
+    fill_face: Option<String>,
+    /// A fill pattern's margin from its face's boundary.
+    #[arg(long, value_name = "LENGTH")]
+    margin: Option<String>,
     /// A hole's place from an edge of --face: REFERENCE=LENGTH; give two.
     #[arg(long = "from-edge", value_name = "REFERENCE=LENGTH", value_parser = param)]
     from_edge: Vec<(String, String)>,
@@ -4038,8 +4046,11 @@ impl FieldArgs {
             // One --face is a chamfer's, a sketch's or a sweep's `face`;
             // several are a move's `faces`, beside any --face-distance
             // groups; with --with they are a replacement's groups.
-            face: (!built && self.with_groups.is_empty() && self.face.len() == 1)
-                .then(|| self.face[0].clone()),
+            face: self.fill_face.clone().or_else(|| {
+                (!built && self.with_groups.is_empty() && self.face.len() == 1)
+                    .then(|| self.face[0].clone())
+            }),
+            margin: self.margin.clone().map(Value::String),
             face_list: None,
             tolerance: self.tolerance.clone().map(Value::String),
             sheets: (!self.sheets.is_empty()).then(|| self.sheets.clone()),

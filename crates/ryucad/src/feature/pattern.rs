@@ -62,7 +62,7 @@ fn pattern_report(part: &Id, x: &crate::doc::pattern::Pattern) -> Value {
     v
 }
 
-pub(crate) const PATTERN: [&str; 15] = [
+pub(crate) const PATTERN: [&str; 17] = [
     "form",
     "features",
     "direction",
@@ -78,11 +78,14 @@ pub(crate) const PATTERN: [&str; 15] = [
     "plane",
     "skip",
     "targets",
+    "face",
+    "margin",
 ];
 
 /// A pattern from `current`'s fields (none for a new one, whose form,
 /// left out, is what its fields say: a mirror with a plane, circular with
-/// an axis, else linear) with what was given laid over them. A new form
+/// an axis, a fill with a face, else linear) with what was given laid
+/// over them. A new form
 /// keeps only the fields it takes; references (a direction, an axis, a
 /// plane) are given as text and kept as a file holds them; `direction2`
 /// `""` drops the second direction, and no skips, or false, is the
@@ -98,6 +101,7 @@ pub(crate) fn pattern_from(
     let f = &given.fields;
     let fresh = || {
         let form = match (&f.plane, &f.axis) {
+            _ if f.face.is_some() => "fill",
             (Some(_), _) => "mirror",
             (None, Some(_)) => "circular",
             _ => "linear",
@@ -121,6 +125,7 @@ pub(crate) fn pattern_from(
                 "skip",
             ],
             "circular" => &["axis", "count", "angle", "skip"],
+            "fill" => &["face", "direction", "spacing", "spacing2", "margin", "skip"],
             _ => &[],
         };
         o.retain(|k, _| {
@@ -138,6 +143,7 @@ pub(crate) fn pattern_from(
         ("direction2", &f.direction2),
         ("axis", &f.axis),
         ("plane", &f.plane),
+        ("face", &f.face),
     ] {
         if let Some(t) = x.as_deref().filter(|t| !t.is_empty()) {
             o.insert(k.into(), entity(t, &format!("/{k}"))?);
@@ -153,6 +159,15 @@ pub(crate) fn pattern_from(
         if let Some(x) = x {
             o.insert(k.into(), x.clone());
         }
+    }
+    match &f.margin {
+        Some(Value::String(s)) if s.is_empty() => {
+            o.remove("margin");
+        }
+        Some(x) => {
+            o.insert("margin".into(), x.clone());
+        }
+        None => {}
     }
     for (k, x) in [("reverse", f.reverse), ("reverse2", f.reverse2)] {
         match x {
@@ -202,6 +217,10 @@ pub(crate) fn pattern_from(
             ),
         ],
         Some("mirror") => &[("plane", "an origin plane or a planar face")],
+        Some("fill") => &[
+            ("face", "the planar face the lattice fills"),
+            ("spacing", "the distance between rows"),
+        ],
         _ => &[],
     };
     let form = o.get("form").and_then(Value::as_str).unwrap_or_default();

@@ -170,6 +170,10 @@ pub struct FeatureFields {
     /// away (a sketch must then be given).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub places: Option<Value>,
+    /// A fill pattern's margin from its face's boundary (ryucad 28.C);
+    /// `""` takes it away. A fill's face is `face`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin: Option<Value>,
     /// An entity on each loop to sweep (for a sweep of a face, an edge or
     /// vertex of it by name); empty means every closed loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
