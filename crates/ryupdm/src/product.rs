@@ -68,6 +68,14 @@ pub trait Product: ryu_git::Layout {
         let _ = (src, part);
         Ok(BTreeMap::new())
     }
+
+    /// Whether a project file (relative to the project) may belong to
+    /// any part: one a commit staging it may make every part with records
+    /// stale (a ryueda block, footprint or `erc.json`). None by default.
+    fn shared(path: &str) -> bool {
+        let _ = path;
+        false
+    }
 }
 
 /// The identity of the project `src` holds, `None` when it has no

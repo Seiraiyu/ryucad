@@ -750,6 +750,12 @@ pub fn staged_for<P: Product>(repo: &gix::Repository, prefix: &str) -> Result<Ve
                     crate::history::blobs(repo, t, &format!("{dir}/"), &mut all)?;
                 }
             }
+            // Root files, so one left as it was isn't read as changed.
+            for name in P::ROOT_FILES {
+                if let Some(id) = crate::history::entry(repo, tree, prefix, name)? {
+                    all.insert((*name).to_owned(), id);
+                }
+            }
             all
         }
         Err(_) => BTreeMap::new(),
@@ -758,6 +764,7 @@ pub fn staged_for<P: Product>(repo: &gix::Repository, prefix: &str) -> Result<Ve
     let paths: std::collections::BTreeSet<&String> = index.keys().chain(head.keys()).collect();
     let mut records_changed: Vec<String> = Vec::new();
     let mut parts_touched: std::collections::BTreeSet<Id> = Default::default();
+    let mut touch_all = false;
     for p in paths {
         if !changed(p) {
             continue;
@@ -776,11 +783,19 @@ pub fn staged_for<P: Product>(repo: &gix::Repository, prefix: &str) -> Result<Ve
                 if let Some(id) = P::part_of(p) {
                     parts_touched.insert(id);
                 }
+                // Both: a ryueda library component is a part in a library
+                // project and placed by designs in a design project.
+                if P::shared(p) {
+                    touch_all = true;
+                }
             }
         }
     }
     let src = Staged { repo, files: index };
     let records = Records::read_in(&src, P::NAME)?;
+    if touch_all {
+        parts_touched.extend(records.parts());
+    }
     let has_records = |p: &Id| records.of(p).next().is_some();
     if records_changed.is_empty() && !parts_touched.iter().any(has_records) {
         return Ok(Vec::new());
