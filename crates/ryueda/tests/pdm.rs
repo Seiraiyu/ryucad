@@ -9,7 +9,7 @@ mod draw;
 #[path = "support/gitrepo.rs"]
 mod gitrepo;
 use gitrepo::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 /// `ryueda args` in `dir`, which must succeed; its `result`.
@@ -298,4 +298,231 @@ fn watchers_hear_of_release_states() {
     assert_eq!(part["part"], "r_4k7", "{v}");
     assert_eq!(part["state"]["state"], "in_work", "{v}");
     ok(&lib, &run, true, &["daemon", "stop"]);
+}
+
+/// What `git args` printed in `dir`, trimmed.
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = git_command(dir).args(args).output().unwrap();
+    assert!(out.status.success(), "git {args:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// The service's signed tag on the record at `rel` (relative to the
+/// repository), official at `commit`, as ryucad's tests make it, the
+/// project at `prefix`.
+fn attest(top: &Path, prefix: &str, rel: &str, commit: &str) {
+    use ryupdm::attest::*;
+    use ryupdm::record::{Kind, Record};
+    let bytes = std::fs::read(top.join(rel)).unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    let record = Record::from_json_in(&v, Kind::Release, "ryueda").unwrap();
+    let rules = vec![ryupdm::approvals::Rule {
+        parts: vec!["*".into()],
+        count: 1,
+        from: vec!["alice".into(), "bob".into()],
+    }];
+    let a = Attestation {
+        approvals: vec![Approval {
+            at: "2026-11-02T09:14:03Z".into(),
+            commit: commit.into(),
+            github: User {
+                id: 1,
+                login: "alice".into(),
+            },
+            review: 1,
+            via: vec![],
+        }],
+        commit: commit.into(),
+        label: record.label().into(),
+        missing: vec![],
+        outcome: Outcome::Approved,
+        part: record.part().clone(),
+        project: record.project().clone(),
+        proposed_by: User {
+            id: 2,
+            login: "dana".into(),
+        },
+        pull: Some(Pull {
+            number: 1,
+            repo: "acme/widgets".into(),
+        }),
+        record: blake3::hash(&bytes).to_hex().to_string(),
+        record_kind: Kind::Release,
+        rules,
+        rules_at: git_out(top, &["rev-parse", &format!("{commit}^")]),
+        signed_at: "2026-11-02T09:20:11Z".into(),
+    };
+    let name = ryupdm::history::tag_name_of(prefix, record.part(), record.label(), Kind::Release);
+    let file = top.join(".git/ATTEST_MSG");
+    std::fs::write(&file, sign(&a, &TEST_SEED)).unwrap();
+    git(
+        top,
+        &[
+            "tag",
+            "-a",
+            "--cleanup=verbatim",
+            "-F",
+            file.to_str().unwrap(),
+            &name,
+            commit,
+        ],
+    );
+}
+
+#[test]
+fn components_release_with_all_become_official_tag_and_go_modified() {
+    for daemon in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let (top, run) = (d.path().join("repo"), d.path().join("run"));
+        std::fs::create_dir_all(&top).unwrap();
+        let (lib, parts) = library(&top, &run, daemon);
+        let v = ok(
+            &lib,
+            &run,
+            daemon,
+            &["release", "propose", "--all", "--note", "first"],
+        );
+        assert_eq!(v["proposed"].as_array().unwrap().len(), parts.len(), "{v}");
+        assert_eq!(v["refused"], json!([]), "{v}");
+        git(&top, &["add", "-A"]);
+        git(&top, &["commit", "-q", "-m", "release A"]);
+        let v = ok(&lib, &run, daemon, &["release", "list"]);
+        assert!(
+            v["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["status"] == "official"),
+            "{v}"
+        );
+        let v = ok(&lib, &run, daemon, &["release", "sync"]);
+        assert_eq!(v["created"].as_array().unwrap().len(), parts.len(), "{v}");
+        let tags = git_out(&top, &["tag", "-l"]);
+        assert!(tags.contains("ryupdm/lib/r_4k7/A"), "{tags}");
+        // The resistor's symbol changes: the resistor is modified, the rest
+        // stay released, and --all proposes B of the resistor alone.
+        let sym = lib.join("library/symbols/r.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&sym).unwrap()).unwrap();
+        v["name"] = json!("R_new");
+        std::fs::write(&sym, ryueda::canonical::to_string(&v)).unwrap();
+        let v = ok(&lib, &run, daemon, &["release", "list", "r_4k7"]);
+        assert_eq!(v["parts"][0]["state"], "modified", "{v}");
+        let v = ok(&lib, &run, daemon, &["release", "propose", "--all"]);
+        let labels: Vec<(&str, &str)> = v["proposed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p["part"].as_str().unwrap(), p["label"].as_str().unwrap()))
+            .collect();
+        assert_eq!(labels, [("r_4k7", "B")], "{v}");
+        let v = ok(&lib, &run, daemon, &["release", "check"]);
+        assert_eq!(v["passed"], true, "{v}");
+        if daemon {
+            ok(&lib, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
+#[test]
+fn approvals_are_verified_offline_from_the_services_tags() {
+    use ryupdm::attest::{TEST_SEED, hex, public_key, test_key_id};
+    let d = tempfile::tempdir().unwrap();
+    let (top, run) = (d.path().join("repo"), d.path().join("run"));
+    std::fs::create_dir_all(&top).unwrap();
+    let (lib, _) = library(&top, &run, false);
+    let approvals = json!({"keys": {test_key_id(): hex(&public_key(&TEST_SEED))},
+                           "rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]});
+    ok(
+        &lib,
+        &run,
+        false,
+        &["pdm", "configure", "--approvals", &approvals.to_string()],
+    );
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-q", "-m", "rules"]);
+    let v = ok(&lib, &run, false, &["release", "propose", "r_4k7"]);
+    assert_eq!(v["proposed"][0]["approval"]["required"], true, "{v}");
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-q", "-m", "A"]);
+    let official = git_out(&top, &["rev-parse", "HEAD"]);
+    let v = ok(&lib, &run, false, &["release", "sync"]);
+    assert_eq!(v["left_to_service"].as_array().unwrap().len(), 1, "{v}");
+    attest(&top, "lib/", "lib/releases/r_4k7/A.json", &official);
+    let v = ok(&lib, &run, false, &["release", "list"]);
+    let a = &v["records"][0]["approval"];
+    assert_eq!(
+        (a["status"].as_str(), a["approvers"][0]["login"].as_str()),
+        (Some("approved"), Some("alice")),
+        "{v}"
+    );
+    assert_eq!(a["key"], test_key_id());
+}
+
+#[test]
+fn a_design_releases_with_its_results() {
+    for daemon in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let (top, run) = (d.path().join("repo"), d.path().join("run"));
+        std::fs::create_dir_all(&top).unwrap();
+        let board = breakout_in_git(&top, &run);
+        git(&top, &["branch", "-M", "main"]);
+        ok(&board, &run, daemon, &["pdm", "init"]);
+        ok(
+            &board,
+            &run,
+            daemon,
+            &["props", "set", "board", "number=200-0001"],
+        );
+        let dry = ok(
+            &board,
+            &run,
+            daemon,
+            &["release", "propose", "board", "--dry-run"],
+        );
+        let problems = dry["parts"][0]["problems"].as_array().unwrap().clone();
+        // Every component without a maker part number gets one.
+        let list = ok(&board, &run, daemon, &["libcomp", "list"]);
+        for c in list["libcomps"].as_array().unwrap() {
+            if c["mpn"].as_str().unwrap_or_default().is_empty() {
+                let id = c["id"].as_str().unwrap();
+                ok(
+                    &board,
+                    &run,
+                    daemon,
+                    &[
+                        "libcomp",
+                        "edit",
+                        id,
+                        "--manufacturer",
+                        "Yageo",
+                        "--mpn",
+                        &format!("TEST-{id}"),
+                    ],
+                );
+            }
+        }
+        let dry = ok(
+            &board,
+            &run,
+            daemon,
+            &["release", "propose", "board", "--dry-run"],
+        );
+        assert_eq!(
+            dry["parts"][0]["ready"], true,
+            "before: {problems:?}, now: {dry}"
+        );
+        let v = ok(&board, &run, daemon, &["release", "propose", "board"]);
+        let rec = &v["proposed"][0]["record"];
+        assert!(
+            rec["results"]["netlist"].is_string() && rec["results"]["erc"].is_string(),
+            "{v}"
+        );
+        git(&top, &["add", "-A"]);
+        git(&top, &["commit", "-q", "-m", "board A"]);
+        let v = ok(&board, &run, daemon, &["release", "check", "--results"]);
+        assert_eq!(v["passed"], true, "{v}");
+        if daemon {
+            ok(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
 }
