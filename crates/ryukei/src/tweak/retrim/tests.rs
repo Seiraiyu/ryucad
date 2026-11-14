@@ -271,3 +271,48 @@ fn a_slabs_side_reaches_the_region_s_side() {
         ))
     ));
 }
+
+/// NIST FTC 07's seam pair (#652, design 551; public domain): a pipe-like
+/// round's straight run (a cylinder, a working face) and its corner torus
+/// (outside the region, across a frontier edge), tangent along the circle
+/// they share, cut from the input and from the re-trim's working body
+/// (plan 18.C, Task 1). Carried past the circle, the cylinder crosses the
+/// torus along curves leaving it, so neither face keeps off the other
+/// beside the seam: the seam built from the input's edge as the re-trim
+/// builds it (`seam_for`) is withheld (Decision 4), and the pair is traced
+/// whole as before. Task 1 found no FTC 07 pair the rule settles.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ftc_07s_seam_pair_crossing_past_its_seam_is_withheld() {
+    use crate::codec::decode_body;
+    use crate::intersect::known_seam;
+    let input = decode_body(include_bytes!(
+        "../../../tests/data/nist_ftc_07_seam_input.body"
+    ))
+    .unwrap();
+    let work = decode_body(include_bytes!(
+        "../../../tests/data/nist_ftc_07_seam_work.body"
+    ))
+    .unwrap();
+    // The edge both input faces use.
+    let e = input
+        .edges()
+        .find(|&e| input.edge_fins(e).count() == 2)
+        .expect("the seam edge");
+    let fins: Vec<_> = input.edge_fins(e).collect();
+    let face = |fin| input.loops[input.fins[fin].loop_].face;
+    // Working faces carry their input faces' names.
+    let working = |f: FaceId| match work.by_name(input.faces[f].name) {
+        Some(EntityId::Face(w)) => w,
+        _ => panic!("no working face for {f:?}"),
+    };
+    let (wa, wb) = (working(face(fins[0])), working(face(fins[1])));
+    let seam = super::body::seam_for(&input, e, (&work, wa), (&work, wb))
+        .expect("tangent all along, with pcurves");
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    assert!(known_seam((&work, wa), (&work, wb), &[seam], &m).is_err());
+}
