@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 /// Where a setting's value comes from, for people.
 fn source(ws: &Workspace, key: &str) -> &'static str {
-    match ws.settings.all.iter().find(|s| s.key == key) {
+    match ws.session.settings.all.iter().find(|s| s.key == key) {
         Some(s) if s.default => "default",
         Some(s) if s.scope == "project" => "this project",
         Some(_) => "your preferences",
@@ -26,7 +26,8 @@ pub fn window(title: &str, view: egui::Rect) -> egui::Window<'_> {
 }
 
 fn about(ws: &Workspace, key: &str) -> String {
-    ws.settings
+    ws.session
+        .settings
         .all
         .iter()
         .find(|s| s.key == key)
@@ -35,7 +36,7 @@ fn about(ws: &Workspace, key: &str) -> String {
 
 /// A setting chosen from a list.
 fn choice(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, options: &[&str]) {
-    let current = ws.settings.text(key, "").to_owned();
+    let current = ws.session.settings.text(key, "").to_owned();
     let name = crate::ui::form::label(ui, label, false).on_hover_text(about(ws, key));
     let mut picked = None;
     egui::ComboBox::from_id_salt(key)
@@ -61,7 +62,7 @@ fn choice(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, options
 fn scale(ui: &mut egui::Ui, ws: &mut Workspace) {
     let key = "ui.scale";
     let now = f64::from(crate::ui::app::scale_of(
-        ws.settings.get(key).unwrap_or(&json!(1.0)),
+        ws.session.settings.get(key).unwrap_or(&json!(1.0)),
     ));
     let percent = |s: f64| format!("{:.0} %", s * 100.0);
     let name = crate::ui::form::label(ui, "UI scale", false).on_hover_text(about(ws, key));
@@ -91,6 +92,7 @@ const SCALES: [f64; 8] = [0.75, 0.875, 1.0, 1.125, 1.25, 1.5, 1.75, 2.0];
 /// A setting that is on or off. Returns whether it was changed.
 fn toggle(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str) -> bool {
     let mut on = ws
+        .session
         .settings
         .get(key)
         .and_then(Value::as_bool)
@@ -109,6 +111,7 @@ fn toggle(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str) -> bool
 fn number(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, range: (i64, i64)) {
     let id = ui.make_persistent_id(("setting", key));
     let stored = ws
+        .session
         .settings
         .get(key)
         .and_then(Value::as_i64)
@@ -136,7 +139,7 @@ fn number(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, range: 
 /// Returns whether it was sent.
 fn text(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, hint: &str) -> bool {
     let id = ui.make_persistent_id(("setting", key));
-    let stored = ws.settings.text(key, "").to_owned();
+    let stored = ws.session.settings.text(key, "").to_owned();
     let mut t = ui
         .data(|d| d.get_temp::<String>(id))
         .unwrap_or(stored.clone());
@@ -205,10 +208,12 @@ fn shared_cache(ui: &mut egui::Ui, ws: &mut Workspace) {
                     ui.data_mut(|d| d.remove::<String>(id));
                 }
                 let stored = ws
+                    .session
                     .cache
                     .as_ref()
                     .is_some_and(|c| c["remote"]["token"] == true)
                     || ws
+                        .session
                         .cache_token
                         .as_ref()
                         .is_some_and(|t| t["token"] == "file");
@@ -221,8 +226,8 @@ fn shared_cache(ui: &mut egui::Ui, ws: &mut Workspace) {
             });
             ui.end_row();
         });
-    ui.weak(shared_text(ws.cache.as_ref()));
-    if let Some(t) = &ws.cache_token {
+    ui.weak(shared_text(ws.session.cache.as_ref()));
+    if let Some(t) = &ws.session.cache_token {
         ui.weak(token_text(t));
     }
 }
@@ -315,7 +320,7 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
         .resizable(false)
         .show(ctx, |ui| {
             ui.label("Saved for you on this machine; projects don't carry them.");
-            for w in ws.settings.warnings.clone() {
+            for w in ws.session.settings.warnings.clone() {
                 ui.colored_label(ui.visuals().warn_fg_color, w);
             }
             crate::ui::form::plain_grid("preferences", 3)
@@ -372,8 +377,8 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label("Disk cache");
-                ui.weak(cache_text(ws.cache.as_ref()));
-                let enabled = ws.cache.as_ref().is_some_and(|c| c["enabled"] == true);
+                ui.weak(cache_text(ws.session.cache.as_ref()));
+                let enabled = ws.session.cache.as_ref().is_some_and(|c| c["enabled"] == true);
                 if ui
                     .add_enabled(enabled, egui::Button::new("Clear cache"))
                     .on_hover_text("Results and meshes every project on this machine reuses; anything cleared is rebuilt when next needed")
@@ -421,7 +426,7 @@ pub fn interference(
         .open(open)
         .default_width(420.0)
         .show(ctx, |ui| {
-            let Some(i) = &ws.interference else {
+            let Some(i) = &ws.assembly.interference else {
                 ui.label("Show an assembly, then check it.");
                 return;
             };
@@ -487,7 +492,7 @@ fn line_grid(ui: &mut egui::Ui, id: &str, lines: &[(String, String)]) {
 /// Tools > Measure, while on: what the picks measured, with Copy. Esc or
 /// closing it leaves the tool.
 pub fn measure(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
-    let mut open = ws.measure.on;
+    let mut open = ws.view.measure.on;
     if !open {
         return;
     }
@@ -496,7 +501,7 @@ pub fn measure(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
         .open(&mut open)
         .default_width(360.0)
         .show(ctx, |ui| {
-            let t = &ws.measure;
+            let t = &ws.view.measure;
             if t.picks.is_empty() {
                 ui.label("Pick a face, edge or vertex: its properties. Pick a second: the distance and angle between them.");
                 return;
@@ -522,7 +527,7 @@ pub fn measure(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
         ctx.copy_text(text);
     }
     if !open {
-        ws.measure.set(false);
+        ws.view.measure.set(false);
     }
 }
 
@@ -533,7 +538,7 @@ pub fn measure(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
 /// material's colour; and Clear, which takes the entry out.
 pub fn appearance(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
     use crate::core::appearance::Preview;
-    let mut open = ws.appearance.open;
+    let mut open = ws.view.appearance.open;
     if !open {
         return;
     }
@@ -547,7 +552,7 @@ pub fn appearance(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
         .open(&mut open)
         .default_width(340.0)
         .show(ctx, |ui| {
-            let e = &mut ws.appearance;
+            let e = &mut ws.view.appearance;
             if e.targets.is_empty() {
                 ui.label("Select a face, a solid or an occurrence, or show one part.");
                 return;
@@ -635,7 +640,14 @@ pub fn appearance(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
         ws.preview_appearance(p);
     }
     // A colour dragged in the picker is written when the pointer is let go.
-    if write.is_none() && released && ws.appearance.dragging.is_some_and(|d| d.colour.is_some()) {
+    if write.is_none()
+        && released
+        && ws
+            .view
+            .appearance
+            .dragging
+            .is_some_and(|d| d.colour.is_some())
+    {
         write = Some("colour");
     }
     if let Some(field) = write {
@@ -658,7 +670,7 @@ pub fn mass(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, view: egui
         .open(open)
         .default_width(380.0)
         .show(ctx, |ui| {
-            let Some(m) = &ws.mass else {
+            let Some(m) = &ws.view.mass else {
                 ui.label("Select a solid, or show a part or assembly.");
                 return;
             };
@@ -706,7 +718,7 @@ pub fn clearance(
         .open(open)
         .default_width(440.0)
         .show(ctx, |ui| {
-            let Some(c) = &mut ws.clearance else {
+            let Some(c) = &mut ws.assembly.clearance else {
                 ui.label("Show an assembly, then measure its clearance.");
                 return;
             };
@@ -744,7 +756,7 @@ pub fn clearance(
         ws.check_clearance();
     }
     let (k, points) = show?;
-    if let Some(c) = &mut ws.clearance {
+    if let Some(c) = &mut ws.assembly.clearance {
         c.shown = Some(k);
     }
     Some(points)

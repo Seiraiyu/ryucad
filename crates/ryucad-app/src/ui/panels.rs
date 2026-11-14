@@ -18,6 +18,7 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
     let me = ws.me().to_owned();
     let now = std::time::Instant::now();
     let lines: Vec<ryu_app::people::Line> = ws
+        .session
         .people
         .all
         .values()
@@ -35,8 +36,8 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
             followable: p.camera.is_some(),
         })
         .collect();
-    if let Some(f) = ryu_app::people::strip(ui, &lines, ws.following.as_deref()) {
-        ws.following = f;
+    if let Some(f) = ryu_app::people::strip(ui, &lines, ws.session.following.as_deref()) {
+        ws.session.following = f;
     }
 }
 
@@ -63,8 +64,10 @@ pub fn compare_bar(ui: &mut egui::Ui, ws: &mut Workspace, typed: &mut Option<Str
             }
             return;
         }
-        let Some(c) = &ws.compare else { return };
-        let blink = ws.blink.clone();
+        let Some(c) = &ws.comparing.compare else {
+            return;
+        };
+        let blink = ws.comparing.blink.clone();
         let named = c.named().to_owned();
         let commit = match (&c.swapped, c.commit.as_deref()) {
             (None, Some(c)) => format!(" ({})", &c[..c.len().min(10)]),
@@ -178,16 +181,17 @@ pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, view: &crate::ui::view::Vie
             if crate::ui::platform::software() {
                 ui.weak("Software rendering");
             }
-            if let Some(m) = &ws.merge {
+            if let Some(m) = &ws.branches.merge {
                 ui.colored_label(ui.visuals().warn_fg_color, m.summary());
             }
             // What can't move, said before a drag or Move is tried (#731).
-            let unmovable = (ws.mode != crate::core::modes::Mode::View && ws.mover.is_none())
-                .then(|| crate::ui::commands::move_target(ws, view.chosen.as_ref()))
-                .flatten()
-                .and_then(Result::err)
-                .map(|why| format!("Can't move: {why}"));
-            if let Some(n) = ws.drag_note.clone().or(unmovable) {
+            let unmovable = (ws.session.mode != crate::core::modes::Mode::View
+                && ws.assembly.mover.is_none())
+            .then(|| crate::ui::commands::move_target(ws, view.chosen.as_ref()))
+            .flatten()
+            .and_then(Result::err)
+            .map(|why| format!("Can't move: {why}"));
+            if let Some(n) = ws.assembly.drag_note.clone().or(unmovable) {
                 ui.colored_label(ui.visuals().warn_fg_color, n);
             }
         });
@@ -198,6 +202,7 @@ pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, view: &crate::ui::view::Vie
 /// what agents are doing, the parts and features, what failed.
 fn model_state(ui: &mut egui::Ui, ws: &Workspace) {
     let busy: Vec<String> = ws
+        .session
         .people
         .others(ws.me())
         .filter_map(|p| p.status.as_ref().map(|(s, _)| format!("{}: {s}", p.name)))

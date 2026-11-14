@@ -8,7 +8,7 @@ use eframe::egui;
 pub fn picker(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
     let names: Vec<String> = ws.deps.rows.iter().filter_map(|r| r.name.clone()).collect();
     let gate = ws.control("feature.add");
-    let Some(p) = ws.picker.as_mut() else {
+    let Some(p) = ws.deps.picker.as_mut() else {
         return;
     };
     let (mut open, mut dependency, mut place) = (true, None, false);
@@ -83,7 +83,7 @@ pub fn picker(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
             }
         });
     if !open {
-        ws.picker = None;
+        ws.deps.picker = None;
         return;
     }
     if let Some(n) = dependency {

@@ -14,6 +14,7 @@ use ryu_board::model::{AttrValue, Feature, FeatureKind, Features, Polarity, Symb
 use ryu_board::symbol::{Corners, Plating, StandardSymbol, ThermalForm};
 
 use crate::odb::attrs::{Decl, Decls};
+use crate::odb::units::Units;
 
 /// Nanometres as millimetres, exactly: up to six decimals, no trailing
 /// zeros.
@@ -358,16 +359,28 @@ impl Lookup {
     }
 }
 
-/// A features file of `features`, in millimetres. User symbols are named
-/// as they are; unknown ones too. Panics on a trapezoid, which ODB++
-/// can't name.
+/// A features file of `features`, in millimetres. User and unknown
+/// symbols are named as they are, in mils (` I`) when their name is a
+/// standard symbol in microns. Panics on a trapezoid, which ODB++ can't
+/// name.
 pub fn write_features(features: &Features) -> String {
     let decls = Decls::default();
     let mut out = String::from("UNITS=MM\n#\n#Feature symbol names\n#\n");
     for (i, s) in features.symbols().iter().enumerate() {
         let name = match s {
             Symbol::Standard(s) => symbol_name(s).expect("ODB++ has no trapezoid"),
-            Symbol::User(n) | Symbol::Unknown(n) => n.clone(),
+            // The reader keeps a name as user or unknown only when it
+            // isn't a standard symbol in the units it was read in. One
+            // that is standard in microns, which this millimetre file
+            // would make it, was read in mils, so it goes back in mils
+            // (fuzz odb, ryucad plan 30.A).
+            Symbol::User(n) | Symbol::Unknown(n) => {
+                if StandardSymbol::parse(n, Units::Mm.names()).is_some() {
+                    format!("{n} I")
+                } else {
+                    n.clone()
+                }
+            }
         };
         out.push_str(&format!("${i} {name}\n"));
     }

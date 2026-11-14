@@ -24,7 +24,7 @@ pub(crate) fn side(v: &serde_json::Value) -> String {
 /// concerns.
 pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     let gate = ws.control("merge.resolve");
-    let Some(m) = &ws.merge else { return };
+    let Some(m) = &ws.branches.merge else { return };
     ui.heading(format!("{} in progress", m.step()));
     ui.label(m.summary());
     ui.weak(

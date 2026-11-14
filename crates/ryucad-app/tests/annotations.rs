@@ -64,7 +64,7 @@ fn drawn(ws: &Workspace) -> Option<String> {
 }
 
 fn set(ws: &mut Workspace, name: &str, text: &str) {
-    let f = ws.form.as_mut().unwrap();
+    let f = ws.forms.form.as_mut().unwrap();
     f.params.iter_mut().find(|x| x.name == name).unwrap().text = text.into();
 }
 
@@ -74,15 +74,17 @@ fn the_window_draws_and_reads_its_persons_draft() {
     let mut ws = open(&p, Mode::Annotate);
     let working = drawn(&ws).unwrap();
     ws.open_form(Some(("p".into(), "boss".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
     set(&mut ws, "radius", "4 mm");
     ws.save_form();
     // The draft is drawn: the boss as suggested, the files as they were.
     assert!(ws.wait_until(WAIT, |ws| ws.model_rev().is_some() && ws.idle()));
     assert!(ws.wait_until(WAIT, |ws| drawn(ws).is_some_and(|h| h != working)));
     // The draft is painted as a compare against the agent's model.
-    assert!(ws.wait_until(WAIT, |ws| ws.compare.as_ref().is_some_and(|c| c.loaded)));
-    let c = ws.compare.as_ref().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.comparing.compare.as_ref().is_some_and(|c| c.loaded)
+    }));
+    let c = ws.comparing.compare.as_ref().unwrap();
     assert_eq!(c.rev, "working");
     assert_eq!(c.to.as_deref(), Some("draft:Dana"));
     assert!(
@@ -93,7 +95,7 @@ fn the_window_draws_and_reads_its_persons_draft() {
     );
     // A second suggestion stands on the first: the form read the draft.
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.form.as_ref().is_some_and(|f| {
+        && ws.forms.form.as_ref().is_some_and(|f| {
             f.params
                 .iter()
                 .any(|x| x.name == "radius" && x.read == "4 mm")
@@ -114,13 +116,20 @@ fn the_window_draws_and_reads_its_persons_draft() {
     assert!(ws.wait_until(WAIT, |ws| {
         ws.model_rev().is_none()
             && ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.rev == format!("annotation:{first}"))
     }));
     ws.choose_annotation(None);
-    assert!(ws.wait_until(WAIT, |ws| ws.model_rev().is_some()
-        && ws.compare.as_ref().is_some_and(|c| c.to.is_some())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.model_rev().is_some()
+            && ws
+                .comparing
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.to.is_some())
+    }));
 }
 
 #[test]
@@ -129,7 +138,7 @@ fn a_part_asked_for_as_the_drawn_revision_moves_is_asked_for_again() {
     let mut ws = open(&p, Mode::Annotate);
     let working = drawn(&ws).unwrap();
     ws.open_form(Some(("p".into(), "boss".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
     set(&mut ws, "radius", "4 mm");
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
@@ -147,10 +156,10 @@ fn a_part_asked_for_as_the_drawn_revision_moves_is_asked_for_again() {
     // It is asked for again at the draft, not left loading.
     assert!(
         ws.wait_until(WAIT, |ws| ws.idle()
-            && ws.loading.is_empty()
+            && ws.model.loading.is_empty()
             && drawn(ws).is_some_and(|h| h != working)),
         "still loading {:?}",
-        ws.loading
+        ws.model.loading
     );
 }
 
@@ -183,7 +192,7 @@ fn a_person_annotates_and_the_agent_works_through_it() {
     );
     // A radius suggested from the form.
     ws.open_form(Some(("p".into(), "boss".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
     set(&mut ws, "radius", "2 mm");
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| ws.annotations.all.len() == 2 && ws.idle()));
@@ -246,11 +255,14 @@ fn view_refuses_and_direct_edit_writes() {
     );
     ws.set_mode(Mode::Edit);
     ws.open_form(Some(("p".into(), "boss".into())));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
     set(&mut ws, "radius", "5 mm");
     ws.save_form();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+        ws.forms
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
     }));
     assert_eq!(radius_on_disk(&p), "5 mm");
 }
@@ -270,7 +282,7 @@ fn a_reconnected_window_is_in_view_again() {
         ws.tick(std::time::Instant::now());
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(ws.mode, Mode::View);
+    assert_eq!(ws.session.mode, Mode::View);
     // And the daemon says so.
     assert!(ws.wait_until(WAIT, |ws| ws.myself().is_some_and(|m| m.mode == Mode::View)));
 }
@@ -286,19 +298,22 @@ fn a_freehand_drag_in_annotate_is_a_rough_suggestion_with_a_comment_to_edit() {
     ws.drag_to("frame", "b2", [0.01, 0.0, 0.0]);
     assert!(ws.wait_until(WAIT, |w| w.idle()));
     ws.drop_drag();
-    assert!(ws.wait_until(WAIT, |w| w.annotation_ui.editing.is_some()));
+    assert!(ws.wait_until(WAIT, |w| w.annotations.annotation_ui.editing.is_some()));
     let listed = p.ok(&["annotations", "list"]);
     let a = &listed["annotations"][0];
     assert_eq!(a["change"]["rough"], true, "{a}");
     assert_eq!(a["comment"], "Move about here", "{a}");
     assert_eq!(a["change"]["request"]["method"], "assembly.move", "{a}");
-    let (id, text) = ws.annotation_ui.editing.clone().unwrap();
+    let (id, text) = ws.annotations.annotation_ui.editing.clone().unwrap();
     assert_eq!(
         (id.as_str(), text.as_str()),
         (a["id"].as_str().unwrap(), "Move about here")
     );
     assert_eq!(ws.wants_tile, Some("annotations"));
-    assert_eq!(ws.chosen_annotation.as_deref(), Some(id.as_str()));
+    assert_eq!(
+        ws.annotations.chosen_annotation.as_deref(),
+        Some(id.as_str())
+    );
     // Nothing moved.
     let x = p.ok(&["feature", "show", "frame", "b2"])["pose"]["origin_m"][0]
         .as_f64()
@@ -336,7 +351,7 @@ fn a_markup_is_posted_with_what_its_marks_touch_and_edited_again() {
     let top = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
     let mut ws = open(&p, Mode::Annotate);
     ws.open_markup(from_above()).unwrap();
-    let m = ws.markup.as_mut().unwrap();
+    let m = ws.annotations.markup.as_mut().unwrap();
     assert_eq!(m.part, "p");
     // An arrow across the block's top, clear of the boss.
     m.press([0.005, 0.002]);
@@ -351,13 +366,16 @@ fn a_markup_is_posted_with_what_its_marks_touch_and_edited_again() {
     m.release(1e-4);
     // Post wants words: a mark says where.
     ws.post_markup();
-    assert!(ws.markup.as_ref().unwrap().note.is_some());
-    ws.markup.as_mut().unwrap().comment = "Round this edge 2 mm".into();
+    assert!(ws.annotations.markup.as_ref().unwrap().note.is_some());
+    ws.annotations.markup.as_mut().unwrap().comment = "Round this edge 2 mm".into();
     ws.post_markup();
-    assert!(ws.wait_until(WAIT, |ws| ws.markup.is_none()
+    assert!(ws.wait_until(WAIT, |ws| ws.annotations.markup.is_none()
         && ws.annotations.all.len() == 1));
     let id = ws.annotations.all.keys().next().unwrap().clone();
-    assert_eq!(ws.chosen_annotation.as_deref(), Some(id.as_str()));
+    assert_eq!(
+        ws.annotations.chosen_annotation.as_deref(),
+        Some(id.as_str())
+    );
     // The daemon worked out what each touches: the block's top.
     let marks = listed_marks(&p, &id);
     assert_eq!(marks["kinds"], serde_json::json!(["arrow", "stroke"]));
@@ -385,7 +403,7 @@ fn a_markup_is_posted_with_what_its_marks_touch_and_edited_again() {
     // Its author edits it: the bar reopens at its view with its marks; the
     // stroke undone, Save sends the arrow alone.
     ws.edit_markup(&id).unwrap();
-    let m = ws.markup.as_mut().unwrap();
+    let m = ws.annotations.markup.as_mut().unwrap();
     assert_eq!((m.marks.len(), m.camera.clone()), (2, from_above()));
     assert_eq!(m.editing.as_deref(), Some(id.as_str()));
     // While the bar edits it, the window draws the bar's marks only: the
@@ -401,14 +419,14 @@ fn a_markup_is_posted_with_what_its_marks_touch_and_edited_again() {
             )
             .is_empty()
     );
-    let m = ws.markup.as_mut().unwrap();
+    let m = ws.annotations.markup.as_mut().unwrap();
     m.undo();
     assert!(
         ws.face_strokes(true).is_empty(),
         "the stroke undone is gone"
     );
     ws.post_markup();
-    assert!(ws.wait_until(WAIT, |ws| ws.markup.is_none()
+    assert!(ws.wait_until(WAIT, |ws| ws.annotations.markup.is_none()
         && ws.annotations.all[&id].mark_count() == 1));
     assert_eq!(listed_marks(&p, &id)["kinds"], serde_json::json!(["arrow"]));
 }
@@ -477,7 +495,7 @@ fn markup_is_refused_in_view_and_a_refusal_keeps_the_marks() {
     let p = Project::new().with_part();
     let mut ws = open(&p, Mode::Annotate);
     ws.open_markup(from_above()).unwrap();
-    let m = ws.markup.as_mut().unwrap();
+    let m = ws.annotations.markup.as_mut().unwrap();
     m.press([0.0, 0.0]);
     m.drag([0.002, 0.0], false);
     m.release(1e-4);
@@ -486,11 +504,16 @@ fn markup_is_refused_in_view_and_a_refusal_keeps_the_marks() {
     ws.set_mode(Mode::View);
     ws.post_markup();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.markup
+        ws.annotations
+            .markup
             .as_ref()
             .is_some_and(|m| !m.posting && m.note.is_some())
     }));
-    assert_eq!(ws.markup.as_ref().unwrap().marks.len(), 1, "kept");
+    assert_eq!(
+        ws.annotations.markup.as_ref().unwrap().marks.len(),
+        1,
+        "kept"
+    );
     assert!(
         p.ok(&["annotations", "list"])["annotations"]
             .as_array()

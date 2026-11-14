@@ -16,10 +16,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 
-// The harness at its old path while ryucad 27 runs (design 541, "Paths
-// kept"); 27.F removes it.
-#[allow(unused_imports)]
-pub(crate) use crate::testing::{
+use crate::geometry::normal_to_face;
+use crate::part::part_id;
+use crate::scene::{RenderAsk, draw_body, meshes, render_scene};
+use crate::testing::{
     RENDER_BUDGET, call, call_live, drain, fresh, render_pixels, with_datums, with_helix,
     with_part, with_sketch,
 };

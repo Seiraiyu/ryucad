@@ -34,10 +34,11 @@ pub fn colour(mode: Mode, p: &Palette) -> Option<u32> {
 
 /// The bar across the window, under the toolbar.
 pub fn bar(ui: &mut egui::Ui, ws: &mut Workspace, p: &Palette) {
-    let (Some((lead, rest, stop)), Some(c)) = (words(ws.mode), colour(ws.mode, p)) else {
+    let (Some((lead, rest, stop)), Some(c)) = (words(ws.session.mode), colour(ws.session.mode, p))
+    else {
         return;
     };
-    let glyph = if ws.mode == Mode::Annotate {
+    let glyph = if ws.session.mode == Mode::Annotate {
         Icon::NOTE_PENCIL
     } else {
         Icon::PENCIL_SIMPLE
@@ -46,7 +47,7 @@ pub fn bar(ui: &mut egui::Ui, ws: &mut Workspace, p: &Palette) {
         icon::show(ui, glyph, 14.0, style::rgb(c));
         ui.label(RichText::new(lead).strong().color(style::rgb(c)));
         ui.label(rest);
-        if ws.mode == Mode::Annotate {
+        if ws.session.mode == Mode::Annotate {
             let n = open_mine(ws);
             ui.weak(match n {
                 1 => "1 open annotation of yours".to_owned(),
@@ -75,7 +76,7 @@ fn draft_toggle(ui: &mut egui::Ui, ws: &mut Workspace) {
         ui.weak("Comparing: stop comparing to see your suggestions");
         return;
     }
-    let (text, to) = if ws.show_agent {
+    let (text, to) = if ws.annotations.show_agent {
         ("Show my suggestions", false)
     } else {
         ("Show agent's model", true)
@@ -87,7 +88,7 @@ fn draft_toggle(ui: &mut egui::Ui, ws: &mut Workspace) {
 
 /// The frame round the viewport, inside its rect.
 pub fn frame(ui: &egui::Ui, ws: &Workspace, rect: egui::Rect, p: &Palette) {
-    if let Some(c) = colour(ws.mode, p) {
+    if let Some(c) = colour(ws.session.mode, p) {
         ui.painter().rect_stroke(
             rect,
             0.0,

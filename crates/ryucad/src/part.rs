@@ -523,7 +523,7 @@ pub(crate) fn part_report(
                 }
             }
             if let Some(d) = deletes.get(fid) {
-                v["delete_body"] = crate::body::delete_report(d, r);
+                v["delete_body"] = crate::feature::delete_body::delete_report(d, r);
             }
             if let Some(i) = inserts.get(fid) {
                 let made = match b {

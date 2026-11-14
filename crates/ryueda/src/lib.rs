@@ -11,6 +11,7 @@ pub use ryu_doc::{canonical, error, expr, id, source, units};
 pub mod activity;
 pub mod annotate;
 pub mod cascade;
+pub mod clash;
 pub mod client;
 pub mod compare;
 pub mod conn;

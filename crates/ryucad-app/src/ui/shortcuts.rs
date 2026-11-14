@@ -87,7 +87,11 @@ pub fn show(ui: &mut egui::Ui, o: &mut Opened) {
             pressed(o, ui.ctx(), id, key, m);
         }
     }
-    let style = o.ws.settings.text("ui.navigation", "ryucad").to_owned();
+    let style =
+        o.ws.session
+            .settings
+            .text("ui.navigation", "ryucad")
+            .to_owned();
     ui.horizontal(|ui| {
         let r = ui.add(
             egui::TextEdit::singleline(&mut o.shortcuts.search)
