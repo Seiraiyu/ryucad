@@ -215,6 +215,7 @@ pub fn answer(
         l.announce(&before);
         publish(l, session);
         publish_merge(l, session);
+        publish_pdm(l, session);
     }
     result
 }
@@ -1805,6 +1806,34 @@ pub fn publish_merge(live: &mut Live<Eda>, session: &mut Session) {
     live.seen.merge_failed = failed;
 }
 
+/// Tells `pdm` subscribers which parts' release states or tags moved
+/// (`pdm.changed`, `{parts: [{part, state, tags}]}`). Worked out only
+/// while someone watches and the PDM revision or the release branch's
+/// refs moved; the first look tells nobody anything.
+pub fn publish_pdm(live: &mut Live<Eda>, session: &mut Session) {
+    if !live.hub.is_watched() {
+        live.seen.pdm = None;
+        return;
+    }
+    let key = crate::pdm::release::key(session);
+    if live.seen.pdm.as_ref().is_some_and(|(was, _)| *was == key) {
+        return;
+    }
+    let now = crate::pdm::release::summary(session);
+    if let Some((_, seen)) = &live.seen.pdm {
+        let changed: Vec<&Value> = now
+            .iter()
+            .filter(|(p, v)| seen.get(*p) != Some(*v))
+            .map(|(_, v)| v)
+            .collect();
+        if !changed.is_empty() {
+            live.hub
+                .send(Topic::Pdm, "pdm.changed", &json!({"parts": changed}));
+        }
+    }
+    live.seen.pdm = Some((key, now));
+}
+
 /// Brings the session and what subscribers know up to date with the
 /// files: before a subscription, and while anyone watches.
 pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
@@ -1818,6 +1847,7 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
         live.announce(&before);
         publish(live, s);
         publish_merge(live, s);
+        publish_pdm(live, s);
         Ok(())
     });
 }

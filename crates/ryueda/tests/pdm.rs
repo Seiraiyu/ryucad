@@ -239,3 +239,63 @@ fn the_hook_refuses_a_commit_that_makes_a_proposal_stale() {
     let (passed, stderr) = git_try(&top, &[], &["commit", "-q", "-m", "notes"]);
     assert!(passed, "{stderr}");
 }
+
+#[test]
+fn watchers_hear_of_release_states() {
+    let d = tempfile::tempdir().unwrap();
+    let (top, run) = (d.path().join("repo"), d.path().join("run"));
+    std::fs::create_dir_all(&top).unwrap();
+    let (lib, _) = library(&top, &run, true);
+    // On a work branch: main is the release branch.
+    git(&top, &["checkout", "-q", "-b", "work"]);
+    let watch = ryueda_cmd(
+        &lib,
+        &run,
+        true,
+        &[
+            "--as",
+            "watcher",
+            "watch",
+            "--topic",
+            "pdm",
+            "--timeout",
+            "20",
+        ],
+    );
+    let waiting = std::thread::spawn(move || {
+        let mut watch = watch;
+        watch.output().unwrap()
+    });
+    let attached = || {
+        let v = ok(&lib, &run, true, &["participants"]);
+        v["participants"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|x| x["name"] == "watcher"))
+    };
+    for _ in 0..200 {
+        if attached() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Nothing says when the watcher has subscribed: propose and undo
+    // until it has heard one change.
+    let mut proposed = false;
+    while !waiting.is_finished() {
+        let args: &[&str] = match proposed {
+            false => &["release", "propose", "r_4k7"],
+            true => &["undo"],
+        };
+        ok(&lib, &run, true, args);
+        proposed = !proposed;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let out = waiting.join().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let note = &v["result"]["notifications"][0];
+    assert_eq!(note["method"], "pdm.changed", "{v}");
+    let part = &note["params"]["parts"][0];
+    assert_eq!(part["part"], "r_4k7", "{v}");
+    assert_eq!(part["state"]["state"], "in_work", "{v}");
+    ok(&lib, &run, true, &["daemon", "stop"]);
+}

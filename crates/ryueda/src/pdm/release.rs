@@ -651,6 +651,34 @@ pub fn sync(session: &mut Session) -> Result<Value> {
     ryupdm::release::sync(repo.gix(), &releases, NAME)
 }
 
+/// What parts' release states and tags move with: the PDM revision and
+/// the release branch's refs (none outside a repository).
+pub fn key(session: &mut Session) -> String {
+    let refs = ryu_git::repo::repo::<crate::Eda>(session.root())
+        .ok()
+        .and_then(|repo: crate::git::Repo| {
+            let c = Config::read_in(&session.snapshot(), NAME).ok()?;
+            ryupdm::release::refs_key(repo.gix(), &c).ok()
+        })
+        .unwrap_or_default();
+    format!("{}\0{refs}", super::revision(session))
+}
+
+/// Each part's release state and its releases' tags, for `pdm.changed`,
+/// by part.
+pub fn summary(session: &mut Session) -> std::collections::BTreeMap<String, Value> {
+    let releases = super::releases_or_none(session);
+    ryupdm::state::derive_all_for::<crate::Eda>(&session.snapshot(), &releases)
+        .into_iter()
+        .map(|(p, s)| {
+            (
+                p.to_string(),
+                ryupdm::release::state_value(&p, &s, &releases),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
