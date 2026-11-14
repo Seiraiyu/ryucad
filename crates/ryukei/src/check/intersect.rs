@@ -784,12 +784,7 @@ fn apart_beside_by(
     let on_plane =
         |x: FaceId| face_beside(body, x, &plane, &rails, &[], strip, BESIDE_CELLS, m).ok();
     match (on_plane(a), on_plane(b)) {
-        (Some(sa), Some(sb)) => {
-            let one = |s: [bool; 2]| s != [true, true];
-            one(sa)
-                && one(sb)
-                && (sa[0] && sb[1] || sa[1] && sb[0] || sa == [false; 2] || sb == [false; 2])
-        }
+        (Some(sa), Some(sb)) => crate::intersect::opposite_sides(sa, sb),
         _ => false,
     }
 }

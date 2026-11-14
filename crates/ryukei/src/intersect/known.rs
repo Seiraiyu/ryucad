@@ -18,14 +18,16 @@
 //!   strip round it as wide as surfaces meeting tangentially stay within
 //!   the touch rule's reach of each other, `sqrt(2 × size × reach)`
 //!   ([`face_beside_rails`]): the self-intersection check's rule for faces
-//!   tangent along an edge they share.
+//!   tangent along an edge they share; or, failing that, each face on its
+//!   own side of the seam's plane outside the strip ([`section_apart`]):
+//!   the check's rule for blends across a section (design 642).
 //!
 //! The branch is then cut where the faces' edges meet the other surface
 //! and placed in both, as a traced one is ([`placed`]). Anything else
 //! withholds the rule: the caller traces the pair as before.
 
 use super::Failure;
-use super::beside::face_beside_rails;
+use super::beside::{face_beside_rails, opposite_sides, section_plane};
 use super::face::{FaceMeet, face_box, max_tolerance, overlap, placed, surface_of};
 use super::fit::pcurve_certified;
 use super::ss::Branch;
@@ -76,10 +78,59 @@ const SEAM_SLACK: f64 = 10.0;
 /// between: the check's `apart_beside` ladder.
 const LADDER: [usize; 3] = [1 << 9, 1 << 12, super::beside::CELLS];
 
+/// The strip round a seam neither certificate looks inside:
+/// `sqrt(2 × size × reach)`, the reach [`TOUCH`] tolerances. The
+/// re-trim's stops leave half of it past a seam (design 642).
+pub(crate) fn seam_strip(size: f64, tolerance: f64) -> f64 {
+    crate::math::sqrt(2.0 * size * TOUCH * tolerance)
+}
+
+/// The second certificate (design 642): the seams lie on one planar
+/// curve ([`section_plane`]), and each face is certified on its own side
+/// of that plane outside the strip, on opposite sides
+/// ([`opposite_sides`]), under the same ladder of part limits. A face
+/// carried past the seam crosses the plane, so this holds only for faces
+/// that end at it (an outside face, or a working face stopped there).
+fn section_apart(
+    a: (&Body, FaceId),
+    b: (&Body, FaceId),
+    surfaces: [&Surface; 2],
+    seams: &[Seam],
+    rails: [&[(&Curve2, [f64; 2])]; 2],
+    strip: f64,
+    m: &Meter,
+) -> bool {
+    let Some((first, rest)) = seams.split_first() else {
+        return false;
+    };
+    if rest.iter().any(|s| s.curve != first.curve) {
+        return false;
+    }
+    let Some(plane) = section_plane(
+        &first.curve,
+        first.interval,
+        first.tolerance,
+        surfaces[0],
+        surfaces[1],
+    ) else {
+        return false;
+    };
+    LADDER.into_iter().any(|cells| {
+        let side = |f: (&Body, FaceId), r: &[(&Curve2, [f64; 2])]| {
+            face_beside_rails(f.0, f.1, &plane, r, strip, cells, m).ok()
+        };
+        match (side(a, rails[0]), side(b, rails[1])) {
+            (Some(x), Some(y)) => opposite_sides(x, y),
+            _ => false,
+        }
+    })
+}
+
 /// How face `a.1` of body `a.0` and face `b.1` of body `b.0` meet, given
 /// curves their surfaces are known to share (`seams`, each with its
 /// pcurves on `a`'s surface first): met along those curves where one face
-/// is certified to keep off the other's surface beside them, charging
+/// is certified to keep off the other's surface beside them, or each lies
+/// on its own side of their plane ([`section_apart`]), charging
 /// `m`. Fails with `Uncertain` where it can't be.
 pub(crate) fn known_seam(
     a: (&Body, FaceId),
@@ -106,28 +157,28 @@ pub(crate) fn known_seam(
         let bx = ba.union(&bb);
         (bx.max() - bx.min()).length()
     };
-    let strip = crate::math::sqrt(2.0 * size * TOUCH * tolerance);
-    let apart = {
-        let rails = |k: usize| -> Vec<(&Curve2, [f64; 2])> {
-            branches
-                .iter()
-                .map(|br| {
-                    let (c2, map) = &br.pcurves[k];
-                    let [s0, s1] = br.range.map(|t| map[0] + map[1] * t);
-                    (c2, [s0.min(s1), s0.max(s1)])
-                })
-                .collect()
-        };
-        let (ra, rb) = (rails(0), rails(1));
-        let keeps_off = |f: (&Body, FaceId), other: &Surface, r: &[(&Curve2, [f64; 2])], cells| {
-            face_beside_rails(f.0, f.1, other, r, strip, cells, m).is_ok()
-        };
-        // Each face's search under a growing part limit, the other's
-        // between: the face that keeps off usually does in a few parts.
-        LADDER
-            .into_iter()
-            .any(|cells| keeps_off(a, sb, &ra, cells) || keeps_off(b, sa, &rb, cells))
+    let strip = seam_strip(size, tolerance);
+    let rails = |k: usize| -> Vec<(&Curve2, [f64; 2])> {
+        branches
+            .iter()
+            .map(|br| {
+                let (c2, map) = &br.pcurves[k];
+                let [s0, s1] = br.range.map(|t| map[0] + map[1] * t);
+                (c2, [s0.min(s1), s0.max(s1)])
+            })
+            .collect()
     };
+    let (ra, rb) = (rails(0), rails(1));
+    let keeps_off = |f: (&Body, FaceId), other: &Surface, r: &[(&Curve2, [f64; 2])], cells| {
+        face_beside_rails(f.0, f.1, other, r, strip, cells, m).is_ok()
+    };
+    // Keep-off first, each face's search under a growing part limit, the
+    // other's between (the face that keeps off usually does in a few
+    // parts); then the section plane.
+    let apart = LADDER
+        .into_iter()
+        .any(|cells| keeps_off(a, sb, &ra, cells) || keeps_off(b, sa, &rb, cells))
+        || section_apart(a, b, [sa, sb], seams, [&ra, &rb], strip, m);
     if !apart {
         return Err(Failure::Uncertain);
     }
@@ -444,5 +495,76 @@ mod tests {
         seam.kind = SeamKind::Frontier;
         let m = Meter::free(); // unmetered: a test
         assert!(known_seam((&a, only(&a)), (&b, only(&b)), &[seam], &m).is_err());
+    }
+
+    /// The pair of `a_cylinder_carried_past_its_torus_seam_is_withheld`
+    /// with each face ending at the seam: the torus over u ∈ [0, 0.5]
+    /// (y ≥ 0), the cylinder stopped just past it, over v ∈ [-6, 0.05] mm,
+    /// the circle a fixed seam. Neither face keeps off the other's surface (the bend
+    /// crosses the run's cylinder, the run's inner side the torus's tube
+    /// past u = 0), but each lies on its own side of the circle's plane,
+    /// y = 0: met along the circle by the section plane (design 642).
+    #[test]
+    fn a_cylinder_and_a_torus_ending_at_their_seam_are_met_across_its_plane() {
+        let (big, small) = (10.0 * MM, 2.0 * MM);
+        let torus = Surface::Torus(Torus::new(Frame::WORLD, big, small).unwrap());
+        let cyl = Surface::Cylinder(
+            Cylinder::new(
+                Frame::new(
+                    Point3::new(big, 0.0, 0.0),
+                    Vector3::new(0.0, 1.0, 0.0),
+                    Vector3::new(1.0, 0.0, 0.0),
+                )
+                .unwrap(),
+                small,
+            )
+            .unwrap(),
+        );
+        let (td, cd) = (torus.domain(), cyl.domain());
+        let a = sheet(&torus, [[0.0, 0.5], td[1]]);
+        // Stopped as the re-trim stops a run: under half a strip past the
+        // seam (the strip here is about 0.16 mm), so the circle lies
+        // inside the run, and on the torus's edge.
+        let b = sheet(&cyl, [cd[0], [-6.0 * MM, 0.05 * MM]]);
+        let circle = Circle::new(
+            Frame::new(
+                Point3::new(big, 0.0, 0.0),
+                Vector3::new(0.0, -1.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            )
+            .unwrap(),
+            small,
+        )
+        .unwrap();
+        let seam = Seam {
+            curve: Curve::Circle(circle),
+            interval: [0.0, 2.0 * PI],
+            tolerance: LINEAR_RESOLUTION,
+            pcurves: [
+                (line2((0.0, 0.0), (0.0, 1.0)), [0.0, 1.0]),
+                (line2((2.0 * PI, 0.0), (-1.0, 0.0)), [0.0, 1.0]),
+            ],
+            kind: SeamKind::Fixed,
+        };
+        // Against sampling: 1 mm before the seam on the run, the inner
+        // point lies inside the tube carried on past u = 0, the outer
+        // outside, so no keep-off holds for the run either.
+        let off_tube = |p: Point3| {
+            let rho = crate::math::sqrt(p.x * p.x + p.y * p.y);
+            crate::math::sqrt((rho - big) * (rho - big) + p.z * p.z) - small
+        };
+        assert!(off_tube(Point3::new(big - small, -MM, 0.0)) < 0.0);
+        assert!(off_tube(Point3::new(big + small, -MM, 0.0)) > 0.0);
+        let m = Meter::free(); // unmetered: a test
+        let meet = known_seam((&a, only(&a)), (&b, only(&b)), &[seam], &m).unwrap();
+        let FaceMeet::Meet {
+            stretches,
+            contacts,
+        } = meet
+        else {
+            panic!("not coincident")
+        };
+        assert!(!stretches.is_empty(), "{contacts:?}");
+        assert!(stretches.iter().all(|s| s.tangent));
     }
 }
