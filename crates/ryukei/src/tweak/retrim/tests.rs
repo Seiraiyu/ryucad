@@ -322,3 +322,86 @@ fn ftc_07s_seam_pair_crossing_past_its_seam_is_withheld() {
     let m = crate::work::Meter::free();
     assert!(known_seam((&work, wa), (&work, wb), &[seam], &m).is_err());
 }
+
+/// Meets a committed cut's pair along the edges its two input faces
+/// share: each held (`partly`: tangent only in places), built as the
+/// re-trim builds it (`seam_for`, with `kind`), and met by `known_seam`
+/// on the working pair (design 642).
+fn met_along_the_cut(input: &[u8], work: &[u8], kind: crate::intersect::SeamKind, partly: bool) {
+    use crate::codec::decode_body;
+    use crate::intersect::known_seam;
+    let input = decode_body(input).unwrap();
+    let work = decode_body(work).unwrap();
+    let edges: Vec<_> = input
+        .edges()
+        .filter(|&e| input.edge_fins(e).count() == 2)
+        .collect();
+    assert!(!edges.is_empty(), "the seam edges");
+    let face = |fin| input.loops[input.fins[fin].loop_].face;
+    let working = |f: FaceId| match work.by_name(input.faces[f].name) {
+        Some(EntityId::Face(w)) => w,
+        _ => panic!("no working face for {f:?}"),
+    };
+    let fins: Vec<_> = input.edge_fins(edges[0]).collect();
+    let (wa, wb) = (working(face(fins[0])), working(face(fins[1])));
+    let mut seams = Vec::new();
+    for &e in &edges {
+        assert!(super::held::held_tangent(&input, e));
+        assert_eq!(
+            matches!(crate::tweak::classify::tangent(&input, e), Ok(true)),
+            !partly
+        );
+        let fs: Vec<_> = input.edge_fins(e).collect();
+        // Each seam's pcurves in the pair's order.
+        let (x, y) = if working(face(fs[0])) == wa {
+            ((&work, wa), (&work, wb))
+        } else {
+            ((&work, wb), (&work, wa))
+        };
+        let mut s = super::body::seam_for(&input, e, x, y, kind).expect("pcurves");
+        if x.1 != wa {
+            s.pcurves.swap(0, 1);
+        }
+        seams.push(s);
+    }
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    assert!(known_seam((&work, wa), (&work, wb), &seams, &m).is_ok());
+}
+
+/// CTC 02 with PMI's one failing pair (#658, census II): its NURBS face,
+/// outside the region, against a working plane, tangent all along a
+/// closed ellipse. A frontier seam, met along the edge: the NURBS face
+/// keeps off the plane beside it.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ctc_02s_closed_frontier_ellipse_is_met_along_it() {
+    met_along_the_cut(
+        include_bytes!("../../../tests/data/nist_ctc_02_ellipse_input.body"),
+        include_bytes!("../../../tests/data/nist_ctc_02_ellipse_work.body"),
+        crate::intersect::SeamKind::Frontier,
+        false,
+    );
+}
+
+/// FTC 07's NURBS/plane pair (#652, census II pair 5): both working,
+/// tangent along an ellipse only in places (`PartlySmooth`), pcurves
+/// Nurbs2 and Ellipse2, a running seam (the deleted blend is round one of
+/// its ends). Held, and met along the edge: the NURBS face keeps off the
+/// plane (the plane's signs one way only over it in the census).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ftc_07s_partly_smooth_ellipse_is_met_along_it() {
+    met_along_the_cut(
+        include_bytes!("../../../tests/data/nist_ftc_07_partly_input.body"),
+        include_bytes!("../../../tests/data/nist_ftc_07_partly_work.body"),
+        crate::intersect::SeamKind::Running,
+        true,
+    );
+}

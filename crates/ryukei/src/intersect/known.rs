@@ -28,10 +28,10 @@
 
 use super::Failure;
 use super::beside::{face_beside_rails, opposite_sides, section_plane};
-use super::face::{FaceMeet, face_box, max_tolerance, overlap, placed, surface_of};
-use super::fit::pcurve_certified;
+use super::face::{FaceMeet, face_box, max_tolerance, overlap, placed, shifted, surface_of};
+use super::fit::{fit_pcurve_within, pcurve_certified};
 use super::ss::Branch;
-use crate::geom::{Box3, Curve, Curve2, Surface};
+use crate::geom::{Box3, Curve, Curve2, Surface, Vector2};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId};
 use crate::work::Meter;
@@ -193,9 +193,20 @@ fn branch(s: &Seam, surfaces: [&Surface; 2], region: &Box3, m: &Meter) -> Option
     let range = run_on(s, region);
     let mut tolerance = s.tolerance.max(LINEAR_RESOLUTION);
     let target = SEAM_SLACK * tolerance;
+    let mut pcurves = s.pcurves.clone();
     for (k, surface) in surfaces.into_iter().enumerate() {
         let (c2, map) = &s.pcurves[k];
-        let bound = pcurve_certified(surface, &s.curve, range, c2, *map, target, m)?;
+        let bound = match pcurve_certified(surface, &s.curve, range, c2, *map, target, m) {
+            Some(bound) => bound,
+            // A conic or a rational pcurve isn't certified as it is (CTC
+            // 02's closed ellipse, FTC 07's partly smooth one; plan 19.A,
+            // census II): one fitted to the curve on the surface is.
+            None => {
+                let (c, bound) = refit(surface, s, k, range, target, m)?;
+                pcurves[k] = c;
+                bound
+            }
+        };
         if bound > target {
             return None;
         }
@@ -206,8 +217,37 @@ fn branch(s: &Seam, surfaces: [&Surface; 2], region: &Box3, m: &Meter) -> Option
         range,
         tangent: true,
         tolerance,
-        pcurves: s.pcurves.clone(),
+        pcurves,
     })
+}
+
+/// How many samples [`refit`] may take: a seam's curve on a surface that
+/// holds it settles in far fewer.
+const REFIT_SAMPLES: usize = 1 << 12;
+
+/// The seam's `k`th pcurve fitted to its curve over `range` on `surface`
+/// ([`fit_pcurve_within`], certified within `target`), by the curve's own
+/// parameter, and moved by whole periods so its middle lies where the
+/// seam's own pcurve's does (its working face's parameter box): with the
+/// fit's bound. `None` where the fit fails or the move can't be made.
+fn refit(
+    surface: &Surface,
+    s: &Seam,
+    k: usize,
+    range: [f64; 2],
+    target: f64,
+    m: &Meter,
+) -> Option<((Curve2, [f64; 2]), f64)> {
+    let (n, bound) = fit_pcurve_within(surface, &s.curve, range, target, REFIT_SAMPLES, m).ok()?;
+    let mid = 0.5 * (range[0] + range[1]);
+    let (c2, map) = &s.pcurves[k];
+    let want = c2.point(map[0] + map[1] * mid);
+    let fitted = Curve2::Nurbs2(std::sync::Arc::new(n));
+    let got = fitted.point(mid);
+    let (pu, pv) = surface.periods();
+    let shift = |p: Option<f64>, d: f64| p.map_or(0.0, |p| (d / p).round() * p);
+    let d = Vector2::new(shift(pu, want.x - got.x), shift(pv, want.y - got.y));
+    Some(((shifted(&fitted, d)?, [0.0, 1.0]), bound))
 }
 
 /// The seam's curve run on past its interval, for a running seam whose
