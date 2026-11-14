@@ -234,8 +234,8 @@ fn put(session: &mut Session, writes: &[(String, Option<Bytes>)]) -> Result<()> 
             && part.starts_with("parts/")
         {
             let dir = path(part);
-            // no session: what the files leave on disk (empty folders, stray files) goes too
             let removed = if dir.exists() {
+                // no session: what the files leave on disk (empty folders, stray files) goes too
                 std::fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))
             } else {
                 Ok(())
