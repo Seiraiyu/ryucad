@@ -35,6 +35,18 @@ use crate::topo::{Body, FaceId};
 use crate::work::Meter;
 use std::collections::BTreeMap;
 
+/// Whether a seam's ends can move (design 642): a frontier seam (one face
+/// outside the region) and a fixed one (every face round its ends stays
+/// where it was) are the edge itself, never run on; a running seam (a
+/// face round one of its ends deleted, moved or given a new surface) may
+/// have to run on past that end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeamKind {
+    Frontier,
+    Fixed,
+    Running,
+}
+
 /// A curve two faces are known to meet along: an edge's curve over its
 /// interval and its tolerance, and its pcurves on the first face's
 /// surface and the second's, each with the affine map from the curve's
@@ -45,6 +57,8 @@ pub(crate) struct Seam {
     pub(crate) interval: [f64; 2],
     pub(crate) tolerance: f64,
     pub(crate) pcurves: [(Curve2, [f64; 2]); 2],
+    /// Whether its ends can move.
+    pub(crate) kind: SeamKind,
 }
 
 /// Known seams by pair of one body's faces, each pair and each seam's
@@ -145,13 +159,16 @@ fn branch(s: &Seam, surfaces: [&Surface; 2], region: &Box3, m: &Meter) -> Option
     })
 }
 
-/// The seam's curve run on past its interval where both pcurves are
-/// lines in the parameter plane (unbounded, so their affine maps hold):
+/// The seam's curve run on past its interval, for a running seam whose
+/// pcurves are both lines in the parameter plane (unbounded, so their
+/// affine maps hold):
 /// a line over the stretch of it inside `region`, a circle or an ellipse
 /// over a whole period from the interval's start. Anything else, or a
 /// line missing the region, keeps the interval.
 fn run_on(s: &Seam, region: &Box3) -> [f64; 2] {
-    if !s.pcurves.iter().all(|(c, _)| matches!(c, Curve2::Line2(_))) {
+    // A seam whose ends can't move is the edge itself (design 642).
+    if s.kind != SeamKind::Running || !s.pcurves.iter().all(|(c, _)| matches!(c, Curve2::Line2(_)))
+    {
         return s.interval;
     }
     match &s.curve {
@@ -244,6 +261,7 @@ mod tests {
                 (line2((0.0, 0.0), (1.0, 0.0)), [0.0, 1.0]),
                 (line2((PI, 0.0), (0.0, 1.0)), [0.0, 1.0]),
             ],
+            kind: SeamKind::Running,
         };
         (a, b, seam)
     }
@@ -390,6 +408,7 @@ mod tests {
                 // On the cylinder, u = 2π - t.
                 (line2((2.0 * PI, 0.0), (-1.0, 0.0)), [0.0, 1.0]),
             ],
+            kind: SeamKind::Running,
         };
         // Against sampling: 1 mm past the seam, the cylinder's outer
         // point lies outside the tube and its inner point inside.
@@ -399,6 +418,30 @@ mod tests {
         };
         assert!(off_tube(Point3::new(big + small, MM, 0.0)) > 0.0);
         assert!(off_tube(Point3::new(big - small, MM, 0.0)) < 0.0);
+        let m = Meter::free(); // unmetered: a test
+        assert!(known_seam((&a, only(&a)), (&b, only(&b)), &[seam], &m).is_err());
+    }
+
+    #[test]
+    fn a_seam_whose_ends_cant_move_is_met_along_its_edge_only() {
+        // Design 642: a frontier or fixed seam is the edge itself, never
+        // run on, whatever its pcurves; a running one with line pcurves
+        // runs on over the region.
+        let (a, b, mut seam) = plane_and_cylinder(0.0, 0.0);
+        let region = Box3::new(
+            Point3::new(-2.0 * MM, -MM, -2.0 * MM),
+            Point3::new(2.0 * MM, MM, 0.0),
+        );
+        let ran = run_on(&seam, &region).map(|t| seam.curve.point(t).x);
+        assert!((ran[0] + 2.0 * MM).abs() <= 1e-12 && (ran[1] - 2.0 * MM).abs() <= 1e-12);
+        for kind in [SeamKind::Frontier, SeamKind::Fixed] {
+            seam.kind = kind;
+            assert_eq!(run_on(&seam, &region), seam.interval, "{kind:?}");
+        }
+        // These faces touch along the whole line, past the edge's ends,
+        // so met along the edge alone neither keeps off the other there:
+        // a frontier seam's faces end at it, and these don't.
+        seam.kind = SeamKind::Frontier;
         let m = Meter::free(); // unmetered: a test
         assert!(known_seam((&a, only(&a)), (&b, only(&b)), &[seam], &m).is_err());
     }

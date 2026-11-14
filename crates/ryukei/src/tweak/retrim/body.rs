@@ -8,7 +8,7 @@ use super::region::Region;
 use super::working::Working;
 use crate::geom::Box3;
 use crate::geom::Vector2;
-use crate::intersect::{Seam, Seams};
+use crate::intersect::{Seam, SeamKind, Seams};
 use crate::layout::{self, Boundary, Layout};
 use crate::name::{BooleanRole, EditRole, Name, OpKey, Role};
 use crate::topo::{Body, EdgeId, EntityId, FaceId, Sense};
@@ -233,7 +233,13 @@ impl WorkBody {
             let (Some(&wa), Some(&wb)) = (back.get(&ia), back.get(&ib)) else {
                 continue;
             };
-            let Some(mut seam) = seam_for(input, e, (&self.body, wa), (&self.body, wb)) else {
+            let Some(mut seam) = seam_for(
+                input,
+                e,
+                (&self.body, wa),
+                (&self.body, wb),
+                SeamKind::Running,
+            ) else {
                 continue;
             };
             let key = if wa < wb {
@@ -259,6 +265,7 @@ pub(crate) fn seam_for(
     e: EdgeId,
     wa: (&Body, FaceId),
     wb: (&Body, FaceId),
+    kind: SeamKind,
 ) -> Option<Seam> {
     let fins: Vec<_> = input.edge_fins(e).collect();
     let [fa, fb] = fins[..] else { return None };
@@ -286,6 +293,7 @@ pub(crate) fn seam_for(
         interval: x.interval,
         tolerance: x.tolerance.get(),
         pcurves: [lift(wa, pa)?, lift(wb, pb)?],
+        kind,
     })
 }
 

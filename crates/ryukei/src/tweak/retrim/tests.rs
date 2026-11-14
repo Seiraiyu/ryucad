@@ -310,8 +310,14 @@ fn ftc_07s_seam_pair_crossing_past_its_seam_is_withheld() {
         _ => panic!("no working face for {f:?}"),
     };
     let (wa, wb) = (working(face(fins[0])), working(face(fins[1])));
-    let seam = super::body::seam_for(&input, e, (&work, wa), (&work, wb))
-        .expect("tangent all along, with pcurves");
+    let seam = super::body::seam_for(
+        &input,
+        e,
+        (&work, wa),
+        (&work, wb),
+        crate::intersect::SeamKind::Running,
+    )
+    .expect("tangent all along, with pcurves");
     // unmetered: a unit test.
     let m = crate::work::Meter::free();
     assert!(known_seam((&work, wa), (&work, wb), &[seam], &m).is_err());
