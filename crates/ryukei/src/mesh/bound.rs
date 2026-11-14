@@ -307,6 +307,7 @@ pub(crate) fn triangle_ok(
 }
 
 /// [`triangle_ok`], saying which test failed.
+#[cfg(test)]
 pub(crate) fn triangle_test(
     surface: &Surface,
     metric: Metric,
@@ -315,26 +316,44 @@ pub(crate) fn triangle_test(
     xyz: [Point3; 3],
     t: &Targets,
 ) -> Verdict {
+    triangle_check(surface, metric, stretched, uv, xyz, t).0
+}
+
+/// [`triangle_test`], with the normal's turn across the triangle the
+/// angle test was given: [`triangle_turn`]'s, bit for bit, from the same
+/// bounds over the same box (NaN where the triangle failed before the
+/// bounds were taken). Refinement keeps it for each triangle that passes,
+/// so mass's area bound needn't take the bounds again (#308).
+pub(crate) fn triangle_check(
+    surface: &Surface,
+    metric: Metric,
+    stretched: bool,
+    uv: [Point2; 3],
+    xyz: [Point3; 3],
+    t: &Targets,
+) -> (Verdict, f64) {
     let size = diameter(&xyz);
     if size > t.max_edge {
-        return Verdict::Long;
+        return (Verdict::Long, f64::NAN);
     }
     let range = uv_box(&uv);
     let b = surface_bound(surface, range);
+    let whole = turn(&b, range);
     let r = enclosing_radius(uv.map(|p| metric.scale(p)));
     if second_derivative(&b, metric) * r * r / 2.0 > t.chord
         && !small_enough(surface, range, size, t.chord)
     {
-        return Verdict::Long;
+        return (Verdict::Long, whole);
     }
-    if angle_ok(surface, stretched, &b, range, &xyz, t.angle, t.waive) {
+    let verdict = if angle_ok(surface, stretched, &b, range, &xyz, t.angle, t.waive) {
         Verdict::Pass
     } else {
         Verdict::Turned {
             turn_u: b.turn_u,
             turn_v: b.turn_v,
         }
-    }
+    };
+    (verdict, whole)
 }
 
 /// True when the segment from `uv[0]` to `uv[1]` can be the edge of a
