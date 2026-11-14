@@ -886,3 +886,16 @@ fn the_tolerant_boolean_that_ran_out_of_memory_ends_typed() {
     assert_eq!(got, want);
     assert!(s < RUNAWAY, "{s} s");
 }
+
+/// #890: the `tolerant` target's find of 2026-11-14 (run 43551143856,
+/// `crash-d32c30b9…`): a tolerant boolean (first byte `0x1a`, even)
+/// whose result had face 0's domain bad (`BadDomain`). It must refuse
+/// typed or build a sound body.
+#[test]
+fn a_tolerant_boolean_whose_face_lost_its_domain() {
+    let out = tolerant_run(&bytes(concat!(
+        "1a4949ebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebeb",
+        "ebebebebebebebebebebebebebebebff05ebebebebebebebebebebebebeb",
+    )));
+    assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+}
