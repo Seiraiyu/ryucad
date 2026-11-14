@@ -707,7 +707,10 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
 
 /// A pattern instance as its origins name it: `[i, j]` for a linear
 /// pattern in two directions, else `[i]`.
-pub(crate) fn instance_json(p: &crate::doc::pattern::Pattern, [i, j]: [u32; 2]) -> Value {
+pub(crate) fn instance_json(
+    p: &crate::doc::pattern::Pattern,
+    [i, j]: crate::doc::pattern::Instance,
+) -> Value {
     if matches!(
         &p.kind,
         crate::doc::pattern::Kind::Linear {

@@ -31,8 +31,9 @@ pub struct Pattern {
 }
 
 /// An instance's index: along the first direction (or round the axis),
-/// and along the second; `[0, 0]` is the seed.
-pub type Instance = [u32; 2];
+/// and along the second; `[0, 0]` is the seed. Negative only in a fill
+/// (ryucad 28.C), whose lattice runs both ways from its seed.
+pub type Instance = [i32; 2];
 
 /// How the instances are placed.
 #[derive(Clone, Debug, PartialEq)]
@@ -328,8 +329,8 @@ impl Pattern {
     /// first direction, then each further step along the second.
     pub fn instances(&self) -> Vec<Instance> {
         let [n, m] = self.kind.counts();
-        (0..m)
-            .flat_map(|j| (0..n).map(move |i| [i, j]))
+        (0..m as i32)
+            .flat_map(|j| (0..n as i32).map(move |i| [i, j]))
             .filter(|x| *x != [0, 0] && !self.skip.contains(x))
             .collect()
     }
@@ -368,7 +369,8 @@ pub(crate) fn skip_from_json(v: &Value, counts: [u32; 2], two: bool) -> Result<V
         .as_array()
         .ok_or_else(|| invalid("/skip", "skip is an array of instance indices"))?;
     let [n, m] = counts;
-    let index = |x: &Value| x.as_u64().and_then(|i| u32::try_from(i).ok());
+    // Counts are at most 100,000, so every valid index fits.
+    let index = |x: &Value| x.as_u64().and_then(|i| i32::try_from(i).ok());
     let mut out: Vec<Instance> = Vec::with_capacity(a.len());
     for (k, x) in a.iter().enumerate() {
         let at = format!("/skip/{k}");
@@ -387,7 +389,7 @@ pub(crate) fn skip_from_json(v: &Value, counts: [u32; 2], two: bool) -> Result<V
                 "instance 0 is the seed, which can't be skipped",
             ));
         }
-        if i[0] >= n || i[1] >= m {
+        if i[0] >= n as i32 || i[1] >= m as i32 {
             return Err(Error::new(
                 Code::InvalidParam,
                 format!("the pattern has no instance {i:?}: it counts {n} by {m}"),

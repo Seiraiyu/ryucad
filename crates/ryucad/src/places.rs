@@ -23,7 +23,7 @@ use std::sync::Arc;
 pub enum Driver {
     /// A pattern's instances in its order, each with the motion that
     /// moves its seeds: `None` for a mirror's reflection.
-    Pattern(Vec<([u32; 2], Option<Rigid>)>),
+    Pattern(Vec<(crate::doc::pattern::Instance, Option<Rigid>)>),
     /// A hole's points in the order it drills them.
     Hole(Vec<(Id, Point3)>),
     /// A sketch as solved: its points are read when a pattern names them.
@@ -211,7 +211,7 @@ pub fn resolve(id: &Id, p: &InstancePattern, scope: &dyn Scope) -> Result<Resolv
             }
             list.iter()
                 .map(|(i, m)| match m {
-                    Some(r) => Ok((CopyKey::Index(*i), *r)),
+                    Some(r) => Ok((CopyKey::Index(copy_index(*i)?), *r)),
                     None => Err(there(fail(
                         Code::InvalidParam,
                         format!(
@@ -306,6 +306,18 @@ fn translations(
             Ok((key, Rigid::translation(at.to_vector() - seed.1.to_vector())))
         })
         .collect()
+}
+
+/// A pattern instance as a following pattern's copy key: unsigned, as
+/// every pattern but a fill's is.
+fn copy_index([i, j]: crate::doc::pattern::Instance) -> Result<[u32; 2]> {
+    match (u32::try_from(i), u32::try_from(j)) {
+        (Ok(i), Ok(j)) => Ok([i, j]),
+        _ => Err(Error::new(
+            Code::Internal,
+            format!("instance [{i}, {j}] has a negative index"),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -443,7 +455,7 @@ pub(crate) mod tests {
         let Driver::Pattern(grid) = &places.by_feature[&id("grid")] else {
             panic!()
         };
-        let at: Vec<([u32; 2], [i64; 3])> = grid
+        let at: Vec<([i32; 2], [i64; 3])> = grid
             .iter()
             .map(|(i, r)| {
                 let t = r.unwrap().translation_part();

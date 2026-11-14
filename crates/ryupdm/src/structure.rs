@@ -583,7 +583,11 @@ pub fn driven_keys(
                         .with("param", "on"),
                 );
             }
-            return Ok(x.instances().into_iter().map(CopyKey::Index).collect());
+            return Ok(x
+                .instances()
+                .into_iter()
+                .map(|[i, j]| CopyKey::Index([i as u32, j as u32]))
+                .collect());
         }
         (Some(Ok(Feature::Hole(h))), None) if !h.places.is_empty() => {
             h.places.keys().cloned().collect()

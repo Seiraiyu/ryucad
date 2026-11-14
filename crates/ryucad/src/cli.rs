@@ -3350,7 +3350,7 @@ struct FieldArgs {
     reverse2: Option<bool>,
     /// An instance a pattern leaves out: i, or i,j with two directions; repeat for
     /// several.
-    #[arg(long = "skip", value_name = "INDEX", value_parser = instance)]
+    #[arg(long = "skip", value_name = "INDEX", value_parser = instance, allow_hyphen_values = true)]
     skip: Vec<Value>,
     /// Leave no instance out again, when editing.
     #[arg(long, conflicts_with = "skip")]
@@ -4668,9 +4668,10 @@ fn triple(s: &str) -> core::result::Result<[String; 3], String> {
 
 /// A pattern instance's index: `i`, or `i,j` along two directions.
 fn instance(s: &str) -> core::result::Result<Value, String> {
+    // Signed: a fill's lattice runs both ways from its seed (ryucad 28.C).
     let n = |x: &str| {
         x.trim()
-            .parse::<u32>()
+            .parse::<i32>()
             .map_err(|_| format!("{x:?} is not an instance's index"))
     };
     match s.split_once(',') {

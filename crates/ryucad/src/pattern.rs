@@ -45,7 +45,8 @@ pub fn instance_key(
         piece(p.as_str());
     }
     piece(&i.to_string());
-    if j > 0 {
+    // The same as `j > 0` for every index an unsigned pattern had.
+    if j != 0 {
         piece(&j.to_string());
     }
     bytes.pop();
@@ -371,6 +372,35 @@ mod tests {
             .filter(|(_, o)| o["feature"] == f)
             .map(|(n, o)| (n.clone(), o["instance"].to_string()))
             .collect()
+    }
+
+    #[test]
+    fn instance_keys_hold_for_unsigned_and_sign_for_negative() {
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let (p, f, s) = (id("p"), id("grid"), id("h"));
+        let pt = Id::parse("p1", "entity").unwrap();
+        // The same bytes as before for every index a pattern had.
+        let old = |i: u32, j: u32| {
+            let mut b = b"ryucad.tool\0p\0grid\0h\0p1\0".to_vec();
+            b.extend_from_slice(i.to_string().as_bytes());
+            if j > 0 {
+                b.push(0);
+                b.extend_from_slice(j.to_string().as_bytes());
+            }
+            b
+        };
+        for (i, j) in [(1u32, 0u32), (0, 1), (9, 9), (99_999, 0)] {
+            assert_eq!(
+                super::instance_key(&p, &f, &s, Some(&pt), [i as i32, j as i32]),
+                ryukei::name::ToolKey(ryukei::name::OpKey::from_bytes(&old(i, j)).0),
+                "{i}, {j}"
+            );
+        }
+        // A fill's negative indices are their own keys: row -1 isn't row 0.
+        let a = super::instance_key(&p, &f, &s, Some(&pt), [-1, 0]);
+        let b = super::instance_key(&p, &f, &s, Some(&pt), [1, 0]);
+        let c = super::instance_key(&p, &f, &s, Some(&pt), [1, -1]);
+        assert!(a != b && b != c && a != c);
     }
 
     #[test]
