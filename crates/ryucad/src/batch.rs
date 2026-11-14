@@ -6,6 +6,7 @@
 //! (content, the parts' lists, the root files, deletions), and each part
 //! the batch changed is rebuilt once, with the assemblies over it.
 
+use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
 use crate::live::Live;
 use crate::proto::{BatchOp, Request};
@@ -68,8 +69,9 @@ pub fn run(
                             "revision": revision});
     if ask.dry_run {
         answer["dry_run"] = json!(true);
+    } else if ask.rebuild {
+        answer["rebuild"] = rebuild(session, &parts);
     }
-    let _ = ask.rebuild;
     Ok(answer)
 }
 
@@ -276,6 +278,47 @@ fn parts_json(s: &Session, parts: &BTreeMap<String, &'static str>) -> Value {
         })
         .collect();
     Value::Object(map)
+}
+
+/// Rebuilds each part the batch created or updated, then each assembly
+/// that places it at working, each once: every one's report as `rebuild`
+/// gives it, and how many features failed. A part that fails to build is
+/// reported, never a refusal: the batch is written.
+fn rebuild(session: &mut Session, parts: &BTreeMap<String, &'static str>) -> Value {
+    let mut ids: Vec<Id> = Vec::new();
+    let mut seen: BTreeSet<Id> = BTreeSet::new();
+    for (p, status) in parts {
+        if !matches!(*status, "created" | "updated") {
+            continue;
+        }
+        let Ok(id) = crate::part::part_id(p) else {
+            continue;
+        };
+        if !session.project().parts.contains_key(&id) {
+            continue;
+        }
+        let over = crate::mate::reached(session.project(), &id);
+        for a in std::iter::once(id).chain(over) {
+            if seen.insert(a.clone()) {
+                ids.push(a);
+            }
+        }
+    }
+    let mut reports = Vec::with_capacity(ids.len());
+    let mut failed = 0;
+    for id in &ids {
+        match crate::part::part_report(session, id, false) {
+            Ok((report, _)) => {
+                failed += report["failed"].as_u64().unwrap_or(0);
+                reports.push(report);
+            }
+            Err(e) => {
+                failed += 1;
+                reports.push(json!({"part": id, "error": e}));
+            }
+        }
+    }
+    json!({"parts": reports, "failed": failed})
 }
 
 #[cfg(test)]
@@ -677,5 +720,40 @@ mod tests {
         assert_eq!(v["revision"], json!(s.project_revision().unwrap()));
         let e = call(&mut s, "batch", json!({"ops": edit, "expect": rev})).unwrap_err();
         assert_eq!(e.code, Code::Conflict, "the old revision is stale now");
+    }
+
+    #[test]
+    fn a_batch_rebuilds_what_it_changed_and_the_assemblies_over_it_once() {
+        let (_dir, mut s) = twin();
+        let edit = |r: u32| {
+            json!({"ops": [
+                {"method": "feature.edit", "params": {"part": "pin", "id": "shank", "params": {"radius": r}}},
+                {"method": "feature.edit", "params": {"part": "pin", "id": "shank", "params": {"height": 12}}}
+            ]})
+        };
+        let v = call(&mut s, "batch", edit(3)).unwrap();
+        let rebuilt: Vec<&str> = v["rebuild"]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["part"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            rebuilt,
+            ["pin", "rig"],
+            "pin once, then the assembly placing it: {v}"
+        );
+        assert_eq!(v["rebuild"]["failed"], 0);
+        // Asked not to, it doesn't.
+        let v = call(
+            &mut s,
+            "batch",
+            json!({"ops": edit(4)["ops"], "rebuild": false}),
+        )
+        .unwrap();
+        assert!(v.get("rebuild").is_none());
+        // Nothing changed: nothing to rebuild.
+        let v = call(&mut s, "batch", edit(4)).unwrap();
+        assert_eq!(v["rebuild"]["parts"], json!([]));
     }
 }
