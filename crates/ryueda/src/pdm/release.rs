@@ -522,6 +522,72 @@ pub fn obsolete(
     )
 }
 
+/// `release.list`: every record (or one part's) with where it became
+/// official and its tag, and each part's state. In a fork, records
+/// naming the ID it had are listed apart as `inherited`.
+pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
+    let part = part.map(|p| Id::parse(p, "part")).transpose()?;
+    let (has_repo, releases) = match super::history(session) {
+        Ok((_, r)) => (true, r),
+        Err(e) if e.code == Code::NotAGitRepo => (false, Releases::default()),
+        Err(e) => return Err(e),
+    };
+    let files = session.snapshot();
+    let config = Config::read_in(&files, NAME)?;
+    let records = Records::read_in(&files, NAME)?;
+    let mine = |p: &Id| part.as_ref().is_none_or(|x| x == p);
+    if let Some(p) = &part
+        && !<crate::Eda as Product>::parts(&files)?.contains(p)
+        && records.of(p).next().is_none()
+    {
+        return Err(Error::new(Code::NotFound, format!("no part {p}")).with("part", p));
+    }
+    let forked = session
+        .project()
+        .manifest
+        .forked_from
+        .as_ref()
+        .map(|f| f.project.clone());
+    let upstream = |e: &ryupdm::record::Entry| {
+        e.record
+            .as_ref()
+            .is_ok_and(|r| Some(r.project()) == forked.as_ref())
+    };
+    let (inherited, own): (Vec<_>, Vec<_>) = records
+        .entries
+        .iter()
+        .filter(|e| mine(&e.part))
+        .partition(|e| upstream(e));
+    let show = |l: Vec<&ryupdm::record::Entry>| -> Vec<Value> {
+        l.into_iter()
+            .map(|e| ryupdm::release::listed(e, &releases, has_repo))
+            .collect()
+    };
+    let parts: Vec<Value> = ryupdm::state::derive_all_for::<crate::Eda>(&files, &releases)
+        .into_iter()
+        .filter(|(p, _)| mine(p))
+        .map(|(p, s)| {
+            let mut v = s.to_json();
+            v["part"] = json!(p);
+            v
+        })
+        .collect();
+    let mut v = json!({
+        "repository": has_repo,
+        "release_branch": config.release_branch,
+        "branch": releases.branch.as_ref().map(|b| json!({"name": b.name, "tip": b.tip})),
+        "shallow": releases.shallow,
+        "records": show(own),
+        "parts": parts,
+        "pdm_revision": super::revision(session),
+    });
+    if let Some(f) = &forked {
+        v["inherited"] = json!(show(inherited));
+        v["forked_from"] = json!(f);
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +782,17 @@ mod tests {
         .unwrap();
         assert_eq!(v["record"]["kind"], "ryupdm.obsolete", "{v}");
         assert!(s.root().join("releases/r_100k/A.obsolete.json").is_file());
+        let v = list(&mut s, None).unwrap();
+        assert_eq!(v["repository"], true);
+        let recs = v["records"].as_array().unwrap();
+        assert_eq!(recs.len(), 2, "{v}");
+        assert_eq!(
+            (recs[0]["label"].as_str(), recs[0]["status"].as_str()),
+            (Some("A"), Some("official"))
+        );
+        assert_eq!(recs[1]["status"], "proposed");
+        assert_eq!(v["parts"][0]["part"], "r_100k");
+        assert_eq!(list(&mut s, Some("nope")).unwrap_err().code, Code::NotFound);
     }
 
     #[test]
