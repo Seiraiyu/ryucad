@@ -150,13 +150,33 @@ fn design_problems(session: &mut Session, part: &Id, r: &mut Readiness) -> Resul
             continue;
         };
         for (cid, c) in &files.components {
-            if let Ok(c) = &c.item
-                && let Some(alias) = &c.of.library
-            {
-                r.problems.push(json!(
-                    super::content::not_released(alias, &c.of.id, &format!("design {part}"))
-                        .with("component", format!("{b}/{cid}"))
-                ));
+            let Ok(c) = &c.item else { continue };
+            let Some(alias) = &c.of.library else { continue };
+            let at = format!("{b}/{cid}");
+            let what = format!("design {part}");
+            let label = p
+                .manifest
+                .libraries
+                .get(alias)
+                .and_then(|a| a.labels.get(&c.of.id));
+            match (label, p.pinned.get(&(alias.to_string(), c.of.id.clone()))) {
+                (None, _) | (_, None) => r.problems.push(json!(
+                    super::content::not_released(alias, &c.of.id, &what).with("component", &at)
+                )),
+                (Some(_), Some(Err(e))) => r.problems.push(json!(e.clone().with("component", &at))),
+                (Some(label), Some(Ok(pn))) if pn.obsolete => r.problems.push(json!(
+                    Error::new(
+                        Code::ComponentObsolete,
+                        format!(
+                            "{what} places {alias}/{}@{label}, which is obsolete: pin a current label (`ryueda lib update`)",
+                            c.of.id
+                        ),
+                    )
+                    .with("alias", alias)
+                    .with("component", &at)
+                    .with("label", label)
+                )),
+                _ => {}
             }
         }
     }
@@ -692,6 +712,26 @@ mod tests {
     use crate::pdm::cmd::tests::session;
     use crate::pdm::tests::id;
 
+    #[test]
+    fn a_design_is_ready_only_with_its_pins_official_and_current() {
+        let (_d, board, mut fake) = crate::project::tests::pinned_board();
+        let ready = |fake: &crate::project::tests::Fake| {
+            let mut s = Session::open_with_pins(&board, Box::new(fake.clone())).unwrap();
+            codes(&readiness(&mut s, &id("d")).unwrap().problems)
+        };
+        let c = ready(&fake);
+        assert!(!c.contains(&"component_not_released".to_owned()), "{c:?}");
+        assert!(!c.contains(&"component_obsolete".to_owned()), "{c:?}");
+        fake.obsolete("r_100k", "A");
+        let c = ready(&fake);
+        assert!(c.contains(&"component_obsolete".to_owned()), "{c:?}");
+        assert!(!c.contains(&"component_not_released".to_owned()), "{c:?}");
+        // A pin that doesn't resolve says why.
+        fake.pins.clear();
+        let c = ready(&fake);
+        assert!(c.contains(&"label_not_found".to_owned()), "{c:?}");
+    }
+
     fn codes(problems: &[Value]) -> Vec<String> {
         problems
             .iter()
@@ -757,7 +797,7 @@ mod tests {
             "{:?}",
             r.problems
         );
-        // Another project's component at working can't be pinned yet.
+        // Another project's component at working: not released.
         let c = s.root().join("blocks/top/components/r1.json");
         let mut v: Value = serde_json::from_slice(&std::fs::read(&c).unwrap()).unwrap();
         v["of"] = json!({"library": "passives", "id": "r_100k"});
@@ -924,7 +964,7 @@ mod tests {
         // ryueda check reports nothing of releases while none is wrong.
         let cats = s.catalogues().unwrap();
         let f = findings(&mut s, false).unwrap();
-        let v = crate::erc::check_project(s.project(), &cats, &[], &f).unwrap();
+        let v = crate::erc::check_project(s.project(), &cats, &[], &f, &[]).unwrap();
         assert!(v.get("release").is_none(), "{v}");
         let at = s.root().join("library/components/r_100k.json");
         let mut v: Value = serde_json::from_slice(&std::fs::read(&at).unwrap()).unwrap();
@@ -942,7 +982,7 @@ mod tests {
         assert!(codes.contains(&"release_stale"), "{codes:?}");
         // `ryueda check` reports them as its `release` section.
         let f = findings(&mut s, false).unwrap();
-        let e = crate::erc::check_project(s.project(), &cats, &[], &f).unwrap_err();
+        let e = crate::erc::check_project(s.project(), &cats, &[], &f, &[]).unwrap_err();
         assert!(
             e.details["report"]["release"]
                 .as_array()
