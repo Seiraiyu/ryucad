@@ -3636,6 +3636,80 @@ fn flat_pieces_section(golden: &mut Golden) {
     hash_body(&mut s, &u, &j);
 }
 
+/// ryukei 18.C's known seams (#652): a block whose vertical edge is
+/// rounded (0.1) and whose top edges beside the round are filleted
+/// (0.01) with the round's top edge, the tangent chain they make, the
+/// small fillets deleted. The delete's region holds the round
+/// and the two sides it is tangent to, so its re-trim records their seams
+/// and builds through the seamed table. The result's body, created names
+/// and mesh, or the refusal's bytes.
+fn known_seams_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::topo::{Body, EntityId, FaceId};
+    use ryukei::tweak::{DeleteBlends, RecogniseOptions, delete_blends};
+    let mut s = golden.section("known_seams");
+    let key = OpKey(0x18c9);
+    let (b0, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let face = |b: &Body, r: FaceRole| match b.by_name(Name::derive(key, Role::Face(r), &[])) {
+        Some(EntityId::Face(f)) => f,
+        _ => panic!("no face {r:?}"),
+    };
+    let shared = |b: &Body, x: FaceId, y: FaceId| {
+        let e = b
+            .edges()
+            .find(|&e| {
+                let fs: Vec<FaceId> = b
+                    .edge_fins(e)
+                    .map(|fin| b.loop_(b.fin(fin).unwrap().loop_).unwrap().face)
+                    .collect();
+                fs.contains(&x) && fs.contains(&y)
+            })
+            .unwrap();
+        b.edge(e).unwrap().name
+    };
+    let fillet = |edge, radius| EdgeBlend {
+        edge,
+        kind: BlendKind::Fillet { radius },
+    };
+    let round = shared(&b0, face(&b0, FaceRole::PlusX), face(&b0, FaceRole::PlusY));
+    let (b1, _) = blend(OpKey(0x18ca), &b0, &[fillet(round, 0.1)]).unwrap();
+    let top = face(&b1, FaceRole::PlusZ);
+    // The round carries the top edges' tangent chain round the corner, so
+    // the chain is filleted whole: beside +X, along the round, beside +Y.
+    let others = [
+        FaceRole::PlusZ,
+        FaceRole::MinusX,
+        FaceRole::MinusY,
+        FaceRole::MinusZ,
+        FaceRole::PlusX,
+        FaceRole::PlusY,
+    ];
+    let round_face = b1
+        .faces()
+        .find(|&f| others.iter().all(|&r| face(&b1, r) != f))
+        .unwrap();
+    let edges = [
+        shared(&b1, top, face(&b1, FaceRole::PlusX)),
+        shared(&b1, top, round_face),
+        shared(&b1, top, face(&b1, FaceRole::PlusY)),
+    ];
+    let (b2, _) = blend(OpKey(0x18cb), &b1, &edges.map(|e| fillet(e, 0.01))).unwrap();
+    let spec = DeleteBlends {
+        max_size: Some(0.02),
+        faces: Vec::new(),
+        options: RecogniseOptions::default(),
+    };
+    match delete_blends(OpKey(0x18cc), &b2, &spec) {
+        Ok((o, j)) => hash_body(&mut s, &o, &j),
+        Err(e) => {
+            for byte in format!("{e:?}").bytes() {
+                s.u64(u64::from(byte));
+            }
+        }
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3732,6 +3806,7 @@ sections! {
     closed_silhouettes => closed_silhouettes_section,
     crossing_beside => crossing_beside_section,
     flat_pieces => flat_pieces_section,
+    known_seams => known_seams_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline

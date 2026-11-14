@@ -177,6 +177,59 @@ fn revolved_folds(
 /// Chebyshev's spacing: densest at the folds, where `u` turns fastest.
 const REVOLVED_SAMPLES: usize = 48;
 
+/// How many times a revolution's branch that can't be certified whole is
+/// halved (plan 17.C, #767): at most sixteen parts.
+const REVOLVED_SPLITS: u32 = 4;
+
+/// `b` fitted, or, where it can't be certified whole, its two halves
+/// (split at its middle sample; a closed branch's second half runs back
+/// to its start), each in turn, down to `depth` halvings, every part
+/// pushed to `out`. `Ok(false)` at the first part that can't be certified
+/// at the last depth.
+fn fit_parts(
+    surface: &Surface,
+    t: Vector3,
+    b: &Traced,
+    depth: u32,
+    m: &Meter,
+    out: &mut Vec<Raw>,
+) -> Result<bool, Failure> {
+    match fit_contour(surface, t, b, m) {
+        Ok(fit) => {
+            let range = fit.curve.domain();
+            out.push(Raw {
+                curve: Curve::Nurbs(Arc::new(fit.curve)),
+                range,
+                pcurve: (Curve2::Nurbs2(Arc::new(fit.pcurve)), [0.0, 1.0]),
+                tolerance: fit.tolerance,
+            });
+            return Ok(true);
+        }
+        Err(Failure::Uncertain) => {}
+        Err(e) => return Err(e),
+    }
+    let n = b.params.len();
+    if depth == 0 || n < 4 {
+        return Ok(false);
+    }
+    let mid = n / 2;
+    let mut second = b.params[mid..].to_vec();
+    if b.closed {
+        second.push(b.params[0]);
+    }
+    for params in [b.params[..=mid].to_vec(), second] {
+        let part = Traced {
+            points: params.iter().map(|&[u, v]| surface.point(u, v)).collect(),
+            closed: false,
+            params,
+        };
+        if !fit_parts(surface, t, &part, depth - 1, m, out)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// A revolution's silhouette over the parameter box `rect` from its
 /// formula (design 484): `u = ψ ± acos(k)`, `k = ρ' t_z / (h' s)`, over
 /// the stretches of `v` where [`revolved_folds`] finds `G` positive. A
@@ -189,7 +242,8 @@ const REVOLVED_SAMPLES: usize = 48;
 /// certified as a traced one ([`fit_contour`]), so no cell, crossing or
 /// cluster is needed. `None` (traced instead) where the range leaves the
 /// profile's domain, the profile has a crease inside it, the folds or
-/// their signs aren't certified, or a fit can't certify.
+/// their signs aren't certified, or a fit can't certify. A branch that
+/// can't be certified whole is fitted in parts ([`fit_parts`], #767).
 fn revolved(
     r: &Revolution,
     surface: &Surface,
@@ -310,18 +364,9 @@ fn revolved(
         if span <= 10.0 * LINEAR_RESOLUTION {
             continue;
         }
-        let fit = match fit_contour(surface, t, b, m) {
-            Ok(fit) => fit,
-            Err(Failure::Uncertain) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let range = fit.curve.domain();
-        out.push(Raw {
-            curve: Curve::Nurbs(Arc::new(fit.curve)),
-            range,
-            pcurve: (Curve2::Nurbs2(Arc::new(fit.pcurve)), [0.0, 1.0]),
-            tolerance: fit.tolerance,
-        });
+        if !fit_parts(surface, t, b, REVOLVED_SPLITS, m, &mut out)? {
+            return Ok(None);
+        }
     }
     Ok(Some(out))
 }
