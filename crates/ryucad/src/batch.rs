@@ -54,12 +54,23 @@ pub fn run(
     }
     session.job().check()?;
     let writes = changed(&working, capture.captured());
+    let parts = statuses(&named, &working, &writes);
     let written = writes.len();
-    if !ask.dry_run && !writes.is_empty() {
-        write(session, ordered(writes))?;
+    let (revision, parts_now) = if ask.dry_run {
+        (capture.project_revision()?, parts_json(&capture, &parts))
+    } else {
+        if !writes.is_empty() {
+            write(session, ordered(writes))?;
+        }
+        (session.project_revision()?, parts_json(session, &parts))
+    };
+    let mut answer = json!({"ops": answers, "parts": parts_now, "written": written,
+                            "revision": revision});
+    if ask.dry_run {
+        answer["dry_run"] = json!(true);
     }
-    let _ = (named, ask.rebuild);
-    Ok(json!({"ops": answers, "written": written}))
+    let _ = ask.rebuild;
+    Ok(answer)
 }
 
 /// The requests a batch may hold: the model edits a person may propose
@@ -217,6 +228,54 @@ fn write(session: &mut Session, writes: Vec<(String, Option<Bytes>)>) -> Result<
         session.reload()?;
     }
     Ok(())
+}
+
+/// Each part the ops named or the batch changed, and what became of it,
+/// judged from the bytes: `created` (its list is new), `deleted` (its
+/// list went), `updated` (any other file of it changed), else
+/// `unchanged`. An op that writes the same bytes again changes nothing.
+fn statuses(
+    named: &BTreeSet<String>,
+    working: &Files,
+    writes: &BTreeMap<String, Option<Bytes>>,
+) -> BTreeMap<String, &'static str> {
+    let mut out: BTreeMap<String, &'static str> =
+        named.iter().map(|p| (p.clone(), "unchanged")).collect();
+    for (path, bytes) in writes {
+        let Some(part) = path
+            .strip_prefix("parts/")
+            .and_then(|r| r.split('/').next())
+        else {
+            continue;
+        };
+        let list = path.ends_with("/part.json");
+        let status = match (list, working.contains_key(path), bytes.is_some()) {
+            (true, false, true) => "created",
+            (true, true, false) => "deleted",
+            _ => "updated",
+        };
+        let e = out.entry(part.to_owned()).or_insert("unchanged");
+        if *e == "unchanged" || status != "updated" {
+            *e = status;
+        }
+    }
+    out
+}
+
+/// `parts` as the answer gives them: each one's status and its revision
+/// as `s` has it now (null once deleted).
+fn parts_json(s: &Session, parts: &BTreeMap<String, &'static str>) -> Value {
+    let map: serde_json::Map<String, Value> = parts
+        .iter()
+        .map(|(p, status)| {
+            let revision = crate::part::part_id(p)
+                .ok()
+                .and_then(|id| s.project().parts.get(&id))
+                .map(|x| x.revision.clone());
+            (p.clone(), json!({"status": status, "revision": revision}))
+        })
+        .collect();
+    Value::Object(map)
 }
 
 #[cfg(test)]
@@ -533,5 +592,90 @@ mod tests {
                 "parts/z/part.json",
             ]
         );
+    }
+
+    #[test]
+    fn each_part_says_what_became_of_it_from_the_bytes() {
+        let (dir, mut s) = twin();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "pin", "properties": {"name": "Pin"}}),
+        )
+        .unwrap();
+        let ops = json!([
+            {"method": "part.create", "params": {"part": "bolt"}},
+            {"method": "feature.add", "params": {"part": "bolt", "type": "sphere", "id": "head",
+                                                 "params": {"radius": 3}}},
+            {"method": "feature.edit", "params": {"part": "plate", "id": "slab", "params": {"y": 30}}},
+            {"method": "props.set", "params": {"part": "pin", "properties": {"name": "Pin"}}},
+            {"method": "materials.set", "params": {"name": "steel", "density": "7850 kg/m^3"}},
+            {"method": "part.delete", "params": {"part": "rig"}}
+        ]);
+        let before = on_disk(dir.path());
+        // Run dry: the same answer, nothing written, no rebuild.
+        let dry = call(&mut s, "batch", json!({"ops": ops, "dry_run": true})).unwrap();
+        assert_eq!(on_disk(dir.path()), before);
+        assert_eq!(dry["dry_run"], true);
+        assert!(dry.get("rebuild").is_none());
+        let v = call(&mut s, "batch", json!({"ops": ops, "rebuild": false})).unwrap();
+        let status = |v: &Value, p: &str| v["parts"][p]["status"].as_str().unwrap().to_owned();
+        for v in [&dry, &v] {
+            assert_eq!(status(v, "bolt"), "created", "{v}");
+            assert_eq!(status(v, "plate"), "updated");
+            assert_eq!(status(v, "pin"), "unchanged", "the same properties again");
+            assert_eq!(status(v, "rig"), "deleted");
+            assert_eq!(v["parts"]["rig"]["revision"], Value::Null);
+            assert_eq!(
+                v["parts"].as_object().unwrap().len(),
+                4,
+                "materials name no part"
+            );
+        }
+        assert_eq!(dry["written"], v["written"]);
+        let bolt = crate::part::part_id("bolt").unwrap();
+        assert_eq!(
+            v["parts"]["bolt"]["revision"],
+            json!(s.project().part(&bolt).unwrap().revision)
+        );
+        assert_eq!(v["revision"], json!(s.project_revision().unwrap()));
+        assert_eq!(
+            on_disk(dir.path())["materials.json"],
+            before["materials.json"]
+        );
+        // The same edit again: unchanged, nothing written.
+        let same = call(
+            &mut s,
+            "batch",
+            json!({"ops": [{"method": "feature.edit", "params": {"part": "plate", "id": "slab", "params": {"y": 30}}}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            (same["written"].clone(), status(&same, "plate")),
+            (json!(0), "unchanged".to_owned())
+        );
+    }
+
+    #[test]
+    fn expect_is_the_project_revision_the_batch_was_written_against() {
+        let (dir, mut s) = twin();
+        let before = on_disk(dir.path());
+        let edit = json!([{"method": "feature.edit",
+                           "params": {"part": "plate", "id": "slab", "params": {"y": 30}}}]);
+        let e = call(&mut s, "batch", json!({"ops": edit, "expect": "stale"})).unwrap_err();
+        assert_eq!(e.code, Code::Conflict);
+        assert_eq!(on_disk(dir.path()), before);
+        let rev = s.project_revision().unwrap();
+        // The project revision is its own settings' (the manifest, PDM,
+        // materials, the lock, project parameters): a part's edit leaves it.
+        let v = call(&mut s, "batch", json!({"ops": edit, "expect": rev})).unwrap();
+        assert_eq!(v["revision"], json!(rev), "a part's edit leaves it");
+        let materials = json!([{"method": "materials.set",
+                                "params": {"name": "alu", "density": "2.7 g/cm^3"}}]);
+        let v = call(&mut s, "batch", json!({"ops": materials, "expect": rev})).unwrap();
+        assert_ne!(v["revision"], json!(rev), "the batch moved it");
+        assert_eq!(v["revision"], json!(s.project_revision().unwrap()));
+        let e = call(&mut s, "batch", json!({"ops": edit, "expect": rev})).unwrap_err();
+        assert_eq!(e.code, Code::Conflict, "the old revision is stale now");
     }
 }
