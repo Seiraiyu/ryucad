@@ -364,6 +364,109 @@ fn stdio_session_through_the_daemon() {
     assert_eq!(got[2].0["result"], got[5].0["result"]);
 }
 
+/// `ryucad batch` (design 603, plan 31.B): a file of ops, both ways, as
+/// one change; a bare array, --dry-run; a refusal names its op and writes
+/// nothing; through the daemon one `undo` takes the batch back; `-` reads
+/// stdin.
+#[test]
+fn batch_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.write(
+        "make.json",
+        r#"{"ops": [
+            {"method": "part.create", "params": {"part": "p"}},
+            {"method": "feature.add", "params": {"part": "p", "type": "box", "id": "plate",
+                                                 "params": {"x": "10", "y": "20", "z": "5"}}},
+            {"method": "materials.set", "params": {"name": "steel", "density": "7850 kg/m^3"}}
+        ]}"#,
+    );
+    let v = p.ok(&["batch", "make.json"]);
+    assert_eq!(v["parts"]["p"]["status"], "created", "{v}");
+    assert_eq!(v["ops"].as_array().unwrap().len(), 3);
+    assert_eq!(v["ops"][1]["method"], "feature.add");
+    assert_eq!(v["rebuild"]["parts"][0]["part"], "p");
+    assert_eq!(v["rebuild"]["failed"], 0);
+    let x = |p: &Pair, root: &Path| {
+        p.run_in(root, "", &["feature", "show", "p", "plate"]).1["result"]["params"]["x"]["value"]
+            .clone()
+    };
+    // A bare array of ops, run dry: answered, nothing written.
+    p.write(
+        "edit.json",
+        r#"[{"method": "feature.edit", "params": {"part": "p", "id": "plate", "params": {"x": "12"}}}]"#,
+    );
+    let dry = p.ok(&["batch", "edit.json", "--dry-run"]);
+    assert_eq!(dry["dry_run"], true, "{dry}");
+    assert_eq!(dry["parts"]["p"]["status"], "updated");
+    assert_eq!(x(&p, &p.direct), "10 mm");
+    // A refusal names its op and writes nothing.
+    p.write(
+        "bad.json",
+        r#"[{"method": "feature.edit", "params": {"part": "p", "id": "plate", "params": {"x": "12"}}},
+            {"method": "feature.edit", "params": {"part": "p", "id": "nope", "params": {}}}]"#,
+    );
+    let e = p.fails(&["batch", "bad.json"], "not_found", 1);
+    assert_eq!(e["details"]["op"], 1, "{e}");
+    assert_eq!(x(&p, &p.direct), "10 mm");
+    p.write("undo.json", r#"[{"method": "undo"}]"#);
+    let e = p.fails(&["batch", "undo.json"], "invalid_param", 1);
+    assert_eq!(e["details"]["pointer"], "/ops/0/method");
+    p.write("junk.json", "{nope");
+    p.fails(&["batch", "junk.json"], "usage", 2);
+    // Written, then undone in one step through the daemon.
+    p.ok(&["batch", "edit.json"]);
+    assert_eq!(x(&p, &p.daemon), "12 mm");
+    let (code, u) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    assert_eq!(x(&p, &p.daemon), "10 mm");
+    // `-` reads the batch from stdin (in process: the two differ from here).
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .current_dir(&p.direct)
+        .args(["batch", "-", "--no-rebuild"])
+        .env("RYUCAD_NO_DAEMON", "1")
+        .env("RYUCAD_RUNTIME_DIR", &p.run)
+        .env("RYUCAD_CONFIG_DIR", p.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", p.direct.with_extension("cache"))
+        .write_stdin(
+            r#"[{"method": "feature.edit", "params": {"part": "p", "id": "plate", "params": {"x": "11"}}}]"#,
+        )
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["result"]["parts"]["p"]["status"], "updated", "{v}");
+    assert!(v["result"].get("rebuild").is_none());
+    assert_eq!(x(&p, &p.direct), "11 mm");
+}
+
+/// A batch through a stdio session, both ways: one line, one answer; a
+/// second run of the same edit writes nothing.
+#[test]
+fn batch_through_a_stdio_session() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let lines = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"batch","params":{"ops":[{"method":"part.create","params":{"part":"p"}},{"method":"feature.add","params":{"part":"p","type":"box","id":"plate","params":{"x":"10","y":"20","z":"5"}}}]}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"batch","params":{"ops":[{"method":"feature.edit","params":{"part":"p","id":"plate","params":{"x":"10"}}}],"rebuild":false}}"#,
+    ];
+    let (a_code, a) = p.script(&p.direct, "", &lines);
+    let (b_code, b) = p.script(&p.daemon, "", &lines);
+    assert_eq!((a_code, b_code), (0, 0));
+    assert_eq!(a, b, "in process vs daemon");
+    assert_eq!(
+        a[0].0["result"]["parts"]["p"]["status"], "created",
+        "{}",
+        a[0].0
+    );
+    assert_eq!(
+        a[1].0["result"]["parts"]["p"]["status"], "unchanged",
+        "{}",
+        a[1].0
+    );
+    assert_eq!(a[1].0["result"]["written"], 0);
+}
+
 /// A daemon that stops between requests is started again for the next
 /// (decision 3).
 #[test]
