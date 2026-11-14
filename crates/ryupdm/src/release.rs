@@ -371,6 +371,52 @@ pub fn sync(repo: &gix::Repository, releases: &Releases, product: &str) -> Resul
     )
 }
 
+/// What a commit of the index would get wrong about releases, for every
+/// project of `P` the index holds (a folder with its manifest): each
+/// project's folder in the work tree with the guard's findings
+/// ([`crate::check::staged_for`]), those with none left out. Nothing
+/// outside a repository. ryucad's `git::release_guard` is this for ryucad.
+pub fn guard_for<P: Product>(
+    here: &std::path::Path,
+) -> Result<Vec<(std::path::PathBuf, Vec<crate::check::Finding>)>> {
+    let Ok(repo) = gix::discover(here) else {
+        return Ok(Vec::new());
+    };
+    let Some(workdir) = repo.workdir().map(std::path::Path::to_path_buf) else {
+        return Ok(Vec::new());
+    };
+    let Ok(index) = repo.open_index() else {
+        return Ok(Vec::new());
+    };
+    let manifest = format!("/{}", P::MANIFEST);
+    let mut prefixes: Vec<String> = index
+        .entries()
+        .iter()
+        .filter(|e| e.stage() == gix::index::entry::Stage::Unconflicted)
+        .filter_map(|e| {
+            let path = e.path(&index).to_string();
+            if path == P::MANIFEST {
+                return Some(String::new());
+            }
+            path.strip_suffix(&manifest).map(|dir| format!("{dir}/"))
+        })
+        .collect();
+    prefixes.sort();
+    prefixes.dedup();
+    let mut out = Vec::new();
+    for prefix in prefixes {
+        let found = crate::check::staged_for::<P>(&repo, &prefix)?;
+        if !found.is_empty() {
+            let root = prefix
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .fold(workdir.clone(), |p, s| p.join(s));
+            out.push((root, found));
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3483,6 +3483,27 @@ fn hook_check(here: &std::path::Path) -> ExitCode {
         }
     };
     let mut failed = false;
+    // The commit guard (design 629): a commit that would leave a proposal
+    // stale or change an official record, merge or not.
+    match ryupdm::release::guard_for::<ryueda::Eda>(here) {
+        Ok(found) => {
+            for (root, list) in found {
+                failed = true;
+                eprintln!(
+                    "ryueda: this commit would leave {} release problem(s) in {}:",
+                    list.len(),
+                    root.display()
+                );
+                for f in &list {
+                    eprintln!("  {}: {}", f.code, f.message);
+                }
+            }
+        }
+        Err(e) => {
+            failed = true;
+            eprintln!("ryueda: checking the release records staged: {}", e.message);
+        }
+    }
     for root in projects {
         let at = root.display();
         match server::handle_safely(&mut None, None, None, &root, Request::MergeStatus {}) {

@@ -208,3 +208,34 @@ fn a_stale_proposal_a_merge_completes_is_withdrawn() {
         git(&top, &["merge", "--abort"]);
     }
 }
+
+#[test]
+fn the_hook_refuses_a_commit_that_makes_a_proposal_stale() {
+    let d = tempfile::tempdir().unwrap();
+    let (top, run) = (d.path().join("repo"), d.path().join("run"));
+    std::fs::create_dir_all(&top).unwrap();
+    let (lib, _) = library(&top, &run, false);
+    ok(&lib, &run, false, &["git", "install"]);
+    // On a work branch: main is the release branch.
+    git(&top, &["checkout", "-q", "-b", "work"]);
+    ok(&lib, &run, false, &["release", "propose", "r_4k7"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-q", "-m", "propose A"]);
+    // The component changes; its proposal no longer describes it.
+    ok(
+        &lib,
+        &run,
+        false,
+        &["libcomp", "edit", "r_4k7", "--value", "4k99"],
+    );
+    git(&top, &["add", "-A"]);
+    let (passed, stderr) = git_try(&top, &[], &["commit", "-q", "-m", "edit"]);
+    assert!(!passed, "the hook refuses it");
+    assert!(stderr.contains("release_stale"), "{stderr}");
+    // A commit that changes nothing a record describes goes through.
+    git(&top, &["reset", "-q", "--hard"]);
+    std::fs::write(top.join("README"), "notes\n").unwrap();
+    git(&top, &["add", "-A"]);
+    let (passed, stderr) = git_try(&top, &[], &["commit", "-q", "-m", "notes"]);
+    assert!(passed, "{stderr}");
+}
