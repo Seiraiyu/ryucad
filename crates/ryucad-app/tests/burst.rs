@@ -9,7 +9,7 @@
 //! failed allocation, wgpu error or lost device, and no exit.
 //!
 //! It needs a graphics adapter (`common::gpu`: lavapipe, WARP) and a
-//! display: on Linux `DISPLAY` or `WAYLAND_DISPLAY` (CI runs it under
+//! display: on Linux `DISPLAY` or `WAYLAND_DISPLAY` (full.yml runs it under
 //! `xvfb-run`), else it passes with a note unless `RYUCAD_REQUIRE_DISPLAY`
 //! is set. `RYUCAD_BURST_PARTS` sizes the burst (default 440, rounded up
 //! to whole subassemblies of 50), `RYUCAD_BURST_SOAK` the seconds it is

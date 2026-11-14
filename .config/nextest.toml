@@ -17,9 +17,3 @@ fail-fast = false
 # killed and fails by name, so a hung test can't eat the job (the slowest
 # take under two minutes on a runner).
 slow-timeout = { period = "60s", terminate-after = 5 }
-
-# #799's burst (crates/ryucad-app/tests/burst.rs) rebuilds and meshes a
-# 450-part assembly behind a real window: minutes, so it has longer.
-[[profile.ci.overrides]]
-filter = "package(ryucad-app) & binary(burst)"
-slow-timeout = { period = "60s", terminate-after = 25 }
