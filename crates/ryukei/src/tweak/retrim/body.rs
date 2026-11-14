@@ -39,7 +39,7 @@ pub(crate) struct WorkBody {
 }
 
 /// A face's sheet key: unique per face within the re-trim.
-fn sheet_key(key: OpKey, face: Name) -> OpKey {
+pub(crate) fn sheet_key(key: OpKey, face: Name) -> OpKey {
     OpKey(Name::derive(key, Role::Edit(EditRole::Edge), &[face]).to_u128())
 }
 

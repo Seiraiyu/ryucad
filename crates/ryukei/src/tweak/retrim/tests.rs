@@ -563,3 +563,44 @@ fn a_stopped_rung_answers_only_where_its_walk_closes() {
         Rung::Walked(_)
     ));
 }
+
+/// FNV-1a of `b`'s `dump_unnamed` (as `ryukei-testkit`'s `fnv`, which the
+/// crate can't depend on).
+fn free_hash(b: &Body) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &x in b.dump_unnamed().as_bytes() {
+        h ^= u64::from(x);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// The bent rod's rim deleted with stops, as plan 19.A built it.
+const BENT_ROD_DELETED_HASH: u64 = 0xcd93_79f0_14d0_8ffc;
+
+/// A plane stop goes only where no iso stop did (plan 19.B, Decision 3):
+/// the bent rod's run, stopped by its iso stop, takes no plane stop, and
+/// its rim's delete builds as 19.A's did, bit for bit.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn an_iso_stopped_run_takes_no_plane_stop() {
+    use super::{Stops, retrim_with};
+    let (rod, rim) = crate::testing::bent_rod();
+    let changes = Changes {
+        deleted: std::collections::BTreeSet::from([rim]),
+        ..Changes::default()
+    };
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let (o, _) = retrim_with(OpKey(0x19a4), &rod, &changes, Stops::AfterHeld, &m).unwrap();
+    // `held_seams`' golden pins the same body; here, its hash.
+    assert_eq!(
+        free_hash(&o),
+        BENT_ROD_DELETED_HASH,
+        "the bent rod's delete moved: {:#x}",
+        free_hash(&o)
+    );
+}

@@ -217,6 +217,41 @@ pub(crate) fn plane_cut(
     divided_behind(key, &sheet, stop, bx, m)
 }
 
+/// Working face `f`'s sheet with its plane stops (design 642), where its
+/// iso stops left `rect` as it was (`unstopped` is the rect before
+/// them; plan 19.B, Decision 3): each held seam on `f` with a stop plane
+/// ([`stop_plane`]) cuts the rect's sheet ([`plane_cut`]), one plane
+/// after another, in edge order. `None` where nothing cuts.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plane_stops(
+    key: OpKey,
+    body: &Body,
+    f: FaceId,
+    held: &[Held],
+    surface: &Surface,
+    unstopped: [[f64; 2]; 2],
+    rect: [[f64; 2]; 2],
+    bx: &Box3,
+    m: &Meter,
+) -> Option<Body> {
+    if rect != unstopped {
+        return None;
+    }
+    let planes: Vec<Plane> = held
+        .iter()
+        .filter(|h| h.faces.contains(&f))
+        .filter_map(|h| stop_plane(body, f, h, m))
+        .collect();
+    let (first, rest) = planes.split_first()?;
+    let mut sheet = plane_cut(key, surface, rect, first, bx, m)?;
+    for p in rest {
+        if let Some(again) = divided_behind(key, &sheet, p, bx, m) {
+            sheet = again;
+        }
+    }
+    Some(sheet)
+}
+
 /// One-face sheet `sheet` divided by `stop` (a plane sheet over `bx`,
 /// grown by its diagonal), and its one face behind the plane: `None`
 /// unless something lies in front and exactly one face behind.
@@ -734,5 +769,27 @@ mod tests {
             .unwrap(),
         );
         assert!(plane_cut(OpKey(0x19b8), &tube, rect, &far, &bx, &m).is_none());
+    }
+
+    #[test]
+    fn plane_stops_cut_a_face_whose_seam_lies_on_no_iso_line() {
+        let (s, h) = oblique_pair();
+        let f = h.faces[0];
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let surface = s.surfaces[s.faces[f].surface].clone();
+        let rect = [[0.0, core::f64::consts::TAU], [-2.0, 2.0]];
+        let bx = Box3::new(
+            crate::geom::Point3::new(-2.0, -2.0, -3.0),
+            crate::geom::Point3::new(2.0, 2.0, 3.0),
+        );
+        let cut = plane_stops(OpKey(0x19b9), &s, f, &[h], &surface, rect, rect, &bx, &m);
+        let c = cut.expect("cut at the ellipse's plane");
+        assert_eq!(c.faces().count(), 1);
+        // A rect already stopped by an iso stop takes no plane stop.
+        let shorter = [[0.0, core::f64::consts::TAU], [-2.0, 1.0]];
+        assert!(
+            plane_stops(OpKey(0x19b9), &s, f, &[h], &surface, rect, shorter, &bx, &m).is_none()
+        );
     }
 }

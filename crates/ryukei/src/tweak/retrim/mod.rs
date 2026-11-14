@@ -281,6 +281,21 @@ fn attempt(
                     let before = w.rect;
                     w.rect = held::iso_stops(body, f, &held, &w.surface, w.rect);
                     stopping |= w.rect != before;
+                    // Where no iso stop did, a plane stop (plan 19.B).
+                    if let Some(cut) = held::plane_stops(
+                        body::sheet_key(key, body.faces[f].name),
+                        body,
+                        f,
+                        &held,
+                        &w.surface,
+                        before,
+                        w.rect,
+                        bx,
+                        m,
+                    ) {
+                        w.cut = Some(cut);
+                        stopping = true;
+                    }
                 }
                 ws.insert(f, w);
             }
