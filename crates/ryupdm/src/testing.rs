@@ -247,4 +247,32 @@ mod tests {
             Some("A")
         );
     }
+
+    #[test]
+    fn a_toys_proposal_goes_stale_when_its_thing_changes() {
+        use crate::check::run_for;
+        let mut f = project(&[("a", "{\"x\": 1}")]);
+        let c = Toy::content(&f, &id("a")).unwrap();
+        f.insert("releases/a/A.json".into(), record("a", "A", &c));
+        let codes = |f: &BTreeMap<String, Vec<u8>>| -> Vec<&'static str> {
+            run_for::<Toy>(f, None, None)
+                .unwrap()
+                .into_iter()
+                .map(|x| x.code)
+                .collect()
+        };
+        assert!(!codes(&f).contains(&"release_stale"), "{:?}", codes(&f));
+        f.insert("things/a.json".into(), b"{\"x\": 2}".to_vec());
+        assert!(codes(&f).contains(&"release_stale"), "{:?}", codes(&f));
+        let mut other = f.clone();
+        other.insert(
+            "toy.json".into(),
+            canonical::to_string(
+                &json!({"default_unit": "mm", "format": 1, "kind": "toy.project",
+                                         "project": "fedcba9876543210fedcba9876543210"}),
+            )
+            .into_bytes(),
+        );
+        assert!(codes(&other).contains(&"release_project_mismatch"));
+    }
 }
