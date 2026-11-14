@@ -383,7 +383,7 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
         .with("param", "against")),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
-            crate::erc::check_project(p, &cats, &[]).map(Answer::json)
+            crate::erc::check_project(p, &cats, &[], &[]).map(Answer::json)
         }
         Request::Describe {
             design,
@@ -1112,7 +1112,10 @@ fn dispatch(
                 None => None,
             };
             let cats = session.catalogues()?;
-            match (crate::erc::check(session.root(), &cats), diff) {
+            // A revision's release findings need its history: `release
+            // check` is the command for them; the working files' are here.
+            let release = crate::pdm::release::findings(session, false).unwrap_or_default();
+            match (crate::erc::check(session.root(), &cats, &release), diff) {
                 (Ok(mut v), Some(d)) => {
                     v["against"] = d;
                     Ok(v)

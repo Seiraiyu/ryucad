@@ -588,6 +588,61 @@ pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
     Ok(v)
 }
 
+/// The release findings for the project (`schema: 1` each, with
+/// `source: release`); with `again`, official releases' results are
+/// worked out again (`release_result_changed`).
+pub fn findings(session: &mut Session, again: bool) -> Result<Vec<Value>> {
+    let files = session.snapshot();
+    let root = session.root().to_path_buf();
+    let found = match super::history(session) {
+        Ok((repo, releases)) => {
+            let h = ryupdm::check::History {
+                repo: repo.gix(),
+                prefix: repo.prefix(),
+                releases: &releases,
+            };
+            let mut a = Again { root };
+            let r: Option<&mut dyn ryupdm::check::Results> =
+                if again { Some(&mut a) } else { None };
+            ryupdm::check::run_for::<crate::Eda>(&files, Some(h), r)?
+        }
+        Err(e) if e.code == Code::NotAGitRepo => {
+            ryupdm::check::run_for::<crate::Eda>(&files, None, None)?
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(found
+        .iter()
+        .map(|f| {
+            let mut v = f.to_json();
+            v["source"] = json!("release");
+            v
+        })
+        .collect())
+}
+
+/// `release.check`: the release checks alone, reported as `check`
+/// reports; fails with `check_failed` when any finding is an error.
+pub fn check(session: &mut Session, again: bool) -> Result<Value> {
+    let findings = findings(session, again)?;
+    let errors = findings.iter().filter(|f| f["severity"] == "error").count();
+    let report = json!({
+        "schema": ryupdm::check::SCHEMA,
+        "passed": errors == 0,
+        "errors": errors,
+        "warnings": findings.len() - errors,
+        "findings": findings,
+    });
+    if errors > 0 {
+        return Err(Error {
+            code: Code::CheckFailed,
+            message: format!("{errors} release check(s) failed"),
+            details: report,
+        });
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,5 +865,42 @@ mod tests {
         let files = s.snapshot();
         let again = results(s.root(), &part_source(&files, &id("d")), &id("d")).unwrap();
         assert_eq!(r, &json!(again));
+    }
+
+    #[test]
+    fn the_release_checks_find_a_stale_proposal() {
+        let (_d, mut s) = session(ProjectKind::Library);
+        crate::pdm::cmd::init(&mut s).unwrap();
+        number(&mut s, "r_100k", "100-0001");
+        in_git(&mut s);
+        propose(&mut s, "agent", &one("r_100k"), false, None, None, false).unwrap();
+        assert_eq!(check(&mut s, false).unwrap()["passed"], true);
+        // ryueda check reports nothing of releases while none is wrong.
+        let cats = s.catalogues().unwrap();
+        let f = findings(&mut s, false).unwrap();
+        let v = crate::erc::check_project(s.project(), &cats, &[], &f).unwrap();
+        assert!(v.get("release").is_none(), "{v}");
+        let at = s.root().join("library/components/r_100k.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&at).unwrap()).unwrap();
+        v["value"] = json!("99k");
+        crate::source::write_atomic(&at, crate::canonical::to_string(&v)).unwrap();
+        s.reload().unwrap();
+        let e = check(&mut s, false).unwrap_err();
+        assert_eq!(e.code, Code::CheckFailed);
+        let codes: Vec<&str> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["code"].as_str())
+            .collect();
+        assert!(codes.contains(&"release_stale"), "{codes:?}");
+        // `ryueda check` reports them as its `release` section.
+        let f = findings(&mut s, false).unwrap();
+        let e = crate::erc::check_project(s.project(), &cats, &[], &f).unwrap_err();
+        assert!(
+            e.details["report"]["release"]
+                .as_array()
+                .is_some_and(|l| !l.is_empty())
+        );
     }
 }
