@@ -959,7 +959,10 @@ fn the_corpus_comes_back_to_a_fixed_point() {
             }
         }
     }
-    assert!(tried > 10, "{tried}");
+    // Every body the corpus's manifest lists as `ok`: 10 since #809 stopped
+    // reading a SHAPE_ASPECT's representation as a second copy of its
+    // part's solid (NIST CTC 05 #6621, FTC 09 #5801).
+    assert!(tried >= 10, "{tried}");
     assert!(moved.is_empty(), "not a fixed point: {moved:#?}");
 }
 
