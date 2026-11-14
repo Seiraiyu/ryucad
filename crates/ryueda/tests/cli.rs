@@ -165,6 +165,48 @@ impl Drop for Pair {
 }
 
 #[test]
+fn open_starts_the_app_named_by_ryueda_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    // A stand-in app that writes the folder it was given.
+    #[cfg(unix)]
+    let app = {
+        let p = dir.path().join("fake-app");
+        std::fs::write(&p, format!("#!/bin/sh\necho \"$1\" > '{}'\n", dir.path().join("opened").display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    };
+    #[cfg(windows)]
+    let app = {
+        let p = dir.path().join("fake-app.cmd");
+        std::fs::write(&p, format!("@echo %1> \"{}\"\r\n", dir.path().join("opened").display())).unwrap();
+        p
+    };
+    let out = ryueda(&run).current_dir(dir.path()).env("RYUEDA_APP", &app).args(["open"]).output().unwrap();
+    let (code, v) = parse(out, dir.path());
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["opened"], "new");
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !dir.path().join("opened").is_file() {
+        assert!(std::time::Instant::now() < end, "the app never ran");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // No app anywhere: app_not_installed, exit 4.
+    let out = ryueda(&run)
+        .current_dir(dir.path())
+        .env("RYUEDA_APP", dir.path().join("nothing"))
+        .env("PATH", "")
+        .args(["open"])
+        .output()
+        .unwrap();
+    let (code, v) = parse(out, dir.path());
+    assert_eq!(code, 4, "{v}");
+    assert_eq!(v["error"]["code"], "app_not_installed");
+}
+
+#[test]
 fn version_names_ryueda() {
     let out = Command::cargo_bin("ryueda")
         .unwrap()

@@ -52,3 +52,31 @@ pub fn stop(root: &Path) -> Result<Value> {
 pub fn stop_all() -> Result<Value> {
     ryu_session::client::stop_all::<Eda>()
 }
+
+/// Names the desktop app `ryueda open` starts, instead of finding
+/// `ryueda-app`: for tests and unusual installs.
+pub const APP_VAR: &str = "RYUEDA_APP";
+
+/// Starts the desktop app on folder `dir`: [`APP_VAR`]'s if it names a
+/// file, else `ryueda-app` beside this binary or on `PATH`; detached,
+/// its output discarded.
+pub fn open(dir: &Path) -> Result<Value> {
+    use crate::error::{Code, Error};
+    use std::process::{Command, Stdio};
+    let app = match std::env::var_os(APP_VAR) {
+        Some(p) => Some(std::path::PathBuf::from(p)).filter(|p| p.is_file()),
+        None => ryu_session::client::find_program("ryueda-app"),
+    };
+    let missing = || {
+        Error::new(
+            Code::AppNotInstalled,
+            "the desktop app, ryueda-app, isn't installed; install it, or use `ryueda render` to see the sheets",
+        )
+    };
+    let app = app.ok_or_else(missing)?;
+    let mut cmd = Command::new(&app);
+    cmd.arg(dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    ryu_session::client::detach(&mut cmd);
+    let child = cmd.spawn().map_err(|e| missing().with("path", &app).with("why", e.to_string()))?;
+    Ok(serde_json::json!({"opened": "new", "app": app, "pid": child.id(), "dir": dir}))
+}
