@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Every kind `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 9] = [
+pub const KINDS: [&str; 13] = [
     "value",
     "delete_edit",
     "order",
@@ -33,6 +33,10 @@ pub const KINDS: [&str; 9] = [
     "layout_pending",
     "layout_conflict",
     "layout_stale",
+    "refdes_clash",
+    "annotate_conflict",
+    "name_clash",
+    "merge_faults",
 ];
 
 /// The error for a request that needs a merge when there is none.
@@ -113,8 +117,21 @@ pub fn concerns(path: &str, pointer: &str) -> Value {
 }
 
 /// What `--expect` guards for a conflict ID: its block (`blocks/<b>/…`,
-/// `<b>#…`), else the project.
+/// `<b>#…`, `name:<b>/…`), else the project (`refdes:…`, `name:/…`,
+/// `faults:erc:…`, and every file outside `blocks/`).
 pub fn scope(conflict: &str) -> String {
+    if let Some(rest) = conflict.strip_prefix("name:") {
+        let block = rest.split('/').next().unwrap_or_default();
+        return if block.is_empty() {
+            "project".to_owned()
+        } else {
+            block.to_owned()
+        };
+    }
+    if conflict.starts_with("refdes:") || conflict.starts_with("faults:erc:") {
+        return "project".to_owned();
+    }
+    let conflict = conflict.strip_prefix("faults:").unwrap_or(conflict);
     let path = conflict.split('#').next().unwrap_or_default();
     match path.strip_prefix("blocks/") {
         Some(rest) => rest.split('/').next().unwrap_or_default().to_owned(),
@@ -156,7 +173,7 @@ pub(crate) fn item(
 }
 
 /// A file's JSON, if it is JSON.
-fn json_of(bytes: &[u8]) -> Option<Value> {
+pub(crate) fn json_of(bytes: &[u8]) -> Option<Value> {
     crate::canonical::parse(std::str::from_utf8(bytes).ok()?).ok()
 }
 
@@ -192,6 +209,19 @@ fn records(working: &Files) -> Vec<Value> {
                 }
             }
             x["choices"] = json!(["ours", "theirs", "value"]);
+            // A library object both sides made under one readable ID:
+            // theirs' can take the next one.
+            if c.kind == Kind::IdCollision
+                && pointer.is_empty()
+                && let Some((folder, id)) = crate::clash::library_object(path)
+            {
+                let to = crate::name::free(id, |s| {
+                    working.contains_key(&format!("library/{folder}/{s}.json"))
+                });
+                x["repairs"] = json!([{"id": "renumber", "to": to.as_str(), "summary": format!(
+                    "theirs' {id} becomes {to}, and what the merge took from theirs that names {id} names {to}"
+                )}]);
+            }
             out.push(x);
         }
     }
@@ -354,12 +384,7 @@ fn current(root: &Path, files: &Files, id: &Id, layout: &Layout) -> Result<Layou
         crate::schem::layout_path(id),
         crate::schem::layout_text(layout).into_bytes().into(),
     );
-    let manifest = files
-        .get(crate::project::MANIFEST)
-        .map(|b| crate::project::Manifest::read(b))
-        .transpose()?
-        .ok_or_else(|| Error::new(Code::ProjectNotFound, "the merge left no manifest"))?;
-    let p = Project::load_from(root, &files, &crate::project::resolve(root, &manifest))?;
+    let p = project_over(root, &files)?;
     let b = p.conn.blocks.get(id).ok_or_else(|| {
         Error::new(
             Code::NotFound,
@@ -372,6 +397,17 @@ fn current(root: &Path, files: &Files, id: &Id, layout: &Layout) -> Result<Layou
             .outcome
             .layout,
     )
+}
+
+/// The project loaded over `files` (a session's files with a batch's
+/// changes), its aliases resolved as the manifest there names them.
+pub(crate) fn project_over(root: &Path, files: &Files) -> Result<Project> {
+    let manifest = files
+        .get(crate::project::MANIFEST)
+        .map(|b| crate::project::Manifest::read(b))
+        .transpose()?
+        .ok_or_else(|| Error::new(Code::ProjectNotFound, "the merge left no manifest"))?;
+    Project::load_from(root, files, &crate::project::resolve(root, &manifest))
 }
 
 /// What settling a layout needs beyond the files: the project's folder,
@@ -402,7 +438,7 @@ fn pending(working: &Files) -> Vec<Id> {
 /// and everything outside `blocks/` (rails, the library, the style, the
 /// manifest's sheet) but ERC's, lint's and sourcing's settings and the
 /// attributes.
-fn affects(path: &str, block: &str) -> bool {
+pub(crate) fn affects(path: &str, block: &str) -> bool {
     match path.strip_prefix("blocks/") {
         Some(rest) => {
             rest.strip_prefix(block).is_some_and(|r| r.starts_with('/'))
@@ -610,8 +646,16 @@ pub fn status(session: &mut Session) -> Result<Value> {
     }
     let root = session.root().to_path_buf();
     let (repo, state) = merging(&root)?;
-    let working = own(&session.snapshot());
-    let v = findings(&root, &repo, &state, &working, Some(session.project()))?;
+    let full = session.snapshot();
+    let working = own(&full);
+    let v = findings(
+        &root,
+        &repo,
+        &state,
+        &working,
+        &full,
+        Some(session.project()),
+    )?;
     if let Some(k) = key {
         session.merge_status = Some((k, v.clone()));
     }
@@ -619,13 +663,15 @@ pub fn status(session: &mut Session) -> Result<Value> {
 }
 
 /// Everything that blocks the merge's commit, from the project's own
-/// working files; `project` is the project loaded over them, `None` when
-/// it doesn't load (its manifest holds a record).
+/// working files (`full`: with its aliases'); `project` is the project
+/// loaded over them, `None` when it doesn't load (its manifest holds a
+/// record).
 fn findings(
     root: &Path,
     repo: &Repo,
     state: &MergeState,
     working: &Files,
+    full: &Files,
     project: Option<&Project>,
 ) -> Result<Value> {
     let paths = repo.unmerged()?;
@@ -638,7 +684,16 @@ fn findings(
     unstaged.sort();
     unstaged.dedup();
     let blocked = !conflicts.is_empty();
-    conflicts.extend(layouts(root, state, working, project, blocked)?);
+    // What the merged project holds that neither side did: judged only
+    // once every file merged and the project loads.
+    let mut found = crate::clash::Found::default();
+    if let (false, Some(p)) = (blocked, project) {
+        found = crate::clash::find(root, state, p, full)?;
+    }
+    let held = blocked || !found.clashes.is_empty();
+    conflicts.extend(std::mem::take(&mut found.clashes));
+    conflicts.extend(std::mem::take(&mut found.faults));
+    conflicts.extend(layouts(root, state, working, project, held)?);
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
@@ -648,6 +703,8 @@ fn findings(
         "base": commit(state.base.as_ref()),
         "clean": conflicts.is_empty(),
         "conflicts": conflicts,
+        "already_failing": found.already,
+        "warnings": found.warnings,
         "unstaged": unstaged,
         "untracked": untracked,
     }))
@@ -665,7 +722,7 @@ fn file_json(files: &Files, path: &str) -> Result<Value> {
 /// `files`: the value put in place ([`crate::merge::settle`]), the entry
 /// gone from the record (and the record with its last entry), the file
 /// canonical at the lowest format.
-fn settle_record(
+pub(crate) fn settle_record(
     files: &mut Files,
     path: &str,
     pointer: &str,
@@ -695,6 +752,13 @@ fn settle_record(
         crate::canonical::to_string(&out).into_bytes().into(),
     );
     Ok(())
+}
+
+/// Whether item `x` offers `choice`.
+fn offers(x: &Value, choice: &str) -> bool {
+    x["choices"]
+        .as_array()
+        .is_some_and(|c| c.iter().any(|y| y == choice))
 }
 
 /// The item `id` of a status, or `conflict_not_found`.
@@ -728,13 +792,17 @@ fn settle(
     // A block's areas (by number) and what each takes; a stale block's repair.
     let mut areas: BTreeMap<String, BTreeMap<usize, ryusch::merge::Repair>> = BTreeMap::new();
     let mut stale: Vec<(String, String)> = Vec::new();
+    // Semantic items' repairs, applied in order once every one is found.
+    let mut semantic: Vec<(Value, String)> = Vec::new();
     for r in resolutions {
         let found = find(now, &r.conflict)?;
         let kind = found["kind"].as_str().unwrap_or_default();
         let path = found["files"][0].as_str().unwrap_or_default().to_owned();
         let usage = |why: String| Error::new(Code::Usage, why).with("conflict", &r.conflict);
         match (kind, r.choice.as_str()) {
-            ("value" | "delete_edit" | "order" | "id_collision", "ours" | "theirs" | "value") => {
+            ("value" | "delete_edit" | "order" | "id_collision", "ours" | "theirs" | "value")
+                if offers(found, r.choice.as_str()) =>
+            {
                 let x = match r.choice.as_str() {
                     "value" => Some(
                         r.value
@@ -805,6 +873,9 @@ fn settle(
                 let n: usize = n.parse().unwrap_or_default();
                 areas.entry(block.to_owned()).or_default().insert(n, repair);
             }
+            ("refdes_clash" | "name_clash" | "delete_edit" | "id_collision", "repair") => {
+                semantic.push((found.clone(), r.repair.clone().unwrap_or_default()));
+            }
             ("layout_stale", "repair") => {
                 let id = r.repair.clone().unwrap_or_default();
                 if !found["repairs"]
@@ -852,6 +923,20 @@ fn settle(
             }
         }
         resolved.push(r.conflict.clone());
+    }
+    if !semantic.is_empty() {
+        let sides = sides(at.root, at.state)?;
+        for (x, id) in &semantic {
+            crate::clash::repair(at.root, files, x, id, &sides)?;
+        }
+        // A repair may not add an error the merge didn't have.
+        if let Some(p) = at.project {
+            let after = project_over(at.root, files)?;
+            let added = crate::write::added_errors(&p.faults(), &after.faults());
+            if !added.is_empty() {
+                return Err(crate::write::refused("the repairs", &added));
+            }
+        }
     }
     if areas.is_empty() && stale.is_empty() {
         return Ok(resolved);
@@ -1022,7 +1107,7 @@ pub fn unloaded(root: &Path, req: crate::proto::Request) -> Result<Value> {
     }
     let (repo, state) = merging(root)?;
     let working = own(&crate::session::current(root)?);
-    let now = findings(root, &repo, &state, &working, None)?;
+    let now = findings(root, &repo, &state, &working, &working, None)?;
     let crate::proto::Request::MergeResolve { resolutions, .. } = req else {
         return Ok(now);
     };
@@ -1034,13 +1119,8 @@ pub fn unloaded(root: &Path, req: crate::proto::Request) -> Result<Value> {
     };
     let resolved = settle(&repo, &now, &mut files, &resolutions, &at)?;
     let changes = write(root, &working, &files)?;
-    let after = findings(
-        root,
-        &repo,
-        &state,
-        &own(&crate::session::current(root)?),
-        None,
-    )?;
+    let after_files = own(&crate::session::current(root)?);
+    let after = findings(root, &repo, &state, &after_files, &after_files, None)?;
     Ok(json!({"resolved": resolved, "changes": changes, "status": after, "unloaded": true}))
 }
 
@@ -1068,6 +1148,23 @@ pub(crate) mod tests {
         assert_eq!(scope("blocks/b/nets/n.json#/name"), "b");
         assert_eq!(scope("b#area:2"), "b");
         assert_eq!(scope("erc.json#/severity/x"), "project");
+        // Plan 4.D's items: a designator crosses blocks (the project's
+        // revision), a name its block's (the project's for rails), what
+        // the merge broke its file's.
+        assert_eq!(scope("refdes:board/R5"), "project");
+        assert_eq!(scope("name:breakout/AUX"), "breakout");
+        assert_eq!(scope("name:/GND"), "project");
+        assert_eq!(scope("faults:blocks/b/nets/n.json#/class"), "b");
+        assert_eq!(scope("faults:erc:0123456789abcdef"), "project");
+        assert_eq!(scope("faults:rails/gnd.json#/name"), "project");
+        for k in [
+            "refdes_clash",
+            "annotate_conflict",
+            "name_clash",
+            "merge_faults",
+        ] {
+            assert!(KINDS.contains(&k), "{k}");
+        }
     }
 
     /// `erc.json` at a severity, as ryueda writes it.
@@ -1109,6 +1206,10 @@ pub(crate) mod tests {
         erc_conflict(r);
         let mut s = Session::open(r).unwrap();
         let v = status(&mut s).unwrap();
+        assert_eq!(
+            (v["already_failing"].clone(), v["warnings"].clone()),
+            (json!([]), json!([]))
+        );
         assert_eq!(
             (v["step"].as_str(), v["clean"].as_bool()),
             (Some("merge"), Some(false))

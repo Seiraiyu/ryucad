@@ -250,6 +250,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "eda_merge"
+path = "fuzz_targets/eda_merge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "kicad"
 path = "fuzz_targets/kicad.rs"
 test = false
