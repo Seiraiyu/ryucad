@@ -11,6 +11,7 @@ use crate::part::{check_revision, order, part_id, part_kind};
 use crate::proto::Request;
 use crate::server::dispatch;
 use crate::session::Session;
+use ryu_session::activity::Files;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
@@ -81,6 +82,7 @@ fn apply(
         .transpose()
         .map_err(|e| e.with("pointer", "/kind"))?;
     let declared = entries(&ask.part, &ask.features)?;
+    let before = session.snapshot();
     let existed = session.project().parts.contains_key(&pid);
     let old: Vec<Id> = if existed {
         let p = session.project().part(&pid)?;
@@ -172,12 +174,58 @@ fn apply(
         )
         .map_err(|e| e.with("pointer", "/props"))?;
     }
+    let after = session.snapshot();
+    let dir = format!("parts/{pid}/");
+    let feature = |f: &Id| format!("{dir}features/{f}.json");
+    let mut features = Map::new();
+    for e in &declared {
+        features.insert(
+            e.id.to_string(),
+            json!(status_of(&before, &after, &feature(&e.id))),
+        );
+    }
+    for f in old.iter().filter(|f| !declared.iter().any(|e| e.id == **f)) {
+        features.insert(f.to_string(), json!("deleted"));
+    }
+    let status = if !existed {
+        "created"
+    } else if before
+        .keys()
+        .chain(after.keys())
+        .filter(|k| k.starts_with(&dir))
+        .any(|k| status_of(&before, &after, k) != "unchanged")
+    {
+        "updated"
+    } else {
+        "unchanged"
+    };
     let p = session.project().part(&pid)?;
-    let mut v = json!({"part": pid, "kind": part_kind(p).as_str(), "revision": p.revision});
+    let mut v = json!({"part": pid, "kind": part_kind(p).as_str(), "status": status,
+                       "revision": p.revision, "features": features});
+    if ask.params.is_some() {
+        v["params"] = json!(status_of(
+            &before,
+            &after,
+            &format!("{dir}{}", crate::doc::project::PARAMETERS)
+        ));
+    }
+    if ask.props.is_some() {
+        v["props"] = json!(status_of(&before, &after, &format!("{dir}properties.json")));
+    }
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);
     }
     Ok(v)
+}
+
+/// What became of file `rel` from `before` to `after`.
+fn status_of(before: &Files, after: &Files, rel: &str) -> &'static str {
+    match (before.get(rel), after.get(rel)) {
+        (None, Some(_)) => "created",
+        (Some(_), None) => "deleted",
+        (Some(a), Some(b)) if a[..] != b[..] => "updated",
+        _ => "unchanged",
+    }
 }
 
 /// Takes `pid`'s features other than `kept` out of its list and its
@@ -437,6 +485,67 @@ mod tests {
             "{e:?}"
         );
         assert_eq!(on_disk(dir.path()), before);
+    }
+
+    #[test]
+    fn an_ensure_says_what_became_of_each_thing_from_the_bytes() {
+        let (dir, mut s) = twin();
+        let op = |v: &Value| v["ops"][0]["result"].clone();
+        // As it is: nothing written.
+        let before = on_disk(dir.path());
+        let v = ensure(&mut s, plate()).unwrap();
+        assert_eq!(v["written"], 0, "{v}");
+        assert_eq!(on_disk(dir.path()), before);
+        let r = op(&v);
+        assert_eq!(r["status"], "unchanged", "{r}");
+        assert_eq!(
+            r["features"],
+            json!({"slab": "unchanged", "extra": "unchanged", "s": "unchanged"})
+        );
+        assert_eq!(r["params"], "unchanged");
+        assert!(r.get("props").is_none(), "not declared, not said");
+        // One changed, one gone, one new.
+        let mut d = plate();
+        d["features"][0]["params"]["y"] = json!(30);
+        d["features"][1] = json!({"id": "knob", "type": "sphere", "params": {"radius": 1}});
+        let r = op(&ensure(&mut s, d).unwrap());
+        assert_eq!(r["status"], "updated");
+        assert_eq!(
+            r["features"],
+            json!({"slab": "updated", "knob": "created", "s": "unchanged", "extra": "deleted"})
+        );
+        // Reordered: every feature as it was, the part updated.
+        let mut d = plate();
+        d["features"][0]["params"]["y"] = json!(30);
+        d["features"] = json!([d["features"][2], d["features"][0],
+                               {"id": "knob", "type": "sphere", "params": {"radius": 1}}]);
+        let r = op(&ensure(&mut s, d).unwrap());
+        assert_eq!(r["status"], "updated");
+        assert_eq!(
+            r["features"],
+            json!({"s": "unchanged", "slab": "unchanged", "knob": "unchanged"})
+        );
+        // A new part, its parameters and properties.
+        let r = op(&ensure(&mut s, json!({"part": "bolt", "params": {"r": "3 mm"}, "props": {"name": "Bolt"},
+            "features": [{"id": "shank", "type": "cylinder", "params": {"radius": "r", "height": 5}}]}))
+        .unwrap());
+        assert_eq!(
+            (r["status"].clone(), r["params"].clone(), r["props"].clone()),
+            (json!("created"), json!("created"), json!("created"))
+        );
+        assert_eq!(r["features"]["shank"], "created");
+        // No parameters any more: the file goes.
+        let r = op(&ensure(&mut s, json!({"part": "bolt", "params": {}, "props": {"name": "Bolt"},
+            "features": [{"id": "shank", "type": "cylinder", "params": {"radius": 3, "height": 5}}]}))
+        .unwrap());
+        assert_eq!(
+            (
+                r["params"].clone(),
+                r["props"].clone(),
+                r["features"]["shank"].clone()
+            ),
+            (json!("deleted"), json!("unchanged"), json!("updated"))
+        );
     }
 
     #[test]
