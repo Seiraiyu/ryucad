@@ -130,6 +130,16 @@ jobs:
         run: |
           gh label create fuzz --color 5319e7 --description "Found by the fuzz nightly" --force
           shopt -s nullglob
+          # A job whose runner died (lost communication, out of disk)
+          # leaves no report: it is filed as one too, from the run's jobs.
+          mkdir -p reports
+          gh run view "$GITHUB_RUN_ID" --json jobs \
+            --jq '.jobs[] | select(.conclusion == "failure") | .name' |
+            while read -r target; do
+              if [ ! -f "reports/$target.tsv" ]; then
+                printf '%s\t%s\t\n' "$target" "runner lost, no report" > "reports/$target.tsv"
+              fi
+            done
           for f in reports/*.tsv; do
             IFS=$'\t' read -r target kind summary < "$f"
             title="fuzz nightly: $target red"
@@ -139,10 +149,14 @@ jobs:
               body="$body
           libFuzzer: \`$summary\`"
             fi
-            if [ "$kind" != "build failure" ] && [ "$kind" != "setup failure" ]; then
+            # Only a run that fuzzed leaves an artifact.
+            case "$kind" in
+              "build failure" | "setup failure" | "runner lost"*) ;;
+              *)
               body="$body
           Artifact: \`fuzz-$target-artifacts\`, kept 90 days: \`gh run download $GITHUB_RUN_ID -n fuzz-$target-artifacts -R $GH_REPO\`"
-            fi
+              ;;
+            esac
             n=$(gh issue list --state open --label fuzz --search "\"$title\" in:title" --json number,title \
               --jq "map(select(.title == \"$title\")) | .[0].number // empty")
             if [ -n "$n" ]; then
