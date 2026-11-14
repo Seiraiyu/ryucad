@@ -101,6 +101,22 @@ if [ -n "$app" ]; then
             ;;
     esac
 fi
+# A build script's session (design 603): a batch of ensures, the same
+# again (nothing written), then undo.
+ensure='{"jsonrpc":"2.0","id":ID,"method":"batch","params":{"ops":[{"method":"part.ensure","params":{"part":"scripted","params":{"w":"20 mm"},"features":[{"id":"base","type":"box","params":{"x":"w","y":10,"z":4}},{"id":"hole","type":"cylinder","params":{"radius":2,"height":10},"placement":{"origin":[5,5,-2]}},{"id":"cut","type":"boolean","op":"subtract","target":"base","tools":["hole"]}]}}]}}'
+out=$(printf '%s\n%s\n%s\n' "$(echo "$ensure" | sed 's/ID/1/')" "$(echo "$ensure" | sed 's/ID/2/')" \
+    '{"jsonrpc":"2.0","id":3,"method":"undo","params":{}}' | "$exe" session --stdio) || {
+    echo "FAIL ryucad session --stdio: $out"
+    exit 1
+}
+first=$(printf '%s\n' "$out" | sed -n 1p)
+second=$(printf '%s\n' "$out" | sed -n 2p)
+third=$(printf '%s\n' "$out" | sed -n 3p)
+case "$first" in *'"status":"created"'*) ;; *) echo "FAIL stdio ensure: $first" && exit 1 ;; esac
+case "$second" in *'"written":0'*) ;; *) echo "FAIL stdio ensure again: $second" && exit 1 ;; esac
+case "$third" in *'"result"'*) ;; *) echo "FAIL stdio undo: $third" && exit 1 ;; esac
+echo "ok   ryucad session --stdio: a batch of ensures, again unchanged, undo"
+
 run daemon status
 case "$out" in *'"running":true'*) ;; *) echo "FAIL no daemon is running" && exit 1 ;; esac
 run daemon stop

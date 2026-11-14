@@ -17,6 +17,8 @@
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
 
+mod common;
+
 use ryucad::doc::files::{Feature, PartFile, Placement, Primitive, PrimitiveType};
 use ryucad::doc::id::Id;
 use ryucad::doc::project::Part;
@@ -7298,6 +7300,82 @@ fn properties_move_no_geometry_instance() {
     }
 }
 
+/// Design 603's `script` section: the scripted project (8 leaves, 24
+/// instances) built by one batch of ensures and, over a copy of the same
+/// empty project, request by request: the same files, byte for byte,
+/// whose parts' files and rebuild hashes are hashed.
+fn script_section(golden: &mut Golden) {
+    use std::collections::BTreeMap;
+    fn files(root: &std::path::Path, rel: &str, out: &mut BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(root.join(rel)).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let r = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if e.file_type().unwrap().is_dir() {
+                files(root, &r, out);
+            } else {
+                out.insert(r, std::fs::read(e.path()).unwrap());
+            }
+        }
+    }
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            if e.file_type().unwrap().is_dir() {
+                copy(&e.path(), &to.join(e.file_name()));
+            } else {
+                std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let mut s = golden.section("script");
+    let script = common::scripted::Script::new(8, 24);
+    let dir = tempfile::tempdir().unwrap();
+    let (a_root, b_root) = (dir.path().join("a"), dir.path().join("b"));
+    std::fs::create_dir(&a_root).unwrap();
+    ryucad::server::init(&a_root, None).unwrap();
+    {
+        let mut a = ryucad::session::Session::open(&a_root).unwrap();
+        common::must(&mut a, "pdm.init", serde_json::json!({}));
+    }
+    copy(&a_root, &b_root);
+    let mut a = ryucad::session::Session::open(&a_root).unwrap();
+    let mut b = ryucad::session::Session::open(&b_root).unwrap();
+    common::must(&mut a, "batch", script.batch());
+    for (m, p) in script.singles() {
+        common::must(&mut b, &m, p);
+    }
+    let (mut fa, mut fb) = (BTreeMap::new(), BTreeMap::new());
+    files(&a_root, "", &mut fa);
+    files(&b_root, "", &mut fb);
+    assert_eq!(fa.keys().collect::<Vec<_>>(), fb.keys().collect::<Vec<_>>());
+    for (k, v) in &fa {
+        assert!(fb[k] == *v, "{k} differs between the batch and one by one");
+    }
+    for p in &script.parts {
+        let id = Id::parse(&p.id, "part").unwrap();
+        s.str(&p.id);
+        for (k, v) in fa.range(format!("parts/{}/", p.id)..format!("parts/{}0", p.id)) {
+            s.str(k);
+            s.bytes(v);
+        }
+        let (ha, hb) = (
+            a.rebuilt(&id).unwrap().hash.clone(),
+            b.rebuilt(&id).unwrap().hash.clone(),
+        );
+        assert_eq!(ha, hb, "{}", p.id);
+        s.str(&ha);
+    }
+}
+
 sections! {
     golden;
     units => units_section(&mut golden),
@@ -7377,4 +7455,5 @@ sections! {
     drawings => drawings_section(&mut golden),
     drawing_sections => drawing_sections_section(&mut golden),
     drawing_annotations => drawing_annotations_section(&mut golden),
+    script => script_section(&mut golden),
 }
