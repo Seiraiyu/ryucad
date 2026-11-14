@@ -497,6 +497,22 @@ pub(crate) fn dispatch(
             resolutions,
             expected_revisions,
         } => crate::validate::resolve(session, &resolutions, &expected_revisions),
+        Request::Batch {
+            ops,
+            expect,
+            dry_run,
+            rebuild,
+        } => crate::batch::run(
+            session,
+            live,
+            me,
+            crate::batch::Ask {
+                ops,
+                expect,
+                dry_run,
+                rebuild: rebuild.unwrap_or(true),
+            },
+        ),
         Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
             "only a running daemon answers daemon requests",

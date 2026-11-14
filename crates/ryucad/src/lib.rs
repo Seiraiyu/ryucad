@@ -53,6 +53,7 @@ pub mod along;
 pub mod annotation;
 pub mod appearance;
 pub mod assembly;
+pub mod batch;
 #[cfg(feature = "bench")]
 pub mod bench;
 pub mod blends;
