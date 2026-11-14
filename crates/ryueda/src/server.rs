@@ -1723,12 +1723,7 @@ fn lib_add(
     }
     check_revision("the project", &p.revision, expected)?;
     let mut m = p.manifest.clone();
-    m.libraries.insert(
-        id.clone(),
-        Alias {
-            path: path.to_owned(),
-        },
-    );
+    m.libraries.insert(id.clone(), Alias::local(path));
     // Refused now, rather than written to fail on every load.
     project::resolve(session.root(), &m)
         .remove(&id)

@@ -276,11 +276,44 @@ impl Sheet {
     }
 }
 
-/// A library project, by its folder relative to this one.
+/// A library project: by its folder relative to this one, in this
+/// repository; or, with `url`, in another repository at `path` inside it
+/// (`""` for its root). `labels` pins components (design 629).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Alias {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The library project's ID: written with `url`, and once one of its
+    /// components is pinned (format 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectId>,
+    /// Each pinned component's label (format 3).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<Id, String>,
+}
+
+impl Alias {
+    /// A library project in this repository, nothing pinned.
+    pub fn local(path: &str) -> Alias {
+        Alias {
+            path: path.to_owned(),
+            url: None,
+            project: None,
+            labels: BTreeMap::new(),
+        }
+    }
+
+    /// Whether it is in another repository.
+    pub fn is_foreign(&self) -> bool {
+        self.url.is_some()
+    }
+
+    /// Whether it needs format 3.
+    fn is_format_3(&self) -> bool {
+        self.url.is_some() || self.project.is_some() || !self.labels.is_empty()
+    }
 }
 
 impl Manifest {
@@ -312,19 +345,63 @@ impl Manifest {
             .with("path", MANIFEST)
             .with("pointer", format!("/libraries/{SELF}")));
         }
+        for (alias, a) in &m.libraries {
+            let at = format!("/libraries/{alias}");
+            if a.url.is_some() && a.project.is_none() {
+                return Err(Error::new(
+                    Code::InvalidDocument,
+                    format!(
+                        "{MANIFEST}: library {alias} is in another repository and names no project"
+                    ),
+                )
+                .with("path", MANIFEST)
+                .with("pointer", format!("{at}/project")));
+            }
+            if a.url.as_deref().is_some_and(|u| u.trim().is_empty()) {
+                return Err(Error::new(
+                    Code::InvalidDocument,
+                    format!("{MANIFEST}: library {alias}'s url is empty"),
+                )
+                .with("path", MANIFEST)
+                .with("pointer", format!("{at}/url")));
+            }
+            if a.url.is_some()
+                && !a.path.is_empty()
+                && (!path_ok(&a.path) || a.path.split('/').any(|s| s == ".."))
+            {
+                return Err(Error::new(
+                    Code::InvalidDocument,
+                    format!(
+                        "{MANIFEST}: library {alias}'s path {:?} isn't folder names joined by /",
+                        a.path
+                    ),
+                )
+                .with("path", MANIFEST)
+                .with("pointer", format!("{at}/path")));
+            }
+            if let Some((c, _)) = a.labels.iter().find(|(_, l)| l.trim().is_empty()) {
+                return Err(Error::new(
+                    Code::InvalidDocument,
+                    format!("{MANIFEST}: {alias}/{c} is pinned to no label"),
+                )
+                .with("path", MANIFEST)
+                .with("pointer", format!("{at}/labels/{c}")));
+            }
+        }
         Ok(m)
     }
 
     /// Its canonical text: format 2 only when it holds what format 1
     /// can't.
     pub fn to_text(&self) -> String {
-        let format = if self.forked_from.is_some() {
-            FORMAT_3
-        } else if !self.properties.is_empty() || self.schematic != Schematic::default() {
-            FORMAT_2
-        } else {
-            FORMAT
-        };
+        let format =
+            if self.forked_from.is_some() || self.libraries.values().any(Alias::is_format_3) {
+                FORMAT_3
+            } else if !self.properties.is_empty() || self.schematic != Schematic::default() {
+                FORMAT_2
+            } else {
+                FORMAT
+            };
         doc::to_string(self, KIND, format)
     }
 }
@@ -350,10 +427,24 @@ pub fn resolve(root: &Path, m: &Manifest) -> BTreeMap<Id, Result<String>> {
     m.libraries
         .iter()
         .map(|(alias, a)| {
+            let found = match &a.url {
+                Some(url) => Err(Error::new(
+                    Code::LibraryForeignWorking,
+                    format!(
+                        "library {alias} is in another repository ({url}): only its pinned components are read; pin them with `ryueda lib pin`"
+                    ),
+                )),
+                None => resolve_one(
+                    root,
+                    &a.path,
+                    a.project.as_ref(),
+                    canonical.as_deref().ok(),
+                    fence.as_deref(),
+                ),
+            };
             (
                 alias.clone(),
-                resolve_one(root, &a.path, canonical.as_deref().ok(), fence.as_deref())
-                    .map_err(|e| e.with("alias", alias).with("path", &a.path)),
+                found.map_err(|e| e.with("alias", alias).with("path", &a.path)),
             )
         })
         .collect()
@@ -375,6 +466,7 @@ fn missing(why: &str) -> Error {
 fn resolve_one(
     root: &Path,
     path: &str,
+    expected: Option<&ProjectId>,
     canonical: Option<&Path>,
     fence: Option<&Path>,
 ) -> Result<String> {
@@ -405,6 +497,19 @@ fn resolve_one(
         return Err(missing(&format!(
             "{path} is a design project, not a library project"
         )));
+    }
+    if let Some(want) = expected
+        && m.project != *want
+    {
+        return Err(Error::new(
+            Code::DependencyProjectMismatch,
+            format!(
+                "{path} holds project {}, not {want}, which the manifest names",
+                m.project
+            ),
+        )
+        .with("project", want)
+        .with("found", &m.project));
     }
     if !m.libraries.is_empty() {
         return Err(Error::new(
@@ -896,6 +1001,9 @@ impl Project {
         for (alias, lib) in &self.libraries {
             let lib = match lib {
                 Ok(l) => l,
+                // A library in another repository has no working library:
+                // the placements that read it report it themselves.
+                Err(e) if e.code == Code::LibraryForeignWorking => continue,
                 Err(e) => {
                     out.push(Fault {
                         severity: Severity::Error,
@@ -1163,14 +1271,104 @@ pub(crate) mod tests {
     pub fn manifest(dir: &Path, kind: ProjectKind, libraries: &[(&str, &str)]) {
         let mut m = Manifest::new(pid(1), Unit::Mm, kind);
         for (alias, path) in libraries {
-            m.libraries.insert(
-                Id::parse(alias, "alias").unwrap(),
-                Alias {
-                    path: (*path).into(),
-                },
-            );
+            m.libraries
+                .insert(Id::parse(alias, "alias").unwrap(), Alias::local(path));
         }
         write_atomic(&dir.join(MANIFEST), m.to_text()).unwrap();
+    }
+
+    #[test]
+    fn an_alias_with_pins_or_a_url_is_format_3_and_one_without_as_before() {
+        let mut m = Manifest::new(pid(1), Unit::Mm, ProjectKind::Design);
+        m.libraries.insert(
+            Id::parse("passives", "a").unwrap(),
+            Alias::local("../passives"),
+        );
+        let before = m.to_text();
+        assert!(before.contains("\"format\": 1"), "{before}");
+        assert!(
+            before.contains(
+                "\"libraries\": {\n    \"passives\": {\n      \"path\": \"../passives\"\n    }"
+            ),
+            "{before}"
+        );
+        let a = m
+            .libraries
+            .get_mut(&Id::parse("passives", "a").unwrap())
+            .unwrap();
+        a.labels
+            .insert(Id::parse("r_4k7", "c").unwrap(), "B".into());
+        a.project = Some(pid(2));
+        let text = m.to_text();
+        assert!(text.contains("\"format\": 3"), "{text}");
+        assert_eq!(Manifest::read(text.as_bytes()).unwrap(), m);
+        // Pinned to nothing: refused.
+        let mut bad = m.clone();
+        bad.libraries
+            .get_mut(&Id::parse("passives", "a").unwrap())
+            .unwrap()
+            .labels
+            .insert(Id::parse("c_1u", "c").unwrap(), " ".into());
+        let e = Manifest::read(bad.to_text().as_bytes()).unwrap_err();
+        assert_eq!(e.details["pointer"], "/libraries/passives/labels/c_1u");
+    }
+
+    #[test]
+    fn a_url_alias_names_its_project() {
+        let mut m = Manifest::new(pid(1), Unit::Mm, ProjectKind::Design);
+        let mut a = Alias::local("lib");
+        a.url = Some("file:///libs".into());
+        m.libraries.insert(Id::parse("passives", "a").unwrap(), a);
+        let e = Manifest::read(m.to_text().as_bytes()).unwrap_err();
+        assert_eq!(e.code, Code::InvalidDocument);
+        assert_eq!(e.details["pointer"], "/libraries/passives/project");
+        let a = m
+            .libraries
+            .get_mut(&Id::parse("passives", "a").unwrap())
+            .unwrap();
+        a.project = Some(pid(2));
+        a.path = "../up".into();
+        let e = Manifest::read(m.to_text().as_bytes()).unwrap_err();
+        assert_eq!(e.details["pointer"], "/libraries/passives/path");
+    }
+
+    #[test]
+    fn a_url_alias_has_no_working_library_and_is_no_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        let mut m = Manifest::read(&std::fs::read(board.join(MANIFEST)).unwrap()).unwrap();
+        let mut a = Alias::local("");
+        a.url = Some("file:///libs".into());
+        a.project = Some(pid(2));
+        m.libraries.insert(Id::parse("passives", "a").unwrap(), a);
+        write_atomic(&board.join(MANIFEST), m.to_text()).unwrap();
+        let p = Project::load(&board).unwrap();
+        assert_eq!(
+            p.library("passives").unwrap_err().code,
+            Code::LibraryForeignWorking
+        );
+        assert_eq!(p.faults(), []);
+    }
+
+    #[test]
+    fn an_alias_naming_a_project_must_find_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (board, lib) = (dir.path().join("board"), dir.path().join("lib"));
+        manifest(&lib, ProjectKind::Library, &[]);
+        manifest(&board, ProjectKind::Design, &[("passives", "../lib")]);
+        let mut m = Manifest::read(&std::fs::read(board.join(MANIFEST)).unwrap()).unwrap();
+        let found = resolve(&board, &m);
+        assert!(found[&Id::parse("passives", "a").unwrap()].is_ok());
+        m.libraries
+            .get_mut(&Id::parse("passives", "a").unwrap())
+            .unwrap()
+            .project = Some(pid(2));
+        let e = resolve(&board, &m)
+            .remove(&Id::parse("passives", "a").unwrap())
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, Code::DependencyProjectMismatch);
     }
 
     /// The test library's files written under `dir`.
@@ -1397,9 +1595,7 @@ pub(crate) mod tests {
         let mut m = Manifest::new(pid(7), Unit::Mm, ProjectKind::Design);
         m.libraries.insert(
             Id::parse(SELF, "alias").unwrap(),
-            Alias {
-                path: "../passives".into(),
-            },
+            Alias::local("../passives"),
         );
         let e = Manifest::read(m.to_text().as_bytes()).unwrap_err();
         assert_eq!(

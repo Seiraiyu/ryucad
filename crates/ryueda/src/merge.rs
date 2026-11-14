@@ -258,7 +258,14 @@ fn format_of(kind: &str, v: &Value, ours: &Value, theirs: &Value) -> u64 {
             }
         }
         crate::project::KIND => {
-            if v.get("forked_from").is_some_and(|f| !f.is_null()) {
+            let pins = v["libraries"].as_object().is_some_and(|o| {
+                o.values().any(|a| {
+                    a.get("url").is_some()
+                        || a.get("project").is_some()
+                        || a["labels"].as_object().is_some_and(|l| !l.is_empty())
+                })
+            });
+            if v.get("forked_from").is_some_and(|f| !f.is_null()) || pins {
                 crate::project::FORMAT_3
             } else if v["properties"].as_object().is_some_and(|o| !o.is_empty())
                 || v.get("schematic").is_some()
