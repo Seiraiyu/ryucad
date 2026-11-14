@@ -238,33 +238,207 @@ pub(crate) fn faces_at<'a>(targets: &[&'a Built], p: Point3) -> Vec<(&'a Body, F
     out
 }
 
-// `from_edges` and `coaxial` come with Task 5; until then:
+/// A place inside planar face `face`, `from[i].1` from each straight edge
+/// `from[i].0`'s line, on the face's side of it.
 fn from_edges(
     at: &At<'_>,
     key: &Id,
-    _role: &dyn Fn(&str) -> String,
-    _face: &GeomRef,
-    _from: &[(GeomRef, crate::units::Quantity); 2],
+    role: &dyn Fn(&str) -> String,
+    face: &GeomRef,
+    from: &[(GeomRef, crate::units::Quantity); 2],
 ) -> Result<Mouth> {
-    Err(off_face(
-        at,
-        key,
-        "from two edges comes with Task 5".into(),
-        None,
-    ))
+    let (b, f) = face_of(at, &role("face"), face)?;
+    let r = face.reference().expect("face_of took a reference");
+    let (o, n) =
+        crate::reference::plane(at.part, at.owner, &role("face"), r, (b, EntityId::Face(f)))?;
+    let size = {
+        let bx = face_box(&b.body, f);
+        (bx.max() - bx.min()).length().max(1e-6)
+    };
+    // Each edge's line in the plane, and its unit normal into the face.
+    let mut lines = Vec::with_capacity(2);
+    for (i, (g, d)) in from.iter().enumerate() {
+        let er = format!("{}.{i}", role("from"));
+        let Some(rr) = g.reference() else {
+            return Err(at.fail(
+                Code::ReferenceWrongKind,
+                &er,
+                g,
+                "is no straight edge".into(),
+            ));
+        };
+        let hit = crate::reference::resolve(
+            at.part,
+            at.order,
+            at.owner,
+            &er,
+            Follow::One,
+            rr,
+            at.results,
+        )?;
+        let (a0, a1) = crate::reference::line(at.part, at.owner, &er, rr, hit)?;
+        let along = a1 - a0;
+        // Into the plane: drop any part along its normal.
+        let along = along - n * along.dot(n);
+        let len = along.length();
+        if len <= LINEAR_RESOLUTION {
+            return Err(at.fail(
+                Code::ReferenceWrongKind,
+                &er,
+                g,
+                "doesn't run along the face's plane".into(),
+            ));
+        }
+        let t = along * (1.0 / len);
+        let mut side = n.cross(t);
+        // Which side is the face's: probe just off the edge's middle.
+        let mid = a0 + (a1 - a0) * 0.5;
+        let probe = |s: Vector3| foot(&b.body, f, mid + s * (size * 1e-3)).3;
+        match (probe(side), probe(-side)) {
+            (Some(true), _) => {}
+            (_, Some(true)) => side = -side,
+            _ => {
+                return Err(off_face(
+                    at,
+                    key,
+                    format!("can't tell which side of its edge {i} the face is"),
+                    None,
+                ));
+            }
+        }
+        lines.push((a0, t, side, d.meters()));
+    }
+    let (a, ta, na, da) = lines[0];
+    let (b0, tb, nb, db) = lines[1];
+    if ta.cross(tb).length() <= ANGULAR_RESOLUTION {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("hole {}: place {key}'s two edges are parallel", at.owner),
+        )
+        .with("feature", at.owner)
+        .with("place", key)
+        .with("reason", "edges_parallel")
+        .with("pointer", format!("/places/{key}/from")));
+    }
+    // p = o + x·u + y·v in the plane, with (p − a)·na = da and
+    // (p − b)·nb = db.
+    let frame = ryukei::geom::Frame::new(o, n, ta).map_err(|e| {
+        Error::new(Code::Internal, "a face's plane that isn't one").with("kernel", format!("{e:?}"))
+    })?;
+    let (u, v) = (frame.x().get(), frame.y().get());
+    let (m11, m12, r1) = (na.dot(u), na.dot(v), da - (o - a).dot(na));
+    let (m21, m22, r2) = (nb.dot(u), nb.dot(v), db - (o - b0).dot(nb));
+    let det = m11 * m22 - m12 * m21;
+    let x = (r1 * m22 - m12 * r2) / det;
+    let y = (m11 * r2 - r1 * m21) / det;
+    let p = o + u * x + v * y;
+    match foot(&b.body, f, p).3 {
+        Some(true) => Ok(Mouth {
+            at: p,
+            down: -n,
+            flush: true,
+        }),
+        _ => Err(off_face(
+            at,
+            key,
+            "lies outside its face at those distances from its edges".into(),
+            Some(0.0),
+        )),
+    }
 }
 
+/// A place on the axis `of` gives, drilling along it (`reverse` turns
+/// it): from the first, along it, of a face's circular edges' centres,
+/// a circular edge's own centre, or where any other axis first enters
+/// the targets. Never flush.
 #[allow(clippy::too_many_arguments)]
 fn coaxial(
     at: &At<'_>,
     key: &Id,
-    _role: &dyn Fn(&str) -> String,
-    _of: &GeomRef,
-    _reverse: bool,
-    _targets: &[&Built],
-    _work: &ryukei::work::Work,
+    role: &dyn Fn(&str) -> String,
+    of: &GeomRef,
+    reverse: bool,
+    targets: &[&Built],
+    work: &ryukei::work::Work,
 ) -> Result<Mouth> {
-    Err(off_face(at, key, "coaxial comes with Task 5".into(), None))
+    let line = one(at, &role("coaxial"), of, Want::Axis)?.axis();
+    let (o, mut down) = (line.origin, line.dir.get());
+    if reverse {
+        down = -down;
+    }
+    // Centres on the axis of the entity's circles: a face's rims, or a
+    // circular edge itself.
+    let mut centres: Vec<Point3> = Vec::new();
+    if let Some(r) = of.reference() {
+        let hit = crate::reference::resolve(
+            at.part,
+            at.order,
+            at.owner,
+            &role("coaxial"),
+            Follow::Carrier,
+            r,
+            at.results,
+        )?;
+        let body = &hit.0.body;
+        let edges: Vec<ryukei::topo::EdgeId> = match hit.1 {
+            EntityId::Face(f) => body
+                .face_loops(f)
+                .flat_map(|l| body.loop_fins(l).collect::<Vec<_>>())
+                .map(|fin| body.fin(fin).expect("live fin").edge)
+                .collect(),
+            EntityId::Edge(e) => vec![e],
+            _ => Vec::new(),
+        };
+        for e in edges {
+            let edge = body.edge(e).expect("live edge");
+            if let Some(ryukei::geom::Curve::Circle(c)) = body.curve(edge.curve) {
+                centres.push(c.frame().origin());
+            }
+        }
+    }
+    let first = centres
+        .into_iter()
+        .map(|c| ((c - o).dot(down), c))
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    let at_p = match first {
+        Some((_, c)) => c,
+        None => {
+            // Where the axis first enters the targets, along `down`.
+            let mut best: Option<f64> = None;
+            for t in targets {
+                let s = super::exits::exits(&t.body, o, down, work).map_err(|_| {
+                    Error::new(
+                        Code::RebuildFailed,
+                        format!(
+                            "hole {}: where place {key}'s axis enters its targets is uncertain",
+                            at.owner
+                        ),
+                    )
+                    .with("feature", at.owner)
+                    .with("place", key)
+                })?;
+                if let Some([t_in, _]) = s.first() {
+                    best = Some(best.map_or(*t_in, |b: f64| b.min(*t_in)));
+                }
+            }
+            match best {
+                Some(t) => o + down * t,
+                None => {
+                    return Err(off_face(
+                        at,
+                        key,
+                        "has an axis that meets none of its targets".into(),
+                        None,
+                    ));
+                }
+            }
+        }
+    };
+    Ok(Mouth {
+        at: at_p,
+        down,
+        flush: false,
+    })
 }
 
 #[cfg(test)]
@@ -510,6 +684,75 @@ pub(crate) mod tests {
         .unwrap();
         close(m.at, [0.044, 0.0, 0.005]);
         close(Point3::ORIGIN + m.down, [-1.0, 0.0, 0.0]);
+        assert!(!m.flush);
+    }
+
+    #[test]
+    fn from_two_edges_is_dimensioned_inside_the_face() {
+        let (_dir, mut s, body) = part();
+        let (top, y0, x0) = top(&body);
+        let place = |dx: &str, dy: &str| {
+            json!({"face": {"feature": "b", "name": top},
+                   "from": [{"edge": {"feature": "b", "name": x0}, "distance": dx},
+                            {"edge": {"feature": "b", "name": y0}, "distance": dy}]})
+        };
+        let m = mouth_of(&mut s, place("6 mm", "3 mm"), false).unwrap();
+        close(m.at, [0.006, 0.003, 0.005]);
+        close(Point3::ORIGIN + m.down, [0.0, 0.0, -1.0]);
+        assert!(m.flush);
+        // Off the face's far side: 30 mm along a 20 mm face.
+        let e = mouth_of(&mut s, place("30 mm", "3 mm"), false).unwrap_err();
+        assert_eq!(e.code, Code::HolePlaceOffFace);
+    }
+
+    #[test]
+    fn parallel_edges_are_refused() {
+        let (_dir, mut s, body) = part();
+        let (top, y0, _) = top(&body);
+        let e = mouth_of(
+            &mut s,
+            json!({"face": {"feature": "b", "name": top},
+                   "from": [{"edge": {"feature": "b", "name": y0}, "distance": "1 mm"},
+                            {"edge": {"feature": "b", "name": y0}, "distance": "2 mm"}]}),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::InvalidParam, Some("edges_parallel"))
+        );
+    }
+
+    #[test]
+    fn coaxial_with_a_cylinder_starts_at_its_first_rim() {
+        let (_dir, mut s, _) = part();
+        let of = json!({"feature": "c", "name": side(&mut s)});
+        // The cylinder's own frame runs up z: the first rim along it is
+        // the bottom one, at z = 0; reverse drills down from the top.
+        let m = mouth_of(&mut s, json!({"coaxial": of}), true).unwrap();
+        close(m.at, [0.040, 0.0, 0.0]);
+        close(Point3::ORIGIN + m.down, [0.0, 0.0, 1.0]);
+        assert!(!m.flush);
+        let m = mouth_of(&mut s, json!({"coaxial": of, "reverse": true}), true).unwrap();
+        close(m.at, [0.040, 0.0, 0.010]);
+        close(Point3::ORIGIN + m.down, [0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn coaxial_with_an_axis_starts_where_it_enters_the_targets() {
+        let (_dir, mut s, _) = part();
+        // A datum axis from pt (5, 5, 5) to mid (5, 5, 2) mm: it has no
+        // circle, runs down -z, and enters the box at its top.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "axis", "id": "ax", "by": "two_points",
+                   "points": ["p/pt", "p/mid"]}),
+        )
+        .unwrap();
+        let m = mouth_of(&mut s, json!({"coaxial": {"feature": "ax"}}), false).unwrap();
+        close(m.at, [0.005, 0.005, 0.005]);
+        close(Point3::ORIGIN + m.down, [0.0, 0.0, -1.0]);
         assert!(!m.flush);
     }
 }
