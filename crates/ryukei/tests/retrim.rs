@@ -494,3 +494,15 @@ fn an_offset_past_the_opposite_side_collapses() {
         );
     }
 }
+
+/// ryukei 19.A's twin: the testkit's rod, pinned (`ROD_DUMP_HASH`): six
+/// faces, a cylinder, a torus, a cylinder, two caps and the rim's torus.
+#[test]
+fn the_bent_rod_is_pinned() {
+    use ryukei_testkit::held_seams::{ROD_DUMP_HASH, bent_rod, fnv};
+    let rod = bent_rod();
+    assert_eq!(rod.counts().faces, 6);
+    assert_eq!(ryukei::check::check(&rod), []);
+    let h = fnv(rod.dump_unnamed().as_bytes());
+    assert_eq!(h, ROD_DUMP_HASH, "rod: {h:#018x}");
+}
