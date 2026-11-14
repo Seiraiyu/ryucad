@@ -12,6 +12,8 @@
 #                           ryueda-v0.1.0 (default: the newest release)
 #   RYUEDA_HOME             install root (default: ~/.ryueda); the binary goes in bin/
 #   RYUEDA_NO_MODIFY_PATH   set to 1 to leave shell profiles alone
+#   RYUEDA_NO_APP           set to 1 to install the ryueda command only, not
+#                           the desktop app (servers, CI)
 #   GH_TOKEN, GITHUB_TOKEN  a token for a private repository (else `gh auth token`)
 #   RYUEDA_DOWNLOAD_BASE    a mirror laid out as <base>/releases (the API's
 #                           list of releases) and <base>/download/<tag>/<asset>;
@@ -99,6 +101,67 @@ newest() {
     ' "$1"
 }
 
+# register BIN SHARE: lets the desktop open projects in the app: a desktop
+# entry and the project MIME type on Linux, ~/Applications/ryueda.app on
+# macOS. Running it again replaces them.
+register() {
+    case "$(uname -s)" in
+        Linux)
+            data=${XDG_DATA_HOME:-$HOME/.local/share}
+            mkdir -p "$data/applications" "$data/mime/packages"
+            # The program, quoted only if it must be: xdg-open's generic
+            # mode can't run a quoted one. Inside quotes the desktop-entry
+            # spec escapes \ " ` and $ with a backslash, itself escaped.
+            exe="$1/ryueda-app"
+            case "$exe" in
+                *[!A-Za-z0-9/._+-]*)
+                    exe=$(printf '%s' "$exe" | sed 's/[\\"`$]/\\\\&/g')
+                    exe="\"$exe\""
+                    ;;
+            esac
+            # As a sed replacement, & | and \ are special.
+            exe=$(printf '%s' "$exe" | sed 's/[&|\\]/\\&/g')
+            sed "s|@EXEC@|$exe|g" "$2/ryueda.desktop" >"$data/applications/ryueda.desktop"
+            cp "$2/ryueda.xml" "$data/mime/packages/ryueda.xml"
+            if command -v update-mime-database >/dev/null 2>&1; then
+                update-mime-database "$data/mime" >/dev/null 2>&1 || true
+            fi
+            if command -v update-desktop-database >/dev/null 2>&1; then
+                update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+            fi
+            ;;
+        Darwin)
+            # A launcher compiled here, so it knows where the binaries are.
+            if command -v osacompile >/dev/null 2>&1; then
+                mkdir -p "$HOME/Applications"
+                sed "s|@BIN@|$1|g" "$2/ryueda.applescript" >"$tmp/ryueda.applescript"
+                app="$HOME/Applications/ryueda.app"
+                rm -rf "$app"
+                # osacompile signs what it makes and says so on stderr
+                # ("replacing existing signature"); only real faults show.
+                status=0
+                osacompile -o "$app" "$tmp/ryueda.applescript" 2>"$tmp/osacompile.err" || status=$?
+                grep -v 'replacing existing signature' "$tmp/osacompile.err" >&2 || true
+                [ "$status" -eq 0 ] || die "could not compile the launcher $app"
+                # Offered by Finder (Open With, not the default) for
+                # folders and JSON files: ryueda.json is plain JSON.
+                plutil -replace CFBundleIdentifier -string com.seiraiyu.ryueda "$app/Contents/Info.plist"
+                plutil -replace CFBundleDocumentTypes -json '[
+                    {"CFBundleTypeName": "Folder", "CFBundleTypeRole": "Viewer",
+                     "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.folder"]},
+                    {"CFBundleTypeName": "ryueda project", "CFBundleTypeRole": "Viewer",
+                     "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.json"]}
+                ]' "$app/Contents/Info.plist"
+                codesign --force --sign - "$app" >/dev/null 2>&1 || true
+                lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+                if [ -x "$lsregister" ]; then
+                    "$lsregister" -f "$app" >/dev/null 2>&1 || true
+                fi
+            fi
+            ;;
+    esac
+}
+
 main() {
     target=$(detect_target)
     token=$(find_token)
@@ -178,6 +241,19 @@ main() {
     if command -v git >/dev/null 2>&1; then
         "$bin/ryueda" git install --global >/dev/null 2>&1 ||
             say "warning: couldn't register ryueda with Git; run: ryueda git install --global"
+    fi
+
+    # The desktop app, unless only the command is wanted.
+    staged="$tmp/ryueda-$version-$target"
+    if [ "${RYUEDA_NO_APP:-0}" = 1 ]; then
+        say "RYUEDA_NO_APP=1: the desktop app is not installed"
+    elif [ -f "$staged/ryueda-app" ]; then
+        cp "$staged/ryueda-app" "$bin/.ryueda-app.new"
+        chmod 755 "$bin/.ryueda-app.new"
+        mv -f "$bin/.ryueda-app.new" "$bin/ryueda-app"
+        register "$bin" "$staged/share"
+        "$bin/ryueda-app" --version >/dev/null 2>&1 ||
+            say "warning: ryueda-app doesn't run on this machine (on Linux it needs glibc 2.35 or newer); the ryueda command works without it"
     fi
 
     # PATH.
