@@ -6,6 +6,7 @@
 //! into the body they were written from.
 
 use ryukei::Error;
+use ryukei::geom::{KnotVector, NurbsSurface, Point3};
 use ryukei::boolean::boolean;
 use ryukei::check::{check, check_intersections};
 use ryukei::heal::{HealOptions, heal};
@@ -695,4 +696,85 @@ fn offset_past_curvature_stops_soon_after_its_cancel() {
     let latency = (secs - CANCEL_AT).max(0.0);
     let bar = if bars() { 0.1 } else { 1.0 };
     assert!(latency <= bar, "stopped {latency:.3} s after its cancel");
+}
+
+/// The nearest of an `(n + 1) × (n + 1)` grid of samples of `s` to `p`.
+fn sampled(s: &NurbsSurface, p: Point3, n: u32) -> f64 {
+    let [[u0, u1], [v0, v1]] = s.domain();
+    let mut best = f64::INFINITY;
+    for i in 0..=n {
+        for j in 0..=n {
+            let u = u0 + (u1 - u0) * f64::from(i) / f64::from(n);
+            let v = v0 + (v1 - v0) * f64::from(j) / f64::from(n);
+            best = best.min(s.point(u, v).distance(p));
+        }
+    }
+    best
+}
+
+/// The `nurbs` target's surface for both finds: degree 1 along `u` and 2
+/// along `v`, both over `[3, 5]`, one patch; control points row-major.
+fn patch(points: [Point3; 6], weights: [f64; 6]) -> NurbsSurface {
+    let ku = KnotVector::clamped(1, &[3.0, 5.0], &[2, 2]).unwrap();
+    let kv = KnotVector::clamped(2, &[3.0, 5.0], &[3, 3]).unwrap();
+    NurbsSurface::new([ku, kv], points.to_vec(), Some(weights.to_vec())).unwrap()
+}
+
+/// What the target asserts (the foot is a point of the surface, beaten by
+/// none of its 9 × 9 samples), the same against a 401 × 401 grid, and the
+/// true foot's parameters, which a dense sample found.
+fn projects_to(s: &NurbsSurface, p: Point3, param: (f64, f64)) {
+    let eps = ryukei::tol::LINEAR_RESOLUTION;
+    let foot = s.project(p);
+    assert_eq!(s.point(foot.param.0, foot.param.1), foot.point);
+    assert!(foot.distance <= sampled(s, p, 8) + eps, "{foot:?}");
+    assert!(foot.distance <= sampled(s, p, 400) + eps, "{foot:?}");
+    assert!(
+        (foot.param.0 - param.0).abs() < 1e-3 && (foot.param.1 - param.1).abs() < 1e-3,
+        "{foot:?}"
+    );
+}
+
+/// The `nurbs` target's find of 2026-11-04 (`crash-5d33ef6d…`): a patch
+/// 5 cm across seen from a kilometre away. The nearest point lies inside
+/// the edge `v = 5`, a linear rational segment with weights 5 and 0.05,
+/// whose light end's coefficient fell under the curve search's one zero
+/// threshold, so the edge's end `(5, 5)` stood for it, 5.3e-7 farther.
+#[test]
+fn a_far_point_and_an_edge_crushed_by_its_weights() {
+    let q = Point3::new(6.0, 6.0, 6.0);
+    let s = patch(
+        [
+            q,
+            q,
+            Point3::new(6.0, 6.0, 5.952941176470588),
+            q,
+            q,
+            Point3::new(5.952941176470588, 6.0, 6.0),
+        ],
+        [5.0, 0.9429411764705884, 5.0, 5.0, 5.0, 0.05],
+    );
+    projects_to(&s, Point3::new(-600.0, -600.0, -600.0), (4.9802, 5.0));
+}
+
+/// The `nurbs` target's find of 2026-11-06 (`crash-1263609a…`): each row
+/// is a parabola whose ends coincide, so the patch is a triangle folded
+/// back on itself along `v = 4`, and the nearest point is an ordinary
+/// minimum on that fold, the patch's first split line. The search found
+/// only the edge `u = 5`'s foot, 0.0138 farther.
+#[test]
+fn a_minimum_on_a_fold_along_the_first_split() {
+    let q = Point3::new(6.0, 6.0, 6.0);
+    let s = patch(
+        [
+            q,
+            Point3::new(6.0, 5.905882352941177, 6.0),
+            q,
+            q,
+            Point3::new(-3.835294117647059, -6.0, -5.576470588235294),
+            q,
+        ],
+        [5.0; 6],
+    );
+    projects_to(&s, Point3::new(6.0, -3.835294117647059, 6.0), (4.2514, 4.0));
 }
