@@ -4,6 +4,7 @@ pub mod activity;
 pub mod command;
 pub mod flash;
 pub mod link;
+pub mod paint;
 pub mod people;
 pub mod pick;
 pub mod prefs;
