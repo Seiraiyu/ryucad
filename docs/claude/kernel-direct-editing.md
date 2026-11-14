@@ -259,4 +259,4 @@ Design 642, plan 19.A (#652, #658).
     - Committed deletes: none slower, same results.
     - Pinned: main 17 defeatured / 9 refused / 2 past the deadline / 5 with no blend in 629.6 s; the branch 17 / 10 / 1 / 5 in 421.0 s. The only slower body is CTC 02 with PMI (2.9 to 15.8 s), which refuses further along.
     - `edit_props` built 78 edits on the branch and on main, with the same refusals.
-    - The fuzzing line comes from Task 15's run.
+    - Fuzzing: the `edit` target ran 30 minutes on cox-worker-4 (Docker, 8 GB) with no crash, timeout or OOM: 5,217 runs, at about 2.9 a second, and a corpus of 654.
