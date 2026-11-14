@@ -1230,7 +1230,7 @@ fn project(
             if matches!(plans[i].0.extra, Extra::Flat { .. }) {
                 return Some(Arc::new(Projection::default()));
             }
-            session.projections.get(k).or_else(|| {
+            session.caches_mut().projections_mut().get(k).or_else(|| {
                 let d = disk.as_ref()?;
                 let bytes = d.get(crate::cache::Kind::Projection, k.as_bytes())?;
                 match ryukei::codec::decode_projection(&bytes) {
@@ -1243,7 +1243,7 @@ fn project(
             })
         })
         .collect();
-    let job = session.job.clone();
+    let job = session.job().clone();
     let stage = job.begin(ryu_session::job::Phase::Project, "views", plans.len());
     use rayon::prelude::*;
     let made: Vec<Option<std::result::Result<Projection, ryukei::Error>>> = plans
@@ -1293,7 +1293,10 @@ fn project(
                         &ryukei::codec::encode_projection(&p),
                     );
                 }
-                session.projections.put(keys[i].clone(), p.clone());
+                session
+                    .caches_mut()
+                    .projections_mut()
+                    .put(keys[i].clone(), p.clone());
                 out.push(Ok(p));
             }
             Some(Err(e)) => {

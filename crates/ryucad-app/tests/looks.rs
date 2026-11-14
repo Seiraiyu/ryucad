@@ -21,7 +21,58 @@ const CHANNEL: u8 = 24;
 /// At most this share of pixels may differ.
 const SHARE: f64 = 0.01;
 
+/// What differs between two runs of the same build, so the exact compare
+/// leaves it out: the Activity tile's newest row, where the annotation
+/// just added shows its age (`1 s ago`) and its file, whose name is a new
+/// random ID every run. `[left, top, right, bottom)` in pixels.
+const VARIES: [(&str, [u32; 4]); 3] = [
+    ("annotate", [282, 882, 720, 908]),
+    ("direct", [282, 882, 720, 908]),
+    ("redlines", [282, 882, 720, 908]),
+];
+
+/// `RYUCAD_PICTURES_KEEP=<dir>` saves every picture this file draws in
+/// `<dir>`; `RYUCAD_PICTURES_SAME=<dir>` requires each to be the one kept
+/// there, pixel for pixel (ryueda 3.C: moving the shell into `ryu-app`
+/// moves no pixel). Both on one adapter: the kept pictures are its own.
+/// Only [`VARIES`] is left out.
+fn same_as_kept(img: &image::RgbaImage, name: &str) {
+    if let Some(dir) = std::env::var_os("RYUCAD_PICTURES_KEEP") {
+        let dir = Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+        img.save(dir.join(format!("{name}.png"))).unwrap();
+    }
+    if let Some(dir) = std::env::var_os("RYUCAD_PICTURES_SAME") {
+        let path = Path::new(&dir).join(format!("{name}.png"));
+        let kept = image::open(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .to_rgba8();
+        assert_eq!(kept.dimensions(), img.dimensions(), "{name}");
+        let varies = |x: u32, y: u32| {
+            VARIES.iter().any(|(n, [x0, y0, x1, y1])| {
+                *n == name && (*x0..*x1).contains(&x) && (*y0..*y1).contains(&y)
+            })
+        };
+        let moved = img
+            .enumerate_pixels()
+            .zip(kept.pixels())
+            .filter(|((x, y, a), b)| a != b && !varies(*x, *y))
+            .count();
+        let new = path.with_extension("moved.png");
+        if moved > 0 {
+            img.save(&new).unwrap();
+        }
+        assert_eq!(
+            moved,
+            0,
+            "{name}: {moved} pixels moved; see {}",
+            new.display()
+        );
+    }
+}
+
 fn looks_as_it_did(lavapipe: bool, img: &image::RgbaImage, name: &str) {
+    same_as_kept(img, name);
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/snapshots/{name}-lavapipe.png"));
     if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {

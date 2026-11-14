@@ -110,6 +110,7 @@ pub mod part;
 pub mod path;
 pub mod pattern;
 pub mod pdm;
+pub mod places;
 pub mod playback;
 pub mod process;
 pub mod profile;

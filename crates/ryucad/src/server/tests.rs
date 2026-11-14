@@ -121,7 +121,7 @@ fn a_render_past_its_budget_is_refused_and_one_within_it_draws() {
     let e = ask(&mut slot, 64 * 1024).unwrap_err();
     // The meshes it made count against its budget, and a refused
     // render leaves none of them in the session's mesh cache (#407).
-    let held = &slot.as_ref().unwrap().meshes;
+    let held = slot.as_ref().unwrap().caches().meshes();
     assert_eq!((held.len(), held.bytes()), (0, 0), "{e}");
     assert_eq!(e.code, Code::RenderTooLarge, "{e}");
     assert_eq!(e.details["occurrences"], 200);
@@ -131,7 +131,7 @@ fn a_render_past_its_budget_is_refused_and_one_within_it_draws() {
     let a = ask(&mut slot, 1 << 30).unwrap();
     assert!(a.binary.is_some());
     // One that draws keeps what it meshed (the plate, once).
-    assert_eq!(slot.as_ref().unwrap().meshes.len(), 1);
+    assert_eq!(slot.as_ref().unwrap().caches().meshes().len(), 1);
     drop(s);
 }
 
@@ -4356,7 +4356,7 @@ fn editing_one_feature_meshes_one_body() {
         .unwrap();
         assert_eq!(m["quality"], "coarse");
         assert_eq!(m["bodies"][1]["feature"], "b");
-        assert_eq!(s.meshes.len(), 2);
+        assert_eq!(s.caches().meshes().len(), 2);
         call(
             &mut s,
             "feature.edit",
@@ -4369,7 +4369,7 @@ fn editing_one_feature_meshes_one_body() {
             json!({"part": "p", "quality": "coarse"}),
         )
         .unwrap();
-        assert_eq!(s.meshes.len(), 3);
+        assert_eq!(s.caches().meshes().len(), 3);
         assert_eq!(again["bodies"][1], m["bodies"][1]);
         assert_ne!(again["bodies"][0]["hash"], m["bodies"][0]["hash"]);
         // The user's display quality is the default.
@@ -4411,14 +4411,14 @@ fn meshes_are_made_before_the_lock_is_taken() {
         let job = prepare(&mut slot, &req(None)).expect("two meshes to make");
         let put = job();
         let s = slot.as_mut().unwrap();
-        assert_eq!(s.meshes.len(), 0);
+        assert_eq!(s.caches().meshes().len(), 0);
         put(s);
-        assert_eq!(s.meshes.len(), 2);
+        assert_eq!(s.caches().meshes().len(), 2);
         assert!(prepare(&mut slot, &req(Some("working"))).is_none());
         // The answer is the one a session that meshed itself gives.
         let mut a = handle_safely(&mut slot, None, None, dir.path(), req(None)).unwrap();
-        assert_eq!(slot.as_ref().unwrap().meshes.len(), 2);
-        slot.as_mut().unwrap().meshes = mesh::Cache::default();
+        assert_eq!(slot.as_ref().unwrap().caches().meshes().len(), 2);
+        *slot.as_mut().unwrap().caches_mut().meshes_mut() = mesh::Cache::default();
         let mut b = handle_safely(&mut slot, None, None, dir.path(), req(None)).unwrap();
         assert_eq!(a.result["binary"]["encoding"], mesh::ENCODING);
         let bytes = a.binary.take().unwrap();
@@ -4752,4 +4752,59 @@ fn renders_draw_thread_rings_unless_told_not_to() {
         json!({"points": ["p1"], "form": "simple", "diameter": 3, "depth": "through_all"}),
     );
     assert_eq!(png(&mut s, true), png(&mut s, false));
+}
+
+#[test]
+fn following_patterns_are_written_shown_and_edited() {
+    use crate::places::tests::{must, tray};
+    let (dir, mut s) = tray();
+    let r = must(
+        &mut s,
+        "feature.add",
+        json!({"part": "pack", "type": "instance_pattern",
+        "id": "bolts", "instances": ["bolt-0"], "form": "feature", "on": "pack/lid/row"}),
+    );
+    assert_eq!(
+        r["feature"]["on"],
+        json!({"instance": ["lid"], "feature": "row", "text": "pack/lid/row"})
+    );
+    let file = std::fs::read_to_string(dir.path().join("parts/pack/features/bolts.json")).unwrap();
+    assert!(file.contains("\"format\": 24"), "{file}");
+    // From and points, given and taken away; a new form keeps only its own.
+    let r = must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "pack", "id": "bolts", "from": "p2"}),
+    );
+    assert_eq!(r["feature"]["from"], "p2");
+    let r = must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "pack", "id": "bolts", "form": "points",
+        "on": "pack/lid/layout", "points": ["p1", "p5"], "from": ""}),
+    );
+    assert_eq!(
+        (
+            r["feature"]["form"].as_str(),
+            r["feature"]["from"].is_null()
+        ),
+        (Some("points"), true)
+    );
+    assert_eq!(r["feature"]["points"], json!(["p1", "p5"]));
+    let e = crate::server::handle(&mut s, crate::proto::Request::from_rpc("feature.add",
+        Some(json!({"part": "pack", "type": "instance_pattern", "id": "x", "instances": ["pin-0"],
+                    "form": "feature", "on": "lid/row"}))).unwrap()).unwrap_err();
+    assert_eq!(e.code, crate::error::Code::InvalidParam);
+    // The rebuild report names each following pattern's driver.
+    let rep = must(&mut s, "rebuild", json!({"part": "pack"}));
+    let bolts = rep["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "bolts")
+        .unwrap();
+    assert_eq!(
+        (&bolts["form"], &bolts["driver"]),
+        (&json!("points"), &json!("lid/layout"))
+    );
 }

@@ -761,7 +761,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             result["schema"] = json!(schema_name);
             result["unit"] = json!(unit_name);
             result["file_name"] = json!(opts.file_name);
-            deliver(&s.job, result, out.as_deref(), "step", |w| {
+            deliver(s.job(), result, out.as_deref(), "step", |w| {
                 w.write_all(&bytes)
             })
         }
@@ -776,7 +776,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 ascii,
                 header: format!("ryucad {version} {part} {}", unit.as_str()),
             };
-            deliver(&s.job, result, out.as_deref(), "stl", |w| {
+            deliver(s.job(), result, out.as_deref(), "stl", |w| {
                 ryuformats::stl::write(&scene, &opts, w)
             })
         }
@@ -797,7 +797,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 metadata.push(("ryucad:max_edge".to_owned(), e.text()));
             }
             let opts = ryuformats::threemf::ThreeMf { unit, metadata };
-            deliver(&s.job, result, out.as_deref(), "3mf", |w| {
+            deliver(s.job(), result, out.as_deref(), "3mf", |w| {
                 ryuformats::threemf::write(&scene, &opts, w)
             })
         }
@@ -889,7 +889,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             // where it is written changes no byte.
             let stem = part.to_string();
             deliver(
-                &s.job,
+                s.job(),
                 result,
                 out.as_deref(),
                 format.as_str(),
@@ -956,7 +956,7 @@ fn dxf(
         result["commit"] = json!(c);
     }
     let (_, s) = session.at(ask.rev.as_deref())?;
-    deliver(&s.job, result, out, "dxf", |w| w.write_all(&bytes))
+    deliver(s.job(), result, out, "dxf", |w| w.write_all(&bytes))
 }
 
 /// USD's model of a scene: each product's solids with their bodies (each
@@ -1054,10 +1054,13 @@ fn meshed_with(
         .flat_map(|p| p.solids.iter().map(move |x| (p, x)))
         .collect();
     let builts: Vec<&Built> = solids.iter().map(|(_, x)| x.built.as_ref()).collect();
-    let job = s.job.clone();
-    let made =
-        s.meshes
-            .export_all_for(&builts, &opts.params, crate::budget::mesh_budget(), &job)?;
+    let job = s.job().clone();
+    let made = s.caches_mut().meshes_mut().export_all_for(
+        &builts,
+        &opts.params,
+        crate::budget::mesh_budget(),
+        &job,
+    )?;
     let mut meshes: BTreeMap<&str, Arc<ryukei::mesh::BodyMesh>> = BTreeMap::new();
     let mut faults = Vec::new();
     let mut warnings = Vec::new();
@@ -1559,13 +1562,13 @@ impl Walk {
                     Ok(Output::Copies(c)) => {
                         for copy in &c.copies {
                             let product = self.product(s, &copy.placed.part, &copy.placed.rev)?;
-                            let id = Id::copy(fid, copy.index).to_string();
+                            let id = Id::copy(fid, &copy.key).to_string();
                             children.push(Child {
                                 product,
                                 place: copy.placed.pose,
                                 usage: id.clone(),
                                 instance: id,
-                                steps: vec![Id::copy(fid, copy.index), copy.seed.clone()],
+                                steps: vec![Id::copy(fid, &copy.key), copy.seed.clone()],
                             });
                         }
                     }
@@ -2968,7 +2971,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             // A fresh mesh cache each time, so every boundary is reached.
-            slot.as_mut().unwrap().meshes = Default::default();
+            *slot.as_mut().unwrap().caches_mut().meshes_mut() = Default::default();
             match crate::server::handle_job(
                 &mut slot,
                 None,

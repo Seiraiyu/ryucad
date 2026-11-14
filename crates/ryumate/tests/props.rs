@@ -8,7 +8,10 @@ mod common;
 use common::*;
 use proptest::prelude::*;
 use ryukei_testkit::Lcg;
-use ryumate::{BodyState, Kind, Mate, MateState, Report, solve, solve_whole};
+use ryumate::{
+    Assembly, BodyState, Connector, Kind, Limits, Mate, MateState, Motion, On, Pattern, Pose,
+    Report, solve, solve_whole,
+};
 
 /// What both ways of solving must agree on: everything but the step
 /// count and the free motions' coordinates, which differ by rounding.
@@ -125,5 +128,40 @@ proptest! {
         let again = solve(&asm).unwrap();
         prop_assert_eq!(&again.poses, &s.poses);
         prop_assert_eq!(&again.report, &s.report);
+    }
+    #[test]
+    fn copies_at_places_are_their_bodys_motions(seed in any::<u64>(), n in 1usize..8, size in 0.001f64..20.0) {
+        let mut g = Lcg::new(seed);
+        let lid = pose(&mut g, size);
+        let screw = pose(&mut g, size);
+        let places: Vec<Pose> = (0..n).map(|_| pose(&mut g, size)).collect();
+        let mut asm = Assembly::default();
+        asm.bodies.insert(1, free(lid));
+        asm.bodies.insert(2, free(screw));
+        asm.patterns.insert(20, Pattern {
+            seeds: vec![2],
+            motion: Motion::Places { body: 1, places: places.clone() },
+        });
+        prop_assert_eq!(asm.validate(), Ok(()));
+        let wanted: Vec<_> = (1..=n as u32).map(|k| (20, 2, [k, 0])).collect();
+        let got = ryumate::copy_poses(&asm, &wanted);
+        let tol = 1e-12 * size.max(1.0);
+        for (k, place) in places.iter().enumerate() {
+            let want = lid.then_after(place).then_after(&lid.inverse()).then_after(&screw);
+            prop_assert!(same(got[k].origin, want.origin, tol), "{k}: {:?} {:?}", got[k], want);
+            for a in 0..3 {
+                prop_assert!(same(got[k].axis(a), want.axis(a), 1e-12));
+            }
+        }
+        // A fixed nut fastened where the last copy is: the solve holds.
+        asm.bodies.insert(3, fixed(got[n - 1]));
+        asm.mates.insert(10, Mate {
+            kind: Kind::Fastened,
+            a: Connector { on: On::Copy { pattern: 20, seed: 2, index: [n as u32, 0] }, frame: Pose::IDENTITY },
+            b: on(3, Pose::IDENTITY),
+            limits: Limits::NONE,
+        });
+        let s = solve(&asm).unwrap();
+        prop_assert!(s.report.converged, "{:?}", s.report);
     }
 }

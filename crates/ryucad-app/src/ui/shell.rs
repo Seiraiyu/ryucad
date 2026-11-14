@@ -5,243 +5,39 @@
 //! default place. The tree is the `ui.layout` preference (`core::layout`),
 //! read when the window opens and saved at most once a second.
 
-use crate::core::layout::{self, Dir, Home, Node};
+use crate::core::layout::{self, Node};
 use crate::ui::app::Opened;
 use eframe::egui;
-use egui_tiles::{Container, Linear, LinearDir, Tile, TileId, Tiles, Tree};
+use egui_tiles::{Tile, TileId, Tiles, Tree};
 
-/// A pane is its tile's id.
-pub type Pane = &'static str;
-
-/// The tile ids, as `'static` strs.
-fn pane(id: &str) -> Option<Pane> {
-    layout::TILES
-        .iter()
-        .find(|(t, _)| *t == id)
-        .map(|(t, _)| *t)
-}
+pub use ryu_app::shell::{Pane, fair_shares, find, is_open, node};
 
 /// The tiles' egui id: one per window, so their state (tab scrolling,
 /// drags) survives the tree being made again.
 pub fn tree_id() -> egui::Id {
-    egui::Id::unique("ryucad tiles")
+    ryu_app::shell::tree_id(&layout::SPEC)
 }
 
 /// The tree of a saved layout.
 pub fn tree(root: &Node) -> Tree<Pane> {
-    let mut tiles = Tiles::default();
-    let root = insert(&mut tiles, root);
-    let mut t = Tree::new(tree_id(), root, tiles);
-    // A layout saved with a one-pixel tile (#531) opens with it usable.
-    fair_shares(&mut t);
-    t
-}
-
-/// How small a share may be against its siblings' mean before it is taken
-/// for one egui_tiles gave a dropped tile rather than one a person chose.
-const LEAST_SHARE: f32 = 0.05;
-
-/// Gives every child of a split whose share is under [`LEAST_SHARE`] of
-/// its siblings' mean that mean. egui_tiles gives a tile dropped into a
-/// split a share of 1, which beside the default layout's pixel-like
-/// shares (1040 and 280) is a pane a pixel wide with no tab bar left to
-/// drag it back by (#531).
-pub fn fair_shares(tree: &mut Tree<Pane>) {
-    for (_, tile) in tree.tiles.iter_mut() {
-        let Tile::Container(Container::Linear(l)) = tile else {
-            continue;
-        };
-        if l.children.len() < 2 {
-            continue;
-        }
-        let shares: Vec<f32> = l.children.iter().map(|c| l.shares[*c]).collect();
-        let total: f32 = shares.iter().sum();
-        let small: Vec<TileId> = l
-            .children
-            .iter()
-            .zip(&shares)
-            .filter(|&(_, s)| {
-                let mean = (total - s) / (shares.len() - 1) as f32;
-                *s < LEAST_SHARE * mean
-            })
-            .map(|(c, _)| *c)
-            .collect();
-        if small.is_empty() || small.len() == shares.len() {
-            continue;
-        }
-        let kept: Vec<f32> = l
-            .children
-            .iter()
-            .zip(&shares)
-            .filter(|(c, _)| !small.contains(c))
-            .map(|(_, s)| *s)
-            .collect();
-        let mean = kept.iter().sum::<f32>() / kept.len() as f32;
-        for c in small {
-            l.shares.set_share(c, mean);
-        }
-    }
-}
-
-fn insert(tiles: &mut Tiles<Pane>, n: &Node) -> TileId {
-    match n {
-        Node::Tile(id) => tiles.insert_pane(pane(id).expect("read layouts hold only known tiles")),
-        Node::Split(dir, children) => {
-            let ids: Vec<TileId> = children.iter().map(|(c, _)| insert(tiles, c)).collect();
-            let dir = match dir {
-                Dir::Horizontal => LinearDir::Horizontal,
-                Dir::Vertical => LinearDir::Vertical,
-            };
-            let mut linear = Linear::new(dir, ids.clone());
-            for (id, (_, share)) in ids.iter().zip(children) {
-                linear.shares.set_share(*id, *share);
-            }
-            tiles.insert_container(Container::Linear(linear))
-        }
-        Node::Tabs(children, active) => {
-            let ids: Vec<TileId> = children.iter().map(|c| insert(tiles, c)).collect();
-            let mut tabs = egui_tiles::Tabs::new(ids.clone());
-            if let Some(a) = ids.get(*active) {
-                tabs.set_active(*a);
-            }
-            tiles.insert_container(Container::Tabs(tabs))
-        }
-    }
-}
-
-/// The saved layout of a tree.
-pub fn node(tree: &Tree<Pane>) -> Option<Node> {
-    fn of(tiles: &Tiles<Pane>, id: TileId) -> Option<Node> {
-        match tiles.get(id)? {
-            Tile::Pane(p) => Some(Node::Tile((*p).to_owned())),
-            Tile::Container(Container::Tabs(t)) => {
-                let kids: Vec<(TileId, Node)> = t
-                    .children
-                    .iter()
-                    .filter_map(|c| Some((*c, of(tiles, *c)?)))
-                    .collect();
-                let active = t
-                    .active
-                    .and_then(|a| kids.iter().position(|(c, _)| *c == a))
-                    .unwrap_or(0);
-                (!kids.is_empty())
-                    .then(|| Node::Tabs(kids.into_iter().map(|k| k.1).collect(), active))
-            }
-            Tile::Container(Container::Linear(l)) => {
-                let dir = match l.dir {
-                    LinearDir::Horizontal => Dir::Horizontal,
-                    LinearDir::Vertical => Dir::Vertical,
-                };
-                let kids: Vec<(Node, f32)> = l
-                    .children
-                    .iter()
-                    .filter_map(|c| Some((of(tiles, *c)?, l.shares[*c])))
-                    .collect();
-                match kids.len() {
-                    0 => None,
-                    1 => kids.into_iter().next().map(|k| k.0),
-                    _ => Some(Node::Split(dir, kids)),
-                }
-            }
-            // The window never makes grids; one dragged into being is
-            // saved as tabs.
-            Tile::Container(Container::Grid(g)) => {
-                let kids: Vec<Node> = g.children().filter_map(|c| of(tiles, *c)).collect();
-                (!kids.is_empty()).then_some(Node::Tabs(kids, 0))
-            }
-        }
-    }
-    of(&tree.tiles, tree.root?)
-}
-
-/// The tile of a pane, if it is open.
-pub fn find(tree: &Tree<Pane>, id: &str) -> Option<TileId> {
-    tree.tiles
-        .iter()
-        .find(|(_, t)| matches!(t, Tile::Pane(p) if *p == id))
-        .map(|(tid, _)| *tid)
-}
-
-/// Whether a pane is open.
-pub fn is_open(tree: &Tree<Pane>, id: &str) -> bool {
-    find(tree, id).is_some()
+    ryu_app::shell::tree(&layout::SPEC, root)
 }
 
 /// Shows `id`: opens it at its default place if it is closed (in the tab
 /// group holding another tile of that place, else beside the viewport),
 /// and makes it the active tab.
 pub fn open(tree: &mut Tree<Pane>, id: &str) {
-    let Some(p) = pane(id) else { return };
-    if let Some(t) = find(tree, p) {
-        tree.make_active(|tid, _| tid == t);
-        return;
-    }
-    let home = layout::home(p);
-    let neighbour = layout::TILES
-        .iter()
-        .map(|(t, _)| *t)
-        .filter(|t| *t != p && layout::home(t) == home)
-        .find_map(|t| find(tree, t));
-    let group = neighbour
-        .or_else(|| find(tree, "viewport"))
-        .and_then(|t| tree.tiles.parent_of(t))
-        .filter(|g| {
-            matches!(
-                tree.tiles.get(*g),
-                Some(Tile::Container(Container::Tabs(_)))
-            )
-        });
-    let new = tree.tiles.insert_pane(p);
-    match group {
-        Some(g) if neighbour.is_some() || home == Home::Centre => {
-            if let Some(Tile::Container(c)) = tree.tiles.get_mut(g) {
-                c.add_child(new);
-            }
-        }
-        _ => {
-            // A place with no tab group open: a new group beside the root.
-            let tabs = tree.tiles.insert_tab_tile(vec![new]);
-            match tree.root {
-                Some(root) => {
-                    let dir = match home {
-                        Home::Bottom => LinearDir::Vertical,
-                        _ => LinearDir::Horizontal,
-                    };
-                    let children = match home {
-                        Home::Left => vec![tabs, root],
-                        _ => vec![root, tabs],
-                    };
-                    let mut linear = Linear::new(dir, children);
-                    linear.shares.set_share(root, 3.0);
-                    tree.root = Some(tree.tiles.insert_container(Container::Linear(linear)));
-                }
-                None => tree.root = Some(tabs),
-            }
-        }
-    }
-    tree.make_active(|tid, _| tid == new);
+    ryu_app::shell::open(&layout::SPEC, tree, id)
 }
 
 /// Opens `id` as [`open`] does, as the first tab of its group.
 pub fn open_first(tree: &mut Tree<Pane>, id: &str) {
-    open(tree, id);
-    let Some(t) = find(tree, id) else { return };
-    if let Some(g) = tree.tiles.parent_of(t)
-        && let Some(Tile::Container(Container::Tabs(tabs))) = tree.tiles.get_mut(g)
-    {
-        tabs.children.retain(|c| *c != t);
-        tabs.children.insert(0, t);
-    }
+    ryu_app::shell::open_first(&layout::SPEC, tree, id)
 }
 
 /// Closes `id` if it is open (never the viewport).
 pub fn close(tree: &mut Tree<Pane>, id: &str) {
-    if id == "viewport" {
-        return;
-    }
-    if let Some(t) = find(tree, id) {
-        tree.remove_recursively(t);
-    }
+    ryu_app::shell::close(&layout::SPEC, tree, id)
 }
 
 /// What the tiles draw with: the window and the GPU.
@@ -452,6 +248,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::layout::Dir;
 
     #[test]
     fn a_layout_becomes_a_tree_and_back() {

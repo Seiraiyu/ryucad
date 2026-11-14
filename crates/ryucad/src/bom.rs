@@ -47,7 +47,7 @@ pub(crate) fn reading<T>(
         Err(e) if e.code == Code::NotAGitRepo => None,
         Err(e) => return Err(e),
     };
-    let mut cache = std::mem::take(&mut s.structure);
+    let mut cache = s.caches_mut().take_structure();
     let mut deps = s.take_deps_reader()?;
     let lock = crate::deps::lock_of(s.project()).unwrap_or_default();
     let out = {
@@ -77,7 +77,7 @@ pub(crate) fn reading<T>(
         f(&mut reader, &ground)
     };
     s.put_deps_reader(deps);
-    s.structure = cache;
+    s.caches_mut().put_structure(cache);
     Ok((commit, out?))
 }
 
@@ -846,7 +846,7 @@ mod tests {
         use crate::deps::tests::{depend, place_foreign, write_lock};
         let (dir, mut s) = crate::assembly::tests::project();
         let root = dir.path();
-        s.deps_cache = Some(ryupdm::deps::Cache::new(root.join("cache")));
+        *s.deps_cache_slot() = Some(ryupdm::deps::Cache::new(root.join("cache")));
         call(
             &mut s,
             "part.create",
@@ -856,7 +856,7 @@ mod tests {
         depend(&mut s, lib, lib_dir);
         place_foreign(root, "asm", "b", lib, "p", "A");
         s.refresh().unwrap();
-        s.deps_cache
+        s.deps_cache_slot()
             .clone()
             .unwrap()
             .fetch(&crate::deps::tests::url(lib_dir), &[""])
@@ -873,7 +873,7 @@ mod tests {
         let mut s = Session::open(lib_dir.path()).unwrap();
         // Fetched by the products into their own caches; the library reads
         // its own parts from its own history, with an empty cache.
-        s.deps_cache = Some(ryupdm::deps::Cache::new(lib_dir.path().join("cache")));
+        *s.deps_cache_slot() = Some(ryupdm::deps::Cache::new(lib_dir.path().join("cache")));
         let parent = one.path().parent().unwrap().to_path_buf();
         let within = vec![
             one.path().display().to_string(),
@@ -1016,5 +1016,30 @@ mod tests {
             glue["quantity"],
             json!({"count": 1, "uom": "l", "value": 0.005, "text": "0.005 l"})
         );
+    }
+
+    /// ryucad 27.E's fetch rule, as main had it: a fetch lets go of what
+    /// was read of other projects and keeps the project's own structure.
+    #[test]
+    fn a_fetch_lets_go_of_what_was_read_of_other_projects() {
+        let (lib_dir, lib) = crate::deps::tests::library();
+        let dir = product(lib_dir.path(), &lib);
+        let mut s = Session::open(dir.path()).unwrap();
+        *s.deps_cache_slot() = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        call(&mut s, "bom.get", json!({"part": "asm"})).unwrap();
+        let own = |s: &Session| {
+            s.caches()
+                .structure()
+                .keys()
+                .filter(|(p, _, _)| p.is_none())
+                .count()
+        };
+        let (ours, all) = (own(&s), s.caches().structure().len());
+        // Main reads the project's own parts from its files here, so only
+        // what was read of the other project is kept: the fetch lets it go
+        // and keeps every own entry there is.
+        assert!(all > ours, "read the other project: {ours} of {all}");
+        s.deps_fetched();
+        assert_eq!((own(&s), s.caches().structure().len()), (ours, ours));
     }
 }

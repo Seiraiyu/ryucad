@@ -200,6 +200,17 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                     lines.push(format!("{k} = {}", connector(&c)));
                 }
             }
+            // A following pattern's places: the path, then the feature.
+            if let Some(on) = rest.remove("on") {
+                let path: Vec<&str> = on["instance"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                let feature = on["feature"].as_str().unwrap_or_default();
+                lines.push(format!("on = {}/{feature}", path.join("/")));
+            }
             // A mate's stops on one line: `limits = angle -6 deg .. 6 deg,
             // distance .. 10 mm`.
             if let Some(Value::Object(l)) = rest.remove("limits") {
@@ -2914,8 +2925,8 @@ pub(crate) fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activ
     if let Some((named, files, stale)) = session.annotation_files(rev)? {
         if !stale.is_empty() {
             session
-                .rev_warnings
-                .push(crate::session::stale_warning(rev, &stale));
+                .caches_mut()
+                .note_rev_warning(crate::session::stale_warning(rev, &stale));
         }
         return Ok((named, files));
     }
@@ -2995,7 +3006,7 @@ pub(crate) fn diff(
     v["from"] = a;
     v["to"] = b;
     if model {
-        let job = session.job.clone();
+        let job = session.job().clone();
         let stage = job.begin(Phase::Rebuild, "revisions", 2);
         stage.step(|| from.to_owned())?;
         let from = rebuilt_at(session, from)?;
@@ -3817,6 +3828,22 @@ mod tests {
              form = cylindrical\n\
              limits = angle -6 deg .. 6 deg, distance .. 10 mm\n"
         );
+    }
+
+    #[test]
+    fn a_following_patterns_places_read_as_one_line() {
+        let v = json!({"format": 24, "kind": "ryucad.feature", "type": "instance_pattern",
+                       "form": "points", "instances": ["screw-0"], "from": "p3",
+                       "on": {"instance": ["sub", "lid"], "feature": "screw-layout"},
+                       "points": ["p3", "p4"]});
+        let t = text(v);
+        assert!(
+            t.starts_with("ryucad.feature instance_pattern (format 24)\n"),
+            "{t}"
+        );
+        assert!(t.contains("\non = sub/lid/screw-layout\n"), "{t}");
+        assert!(t.contains("\nfrom = p3\n"), "{t}");
+        assert!(!t.contains("on.instance"), "{t}");
     }
 
     #[test]

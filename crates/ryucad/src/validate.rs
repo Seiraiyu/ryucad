@@ -1370,14 +1370,14 @@ pub fn retry_stamp(session: &Session) -> String {
 /// [`key`], so asking again about the same state costs nothing.
 pub fn status(session: &mut Session) -> Result<Value> {
     let key = key(session);
-    if let (Some(k), Some((was, v))) = (&key, &session.merge_status)
-        && k == was
+    if let Some(k) = &key
+        && let Some(v) = session.caches().merge_status(k)
     {
         return Ok(v.clone());
     }
     let v = compute(session)?;
     if let Some(k) = key {
-        session.merge_status = Some((k, v.clone()));
+        session.caches_mut().put_merge_status(k, v.clone());
     }
     Ok(v)
 }
@@ -1394,7 +1394,7 @@ fn compute(session: &mut Session) -> Result<Value> {
     let staged = repo.unstaged(&working)?;
     let untracked = repo.untracked(&working)?;
     // Four rebuilds: each side, then the merge.
-    let job = session.job.clone();
+    let job = session.job().clone();
     let stage = job.begin(Phase::Rebuild, "revisions", 4);
     stage.step(|| "ours".into())?;
     let ours = side(session, Some(&state.ours))?;
@@ -1517,9 +1517,6 @@ fn findings(
     })
 }
 
-/// How many merge previews a session keeps, most recently made first.
-const PREVIEWS: usize = 4;
-
 /// `merge.preview`: what merging `rev` (a revision, or another worktree's
 /// working files as `worktree:<path>`) into this worktree's working files
 /// would leave to settle, as `merge.status` would report it after the
@@ -1561,7 +1558,7 @@ pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
         }
     };
     let key = format!("{ours_head}:{}:{theirs_key}", session.digest());
-    if let Some((_, v)) = session.previews.iter().find(|(k, _)| *k == key) {
+    if let Some(v) = session.caches().preview(&key) {
         return Ok(v.clone());
     }
     let base_commit = repo.merge_base(&ours_head, &theirs_head)?;
@@ -1619,8 +1616,7 @@ pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
         "unmerged": merged.unmerged.keys().collect::<Vec<_>>(),
         "warnings": warnings,
     });
-    session.previews.insert(0, (key, v.clone()));
-    session.previews.truncate(PREVIEWS);
+    session.caches_mut().put_preview(key, v.clone());
     Ok(v)
 }
 
@@ -3973,7 +3969,7 @@ pub(crate) mod tests {
         // Nothing changed: nothing said, and the status is kept.
         assert!(told(&mut live, &mut m).is_empty());
         let key = key(&m.session).unwrap();
-        assert_eq!(m.session.merge_status.as_ref().unwrap().0, key);
+        assert_eq!(m.session.caches().merge_status_key(), Some(key.as_str()));
         resolve(
             &mut m,
             "parts/p/features/b.json#/params/x",

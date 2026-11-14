@@ -3606,6 +3606,36 @@ fn crossing_beside_section(golden: &mut Golden) {
     }
 }
 
+/// ryukei 18.B's flat pieces (#585): the flat-span twin healed as one
+/// solid and self-united (its self-union splits the span off) and united
+/// as a boolean, each result's body, created names and mesh.
+fn flat_pieces_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, boolean};
+    use ryukei::geom::Rigid;
+    use ryukei::heal::{HealOptions, heal, seamed};
+    use ryukei::name::ToolKey;
+    use ryukei_testkit::crossing::{joined, one_solid};
+    let mut s = golden.section("flat_pieces");
+    let (prism, slab) = ryukei_testkit::nurbs::flat_span_twin();
+    let shape = |b: &ryukei::topo::Body| seamed(b, 1e-7).unwrap();
+    let sh = one_solid(joined(&shape(&prism), &shape(&slab)));
+    let (h, _, _) = heal(OpKey(7), &sh, &HealOptions::default()).unwrap();
+    let (u, j) = ryukei::repair::self_union(OpKey(9), &h).unwrap();
+    hash_body(&mut s, &u, &j);
+    let (u, j) = boolean(
+        OpKey(51),
+        BooleanOp::Unite,
+        &prism,
+        &[Tool {
+            key: ToolKey(1),
+            body: &slab,
+            place: Rigid::IDENTITY,
+        }],
+    )
+    .unwrap();
+    hash_body(&mut s, &u, &j);
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3701,6 +3731,7 @@ sections! {
     cusp_images => cusp_images_section,
     closed_silhouettes => closed_silhouettes_section,
     crossing_beside => crossing_beside_section,
+    flat_pieces => flat_pieces_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline

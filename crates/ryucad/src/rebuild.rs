@@ -2271,8 +2271,20 @@ pub fn rebuild_part_in(
                     k.update(h.as_bytes());
                     k.update(format!("{model:?}").as_bytes());
                     let h = k.finalize();
+                    // Its part's places aren't in the model's hash (design
+                    // 521): a cached placing whose model has other places
+                    // than the part's now is built again, so a following
+                    // pattern reads them current, and no hash moves.
+                    let places = children
+                        .get(&(inst.part.clone(), inst.rev.clone()))
+                        .and_then(|m| m.as_ref().ok())
+                        .map(|m| m.places_hash.as_str());
+                    let current = |r: &Result<Output>| match r {
+                        Ok(Output::Instance(p)) => Some(p.model.places_hash.as_str()) == places,
+                        _ => true,
+                    };
                     let (result, new) = match cache.features.get(&id) {
-                        Some((c, r)) if *c == h => (r.clone(), false),
+                        Some((c, r)) if *c == h && current(r) => (r.clone(), false),
                         _ => (
                             crate::assembly::place(&id, inst, children)
                                 .map(|p| Output::Instance(Arc::new(p))),
