@@ -310,9 +310,252 @@ fn ftc_07s_seam_pair_crossing_past_its_seam_is_withheld() {
         _ => panic!("no working face for {f:?}"),
     };
     let (wa, wb) = (working(face(fins[0])), working(face(fins[1])));
-    let seam = super::body::seam_for(&input, e, (&work, wa), (&work, wb))
-        .expect("tangent all along, with pcurves");
+    let seam = super::body::seam_for(
+        &input,
+        e,
+        (&work, wa),
+        (&work, wb),
+        crate::intersect::SeamKind::Running,
+    )
+    .expect("tangent all along, with pcurves");
     // unmetered: a unit test.
     let m = crate::work::Meter::free();
     assert!(known_seam((&work, wa), (&work, wb), &[seam], &m).is_err());
+}
+
+/// FTC 07's torus/cylinder pair (#652, pairs 3 and 4), from the same
+/// cuts as the guard above, with the run stopped at its seam (design
+/// 642): the torus stays outside the region, so the seam is a frontier
+/// one, and the cylinder's pcurve along it is iso at its own box's end.
+/// Stopped half a strip past the circle, the run lies on its side of the
+/// circle's plane outside the strip, the torus on the other: met along
+/// the circle by the section plane.
+///
+/// Not yet (plan 19.A, Task 11): the run is a whole turn (its own pcurves
+/// span 2π, so `delete_turn` leaves it whole) and its seam with this torus
+/// a quarter of its end circle. Stopped half a strip past the seam, the
+/// rest of its rim lies past the circle's plane outside the seam's strip,
+/// so the run is on both sides of it (the torus on one): 19.B's plane stop.
+#[test]
+#[ignore = "#652: a whole-turn run stopped past a quarter-arc seam crosses its plane; 19.B's plane stop"]
+fn ftc_07s_seam_pair_is_met_once_its_run_stops() {
+    use crate::codec::decode_body;
+    use crate::geom::Surface;
+    use crate::intersect::{SeamKind, known_seam};
+    let input = decode_body(include_bytes!(
+        "../../../tests/data/nist_ftc_07_seam_input.body"
+    ))
+    .unwrap();
+    let work = decode_body(include_bytes!(
+        "../../../tests/data/nist_ftc_07_seam_work.body"
+    ))
+    .unwrap();
+    let e = input
+        .edges()
+        .find(|&e| input.edge_fins(e).count() == 2)
+        .expect("the seam edge");
+    let fins: Vec<_> = input.edge_fins(e).collect();
+    let face = |fin| input.loops[input.fins[fin].loop_].face;
+    let (ia, ib) = (face(fins[0]), face(fins[1]));
+    let working = |f: FaceId| match work.by_name(input.faces[f].name) {
+        Some(EntityId::Face(w)) => w,
+        _ => panic!("no working face for {f:?}"),
+    };
+    let is_run = |f: FaceId| matches!(input.surfaces[input.faces[f].surface], Surface::Cylinder(_));
+    assert!(is_run(ia) != is_run(ib), "a cylinder and a torus");
+    let run = if is_run(ia) { ia } else { ib };
+    let h = super::held::Held {
+        edge: e,
+        faces: [ia, ib],
+        kind: SeamKind::Frontier,
+    };
+    let wr = working(run);
+    let surface = work.surfaces[work.faces[wr].surface].clone();
+    let rect = crate::intersect::parameter_box(&work, wr);
+    let stopped = super::held::iso_stops(&input, run, &[h], &surface, rect);
+    assert_ne!(stopped, rect, "the run is stopped at its seam");
+    let (sheet, _) = crate::sheet::from_surface(K, &surface, stopped).unwrap();
+    let sf = sheet.faces().next().unwrap();
+    let torus = (&work, working(if run == ia { ib } else { ia }));
+    // The pair in the input's fin order, as `seam_for` takes it.
+    let (x, y) = if run == ia {
+        ((&sheet, sf), torus)
+    } else {
+        (torus, (&sheet, sf))
+    };
+    let seam = super::body::seam_for(&input, e, x, y, SeamKind::Frontier).expect("pcurves");
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    assert!(known_seam(x, y, &[seam], &m).is_ok());
+}
+
+/// Meets a committed cut's pair along the edges its two input faces
+/// share: each held (`partly`: tangent only in places), built as the
+/// re-trim builds it (`seam_for`, with `kind`), and met by `known_seam`
+/// on the working pair (design 642).
+fn met_along_the_cut(input: &[u8], work: &[u8], kind: crate::intersect::SeamKind, partly: bool) {
+    use crate::codec::decode_body;
+    use crate::intersect::known_seam;
+    let input = decode_body(input).unwrap();
+    let work = decode_body(work).unwrap();
+    let edges: Vec<_> = input
+        .edges()
+        .filter(|&e| input.edge_fins(e).count() == 2)
+        .collect();
+    assert!(!edges.is_empty(), "the seam edges");
+    let face = |fin| input.loops[input.fins[fin].loop_].face;
+    let working = |f: FaceId| match work.by_name(input.faces[f].name) {
+        Some(EntityId::Face(w)) => w,
+        _ => panic!("no working face for {f:?}"),
+    };
+    let fins: Vec<_> = input.edge_fins(edges[0]).collect();
+    let (wa, wb) = (working(face(fins[0])), working(face(fins[1])));
+    let mut seams = Vec::new();
+    for &e in &edges {
+        assert!(super::held::held_tangent(&input, e));
+        assert_eq!(
+            matches!(crate::tweak::classify::tangent(&input, e), Ok(true)),
+            !partly
+        );
+        let fs: Vec<_> = input.edge_fins(e).collect();
+        // Each seam's pcurves in the pair's order.
+        let (x, y) = if working(face(fs[0])) == wa {
+            ((&work, wa), (&work, wb))
+        } else {
+            ((&work, wb), (&work, wa))
+        };
+        let mut s = super::body::seam_for(&input, e, x, y, kind).expect("pcurves");
+        if x.1 != wa {
+            s.pcurves.swap(0, 1);
+        }
+        seams.push(s);
+    }
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    assert!(known_seam((&work, wa), (&work, wb), &seams, &m).is_ok());
+}
+
+/// CTC 02 with PMI's one failing pair (#658, census II): its NURBS face,
+/// outside the region, against a working plane, tangent all along a
+/// closed ellipse. A frontier seam, met along the edge: the NURBS face
+/// keeps off the plane beside it.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ctc_02s_closed_frontier_ellipse_is_met_along_it() {
+    met_along_the_cut(
+        include_bytes!("../../../tests/data/nist_ctc_02_ellipse_input.body"),
+        include_bytes!("../../../tests/data/nist_ctc_02_ellipse_work.body"),
+        crate::intersect::SeamKind::Frontier,
+        false,
+    );
+}
+
+/// FTC 07's NURBS/plane pair (#652, census II pair 5): both working,
+/// tangent along an ellipse only in places (`PartlySmooth`), pcurves
+/// Nurbs2 and Ellipse2, a running seam (the deleted blend is round one of
+/// its ends). Held, and met along the edge: the NURBS face keeps off the
+/// plane (the plane's signs one way only over it in the census).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ftc_07s_partly_smooth_ellipse_is_met_along_it() {
+    met_along_the_cut(
+        include_bytes!("../../../tests/data/nist_ftc_07_partly_input.body"),
+        include_bytes!("../../../tests/data/nist_ftc_07_partly_work.body"),
+        crate::intersect::SeamKind::Running,
+        true,
+    );
+}
+
+/// The bent rod's rim deleted needs its stop (design 642): without stops
+/// the run, carried past the bend, meets the bend's torus uncertain;
+/// with them the rung is built again with the run stopped at their seam,
+/// met along it, and the rod ends square. The public delete goes the same
+/// way.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_bent_rods_rim_needs_its_stop() {
+    use super::{Stops, retrim_with};
+    let (rod, rim) = crate::testing::bent_rod();
+    let changes = Changes {
+        deleted: std::collections::BTreeSet::from([rim]),
+        ..Changes::default()
+    };
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let never = retrim_with(OpKey(0x19a4), &rod, &changes, Stops::Never, &m);
+    assert!(
+        matches!(
+            never,
+            Err(crate::Error::InvalidTweak(
+                crate::TweakError::Uncertain { .. }
+            ))
+        ),
+        "{never:?}"
+    );
+    let (o, _) = retrim_with(OpKey(0x19a4), &rod, &changes, Stops::AfterHeld, &m).unwrap();
+    assert_eq!(crate::check::check(&o), []);
+    assert_eq!(o.faces().count(), rod.faces().count() - 1);
+    let spec = crate::tweak::DeleteBlends {
+        max_size: Some(0.1),
+        faces: Vec::new(),
+        options: Default::default(),
+    };
+    let (d, _) = crate::tweak::delete_blends(OpKey(0x19a4), &rod, &spec).unwrap();
+    assert_eq!(d.dump_unnamed(), o.dump_unnamed());
+}
+
+/// Design 642's fallback: a stopped build whose walk fails, or that stops
+/// nothing, leaves the first build's answer; a stopped build's own
+/// refusal is the rung's; without stops, or where the first build didn't
+/// refuse at a held pair, nothing is built again.
+#[test]
+fn a_stopped_rung_answers_only_where_its_walk_closes() {
+    use super::{Rung, Stops, settle};
+    use crate::TweakError;
+    let held = || {
+        Rung::Held(
+            TweakError::Uncertain {
+                at: Name::from_u128(1),
+            }
+            .into(),
+        )
+    };
+    let walked = || {
+        Rung::Walked(
+            TweakError::GapNotHealed {
+                face: Name::from_u128(2),
+            }
+            .into(),
+        )
+    };
+    let uncertain = |r: Rung| matches!(r, Rung::Done(r) if matches!(*r, Err(crate::Error::InvalidTweak(TweakError::Uncertain { .. }))));
+    assert!(uncertain(settle(held(), Stops::AfterHeld, walked)));
+    assert!(uncertain(settle(held(), Stops::AfterHeld, || {
+        Rung::Unstopped
+    })));
+    assert!(matches!(
+        settle(held(), Stops::AfterHeld, || Rung::Next(
+            TweakError::HealAmbiguous {
+                face: Name::from_u128(3)
+            }
+            .into()
+        )),
+        Rung::Next(crate::Error::InvalidTweak(TweakError::HealAmbiguous { .. }))
+    ));
+    assert!(uncertain(settle(held(), Stops::Never, || panic!(
+        "built with stops"
+    ))));
+    assert!(matches!(
+        settle(walked(), Stops::AfterHeld, || panic!("built with stops")),
+        Rung::Walked(_)
+    ));
 }

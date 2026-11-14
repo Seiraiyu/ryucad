@@ -613,6 +613,9 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// AP242 twins (STC 07 #11020, STC 10 #3044, FTC 07 #13541) here too; their
 /// seams lie on the frontier or are only partly smooth, so the known seams
 /// don't settle them (#652, #658: ryukei 19 adds them when they build).
+/// CTC 02 with PMI (#295) isn't here either: plan 19.A's held seams meet
+/// its closed frontier ellipse, but a later re-trim of the same delete
+/// then fails to trace a cylinder/cylinder pair with no seam (#658).
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
@@ -749,7 +752,7 @@ fn pinned_bodies_defeature() {
                 .iter()
                 .any(|(f, r)| name.ends_with(f) && *r == rep);
             if blends == 0 {
-                assert!(!must, "{name} #{rep}: must defeature (plan 18.C)");
+                assert!(!must, "{name} #{rep}: must defeature (plans 18.C, 19.A)");
                 none += 1;
                 continue;
             }
@@ -780,7 +783,10 @@ fn pinned_bodies_defeature() {
                     defeatured += 1;
                 }
                 Err(Error::InvalidTweak(e)) => {
-                    assert!(!must, "{name} #{rep}: must defeature (plan 18.C): {e:?}");
+                    assert!(
+                        !must,
+                        "{name} #{rep}: must defeature (plans 18.C, 19.A): {e:?}"
+                    );
                     println!(
                         "{name} #{rep}: {blends} blends, refused {e:?} in {:.2} s",
                         t.elapsed().as_secs_f64()
@@ -790,7 +796,7 @@ fn pinned_bodies_defeature() {
                 Err(Error::Cancelled) => {
                     assert!(
                         !must,
-                        "{name} #{rep}: must defeature (plan 18.C), past the deadline"
+                        "{name} #{rep}: must defeature (plans 18.C, 19.A), past the deadline"
                     );
                     println!(
                         "{name} #{rep}: {blends} blends, past the deadline ({:.2} s)",

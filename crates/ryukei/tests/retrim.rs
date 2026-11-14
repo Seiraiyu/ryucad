@@ -494,3 +494,44 @@ fn an_offset_past_the_opposite_side_collapses() {
         );
     }
 }
+
+/// ryukei 19.A's twin: the testkit's rod, pinned (`ROD_DUMP_HASH`): six
+/// faces, a cylinder, a torus, a cylinder, two caps and the rim's torus.
+#[test]
+fn the_bent_rod_is_pinned() {
+    use ryukei_testkit::held_seams::{ROD_DUMP_HASH, bent_rod, fnv};
+    let rod = bent_rod();
+    assert_eq!(rod.counts().faces, 6);
+    assert_eq!(ryukei::check::check(&rod), []);
+    let h = fnv(rod.dump_unnamed().as_bytes());
+    assert_eq!(h, ROD_DUMP_HASH, "rod: {h:#018x}");
+}
+
+/// ryukei 19.A's twin (design 642): the bent rod's rim deleted through
+/// the public `delete_blends`. Its straight run is carried past the bend,
+/// where it crosses the bend's torus; stopped at their seam it is met
+/// along it, and the rod ends square: every check clean, one face fewer,
+/// the volume Pappus gives for a bar of radius 0.3 along 4 + π/2.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_bent_rods_rim_is_deleted() {
+    use core::f64::consts::{FRAC_PI_2, PI};
+    use ryukei::check::{check, check_intersections};
+    use ryukei::mesh::{MeshParams, tessellate};
+    use ryukei::name::OpKey;
+    use ryukei::tweak::delete_blends;
+    use ryukei_testkit::held_seams::{RADIUS, bent_rod, spec};
+    let rod = bent_rod();
+    let (o, _) = delete_blends(OpKey(0x19a3), &rod, &spec()).unwrap();
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    assert_eq!(o.counts().faces, rod.counts().faces - 1);
+    let m = tessellate(&o, &MeshParams::new(2e-4, 0.3)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    let (v, _) = ryukei_testkit::mesh::volume_and_area(&m);
+    let want = PI * RADIUS * RADIUS * (4.0 + FRAC_PI_2);
+    assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
+}
