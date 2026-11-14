@@ -11,6 +11,7 @@ use super::files::{Obj, invalid, number};
 use super::id::{Id, ProjectId};
 use super::import::{ProductRef, count, import_path};
 use super::sketch::clean;
+pub use ryu_doc::units::snap_origin;
 use crate::error::Result;
 use serde_json::{Value, json};
 
@@ -138,28 +139,6 @@ pub fn snap_axis(x: f64) -> f64 {
         }
     }
     clean(x)
-}
-
-/// An origin's component as a pose is written: the shortest decimal
-/// within a few units in its last place, so a sum of typed lengths
-/// (`45 mm + 5 mm` is `0.049999999999999996` m) or a length typed in
-/// millimetres reads as typed (issue #108); `-0` is `0`. Rust formats
-/// and parses floats exactly, so this is the same on every platform.
-pub fn snap_origin(x: f64) -> f64 {
-    let x = clean(x);
-    if x == 0.0 || !x.is_finite() {
-        return x;
-    }
-    let reach = SNAP * x.abs();
-    for digits in 0..17 {
-        let short: f64 = format!("{x:.digits$e}")
-            .parse()
-            .expect("a float's own text reads back");
-        if (short - x).abs() <= reach {
-            return short;
-        }
-    }
-    x
 }
 
 impl Pose {
