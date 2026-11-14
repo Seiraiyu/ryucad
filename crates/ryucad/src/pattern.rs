@@ -11,6 +11,8 @@
 //! an instance or changing a spacing, angle or count renames nothing that
 //! remains.
 
+pub mod fill;
+
 use crate::doc::files::Feature;
 use crate::doc::geometry::GeomRef;
 use crate::doc::id::Id;
@@ -226,12 +228,28 @@ pub fn motions(
                 .map(|x| (x, Motion::Mirror(plane)))
                 .collect())
         }
-        Kind::Fill { .. } => Err(Error::new(Code::Internal, "fills come with Task 13")),
+        Kind::Fill {
+            face,
+            direction,
+            spacing,
+            spacing2,
+            margin,
+        } => {
+            let s1 = spacing.meters();
+            let s2 = spacing2.as_ref().map_or(s1, crate::units::Quantity::meters);
+            let m = margin.as_ref().map_or(0.0, crate::units::Quantity::meters);
+            Ok(
+                fill::lattice(part, id, p, face, direction.as_ref(), (s1, s2), m, before)?
+                    .into_iter()
+                    .map(|(i, r)| (i, Motion::Rigid(r)))
+                    .collect(),
+            )
+        }
     }
 }
 
 /// Where a pattern's references resolve.
-fn at<'a>(part: &'a Part, id: &'a Id, before: &'a dyn Results) -> At<'a> {
+pub(crate) fn at<'a>(part: &'a Part, id: &'a Id, before: &'a dyn Results) -> At<'a> {
     At {
         part,
         order: part.order(),

@@ -777,6 +777,23 @@ pub fn mouths(
     }
 }
 
+/// The radius of the widest circle a hole's mouth cuts: its counterbore,
+/// countersink, counterdrill, spotface or near chamfer, else its drill.
+pub fn mouth_radius(s: &Sizes) -> f64 {
+    [
+        Some(s.drill.si),
+        s.counterbore.as_ref().map(|c| c.0.si),
+        s.countersink.as_ref().map(|c| c.0.si),
+        s.counterdrill.as_ref().map(|c| c.0.si),
+        s.spotface.as_ref().map(|c| c.0.si),
+        s.near.as_ref().map(|c| c.0.si),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(0.0, f64::max)
+        / 2.0
+}
+
 /// Whether a hole's tool depends on where each place's axis leaves its
 /// targets: a far side, or through_next.
 pub fn needs_exits(h: &Hole) -> bool {
