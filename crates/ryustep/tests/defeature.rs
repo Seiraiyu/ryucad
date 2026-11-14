@@ -53,7 +53,9 @@ const MAX_SIZE: f64 = 2e-3;
 
 /// Committed bodies whose small blends are still refused, each with its
 /// issue: NIST FTC 07 and FTC 10, kept faces tangent along a seam whose
-/// carried working faces meet uncertain (plan 16.C, question 517).
+/// carried working faces meet uncertain (plan 16.C, question 517). Plan
+/// 18.C's known seams don't reach them: their seams lie on the frontier
+/// or are only partly smooth (#652, ryukei 19).
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -556,8 +558,13 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 /// tangentially along it; the trace can't certify it within its cap
 /// (3 to 34 s a pair) and refuses `Uncertain`. FTC 07 in 85 s, FTC 10 in
 /// 65 s, one thread on cox-worker-2 (AMD Ryzen 7 9700X).
+///
+/// Plan 18.C's known seams settle none of them: every failing pair has a
+/// face outside the region across a frontier edge, or an edge tangent
+/// only partly (`PartlySmooth`) with NURBS pcurves, and a plane/plane pair
+/// beside the frontier refuses behind them (#652's census; ryukei 19).
 #[test]
-#[ignore = "#652: kept faces tangent along a seam, carried past it, meet uncertain"]
+#[ignore = "#652: frontier and partly smooth seams, carried past, meet uncertain (ryukei 19)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
