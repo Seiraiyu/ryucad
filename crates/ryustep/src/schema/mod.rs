@@ -256,6 +256,17 @@ pub enum Entity {
         relationship: Id,
         product_shape: Id,
     },
+    /// `PROPERTY_DEFINITION` (only as a simple instance; a
+    /// `PRODUCT_DEFINITION_SHAPE` is `DefinitionShape`): what it is a
+    /// property of, read only to tell a `SHAPE_ASPECT`'s shape (#809).
+    PropertyDefinition {
+        definition: Id,
+    },
+    /// `SHAPE_ASPECT` (only as a simple instance): a part of a product's
+    /// shape, `of_shape`, that properties are given to.
+    ShapeAspect {
+        of_shape: Id,
+    },
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
     Other(Box<str>),
@@ -311,6 +322,8 @@ impl Entity {
             Entity::ShapeDefinition { .. } => "SHAPE_DEFINITION_REPRESENTATION",
             Entity::Usage { .. } => "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
             Entity::ContextDependentShape { .. } => "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
+            Entity::PropertyDefinition { .. } => "PROPERTY_DEFINITION",
+            Entity::ShapeAspect { .. } => "SHAPE_ASPECT",
             Entity::Other(name) => name,
         }
     }

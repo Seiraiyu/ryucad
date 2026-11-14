@@ -34,6 +34,20 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Enti
                 definition: a.id()?,
             })
         })(),
+        "PROPERTY_DEFINITION" => (|| {
+            let mut a = Args::new(id, params, 3)?;
+            a.skip();
+            a.skip();
+            Ok(Entity::PropertyDefinition {
+                definition: a.id()?,
+            })
+        })(),
+        "SHAPE_ASPECT" => (|| {
+            let mut a = Args::new(id, params, 4)?;
+            a.skip();
+            a.skip();
+            Ok(Entity::ShapeAspect { of_shape: a.id()? })
+        })(),
         "SHAPE_DEFINITION_REPRESENTATION" => (|| {
             let mut a = Args::new(id, params, 2)?;
             Ok(Entity::ShapeDefinition {
