@@ -38,6 +38,7 @@ pub mod check;
 pub mod config;
 #[cfg(feature = "cad")]
 pub mod content;
+pub mod dependents;
 pub mod deps;
 pub mod git;
 pub mod history;
