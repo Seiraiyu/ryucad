@@ -94,6 +94,34 @@ pub const ROOT_FILES: [&str; 8] = [
     super::hole_standards::HOLE_STANDARDS,
 ];
 
+/// The folders below the project a revision holds whole.
+pub const FOLDERS: [&str; 5] = [
+    "parts",
+    RELEASES,
+    IMPORTS,
+    super::annotation::ANNOTATIONS,
+    super::drawing_template::TEMPLATES,
+];
+
+/// Whether `rel` (relative to a project) is one of the files its state
+/// depends on, as a session lists them: the files at its root, files two
+/// and three levels under `parts/`, files two levels under `releases/`,
+/// and files under `imports/`, `annotations/` and `templates/`.
+pub fn project_file(rel: &str) -> bool {
+    if ROOT_FILES.contains(&rel) {
+        return true;
+    }
+    let mut parts = rel.split('/');
+    match parts.next() {
+        Some("parts") => matches!(parts.count(), 2 | 3),
+        Some(RELEASES) => parts.count() == 2,
+        Some(IMPORTS) => parts.count() == 1,
+        Some(super::annotation::ANNOTATIONS) => parts.count() == 1,
+        Some(super::drawing_template::TEMPLATES) => parts.count() == 1,
+        _ => false,
+    }
+}
+
 /// The tag of the piece of a part's revision holding the project
 /// parameters it reads.
 pub const PROJECT_PARAMETERS_TAG: &str = "ryucad.project_parameters";
@@ -1195,6 +1223,29 @@ pub fn write_json(path: &Path, v: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_files_a_revision_holds() {
+        for yes in [
+            "ryucad.json",
+            "ryupdm.json",
+            "parts/p/part.json",
+            "parts/p/features/f.json",
+            "releases/p/A.json",
+            "imports/x.step",
+            "annotations/a.json",
+            "templates/t.json",
+        ] {
+            assert!(project_file(yes), "{yes}");
+        }
+        for no in ["README", "parts/p", "parts/p/a/b/c.json", "releases/p", "imports/a/b"] {
+            assert!(!project_file(no), "{no}");
+        }
+        assert_eq!(
+            FOLDERS,
+            ["parts", "releases", "imports", "annotations", "templates"]
+        );
+    }
+
     use super::*;
     use crate::doc::files::{Placement, Primitive, PrimitiveType};
     use crate::units::{Quantity, Unit};
