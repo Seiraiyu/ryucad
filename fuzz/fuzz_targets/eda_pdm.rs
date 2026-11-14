@@ -80,7 +80,7 @@ fuzz_target!(|data: &[u8]| {
         );
     }
     lock_and_pins(&files, &plain);
-    let Ok(parts) = <ryueda::Eda as Product>::parts(&files) else {
+    let Ok(parts) = ryupdm::product::part_ids::<ryueda::Eda>(&files) else {
         return;
     };
     for part in &parts {

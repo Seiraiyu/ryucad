@@ -362,7 +362,7 @@ fn prepare(
 /// The parts `--all` proposes: those in work or modified.
 fn proposable(session: &Session, releases: &Releases) -> Vec<Id> {
     let files = session.snapshot();
-    let parts = <crate::Eda as Product>::parts(&files).unwrap_or_default();
+    let parts = ryupdm::product::part_ids::<crate::Eda>(&files).unwrap_or_default();
     ryupdm::state::derive_all_for::<crate::Eda>(&files, releases)
         .into_iter()
         .filter(|(_, s)| matches!(s.status, Status::InWork | Status::Modified(_)))
@@ -569,7 +569,7 @@ pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let records = Records::read_in(&files, NAME)?;
     let mine = |p: &Id| part.as_ref().is_none_or(|x| x == p);
     if let Some(p) = &part
-        && !<crate::Eda as Product>::parts(&files)?.contains(p)
+        && !ryupdm::product::part_ids::<crate::Eda>(&files)?.contains(p)
         && records.of(p).next().is_none()
     {
         return Err(Error::new(Code::NotFound, format!("no part {p}")).with("part", p));
