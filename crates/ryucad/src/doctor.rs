@@ -2991,6 +2991,29 @@ pub(crate) mod tests {
         assert_eq!(report(dir.path()).unwrap()["healthy"], true);
     }
 
+    /// ryucad 28.B's Task 25: a cosmetic thread at its format is clean,
+    /// and one past the newest is `format_too_new`. ryucad has no
+    /// `format_too_low`: a file stamped below what it holds still reads
+    /// and the writer restamps it.
+    #[test]
+    fn a_cosmetic_thread_at_its_format_is_clean() {
+        let dir = healthy();
+        let r = dir.path();
+        let b = "parts/p/features/b.json";
+        let face = |k: u8| json!({"feature": "a", "name": format!("{k:032x}")});
+        let thread = |format: u64| {
+            canonical::to_string(&json!({"format": format, "kind": "ryucad.feature",
+                "type": "cosmetic_thread", "faces": [face(1)],
+                "thread": {"standard": "iso_metric", "size": "M10", "class": "6g"}}))
+        };
+        w(r, b, &thread(crate::doc::thread::FORMAT));
+        assert_eq!(codes(r), []);
+        w(r, b, &thread(crate::doc::thread::FORMAT - 1));
+        assert_eq!(codes(r), []);
+        w(r, b, &thread(crate::doc::files::FEATURE_FORMAT + 1));
+        assert_eq!(codes(r), [("format_too_new", vec![b.to_owned()])]);
+    }
+
     #[test]
     fn parameters_are_checked_and_read() {
         let dir = healthy();

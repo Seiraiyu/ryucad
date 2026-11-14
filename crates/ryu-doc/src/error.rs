@@ -907,6 +907,11 @@ pub enum Code {
     /// holds the angle in the section square to it instead). The face,
     /// both angles and the angle asked are in the details.
     DraftAngleVaries,
+    /// A warning: a cosmetic thread on a face whose diameter isn't the
+    /// thread's (an external thread's major diameter, an internal one's
+    /// minor or tap drill) within its class's limits widened by 0.1 mm;
+    /// the face, its diameter and the range are in the details.
+    ThreadSizeMismatch,
     /// A warning: a USD export wrote a sheet as its mesh alone, the
     /// BrepArray writer having refused it (`solid`, `face`, `reason`;
     /// until ryucad 24.E every sheet was written so).
@@ -1251,6 +1256,11 @@ mod tests {
     fn draft_angle_varies_code() {
         assert_eq!(json!(Code::DraftAngleVaries), json!("draft_angle_varies"));
         assert_eq!(Code::DraftAngleVaries.exit_code(), 1);
+        assert_eq!(
+            json!(Code::ThreadSizeMismatch),
+            json!("thread_size_mismatch")
+        );
+        assert_eq!(Code::ThreadSizeMismatch.exit_code(), 1);
     }
 
     #[test]

@@ -20,6 +20,13 @@ use serde_json::{Value, json};
 /// nothing else names it.
 pub const INTENT_FORMAT: u64 = 23;
 
+/// The feature format that holds a hole's new geometry (ryucad 28.B):
+/// counterdrills, spotfaces, near and far treatments, through_next, tip
+/// depths, ball bottoms and tapered walls. A hole holding none stays at
+/// its format. Taken in the order stages merge: 25.C took 24 first, so
+/// this is 25.
+pub const GEOMETRY_FORMAT: u64 = 25;
+
 /// A hole at each of a sketch's points.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hole {
@@ -40,6 +47,10 @@ pub struct Hole {
     pub fastener: Option<Fastener>,
     /// The bore's tolerance (`fit` or `tolerance` in the file).
     pub bore: Option<BoreTolerance>,
+    /// A chamfer at the top of the bore.
+    pub near: Option<Near>,
+    /// A through hole's back-side treatment.
+    pub far: Option<Far>,
 }
 
 /// A tapped hole's thread: what it is, never its sizes (`hole::derive`
@@ -64,6 +75,9 @@ pub struct Thread {
     /// tapped hole must give it.
     pub depth: Option<ThreadDepth>,
     pub drill: TapDrill,
+    /// A tapered thread's wall is tapered too (`"wall": "taper"`), not a
+    /// straight drill.
+    pub taper_wall: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -165,10 +179,14 @@ impl Thread {
             TapDrill::Engagement(e) => v["drill"] = json!({"engagement": e}),
             TapDrill::RollForm => v["drill"] = json!("roll_form"),
         }
+        if self.taper_wall {
+            v["wall"] = json!("taper");
+        }
         v
     }
 
-    fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Thread> {
+    /// A thread as a file holds it (a hole's, or a cosmetic thread's).
+    pub fn read(v: &Value, default: Unit, env: &Env) -> Result<Thread> {
         let at = "/thread";
         let mut o = Obj::new(v, at)?;
         let standard = name(&mut o, "standard", at)?;
@@ -245,6 +263,16 @@ impl Thread {
                 }
             },
         };
+        let taper_wall = match o.take_opt("wall") {
+            None => false,
+            Some(w) if w == "taper" => true,
+            Some(_) => {
+                return Err(invalid(
+                    "/thread/wall",
+                    "wall is \"taper\", written only for a tapered wall",
+                ));
+            }
+        };
         o.finish()?;
         Ok(Thread {
             standard,
@@ -256,6 +284,7 @@ impl Thread {
             starts,
             depth,
             drill,
+            taper_wall,
         })
     }
 }
@@ -360,6 +389,113 @@ impl BoreTolerance {
     }
 }
 
+/// A chamfer or countersink at the very top of the bore (a tap's lead-in):
+/// at the part's face for a simple hole, a counterbore or a counterdrill;
+/// at the floor for a spotface.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Near {
+    pub diameter: Quantity,
+    /// Included; 90 deg when left out.
+    pub angle: Option<Quantity>,
+}
+
+/// A back-side treatment where a through bore leaves its target.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Far {
+    Countersink { diameter: Quantity, angle: Quantity },
+    Counterbore { diameter: Quantity, depth: Quantity },
+}
+
+impl Near {
+    fn to_json(&self) -> Value {
+        let mut v = json!({"diameter": self.diameter.text()});
+        if let Some(a) = &self.angle {
+            v["angle"] = json!(a.text());
+        }
+        v
+    }
+
+    fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Near> {
+        let mut o = Obj::new(v, "/near")?;
+        let diameter = size(
+            &o.take("diameter")?,
+            Field::Length(default),
+            env,
+            "/near/diameter",
+            "a near chamfer's diameter",
+        )?;
+        let angle = o
+            .take_opt("angle")
+            .map(|a| angle(&a, env, "/near/angle", "a near chamfer"))
+            .transpose()?;
+        o.finish()?;
+        Ok(Near { diameter, angle })
+    }
+}
+
+impl Far {
+    fn to_json(&self) -> Value {
+        match self {
+            Far::Countersink { diameter, angle } => json!({"countersink":
+                {"diameter": diameter.text(), "angle": angle.text()}}),
+            Far::Counterbore { diameter, depth } => json!({"counterbore":
+                {"diameter": diameter.text(), "depth": depth.text()}}),
+        }
+    }
+
+    fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Far> {
+        let Some((k, x)) = v
+            .as_object()
+            .filter(|o| o.len() == 1)
+            .and_then(|o| o.iter().next())
+        else {
+            return Err(invalid(
+                "/far",
+                "far is {\"countersink\": {diameter, angle}} or {\"counterbore\": {diameter, depth}}",
+            ));
+        };
+        let at = format!("/far/{k}");
+        let mut o = Obj::new(x, &at)?;
+        let len = Field::Length(default);
+        let diameter = size(
+            &o.take("diameter")?,
+            len,
+            env,
+            &format!("{at}/diameter"),
+            "a far side's diameter",
+        )?;
+        let far = match k.as_str() {
+            "countersink" => Far::Countersink {
+                diameter,
+                angle: angle(
+                    &o.take("angle")?,
+                    env,
+                    &format!("{at}/angle"),
+                    "a far countersink",
+                )?,
+            },
+            "counterbore" => Far::Counterbore {
+                diameter,
+                depth: size(
+                    &o.take("depth")?,
+                    len,
+                    env,
+                    &format!("{at}/depth"),
+                    "a far counterbore's depth",
+                )?,
+            },
+            _ => {
+                return Err(invalid(
+                    "/far",
+                    "far is {\"countersink\": {diameter, angle}} or {\"counterbore\": {diameter, depth}}",
+                ));
+            }
+        };
+        o.finish()?;
+        Ok(far)
+    }
+}
+
 /// What the hole's mouth is.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HoleForm {
@@ -376,6 +512,21 @@ pub enum HoleForm {
         diameter: Option<Quantity>,
         angle: Option<Quantity>,
     },
+    /// A counterbore whose floor is a drill point of `angle` (118 deg when
+    /// left out). With a fastener, `diameter` and `depth` may be left out
+    /// (the fastener's counterbore).
+    Counterdrill {
+        diameter: Option<Quantity>,
+        depth: Option<Quantity>,
+        angle: Option<Quantity>,
+    },
+    /// A flat of `diameter` at `depth` below the mouth (0 when left out),
+    /// its wall reaching up past the targets' box. With a fastener,
+    /// `diameter` may be left out (the fastener's spotface).
+    Spotface {
+        diameter: Option<Quantity>,
+        depth: Option<Quantity>,
+    },
 }
 
 /// How deep the bore goes, from the sketch's plane.
@@ -385,6 +536,11 @@ pub enum Depth {
     Blind(Quantity),
     /// Past everything of its targets.
     ThroughAll,
+    /// Through the first wall its axis meets inside its targets, and no
+    /// further.
+    ThroughNext,
+    /// Blind, to the drill point's tip (needs a drill bottom).
+    Tip(Quantity),
     /// To a planar face parallel to the sketch, or a vertex, then
     /// `offset` further (a length, of either sign).
     UpTo {
@@ -397,18 +553,38 @@ pub enum Depth {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Bottom {
     Flat,
+    /// A half sphere of the bore's diameter (a ball end mill's).
+    Ball,
     /// A drill point of this included angle.
     Drill(Quantity),
 }
 
 impl HoleForm {
-    pub const NAMES: [&str; 3] = ["simple", "counterbore", "countersink"];
+    pub const NAMES: [&str; 5] = [
+        "simple",
+        "counterbore",
+        "countersink",
+        "counterdrill",
+        "spotface",
+    ];
 
     pub fn type_name(&self) -> &'static str {
         match self {
             HoleForm::Simple => "simple",
             HoleForm::Counterbore { .. } => "counterbore",
             HoleForm::Countersink { .. } => "countersink",
+            HoleForm::Counterdrill { .. } => "counterdrill",
+            HoleForm::Spotface { .. } => "spotface",
+        }
+    }
+
+    /// The fields its mouth object takes, for messages.
+    fn mouth_fields(name: &str) -> &'static str {
+        match name {
+            "counterbore" => "{diameter, depth}",
+            "countersink" => "{diameter, angle}",
+            "counterdrill" => "{diameter, depth, angle?}",
+            _ => "{diameter, depth?}",
         }
     }
 }
@@ -418,14 +594,28 @@ impl Depth {
         match self {
             Depth::Blind(_) => "blind",
             Depth::ThroughAll => "through_all",
+            Depth::ThroughNext => "through_next",
+            Depth::Tip(_) => "tip",
             Depth::UpTo { .. } => "up_to",
         }
+    }
+
+    /// Whether it ends in the material: blind, or to a tip.
+    pub fn is_blind(&self) -> bool {
+        matches!(self, Depth::Blind(_) | Depth::Tip(_))
+    }
+
+    /// Whether it goes through: all, or the next wall.
+    pub fn is_through(&self) -> bool {
+        matches!(self, Depth::ThroughAll | Depth::ThroughNext)
     }
 
     pub fn to_json(&self) -> Value {
         match self {
             Depth::Blind(q) => json!({"blind": q.text()}),
             Depth::ThroughAll => json!("through_all"),
+            Depth::ThroughNext => json!("through_next"),
+            Depth::Tip(q) => json!({"tip": q.text()}),
             Depth::UpTo { target, offset } => {
                 let mut v = json!({"target": target.to_json()});
                 if let Some(q) = offset {
@@ -440,10 +630,13 @@ impl Depth {
         if v == "through_all" {
             return Ok(Depth::ThroughAll);
         }
+        if v == "through_next" {
+            return Ok(Depth::ThroughNext);
+        }
         let bad = || {
             invalid_extent(
                 "/depth",
-                "a hole's depth is {\"blind\": length}, \"through_all\" or {\"up_to\": {target, offset}}"
+                "a hole's depth is {\"blind\": length}, {\"tip\": length}, \"through_all\", \"through_next\" or {\"up_to\": {target, offset}}"
                     .to_owned(),
             )
         };
@@ -458,6 +651,13 @@ impl Depth {
                 env,
                 "/depth/blind",
                 "a hole's depth",
+            )?)),
+            "tip" => Ok(Depth::Tip(size(
+                x,
+                Field::Length(default),
+                env,
+                "/depth/tip",
+                "a hole's depth to its tip",
             )?)),
             "up_to" => {
                 let mut o = Obj::new(x, "/depth/up_to")?;
@@ -481,6 +681,7 @@ impl Bottom {
     pub fn to_json(&self) -> Value {
         match self {
             Bottom::Flat => json!("flat"),
+            Bottom::Ball => json!("ball"),
             Bottom::Drill(q) => json!({"drill": q.text()}),
         }
     }
@@ -488,6 +689,9 @@ impl Bottom {
     fn from_json(v: &Value, env: &Env) -> Result<Bottom> {
         if v == "flat" {
             return Ok(Bottom::Flat);
+        }
+        if v == "ball" {
+            return Ok(Bottom::Ball);
         }
         match v
             .as_object()
@@ -502,7 +706,7 @@ impl Bottom {
             )?)),
             None => Err(invalid(
                 "/bottom",
-                "a hole's bottom is \"flat\" or {\"drill\": angle}",
+                "a hole's bottom is \"flat\", \"ball\" or {\"drill\": angle}",
             )),
         }
     }
@@ -541,10 +745,26 @@ fn pitch_of(standard: Standard, t: &Thread) -> Result<Option<Pitch>> {
     }
 }
 
+/// A tapped hole's thread resolved, as [`resolve_any`] does: an external
+/// thread's class (`6g`) is refused, since a tapped hole is internal.
+pub fn resolve(t: &Thread) -> Result<Option<builtin::Thread>> {
+    match resolve_any(t)? {
+        Some(b) if !b.internal => Err(refuse(
+            "/thread/class",
+            "external_class",
+            format!(
+                "{} is an external thread's class; a tapped hole is internal: give an internal class (6H, 2B) or none",
+                t.class.as_deref().unwrap_or("")
+            ),
+        )),
+        b => Ok(b),
+    }
+}
+
 /// The built-in thread a hole's thread names, or `None` for a project
 /// standard; a size, pitch or class the built-in doesn't have is refused
 /// with what it does have.
-pub fn resolve(t: &Thread) -> Result<Option<builtin::Thread>> {
+pub fn resolve_any(t: &Thread) -> Result<Option<builtin::Thread>> {
     let Some(standard) = Standard::parse(&t.standard) else {
         return Ok(None);
     };
@@ -627,6 +847,16 @@ fn angle(v: &Value, env: &Env, at: &str, what: &str) -> Result<Quantity> {
     Ok(q)
 }
 
+/// A length of zero or more, at `at`.
+fn nonneg(v: &Value, default: Unit, env: &Env, at: &str, what: &str) -> Result<Quantity> {
+    let q = Quantity::from_json_as(v, Field::Length(default), &|n| env.get(n))
+        .map_err(|e| e.with("pointer", at))?;
+    if q.meters() < 0.0 {
+        return Err(bad_size(at, &format!("{what} is zero or more"), &q));
+    }
+    Ok(q)
+}
+
 fn bad_size(at: &str, msg: &str, q: &Quantity) -> Error {
     Error::new(Code::InvalidParam, format!("{msg}, not {q}"))
         .with("pointer", at)
@@ -655,6 +885,17 @@ impl Hole {
             HoleForm::Countersink { diameter, angle } => {
                 v["countersink"] = mouth(&[("diameter", diameter), ("angle", angle)]);
             }
+            HoleForm::Counterdrill {
+                diameter,
+                depth,
+                angle,
+            } => {
+                v["counterdrill"] =
+                    mouth(&[("diameter", diameter), ("depth", depth), ("angle", angle)]);
+            }
+            HoleForm::Spotface { diameter, depth } => {
+                v["spotface"] = mouth(&[("diameter", diameter), ("depth", depth)]);
+            }
         }
         if self.bottom != Bottom::Flat {
             v["bottom"] = self.bottom.to_json();
@@ -668,6 +909,12 @@ impl Hole {
         if let Some(b) = &self.bore {
             b.write(&mut v);
         }
+        if let Some(n) = &self.near {
+            v["near"] = n.to_json();
+        }
+        if let Some(f) = &self.far {
+            v["far"] = f.to_json();
+        }
         v
     }
 
@@ -675,6 +922,32 @@ impl Hole {
     /// `INTENT_FORMAT`, its sizes derived.
     pub fn has_intent(&self) -> bool {
         self.thread.is_some() || self.fastener.is_some() || self.bore.is_some()
+    }
+
+    /// Whether it holds anything new with ryucad 28.B: written at
+    /// `GEOMETRY_FORMAT`.
+    pub fn has_geometry(&self) -> bool {
+        matches!(
+            self.form,
+            HoleForm::Counterdrill { .. } | HoleForm::Spotface { .. }
+        ) || self.near.is_some()
+            || self.far.is_some()
+            || matches!(self.depth, Depth::ThroughNext | Depth::Tip(_))
+            || self.bottom == Bottom::Ball
+            || self.thread.as_ref().is_some_and(|t| t.taper_wall)
+    }
+
+    /// Whether its JSON holds anything [`Hole::has_geometry`] counts.
+    pub fn json_has_geometry(v: &Value) -> bool {
+        matches!(
+            v.get("form").and_then(Value::as_str),
+            Some("counterdrill" | "spotface")
+        ) || v.get("near").is_some()
+            || v.get("far").is_some()
+            || v.get("depth")
+                .is_some_and(|d| d == "through_next" || d.get("tip").is_some())
+            || v.get("bottom").is_some_and(|b| b == "ball")
+            || v.pointer("/thread/wall").is_some()
     }
 
     #[doc(hidden)]
@@ -688,7 +961,7 @@ impl Hole {
         let points = points_from_json(o.take_opt("points"))?;
         let thread = o
             .take_opt("thread")
-            .map(|t| Thread::from_json(&t, default, env))
+            .map(|t| Thread::read(&t, default, env))
             .transpose()?;
         let fastener = o
             .take_opt("fastener")
@@ -696,6 +969,14 @@ impl Hole {
             .transpose()?;
         let bore =
             BoreTolerance::from_json(o.take_opt("fit"), o.take_opt("tolerance"), default, env)?;
+        let near = o
+            .take_opt("near")
+            .map(|n| Near::from_json(&n, default, env))
+            .transpose()?;
+        let far = o
+            .take_opt("far")
+            .map(|f| Far::from_json(&f, default, env))
+            .transpose()?;
         let derived = thread.is_some() || fastener.is_some();
         let diameter = match o.take_opt("diameter") {
             Some(d) => Some(size(&d, length, env, "/diameter", "a hole's diameter")?),
@@ -722,10 +1003,44 @@ impl Hole {
             }
         };
         let form = o.take("form")?;
-        let (cbore, csink) = (o.take_opt("counterbore"), o.take_opt("countersink"));
-        let form = match (form.as_str(), cbore, csink) {
-            (Some("simple"), None, None) => HoleForm::Simple,
-            (Some("counterbore"), Some(c), None) => {
+        let mut mouths: Vec<(&str, Option<Value>)> = HoleForm::NAMES[1..]
+            .iter()
+            .map(|k| (*k, o.take_opt(k)))
+            .collect();
+        let Some(name) = form.as_str().filter(|f| HoleForm::NAMES.contains(f)) else {
+            return Err(invalid(
+                "/form",
+                "a hole's form is simple, counterbore, countersink, counterdrill or spotface",
+            ));
+        };
+        let others: Vec<&str> = mouths
+            .iter()
+            .filter(|(k, v)| v.is_some() && *k != name)
+            .map(|(k, _)| *k)
+            .collect();
+        if name == "simple" && !others.is_empty() {
+            return Err(invalid(
+                "/form",
+                &format!("a simple hole has no {}", others.join(" or ")),
+            ));
+        }
+        let own = mouths
+            .iter_mut()
+            .find(|(k, _)| *k == name)
+            .and_then(|(_, v)| v.take());
+        if name != "simple" && (own.is_none() || !others.is_empty()) {
+            let at = format!("/{name}");
+            return Err(invalid(
+                &at,
+                &format!(
+                    "a {name} hole has a {name} {}, and no other mouth",
+                    HoleForm::mouth_fields(name)
+                ),
+            ));
+        }
+        let form = match (name, own) {
+            ("simple", _) => HoleForm::Simple,
+            ("counterbore", Some(c)) => {
                 let mut c = Obj::new(&c, "/counterbore")?;
                 let d = mouth_size(&mut c, "diameter", "/counterbore", "a counterbore", false)?;
                 let depth = mouth_size(&mut c, "depth", "/counterbore", "a counterbore", false)?;
@@ -735,7 +1050,7 @@ impl Hole {
                 }
                 HoleForm::Counterbore { diameter: d, depth }
             }
-            (Some("countersink"), None, Some(c)) => {
+            ("countersink", Some(c)) => {
                 let mut c = Obj::new(&c, "/countersink")?;
                 let d = mouth_size(&mut c, "diameter", "/countersink", "a countersink", false)?;
                 let a = mouth_size(&mut c, "angle", "/countersink", "a countersink", true)?;
@@ -748,44 +1063,75 @@ impl Hole {
                     angle: a,
                 }
             }
-            (Some(f @ ("simple" | "counterbore" | "countersink")), _, _) => {
-                let (at, msg) = match f {
-                    "counterbore" => (
-                        "/counterbore",
-                        "a counterbore hole has a counterbore {diameter, depth}, and no countersink",
-                    ),
-                    "countersink" => (
-                        "/countersink",
-                        "a countersink hole has a countersink {diameter, angle}, and no counterbore",
-                    ),
-                    _ => ("/form", "a simple hole has no counterbore or countersink"),
-                };
-                return Err(invalid(at, msg));
+            ("counterdrill", Some(c)) => {
+                let mut c = Obj::new(&c, "/counterdrill")?;
+                let d = mouth_size(&mut c, "diameter", "/counterdrill", "a counterdrill", false)?;
+                let depth = mouth_size(&mut c, "depth", "/counterdrill", "a counterdrill", false)?;
+                // The angle is never derived: 118 deg when left out.
+                let angle = c
+                    .take_opt("angle")
+                    .map(|x| angle(&x, env, "/counterdrill/angle", "a counterdrill"))
+                    .transpose()?;
+                c.finish()?;
+                if let (Some(d), Some(b)) = (&d, &diameter) {
+                    wider(d, b, "/counterdrill/diameter", "a counterdrill")?;
+                }
+                HoleForm::Counterdrill {
+                    diameter: d,
+                    depth,
+                    angle,
+                }
             }
-            _ => {
-                return Err(invalid(
-                    "/form",
-                    "a hole's form is simple, counterbore or countersink",
-                ));
+            ("spotface", Some(c)) => {
+                let mut c = Obj::new(&c, "/spotface")?;
+                let d = mouth_size(&mut c, "diameter", "/spotface", "a spotface", false)?;
+                let depth = c
+                    .take_opt("depth")
+                    .map(|x| nonneg(&x, default, env, "/spotface/depth", "a spotface's depth"))
+                    .transpose()?;
+                c.finish()?;
+                if let (Some(d), Some(b)) = (&d, &diameter) {
+                    wider(d, b, "/spotface/diameter", "a spotface")?;
+                }
+                HoleForm::Spotface { diameter: d, depth }
             }
+            _ => unreachable!("the form's own mouth was checked"),
         };
         let depth = Depth::from_json(&o.take("depth")?, default, env)?;
         let bottom = match o.take_opt("bottom") {
             None => Bottom::Flat,
             Some(b) => Bottom::from_json(&b, env)?,
         };
-        if matches!(bottom, Bottom::Drill(_)) && !matches!(depth, Depth::Blind(_)) {
-            return Err(invalid_extent(
-                "/bottom",
-                format!(
-                    "a drill point ends a blind hole; a {} hole has no bottom of its own",
-                    depth.type_name()
-                ),
-            ));
+        match (&bottom, &depth) {
+            (Bottom::Drill(_), Depth::Blind(_) | Depth::Tip(_)) => {}
+            (Bottom::Drill(_), d) => {
+                return Err(invalid_extent(
+                    "/bottom",
+                    format!(
+                        "a drill point ends a blind hole; a {} hole has no bottom of its own",
+                        d.type_name()
+                    ),
+                ));
+            }
+            (Bottom::Ball, Depth::Blind(_)) => {}
+            (Bottom::Ball, d) => {
+                return Err(invalid_extent(
+                    "/bottom",
+                    format!("a ball ends a blind hole, not a {} one", d.type_name()),
+                ));
+            }
+            (Bottom::Flat, Depth::Tip(_)) => {
+                return Err(invalid_extent(
+                    "/bottom",
+                    "a depth to the tip is to a drill point's: give bottom {\"drill\": angle}"
+                        .into(),
+                ));
+            }
+            _ => {}
         }
         // Full depth on a through hole is the default: never written.
         let thread = thread.map(|mut t| {
-            if !matches!(depth, Depth::Blind(_)) && t.depth == Some(ThreadDepth::Full) {
+            if !depth.is_blind() && t.depth == Some(ThreadDepth::Full) {
                 t.depth = None;
             }
             t
@@ -802,7 +1148,27 @@ impl Hole {
             thread,
             fastener,
             bore,
+            near,
+            far,
         };
+        if hole.near.is_some() && matches!(hole.form, HoleForm::Countersink { .. }) {
+            return Err(refuse(
+                "/near",
+                "near_on_countersink",
+                "a countersink is its own near chamfer: take near out, or make the hole simple"
+                    .into(),
+            ));
+        }
+        if hole.far.is_some() && !hole.depth.is_through() {
+            return Err(refuse(
+                "/far",
+                "far_needs_through",
+                format!(
+                    "a far side is where the bore leaves its target: give a through depth, not {}",
+                    hole.depth.type_name()
+                ),
+            ));
+        }
         if let (Depth::Blind(d), Some((mouth, at))) = (&hole.depth, hole.mouth_depth())
             && mouth >= d.meters()
         {
@@ -844,7 +1210,26 @@ impl Hole {
         }
         if let Some(t) = &hole.thread {
             let built = resolve(t)?;
-            if let Depth::Blind(drill) = &hole.depth {
+            if t.taper_wall {
+                if built.as_ref().and_then(|b| b.taper).is_none() {
+                    return Err(refuse(
+                        "/thread/wall",
+                        "wall_not_tapered",
+                        format!(
+                            "{} {} isn't a tapered thread: take wall out",
+                            t.standard, t.size
+                        ),
+                    ));
+                }
+                if !matches!(t.depth, Some(ThreadDepth::Length(_))) {
+                    return Err(refuse(
+                        "/thread/depth",
+                        "thread_depth_needed",
+                        "a tapered wall runs a given length: give the thread's depth".into(),
+                    ));
+                }
+            }
+            if let Depth::Blind(drill) | Depth::Tip(drill) = &hole.depth {
                 match &t.depth {
                     None => {
                         let mut e = refuse(
@@ -895,6 +1280,22 @@ impl Hole {
                 let half = angle.as_ref()?.radians() / 2.0;
                 Some((run / ryukei::math::tan(half), "/countersink"))
             }
+            HoleForm::Counterdrill {
+                diameter,
+                depth,
+                angle,
+            } => {
+                let half = angle.as_ref().map_or(118f64.to_radians(), |a| a.radians()) / 2.0;
+                let run = (diameter.as_ref()?.meters() - self.diameter.as_ref()?.meters()) / 2.0;
+                Some((
+                    depth.as_ref()?.meters() + run / ryukei::math::tan(half),
+                    "/counterdrill/depth",
+                ))
+            }
+            HoleForm::Spotface { depth, .. } => Some((
+                depth.as_ref().map_or(0.0, Quantity::meters),
+                "/spotface/depth",
+            )),
         }
     }
 
@@ -967,17 +1368,35 @@ fn points_from_json(v: Option<Value>) -> Result<Vec<Id>> {
 pub fn expression_strings<'a>(k: &str, field: &'a mut Value) -> Vec<&'a mut String> {
     let mut out = Vec::new();
     match (k, field) {
-        ("counterbore" | "countersink", Value::Object(o)) => {
+        ("counterbore" | "countersink" | "counterdrill" | "spotface", Value::Object(o)) => {
             for x in o.values_mut() {
                 if let Value::String(s) = x {
                     out.push(s);
                 }
             }
         }
+        ("near", Value::Object(o)) => {
+            for x in o.values_mut() {
+                if let Value::String(s) = x {
+                    out.push(s);
+                }
+            }
+        }
+        ("far", Value::Object(o)) => {
+            for inner in o.values_mut() {
+                if let Value::Object(i) = inner {
+                    for x in i.values_mut() {
+                        if let Value::String(s) = x {
+                            out.push(s);
+                        }
+                    }
+                }
+            }
+        }
         ("depth", Value::Object(o)) => {
             for (k, x) in o.iter_mut() {
                 match (k.as_str(), x) {
-                    ("blind", Value::String(s)) => out.push(s),
+                    ("blind" | "tip", Value::String(s)) => out.push(s),
                     ("up_to", Value::Object(u)) => {
                         if let Some(Value::String(s)) = u.get_mut("offset") {
                             out.push(s);
@@ -1359,7 +1778,7 @@ mod tests {
         assert_eq!(e.details["listed"], json!(["1.0", "0.75"]));
         let e = err(with(
             "thread",
-            json!({"standard": "iso_metric", "size": "M6", "class": "6g"}),
+            json!({"standard": "iso_metric", "size": "M6", "class": "6e"}),
         ));
         assert_eq!(e.details["reason"], "unknown_thread_class");
         let e = err(with(
@@ -1394,5 +1813,224 @@ mod tests {
         // A project standard reads: its sizes are checked when written.
         let v = with("thread", json!({"standard": "house_acme", "size": "T10"}));
         assert!(read(&v).is_ok());
+    }
+
+    #[test]
+    fn counterdrills_and_spotfaces_round_trip() {
+        for (form, mouth) in [
+            (
+                "counterdrill",
+                json!({"diameter": "10 mm", "depth": "5 mm"}),
+            ),
+            (
+                "counterdrill",
+                json!({"diameter": "10 mm", "depth": "5 mm", "angle": "100 deg"}),
+            ),
+            ("spotface", json!({"diameter": "12 mm"})),
+            ("spotface", json!({"diameter": "12 mm", "depth": "0.5 mm"})),
+        ] {
+            let mut v = hole();
+            v["format"] = json!(25);
+            v.as_object_mut().unwrap().remove("counterbore");
+            v["form"] = json!(form);
+            v[form] = mouth.clone();
+            let f = read(&v).unwrap_or_else(|e| panic!("{form} {mouth}: {e}"));
+            let Feature::Hole(h) = &f else { panic!() };
+            assert_eq!(h.form.type_name(), form);
+            assert_eq!(f.to_json(), v, "{form} keeps its bytes");
+        }
+        // A spotface's depth may be zero (flush), never less.
+        let mut v = hole();
+        v["format"] = json!(25);
+        v.as_object_mut().unwrap().remove("counterbore");
+        v["form"] = json!("spotface");
+        v["spotface"] = json!({"diameter": "12 mm", "depth": "0 mm"});
+        read(&v).unwrap();
+        v["spotface"]["depth"] = json!("-1 mm");
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/spotface/depth");
+        // Without a fastener, a counterdrill gives its diameter and depth,
+        // a spotface its diameter; each is wider than the bore.
+        for (form, mouth, pointer) in [
+            (
+                "counterdrill",
+                json!({"depth": "5 mm"}),
+                "/counterdrill/diameter",
+            ),
+            (
+                "counterdrill",
+                json!({"diameter": "10 mm"}),
+                "/counterdrill/depth",
+            ),
+            ("spotface", json!({}), "/spotface/diameter"),
+            (
+                "spotface",
+                json!({"diameter": "2 mm"}),
+                "/spotface/diameter",
+            ),
+        ] {
+            let mut v = hole();
+            v["format"] = json!(25);
+            v.as_object_mut().unwrap().remove("counterbore");
+            v["form"] = json!(form);
+            v[form] = mouth;
+            assert_eq!(read(&v).unwrap_err().details["pointer"], pointer, "{form}");
+        }
+        // Only the form's own mouth.
+        let mut v = hole();
+        v["form"] = json!("simple");
+        v["spotface"] = json!({"diameter": "12 mm"});
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/form");
+    }
+
+    #[test]
+    fn near_and_far_round_trip_and_refuse() {
+        let mut v = hole();
+        v["format"] = json!(25);
+        // Through: no bottom of its own.
+        v.as_object_mut().unwrap().remove("bottom");
+        v["depth"] = json!("through_all");
+        v["near"] = json!({"diameter": "7 mm"});
+        v["far"] = json!({"countersink": {"diameter": "8 mm", "angle": "90 deg"}});
+        let f = read(&v).unwrap();
+        assert_eq!(f.to_json(), v);
+        v["near"] = json!({"diameter": "7 mm", "angle": "120 deg"});
+        v["far"] = json!({"counterbore": {"diameter": "8 mm", "depth": "2 mm"}});
+        assert_eq!(read(&v).unwrap().to_json(), v);
+        // A far side is where the bore leaves its target: through only.
+        v["depth"] = json!({"blind": "3 mm"});
+        let e = read(&v).unwrap_err();
+        assert_eq!(
+            (e.details["pointer"].as_str(), e.details["reason"].as_str()),
+            (Some("/far"), Some("far_needs_through"))
+        );
+        // No near chamfer on a countersink: it is one.
+        let mut v = hole();
+        v["format"] = json!(25);
+        v.as_object_mut().unwrap().remove("counterbore");
+        v["form"] = json!("countersink");
+        v["countersink"] = json!({"diameter": "8 mm", "angle": "90 deg"});
+        v["near"] = json!({"diameter": "9 mm"});
+        let e = read(&v).unwrap_err();
+        assert_eq!(e.details["reason"], "near_on_countersink");
+        // One far treatment, whole.
+        let mut v = hole();
+        v["depth"] = json!("through_all");
+        v["far"] = json!({"countersink": {"diameter": "8 mm"}});
+        assert_eq!(
+            read(&v).unwrap_err().details["pointer"],
+            "/far/countersink/angle"
+        );
+        v["far"] = json!({"countersink": {"diameter": "8 mm", "angle": "90 deg"},
+                          "counterbore": {"diameter": "8 mm", "depth": "1 mm"}});
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/far");
+    }
+
+    #[test]
+    fn new_depths_bottoms_and_tapered_walls() {
+        let at24 = |f: &dyn Fn(&mut Value)| {
+            let mut v = hole();
+            v["format"] = json!(25);
+            // Each case gives its own bottom.
+            v.as_object_mut().unwrap().remove("bottom");
+            f(&mut v);
+            v
+        };
+        // Round trips.
+        for v in [
+            at24(&|v| v["depth"] = json!("through_next")),
+            at24(&|v| {
+                v["depth"] = json!({"tip": "12 mm"});
+                v["bottom"] = json!({"drill": "118 deg"});
+            }),
+            at24(&|v| {
+                v["depth"] = json!({"blind": "10 mm"});
+                v["bottom"] = json!("ball");
+            }),
+            at24(&|v| {
+                v.as_object_mut().unwrap().remove("diameter");
+                v["format"] = json!(25);
+                v["thread"] =
+                    json!({"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"});
+                v["depth"] = json!({"blind": "12 mm"});
+            }),
+        ] {
+            assert_eq!(read(&v).unwrap_or_else(|e| panic!("{v}: {e}")).to_json(), v);
+        }
+        // Refusals.
+        for (v, pointer, reason) in [
+            // A tip depth is to a drill point.
+            (
+                at24(&|v| v["depth"] = json!({"tip": "12 mm"})),
+                "/bottom",
+                None,
+            ),
+            // A ball ends a blind hole.
+            (
+                at24(&|v| {
+                    v["depth"] = json!("through_all");
+                    v["bottom"] = json!("ball");
+                }),
+                "/bottom",
+                None,
+            ),
+            // A tapered wall is a tapered thread's...
+            (
+                at24(&|v| {
+                    v.as_object_mut().unwrap().remove("diameter");
+                    v["thread"] = json!({"standard": "iso_metric", "size": "M6", "wall": "taper"});
+                    v["depth"] = json!("through_all");
+                }),
+                "/thread/wall",
+                Some("wall_not_tapered"),
+            ),
+            // ...and runs a given length.
+            (
+                at24(&|v| {
+                    v.as_object_mut().unwrap().remove("diameter");
+                    v["thread"] = json!({"standard": "npt", "size": "1/8", "wall": "taper"});
+                    v["depth"] = json!("through_all");
+                }),
+                "/thread/depth",
+                Some("thread_depth_needed"),
+            ),
+        ] {
+            let e = read(&v).unwrap_err();
+            assert_eq!(e.details["pointer"], pointer, "{v}: {e}");
+            if let Some(r) = reason {
+                assert_eq!(e.details["reason"], r, "{v}: {e}");
+            }
+        }
+        // A blind tapped hole to a tip still gives its thread's depth.
+        let v = at24(&|v| {
+            v.as_object_mut().unwrap().remove("diameter");
+            v["thread"] = json!({"standard": "iso_metric", "size": "M6"});
+            v["depth"] = json!({"tip": "15 mm"});
+            v["bottom"] = json!({"drill": "118 deg"});
+        });
+        assert_eq!(
+            read(&v).unwrap_err().details["reason"],
+            "thread_depth_needed"
+        );
+        // A far side on through_next is taken.
+        let v = at24(&|v| {
+            v["depth"] = json!("through_next");
+            v["far"] = json!({"counterbore": {"diameter": "8 mm", "depth": "1 mm"}});
+        });
+        read(&v).unwrap();
+    }
+
+    #[test]
+    fn a_tapped_hole_is_internal() {
+        let mut v = hole();
+        v["format"] = json!(23);
+        v.as_object_mut().unwrap().remove("diameter");
+        v["thread"] = json!({"standard": "iso_metric", "size": "M6", "class": "6g"});
+        v["depth"] = json!("through_all");
+        v.as_object_mut().unwrap().remove("bottom");
+        let e = read(&v).unwrap_err();
+        assert_eq!(
+            (e.details["pointer"].as_str(), e.details["reason"].as_str()),
+            (Some("/thread/class"), Some("external_class"))
+        );
     }
 }

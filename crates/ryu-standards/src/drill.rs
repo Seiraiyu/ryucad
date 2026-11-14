@@ -121,6 +121,14 @@ pub fn by_name(name: &str) -> Option<&'static Drill> {
     all().iter().find(|d| d.name == name)
 }
 
+/// The standard drill of that system nearest `nm`, a tie going to the
+/// larger (a tap cuts a thread more easily in it).
+pub fn nearest(nm: Nm, inch: bool) -> &'static Drill {
+    of(inch)
+        .min_by_key(|d| ((d.nm - nm).abs(), core::cmp::Reverse(d.nm)))
+        .expect("every system has drills")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +164,17 @@ mod tests {
             .filter(|d| d.series != Series::Metric)
             .collect();
         assert!(inch.windows(2).all(|w| w[0].nm <= w[1].nm));
+    }
+
+    #[test]
+    fn the_nearest_drill() {
+        // 5.04 mm: 5.0 is nearer than 5.1.
+        assert_eq!(nearest(5_040_000, false).name, "5");
+        // Halfway between 5.0 and 5.1 (the series steps 0.1 mm from 3 to
+        // 20 mm): the larger, which a tap prefers.
+        assert_eq!(nearest(5_050_000, false).name, "5.1");
+        assert_eq!(nearest(5_075_000, false).name, "5.1");
+        // Inch: 0.2015 in is nearer #7 (0.2010) than 13/64 (0.2031).
+        assert_eq!(nearest(5_118_100, true).name, "#7");
     }
 }

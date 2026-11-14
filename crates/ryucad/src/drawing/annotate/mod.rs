@@ -1827,17 +1827,17 @@ fn hole_callout(
     first.push(Run::Text(len(sizes.drill.si)));
     let depth = match &h.depth {
         Depth::ThroughAll => Some("THRU".to_owned()),
-        Depth::Blind(d) => Some(len(d.meters())),
-        Depth::UpTo { .. } => None,
+        Depth::Blind(d) | Depth::Tip(d) => Some(len(d.meters())),
+        Depth::UpTo { .. } | Depth::ThroughNext => None,
     };
     match &h.depth {
         Depth::ThroughAll => first.push(Run::Text(" THRU".into())),
-        Depth::Blind(_) => {
+        Depth::Blind(_) | Depth::Tip(_) => {
             first.push(Run::Text(" ".into()));
             first.push(Run::Symbol(Symbol::Depth));
             first.push(Run::Text(depth.clone().unwrap_or_default()));
         }
-        Depth::UpTo { .. } => {}
+        Depth::UpTo { .. } | Depth::ThroughNext => {}
     }
     let mut lines = vec![first];
     match (&h.form, &sizes.counterbore, &sizes.countersink) {

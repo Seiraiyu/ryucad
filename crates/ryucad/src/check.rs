@@ -6,16 +6,17 @@
 //! meshes without faults, that the session's cached results are what a
 //! rebuild from nothing gives, that every saved motion of an assembly
 //! sweeps (solve-only; with interference under `--interference`), and
-//! ryupdm's release checks. Interference
-//! runs only when asked (`interference`, design 525): without it, each
-//! assembly checked gets an `interference_not_checked` note. CI and hosted
+//! ryupdm's release checks, and, under `--holes`, the hole checks
+//! (`hole::check`). Interference and the hole checks run only when asked
+//! (`interference`, design 525; `holes`, design 533): without the first,
+//! each assembly checked gets an `interference_not_checked` note. CI and hosted
 //! review run it.
 //!
 //! The report is versioned (`schema`, [`ryupdm::check::SCHEMA`]): each
 //! finding is `{code, severity, source, part?, feature?, label?, message,
 //! details?}` plus what its code adds (`severity` is `error`, `warning` or
 //! `info`, a note: `interference_not_checked`), `source` being `doctor`, `release`,
-//! `bom`, `deps`, `drawing` or absent for ryucad's own. Adding a field or a code is not a new
+//! `bom`, `deps`, `drawing`, `holes` or absent for ryucad's own. Adding a field or a code is not a new
 //! schema; changing or removing one is. A hosted job can run `ryucad check
 //! --against <base>` and gate on the exit code and the findings.
 
@@ -29,7 +30,7 @@ use ryu_session::job::Phase;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 22] = [
+pub const CODES: [(&str, &str); 29] = [
     ("feature_failed", "error"),
     ("assembly_unsolved", "error"),
     ("mate_out_of_limits", "error"),
@@ -52,6 +53,14 @@ pub const CODES: [(&str, &str); 22] = [
     ("motion_past_limit", "warning"),
     ("motion_blocked", "warning"),
     ("motion_interferes", "warning"),
+    // The hole checks' (`hole::check::CODES`), under `--holes` only.
+    ("hole_breakout", "error"),
+    ("hole_breaks_through", "error"),
+    ("hole_thread_past_material", "error"),
+    ("hole_edge_distance", "warning"),
+    ("hole_thread_engagement", "warning"),
+    ("hole_cannot_check", "warning"),
+    ("hole_tap_drill_nonstandard", "info"),
 ];
 
 fn severity(code: &str) -> &'static str {
@@ -258,6 +267,7 @@ pub fn run(
     against: Option<&str>,
     results: bool,
     interference: bool,
+    holes: Option<crate::hole::check::Options>,
 ) -> Result<Value> {
     // A revision that isn't there fails before anything is built.
     let changes = match against {
@@ -403,6 +413,16 @@ pub fn run(
         }
         findings.extend(unsolved(id, &fresh));
         findings.extend(limit_findings(id, &p));
+        // The hole checks, only when asked (`--holes`), as interference.
+        if let Some(opts) = holes {
+            let (found, _) = crate::hole::check::check(session, id, None, opts, None)?;
+            for f in found {
+                let mut v = f.to_json();
+                v["part"] = json!(id);
+                v["source"] = json!("holes");
+                findings.push(v);
+            }
+        }
         // A part's check takes in what fails in every assembly it places,
         // at any depth (issue #158): its occurrences aren't where those
         // assemblies' mates say. The whole project's has them already.
@@ -904,7 +924,7 @@ mod tests {
         s.refresh().unwrap();
         // Unasked, check runs no interference (design 525), and says so
         // once for the assembly, as a note that counts as no warning.
-        let v = run(&mut s, None, None, false, false).unwrap();
+        let v = run(&mut s, None, None, false, false, None).unwrap();
         let findings = v["findings"].as_array().unwrap();
         assert!(
             !findings.iter().any(|f| f["code"] == "instances_interfere"),
@@ -934,7 +954,7 @@ mod tests {
         assert_eq!(v["warnings"], json!(warned), "{v}");
         assert!(v["passed"].as_bool().unwrap(), "{v}");
         // Asked, it reports each pair that shares a volume.
-        let v = run(&mut s, None, None, false, true).unwrap();
+        let v = run(&mut s, None, None, false, true, None).unwrap();
         let found: Vec<&Value> = v["findings"]
             .as_array()
             .unwrap()
@@ -961,7 +981,7 @@ mod tests {
             "{v}"
         );
         // One part checked alone isn't an assembly's.
-        let v = run(&mut s, Some("bolt"), None, false, true).unwrap();
+        let v = run(&mut s, Some("bolt"), None, false, true, None).unwrap();
         assert!(
             !v["findings"]
                 .as_array()
@@ -970,7 +990,7 @@ mod tests {
                 .any(|f| f["code"] == "instances_interfere")
         );
         // A part checked alone gets no note: it places nothing.
-        let v = run(&mut s, Some("bolt"), None, false, false).unwrap();
+        let v = run(&mut s, Some("bolt"), None, false, false, None).unwrap();
         assert!(
             !v["findings"]
                 .as_array()
@@ -1208,5 +1228,52 @@ mod tests {
                 .is_none_or(|a| a.iter().all(|x| x["solid"] != "pcb/board")),
             "{r}"
         );
+    }
+
+    #[test]
+    fn check_holes_runs_the_hole_checks_and_only_then() {
+        let (_dir, mut s) = crate::hole::tests::drilled();
+        crate::hole::tests::put(
+            &mut s,
+            "h",
+            json!({"format": 23, "points": ["p1"], "form": "simple",
+            "thread": {"standard": "iso_metric", "size": "M3", "depth": "2 mm"},
+            "diameter": "2.53 mm", "depth": {"blind": "4 mm"}}),
+        );
+        let runs = crate::hole::check::runs;
+        let before = runs();
+        let v = run(&mut s, None, None, false, false, None).unwrap();
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"].as_str().is_some_and(|c| c.starts_with("hole_")))
+        );
+        assert_eq!(runs(), before, "a plain check runs no hole check");
+        let v = run(
+            &mut s,
+            None,
+            None,
+            false,
+            false,
+            Some(crate::hole::check::Options::default()),
+        )
+        .unwrap();
+        let f = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["code"] == "hole_tap_drill_nonstandard")
+            .unwrap();
+        assert_eq!(
+            (
+                f["part"].as_str(),
+                f["source"].as_str(),
+                f["severity"].as_str()
+            ),
+            (Some("p"), Some("holes"), Some("info"))
+        );
+        assert_eq!(runs(), before + 1);
     }
 }

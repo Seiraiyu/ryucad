@@ -261,6 +261,23 @@ pub struct FeatureFields {
     /// A countersunk hole's countersink, `{diameter, angle}`, or either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub countersink: Option<Value>,
+    /// A hole's counterdrill {diameter, depth, angle?}, laid over the
+    /// current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterdrill: Option<Value>,
+    /// A hole's spotface {diameter, depth?}, laid over the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotface: Option<Value>,
+    /// A hole's near chamfer {diameter, angle?}; "" takes it away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<Value>,
+    /// A hole's far side {countersink: {..}} or {counterbore: {..}}; ""
+    /// takes it away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub far: Option<Value>,
+    /// A tapped hole's wall: "taper", or "" for straight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_wall: Option<String>,
     /// A hole's depth: `{"blind": length}`, `"through_all"`, or
     /// `{"up_to": {target, offset}}` with its target as
     /// `<part>/<feature>/<name>`.
@@ -1256,6 +1273,21 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// The hole checks, only when asked (`holes --check`): breakout, edge
+    /// distance, blind holes that broke through, threads past the material,
+    /// short engagement and non-standard tap drills, each with its fixes.
+    #[serde(rename = "holes.check")]
+    HolesCheck {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge_factor: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_engagement: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// What the hole standards hold: `threads`, `fasteners` or `drills`,
     /// optionally one standard (or drill series) and size, each value
     /// with its source.
@@ -1734,6 +1766,16 @@ pub enum Request {
         /// `interference_not_checked` note.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         interference: bool,
+        /// Also run the hole checks (`hole_*`, design 533): only when asked.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        holes: bool,
+        /// With `holes`: a bore's least distance to another face, times
+        /// its diameter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge_factor: Option<f64>,
+        /// With `holes`: a thread's least engagement, times its diameter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_engagement: Option<f64>,
     },
     /// What changed between two revisions (`HEAD` and the working files by
     /// default): files as ryucad reads them, and with `model` the bodies.

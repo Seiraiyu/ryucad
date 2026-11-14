@@ -16,6 +16,7 @@ pub(crate) mod pattern;
 pub(crate) mod planar;
 pub(crate) mod primitive;
 pub(crate) mod sketch;
+pub(crate) mod thread;
 
 use crate::doc::files::{Feature, Placement, PrimitiveType, number};
 use crate::doc::id::Id;
@@ -428,6 +429,7 @@ pub(crate) static KINDS: &[&dyn FeatureKind] = &[
     &insert::Inserts,
     &delete_body::Deletes,
     &crate::datum::Datums,
+    &thread::CosmeticThreads,
     &crate::path::Paths,
     &crate::body::WholeBodies,
     &crate::sheet_metal::SheetMetal,
@@ -874,6 +876,7 @@ mod tests {
             ("plane", None, Never),
             ("axis", None, Never),
             ("point", None, Never),
+            ("cosmetic_thread", None, Never),
             ("path", None, Never),
             ("helix", None, Never),
             ("shell", solid, Never),

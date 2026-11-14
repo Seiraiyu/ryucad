@@ -1568,6 +1568,7 @@ fn every_protocol_method_has_a_command() {
         ("hole.derive", &["hole", "derive"]),
         ("standards.list", &["standards"]),
         ("holes.list", &["holes"]),
+        ("holes.check", &["holes"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
         ("feature_faces.get", &["feature-faces"]),
@@ -10013,6 +10014,193 @@ fn check_runs_interference_only_when_asked() {
         (&pair["a"], &pair["b"]),
         (&json!("frame/b1/shank"), &json!("frame/b2/shank"))
     );
+}
+
+#[test]
+fn hole_geometry_flags() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [5, 5]},
+        {"op": "add", "type": "fix", "a": "p1"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--point",
+        "p1",
+        "--diameter",
+        "2",
+        "--form",
+        "counterdrill",
+        "--counterdrill-diameter",
+        "4",
+        "--counterdrill-depth",
+        "1",
+        "--near-diameter",
+        "5",
+        "--depth",
+        "through_next",
+        "--far-counterbore-diameter",
+        "3",
+        "--far-counterbore-depth",
+        "0.5",
+    ]);
+    // add and edit answer with the hole's report.
+    assert_eq!(
+        v["feature"]["spec"],
+        "DIA 2 THRU NEXT, CDRILL 4 1 DEEP, NEAR 5, FAR CBORE 3 0.5 DEEP"
+    );
+    let v = p.ok(&[
+        "feature", "edit", "p", "h", "--depth", "tip:3", "--bottom", "118", "--no-far",
+    ]);
+    assert_eq!(v["feature"]["depth"]["tip"]["value"], "3 mm");
+    assert!(v["feature"].get("far").is_none());
+    p.ok(&[
+        "feature", "edit", "p", "h", "--depth", "2", "--bottom", "ball",
+    ]);
+    // show gives the file's own fields.
+    let v = p.ok(&["feature", "show", "p", "h"]);
+    assert_eq!(v["bottom"], "ball");
+    // Both far kinds at once is usage.
+    p.fails(
+        &[
+            "feature",
+            "edit",
+            "p",
+            "h",
+            "--far-countersink-diameter",
+            "3",
+            "--far-counterbore-diameter",
+            "3",
+        ],
+        "usage",
+        2,
+    );
+}
+
+#[test]
+fn standards_list_external_classes() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let m10 = p.ok(&["standards", "threads", "iso_metric", "M10"]);
+    let classes = m10["classes"].as_array().unwrap();
+    let g6 = classes.iter().find(|c| c["class"] == "6g").unwrap();
+    assert_eq!(g6["side"], "external");
+    assert_eq!(
+        g6["major"],
+        json!([
+            {"value": "9.732 mm", "source": "formula: ISO 965-1"},
+            {"value": "9.968 mm", "source": "formula: ISO 965-1"}
+        ])
+    );
+    let h6 = classes.iter().find(|c| c["class"] == "6H").unwrap();
+    assert_eq!(h6["side"], "internal");
+    // Unified lists its internal classes only.
+    let q = p.ok(&["standards", "threads", "unc", "1/4"]);
+    assert!(
+        q["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["side"] == "internal")
+    );
+}
+
+#[test]
+fn cosmetic_threads_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "shaft",
+        "--param",
+        "radius=4.95",
+        "--param",
+        "height=20",
+    ]);
+    let shown = p.ok(&["inspect", "p", "shaft"]);
+    // The shaft's side, its cylinder, by name.
+    let faces = shown["bodies"][0]["faces"].as_array().unwrap();
+    let side = faces
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .unwrap_or_else(|| panic!("{shown}"));
+    let side = format!("p/shaft/{}", side["name"].as_str().unwrap());
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cosmetic_thread",
+        "--id",
+        "t",
+        "--face",
+        &side,
+        "--thread",
+        "iso_metric:M10",
+        "--class",
+        "6g",
+    ]);
+    assert_eq!(v["feature"]["thread"]["class"], "6g");
+    assert_eq!(v["feature"]["faces"], serde_json::json!([side]));
+    let types = p.ok(&["feature", "types", "cosmetic_thread"]);
+    assert!(types.to_string().contains("thread_depth"), "{types}");
+}
+
+#[test]
+fn holes_check_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [10, 5]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--diameter",
+        "2",
+        "--depth",
+        "through_all",
+    ]);
+    let v = p.ok(&["holes", "p", "--check"]);
+    assert_eq!(v["passed"], true, "{v}");
+    assert_eq!(v["checked"], 1);
+    // The options only with --check.
+    p.fails(&["holes", "p", "--edge-factor", "2"], "usage", 2);
 }
 
 #[test]

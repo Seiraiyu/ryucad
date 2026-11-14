@@ -6,13 +6,18 @@
 //! key of its own.
 //!
 //! A segment's key is SipHash of `ryucad.hole\0<part>\0<feature>\0<segment>`
-//! (`top`, `counterbore_wall`, `counterbore_floor`, `countersink`, `wall`
-//! (the threaded length, when tapped), `drill_wall` (a blind tapped hole's
-//! drill below its thread), `bottom`, `tip`, `axis`), never of a size, so resizing a hole renames
+//! (`top`, `near`, `counterbore_wall`, `counterbore_floor`, `countersink`,
+//! `counterdrill_wall`, `counterdrill_floor`, `spotface_wall`,
+//! `spotface_floor`, `wall` (the threaded length, when tapped), `taper_end`,
+//! `drill_wall` (a blind tapped hole's drill below its thread),
+//! `far_countersink`, `far_counterbore_floor`, `far_counterbore_wall`,
+//! `bottom`, `tip`, `ball`, `axis`), never of a size, so resizing a hole renames
 //! nothing and switching its form renames only what its new segments
 //! touch. A point's tool key is `ryucad.tool\0<part>\0<feature>\0<point>`.
 
+pub mod check;
 pub mod derive;
+pub mod exits;
 pub mod spec;
 
 use crate::doc::files::Feature;
@@ -26,10 +31,11 @@ use crate::rebuild::{Built, Results};
 use crate::sketch::Solved;
 use core::f64::consts::TAU;
 use derive::Sizes;
-use ryukei::geom::{Axis, Curve2, Frame, Line2, Point2, Point3, Vector3};
+use ryukei::geom::{Axis, Circle2, Curve2, Frame, Frame2, Line2, Point2, Point3, Vector2, Vector3};
 use ryukei::name::{OpKey, ToolKey};
 use ryukei::sweep::{self, Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
 use serde_json::json;
+use std::sync::Arc;
 
 /// The key of one of a hole's profile segments.
 pub fn segment_key(part: &Id, feature: &Id, segment: &str) -> u128 {
@@ -149,7 +155,23 @@ fn depth(
     }
     let d = match &h.depth {
         Depth::Blind(q) => return Ok(q.meters()),
+        Depth::Tip(q) => {
+            let Bottom::Drill(a) = &h.bottom else {
+                unreachable!("doc::hole refuses a tip depth with no drill point")
+            };
+            let shoulder = q.meters() - s.drill.si / 2.0 / ryukei::math::tan(a.radians() / 2.0);
+            if shoulder <= s.mouth_depth().unwrap_or(0.0) {
+                return Err(Error::new(
+                    Code::InvalidExtent,
+                    format!("hole {id}: its point alone is deeper than {q} to the tip"),
+                )
+                .with("feature", id)
+                .with("pointer", "/depth/tip"));
+            }
+            return Ok(shoulder);
+        }
         Depth::ThroughAll => crate::rebuild::through_all("hole", id, from, dir, false, targets)?.1,
+        Depth::ThroughNext => unreachable!("through_next is built per place (hole::tool_at)"),
         Depth::UpTo { target, offset } => crate::rebuild::UpTo {
             ty: "hole",
             role: "depth",
@@ -162,6 +184,8 @@ fn depth(
     };
     let at = match h.form {
         HoleForm::Countersink { .. } => "/countersink",
+        HoleForm::Counterdrill { .. } => "/counterdrill/depth",
+        HoleForm::Spotface { .. } => "/spotface/depth",
         _ => "/counterbore/depth",
     };
     if let Some(mouth) = s.mouth_depth()
@@ -180,49 +204,189 @@ fn depth(
     Ok(d)
 }
 
-/// The profile's corners, `(radius, depth)` from the mouth on the axis,
-/// each with the segment that leaves it: out along the mouth, down the
-/// counterbore or countersink and the bore, across the bottom or down the
-/// drill point to the axis, and up the axis.
-fn corners(h: &Hole, s: &Sizes, depth: f64) -> Vec<((f64, f64), &'static str)> {
+/// A corner of the profile, `(radius, depth)` from the mouth on the axis
+/// (negative depth above it), and the segment that leaves it: a line to
+/// the next corner, or an arc about `arc`.
+struct Corner {
+    at: (f64, f64),
+    name: &'static str,
+    arc: Option<(f64, f64)>,
+}
+
+fn line(at: (f64, f64), name: &'static str) -> Corner {
+    Corner {
+        at,
+        name,
+        arc: None,
+    }
+}
+
+/// The profile's corners: out along the top, down the mouth form (a near
+/// chamfer first), the bore, a far side (Task 9), and across the bottom
+/// or down the point or round the ball to the axis, and up the axis.
+/// `depth` is the bore's shoulder; `up` how far a spotface's wall reaches
+/// back above the mouth.
+fn corners(
+    id: &Id,
+    h: &Hole,
+    s: &Sizes,
+    depth: f64,
+    up: f64,
+    exit: Option<f64>,
+) -> Result<Vec<Corner>> {
     let r = s.drill.si / 2.0;
-    let mut out = vec![((0.0, 0.0), "top")];
-    match (&s.counterbore, &s.countersink) {
-        (Some((diameter, depth)), _) => {
-            let rc = diameter.si / 2.0;
-            out.push(((rc, 0.0), "counterbore_wall"));
-            out.push(((rc, depth.si), "counterbore_floor"));
-            out.push(((r, depth.si), "wall"));
+    // A tapered thread's wall is a cone, 1:16 on the diameter through the
+    // gauge plane, to the thread's end; then an annulus in to the drill.
+    let taper = s
+        .thread
+        .as_ref()
+        .and_then(|t| Some((t.gauge.as_ref()?, t.taper?, t.depth.as_ref()?)));
+    let radius_at = |z: f64| -> f64 {
+        match taper {
+            Some(((gd, gl), (a, b), _)) => {
+                (gd.si - (z - gl.si) * f64::from(a) / f64::from(b)) / 2.0
+            }
+            None => r,
         }
-        (None, Some((diameter, _))) => {
-            let d = s.mouth_depth().expect("a countersink has a depth");
-            out.push(((diameter.si / 2.0, 0.0), "countersink"));
-            out.push(((r, d), "wall"));
+    };
+    let wall = |out: &mut Vec<Corner>, z: f64| {
+        out.push(line((radius_at(z), z), "wall"));
+        if let Some((_, _, end)) = taper {
+            let re = radius_at(end.si);
+            if re - r > ryukei::tol::LINEAR_RESOLUTION {
+                out.push(line((re, end.si), "taper_end"));
+            }
         }
-        (None, None) => out.push(((r, 0.0), "wall")),
+    };
+    if let Some((_, _, end)) = taper
+        && radius_at(end.si) < r
+    {
+        return Err(Error::new(
+            Code::InvalidExtent,
+            format!(
+                "hole {id}: its tapered wall narrows inside its drill at {} from the mouth",
+                end.text
+            ),
+        )
+        .with("feature", id)
+        .with("pointer", "/thread/depth"));
+    }
+    let tan = |a: &derive::Size| ryukei::math::tan(a.si / 2.0);
+    let top = if s.spotface.is_some() { -up } else { 0.0 };
+    let mut out = vec![line((0.0, top), "top")];
+    // A near chamfer at `z`, down to radius `under`: where it ends.
+    let near = |out: &mut Vec<Corner>, z: f64, under: f64| -> f64 {
+        match &s.near {
+            Some((d, a)) => {
+                let rn = d.si / 2.0;
+                out.push(line((rn, z), "near"));
+                z + (rn - under) / tan(a)
+            }
+            None => z,
+        }
+    };
+    if let Some((d, cdepth)) = &s.counterbore {
+        let rc = d.si / 2.0;
+        let z = near(&mut out, 0.0, rc);
+        out.push(line((rc, z), "counterbore_wall"));
+        out.push(line((rc, cdepth.si), "counterbore_floor"));
+        wall(&mut out, cdepth.si);
+    } else if let Some((d, _)) = &s.countersink {
+        let z = s.mouth_depth().expect("a countersink has a depth");
+        out.push(line((d.si / 2.0, 0.0), "countersink"));
+        wall(&mut out, z);
+    } else if let Some((d, cdepth, a)) = &s.counterdrill {
+        let rc = d.si / 2.0;
+        let z = near(&mut out, 0.0, rc);
+        out.push(line((rc, z), "counterdrill_wall"));
+        out.push(line((rc, cdepth.si), "counterdrill_floor"));
+        wall(&mut out, cdepth.si + (rc - r) / tan(a));
+    } else if let Some((d, sdepth)) = &s.spotface {
+        let rs = d.si / 2.0;
+        out.push(line((rs, -up), "spotface_wall"));
+        out.push(line((rs, sdepth.si), "spotface_floor"));
+        let z = near(&mut out, sdepth.si, radius_at(sdepth.si));
+        wall(&mut out, z);
+    } else {
+        let z = near(&mut out, 0.0, radius_at(0.0));
+        wall(&mut out, z);
     }
     // A blind thread that stops short of its drill: the wall ends where
     // the thread does, and the drill's own wall goes on to the bottom.
-    let mouth = s.mouth_depth().unwrap_or(0.0);
-    if matches!(h.depth, Depth::Blind(_))
+    let mouth = s.thread_start();
+    if h.depth.is_blind()
         && let Some(t) = s.thread.as_ref().and_then(|t| t.depth.as_ref())
         && t.si > mouth
         && t.si < depth
     {
-        out.push(((r, t.si), "drill_wall"));
+        out.push(line((r, t.si), "drill_wall"));
     }
     match &h.bottom {
         Bottom::Flat => {
-            out.push(((r, depth), "bottom"));
-            out.push(((0.0, depth), "axis"));
+            let tan = |a: &derive::Size| ryukei::math::tan(a.si / 2.0);
+            match (&s.far, exit) {
+                (Some(derive::FarSizes::Countersink(d, a)), Some(e)) => {
+                    let rf = d.si / 2.0;
+                    out.push(line((r, e - (rf - r) / tan(a)), "far_countersink"));
+                    // The cone runs on past the exit to the bore's end.
+                    out.push(line((rf + (depth - e) * tan(a), depth), "bottom"));
+                }
+                (Some(derive::FarSizes::Counterbore(d, fd)), Some(e)) => {
+                    let rf = d.si / 2.0;
+                    out.push(line((r, e - fd.si), "far_counterbore_floor"));
+                    out.push(line((rf, e - fd.si), "far_counterbore_wall"));
+                    out.push(line((rf, depth), "bottom"));
+                }
+                _ => out.push(line((r, depth), "bottom")),
+            }
+            out.push(line((0.0, depth), "axis"));
         }
         Bottom::Drill(angle) => {
-            out.push(((r, depth), "tip"));
-            let point = r / ryukei::math::tan(angle.radians() / 2.0);
-            out.push(((0.0, depth + point), "axis"));
+            out.push(line((r, depth), "tip"));
+            out.push(line(
+                (0.0, depth + r / ryukei::math::tan(angle.radians() / 2.0)),
+                "axis",
+            ));
+        }
+        Bottom::Ball => {
+            out.push(Corner {
+                at: (r, depth),
+                name: "ball",
+                arc: Some((0.0, depth)),
+            });
+            out.push(line((0.0, depth + r), "axis"));
         }
     }
-    out
+    Ok(out)
+}
+
+/// How far a spotface's wall reaches back from `from` against `down`:
+/// past every corner of the targets' boxes, by a hundredth of their depth
+/// along it (never refused: a flat face has nothing above it).
+fn reach_back(from: Point3, down: Vector3, targets: &[&Built]) -> f64 {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for b in targets {
+        for f in b.body.faces() {
+            let bx = ryukei::intersect::face_box(&b.body, f);
+            let (a, z) = (bx.min(), bx.max());
+            for (x, y, w) in [
+                (a.x, a.y, a.z),
+                (z.x, a.y, a.z),
+                (a.x, z.y, a.z),
+                (z.x, z.y, a.z),
+                (a.x, a.y, z.z),
+                (z.x, a.y, z.z),
+                (a.x, z.y, z.z),
+                (z.x, z.y, z.z),
+            ] {
+                let d = (Point3::new(x, y, w) - from).dot(down);
+                lo = lo.min(d);
+                hi = hi.max(d);
+            }
+        }
+    }
+    let margin = (hi - lo).max(1e-6) * 0.01;
+    (-lo).max(0.0) + margin
 }
 
 /// The hole's tool: its profile turned all round its axis, at the
@@ -238,34 +402,85 @@ pub fn tool(
     targets: &[&Built],
     before: &dyn Results,
 ) -> Result<(Built, Point3)> {
+    let (origin, down) = frame_of(solved)?;
+    let d = depth(part, id, h, s, origin, down, targets, before)?;
+    build_tool(part, id, h, s, solved, targets, d, None)
+}
+
+/// The sketch frame's origin and the direction a hole drills.
+fn frame_of(solved: &Solved) -> Result<(Point3, Vector3)> {
+    let sketch = Frame::from_rigid(&solved.frame).map_err(|e| {
+        Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
+    })?;
+    Ok((sketch.origin(), -sketch.z().get()))
+}
+
+/// The hole's tool at the sketch's origin for a bore of depth `d`, and,
+/// for a far side, the place's exit.
+#[allow(clippy::too_many_arguments)]
+fn build_tool(
+    part: &Part,
+    id: &Id,
+    h: &Hole,
+    s: &Sizes,
+    solved: &Solved,
+    targets: &[&Built],
+    d: f64,
+    exit: Option<f64>,
+) -> Result<(Built, Point3)> {
     let sketch = Frame::from_rigid(&solved.frame).map_err(|e| {
         Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
     let (origin, down) = (sketch.origin(), -sketch.z().get());
-    let d = depth(part, id, h, s, origin, down, targets, before)?;
     // The profile's plane holds the axis: x across, y down the hole.
     let frame = Frame::new(origin, sketch.y().get(), sketch.x().get()).map_err(|e| {
         Error::new(Code::Internal, "a hole's frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
-    let corners = corners(h, s, d);
+    let up = if s.spotface.is_some() {
+        reach_back(origin, down, targets)
+    } else {
+        0.0
+    };
+    let corners = corners(id, h, s, d, up, exit)?;
     let mut keys = Keys::default();
     let segments: Vec<Segment> = corners
         .iter()
         .enumerate()
-        .map(|(i, ((r0, d0), name))| {
-            let ((r1, d1), _) = corners[(i + 1) % corners.len()];
-            let (a, b) = (Point2::new(*r0, *d0), Point2::new(r1, d1));
-            let k = segment_key(&part.id, id, name);
+        .map(|(i, c)| {
+            let next = &corners[(i + 1) % corners.len()];
+            let (a, b) = (
+                Point2::new(c.at.0, c.at.1),
+                Point2::new(next.at.0, next.at.1),
+            );
+            let k = segment_key(&part.id, id, c.name);
             keys.segments.insert(
                 k,
-                Id::parse(name, "entity").expect("a segment's name is an ID"),
+                Id::parse(c.name, "entity").expect("a segment's name is an ID"),
             );
-            let line = Line2::through(a, b).expect("a hole's corners are apart");
+            let (curve, t0, t1) = match c.arc {
+                None => {
+                    let line = Line2::through(a, b).expect("a hole's corners are apart");
+                    (Curve2::Line2(line), 0.0, a.distance(b))
+                }
+                Some((cx, cy)) => {
+                    let centre = Point2::new(cx, cy);
+                    let x = Vector2::new(a.x - cx, a.y - cy);
+                    let frame = Frame2::new(centre, x, true).expect("a ball has a radius");
+                    let circle =
+                        Circle2::new(frame, a.distance(centre)).expect("a ball has a radius");
+                    let (dx, dy) = (b.x - cx, b.y - cy);
+                    let mut t1 = ryukei::math::atan2(x.x * dy - x.y * dx, x.x * dx + x.y * dy);
+                    if t1 <= 0.0 {
+                        t1 += TAU;
+                    }
+                    (Curve2::Circle2(circle), 0.0, t1)
+                }
+            };
             Segment {
                 key: SegmentKey(k),
-                curve: Curve2::Line2(line),
-                t0: 0.0,
-                t1: a.distance(b),
+                curve,
+                t0,
+                t1,
             }
         })
         .collect();
@@ -312,9 +527,151 @@ pub fn tool(
     Ok((built, origin))
 }
 
-/// Whether a feature is a hole whose depth reaches past its targets.
+/// Whether a hole's tool depends on where each place's axis leaves its
+/// targets: a far side, or through_next.
+pub fn needs_exits(h: &Hole) -> bool {
+    h.far.is_some() || h.depth == Depth::ThroughNext
+}
+
+/// The tools of a hole whose shape depends on each place's exit, built
+/// at the sketch's origin one per distinct exit (equal within the linear
+/// resolution, first come first kept), for the hole and its patterns.
+pub(crate) struct ExitTools<'a> {
+    part: &'a Part,
+    id: &'a Id,
+    h: &'a Hole,
+    s: &'a Sizes,
+    solved: &'a Solved,
+    targets: &'a [&'a Built],
+    origin: Point3,
+    down: Vector3,
+    /// through_all's depth; a hundredth of the targets' depth (through_next's margin).
+    through: f64,
+    margin: f64,
+    pub tools: Vec<(f64, Arc<Built>)>,
+}
+
+impl<'a> ExitTools<'a> {
+    pub fn new(
+        part: &'a Part,
+        id: &'a Id,
+        h: &'a Hole,
+        s: &'a Sizes,
+        solved: &'a Solved,
+        targets: &'a [&'a Built],
+        before: &dyn Results,
+    ) -> Result<ExitTools<'a>> {
+        let (origin, down) = frame_of(solved)?;
+        let (lo, hi) = crate::rebuild::span(origin, down, targets);
+        let through = match h.depth {
+            Depth::ThroughAll => depth(part, id, h, s, origin, down, targets, before)?,
+            _ => 0.0,
+        };
+        Ok(ExitTools {
+            part,
+            id,
+            h,
+            s,
+            solved,
+            targets,
+            origin,
+            down,
+            through,
+            margin: (hi - lo).max(1e-6) * 0.01,
+            tools: Vec::new(),
+        })
+    }
+
+    pub fn origin(&self) -> Point3 {
+        self.origin
+    }
+
+    pub fn down(&self) -> Vector3 {
+        self.down
+    }
+
+    /// Where the axis through `at` along `axis` leaves the targets, from
+    /// `at`: the first wall's far side for through_next, the last for
+    /// through_all. `place` names the place in refusals.
+    pub fn exit(
+        &self,
+        id: &Id,
+        place: &str,
+        at: Point3,
+        axis: Vector3,
+        work: &ryukei::work::Work,
+    ) -> Result<f64> {
+        let next = self.h.depth == Depth::ThroughNext;
+        let bodies = self.targets.iter().map(|b| &b.body);
+        match exits::over(bodies, at, axis, next, work) {
+            Ok(Some(e)) => Ok(e),
+            Ok(None) => Err(Error::new(
+                Code::OperationNoEffect,
+                format!("hole {id}: its axis at {place} meets none of its targets"),
+            )
+            .with("feature", id)
+            .with("tool", id)
+            .with("point", place)),
+            Err(exits::Uncertain) => Err(Error::new(
+                Code::RebuildFailed,
+                format!("hole {id}: where its axis at {place} leaves its targets is uncertain"),
+            )
+            .with("feature", id)
+            .with("point", place)),
+        }
+    }
+
+    /// The index of the tool for `exit`: one built for an exit within the
+    /// linear resolution, else a new one.
+    pub fn tool(&mut self, exit: f64) -> Result<usize> {
+        if let Some(i) = self
+            .tools
+            .iter()
+            .position(|(e, _)| (e - exit).abs() <= ryukei::tol::LINEAR_RESOLUTION)
+        {
+            return Ok(i);
+        }
+        let d = match self.h.depth {
+            Depth::ThroughNext => exit + self.margin,
+            _ => self.through,
+        };
+        let far_top = match &self.s.far {
+            Some(derive::FarSizes::Countersink(dia, a)) => {
+                exit - (dia.si - self.s.drill.si) / 2.0 / ryukei::math::tan(a.si / 2.0)
+            }
+            Some(derive::FarSizes::Counterbore(_, fd)) => exit - fd.si,
+            None => exit,
+        };
+        if far_top <= self.s.thread_start() {
+            return Err(Error::new(
+                Code::InvalidExtent,
+                format!("hole {}: its far side reaches up past its mouth", self.id),
+            )
+            .with("feature", self.id)
+            .with("pointer", "/far"));
+        }
+        let (b, _) = build_tool(
+            self.part,
+            self.id,
+            self.h,
+            self.s,
+            self.solved,
+            self.targets,
+            d,
+            Some(exit),
+        )?;
+        self.tools.push((exit, Arc::new(b)));
+        Ok(self.tools.len() - 1)
+    }
+}
+
+/// Whether a feature is a hole whose tool depends on its targets: through
+/// all, through the next wall, a far side or a spotface (which reaches
+/// past them).
 pub fn through(f: &Feature) -> bool {
-    matches!(f, Feature::Hole(h) if h.depth == Depth::ThroughAll)
+    matches!(f, Feature::Hole(h) if h.depth.is_through()
+        || h.far.is_some()
+        || matches!(h.form, HoleForm::Spotface { .. }))
 }
 
 #[cfg(test)]
@@ -837,5 +1194,401 @@ pub(crate) mod tests {
             json!({"part": "p", "id": "h", "thread": "", "diameter": "5 mm"}),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn new_forms_depths_and_bottoms_cut_what_they_say() {
+        let (_dir, mut s) = drilled();
+        let cone = |r: f64, h: f64| PI * r * r * h / 3.0;
+        let frustum = |a: f64, b: f64, h: f64| PI * h * (a * a + a * b + b * b) / 3.0;
+        let t59 = ryukei::math::tan(59f64.to_radians());
+        for (fields, removed) in [
+            // A counterdrill: 8 mm to 1 mm, its 118 deg floor down to the
+            // 4 mm bore, the bore through.
+            (
+                json!({"format": 25, "points": ["p1"], "form": "counterdrill", "diameter": 4,
+                       "counterdrill": {"diameter": 8, "depth": 1}, "depth": "through_all"}),
+                {
+                    let floor = 2.0 / t59;
+                    PI * 16.0 * 1.0 + frustum(4.0, 2.0, floor) + PI * 4.0 * (5.0 - 1.0 - floor)
+                },
+            ),
+            // A spotface 0.5 mm deep: the top 0.5 mm within 8 mm goes.
+            (
+                json!({"format": 25, "points": ["p1"], "form": "spotface", "diameter": 4,
+                       "spotface": {"diameter": 8, "depth": 0.5}, "depth": "through_all"}),
+                PI * 16.0 * 0.5 + PI * 4.0 * 4.5,
+            ),
+            // A near chamfer, 6 mm at 90 deg: 1 mm down to the bore.
+            (
+                json!({"format": 25, "points": ["p1"], "form": "simple", "diameter": 4,
+                       "near": {"diameter": 6}, "depth": "through_all"}),
+                frustum(3.0, 2.0, 1.0) + PI * 4.0 * 4.0,
+            ),
+            // To the tip: 3 mm to the tip, the shoulder above it.
+            (
+                json!({"format": 25, "points": ["p1"], "form": "simple", "diameter": 4,
+                       "depth": {"tip": 3}, "bottom": {"drill": "118 deg"}}),
+                PI * 4.0 * (3.0 - 2.0 / t59) + cone(2.0, 2.0 / t59),
+            ),
+            // A ball bottom: 3 mm to the shoulder, then a hemisphere.
+            (
+                json!({"format": 25, "points": ["p1"], "form": "simple", "diameter": 3,
+                       "depth": {"blind": 2}, "bottom": "ball"}),
+                PI * 2.25 * 2.0 + 2.0 / 3.0 * PI * 1.5 * 1.5 * 1.5,
+            ),
+        ] {
+            put(&mut s, "h", fields.clone());
+            let b = after(&mut s, "h").unwrap_or_else(|e| panic!("{fields}: {e}"));
+            near(volume(&b), 1000.0 - removed);
+        }
+        // Each new segment has its name, and none of them is a size.
+        let segs = |b: &Built| -> BTreeSet<String> {
+            b.origins
+                .values()
+                .filter(|o| o["feature"] == "h")
+                .filter_map(|o| o["segment"].as_str().map(str::to_owned))
+                .collect()
+        };
+        put(
+            &mut s,
+            "h",
+            json!({"format": 25, "points": ["p1"], "form": "counterdrill",
+            "diameter": 4, "counterdrill": {"diameter": 8, "depth": 1}, "near": {"diameter": 9},
+            "depth": {"blind": 2.5}, "bottom": "ball"}),
+        );
+        assert_eq!(
+            segs(&after(&mut s, "h").unwrap()),
+            [
+                "ball",
+                "counterdrill_floor",
+                "counterdrill_wall",
+                "near",
+                "wall"
+            ]
+            .map(String::from)
+            .into()
+        );
+        // A tip depth no deeper than the point is refused.
+        put(
+            &mut s,
+            "h",
+            json!({"format": 25, "points": ["p1"], "form": "simple", "diameter": 4,
+            "depth": {"tip": 1}, "bottom": {"drill": "118 deg"}}),
+        );
+        assert_eq!(
+            after(&mut s, "h").unwrap_err().details["pointer"],
+            "/depth/tip"
+        );
+    }
+
+    /// Box b (z 0 to 5 mm), a 10 x 10 x 5 mm box joined under its left
+    /// half (z -5 to 0), and `p5` at (16, 5) on the sketch beside `p2`
+    /// (4, 5): p2's axis leaves at 10 mm, p5's at 5 mm.
+    fn stepped() -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = drilled();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "under",
+            "operation": "join", "targets": ["b"], "params": {"x": 10, "y": 10, "z": 5},
+            "placement": {"origin": [0, 0, -5]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+            {"op": "add", "type": "point", "at": [16, 5]},
+            {"op": "add", "type": "fix", "a": "p5"}]}),
+        )
+        .unwrap();
+        (dir, s)
+    }
+
+    #[test]
+    fn far_sides_sit_at_each_places_exit() {
+        let (_dir, mut s) = stepped();
+        put(
+            &mut s,
+            "h",
+            json!({"format": 25, "points": ["p2", "p5"], "form": "simple",
+            "diameter": 2, "depth": "through_all",
+            "far": {"counterbore": {"diameter": 4, "depth": 1}}}),
+        );
+        let r = s.rebuilt(&id("p")).unwrap();
+        let (_, out) = r.features.iter().find(|(f, _)| *f == id("h")).unwrap();
+        let out = out.as_ref().unwrap();
+        let b = out.solid(&id("b")).unwrap();
+        // p2: 9 mm of bore and the counterbore's 1 mm; p5: 4 mm and 1 mm.
+        near(
+            volume(b),
+            1500.0 - (PI * 9.0 + PI * 4.0) - (PI * 4.0 + PI * 4.0),
+        );
+        // Two tools: p5's differs from p2's.
+        let applied = out.applied().unwrap();
+        assert_eq!(applied.others.len(), 1);
+        assert_eq!(applied.others[0].0, 1);
+        // Both places' far faces carry their names.
+        let far: BTreeSet<&str> = b
+            .origins
+            .values()
+            .filter(|o| o["feature"] == "h" && o["segment"] == "far_counterbore_wall")
+            .filter_map(|o| o["point"].as_str())
+            .collect();
+        assert_eq!(far, ["p2", "p5"].into());
+    }
+
+    #[test]
+    fn through_next_stops_at_the_first_wall() {
+        // b and `up` (z 5 to 10) make 10 mm; a slot (x 2 to 18, z 4 to 6)
+        // leaves two walls along the axis at (10, 5).
+        let (_dir, mut s) = drilled();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "up",
+            "operation": "join", "targets": ["b"], "params": {"x": 20, "y": 10, "z": 5},
+            "placement": {"origin": [0, 0, 5]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "slot",
+            "operation": "cut", "targets": ["b"], "params": {"x": 16, "y": 12, "z": 2},
+            "placement": {"origin": [2, -1, 4]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t",
+            "placement": {"origin": [0, 0, 10]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "t", "ops": [
+            {"op": "add", "type": "point", "at": [10, 5]},
+            {"op": "add", "type": "fix", "a": "p1"}]}),
+        )
+        .unwrap();
+        let mut v = json!({"format": 25, "form": "simple", "diameter": 2,
+                           "depth": "through_next"});
+        v["kind"] = json!("ryucad.feature");
+        v["type"] = json!("hole");
+        v["sketch"] = json!("t");
+        v["targets"] = json!(["b"]);
+        let f = Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap();
+        let mut list = crate::part::order(s.project().part(&id("p")).unwrap()).unwrap();
+        list.push(id("n"));
+        crate::save::save(&mut s, &id("p"), &[(&id("n"), &f)], list).unwrap();
+        let before = 20.0 * 10.0 * 10.0 - 16.0 * 10.0 * 2.0;
+        near(volume(&after(&mut s, "n").unwrap()), before - PI * 4.0);
+        // Through all goes on through the lower wall.
+        v["depth"] = json!("through_all");
+        v["format"] = json!(3);
+        let f = Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap();
+        let list = crate::part::order(s.project().part(&id("p")).unwrap()).unwrap();
+        crate::save::save(&mut s, &id("p"), &[(&id("n"), &f)], list).unwrap();
+        near(volume(&after(&mut s, "n").unwrap()), before - PI * 8.0);
+    }
+
+    #[test]
+    fn a_pattern_of_a_far_sided_hole_measures_each_instance() {
+        let (_dir, mut s) = stepped();
+        // The seed at p5 (16, 5) leaves at 5 mm; its copy 12 mm along -x,
+        // at (4, 5), at 10 mm; its mirror in x = 10 mm, at (4, 5) too.
+        put(
+            &mut s,
+            "h",
+            json!({"format": 25, "points": ["p5"], "form": "simple",
+            "diameter": 2, "depth": "through_all",
+            "far": {"counterbore": {"diameter": 4, "depth": 1}}}),
+        );
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "pattern", "id": "row",
+            "features": ["h"], "direction": "x", "reverse": true, "spacing": 12, "count": 2}),
+        )
+        .unwrap();
+        let r = s.rebuilt(&id("p")).unwrap();
+        let (_, out) = r.features.iter().find(|(f, _)| *f == id("row")).unwrap();
+        let b = out.as_ref().unwrap().solid(&id("b")).unwrap();
+        near(
+            volume(b),
+            1500.0 - (PI * 4.0 + PI * 4.0) - (PI * 9.0 + PI * 4.0),
+        );
+    }
+
+    #[test]
+    fn a_tapered_pipe_wall_is_a_cone_from_the_gauge_plane() {
+        let (dir, mut s) = drilled();
+        // House values, made up for this test: never a standard's.
+        std::fs::write(
+            dir.path().join("hole_standards.json"),
+            crate::doc::canonical::to_string(&json!({
+                "format": 1, "kind": "ryucad.hole_standards",
+                "threads": {"npt": {"1/8": {"tap_drill": "8.7 mm",
+                    "gauge_diameter": "10.2 mm", "gauge_length": "4 mm"}}}})),
+        )
+        .unwrap();
+        s.reload().unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "t",
+            "params": {"x": 30, "y": 30, "z": 20}, "placement": {"origin": [40, 0, 0]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "u",
+            "placement": {"origin": [0, 0, 20]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "u", "ops": [
+            {"op": "add", "type": "point", "at": [55, 15]},
+            {"op": "add", "type": "fix", "a": "p1"}]}),
+        )
+        .unwrap();
+        let v = json!({"format": 25, "kind": "ryucad.feature", "type": "hole", "sketch": "u",
+            "form": "simple", "targets": ["t"], "depth": {"blind": "12 mm"},
+            "thread": {"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"}});
+        let f = Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap();
+        let mut list = crate::part::order(s.project().part(&id("p")).unwrap()).unwrap();
+        list.push(id("n"));
+        crate::save::save(&mut s, &id("p"), &[(&id("n"), &f)], list).unwrap();
+        let r = s.rebuilt(&id("p")).unwrap();
+        let (_, out) = r.features.iter().find(|(f, _)| *f == id("n")).unwrap();
+        let b = out
+            .as_ref()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .solid(&id("t"))
+            .unwrap();
+        // 1:16 on the diameter: 10.45 mm at the mouth, 9.95 mm at 8 mm,
+        // then the annulus in to the 8.7 mm drill, 4 mm more of it.
+        let frustum = |a: f64, c: f64, h: f64| PI * h * (a * a + a * c + c * c) / 3.0;
+        near(
+            volume(b),
+            18000.0 - frustum(5.225, 4.975, 8.0) - PI * 4.35 * 4.35 * 4.0,
+        );
+        let segs: BTreeSet<&str> = b
+            .origins
+            .values()
+            .filter(|o| o["feature"] == "n")
+            .filter_map(|o| o["segment"].as_str())
+            .collect();
+        assert!(
+            segs.contains("taper_end") && segs.contains("drill_wall"),
+            "{segs:?}"
+        );
+        // No gauge values: needs_project_table names them.
+        std::fs::write(
+            dir.path().join("hole_standards.json"),
+            crate::doc::canonical::to_string(&json!({"format": 1, "kind": "ryucad.hole_standards",
+                "threads": {"npt": {"1/8": {"tap_drill": "8.7 mm"}}}})),
+        )
+        .unwrap();
+        s.reload().unwrap();
+        // hole.derive takes a hole's fields, not the file's header.
+        let mut fields = v.clone();
+        for k in ["format", "kind", "type"] {
+            fields.as_object_mut().unwrap().remove(k);
+        }
+        let e = call(&mut s, "hole.derive", json!({"fields": fields})).unwrap_err();
+        assert_eq!(
+            e.details["missing"],
+            json!(["gauge_diameter", "gauge_length"])
+        );
+    }
+
+    #[test]
+    fn the_new_fields_through_the_protocol() {
+        let (_dir, mut s) = drilled();
+        let add = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "h",
+            "sketch": "s", "points": ["p1"], "diameter": "2 mm", "form": "counterdrill",
+            "counterdrill": {"diameter": "4 mm", "depth": "1 mm"}, "depth": "through_all",
+            "near": {"diameter": "5 mm"}, "targets": ["b"]}),
+        )
+        .unwrap();
+        let f = &add["feature"];
+        assert_eq!(f["counterdrill"]["diameter"]["value"], "4 mm");
+        assert_eq!(f["near"]["diameter"]["value"], "5 mm");
+        assert_eq!(f["spec"], "DIA 2 THRU, CDRILL 4 1 DEEP, NEAR 5");
+        // Part of a mouth is laid over the rest; a new form drops the old.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "counterdrill": {"angle": "90 deg"}}),
+        )
+        .unwrap();
+        assert_eq!(e["feature"]["counterdrill"]["depth"]["value"], "1 mm");
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "form": "spotface", "spotface": {"diameter": "6 mm"}}),
+        )
+        .unwrap();
+        assert!(e["feature"].get("counterdrill").is_none());
+        // "" takes near or far away.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "near": ""}),
+        )
+        .unwrap();
+        assert!(e["feature"].get("near").is_none());
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "far": {"countersink": {"diameter": "3 mm", "angle": "90 deg"}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            e["feature"]["far"]["countersink"]["angle"]["value"],
+            "90 deg"
+        );
+        // A spec sets them; given twice is usage.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "spec": "DIA 2 THRU NEXT, NEAR 3", "near": {"diameter": "3 mm"}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        // A spec naming no far side keeps it: through_next takes one.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "spec": "DIA 2 THRU NEXT"}),
+        )
+        .unwrap();
+        assert_eq!(e["feature"]["depth"], "through_next");
+        assert!(e["feature"].get("far").is_some());
+        // A thread's wall, given flat, needs a thread.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h",
+            "thread_wall": "taper"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
     }
 }

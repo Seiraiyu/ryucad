@@ -62,6 +62,12 @@ impl Follow {
             Feature::Extrude(_) => (r == "target").then_some(Carrier),
             Feature::Revolve(_) => (r == "axis").then_some(Carrier),
             Feature::Hole(_) => (r == "depth").then_some(Carrier),
+            // Its faces as a set, its start edge as an extent.
+            Feature::CosmeticThread(_) => match r {
+                "faces.#" => Some(All),
+                "from" => Some(One),
+                _ => None,
+            },
             Feature::Fillet(_) => (r == "groups.#.edges.#").then_some(All),
             Feature::Chamfer(_) => match r {
                 "groups.#.edges.#" => Some(All),
@@ -1094,6 +1100,33 @@ mod tests {
         // A role the feature never names has none, and refuses.
         assert_eq!(Follow::classify(&f, "plane"), None);
         assert_eq!(Follow::of(&f, "plane"), Follow::One);
+    }
+
+    #[test]
+    fn a_cosmetic_thread_s_roles_have_their_classes() {
+        use super::Follow;
+        use crate::units::Unit;
+        let r = |k: u8| json!({"feature": "shaft", "name": format!("{k:032x}")});
+        let v = json!({"format": 25, "kind": "ryucad.feature", "type": "cosmetic_thread",
+            "faces": [r(1)], "thread": {"standard": "iso_metric", "size": "M10", "class": "6g"},
+            "from": r(2), "depth": "12 mm"});
+        let f = crate::doc::files::Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty())
+            .unwrap();
+        let classes: Vec<(String, Option<Follow>)> = f
+            .references()
+            .into_iter()
+            .map(|(role, _)| {
+                let c = Follow::classify(&f, &role);
+                (role, c)
+            })
+            .collect();
+        assert_eq!(
+            classes,
+            [
+                ("faces.0".to_owned(), Some(Follow::All)),
+                ("from".to_owned(), Some(Follow::One)),
+            ]
+        );
     }
 
     /// The 1 mm slot `c` cut across the box `b` (20 x 10 x 5 mm): short,
