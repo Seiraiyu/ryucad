@@ -22,10 +22,13 @@
 //! }
 //! ```
 //!
-//! `approvals` and `attestations` are reserved for the format the service
-//! will write (format 2): format 1 refuses them, as it refuses any key it
-//! doesn't know, and this build reads a format 2 record as
-//! `format_too_new`, never as a release it half understands.
+//! Release records are format 1, or 2 when another product than ryucad
+//! wrote them: then `built_with` is `{commit, product, version}`. Format 1
+//! refuses `approvals` and `attestations`, as it refuses any key it
+//! doesn't know, and a format 2 record whose `built_with` names no
+//! product reads as `format_too_new`, as every format 2 record did before
+//! (design 57 reserved 2 for approvals; design 261 put them in tags),
+//! never as a release half understood.
 
 use crate::RELEASES;
 use crate::config::Config;
@@ -41,6 +44,11 @@ use std::collections::BTreeMap;
 pub const RELEASE_KIND: &str = "ryupdm.release";
 pub const OBSOLETE_KIND: &str = "ryupdm.obsolete";
 pub const FORMAT: u64 = 1;
+/// The format of a release record another product than ryucad wrote:
+/// `built_with` is `{commit, product, version}` (design 629). Design 57
+/// reserved 2 for approvals in records; design 261 put them in signed
+/// tags, so the number was free.
+pub const PRODUCT_FORMAT: u64 = 2;
 
 /// Keys of a release record that a later format adds, and format 1 refuses.
 pub const RESERVED: [&str; 2] = ["approvals", "attestations"];
@@ -95,12 +103,29 @@ pub fn parse_name(file: &str) -> Option<(String, Kind)> {
         .then(|| (label.to_owned(), kind))
 }
 
-/// The ryucad build that rebuilt a release's results.
+/// The build that released a part, and rebuilt its results.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltWith {
+    /// ryucad's version; for another product's record (`product` set),
+    /// that product's version.
     pub ryucad: String,
+    /// ryukei's version; empty for another product's record.
     pub ryukei: String,
     pub commit: String,
+    /// The product, when it isn't ryucad: its records are format 2.
+    pub product: Option<String>,
+}
+
+impl BuiltWith {
+    /// Another product's build: `product` at `version`, from `commit`.
+    pub fn of_product(product: &str, version: &str, commit: &str) -> BuiltWith {
+        BuiltWith {
+            ryucad: version.to_owned(),
+            ryukei: String::new(),
+            commit: commit.to_owned(),
+            product: Some(product.to_owned()),
+        }
+    }
 }
 
 /// Who wrote a record: the Git identity, where Git's config has one, and
@@ -254,8 +279,12 @@ impl Record {
     }
 
     pub fn to_json(&self) -> Value {
+        let format = match self {
+            Record::Release(r) if r.built_with.product.is_some() => PRODUCT_FORMAT,
+            _ => FORMAT,
+        };
         let mut v = json!({
-            "format": FORMAT,
+            "format": format,
             "kind": self.kind().file_kind(),
             "label": self.label(),
             "part": self.part(),
@@ -267,9 +296,11 @@ impl Record {
         }
         if let Record::Release(r) = self {
             let props: Map<String, Value> = r.properties.clone().into_iter().collect();
-            v["built_with"] = json!({"commit": r.built_with.commit,
-                                     "ryucad": r.built_with.ryucad,
-                                     "ryukei": r.built_with.ryukei});
+            let b = &r.built_with;
+            v["built_with"] = match &b.product {
+                None => json!({"commit": b.commit, "ryucad": b.ryucad, "ryukei": b.ryukei}),
+                Some(p) => json!({"commit": b.commit, "product": p, "version": b.ryucad}),
+            };
             v["content"] = json!(r.content);
             v["properties"] = Value::Object(props);
             v["results"] = json!(r.results);
@@ -281,7 +312,18 @@ impl Record {
     /// Reads a record of `kind`. Whether it belongs where it was found is
     /// [`Records::read`]'s to say.
     pub fn from_json(v: &Value, kind: Kind) -> Result<Record> {
-        let mut o = header(v, kind.file_kind(), FORMAT)?;
+        // Only a release naming its product is format 2: any other record
+        // reads exactly as format 1's reader read it, a newer one as
+        // `format_too_new`.
+        let names_product =
+            kind == Kind::Release && v.get("built_with").and_then(|b| b.get("product")).is_some();
+        let newest = if names_product {
+            PRODUCT_FORMAT
+        } else {
+            FORMAT
+        };
+        let format = v.get("format").and_then(Value::as_u64).unwrap_or(FORMAT);
+        let mut o = header(v, kind.file_kind(), newest)?;
         let project = o.take("project")?;
         let project = project
             .as_str()
@@ -331,10 +373,24 @@ impl Record {
             .collect::<Result<_>>()?;
         let built = o.take("built_with")?;
         let mut b = Obj::new(&built, "/built_with")?;
-        let built_with = BuiltWith {
-            commit: text(&b.take("commit")?, "/built_with/commit")?,
-            ryucad: text(&b.take("ryucad")?, "/built_with/ryucad")?,
-            ryukei: text(&b.take("ryukei")?, "/built_with/ryukei")?,
+        let commit = text(&b.take("commit")?, "/built_with/commit")?;
+        let built_with = if format >= PRODUCT_FORMAT {
+            let product = text(&b.take("product")?, "/built_with/product")?;
+            if product == crate::NAMED {
+                return Err(invalid(
+                    "/built_with/product",
+                    "ryucad's release records are format 1",
+                ));
+            }
+            let version = text(&b.take("version")?, "/built_with/version")?;
+            BuiltWith::of_product(&product, &version, &commit)
+        } else {
+            BuiltWith {
+                commit,
+                ryucad: text(&b.take("ryucad")?, "/built_with/ryucad")?,
+                ryukei: text(&b.take("ryukei")?, "/built_with/ryukei")?,
+                product: None,
+            }
         };
         b.finish()?;
         let supersedes = match o.take("supersedes")? {
@@ -522,6 +578,7 @@ mod tests {
                 ryucad: "0.6.0".into(),
                 ryukei: "0.6.0".into(),
                 commit: "515f283".into(),
+                product: None,
             },
             released_by: ReleasedBy {
                 name: Some("Dave".into()),
@@ -590,6 +647,54 @@ mod tests {
         ] {
             assert_eq!(parse_name(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn another_products_release_is_format_2_and_names_it() {
+        let Record::Release(mut r) = release("p", "A", None) else {
+            unreachable!()
+        };
+        r.built_with = BuiltWith::of_product("ryueda", "0.5.0", "c0ffee");
+        let v = Record::Release(r.clone()).to_json();
+        assert_eq!(v["format"], json!(2));
+        assert_eq!(
+            v["built_with"],
+            json!({"commit": "c0ffee", "product": "ryueda", "version": "0.5.0"})
+        );
+        assert_eq!(
+            Record::from_json(&v, Kind::Release).unwrap(),
+            Record::Release(r)
+        );
+        // ryucad's stays format 1, byte for byte.
+        let cad = release("p", "A", None).to_json();
+        assert_eq!(cad["format"], json!(1));
+        assert_eq!(cad["built_with"].as_object().unwrap().len(), 3);
+        assert!(cad["built_with"].get("ryukei").is_some());
+        // Format 2 names a product other than ryucad, and only format 2 does.
+        let mut bad = v.clone();
+        bad["built_with"]["product"] = json!("ryucad");
+        assert_eq!(
+            Record::from_json(&bad, Kind::Release).unwrap_err().details["pointer"],
+            json!("/built_with/product")
+        );
+        let mut one = v.clone();
+        one["format"] = json!(1);
+        assert!(Record::from_json(&one, Kind::Release).is_err());
+        // ryucad's record at format 2 is too new, as it always was.
+        let mut two = cad.clone();
+        two["format"] = json!(2);
+        assert_eq!(
+            Record::from_json(&two, Kind::Release).unwrap_err().code,
+            Code::FormatTooNew
+        );
+        // Obsolete records have no builder: format 1 only.
+        let o = json!({"format": 2, "kind": "ryupdm.obsolete", "label": "A", "part": "p",
+                       "project": "0123456789abcdef0123456789abcdef",
+                       "released_by": {"participant": "agent"}});
+        assert_eq!(
+            Record::from_json(&o, Kind::Obsolete).unwrap_err().code,
+            Code::FormatTooNew
+        );
     }
 
     #[test]

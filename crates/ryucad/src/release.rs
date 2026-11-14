@@ -570,6 +570,7 @@ pub fn propose(
             ryucad: v.ryucad,
             ryukei: v.ryukei,
             commit: v.commit,
+            product: None,
         },
         released_by: released_by(&repo, participant),
         supersedes: p.supersedes,

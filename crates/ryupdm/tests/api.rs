@@ -80,6 +80,7 @@ fn release(dir: &Path, label: &str, supersedes: Option<&str>) -> Record {
             ryucad: "0".into(),
             ryukei: "0".into(),
             commit: "c".into(),
+            product: None,
         },
         released_by: ReleasedBy {
             name: None,
@@ -222,6 +223,7 @@ fn release_of(dir: &Path, part: &str, label: &str, supersedes: Option<&str>) -> 
             ryucad: "0".into(),
             ryukei: "0".into(),
             commit: "c".into(),
+            product: None,
         },
         released_by: ReleasedBy {
             name: None,

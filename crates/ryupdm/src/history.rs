@@ -1351,6 +1351,7 @@ pub(crate) mod tests {
                     ryucad: "0".into(),
                     ryukei: "0".into(),
                     commit: "c".into(),
+                    product: None,
                 },
                 released_by: by,
                 supersedes: None,
