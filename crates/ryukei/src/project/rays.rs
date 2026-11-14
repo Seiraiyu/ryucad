@@ -4,13 +4,15 @@
 use super::hidden::Visibility;
 use super::{Image, ImageCurve, View};
 use crate::geom::{Box3, Curve, Line, Point2, Point3};
+use crate::intersect::Side;
 use crate::intersect::broad::BoxTree;
 use crate::intersect::{
-    CurveHit, Place, curve_surface_in, face_box, face_tolerance, point_in_face,
+    CurveHit, FaceIndex, Failure, Place, curve_surface_in, face_box, face_tolerance,
 };
 use crate::tol::LINEAR_RESOLUTION;
-use crate::topo::{Body, FaceId};
+use crate::topo::{Body, EdgeId, FaceId, Sense};
 use crate::work::{Meter, Scope};
+use std::sync::OnceLock;
 
 /// How far past the nearest face a ray runs.
 const PAST: f64 = 1e-6;
@@ -23,6 +25,10 @@ pub(super) struct Scene<'a> {
     tree: BoxTree,
     /// The largest depth any face reaches.
     far: f64,
+    /// Each face's boundary, prepared on its first ray and shared by every
+    /// ray of the view on any thread (plan 17.C): the same places
+    /// `point_in_face` gives.
+    indexes: Vec<OnceLock<FaceIndex>>,
 }
 
 /// What a ray from a point of a piece must know of the piece.
@@ -49,6 +55,77 @@ pub(super) enum Count {
     Unsure,
 }
 
+/// A ray's hit placed on an edge of the face it hit, kept until every
+/// face has been met: the edge's two faces' hits decide it together
+/// (#643, plan 17.C).
+#[derive(Clone, Copy, Debug)]
+struct EdgeHit {
+    body: usize,
+    edge: EdgeId,
+    face: FaceId,
+    point: Point3,
+    /// The ray leaves the material through this face there.
+    leaving: bool,
+}
+
+/// Whether a ray crossing face `f`'s surface from `before` to `after`
+/// leaves the material: it moves to the side the natural normal points
+/// to, and the face's sense says whether that normal points out of the
+/// material. `None` unless it is a crossing (`Beyond`, or a touch).
+fn leaving(body: &Body, f: FaceId, before: Side, after: Side) -> Option<bool> {
+    let along = match (before, after) {
+        (Side::Negative, Side::Positive) => true,
+        (Side::Positive, Side::Negative) => false,
+        _ => return None,
+    };
+    Some(along == (body.faces[f].sense == Sense::Forward))
+}
+
+/// The faces in front that a ray's edge hits add (#643): for each edge,
+/// a seam's one crossing counts once; an edge between two faces, both
+/// crossed near one point, counts once when the ray leaves (or enters)
+/// through both, and not at all when it leaves through one and enters
+/// through the other, whether the edge is convex or concave. `None` (the
+/// ray settles nothing, as before) for any other pattern: one face of
+/// two crossed, three hits or more, or hits apart along the edge.
+fn settle_edges(hits: &[EdgeHit], bodies: &[&Body]) -> Option<u32> {
+    let mut done = vec![false; hits.len()];
+    let mut n = 0;
+    for i in 0..hits.len() {
+        if done[i] {
+            continue;
+        }
+        let h = hits[i];
+        let same: Vec<usize> = (i..hits.len())
+            .filter(|&j| hits[j].body == h.body && hits[j].edge == h.edge)
+            .collect();
+        for &j in &same {
+            done[j] = true;
+        }
+        let body = bodies[h.body];
+        let faces: Vec<FaceId> = body
+            .edge_fins(h.edge)
+            .map(|fi| body.loops[body.fins[fi].loop_].face)
+            .collect();
+        let reach = 2.0 * body.edges[h.edge].tolerance.get() + 2.0 * LINEAR_RESOLUTION;
+        match (faces.as_slice(), same.as_slice()) {
+            ([f, g], [_]) if f == g && h.face == *f => n += 1,
+            ([f, g], [j, k]) if f != g => {
+                let (a, b) = (hits[*j], hits[*k]);
+                let pair = (a.face == *f && b.face == *g) || (a.face == *g && b.face == *f);
+                if !pair || a.point.distance(b.point) > reach {
+                    return None;
+                }
+                if a.leaving == b.leaving {
+                    n += 1;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(n)
+}
+
 impl<'a> Scene<'a> {
     pub(super) fn new(view: &'a View, bodies: &'a [&'a Body]) -> Self {
         let mut faces = Vec::new();
@@ -72,13 +149,24 @@ impl<'a> Scene<'a> {
                 faces.push((b, f));
             }
         }
+        let n = faces.len();
         Self {
             view,
             bodies,
             faces,
             tree: BoxTree::new(boxes),
             far,
+            indexes: (0..n).map(|_| OnceLock::new()).collect(),
         }
+    }
+
+    /// Where `uv` lies against the `i`th face.
+    fn place(&self, i: usize, uv: Point2) -> Result<Place, Failure> {
+        let (b, f) = self.faces[i];
+        let body = self.bodies[b];
+        self.indexes[i]
+            .get_or_init(|| FaceIndex::new(body, f))
+            .place(body, uv, 0.0)
     }
 
     /// The faces whose image box holds `p`'s image and reaches in front
@@ -107,6 +195,7 @@ impl<'a> Scene<'a> {
         let line = Curve::Line(line);
         let reach = (self.far - self.view.depth(p)).max(0.0) + PAST;
         let mut n = 0u32;
+        let mut at_edges: Vec<EdgeHit> = Vec::new();
         for i in self.candidates(p) {
             // A face a ray meets.
             if m.charge(1).is_err() {
@@ -145,17 +234,30 @@ impl<'a> Scene<'a> {
                             continue;
                         }
                         let (u, v) = surface.project(point).param;
-                        match point_in_face(body, f, Point2::new(u, v)) {
+                        match self.place(i, Point2::new(u, v)) {
                             Ok(Place::Outside) => {}
                             Ok(Place::Inside) if before != after => n += 1,
                             Ok(_) if ray.lenient => {}
+                            Ok(Place::OnEdge(e)) => match leaving(body, f, before, after) {
+                                Some(leaving) => at_edges.push(EdgeHit {
+                                    body: b,
+                                    edge: e,
+                                    face: f,
+                                    point,
+                                    leaving,
+                                }),
+                                None => return Count::Unsure,
+                            },
                             _ => return Count::Unsure,
                         }
                     }
                 }
             }
         }
-        Count::Settled(n)
+        match settle_edges(&at_edges, self.bodies) {
+            Some(k) => Count::Settled(n + k),
+            None => Count::Unsure,
+        }
     }
 }
 
@@ -323,5 +425,35 @@ mod tests {
             judge(&scene, &along, &ic, &ray, false, &m),
             Visibility::Visible
         );
+    }
+
+    /// #643's rule: a ray through a block's vertical edge, across both
+    /// its faces. Seen along `(1, −1, 0)`, a point inside the block
+    /// leaves it through both faces at the edge: one face in front. Seen
+    /// along `(1, 1, 0)`, a point beside the block grazes the edge,
+    /// leaving through one face and entering through the other: none.
+    #[test]
+    fn a_ray_through_an_edge_is_settled_by_its_two_faces() {
+        let (b, _) = primitive::block(OpKey(4), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+        let bodies = [&b];
+        // unmetered: a unit test
+        let m = Meter::free();
+        let ray = Ray {
+            body: 1,
+            own: &[],
+            skip_own: 0.0,
+            near: 1e-6,
+            lenient: false,
+        };
+        let edge = Point3::new(0.01, 0.0, 0.005);
+        for (t, want) in [
+            (Vector3::new(1.0, -1.0, 0.0), Count::Settled(1)),
+            (Vector3::new(1.0, 1.0, 0.0), Count::Settled(0)),
+        ] {
+            let v = View::new(t, Vector3::new(0.0, 0.0, 1.0)).unwrap();
+            let scene = Scene::new(&v, &bodies);
+            let back = edge - v.towards().get() * 0.005;
+            assert_eq!(scene.count(back, &ray, &m), want, "{t:?}");
+        }
     }
 }

@@ -62,6 +62,7 @@ pub(crate) use fit::{
     fit_pcurve_within, pcurve_certified,
 };
 pub(crate) use implicit::curve_distance;
+pub(crate) use inface::FaceIndex;
 pub use inface::{Place, point_in_face};
 pub use pipe::Cell;
 pub use pipe_cs::curve_pipe;
