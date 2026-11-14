@@ -100,3 +100,10 @@ The design is document 296 in the Coxswain planning project `ryucad-ryukei`; thi
 
     That is 0.55 to 0.58 of OCCT's time; the load after is the test's own.
   - **The slowest bodies**, in every run 303, 1382, 1101, 1257, 489, 869, 834 and 1530 at 0.8 to 1.4 s each (body 1257, 283,168 triangles, the slowest in two runs at 1.32 and 1.41 s).
+
+## Faces of no width (decided in the v0.9.1 burn-down, #796)
+
+- **Why.** A file can leave a face between two copies of one edge, where two faces meet: one loop of two edges between the same two vertices, lying on each other. Its loop makes no region of its parameter plane, so the mesher's domain refused it, and the face was a `BadDomain` fault, drawn as a hole.
+- **The rule.** The mesher's `no_width` (mesh/mod.rs) judges such a face: one loop of two different edges with the same two end vertices, each edge's samples within both edges' tolerances, the chord and the resolution of the other's polyline. Two arcs of one circle round a disc aren't one. A face of no width meshes as no triangles and no fault (`FaceMesh` with empty ranges), and the meshes either side meet along both its edges.
+- **Watertight still means it.** `check_mesh` lets an edge segment have one use only on a sheet's laminar edge or on an edge of a face it re-derives as of no width (`slit_face`: the same topology, each edge's samples within both edges' tolerances of the other edge's curve, with twice the larger polyline sagitta as slack). Any other face meshed as no triangles, for example one whose triangles were all lost to welding or a pole's clean-up, is a hole and reports `OpenEdge`. Neither `BodyMesh` nor its codec changed.
+- **Testing.** `heal::reference`'s `a_face_of_no_width_between_coincident_edges_meshes_empty` (a block with an edge split into two copies and a sliver along them), and `mesh::tests::a_face_meshed_as_no_triangles_is_a_hole_unless_it_has_no_width` (a block face's triangles dropped). No golden moved.
