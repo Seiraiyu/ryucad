@@ -115,6 +115,41 @@ fn ryueda_out(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+/// ryueda's PDM over the breakout (design 629), in a folder of its own
+/// so no other key's files change: the design's content hash (which
+/// covers the `self` components placed) and defaults through ryupdm's
+/// trait, and `release propose --dry-run` in a repository, this
+/// machine's supply findings left out. Neither reads the random project
+/// ID `init` draws.
+fn pdm(golden: &mut Golden, board: &Path) {
+    use ryupdm::product::Product;
+    std::fs::create_dir_all(board).unwrap();
+    ryueda(board, 1, &["init"]);
+    breakout_at(board);
+    let files = ryueda::session::current(board).unwrap();
+    let id = ryueda::id::Id::parse("board", "part").unwrap();
+    let content = <ryueda::Eda as Product>::content(&files, &id).unwrap();
+    golden.json("pdm.breakout.content", &Value::String(content));
+    let defaults = <ryueda::Eda as Product>::defaults(&files, &id).unwrap();
+    golden.json(
+        "pdm.breakout.defaults",
+        &serde_json::to_value(defaults).unwrap(),
+    );
+    git(board, &["init", "-q"]);
+    let dry = |threads: usize| {
+        let mut v = ryueda(
+            board,
+            threads,
+            &["release", "propose", "board", "--dry-run"],
+        );
+        v.as_object_mut().unwrap().remove("supply");
+        v
+    };
+    let one = dry(1);
+    assert_eq!(dry(8), one, "one thread and eight");
+    golden.json("pdm.breakout.dry_run", &one);
+}
+
 /// The sensor breakout entered by its script in `board` (made by `init`).
 fn breakout_at(board: &Path) {
     for (path, text) in breakout::footprints() {
@@ -144,6 +179,7 @@ fn netlists_and_erc_are_bit_exact() {
         assert_eq!(ryueda(&board, 8, &[what]), one, "{what}");
         golden.json(&format!("breakout.{what}"), &one);
     }
+    pdm(&mut golden, &dir.path().join("pdm").join("board"));
     let made = dir.path().join("generated");
     generated::write(&made, 8, 16);
     let p = ryueda::project::Project::load(&made).unwrap();

@@ -203,6 +203,15 @@ pub fn absolute_params(method: &str, params: &mut Value, here: &Path) {
         }
         return;
     }
+    // An ensure's features are feature.add's params (plan 31.C).
+    if method == "part.ensure" {
+        if let Some(Value::Array(features)) = map.get_mut("features") {
+            for f in features {
+                absolute_params("feature.add", f, here);
+            }
+        }
+        return;
+    }
     let paths = PATH_PARAMS
         .iter()
         .find(|(m, _)| *m == method)
@@ -292,6 +301,23 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn an_ensures_features_are_made_absolute_as_feature_adds() {
+        let here = Path::new("work");
+        let mut params = json!({"part": "a", "features": [
+            {"id": "i", "type": "instance", "of": "p", "rev": "worktree:../arm"},
+            {"id": "b", "type": "box"}
+        ]});
+        absolute_params("part.ensure", &mut params, here);
+        assert_eq!(
+            params["features"][0]["rev"],
+            format!("{}{}", crate::session::WORKTREE, abs(here, "../arm"))
+        );
+        let mut ops = json!({"ops": [{"method": "part.ensure", "params": params.clone()}]});
+        absolute_params("batch", &mut ops, here);
+        assert_eq!(ops["ops"][0]["params"], params, "already absolute stays");
     }
 
     #[test]

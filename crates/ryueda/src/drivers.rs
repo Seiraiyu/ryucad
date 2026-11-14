@@ -12,7 +12,7 @@ pub use crate::project::ATTRIBUTES;
 /// The lines ryueda needs, beside its manifest. `eol=lf` keeps files
 /// canonical where Git for Windows checks text out with CRLF; model files
 /// are kept byte for byte (their BLAKE3s name them).
-pub const LINES: [&str; 12] = [
+pub const LINES: [&str; 15] = [
     "ryueda.json merge=ryueda diff=ryueda text eol=lf",
     "erc.json merge=ryueda diff=ryueda text eol=lf",
     "lint.json merge=ryueda diff=ryueda text eol=lf",
@@ -23,6 +23,9 @@ pub const LINES: [&str; 12] = [
     "classes/*.json merge=ryueda diff=ryueda text eol=lf",
     "blocks/**/*.json merge=ryueda diff=ryueda text eol=lf",
     "library/**/*.json merge=ryueda diff=ryueda text eol=lf",
+    "ryupdm.json merge=ryueda diff=ryueda text eol=lf",
+    "properties/*.json merge=ryueda diff=ryueda text eol=lf",
+    "releases/**/*.json merge=ryueda diff=ryueda text eol=lf",
     crate::kicad::import::MODELS_LINE,
     ".gitattributes text eol=lf",
 ];
@@ -105,6 +108,9 @@ mod tests {
             "library/**/*.json merge=ryueda diff=ryueda text eol=lf",
             "library/models/** binary",
             ".gitattributes text eol=lf",
+            "ryupdm.json merge=ryueda diff=ryueda text eol=lf",
+            "properties/*.json merge=ryueda diff=ryueda text eol=lf",
+            "releases/**/*.json merge=ryueda diff=ryueda text eol=lf",
         ] {
             assert!(LINES.contains(&l), "{l}");
         }

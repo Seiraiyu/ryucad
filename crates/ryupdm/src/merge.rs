@@ -158,7 +158,7 @@ type Key = (String, Id, String);
 /// conflict, and nothing can be judged against it.
 fn faults<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
     let mut out = BTreeMap::new();
-    let Ok(config) = Config::read(src) else {
+    let Ok(config) = Config::read_in(src, P::NAME) else {
         return out;
     };
     let unit = crate::product::identity::<P>(src).map(|i| i.unit);
@@ -199,7 +199,7 @@ fn faults<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fa
             }
         }
     }
-    let Ok(records) = Records::read(src) else {
+    let Ok(records) = Records::read_in(src, P::NAME) else {
         return out;
     };
     let official = |path: &str| releases.official.contains_key(path);

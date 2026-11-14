@@ -9,6 +9,7 @@ use ryu_doc::id::{Id, ProjectId};
 use ryu_doc::source::Source;
 use ryu_doc::units::Unit;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// What a project's manifest says that the core reads.
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +60,22 @@ pub trait Product: ryu_git::Layout {
     /// What the manifest (as `read_json` read it) says; `None` when it
     /// doesn't read as the product's manifest.
     fn identity(manifest: &Value) -> Option<Identity>;
+
+    /// Properties the product's own files give `part` where its
+    /// properties file doesn't set them (design 629): read, never
+    /// written, never revising. None by default.
+    fn defaults(src: &dyn Source, part: &Id) -> Result<BTreeMap<String, Value>> {
+        let _ = (src, part);
+        Ok(BTreeMap::new())
+    }
+
+    /// Whether a project file (relative to the project) may belong to
+    /// any part: one a commit staging it may make every part with records
+    /// stale (a ryueda block, footprint or `erc.json`). None by default.
+    fn shared(path: &str) -> bool {
+        let _ = path;
+        false
+    }
 }
 
 /// The identity of the project `src` holds, `None` when it has no

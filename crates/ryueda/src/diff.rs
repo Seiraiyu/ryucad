@@ -912,8 +912,16 @@ pub fn between(
 ) -> Result<Value> {
     let (a, b) = (Read::of(session, from)?, Read::of(session, to)?);
     let files = session.snapshot();
+    let releases = crate::pdm::releases_or_none(session);
     let p = session.project();
-    diff(&a.side(from, &files, p), &b.side(to, &files, p), opts)
+    let (sa, sb) = (a.side(from, &files, p), b.side(to, &files, p));
+    let mut v = diff(&sa, &sb, opts)?;
+    // ryupdm's files, only when something there moved: a project without
+    // PDM diffs as it always has.
+    if let Some(d) = crate::pdm::diff::pdm(sa.files, sb.files, &releases) {
+        v["pdm"] = d;
+    }
+    Ok(v)
 }
 
 #[cfg(test)]

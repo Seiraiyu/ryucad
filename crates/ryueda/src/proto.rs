@@ -262,6 +262,93 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Writes ryupdm's default settings, keeping any the project has.
+    #[serde(rename = "pdm.init")]
+    PdmInit {},
+    /// Gives a copied project an ID of its own (`forked_from`).
+    #[serde(rename = "pdm.new_id")]
+    PdmNewId {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// ryupdm's settings, with their defaults filled in.
+    #[serde(rename = "pdm.config")]
+    PdmConfig {},
+    /// Changes ryupdm's settings; what isn't given stays.
+    #[serde(rename = "pdm.configure")]
+    PdmConfigure {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revisions: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        release_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        properties: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approvals: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bump: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A part's PDM properties: every core and declared one, with where
+    /// each value comes from, and its release state.
+    #[serde(rename = "props.get")]
+    PropsGet { part: String },
+    /// Sets a part's PDM properties; `null` clears one.
+    #[serde(rename = "props.set")]
+    PropsSet {
+        part: String,
+        properties: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Writes the record of each named part's next revision (or every part
+    /// in work or modified, with `all`), as proposals, in one change.
+    #[serde(rename = "release.propose")]
+    ReleasePropose {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+    },
+    /// Writes an obsolete record for a part's latest official revision.
+    #[serde(rename = "release.obsolete")]
+    ReleaseObsolete {
+        part: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Release records (or one part's), where each became official, their
+    /// tags and approvals, and each part's state.
+    #[serde(rename = "release.list")]
+    ReleaseList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// The release checks; with `results`, official releases' netlists
+    /// and ERC are worked out again.
+    #[serde(rename = "release.check")]
+    ReleaseCheck {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        results: bool,
+    },
+    /// Creates the local `ryupdm/` tag of every official release that has
+    /// none and moves those that point elsewhere.
+    #[serde(rename = "release.sync")]
+    ReleaseSync {},
     /// The records a key names (`lcsc:C1525`, `mpn:<part number>`,
     /// `library:<reference>`). Catalogues never fetch per part, so
     /// `refresh` says how to refresh one and `offline` changes nothing.
@@ -1187,6 +1274,12 @@ impl Request {
                 | Request::LintConfigure { .. }
                 | Request::StandardsSet { .. }
                 | Request::PartsConfigure { .. }
+                | Request::PdmInit { .. }
+                | Request::PdmNewId { .. }
+                | Request::PdmConfigure { .. }
+                | Request::PropsSet { .. }
+                | Request::ReleasePropose { .. }
+                | Request::ReleaseObsolete { .. }
                 | Request::Layout { .. }
                 | Request::LayoutPlace { .. }
                 | Request::Undo { .. }
@@ -1253,6 +1346,45 @@ mod tests {
                 expected_revision: Some("r".into()),
             },
             Request::Undo { entry: None },
+            Request::PdmInit {},
+            Request::PdmNewId {
+                expected_revision: Some("r".into()),
+            },
+            Request::PdmConfig {},
+            Request::PdmConfigure {
+                revisions: Some("numeric".into()),
+                release_branch: None,
+                pattern: Some("".into()),
+                properties: [("finish".to_owned(), Value::Null)].into_iter().collect(),
+                approvals: Some(Value::Bool(false)),
+                bump: None,
+                force: true,
+                expected_revision: None,
+            },
+            Request::PropsGet { part: "d".into() },
+            Request::ReleasePropose {
+                parts: vec!["d".into()],
+                all: false,
+                note: Some("first".into()),
+                expected_revision: None,
+                dry_run: true,
+            },
+            Request::ReleaseObsolete {
+                part: "d".into(),
+                label: "A".into(),
+                note: None,
+                expected_revision: Some("r".into()),
+            },
+            Request::ReleaseList { part: None },
+            Request::ReleaseCheck { results: true },
+            Request::ReleaseSync {},
+            Request::PropsSet {
+                part: "d".into(),
+                properties: [("number".to_owned(), json!("100-0001"))]
+                    .into_iter()
+                    .collect(),
+                expected_revision: Some("r".into()),
+            },
             Request::Subscribe {
                 topics: vec!["project".into()],
             },
