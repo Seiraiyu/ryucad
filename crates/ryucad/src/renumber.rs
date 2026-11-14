@@ -2005,4 +2005,30 @@ mod tests {
         );
         assert_eq!(read("parts/enc/features/m.json")["solid"], "board-2/u1");
     }
+
+    #[test]
+    fn a_cosmetic_thread_follows_its_faces_and_start() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let r = |k: u8| json!({"feature": "shaft", "name": old(k)});
+        let t = json!({"format": 25, "kind": "ryucad.feature", "type": "cosmetic_thread",
+            "faces": [r(1)], "from": r(2), "depth": "12 mm",
+            "thread": {"standard": "iso_metric", "size": "M10"}});
+        let f = files(&[("parts/a/features/t.json", t)]);
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "shaft".into(),
+            to: "shaft2".into(),
+        };
+        let names = BTreeMap::from([(
+            "shaft".to_owned(),
+            (1..=2)
+                .map(|k| (old(k), new(k)))
+                .collect::<BTreeMap<_, _>>(),
+        )]);
+        let out = renumbered(&f, &rename, &names);
+        let d = serde_json::from_slice::<Value>(&out["parts/a/features/t.json"]).unwrap();
+        let to = |k: u8| json!({"feature": "shaft2", "name": new(k)});
+        assert_eq!((&d["faces"], &d["from"]), (&json!([to(1)]), &to(2)));
+    }
 }

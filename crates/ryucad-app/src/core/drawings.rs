@@ -791,6 +791,9 @@ pub struct Tile {
     pub error: Option<ryucad::error::Error>,
     /// A line said under the sheet (why a drag wrote nothing, a conflict).
     pub note: Option<String>,
+    /// Every part's drawings, for the tree: ID, name, and whether its
+    /// file doesn't read (`drawing.list` of the project).
+    pub drawing_rows: BTreeMap<String, Vec<(String, String, bool)>>,
 }
 
 impl Tile {

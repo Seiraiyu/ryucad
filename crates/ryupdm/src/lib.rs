@@ -1,4 +1,4 @@
-//! ryupdm: product data management for ryucad projects, local and
+//! ryupdm: product data management for ryu projects, local and
 //! offline. A project's parts carry properties checked against the
 //! project's settings (this crate's [`props`] and [`config`]), and are
 //! released under labels its revision scheme derives ([`label`]), each
@@ -10,13 +10,14 @@
 //! A merge's result is checked against its sides for faults neither had
 //! ([`merge`]).
 //!
-//! ryupdm reads projects through `ryucad-doc` and never calls the kernel,
+//! ryupdm reads projects through a [`product::Product`]; ryucad's is
+//! [`cad::Cad`], behind the default `cad` feature. It never calls the kernel,
 //! a session, the daemon or the app: ryucad exposes it through its
 //! protocol and CLI, and a service can link it to read any revision.
 //!
 //! # As a library
 //!
-//! Every function takes a [`ryucad_doc::doc::source::Source`], and where
+//! Every function takes a [`ryu_doc::source::Source`], and where
 //! history matters a `gix::Repository` and the project's place in it, so
 //! it works on a bare repository at any commit ([`history::files`] reads
 //! one): [`content::hash`], [`props::Pdm::read`],
@@ -29,27 +30,54 @@
 
 pub mod approvals;
 pub mod attest;
+#[cfg(feature = "cad")]
 pub mod bom;
+#[cfg(feature = "cad")]
+pub mod cad;
 pub mod check;
 pub mod config;
+#[cfg(feature = "cad")]
 pub mod content;
+pub mod dependents;
 pub mod deps;
+pub mod git;
 pub mod history;
+#[cfg(feature = "cad")]
 pub mod items;
 pub mod label;
 pub mod merge;
 pub mod package;
+pub mod product;
 pub mod props;
 pub mod record;
 pub mod state;
+#[cfg(feature = "cad")]
 pub mod structure;
+#[cfg(test)]
+pub(crate) mod testing;
+#[cfg(feature = "cad")]
 pub mod where_used;
 
-use ryucad_doc::doc::canonical;
-use ryucad_doc::doc::id::ProjectId;
-use ryucad_doc::doc::project::conflicted;
-use ryucad_doc::doc::source::Source;
-use ryucad_doc::error::{Code, Error, Result};
+/// ryupdm's settings, beside a project's manifest, in every product.
+pub const PDM_CONFIG: &str = "ryupdm.json";
+/// The folder of release records, beside a project's manifest.
+pub const RELEASES: &str = "releases";
+
+/// The product named in the messages of readers that aren't yet told
+/// which product reads them: ryupdm's own files (settings, properties,
+/// records, attestations, packages). Plan 10.B threads the product
+/// through them; until then every message reads as it always has.
+pub(crate) const NAMED: &str = "ryucad";
+
+/// [`ryu_doc::files::header_in`] for ryupdm's own files.
+pub(crate) fn header<'a>(v: &'a Value, kind: &str, newest: u64) -> Result<ryu_doc::files::Obj<'a>> {
+    ryu_doc::files::header_in(v, kind, newest, NAMED)
+}
+
+use ryu_doc::canonical;
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::ProjectId;
+use ryu_doc::source::Source;
 use serde_json::Value;
 
 /// A new project ID: 128 bits from the operating system's random source.
@@ -70,7 +98,7 @@ pub(crate) fn read_json(src: &dyn Source, at: &str) -> Result<Option<Value>> {
         Error::new(Code::InvalidJson, format!("{at} is not UTF-8")).with("path", at)
     })?;
     let v = canonical::parse(text).map_err(|e| e.with("path", at))?;
-    match conflicted(&v, at) {
+    match ryu_doc::files::conflicted_in(&v, at, NAMED) {
         Some(e) => Err(e),
         None => Ok(Some(v)),
     }
@@ -78,6 +106,17 @@ pub(crate) fn read_json(src: &dyn Source, at: &str) -> Result<Option<Value>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_cores_folders_are_ryucads() {
+        assert_eq!(super::PDM_CONFIG, "ryupdm.json");
+        assert_eq!(super::RELEASES, "releases");
+        #[cfg(feature = "cad")]
+        {
+            assert_eq!(super::PDM_CONFIG, ryucad_doc::doc::project::PDM_CONFIG);
+            assert_eq!(super::RELEASES, ryucad_doc::doc::project::RELEASES);
+        }
+    }
+
     use super::*;
 
     #[test]

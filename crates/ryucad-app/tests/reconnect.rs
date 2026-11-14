@@ -42,7 +42,10 @@ fn a_lost_daemon_is_replaced_and_the_window_catches_up() {
     );
     ws.share_camera(&camera);
     frames(&mut ws, |ws| {
-        ws.people.get(ws.me()).is_some_and(|m| m.camera.is_some())
+        ws.session
+            .people
+            .get(ws.me())
+            .is_some_and(|m| m.camera.is_some())
     });
     p.ok(&["daemon", "stop"]);
     frames(&mut ws, |ws| ws.lost);
@@ -64,10 +67,13 @@ fn a_lost_daemon_is_replaced_and_the_window_catches_up() {
         !ws.lost && ws.part("q").is_some() && boss_hash(ws).is_some_and(|h| Some(h) != before)
     });
     assert_ne!(ws.me(), me);
-    assert!(ws.people.get(ws.me()).is_some());
+    assert!(ws.session.people.get(ws.me()).is_some());
     // The new session hears the window's camera again, unmoved.
     frames(&mut ws, |ws| {
-        ws.people.get(ws.me()).is_some_and(|m| m.camera.is_some())
+        ws.session
+            .people
+            .get(ws.me())
+            .is_some_and(|m| m.camera.is_some())
     });
     // While it was away a part went: it goes from the window too.
     p.ok(&["daemon", "stop"]);
@@ -100,10 +106,12 @@ fn panels_asked_for_while_the_daemon_went_come_back() {
     p.ok(&["daemon", "stop"]);
     ws.show_params(Some("p"));
     frames(&mut ws, |ws| ws.lost);
-    frames(&mut ws, |ws| !ws.lost && ws.idle() && ws.params.is_some());
+    frames(&mut ws, |ws| {
+        !ws.lost && ws.idle() && ws.parameters.params.is_some()
+    });
     // A save lost the same way leaves what was typed, ready to save again.
     p.ok(&["daemon", "stop"]);
-    let params = ws.params.as_mut().unwrap();
+    let params = ws.parameters.params.as_mut().unwrap();
     let row = params
         .params
         .iter_mut()
@@ -113,7 +121,7 @@ fn panels_asked_for_while_the_daemon_went_come_back() {
     ws.save_params();
     frames(&mut ws, |ws| ws.lost);
     frames(&mut ws, |ws| !ws.lost && ws.idle());
-    let params = ws.params.as_ref().unwrap();
+    let params = ws.parameters.params.as_ref().unwrap();
     assert!(!params.saving);
     assert!(params.dirty());
 }
@@ -133,6 +141,7 @@ fn a_reconnected_window_keeps_its_focus() {
         !ws.lost
             && ws.idle()
             && ws
+                .session
                 .people
                 .get(ws.me())
                 .is_some_and(|m| m.focus.as_deref() == Some("p"))

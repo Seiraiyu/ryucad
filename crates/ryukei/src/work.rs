@@ -100,7 +100,9 @@ impl<'a> Work<'a> {
         self.projections.load(Ordering::Relaxed)
     }
 
-    fn cancelled(&self) -> bool {
+    /// Whether the cancel flag is set: for callers that loop over kernel
+    /// calls and stop between them.
+    pub fn cancelled(&self) -> bool {
         self.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
     }
 }

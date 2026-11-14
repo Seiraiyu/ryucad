@@ -10,7 +10,8 @@
 //! face, or changing what a tweak turns about, is an agent's work. Each
 //! save is one `feature.edit` against the revision read.
 
-use super::{Choice, Field, Flag, Picks, text, texts};
+use super::{Choice, FeatureForm, Field, Flag, Picks, text, texts};
+use ryucad::error::Error;
 use ryucad::proto::{FeatureFields, Flip};
 use serde_json::{Value, json};
 
@@ -623,6 +624,49 @@ impl TweakForm {
             r.given(out);
         }
     }
+}
+
+impl FeatureForm for TweakForm {
+    fn read(ty: &str, v: &Value) -> Option<TweakForm> {
+        TweakForm::from_show(ty, v)
+    }
+    fn kind_fields(&self) -> Vec<&Field> {
+        self.fields()
+    }
+    fn kind_fields_mut(&mut self) -> Vec<&mut Field> {
+        self.fields_mut()
+    }
+    fn kind_dirty(&self) -> bool {
+        self.dirty()
+    }
+    fn kind_revert(&mut self) {
+        self.revert();
+    }
+    fn kind_given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        self.given(out);
+        Ok(())
+    }
+    // A tweak's groups came first in `Form::at_pointer`, whatever their
+    // length; nothing else of a tweak's was asked.
+    fn kind_at_pointer(&mut self, steps: &[&str]) -> Option<&mut Field> {
+        match steps {
+            ["groups", ..] => self.at_pointer(steps),
+            _ => None,
+        }
+    }
+}
+
+/// The tree's icon of a type this kind owns.
+pub(crate) fn icon(ty: &str, _op: Option<&str>, _form: Option<&str>) -> Option<&'static str> {
+    Some(match ty {
+        "draft" => "draft",
+        "move_face" => "move-face",
+        "replace_face" => "replace-face",
+        "delete_face" => "delete-face",
+        "delete_blend" => "delete-blend",
+        "resize_blend" => "resize-blend",
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

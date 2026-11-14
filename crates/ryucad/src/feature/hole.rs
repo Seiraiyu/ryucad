@@ -21,7 +21,7 @@ fn hole_report(
     unit: Unit,
     tables: crate::hole::derive::Tables,
 ) -> Value {
-    use crate::doc::hole::{Bottom, Depth, HoleForm};
+    use crate::doc::hole::{Bottom, Depth, Far, HoleForm};
     let mut v = h.fields();
     v["spec"] = json!(crate::hole::spec::canonical(h, unit));
     match crate::hole::derive::derive(h, tables) {
@@ -48,10 +48,23 @@ fn hole_report(
         HoleForm::Countersink { diameter, angle } => {
             v["countersink"] = mouth(&[("diameter", diameter), ("angle", angle)]);
         }
+        HoleForm::Counterdrill {
+            diameter,
+            depth,
+            angle,
+        } => {
+            v["counterdrill"] =
+                mouth(&[("diameter", diameter), ("depth", depth), ("angle", angle)]);
+        }
+        HoleForm::Spotface { diameter, depth } => {
+            v["spotface"] = mouth(&[("diameter", diameter), ("depth", depth)]);
+        }
     }
     match &h.depth {
         Depth::Blind(q) => v["depth"] = json!({"blind": q.report()}),
         Depth::ThroughAll => {}
+        Depth::ThroughNext => v["depth"] = json!("through_next"),
+        Depth::Tip(q) => v["depth"] = json!({"tip": q.report()}),
         Depth::UpTo { target, offset } => {
             v["depth"]["up_to"]["target"] = json!(target.text(part));
             if let Some(q) = offset {
@@ -61,6 +74,24 @@ fn hole_report(
     }
     if let Bottom::Drill(q) = &h.bottom {
         v["bottom"] = json!({"drill": q.report()});
+    }
+    if let Some(n) = &h.near {
+        let mut x = json!({"diameter": n.diameter.report()});
+        if let Some(a) = &n.angle {
+            x["angle"] = a.report();
+        }
+        v["near"] = x;
+    }
+    match &h.far {
+        Some(Far::Countersink { diameter, angle }) => {
+            v["far"] =
+                json!({"countersink": {"diameter": diameter.report(), "angle": angle.report()}});
+        }
+        Some(Far::Counterbore { diameter, depth }) => {
+            v["far"] =
+                json!({"counterbore": {"diameter": diameter.report(), "depth": depth.report()}});
+        }
+        None => {}
     }
     v
 }
@@ -76,13 +107,18 @@ fn error_json(e: &Error) -> Value {
     v
 }
 
-pub(crate) const HOLE: [&str; 22] = [
+pub(crate) const HOLE: [&str; 27] = [
     "sketch",
     "points",
     "form",
     "diameter",
     "counterbore",
     "countersink",
+    "counterdrill",
+    "spotface",
+    "near",
+    "far",
+    "thread_wall",
     "depth",
     "bottom",
     "targets",
@@ -131,6 +167,95 @@ fn tap_drill_json(s: &str) -> Result<Value> {
     }
 }
 
+/// A thread given in a request laid over `o`'s: `thread` as an object,
+/// `STANDARD:SIZE` or `""`, then its own fields given flat (a hole's
+/// depth, tap drill and wall only when `hole`).
+pub(crate) fn thread_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &crate::proto::FeatureFields,
+    hole: bool,
+) -> Result<()> {
+    // The thread: a whole object laid over the current one,
+    // "STANDARD:SIZE" for a new one, "" to take it away.
+    {
+        let (k, x) = ("thread", &f.thread);
+        match x {
+            None => {}
+            Some(Value::String(s)) if s.is_empty() => {
+                o.remove(k);
+            }
+            Some(Value::String(s)) => {
+                let (standard, size) = s.split_once(':').ok_or_else(|| {
+                    Error::new(
+                        Code::InvalidParam,
+                        format!("{k} is STANDARD:SIZE, such as iso_metric:M6"),
+                    )
+                    .with("param", k)
+                })?;
+                o.insert(k.into(), json!({"standard": standard, "size": size}));
+            }
+            Some(Value::Object(new)) => match o.get_mut(k) {
+                Some(Value::Object(old)) => old.extend(new.clone()),
+                _ => {
+                    o.insert(k.into(), Value::Object(new.clone()));
+                }
+            },
+            Some(_) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{k} is an object, STANDARD:SIZE or \"\""),
+                )
+                .with("param", k));
+            }
+        }
+    }
+    // A thread's own fields, given flat.
+    let mut flat: Vec<(&str, Option<Value>)> = vec![
+        ("pitch", f.pitch.clone()),
+        ("tpi", f.tpi.clone()),
+        ("class", f.class.clone().map(Value::String)),
+        (
+            "hand",
+            f.hand
+                .clone()
+                .map(|h| if h == "right" { json!("") } else { json!(h) }),
+        ),
+        (
+            "starts",
+            f.starts.map(|n| if n <= 1 { json!("") } else { json!(n) }),
+        ),
+    ];
+    // A hole's thread also has its depth, tap drill and wall; a cosmetic
+    // thread's depth is the feature's own.
+    if hole {
+        flat.push(("depth", f.thread_depth.clone()));
+        flat.push((
+            "drill",
+            f.tap_drill.as_deref().map(tap_drill_json).transpose()?,
+        ));
+        flat.push(("wall", f.thread_wall.clone().map(Value::String)));
+    }
+    for (k, x) in flat {
+        let Some(x) = x else { continue };
+        let Some(Value::Object(t)) = o.get_mut("thread") else {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a feature with no thread has no {k}: give --thread first"),
+            )
+            .with("param", k));
+        };
+        if x == "" {
+            t.remove(k);
+        } else {
+            t.insert(k.into(), x);
+        }
+    }
+    Ok(())
+}
+
+/// A hole's mouth objects, one per form but simple.
+const MOUTHS: [&str; 4] = ["counterbore", "countersink", "counterdrill", "spotface"];
+
 /// A hole from `current`'s fields (none for a new one, which is simple)
 /// with what was given laid over them. A counterbore or countersink given
 /// in part keeps the rest; a new form keeps only its own; an up-to target
@@ -170,7 +295,7 @@ pub(crate) fn hole_from(
                     o.remove("bottom");
                 }
                 ("form", Value::String(form)) => {
-                    for m in ["counterbore", "countersink"] {
+                    for m in MOUTHS {
                         if form != m {
                             o.remove(m);
                         }
@@ -183,9 +308,11 @@ pub(crate) fn hole_from(
             }
         }
     }
-    // A thread or fastener: a whole object laid over the current one,
+    thread_given(o, f, true)?;
+    // A fastener: a whole object laid over the current one,
     // "STANDARD:SIZE" for a new one, "" to take it away.
-    for (k, x) in [("thread", &f.thread), ("fastener", &f.fastener)] {
+    {
+        let (k, x) = ("fastener", &f.fastener);
         match x {
             None => {}
             Some(Value::String(s)) if s.is_empty() => {
@@ -216,40 +343,16 @@ pub(crate) fn hole_from(
             }
         }
     }
-    // A thread's own fields, given flat.
-    let flat: [(&str, Option<Value>); 7] = [
-        ("pitch", f.pitch.clone()),
-        ("tpi", f.tpi.clone()),
-        ("class", f.class.clone().map(Value::String)),
-        (
-            "hand",
-            f.hand
-                .clone()
-                .map(|h| if h == "right" { json!("") } else { json!(h) }),
-        ),
-        (
-            "starts",
-            f.starts.map(|n| if n <= 1 { json!("") } else { json!(n) }),
-        ),
-        ("depth", f.thread_depth.clone()),
-        (
-            "drill",
-            f.tap_drill.as_deref().map(tap_drill_json).transpose()?,
-        ),
-    ];
-    for (k, x) in flat {
-        let Some(x) = x else { continue };
-        let Some(Value::Object(t)) = o.get_mut("thread") else {
-            return Err(Error::new(
-                Code::InvalidParam,
-                format!("a hole with no thread has no {k}: give --thread first"),
-            )
-            .with("param", k));
-        };
-        if x == "" {
-            t.remove(k);
-        } else {
-            t.insert(k.into(), x);
+    // A near chamfer and a far side: whole values, "" takes one away.
+    for (k, x) in [("near", &f.near), ("far", &f.far)] {
+        match x {
+            None => {}
+            Some(Value::String(s)) if s.is_empty() => {
+                o.remove(k);
+            }
+            Some(x) => {
+                o.insert(k.into(), x.clone());
+            }
         }
     }
     if let Some(fit) = &f.fastener_fit {
@@ -282,7 +385,7 @@ pub(crate) fn hole_from(
     }
     if let Some(form) = &f.form {
         o.insert("form".into(), json!(form));
-        for k in ["counterbore", "countersink"] {
+        for k in MOUTHS {
             if form != k {
                 o.remove(k);
             }
@@ -291,6 +394,8 @@ pub(crate) fn hole_from(
     for (k, x) in [
         ("counterbore", &f.counterbore),
         ("countersink", &f.countersink),
+        ("counterdrill", &f.counterdrill),
+        ("spotface", &f.spotface),
     ] {
         match (o.get_mut(k), x) {
             (Some(Value::Object(old)), Some(Value::Object(new))) => old.extend(new.clone()),

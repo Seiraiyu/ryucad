@@ -367,7 +367,7 @@ fn the_tree_groups_features_by_solid() {
     h.get_by_label("boss (tool, consumed)");
     h.get_by_label("slot (box, cut)").click();
     frames(&mut h, |a| {
-        a.opened().ws.made.is_some() && a.opened().ws.form.is_some()
+        a.opened().ws.model.made.is_some() && a.opened().ws.forms.form.is_some()
     });
     assert_eq!(
         h.state().opened().view.chosen,
@@ -661,6 +661,7 @@ fn an_agents_highlight_shows_its_label() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .people
             .all
             .values()
@@ -674,6 +675,7 @@ fn an_agents_highlight_shows_its_label() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .people
             .all
             .values()
@@ -700,6 +702,7 @@ fn a_highlight_label_stays_inside_the_view() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .people
             .all
             .values()
@@ -746,7 +749,7 @@ fn the_history_tab_keeps_the_view_its_size() {
     // Whatever the history holds (here, the commits of the checkout the
     // tests run in, if any), the view stays as it was.
     h.get_by_label("History").click();
-    frames(&mut h, |a| a.opened().ws.history.is_some());
+    frames(&mut h, |a| a.opened().ws.activity.history.is_some());
     h.run_steps(2);
     assert_eq!(h.state().opened().view.rect, before);
 }
@@ -765,6 +768,7 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .people
             .all
             .values()
@@ -774,12 +778,12 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     // The People strip and the activity feed both show the status.
     assert!(h.get_all_by_label("drilling the boss").next().is_some());
     h.get_by_label("Follow").click();
-    frames(&mut h, |a| a.opened().ws.following.is_some());
+    frames(&mut h, |a| a.opened().ws.session.following.is_some());
     h.step();
     let agent = h.state().opened().ws.followed_camera().unwrap().clone();
     assert_eq!(h.state().opened().view.nav.camera, agent);
     // The window shares the camera it shows: the agent's.
-    let followed = h.state().opened().ws.following.clone().unwrap();
+    let followed = h.state().opened().ws.session.following.clone().unwrap();
     let t = Instant::now();
     while p.ok(&["camera"])["camera"] != p.ok(&["camera", "--of", &followed])["camera"] {
         assert!(
@@ -811,7 +815,7 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
         modifiers: egui::Modifiers::NONE,
     });
     h.step();
-    assert_eq!(h.state().opened().ws.following, None);
+    assert_eq!(h.state().opened().ws.session.following, None);
     assert_ne!(h.state().opened().view.nav.camera, agent);
 }
 
@@ -825,7 +829,7 @@ fn a_parameter_is_edited_in_the_property_panel() {
     let mut h = window(&p);
     frames(&mut h, loaded);
     h.get_by_label("boss (cylinder)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.step();
     // The radius field holds the value as written; a person types over it.
     let field = h.get_all_by_value("3 mm").next().unwrap();
@@ -835,6 +839,7 @@ fn a_parameter_is_edited_in_the_property_panel() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -872,7 +877,7 @@ fn a_fillets_radius_is_edited_in_the_property_panel() {
     let mut h = window(&p);
     frames(&mut h, loaded);
     h.get_by_label("round (fillet)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.step();
     // Its edge and propagation are shown; its radius is typed over.
     h.get_by_label(&format!("edge {}", &corner[corner.len() - 8..]));
@@ -884,6 +889,7 @@ fn a_fillets_radius_is_edited_in_the_property_panel() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -940,7 +946,7 @@ fn a_patterns_count_is_edited_in_the_property_panel() {
     let mut h = window(&p);
     frames(&mut h, loaded);
     h.get_by_label("row (pattern, cut)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.step();
     // Its seed and reversal are shown; its count is typed over.
     h.get_by_label("h");
@@ -952,6 +958,7 @@ fn a_patterns_count_is_edited_in_the_property_panel() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -1043,17 +1050,18 @@ fn preferences_change_the_window_whoever_sets_them() {
     frames(&mut h, loaded);
     menu(&mut h, "Edit", "Preferences…");
     frames(&mut h, |a| {
-        a.opened().dialogs.preferences && !a.opened().ws.settings.all.is_empty()
+        a.opened().dialogs.preferences && !a.opened().ws.session.settings.all.is_empty()
     });
     h.step();
     // It says what the disk cache holds, and clears it.
-    frames(&mut h, |a| a.opened().ws.cache.is_some());
+    frames(&mut h, |a| a.opened().ws.session.cache.is_some());
     h.step();
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear cache")
         .click();
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .cache
             .as_ref()
             .is_some_and(|c| c["removed"].is_object())
@@ -1067,7 +1075,7 @@ fn preferences_change_the_window_whoever_sets_them() {
     // An agent picks the dark theme; the window follows.
     p.ok(&["config", "set", "ui.theme", "dark"]);
     frames(&mut h, |a| {
-        a.opened().ws.settings.text("ui.theme", "") == "dark"
+        a.opened().ws.session.settings.text("ui.theme", "") == "dark"
     });
     h.step();
     assert_eq!(
@@ -1087,12 +1095,13 @@ fn preferences_change_the_window_whoever_sets_them() {
     type_into(&mut h, "Shared cache server", url);
     h.key_press(egui::Key::Enter);
     frames(&mut h, |a| {
-        a.opened().ws.settings.text("cache.remote", "") == url
+        a.opened().ws.session.settings.text("cache.remote", "") == url
     });
     assert_eq!(p.ok(&["config", "get", "cache.remote"])["value"], url);
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .cache
             .as_ref()
             .is_some_and(|c| c["remote"]["url"] == url)
@@ -1103,6 +1112,7 @@ fn preferences_change_the_window_whoever_sets_them() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .cache_token
             .as_ref()
             .is_some_and(|t| t["token"] == "file")
@@ -1113,6 +1123,7 @@ fn preferences_change_the_window_whoever_sets_them() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .cache_token
             .as_ref()
             .is_some_and(|t| t["token"].is_null())
@@ -1566,7 +1577,7 @@ fn inserted(app: &App) -> bool {
                         .contains_key(&("e".to_owned(), s.id.clone()))
                 })
         })
-        && !o.ws.states.by_part.is_empty()
+        && !o.ws.pdm.states.by_part.is_empty()
 }
 
 #[test]
@@ -1641,13 +1652,19 @@ fn an_inserts_pin_is_previewed_and_moved_from_its_panel() {
     h.get_by_label("brd (insert of pcb @ label A, behind, 2 solids)")
         .click();
     frames(&mut h, |a| {
-        a.opened().ws.form.as_ref().is_some_and(|f| f.of.is_some())
+        a.opened()
+            .ws
+            .forms
+            .form
+            .as_ref()
+            .is_some_and(|f| f.of.is_some())
     });
     h.step();
     h.get_by_label("Update to B").click();
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .insert_preview
             .as_ref()
             .is_some_and(|p| p.answer.is_some())
@@ -1660,6 +1677,7 @@ fn an_inserts_pin_is_previewed_and_moved_from_its_panel() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -1803,7 +1821,7 @@ fn a_dimension_label_opens_its_value() {
     frames(&mut h, sketched);
     h.step();
     h.get_by_label("1.5 mm").click();
-    frames(&mut h, |a| a.opened().ws.dimension.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.dimension.is_some());
     h.step();
     let field = h.get_all_by_value("1.5 mm").next().unwrap();
     field.set_text_value_accesskit("2 mm");
@@ -1812,6 +1830,7 @@ fn a_dimension_label_opens_its_value() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .dimension
             .as_ref()
             .is_some_and(|f| !f.saving && f.value.read == "2 mm")
@@ -1877,7 +1896,7 @@ fn a_parameter_is_edited_in_its_panel() {
     show_tab(&mut h, "parameters");
     frames(&mut h, |a| {
         let o = a.opened();
-        o.ws.idle() && o.ws.params.is_some() && o.ws.model.sketches.len() == 1
+        o.ws.idle() && o.ws.parameters.params.is_some() && o.ws.model.sketches.len() == 1
     });
     h.step();
     h.get_by_label("Parameters of p");
@@ -1888,6 +1907,7 @@ fn a_parameter_is_edited_in_its_panel() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .parameters
             .params
             .as_ref()
             .is_some_and(|p| !p.saving && !p.dirty() && p.params[0].field.read == "35 mm")
@@ -1921,6 +1941,7 @@ fn a_project_parameter_is_edited_in_the_equations_tile() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .parameters
             .equations
             .as_ref()
             .is_some_and(|e| e.rows.len() == 2)
@@ -1933,9 +1954,14 @@ fn a_project_parameter_is_edited_in_the_equations_tile() {
     h.step();
     h.get_by_label("Apply project").click();
     frames(&mut h, |a| {
-        a.opened().ws.equations.as_ref().is_some_and(|e| {
-            e.saving.is_none() && e.rows[0].field.read == "6 mm" && e.rows[1].value == "18 mm"
-        })
+        a.opened()
+            .ws
+            .parameters
+            .equations
+            .as_ref()
+            .is_some_and(|e| {
+                e.saving.is_none() && e.rows[0].field.read == "6 mm" && e.rows[1].value == "18 mm"
+            })
     });
     let list = p.ok(&["param", "list", "--project"]);
     assert_eq!(list["parameters"][0]["value"], "6 mm");
@@ -1947,6 +1973,7 @@ fn a_project_parameter_is_edited_in_the_equations_tile() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .parameters
             .equations
             .as_ref()
             .is_some_and(|e| e.saving.is_none() && e.rows[1].value == "12 mm")
@@ -1960,6 +1987,7 @@ fn compared(app: &App) -> bool {
     let o = app.opened();
     o.ws.idle()
         && o.ws
+            .comparing
             .compare
             .as_ref()
             .is_some_and(|c| c.loaded && c.ghosts.len() == c.wanted.len())
@@ -1991,19 +2019,29 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
     h.get_by_label("Changes since HEAD");
     h.get_by_label("result: built → absent");
     h.get_by_label("Stop comparing").click();
-    frames(&mut h, |a| a.opened().ws.compare.is_none());
+    frames(&mut h, |a| a.opened().ws.comparing.compare.is_none());
     h.step();
     assert!(h.query_by_label("base (box) [changed]").is_none());
     h.get_by_label("base (box)");
     // A commit in the history is compared with by its button.
     h.get_by_label("History").click();
-    frames(&mut h, |a| a.opened().ws.history.is_some());
+    frames(&mut h, |a| a.opened().ws.activity.history.is_some());
     h.step();
     h.get_by_label("Compare").click();
     frames(&mut h, compared);
     let head = p.ok(&["compare"])["compare"]["commit"].clone();
     assert_eq!(
-        Some(h.state().opened().ws.compare.as_ref().unwrap().rev.as_str()),
+        Some(
+            h.state()
+                .opened()
+                .ws
+                .comparing
+                .compare
+                .as_ref()
+                .unwrap()
+                .rev
+                .as_str()
+        ),
         head.as_str()
     );
     // A revision typed in.
@@ -2014,7 +2052,7 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
     h.step();
     h.get_by_label("Start comparing").click();
     frames(&mut h, |a| {
-        compared(a) && a.opened().ws.compare.as_ref().unwrap().rev == "main"
+        compared(a) && a.opened().ws.comparing.compare.as_ref().unwrap().rev == "main"
     });
 }
 
@@ -2046,6 +2084,7 @@ fn b_swaps_a_compare_and_writes_wait_for_the_working_files() {
             && a.opened().ws.model.meshes.len() == 2
             && a.opened()
                 .ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.swapped.as_deref() == Some("HEAD"))
@@ -2057,12 +2096,22 @@ fn b_swaps_a_compare_and_writes_wait_for_the_working_files() {
     assert_eq!(command::enabled("edit.undo", &state), Err(SWAPPED));
     // An agent's write lands; the ghost follows it.
     let key = ("p".to_owned(), "base".to_owned());
-    let before = h.state().opened().ws.compare.as_ref().unwrap().wanted[&key].clone();
+    let before = h
+        .state()
+        .opened()
+        .ws
+        .comparing
+        .compare
+        .as_ref()
+        .unwrap()
+        .wanted[&key]
+        .clone();
     p.ok(&["feature", "edit", "p", "base", "--param", "x=25"]);
     frames(&mut h, |a| {
         compared(a)
             && a.opened()
                 .ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.wanted.get(&key).is_some_and(|h| *h != before))
@@ -2083,7 +2132,8 @@ fn b_swaps_a_compare_and_writes_wait_for_the_working_files() {
     // Stop comparing ends the blink.
     h.get_by_label("Stop comparing").click();
     frames(&mut h, |a| {
-        a.opened().ws.compare.is_none() && a.opened().ws.blink == Blink::default()
+        a.opened().ws.comparing.compare.is_none()
+            && a.opened().ws.comparing.blink == Blink::default()
     });
 }
 
@@ -2099,7 +2149,7 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     frames(&mut h, |a| {
         let o = a.opened();
         // The conflicted box fails in its place; the cylinder builds.
-        o.ws.idle() && o.ws.merge.is_some() && o.ws.model.meshes.len() == 1
+        o.ws.idle() && o.ws.branches.merge.is_some() && o.ws.model.meshes.len() == 1
     });
     h.step();
     assert!(h.state().title().contains("(merge in progress)"));
@@ -2119,6 +2169,7 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .branches
             .merge
             .as_ref()
             .is_some_and(|m| m.clean() && !m.resolving)
@@ -2134,7 +2185,7 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     // Once committed, the panel goes.
     p.git(&["add", "."]);
     p.git(&["commit", "-q", "--no-edit"]);
-    frames(&mut h, |a| a.opened().ws.merge.is_none());
+    frames(&mut h, |a| a.opened().ws.branches.merge.is_none());
     h.step();
     // The tile closed itself with the merge.
     assert!(!ryucad_app::ui::shell::is_open(
@@ -2157,13 +2208,13 @@ fn parts_show_their_release_state_and_a_compare_marks_proposals() {
     let p = p.committed();
     let mut h = window(&p);
     frames(&mut h, |a| {
-        loaded(a) && a.opened().ws.states.get("p").is_some()
+        loaded(a) && a.opened().ws.pdm.states.get("p").is_some()
     });
     h.step();
     h.get_by_label("p (in work)");
     p.ok(&["release", "propose", "p"]);
     frames(&mut h, |a| {
-        a.opened().ws.states.badge("p").as_deref() == Some("in work, A proposed")
+        a.opened().ws.pdm.states.badge("p").as_deref() == Some("in work, A proposed")
     });
     h.step();
     h.get_by_label("p (in work, A proposed)");
@@ -2174,6 +2225,7 @@ fn parts_show_their_release_state_and_a_compare_marks_proposals() {
         compared(a)
             && a.opened()
                 .ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.pdm.contains_key("p"))
@@ -2200,7 +2252,7 @@ fn a_property_is_edited_in_the_part_section_and_pdm_set_up() {
     show_tab(&mut h, "part");
     frames(&mut h, |a| {
         let o = a.opened();
-        loaded(a) && o.ws.props.is_some() && o.ws.pdm_config.is_some()
+        loaded(a) && o.ws.pdm.props.is_some() && o.ws.pdm.pdm_config.is_some()
     });
     h.step();
     h.get_by_label("Properties of p");
@@ -2222,6 +2274,7 @@ fn a_property_is_edited_in_the_part_section_and_pdm_set_up() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .pdm
             .props
             .as_ref()
             .is_some_and(|p| !p.saving && !p.dirty() && p.props[0].field.read == "100-0042")
@@ -2246,34 +2299,36 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
     frames(&mut h, loaded);
     h.get_by_label("Releases").click();
     frames(&mut h, |a| {
-        a.opened().ws.idle() && a.opened().ws.releases.list.is_some()
+        a.opened().ws.idle() && a.opened().ws.pdm.releases.list.is_some()
     });
     h.step();
     h.get_by_label("Releases of p");
     h.get_by_label("No release records yet");
     // Propose: the dialog says the label, then the record is written.
     h.get_by_label("Propose…").click();
-    frames(&mut h, |a| a.opened().ws.releases.proposal.is_some());
+    frames(&mut h, |a| a.opened().ws.pdm.releases.proposal.is_some());
     shown(&mut h, "It will be revision A.");
     h.get_by_label("Note").click();
     h.get_by_label("Note").set_text_value_accesskit("first");
     h.step();
     h.get_by_label("Propose").click();
-    frames(&mut h, |a| a.opened().ws.releases.records("p").len() == 1);
+    frames(&mut h, |a| {
+        a.opened().ws.pdm.releases.records("p").len() == 1
+    });
     shown(&mut h, "wrote releases/p/A.json");
     assert!(h.query_by_label("It will be revision A.").is_none());
     // Official once main holds it; its tag is synced after confirming.
     p.git(&["add", "."]);
     p.git(&["commit", "-q", "-m", "release p A"]);
     frames(&mut h, |a| {
-        a.opened().ws.idle() && !a.opened().ws.releases.to_sync().is_empty()
+        a.opened().ws.idle() && !a.opened().ws.pdm.releases.to_sync().is_empty()
     });
     h.step();
     h.get_by_label("Sync tags…").click();
     shown(&mut h, "create ryupdm/p/A");
     h.get_by_label("Sync").click();
     frames(&mut h, |a| {
-        let t = &a.opened().ws.releases;
+        let t = &a.opened().ws.pdm.releases;
         a.opened().ws.idle() && !t.busy && t.done.is_some() && t.to_sync().is_empty()
     });
     shown(&mut h, "tags: 1 created, 0 moved");
@@ -2281,7 +2336,9 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
     h.get_by_label("Obsolete…").click();
     shown(&mut h, "Make obsolete");
     h.get_by_label("Make obsolete").click();
-    frames(&mut h, |a| a.opened().ws.releases.records("p").len() == 2);
+    frames(&mut h, |a| {
+        a.opened().ws.pdm.releases.records("p").len() == 2
+    });
     let list = p.ok(&["release", "list", "p"]);
     assert_eq!(list["records"][1]["kind"], "obsolete");
 }
@@ -2357,12 +2414,12 @@ fn a_release_approved_by_the_services_tag_says_who_approved_it() {
     frames(&mut h, loaded);
     h.get_by_label("Releases").click();
     frames(&mut h, |a| {
-        a.opened().ws.idle() && a.opened().ws.releases.list.is_some()
+        a.opened().ws.idle() && a.opened().ws.pdm.releases.list.is_some()
     });
     h.step();
     shown(&mut h, "Approved by alice");
     // Nothing for Sync tags to do: the tag is the service's.
-    frames(&mut h, |a| a.opened().ws.releases.to_sync().is_empty());
+    frames(&mut h, |a| a.opened().ws.pdm.releases.to_sync().is_empty());
 }
 
 #[test]
@@ -2443,7 +2500,7 @@ fn the_measure_tool_measures_two_faces_and_esc_leaves_it() {
     }
     h.run_steps(2);
     menu(&mut h, "Tools", "Measure");
-    frames(&mut h, |a| a.opened().ws.measure.on);
+    frames(&mut h, |a| a.opened().ws.view.measure.on);
     let pick = |h: &mut Harness<'static, App>, p: [f64; 3]| {
         let at = on_screen(h, p);
         h.event(egui::Event::PointerMoved(at));
@@ -2456,6 +2513,7 @@ fn the_measure_tool_measures_two_faces_and_esc_leaves_it() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .view
             .measure
             .reading
             .as_ref()
@@ -2469,13 +2527,13 @@ fn the_measure_tool_measures_two_faces_and_esc_leaves_it() {
             .myself()
             .is_some_and(|m| m.selection.is_empty())
     );
-    let r = h.state().opened().ws.measure.reading.clone().unwrap();
+    let r = h.state().opened().ws.view.measure.reading.clone().unwrap();
     assert_eq!(r.label.as_deref(), Some("8 mm"), "{r:?}");
     shown(&mut h, "8 mm (exact)");
     h.get_by_label("Copy");
     // Esc leaves the tool, and its panel goes.
     h.key_press(egui::Key::Escape);
-    frames(&mut h, |a| !a.opened().ws.measure.on);
+    frames(&mut h, |a| !a.opened().ws.view.measure.on);
     h.run_steps(2);
     assert!(h.query_by_label("8 mm (exact)").is_none());
 }
@@ -2514,10 +2572,10 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
     menu(&mut h, "Tools", "Appearance");
     shown(&mut h, "Colour what");
     assert_eq!(
-        h.state().opened().ws.appearance.target(),
+        h.state().opened().ws.view.appearance.target(),
         Some(face.as_str())
     );
-    let before = h.state().opened().ws.appearance.typed.clone();
+    let before = h.state().opened().ws.view.appearance.typed.clone();
     // Typed, and written once Enter is pressed.
     h.get_by_label("Hex").click();
     h.step();
@@ -2545,14 +2603,14 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
         !file.exists() && a.opened().ws.model.looks.is_empty()
     });
     // The open window reads its target again: the old colour (#577).
-    frames(&mut h, |a| a.opened().ws.appearance.typed == before);
+    frames(&mut h, |a| a.opened().ws.view.appearance.typed == before);
     h.step();
     assert_eq!(
         h.get_by_label("Hex").value().as_deref(),
         Some(before.as_str())
     );
     // An opacity dragged previews on the model, written when let go.
-    h.state_mut().opened_mut().ws.appearance.chosen = 1;
+    h.state_mut().opened_mut().ws.view.appearance.chosen = 1;
     h.state_mut()
         .opened_mut()
         .ws
@@ -2570,11 +2628,11 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
             .any(|l| l.translucent())
     );
     assert!(!file.exists(), "a preview writes nothing");
-    h.state_mut().opened_mut().ws.appearance.opacity = 0.4;
+    h.state_mut().opened_mut().ws.view.appearance.opacity = 0.4;
     h.state_mut().opened_mut().ws.write_appearance("opacity");
     frames(&mut h, |a| {
         file.is_file()
-            && a.opened().ws.appearance.dragging.is_none()
+            && a.opened().ws.view.appearance.dragging.is_none()
             && a.opened().ws.model.looks.values().any(|l| l.translucent())
     });
     assert_eq!(p.ok(&["appearance", "p"])["solids"][0]["opacity"], 0.4);
@@ -2608,17 +2666,22 @@ fn tools_mass_properties_and_clearance_list_their_values() {
     both_bolts(&mut h);
     menu(&mut h, "Tools", "Mass properties");
     frames(&mut h, |a| {
-        a.opened().ws.mass.as_ref().is_some_and(|m| m.loaded)
+        a.opened().ws.view.mass.as_ref().is_some_and(|m| m.loaded)
     });
-    let m = h.state().opened().ws.mass.clone().unwrap();
+    let m = h.state().opened().ws.view.mass.clone().unwrap();
     assert!(m.error.is_none() && m.centre.is_some(), "{m:?}");
     assert_eq!(m.lines[0].0, "Mass", "{m:?}");
     shown(&mut h, "Centre of mass");
     menu(&mut h, "Tools", "Clearance");
     frames(&mut h, |a| {
-        a.opened().ws.clearance.as_ref().is_some_and(|c| c.loaded)
+        a.opened()
+            .ws
+            .assembly
+            .clearance
+            .as_ref()
+            .is_some_and(|c| c.loaded)
     });
-    let c = h.state().opened().ws.clearance.clone().unwrap();
+    let c = h.state().opened().ws.assembly.clearance.clone().unwrap();
     assert!(c.error.is_none(), "{c:?}");
     assert_eq!(c.gaps.len(), 1, "{c:?}");
     assert_eq!(
@@ -2631,13 +2694,23 @@ fn tools_mass_properties_and_clearance_list_their_values() {
     h.run_steps(4);
     assert_ne!(h.state().opened().view.nav.camera, before);
     assert_eq!(
-        h.state().opened().ws.clearance.as_ref().unwrap().shown,
+        h.state()
+            .opened()
+            .ws
+            .assembly
+            .clearance
+            .as_ref()
+            .unwrap()
+            .shown,
         Some(0)
     );
     h.state_mut().opened_mut().dialogs.clearance = false;
     h.state_mut().opened_mut().dialogs.mass = false;
     h.step();
-    assert!(h.state().opened().ws.clearance.is_none() && h.state().opened().ws.mass.is_none());
+    assert!(
+        h.state().opened().ws.assembly.clearance.is_none()
+            && h.state().opened().ws.view.mass.is_none()
+    );
 }
 
 #[test]
@@ -2657,6 +2730,7 @@ fn tools_check_interference_lists_and_paints_the_pairs() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .assembly
             .interference
             .as_ref()
             .is_some_and(|i| i.loaded)
@@ -2683,7 +2757,7 @@ fn tools_check_interference_lists_and_paints_the_pairs() {
         row(&h),
         "no row for the pair (dialog open: {}): {:?}",
         h.state().opened().dialogs.interference,
-        h.state().opened().ws.interference
+        h.state().opened().ws.assembly.interference
     );
     // Its faces are painted, and Show frames them.
     let before = h.state().opened().view.nav.camera.clone();
@@ -2692,12 +2766,12 @@ fn tools_check_interference_lists_and_paints_the_pairs() {
         h.step();
     }
     assert_ne!(h.state().opened().view.nav.camera, before);
-    let i = h.state().opened().ws.interference.clone().unwrap();
+    let i = h.state().opened().ws.assembly.interference.clone().unwrap();
     assert!(i.faces().count() >= 2, "{i:?}");
     // Closing the dialog ends the paint (#138).
     h.state_mut().opened_mut().dialogs.interference = false;
     h.step();
-    assert!(h.state().opened().ws.interference.is_none());
+    assert!(h.state().opened().ws.assembly.interference.is_none());
 }
 
 #[test]
@@ -2792,7 +2866,7 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
     h.get_by_label("ring:2/pin");
     // The tree says where its value stands (ryucad 26.C).
     h.get_by_label("m1 (revolute: base → pin, 30.0°)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     // Chosen, the mate draws both its connectors' frames: three axes each,
     // from where the report says they are.
     let (lines, names) = {
@@ -2823,6 +2897,7 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -2994,9 +3069,9 @@ fn waited(h: &mut Harness<'static, App>, what: &str, done: impl Fn(&App) -> bool
         assert!(
             t.elapsed() < Duration::from_secs(30),
             "timed out waiting for {what}: {:?}, {:?}, {:?}, {} meshes, idle {}",
-            o.ws.mover,
-            o.ws.mating,
-            o.ws.drag_note,
+            o.ws.assembly.mover,
+            o.ws.assembly.mating,
+            o.ws.assembly.drag_note,
             o.ws.model.meshes.len(),
             o.ws.idle()
         );
@@ -3009,7 +3084,7 @@ fn waited(h: &mut Harness<'static, App>, what: &str, done: impl Fn(&App) -> bool
 fn move_handle(h: &mut Harness<'static, App>, k: usize, ring: bool) -> egui::Pos2 {
     let o = h.state_mut().opened_mut();
     let length = o.view.handle_length(&o.ws);
-    let m = o.ws.mover.clone().expect("the Move tool is on");
+    let m = o.ws.assembly.mover.clone().expect("the Move tool is on");
     let (arrows, rings) = m.handles(length);
     let p = if ring {
         let r = rings[k];
@@ -3048,7 +3123,7 @@ fn a_typed_move_by_the_handle_is_written_in_direct_edit_and_proposed_in_annotate
     });
     h.get_by_label("Move").click();
     waited(&mut h, "the Move tool on", |a| {
-        a.opened().ws.mover.is_some()
+        a.opened().ws.assembly.mover.is_some()
     });
     h.run_steps(2);
     // A click on x's arrow opens the field at 0; 20 typed and Enter.
@@ -3057,6 +3132,7 @@ fn a_typed_move_by_the_handle_is_written_in_direct_edit_and_proposed_in_annotate
     waited(&mut h, "a handle's value", |a| {
         a.opened()
             .ws
+            .assembly
             .mover
             .as_ref()
             .is_some_and(|m| m.grip.is_some())
@@ -3066,7 +3142,7 @@ fn a_typed_move_by_the_handle_is_written_in_direct_edit_and_proposed_in_annotate
     h.run_steps(2);
     h.key_press(egui::Key::Enter);
     waited(&mut h, "the move sent", |a| {
-        a.opened().ws.mover.is_none() && a.opened().ws.idle()
+        a.opened().ws.assembly.mover.is_none() && a.opened().ws.idle()
     });
     let t = Instant::now();
     while (x_of(&p) - 0.06).abs() > 1e-9 {
@@ -3085,7 +3161,7 @@ fn a_typed_move_by_the_handle_is_written_in_direct_edit_and_proposed_in_annotate
     h.run_steps(2);
     h.get_by_label("Move").click();
     waited(&mut h, "the Move tool on", |a| {
-        a.opened().ws.mover.is_some()
+        a.opened().ws.assembly.mover.is_some()
     });
     h.run_steps(2);
     // Framed again: the draft's reading may leave b2 out of the view.
@@ -3106,6 +3182,7 @@ fn a_typed_move_by_the_handle_is_written_in_direct_edit_and_proposed_in_annotate
     waited(&mut h, "a handle's value in Annotate", |a| {
         a.opened()
             .ws
+            .assembly
             .mover
             .as_ref()
             .is_some_and(|m| m.grip.is_some())
@@ -3144,7 +3221,7 @@ fn a_dragged_ring_previews_and_esc_drops_the_value_then_the_tool() {
         !a.opened().ws.myself().unwrap().selection.is_empty()
     });
     h.get_by_label("Move").click();
-    frames(&mut h, |a| a.opened().ws.mover.is_some());
+    frames(&mut h, |a| a.opened().ws.assembly.mover.is_some());
     h.run_steps(2);
     // Round z's ring by a drag: it snaps to 15° steps and previews.
     let from = move_handle(&mut h, 2, true);
@@ -3155,7 +3232,17 @@ fn a_dragged_ring_previews_and_esc_drops_the_value_then_the_tool() {
         pressed: true,
         modifiers: egui::Modifiers::NONE,
     });
-    let middle = on_screen(&h, h.state().opened().ws.mover.as_ref().unwrap().middle);
+    let middle = on_screen(
+        &h,
+        h.state()
+            .opened()
+            .ws
+            .assembly
+            .mover
+            .as_ref()
+            .unwrap()
+            .middle,
+    );
     let r = from - middle;
     for i in 1..=12 {
         let t = std::f32::consts::FRAC_PI_2 * i as f32 / 12.0;
@@ -3173,7 +3260,7 @@ fn a_dragged_ring_previews_and_esc_drops_the_value_then_the_tool() {
     });
     frames(&mut h, |a| !a.opened().ws.model.preview.is_empty());
     {
-        let m = h.state().opened().ws.mover.clone().unwrap();
+        let m = h.state().opened().ws.assembly.mover.clone().unwrap();
         assert_eq!(m.grip, Some(ryucad_app::core::mover::Grip::Ring(2)));
         let steps = m.value / ryucad_app::core::mover::ANGLE_STEP;
         assert!(
@@ -3189,6 +3276,7 @@ fn a_dragged_ring_previews_and_esc_drops_the_value_then_the_tool() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .assembly
             .mover
             .as_ref()
             .is_some_and(|m| m.grip.is_none())
@@ -3196,7 +3284,7 @@ fn a_dragged_ring_previews_and_esc_drops_the_value_then_the_tool() {
     });
     h.run_steps(2);
     h.key_press(egui::Key::Escape);
-    frames(&mut h, |a| a.opened().ws.mover.is_none());
+    frames(&mut h, |a| a.opened().ws.assembly.mover.is_none());
     let x = p.ok(&["feature", "show", "frame", "b2"])["pose"]["x"].clone();
     assert_eq!(x, serde_json::json!([1, 0, 0]));
 }
@@ -3233,13 +3321,14 @@ fn move_works_on_an_instance_chosen_by_its_row_or_a_whole_body_pick() {
     waited(&mut h, "the Move tool on b2", |a| {
         a.opened()
             .ws
+            .assembly
             .mover
             .as_ref()
             .is_some_and(|m| m.instance == "b2")
     });
     h.run_steps(2);
     h.key_press(egui::Key::Escape);
-    frames(&mut h, |a| a.opened().ws.mover.is_none());
+    frames(&mut h, |a| a.opened().ws.assembly.mover.is_none());
     h.state_mut().opened_mut().view.filter.bodies = true;
     h.run_steps(2);
     let at = over_body(&mut h, "b2/shank");
@@ -3268,7 +3357,7 @@ fn a_fixed_instance_shows_no_handles_and_says_why() {
     assert!(h.get_by_label("Move").accesskit_node().is_disabled());
     h.get_by_label("Move").click();
     h.run_steps(2);
-    assert!(h.state().opened().ws.mover.is_none());
+    assert!(h.state().opened().ws.assembly.mover.is_none());
     h.run_steps(2);
     h.get_by_label_contains("b1 is fixed: free it with --fixed false");
 }
@@ -3287,28 +3376,52 @@ fn a_mate_is_picked_previewed_and_added_from_its_dialog() {
     });
     h.step();
     menu(&mut h, "Edit", "Mate…");
-    waited(&mut h, "step 2", |a| a.opened().ws.mating.is_some());
+    waited(&mut h, "step 2", |a| {
+        a.opened().ws.assembly.mating.is_some()
+    });
     shown(&mut h, "Mate");
     // The bolt, then the plate: each click picks for the next side.
     let pin = over_body(&mut h, "pin/shank");
     click(&h, pin);
     waited(&mut h, "step 3", |a| {
-        a.opened().ws.mating.as_ref().unwrap().a.is_some()
+        a.opened().ws.assembly.mating.as_ref().unwrap().a.is_some()
     });
     // A second pick on the same instance is refused in the dialog.
     click(&h, pin);
     waited(&mut h, "step 4", |a| {
-        a.opened().ws.mating.as_ref().unwrap().note.is_some()
+        a.opened()
+            .ws
+            .assembly
+            .mating
+            .as_ref()
+            .unwrap()
+            .note
+            .is_some()
     });
-    assert!(h.state().opened().ws.mating.as_ref().unwrap().b.is_none());
+    assert!(
+        h.state()
+            .opened()
+            .ws
+            .assembly
+            .mating
+            .as_ref()
+            .unwrap()
+            .b
+            .is_none()
+    );
     let base = over_body(&mut h, "base/slab");
     click(&h, base);
     waited(&mut h, "step 5", |a| {
-        a.opened().ws.mating.as_ref().unwrap().b.is_some()
+        a.opened().ws.assembly.mating.as_ref().unwrap().b.is_some()
     });
     // Fastened holds wherever they are: Add is enabled once it solved.
     waited(&mut h, "step 6", |a| {
-        a.opened().ws.mating.as_ref().is_some_and(|d| d.addable())
+        a.opened()
+            .ws
+            .assembly
+            .mating
+            .as_ref()
+            .is_some_and(|d| d.addable())
     });
     assert!(
         h.state().opened().ws.myself().unwrap().selection.is_empty(),
@@ -3319,7 +3432,7 @@ fn a_mate_is_picked_previewed_and_added_from_its_dialog() {
     assert!(!add.accesskit_node().is_disabled());
     add.click();
     waited(&mut h, "step 7", |a| {
-        a.opened().ws.mating.is_none() && a.opened().ws.idle()
+        a.opened().ws.assembly.mating.is_none() && a.opened().ws.idle()
     });
     let t = Instant::now();
     while !p
@@ -3350,13 +3463,15 @@ fn the_mate_dialogs_add_waits_for_both_picks_and_esc_closes_it() {
     let pin = over_body(&mut h, "pin/shank");
     click(&h, pin);
     waited(&mut h, "step 2", |a| {
-        a.opened().ws.mating.as_ref().unwrap().a.is_some()
+        a.opened().ws.assembly.mating.as_ref().unwrap().a.is_some()
     });
     h.run_steps(2);
     assert!(h.get_by_label("Add").accesskit_node().is_disabled());
     // In View it can't be opened at all.
     h.key_press(egui::Key::Escape);
-    waited(&mut h, "step 3", |a| a.opened().ws.mating.is_none());
+    waited(&mut h, "step 3", |a| {
+        a.opened().ws.assembly.mating.is_none()
+    });
     h.state_mut()
         .opened_mut()
         .ws
@@ -3364,7 +3479,7 @@ fn the_mate_dialogs_add_waits_for_both_picks_and_esc_closes_it() {
     waited(&mut h, "step 4", |a| a.opened().ws.idle());
     menu(&mut h, "Edit", "Mate…");
     h.run_steps(2);
-    assert!(h.state().opened().ws.mating.is_none());
+    assert!(h.state().opened().ws.assembly.mating.is_none());
 }
 
 #[test]
@@ -3413,6 +3528,7 @@ fn a_free_instance_is_dragged_and_written_once() {
         h.state()
             .opened()
             .ws
+            .assembly
             .drag_note
             .as_deref()
             .is_some_and(|n| n.starts_with("b1 is fixed"))
@@ -3431,7 +3547,7 @@ fn a_free_instance_is_dragged_and_written_once() {
     frames(&mut h, |a| !a.opened().ws.model.preview.is_empty());
     press(&h, at + egui::vec2(60.0, 0.0), false);
     frames(&mut h, |a| {
-        a.opened().ws.drag.is_none() && a.opened().ws.idle()
+        a.opened().ws.assembly.drag.is_none() && a.opened().ws.idle()
     });
     let t = Instant::now();
     while moves(&p) == before {
@@ -3494,6 +3610,7 @@ fn file_import_step_plans_then_imports() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .exchange
             .import
             .as_ref()
             .is_some_and(|i| i.current().is_some())
@@ -3503,6 +3620,7 @@ fn file_import_step_plans_then_imports() {
         .state()
         .opened()
         .ws
+        .exchange
         .import
         .as_ref()
         .and_then(|i| i.current())
@@ -3534,6 +3652,7 @@ fn file_import_step_plans_then_imports() {
         h.state()
             .opened()
             .ws
+            .exchange
             .import
             .as_ref()
             .unwrap()
@@ -3566,6 +3685,7 @@ fn a_step_file_imports_as_a_reference_and_its_row_converts_it() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .exchange
             .import
             .as_ref()
             .is_some_and(|i| i.current().is_some())
@@ -3632,7 +3752,7 @@ fn converting_an_import_is_gated_by_mode() {
     frames(&mut h, |a| mode(a) == Some(true));
     let row = "body (import: box_ap214.step / part 2, reference)";
     h.get_by_label(row).click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.run_steps(2);
     for m in [Mode::View, Mode::Annotate] {
         h.state_mut().opened_mut().ws.set_mode(m);
@@ -3687,11 +3807,12 @@ fn file_export_writes_the_shown_part() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .exchange
             .export
             .as_ref()
             .is_some_and(|e| e.done.is_some() || e.error.is_some())
     });
-    let e = h.state().opened().ws.export.clone().unwrap();
+    let e = h.state().opened().ws.exchange.export.clone().unwrap();
     assert!(e.error.is_none(), "{:?}", e.error);
     assert_eq!(e.part, "p");
     let bytes = std::fs::read(&path).unwrap();
@@ -3706,18 +3827,19 @@ fn file_export_writes_the_shown_part() {
     shown(&mut h, "Chord");
     let stl = out.path().join("p.stl");
     assert_eq!(
-        h.state().opened().ws.export.as_ref().unwrap().path,
+        h.state().opened().ws.exchange.export.as_ref().unwrap().path,
         stl.display().to_string()
     );
     h.get_by_label("Export").click();
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .exchange
             .export
             .as_ref()
             .is_some_and(|e| !e.waiting && (e.done.is_some() || e.error.is_some()))
     });
-    let e = h.state().opened().ws.export.clone().unwrap();
+    let e = h.state().opened().ws.exchange.export.clone().unwrap();
     assert!(e.error.is_none(), "{:?}", e.error);
     let bytes = std::fs::read(&stl).unwrap();
     assert!(bytes.starts_with(b"ryucad "));
@@ -3773,7 +3895,7 @@ fn bom_tab(p: &Project) -> Harness<'static, App> {
     frames(&mut h, bolts_drawn);
     h.get_by_label("BOM").click();
     frames(&mut h, |a| {
-        a.opened().ws.idle() && a.opened().ws.bom.root.is_some()
+        a.opened().ws.idle() && a.opened().ws.pdm.bom.root.is_some()
     });
     shown(&mut h, "BOM of frame");
     h
@@ -3802,7 +3924,7 @@ fn the_bom_tab_chooses_a_line_and_goes_flat() {
     // Flat: one line per part.
     h.get_by_label("Flat").click();
     frames(&mut h, |a| {
-        a.opened().ws.idle() && !a.opened().ws.bom.flat_lines.is_empty()
+        a.opened().ws.idle() && !a.opened().ws.pdm.bom.flat_lines.is_empty()
     });
     shown(&mut h, "BOM line: bolt working");
 }
@@ -3822,7 +3944,7 @@ fn an_item_number_is_set_in_the_bom_tab() {
     h.step();
     h.get_by_label("Set item").click();
     frames(&mut h, |a| {
-        let t = &a.opened().ws.bom;
+        let t = &a.opened().ws.pdm.bom;
         a.opened().ws.idle() && t.editing.is_none() && t.tree[0].item == Some(7)
     });
     let bom = p.ok(&["bom", "frame"]);
@@ -3830,7 +3952,7 @@ fn an_item_number_is_set_in_the_bom_tab() {
     // The flat BOM's numbers aren't edited.
     h.get_by_label("Flat").click();
     frames(&mut h, |a| {
-        a.opened().ws.idle() && !a.opened().ws.bom.flat_lines.is_empty()
+        a.opened().ws.idle() && !a.opened().ws.pdm.bom.flat_lines.is_empty()
     });
     h.step();
     assert!(h.query_by_label("Item of bolt in frame").is_none());
@@ -3851,6 +3973,7 @@ fn where_used_shows_an_assembly() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .pdm
             .where_used
             .as_ref()
             .is_some_and(|w| w.part == "bolt")
@@ -3888,7 +4011,7 @@ fn a_compare_marks_the_bom_tab() {
     ]);
     menu(&mut h, "View", "Compare with HEAD");
     frames(&mut h, |a| {
-        compared(a) && a.opened().ws.idle() && a.opened().ws.bom.diff.is_some()
+        compared(a) && a.opened().ws.idle() && a.opened().ws.pdm.bom.diff.is_some()
     });
     shown(&mut h, "Compared with HEAD: 0 added, 0 removed, 1 changed");
     shown(&mut h, "3 (was 2)");
@@ -3899,7 +4022,7 @@ fn a_compare_marks_the_bom_tab() {
         "feature", "add", "frame", "instance", "--id", "w1", "--of", "washer",
     ]);
     frames(&mut h, |a| {
-        let t = &a.opened().ws.bom;
+        let t = &a.opened().ws.pdm.bom;
         a.opened().ws.idle() && t.summary().as_deref() == Some("1 added, 0 removed, 1 changed")
     });
     h.get_by_label("BOM line 3: washer").click();
@@ -3916,7 +4039,7 @@ fn a_compare_marks_the_bom_tab() {
     h.step();
     h.get_by_label("Set item").click();
     frames(&mut h, |a| {
-        let t = &a.opened().ws.bom;
+        let t = &a.opened().ws.pdm.bom;
         a.opened().ws.idle() && t.editing.is_none() && t.tree.iter().any(|l| l.item == Some(9))
     });
     let bom = p.ok(&["bom", "frame"]);
@@ -4040,7 +4163,7 @@ fn space_opens_the_view_selector_and_named_views_restore_and_save() {
     ]);
     let mut h = window(&p);
     frames(&mut h, |a| {
-        loaded(a) && a.opened().ws.views.camera("detail").is_some()
+        loaded(a) && a.opened().ws.view.views.camera("detail").is_some()
     });
     let mid = h.state().opened().view.rect.center();
     h.event(egui::Event::PointerMoved(mid));
@@ -4070,7 +4193,9 @@ fn space_opens_the_view_selector_and_named_views_restore_and_save() {
     h.event(egui::Event::Text("close".into()));
     h.run_steps(2);
     h.get_by_label("Save").click();
-    frames(&mut h, |a| a.opened().ws.views.camera("close").is_some());
+    frames(&mut h, |a| {
+        a.opened().ws.view.views.camera("close").is_some()
+    });
     assert!(p.root.join("parts/p/views/close.json").is_file());
     let saved = p.ok(&["view", "list", "p"]);
     let close = saved["views"]
@@ -4089,7 +4214,9 @@ fn space_opens_the_view_selector_and_named_views_restore_and_save() {
     h.event(egui::Event::Text("entered".into()));
     h.run_steps(2);
     h.key_press(egui::Key::Enter);
-    frames(&mut h, |a| a.opened().ws.views.camera("entered").is_some());
+    frames(&mut h, |a| {
+        a.opened().ws.view.views.camera("entered").is_some()
+    });
     assert!(p.root.join("parts/p/views/entered.json").is_file());
     // Esc closes it.
     h.event(egui::Event::PointerMoved(mid));
@@ -4184,6 +4311,7 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .comparing
             .compare
             .as_ref()
             .is_some_and(|c| c.rev == format!("worktree:{arm_s}") && c.loaded)
@@ -4414,9 +4542,9 @@ fn a_rebound_key_is_used_and_a_conflict_refused() {
     h.event(egui::Event::PointerMoved(over));
     h.step();
     h.key_press(egui::Key::G);
-    frames(&mut h, |a| a.opened().ws.measure.on);
+    frames(&mut h, |a| a.opened().ws.view.measure.on);
     h.key_press(egui::Key::Escape);
-    frames(&mut h, |a| !a.opened().ws.measure.on);
+    frames(&mut h, |a| !a.opened().ws.view.measure.on);
     // Every window test shares the preferences.
     h.get_by_label("Reset all").click();
     frames(&mut h, |a| {
@@ -4858,16 +4986,16 @@ fn a_section_plane_is_dragged_by_its_arrow_and_written_once() {
     frames(&mut h, loaded);
     // An agent cuts the human's window: the box is 5 mm tall.
     p.ok(&["section", "xy", "--offset", "3"]);
-    frames(&mut h, |a| a.opened().ws.sections.planes.len() == 1);
+    frames(&mut h, |a| a.opened().ws.view.sections.planes.len() == 1);
     menu(&mut h, "View", "Section view");
     shown(&mut h, "Plane 1");
-    assert!(h.state().opened().ws.sections.handles);
+    assert!(h.state().opened().ws.view.sections.handles);
     // The arrow runs up from the plane's origin: drag it up half its
     // length on screen.
     let (base, tip) = {
         let o = h.state_mut().opened_mut();
         let length = o.view.handle_length(&o.ws);
-        let plane = o.ws.sections.planes[0];
+        let plane = o.ws.view.sections.planes[0];
         let tip = [0, 1, 2].map(|k| plane.origin_m[k] + plane.normal[k] * length);
         (plane.origin_m, tip)
     };
@@ -4885,7 +5013,7 @@ fn a_section_plane_is_dragged_by_its_arrow_and_written_once() {
             .as_f64()
             .unwrap();
         if z > 0.0031 {
-            assert!(h.state().opened().ws.sections.dragging.is_none());
+            assert!(h.state().opened().ws.view.sections.dragging.is_none());
             break;
         }
         assert!(t0.elapsed() < Duration::from_secs(30), "never written: {z}");
@@ -4945,7 +5073,9 @@ fn a_named_view_restores_its_planes_and_explode_and_save_keeps_them() {
     p.ok(&["explode", "show", "--off"]);
     let mut h = window(&p);
     both_bolts(&mut h);
-    frames(&mut h, |a| a.opened().ws.views.camera("cutaway").is_some());
+    frames(&mut h, |a| {
+        a.opened().ws.view.views.camera("cutaway").is_some()
+    });
     // Restored by the window: its participant has the planes and explode.
     {
         let o = h.state_mut().opened_mut();
@@ -4965,13 +5095,15 @@ fn a_named_view_restores_its_planes_and_explode_and_save_keeps_them() {
         );
         h.step();
     }
-    frames(&mut h, |a| a.opened().ws.sections.planes.len() == 3);
+    frames(&mut h, |a| a.opened().ws.view.sections.planes.len() == 3);
     // Save view… from the window keeps them, with its camera exactly.
     turned(&mut h);
     h.run_steps(2);
     let c = h.state().opened().view.nav.camera.clone();
     h.state_mut().opened_mut().ws.save_view("kept", &c);
-    frames(&mut h, |a| a.opened().ws.views.camera("kept").is_some());
+    frames(&mut h, |a| {
+        a.opened().ws.view.views.camera("kept").is_some()
+    });
     let saved = p.ok(&["view", "list", "frame"]);
     let kept = saved["views"]
         .as_array()
@@ -5006,7 +5138,7 @@ fn an_explode_is_chosen_and_played_from_its_tile() {
     let z = |h: &Harness<'static, App>| h.state().opened().ws.model.pose(&b2).origin[2];
     let before = z(&h);
     menu(&mut h, "View", "Exploded view");
-    frames(&mut h, |a| a.opened().ws.explodes.list.len() == 1);
+    frames(&mut h, |a| a.opened().ws.assembly.explodes.list.len() == 1);
     shown(&mut h, "apart");
     h.get_by_label("apart").click();
     frames(&mut h, |a| {
@@ -5084,10 +5216,10 @@ fn the_motion_tile_scrubs_plays_sweeps_and_shows_a_collision() {
     let x = |h: &Harness<'static, App>| h.state().opened().ws.model.pose(&b2).origin[0];
     let rest = x(&h);
     menu(&mut h, "View", "Motion");
-    frames(&mut h, |a| a.opened().ws.motions.list.len() == 1);
+    frames(&mut h, |a| a.opened().ws.assembly.motions.list.len() == 1);
     shown(&mut h, "slam");
     h.get_by_label("slam").click();
-    frames(&mut h, |a| a.opened().ws.motions.frames_current());
+    frames(&mut h, |a| a.opened().ws.assembly.motions.frames_current());
     // Dragged to its end, b2 is drawn 40 mm along -x; written when let go.
     shown(&mut h, "motion fraction");
     let r = h.get_by_label("motion fraction").rect();
@@ -5110,10 +5242,10 @@ fn the_motion_tile_scrubs_plays_sweeps_and_shows_a_collision() {
     // Play, then Pause (the button says Pause from the next frame).
     shown(&mut h, "Play");
     h.get_by_label("Play").click();
-    frames(&mut h, |a| a.opened().ws.motions.playing());
+    frames(&mut h, |a| a.opened().ws.assembly.motions.playing());
     shown(&mut h, "Pause");
     h.get_by_label("Pause").click();
-    frames(&mut h, |a| !a.opened().ws.motions.playing());
+    frames(&mut h, |a| !a.opened().ws.assembly.motions.playing());
     // Sweep lists the shanks' collision; Show jumps to the contact.
     shown(&mut h, "Sweep");
     h.get_by_label("Sweep").click();
@@ -5121,6 +5253,7 @@ fn the_motion_tile_scrubs_plays_sweeps_and_shows_a_collision() {
         a.opened().ws.idle()
             && a.opened()
                 .ws
+                .assembly
                 .motions
                 .sweep
                 .as_ref()
@@ -5133,6 +5266,7 @@ fn the_motion_tile_scrubs_plays_sweeps_and_shows_a_collision() {
         .state()
         .opened()
         .ws
+        .assembly
         .motions
         .fraction(Instant::now())
         .unwrap();
@@ -5160,7 +5294,7 @@ fn a_mates_limits_show_in_the_property_panel() {
         .ws
         .open_form(Some(("frame".into(), "m1".into())));
     show_tab(&mut h, "properties");
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     shown(&mut h, "angle min (empty: none)");
     shown(&mut h, "angle max (empty: none)");
     assert!(
@@ -5355,7 +5489,7 @@ fn a_clicked_row_keeps_plain_keys_and_leaves_the_windows_modified_ones() {
     frames(&mut h, loaded);
     // The window's own change, for its Mod+Z to undo.
     h.get_by_label("boss (cylinder)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.step();
     h.get_all_by_value("3 mm").next().unwrap().click();
     h.step();
@@ -5367,6 +5501,7 @@ fn a_clicked_row_keeps_plain_keys_and_leaves_the_windows_modified_ones() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty() && f.params.iter().any(|x| x.read == "5 mm"))
@@ -5421,7 +5556,7 @@ fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
     let mut h = window(&p);
     frames(&mut h, loaded);
     h.get_by_label("boss (cylinder)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.step();
     let edit = |h: &mut Harness<'static, App>, from: &str, text: &str| {
         h.get_all_by_value(from).next().unwrap().click();
@@ -5445,7 +5580,7 @@ fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
     // Esc puts back what was read.
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
-    let form = h.state().opened().ws.form.clone().unwrap();
+    let form = h.state().opened().ws.forms.form.clone().unwrap();
     assert!(!form.dirty(), "{:?}", form.params);
     h.get_all_by_value("3 mm").next().unwrap();
     // Enter applies.
@@ -5454,6 +5589,7 @@ fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty() && f.params.iter().any(|x| x.read == "4 mm"))
@@ -5464,11 +5600,11 @@ fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
     edit(&mut h, "4 mm", "4 kg");
     h.key_press(egui::Key::Enter);
     frames(&mut h, |a| {
-        a.opened().ws.form.as_ref().is_some_and(|f| {
+        a.opened().ws.forms.form.as_ref().is_some_and(|f| {
             !f.saving && (f.error.is_some() || f.params.iter().any(|x| x.error.is_some()))
         })
     });
-    let form = h.state().opened().ws.form.clone().unwrap();
+    let form = h.state().opened().ws.forms.form.clone().unwrap();
     let radius = form.params.iter().find(|x| x.name == "radius").unwrap();
     assert!(
         radius.error.is_some() && form.error.is_none(),
@@ -5479,7 +5615,7 @@ fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
     // Revert puts the value back and the refusal goes with it (#532).
     h.get_by_label("Revert").click();
     h.run_steps(2);
-    let form = h.state().opened().ws.form.clone().unwrap();
+    let form = h.state().opened().ws.forms.form.clone().unwrap();
     let radius = form.params.iter().find(|x| x.name == "radius").unwrap();
     assert!(
         !form.dirty() && radius.error.is_none() && form.error.is_none(),
@@ -5722,6 +5858,7 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .deps
             .picker
             .as_ref()
             .is_some_and(|p| !p.parts.is_empty())
@@ -5730,7 +5867,7 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
     h.get_by_label("B-6 (p): A released").click();
     h.run_steps(2);
     h.get_by_label("Place").click();
-    frames(&mut h, |a| a.opened().ws.picker.is_none());
+    frames(&mut h, |a| a.opened().ws.deps.picker.is_none());
     // The tree marks it as the dependency's.
     frames(&mut h, |a| {
         a.opened()
@@ -5930,6 +6067,7 @@ fn zoom_in_out_and_actual_size_scale_the_window_and_high_contrast_shows() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .settings
             .get("ui.scale")
             .and_then(|v| v.as_f64())
@@ -5942,6 +6080,7 @@ fn zoom_in_out_and_actual_size_scale_the_window_and_high_contrast_shows() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .settings
             .get("ui.scale")
             .and_then(|v| v.as_f64())
@@ -5951,6 +6090,7 @@ fn zoom_in_out_and_actual_size_scale_the_window_and_high_contrast_shows() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .settings
             .get("ui.scale")
             .and_then(|v| v.as_f64())
@@ -5960,6 +6100,7 @@ fn zoom_in_out_and_actual_size_scale_the_window_and_high_contrast_shows() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .session
             .settings
             .get("ui.scale")
             .and_then(|v| v.as_f64())
@@ -6110,7 +6251,7 @@ fn a_lofts_weight_and_a_sweeps_twist_are_edited_from_their_forms() {
     h.get_by_label("l (loft)").click();
     frames(&mut h, |a| {
         let ws = &a.opened().ws;
-        ws.form.as_ref().is_some_and(|f| f.loft.is_some()) && ws.swept.is_some()
+        ws.forms.form.as_ref().is_some_and(|f| f.loft.is_some()) && ws.model.swept.is_some()
     });
     h.step();
     h.get_by_label("sketch s2");
@@ -6121,6 +6262,7 @@ fn a_lofts_weight_and_a_sweeps_twist_are_edited_from_their_forms() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -6131,6 +6273,7 @@ fn a_lofts_weight_and_a_sweeps_twist_are_edited_from_their_forms() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| f.sweep.is_some())
@@ -6144,6 +6287,7 @@ fn a_lofts_weight_and_a_sweeps_twist_are_edited_from_their_forms() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -6173,6 +6317,7 @@ fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| f.shell.is_some())
@@ -6185,6 +6330,7 @@ fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -6195,6 +6341,7 @@ fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| f.split.is_some())
@@ -6209,6 +6356,7 @@ fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -6252,6 +6400,7 @@ fn a_thickens_front_and_a_fills_tolerance_are_edited_from_their_forms() {
         frames(h, |a| {
             a.opened()
                 .ws
+                .forms
                 .form
                 .as_ref()
                 .is_some_and(|f| !f.saving && !f.dirty())
@@ -6261,6 +6410,7 @@ fn a_thickens_front_and_a_fills_tolerance_are_edited_from_their_forms() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| f.surface_form.is_some())
@@ -6275,7 +6425,7 @@ fn a_thickens_front_and_a_fills_tolerance_are_edited_from_their_forms() {
     assert_eq!(shown["front"]["value"], "3 mm");
     h.get_by_label("f (fill)").click();
     frames(&mut h, |a| {
-        a.opened().ws.form.as_ref().is_some_and(|f| {
+        a.opened().ws.forms.form.as_ref().is_some_and(|f| {
             matches!(
                 f.surface_form,
                 Some(ryucad_app::core::edit::SurfaceForm::Fill(_))
@@ -6317,6 +6467,7 @@ fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat
         frames(h, |a| {
             a.opened()
                 .ws
+                .forms
                 .form
                 .as_ref()
                 .is_some_and(|f| !f.saving && !f.dirty())
@@ -6326,6 +6477,7 @@ fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| f.sheet.is_some())
@@ -6341,7 +6493,7 @@ fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat
     assert_eq!(shown["angle"]["value"], "100 deg");
     h.get_by_label("plate (base_flange)").click();
     frames(&mut h, |a| {
-        a.opened().ws.form.as_ref().is_some_and(|f| {
+        a.opened().ws.forms.form.as_ref().is_some_and(|f| {
             matches!(
                 f.sheet,
                 Some(ryucad_app::core::edit::SheetMetalForm::BaseFlange(_))
@@ -6360,7 +6512,12 @@ fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat
     menu(&mut h, "View", "Flat pattern");
     frames(&mut h, |a| {
         let ws = &a.opened().ws;
-        ws.model.flat.is_some() && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+        ws.model.flat.is_some()
+            && ws
+                .model
+                .flat_view
+                .as_ref()
+                .is_some_and(|v| v.lines.is_some())
     });
     menu(&mut h, "View", "Flat pattern");
     h.step();
@@ -6392,6 +6549,7 @@ fn a_drafts_angle_and_a_moves_distance_are_edited_from_their_forms() {
         frames(h, |a| {
             a.opened()
                 .ws
+                .forms
                 .form
                 .as_ref()
                 .is_some_and(|f| !f.saving && !f.dirty())
@@ -6401,6 +6559,7 @@ fn a_drafts_angle_and_a_moves_distance_are_edited_from_their_forms() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| f.tweak.is_some())
@@ -6416,7 +6575,7 @@ fn a_drafts_angle_and_a_moves_distance_are_edited_from_their_forms() {
     assert_eq!(shown["angle"]["value"], "3 deg");
     h.get_by_label("m (move_face)").click();
     frames(&mut h, |a| {
-        a.opened().ws.form.as_ref().is_some_and(|f| {
+        a.opened().ws.forms.form.as_ref().is_some_and(|f| {
             matches!(
                 f.tweak,
                 Some(ryucad_app::core::edit::TweakForm::MoveFace(_))
@@ -6457,6 +6616,7 @@ fn a_deletes_heal_and_a_resizes_radius_are_edited_from_their_forms() {
         frames(h, |a| {
             a.opened()
                 .ws
+                .forms
                 .form
                 .as_ref()
                 .is_some_and(|f| !f.saving && !f.dirty())
@@ -6464,7 +6624,7 @@ fn a_deletes_heal_and_a_resizes_radius_are_edited_from_their_forms() {
     };
     h.get_by_label("x (delete_face)").click();
     frames(&mut h, |a| {
-        a.opened().ws.form.as_ref().is_some_and(|f| {
+        a.opened().ws.forms.form.as_ref().is_some_and(|f| {
             matches!(
                 f.tweak,
                 Some(ryucad_app::core::edit::TweakForm::DeleteFace(_))
@@ -6485,7 +6645,7 @@ fn a_deletes_heal_and_a_resizes_radius_are_edited_from_their_forms() {
     assert_eq!(shown["heal"], "auto");
     h.get_by_label("r (resize_blend)").click();
     frames(&mut h, |a| {
-        a.opened().ws.form.as_ref().is_some_and(|f| {
+        a.opened().ws.forms.form.as_ref().is_some_and(|f| {
             matches!(
                 f.tweak,
                 Some(ryucad_app::core::edit::TweakForm::ResizeBlend(_))
@@ -6595,7 +6755,7 @@ fn a_datums_row_hides_it_and_its_form_edits_its_distance() {
     );
     // Chosen, its form shows how it is built and edits its distance.
     h.get_by_label("d1 (plane)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.step();
     h.get_by_label("offset");
     let field = h.get_all_by_value("3 mm").next().unwrap();
@@ -6605,6 +6765,7 @@ fn a_datums_row_hides_it_and_its_form_edits_its_distance() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -6664,7 +6825,7 @@ fn tab_reaches_an_annotations_row_with_the_pointer_over_the_viewport() {
     assert!(reached, "Tab never reached {row}");
     hooked(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
     frames(&mut h, |a| {
-        a.opened().ws.chosen_annotation.as_deref() == Some(e.id.as_str())
+        a.opened().ws.annotations.chosen_annotation.as_deref() == Some(e.id.as_str())
     });
 }
 
@@ -6702,7 +6863,9 @@ fn the_mate_dialog_takes_the_keyboard_and_esc_closes_it_with_nothing_selected() 
         "Tab hid nothing under the pointer"
     );
     hooked(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
-    waited(&mut h, "closed", |a| a.opened().ws.mating.is_none());
+    waited(&mut h, "closed", |a| {
+        a.opened().ws.assembly.mating.is_none()
+    });
 }
 
 /// #742: the Markup bar wraps inside a narrow viewport.
@@ -6718,7 +6881,9 @@ fn the_markup_bar_fits_a_narrow_viewport() {
     frames(&mut h, loaded);
     h.step();
     h.get_by_label("Markup").click();
-    waited(&mut h, "the bar", |a| a.opened().ws.markup.is_some());
+    waited(&mut h, "the bar", |a| {
+        a.opened().ws.annotations.markup.is_some()
+    });
     shown(&mut h, "Pen on faces");
     h.run_steps(3);
     let view = h.state().opened().view.rect;
@@ -6906,7 +7071,7 @@ fn the_annotations_tile_lists_an_agents_reply() {
     // alike, and comes after the tile's in the tree).
     h.get_all_by_label("#1").next().unwrap().click();
     frames(&mut h, |a| {
-        a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
+        a.opened().ws.annotations.chosen_annotation.as_deref() == Some(id.as_str())
     });
 }
 
@@ -6933,7 +7098,7 @@ fn a_pins_marker_is_drawn_and_chooses_its_annotation() {
     h.run_steps(3);
     h.get_by_label("#1").click();
     frames(&mut h, |a| {
-        a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
+        a.opened().ws.annotations.chosen_annotation.as_deref() == Some(id.as_str())
     });
     h.run_steps(3);
     let tags: Vec<egui::Rect> = h.query_all_by_label("#1").map(|n| n.rect()).collect();
@@ -7024,7 +7189,7 @@ fn view_disables_editing_and_says_which_mode_enables_it() {
     let mut h = viewing(&p);
     frames(&mut h, loaded);
     h.get_by_label("boss (cylinder)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.run_steps(2);
     assert!(h.get_by_label("Apply").accesskit_node().is_disabled());
     assert!(h.query_by_label("Annotating:").is_none());
@@ -7042,13 +7207,13 @@ fn annotate_shows_its_bar_and_the_form_suggests() {
     frames(&mut h, loaded);
     h.get_all_by_label("Annotate").next().unwrap().click();
     frames(&mut h, |a| {
-        a.opened().ws.mode == ryucad_app::core::modes::Mode::Annotate
+        a.opened().ws.session.mode == ryucad_app::core::modes::Mode::Annotate
     });
     h.run_steps(2);
     h.get_by_label("Annotating:");
     h.get_by_label("Stop annotating");
     h.get_by_label("boss (cylinder)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.step();
     h.get_all_by_value("3 mm").next().unwrap().click();
     h.step();
@@ -7067,7 +7232,7 @@ fn annotate_shows_its_bar_and_the_form_suggests() {
     h.get_by_label("Show agent's model");
     h.get_by_label("Stop annotating").click();
     frames(&mut h, |a| {
-        a.opened().ws.mode == ryucad_app::core::modes::Mode::View
+        a.opened().ws.session.mode == ryucad_app::core::modes::Mode::View
     });
 }
 
@@ -7082,12 +7247,12 @@ fn direct_edit_shows_its_bar_and_writes() {
     frames(&mut h, loaded);
     h.get_by_label("Direct edit").click();
     frames(&mut h, |a| {
-        a.opened().ws.mode == ryucad_app::core::modes::Mode::Edit
+        a.opened().ws.session.mode == ryucad_app::core::modes::Mode::Edit
     });
     h.run_steps(2);
     h.get_by_label("Direct edit:");
     h.get_by_label("boss (cylinder)").click();
-    frames(&mut h, |a| a.opened().ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
     h.step();
     h.get_all_by_value("3 mm").next().unwrap().click();
     h.step();
@@ -7099,6 +7264,7 @@ fn direct_edit_shows_its_bar_and_writes() {
     frames(&mut h, |a| {
         a.opened()
             .ws
+            .forms
             .form
             .as_ref()
             .is_some_and(|f| !f.saving && !f.dirty())
@@ -7109,7 +7275,7 @@ fn direct_edit_shows_its_bar_and_writes() {
     );
     h.get_by_label("Stop editing").click();
     frames(&mut h, |a| {
-        a.opened().ws.mode == ryucad_app::core::modes::Mode::View
+        a.opened().ws.session.mode == ryucad_app::core::modes::Mode::View
     });
 }
 
@@ -7231,7 +7397,9 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     frames(&mut h, loaded);
     h.step();
     h.get_by_label("Markup").click();
-    waited(&mut h, "the bar", |a| a.opened().ws.markup.is_some());
+    waited(&mut h, "the bar", |a| {
+        a.opened().ws.annotations.markup.is_some()
+    });
     shown(&mut h, "Pen on faces");
     h.run_steps(2);
     let held = h.state().opened().view.nav.camera.clone();
@@ -7241,7 +7409,15 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     let from = rect.center() + egui::vec2(-80.0, 60.0);
     drag(&mut h, from, from + egui::vec2(120.0, 40.0), 6);
     waited(&mut h, "an arrow", |a| {
-        a.opened().ws.markup.as_ref().unwrap().marks.len() == 1
+        a.opened()
+            .ws
+            .annotations
+            .markup
+            .as_ref()
+            .unwrap()
+            .marks
+            .len()
+            == 1
     });
     // The wheel zooms nothing.
     h.event(egui::Event::PointerMoved(rect.center()));
@@ -7262,12 +7438,27 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     hooked(&mut h, egui::Key::E, egui::Modifiers::NONE);
     h.run_steps(2);
     assert_eq!(
-        h.state().opened().ws.markup.as_ref().unwrap().tool,
+        h.state()
+            .opened()
+            .ws
+            .annotations
+            .markup
+            .as_ref()
+            .unwrap()
+            .tool,
         Tool::Ellipse
     );
     drag(&mut h, from, from + egui::vec2(60.0, 30.0), 4);
     waited(&mut h, "an ellipse", |a| {
-        a.opened().ws.markup.as_ref().unwrap().marks.len() == 2
+        a.opened()
+            .ws
+            .annotations
+            .markup
+            .as_ref()
+            .unwrap()
+            .marks
+            .len()
+            == 2
     });
     // Ctrl on Linux and Windows is the platform's Mod, as winit sends it.
     let ctrl = egui::Modifiers {
@@ -7279,7 +7470,15 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     hooked(&mut h, egui::Key::Z, ctrl);
     h.run_steps(2);
     assert_eq!(
-        h.state().opened().ws.markup.as_ref().unwrap().marks.len(),
+        h.state()
+            .opened()
+            .ws
+            .annotations
+            .markup
+            .as_ref()
+            .unwrap()
+            .marks
+            .len(),
         1
     );
     // The camera's own commands say why they are off.
@@ -7295,7 +7494,7 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     h.run_steps(2);
     h.get_by_label("Post").click();
     waited(&mut h, "posted", |a| {
-        a.opened().ws.markup.is_none() && a.opened().ws.annotations.all.len() == 1
+        a.opened().ws.annotations.markup.is_none() && a.opened().ws.annotations.all.len() == 1
     });
     h.run_steps(2);
     assert!(!h.state().opened().view.nav.locked);
@@ -7345,6 +7544,7 @@ fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_i
         h.state()
             .opened()
             .ws
+            .annotations
             .markup
             .as_ref()
             .unwrap()
@@ -7355,11 +7555,11 @@ fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_i
     h.run_steps(2);
     press(&h, at + egui::vec2(40.0, 0.0), false);
     h.run_steps(2);
-    let m = h.state().opened().ws.markup.clone().unwrap();
+    let m = h.state().opened().ws.annotations.markup.clone().unwrap();
     assert!(m.drawing.is_none() && m.marks.is_empty());
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
-    assert!(h.state().opened().ws.markup.is_none());
+    assert!(h.state().opened().ws.annotations.markup.is_none());
     assert!(!h.state().opened().view.nav.locked);
     // In View the tool is off, and says why.
     h.state_mut()
@@ -7391,7 +7591,7 @@ fn the_part_section_shows_from_the_step_file() {
     show_tab(&mut h, "part");
     frames(&mut h, |app| match &app.screen {
         ryucad_app::ui::app::Screen::Opened(o) => {
-            o.ws.props.as_ref().is_some_and(|p| !p.file.is_empty())
+            o.ws.pdm.props.as_ref().is_some_and(|p| !p.file.is_empty())
         }
         _ => false,
     });
@@ -7452,5 +7652,5 @@ fn tools_appearance_says_a_colour_came_from_the_step_file() {
     menu(&mut h, "Tools", "Appearance");
     shown(&mut h, "Colour what");
     shown(&mut h, "From the STEP file");
-    assert!(h.state().opened().ws.appearance.from_file);
+    assert!(h.state().opened().ws.view.appearance.from_file);
 }

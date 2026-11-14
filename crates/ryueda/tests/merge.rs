@@ -100,6 +100,11 @@ fn layouts_merge_at_status_time_and_relayout_settles_them() {
         .unwrap();
         assert_eq!(r1["value"], "47k", "{r1}");
         let list = items(&board, &run, daemon);
+        let whole = ok(&board, &run, daemon, &["merge", "status"]);
+        assert!(
+            whole["already_failing"].is_array() && whole["warnings"].is_array(),
+            "{whole}"
+        );
         let areas: Vec<&Value> = list
             .iter()
             .filter(|c| c["kind"] == "layout_conflict")
@@ -462,4 +467,445 @@ fn a_merge_is_told_to_watchers() {
         format!("{R1}#/value")
     );
     ok(&board, &run, true, &["daemon", "stop"]);
+}
+
+/// Runs each command in `board`, which must succeed.
+fn script(board: &Path, run: &Path, cmds: &[Vec<&str>]) {
+    for args in cmds {
+        ok(board, run, false, args);
+    }
+}
+
+/// The breakout committed with a spare library component R 10k, then
+/// branch `theirs` and `main` (ours) each running their commands, and
+/// `git merge --no-commit theirs` begun (`--no-commit`, so the hook never
+/// decides whether the merge stops).
+fn branches(
+    top: &Path,
+    run: &Path,
+    ours: &[Vec<&str>],
+    theirs: &[Vec<&str>],
+) -> std::path::PathBuf {
+    let board = breakout_in_git(top, run);
+    script(
+        &board,
+        run,
+        &[vec![
+            "libcomp",
+            "create",
+            "R 10k",
+            "--symbol",
+            "r",
+            "--prefix",
+            "R",
+            "--value",
+            "10k",
+            "--footprint",
+            "r_0402",
+            "--mpn",
+            "BASE",
+        ]],
+    );
+    commit_all(top, "a spare part");
+    git(top, &["checkout", "-q", "-b", "theirs"]);
+    script(&board, run, theirs);
+    commit_all(top, "theirs");
+    git(top, &["checkout", "-q", "main"]);
+    script(&board, run, ours);
+    commit_all(top, "ours");
+    let _ = git_try(top, &[], &["merge", "--no-commit", "-q", "theirs"]);
+    board
+}
+
+/// Settles every item by its first repair (a block's areas together),
+/// until the status is clean or an item has none; answers the kinds met,
+/// in the order met.
+fn settle_all(board: &Path, run: &Path, daemon: bool) -> Vec<String> {
+    let mut met = Vec::new();
+    for _ in 0..8 {
+        let list = items(board, run, daemon);
+        let Some(c) = list
+            .iter()
+            .find(|c| c["repairs"].as_array().is_some_and(|r| !r.is_empty()))
+        else {
+            assert!(list.is_empty(), "items with no repair left: {list:?}");
+            return met;
+        };
+        met.push(c["kind"].as_str().unwrap().to_owned());
+        let repair = c["repairs"][0]["id"].as_str().unwrap();
+        let ids: Vec<String> = match c["with"].as_array() {
+            Some(all) => all.iter().map(|x| x.as_str().unwrap().to_owned()).collect(),
+            None => vec![c["id"].as_str().unwrap().to_owned()],
+        };
+        let mut args = vec!["merge", "resolve"];
+        args.extend(ids.iter().map(String::as_str));
+        args.extend(["--repair", repair]);
+        ok(board, run, daemon, &args);
+    }
+    panic!(
+        "not settled in eight rounds: {:?}",
+        items(board, run, daemon)
+    );
+}
+
+#[test]
+fn designators_names_and_joined_nets_settle_by_their_first_repairs() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let ours = [
+            vec![
+                "component",
+                "add",
+                "breakout",
+                "--of",
+                "r_10k",
+                "--id",
+                "r8",
+                "--refdes",
+                "R5",
+            ],
+            vec!["connect", "breakout/r8/1", "rail:3V3"],
+            vec!["connect", "breakout/r8/2", "rail:GND"],
+            vec!["net", "add", "breakout", "AUX", "--id", "aux_o"],
+            vec!["net", "join", "breakout/SDA", "SCL"],
+        ];
+        let theirs = [
+            vec![
+                "component",
+                "add",
+                "breakout",
+                "--of",
+                "r_10k",
+                "--id",
+                "r9",
+                "--refdes",
+                "R5",
+            ],
+            vec!["net", "add", "breakout", "AUX", "--id", "aux_t"],
+            vec!["connect", "breakout/r9/1", "AUX"],
+            vec!["connect", "breakout/r9/2", "SDA"],
+        ];
+        let board = branches(&top, &run, &ours, &theirs);
+        let list = items(&board, &run, daemon);
+        let kinds: std::collections::BTreeSet<&str> =
+            list.iter().filter_map(|c| c["kind"].as_str()).collect();
+        for k in ["refdes_clash", "name_clash", "delete_edit"] {
+            assert!(kinds.contains(k), "{k}: {list:?}");
+        }
+        // Staged as they are, the shared hook refuses the commit.
+        git(&top, &["add", "-A"]);
+        let (committed, said) = git_try(&top, &[], &["commit", "-q", "-m", "merge"]);
+        assert!(!committed && said.contains("refdes:board/R5"), "{said}");
+        // Through the daemon, one resolution undone and done again.
+        if daemon {
+            let c = list.iter().find(|c| c["kind"] == "refdes_clash").unwrap();
+            ok(
+                &board,
+                &run,
+                true,
+                &[
+                    "merge",
+                    "resolve",
+                    c["id"].as_str().unwrap(),
+                    "--repair",
+                    "renumber",
+                ],
+            );
+            assert!(
+                items(&board, &run, true)
+                    .iter()
+                    .all(|x| x["kind"] != "refdes_clash")
+            );
+            ok(&board, &run, true, &["undo"]);
+            assert!(
+                items(&board, &run, true)
+                    .iter()
+                    .any(|x| x["kind"] == "refdes_clash")
+            );
+        }
+        settle_all(&board, &run, daemon);
+        // Ours' R5 stands, theirs' R9 took another; theirs' AUX joined
+        // ours'; R9's pin on SDA followed SDA into SCL.
+        let read = |p: &str| -> Value {
+            serde_json::from_slice(&std::fs::read(board.join(p)).unwrap()).unwrap()
+        };
+        let r8 = read("blocks/breakout/components/r8.json");
+        let r9 = read("blocks/breakout/components/r9.json");
+        assert_eq!(r8["refdes"], "R5");
+        assert_ne!(r9["refdes"], "R5");
+        assert_eq!(
+            (r9["pins"]["1"].clone(), r9["pins"]["2"].clone()),
+            (json!("aux_o"), json!("scl")),
+            "{r9}"
+        );
+        assert!(!board.join("blocks/breakout/nets/aux_t.json").exists());
+        // The repaired merge commits.
+        git(&top, &["add", "-A"]);
+        let (committed, said) = git_try(&top, &[], &["commit", "-q", "-m", "merge"]);
+        assert!(committed, "{said}");
+        if daemon {
+            let _ = ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
+#[test]
+fn a_library_component_both_sides_made_is_renumbered_with_its_users() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let make = |mpn: &'static str| {
+        vec![
+            "libcomp",
+            "create",
+            "R 22k",
+            "--symbol",
+            "r",
+            "--prefix",
+            "R",
+            "--value",
+            "22k",
+            "--footprint",
+            "r_0402",
+            "--mpn",
+            mpn,
+        ]
+    };
+    let board = branches(
+        &top,
+        &run,
+        &[make("OURS")],
+        &[
+            make("THEIRS"),
+            vec![
+                "component",
+                "add",
+                "breakout",
+                "--of",
+                "r_22k",
+                "--id",
+                "r7",
+                "--refdes",
+                "R7",
+            ],
+        ],
+    );
+    let list = items(&board, &run, false);
+    let c = list
+        .iter()
+        .find(|c| c["id"] == "library/components/r_22k.json#")
+        .unwrap_or_else(|| panic!("the collision: {list:?}"));
+    assert_eq!(c["kind"], "id_collision");
+    assert_eq!(c["repairs"][0]["to"], "r_22k-2");
+    ok(
+        &board,
+        &run,
+        false,
+        &[
+            "merge",
+            "resolve",
+            "library/components/r_22k.json#",
+            "--repair",
+            "renumber",
+        ],
+    );
+    let read = |p: &str| -> Value {
+        serde_json::from_slice(&std::fs::read(board.join(p)).unwrap()).unwrap()
+    };
+    assert_eq!(read("library/components/r_22k.json")["mpn"], "OURS");
+    assert_eq!(read("library/components/r_22k-2.json")["mpn"], "THEIRS");
+    assert_eq!(
+        read("blocks/breakout/components/r7.json")["of"],
+        json!({"id": "r_22k-2"})
+    );
+}
+
+/// Both branches draw a symbol `vreg` and make a library component `vreg`
+/// of it, so the symbol and the component collide together: once both
+/// are renumbered, theirs' component names theirs' symbol, whether one
+/// `merge resolve` renumbers both or the symbol's comes first. (The
+/// component's alone first is refused: its users would name a symbol
+/// whose record is still unsettled.)
+#[test]
+fn a_symbol_and_its_library_component_renumbered_together_stay_wired() {
+    let make = |pins: &'static str, mpn: &'static str| {
+        vec![
+            vec![
+                "symbol",
+                "create",
+                "vreg",
+                "--template",
+                "ic",
+                "--pins",
+                pins,
+            ],
+            vec![
+                "libcomp",
+                "create",
+                "VREG",
+                "--symbol",
+                "vreg",
+                "--prefix",
+                "U",
+                "--value",
+                "vreg",
+                "--footprint",
+                "r_0402",
+                "--mpn",
+                mpn,
+            ],
+        ]
+    };
+    let sym = "library/symbols/vreg.json#";
+    let comp = "library/components/vreg.json#";
+    for batches in [vec![vec![sym, comp]], vec![vec![sym], vec![comp]]] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = branches(
+            &top,
+            &run,
+            &make(
+                r#"[{"number":"1","name":"A","type":"passive"},{"number":"2","name":"B","type":"passive"}]"#,
+                "OURS",
+            ),
+            &make(
+                r#"[{"number":"1","name":"IN","type":"passive"},{"number":"2","name":"OUT","type":"passive"}]"#,
+                "THEIRS",
+            ),
+        );
+        let list = items(&board, &run, false);
+        for id in [sym, comp] {
+            let c = list
+                .iter()
+                .find(|c| c["id"] == id)
+                .unwrap_or_else(|| panic!("{id}: {list:?}"));
+            assert_eq!(c["kind"], "id_collision");
+            assert_eq!(c["repairs"][0]["to"], "vreg-2");
+        }
+        for batch in &batches {
+            let mut args = vec!["merge", "resolve"];
+            args.extend(batch.iter().copied());
+            args.extend(["--repair", "renumber"]);
+            ok(&board, &run, false, &args);
+        }
+        let read = |p: &str| -> Value {
+            serde_json::from_slice(&std::fs::read(board.join(p)).unwrap()).unwrap()
+        };
+        let (ours, theirs) = (
+            read("library/components/vreg.json"),
+            read("library/components/vreg-2.json"),
+        );
+        assert_eq!(
+            (&ours["mpn"], &ours["symbol"]),
+            (&json!("OURS"), &json!({"id": "vreg"})),
+            "{batches:?}"
+        );
+        assert_eq!(
+            (&theirs["mpn"], &theirs["symbol"]),
+            (&json!("THEIRS"), &json!({"id": "vreg-2"})),
+            "{batches:?}"
+        );
+        assert_ne!(
+            read("library/symbols/vreg.json"),
+            read("library/symbols/vreg-2.json")
+        );
+    }
+}
+
+#[test]
+fn a_library_component_deleted_under_a_placement_is_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = branches(
+        &top,
+        &run,
+        &[vec!["libcomp", "delete", "r_10k"]],
+        &[vec![
+            "component",
+            "add",
+            "breakout",
+            "--of",
+            "r_10k",
+            "--id",
+            "r9",
+            "--refdes",
+            "R9",
+        ]],
+    );
+    let list = items(&board, &run, false);
+    let c = list
+        .iter()
+        .find(|c| c["kind"] == "delete_edit")
+        .unwrap_or_else(|| panic!("the deleted libcomp: {list:?}"));
+    assert_eq!(c["id"], "blocks/breakout/components/r9.json#/of");
+    assert_eq!(c["repairs"][0]["id"], "restore");
+    ok(
+        &board,
+        &run,
+        false,
+        &[
+            "merge",
+            "resolve",
+            c["id"].as_str().unwrap(),
+            "--repair",
+            "restore",
+        ],
+    );
+    assert!(board.join("library/components/r_10k.json").exists());
+}
+
+#[test]
+fn what_the_merge_broke_blocks_the_commit_until_fixed() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    // A class in the base; theirs deletes it, ours gives SDA it.
+    let board = breakout_in_git(&top, &run);
+    script(
+        &board,
+        &run,
+        &[vec!["class", "add", "Fast", "--id", "fast"]],
+    );
+    commit_all(&top, "a class");
+    git(&top, &["checkout", "-q", "-b", "theirs"]);
+    script(&board, &run, &[vec!["class", "delete", "fast"]]);
+    commit_all(&top, "theirs");
+    git(&top, &["checkout", "-q", "main"]);
+    script(
+        &board,
+        &run,
+        &[vec!["net", "edit", "breakout/SDA", "--class", "Fast"]],
+    );
+    commit_all(&top, "ours");
+    let _ = git_try(&top, &[], &["merge", "--no-commit", "-q", "theirs"]);
+    let list = items(&board, &run, false);
+    let c = list
+        .iter()
+        .find(|c| c["kind"] == "merge_faults")
+        .unwrap_or_else(|| panic!("what the merge broke: {list:?}"));
+    assert_eq!(c["id"], "faults:blocks/breakout/nets/sda.json#/class");
+    assert_eq!(c["cause"], "both");
+    git(&top, &["add", "-A"]);
+    let (committed, _) = git_try(&top, &[], &["commit", "-q", "-m", "merge"]);
+    assert!(!committed);
+    // Fixed by an edit: the class taken off SDA.
+    ok(
+        &board,
+        &run,
+        false,
+        &["net", "edit", "breakout/SDA", "--class", ""],
+    );
+    assert!(items(&board, &run, false).is_empty());
+    git(&top, &["add", "-A"]);
+    let (committed, said) = git_try(&top, &[], &["commit", "-q", "-m", "merge"]);
+    assert!(committed, "{said}");
 }

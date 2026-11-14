@@ -414,7 +414,9 @@ impl View {
         pr: &Projector,
         length: f64,
     ) {
-        let Some(m) = ws.mover.clone() else { return };
+        let Some(m) = ws.assembly.mover.clone() else {
+            return;
+        };
         let size = [f64::from(rect.width()), f64::from(rect.height())];
         let at = |q: [f64; 2]| egui::pos2(rect.min.x + q[0] as f32, rect.min.y + q[1] as f32);
         let painter = ui.painter_at(rect);
@@ -506,7 +508,7 @@ impl View {
                         ui.colored_label(ui.visuals().warn_fg_color, e);
                     }
                     if ui.checkbox(&mut own, "Own axes").changed()
-                        && let Some(m) = ws.mover.as_mut()
+                        && let Some(m) = ws.assembly.mover.as_mut()
                     {
                         m.own = own;
                     }
@@ -548,7 +550,7 @@ impl View {
                 Picker::of(&ws.model, self.sketches)
                     .with_datums(&ws.model, self.datums)
                     .with_compare(ws.painted())
-                    .with_sections(&ws.sections.planes),
+                    .with_sections(&ws.view.sections.planes),
             );
             self.picked_at = wanted;
         }
@@ -594,7 +596,7 @@ impl View {
     /// of where it landed when motion is reduced.
     pub fn turn(&mut self, ws: &mut Workspace, to: Camera) {
         self.framed = true;
-        ws.following = None;
+        ws.session.following = None;
         // From the next step, wherever it was asked for; with motion
         // reduced it is there now, and no step follows to share it (#603).
         if self.nav.turn_to(to, f64::NAN) {
@@ -633,7 +635,7 @@ impl View {
 
     /// Turns to the named view `id` of the part shown, as it was saved.
     pub fn restore_view(&mut self, ws: &mut Workspace, id: &str) {
-        if let Some(c) = ws.views.camera(id).cloned() {
+        if let Some(c) = ws.view.views.camera(id).cloned() {
             ws.restore_named_view(id);
             self.turn(ws, c);
         }
@@ -778,7 +780,7 @@ impl View {
     fn frame_to(&mut self, ws: &mut Workspace, points: &[[f64; 3]]) {
         if !points.is_empty() {
             self.framed = true;
-            ws.following = None;
+            ws.session.following = None;
             // From the next frame's step: a menu or the toolbar runs this
             // before the viewport reads the frame's time.
             self.nav.fit_to(points, self.aspect(), f64::NAN);
@@ -815,7 +817,7 @@ impl View {
     pub fn moved(&mut self, ws: &mut Workspace) {
         // The person's camera from now on, loaded or not.
         self.framed = true;
-        ws.following = None;
+        ws.session.following = None;
         ws.share_camera(&self.nav.camera);
     }
 
@@ -841,11 +843,11 @@ impl View {
     /// #504), and the lines drawn over everything (a mate's frames).
     fn painted(&mut self, ws: &Workspace) -> Painted {
         let mut wanted: Vec<(String, Rgb)> = Vec::new();
-        for p in ws.people.others(ws.me()) {
+        for p in ws.session.people.others(ws.me()) {
             let c = style::participant(&p.id);
             wanted.extend(p.selection.iter().map(|e| (e.clone(), c)));
         }
-        for p in ws.people.all.values() {
+        for p in ws.session.people.all.values() {
             for h in &p.highlights {
                 let c = style::highlight(h.style);
                 wanted.extend(h.entities.iter().map(|e| (e.clone(), c)));
@@ -857,7 +859,7 @@ impl View {
         // selection it colours, so the selection isn't painted over it
         // (#426).
         if let Some(me) = ws.myself()
-            && !ws.appearance.open
+            && !ws.view.appearance.open
         {
             wanted.extend(me.selection.iter().map(|e| (e.clone(), style::SELECTED)));
         }
@@ -883,6 +885,7 @@ impl View {
         // What the chosen feature made, in the solids that show it; of a
         // thicken, its walls.
         if let Some(made) = ws
+            .model
             .made
             .as_ref()
             .filter(|m| chosen.as_ref() == Some(&m.feature))
@@ -953,7 +956,12 @@ impl View {
         }
         // Interference found: the faces each pair's shared volume touches,
         // but not over a compare, whose red means removed (#138).
-        if let Some(i) = ws.interference.as_ref().filter(|_| ws.compare.is_none()) {
+        if let Some(i) = ws
+            .assembly
+            .interference
+            .as_ref()
+            .filter(|_| ws.comparing.compare.is_none())
+        {
             let removed = linear(style::REMOVED);
             for r in i.faces() {
                 if let Some(Place::Face(k, f)) = picker.place(r) {
@@ -963,9 +971,13 @@ impl View {
         }
         // The shown motion's last sweep: the faces colliding at the step
         // nearest the slider, but not over a compare.
-        if ws.compare.is_none() {
+        if ws.comparing.compare.is_none() {
             let removed = linear(style::REMOVED);
-            for r in ws.motions.collision_faces(std::time::Instant::now()) {
+            for r in ws
+                .assembly
+                .motions
+                .collision_faces(std::time::Instant::now())
+            {
                 if let Some(Place::Face(k, f)) = picker.place(&r) {
                     faces.push((k, f, removed));
                 }
@@ -980,7 +992,7 @@ impl View {
             .unwrap_or_default();
         for (refs, c) in [
             (sheet.0, style::CHOSEN),
-            (ws.sheet_hover.clone(), style::HOVER),
+            (ws.model.sheet_hover.clone(), style::HOVER),
         ] {
             for r in refs {
                 if let Some(Place::Face(k, i)) = picker.place(&r) {
@@ -1056,6 +1068,7 @@ impl View {
         };
         let size = [f64::from(px[0]), f64::from(px[1])];
         if let Some(made) = ws
+            .model
             .made
             .as_ref()
             .filter(|m| m.feature == (part.clone(), id.clone()) && !m.lines.is_empty())
@@ -1103,6 +1116,7 @@ impl View {
         };
         if b.kind == "shell"
             && let Some(made) = ws
+                .model
                 .made
                 .as_ref()
                 .filter(|m| m.feature == (part.clone(), id.clone()))
@@ -1241,7 +1255,7 @@ impl View {
     fn marks(&mut self, ws: &Workspace) -> Vec<Mark> {
         let picker = self.picker(ws);
         let mut out = Vec::new();
-        for p in ws.people.all.values() {
+        for p in ws.session.people.all.values() {
             for h in &p.highlights {
                 if let Some((lo, hi)) = picker.bounds_of(&h.entities) {
                     out.push(Mark {
@@ -1310,7 +1324,7 @@ impl View {
                 continue;
             }
             let colour = style::color32(style::participant(&m.by));
-            let picked = ws.chosen_annotation.as_deref() == Some(m.id.as_str());
+            let picked = ws.annotations.chosen_annotation.as_deref() == Some(m.id.as_str());
             let id = ui.scope_id().with(("annotation", &m.id, m.pin));
             egui::Area::new(id)
                 .fixed_pos(s)
@@ -1360,6 +1374,7 @@ impl View {
     ) {
         let size = [f64::from(rect.width()), f64::from(rect.height())];
         let open = ws
+            .forms
             .dimension
             .as_ref()
             .map(|f| (f.part.clone(), f.sketch.clone(), f.constraint.clone()));
@@ -1441,6 +1456,7 @@ impl View {
     /// writes them.
     fn bend_notes(&mut self, ui: &egui::Ui, ws: &Workspace, rect: egui::Rect, pr: &Projector) {
         let Some(l) = ws
+            .model
             .flat_view
             .as_ref()
             .and_then(|v| v.lines.as_ref())
@@ -1487,7 +1503,7 @@ impl View {
         self.now = ui.input(|i| i.time);
         // The Markup bar holds the camera at its view (design 423): every
         // view mark lies in that view's plane.
-        match ws.markup.as_ref() {
+        match ws.annotations.markup.as_ref() {
             Some(m) if !self.nav.locked || self.nav.camera != m.camera => {
                 self.nav.lock(m.camera.clone());
                 ws.share_camera(&self.nav.camera);
@@ -1503,7 +1519,7 @@ impl View {
         }
         // A view normal to a face, as the daemon worked it out, framed
         // for this viewport.
-        if let Some(c) = ws.looked.take() {
+        if let Some(c) = ws.view.looked.take() {
             let points = self.picker(ws).points(None);
             if !points.is_empty() {
                 let to = view::refit_points(&c, &points, self.aspect());
@@ -1512,7 +1528,7 @@ impl View {
         }
         // Showing another part frames it, as the first view frames the
         // model: whatever the camera was, the shown part may be elsewhere.
-        if std::mem::take(&mut ws.refocused) {
+        if std::mem::take(&mut ws.view.refocused) {
             self.framed = false;
             self.framing = None;
         }
@@ -1603,7 +1619,7 @@ impl View {
         let length = self.handle_length(ws);
         // While the Markup bar is open the left button draws marks: it
         // picks, selects and moves nothing.
-        let marking = ws.markup.is_some();
+        let marking = ws.annotations.markup.is_some();
         if marking {
             self.markup_input(ui, ws, &response, &pr, rect, modifiers.shift);
         }
@@ -1618,19 +1634,21 @@ impl View {
             {
                 let at = local(p);
                 if ws
+                    .assembly
                     .mover
                     .as_mut()
                     .is_some_and(|m| m.grab(&pr, size, at, length))
                 {
                     self.handle = Some(Handle::Mover);
                 } else if ws
+                    .assembly
                     .explodes
                     .adding
                     .as_mut()
                     .is_some_and(|a| a.grab(&pr, size, at, length))
                 {
                     self.handle = Some(Handle::Step);
-                } else if ws.sections.handles && ws.sections.grab(&pr, size, at, length) {
+                } else if ws.view.sections.handles && ws.view.sections.grab(&pr, size, at, length) {
                     self.handle = Some(Handle::Section);
                 }
             }
@@ -1656,16 +1674,16 @@ impl View {
                         ) && ws.model.parts.get(&h.part).is_some_and(|p| p.assembly) =>
                     {
                         // View changes nothing: the drag orbits instead.
-                        ws.drag_note =
+                        ws.assembly.drag_note =
                             Some("View only: Annotate or Direct edit moves an instance".into());
                     }
                     Ok((part, instance)) if ws.model.parts[&part].assembly => {
-                        ws.drag_note = None;
+                        ws.assembly.drag_note = None;
                         self.grab = Some((part, instance, h.point));
                     }
                     Ok(_) => {}
                     Err(why) if ws.model.parts.get(&h.part).is_some_and(|p| p.assembly) => {
-                        ws.drag_note = Some(why);
+                        ws.assembly.drag_note = Some(why);
                     }
                     Err(_) => {}
                 }
@@ -1676,16 +1694,16 @@ impl View {
             && let Some(p) = response.interact_pointer_pos()
         {
             match handle {
-                Handle::Section => ws.sections.drag(&pr, size, local(p), length),
+                Handle::Section => ws.view.sections.drag(&pr, size, local(p), length),
                 Handle::Step => {
-                    if let Some(a) = ws.explodes.adding.as_mut() {
+                    if let Some(a) = ws.assembly.explodes.adding.as_mut() {
                         a.drag(&pr, size, local(p), length);
                     }
                     ws.sync_explode();
                 }
                 Handle::Mover => {
                     let unit = ws.unit();
-                    if let Some(m) = ws.mover.as_mut() {
+                    if let Some(m) = ws.assembly.mover.as_mut() {
                         let snap = match m.grip {
                             Some(crate::core::mover::Grip::Ring(_)) => {
                                 crate::core::mover::angle_step(modifiers.shift)
@@ -1741,14 +1759,14 @@ impl View {
         if response.drag_stopped() {
             match self.handle.take() {
                 Some(Handle::Section) => {
-                    if let Some(planes) = ws.sections.release() {
+                    if let Some(planes) = ws.view.sections.release() {
                         ws.set_sections(planes);
                     }
                 }
                 Some(Handle::Step) => ws.finish_step(),
                 // Letting go keeps the value: Enter in its field sends it.
                 Some(Handle::Mover) => {
-                    if let Some(m) = ws.mover.as_mut() {
+                    if let Some(m) = ws.assembly.mover.as_mut() {
                         m.release();
                     }
                     self.mover_focus = true;
@@ -1805,7 +1823,7 @@ impl View {
         let ghost = self.hover.as_ref().is_some_and(|h| h.rev.is_some());
         // In the Measure tool a pick of a face, edge or vertex is measured,
         // not selected.
-        let measuring = ws.measure.on
+        let measuring = ws.view.measure.on
             && self
                 .hover
                 .as_ref()
@@ -1822,7 +1840,7 @@ impl View {
         // picks.
         if clicked
             && let Some(p) = response.interact_pointer_pos()
-            && let Some(m) = ws.mover.as_mut()
+            && let Some(m) = ws.assembly.mover.as_mut()
             && m.grab(&pr, size, local(p), length)
         {
             m.release();
@@ -1832,7 +1850,11 @@ impl View {
         // While the Mate dialog waits on a pick, a click picks a face, edge
         // or vertex of an occurrence for it; it never selects.
         if clicked
-            && ws.mating.as_ref().is_some_and(|d| d.next().is_some())
+            && ws
+                .assembly
+                .mating
+                .as_ref()
+                .is_some_and(|d| d.next().is_some())
             && let Some(p) = response.interact_pointer_pos()
         {
             let hit = self.picker(ws).pick_with(
@@ -1846,7 +1868,7 @@ impl View {
                     ws.mate_pick(&h.entity).ok();
                 }
                 None => {
-                    if let Some(d) = ws.mating.as_mut() {
+                    if let Some(d) = ws.assembly.mating.as_mut() {
                         d.note = Some("Click a face, edge or vertex of an instance.".into());
                     }
                 }
@@ -1854,7 +1876,7 @@ impl View {
             clicked = false;
         }
         // The Move tool previews its value as it changes.
-        if ws.mover.is_some() {
+        if ws.assembly.mover.is_some() {
             ws.preview_move();
         }
         // With whole bodies picked, a click chooses the solid or the
@@ -1968,6 +1990,7 @@ impl View {
         let (drawn, wanted) = crate::core::lod::choose(&ws.model, self.picker(ws), &pr, height);
         // Within what the window may keep on its adapter.
         let budget = ws
+            .session
             .settings
             .get("display.gpu_memory")
             .and_then(serde_json::Value::as_u64)
@@ -2036,8 +2059,8 @@ impl View {
                 painter.circle_filled(at(t), 4.5, accent);
             }
         };
-        if ws.sections.handles
-            && let Some((a, rings)) = ws.sections.gizmo(length)
+        if ws.view.sections.handles
+            && let Some((a, rings)) = ws.view.sections.gizmo(length)
         {
             arrow(&painter, &a);
             for r in rings {
@@ -2049,19 +2072,19 @@ impl View {
                 painter.add(egui::Shape::line(pts, egui::Stroke::new(1.5, accent)));
             }
         }
-        if let Some(a) = &ws.explodes.adding {
+        if let Some(a) = &ws.assembly.explodes.adding {
             for x in a.arrows(length) {
                 arrow(&painter, &x);
             }
         }
-        if ws.mover.is_some() {
+        if ws.assembly.mover.is_some() {
             self.mover_handles(ui, ws, rect, &pr, length);
         }
-        if let Some(part) = ws.explodes.part.clone()
-            && ws.explodes.current(&part).is_some()
+        if let Some(part) = ws.assembly.explodes.part.clone()
+            && ws.assembly.explodes.current(&part).is_some()
         {
             let trail = egui::Stroke::new(1.0, style::color32(ryucad::render::TRAIL));
-            for t in ws.explodes.trails(&part, &ws.model.middles(&part)) {
+            for t in ws.assembly.explodes.trails(&part, &ws.model.middles(&part)) {
                 let pts: Vec<egui::Pos2> = t.iter().filter_map(|p| to_screen(*p)).collect();
                 painter.extend(egui::Shape::dashed_line(&pts, trail, 6.0, 4.0));
             }
@@ -2069,12 +2092,17 @@ impl View {
         // The Measure tool's dimension, a clearance shown, a centre of
         // mass: lines and marks over the model.
         let mut lines: Vec<([f64; 3], [f64; 3], Option<String>)> = Vec::new();
-        if let Some(r) = ws.measure.reading.as_ref().filter(|_| ws.measure.on)
+        if let Some(r) = ws
+            .view
+            .measure
+            .reading
+            .as_ref()
+            .filter(|_| ws.view.measure.on)
             && let Some((a, b)) = r.line
         {
             lines.push((a, b, r.label.clone()));
         }
-        if let Some(c) = &ws.clearance
+        if let Some(c) = &ws.assembly.clearance
             && let Some(g) = c.shown.and_then(|k| c.gaps.get(k))
         {
             lines.push((g.points[0], g.points[1], Some(g.distance.clone())));
@@ -2097,7 +2125,7 @@ impl View {
                 );
             }
         }
-        if let Some(c) = ws.mass.as_ref().and_then(|m| m.centre)
+        if let Some(c) = ws.view.mass.as_ref().and_then(|m| m.centre)
             && let Some(s) = to_screen(c)
         {
             let d = 6.0;
@@ -2115,6 +2143,7 @@ impl View {
         }
         let (_, frame_names) = self.mate_frames(ws);
         let swept = ws
+            .model
             .swept
             .as_ref()
             .filter(|d| self.chosen.as_ref() == Some(&d.feature))
@@ -2353,7 +2382,11 @@ impl View {
             }
         }
         // The text being typed, in place: Enter makes it a mark.
-        let typing = ws.markup.as_ref().and_then(|m| m.typing.clone());
+        let typing = ws
+            .annotations
+            .markup
+            .as_ref()
+            .and_then(|m| m.typing.clone());
         if let Some((xy, mut text)) = typing
             && let Some(p) = at(xy)
         {
@@ -2377,7 +2410,7 @@ impl View {
                     }
                     done = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 });
-            if let Some(m) = ws.markup.as_mut() {
+            if let Some(m) = ws.annotations.markup.as_mut() {
                 if let Some(t) = m.typing.as_mut() {
                     t.1 = text;
                 }
@@ -2404,7 +2437,7 @@ impl View {
         let size = [f64::from(rect.width()), f64::from(rect.height())];
         let local = |p: egui::Pos2| [f64::from(p.x - rect.min.x), f64::from(p.y - rect.min.y)];
         let primary = ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released());
-        let Some(tool) = ws.markup.as_ref().map(|m| m.tool) else {
+        let Some(tool) = ws.annotations.markup.as_ref().map(|m| m.tool) else {
             return;
         };
         // The solid under a pixel and the point there in its part's frame.
@@ -2427,17 +2460,17 @@ impl View {
                 match on_solid(self, ws, at) {
                     Some((key, point)) => {
                         let on = ws.model.on_of(&key);
-                        if let Some(m) = ws.markup.as_mut() {
+                        if let Some(m) = ws.annotations.markup.as_mut() {
                             m.press_face(key, on, point);
                         }
                     }
                     None => {
-                        if let Some(m) = ws.markup.as_mut() {
+                        if let Some(m) = ws.annotations.markup.as_mut() {
                             m.note = Some("Press on a face of the model to draw on it.".into());
                         }
                     }
                 }
-            } else if let Some(m) = ws.markup.as_mut() {
+            } else if let Some(m) = ws.annotations.markup.as_mut() {
                 m.press(plane_at(pr, size, at));
             }
         }
@@ -2448,17 +2481,17 @@ impl View {
             let at = local(p);
             if tool == Tool::PenFaces {
                 let under = on_solid(self, ws, at);
-                if let Some(m) = ws.markup.as_mut() {
+                if let Some(m) = ws.annotations.markup.as_mut() {
                     m.drag_face(under);
                 }
-            } else if let Some(m) = ws.markup.as_mut() {
+            } else if let Some(m) = ws.annotations.markup.as_mut() {
                 m.drag(plane_at(pr, size, at), shift);
             }
             ui.ctx().request_repaint();
         }
         if response.drag_stopped() {
             let pixel = pr.pixel(pr.camera.target, size[1]);
-            if let Some(m) = ws.markup.as_mut() {
+            if let Some(m) = ws.annotations.markup.as_mut() {
                 m.release(pixel);
             }
         }
@@ -2466,7 +2499,7 @@ impl View {
         if response.clicked()
             && tool == Tool::Text
             && let Some(p) = response.interact_pointer_pos()
-            && let Some(m) = ws.markup.as_mut()
+            && let Some(m) = ws.annotations.markup.as_mut()
         {
             m.press(plane_at(pr, size, local(p)));
             self.markup_text_focus = true;
@@ -2506,7 +2539,7 @@ impl View {
         };
         // With the Markup bar open, the pin goes with its marks (design
         // 423, Posting).
-        if let Some(m) = ws.markup.as_mut() {
+        if let Some(m) = ws.annotations.markup.as_mut() {
             m.pins.push(pin);
             return;
         }
@@ -2655,16 +2688,16 @@ impl View {
     /// A button per named view of the part shown; a view that doesn't
     /// read says why. Returns whether one was chosen.
     fn named_views(&mut self, ui: &mut egui::Ui, ws: &mut Workspace) -> bool {
-        if ws.views.part.is_none() {
+        if ws.view.views.part.is_none() {
             ui.weak("Named views: show one part or assembly");
             return false;
         }
-        if ws.views.views.is_empty() {
+        if ws.view.views.views.is_empty() {
             ui.weak("No named views");
             return false;
         }
         let mut chosen = None;
-        for v in &ws.views.views {
+        for v in &ws.view.views.views {
             match &v.camera {
                 Ok(_) => {
                     if ui.button(&v.id).clicked() {
@@ -2760,7 +2793,7 @@ impl View {
                     if self.named_views(ui, ws) {
                         close = true;
                     }
-                    if ws.views.part.is_some() {
+                    if ws.view.views.part.is_some() {
                         match &mut naming {
                             None => {
                                 if crate::ui::modes::button(ui, ws, "view.save", "Save view…")
@@ -2855,7 +2888,8 @@ impl View {
         let chosen = self.chosen.clone();
         scene.sync_deleted(
             &rs.device,
-            ws.deleted
+            ws.model
+                .deleted
                 .as_ref()
                 .filter(|d| chosen.as_ref() == Some(&d.feature)),
         );
@@ -2890,6 +2924,7 @@ impl View {
         // A sweep or loft chosen in the tree: its profile and path, or
         // its sections with a square where each loop starts.
         if let Some(d) = ws
+            .model
             .swept
             .as_ref()
             .filter(|d| self.chosen.as_ref() == Some(&d.feature))
@@ -2925,6 +2960,7 @@ impl View {
         }
         // The flat view's bend lines, dashed in their direction's colour.
         if let Some(l) = ws
+            .model
             .flat_view
             .as_ref()
             .and_then(|v| v.lines.as_ref())
@@ -2958,7 +2994,7 @@ impl View {
             overlay: &overlay,
             glass: &glass,
         };
-        scene.cut(scene::Cut::of(&ws.sections.planes, &pr.camera));
+        scene.cut(scene::Cut::of(&ws.view.sections.planes, &pr.camera));
         let view = scene.render(&rs.device, &rs.queue, px, &list);
         let mut renderer = rs.renderer.write();
         let id = match self.texture {

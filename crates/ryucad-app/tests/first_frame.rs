@@ -187,7 +187,7 @@ fn the_first_full_frame_of_100000_occurrences() {
         "over the warm cache: the root's report in {report:.1} s, {n} occurrences' meshes in \
          {meshed:.1} s ({coarse} of {} coarse, {:.0} MB fetched)",
         ws.model.meshes.len(),
-        ws.received as f64 / 1e6
+        ws.model.received as f64 / 1e6
     );
     // What the view does before it draws: its picker, then levels chosen
     // and kept within the GPU budget.

@@ -29,16 +29,24 @@ fn a_file_is_planned_imported_updated_and_exported() {
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
     // Planned: nothing is written. Healed, as "Convert to solids (heal)"
     // asks; references are `a_file_imports_as_a_reference_and_converts`'s.
-    ws.import = Some(Import::new());
-    ws.import.as_mut().unwrap().solid = true;
-    ws.import.as_mut().unwrap().path = occt("box_ap214.stp").display().to_string();
+    ws.exchange.import = Some(Import::new());
+    ws.exchange.import.as_mut().unwrap().solid = true;
+    ws.exchange.import.as_mut().unwrap().path = occt("box_ap214.stp").display().to_string();
     ws.plan_import();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.import
+        ws.exchange
+            .import
             .as_ref()
             .is_some_and(|i| !i.waiting && i.current().is_some())
     }));
-    let plan = ws.import.as_ref().unwrap().current().unwrap().clone();
+    let plan = ws
+        .exchange
+        .import
+        .as_ref()
+        .unwrap()
+        .current()
+        .unwrap()
+        .clone();
     assert_eq!(plan.stored, "imports/box_ap214.step");
     assert_eq!(plan.parts.len(), 1);
     assert_eq!(plan.parts[0].0, "part-2 (new part, product part 2)");
@@ -50,7 +58,10 @@ fn a_file_is_planned_imported_updated_and_exported() {
     // Imported: the tree shows the import with its file and product.
     ws.run_import();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.import.as_ref().is_some_and(|i| i.done.is_some())
+        ws.exchange
+            .import
+            .as_ref()
+            .is_some_and(|i| i.done.is_some())
             && ws
                 .part("part-2")
                 .and_then(|p| p.feature("body"))
@@ -73,15 +84,16 @@ fn a_file_is_planned_imported_updated_and_exported() {
     let out = tempfile::tempdir().unwrap();
     let path = out.path().join("box.step");
     ws.open_export("part-2");
-    ws.export.as_mut().unwrap().path = path.display().to_string();
-    ws.export.as_mut().unwrap().choices.step_unit = "m".into();
+    ws.exchange.export.as_mut().unwrap().path = path.display().to_string();
+    ws.exchange.export.as_mut().unwrap().choices.step_unit = "m".into();
     ws.run_export();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.export
+        ws.exchange
+            .export
             .as_ref()
             .is_some_and(|e| e.done.is_some() || e.error.is_some())
     }));
-    let e = ws.export.as_ref().unwrap();
+    let e = ws.exchange.export.as_ref().unwrap();
     assert!(e.error.is_none(), "{:?}", e.error);
     let bytes = std::fs::read(&path).unwrap();
     let done = e.done.as_ref().unwrap();
@@ -93,30 +105,40 @@ fn a_file_is_planned_imported_updated_and_exported() {
     assert!(text.contains(".METRE."), "in meters");
     // An update's plan says what would stop building: the AP203 box is
     // product `part 3`, so `part 2`'s body would be gone.
-    ws.import = Some(Import::update("imports/box_ap214.step"));
-    ws.import.as_mut().unwrap().path = occt("box_ap203.stp").display().to_string();
+    ws.exchange.import = Some(Import::update("imports/box_ap214.step"));
+    ws.exchange.import.as_mut().unwrap().path = occt("box_ap203.stp").display().to_string();
     ws.plan_import();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.import
+        ws.exchange
+            .import
             .as_ref()
             .is_some_and(|i| !i.waiting && i.current().is_some())
     }));
-    let plan = ws.import.as_ref().unwrap().current().unwrap().clone();
+    let plan = ws
+        .exchange
+        .import
+        .as_ref()
+        .unwrap()
+        .current()
+        .unwrap()
+        .clone();
     assert_eq!(plan.stored, "imports/box_ap214.step");
     assert_eq!(plan.failing, ["part-2/body: import_product_missing"]);
     assert_eq!(plan.vanished, ["part 2 (in part-2)"]);
     // Updated with its own export instead: the same product, so the
     // feature only takes the new bytes' hash.
     let new = ryucad::doc::project::ImportFile::new(bytes).blake3;
-    ws.import.as_mut().unwrap().path = path.display().to_string();
+    ws.exchange.import.as_mut().unwrap().path = path.display().to_string();
     ws.plan_import();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.import
+        ws.exchange
+            .import
             .as_ref()
             .is_some_and(|i| !i.waiting && i.current().is_some())
     }));
     assert!(
-        ws.import
+        ws.exchange
+            .import
             .as_ref()
             .unwrap()
             .current()
@@ -130,20 +152,24 @@ fn a_file_is_planned_imported_updated_and_exported() {
             .and_then(|p| p.feature("body"))
             .and_then(|f| f.import.as_ref())
             .is_some_and(|i| i.blake3 == new)
-            && ws.import.as_ref().is_some_and(|i| i.done.is_some())
+            && ws
+                .exchange
+                .import
+                .as_ref()
+                .is_some_and(|i| i.done.is_some())
     }));
     let f = ws.part("part-2").unwrap().feature("body").unwrap();
     assert!(f.error.is_none(), "{:?}", f.error);
     // A file that isn't STEP is refused in the plan.
-    ws.import = Some(Import::new());
+    ws.exchange.import = Some(Import::new());
     let junk = out.path().join("junk.step");
     std::fs::write(&junk, b"not STEP").unwrap();
-    ws.import.as_mut().unwrap().path = junk.display().to_string();
+    ws.exchange.import.as_mut().unwrap().path = junk.display().to_string();
     ws.plan_import();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.import.as_ref().is_some_and(|i| !i.waiting)
+        ws.exchange.import.as_ref().is_some_and(|i| !i.waiting)
     }));
-    let i = ws.import.as_ref().unwrap();
+    let i = ws.exchange.import.as_ref().unwrap();
     assert_eq!(
         i.error.as_ref().unwrap().code,
         ryucad::error::Code::StepUnreadable
@@ -158,25 +184,36 @@ fn a_file_imports_as_a_reference_and_converts() {
     let p = Project::new();
     let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
-    ws.import = Some(Import::new());
-    ws.import.as_mut().unwrap().path = occt("box_ap214.stp").display().to_string();
-    assert!(!ws.import.as_ref().unwrap().solid, "references by default");
+    ws.exchange.import = Some(Import::new());
+    ws.exchange.import.as_mut().unwrap().path = occt("box_ap214.stp").display().to_string();
+    assert!(
+        !ws.exchange.import.as_ref().unwrap().solid,
+        "references by default"
+    );
     ws.plan_import();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.import
+        ws.exchange
+            .import
             .as_ref()
             .is_some_and(|i| !i.waiting && i.current().is_some())
     }));
-    let plan = ws.import.as_ref().unwrap().current().unwrap().clone();
+    let plan = ws
+        .exchange
+        .import
+        .as_ref()
+        .unwrap()
+        .current()
+        .unwrap()
+        .clone();
     assert_eq!(
         plan.parts[0].1[0],
         "body (body 0, reference): 6 faces, 12 edges, 8 vertices"
     );
     // Ticking the box asks for another plan: the one there is no longer
     // current.
-    ws.import.as_mut().unwrap().solid = true;
-    assert!(ws.import.as_ref().unwrap().current().is_none());
-    ws.import.as_mut().unwrap().solid = false;
+    ws.exchange.import.as_mut().unwrap().solid = true;
+    assert!(ws.exchange.import.as_ref().unwrap().current().is_none());
+    ws.exchange.import.as_mut().unwrap().solid = false;
     ws.run_import();
     let reference = |ws: &Workspace| {
         ws.part("part-2")
@@ -252,7 +289,7 @@ fn every_format_is_exported_by_the_daemon() {
         (Format::Usd, "usdz", "usdz", &b"PK\x03\x04"[..]),
     ] {
         ws.open_export("p");
-        let e = ws.export.as_mut().unwrap();
+        let e = ws.exchange.export.as_mut().unwrap();
         e.path = path.clone();
         e.choices.format = format;
         e.choices.encoding = encoding.into();
@@ -262,11 +299,12 @@ fn every_format_is_exported_by_the_daemon() {
         path = e.path.clone();
         ws.run_export();
         assert!(ws.wait_until(WAIT, |ws| {
-            ws.export
+            ws.exchange
+                .export
                 .as_ref()
                 .is_some_and(|e| e.done.is_some() || e.error.is_some())
         }));
-        let e = ws.export.as_ref().unwrap();
+        let e = ws.exchange.export.as_ref().unwrap();
         assert!(e.error.is_none(), "{ext}: {:?}", e.error);
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(magic), "{ext}");
@@ -277,21 +315,24 @@ fn every_format_is_exported_by_the_daemon() {
     }
     // The next export starts where the last left off.
     ws.open_export("p");
-    let c = &ws.export.as_ref().unwrap().choices;
+    let c = &ws.exchange.export.as_ref().unwrap().choices;
     assert_eq!(
         (c.format, c.encoding.as_str(), c.chord.as_str()),
         (Format::Usd, "usdz", "0.1 mm")
     );
     // A chord the daemon refuses comes back as its refusal, and nothing
     // is written.
-    let e = ws.export.as_mut().unwrap();
+    let e = ws.exchange.export.as_mut().unwrap();
     e.choices.chord = "1 nm".into();
     e.path = out.path().join("refused.usdz").display().to_string();
     ws.run_export();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.export.as_ref().is_some_and(|e| e.error.is_some())
+        ws.exchange
+            .export
+            .as_ref()
+            .is_some_and(|e| e.error.is_some())
     }));
-    let err = ws.export.as_ref().unwrap().error.clone().unwrap();
+    let err = ws.exchange.export.as_ref().unwrap().error.clone().unwrap();
     assert_eq!(err.code, ryucad::error::Code::InvalidParam, "{err:?}");
     assert!(!out.path().join("refused.usdz").exists());
 }

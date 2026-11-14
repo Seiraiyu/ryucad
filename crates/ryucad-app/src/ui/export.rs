@@ -170,7 +170,7 @@ pub fn dialog(
     browse: &mut Option<Browse>,
     view: egui::Rect,
 ) -> Option<Vec<String>> {
-    let mut e = ws.export.take()?;
+    let mut e = ws.exchange.export.take()?;
     let (mut open, mut go, mut show) = (true, false, None);
     // Titled by what it exports, so its title and its Export button are
     // two names.
@@ -200,7 +200,7 @@ pub fn dialog(
             show = outcome(ui, &e, ws);
         });
     if open {
-        ws.export = Some(e);
+        ws.exchange.export = Some(e);
     }
     if go {
         ws.run_export();

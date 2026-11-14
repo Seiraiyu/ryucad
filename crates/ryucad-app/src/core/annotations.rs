@@ -300,6 +300,16 @@ pub struct Annotations {
     pub faults: Vec<Value>,
     /// Bumped whenever anything here changes, so views redraw.
     pub generation: u64,
+    /// The annotation chosen in the tile or by its marker.
+    pub chosen_annotation: Option<String>,
+    /// Annotate's Show agent's model: the working files drawn though the
+    /// person has a draft.
+    pub show_agent: bool,
+    /// The Annotations tile's filter and what is typed in it.
+    pub annotation_filter: crate::core::annotations::Filter,
+    pub annotation_ui: crate::core::annotations::Typed,
+    /// The Markup bar, while it is open (design 423).
+    pub markup: Option<crate::core::markup::Markup>,
 }
 
 impl Annotations {

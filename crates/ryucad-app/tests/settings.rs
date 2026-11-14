@@ -14,7 +14,7 @@ const WAIT: Duration = Duration::from_secs(30);
 
 fn open(p: &Project) -> Workspace {
     let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.settings.all.is_empty()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.session.settings.all.is_empty()));
     ws
 }
 
@@ -24,8 +24,8 @@ fn the_disk_cache_is_shown_and_cleared() {
     let mut ws = open(&p);
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.len() == 2));
     ws.read_cache();
-    assert!(ws.wait_until(WAIT, |ws| ws.cache.is_some()));
-    let held = ws.cache.clone().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.session.cache.is_some()));
+    let held = ws.session.cache.clone().unwrap();
     assert_eq!(held["enabled"], true);
     assert_eq!(held["kinds"]["features"]["entries"], 2, "{held}");
     assert_eq!(held["kinds"]["meshes"]["entries"], 2, "{held}");
@@ -35,9 +35,9 @@ fn the_disk_cache_is_shown_and_cleared() {
     );
     ws.clear_cache();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.cache.as_ref().is_some_and(|c| c["entries"] == 0)
+        ws.session.cache.as_ref().is_some_and(|c| c["entries"] == 0)
     }));
-    assert_eq!(ws.cache.as_ref().unwrap()["removed"]["entries"], 4);
+    assert_eq!(ws.session.cache.as_ref().unwrap()["removed"]["entries"], 4);
     assert_eq!(p.ok(&["cache", "stats"])["entries"], 0);
     assert_eq!(ryucad_app::ui::dialogs::cache_text(None), "reading…");
 }
@@ -51,32 +51,35 @@ fn the_shared_cache_is_set_and_its_token_stored() {
     ws.set_config("cache.remote", json!(url));
     ws.read_cache();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.cache.as_ref().is_some_and(|c| c["remote"]["url"] == url)
+        ws.session
+            .cache
+            .as_ref()
+            .is_some_and(|c| c["remote"]["url"] == url)
     }));
     // The app's daemon is a development build: it says so.
-    let text = shared_text(ws.cache.as_ref());
+    let text = shared_text(ws.session.cache.as_ref());
     assert!(text.contains("development build"), "{text}");
     ws.login_cache(" ryc_secret ");
-    assert!(ws.wait_until(WAIT, |ws| ws.cache_token.is_some()));
-    let t = ws.cache_token.take().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.session.cache_token.is_some()));
+    let t = ws.session.cache_token.take().unwrap();
     assert_eq!(t["token"], "file", "{t}");
     assert_eq!(token_text(&t), "Saved");
     let file = std::path::PathBuf::from(t["file"].as_str().unwrap());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "ryc_secret\n");
     ws.login_cache("two words");
-    assert!(ws.wait_until(WAIT, |ws| ws.cache_token.is_some()));
-    let t = ws.cache_token.take().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.session.cache_token.is_some()));
+    let t = ws.session.cache_token.take().unwrap();
     assert!(token_text(&t).starts_with("Not saved: "), "{t}");
     ws.logout_cache();
-    assert!(ws.wait_until(WAIT, |ws| ws.cache_token.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.session.cache_token.is_some()));
     assert_eq!(
-        token_text(ws.cache_token.as_ref().unwrap()),
+        token_text(ws.session.cache_token.as_ref().unwrap()),
         "No token stored"
     );
     assert!(!file.exists());
     ws.set_config("cache.remote", json!(""));
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.settings.text("cache.remote", "?").is_empty()));
+        && ws.session.settings.text("cache.remote", "?").is_empty()));
 }
 
 #[test]
@@ -122,10 +125,10 @@ fn the_shared_cache_says_what_it_did() {
 fn preferences_go_both_ways() {
     let p = Project::new();
     let mut ws = open(&p);
-    assert_eq!(ws.settings.text("ui.navigation", ""), "ryucad");
+    assert_eq!(ws.session.settings.text("ui.navigation", ""), "ryucad");
     ws.set_config("ui.navigation", json!("onshape"));
     assert!(
-        ws.wait_until(WAIT, |ws| ws.settings.text("ui.navigation", "")
+        ws.wait_until(WAIT, |ws| ws.session.settings.text("ui.navigation", "")
             == "onshape")
     );
     assert_eq!(
@@ -135,7 +138,7 @@ fn preferences_go_both_ways() {
     // An agent's change reaches the window.
     p.ok(&["config", "set", "ui.navigation", "solidworks"]);
     assert!(
-        ws.wait_until(WAIT, |ws| ws.settings.text("ui.navigation", "")
+        ws.wait_until(WAIT, |ws| ws.session.settings.text("ui.navigation", "")
             == "solidworks")
     );
     // A bad value is refused, and says why.
@@ -150,13 +153,13 @@ fn a_project_setting_is_guarded_by_its_revision() {
     let mut ws = open(&p);
     ws.set_config("default_unit", json!("in"));
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.settings.text("default_unit", "") == "in"));
+        && ws.session.settings.text("default_unit", "") == "in"));
     assert_eq!(p.ok(&["config", "get", "default_unit"])["value"], "in");
     // A stale revision: someone changed ryucad.json since the window read it.
-    let stale = ws.settings.project_revision.clone();
+    let stale = ws.session.settings.project_revision.clone();
     p.ok(&["config", "set", "default_unit", "cm"]);
-    assert!(ws.wait_until(WAIT, |ws| ws.settings.project_revision != stale));
-    ws.settings.project_revision = stale;
+    assert!(ws.wait_until(WAIT, |ws| ws.session.settings.project_revision != stale));
+    ws.session.settings.project_revision = stale;
     ws.set_config("default_unit", json!("ft"));
     assert!(ws.wait_until(WAIT, |ws| !ws.errors.is_empty()));
     assert_eq!(ws.errors[0].code, ryucad::error::Code::Conflict);

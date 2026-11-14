@@ -86,7 +86,7 @@ pub fn waiting(ui: &mut egui::Ui, ws: &Workspace) {
     let Some((who, r)) = ws.progress.blocking(now) else {
         return;
     };
-    let name = ws.people.get(who).map_or(who, |p| p.name.as_str());
+    let name = ws.session.people.get(who).map_or(who, |p| p.name.as_str());
     ui.horizontal(|ui| {
         icon::show(ui, Icon::CLOCK, 12.0, ui.visuals().weak_text_color());
         ui.weak(format!("waiting for {name}'s {}", r.method));

@@ -15,7 +15,7 @@ pub fn section(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     let unit =
         ryucad::units::Unit::parse(&ws.model.default_unit).unwrap_or(ryucad::units::Unit::Mm);
     let factor = unit.factor();
-    let full = ws.sections.planes.len() >= MAX_PLANES;
+    let full = ws.view.sections.planes.len() >= MAX_PLANES;
     ui.horizontal_wrapped(|ui| {
         ui.label("Add a plane:");
         for (name, title) in [("xy", "XY"), ("yz", "YZ"), ("zx", "ZX")] {
@@ -38,11 +38,11 @@ pub fn section(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             ws.add_section(&f);
         }
     });
-    if ws.sections.planes.is_empty() {
+    if ws.view.sections.planes.is_empty() {
         ui.weak("No section planes: the model is drawn whole.");
         return;
     }
-    let mut planes = ws.sections.planes.clone();
+    let mut planes = ws.view.sections.planes.clone();
     let (mut write, mut preview) = (false, false);
     let mut remove = None;
     egui::Grid::new("sections").num_columns(6).show(ui, |ui| {
@@ -54,13 +54,13 @@ pub fn section(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         ui.label("");
         ui.end_row();
         for (k, p) in planes.iter_mut().enumerate() {
-            let chosen = ws.sections.active == k;
+            let chosen = ws.view.sections.active == k;
             if ui
                 .selectable_label(chosen, format!("Plane {}", k + 1))
                 .on_hover_text("The plane the viewport's handles move")
                 .clicked()
             {
-                ws.sections.active = k;
+                ws.view.sections.active = k;
             }
             let mut offset = p.offset() / factor;
             let r = ui.add(egui::DragValue::new(&mut offset).speed(0.1).max_decimals(4));
@@ -128,11 +128,11 @@ pub fn section(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     if write {
         ws.set_sections(planes);
     } else if preview {
-        ws.sections.planes = planes;
+        ws.view.sections.planes = planes;
         ws.model.generation += 1;
     }
     ui.horizontal(|ui| {
-        ui.checkbox(&mut ws.sections.handles, "Handles in the viewport")
+        ui.checkbox(&mut ws.view.sections.handles, "Handles in the viewport")
             .on_hover_text("Drag the arrow to move the plane, a ring to turn it");
         if ui.button("Remove all").clicked() {
             ws.set_sections(Vec::<Plane>::new());

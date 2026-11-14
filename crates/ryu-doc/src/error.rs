@@ -907,6 +907,11 @@ pub enum Code {
     /// holds the angle in the section square to it instead). The face,
     /// both angles and the angle asked are in the details.
     DraftAngleVaries,
+    /// A warning: a cosmetic thread on a face whose diameter isn't the
+    /// thread's (an external thread's major diameter, an internal one's
+    /// minor or tap drill) within its class's limits widened by 0.1 mm;
+    /// the face, its diameter and the range are in the details.
+    ThreadSizeMismatch,
     /// A warning: a USD export wrote a sheet as its mesh alone, the
     /// BrepArray writer having refused it (`solid`, `face`, `reason`;
     /// until ryucad 24.E every sheet was written so).
@@ -1019,6 +1024,17 @@ pub enum Code {
     /// nothing in the project; `details.ref`, and `details.closest`, the
     /// nearest reference paths (plan 3.B).
     RefUnresolved,
+    /// ryueda: a designator two occurrences share in a merge's netlist
+    /// that neither side shared (design 518); `merge status`'s kind, with
+    /// the repairs `renumber` and `annotate`.
+    RefdesClash,
+    /// ryueda: two nets, ports or rails of one scope that took one name
+    /// on different sides of a merge; `merge status`'s kind, with the
+    /// repairs `join` and `rename`.
+    NameClash,
+    /// ryueda: an error the merged project holds that neither side did
+    /// and no other item explains, blamed on a side; `merge status`'s kind.
+    MergeFaults,
 }
 
 impl Code {
@@ -1240,6 +1256,11 @@ mod tests {
     fn draft_angle_varies_code() {
         assert_eq!(json!(Code::DraftAngleVaries), json!("draft_angle_varies"));
         assert_eq!(Code::DraftAngleVaries.exit_code(), 1);
+        assert_eq!(
+            json!(Code::ThreadSizeMismatch),
+            json!("thread_size_mismatch")
+        );
+        assert_eq!(Code::ThreadSizeMismatch.exit_code(), 1);
     }
 
     #[test]
@@ -1474,6 +1495,18 @@ mod tests {
             (Code::GitHookMissing, "git_hook_missing"),
             (Code::GitHookForeign, "git_hook_foreign"),
             (Code::LayoutPending, "layout_pending"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+        }
+    }
+
+    #[test]
+    fn eda_merge_codes() {
+        for (c, s) in [
+            (Code::RefdesClash, "refdes_clash"),
+            (Code::NameClash, "name_clash"),
+            (Code::MergeFaults, "merge_faults"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);

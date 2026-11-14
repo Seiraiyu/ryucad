@@ -9,18 +9,28 @@ use eframe::egui;
 /// Draws the tile.
 pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
     let save_gate = ws.control("explode.save");
-    let Some(part) = ws.explodes.part.clone().or_else(|| ws.shown_assembly()) else {
+    let Some(part) = ws
+        .assembly
+        .explodes
+        .part
+        .clone()
+        .or_else(|| ws.shown_assembly())
+    else {
         ui.weak("Show an assembly to explode it (View > Show).");
         return;
     };
-    if ws.explodes.part.as_deref() != Some(part.as_str()) {
-        ws.explodes.part = Some(part.clone());
+    if ws.assembly.explodes.part.as_deref() != Some(part.as_str()) {
+        ws.assembly.explodes.part = Some(part.clone());
         ws.read_explodes();
     }
     ui.label(format!("Exploded views of {part}"));
-    let shown = ws.explodes.current(&part).map(|(e, f)| (e.id.clone(), f));
+    let shown = ws
+        .assembly
+        .explodes
+        .current(&part)
+        .map(|(e, f)| (e.id.clone(), f));
     let mut choose = None;
-    for e in &ws.explodes.list {
+    for e in &ws.assembly.explodes.list {
         let on = shown.as_ref().is_some_and(|(id, _)| *id == e.id);
         let text = match &e.error {
             Some(_) => format!("{} (doesn't read)", e.id),
@@ -35,7 +45,7 @@ pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
             choose = Some(e.id.clone());
         }
     }
-    if ws.explodes.list.is_empty() {
+    if ws.assembly.explodes.list.is_empty() {
         ui.weak("None yet: select occurrences and add a step.");
     }
     if let Some(id) = choose {
@@ -65,7 +75,13 @@ pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
         {
             ws.show_explode(None, None, true);
         }
-        let entry = ws.explodes.list.iter().find(|e| e.id == id).cloned();
+        let entry = ws
+            .assembly
+            .explodes
+            .list
+            .iter()
+            .find(|e| e.id == id)
+            .cloned();
         if let Some(e) = entry {
             let mut remove = None;
             for (k, step) in e.steps.as_array().into_iter().flatten().enumerate() {
@@ -88,29 +104,29 @@ pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
         }
     }
     ui.separator();
-    match &ws.explodes.adding {
+    match &ws.assembly.explodes.adding {
         Some(a) => {
             ui.label(format!(
                 "Moving {}: drag an arrow in the viewport.",
                 a.instances.join(", ")
             ));
             if ui.button("Cancel step").clicked() {
-                ws.explodes.adding = None;
+                ws.assembly.explodes.adding = None;
                 ws.sync_explode();
             }
         }
         None => {
-            let new = ws.explodes.current(&part).is_none();
+            let new = ws.assembly.explodes.current(&part).is_none();
             if new {
                 let r = ui.add(
-                    egui::TextEdit::singleline(&mut ws.explodes.name)
+                    egui::TextEdit::singleline(&mut ws.assembly.explodes.name)
                         .hint_text("new explode's name"),
                 );
                 r.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::Role::TextInput, true, "new explode's name")
                 });
             }
-            let named = !new || !ws.explodes.name.is_empty();
+            let named = !new || !ws.assembly.explodes.name.is_empty();
             let selected = ws.myself().is_some_and(|m| {
                 m.selection
                     .iter()

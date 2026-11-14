@@ -238,6 +238,10 @@ pub fn row_text(f: &Feature, faults: usize, holes: usize) -> String {
             }
             s
         }
+        // A cosmetic thread its size and class, as its file says.
+        (Some(t), _, None) if t == "cosmetic_thread" && f.spec.is_some() => {
+            f.spec.clone().unwrap_or_default()
+        }
         // A hole with intent its spec, and how many holes it makes.
         (Some(t), _, None) if t == "hole" && f.spec.is_some() => {
             let spec = f.spec.as_deref().unwrap_or_default();
@@ -391,18 +395,12 @@ pub fn row_of(f: &Feature) -> command::Row {
     }
 }
 
-/// The icon of a pattern by its form.
-fn pattern_icon(form: Option<&str>) -> &'static str {
-    match form {
-        Some("circular") => "pattern-circular",
-        Some("mirror") => "flip-horizontal",
-        _ => "pattern-linear",
-    }
-}
-
 /// The icon of a feature of type `ty` doing `op` (`cut`, `intersect`, a
 /// boolean's `subtract`), a pattern of `form`.
 pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str {
+    if let Some(icon) = crate::core::edit::icon(ty, op, form) {
+        return icon;
+    }
     match ty {
         "box" => "cube-transparent",
         "cylinder" => "cylinder",
@@ -410,47 +408,14 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "sphere" => "sphere",
         "torus" => "torus",
         "sketch" => "pencil-simple-line",
-        "extrude" if op == Some("cut") => "extrude-cut",
-        "extrude" => "extrude",
-        "revolve" if op == Some("cut") => "revolve-cut",
-        "revolve" => "revolve",
         "boolean" => match op {
             Some("subtract") => "subtract",
             Some("intersect") => "intersect",
             _ => "unite",
         },
-        "fillet" => "fillet",
-        "chamfer" => "chamfer",
-        "hole" => "hole",
-        "pattern" | "instance_pattern" => pattern_icon(form),
         "import" => "file-arrow-down",
         "instance" => "cube",
-        "mate" => "paperclip",
-        "plane" => "datum-plane",
-        "axis" => "datum-axis",
-        "point" => "datum-point",
-        "path" | "helix" => "path",
-        "sweep" => "sweep",
-        "loft" => "loft",
-        "shell" => "shell",
-        "offset" => "offset",
-        "mirror" => "mirror-body",
-        "split" => "split",
-        "base_flange" => "base-flange",
-        "flange" => "edge-flange",
-        "unfold" => "unfold",
-        "refold" => "refold",
         "planar" => "planar-face",
-        "fill" => "fill",
-        "extract" => "extract",
-        "sew" => "sew",
-        "thicken" => "thicken",
-        "draft" => "draft",
-        "move_face" => "move-face",
-        "replace_face" => "replace-face",
-        "delete_face" => "delete-face",
-        "delete_blend" => "delete-blend",
-        "resize_blend" => "resize-blend",
         "insert" => "arrow-square-in",
         "delete_body" => "trash",
         _ => "question",
@@ -1800,6 +1765,22 @@ mod tests {
             delete: None,
             spec: None,
         }
+    }
+
+    #[test]
+    fn a_cosmetic_threads_row_gives_its_size_and_class() {
+        let mut t = feature("cosmetic_thread");
+        t.id = "t".into();
+        t.spec = Some("M10 6g".into());
+        assert_eq!(row_text(&t, 0, 0), "t (M10 6g)");
+        t.spec = Some("M10".into());
+        assert_eq!(row_text(&t, 0, 0), "t (M10)");
+        assert_eq!(
+            crate::core::model::cosmetic_label(&serde_json::json!({"type": "cosmetic_thread",
+                    "thread": {"standard": "iso_metric", "size": "M10", "class": "6g"}}))
+            .as_deref(),
+            Some("M10 6g")
+        );
     }
 
     #[test]

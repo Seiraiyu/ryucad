@@ -217,3 +217,132 @@ fn resizing_a_hole_renames_nothing() {
     );
     assert_eq!(names(&mut s), before);
 }
+
+/// ryucad 28.B's forms, depths and bottoms through a spec, against exact
+/// volumes, each body passing the kernel's checks and meshing clean.
+#[test]
+fn new_forms_through_their_specs() {
+    let (_dir, mut s) = plate(&[
+        [8.0, 8.0],
+        [20.0, 8.0],
+        [32.0, 8.0],
+        [8.0, 22.0],
+        [20.0, 22.0],
+    ]);
+    let plate = 40.0 * 30.0 * 10.0;
+    let add = |s: &mut Session, id: &str, point: &str, spec: &str| {
+        must(
+            s,
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": id, "sketch": "s",
+                   "points": [point], "spec": spec}),
+        )
+    };
+    let t59 = ryukei::math::tan(59f64.to_radians());
+    let frustum = |a: f64, b: f64, h: f64| PI * h * (a * a + a * b + b * b) / 3.0;
+    // A counterdrill: 9 mm to 3 mm, its 118 deg floor to the bore, through.
+    add(&mut s, "cd", "p1", "DIA 5 THRU, CDRILL 9 3 DEEP");
+    let floor = 2.0 / t59;
+    let mut removed =
+        PI * 20.25 * 3.0 + frustum(4.5, 2.5, floor) + PI * 6.25 * (10.0 - 3.0 - floor);
+    near(volume(&mut s), plate - removed);
+    // A near chamfer, 7 mm at 90 deg, on a through 5 mm bore.
+    add(&mut s, "nc", "p2", "DIA 5 THRU, NEAR 7");
+    removed += frustum(3.5, 2.5, 1.0) + PI * 6.25 * 9.0;
+    near(volume(&mut s), plate - removed);
+    // 6 mm to the tip of a 118 deg point.
+    add(&mut s, "tp", "p3", "DIA 4 6 DEEP TIP 118DEG");
+    let point = 2.0 / t59;
+    removed += PI * 4.0 * (6.0 - point) + PI * 4.0 * point / 3.0;
+    near(volume(&mut s), plate - removed);
+    // 5 mm to a ball's shoulder, then the half sphere.
+    add(&mut s, "bl", "p4", "DIA 4 5 DEEP BALL");
+    removed += PI * 4.0 * 5.0 + 2.0 / 3.0 * PI * 8.0;
+    near(volume(&mut s), plate - removed);
+    // A far countersink where the through bore leaves the plate's bottom.
+    add(&mut s, "fc", "p5", "DIA 4 THRU, FAR CSK 8 90DEG");
+    removed += PI * 4.0 * 8.0 + frustum(4.0, 2.0, 2.0);
+    near(volume(&mut s), plate - removed);
+    let v = must(&mut s, "holes.list", json!({"part": "p"}));
+    let specs: Vec<&str> = v["holes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["spec"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        specs,
+        [
+            "DIA 5 THRU, CDRILL 9 3 DEEP",
+            "DIA 5 THRU, NEAR 7",
+            "DIA 4 6 DEEP TIP 118DEG",
+            "DIA 4 5 DEEP BALL",
+            "DIA 4 THRU, FAR CSK 8 90DEG",
+        ]
+    );
+}
+
+/// #808: a mirror joined into its own solid lists its copies of the
+/// holes it mirrors.
+#[test]
+fn a_mirror_joined_into_its_solid_lists_its_copies() {
+    let (_dir, mut s) = plate(&[[8.0, 8.0]]);
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "hole", "id": "h", "sketch": "s",
+               "spec": "DIA 4 THRU"}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "mirror", "id": "m", "solid": "b", "plane": "yz"}),
+    );
+    let v = must(&mut s, "holes.list", json!({"part": "p"}));
+    let refs: Vec<&str> = v["holes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["ref"].as_str().unwrap())
+        .collect();
+    assert_eq!(refs, ["p/h/p1", "p/m/h/p1"]);
+}
+
+/// Adding a near chamfer or a far side renames no face that was there:
+/// only the new segments' faces are new.
+#[test]
+fn a_near_chamfer_or_a_far_side_renames_nothing_that_was_there() {
+    let (_dir, mut s) = plate(&[[10.0, 10.0]]);
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "hole", "id": "h", "sketch": "s", "diameter": 4,
+               "depth": "through_all"}),
+    );
+    let faces = |s: &mut Session| -> std::collections::BTreeSet<String> {
+        let v = must(s, "inspect", json!({"part": "p"}));
+        v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let before = faces(&mut s);
+    for (k, x) in [
+        ("near", json!({"diameter": "6 mm"})),
+        (
+            "far",
+            json!({"counterbore": {"diameter": "7 mm", "depth": "1 mm"}}),
+        ),
+    ] {
+        must(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", k: x}),
+        );
+        let after = faces(&mut s);
+        assert!(before.is_subset(&after), "{k}: {before:?} -> {after:?}");
+        assert!(after.len() > before.len(), "{k} adds its faces");
+    }
+}

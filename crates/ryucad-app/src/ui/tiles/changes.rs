@@ -9,7 +9,7 @@ use eframe::egui::{self, RichText};
 /// part and of the project: a change nothing reads, weak, with
 /// `(read by nothing)`.
 pub fn changes(ui: &mut egui::Ui, ws: &Workspace, view: &View) {
-    let (Some(c), Some(key)) = (&ws.compare, &view.chosen) else {
+    let (Some(c), Some(key)) = (&ws.comparing.compare, &view.chosen) else {
         return;
     };
     ui.heading(format!("Changes since {}", c.rev));

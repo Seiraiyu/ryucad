@@ -37,6 +37,7 @@ fn key(f: &str) -> (String, String) {
 fn ghosted(ws: &Workspace) -> bool {
     ws.idle()
         && ws
+            .comparing
             .compare
             .as_ref()
             .is_some_and(|c| c.loaded && c.ghosts.len() == c.wanted.len())
@@ -51,7 +52,7 @@ fn an_agent_puts_the_window_into_a_compare() {
     let r = p.ok(&["compare", "HEAD"]);
     assert_eq!(r["participant"], ws.me());
     assert!(ws.wait_until(WAIT, ghosted));
-    let c = ws.compare.as_ref().unwrap();
+    let c = ws.comparing.compare.as_ref().unwrap();
     assert_eq!(c.rev, "HEAD");
     assert_eq!(c.commit.as_deref(), r["compare"]["commit"].as_str());
     assert_eq!(c.features[&key("base")].change, Change::Changed);
@@ -79,12 +80,14 @@ fn an_agent_puts_the_window_into_a_compare() {
     assert!(ws.wait_until(WAIT, |ws| {
         ghosted(ws)
             && ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| !c.features.contains_key(&key("base")))
     }));
     assert!(
-        !ws.compare
+        !ws.comparing
+            .compare
             .as_ref()
             .unwrap()
             .ghosts
@@ -92,7 +95,7 @@ fn an_agent_puts_the_window_into_a_compare() {
     );
     // The window ends it itself.
     ws.set_compare(None);
-    assert!(ws.wait_until(WAIT, |ws| ws.compare.is_none()));
+    assert!(ws.wait_until(WAIT, |ws| ws.comparing.compare.is_none()));
     assert_eq!(p.ok(&["compare"])["compare"], serde_json::Value::Null);
 }
 
@@ -110,12 +113,13 @@ fn swapped_the_revision_is_drawn_and_its_ghost_is_the_working_files() {
         ghosted(ws)
             && ws.model.meshes.contains_key(&key("boss"))
             && ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.swapped.as_deref() == Some("HEAD"))
     }));
     assert_eq!(ws.model_rev().as_deref(), Some("HEAD"));
-    let c = ws.compare.as_ref().unwrap();
+    let c = ws.comparing.compare.as_ref().unwrap();
     assert_eq!(
         (c.rev.as_str(), c.to.as_deref(), c.named()),
         ("working", Some("HEAD"), "HEAD")
@@ -131,6 +135,7 @@ fn swapped_the_revision_is_drawn_and_its_ghost_is_the_working_files() {
     assert!(ws.wait_until(WAIT, |ws| {
         ghosted(ws)
             && ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.wanted.get(&key("base")).is_some_and(|h| *h != before))
@@ -151,8 +156,8 @@ fn swapped_the_revision_is_drawn_and_its_ghost_is_the_working_files() {
     assert!(ws.painted().is_some());
     // Stopping the compare starts the blink again.
     p.ok(&["compare", "--off"]);
-    assert!(ws.wait_until(WAIT, |ws| ws.compare.is_none()));
-    assert_eq!(ws.blink, Blink::default());
+    assert!(ws.wait_until(WAIT, |ws| ws.comparing.compare.is_none()));
+    assert_eq!(ws.comparing.blink, Blink::default());
 }
 
 #[test]
@@ -162,12 +167,12 @@ fn a_window_compares_with_any_revision() {
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
     ws.set_compare(Some("main".into()));
     assert!(ws.wait_until(WAIT, ghosted));
-    assert_eq!(ws.compare.as_ref().unwrap().counts(), (1, 1, 1));
+    assert_eq!(ws.comparing.compare.as_ref().unwrap().counts(), (1, 1, 1));
     // A revision that doesn't resolve is refused, and the compare stays.
     ws.set_compare(Some("nowhere".into()));
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.errors.is_empty()));
     assert_eq!(ws.errors.last().unwrap().code, Code::RevNotFound);
-    assert_eq!(ws.compare.as_ref().unwrap().rev, "main");
+    assert_eq!(ws.comparing.compare.as_ref().unwrap().rev, "main");
 }
 
 #[test]
@@ -182,7 +187,7 @@ fn a_proposal_and_property_changes_show_in_a_compare() {
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.len() == 2));
     ws.set_compare(Some("HEAD".into()));
     assert!(ws.wait_until(WAIT, ghosted));
-    let m = &ws.compare.as_ref().unwrap().pdm["p"];
+    let m = &ws.comparing.compare.as_ref().unwrap().pdm["p"];
     assert_eq!(m.marks, ["proposes A"]);
     assert_eq!(
         m.lines,
@@ -228,7 +233,7 @@ fn an_assemblys_occurrences_are_painted_and_ghosted_where_they_were() {
         && ws.model.meshes.contains_key(&k("b1"))));
     p.ok(&["compare", "HEAD"]);
     assert!(ws.wait_until(WAIT, ghosted));
-    let c = ws.compare.as_ref().unwrap();
+    let c = ws.comparing.compare.as_ref().unwrap();
     // Both bolts' faces differ, and both are ghosted: b1 where it is, b2
     // where it was, 10 mm off.
     for b in ["b1", "b2"] {

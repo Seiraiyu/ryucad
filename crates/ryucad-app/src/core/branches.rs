@@ -13,11 +13,12 @@
 //! project revision the list was read at; Compare compares with the
 //! branch; Open worktree opens the worktree that has it.
 
+use crate::core::merge::Merge;
 use ryucad::error::Code;
 use ryucad::error::Error;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How often the tab reads the worktrees again while it is shown: another
 /// agent's work changes no file of this project, so no notification says
@@ -70,6 +71,11 @@ pub struct Branches {
     pub branch_error: Option<Error>,
     /// The Check out dialog, while it is open.
     pub checkout: Option<Checkout>,
+    pub(crate) branches_at: Option<Instant>,
+    pub(crate) branches_waiting: bool,
+    /// The merge Git is in the middle of, while it is in one: what is left
+    /// to settle.
+    pub merge: Option<Merge>,
 }
 
 impl Branches {

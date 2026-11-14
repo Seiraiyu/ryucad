@@ -30,16 +30,16 @@ pub fn line_name(line: &Line, level: &str) -> String {
 /// The BOM tab.
 pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     let item_gate = ws.control("bom.renumber");
-    let mut flat = ws.bom.flat;
+    let mut flat = ws.pdm.bom.flat;
     let mut focus = None;
     ui.horizontal(|ui| {
-        match &ws.bom.root {
+        match &ws.pdm.bom.root {
             Some(r) => ui.strong(format!("BOM of {r}")),
             None => ui.strong("BOM"),
         };
         ui.checkbox(&mut flat, "Flat")
             .on_hover_text("Every part bought or made at the bottom, with its total");
-        let any = ws.bom.root.is_some();
+        let any = ws.pdm.bom.root.is_some();
         if ui
             .add_enabled(any, egui::Button::new("Export CSV…"))
             .on_hover_text("Write this BOM as CSV, as `ryucad bom --out` does")
@@ -48,30 +48,30 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             ws.open_bom_export();
         }
     });
-    if flat != ws.bom.flat {
+    if flat != ws.pdm.bom.flat {
         ws.set_bom_flat(flat);
     }
     let error = ui.visuals().error_fg_color;
-    if !ws.bom.roots.is_empty() {
+    if !ws.pdm.bom.roots.is_empty() {
         ui.label("The project has several root assemblies: show one for its BOM.");
         ui.horizontal_wrapped(|ui| {
-            for r in &ws.bom.roots {
+            for r in &ws.pdm.bom.roots {
                 if ui.button(format!("Show {r}")).clicked() {
                     focus = Some(r.clone());
                 }
             }
         });
-    } else if let Some(e) = &ws.bom.error {
+    } else if let Some(e) = &ws.pdm.bom.error {
         ui.colored_label(error, &e.message);
-    } else if ws.bom.root.is_none() {
+    } else if ws.pdm.bom.root.is_none() {
         ui.spinner();
     }
     if let Some(r) = focus {
         ws.set_focus(Some(r));
         return;
     }
-    if let Some(c) = &ws.compare {
-        match (ws.bom.summary(), &ws.bom.diff_error) {
+    if let Some(c) = &ws.comparing.compare {
+        match (ws.pdm.bom.summary(), &ws.pdm.bom.diff_error) {
             (Some(s), _) => ui.label(format!("Compared with {}: {s}", c.named())),
             (None, Some(e)) => {
                 ui.colored_label(error, format!("No BOM at {}: {}", c.named(), e.message))
@@ -79,28 +79,28 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             (None, None) => ui.spinner(),
         };
     }
-    for f in &ws.bom.findings {
+    for f in &ws.pdm.bom.findings {
         ui.colored_label(ui.visuals().warn_fg_color, f);
     }
-    if let Some(c) = &ws.bom.changed {
+    if let Some(c) = &ws.pdm.bom.changed {
         let mut ok = false;
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(ui.visuals().warn_fg_color, c);
             ok = ui.button("OK").clicked();
         });
         if ok {
-            ws.bom.changed = None;
+            ws.pdm.bom.changed = None;
         }
     }
-    if let Some(e) = &ws.bom.edit_error {
+    if let Some(e) = &ws.pdm.bom.edit_error {
         ui.colored_label(error, e);
     }
     let mut chose: Option<Vec<String>> = None;
     // The item number typed, apart from the lines it is typed over.
-    let mut typed = ws.bom.editing.as_ref().map(|e| e.text.clone());
+    let mut typed = ws.pdm.bom.editing.as_ref().map(|e| e.text.clone());
     let (mut start, mut set, mut cancel) = (None, false, false);
     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-        let t = &ws.bom;
+        let t = &ws.pdm.bom;
         egui::Grid::new("bom").striped(true).show(ui, |ui| {
             for c in &t.columns {
                 ui.strong(c);
@@ -237,18 +237,18 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             }
         });
     });
-    if let (Some(text), Some(e)) = (typed, ws.bom.editing.as_mut()) {
+    if let (Some(text), Some(e)) = (typed, ws.pdm.bom.editing.as_mut()) {
         e.text = text;
     }
     if let Some(line) = start {
-        ws.bom.edit(&line);
+        ws.pdm.bom.edit(&line);
     }
     if set {
         ws.save_item();
     }
     if cancel {
-        ws.bom.editing = None;
-        ws.bom.edit_error = None;
+        ws.pdm.bom.editing = None;
+        ws.pdm.bom.edit_error = None;
     }
     if let Some(occurrences) = chose {
         choose(ws, view, occurrences);
@@ -262,7 +262,7 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
 pub fn where_used(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     let part = crate::ui::tiles::part::section_part(ws, view);
     ws.show_where_used(part.as_deref());
-    let Some(w) = &ws.where_used else {
+    let Some(w) = &ws.pdm.where_used else {
         return;
     };
     ui.heading(format!("Where {} is used", w.part));
@@ -366,8 +366,8 @@ pub fn export(
     browse: &mut Option<crate::ui::step::Browse>,
     view: egui::Rect,
 ) {
-    let root = ws.bom.root.clone().unwrap_or_default();
-    let Some(e) = &mut ws.bom_export else {
+    let root = ws.pdm.bom.root.clone().unwrap_or_default();
+    let Some(e) = &mut ws.pdm.bom_export else {
         return;
     };
     let (mut open, mut go) = (true, false);
@@ -400,14 +400,14 @@ pub fn export(
         ws.run_bom_export();
     }
     if !open {
-        ws.bom_export = None;
+        ws.pdm.bom_export = None;
     }
 }
 
 /// Chooses a line: its occurrences become this window's selection, and
 /// the view frames them.
 fn choose(ws: &mut Workspace, view: &mut View, occurrences: Vec<String>) {
-    ws.bom.chosen = Some(occurrences.clone());
+    ws.pdm.bom.chosen = Some(occurrences.clone());
     ws.select(occurrences.clone(), SelectMode::Replace);
     view.fit_entities(ws, &occurrences);
 }

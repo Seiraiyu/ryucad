@@ -3,12 +3,12 @@
     "gearbox": {
       "check": {
         "codes": {
-          "drawing_view_uncertain": 4,
+          "drawing_view_uncertain": 2,
           "dwg_hole_uncalled": 3,
           "instances_interfere": 2
         },
         "errors": 0,
-        "warnings": 9
+        "warnings": 7
       },
       "drawings": {
         "gearbox/main": {
@@ -120,10 +120,8 @@
           "annotations": {
             "d1": "⌀20.00 H7 (+0.021/0)"
           },
-          "findings": {
-            "drawing_view_uncertain": 1
-          },
-          "pdf": "8d9342f5913e66d5bbd9da8db38bbed2b707218f31b6c0a41db170c505702e90",
+          "findings": {},
+          "pdf": "4615677356f4091aec692019d2d0595aa35a8652793205b62c702064af144b89",
           "scores": {
             "s1": 100
           },
@@ -142,7 +140,7 @@
               "failed": null,
               "pieces": {
                 "hidden": 0,
-                "uncertain": 1,
+                "uncertain": 0,
                 "visible": 58
               },
               "scale": "2:1",
@@ -174,10 +172,8 @@
           "annotations": {
             "d1": "⌀24.00 H7 (+0.021/0)"
           },
-          "findings": {
-            "drawing_view_uncertain": 1
-          },
-          "pdf": "527257bcd8c4aa3f0044928d1adf5b480c484d596e77d19cb1b09dd77039a390",
+          "findings": {},
+          "pdf": "eaa3e96dcbc0bb1a6ac37fa28c9412f06c613a6560efd03fc9c3a37dfaf79fb6",
           "scores": {
             "s1": 100
           },
@@ -196,7 +192,7 @@
               "failed": null,
               "pieces": {
                 "hidden": 0,
-                "uncertain": 1,
+                "uncertain": 0,
                 "visible": 66
               },
               "scale": "2:1",
@@ -689,7 +685,7 @@
           "findings": {
             "drawing_view_uncertain": 4
           },
-          "pdf": "e319413ab81bb309949fe08d560544ee5e51518c30a5bf2ce667298edc012df7",
+          "pdf": "e99fd8a75642ea0e9d986e38454ce9cb644b8d752e14cb9dfa21fd3928971939",
           "scores": {
             "s1": 100
           },
@@ -698,8 +694,8 @@
               "failed": null,
               "pieces": {
                 "hidden": 0,
-                "uncertain": 656,
-                "visible": 517
+                "uncertain": 37,
+                "visible": 518
               },
               "scale": "1:2",
               "type": "base"
@@ -708,8 +704,8 @@
               "failed": null,
               "pieces": {
                 "hidden": 0,
-                "uncertain": 1753,
-                "visible": 333
+                "uncertain": 17,
+                "visible": 296
               },
               "scale": "1:2",
               "type": "projected"
@@ -718,8 +714,8 @@
               "failed": null,
               "pieces": {
                 "hidden": 0,
-                "uncertain": 133,
-                "visible": 508
+                "uncertain": 51,
+                "visible": 464
               },
               "scale": "1:2",
               "type": "projected"
@@ -744,7 +740,7 @@
             "drawing_view_uncertain": 1,
             "dwg_balloon_missing": 13
           },
-          "pdf": "428442c6791db60accf3082a5d22ee39997987763ea131113a5a9551f01feaac",
+          "pdf": "48ce46950f70f1e93a3547857eb014a31a6b22885025d06ea1f0bc16eb937507",
           "scores": {
             "s1": 74
           },
@@ -753,7 +749,7 @@
               "failed": null,
               "pieces": {
                 "hidden": 0,
-                "uncertain": 681,
+                "uncertain": 680,
                 "visible": 67686
               },
               "scale": "1:2",

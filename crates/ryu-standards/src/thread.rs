@@ -108,7 +108,8 @@ impl Pitch {
 }
 
 /// A built-in thread, resolved: what it is and every value with its
-/// source. Internal threads only in 28.A.
+/// source: an internal thread (a tapped hole), or an external one (a
+/// stud) for ISO metric's external classes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Thread {
     pub standard: Standard,
@@ -127,6 +128,12 @@ pub struct Thread {
     pub major_min: Option<Valued<Nm>>,
     /// The taper on the diameter, `(1, 16)`, for tapered pipe threads.
     pub taper: Option<(u32, u32)>,
+    /// An internal thread (a tapped hole) or an external one (a stud).
+    pub internal: bool,
+    /// An external thread's greatest major diameter.
+    pub major_max: Option<Valued<Nm>>,
+    /// The basic minor diameter, for an external thread's ring.
+    pub basic_minor: Option<Valued<Nm>>,
 }
 
 /// Why a lookup failed, with what would be valid.
@@ -196,27 +203,65 @@ pub fn lookup(
                     });
                 }
             };
-            let c = match class {
-                None => iso_metric_limits::Class::DEFAULT,
-                Some(t) => iso_metric_limits::Class::parse(t).ok_or_else(|| Unknown::Class {
-                    known: iso_metric_limits::Class::all()
-                        .iter()
-                        .map(|c| c.text())
-                        .collect(),
-                })?,
+            enum Side {
+                In(iso_metric_limits::Class),
+                Out(iso_metric_limits::ExtClass),
+            }
+            let side = match class {
+                None => Side::In(iso_metric_limits::Class::DEFAULT),
+                Some(t) => match (
+                    iso_metric_limits::Class::parse(t),
+                    iso_metric_limits::ExtClass::parse(t),
+                ) {
+                    (Some(c), _) => Side::In(c),
+                    (None, Some(c)) => Side::Out(c),
+                    _ => {
+                        let mut known: Vec<String> = iso_metric_limits::Class::all()
+                            .iter()
+                            .map(|c| c.text())
+                            .collect();
+                        known.extend(iso_metric_limits::ExtClass::all().iter().map(|c| c.text()));
+                        return Err(Unknown::Class { known });
+                    }
+                },
             };
-            let l = iso_metric_limits::internal_limits(s, p, c);
-            Ok(Thread {
-                standard,
-                size: s.name,
-                major: Some(Valued::new(s.major, fact)),
-                pitch: Valued::new(Pitch::Mm(p), fact),
-                coarse: p == s.pitches[0],
-                class: Some(c.text()),
-                default_class: c == iso_metric_limits::Class::DEFAULT,
-                minor: Some(l.minor),
-                major_min: Some(l.major_min),
-                taper: None,
+            Ok(match side {
+                Side::In(c) => {
+                    let l = iso_metric_limits::internal_limits(s, p, c);
+                    Thread {
+                        standard,
+                        size: s.name,
+                        major: Some(Valued::new(s.major, fact)),
+                        pitch: Valued::new(Pitch::Mm(p), fact),
+                        coarse: p == s.pitches[0],
+                        class: Some(c.text()),
+                        default_class: c == iso_metric_limits::Class::DEFAULT,
+                        minor: Some(l.minor),
+                        major_min: Some(l.major_min),
+                        taper: None,
+                        internal: true,
+                        major_max: None,
+                        basic_minor: Some(iso_metric::basic_minor(s.major, p)),
+                    }
+                }
+                Side::Out(c) => {
+                    let l = iso_metric_limits::external_limits(s, p, c);
+                    Thread {
+                        standard,
+                        size: s.name,
+                        major: Some(Valued::new(s.major, fact)),
+                        pitch: Valued::new(Pitch::Mm(p), fact),
+                        coarse: p == s.pitches[0],
+                        class: Some(c.text()),
+                        default_class: c == iso_metric_limits::ExtClass::DEFAULT,
+                        minor: None,
+                        major_min: Some(l.major.0),
+                        major_max: Some(l.major.1),
+                        basic_minor: Some(l.basic_minor),
+                        taper: None,
+                        internal: false,
+                    }
+                }
             })
         }
         Standard::Unc | Standard::Unf | Standard::Unef | Standard::Un => {
@@ -271,6 +316,12 @@ pub fn lookup(
                 minor: Some(l.minor),
                 major_min: Some(l.major_min),
                 taper: None,
+                internal: true,
+                major_max: None,
+                basic_minor: Some(Valued::new(
+                    unified::basic_minor(s.major, t),
+                    Source::Formula("FED-STD-H28/2B"),
+                )),
             })
         }
         Standard::Npt | Standard::Nptf | Standard::Nps | Standard::Bspt | Standard::Bspp => {
@@ -322,6 +373,11 @@ pub fn lookup(
                 minor: None,
                 major_min: None,
                 taper,
+                // A pipe thread takes no class: a cosmetic thread says
+                // which side by its face.
+                internal: true,
+                major_max: None,
+                basic_minor: None,
             })
         }
     }
@@ -441,7 +497,8 @@ mod tests {
             panic!()
         };
         assert_eq!(listed, ["1.0", "0.75"]);
-        let Err(Unknown::Class { known }) = lookup(Standard::IsoMetric, "M6", None, Some("6g"))
+        // 6e is no class built in (6g is an external one since 28.B).
+        let Err(Unknown::Class { known }) = lookup(Standard::IsoMetric, "M6", None, Some("6e"))
         else {
             panic!()
         };
@@ -496,5 +553,32 @@ mod tests {
             panic!()
         };
         assert_eq!(known, ["Rc1/16", "Rc1/8", "Rc1/4", "Rc3/8"]);
+    }
+
+    #[test]
+    fn external_classes_resolve_with_their_side() {
+        let m10 = lookup(Standard::IsoMetric, "M10", None, Some("6g")).unwrap();
+        assert!(!m10.internal);
+        assert_eq!(m10.major_min.unwrap().value, 9_732_000);
+        assert_eq!(m10.major_max.unwrap().value, 9_968_000);
+        assert_eq!(m10.minor, None);
+        assert_eq!(m10.basic_minor.unwrap().value, 8_376_000);
+        // Unified external classes aren't built in (H28/2B prints no
+        // external limits): a project's table gives them.
+        assert!(matches!(
+            lookup(Standard::Unc, "1/4", None, Some("2A")),
+            Err(Unknown::Class { .. })
+        ));
+        // The default is still the internal class.
+        assert!(
+            lookup(Standard::IsoMetric, "M10", None, None)
+                .unwrap()
+                .internal
+        );
+        let Err(Unknown::Class { known }) = lookup(Standard::IsoMetric, "M6", None, Some("6e"))
+        else {
+            panic!()
+        };
+        assert!(known.contains(&"6g".to_owned()) && known.contains(&"6H".to_owned()));
     }
 }

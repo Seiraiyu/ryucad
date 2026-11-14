@@ -16,7 +16,7 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     let part = ws.model.followed_part(view.chosen.as_ref());
     ws.show_params(part.as_deref());
     let gate = ws.control("param.set");
-    let Some(p) = &mut ws.params else {
+    let Some(p) = &mut ws.parameters.params else {
         return;
     };
     form::heading(

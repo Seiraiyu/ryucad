@@ -201,8 +201,8 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
                 Screen::Opened(o) => {
                     o.ws.idle()
                         && o.ws.model.meshes.len() >= 2
-                        && o.ws.settings.text("ui.style", "") == look
-                        && o.ws.settings.text("ui.contrast", "") == contrast
+                        && o.ws.session.settings.text("ui.style", "") == look
+                        && o.ws.session.settings.text("ui.contrast", "") == contrast
                 }
                 _ => false,
             },
@@ -211,8 +211,8 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
                     "idle {}, {} meshes, style {:?}, contrast {:?}",
                     o.ws.idle(),
                     o.ws.model.meshes.len(),
-                    o.ws.settings.get("ui.style"),
-                    o.ws.settings.get("ui.contrast")
+                    o.ws.session.settings.get("ui.style"),
+                    o.ws.session.settings.get("ui.contrast")
                 ),
                 _ => "no project open".to_owned(),
             },
@@ -318,7 +318,7 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
         let camera = o.view.nav.camera.clone();
         let hh = camera.half_height(camera.distance());
         o.ws.open_markup(camera).unwrap();
-        let m = o.ws.markup.as_mut().unwrap();
+        let m = o.ws.annotations.markup.as_mut().unwrap();
         let at = |x: f64, y: f64| [x * hh, y * hh];
         m.press(at(-0.6, 0.5));
         m.drag(at(-0.2, 0.15), false);

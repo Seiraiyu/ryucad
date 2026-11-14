@@ -197,6 +197,9 @@ jobs:
       # Plan 2.G: the schematic fuzz case over 400 seeded inputs (#664, #665).
       - run: cargo test -p ryusch --release --test seeded_sweep
       - run: cargo test -p ryueda --release --test schematic_corpus the_corpus_from_nothing
+      # Plan 4.D: two branches of each corpus circuit merged through Git
+      # and settled by their first repairs.
+      - run: cargo test -p ryueda --release --test schematic_corpus corpus_branches
       - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
       # #400: the window's open keeps its daemon within its budget.
       - run: cargo test -p ryucad-app --release --test open_memory -- --nocapture

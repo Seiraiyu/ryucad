@@ -110,11 +110,12 @@ fn a_compare_looks_as_it_did() {
         ws.idle()
             && ws.model.meshes.len() == 1
             && ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.loaded && c.ghosts.len() == 2)
     }));
-    let c = ws.compare.as_ref().unwrap();
+    let c = ws.comparing.compare.as_ref().unwrap();
     let picker = Picker::new(&ws.model);
     let (lo, hi) = ([-0.004, -0.004, 0.0], [0.03, 0.01, 0.013]);
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -169,18 +170,19 @@ fn a_swapped_compare_looks_as_it_did() {
     let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     p.ok(&["compare", "HEAD"]);
     assert!(ws.wait_until(Duration::from_secs(30), |ws| {
-        ws.idle() && ws.compare.as_ref().is_some_and(|c| c.loaded)
+        ws.idle() && ws.comparing.compare.as_ref().is_some_and(|c| c.loaded)
     }));
     ws.swap_compare();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| {
         ws.idle()
             && ws.model.meshes.len() == 2
             && ws
+                .comparing
                 .compare
                 .as_ref()
                 .is_some_and(|c| c.swapped.is_some() && c.loaded && c.ghosts.len() == 1)
     }));
-    let c = ws.compare.as_ref().unwrap();
+    let c = ws.comparing.compare.as_ref().unwrap();
     let picker = Picker::new(&ws.model);
     let (lo, hi) = ([-0.004, -0.004, 0.0], [0.03, 0.01, 0.013]);
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -652,7 +654,7 @@ fn a_chosen_loft_looks_as_it_did() {
     assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     ws.choose(Some(("p".to_owned(), "l".to_owned())));
-    assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.swept.is_some()));
+    assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.model.swept.is_some()));
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -661,7 +663,7 @@ fn a_chosen_loft_looks_as_it_did() {
     let mut scene = Scene::new(&device, &adapter);
     scene.sync(&device, &ws.model, centre);
     let overlay = ryucad_app::core::sweeps::overlay(
-        ws.swept.as_ref().unwrap(),
+        ws.model.swept.as_ref().unwrap(),
         style::CHOSEN,
         &pr,
         [f64::from(W), f64::from(H)],
@@ -752,7 +754,7 @@ fn a_chosen_draft_looks_as_it_did() {
         && ws.model.meshes.len() == 1));
     ws.choose(Some(("p".to_owned(), "d".to_owned())));
     assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
-        && ws.made.is_some()));
+        && ws.model.made.is_some()));
     let t = ws.model.parts["p"]
         .feature("d")
         .unwrap()
@@ -771,6 +773,7 @@ fn a_chosen_draft_looks_as_it_did() {
     scene.sync(&device, &ws.model, centre);
     let c = scene::linear(style::CHOSEN);
     let faces: Vec<scene::PaintedFace> = ws
+        .model
         .made
         .as_ref()
         .unwrap()
@@ -829,7 +832,7 @@ fn a_chosen_delete_looks_as_it_did() {
         && ws.model.meshes.len() == 1));
     ws.choose(Some(("p".to_owned(), "x".to_owned())));
     assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
-        && ws.made.is_some()));
+        && ws.model.made.is_some()));
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -842,6 +845,7 @@ fn a_chosen_delete_looks_as_it_did() {
     scene.sync(&device, &ws.model, centre);
     let c = scene::linear(style::CHOSEN);
     let faces: Vec<scene::PaintedFace> = ws
+        .model
         .made
         .as_ref()
         .unwrap()
@@ -891,12 +895,16 @@ fn a_flat_pattern_looks_as_it_did() {
     assert!(ws.wait_until(Duration::from_secs(120), |ws| {
         ws.idle()
             && ws.model.flat.is_some()
-            && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+            && ws
+                .model
+                .flat_view
+                .as_ref()
+                .is_some_and(|v| v.lines.is_some())
     }));
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
-    let lines = ws.flat_view.as_ref().unwrap().lines.as_ref().unwrap();
+    let lines = ws.model.flat_view.as_ref().unwrap().lines.as_ref().unwrap();
     // As the window turns to it: from the pattern's viewer side.
     let camera = lines.camera(&picker.points(None), f64::from(W) / f64::from(H));
     let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
@@ -933,7 +941,10 @@ fn sheets_look_as_they_did() {
     assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
         && ws.model.meshes.len() == 6));
     p.ok(&["section", "xy", "--offset", "5"]);
-    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.sections.planes.len() == 1));
+    assert!(
+        ws.wait_until(Duration::from_secs(30), |ws| ws.view.sections.planes.len()
+            == 1)
+    );
     // Box `b`, whose faces were sewn, coincides with the sewn box: left
     // out, so the box's inside shows.
     ws.model.meshes.remove(&("p".to_owned(), "b".to_owned()));
@@ -947,7 +958,7 @@ fn sheets_look_as_they_did() {
     let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
     let mut scene = Scene::new(&device, &adapter);
     scene.sync(&device, &ws.model, centre);
-    scene.cut(scene::Cut::of(&ws.sections.planes, &camera));
+    scene.cut(scene::Cut::of(&ws.view.sections.planes, &camera));
     let list = DrawList {
         reference: centre,
         matrix: pr.matrix(centre),
@@ -1036,7 +1047,10 @@ fn a_cut_part_looks_as_it_did() {
         && ws.model.meshes.len() == 2));
     p.ok(&["section", "zx", "--offset", "1", "--flip"]);
     p.ok(&["section", "xy", "--offset", "10", "--add"]);
-    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.sections.planes.len() == 2));
+    assert!(
+        ws.wait_until(Duration::from_secs(30), |ws| ws.view.sections.planes.len()
+            == 2)
+    );
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -1044,7 +1058,7 @@ fn a_cut_part_looks_as_it_did() {
     let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
     let mut scene = Scene::new(&device, &adapter);
     scene.sync(&device, &ws.model, centre);
-    scene.cut(scene::Cut::of(&ws.sections.planes, &camera));
+    scene.cut(scene::Cut::of(&ws.view.sections.planes, &camera));
     let list = DrawList {
         reference: centre,
         matrix: pr.matrix(centre),
@@ -1094,7 +1108,7 @@ fn an_exploded_assembly_looks_as_it_did() {
     p.ok(&["explode", "show", "apart"]);
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.exploded.is_some()
-        && ws.explodes.list.len() == 1));
+        && ws.assembly.explodes.list.len() == 1));
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -1162,7 +1176,7 @@ fn a_motion_half_way_looks_as_it_did() {
     ]);
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.exploded.is_some()
-        && ws.motions.frames_current()));
+        && ws.assembly.motions.frames_current()));
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);

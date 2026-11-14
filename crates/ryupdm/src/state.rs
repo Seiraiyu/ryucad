@@ -16,11 +16,12 @@
 use crate::config::{Config, Scheme};
 use crate::history::Releases;
 use crate::label;
+use crate::product::Product;
 use crate::props;
 use crate::record::{Entry, Kind, Record, Records};
-use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::source::Source;
-use ryucad_doc::error::{Code, Error, Result};
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::Id;
+use ryu_doc::source::Source;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -139,28 +140,25 @@ pub fn ordered<'a>(
 /// The state of `part` in the project `src` holds, the release branch
 /// read into `releases` (`Releases::default()` outside a repository: then
 /// nothing is official).
-pub fn derive(src: &dyn Source, part: &Id, releases: &Releases) -> State {
+pub fn derive_for<P: Product>(src: &dyn Source, part: &Id, releases: &Releases) -> State {
     let config = Config::read(src);
     let records = Records::read(src);
     match (config, records) {
-        (Ok(c), Ok(r)) => of(src, &c, &r, part, releases),
+        (Ok(c), Ok(r)) => of_for::<P>(src, &c, &r, part, releases),
         (Err(e), _) | (_, Err(e)) => unknown(e),
     }
 }
 
-/// The parts [`derive_all`] gives states for: every part folder and every
-/// part a record names, in order.
-pub fn parts(src: &dyn Source, records: &Result<Records>) -> Vec<Id> {
-    let mut parts: Vec<Id> = src
-        .list("parts")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(n, k)| {
-            (k == ryucad_doc::doc::source::Kind::Dir)
-                .then(|| Id::parse(&n, "part").ok())
-                .flatten()
-        })
-        .collect();
+/// [`derive_for`] for ryucad.
+#[cfg(feature = "cad")]
+pub fn derive(src: &dyn Source, part: &Id, releases: &Releases) -> State {
+    derive_for::<crate::cad::Cad>(src, part, releases)
+}
+
+/// The parts [`derive_all_for`] gives states for: every part the
+/// project of `P` has and every part a record names, in order.
+pub fn parts_for<P: Product>(src: &dyn Source, records: &Result<Records>) -> Vec<Id> {
+    let mut parts: Vec<Id> = P::parts(src).unwrap_or_default();
     if let Ok(r) = records {
         parts.extend(r.parts());
     }
@@ -169,15 +167,28 @@ pub fn parts(src: &dyn Source, records: &Result<Records>) -> Vec<Id> {
     parts
 }
 
-/// [`derive()`] for every part the project has or a record names.
+/// [`parts_for`] for ryucad: every folder under `parts/` and every part
+/// a record names.
+#[cfg(feature = "cad")]
+pub fn parts(src: &dyn Source, records: &Result<Records>) -> Vec<Id> {
+    parts_for::<crate::cad::Cad>(src, records)
+}
+
+/// [`derive_all_for`] for ryucad.
+#[cfg(feature = "cad")]
 pub fn derive_all(src: &dyn Source, releases: &Releases) -> BTreeMap<Id, State> {
+    derive_all_for::<crate::cad::Cad>(src, releases)
+}
+
+/// [`derive_for`] for every part the project has or a record names.
+pub fn derive_all_for<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Id, State> {
     let config = Config::read(src);
     let records = Records::read(src);
-    parts(src, &records)
+    parts_for::<P>(src, &records)
         .into_iter()
         .map(|p| {
             let s = match (&config, &records) {
-                (Ok(c), Ok(r)) => of(src, c, r, &p, releases),
+                (Ok(c), Ok(r)) => of_for::<P>(src, c, r, &p, releases),
                 (Err(e), _) | (_, Err(e)) => unknown(e.clone()),
             };
             (p, s)
@@ -195,8 +206,20 @@ pub fn unknown(e: Error) -> State {
     }
 }
 
-/// The state of `part` with the project's settings and records read.
+/// [`of_for`] for ryucad.
+#[cfg(feature = "cad")]
 pub fn of(
+    src: &dyn Source,
+    config: &Config,
+    records: &Records,
+    part: &Id,
+    releases: &Releases,
+) -> State {
+    of_for::<crate::cad::Cad>(src, config, records, part, releases)
+}
+
+/// The state of `part` with the project's settings and records read.
+pub fn of_for<P: Product>(
     src: &dyn Source,
     config: &Config,
     records: &Records,
@@ -243,7 +266,7 @@ pub fn of(
             changes: Vec::new(),
         };
     }
-    let changes = match (crate::content::hash(src, part), props::read(src, part)) {
+    let changes = match (P::content(src, part), props::read_for::<P>(src, part)) {
         (Ok(content), Ok(p)) => release.changes(&content, config, &p),
         // A part that can't be read isn't what was released.
         _ => vec!["content".to_owned()],
@@ -261,13 +284,15 @@ pub fn of(
     }
 }
 
-#[cfg(test)]
+// ryucad's tests: they read ryucad's projects (`cad`); the core's own
+// are in `crate::testing`, over a toy product.
+#[cfg(all(test, feature = "cad"))]
 pub(crate) mod tests {
     use super::*;
     use crate::history::Official;
     use crate::record::{BuiltWith, Obsolete, Release, ReleasedBy};
-    use ryucad_doc::doc::canonical;
-    use ryucad_doc::doc::id::ProjectId;
+    use ryu_doc::canonical;
+    use ryu_doc::id::ProjectId;
     use std::collections::BTreeMap;
 
     pub(crate) const PROJECT: &str = "0123456789abcdef0123456789abcdef";
@@ -326,6 +351,7 @@ pub(crate) mod tests {
                 ryucad: "0".into(),
                 ryukei: "0".into(),
                 commit: "c".into(),
+                product: None,
             },
             released_by: by(),
             supersedes: supersedes.map(str::to_owned),

@@ -1,14 +1,16 @@
 //! Hole specs: the one-line callout an agent writes (`--spec "M6x1.0-6H
 //! THRU"`), parsed into a hole's fields, and written back canonically
-//! from a feature. See the plan's grammar (ryucad 28.A); `THRU NEXT` and
-//! `SPOTFACE` arrive with 28.B.
+//! from a feature. See the plan's grammar (ryucad 28.A); `THRU NEXT`,
+//! `TIP`, `BALL`, `CDRILL`, `SPOTFACE`, `NEAR`, `FAR` and `TAPER` arrived
+//! with 28.B.
 //!
 //! Canonical text is ASCII and exact: lengths are their literals' own
 //! decimals, expressions are in parentheses, and nothing is formatted from
 //! a float. Drawings write the symbol form.
 
 use crate::doc::hole::{
-    BoreTolerance, Bottom, Depth as HoleDepth, FastenerFit, Hole, HoleForm, ThreadDepth,
+    BoreTolerance, Bottom, Depth as HoleDepth, Far as HoleFar, FastenerFit, Hole, HoleForm,
+    ThreadDepth,
 };
 use crate::error::{Code, Error, Result};
 use crate::units::{Quantity, Unit};
@@ -37,6 +39,41 @@ pub enum ThreadKind {
 pub enum MouthKind {
     Cbore,
     Csk,
+    Cdrill,
+    Spotface,
+}
+
+impl MouthKind {
+    /// The spec's word for it.
+    fn word(self) -> &'static str {
+        match self {
+            MouthKind::Cbore => "CBORE",
+            MouthKind::Csk => "CSK",
+            MouthKind::Cdrill => "CDRILL",
+            MouthKind::Spotface => "SPOTFACE",
+        }
+    }
+
+    /// The hole's form it makes.
+    fn form(self) -> &'static str {
+        match self {
+            MouthKind::Cbore => "counterbore",
+            MouthKind::Csk => "countersink",
+            MouthKind::Cdrill => "counterdrill",
+            MouthKind::Spotface => "spotface",
+        }
+    }
+
+    fn parse(word: &str) -> Option<MouthKind> {
+        [
+            MouthKind::Cbore,
+            MouthKind::Csk,
+            MouthKind::Cdrill,
+            MouthKind::Spotface,
+        ]
+        .into_iter()
+        .find(|k| k.word().eq_ignore_ascii_case(word))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,7 +88,7 @@ pub enum What {
         left: bool,
     },
     Fastener {
-        /// Counterbore or countersink; none is a plain clearance hole.
+        /// Its mouth's kind; none is a plain clearance hole.
         mouth: Option<MouthKind>,
         standard: String,
         size: String,
@@ -66,8 +103,11 @@ pub enum What {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Depth {
     Thru,
+    ThruNext,
     Full,
     Deep(Len),
+    /// A plain hole's depth to its drill point's tip.
+    Tip(Len),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,14 +115,33 @@ pub struct Drill {
     pub diameter: Option<Len>,
     /// A tapped hole's drill depth.
     pub depth: Option<Len>,
+    /// The depth is to the point's tip.
+    pub tip: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mouth {
     pub kind: MouthKind,
     pub diameter: Option<Len>,
-    /// A counterbore's depth, or a countersink's angle in degrees.
+    /// A counterbore's, counterdrill's or spotface's depth, or a
+    /// countersink's angle in degrees.
     pub second: Option<Len>,
+    /// A counterdrill's angle in degrees.
+    pub third: Option<Len>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Near {
+    pub diameter: Len,
+    pub angle: Option<Len>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Far {
+    /// Diameter, angle in degrees.
+    Csk(Len, Len),
+    /// Diameter, depth.
+    Cbore(Len, Len),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,8 +152,14 @@ pub struct Spec {
     /// A drill point's included angle in degrees: after a plain hole's
     /// depth, in a tapped hole's DRILL clause.
     pub angle: Option<Len>,
+    /// A ball bottom, where an angle would be.
+    pub ball: bool,
     pub drill: Option<Drill>,
     pub mouth: Option<Mouth>,
+    pub near: Option<Near>,
+    pub far: Option<Far>,
+    /// A tapered pipe thread's wall.
+    pub taper: bool,
 }
 
 /// The unit a spec's bare numbers take: a metric thread's millimetres,
@@ -195,6 +260,8 @@ impl Spec {
                     HoleForm::Simple => None,
                     HoleForm::Counterbore { .. } => Some(MouthKind::Cbore),
                     HoleForm::Countersink { .. } => Some(MouthKind::Csk),
+                    HoleForm::Counterdrill { .. } => Some(MouthKind::Cdrill),
+                    HoleForm::Spotface { .. } => Some(MouthKind::Spotface),
                 },
                 standard: f.standard.clone(),
                 size: f.size.clone(),
@@ -215,17 +282,20 @@ impl Spec {
         let tapped = h.thread.is_some();
         let angle = match &h.bottom {
             Bottom::Drill(a) => Some(Len::of_angle(a)),
-            Bottom::Flat => None,
+            Bottom::Flat | Bottom::Ball => None,
         };
         let depth = match (&h.thread, &h.depth) {
             (Some(t), d) => match (&t.depth, d) {
                 (Some(ThreadDepth::Full), _) => Some(Depth::Full),
                 (Some(ThreadDepth::Length(q)), _) => Some(Depth::Deep(Len::of(q, cu))),
                 (None, HoleDepth::ThroughAll) => Some(Depth::Thru),
+                (None, HoleDepth::ThroughNext) => Some(Depth::ThruNext),
                 (None, _) => None,
             },
             (None, HoleDepth::ThroughAll) => Some(Depth::Thru),
+            (None, HoleDepth::ThroughNext) => Some(Depth::ThruNext),
             (None, HoleDepth::Blind(q)) => Some(Depth::Deep(Len::of(q, cu))),
+            (None, HoleDepth::Tip(q)) => Some(Depth::Tip(Len::of(q, cu))),
             (None, HoleDepth::UpTo { .. }) => None,
         };
         let derived = h.thread.is_some() || h.fastener.is_some();
@@ -235,12 +305,13 @@ impl Spec {
             .filter(|_| derived)
             .map(|q| Len::of(q, cu));
         let drill_depth = match (&h.depth, tapped) {
-            (HoleDepth::Blind(q), true) => Some(Len::of(q, cu)),
+            (HoleDepth::Blind(q) | HoleDepth::Tip(q), true) => Some(Len::of(q, cu)),
             _ => None,
         };
         let drill = (drill_diameter.is_some() || drill_depth.is_some()).then_some(Drill {
             diameter: drill_diameter,
             depth: drill_depth,
+            tip: tapped && matches!(h.depth, HoleDepth::Tip(_)),
         });
         let written = |q: &Option<Quantity>| q.as_ref().map(|q| Len::of(q, cu));
         let mouth = match &h.form {
@@ -249,22 +320,58 @@ impl Spec {
                 kind: MouthKind::Cbore,
                 diameter: written(diameter),
                 second: written(depth),
+                third: None,
             }),
             HoleForm::Countersink { diameter, angle } => Some(Mouth {
                 kind: MouthKind::Csk,
                 diameter: written(diameter),
                 second: angle.as_ref().map(Len::of_angle),
+                third: None,
+            }),
+            HoleForm::Counterdrill {
+                diameter,
+                depth,
+                angle,
+            } => Some(Mouth {
+                kind: MouthKind::Cdrill,
+                diameter: written(diameter),
+                second: written(depth),
+                third: angle.as_ref().map(Len::of_angle),
+            }),
+            HoleForm::Spotface { diameter, depth } => Some(Mouth {
+                kind: MouthKind::Spotface,
+                diameter: written(diameter),
+                second: written(depth),
+                third: None,
             }),
         }
         // A fastener's mouth with nothing written says nothing more.
-        .filter(|m| h.fastener.is_none() || m.diameter.is_some() || m.second.is_some());
+        .filter(|m| {
+            h.fastener.is_none() || m.diameter.is_some() || m.second.is_some() || m.third.is_some()
+        });
+        let near = h.near.as_ref().map(|n| Near {
+            diameter: Len::of(&n.diameter, cu),
+            angle: n.angle.as_ref().map(Len::of_angle),
+        });
+        let far = h.far.as_ref().map(|f| match f {
+            HoleFar::Countersink { diameter, angle } => {
+                Far::Csk(Len::of(diameter, cu), Len::of_angle(angle))
+            }
+            HoleFar::Counterbore { diameter, depth } => {
+                Far::Cbore(Len::of(diameter, cu), Len::of(depth, cu))
+            }
+        });
         Spec {
             what,
             starts: h.thread.as_ref().and_then(|t| t.starts),
             depth,
             angle,
+            ball: h.bottom == Bottom::Ball,
             drill,
             mouth,
+            near,
+            far,
+            taper: h.thread.as_ref().is_some_and(|t| t.taper_wall),
         }
     }
 
@@ -307,11 +414,7 @@ impl Spec {
                 size,
                 fit,
             } => {
-                let word = match mouth {
-                    Some(MouthKind::Cbore) => "CBORE",
-                    Some(MouthKind::Csk) => "CSK",
-                    None => "CLEAR",
-                };
+                let word = mouth.map_or("CLEAR", MouthKind::word);
                 let mut s = format!("{word} {} {size}", standard.to_uppercase());
                 if let Some(f) = fit {
                     s.push_str(&format!(" {}", f.key().to_uppercase()));
@@ -333,14 +436,23 @@ impl Spec {
         match &self.depth {
             None => {}
             Some(Depth::Thru) => s.push_str(" THRU"),
+            Some(Depth::ThruNext) => s.push_str(" THRU NEXT"),
             Some(Depth::Full) => s.push_str(" FULL"),
             Some(Depth::Deep(l)) => s.push_str(&format!(" {} DEEP", l.0)),
+            Some(Depth::Tip(l)) => s.push_str(&format!(" {} DEEP TIP", l.0)),
         }
-        if !tapped && let Some(a) = &self.angle {
-            s.push_str(&format!(" {}DEG", a.0));
+        // A plain hole's bottom follows its depth; a tapped hole's is in
+        // its DRILL clause.
+        let bottom = |s: &mut String| match &self.angle {
+            Some(a) => s.push_str(&format!(" {}DEG", a.0)),
+            None if self.ball => s.push_str(" BALL"),
+            None => {}
+        };
+        if !tapped {
+            bottom(&mut s);
         }
-        let tapped_angle = self.angle.as_ref().filter(|_| tapped);
-        if self.drill.is_some() || tapped_angle.is_some() {
+        let tapped_bottom = tapped && (self.angle.is_some() || self.ball);
+        if self.drill.is_some() || tapped_bottom {
             s.push_str(", DRILL");
             if let Some(d) = &self.drill {
                 if let Some(x) = &d.diameter {
@@ -348,25 +460,42 @@ impl Spec {
                 }
                 if let Some(x) = &d.depth {
                     s.push_str(&format!(" {} DEEP", x.0));
+                    if d.tip {
+                        s.push_str(" TIP");
+                    }
                 }
             }
-            if let Some(a) = tapped_angle {
-                s.push_str(&format!(" {}DEG", a.0));
+            if tapped {
+                bottom(&mut s);
             }
         }
         if let Some(m) = &self.mouth {
-            s.push_str(match m.kind {
-                MouthKind::Cbore => ", CBORE",
-                MouthKind::Csk => ", CSK",
-            });
+            s.push_str(&format!(", {}", m.kind.word()));
             if let Some(d) = &m.diameter {
                 s.push_str(&format!(" {}", d.0));
             }
             match (m.kind, &m.second) {
-                (MouthKind::Cbore, Some(x)) => s.push_str(&format!(" {} DEEP", x.0)),
                 (MouthKind::Csk, Some(x)) => s.push_str(&format!(" {}DEG", x.0)),
+                (_, Some(x)) => s.push_str(&format!(" {} DEEP", x.0)),
                 _ => {}
             }
+            if let Some(a) = &m.third {
+                s.push_str(&format!(" {}DEG", a.0));
+            }
+        }
+        if let Some(n) = &self.near {
+            s.push_str(&format!(", NEAR {}", n.diameter.0));
+            if let Some(a) = &n.angle {
+                s.push_str(&format!(" {}DEG", a.0));
+            }
+        }
+        match &self.far {
+            Some(Far::Csk(d, a)) => s.push_str(&format!(", FAR CSK {} {}DEG", d.0, a.0)),
+            Some(Far::Cbore(d, h)) => s.push_str(&format!(", FAR CBORE {} {} DEEP", d.0, h.0)),
+            None => {}
+        }
+        if self.taper {
+            s.push_str(", TAPER");
         }
         s
     }
@@ -552,7 +681,12 @@ impl Spec {
         }
         let depth = if r.is("THRU") {
             r.at += 1;
-            Some(Depth::Thru)
+            if r.is("NEXT") {
+                r.at += 1;
+                Some(Depth::ThruNext)
+            } else {
+                Some(Depth::Thru)
+            }
         } else if tapped && r.is("FULL") {
             r.at += 1;
             Some(Depth::Full)
@@ -565,7 +699,12 @@ impl Spec {
             match r.len() {
                 Some(l) if r.is("DEEP") => {
                     r.at += 1;
-                    Some(Depth::Deep(l))
+                    if !tapped && r.is("TIP") {
+                        r.at += 1;
+                        Some(Depth::Tip(l))
+                    } else {
+                        Some(Depth::Deep(l))
+                    }
                 }
                 Some(_) => {
                     r.at = save;
@@ -575,22 +714,33 @@ impl Spec {
             }
         };
         let mut angle = None;
-        if !tapped && matches!(depth, Some(Depth::Deep(_))) {
+        let mut ball = false;
+        if !tapped && matches!(depth, Some(Depth::Deep(_) | Depth::Tip(_))) {
             angle = r.angle();
+            // A tip has a point, never a ball.
+            if angle.is_none() && !matches!(depth, Some(Depth::Tip(_))) && r.is("BALL") {
+                r.at += 1;
+                ball = true;
+            }
         }
         let (mut drill, mut mouth) = (None, None);
+        let (mut near, mut far, mut taper) = (None, None, false);
         while r.is(",") {
             r.at += 1;
             let p = r.pos();
             if r.is("DRILL")
                 && drill.is_none()
                 && mouth.is_none()
+                && near.is_none()
+                && far.is_none()
+                && !taper
                 && !matches!(what, What::Dia { .. })
             {
                 r.at += 1;
                 let mut d = Drill {
                     diameter: None,
                     depth: None,
+                    tip: false,
                 };
                 let save = r.at;
                 let first = if r.angle_next() { None } else { r.len() };
@@ -598,6 +748,10 @@ impl Spec {
                     if tapped && r.is("DEEP") {
                         r.at += 1;
                         d.depth = Some(l);
+                        d.tip = r.is("TIP");
+                        if d.tip {
+                            r.at += 1;
+                        }
                     } else {
                         d.diameter = Some(l);
                         let save2 = r.at;
@@ -605,6 +759,10 @@ impl Spec {
                             Some(l2) if tapped && r.is("DEEP") => {
                                 r.at += 1;
                                 d.depth = Some(l2);
+                                d.tip = r.is("TIP");
+                                if d.tip {
+                                    r.at += 1;
+                                }
                             }
                             _ => r.at = save2,
                         }
@@ -614,37 +772,43 @@ impl Spec {
                 }
                 if tapped {
                     angle = r.angle();
+                    if angle.is_none() && !d.tip && r.is("BALL") {
+                        r.at += 1;
+                        ball = true;
+                    }
                 }
                 if d.diameter.is_some() || d.depth.is_some() {
                     drill = Some(d);
-                } else if angle.is_none() {
+                } else if angle.is_none() && !ball {
                     return Err(syntax(r.pos(), "a drill's diameter, depth or angle"));
                 }
-            } else if (r.is("CBORE") || r.is("CSK")) && mouth.is_none() {
-                let kind = if r.is("CBORE") {
-                    MouthKind::Cbore
-                } else {
-                    MouthKind::Csk
-                };
+            } else if let Some(kind) = r.peek().and_then(MouthKind::parse)
+                && mouth.is_none()
+                && near.is_none()
+                && far.is_none()
+                && !taper
+            {
                 if let What::Fastener { mouth: Some(m), .. } = &what
                     && *m != kind
                 {
                     return Err(syntax(p, "the fastener's own mouth"));
                 }
                 r.at += 1;
-                // A countersink's angle alone is no diameter.
-                let first = if kind == MouthKind::Csk && r.angle_next() {
+                // An angle alone is no diameter.
+                let first = if matches!(kind, MouthKind::Csk | MouthKind::Cdrill) && r.angle_next()
+                {
                     None
                 } else {
                     r.len()
                 };
                 let (diameter, second) = match kind {
+                    MouthKind::Csk => (first, r.angle()),
                     // `CBORE 6.8 DEEP` is a depth alone.
-                    MouthKind::Cbore if first.is_some() && r.is("DEEP") => {
+                    _ if first.is_some() && r.is("DEEP") => {
                         r.at += 1;
                         (None, first)
                     }
-                    MouthKind::Cbore => {
+                    _ => {
                         let save = r.at;
                         let depth = match r.len() {
                             Some(l) if r.is("DEEP") => {
@@ -658,15 +822,61 @@ impl Spec {
                         };
                         (first, depth)
                     }
-                    MouthKind::Csk => (first, r.angle()),
+                };
+                let third = if kind == MouthKind::Cdrill {
+                    r.angle()
+                } else {
+                    None
                 };
                 mouth = Some(Mouth {
                     kind,
                     diameter,
                     second,
+                    third,
                 });
+            } else if r.is("NEAR") && near.is_none() && far.is_none() && !taper {
+                r.at += 1;
+                let p = r.pos();
+                let diameter = r
+                    .len()
+                    .ok_or_else(|| syntax(p, "a near chamfer's diameter"))?;
+                near = Some(Near {
+                    diameter,
+                    angle: r.angle(),
+                });
+            } else if r.is("FAR") && far.is_none() && !taper {
+                r.at += 1;
+                let p = r.pos();
+                let csk = r.is("CSK");
+                if !csk && !r.is("CBORE") {
+                    return Err(syntax(p, "CSK or CBORE"));
+                }
+                r.at += 1;
+                let p = r.pos();
+                let d = r.len().ok_or_else(|| syntax(p, "a far side's diameter"))?;
+                let p = r.pos();
+                far = Some(if csk {
+                    Far::Csk(
+                        d,
+                        r.angle()
+                            .ok_or_else(|| syntax(p, "a far countersink's angle"))?,
+                    )
+                } else {
+                    let h = r
+                        .len()
+                        .filter(|_| r.is("DEEP"))
+                        .ok_or_else(|| syntax(p, "a far counterbore's depth, then DEEP"))?;
+                    r.at += 1;
+                    Far::Cbore(d, h)
+                });
+            } else if tapped && r.is("TAPER") && !taper {
+                r.at += 1;
+                taper = true;
             } else {
-                return Err(syntax(p, "DRILL, CBORE or CSK"));
+                return Err(syntax(
+                    p,
+                    "DRILL, CBORE, CSK, CDRILL, SPOTFACE, NEAR, FAR or TAPER",
+                ));
             }
         }
         if r.peek().is_some() {
@@ -677,8 +887,12 @@ impl Spec {
             starts,
             depth,
             angle,
+            ball,
             drill,
             mouth,
+            near,
+            far,
+            taper,
         })
     }
 
@@ -704,12 +918,8 @@ impl Spec {
             Ok((class, left))
         };
         match up.as_str() {
-            "CBORE" | "CSK" | "CLEAR" => {
-                let mouth = match up.as_str() {
-                    "CBORE" => Some(MouthKind::Cbore),
-                    "CSK" => Some(MouthKind::Csk),
-                    _ => None,
-                };
+            "CBORE" | "CSK" | "CDRILL" | "SPOTFACE" | "CLEAR" => {
+                let mouth = MouthKind::parse(&up);
                 let p = r.pos();
                 let standard = r
                     .take()
@@ -924,11 +1134,18 @@ impl Spec {
                 }
                 match &self.depth {
                     Some(Depth::Full) => t["depth"] = json!("full"),
-                    Some(Depth::Deep(l)) => t["depth"] = json!(l.field(cu)),
+                    Some(Depth::Deep(l) | Depth::Tip(l)) => t["depth"] = json!(l.field(cu)),
                     Some(Depth::Thru) => {
                         f.insert("depth".into(), json!("through_all"));
                     }
+                    // Its thread is then full.
+                    Some(Depth::ThruNext) => {
+                        f.insert("depth".into(), json!("through_next"));
+                    }
                     None => {}
+                }
+                if self.taper {
+                    t["wall"] = json!("taper");
                 }
                 f.insert("thread".into(), t);
                 f.insert("fastener".into(), json!(""));
@@ -946,11 +1163,7 @@ impl Spec {
                 }
                 f.insert("fastener".into(), x);
                 f.insert("thread".into(), json!(""));
-                form = match mouth {
-                    Some(MouthKind::Cbore) => "counterbore",
-                    Some(MouthKind::Csk) => "countersink",
-                    None => "simple",
-                };
+                form = mouth.map_or("simple", MouthKind::form);
             }
             What::Dia { diameter, class } => {
                 f.insert("diameter".into(), json!(diameter.field(cu)));
@@ -965,8 +1178,14 @@ impl Spec {
                 Some(Depth::Thru) => {
                     f.insert("depth".into(), json!("through_all"));
                 }
+                Some(Depth::ThruNext) => {
+                    f.insert("depth".into(), json!("through_next"));
+                }
                 Some(Depth::Deep(l)) => {
                     f.insert("depth".into(), json!({"blind": l.field(cu)}));
+                }
+                Some(Depth::Tip(l)) => {
+                    f.insert("depth".into(), json!({"tip": l.field(cu)}));
                 }
                 _ => {}
             }
@@ -976,7 +1195,8 @@ impl Spec {
                 f.insert("diameter".into(), json!(x.field(cu)));
             }
             if let Some(x) = &d.depth {
-                f.insert("depth".into(), json!({"blind": x.field(cu)}));
+                let key = if d.tip { "tip" } else { "blind" };
+                f.insert("depth".into(), json!({ key: x.field(cu) }));
             }
         }
         let mut defaults = Vec::new();
@@ -991,6 +1211,9 @@ impl Spec {
             Some(a) => {
                 f.insert("bottom".into(), json!({"drill": a.angle_field()}));
             }
+            None if self.ball => {
+                f.insert("bottom".into(), json!("ball"));
+            }
             // A depth named with no point is flat.
             None if f.contains_key("depth") => {
                 f.insert("bottom".into(), json!("flat"));
@@ -999,9 +1222,11 @@ impl Spec {
             None => {}
         }
         if let Some(m) = &self.mouth {
-            let (key, name) = match m.kind {
-                MouthKind::Cbore => ("counterbore", "depth"),
-                MouthKind::Csk => ("countersink", "angle"),
+            let key = m.kind.form();
+            let name = if m.kind == MouthKind::Csk {
+                "angle"
+            } else {
+                "depth"
             };
             form = key;
             let mut o = json!({});
@@ -1015,13 +1240,55 @@ impl Spec {
                     s.field(cu)
                 });
             }
+            if let Some(a) = &m.third {
+                o["angle"] = json!(a.angle_field());
+            }
             f.insert(key.into(), o);
         } else if form != "simple" {
             f.insert(form.into(), json!({}));
         }
         f.insert("form".into(), json!(form));
+        if let Some(n) = &self.near {
+            let mut o = json!({"diameter": n.diameter.field(cu)});
+            if let Some(a) = &n.angle {
+                o["angle"] = json!(a.angle_field());
+            }
+            f.insert("near".into(), o);
+        }
+        match &self.far {
+            Some(Far::Csk(d, a)) => {
+                f.insert(
+                    "far".into(),
+                    json!({"countersink": {"diameter": d.field(cu), "angle": a.angle_field()}}),
+                );
+            }
+            Some(Far::Cbore(d, h)) => {
+                f.insert(
+                    "far".into(),
+                    json!({"counterbore": {"diameter": d.field(cu), "depth": h.field(cu)}}),
+                );
+            }
+            None => {}
+        }
         Ok((f, defaults))
     }
+}
+
+/// A hole's near chamfer as textconv writes it: `7 mm, 120 deg`.
+pub fn near_line(v: &Value) -> Option<String> {
+    let d = v.get("diameter")?.as_str()?;
+    Some(match v.get("angle").and_then(Value::as_str) {
+        Some(a) => format!("{d}, {a}"),
+        None => d.to_owned(),
+    })
+}
+
+/// A hole's far side as textconv writes it: `countersink 8 mm, 90 deg`.
+pub fn far_line(v: &Value) -> Option<String> {
+    let (k, x) = v.as_object()?.iter().next()?;
+    let d = x.get("diameter")?.as_str()?;
+    let second = x.get("angle").or(x.get("depth"))?.as_str()?;
+    Some(format!("{k} {d}, {second}"))
 }
 
 /// A class as specs write it: ISO's grade then an upper-case position
@@ -1076,6 +1343,9 @@ pub fn thread_line(t: &Value) -> Option<String> {
     let mut line = crate::hole::derive::designation(standard, size, pitch, class.as_deref(), left);
     line.push_str(", ");
     line.push_str(t.get("depth").and_then(Value::as_str).unwrap_or("full"));
+    if t.get("wall").and_then(Value::as_str) == Some("taper") {
+        line.push_str(", taper");
+    }
     match t.get("drill") {
         Some(Value::String(s)) if s == "roll_form" => line.push_str(", roll form"),
         Some(d) => {
@@ -1169,7 +1439,13 @@ pub fn arbitrary(seed: &mut u64) -> Spec {
             left: opt(&mut next),
         },
         5 => What::Fastener {
-            mouth: [None, Some(MouthKind::Cbore), Some(MouthKind::Csk)][next(3)],
+            mouth: [
+                None,
+                Some(MouthKind::Cbore),
+                Some(MouthKind::Csk),
+                Some(MouthKind::Cdrill),
+                Some(MouthKind::Spotface),
+            ][next(5)],
             standard: pick(&mut next, &["iso4762", "house_cap"]),
             size: pick(&mut next, &["M5", "#10"]),
             fit: [None, Some(FastenerFit::Close), Some(FastenerFit::Loose)][next(3)],
@@ -1181,47 +1457,94 @@ pub fn arbitrary(seed: &mut u64) -> Spec {
     };
     let tapped = matches!(what, What::Thread { .. });
     let starts = (tapped && opt(&mut next)).then(|| 2 + next(4) as u32);
-    let depth = match next(if tapped { 4 } else { 3 }) {
+    let depth = match next(5) {
         0 => None,
         1 => Some(Depth::Thru),
         2 => Some(Depth::Deep(len(&mut next))),
-        _ => Some(Depth::Full),
+        3 => Some(Depth::ThruNext),
+        _ if tapped => Some(Depth::Full),
+        _ => Some(Depth::Tip(len(&mut next))),
     };
-    let angle = (opt(&mut next) && (tapped || matches!(depth, Some(Depth::Deep(_)))))
-        .then(|| Len(pick(&mut next, &ANGLES)));
+    let plain_deep = !tapped && matches!(depth, Some(Depth::Deep(_) | Depth::Tip(_)));
+    let angle = (opt(&mut next) && (tapped || plain_deep)).then(|| Len(pick(&mut next, &ANGLES)));
     let drill = match &what {
         What::Dia { .. } => None,
         _ if opt(&mut next) => None,
         What::Fastener { .. } => Some(Drill {
             diameter: Some(len(&mut next)),
             depth: None,
+            tip: false,
         }),
         _ => {
             let diameter = opt(&mut next).then(|| len(&mut next));
             let depth = (diameter.is_none() || opt(&mut next)).then(|| len(&mut next));
-            Some(Drill { diameter, depth })
+            let tip = depth.is_some() && next(3) == 0;
+            Some(Drill {
+                diameter,
+                depth,
+                tip,
+            })
         }
     };
+    // A ball where a point could be: a plain blind hole's, or a tapped
+    // hole's drill not to its tip.
+    let may_ball = if tapped {
+        !drill.as_ref().is_some_and(|d| d.tip)
+    } else {
+        matches!(depth, Some(Depth::Deep(_)))
+    };
+    let ball = angle.is_none() && may_ball && next(3) == 0;
+    const KINDS: [Option<MouthKind>; 5] = [
+        None,
+        Some(MouthKind::Cbore),
+        Some(MouthKind::Csk),
+        Some(MouthKind::Cdrill),
+        Some(MouthKind::Spotface),
+    ];
     let kind = match &what {
         What::Fastener { mouth: None, .. } => None,
         What::Fastener { mouth: Some(k), .. } => opt(&mut next).then_some(*k),
-        _ => [None, Some(MouthKind::Cbore), Some(MouthKind::Csk)][next(3)],
+        _ => KINDS[next(5)],
     };
     let mouth = kind.map(|kind| Mouth {
         kind,
         diameter: opt(&mut next).then(|| len(&mut next)),
         second: opt(&mut next).then(|| match kind {
-            MouthKind::Cbore => len(&mut next),
             MouthKind::Csk => Len(pick(&mut next, &ANGLES)),
+            _ => len(&mut next),
         }),
+        third: (kind == MouthKind::Cdrill && opt(&mut next)).then(|| Len(pick(&mut next, &ANGLES))),
     });
+    let near = (kind != Some(MouthKind::Csk) && next(4) == 0).then(|| Near {
+        diameter: len(&mut next),
+        angle: opt(&mut next).then(|| Len(pick(&mut next, &ANGLES))),
+    });
+    let far = (matches!(depth, Some(Depth::Thru | Depth::ThruNext)) && next(4) == 0).then(|| {
+        if opt(&mut next) {
+            Far::Csk(len(&mut next), Len(pick(&mut next, &ANGLES)))
+        } else {
+            Far::Cbore(len(&mut next), len(&mut next))
+        }
+    });
+    let taper = matches!(
+        what,
+        What::Thread {
+            kind: ThreadKind::Pipe(_),
+            ..
+        }
+    ) && matches!(depth, Some(Depth::Deep(_)))
+        && opt(&mut next);
     Spec {
         what,
         starts,
         depth,
         angle,
+        ball,
         drill,
         mouth,
+        near,
+        far,
+        taper,
     }
 }
 
@@ -1432,5 +1755,96 @@ pub(crate) mod tests {
                 "{t}"
             );
         }
+    }
+
+    #[test]
+    fn the_geometry_grammar() {
+        for (text, canonical) in [
+            ("DIA 5 THRU NEXT", "DIA 5 THRU NEXT"),
+            ("m6x1-6h thru next", "M6x1-6H THRU NEXT"),
+            ("DIA 5 12 DEEP TIP 118°", "DIA 5 12 DEEP TIP 118DEG"),
+            ("DIA 6 10 DEEP BALL", "DIA 6 10 DEEP BALL"),
+            (
+                "M8x1.25-6H 16 DEEP, DRILL 20 DEEP TIP 118DEG",
+                "M8x1.25-6H 16 DEEP, DRILL 20 DEEP TIP 118DEG",
+            ),
+            (
+                "M8 16 DEEP, DRILL 20 DEEP BALL",
+                "M8 16 DEEP, DRILL 20 DEEP BALL",
+            ),
+            ("DIA 5 THRU, CDRILL 9 4 DEEP", "DIA 5 THRU, CDRILL 9 4 DEEP"),
+            (
+                "DIA 5 THRU, CDRILL 9 4 DEEP 100DEG",
+                "DIA 5 THRU, CDRILL 9 4 DEEP 100DEG",
+            ),
+            ("DIA 5 THRU, SPOTFACE 12", "DIA 5 THRU, SPOTFACE 12"),
+            (
+                "DIA 5 THRU, SPOTFACE 12 0.5 DEEP",
+                "DIA 5 THRU, SPOTFACE 12 0.5 DEEP",
+            ),
+            ("CDRILL HOUSE_CAP M5 THRU", "CDRILL HOUSE_CAP M5 THRU"),
+            ("spotface house_cap M5 thru", "SPOTFACE HOUSE_CAP M5 THRU"),
+            ("M6 THRU, NEAR 7", "M6 THRU, NEAR 7"),
+            ("M6 THRU, NEAR 7 120DEG", "M6 THRU, NEAR 7 120DEG"),
+            ("DIA 5 THRU, FAR CSK 8 90DEG", "DIA 5 THRU, FAR CSK 8 90DEG"),
+            (
+                "DIA 5 THRU, FAR CBORE 8 1 DEEP",
+                "DIA 5 THRU, FAR CBORE 8 1 DEEP",
+            ),
+            (
+                "DIA 5 THRU, CBORE 9 2 DEEP, NEAR 10, FAR CSK 8 90DEG",
+                "DIA 5 THRU, CBORE 9 2 DEEP, NEAR 10, FAR CSK 8 90DEG",
+            ),
+            (
+                "1/8-27 NPT .315 DEEP, DRILL .5 DEEP, TAPER",
+                "1/8-27 NPT .315 DEEP, DRILL .5 DEEP, TAPER",
+            ),
+        ] {
+            let s = Spec::parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(s.text(), canonical, "{text}");
+            assert_eq!(Spec::parse(canonical).unwrap(), s, "{canonical}");
+        }
+        // What each sets.
+        let f = |t: &str| Spec::parse(t).unwrap().apply(Unit::Mm).unwrap().0;
+        assert_eq!(f("DIA 5 THRU NEXT")["depth"], "through_next");
+        assert_eq!(
+            f("DIA 5 12 DEEP TIP 118DEG")["depth"],
+            json!({"tip": "12 mm"})
+        );
+        assert_eq!(f("DIA 6 10 DEEP BALL")["bottom"], "ball");
+        assert_eq!(
+            f("DIA 5 THRU, CDRILL 9 4 DEEP")["counterdrill"],
+            json!({"diameter": "9 mm", "depth": "4 mm"})
+        );
+        assert_eq!(f("DIA 5 THRU, CDRILL 9 4 DEEP")["form"], "counterdrill");
+        assert_eq!(f("DIA 5 THRU, NEAR 7")["near"], json!({"diameter": "7 mm"}));
+        assert_eq!(
+            f("DIA 5 THRU, FAR CBORE 8 1 DEEP")["far"],
+            json!({"counterbore": {"diameter": "8 mm", "depth": "1 mm"}})
+        );
+        assert_eq!(
+            f("1/8-27 NPT .315 DEEP, DRILL .5 DEEP, TAPER")["thread"]["wall"],
+            "taper"
+        );
+        // Errors say where.
+        for (text, at) in [
+            ("DIA 5 THRU, FAR 8", 16),
+            ("DIA 5 THRU, NEAR", 16),
+            ("DIA 5 12 DEEP TIP BALL", 18),
+        ] {
+            let e = Spec::parse(text).unwrap_err();
+            assert_eq!(e.details["position"], at, "{text}: {e}");
+        }
+        // Holes write their spec back.
+        let h = |v: Value| crate::hole::derive::tests::hole(v);
+        assert_eq!(
+            canonical(
+                &h(json!({"format": 25, "form": "spotface", "diameter": "5 mm",
+                "spotface": {"diameter": "12 mm"}, "depth": "through_next",
+                "far": {"countersink": {"diameter": "8 mm", "angle": "90 deg"}}})),
+                Unit::Mm
+            ),
+            "DIA 5 THRU NEXT, SPOTFACE 12, FAR CSK 8 90DEG"
+        );
     }
 }

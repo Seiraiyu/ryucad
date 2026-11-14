@@ -1,7 +1,7 @@
 //! The unit tests' harness: a fresh project and its session, a request
 //! by method name (in process or as a daemon's participant), and the
 //! fixtures many modules' tests share. It was `server::tests`' until
-//! ryucad 27.B, which re-exports it there while ryucad 27 runs.
+//! ryucad 27.B moved it here.
 
 use crate::doc::files::PartFile;
 use crate::doc::id::Id;

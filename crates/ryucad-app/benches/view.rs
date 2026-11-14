@@ -4,7 +4,8 @@
 
 use divan::Bencher;
 use ryucad::proto::Request;
-use ryucad::server::{handle, init, meshes};
+use ryucad::scene::meshes;
+use ryucad::server::{handle, init};
 use ryucad::session::Session;
 use ryucad::view::{self, StandardView};
 use ryucad_app::core::model::Model;

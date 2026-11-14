@@ -14,12 +14,12 @@ fn open(p: &Project) -> Workspace {
     let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("p").is_some()));
     ws.show_params(Some("p"));
-    assert!(ws.wait_until(WAIT, |ws| ws.params.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.parameters.params.is_some()));
     ws
 }
 
 fn width(ws: &mut Workspace) -> &mut ryucad_app::core::edit::Field {
-    let p = ws.params.as_mut().unwrap();
+    let p = ws.parameters.params.as_mut().unwrap();
     &mut p
         .params
         .iter_mut()
@@ -44,32 +44,33 @@ fn on_disk(p: &Project, name: &str) -> String {
 fn a_parameter_saves_through_param_set_and_moves_the_sketch() {
     let p = Project::new().with_sketch();
     let mut ws = open(&p);
-    let row = &ws.params.as_ref().unwrap().params[0];
+    let row = &ws.parameters.params.as_ref().unwrap().params[0];
     assert_eq!(
         (row.value.as_str(), row.used_by.clone()),
         ("20 mm", vec!["s".to_owned()])
     );
     width(&mut ws).text = "30 mm".into();
     {
-        let panel = ws.params.as_mut().unwrap();
+        let panel = ws.parameters.params.as_mut().unwrap();
         panel.new_name = "depth".into();
         panel.new_value = "width / 2".into();
     }
     ws.save_params();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.params
+        ws.parameters
+            .params
             .as_ref()
             .is_some_and(|p| !p.saving && !p.dirty() && p.params.len() == 2)
     }));
     assert_eq!(on_disk(&p, "width"), "30 mm");
     assert_eq!(on_disk(&p, "depth"), "width / 2");
-    let depth = &ws.params.as_ref().unwrap().params[0];
+    let depth = &ws.parameters.params.as_ref().unwrap().params[0];
     assert_eq!(
         (depth.field.name.as_str(), depth.value.as_str()),
         ("depth", "15 mm")
     );
     // Nothing reads the new `depth`; the sketch reads `width`.
-    let panel = ws.params.as_ref().unwrap();
+    let panel = ws.parameters.params.as_ref().unwrap();
     let unused: Vec<(&str, bool)> = panel
         .params
         .iter()
@@ -94,9 +95,12 @@ fn a_stale_save_conflicts_and_shows_what_changed() {
     p.ok(&["param", "set", "p", "width=25 mm"]);
     ws.save_params();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.params.as_ref().is_some_and(|p| !p.changed.is_empty())
+        ws.parameters
+            .params
+            .as_ref()
+            .is_some_and(|p| !p.changed.is_empty())
     }));
-    let c = &ws.params.as_ref().unwrap().changed[0];
+    let c = &ws.parameters.params.as_ref().unwrap().changed[0];
     assert_eq!((c.theirs.as_str(), c.yours.as_str()), ("25 mm", "30 mm"));
     assert_eq!(on_disk(&p, "width"), "25 mm");
     assert_eq!(width(&mut ws).text, "25 mm");
@@ -109,9 +113,19 @@ fn a_bad_expression_keeps_what_was_typed() {
     width(&mut ws).text = "width + 1 mm".into();
     ws.save_params();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.params.as_ref().is_some_and(|p| p.error.is_some())
+        ws.parameters
+            .params
+            .as_ref()
+            .is_some_and(|p| p.error.is_some())
     }));
-    let e = ws.params.as_ref().unwrap().error.as_ref().unwrap();
+    let e = ws
+        .parameters
+        .params
+        .as_ref()
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap();
     assert_eq!(e.code, ryucad::error::Code::ParameterCycle);
     assert_eq!(width(&mut ws).text, "width + 1 mm");
 }
@@ -122,7 +136,7 @@ fn an_untouched_panel_follows_the_files() {
     let mut ws = open(&p);
     p.ok(&["param", "set", "p", "width=40 mm"]);
     assert!(
-        ws.wait_until(WAIT, |ws| ws.params.as_ref().is_some_and(|p| {
+        ws.wait_until(WAIT, |ws| ws.parameters.params.as_ref().is_some_and(|p| {
             p.params
                 .iter()
                 .any(|r| r.field.name == "width" && r.field.read == "40 mm")

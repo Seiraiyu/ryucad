@@ -762,6 +762,12 @@ impl Session {
         }
     }
 
+    /// Whether this is a capture session ([`Session::capturing`]): what it
+    /// writes is kept, never put on disk.
+    pub(crate) fn captures(&self) -> bool {
+        matches!(self.sink, Sink::Capture { .. })
+    }
+
     /// Brings the session up to date with the files. Returns whether the
     /// project was reloaded.
     pub fn refresh(&mut self) -> Result<bool> {
@@ -1845,6 +1851,10 @@ struct Held<'a> {
 impl crate::doc::source::Source for Held<'_> {
     fn list(&self, dir: &str) -> Result<Vec<(String, crate::doc::source::Kind)>> {
         crate::doc::source::Folder(self.root).list(dir)
+    }
+
+    fn is_dir(&self, dir: &str) -> Result<bool> {
+        crate::doc::source::Folder(self.root).is_dir(dir)
     }
 
     fn read(&self, rel: &str) -> Result<Option<Vec<u8>>> {

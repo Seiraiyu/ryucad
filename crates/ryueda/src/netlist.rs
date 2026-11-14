@@ -358,7 +358,7 @@ fn name_prefix(path: &[Id]) -> String {
 /// Flattens design `design`. Refused (with the first fault's code and
 /// every fault in the details) when any file it reads has an error.
 pub fn flatten(p: &Project, design: &Id) -> Result<Netlist> {
-    let root = design_root(p, design)?;
+    design_root(p, design)?;
     let errors = faults(p, design);
     if !errors.is_empty() {
         let first = &errors[0].error;
@@ -373,6 +373,15 @@ pub fn flatten(p: &Project, design: &Id) -> Result<Netlist> {
         .with("design", design)
         .with("faults", fault::list(&errors)));
     }
+    flatten_ungated(p, design)
+}
+
+/// [`flatten`] without its refusal of file faults: what a merge's status
+/// reads designators from while a pin still names a net the merge lost
+/// (`clash`). Connectivity through a faulty file is whatever the file
+/// names; nothing else should read it.
+pub(crate) fn flatten_ungated(p: &Project, design: &Id) -> Result<Netlist> {
+    let root = design_root(p, design)?;
     // Every block occurrence, depth first, instances in ID order.
     let mut occs: Vec<BlockOcc> = Vec::new();
     let mut stack: Vec<Walk> = vec![(Vec::new(), root.clone(), None)];
@@ -490,6 +499,15 @@ pub fn flatten(p: &Project, design: &Id) -> Result<Netlist> {
                     net: Some((occ.files.id.clone(), nid.clone())),
                 },
             );
+        }
+    }
+    // A pin on a net or rail that isn't there reads as unconnected: only
+    // a flatten without the fault gate (`flatten_ungated`) meets one.
+    for k in pin_keys.iter_mut().flatten() {
+        if matches!(k, Some(Key::Net(..) | Key::Rail(_)))
+            && k.as_ref().is_some_and(|x| !nets.contains_key(x))
+        {
+            *k = None;
         }
     }
     for (c, keys) in pin_keys.iter().enumerate() {

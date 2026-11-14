@@ -14,7 +14,7 @@ use ryucad::view::{CameraArg, ProjectionArg};
 use ryucad::{cancel, client, daemon, server};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -104,6 +104,16 @@ enum Command {
         /// One hole by its reference (p/h/p1, p/row/h/p1/1).
         #[arg(long = "ref", value_name = "REF")]
         reference: Option<String>,
+        /// Run the hole checks (breakout, edge distance, break-through, threads past
+        /// the material, engagement, tap drills); only ever when asked.
+        #[arg(long, conflicts_with_all = ["csv", "group", "reference"])]
+        check: bool,
+        /// With --check: a bore's least distance to another face, times its diameter.
+        #[arg(long, requires = "check", value_name = "K")]
+        edge_factor: Option<f64>,
+        /// With --check: a thread's least engagement, times its diameter (1.5 for soft materials).
+        #[arg(long, requires = "check", value_name = "K")]
+        min_engagement: Option<f64>,
         #[command(flatten)]
         rev: RevArg,
     },
@@ -293,6 +303,16 @@ enum Command {
         /// run, and each assembly says so.
         #[arg(long)]
         interference: bool,
+        /// Also run the hole checks (breakout, edge distance, break-through,
+        /// threads past the material, engagement, tap drills): only when asked.
+        #[arg(long)]
+        holes: bool,
+        /// With --holes: a bore's least distance to another face, times its diameter.
+        #[arg(long, requires = "holes", value_name = "K")]
+        edge_factor: Option<f64>,
+        /// With --holes: a thread's least engagement, times its diameter.
+        #[arg(long, requires = "holes", value_name = "K")]
+        min_engagement: Option<f64>,
     },
     /// An assembly's bill of materials, from its files alone: indented (each
     /// assembly's children with how many it places), or flat (every part
@@ -881,6 +901,41 @@ enum Command {
     /// Cancel this agent's running long request by its token (what
     /// Ctrl+C sends): it stops before its next feature, body or pair.
     Cancel { token: String },
+    /// Run many model edits as one checked, logged, undoable change: one
+    /// write pass, and one rebuild of each part it changed and the
+    /// assemblies over it.
+    ///
+    /// FILE (or - for stdin) holds {"ops": [{"method": M, "params": {…}}, …],
+    /// "expect"?: REVISION, "dry_run"?: true, "rebuild"?: false}, or a bare
+    /// array of ops; the flags override it. An op is any model edit (what
+    /// `annotations propose` takes: feature, sketch, param, assembly move,
+    /// appearance, materials, props, bom renumber, views, explodes, motions,
+    /// drawings) or part.create or part.delete, with the params `--json`
+    /// help and the protocol name. Each op sees what the ones before it
+    /// wrote. The first refusal stops the batch and nothing is written
+    /// (its error says which op, in details.op). The answer gives each op's
+    /// own answer, each part's status (created, updated, unchanged or
+    /// deleted, judged from the bytes) and revision, the files written,
+    /// and the project's revision for the next --expect. `undo` takes back
+    /// the whole batch.
+    Batch {
+        /// The batch's JSON file, or - for stdin.
+        #[arg(value_name = "FILE")]
+        file: String,
+        /// Fail with `conflict` unless the project is still at this
+        /// revision (a batch's answer gives it as `revision`).
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+        /// Run the ops and answer what they would do; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Rebuild what the batch changed (the default).
+        #[arg(long, overrides_with = "no_rebuild")]
+        rebuild: bool,
+        /// Write without rebuilding.
+        #[arg(long, overrides_with = "rebuild")]
+        no_rebuild: bool,
+    },
     /// Undo this agent's latest change, or the activity entry --entry.
     Undo {
         #[arg(long, value_name = "SEQ")]
@@ -1412,9 +1467,11 @@ enum FeatureCmd {
     /// a sheet; a sew (--sheet, repeated, --tolerance, --no-solid) of
     /// sheets into one body; a thicken (--sheet, or --face repeated;
     /// --front, --back, --face-sides, --operation and --target) of a sheet
-    /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
-    /// countersink, --bottom; or --spec, --thread with --pitch, --tpi, --class,
-    /// --left-hand, --starts, --thread-depth and --tap-drill, --fastener with
+    /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore,
+    /// countersink, counterdrill or spotface, --bottom, --near-diameter and
+    /// --near-angle, a far side --far-countersink-* or --far-counterbore-*;
+    /// or --spec, --thread with --pitch, --tpi, --class,
+    /// --left-hand, --starts, --thread-depth, --tap-drill and --thread-wall, --fastener with
     /// --fastener-fit, --fit) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -3180,11 +3237,48 @@ struct FieldArgs {
     /// A countersink's included angle: 90, "82 deg".
     #[arg(long, value_name = "ANGLE")]
     countersink_angle: Option<String>,
-    /// A hole's depth: a length (blind, to the drill point's shoulder), through_all, or
+    /// A counterdrill's diameter, depth and floor angle (118 when left out).
+    #[arg(long, value_name = "QUANTITY")]
+    counterdrill_diameter: Option<String>,
+    #[arg(long, value_name = "QUANTITY")]
+    counterdrill_depth: Option<String>,
+    #[arg(long, value_name = "ANGLE")]
+    counterdrill_angle: Option<String>,
+    /// A spotface's diameter, and its depth below the mouth (0 when left out).
+    #[arg(long, value_name = "QUANTITY")]
+    spotface_diameter: Option<String>,
+    #[arg(long, value_name = "QUANTITY")]
+    spotface_depth: Option<String>,
+    /// A near chamfer (a tap's lead-in) at the top: its diameter and angle (90).
+    #[arg(long, value_name = "QUANTITY")]
+    near_diameter: Option<String>,
+    #[arg(long, value_name = "ANGLE")]
+    near_angle: Option<String>,
+    /// Takes the near chamfer away.
+    #[arg(long, conflicts_with_all = ["near_diameter", "near_angle"])]
+    no_near: bool,
+    /// A far countersink where the bore leaves: its diameter and angle.
+    #[arg(long, value_name = "QUANTITY")]
+    far_countersink_diameter: Option<String>,
+    #[arg(long, value_name = "ANGLE")]
+    far_countersink_angle: Option<String>,
+    /// A far counterbore where the bore leaves: its diameter and depth.
+    #[arg(long, value_name = "QUANTITY", conflicts_with_all = ["far_countersink_diameter", "far_countersink_angle"])]
+    far_counterbore_diameter: Option<String>,
+    #[arg(long, value_name = "QUANTITY", conflicts_with_all = ["far_countersink_diameter", "far_countersink_angle"])]
+    far_counterbore_depth: Option<String>,
+    /// Takes the far side away.
+    #[arg(long, conflicts_with_all = ["far_countersink_diameter", "far_countersink_angle", "far_counterbore_diameter", "far_counterbore_depth"])]
+    no_far: bool,
+    /// A tapped pipe thread's wall: taper (1:16 from the project's gauge plane), or "" for straight.
+    #[arg(long, value_name = "taper")]
+    thread_wall: Option<String>,
+    /// A hole's depth: a length (blind, to the drill point's shoulder),
+    /// tip:LENGTH (to the drill point's tip), through_all, through_next, or
     /// up_to (--up-to, --offset).
     #[arg(long, value_name = "DEPTH")]
     depth: Option<String>,
-    /// A hole's bottom: flat (the default), or a drill point's included angle: 118.
+    /// A hole's bottom: flat (the default), ball, or a drill point's included angle: 118.
     #[arg(long, value_name = "BOTTOM")]
     bottom: Option<String>,
     /// A hole's spec: "M6x1.0-6H THRU", "1/4-20 UNC-2B .5 DEEP, DRILL .625 DEEP",
@@ -3854,15 +3948,20 @@ impl FieldArgs {
                 }
                 json!({ "up_to": up })
             }
-            d => json!({ "blind": d }),
+            "through_next" => json!("through_next"),
+            d => match d.strip_prefix("tip:") {
+                Some(t) => json!({ "tip": t }),
+                None => json!({ "blind": d }),
+            },
         });
-        let part = |a: (&str, &Option<String>), b: (&str, &Option<String>)| {
-            let m: Map<String, Value> = [a, b]
-                .into_iter()
-                .filter_map(|(k, v)| Some((k.to_owned(), json!(v.as_ref()?))))
+        let part3 = |pairs: &[(&str, &Option<String>)]| {
+            let m: Map<String, Value> = pairs
+                .iter()
+                .filter_map(|(k, v)| Some(((*k).to_owned(), json!(v.as_ref()?))))
                 .collect();
             (!m.is_empty()).then_some(Value::Object(m))
         };
+        let part = |a: (&str, &Option<String>), b: (&str, &Option<String>)| part3(&[a, b]);
         if let Some(b) = self.both {
             extent.insert("both".into(), json!(b));
         }
@@ -3988,9 +4087,42 @@ impl FieldArgs {
                 ("diameter", &self.countersink_diameter),
                 ("angle", &self.countersink_angle),
             ),
+            counterdrill: part3(&[
+                ("diameter", &self.counterdrill_diameter),
+                ("depth", &self.counterdrill_depth),
+                ("angle", &self.counterdrill_angle),
+            ]),
+            spotface: part(
+                ("diameter", &self.spotface_diameter),
+                ("depth", &self.spotface_depth),
+            ),
+            near: if self.no_near {
+                Some(json!(""))
+            } else {
+                part(
+                    ("diameter", &self.near_diameter),
+                    ("angle", &self.near_angle),
+                )
+            },
+            far: if self.no_far {
+                Some(json!(""))
+            } else if let Some(c) = part(
+                ("diameter", &self.far_countersink_diameter),
+                ("angle", &self.far_countersink_angle),
+            ) {
+                Some(json!({ "countersink": c }))
+            } else {
+                part(
+                    ("diameter", &self.far_counterbore_diameter),
+                    ("depth", &self.far_counterbore_depth),
+                )
+                .map(|c| json!({ "counterbore": c }))
+            },
+            thread_wall: self.thread_wall.clone(),
             depth,
             bottom: self.bottom.as_deref().map(|b| match b {
                 "flat" => json!("flat"),
+                "ball" => json!("ball"),
                 b => json!({ "drill": b }),
             }),
             features: (!self.seeds.is_empty()).then(|| self.seeds.clone()),
@@ -4546,6 +4678,7 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Worktree(WorktreeCmd::Add { .. } | WorktreeCmd::Remove { .. })
         | Command::Watch { .. }
         | Command::Cancel { .. }
+        | Command::Batch { .. }
         | Command::Open { .. } => {
             return None;
         }
@@ -4810,10 +4943,26 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Holes {
             part,
             solid,
+            check: true,
+            edge_factor,
+            min_engagement,
+            rev,
+            ..
+        } => Request::HolesCheck {
+            part: part.clone(),
+            solid: solid.clone(),
+            edge_factor: *edge_factor,
+            min_engagement: *min_engagement,
+            rev: rev.rev.clone(),
+        },
+        Command::Holes {
+            part,
+            solid,
             csv,
             group,
             reference,
             rev,
+            ..
         } => Request::HolesList {
             part: part.clone(),
             solid: solid.clone(),
@@ -5589,11 +5738,17 @@ fn request(cmd: &Command) -> Option<Request> {
             against,
             results,
             interference,
+            holes,
+            edge_factor,
+            min_engagement,
         } => Request::Check {
             part: part.clone(),
             against: against.clone(),
             results: *results,
             interference: *interference,
+            holes: *holes,
+            edge_factor: *edge_factor,
+            min_engagement: *min_engagement,
         },
         Command::Diff {
             from,
@@ -5963,6 +6118,57 @@ fn no_daemon(cli: &Cli) -> bool {
     cli.no_daemon || std::env::var("RYUCAD_NO_DAEMON").is_ok_and(|v| v == "1")
 }
 
+/// The request `ryucad batch` sends: its file's JSON (stdin's for `-`),
+/// an object or a bare array of ops, with the flags over it. `None` for
+/// every other command. A file that isn't JSON, or JSON that isn't a
+/// batch, is `usage`.
+fn batch_request(cmd: &Command, here: &Path) -> Result<Option<Request>> {
+    let Command::Batch {
+        file,
+        expect,
+        dry_run,
+        rebuild,
+        no_rebuild,
+    } = cmd
+    else {
+        return Ok(None);
+    };
+    let text = if file == "-" {
+        let mut t = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
+            .map_err(|e| Error::new(Code::Io, format!("stdin: {e}")))?;
+        t
+    } else {
+        let path = here.join(file);
+        std::fs::read_to_string(&path).map_err(|e| Error::io(&path, &e))?
+    };
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| Error::new(Code::Usage, format!("the batch isn't JSON: {e}")))?;
+    let mut params = match v {
+        Value::Array(_) => json!({ "ops": v }),
+        Value::Object(_) => v,
+        _ => {
+            return Err(Error::new(
+                Code::Usage,
+                "a batch is an object with ops, or an array of ops",
+            ));
+        }
+    };
+    if let Some(e) = expect {
+        params["expect"] = json!(e);
+    }
+    if *dry_run {
+        params["dry_run"] = json!(true);
+    }
+    if *rebuild {
+        params["rebuild"] = json!(true);
+    }
+    if *no_rebuild {
+        params["rebuild"] = json!(false);
+    }
+    Request::from_rpc("batch", Some(params)).map(Some)
+}
+
 /// The agent participant to act as.
 /// Refusals of `ryucad annotations` the parser can't make: a point with
 /// no place, a request that isn't JSON.
@@ -6217,10 +6423,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             }
             // The daemon's folder isn't the caller's: every path the
             // request names is made absolute against `here` (`-C`'s).
-            let req = client::absolute(
-                request(cmd).expect("every other command is a request"),
-                &here,
-            )?;
+            let req = match batch_request(cmd, &here)? {
+                Some(r) => r,
+                None => request(cmd).expect("every other command is a request"),
+            };
+            let req = client::absolute(req, &here)?;
             let root = find_root(&here)?;
             let me = participant(cli);
             let req = client::with_author(req, me.as_deref());
@@ -7155,6 +7362,29 @@ mod tests {
     }
 
     #[test]
+    fn taking_a_side_away_conflicts_with_setting_it() {
+        on_cli_stack(|| {
+            for (no, set) in [
+                ("--no-near", "--near-diameter"),
+                ("--no-near", "--near-angle"),
+                ("--no-far", "--far-countersink-diameter"),
+                ("--no-far", "--far-countersink-angle"),
+                ("--no-far", "--far-counterbore-diameter"),
+                ("--no-far", "--far-counterbore-depth"),
+            ] {
+                let e = Cli::try_parse_from(["ryucad", "feature", "edit", "p", "h", no, set, "8"])
+                    .err()
+                    .unwrap_or_else(|| panic!("{no} with {set} parses"));
+                assert_eq!(
+                    e.kind(),
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "{no} {set}"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn an_insert_is_added_from_the_command_line() {
         on_cli_stack(|| {
             let c = Cli::try_parse_from([
@@ -7763,6 +7993,51 @@ mod tests {
                 (f.topology.as_deref(), f.blends.as_deref()),
                 (Some("change"), Some("rebuild"))
             );
+        });
+    }
+
+    #[test]
+    fn a_batch_is_its_files_json_with_the_flags_over_it() {
+        on_cli_stack(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("b.json"),
+                r#"[{"method": "part.create", "params": {"part": "p"}}]"#,
+            )
+            .unwrap();
+            let c = Cli::try_parse_from([
+                "ryucad",
+                "batch",
+                "b.json",
+                "--dry-run",
+                "--no-rebuild",
+                "--expect",
+                "r1",
+            ])
+            .unwrap();
+            let r = batch_request(&c.command, dir.path()).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(&r).unwrap(),
+                json!({"method": "batch", "params": {
+                    "ops": [{"method": "part.create", "params": {"part": "p"}}],
+                    "expect": "r1", "dry_run": true, "rebuild": false}})
+            );
+            std::fs::write(
+                dir.path().join("o.json"),
+                r#"{"ops": [], "rebuild": false}"#,
+            )
+            .unwrap();
+            let c = Cli::try_parse_from(["ryucad", "batch", "o.json", "--rebuild"]).unwrap();
+            let r = batch_request(&c.command, dir.path()).unwrap().unwrap();
+            assert_eq!(r.params(), json!({"ops": [], "rebuild": true}));
+            std::fs::write(dir.path().join("x.json"), "3").unwrap();
+            let c = Cli::try_parse_from(["ryucad", "batch", "x.json"]).unwrap();
+            assert_eq!(
+                batch_request(&c.command, dir.path()).unwrap_err().code,
+                Code::Usage
+            );
+            let c = Cli::try_parse_from(["ryucad", "part", "list"]).unwrap();
+            assert!(batch_request(&c.command, dir.path()).unwrap().is_none());
         });
     }
 }

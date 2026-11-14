@@ -18,28 +18,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-// Old paths, kept while ryucad 27 runs beside other stages (design 541,
-// "Paths kept"); 27.F removes the ones nothing uses.
-#[allow(unused_imports)]
-pub(crate) use crate::budget::{mesh_budget, render_budget};
-#[allow(unused_imports)]
-pub(crate) use crate::diff::diff;
-#[allow(unused_imports)]
-pub(crate) use crate::geometry::{geom_json, normal_to_face, normal_to_face_at};
-#[allow(unused_imports)]
-pub use crate::part::connector_text;
-#[allow(unused_imports)]
-pub(crate) use crate::part::{
-    check_revision, feature, feature_id, insert_at, no_feature, order, part_id, part_kind,
-    part_report, proposed, reference_texts, sweeps_of,
-};
-#[allow(unused_imports)]
-pub(crate) use crate::save::save;
-#[allow(unused_imports)]
-pub(crate) use crate::scene::{
-    DrawExplode, DrawMotion, RenderAsk, Scene, draw_body, ghost, render, render_flat,
-    render_for_package, render_noting, render_scene, sketches,
-};
+use crate::budget::mesh_budget;
+use crate::part::part_report;
+use crate::scene::{DrawExplode, DrawMotion, RenderAsk, render_noting};
 
 mod annotation;
 mod assembly;
@@ -55,11 +36,6 @@ mod view;
 use part::rebuild;
 pub(crate) use route::dispatch;
 use view::{flat_alone, mesh_binary, mesh_flat_binary, mesh_pending, wanted};
-// Old paths (design 541, "Paths kept"); 27.F removes the ones nothing uses.
-#[allow(unused_imports)]
-pub use crate::scene::{meshes, model_points, occurrence_meshes};
-#[allow(unused_imports)]
-pub use feature::feature_report;
 
 /// Creates a project in `root`. Not a session request: there is no
 /// project to open until this has run.
@@ -646,8 +622,11 @@ pub fn answer_live(
         }
         r => r,
     };
-    if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
-    {
+    // A batch whose write pass failed part way has written what it wrote:
+    // that is logged too, so `undo` takes it back (design 603). A refused
+    // batch wrote nothing, so logs nothing.
+    let logged = result.is_ok() || method == "batch";
+    if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, logged) {
         let files = activity::diff(&files_before, &session.files());
         let who = l.caller(me);
         if !files.is_empty() {

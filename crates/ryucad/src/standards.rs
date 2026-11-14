@@ -128,7 +128,7 @@ pub fn list(
                 .filter_map(|c| lookup(b, z, None, Some(&c)).ok().map(|x| (c, x)))
                 .filter_map(|(c, x)| {
                     let (lo, hi) = x.minor?;
-                    let mut row = json!({"class": c, "minor": [
+                    let mut row = json!({"class": c, "side": "internal", "minor": [
                         length(lo.value, inch, lo.source), length(hi.value, inch, hi.source)]});
                     if let Some(m) = x.major_min {
                         row["major_min"] = length(m.value, inch, m.source);
@@ -136,6 +136,17 @@ pub fn list(
                     Some(row)
                 })
                 .collect();
+            // Then the external classes built in (ISO metric g and h), with
+            // their major diameter's limits.
+            let external = external_names(b)
+                .into_iter()
+                .filter_map(|c| lookup(b, z, None, Some(&c)).ok().map(|x| (c, x)))
+                .filter_map(|(c, x)| {
+                    let (lo, hi) = (x.major_min?, x.major_max?);
+                    Some(json!({"class": c, "side": "external", "major": [
+                        length(lo.value, inch, lo.source), length(hi.value, inch, hi.source)]}))
+                });
+            let classes: Vec<Value> = classes.into_iter().chain(external).collect();
             v["classes"] = json!(classes);
             v["tap_drill"] = match ryu_standards::tap::rule(&t) {
                 Some(d) => {
@@ -218,6 +229,19 @@ pub fn list(
             Error::new(Code::Usage, "standards lists threads, fasteners or drills")
                 .with("param", "table"),
         ),
+    }
+}
+
+/// A standard's built-in external classes, by name: ISO metric's g and
+/// h. Unified external classes come from a project's table (H28/2B
+/// prints no external limits).
+fn external_names(s: Standard) -> Vec<String> {
+    match s {
+        Standard::IsoMetric => ryu_standards::iso_metric_limits::ExtClass::all()
+            .iter()
+            .map(|c| c.text())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

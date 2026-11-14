@@ -10,7 +10,7 @@ use eframe::egui;
 
 pub fn window(ctx: &egui::Context, ws: &mut Workspace, at: egui::Rect) {
     let given = egui::Id::unique("mate-dialog keyboard");
-    let Some(d) = ws.mating.clone() else {
+    let Some(d) = ws.assembly.mating.clone() else {
         ctx.data_mut(|m| m.remove::<bool>(given));
         return;
     };
@@ -112,7 +112,7 @@ pub fn window(ctx: &egui::Context, ws: &mut Workspace, at: egui::Rect) {
                 cancel = ui.button("Cancel").clicked();
             });
         });
-    if let Some(m) = ws.mating.as_mut() {
+    if let Some(m) = ws.assembly.mating.as_mut() {
         (m.form, m.angle, m.distance, m.flip) = (form, angle, distance, flip);
     }
     if add {

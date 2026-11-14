@@ -11,10 +11,11 @@ pub mod attest;
 pub mod verify;
 pub mod zip;
 
-use ryucad_doc::doc::canonical;
-use ryucad_doc::doc::files::{Obj, header, invalid};
-use ryucad_doc::doc::id::{Id, ProjectId};
-use ryucad_doc::error::{Code, Error, Result};
+use crate::header;
+use ryu_doc::canonical;
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::files::{Obj, invalid};
+use ryu_doc::id::{Id, ProjectId};
 use serde_json::{Value, json};
 
 pub const KIND: &str = "ryupdm.package";

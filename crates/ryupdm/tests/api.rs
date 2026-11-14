@@ -4,10 +4,12 @@
 //! repository was made from; merge validation reads a merge's sides from
 //! the bare repository's commits.
 
-use ryucad_doc::doc::canonical;
-use ryucad_doc::doc::id::{Id, ProjectId};
+#![cfg(feature = "cad")]
+
+use ryu_doc::canonical;
+use ryu_doc::id::{Id, ProjectId};
+use ryu_doc::source::Folder;
 use ryucad_doc::doc::project::Project;
-use ryucad_doc::doc::source::Folder;
 use ryupdm::check::{self, History};
 use ryupdm::config::Config;
 use ryupdm::history::{self, Releases};
@@ -78,6 +80,7 @@ fn release(dir: &Path, label: &str, supersedes: Option<&str>) -> Record {
             ryucad: "0".into(),
             ryukei: "0".into(),
             commit: "c".into(),
+            product: None,
         },
         released_by: ReleasedBy {
             name: None,
@@ -220,6 +223,7 @@ fn release_of(dir: &Path, part: &str, label: &str, supersedes: Option<&str>) -> 
             ryucad: "0".into(),
             ryukei: "0".into(),
             commit: "c".into(),
+            product: None,
         },
         released_by: ReleasedBy {
             name: None,

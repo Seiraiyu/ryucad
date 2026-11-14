@@ -40,12 +40,15 @@ fn an_open_project_is_diagnosed_and_repaired_through_its_daemon() {
     let boss = std::fs::read(p.root.join("parts/p/features/boss.json")).unwrap();
     std::fs::write(p.root.join("parts/p/features/spare.json"), boss).unwrap();
     ws.diagnose();
-    assert!(ws.wait_until(WAIT, |ws| ws.doctor.is_some()));
-    let report = ws.doctor.clone().unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.session.doctor.is_some()));
+    let report = ws.session.doctor.clone().unwrap();
     assert_eq!(codes(&report), ["orphan_feature"]);
     ws.repair(vec![repair(&report, "orphan_feature")], Default::default());
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.doctor.as_ref().is_some_and(|d| d["healthy"] == true)
+        ws.session
+            .doctor
+            .as_ref()
+            .is_some_and(|d| d["healthy"] == true)
     }));
     // The repair is in the log, as the window's.
     assert!(

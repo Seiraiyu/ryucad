@@ -212,7 +212,7 @@ fn version_reports_every_component() {
     let r = p.ok(&["version"]);
     assert_eq!(r["ryucad"], env!("CARGO_PKG_VERSION"));
     assert_eq!(r["ryukei"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(r["protocol"], 2);
+    assert_eq!(r["protocol"], 3);
     assert!(r["target"].as_str().unwrap().contains('-'));
     assert!(!r["commit"].as_str().unwrap().is_empty());
 }
@@ -362,6 +362,109 @@ fn stdio_session_through_the_daemon() {
     assert!(!p.daemon.join("p.stl").exists());
     // builder's own edit, undone by builder.
     assert_eq!(got[2].0["result"], got[5].0["result"]);
+}
+
+/// `ryucad batch` (design 603, plan 31.B): a file of ops, both ways, as
+/// one change; a bare array, --dry-run; a refusal names its op and writes
+/// nothing; through the daemon one `undo` takes the batch back; `-` reads
+/// stdin.
+#[test]
+fn batch_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.write(
+        "make.json",
+        r#"{"ops": [
+            {"method": "part.create", "params": {"part": "p"}},
+            {"method": "feature.add", "params": {"part": "p", "type": "box", "id": "plate",
+                                                 "params": {"x": "10", "y": "20", "z": "5"}}},
+            {"method": "materials.set", "params": {"name": "steel", "density": "7850 kg/m^3"}}
+        ]}"#,
+    );
+    let v = p.ok(&["batch", "make.json"]);
+    assert_eq!(v["parts"]["p"]["status"], "created", "{v}");
+    assert_eq!(v["ops"].as_array().unwrap().len(), 3);
+    assert_eq!(v["ops"][1]["method"], "feature.add");
+    assert_eq!(v["rebuild"]["parts"][0]["part"], "p");
+    assert_eq!(v["rebuild"]["failed"], 0);
+    let x = |p: &Pair, root: &Path| {
+        p.run_in(root, "", &["feature", "show", "p", "plate"]).1["result"]["params"]["x"]["value"]
+            .clone()
+    };
+    // A bare array of ops, run dry: answered, nothing written.
+    p.write(
+        "edit.json",
+        r#"[{"method": "feature.edit", "params": {"part": "p", "id": "plate", "params": {"x": "12"}}}]"#,
+    );
+    let dry = p.ok(&["batch", "edit.json", "--dry-run"]);
+    assert_eq!(dry["dry_run"], true, "{dry}");
+    assert_eq!(dry["parts"]["p"]["status"], "updated");
+    assert_eq!(x(&p, &p.direct), "10 mm");
+    // A refusal names its op and writes nothing.
+    p.write(
+        "bad.json",
+        r#"[{"method": "feature.edit", "params": {"part": "p", "id": "plate", "params": {"x": "12"}}},
+            {"method": "feature.edit", "params": {"part": "p", "id": "nope", "params": {}}}]"#,
+    );
+    let e = p.fails(&["batch", "bad.json"], "not_found", 1);
+    assert_eq!(e["details"]["op"], 1, "{e}");
+    assert_eq!(x(&p, &p.direct), "10 mm");
+    p.write("undo.json", r#"[{"method": "undo"}]"#);
+    let e = p.fails(&["batch", "undo.json"], "invalid_param", 1);
+    assert_eq!(e["details"]["pointer"], "/ops/0/method");
+    p.write("junk.json", "{nope");
+    p.fails(&["batch", "junk.json"], "usage", 2);
+    // Written, then undone in one step through the daemon.
+    p.ok(&["batch", "edit.json"]);
+    assert_eq!(x(&p, &p.daemon), "12 mm");
+    let (code, u) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    assert_eq!(x(&p, &p.daemon), "10 mm");
+    // `-` reads the batch from stdin (in process: the two differ from here).
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .current_dir(&p.direct)
+        .args(["batch", "-", "--no-rebuild"])
+        .env("RYUCAD_NO_DAEMON", "1")
+        .env("RYUCAD_RUNTIME_DIR", &p.run)
+        .env("RYUCAD_CONFIG_DIR", p.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", p.direct.with_extension("cache"))
+        .write_stdin(
+            r#"[{"method": "feature.edit", "params": {"part": "p", "id": "plate", "params": {"x": "11"}}}]"#,
+        )
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["result"]["parts"]["p"]["status"], "updated", "{v}");
+    assert!(v["result"].get("rebuild").is_none());
+    assert_eq!(x(&p, &p.direct), "11 mm");
+}
+
+/// A batch through a stdio session, both ways: one line, one answer; a
+/// second run of the same edit writes nothing.
+#[test]
+fn batch_through_a_stdio_session() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let lines = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"batch","params":{"ops":[{"method":"part.create","params":{"part":"p"}},{"method":"feature.add","params":{"part":"p","type":"box","id":"plate","params":{"x":"10","y":"20","z":"5"}}}]}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"batch","params":{"ops":[{"method":"feature.edit","params":{"part":"p","id":"plate","params":{"x":"10"}}}],"rebuild":false}}"#,
+    ];
+    let (a_code, a) = p.script(&p.direct, "", &lines);
+    let (b_code, b) = p.script(&p.daemon, "", &lines);
+    assert_eq!((a_code, b_code), (0, 0));
+    assert_eq!(a, b, "in process vs daemon");
+    assert_eq!(
+        a[0].0["result"]["parts"]["p"]["status"], "created",
+        "{}",
+        a[0].0
+    );
+    assert_eq!(
+        a[1].0["result"]["parts"]["p"]["status"], "unchanged",
+        "{}",
+        a[1].0
+    );
+    assert_eq!(a[1].0["result"]["written"], 0);
 }
 
 /// A daemon that stops between requests is started again for the next
@@ -1465,6 +1568,7 @@ fn every_protocol_method_has_a_command() {
         ("hole.derive", &["hole", "derive"]),
         ("standards.list", &["standards"]),
         ("holes.list", &["holes"]),
+        ("holes.check", &["holes"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
         ("feature_faces.get", &["feature-faces"]),
@@ -1500,6 +1604,7 @@ fn every_protocol_method_has_a_command() {
         ("check", &["check"]),
         ("merge.status", &["merge", "status"]),
         ("merge.resolve", &["merge", "resolve"]),
+        ("batch", &["batch"]),
         ("merge.preview", &["merge", "preview"]),
         ("worktree.list", &["worktree", "list"]),
         ("branch.list", &["branch", "list"]),
@@ -9909,6 +10014,193 @@ fn check_runs_interference_only_when_asked() {
         (&pair["a"], &pair["b"]),
         (&json!("frame/b1/shank"), &json!("frame/b2/shank"))
     );
+}
+
+#[test]
+fn hole_geometry_flags() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [5, 5]},
+        {"op": "add", "type": "fix", "a": "p1"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--point",
+        "p1",
+        "--diameter",
+        "2",
+        "--form",
+        "counterdrill",
+        "--counterdrill-diameter",
+        "4",
+        "--counterdrill-depth",
+        "1",
+        "--near-diameter",
+        "5",
+        "--depth",
+        "through_next",
+        "--far-counterbore-diameter",
+        "3",
+        "--far-counterbore-depth",
+        "0.5",
+    ]);
+    // add and edit answer with the hole's report.
+    assert_eq!(
+        v["feature"]["spec"],
+        "DIA 2 THRU NEXT, CDRILL 4 1 DEEP, NEAR 5, FAR CBORE 3 0.5 DEEP"
+    );
+    let v = p.ok(&[
+        "feature", "edit", "p", "h", "--depth", "tip:3", "--bottom", "118", "--no-far",
+    ]);
+    assert_eq!(v["feature"]["depth"]["tip"]["value"], "3 mm");
+    assert!(v["feature"].get("far").is_none());
+    p.ok(&[
+        "feature", "edit", "p", "h", "--depth", "2", "--bottom", "ball",
+    ]);
+    // show gives the file's own fields.
+    let v = p.ok(&["feature", "show", "p", "h"]);
+    assert_eq!(v["bottom"], "ball");
+    // Both far kinds at once is usage.
+    p.fails(
+        &[
+            "feature",
+            "edit",
+            "p",
+            "h",
+            "--far-countersink-diameter",
+            "3",
+            "--far-counterbore-diameter",
+            "3",
+        ],
+        "usage",
+        2,
+    );
+}
+
+#[test]
+fn standards_list_external_classes() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let m10 = p.ok(&["standards", "threads", "iso_metric", "M10"]);
+    let classes = m10["classes"].as_array().unwrap();
+    let g6 = classes.iter().find(|c| c["class"] == "6g").unwrap();
+    assert_eq!(g6["side"], "external");
+    assert_eq!(
+        g6["major"],
+        json!([
+            {"value": "9.732 mm", "source": "formula: ISO 965-1"},
+            {"value": "9.968 mm", "source": "formula: ISO 965-1"}
+        ])
+    );
+    let h6 = classes.iter().find(|c| c["class"] == "6H").unwrap();
+    assert_eq!(h6["side"], "internal");
+    // Unified lists its internal classes only.
+    let q = p.ok(&["standards", "threads", "unc", "1/4"]);
+    assert!(
+        q["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["side"] == "internal")
+    );
+}
+
+#[test]
+fn cosmetic_threads_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "shaft",
+        "--param",
+        "radius=4.95",
+        "--param",
+        "height=20",
+    ]);
+    let shown = p.ok(&["inspect", "p", "shaft"]);
+    // The shaft's side, its cylinder, by name.
+    let faces = shown["bodies"][0]["faces"].as_array().unwrap();
+    let side = faces
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .unwrap_or_else(|| panic!("{shown}"));
+    let side = format!("p/shaft/{}", side["name"].as_str().unwrap());
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cosmetic_thread",
+        "--id",
+        "t",
+        "--face",
+        &side,
+        "--thread",
+        "iso_metric:M10",
+        "--class",
+        "6g",
+    ]);
+    assert_eq!(v["feature"]["thread"]["class"], "6g");
+    assert_eq!(v["feature"]["faces"], serde_json::json!([side]));
+    let types = p.ok(&["feature", "types", "cosmetic_thread"]);
+    assert!(types.to_string().contains("thread_depth"), "{types}");
+}
+
+#[test]
+fn holes_check_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [10, 5]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--diameter",
+        "2",
+        "--depth",
+        "through_all",
+    ]);
+    let v = p.ok(&["holes", "p", "--check"]);
+    assert_eq!(v["passed"], true, "{v}");
+    assert_eq!(v["checked"], 1);
+    // The options only with --check.
+    p.fails(&["holes", "p", "--edge-factor", "2"], "usage", 2);
 }
 
 #[test]

@@ -35,16 +35,22 @@ fn open(p: &Project) -> Workspace {
 /// The form of `id`, once `feature.show` has answered.
 fn form(ws: &mut Workspace, id: &str) -> Form {
     ws.open_form(Some(key(id)));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
-    ws.form.clone().unwrap()
+    assert!(ws.wait_until(WAIT, |ws| ws.forms.form.is_some()));
+    ws.forms.form.clone().unwrap()
 }
 
 /// Saves `f` and waits for the window to settle.
 fn save(ws: &mut Workspace, f: Form) {
-    ws.form = Some(f);
+    ws.forms.form = Some(f);
     ws.save_form();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .forms
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+    }));
 }
 
 #[test]
@@ -90,9 +96,12 @@ fn tweaks_are_read_and_a_chosen_one_paints_what_it_modified() {
     // Chosen, the draft paints both walls it drafted, by their names.
     ws.choose(Some(key("d")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.feature == key("d"))
+        ws.model
+            .made
+            .as_ref()
+            .is_some_and(|m| m.feature == key("d"))
     }));
-    let made = ws.made.clone().unwrap();
+    let made = ws.model.made.clone().unwrap();
     let walls = &made.faces[&key("b")];
     assert_eq!(walls.len(), 2, "{walls:?}");
     assert!(walls.contains(east.rsplit('/').next().unwrap()));

@@ -44,8 +44,8 @@ fn open(p: &Project) -> Workspace {
 
 /// The quantity cell of the tab's line for `part`.
 fn count(ws: &Workspace, part: &str) -> Option<String> {
-    let q = ws.bom.columns.iter().position(|c| c == "quantity")?;
-    let line = ws.bom.shown().iter().find(|l| l.part == part)?;
+    let q = ws.pdm.bom.columns.iter().position(|c| c == "quantity")?;
+    let line = ws.pdm.bom.shown().iter().find(|l| l.part == part)?;
     Some(line.cells[q].clone())
 }
 
@@ -54,10 +54,10 @@ fn the_tab_shows_the_shown_assemblys_bom_and_follows_it() {
     let p = assembled();
     let mut ws = open(&p);
     ws.load_bom();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.bom.root.is_some()));
-    assert_eq!(ws.bom.root.as_deref(), Some("frame"));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.pdm.bom.root.is_some()));
+    assert_eq!(ws.pdm.bom.root.as_deref(), Some("frame"));
     assert_eq!(count(&ws, "bolt").as_deref(), Some("2"));
-    let bolt = &ws.bom.tree[0];
+    let bolt = &ws.pdm.bom.tree[0];
     assert_eq!(bolt.occurrences, ["frame/b1", "frame/b2"]);
     assert_eq!(bolt.item, Some(1));
     // An agent adds a bolt: the tab reads it again.
@@ -67,9 +67,9 @@ fn the_tab_shows_the_shown_assemblys_bom_and_follows_it() {
     assert!(ws.wait_until(WAIT, |ws| count(ws, "bolt").as_deref() == Some("3")));
     // Flat: one line, its occurrences from the indented lines.
     ws.set_bom_flat(true);
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.bom.flat_lines.is_empty()));
-    assert_eq!(ws.bom.shown().len(), 1);
-    assert_eq!(ws.bom.shown()[0].occurrences.len(), 3);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.pdm.bom.flat_lines.is_empty()));
+    assert_eq!(ws.pdm.bom.shown().len(), 1);
+    assert_eq!(ws.pdm.bom.shown()[0].occurrences.len(), 3);
     // A property declared in the settings is a column, as in the CSV.
     p.ok(&["pdm", "init"]);
     p.ok(&[
@@ -79,7 +79,7 @@ fn the_tab_shows_the_shown_assemblys_bom_and_follows_it() {
         r#"finish={"type": "string"}"#,
     ]);
     assert!(
-        ws.wait_until(WAIT, |ws| ws.bom.columns.last().map(String::as_str)
+        ws.wait_until(WAIT, |ws| ws.pdm.bom.columns.last().map(String::as_str)
             == Some("finish"))
     );
 }
@@ -90,24 +90,31 @@ fn several_roots_are_offered_and_a_focus_chooses() {
     p.ok(&["part", "create", "other", "--assembly"]);
     let mut ws = open(&p);
     ws.load_bom();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.bom.roots.is_empty()));
-    assert_eq!(ws.bom.roots, ["frame", "other"]);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.pdm.bom.roots.is_empty()));
+    assert_eq!(ws.pdm.bom.roots, ["frame", "other"]);
     // Showing one assembly makes it the tab's.
     ws.set_focus(Some("frame".into()));
-    assert!(ws.wait_until(WAIT, |ws| ws.bom.root.as_deref() == Some("frame")));
-    assert!(ws.bom.roots.is_empty());
+    assert!(ws.wait_until(WAIT, |ws| ws.pdm.bom.root.as_deref() == Some("frame")));
+    assert!(ws.pdm.bom.roots.is_empty());
 }
 
 /// The item number the tab shows for `part`.
 fn item(ws: &Workspace, part: &str) -> Option<u64> {
-    ws.bom.tree.iter().find(|l| l.part == part)?.item
+    ws.pdm.bom.tree.iter().find(|l| l.part == part)?.item
 }
 
 /// Types `text` as `part`'s item number and sets it.
 fn set_item(ws: &mut Workspace, part: &str, text: &str) {
-    let line = ws.bom.tree.iter().find(|l| l.part == part).unwrap().clone();
-    ws.bom.edit(&line);
-    ws.bom.editing.as_mut().unwrap().text = text.into();
+    let line = ws
+        .pdm
+        .bom
+        .tree
+        .iter()
+        .find(|l| l.part == part)
+        .unwrap()
+        .clone();
+    ws.pdm.bom.edit(&line);
+    ws.pdm.bom.editing.as_mut().unwrap().text = text.into();
     ws.save_item();
 }
 
@@ -123,24 +130,24 @@ fn an_item_number_is_set_through_bom_renumber_and_a_stale_one_conflicts() {
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && item(ws, "nut") == Some(2)));
     set_item(&mut ws, "bolt", "7");
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && item(ws, "bolt") == Some(7)));
-    assert!(ws.bom.editing.is_none() && !ws.bom.saving);
+    assert!(ws.pdm.bom.editing.is_none() && !ws.pdm.bom.saving);
     let log = p.ok(&["activity"]);
     let last = log["entries"].as_array().unwrap().last().unwrap().clone();
     assert_eq!(last["method"], "bom.renumber");
     assert_eq!(last["participant"]["id"], ws.me());
     // Not an item number: refused here, the text kept.
     set_item(&mut ws, "bolt", "0");
-    assert!(ws.bom.edit_error.is_some());
-    assert_eq!(ws.bom.editing.as_ref().unwrap().text, "0");
-    ws.bom.editing = None;
+    assert!(ws.pdm.bom.edit_error.is_some());
+    assert_eq!(ws.pdm.bom.editing.as_ref().unwrap().text, "0");
+    ws.pdm.bom.editing = None;
     // Someone renumbers while the window hears nothing: the save is
     // against the revision it saw, conflicts, and says what changed.
     ws.deaf = true;
     p.ok(&["bom", "renumber", "frame", "bolt=3"]);
     set_item(&mut ws, "bolt", "5");
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.bom.changed.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.pdm.bom.changed.is_some()));
     assert_eq!(
-        ws.bom.changed.as_deref(),
+        ws.pdm.bom.changed.as_deref(),
         Some("Someone changed frame's item numbers while you edited: bolt is now 3 (you typed 5)")
     );
     assert_eq!(item(&ws, "bolt"), Some(3));
@@ -153,14 +160,14 @@ fn the_csv_written_is_the_clis() {
     let p = assembled();
     let mut ws = open(&p);
     ws.set_bom_flat(true);
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.bom.flat_lines.is_empty()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.pdm.bom.flat_lines.is_empty()));
     ws.open_bom_export();
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("bom.csv");
-    ws.bom_export.as_mut().unwrap().path = out.display().to_string();
+    ws.pdm.bom_export.as_mut().unwrap().path = out.display().to_string();
     ws.run_bom_export();
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.bom_export.as_ref().is_some_and(|e| e.done.is_some())
+        ws.pdm.bom_export.as_ref().is_some_and(|e| e.done.is_some())
     }));
     let cli = p.ok(&["bom", "frame", "--flat", "--format", "csv"]);
     assert_eq!(
@@ -178,13 +185,13 @@ fn where_used_lists_the_assemblies_that_reach_a_part() {
     ]);
     let mut ws = open(&p);
     ws.show_where_used(Some("bolt"));
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.where_used.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.pdm.where_used.is_some()));
     let texts = |ws: &Workspace| -> Vec<String> {
-        let w = ws.where_used.as_ref().unwrap();
+        let w = ws.pdm.where_used.as_ref().unwrap();
         w.working.iter().map(|u| u.text()).collect()
     };
     assert_eq!(texts(&ws), ["frame (2)", "rig (2)"]);
-    let w = ws.where_used.as_ref().unwrap();
+    let w = ws.pdm.where_used.as_ref().unwrap();
     assert_eq!(w.working[1].paths, ["rig > frame: 2 at working"]);
     // Not committed on a release branch: nothing released was searched.
     assert!(w.released.is_empty());
@@ -200,34 +207,41 @@ fn a_compare_marks_what_the_bom_changed_since_a_revision() {
     let p = assembled().committed();
     let mut ws = open(&p);
     ws.load_bom();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.bom.root.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.pdm.bom.root.is_some()));
     p.ok(&["part", "create", "nut"]);
     p.ok(&[
         "feature", "add", "frame", "instance", "--id", "n1", "--of", "nut",
     ]);
     p.ok(&["feature", "delete", "frame", "b2"]);
     ws.set_compare(Some("HEAD".into()));
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.bom.diff.is_some()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.pdm.bom.diff.is_some()));
     assert_eq!(
-        ws.bom.summary().as_deref(),
+        ws.pdm.bom.summary().as_deref(),
         Some("1 added, 0 removed, 1 changed")
     );
     use ryucad_app::core::bom::Mark;
     let mark = |ws: &Workspace, part: &str| {
-        ws.bom
+        ws.pdm
+            .bom
             .tree
             .iter()
             .find(|l| l.part == part)
             .and_then(|l| l.mark.clone())
     };
     assert_eq!(mark(&ws, "nut"), Some(Mark::Added));
-    let q = ws.bom.columns.iter().position(|c| c == "quantity").unwrap();
+    let q = ws
+        .pdm
+        .bom
+        .columns
+        .iter()
+        .position(|c| c == "quantity")
+        .unwrap();
     match mark(&ws, "bolt") {
         Some(Mark::Changed(old)) => assert_eq!(old.get(&q).map(String::as_str), Some("2")),
         other => panic!("{other:?}"),
     }
     // Out of the compare, the marks go.
     ws.set_compare(None);
-    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.bom.diff.is_none()));
-    assert!(ws.bom.tree.iter().all(|l| l.mark.is_none()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.pdm.bom.diff.is_none()));
+    assert!(ws.pdm.bom.tree.iter().all(|l| l.mark.is_none()));
 }

@@ -586,13 +586,20 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
-        // A hole's thread and fastener are a line each, as a spec says
-        // them.
-        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("hole") => {
+        // A hole's thread, fastener, near chamfer and far side are a line
+        // each, as a spec says them; so is a cosmetic thread's thread.
+        Some("ryucad.feature")
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("hole" | "cosmetic_thread")
+            ) =>
+        {
             type Line = fn(&Value) -> Option<String>;
-            let each: [(&str, Line); 2] = [
+            let each: [(&str, Line); 4] = [
                 ("thread", crate::hole::spec::thread_line),
                 ("fastener", crate::hole::spec::fastener_line),
+                ("near", crate::hole::spec::near_line),
+                ("far", crate::hole::spec::far_line),
             ];
             for (key, line) in each {
                 if let Some(x) = rest.remove(key) {
@@ -687,48 +694,12 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
-        Some(ryupdm::config::KIND) => {
-            if let Some(Value::Object(decls)) = rest.remove("properties") {
-                for (name, d) in &decls {
-                    lines.push(format!("properties.{name} = {}", declaration(d)));
-                }
-            }
-            if let Some(Value::Object(mut a)) = rest.remove("approvals") {
-                if let Some(Value::Array(rules)) = a.remove("rules") {
-                    for (i, r) in rules.iter().enumerate() {
-                        let line = ryupdm::approvals::Rule::from_json(r, "")
-                            .map_or_else(|_| r.to_string(), |r| r.text());
-                        lines.push(format!("approvals.rules.{i} = {line}"));
-                    }
-                }
-                if let Some(Value::Object(keys)) = a.remove("keys") {
-                    for (id, k) in &keys {
-                        // A key, or `{key, revoked}` for one revoked on a day.
-                        let line = match (k.as_str(), &k["key"], &k["revoked"]) {
-                            (Some(hex), _, _) => hex.to_owned(),
-                            (None, Value::String(hex), Value::String(day)) => {
-                                format!("{hex} (revoked {day})")
-                            }
-                            _ => k.to_string(),
-                        };
-                        lines.push(format!("approvals.keys.{id} = {line}"));
-                    }
-                }
-                // Anything else a newer file holds, field by field.
-                if !a.is_empty() {
-                    flatten("approvals", &Value::Object(a), &mut lines);
-                }
-            }
-        }
-        Some(ryupdm::record::RELEASE_KIND | ryupdm::record::OBSOLETE_KIND) => {
-            if let Some(by) = rest.remove("released_by") {
-                lines.push(format!("released_by = {}", released_by(&by)));
-            }
-            if let Some(Value::Object(results)) = rest.remove("results") {
-                for (f, hash) in &results {
-                    last.push(format!("results.{f} = {}", scalar(hash)));
-                }
-            }
+        Some(
+            k @ (ryupdm::config::KIND
+            | ryupdm::record::RELEASE_KIND
+            | ryupdm::record::OBSOLETE_KIND),
+        ) => {
+            ryupdm::git::textconv(k, &mut rest, &mut lines, &mut last, &flatten);
         }
         Some(crate::doc::annotation::KIND) => {
             let who = |b: &Value| {
@@ -1341,53 +1312,6 @@ fn flatten(path: &str, v: &Value, out: &mut Vec<String>) {
         }
         v => out.push(format!("{path} = {}", scalar(v))),
     }
-}
-
-/// A declared property: `enum anodized, bare (required, revising)`,
-/// `quantity length`, `string`.
-fn declaration(d: &Value) -> String {
-    let mut s = d.get("type").map(scalar).unwrap_or_default();
-    if let Some(Value::Array(values)) = d.get("values") {
-        let list: Vec<String> = values.iter().map(scalar).collect();
-        s.push_str(&format!(" {}", list.join(", ")));
-    }
-    if let Some(dim) = d.get("dim") {
-        s.push_str(&format!(" {}", scalar(dim)));
-    }
-    let flags: Vec<&str> = ["required", "revising"]
-        .into_iter()
-        .filter(|f| d.get(*f) == Some(&Value::Bool(true)))
-        .collect();
-    if !flags.is_empty() {
-        s.push_str(&format!(" ({})", flags.join(", ")));
-    }
-    if let Some(o) = d.as_object() {
-        for (k, v) in o {
-            if !matches!(
-                k.as_str(),
-                "type" | "values" | "dim" | "required" | "revising"
-            ) {
-                s.push_str(&format!(" {k}={}", scalar(v)));
-            }
-        }
-    }
-    s
-}
-
-/// Who wrote a record: `Ada <ada@example.com> as agent`, each part only
-/// when it is there.
-fn released_by(by: &Value) -> String {
-    let mut parts = Vec::new();
-    if let Some(n) = by.get("name") {
-        parts.push(scalar(n));
-    }
-    if let Some(e) = by.get("email") {
-        parts.push(format!("<{}>", scalar(e)));
-    }
-    if let Some(p) = by.get("participant") {
-        parts.push(format!("as {}", scalar(p)));
-    }
-    parts.join(" ")
 }
 
 /// A sketch entity without its position: `line p1 → p2`, `arc p5: p2 → p3`,
@@ -4312,6 +4236,7 @@ mod tests {
                 ryucad: "0".into(),
                 ryukei: "0".into(),
                 commit: "c".into(),
+                product: None,
             },
             released_by: ryupdm::record::ReleasedBy {
                 name: None,
@@ -5645,5 +5570,37 @@ mod tests {
         assert_eq!(change["at"], "/rev/label", "{v}");
         assert_eq!((&change["from"], &change["to"]), (&json!("A"), &json!("B")));
         assert!(p["solids"].get("pcb/board").is_some(), "{v}");
+    }
+
+    #[test]
+    fn a_holes_near_and_far_are_a_line_each() {
+        let t = text(
+            json!({"format": 25, "kind": "ryucad.feature", "type": "hole",
+            "sketch": "s", "form": "simple", "diameter": "5 mm", "depth": "through_all",
+            "targets": ["b"], "near": {"diameter": "7 mm", "angle": "120 deg"},
+            "far": {"countersink": {"diameter": "8 mm", "angle": "90 deg"}}}),
+        );
+        assert!(t.contains("\nnear = 7 mm, 120 deg\n"), "{t}");
+        assert!(t.contains("\nfar = countersink 8 mm, 90 deg\n"), "{t}");
+        // A tapered wall is part of the thread's line.
+        let t = text(
+            json!({"format": 25, "kind": "ryucad.feature", "type": "hole",
+            "sketch": "s", "form": "simple", "depth": {"blind": "12 mm"}, "targets": ["b"],
+            "thread": {"standard": "npt", "size": "1/8", "depth": "8 mm", "wall": "taper"}}),
+        );
+        assert!(t.contains(", 8 mm, taper\n"), "{t}");
+    }
+
+    #[test]
+    fn a_cosmetic_threads_thread_is_one_line() {
+        let face = |k: u8| json!({"feature": "shaft", "name": format!("{k:032x}")});
+        let t = text(
+            json!({"format": 25, "kind": "ryucad.feature", "type": "cosmetic_thread",
+            "faces": [face(1), face(2)], "from": face(3), "depth": "12 mm",
+            "thread": {"standard": "iso_metric", "size": "M10", "class": "6g"}}),
+        );
+        assert!(t.contains("\nthread = M10x1.5-6g, full\n"), "{t}");
+        assert!(t.contains("\ndepth = 12 mm\n"), "{t}");
+        assert!(!t.contains("thread.size"), "{t}");
     }
 }

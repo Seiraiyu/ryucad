@@ -16,10 +16,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 
-// The harness at its old path while ryucad 27 runs (design 541, "Paths
-// kept"); 27.F removes it.
-#[allow(unused_imports)]
-pub(crate) use crate::testing::{
+use crate::geometry::normal_to_face;
+use crate::part::part_id;
+use crate::scene::{RenderAsk, draw_body, meshes, render_scene};
+use crate::testing::{
     RENDER_BUDGET, call, call_live, drain, fresh, render_pixels, with_datums, with_helix,
     with_part, with_sketch,
 };
@@ -4807,4 +4807,28 @@ fn following_patterns_are_written_shown_and_edited() {
         (&bolts["form"], &bolts["driver"]),
         (&json!("points"), &json!("lid/layout"))
     );
+}
+
+/// `part.create` and `part.delete` in a capture session write nothing to
+/// the folder (plan 31.B): a batch runs them captured.
+#[test]
+fn part_create_and_delete_run_captured() {
+    let (dir, s) = with_part();
+    let mut c = s.capturing(s.snapshot()).unwrap();
+    let run = |c: &mut Session, m: &str, p: Value| {
+        dispatch(c, None, None, Request::from_rpc(m, Some(p)).unwrap()).unwrap()
+    };
+    run(&mut c, "part.delete", json!({"part": "p"}));
+    run(&mut c, "part.create", json!({"part": "q"}));
+    assert!(
+        dir.path().join("parts/p/part.json").is_file(),
+        "the folder keeps p"
+    );
+    assert!(!dir.path().join("parts/q").exists());
+    let w = c.captured();
+    assert_eq!(w["parts/p/part.json"], None);
+    assert!(w["parts/q/part.json"].is_some());
+    assert!(c.captures() && !s.captures());
+    let names: Vec<&str> = c.project().parts.keys().map(|i| i.as_str()).collect();
+    assert_eq!(names, ["q"]);
 }

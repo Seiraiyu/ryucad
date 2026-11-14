@@ -109,7 +109,7 @@ fn serves_requests_and_shuts_down() {
     let conn = f.connect().unwrap();
     let status = ask(&conn, &Request::DaemonStatus {}).unwrap();
     assert_eq!(status["pid"], child.id());
-    assert_eq!(status["version"]["protocol"], 2);
+    assert_eq!(status["version"]["protocol"], 3);
     ask(
         &conn,
         &Request::PartCreate {
