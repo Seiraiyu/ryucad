@@ -33,7 +33,10 @@ impl Workspace {
             scope: None,
             rev: self.form_rev(),
         };
-        self.send(req, Pending::Params(part, before));
+        self.send(
+            req,
+            Pending::Parameters(parameters::Asked::Params(part, before)),
+        );
     }
 
     /// Shows the Equations tile's table, read the first time.
@@ -50,7 +53,10 @@ impl Workspace {
             all: false,
             rev: None,
         };
-        self.send(req, Pending::Equations(conflicted));
+        self.send(
+            req,
+            Pending::Parameters(parameters::Asked::Equations(conflicted)),
+        );
     }
 
     /// Reads the table again if it is open and nothing is being written,
@@ -77,7 +83,7 @@ impl Workspace {
         let Some(req) = e.request(i) else { return };
         e.saving = Some(Some(i));
         e.error = None;
-        self.send(req, Pending::EquationSave);
+        self.send(req, Pending::Parameters(parameters::Asked::EquationSave));
     }
 
     /// Adds the Equations tile's new parameter, to the project or a part.
@@ -88,7 +94,7 @@ impl Workspace {
         let Some(req) = e.add_request() else { return };
         e.saving = Some(None);
         e.error = None;
-        self.send(req, Pending::EquationSave);
+        self.send(req, Pending::Parameters(parameters::Asked::EquationSave));
     }
 
     /// Saves what was typed into the parameter panel.
@@ -99,6 +105,99 @@ impl Workspace {
         p.saving = true;
         p.error = None;
         let req = p.request();
-        self.send(req, Pending::ParamSave);
+        self.send(req, Pending::Parameters(parameters::Asked::ParamSave));
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// A part's parameters for the panel; after a conflict, with the
+    /// panel as it was.
+    Params(String, Option<Box<Params>>),
+    ParamSave,
+    /// The Equations tile's table (`equations.list`), and whether a
+    /// write conflicted. Read again over the table as it is when the
+    /// answer comes, never as it was when it was asked for: what was
+    /// typed meanwhile stays.
+    Equations(bool),
+    /// A row of the Equations tile written.
+    EquationSave,
+}
+
+impl Workspace {
+    pub(super) fn answer_parameters(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::Params(part, before), Ok(a)) => {
+                if self.parameters.params_part.as_deref() == Some(part.as_str()) {
+                    let unit = self.model.default_unit.clone();
+                    self.parameters.params = Some(match before {
+                        Some(b) => b.reloaded(&a.result, &unit),
+                        None => Params::from_list(&a.result, &unit),
+                    });
+                }
+            }
+            (Asked::ParamSave, Ok(_)) => {
+                if let Some(p) = &self.parameters.params {
+                    let part = p.part.clone();
+                    self.read_params(part, None);
+                }
+            }
+            (Asked::Equations(conflicted), Ok(a)) => {
+                let unit = self.model.default_unit.clone();
+                self.parameters.equations = Some(match &self.parameters.equations {
+                    Some(now) => now.reloaded(&a.result, &unit, conflicted),
+                    None => Equations::from_list(&a.result, &unit),
+                });
+            }
+            (Asked::Equations(_), Err(e)) => {
+                let mut table = self.parameters.equations.take().unwrap_or_default();
+                table.saving = None;
+                table.error = Some(e);
+                self.parameters.equations = Some(table);
+            }
+            (Asked::EquationSave, Ok(_)) => {
+                if let Some(e) = &mut self.parameters.equations {
+                    // What was written reads back as written.
+                    match e.saving.take() {
+                        Some(Some(i)) => {
+                            if let Some(r) = e.rows.get_mut(i) {
+                                r.field.read = r.field.text.trim().to_owned();
+                            }
+                        }
+                        Some(None) => {
+                            e.new_name.clear();
+                            e.new_value.clear();
+                        }
+                        None => {}
+                    }
+                    self.read_equations(false);
+                }
+            }
+            (Asked::EquationSave, Err(err)) => {
+                if let Some(e) = &mut self.parameters.equations {
+                    e.saving = None;
+                    if err.code == Code::Conflict {
+                        self.read_equations(true);
+                    } else {
+                        e.error = Some(err);
+                    }
+                }
+            }
+            (Asked::ParamSave, Err(e)) => {
+                if let Some(p) = &mut self.parameters.params {
+                    p.saving = false;
+                    if e.code == Code::Conflict {
+                        let before = Box::new(p.clone());
+                        let part = p.part.clone();
+                        self.read_params(part, Some(before));
+                    } else {
+                        p.error = Some(e);
+                    }
+                }
+            }
+            (_, Err(e)) => self.fail(e),
+        }
     }
 }

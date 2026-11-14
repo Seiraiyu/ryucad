@@ -35,7 +35,10 @@ impl Workspace {
         };
         self.send(
             req,
-            Pending::ImportConvert(part.to_owned(), feature.to_owned()),
+            Pending::Forms(forms::Asked::ImportConvert(
+                part.to_owned(),
+                feature.to_owned(),
+            )),
         );
     }
 
@@ -55,7 +58,7 @@ impl Workspace {
             id: id.clone(),
             rev: self.form_rev(),
         };
-        self.send(req, Pending::Form(part, id, before));
+        self.send(req, Pending::Forms(forms::Asked::Form(part, id, before)));
     }
 
     /// Opens the form for a sketch's dimension (or closes it, with
@@ -83,7 +86,10 @@ impl Workspace {
             quality: None,
             rev: self.form_rev(),
         };
-        self.send(req, Pending::Dim(part, sketch, constraint, before));
+        self.send(
+            req,
+            Pending::Forms(forms::Asked::Dim(part, sketch, constraint, before)),
+        );
     }
 
     /// Saves the value typed into the dimension's form.
@@ -94,7 +100,7 @@ impl Workspace {
         f.saving = true;
         f.error = None;
         let req = f.request();
-        self.send(req, Pending::DimSave);
+        self.send(req, Pending::Forms(forms::Asked::DimSave));
     }
 
     /// Saves what was typed into the form.
@@ -130,7 +136,7 @@ impl Workspace {
             dry_run: true,
             expected_revision: None,
         };
-        self.send(req, Pending::InsertPreview(key));
+        self.send(req, Pending::Forms(forms::Asked::InsertPreview(key)));
     }
 
     pub fn save_form(&mut self) {
@@ -142,8 +148,184 @@ impl Workspace {
             Ok(req) => {
                 form.saving = true;
                 form.error = None;
-                self.send(req, Pending::Save);
+                self.send(req, Pending::Forms(forms::Asked::Save));
             }
+        }
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// A feature read for the form: its part and ID; after a conflict,
+    /// with the form as it was when the save failed.
+    Form(String, String, Option<Box<Form>>),
+    Save,
+    /// A sketch read for a dimension's form: its part, sketch and
+    /// constraint; after a conflict, with the form as it was.
+    Dim(String, String, String, Option<Box<DimForm>>),
+    DimSave,
+    /// A foreign instance's form's labels (`deps.parts`), for this
+    /// assembly and instance.
+    FormLabels(String, String),
+    /// An insert update's dry run for the form: part, insert and `to`.
+    InsertPreview((String, String, String)),
+    /// An import's mode set (`import.convert`): its part and feature.
+    ImportConvert(String, String),
+}
+
+impl Workspace {
+    pub(super) fn answer_forms(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::InsertPreview(key), a) => {
+                if let Some(p) = self.forms.insert_preview.as_mut().filter(|p| p.key == key) {
+                    p.answer = Some(a.map(|a| crate::core::inserts::Moved::from_answer(&a.result)));
+                }
+            }
+            // The rebuild follows as `model.changed`; an open form on the
+            // import is read again, its mode with it.
+            (Asked::ImportConvert(part, feature), a) => match a {
+                Ok(_) => {
+                    let key = (part, feature);
+                    if self.forms.form_for.as_ref() == Some(&key) {
+                        self.open_form(Some(key));
+                    }
+                }
+                Err(e) => self.fail(e),
+            },
+            (Asked::Form(part, id, before), Ok(a)) => {
+                // Only the form last asked for opens (a dimension may have
+                // been chosen since); a reload after a conflict only if
+                // that form is still open.
+                let asked = self.forms.form_for.as_ref() == Some(&(part.clone(), id));
+                let wanted = asked
+                    && match (&before, &self.forms.form) {
+                        (Some(b), Some(f)) => b.feature == f.feature && b.part == f.part,
+                        (None, _) => true,
+                        (Some(_), None) => false,
+                    };
+                if wanted {
+                    let mut form = match before {
+                        Some(b) => b.reloaded(&a.result),
+                        None => Form::from_show_in(&part, &a.result, self.unit()),
+                    };
+                    if let Some(p) = self.model.parts.get(&part) {
+                        // A reference import's solid is never offered to
+                        // act on (design 364).
+                        form.offer(&p.modellable());
+                    }
+                    // An instance may take its part's latest release; another
+                    // project's, any of its dependency's official labels.
+                    let placed = a.result["part"].as_str().unwrap_or_default();
+                    if let Some(project) = form.foreign.clone() {
+                        let name = self.model.marks.name(&project);
+                        let req = Request::DepsParts {
+                            name,
+                            part: Some(placed.to_owned()),
+                        };
+                        let why =
+                            Pending::Forms(Asked::FormLabels(part.clone(), form.feature.clone()));
+                        self.send(req, why);
+                    } else if let Some(l) = self
+                        .pdm
+                        .states
+                        .by_part
+                        .get(placed)
+                        .and_then(|s| s["label"].as_str())
+                    {
+                        form.offer_revs(&[l.to_owned()]);
+                    }
+                    // An insert of this project's part may take any of its
+                    // official labels (design 521): every one, read now.
+                    if form.ty == "insert" && form.foreign.is_none() {
+                        let req = Request::ReleaseList {
+                            part: Some(placed.to_owned()),
+                        };
+                        self.send(
+                            req,
+                            Pending::Forms(Asked::FormLabels(part.clone(), form.feature.clone())),
+                        );
+                    }
+                    self.forms.form = Some(form);
+                }
+            }
+            (Asked::FormLabels(part, id), Ok(a)) => {
+                if let Some(f) = self
+                    .forms
+                    .form
+                    .as_mut()
+                    .filter(|f| f.part == part && f.feature == id)
+                {
+                    // An insert's from `release.list`, an instance's of
+                    // another project from `deps.parts`.
+                    let of = f.of.clone().unwrap_or_default();
+                    let labels = crate::core::inserts::official_labels(&a.result, &of);
+                    f.offer_revs(&labels);
+                }
+            }
+            // Not fetched: the label stays as read; the Dependencies tab says why.
+            (Asked::FormLabels(..), Err(_)) => {}
+            (Asked::Dim(part, sketch, constraint, before), Ok(a)) => {
+                // Only the dimension last asked for opens, as for features.
+                let key = (part.clone(), sketch.clone(), constraint.clone());
+                let wanted = self.forms.dimension_for.as_ref() == Some(&key)
+                    && match (&before, &self.forms.dimension) {
+                        (Some(_), Some(_)) | (None, _) => true,
+                        (Some(_), None) => false,
+                    };
+                if wanted {
+                    self.forms.dimension = match before {
+                        Some(b) => b.reloaded(&a.result),
+                        None => DimForm::from_get(&part, &sketch, &constraint, &a.result),
+                    };
+                }
+            }
+            (Asked::DimSave, Ok(_)) => {
+                // Read it back as the files now have it.
+                if let Some(f) = &self.forms.dimension {
+                    let (p, s, c) = (f.part.clone(), f.sketch.clone(), f.constraint.clone());
+                    self.read_dimension(p, s, c, None);
+                }
+            }
+            (Asked::DimSave, Err(e)) => {
+                if let Some(f) = &mut self.forms.dimension {
+                    f.saving = false;
+                    if e.code == Code::Conflict {
+                        let before = Box::new(f.clone());
+                        let (p, s, c) = (f.part.clone(), f.sketch.clone(), f.constraint.clone());
+                        self.read_dimension(p, s, c, Some(before));
+                    } else {
+                        f.error = Some(e);
+                    }
+                }
+            }
+            (Asked::Save, Ok(a)) => {
+                if let Some(f) = &self.forms.form {
+                    let mut v = a.result["feature"].clone();
+                    v["revision"] = a.result["revision"].clone();
+                    self.forms.form = Some(Form::from_show_in(&f.part, &v, self.unit()));
+                }
+            }
+            (Asked::Save, Err(e)) => {
+                // A feature that would change a reference import: the
+                // card offers Convert to solid, beside the form's own.
+                if e.code == Code::ReferenceBody {
+                    self.fail(e.clone());
+                }
+                if let Some(f) = &mut self.forms.form {
+                    f.saving = false;
+                    if e.code == Code::Conflict {
+                        // Read it again and show what changed underneath.
+                        let (part, id) = (f.part.clone(), f.feature.clone());
+                        let before = Box::new(f.clone());
+                        self.read_form(part, id, Some(before));
+                    } else {
+                        f.refuse(e);
+                    }
+                }
+            }
+            (_, Err(e)) => self.fail(e),
         }
     }
 }

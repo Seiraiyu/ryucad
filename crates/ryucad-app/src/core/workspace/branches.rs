@@ -11,8 +11,14 @@ impl Workspace {
     pub fn load_branches(&mut self) {
         self.branches.branches_at = Some(Instant::now());
         self.branches.branches_waiting = true;
-        self.send(Request::BranchList {}, Pending::BranchList);
-        self.send(Request::WorktreeList {}, Pending::Branches);
+        self.send(
+            Request::BranchList {},
+            Pending::Branches(branches::Asked::BranchList),
+        );
+        self.send(
+            Request::WorktreeList {},
+            Pending::Branches(branches::Asked::Branches),
+        );
     }
 
     /// Reads the worktrees again after this project changed, once the tab
@@ -46,7 +52,10 @@ impl Workspace {
         };
         self.branches.previewing = Some((path.clone(), key.clone()));
         let rev = crate::core::branches::compare_rev(&path);
-        self.send(Request::MergePreview { rev }, Pending::Preview(path, key));
+        self.send(
+            Request::MergePreview { rev },
+            Pending::Branches(branches::Asked::Preview(path, key)),
+        );
     }
 
     /// Opens the worktree at `path` in a new window of this app, or brings
@@ -85,7 +94,7 @@ impl Workspace {
             branch: c.branch.clone(),
             expected_revision: c.expected.clone(),
         };
-        self.send(req, Pending::Switch);
+        self.send(req, Pending::Branches(branches::Asked::Switch));
     }
 
     /// Settles a merge conflict by `choice` (`ours`, `theirs`, or `repair`
@@ -102,6 +111,98 @@ impl Workspace {
         let req = crate::core::merge::resolution(c, choice, repair, &self.model.parts);
         m.resolving = true;
         m.failed = None;
-        self.send(req, Pending::Resolve);
+        self.send(req, Pending::Branches(branches::Asked::Resolve));
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// The Branches tab's worktrees (`worktree.list`).
+    Branches,
+    /// A merge preview with the worktree at this path, made from this key.
+    Preview(String, String),
+    /// The Branches tab's branches (`branch.list`).
+    BranchList,
+    /// The Check out dialog's `branch.switch`.
+    Switch,
+    /// The merge Git is in, if any.
+    Merge,
+    Resolve,
+}
+
+impl Workspace {
+    pub(super) fn answer_branches(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::Merge, Ok(a)) => {
+                // A failure read again after keeps saying why.
+                let failed = self.branches.merge.as_mut().and_then(|m| m.failed.take());
+                let mut m = Merge::of(a.result);
+                m.failed = failed;
+                self.branches.merge = Some(m);
+            }
+            // No merge: nothing to show.
+            (Asked::Merge, Err(e)) if matches!(e.code, Code::NotMerging | Code::NotAGitRepo) => {
+                self.branches.merge = None;
+            }
+            (Asked::Merge, Err(e)) => self.branches.merge = Some(Merge::broken(e)),
+            (Asked::Resolve, Ok(a)) => {
+                if let Some(m) = &mut self.branches.merge {
+                    m.resolving = false;
+                    m.status = a.result["status"].clone();
+                }
+            }
+            (Asked::Resolve, Err(e)) => {
+                // Changed underneath: read the status again.
+                let again = matches!(e.code, Code::Conflict | Code::RepairConflict);
+                if let Some(m) = &mut self.branches.merge {
+                    m.resolving = false;
+                    m.failed = Some(e);
+                }
+                if again {
+                    self.send(Request::MergeStatus {}, Pending::Branches(Asked::Merge));
+                }
+            }
+            (Asked::Branches, a) => {
+                self.branches.branches_waiting = false;
+                match a {
+                    Ok(a) => {
+                        self.branches.listed(a.result);
+                        self.ask_preview();
+                    }
+                    // Said in the tab: outside a repository, there are none.
+                    Err(e) => self.branches.error = Some(e),
+                }
+            }
+            (Asked::BranchList, a) => match a {
+                Ok(a) => {
+                    self.branches.branch_list = Some(a.result);
+                    self.branches.branch_error = None;
+                }
+                // Said in the tab: outside a repository, there are none.
+                Err(e) => self.branches.branch_error = Some(e),
+            },
+            (Asked::Switch, a) => {
+                match a {
+                    Ok(_) => self.branches.checkout = None,
+                    Err(e) => {
+                        if let Some(c) = self.branches.checkout.as_mut() {
+                            c.busy = false;
+                            c.refused = Some(e);
+                        }
+                    }
+                }
+                // The head moved, or the list was stale: read both again.
+                // The files' changes come as model.changed and
+                // project.changed, as an outside change's do.
+                self.load_branches();
+                self.reload_history();
+            }
+            (Asked::Preview(path, key), a) => {
+                self.branches.previewed(path, key, a.map(|a| a.result));
+                self.ask_preview();
+            }
+        }
     }
 }

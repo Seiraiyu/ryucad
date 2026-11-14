@@ -13,15 +13,21 @@ impl Workspace {
             return;
         }
         self.deps.deps_waiting = true;
-        self.send(Request::DepsList {}, Pending::DepsList);
-        self.send(Request::DepsOutdated {}, Pending::DepsOutdated);
+        self.send(Request::DepsList {}, Pending::Deps(deps::Asked::DepsList));
+        self.send(
+            Request::DepsOutdated {},
+            Pending::Deps(deps::Asked::DepsOutdated),
+        );
     }
 
     /// Fetches every dependency, or those named.
     pub fn fetch_deps(&mut self, names: Vec<String>) {
         self.deps.busy = true;
         self.deps.failed = None;
-        self.send_aside(Request::DepsFetch { names }, Pending::DepsWrite);
+        self.send_aside(
+            Request::DepsFetch { names },
+            Pending::Deps(deps::Asked::DepsWrite),
+        );
     }
 
     /// Adds the dependency typed into the tab.
@@ -36,7 +42,7 @@ impl Workspace {
         };
         self.deps.busy = true;
         self.deps.failed = None;
-        self.send_aside(req, Pending::DepsWrite);
+        self.send_aside(req, Pending::Deps(deps::Asked::DepsWrite));
     }
 
     /// Removes dependency `name`.
@@ -47,7 +53,7 @@ impl Workspace {
         };
         self.deps.busy = true;
         self.deps.failed = None;
-        self.send(req, Pending::DepsWrite);
+        self.send(req, Pending::Deps(deps::Asked::DepsWrite));
     }
 
     /// Update's first step: a dry run (fetching first) that says what
@@ -64,7 +70,7 @@ impl Workspace {
         self.deps.busy = true;
         self.deps.failed = None;
         self.deps.update = None;
-        self.send_aside(req, Pending::DepsDry(names, part));
+        self.send_aside(req, Pending::Deps(deps::Asked::DepsDry(names, part)));
     }
 
     /// Writes the update its dry run showed, from what that fetched.
@@ -81,7 +87,7 @@ impl Workspace {
             expected_revision: self.deps.revision.clone(),
         };
         self.deps.busy = true;
-        self.send(req, Pending::DepsWrite);
+        self.send(req, Pending::Deps(deps::Asked::DepsWrite));
     }
 
     /// Opens Place from dependency… on the shown assembly.
@@ -104,7 +110,7 @@ impl Workspace {
             name: name.to_owned(),
             part: None,
         };
-        self.send(req, Pending::DepsParts(name.to_owned()));
+        self.send(req, Pending::Deps(deps::Asked::DepsParts(name.to_owned())));
     }
 
     /// Places the picker's part at its label, at the assembly's origin.
@@ -137,6 +143,116 @@ impl Workspace {
             expected_revision: expected,
             dry_run: false,
         };
-        self.send(req, Pending::DepsPlace);
+        self.send(req, Pending::Deps(deps::Asked::DepsPlace));
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+// The variants keep the names they had in `Pending`.
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum Asked {
+    /// `deps.list` and `deps.outdated`, for the tab and the marks.
+    DepsList,
+    DepsOutdated,
+    /// A fetch, an add, an update or a removal from the tab.
+    DepsWrite,
+    /// An update's dry run, for the names and part it was asked for.
+    DepsDry(Vec<String>, Option<String>),
+    /// The picker's `deps.parts`, for this dependency.
+    DepsParts(String),
+    /// The picker's `feature.add`.
+    DepsPlace,
+}
+
+impl Workspace {
+    pub(super) fn answer_deps(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::DepsList, a) => {
+                match a {
+                    Ok(a) => self.deps.listed(&a.result),
+                    Err(e) => self.deps.error = Some(e),
+                }
+                self.model.set_marks(self.deps.marks());
+            }
+            (Asked::DepsOutdated, a) => {
+                self.deps.deps_waiting = false;
+                if let Ok(a) = a {
+                    self.deps.outdated(&a.result);
+                    self.model.set_marks(self.deps.marks());
+                }
+                if std::mem::take(&mut self.deps.deps_again) {
+                    self.load_deps();
+                }
+            }
+            (Asked::DepsWrite, a) => {
+                self.deps.busy = false;
+                match a {
+                    Ok(a) => {
+                        if let Some(f) = a.result["fetched"].as_array() {
+                            let changed = f
+                                .iter()
+                                .flat_map(|r| r["branches"].as_array().into_iter().flatten())
+                                .filter(|b| b["changed"] == true)
+                                .count();
+                            let what = if f.len() == 1 {
+                                "repository"
+                            } else {
+                                "repositories"
+                            };
+                            self.deps.fetched =
+                                Some(format!("fetched {} {what}, {changed} changed", f.len()));
+                        }
+                        if a.result["dependency"].is_object() {
+                            self.deps.add_url.clear();
+                            self.deps.add_path.clear();
+                            self.deps.add_name.clear();
+                        }
+                    }
+                    Err(e) => self.deps.failed = Some(e),
+                }
+                // A fetch writes no project file: nothing else says so.
+                self.load_deps();
+            }
+            (Asked::DepsDry(names, part), a) => {
+                self.deps.busy = false;
+                match a {
+                    Ok(a) => {
+                        let mut u = Update::from_answer(&a.result);
+                        u.names = names;
+                        u.part = part;
+                        self.deps.update = Some(u);
+                    }
+                    Err(e) => self.deps.failed = Some(e),
+                }
+                self.load_deps();
+            }
+            (Asked::DepsParts(name), a) => {
+                if let Some(p) = self
+                    .deps
+                    .picker
+                    .as_mut()
+                    .filter(|p| p.dependency.as_deref() == Some(name.as_str()))
+                {
+                    match a {
+                        Ok(a) => p.parts_read(&a.result),
+                        Err(e) => {
+                            p.reading = false;
+                            p.error = Some(e);
+                        }
+                    }
+                }
+            }
+            (Asked::DepsPlace, a) => match a {
+                Ok(_) => self.deps.picker = None,
+                Err(e) => {
+                    if let Some(p) = self.deps.picker.as_mut() {
+                        p.placing = false;
+                        p.error = Some(e);
+                    }
+                }
+            },
+        }
     }
 }

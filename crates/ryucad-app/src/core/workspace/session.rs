@@ -35,14 +35,14 @@ impl Workspace {
             key: None,
             scope: None,
         };
-        self.send(req, Pending::Config);
+        self.send(req, Pending::Session(session::Asked::Config));
     }
 
     /// Changes a setting through `config.set`: a project setting against
     /// the revision it was read at. A failure lands in `errors`.
     pub fn set_config(&mut self, key: &str, value: Value) {
         let req = self.config_request(key, value);
-        self.send(req, Pending::Config);
+        self.send(req, Pending::Session(session::Asked::Config));
     }
 
     /// [`Workspace::set_config`], waiting up to `timeout` for the daemon's
@@ -73,17 +73,23 @@ impl Workspace {
     /// Diagnoses the project (`doctor`).
     pub fn diagnose(&mut self) {
         self.session.doctor_waiting = true;
-        self.send(Request::Doctor {}, Pending::Doctor);
+        self.send(Request::Doctor {}, Pending::Session(session::Asked::Doctor));
     }
 
     /// Asks what the disk cache holds.
     pub fn read_cache(&mut self) {
-        self.send(Request::CacheStats {}, Pending::Cache);
+        self.send(
+            Request::CacheStats {},
+            Pending::Session(session::Asked::Cache),
+        );
     }
 
     /// Empties the disk cache; the answer says what it holds now.
     pub fn clear_cache(&mut self) {
-        self.send(Request::CacheClear {}, Pending::Cache);
+        self.send(
+            Request::CacheClear {},
+            Pending::Session(session::Asked::Cache),
+        );
     }
 
     /// Stores the token the shared cache is sent (`cache.login`), then
@@ -92,12 +98,15 @@ impl Workspace {
         let req = Request::CacheLogin {
             token: token.trim().to_owned(),
         };
-        self.send(req, Pending::CacheToken);
+        self.send(req, Pending::Session(session::Asked::CacheToken));
     }
 
     /// Removes the stored token (`cache.logout`).
     pub fn logout_cache(&mut self) {
-        self.send(Request::CacheLogout {}, Pending::CacheToken);
+        self.send(
+            Request::CacheLogout {},
+            Pending::Session(session::Asked::CacheToken),
+        );
     }
 
     pub(super) fn rediagnose(&mut self) {
@@ -112,7 +121,10 @@ impl Workspace {
     /// brings the new report.
     pub fn repair(&mut self, repairs: Vec<String>, params: serde_json::Map<String, Value>) {
         self.session.doctor_waiting = true;
-        self.send(Request::DoctorRepair { repairs, params }, Pending::Doctor);
+        self.send(
+            Request::DoctorRepair { repairs, params },
+            Pending::Session(session::Asked::Doctor),
+        );
     }
 
     /// Cuts this window with exactly `planes` (`section.set`): drawn at
@@ -121,14 +133,14 @@ impl Workspace {
         let req = crate::core::section::request(&planes, &self.link.participant);
         self.view.sections.planes = planes;
         self.model.generation += 1;
-        self.send(req, Pending::Sections);
+        self.send(req, Pending::Session(session::Asked::Sections));
     }
 
     /// Adds the plane `plane` names (`xy`, `yz`, `zx` or a planar face's
     /// reference) to this window's.
     pub fn add_section(&mut self, plane: &str) {
         let req = crate::core::section::add(plane, &self.link.participant);
-        self.send(req, Pending::Sections);
+        self.send(req, Pending::Session(session::Asked::Sections));
     }
 
     /// Shows explode `explode` of the explodes' assembly in this window,
@@ -142,7 +154,7 @@ impl Workspace {
             off,
             participant: Some(self.link.participant.clone()),
         };
-        self.send(req, Pending::ExplodeShown);
+        self.send(req, Pending::Session(session::Asked::ExplodeShown));
     }
 
     /// Shows motion `motion` of the motions' assembly in this window
@@ -163,7 +175,7 @@ impl Workspace {
             off,
             participant: Some(self.link.participant.clone()),
         };
-        self.send(req, Pending::MotionShown);
+        self.send(req, Pending::Session(session::Asked::MotionShown));
     }
 
     /// Changes what this window hides (`visibility.set`): everything
@@ -184,7 +196,7 @@ impl Workspace {
             all,
             participant: Some(self.link.participant.clone()),
         };
-        self.send(req, Pending::Hidden);
+        self.send(req, Pending::Session(session::Asked::Hidden));
     }
 
     /// Puts the window in `mode`: at once here, and for the daemon, which
@@ -195,7 +207,10 @@ impl Workspace {
             return;
         }
         let was = std::mem::replace(&mut self.session.mode, mode);
-        self.send(Request::ParticipantMode { mode }, Pending::Mode(was));
+        self.send(
+            Request::ParticipantMode { mode },
+            Pending::Session(session::Asked::Mode(was)),
+        );
         if mode != crate::core::modes::Mode::Annotate {
             self.annotations.show_agent = false;
         }
@@ -242,5 +257,114 @@ impl Workspace {
     pub(super) fn display_quality(&self) -> ryucad::mesh::Quality {
         ryucad::mesh::Quality::parse(self.session.settings.text("display.quality", "normal"))
             .unwrap_or_default()
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// This window's own `participant.mode`; the mode it was in before.
+    Mode(crate::core::modes::Mode),
+    People,
+    /// This window's own `visibility.set`.
+    Hidden,
+    Config,
+    Doctor,
+    /// What the disk cache holds (`cache.stats` or `cache.clear`).
+    Cache,
+    /// The shared cache's token stored or removed (`cache.login`,
+    /// `cache.logout`).
+    CacheToken,
+    /// This window's own `section.set`.
+    Sections,
+    /// This window's own `explode.show`.
+    ExplodeShown,
+    /// This window's own `motion.show`.
+    MotionShown,
+}
+
+impl Workspace {
+    pub(super) fn answer_session(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::Mode(_), Ok(_)) => {}
+            (Asked::Mode(was), Err(e)) => {
+                self.session.mode = was;
+                self.fail(e);
+            }
+            (Asked::People, Ok(a)) => {
+                self.session.people.reset(&a.result["participants"]);
+                self.follow_draft();
+                self.follow_focus();
+            }
+            // Drawn as its own request answers, not only when the
+            // notification comes (#143).
+            (Asked::Hidden, Ok(a)) => {
+                let me = self.link.participant.clone();
+                if let Some(p) = self.session.people.all.get_mut(&me) {
+                    p.hidden = a.result["hidden"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|s| s.as_str().map(str::to_owned))
+                        .collect();
+                    self.session.people.generation += 1;
+                }
+                self.follow_focus();
+            }
+            (Asked::Cache, Ok(a)) => self.session.cache = Some(a.result),
+            (Asked::CacheToken, Ok(a)) => {
+                self.session.cache_token = Some(a.result);
+                self.read_cache();
+            }
+            // Said beside the field, not only in the status line.
+            (Asked::CacheToken, Err(e)) => self.session.cache_token = Some(json!({"error": e})),
+            (Asked::Sections, Ok(a)) => {
+                let me = self.link.participant.clone();
+                if let Some(p) = self.session.people.all.get_mut(&me) {
+                    p.sections =
+                        serde_json::from_value(a.result["sections"].clone()).unwrap_or_default();
+                    self.session.people.generation += 1;
+                }
+                self.follow_sections();
+            }
+            (Asked::ExplodeShown, Ok(a)) => {
+                let me = self.link.participant.clone();
+                if let Some(p) = self.session.people.all.get_mut(&me) {
+                    p.explode = crate::core::explode::Shown::from_json(&a.result["explode"]);
+                    if p.explode.is_some() {
+                        p.motion = None;
+                    }
+                    self.session.people.generation += 1;
+                }
+                self.assembly.explodes.sliding = None;
+                self.follow_explode();
+                self.follow_motion();
+            }
+            (Asked::MotionShown, Ok(a)) => {
+                let me = self.link.participant.clone();
+                if let Some(p) = self.session.people.all.get_mut(&me) {
+                    p.motion = crate::core::motion::Shown::from_json(&a.result["motion"]);
+                    if p.motion.is_some() {
+                        p.explode = None;
+                    }
+                    self.session.people.generation += 1;
+                }
+                self.assembly.motions.sliding = None;
+                self.follow_explode();
+                self.follow_motion();
+            }
+            (Asked::Doctor, Ok(a)) => {
+                self.session.doctor = Some(crate::core::doctor::report_of(&a.result))
+            }
+            // A whole reading, or one changed setting: read them all again,
+            // which also brings the project revision up to date.
+            (Asked::Config, Ok(a)) if a.result.get("settings").is_some() => {
+                self.session.settings.reset(&a.result);
+                self.model.base = self.display_quality();
+            }
+            (Asked::Config, Ok(_)) => self.load_settings(),
+            (_, Err(e)) => self.fail(e),
+        }
     }
 }

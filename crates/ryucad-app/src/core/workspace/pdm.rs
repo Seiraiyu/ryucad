@@ -55,7 +55,7 @@ impl Workspace {
             part: part.clone(),
             rev: self.form_rev(),
         };
-        self.send(req, Pending::Props(part, before));
+        self.send(req, Pending::Pdm(pdm::Asked::Props(part, before)));
     }
 
     /// Saves what was typed into the Part section.
@@ -64,7 +64,7 @@ impl Workspace {
         p.saving = true;
         p.error = None;
         let req = p.request();
-        self.send(req, Pending::PropsSave);
+        self.send(req, Pending::Pdm(pdm::Asked::PropsSave));
     }
 
     /// Reads the release records the first time the Releases tile shows.
@@ -85,9 +85,12 @@ impl Workspace {
     /// now on they are read again as they change.
     pub fn load_releases(&mut self) {
         self.pdm.releases_open = true;
-        self.send(Request::ReleaseList { part: None }, Pending::States);
+        self.send(
+            Request::ReleaseList { part: None },
+            Pending::Pdm(pdm::Asked::States),
+        );
         let req = Request::ReleaseCheck { results: false };
-        self.send(req, Pending::ReleaseCheck);
+        self.send(req, Pending::Pdm(pdm::Asked::ReleaseCheck));
     }
 
     /// The dry run of proposing `part`, for its Propose dialog: the label
@@ -100,7 +103,7 @@ impl Workspace {
             expected_revision: None,
             dry_run: true,
         };
-        self.send(req, Pending::ProposeDry(part.to_owned()));
+        self.send(req, Pending::Pdm(pdm::Asked::ProposeDry(part.to_owned())));
     }
 
     /// The revision of `part` the window last saw, to guard a write.
@@ -140,7 +143,7 @@ impl Workspace {
         self.pdm.releases.busy = true;
         self.pdm.releases.error = None;
         self.pdm.releases.done = None;
-        self.send(req, Pending::ReleaseWrite);
+        self.send(req, Pending::Pdm(pdm::Asked::ReleaseWrite));
     }
 
     /// The part whose BOM the BOM tab shows: the window's focus; else
@@ -172,7 +175,7 @@ impl Workspace {
             depth: None,
             format: None,
         };
-        self.send(req, Pending::Bom { flat });
+        self.send(req, Pending::Pdm(pdm::Asked::Bom { flat }));
     }
 
     /// While the window compares, asks for the BOM's diff from the
@@ -185,7 +188,7 @@ impl Workspace {
                     from: Some(c.named().to_owned()),
                     to: None,
                 };
-                self.send(req, Pending::BomDiff);
+                self.send(req, Pending::Pdm(pdm::Asked::BomDiff));
             }
             _ => {
                 self.pdm.bom.take_diff(None);
@@ -230,7 +233,7 @@ impl Workspace {
                 within: Vec::new(),
                 no_dependents: false,
             };
-            self.send(req, Pending::WhereUsed(part.clone()));
+            self.send(req, Pending::Pdm(pdm::Asked::WhereUsed(part.clone())));
             self.ask_org(&part);
         }
     }
@@ -318,7 +321,7 @@ impl Workspace {
             depth: None,
             format: Some("csv".to_owned()),
         };
-        self.send(req, Pending::BomExport(path));
+        self.send(req, Pending::Pdm(pdm::Asked::BomExport(path)));
     }
 
     /// Saves the item number being typed in the BOM tab (`bom.renumber`),
@@ -349,7 +352,7 @@ impl Workspace {
         };
         self.pdm.bom.saving = true;
         self.pdm.bom.edit_error = None;
-        self.send(req, Pending::BomRenumber(e));
+        self.send(req, Pending::Pdm(pdm::Asked::BomRenumber(e)));
     }
 
     /// Reads the BOM again if the tab was opened.
@@ -370,6 +373,192 @@ impl Workspace {
     /// Sets up ryupdm (`pdm.init`): the project's ID and default
     /// settings. The answer is the new settings.
     pub fn pdm_init(&mut self) {
-        self.send(Request::PdmInit {}, Pending::PdmConfig);
+        self.send(Request::PdmInit {}, Pending::Pdm(pdm::Asked::PdmConfig));
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// Every release record and part's release state (`release.list`).
+    States,
+    /// The release checks' findings, for the Releases tab.
+    ReleaseCheck,
+    /// A proposal's dry run, for `part`'s Propose dialog.
+    ProposeDry(String),
+    /// A proposal, an obsolete record or a tag sync, from the Releases tab.
+    ReleaseWrite,
+    /// ryupdm's settings, and whether the project has an ID yet.
+    PdmConfig,
+    /// The BOM tab's indented BOM, or (`flat`) its flat one.
+    Bom {
+        flat: bool,
+    },
+    /// An item number set from the BOM tab (`bom.renumber`).
+    BomRenumber(crate::core::bom::ItemEdit),
+    /// The BOM's CSV, to write at this path.
+    BomExport(PathBuf),
+    /// Where a part is used, for the Part section.
+    WhereUsed(String),
+    /// The BOM tab's `bom.diff` from the compared revision.
+    BomDiff,
+    /// A part's properties for the Part section; after a conflict, with
+    /// the form as it was.
+    Props(String, Option<Box<PartProps>>),
+    PropsSave,
+}
+
+impl Workspace {
+    pub(super) fn answer_pdm(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::States, Ok(a)) => {
+                self.pdm.states.reset(&a.result);
+                self.pdm.releases.list = Some(a.result);
+            }
+            (Asked::ReleaseCheck, r) => match r {
+                Ok(a) => self.pdm.releases.findings = findings(&a.result),
+                // A failing check is still a report.
+                Err(e) if e.code == Code::CheckFailed => {
+                    self.pdm.releases.findings = findings(&e.details);
+                }
+                Err(e) => self.pdm.releases.error = Some(e),
+            },
+            (Asked::ProposeDry(part), r) => match r {
+                Ok(a) => self.pdm.releases.proposal = Some((part, a.result)),
+                Err(e) => self.pdm.releases.error = Some(e),
+            },
+            (Asked::ReleaseWrite, r) => {
+                self.pdm.releases.busy = false;
+                match r {
+                    Ok(a) => {
+                        self.pdm.releases.proposal = None;
+                        self.pdm.releases.confirm = None;
+                        self.pdm.releases.note.clear();
+                        self.pdm.releases.done = Some(match a.result.get("path") {
+                            Some(p) => format!("wrote {}", p.as_str().unwrap_or_default()),
+                            None => crate::core::releases::synced(&a.result),
+                        });
+                        self.load_releases();
+                    }
+                    Err(e) => self.pdm.releases.error = Some(e),
+                }
+            }
+            (Asked::Bom { flat }, r) => {
+                match r {
+                    Ok(a) => self.pdm.bom.take(&a.result),
+                    Err(e) => self.pdm.bom.failed(e),
+                }
+                // The flat BOM follows the indented one, whose lines give
+                // it its occurrences, and a compare's diff follows both.
+                if !flat && self.pdm.bom.flat && self.pdm.bom.error.is_none() {
+                    self.ask_bom(true);
+                } else {
+                    self.ask_bom_diff();
+                }
+            }
+            (Asked::BomDiff, r) => {
+                match r {
+                    Ok(a) => self.pdm.bom.take_diff(Some(&a.result)),
+                    Err(e) => self.pdm.bom.diff_failed(e),
+                }
+                self.bom_read();
+            }
+            (Asked::WhereUsed(part), r) => {
+                if self.pdm.where_used_part.as_deref() == Some(part.as_str()) {
+                    use crate::core::where_used::WhereUsed;
+                    let mut w = match r {
+                        Ok(a) => WhereUsed::from_answer(&part, &a.result),
+                        Err(e) => WhereUsed::failed(&part, e),
+                    };
+                    // The organization's answer may have come first; else
+                    // the last one stands until the new one comes.
+                    match self.pdm.org_early.take() {
+                        Some((p, rows)) if p == part => w.org = Some(rows),
+                        _ => {
+                            w.org = self
+                                .pdm
+                                .where_used
+                                .take()
+                                .filter(|old| old.part == part)
+                                .and_then(|old| old.org);
+                        }
+                    }
+                    self.pdm.where_used = Some(w);
+                }
+            }
+            (Asked::BomExport(path), a) => {
+                let Some(e) = self.pdm.bom_export.as_mut() else {
+                    return;
+                };
+                e.waiting = false;
+                let written = a.and_then(|a| {
+                    let csv = a.result["csv"].as_str().ok_or_else(|| {
+                        Error::new(Code::Internal, "the BOM came without its CSV")
+                    })?;
+                    ryucad::doc::project::write_atomic(&path, csv)?;
+                    Ok(csv.len())
+                });
+                match written {
+                    Ok(n) => e.done = Some((path.display().to_string(), n)),
+                    Err(err) => e.error = Some(err),
+                }
+            }
+            (Asked::BomRenumber(edit), r) => {
+                self.pdm.bom.saving = false;
+                match r {
+                    Ok(_) => self.pdm.bom.editing = None,
+                    // Someone renumbered first: read again, and say what
+                    // changed.
+                    Err(e) if e.code == Code::Conflict => {
+                        self.pdm.bom.editing = None;
+                        self.pdm.bom.conflict = Some(edit);
+                    }
+                    Err(e) => self.pdm.bom.edit_error = Some(e.message),
+                }
+                self.load_bom();
+            }
+            (Asked::PdmConfig, Ok(a)) => {
+                let was = self.pdm_ready();
+                self.pdm.pdm_config = Some(a.result);
+                // Set up just now: the properties' faults may have moved.
+                if !was
+                    && self.pdm_ready()
+                    && let Some(part) = self.pdm.props_part.clone()
+                {
+                    self.read_props(part, None);
+                }
+            }
+            (Asked::Props(part, before), Ok(a)) => {
+                if self.pdm.props_part.as_deref() == Some(part.as_str()) {
+                    self.pdm.props = Some(match (before, &self.pdm.props) {
+                        (Some(b), _) => b.reloaded(&a.result),
+                        // Read again under someone typing (after Set up
+                        // PDM): what they typed stays.
+                        (None, Some(p)) if p.part == part => p.refreshed(&a.result),
+                        (None, _) => PartProps::from_get(&a.result),
+                    });
+                }
+            }
+            (Asked::PropsSave, Ok(_)) => {
+                if let Some(p) = &self.pdm.props {
+                    let part = p.part.clone();
+                    self.read_props(part, None);
+                }
+            }
+            (Asked::PropsSave, Err(e)) => {
+                if let Some(p) = &mut self.pdm.props {
+                    p.saving = false;
+                    if e.code == Code::Conflict {
+                        let before = Box::new(p.clone());
+                        let part = p.part.clone();
+                        self.read_props(part, Some(before));
+                    } else {
+                        p.error = Some(e);
+                    }
+                }
+            }
+            (_, Err(e)) => self.fail(e),
+        }
     }
 }

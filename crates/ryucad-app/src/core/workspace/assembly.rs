@@ -57,7 +57,7 @@ impl Workspace {
             part: part.clone(),
             instances: Vec::new(),
         };
-        self.send(req, Pending::Interference(part));
+        self.send(req, Pending::Assembly(assembly::Asked::Interference(part)));
     }
 
     /// Finds the shown assembly's clearances (`clearance`); nothing when it
@@ -72,7 +72,7 @@ impl Workspace {
             instances: Vec::new(),
             below: None,
         };
-        self.send(req, Pending::Clearance(part));
+        self.send(req, Pending::Assembly(assembly::Asked::Clearance(part)));
     }
 
     /// Diagnoses the project again after it changed, so badges don't
@@ -124,7 +124,7 @@ impl Workspace {
             mates: Vec::new(),
         };
         let part = d.part.clone();
-        self.send(req, Pending::DragSolve(part));
+        self.send(req, Pending::Assembly(assembly::Asked::DragSolve(part)));
     }
 
     /// Ends a drag, writing where it left the instance with one
@@ -156,7 +156,7 @@ impl Workspace {
         // for the person to say more in.
         self.send_with(
             req,
-            Pending::DragMove(d.part),
+            Pending::Assembly(assembly::Asked::DragMove(d.part)),
             Proposal {
                 comment: Some(ROUGH_COMMENT.into()),
                 rough: true,
@@ -234,7 +234,7 @@ impl Workspace {
         let req = m.preview(self.model_rev());
         self.assembly.mover_asked = Some((Instant::now(), asked.0, asked.1));
         self.assembly.mover_waiting = true;
-        self.send(req, Pending::MoveSolve(part));
+        self.send(req, Pending::Assembly(assembly::Asked::MoveSolve(part)));
     }
 
     /// Sends the Move tool's value as `assembly.move` (proposed in
@@ -252,7 +252,10 @@ impl Workspace {
         let part = m.part.clone();
         self.assembly.mover_asked = None;
         self.assembly.mover_waiting = false;
-        self.send(m.request(revision), Pending::MoveWrite(part));
+        self.send(
+            m.request(revision),
+            Pending::Assembly(assembly::Asked::MoveWrite(part)),
+        );
     }
 
     /// Drops the Move tool's value and its preview; the handles stay.
@@ -310,7 +313,10 @@ impl Workspace {
         d.waiting = true;
         let part = d.part.clone();
         let asked = d.asked;
-        self.send(req, Pending::MatePreview(part, asked));
+        self.send(
+            req,
+            Pending::Assembly(assembly::Asked::MatePreview(part, asked)),
+        );
     }
 
     /// Sends the dialog's mate (`feature.add`; proposed in Annotate)
@@ -328,7 +334,7 @@ impl Workspace {
         let Some(req) = d.add(revision) else { return };
         self.model.preview.retain(|(p, _), _| *p != part);
         self.model.generation += 1;
-        self.send(req, Pending::MateAdd(part));
+        self.send(req, Pending::Assembly(assembly::Asked::MateAdd(part)));
     }
 
     /// Closes the Mate dialog and drops its preview.
@@ -345,7 +351,7 @@ impl Workspace {
             let req = Request::ExplodeList {
                 part: Some(p.clone()),
             };
-            self.send(req, Pending::Explodes(p));
+            self.send(req, Pending::Assembly(assembly::Asked::Explodes(p)));
         }
     }
 
@@ -434,7 +440,10 @@ impl Workspace {
             self.assembly.explodes.revision.clone(),
         );
         self.sync_explode();
-        self.send(req, Pending::ExplodeSaved(part, Some(id)));
+        self.send(
+            req,
+            Pending::Assembly(assembly::Asked::ExplodeSaved(part, Some(id))),
+        );
     }
 
     /// Takes step `k` out of the shown explode, or deletes the explode
@@ -461,7 +470,10 @@ impl Workspace {
                 self.assembly.explodes.revision.clone(),
             )
         };
-        self.send(req, Pending::ExplodeSaved(part, Some(e.id)));
+        self.send(
+            req,
+            Pending::Assembly(assembly::Asked::ExplodeSaved(part, Some(e.id))),
+        );
     }
 
     /// Reads the motions of the assembly they are of (`motion.list`).
@@ -471,7 +483,7 @@ impl Workspace {
                 Request::MotionList {
                     part: Some(p.clone()),
                 },
-                Pending::Motions(p),
+                Pending::Assembly(assembly::Asked::Motions(p)),
             );
         }
     }
@@ -486,7 +498,10 @@ impl Workspace {
                 steps: None,
                 frames: None,
             };
-            self.send(req, Pending::MotionFrames(s.part, s.motion));
+            self.send(
+                req,
+                Pending::Assembly(assembly::Asked::MotionFrames(s.part, s.motion)),
+            );
         }
     }
 
@@ -531,7 +546,10 @@ impl Workspace {
             poses: false,
             refine: None,
         };
-        self.send(req, Pending::MotionSwept(s.part, s.motion));
+        self.send(
+            req,
+            Pending::Assembly(assembly::Asked::MotionSwept(s.part, s.motion)),
+        );
     }
 
     /// Jumps the slider to `fraction` and writes it (a sweep's Show).
@@ -567,7 +585,7 @@ impl Workspace {
             &steps,
             self.assembly.motions.revision.clone(),
         ) {
-            Ok(req) => self.send(req, Pending::MotionSaved(part)),
+            Ok(req) => self.send(req, Pending::Assembly(assembly::Asked::MotionSaved(part))),
             Err(why) => self.fail(Error::new(Code::InvalidParam, why)),
         }
     }
@@ -596,5 +614,226 @@ impl Workspace {
             Some((p, offsets))
         });
         self.model.explode(moved);
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// An assembly's interference (`interference`).
+    Interference(String),
+    /// An assembly's clearances (`clearance`).
+    Clearance(String),
+    /// A drag's preview solve (`assembly.solve`), for this assembly.
+    DragSolve(String),
+    /// A drag's move, written (`assembly.move`).
+    DragMove(String),
+    /// The Move tool's preview of an assembly, and its write.
+    MoveSolve(String),
+    MoveWrite(String),
+    /// The Mate dialog's preview of an assembly, and its add.
+    MatePreview(String, u64),
+    MateAdd(String),
+    /// An assembly's explodes (`explode.list`).
+    Explodes(String),
+    /// An assembly's explode written or deleted, to show `explode` next
+    /// if it is still there.
+    ExplodeSaved(String, Option<String>),
+    /// An assembly's motions (`motion.list`).
+    Motions(String),
+    /// A motion's frames (`motion.frames`): its assembly and ID.
+    MotionFrames(String, String),
+    /// A motion written (`motion.save`), of an assembly.
+    MotionSaved(String),
+    /// A motion swept with interference: its assembly and ID.
+    MotionSwept(String, String),
+}
+
+impl Workspace {
+    pub(super) fn answer_assembly(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::DragSolve(part), a) => {
+                let mut again = false;
+                if let Some(d) = self.assembly.drag.as_mut().filter(|d| d.part == part) {
+                    d.waiting = false;
+                    again = d.asked.is_some_and(|(_, t)| t != d.translate);
+                }
+                match a {
+                    // Only while it is still dragged: a late answer after
+                    // the drop would undo the written move's look.
+                    Ok(a) if self.assembly.drag.is_some() => self.preview_poses(&part, &a.result),
+                    Ok(_) => {}
+                    Err(e) => self.fail(e),
+                }
+                if again {
+                    self.ask_drag();
+                }
+            }
+            (Asked::MoveSolve(part), a) => {
+                self.assembly.mover_waiting = false;
+                let on = self.assembly.mover.as_ref().is_some_and(|m| m.part == part);
+                match a {
+                    // A late answer after the tool went would undo the
+                    // written move's look.
+                    Ok(a) if on => self.preview_poses(&part, &a.result),
+                    Ok(_) => {}
+                    Err(e) => {
+                        if let Some(m) = self.assembly.mover.as_mut().filter(|_| on) {
+                            m.error = Some(e.message.clone());
+                        }
+                    }
+                }
+            }
+            (Asked::MatePreview(part, asked), a) => {
+                let Some(d) = self
+                    .assembly
+                    .mating
+                    .as_mut()
+                    .filter(|d| d.part == part && d.asked == asked)
+                else {
+                    return;
+                };
+                match a {
+                    Ok(a) => {
+                        d.previewed(Ok(a.result["converged"].as_bool().unwrap_or(false)));
+                        self.model.preview.retain(|(p, _), _| *p != part);
+                        self.preview_poses(&part, &a.result);
+                    }
+                    Err(e) => {
+                        let code = serde_json::to_value(e.code)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned));
+                        d.previewed(Err((code.unwrap_or_default(), e.message.clone())));
+                        self.model.preview.retain(|(p, _), _| *p != part);
+                        self.model.generation += 1;
+                    }
+                }
+            }
+            (Asked::MateAdd(_), Err(e)) => self.fail(e),
+            (Asked::MateAdd(_), Ok(_)) => {}
+            (Asked::MoveWrite(part), a) => {
+                self.model.preview.retain(|(p, _), _| *p != part);
+                self.model.generation += 1;
+                if let Err(e) = a {
+                    self.fail(e);
+                }
+            }
+            (Asked::DragMove(part), a) => {
+                if let Err(e) = a {
+                    self.model.preview.retain(|(p, _), _| *p != part);
+                    self.model.generation += 1;
+                    self.fail(e);
+                }
+            }
+            (Asked::Explodes(part), Ok(a)) => {
+                if self.assembly.explodes.part.as_deref() == Some(part.as_str()) {
+                    self.assembly.explodes.listed(&part, &a.result);
+                    self.sync_explode();
+                }
+            }
+            (Asked::Motions(part), Ok(a)) => {
+                if self.assembly.motions.part.as_deref() == Some(part.as_str()) {
+                    self.assembly.motions.listed(&part, &a.result);
+                    if self.assembly.motions.shown.is_some()
+                        && !self.assembly.motions.frames_current()
+                    {
+                        self.read_frames();
+                    }
+                    self.sync_moved();
+                }
+            }
+            (Asked::MotionFrames(part, id), Ok(a)) => {
+                let wanted = self
+                    .assembly
+                    .motions
+                    .shown
+                    .as_ref()
+                    .is_some_and(|s| s.part == part && s.motion == id);
+                if wanted {
+                    self.assembly.motions.frames =
+                        crate::core::motion::Frames::from_json(&a.result);
+                    self.sync_moved();
+                }
+            }
+            (Asked::MotionSaved(part), r) => match r {
+                Ok(_) => {
+                    if self.assembly.motions.part.as_deref() == Some(part.as_str()) {
+                        self.assembly.motions.editing = None;
+                        self.read_motions();
+                    }
+                }
+                Err(e) => self.fail(e),
+            },
+            (Asked::MotionSwept(part, id), r) => {
+                let Some(w) = self
+                    .assembly
+                    .motions
+                    .sweep
+                    .as_mut()
+                    .filter(|w| w.part == part && w.motion == id)
+                else {
+                    return;
+                };
+                match r {
+                    Ok(a) => *w = crate::core::motion::Sweep::from_json(&a.result),
+                    Err(e) => {
+                        w.loaded = true;
+                        w.error = Some(e.message.clone());
+                    }
+                }
+                self.model.generation += 1;
+            }
+            (Asked::ExplodeSaved(part, show), r) => match r {
+                Ok(a) => {
+                    if self.assembly.explodes.part.as_deref() == Some(part.as_str()) {
+                        self.read_explodes();
+                    }
+                    // A new explode, or one still there, is shown.
+                    if let Some(id) = show
+                        && a.result.get("steps").is_some()
+                        && self
+                            .assembly
+                            .explodes
+                            .shown
+                            .as_ref()
+                            .is_none_or(|s| s.explode != id)
+                    {
+                        self.show_explode(Some(&id), Some(1.0), false);
+                    }
+                    self.assembly.explodes.name.clear();
+                }
+                Err(e) => {
+                    self.sync_explode();
+                    self.fail(e);
+                }
+            },
+            (Asked::Clearance(part), a) => {
+                let Some(c) = self.assembly.clearance.as_mut().filter(|c| c.part == part) else {
+                    return;
+                };
+                match a {
+                    Ok(a) => c.take(&a.result),
+                    Err(e) => c.failed(e),
+                }
+                self.model.generation += 1;
+            }
+            (Asked::Interference(part), a) => {
+                let Some(i) = self
+                    .assembly
+                    .interference
+                    .as_mut()
+                    .filter(|i| i.part == part)
+                else {
+                    return;
+                };
+                match a {
+                    Ok(a) => i.take(&a.result),
+                    Err(e) => i.failed(e),
+                }
+                self.model.generation += 1;
+            }
+            (_, Err(e)) => self.fail(e),
+        }
     }
 }

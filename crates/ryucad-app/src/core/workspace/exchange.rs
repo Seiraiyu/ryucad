@@ -29,7 +29,7 @@ impl Workspace {
         i.error = None;
         i.done = None;
         let req = import_request(&key.0, i.update.clone(), true, key.1);
-        self.send(req, Pending::ImportPlan(key));
+        self.send(req, Pending::Exchange(exchange::Asked::ImportPlan(key)));
     }
 
     /// Imports the open import's file, as its plan said: the same
@@ -42,7 +42,7 @@ impl Workspace {
         i.waiting = true;
         i.error = None;
         let req = import_request(&key.0, i.update.clone(), false, key.1);
-        self.send(req, Pending::Import(key));
+        self.send(req, Pending::Exchange(exchange::Asked::Import(key)));
     }
 
     /// Opens File > Export… on `part`, with the last export's choices.
@@ -83,6 +83,55 @@ impl Workspace {
         e.faults.clear();
         self.exchange.export_choices = e.choices.clone();
         let req = e.request(&path);
-        self.send(req, Pending::Export);
+        self.send(req, Pending::Exchange(exchange::Asked::Export));
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// An import's dry run, for the file at this path, as solids or not.
+    ImportPlan((String, bool)),
+    /// An import or update of the file at this path, written.
+    Import((String, bool)),
+    /// An export, which the daemon writes where the dialog says.
+    Export,
+}
+
+impl Workspace {
+    pub(super) fn answer_exchange(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            // Only the dialog for that file takes an answer: one opened
+            // since asks again.
+            (Asked::ImportPlan(key), a) => {
+                let Some(i) = self.exchange.import.as_mut().filter(|i| i.key() == key) else {
+                    return;
+                };
+                i.waiting = false;
+                match a {
+                    Ok(a) => i.plan = Some((key, crate::core::step::Plan::from_answer(&a.result))),
+                    Err(e) => i.error = Some(e),
+                }
+            }
+            (Asked::Import(key), a) => {
+                let Some(i) = self.exchange.import.as_mut().filter(|i| i.key() == key) else {
+                    return;
+                };
+                i.waiting = false;
+                match a {
+                    Ok(a) => {
+                        i.done = Some(crate::core::step::Plan::from_answer(&a.result));
+                        i.plan = None;
+                    }
+                    Err(e) => i.error = Some(e),
+                }
+            }
+            (Asked::Export, a) => {
+                if let Some(e) = self.exchange.export.as_mut() {
+                    e.answered(a.map(|a| a.result));
+                }
+            }
+        }
     }
 }

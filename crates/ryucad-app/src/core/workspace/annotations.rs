@@ -50,7 +50,7 @@ impl Workspace {
         };
         m.posting = true;
         m.note = None;
-        self.send(req, Pending::MarkupPost);
+        self.send(req, Pending::Annotations(annotations::Asked::MarkupPost));
     }
 
     /// The view marks the viewport draws on the glass (design 423, When):
@@ -156,7 +156,10 @@ impl Workspace {
             view: None,
             author: None,
         };
-        self.send(req, Pending::AnnotationWrite);
+        self.send(
+            req,
+            Pending::Annotations(annotations::Asked::AnnotationWrite),
+        );
     }
 
     pub fn reply_annotation(&mut self, id: &str, text: String) {
@@ -166,7 +169,10 @@ impl Workspace {
             expect: None,
             author: None,
         };
-        self.send(req, Pending::AnnotationWrite);
+        self.send(
+            req,
+            Pending::Annotations(annotations::Asked::AnnotationWrite),
+        );
     }
 
     pub fn edit_annotation(&mut self, id: &str, comment: String) {
@@ -179,7 +185,10 @@ impl Workspace {
             expect: None,
             author: None,
         };
-        self.send(req, Pending::AnnotationWrite);
+        self.send(
+            req,
+            Pending::Annotations(annotations::Asked::AnnotationWrite),
+        );
     }
 
     pub fn delete_annotation(&mut self, id: &str) {
@@ -188,7 +197,10 @@ impl Workspace {
             expect: None,
             author: None,
         };
-        self.send(req, Pending::AnnotationWrite);
+        self.send(
+            req,
+            Pending::Annotations(annotations::Asked::AnnotationWrite),
+        );
     }
 
     /// Takes an annotation's change into the working files (Direct edit).
@@ -199,7 +211,10 @@ impl Workspace {
             expect: None,
             author: None,
         };
-        self.send(req, Pending::AnnotationWrite);
+        self.send(
+            req,
+            Pending::Annotations(annotations::Asked::AnnotationWrite),
+        );
     }
 
     /// Chooses an annotation (or none): its view restored, and with a
@@ -230,5 +245,50 @@ impl Workspace {
             None => {}
         }
         self.model.generation += 1;
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// `annotation.list`.
+    Annotations,
+    /// An annotation made, answered or closed from the window.
+    AnnotationWrite,
+    /// The Markup bar's Post (`annotation.create` or `annotation.edit`).
+    MarkupPost,
+}
+
+impl Workspace {
+    pub(super) fn answer_annotations(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::Annotations, Ok(a)) => {
+                self.annotations.reset(&a.result);
+                self.model.generation += 1;
+                self.follow_draft();
+            }
+            (Asked::AnnotationWrite, Ok(_)) => {}
+            (Asked::MarkupPost, a) => match a {
+                // Posted: the bar closes, and the annotation is chosen, so
+                // its marks are drawn in its view.
+                Ok(a) => {
+                    self.annotations.markup = None;
+                    if let Some(id) = a.result["annotation"]["id"].as_str() {
+                        let id = id.to_owned();
+                        self.choose_annotation(Some(&id));
+                    }
+                }
+                // Refused: said on the bar, the marks kept.
+                Err(e) => match self.annotations.markup.as_mut() {
+                    Some(m) => {
+                        m.posting = false;
+                        m.note = Some(e.message.clone());
+                    }
+                    None => self.fail(e),
+                },
+            },
+            (_, Err(e)) => self.fail(e),
+        }
     }
 }

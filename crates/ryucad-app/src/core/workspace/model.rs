@@ -57,7 +57,10 @@ impl Workspace {
                 solid: (!key.1.is_empty()).then(|| key.1.clone()),
                 rev: self.model_rev(),
             };
-            self.send(req, Pending::SheetTable(key.clone(), revision));
+            self.send(
+                req,
+                Pending::Model(model::Asked::SheetTable(key.clone(), revision)),
+            );
         }
     }
 
@@ -99,7 +102,10 @@ impl Workspace {
                 fixed: None,
                 bends: Vec::new(),
             };
-            self.send(req, Pending::FlatLines(key.clone(), revision));
+            self.send(
+                req,
+                Pending::Model(model::Asked::FlatLines(key.clone(), revision)),
+            );
         }
     }
 
@@ -204,7 +210,7 @@ impl Workspace {
             flat: Some(key.1.clone()),
             before: None,
         };
-        self.send(req, Pending::FlatMesh(key, revision));
+        self.send(req, Pending::Model(model::Asked::FlatMesh(key, revision)));
     }
 
     /// Turns the camera to the flat view, once its body and lines have
@@ -269,7 +275,10 @@ impl Workspace {
             quality: None,
             rev: self.model_rev(),
         };
-        self.send(req, Pending::Sweep(key.clone(), revision));
+        self.send(
+            req,
+            Pending::Model(model::Asked::Sweep(key.clone(), revision)),
+        );
     }
 
     /// Reads the faces `key` made, unless it is a sketch: it makes none. A
@@ -297,7 +306,7 @@ impl Workspace {
                 flat: None,
                 before: Some(key.1.clone()),
             };
-            self.send(req, Pending::Deleted(key.clone()));
+            self.send(req, Pending::Model(model::Asked::Deleted(key.clone())));
         }
     }
 
@@ -340,7 +349,7 @@ impl Workspace {
             entity: None,
             rev: self.model_rev(),
         };
-        self.send(req, Pending::Made(key, revision));
+        self.send(req, Pending::Model(model::Asked::Made(key, revision)));
     }
 
     /// Fetches the drawings of `part`'s sketches, paths and helices that
@@ -353,7 +362,7 @@ impl Workspace {
                 quality: None,
                 rev: self.model_rev(),
             };
-            self.send(req, Pending::Sketch(key, revision));
+            self.send(req, Pending::Model(model::Asked::Sketch(key, revision)));
         }
         for (key, revision) in self.model.ask_paths(part) {
             let req = Request::PathGet {
@@ -362,7 +371,7 @@ impl Workspace {
                 quality: None,
                 rev: self.model_rev(),
             };
-            self.send(req, Pending::Path(key, revision));
+            self.send(req, Pending::Model(model::Asked::Path(key, revision)));
         }
         if let Some(revision) = self.model.ask_holes(part) {
             let req = Request::HolesList {
@@ -373,7 +382,10 @@ impl Workspace {
                 reference: None,
                 rev: self.model_rev(),
             };
-            self.send(req, Pending::Holes(part.to_owned(), revision));
+            self.send(
+                req,
+                Pending::Model(model::Asked::Holes(part.to_owned(), revision)),
+            );
         }
     }
 
@@ -406,7 +418,7 @@ impl Workspace {
                         flat: None,
                         before: None,
                     };
-                    self.send(req, Pending::Mesh(key, hash));
+                    self.send(req, Pending::Model(model::Asked::Mesh(key, hash)));
                 }
             }
         }
@@ -426,7 +438,7 @@ impl Workspace {
                     flat: None,
                     before: None,
                 };
-                self.send(req, Pending::Meshes(batch.to_vec()));
+                self.send(req, Pending::Model(model::Asked::Meshes(batch.to_vec())));
             }
         }
     }
@@ -451,7 +463,7 @@ impl Workspace {
                 flat: None,
                 before: None,
             };
-            self.send(req, Pending::Level(hash, level));
+            self.send(req, Pending::Model(model::Asked::Level(hash, level)));
         }
     }
 
@@ -499,6 +511,287 @@ impl Workspace {
             part: Some(id.to_owned()),
             rev: rev.clone(),
         };
-        self.send(req, Pending::Rebuild(id.to_owned(), rev));
+        self.send(
+            req,
+            Pending::Model(model::Asked::Rebuild(id.to_owned(), rev)),
+        );
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    Info,
+    Parts,
+    /// A part's report, asked for at this revision (the draft, or the
+    /// working files).
+    Rebuild(String, Option<String>),
+    /// A body's mesh, asked for at this hash.
+    Mesh(BodyKey, String),
+    /// Several bodies of one assembly's occurrences, each at its hash.
+    Meshes(Vec<(BodyKey, String)>),
+    /// A body's mesh at another level of detail.
+    Level(String, ryucad::mesh::Quality),
+    /// A sketch's drawing, asked for at this part revision.
+    Sketch(BodyKey, String),
+    /// A path's or helix's drawing, asked for at this part revision.
+    Path(BodyKey, String),
+    /// A part's holes, at its revision.
+    Holes(String, String),
+    /// The chosen sweep's or loft's drawing, asked for at this part
+    /// revision.
+    Sweep(BodyKey, String),
+    /// A chosen delete's ghost: the delete it was asked for.
+    Deleted(BodyKey),
+    /// The model's solids, read for the faces a feature made, at this
+    /// part revision.
+    Made(BodyKey, String),
+    /// A sheet metal solid's table (`sheet.get`): its part and the solid
+    /// asked for, at a part revision.
+    SheetTable(BodyKey, String),
+    /// A sheet metal solid's flat bend lines (`flat.get`), likewise.
+    FlatLines(BodyKey, String),
+    /// The flat view's body (`mesh.get` with `flat`), likewise.
+    FlatMesh(BodyKey, String),
+}
+
+impl Workspace {
+    pub(super) fn answer_model(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::Info, Ok(a)) => {
+                self.model.default_unit = a.result["default_unit"].as_str().unwrap_or("mm").into();
+            }
+            (Asked::Parts, Ok(a)) => {
+                let listed: BTreeMap<String, Listed> = a.result["parts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| Some((p["part"].as_str()?.to_owned(), Listed::from_json(p))))
+                    .collect();
+                // Parts deleted while the window wasn't listening go.
+                let gone: Vec<String> = self
+                    .model
+                    .parts
+                    .keys()
+                    .filter(|id| !listed.contains_key(*id))
+                    .cloned()
+                    .collect();
+                for id in gone {
+                    self.model.remove_part(&id);
+                }
+                self.model.model_parts = a.result["model"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p.as_str().map(str::to_owned))
+                    .collect();
+                // A project of a few parts loads whole; a larger one, what
+                // the window shows, and the rest as its tree asks.
+                let whole = listed.len() <= LOAD_WHOLE;
+                let shown: Vec<String> = self.model.shown().iter().map(|s| s.to_string()).collect();
+                for (id, l) in &listed {
+                    match &l.error {
+                        Some(e) => {
+                            self.model.apply_part(
+                                &json!({"part": id, "revision": l.revision, "error": e}),
+                            );
+                        }
+                        None if whole
+                            || shown.contains(id)
+                            || self.model.parts.contains_key(id) =>
+                        {
+                            self.ask_part(id);
+                        }
+                        None => {}
+                    }
+                }
+                self.model.listed = listed;
+                self.model.generation += 1;
+            }
+            (Asked::Rebuild(id, rev), r) => {
+                // Asked at a revision the window no longer draws: its
+                // answer is dropped, and the part asked for at the one it
+                // draws unless that is on its way already (a part not yet
+                // loaded when the revision moved isn't asked again then).
+                let now = self.model_rev();
+                if rev != now {
+                    if self.model.asked_at.get(&id) != Some(&now) {
+                        self.model.loading.remove(&id);
+                        self.ask_part(&id);
+                    }
+                    return;
+                }
+                self.model.loading.remove(&id);
+                self.model.asked_at.remove(&id);
+                // A failed feature fails the rebuild; the report is in the details.
+                let report = match r {
+                    Ok(a) => a.result["parts"][0].clone(),
+                    Err(e) if e.code == Code::RebuildFailed => e.details["parts"][0].clone(),
+                    Err(e) => json!({"part": id, "error": e}),
+                };
+                self.part_changed(&report);
+            }
+            // A delete chosen before this one answers too late to matter:
+            // its ghosts and its failures alike are dropped.
+            (Asked::Deleted(key), _)
+                if !self.model.deleted.as_ref().is_some_and(|d| d.is_for(&key)) => {}
+            (Asked::Deleted(key), a) => {
+                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(bodies))) => {
+                        for b in bodies {
+                            if self.model.deleted.as_mut().is_some_and(|d| d.take(&key, b)) {
+                                self.model.generation += 1;
+                            }
+                        }
+                    }
+                    Ok(Some(Err(e))) | Err(e) => self.fail(e),
+                    Ok(None) => {
+                        self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
+                    }
+                }
+            }
+            (Asked::Sketch(key, revision), a) => {
+                self.model.sketch_answered(&key, &revision);
+                match a {
+                    Ok(a) => {
+                        self.model
+                            .take_sketch(&key, crate::core::sketch::Drawing::from_get(&a.result));
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            (Asked::Path(key, revision), a) => {
+                self.model.path_answered(&key, &revision);
+                match a {
+                    Ok(a) => {
+                        self.model
+                            .take_path(&key, crate::core::datums::PathDrawing::from_get(&a.result));
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            // A part that doesn't rebuild has no holes to show.
+            (Asked::Holes(part, revision), a) => {
+                self.model.holes_answered(&part, &revision);
+                let mut t = match a {
+                    Ok(a) => crate::core::threads::HoleTable::from_list(&a.result),
+                    Err(_) => crate::core::threads::HoleTable::default(),
+                };
+                t.revision = revision;
+                self.model.take_holes(&part, t);
+            }
+            (Asked::Sweep(key, _), a) => {
+                if self.model.made_for.as_ref() == Some(&key) {
+                    match a {
+                        Ok(a) => {
+                            self.model.swept =
+                                Some(crate::core::sweeps::SweepDrawing::from_get(key, &a.result));
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                    self.model.generation += 1;
+                }
+            }
+            (Asked::SheetTable(key, revision), a) => {
+                use crate::core::sheet::{SheetTable, Shown};
+                let t = match a {
+                    Ok(a) => Shown::Table(SheetTable::from_answer(&revision, &a.result)),
+                    Err(e) => Shown::Failed(e),
+                };
+                self.model.sheets.take_table(key, revision, t);
+                self.model.generation += 1;
+            }
+            (Asked::FlatLines(key, revision), a) => {
+                let f = a.map(|a| crate::core::flat::FlatLines::from_answer(&a.result));
+                if let Some(v) =
+                    self.model.flat_view.as_mut().filter(|v| {
+                        (v.part.clone(), v.solid.clone()) == key && v.revision == revision
+                    })
+                {
+                    match &f {
+                        Ok(l) => v.lines = Some(l.clone()),
+                        Err(e) => {
+                            // The flat no longer reads: draw the folded
+                            // body again, not the last revision's flat.
+                            v.lines = None;
+                            v.error = Some(e.clone());
+                            self.model.show_flat(None);
+                        }
+                    }
+                }
+                self.model.sheets.take_flat(key, revision, f);
+                self.turn_to_flat();
+                self.model.generation += 1;
+            }
+            (Asked::FlatMesh(key, revision), a) => {
+                let wanted = self.model.flat_view.as_ref().is_some_and(|v| {
+                    (v.part.clone(), v.solid.clone()) == key && v.revision == revision
+                });
+                if !wanted {
+                    return;
+                }
+                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(mut bodies))) if bodies.len() == 1 => {
+                        let body = bodies.remove(0);
+                        // The solid it is, named now the daemon has chosen it.
+                        let solid = (key.0.clone(), body.feature.clone());
+                        if let Some(v) = &mut self.model.flat_view {
+                            v.solid.clone_from(&body.feature);
+                        }
+                        self.model.show_flat(Some((solid, body)));
+                        self.turn_to_flat();
+                    }
+                    Ok(Some(Err(e))) | Err(e) => {
+                        // Refused (an edit left the solid unfolding no
+                        // more): the folded body is drawn again, and the
+                        // view keeps the refusal, not the stale flat.
+                        if let Some(v) = &mut self.model.flat_view {
+                            v.lines = None;
+                            v.error = Some(e.clone());
+                        }
+                        self.model.show_flat(None);
+                        self.fail(e);
+                    }
+                    Ok(_) => {
+                        self.model.show_flat(None);
+                        self.fail(Error::new(Code::Daemon, "a flat came without its body"));
+                    }
+                }
+            }
+            (Asked::Made(key, revision), a) => {
+                if self.model.made_for.as_ref() == Some(&key) {
+                    match a {
+                        Ok(a) => {
+                            self.model.made = Some(Made::from_inspect(&key, &revision, &a.result))
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                    self.model.generation += 1;
+                }
+            }
+            (Asked::Level(hash, level), a) => {
+                let bodies = match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(bodies))) => bodies,
+                    Ok(Some(Err(e))) | Err(e) => {
+                        self.fail(e);
+                        Vec::new()
+                    }
+                    Ok(None) => Vec::new(),
+                };
+                let mut taken = false;
+                for b in bodies.into_iter().filter(|b| b.hash == hash) {
+                    taken |= self.model.take_level(b, level);
+                }
+                if !taken {
+                    self.model.levels_asked.remove(&(hash, level));
+                }
+            }
+            (Asked::Mesh(key, hash), a) => {
+                self.answered_meshes(vec![(key, hash)], a);
+            }
+            (Asked::Meshes(asked), a) => self.answered_meshes(asked, a),
+            (_, Err(e)) => self.fail(e),
+        }
     }
 }

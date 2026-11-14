@@ -57,7 +57,7 @@ impl Workspace {
             let req = Request::ViewList {
                 part: Some(p.clone()),
             };
-            self.send(req, Pending::Views(p));
+            self.send(req, Pending::View(view::Asked::Views(p)));
         }
     }
 
@@ -88,7 +88,7 @@ impl Workspace {
             participant: Some(self.me().to_owned()),
             expected_revision: None,
         };
-        self.send(req, Pending::ViewSaved(part));
+        self.send(req, Pending::View(view::Asked::ViewSaved(part)));
     }
 
     /// Restores named view `id` of the part shown on this window's
@@ -119,7 +119,7 @@ impl Workspace {
             normal_to: Some(face.to_owned()),
             part: None,
         };
-        self.send(req, Pending::NormalTo);
+        self.send(req, Pending::View(view::Asked::NormalTo));
     }
 
     /// Reads how the bodies the window shows look (`appearance.get`).
@@ -130,7 +130,10 @@ impl Workspace {
             participant: None,
             rev: self.model_rev(),
         };
-        self.send(req, Pending::Appearance(self.view.looks_asked));
+        self.send(
+            req,
+            Pending::View(view::Asked::Appearance(self.view.looks_asked)),
+        );
     }
 
     /// Lays what the Appearance window drags over the daemon's looks.
@@ -221,7 +224,7 @@ impl Workspace {
             file_styles: None,
             expected_revision: None,
         };
-        self.send(req, Pending::AppearanceWritten);
+        self.send(req, Pending::View(view::Asked::AppearanceWritten));
     }
 
     /// Takes the Appearance window's target's entry out
@@ -236,7 +239,7 @@ impl Workspace {
             entities: vec![target],
             expected_revision: None,
         };
-        self.send(req, Pending::AppearanceWritten);
+        self.send(req, Pending::View(view::Asked::AppearanceWritten));
     }
 
     /// Closes the Appearance window, dropping anything dragged.
@@ -253,7 +256,7 @@ impl Workspace {
             entities: picks.clone(),
             rev: None,
         };
-        self.send(req, Pending::Measure(picks));
+        self.send(req, Pending::View(view::Asked::Measure(picks)));
     }
 
     /// Measures the Measure tool's picks again: what they name changed.
@@ -266,7 +269,7 @@ impl Workspace {
             entities: picks.clone(),
             rev: self.model_rev(),
         };
-        self.send(req, Pending::Measure(picks));
+        self.send(req, Pending::View(view::Asked::Measure(picks)));
     }
 
     /// What Tools > Mass properties weighs: the solid or occurrence of the
@@ -291,6 +294,91 @@ impl Workspace {
             tolerance: None,
             rev: self.model_rev(),
         };
-        self.send(req, Pending::Mass(of.to_owned()));
+        self.send(req, Pending::View(view::Asked::Mass(of.to_owned())));
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// The Measure tool's picks (`measure`).
+    Measure(Vec<String>),
+    /// What the Mass properties panel weighs (`mass`).
+    Mass(String),
+    /// A part's named views (`view.list`).
+    Views(String),
+    /// A named view of a part, saved (`view.save`).
+    ViewSaved(String),
+    /// A camera normal to a face (`camera.set` with `normal_to`).
+    NormalTo,
+    /// How the shown bodies look (`appearance.get`), the reading's number.
+    Appearance(u64),
+    /// An appearance written (`appearance.set` or `appearance.clear`).
+    AppearanceWritten,
+}
+
+impl Workspace {
+    pub(super) fn answer_view(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::Views(part), Ok(a)) => {
+                if self.view.views.part.as_deref() == Some(part.as_str()) {
+                    self.view.views = crate::core::views::NamedViews::of(&part, &a.result);
+                }
+            }
+            (Asked::ViewSaved(part), a) => match a {
+                Ok(_) => {
+                    if self.view.views.part.as_deref() == Some(part.as_str()) {
+                        self.read_views();
+                    }
+                }
+                Err(e) => {
+                    self.view.views.error = Some(e.clone());
+                    self.fail(e);
+                }
+            },
+            (Asked::Appearance(n), Ok(a)) => {
+                if n == self.view.looks_asked {
+                    self.view.looks_read = crate::core::appearance::read(&a.result);
+                    self.refresh_looks();
+                    // An open window shows its target as it is now.
+                    let now = self.look_of(self.view.appearance.target());
+                    self.view.appearance.reread(now, ryucad::render::SURFACE);
+                }
+            }
+            (Asked::AppearanceWritten, a) => {
+                // What was dragged stays drawn until the new reading.
+                self.view.appearance.dragging = None;
+                match a {
+                    Ok(_) => self.read_appearance(),
+                    Err(e) => {
+                        self.view.appearance.error = Some(e.clone());
+                        self.refresh_looks();
+                        self.fail(e);
+                    }
+                }
+            }
+            (Asked::NormalTo, Ok(a)) => {
+                self.view.looked = serde_json::from_value(a.result["camera"].clone()).ok();
+            }
+            (Asked::Measure(picks), a) => {
+                match a {
+                    Ok(a) => self.view.measure.take(&picks, &a.result),
+                    Err(e) => self.view.measure.failed(&picks, e),
+                }
+                self.model.generation += 1;
+            }
+            (Asked::Mass(of), a) => {
+                let Some(m) = self.view.mass.as_mut().filter(|m| m.of == of) else {
+                    return;
+                };
+                match a {
+                    Ok(a) => m.take(&a.result),
+                    Err(e) => m.failed(e),
+                }
+                self.model.generation += 1;
+            }
+            (_, Err(e)) => self.fail(e),
+        }
     }
 }

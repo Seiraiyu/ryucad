@@ -126,7 +126,7 @@ impl Workspace {
         self.comparing.compare_waiting = true;
         self.comparing.compare_again = false;
         let n = self.comparing.compare_asked;
-        self.send(req, Pending::Compare(n));
+        self.send(req, Pending::Comparing(comparing::Asked::Compare(n)));
     }
 
     /// Fetches the ghosts the compare wants and doesn't have, one body
@@ -155,7 +155,67 @@ impl Workspace {
                 flat: None,
                 before: None,
             };
-            self.send(req, Pending::Ghost(key, hash));
+            self.send(req, Pending::Comparing(comparing::Asked::Ghost(key, hash)));
+        }
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    /// The diff of a compare, the `n`th asked for.
+    Compare(u64),
+    /// A ghost's mesh, asked for at this hash.
+    Ghost(BodyKey, String),
+}
+
+impl Workspace {
+    pub(super) fn answer_comparing(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::Compare(n), r) => {
+                if n == self.comparing.compare_asked {
+                    self.comparing.compare_waiting = false;
+                }
+                if let Some(c) = self
+                    .comparing
+                    .compare
+                    .as_mut()
+                    .filter(|_| n == self.comparing.compare_asked)
+                {
+                    match r {
+                        Ok(a) => c.take_diff(&a.result),
+                        Err(e) => c.failed(e),
+                    }
+                    self.model.generation += 1;
+                    self.fetch_ghosts();
+                }
+                if std::mem::take(&mut self.comparing.compare_again) {
+                    self.ask_diff();
+                }
+            }
+            (Asked::Ghost(key, hash), a) => {
+                let Some(c) = &mut self.comparing.compare else {
+                    return;
+                };
+                c.answered(&key, &hash);
+                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(bodies))) => {
+                        if !bodies.iter().any(|b| b.feature == key.1) {
+                            c.no_ghost(&key, &hash);
+                        }
+                        for b in bodies {
+                            if c.take_ghost(&key.0, b) {
+                                self.model.generation += 1;
+                            }
+                        }
+                    }
+                    Ok(Some(Err(e))) | Err(e) => self.fail(e),
+                    Ok(None) => {
+                        self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
+                    }
+                }
+            }
         }
     }
 }

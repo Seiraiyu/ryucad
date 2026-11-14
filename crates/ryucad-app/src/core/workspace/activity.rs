@@ -13,7 +13,7 @@ impl Workspace {
             part: None,
             limit: Some(100),
         };
-        self.send(req, Pending::History);
+        self.send(req, Pending::Activity(activity::Asked::History));
     }
 
     /// Reads the history again after the project changed, once it was
@@ -36,5 +36,28 @@ impl Workspace {
         }
         due.saturating_duration_since(now)
             .max(Duration::from_millis(100))
+    }
+}
+
+/// What one of this sub-state's requests was for (design 541,
+/// "Typed handles"): `Workspace::answer` routes its answer here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Asked {
+    Activity,
+    History,
+}
+
+impl Workspace {
+    pub(super) fn answer_activity(&mut self, why: Asked, answer: Result<Answer>) {
+        match (why, answer) {
+            (Asked::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
+            (Asked::History, Ok(a)) => self.activity.history = Some(a.result),
+            // Said in the tab, not left spinning.
+            (Asked::History, Err(e)) => {
+                self.activity.history = Some(json!({"error": e.message}));
+                self.fail(e);
+            }
+            (_, Err(e)) => self.fail(e),
+        }
     }
 }
