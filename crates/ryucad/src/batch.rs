@@ -41,6 +41,8 @@ pub fn run(
     capture.defer_solves();
     let mut answers = Vec::with_capacity(requests.len());
     let mut named = BTreeSet::new();
+    // What `prune` keeps: the parts the ensures and creates name.
+    let mut kept: BTreeSet<Id> = BTreeSet::new();
     for (i, (op, req)) in ask.ops.iter().zip(requests).enumerate() {
         // A cancel stops a batch between its ops (and inside one, through
         // the job the capture shares), before anything is written.
@@ -52,10 +54,18 @@ pub fn run(
             .and_then(Value::as_str)
         {
             named.insert(p.to_owned());
+            if matches!(op.method.as_str(), "part.ensure" | "part.create")
+                && let Ok(id) = crate::part::part_id(p)
+            {
+                kept.insert(id);
+            }
         }
         let result = crate::server::dispatch(&mut capture, live.as_deref_mut(), me, req)
             .map_err(|e| at_op(e, i, &op.method))?;
         answers.push(json!({"method": op.method, "result": result}));
+    }
+    if ask.prune {
+        prune(&mut capture, live.as_deref_mut(), me, &kept)?;
     }
     let (assemblies, warnings) = solve_deferred(session, &mut capture)?;
     session.job().check()?;
@@ -84,6 +94,63 @@ pub fn run(
         answer["rebuild"] = rebuild(session, &parts);
     }
     Ok(answer)
+}
+
+/// `prune`: deletes in the capture, through `part.delete` and its
+/// checks, every part not `kept`, one no other part places or inserts at
+/// working first. When none left can go, the first one's own refusal
+/// (`has_dependents`) refuses the batch.
+fn prune(
+    capture: &mut Session,
+    mut live: Option<&mut Live>,
+    me: Option<&str>,
+    kept: &BTreeSet<Id>,
+) -> Result<()> {
+    loop {
+        let doomed: Vec<Id> = capture
+            .project()
+            .parts
+            .keys()
+            .filter(|p| !kept.contains(*p))
+            .cloned()
+            .collect();
+        let Some(first) = doomed.first() else {
+            return Ok(());
+        };
+        let next = doomed
+            .iter()
+            .find(|p| !placed_by_another(capture.project(), p))
+            .unwrap_or(first)
+            .clone();
+        crate::server::dispatch(
+            capture,
+            live.as_deref_mut(),
+            me,
+            Request::PartDelete {
+                part: next.to_string(),
+                expected_revision: None,
+            },
+        )
+        .map_err(|e| e.with("prune", true).with("pointer", "/prune"))?;
+    }
+}
+
+/// Whether another part places `part` as an instance or inserts it, at
+/// working: what `part.delete` refuses.
+fn placed_by_another(project: &crate::doc::project::Project, part: &Id) -> bool {
+    use crate::doc::assembly::Rev;
+    use crate::doc::files::Feature;
+    project
+        .parts
+        .iter()
+        .filter(|(id, _)| *id != part)
+        .any(|(_, p)| {
+            p.features.values().any(|f| match f {
+                Ok(Feature::Instance(i)) => i.part == *part && i.rev == Rev::Working,
+                Ok(Feature::Insert(i)) => i.part == *part && i.rev == Rev::Working,
+                _ => false,
+            })
+        })
 }
 
 /// The solves the ops deferred (plan 31.C), each assembly once: every
@@ -1057,6 +1124,54 @@ mod tests {
         // The example is a real conflict: alone it is refused too.
         let e = call(&mut s, "feature.add", mate).unwrap_err();
         assert_eq!(e.code, Code::AssemblyOverconstrained, "{e:?}");
+    }
+
+    #[test]
+    fn prune_deletes_what_no_ensure_named_unplaced_first() {
+        let pin = json!({"method": "part.ensure", "params": {"part": "pin", "features": [
+            {"id": "shank", "type": "cylinder", "params": {"radius": 2, "height": 10}}]}});
+        // Not asked: nothing else goes.
+        let (_dir, mut s) = twin();
+        let v = call(&mut s, "batch", json!({"ops": [pin], "rebuild": false})).unwrap();
+        assert_eq!(v["parts"].as_object().unwrap().len(), 1, "{v}");
+        // Asked: rig first (it places plate), then plate; pin stays.
+        let v = call(
+            &mut s,
+            "batch",
+            json!({"ops": [pin], "prune": true, "rebuild": false}),
+        )
+        .unwrap();
+        let st = |p: &str| v["parts"][p]["status"].clone();
+        assert_eq!(
+            (st("pin"), st("rig"), st("plate")),
+            (json!("unchanged"), json!("deleted"), json!("deleted")),
+            "{v}"
+        );
+        assert_eq!(s.project().parts.len(), 1);
+        // A kept assembly placing what isn't named: refused, nothing written.
+        let (dir, mut s) = twin();
+        let before = on_disk(dir.path());
+        let rig = json!({"method": "part.ensure", "params": {"part": "rig", "features": [
+            {"id": "base", "type": "instance", "of": "plate", "fixed": true},
+            {"id": "p1", "type": "instance", "of": "pin", "placement": {"origin": [10, 10, 5]}}]}});
+        let e = call(&mut s, "batch", json!({"ops": [rig], "prune": true})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e:?}");
+        assert_eq!(
+            (e.details["prune"].clone(), e.details["pointer"].clone()),
+            (json!(true), json!("/prune"))
+        );
+        assert_eq!(on_disk(dir.path()), before);
+        // part.create names a part too.
+        let (_dir, mut s) = twin();
+        let v = call(
+            &mut s,
+            "batch",
+            json!({"ops": [pin, {"method": "part.create", "params": {"part": "new"}}],
+                   "prune": true, "rebuild": false}),
+        )
+        .unwrap();
+        assert_eq!(v["parts"]["new"]["status"], "created", "{v}");
+        assert_eq!(s.project().parts.len(), 2);
     }
 
     #[test]
