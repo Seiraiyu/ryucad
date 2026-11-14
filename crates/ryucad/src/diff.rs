@@ -5584,6 +5584,25 @@ mod tests {
     }
 
     #[test]
+    fn a_fill_is_one_line_per_value() {
+        let f = "0123456789abcdef0123456789abcdef";
+        let t = text(
+            json!({"format": 26, "kind": "ryucad.feature", "type": "pattern",
+            "form": "fill", "features": ["h"], "targets": ["b"],
+            "face": {"feature": "b", "name": f},
+            "spacing": "20 mm", "margin": "2 mm", "skip": [[-1, 0], [4, 4]]}),
+        );
+        for line in [
+            format!("face = b/{f}"),
+            "spacing = 20 mm".into(),
+            "margin = 2 mm".into(),
+            "skip = [[-1, 0], [4, 4]]".into(),
+        ] {
+            assert!(t.contains(&format!("\n{line}\n")), "{line} in {t}");
+        }
+    }
+
+    #[test]
     fn a_holes_places_are_a_line_each() {
         let f = "0123456789abcdef0123456789abcdef";
         let t = text(

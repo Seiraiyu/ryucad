@@ -2012,6 +2012,35 @@ mod tests {
     }
 
     #[test]
+    fn a_fills_face_and_seed_follow_renames() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let fl = json!({"format": 26, "kind": "ryucad.feature", "type": "pattern",
+            "form": "fill", "features": ["h"], "targets": ["shaft"], "spacing": "20 mm",
+            "face": {"feature": "shaft", "name": old(1)}});
+        let f = files(&[("parts/a/features/fl.json", fl)]);
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "shaft".into(),
+            to: "shaft2".into(),
+        };
+        let names = BTreeMap::from([("shaft".to_owned(), BTreeMap::from([(old(1), new(1))]))]);
+        let out = renumbered(&f, &rename, &names);
+        let d = serde_json::from_slice::<Value>(&out["parts/a/features/fl.json"]).unwrap();
+        assert_eq!(d["face"], json!({"feature": "shaft2", "name": new(1)}));
+        assert_eq!(d["targets"], json!(["shaft2"]));
+        // A seed renumbered: the fill's features follow it.
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "h".into(),
+            to: "h2".into(),
+        };
+        let out = renumbered(&f, &rename, &BTreeMap::new());
+        let d = serde_json::from_slice::<Value>(&out["parts/a/features/fl.json"]).unwrap();
+        assert_eq!(d["features"], json!(["h2"]));
+    }
+
+    #[test]
     fn a_holes_places_follow_renamed_faces_and_features() {
         let old = |k: u8| format!("{k:032x}");
         let new = |k: u8| format!("{:032x}", k + 100);

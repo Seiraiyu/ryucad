@@ -1636,6 +1636,29 @@ mod tests {
     }
 
     #[test]
+    fn a_fills_skips_merge_as_one_value_and_its_margin_per_key() {
+        let base = json!({"format": 26, "kind": "ryucad.feature", "type": "pattern",
+            "form": "fill", "features": ["h"], "targets": ["b"],
+            "face": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"},
+            "spacing": "20 mm"});
+        let mut ours = base.clone();
+        ours["margin"] = json!("2 mm");
+        let mut theirs = base.clone();
+        theirs["skip"] = json!([[-1, 0]]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["margin"], &m.value["skip"]),
+            (&json!("2 mm"), &json!([[-1, 0]]))
+        );
+        let mut o = base.clone();
+        o["skip"] = json!([[1, 1]]);
+        let m = merge(Some(&base), &o, &theirs);
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(at, ["/skip"]);
+    }
+
+    #[test]
     fn a_holes_places_merge_per_place() {
         let base = json!({"format": 26, "kind": "ryucad.feature", "type": "hole",
             "form": "simple", "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
