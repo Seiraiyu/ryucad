@@ -276,6 +276,10 @@ pub fn failing_warnings(
     parts: &[Id],
     after: &str,
 ) -> Vec<Value> {
+    // Said once, at the batch's end (plan 31.C).
+    if session.defers_solves() {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for a in parts {
         let Ok(p) = session.project().part(a) else {
@@ -1413,6 +1417,16 @@ pub fn after_moves(
     Ok(free)
 }
 
+/// What a capture session that defers its solves (a batch's, plan 31.C)
+/// noted instead of solving: the parts whose writes would have solved
+/// the assemblies they reach, and the assemblies whose instance or mate
+/// writes would have been judged for overconstraint.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Deferred {
+    pub parts: std::collections::BTreeSet<Id>,
+    pub assembled: std::collections::BTreeSet<Id>,
+}
+
 /// The assemblies a write to `part` may leave stale: `part` itself if it
 /// is one, then every assembly that places it at `working`, at any depth,
 /// nearest first.
@@ -1458,6 +1472,10 @@ pub(crate) fn reached(project: &crate::doc::project::Project, part: &Id) -> Vec<
 /// poses hold now (or that have nothing to solve): the ones
 /// [`keep_current`] keeps so.
 pub fn current(session: &mut crate::session::Session, part: &Id) -> Result<Vec<Id>> {
+    // A batch solves once, at its end (plan 31.C): note the part.
+    if session.note_deferred(part, false) {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     for a in reached(session.project(), part) {
         // With nothing to solve, its poses are as stored.
@@ -1526,6 +1544,10 @@ pub fn keep_current(session: &mut crate::session::Session, before: &[Id]) -> Res
 /// all hold, where they hold now: `assembly_overconstrained`, with the
 /// conflicting mates. One that fails already is left to fail.
 pub fn refuse_overconstrained(session: &mut crate::session::Session, proposed: Part) -> Result<()> {
+    // Judged once, at the batch's end (plan 31.C).
+    if session.note_deferred(&proposed.id, true) {
+        return Ok(());
+    }
     let id = proposed.id.clone();
     let holds =
         |r: &crate::rebuild::PartResult| r.solve.as_ref().is_none_or(|s| s.report.converged);

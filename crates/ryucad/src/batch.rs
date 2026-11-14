@@ -886,6 +886,35 @@ mod tests {
     }
 
     #[test]
+    fn a_deferring_capture_notes_what_it_would_solve_and_solves_nothing() {
+        let (_dir, mut s) = crate::mate::tests::hinged();
+        let bolt = crate::part::part_id("bolt").unwrap();
+        let frame = crate::part::part_id("frame").unwrap();
+        let want = crate::mate::current(&mut s, &bolt).unwrap();
+        let mut c = s.capturing(s.snapshot()).unwrap();
+        assert!(!c.defers_solves());
+        c.defer_solves();
+        assert!(c.defers_solves());
+        assert_eq!(crate::mate::current(&mut c, &bolt).unwrap(), Vec::<Id>::new());
+        let p = c.project().part(&frame).unwrap().clone();
+        crate::mate::refuse_overconstrained(&mut c, p).unwrap();
+        assert_eq!(
+            crate::mate::failing_warnings(&mut c, std::slice::from_ref(&frame), ""),
+            Vec::<Value>::new()
+        );
+        let d = c.take_deferred().unwrap();
+        assert_eq!(d.parts.into_iter().collect::<Vec<_>>(), [bolt.clone()]);
+        assert_eq!(d.assembled.into_iter().collect::<Vec<_>>(), [frame.clone()]);
+        // Taken, it solves again as it always has.
+        assert!(!c.defers_solves());
+        assert_eq!(crate::mate::current(&mut c, &bolt).unwrap(), want);
+        // A disk session never defers.
+        let mut d = s;
+        d.defer_solves();
+        assert!(!d.defers_solves());
+    }
+
+    #[test]
     fn a_cancel_stops_a_batch_between_its_ops_and_writes_nothing() {
         let (dir, mut s) = twin();
         let before = on_disk(dir.path());

@@ -156,6 +156,9 @@ enum Sink {
         writes: BTreeMap<String, Option<Bytes>>,
         /// Written since the last reload.
         pending: Vec<String>,
+        /// What it would have solved, while it defers its solves (a
+        /// batch's, plan 31.C): `None` when it solves as it goes.
+        deferred: Option<crate::mate::Deferred>,
     },
 }
 
@@ -667,7 +670,7 @@ impl Session {
         match &mut self.sink {
             // no session: the session's own write to the folder
             Sink::Disk => crate::doc::source::write_atomic(path, bytes),
-            Sink::Capture { writes, pending } => {
+            Sink::Capture { writes, pending, .. } => {
                 writes.insert(rel.clone(), Some(Bytes::from(bytes)));
                 pending.push(rel);
                 Ok(())
@@ -687,7 +690,7 @@ impl Session {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(Error::io(path, &e)),
             },
-            Sink::Capture { writes, pending } => {
+            Sink::Capture { writes, pending, .. } => {
                 writes.insert(rel.clone(), None);
                 pending.push(rel);
                 Ok(())
@@ -749,6 +752,7 @@ impl Session {
         s.sink = Sink::Capture {
             writes: BTreeMap::new(),
             pending: Vec::new(),
+            deferred: None,
         };
         Ok(s)
     }
@@ -768,6 +772,52 @@ impl Session {
         matches!(self.sink, Sink::Capture { .. })
     }
 
+    /// Defers this capture session's mate solves until
+    /// [`Session::take_deferred`] (plan 31.C). A disk session solves as it
+    /// goes.
+    pub(crate) fn defer_solves(&mut self) {
+        if let Sink::Capture { deferred, .. } = &mut self.sink {
+            *deferred = Some(crate::mate::Deferred::default());
+        }
+    }
+
+    /// Whether this session defers its solves.
+    pub(crate) fn defers_solves(&self) -> bool {
+        matches!(
+            self.sink,
+            Sink::Capture {
+                deferred: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Notes `part` (with `assembled`, as an assembly whose instances or
+    /// mates were written) if this session defers its solves: whether it
+    /// does.
+    pub(crate) fn note_deferred(&mut self, part: &Id, assembled: bool) -> bool {
+        let Sink::Capture {
+            deferred: Some(d), ..
+        } = &mut self.sink
+        else {
+            return false;
+        };
+        if assembled {
+            d.assembled.insert(part.clone());
+        } else {
+            d.parts.insert(part.clone());
+        }
+        true
+    }
+
+    /// What it noted, and solving as it goes again.
+    pub(crate) fn take_deferred(&mut self) -> Option<crate::mate::Deferred> {
+        match &mut self.sink {
+            Sink::Capture { deferred, .. } => deferred.take(),
+            Sink::Disk => None,
+        }
+    }
+
     /// Brings the session up to date with the files. Returns whether the
     /// project was reloaded.
     pub fn refresh(&mut self) -> Result<bool> {
@@ -777,7 +827,7 @@ impl Session {
     /// [`Session::refresh`], returning the files that changed (relative,
     /// with `/`) and how: `created`, `modified` or `deleted`.
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
-        if let Sink::Capture { writes, pending } = &mut self.sink {
+        if let Sink::Capture { writes, pending, .. } = &mut self.sink {
             let mut paths = std::mem::take(pending);
             if paths.is_empty() {
                 return Ok(Vec::new());
