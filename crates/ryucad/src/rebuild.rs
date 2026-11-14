@@ -1184,36 +1184,71 @@ fn build_body(
         Err(e) => return (Err(e), None),
     };
     let bodies: Vec<&Built> = targets.iter().map(|(_, b)| *b).collect();
-    // A hole's points, and where its body sits: each point's tool is its
-    // body moved from there to the point.
+    // A hole's places: a sketch's points (one tool, translated: each
+    // point's tool is its body moved from the sketch's origin to the
+    // point), or places resolved from references (ryucad 28.C).
+    let work = crate::work::work(run.job);
     let holes = match f {
         Feature::Hole(h) => {
             let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref())
                 .map_err(crate::hole::derive::at_rebuild);
-            let points = sizes.and_then(|sizes| {
-                let Some(sk) = &h.sketch else {
-                    return Err(Error::new(Code::Internal, "places come with Task 7"));
+            let spots = sizes.and_then(|sizes| {
+                let spots = match &h.sketch {
+                    Some(sk) => {
+                        let s = sketch_input(part, id, sk, before)?;
+                        Spots::Sketch(s, crate::hole::points(id, h, sk, s)?)
+                    }
+                    None => {
+                        let at = crate::geometry::At {
+                            part,
+                            order: part.order(),
+                            owner: id,
+                            results: before,
+                        };
+                        let mut keys: Vec<&Id> = h.places.keys().collect();
+                        keys.sort_by(|a, b| {
+                            crate::doc::sketch::natural(a).cmp(&crate::doc::sketch::natural(b))
+                        });
+                        let mouths = keys
+                            .into_iter()
+                            .map(|k| {
+                                crate::hole::place::mouth(&at, k, &h.places[k], &bodies, &work)
+                                    .map(|m| (k.clone(), m))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        Spots::Places(mouths)
+                    }
                 };
-                let s = sketch_input(part, id, sk, before)?;
-                Ok((s, crate::hole::points(id, h, sk, s)?, sizes))
+                Ok((spots, sizes))
             });
-            match points {
+            match spots {
                 Ok(p) => Some((h, p)),
                 Err(e) => return (Err(e), None),
             }
         }
         _ => None,
     };
+    let at_places = matches!(&holes, Some((_, (Spots::Places(_), _))));
     let exit_dependent = matches!(f, Feature::Hole(h) if crate::hole::needs_exits(h));
     let mut others: Vec<(usize, Arc<Built>)> = Vec::new();
+    let mut place_motions: Option<Vec<(Option<Id>, Rigid)>> = None;
     let own = match tool {
-        Some((h, Some((c, b)))) if *c == h && !exit_dependent => Ok(Arc::clone(b)),
+        Some((h, Some((c, b)))) if *c == h && !exit_dependent && !at_places => Ok(Arc::clone(b)),
         // A hole's tools are its body at each of its points (one per
         // distinct exit for a far side or through_next, never from or to
-        // the tool cache); any other kind builds its own (27.D).
+        // the tool cache); a hole at places has one per shape of tool
+        // its places need (never from or to the tool cache either); any
+        // other kind builds its own (27.D).
         _ => match &holes {
-            Some((h, (solved, points, sizes))) if crate::hole::needs_exits(h) => {
-                let work = crate::work::work(run.job);
+            Some((h, (Spots::Places(mouths), sizes))) => crate::hole::at_places(
+                part, id, h, sizes, mouths, &bodies, before, &work,
+            )
+            .map(|t| {
+                others = t.others;
+                place_motions = Some(t.places);
+                t.body
+            }),
+            Some((h, (Spots::Sketch(solved, points), sizes))) if crate::hole::needs_exits(h) => {
                 crate::hole::Drill::of_sketch(solved)
                     .and_then(|drill| {
                         crate::hole::ExitTools::new(part, id, h, sizes, drill, &bodies, before)
@@ -1240,7 +1275,7 @@ fn build_body(
                         }
                     })
             }
-            Some((h, (solved, _, sizes))) => {
+            Some((h, (Spots::Sketch(solved, _), sizes))) => {
                 crate::hole::tool(part, id, h, sizes, solved, &bodies, before)
                     .map(|(b, _)| Arc::new(b))
             }
@@ -1263,15 +1298,16 @@ fn build_body(
         Operation::Intersect => BooleanOp::Intersect,
         Operation::New => unreachable!("a new solid acts on nothing"),
     };
-    let places: Vec<(Option<Id>, Rigid)> = match &holes {
-        Some((_, (solved, points, _))) => {
+    let places: Vec<(Option<Id>, Rigid)> = match (&holes, place_motions) {
+        (_, Some(p)) => p,
+        (Some((_, (Spots::Sketch(solved, points), _))), None) => {
             let origin = solved.frame.apply_point(Point3::ORIGIN);
             points
                 .iter()
                 .map(|(p, at)| (Some(p.clone()), Rigid::translation(*at - origin)))
                 .collect()
         }
-        None => vec![(None, Rigid::IDENTITY)],
+        _ => vec![(None, Rigid::IDENTITY)],
     };
     let tools: Vec<ToolBody> = places
         .iter()
@@ -1304,9 +1340,16 @@ fn build_body(
         applied: Some(applied),
         ..Made::new(m)
     });
-    // An exit-dependent hole's tools are as many as its exits: none goes
-    // to the tool cache.
-    (made, (!exit_dependent).then_some(own))
+    // An exit-dependent hole's tools are as many as its exits, and a hole
+    // at places' depend on its references: none goes to the tool cache.
+    (made, (!exit_dependent && !at_places).then_some(own))
+}
+
+/// Where a hole drills: a sketch's points, or its places' mouths
+/// (ryucad 28.C).
+enum Spots<'s> {
+    Sketch(&'s crate::sketch::Solved, Vec<(Id, Point3)>),
+    Places(Vec<(Id, crate::hole::place::Mouth)>),
 }
 
 /// The rebuild step of a feature that makes a body of its own (its

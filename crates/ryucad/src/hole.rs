@@ -429,6 +429,152 @@ pub fn tool(
     build_tool(part, id, h, s, &drill, d, up, 0.0, None)
 }
 
+/// A hole at places' tools: the first one's body, each place's motion
+/// from the canonical drill to its mouth, and the places whose tool isn't
+/// the first (as `rebuild::Applied::others`). Places share a tool when
+/// its depth, its reach and its exit are equal within the linear
+/// resolution; a through-all depth and a curved mouth's reach are the
+/// greatest any place needs, so flush through holes share one tool.
+pub struct AtPlaces {
+    pub body: Arc<Built>,
+    pub places: Vec<(Option<Id>, Rigid)>,
+    pub others: Vec<(usize, Arc<Built>)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn at_places(
+    part: &Part,
+    id: &Id,
+    h: &Hole,
+    s: &Sizes,
+    mouths: &[(Id, place::Mouth)],
+    targets: &[&Built],
+    before: &dyn Results,
+    work: &ryukei::work::Work,
+) -> Result<AtPlaces> {
+    let next = h.depth == Depth::ThroughNext;
+    // Each place's depth, exit, and whether it reaches back.
+    let mut each: Vec<(f64, Option<f64>, bool)> = Vec::with_capacity(mouths.len());
+    for (k, m) in mouths {
+        let exit = if needs_exits(h) {
+            let bodies = targets.iter().map(|b| &b.body);
+            match exits::over(bodies, m.at, m.down, next, work) {
+                Ok(Some(e)) => Some(e),
+                Ok(None) => {
+                    return Err(Error::new(
+                        Code::OperationNoEffect,
+                        format!("hole {id}: its axis at {k} meets none of its targets"),
+                    )
+                    .with("feature", id)
+                    .with("tool", id)
+                    .with("point", k));
+                }
+                Err(exits::Uncertain) => {
+                    return Err(Error::new(
+                        Code::RebuildFailed,
+                        format!("hole {id}: where its axis at {k} leaves its targets is uncertain"),
+                    )
+                    .with("feature", id)
+                    .with("point", k));
+                }
+            }
+        } else {
+            None
+        };
+        let d = match (&h.depth, exit) {
+            (Depth::ThroughNext, Some(e)) => {
+                let (lo, hi) = crate::rebuild::span(m.at, m.down, targets);
+                e + (hi - lo).max(1e-6) * 0.01
+            }
+            _ => depth(part, id, h, s, m.at, m.down, targets, before)?,
+        };
+        each.push((d, exit, !m.flush));
+    }
+    // A through-all bore goes past the box from every place: the deepest.
+    if h.depth == Depth::ThroughAll {
+        let deepest = each.iter().map(|e| e.0).fold(0.0, f64::max);
+        for e in &mut each {
+            e.0 = deepest;
+        }
+    }
+    let reach = mouths
+        .iter()
+        .zip(&each)
+        .filter(|(_, e)| e.2)
+        .map(|((_, m), _)| reach_back(m.at, m.down, targets))
+        .fold(0.0, f64::max);
+    let drill = Drill::canonical();
+    let close = |a: f64, b: f64| (a - b).abs() <= ryukei::tol::LINEAR_RESOLUTION;
+    let mut tools: Vec<((f64, Option<f64>, bool), Arc<Built>)> = Vec::new();
+    let mut places = Vec::with_capacity(mouths.len());
+    let mut others = Vec::new();
+    for (i, ((k, m), e)) in mouths.iter().zip(&each).enumerate() {
+        let found = tools.iter().position(|((d, x, r), _)| {
+            close(*d, e.0)
+                && *r == e.2
+                && match (x, e.1) {
+                    (Some(a), Some(b)) => close(*a, b),
+                    (None, None) => true,
+                    _ => false,
+                }
+        });
+        let t = match found {
+            Some(t) => t,
+            None => {
+                if let Some(x) = e.1 {
+                    far_reaches_mouth(id, s, x)?;
+                }
+                let up = if s.spotface.is_some() {
+                    reach_back(m.at, m.down, targets)
+                } else {
+                    0.0
+                };
+                let r = if e.2 { reach } else { 0.0 };
+                let (b, _) = build_tool(part, id, h, s, &drill, e.0, up, r, e.1)?;
+                tools.push((*e, Arc::new(b)));
+                tools.len() - 1
+            }
+        };
+        if t != 0 {
+            others.push((i, Arc::clone(&tools[t].1)));
+        }
+        places.push((Some(k.clone()), Drill::place(m.at, m.down)?));
+    }
+    let Some((_, body)) = tools.first() else {
+        return Err(Error::new(
+            Code::OperationNoEffect,
+            format!("hole {id}: it has no places"),
+        )
+        .with("feature", id));
+    };
+    Ok(AtPlaces {
+        body: Arc::clone(body),
+        places,
+        others,
+    })
+}
+
+/// A far side that reaches up past the mouth is refused, as
+/// `ExitTools::tool` refuses it.
+fn far_reaches_mouth(id: &Id, s: &Sizes, exit: f64) -> Result<()> {
+    let far_top = match &s.far {
+        Some(derive::FarSizes::Countersink(dia, a)) => {
+            exit - (dia.si - s.drill.si) / 2.0 / ryukei::math::tan(a.si / 2.0)
+        }
+        Some(derive::FarSizes::Counterbore(_, fd)) => exit - fd.si,
+        None => exit,
+    };
+    if far_top <= s.thread_start() {
+        return Err(Error::new(
+            Code::InvalidExtent,
+            format!("hole {id}: its far side reaches up past its mouth"),
+        )
+        .with("feature", id)
+        .with("pointer", "/far"));
+    }
+    Ok(())
+}
+
 /// The frame a hole's tool is built in: its mouth's centre, two axes
 /// across the bore, and the way it drills. A sketch hole's is its
 /// sketch's frame (drilling against its normal), as it has always been;
@@ -845,6 +991,123 @@ pub(crate) mod tests {
             ryukei::mesh::tessellate(&b.body, &ryukei::mesh::MeshParams::new(2e-6, 0.1)).unwrap();
         assert!(m.faults.is_empty(), "{:?}", m.faults);
         ryukei_testkit::mesh::volume_and_area(&m).0 * 1e9
+    }
+
+    /// Writes hole `h` at places, as `put` writes one at sketch `s`.
+    pub(crate) fn put_at(s: &mut Session, h: &str, fields: Value) {
+        let mut v = fields;
+        v["format"] = json!(crate::doc::hole::PLACES_FORMAT);
+        v["kind"] = json!("ryucad.feature");
+        v["type"] = json!("hole");
+        if v.get("targets").is_none() {
+            v["targets"] = json!(["b"]);
+        }
+        let f = Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap();
+        let pid = id("p");
+        let mut list = crate::part::order(s.project().part(&pid).unwrap()).unwrap();
+        if !list.contains(&id(h)) {
+            list.push(id(h));
+        }
+        crate::save::save(s, &pid, &[(&id(h), &f)], list).unwrap();
+    }
+
+    #[test]
+    fn holes_at_places_drill_where_their_places_say() {
+        let (_dir, mut s, body) = crate::hole::place::tests::part();
+        let (top, y0, x0) = crate::hole::place::tests::top(&body);
+        put_at(
+            &mut s,
+            "h",
+            json!({"form": "simple", "diameter": "2 mm", "depth": {"blind": "3 mm"},
+                   "places": {
+                       "a": {"at": {"feature": "pt"}},
+                       "b": {"face": {"feature": "b", "name": top},
+                             "from": [{"edge": {"feature": "b", "name": x0}, "distance": "15 mm"},
+                                      {"edge": {"feature": "b", "name": y0}, "distance": "5 mm"}]}}}),
+        );
+        let b = after(&mut s, "h").unwrap();
+        assert!(ryukei::check::check(&b.body).is_empty());
+        let want = 20.0 * 10.0 * 5.0 - 2.0 * PI * 1.0 * 1.0 * 3.0;
+        let v = volume(&b);
+        assert!((v - want).abs() < 1e-4 * want, "{v} != {want}");
+        // Each place's faces name it, as a sketch point's do.
+        let points: BTreeSet<String> = b
+            .body
+            .faces()
+            .filter_map(|f| b.origins.get(&b.body.face(f).unwrap().name.to_string()))
+            .filter_map(|o| o.get("point").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        assert_eq!(points, BTreeSet::from(["a".to_owned(), "b".to_owned()]));
+    }
+
+    #[test]
+    fn a_radial_hole_through_a_tube_wall_cuts_cleanly() {
+        let (_dir, mut s, _) = crate::hole::place::tests::part();
+        // A tube: cylinder c (r 4, 10 long) less a bore of r 3.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cylinder", "id": "bore",
+                   "operation": "cut", "targets": ["c"], "params": {"radius": 3, "height": 10},
+                   "placement": {"origin": [40, 0, 0]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "point", "id": "out",
+                   "by": "coordinates", "coordinates": ["50 mm", "0 mm", "5 mm"]}),
+        )
+        .unwrap();
+        let c = call(&mut s, "inspect", json!({"part": "p", "feature": "c"})).unwrap();
+        let side = c["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["surface"]["type"] == "cylinder")
+            .max_by(|a, b| {
+                a["surface"]["radius"]
+                    .as_f64()
+                    .unwrap()
+                    .total_cmp(&b["surface"]["radius"].as_f64().unwrap())
+            })
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .unwrap();
+        put_at(
+            &mut s,
+            "h",
+            json!({"form": "simple", "diameter": "2 mm", "depth": "through_next", "targets": ["c"],
+                   "places": {"a": {"at": {"feature": "out"}, "face": {"feature": "c", "name": side}}}}),
+        );
+        let r = s.rebuilt(&id("p")).unwrap().clone();
+        let (_, out) = r.features.iter().find(|(f, _)| *f == id("h")).unwrap();
+        let tube = out.as_ref().unwrap().solid(&id("c")).unwrap();
+        assert!(ryukei::check::check(&tube.body).is_empty());
+        // Through the near wall only: the far wall at x = 36..37 mm is whole.
+        let before = PI * (16.0 - 9.0) * 10.0;
+        let v = volume(tube);
+        assert!(v < before && v > before - 2.0 * PI * 1.1, "{v} vs {before}");
+    }
+
+    #[test]
+    fn a_sketch_hole_builds_the_tool_it_always_did() {
+        // The refactor's guard: one place per point, translated, one tool.
+        let (_dir, mut s) = drilled();
+        put(
+            &mut s,
+            "h",
+            json!({"form": "simple", "diameter": "2 mm", "depth": "through_all"}),
+        );
+        let r = s.rebuilt(&id("p")).unwrap().clone();
+        let (_, out) = r.features.iter().find(|(f, _)| *f == id("h")).unwrap();
+        let a = out.as_ref().unwrap().applied().unwrap();
+        assert!(a.others.is_empty());
+        for (_, m) in &a.places {
+            assert_eq!(
+                m.rotation_matrix(),
+                ryukei::geom::Rigid::IDENTITY.rotation_matrix()
+            );
+        }
     }
 
     fn near(got: f64, want: f64) {
