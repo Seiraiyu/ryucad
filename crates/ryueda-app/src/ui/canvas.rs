@@ -331,7 +331,7 @@ fn text_at(
 }
 
 /// An error code as the CLI's envelope writes it (`not_found`).
-fn code_word(code: ryu_doc::error::Code) -> String {
+pub fn code_word(code: ryu_doc::error::Code) -> String {
     serde_json::to_value(code)
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
