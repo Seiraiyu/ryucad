@@ -196,38 +196,53 @@ pub(crate) fn ordered(writes: BTreeMap<String, Option<Bytes>>) -> Vec<(String, O
 /// projects. A write that fails leaves the ones before it, which the
 /// activity log keeps, so `undo` takes them back.
 fn write(session: &mut Session, writes: Vec<(String, Option<Bytes>)>) -> Result<()> {
-    let root = session.root().to_path_buf();
-    let path = |rel: &str| rel.split('/').fold(root.clone(), |p, s| p.join(s));
     // A cancel no longer counts once the files begin to change.
     session.job().writing();
-    for (rel, bytes) in &writes {
-        let done = match bytes {
-            Some(b) => session.write_bytes(&path(rel), b),
-            None => session.remove_file(&path(rel)),
-        };
-        if let Err(e) = done {
-            session.reload()?;
-            return Err(e);
+    // Whatever fails from here, the session takes in what is on disk, so
+    // the activity log sees the files that did change and `undo` takes
+    // them back; the first error is the answer.
+    let done = put(session, &writes);
+    let reloaded = session.reload();
+    done?;
+    reloaded?;
+    // What the working files place from other projects may have moved.
+    match crate::deps::keep_lock(session) {
+        Ok(false) => Ok(()),
+        Ok(true) => session.reload(),
+        Err(e) => {
+            let _ = session.reload();
+            Err(e)
+        }
+    }
+}
+
+/// Writes and removes each file in order, then removes the folders of
+/// the deleted parts, stopping at the first failure.
+fn put(session: &mut Session, writes: &[(String, Option<Bytes>)]) -> Result<()> {
+    let root = session.root().to_path_buf();
+    let path = |rel: &str| rel.split('/').fold(root.clone(), |p, s| p.join(s));
+    for (rel, bytes) in writes {
+        match bytes {
+            Some(b) => session.write_bytes(&path(rel), b)?,
+            None => session.remove_file(&path(rel))?,
         }
     }
     // A deleted part's folder goes with what else lies in it, as
     // `part.delete` alone removes it.
-    for (rel, bytes) in &writes {
+    for (rel, bytes) in writes {
         if let (None, Some(part)) = (bytes, rel.strip_suffix("/part.json"))
             && part.starts_with("parts/")
         {
             let dir = path(part);
-            if dir.exists() {
-                // no session: what the files leave on disk (empty folders, stray files) goes too
-                std::fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
-            }
+            // no session: what the files leave on disk (empty folders, stray files) goes too
+            let removed = if dir.exists() {
+                std::fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))
+            } else {
+                Ok(())
+            };
             crate::doc::source::note_written(&dir);
+            removed?;
         }
-    }
-    session.reload()?;
-    // What the working files place from other projects may have moved.
-    if crate::deps::keep_lock(session)? {
-        session.reload()?;
     }
     Ok(())
 }
@@ -826,6 +841,44 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(e.code, Code::Io, "{e:?}");
         assert!(dir.path().join("parts/pin/features/knob.json").is_file());
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        assert_eq!(log["entries"][0]["method"], "batch", "{log}");
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert_eq!(on_disk(dir.path()), before);
+    }
+
+    /// A deleted part's folder that can't be removed (an empty folder in
+    /// a read-only folder of it, which no file deletion names) leaves the
+    /// part's files gone, logged, so undo takes them back.
+    #[cfg(unix)]
+    #[test]
+    fn a_part_folder_that_wont_go_is_logged_and_undone() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut s) = twin();
+        let mut live = Live::new();
+        let locked = dir.path().join("parts/rig/stray");
+        std::fs::create_dir_all(locked.join("empty")).unwrap();
+        let before = on_disk(dir.path());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let unlock =
+            || std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root removes it anyway: then there is nothing to test.
+        if std::fs::write(locked.join("probe"), b"").is_ok() {
+            std::fs::remove_file(locked.join("probe")).unwrap();
+            unlock();
+            eprintln!("skipped: this user writes into a read-only folder");
+            return;
+        }
+        let e = call_live(&mut s, &mut live, None, "batch", json!({"ops": [
+            {"method": "feature.edit", "params": {"part": "plate", "id": "slab", "params": {"y": 30}}},
+            {"method": "part.delete", "params": {"part": "rig"}}
+        ]}))
+        .unwrap_err();
+        unlock();
+        assert_eq!(e.code, Code::Io, "{e:?}");
+        assert!(e.message.contains("parts/rig"), "{e:?}");
+        assert!(!dir.path().join("parts/rig/part.json").exists());
+        assert!(locked.join("empty").is_dir());
         let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
         assert_eq!(log["entries"][0]["method"], "batch", "{log}");
         call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
