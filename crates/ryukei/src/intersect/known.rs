@@ -201,8 +201,13 @@ fn branch(s: &Seam, surfaces: [&Surface; 2], region: &Box3, m: &Meter) -> Option
             // A conic or a rational pcurve isn't certified as it is (CTC
             // 02's closed ellipse, FTC 07's partly smooth one; plan 19.A,
             // census II): one fitted to the curve on the surface is.
+            // Fitted to the edge's own tolerance, not the slack: the fit
+            // reports at least what it is asked for, so asked for the
+            // slack, the seam would take ten times its tolerance, and a
+            // delete's next re-trim ten times that.
             None => {
-                let (c, bound) = refit(surface, s, k, range, target, m)?;
+                let own = s.tolerance.max(LINEAR_RESOLUTION);
+                let (c, bound) = refit(surface, s, k, range, own, m)?;
                 pcurves[k] = c;
                 bound
             }
@@ -226,7 +231,8 @@ fn branch(s: &Seam, surfaces: [&Surface; 2], region: &Box3, m: &Meter) -> Option
 const REFIT_SAMPLES: usize = 1 << 12;
 
 /// The seam's `k`th pcurve fitted to its curve over `range` on `surface`
-/// ([`fit_pcurve_within`], certified within `target`), by the curve's own
+/// ([`fit_pcurve_within`], split until certified within `target`, failing
+/// past ten times that), by the curve's own
 /// parameter, and moved by whole periods so its middle lies where the
 /// seam's own pcurve's does (its working face's parameter box): with the
 /// fit's bound. `None` where the fit fails or the move can't be made.
