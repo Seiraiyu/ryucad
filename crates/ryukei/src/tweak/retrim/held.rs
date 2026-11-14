@@ -6,6 +6,7 @@
 //! can't move (`iso_stops`).
 
 use super::region::Region;
+use crate::geom::Curve2;
 use crate::intersect::SeamKind;
 use crate::topo::{Body, EdgeId, FaceId, FinId};
 use crate::{Error, TweakCase, TweakError};
@@ -88,6 +89,45 @@ fn ends_stay(body: &Body, e: EdgeId, stays: &dyn Fn(FaceId) -> bool) -> bool {
                 .all(|fin| stays(body.loops[body.fins[fin].loop_].face))
         })
     })
+}
+
+/// The direction a pcurve holds fixed and the value it holds it at
+/// (design 642): `(0, u)` for a pcurve along `v` at `u`, `(1, v)` for one
+/// along `u` at `v`. A `Line2` whose direction has that component zero,
+/// or a `Nurbs2` whose control points all have that coordinate bit for
+/// bit (so it lies on the iso-line, inside their hull; STEP files often
+/// write iso pcurves as B-splines). `None` for anything else.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn iso(c: &Curve2) -> Option<(usize, f64)> {
+    match c {
+        Curve2::Line2(l) => {
+            let (o, d) = (l.origin(), l.dir());
+            if d.x == 0.0 {
+                Some((0, o.x))
+            } else if d.y == 0.0 {
+                Some((1, o.y))
+            } else {
+                None
+            }
+        }
+        Curve2::Nurbs2(n) => {
+            let mut pts = n.control_points();
+            let first = pts.next()?;
+            let (mut su, mut sv) = (true, true);
+            for p in pts {
+                su &= p.x.to_bits() == first.x.to_bits();
+                sv &= p.y.to_bits() == first.y.to_bits();
+            }
+            if su {
+                Some((0, first.x))
+            } else if sv {
+                Some((1, first.y))
+            } else {
+                None
+            }
+        }
+        Curve2::Circle2(_) | Curve2::Ellipse2(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +242,33 @@ mod tests {
         assert!(h.iter().all(|s| s.kind == SeamKind::Running), "{h:?}");
         // Nothing stays but the bottom: no held seam.
         assert!(held(&b, &r, &|_| false).is_empty());
+    }
+    #[test]
+    fn iso_pcurves_are_lines_and_splines_along_one_parameter() {
+        use crate::geom::{Curve2, KnotVector, Line2, NurbsCurve2, Point2, Vector2};
+        let line = |o: (f64, f64), d: (f64, f64)| {
+            Curve2::Line2(Line2::new(Point2::new(o.0, o.1), Vector2::new(d.0, d.1)).unwrap())
+        };
+        assert_eq!(iso(&line((0.25, 1.0), (0.0, -2.0))), Some((0, 0.25)));
+        assert_eq!(iso(&line((0.25, 1.0), (3.0, 0.0))), Some((1, 1.0)));
+        assert_eq!(iso(&line((0.25, 1.0), (1.0, 1.0))), None);
+        let spline = |pts: Vec<Point2>| {
+            let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+            Curve2::Nurbs2(std::sync::Arc::new(NurbsCurve2::new(k, pts, None).unwrap()))
+        };
+        let v = 0.7;
+        let on = spline(vec![
+            Point2::new(0.0, v),
+            Point2::new(0.4, v),
+            Point2::new(1.0, v),
+        ]);
+        assert_eq!(iso(&on), Some((1, v)));
+        // One control point an ulp off: not on the iso-line.
+        let off = spline(vec![
+            Point2::new(0.0, v),
+            Point2::new(0.4, f64::from_bits(v.to_bits() + 1)),
+            Point2::new(1.0, v),
+        ]);
+        assert_eq!(iso(&off), None);
     }
 }
