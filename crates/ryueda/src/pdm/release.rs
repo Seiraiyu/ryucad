@@ -104,9 +104,98 @@ pub fn readiness(session: &mut Session, part: &Id) -> Result<Readiness> {
     Ok(r)
 }
 
-/// A design's problems: Task 16.
+/// A design's problems (design 629): every error fault of the project's
+/// files and doctor's; the schematic's errors and stale layouts; ERC's
+/// errors for it, waivers applied; another project's component placed
+/// at `working`; every populated occurrence whose component has no maker
+/// part number (raw `part_unidentified`, whatever severity it is given);
+/// supply findings `parts.json` raises to `error`.
 fn design_problems(session: &mut Session, part: &Id, r: &mut Readiness) -> Result<()> {
-    let _ = (session, part, r);
+    use crate::fault::Fault;
+    let cats = session.catalogues()?;
+    let root = session.root().to_path_buf();
+    let p = session.project();
+    let errors = |list: Vec<Fault>| -> Vec<Value> {
+        list.iter()
+            .filter(|f| f.is_error())
+            .map(Fault::to_json)
+            .collect()
+    };
+    r.problems.extend(errors(p.faults()));
+    r.problems.extend(errors(
+        crate::doctor::diagnose(&root, p)
+            .iter()
+            .filter(|i| !matches!(i.code, Code::UnknownFile | Code::MergeConflict))
+            .map(crate::doctor::Issue::fault)
+            .collect(),
+    ));
+    for f in crate::erc::schematic_warnings(p) {
+        if f.is_error() || f.error.code == Code::LayoutStale {
+            r.problems.push(f.to_json());
+        }
+    }
+    let design = p
+        .conn
+        .designs
+        .get(part)
+        .and_then(|d| d.item.as_ref().ok())
+        .ok_or_else(|| {
+            Error::new(Code::NotFound, format!("no design {part}")).with("part", part)
+        })?;
+    for b in super::content::reached(&p.conn, &design.root) {
+        let Some(files) = p.conn.blocks.get(&b) else {
+            continue;
+        };
+        for (cid, c) in &files.components {
+            if let Ok(c) = &c.item
+                && let Some(alias) = &c.of.library
+            {
+                r.problems.push(json!(
+                    super::content::not_released(alias, &c.of.id, &format!("design {part}"))
+                        .with("component", format!("{b}/{cid}"))
+                ));
+            }
+        }
+    }
+    match crate::netlist::flatten(p, part) {
+        Err(e) => r.problems.push(json!(e)),
+        Ok(n) => {
+            for f in crate::erc::check_design(p, part)? {
+                if f.severity == crate::fault::Severity::Error && f.waived.is_none() {
+                    r.problems.push(json!(f));
+                }
+            }
+            // Every populated line must name its maker part, whatever its
+            // category or the severity erc.json gives `part_unidentified`;
+            // once each, where ERC's configured finding already holds it.
+            for (of, c, placed) in crate::erc::placed_by_libcomp(p, &n) {
+                if !c.mpn.trim().is_empty()
+                    || r.problems
+                        .iter()
+                        .any(|x| x["code"] == "part_unidentified" && x["details"]["libcomp"] == of)
+                {
+                    continue;
+                }
+                let mut refs = vec![of.to_owned()];
+                refs.extend(placed.iter().map(|o| o.reference.clone()));
+                r.problems.push(json!(
+                    Error::new(
+                        Code::PartUnidentified,
+                        format!("{of} has no maker part number: a release needs every placed part identified"),
+                    )
+                    .with("libcomp", of)
+                    .with("refs", &refs)
+                ));
+            }
+        }
+    }
+    r.supply = crate::supply::findings(p, &cats)?;
+    r.problems.extend(
+        r.supply
+            .iter()
+            .filter(|f| f["severity"] == "error")
+            .cloned(),
+    );
     Ok(())
 }
 
@@ -152,6 +241,46 @@ mod tests {
         assert!(
             !r.problems.is_empty(),
             "the component's own faults block it"
+        );
+    }
+
+    #[test]
+    fn a_design_is_ready_when_check_is_clean_for_it_and_every_line_is_identified() {
+        let (_d, mut s) = session(ProjectKind::Design);
+        crate::pdm::cmd::init(&mut s).unwrap();
+        let mut n = serde_json::Map::new();
+        n.insert("number".into(), json!("200-0001"));
+        crate::pdm::cmd::set(&mut s, "d", n, None).unwrap();
+        // The test design is clean, every line identified.
+        let r = readiness(&mut s, &id("d")).unwrap();
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        // A line with no maker part number isn't, whatever its category
+        // and whatever severity ERC gives it.
+        let at = s.root().join("library/components/r_100k.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&at).unwrap()).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("mpn");
+        o.remove("manufacturer");
+        o.remove("alternates");
+        crate::source::write_atomic(&at, crate::canonical::to_string(&v)).unwrap();
+        s.reload().unwrap();
+        let r = readiness(&mut s, &id("d")).unwrap();
+        assert!(
+            codes(&r.problems).contains(&"part_unidentified".to_owned()),
+            "{:?}",
+            r.problems
+        );
+        // Another project's component at working can't be pinned yet.
+        let c = s.root().join("blocks/top/components/r1.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&c).unwrap()).unwrap();
+        v["of"] = json!({"library": "passives", "id": "r_100k"});
+        crate::source::write_atomic(&c, crate::canonical::to_string(&v)).unwrap();
+        s.reload().unwrap();
+        let r = readiness(&mut s, &id("d")).unwrap();
+        assert!(
+            codes(&r.problems).contains(&"component_not_released".to_owned()),
+            "{:?}",
+            r.problems
         );
     }
 }
