@@ -95,9 +95,10 @@ impl ryu_session::Product for Eda {
 impl ryu_session::prefs::Schema for Eda {
     const CONFIG_DIR_VAR: &'static str = "RYUEDA_CONFIG_DIR";
 
-    /// The one preference so far: how often a watched daemon checks the
-    /// files.
+    /// The daemon's own keys, and the window's (plan 3.D): `ui.*` and
+    /// `app.window`, which only the app reads.
     fn accepts(name: &str, value: &serde_json::Value) -> bool {
+        let one_of = |words: &[&str]| value.as_str().is_some_and(|s| words.contains(&s));
         match name {
             "daemon.poll_ms" => value.as_u64().is_some_and(|n| (10..=10_000).contains(&n)),
             // Seconds a downloaded catalogue serves before searches warn:
@@ -105,15 +106,55 @@ impl ryu_session::prefs::Schema for Eda {
             "parts.max_age" => value
                 .as_u64()
                 .is_some_and(|n| (3_600..=365 * 86_400).contains(&n)),
+            "ui.theme" => one_of(&["system", "light", "dark"]),
+            "ui.style" => one_of(&["drafting", "graphite", "studio"]),
+            "ui.contrast" => one_of(&["normal", "high"]),
+            "ui.notify" => one_of(&["all", "errors", "off"]),
+            "ui.layout" | "ui.keys" | "app.window" => value.is_object(),
+            "ui.flash_changes" | "ui.follow_shows" => value.is_boolean(),
             _ => false,
         }
     }
 
     fn default_of(name: &str) -> Option<serde_json::Value> {
+        use serde_json::json;
         match name {
-            "daemon.poll_ms" => Some(serde_json::json!(250)),
-            "parts.max_age" => Some(serde_json::json!(crate::parts::MAX_AGE)),
+            "daemon.poll_ms" => Some(json!(250)),
+            "parts.max_age" => Some(json!(crate::parts::MAX_AGE)),
+            "ui.theme" => Some(json!("system")),
+            "ui.style" => Some(json!("drafting")),
+            "ui.contrast" => Some(json!("normal")),
+            "ui.notify" => Some(json!("all")),
+            "ui.layout" | "ui.keys" => Some(json!({})),
+            "ui.flash_changes" | "ui.follow_shows" => Some(json!(true)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ryu_session::prefs::Schema;
+    use serde_json::json;
+
+    #[test]
+    fn the_window_s_preferences_are_accepted_with_their_defaults() {
+        for (k, v) in [
+            ("ui.theme", json!("dark")),
+            ("ui.style", json!("graphite")),
+            ("ui.contrast", json!("high")),
+            ("ui.layout", json!({"format": 1})),
+            ("ui.keys", json!({"view.fit": ["F"]})),
+            ("ui.notify", json!("errors")),
+            ("ui.flash_changes", json!(false)),
+            ("ui.follow_shows", json!(false)),
+            ("app.window", json!({"size": [1280, 800]})),
+        ] {
+            assert!(super::Eda::accepts(k, &v), "{k}");
+        }
+        assert!(!super::Eda::accepts("ui.theme", &json!("blue")));
+        assert!(!super::Eda::accepts("ui.flash_changes", &json!("yes")));
+        assert_eq!(super::Eda::default_of("ui.theme"), Some(json!("system")));
+        assert_eq!(super::Eda::default_of("ui.flash_changes"), Some(json!(true)));
     }
 }
