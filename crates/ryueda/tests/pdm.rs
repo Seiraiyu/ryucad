@@ -526,3 +526,208 @@ fn a_design_releases_with_its_results() {
         }
     }
 }
+
+/// The breakout (`board`) beside `lib` in one repository, naming `lib` as
+/// `passives` and placing `comp` from it instead of from its own library.
+fn board_placing(top: &Path, run: &Path, daemon: bool, comp: &str) -> PathBuf {
+    let board = breakout_in_git(top, run);
+    ok(&board, run, daemon, &["lib", "add", "passives", "../lib"]);
+    place_from_passives(&board, comp);
+    git(top, &["add", "-A"]);
+    git(top, &["commit", "-q", "-m", "board places passives"]);
+    board
+}
+
+/// Every component of `board` placing its own `comp` places `passives`'s.
+fn place_from_passives(board: &Path, comp: &str) {
+    let mut moved = false;
+    for b in std::fs::read_dir(board.join("blocks")).unwrap() {
+        let dir = b.unwrap().path().join("components");
+        for f in std::fs::read_dir(&dir).into_iter().flatten() {
+            let f = f.unwrap().path();
+            let mut v: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+            if v["of"]["id"] == comp && v["of"].get("library").is_none() {
+                v["of"]["library"] = json!("passives");
+                std::fs::write(
+                    &f,
+                    format!("{}\n", serde_json::to_string_pretty(&v).unwrap()),
+                )
+                .unwrap();
+                moved = true;
+            }
+        }
+    }
+    assert!(moved, "the breakout places {comp}");
+}
+
+/// Edits the description of the first footprint `comp` lists in `lib`,
+/// so the component releases again.
+fn edit_footprint_of(lib: &Path, comp: &str, text: &str) {
+    let c: Value = serde_json::from_slice(
+        &std::fs::read(lib.join(format!("library/components/{comp}.json"))).unwrap(),
+    )
+    .unwrap();
+    let fp = c["footprints"][0]["footprint"]["id"].as_str().unwrap();
+    let at = lib.join(format!("library/footprints/{fp}.json"));
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&at).unwrap()).unwrap();
+    v["description"] = json!(text);
+    std::fs::write(
+        &at,
+        format!("{}\n", serde_json::to_string_pretty(&v).unwrap()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_design_places_a_sibling_librarys_components_by_label() {
+    for daemon in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let (top, run) = (d.path().join("repo"), d.path().join("run"));
+        std::fs::create_dir_all(&top).unwrap();
+        let (lib, parts) = library(&top, &run, daemon);
+        let comp = parts.iter().find(|p| p.starts_with("r_")).unwrap().clone();
+        ok(&lib, &run, daemon, &["release", "propose", "--all"]);
+        git(&top, &["add", "-A"]);
+        git(&top, &["commit", "-q", "-m", "library A"]);
+        let board = board_placing(&top, &run, daemon, &comp);
+        let dry = ok(
+            &board,
+            &run,
+            daemon,
+            &["release", "propose", "board", "--dry-run"],
+        );
+        assert!(dry.to_string().contains("component_not_released"), "{dry}");
+        let target = format!("passives/{comp}");
+        let v = ok(&board, &run, daemon, &["lib", "pin", &target, "--latest"]);
+        assert_eq!(v["pinned"][0]["to"], "A", "{v}");
+        let dry = ok(
+            &board,
+            &run,
+            daemon,
+            &["release", "propose", "board", "--dry-run"],
+        );
+        assert!(!dry.to_string().contains("component_not_released"), "{dry}");
+        // The library moves on: the footprint edited, its parts released at B.
+        edit_footprint_of(&lib, &comp, "edited");
+        ok(&lib, &run, daemon, &["release", "propose", "--all"]);
+        git(&top, &["add", "-A"]);
+        git(&top, &["commit", "-q", "-m", "library B"]);
+        let parts_v = ok(&board, &run, daemon, &["lib", "parts", "passives"]);
+        assert!(parts_v.to_string().contains("\"superseded\""), "{parts_v}");
+        let o = ok(&board, &run, daemon, &["lib", "outdated"]);
+        assert_eq!(o["outdated"][0]["latest"], "B", "{o}");
+        let (_, check) = ryueda(&board, &run, daemon, &["check"]);
+        assert!(check.to_string().contains("component_outdated"), "{check}");
+        let v = ok(&board, &run, daemon, &["lib", "pin", &target, "--latest"]);
+        assert_eq!(
+            (
+                v["pinned"][0]["from"].as_str(),
+                v["pinned"][0]["to"].as_str()
+            ),
+            (Some("A"), Some("B")),
+            "{v}"
+        );
+        // A label that isn't official: refused, nothing written.
+        let (code, v) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["lib", "pin", &target, "--label", "Z"],
+        );
+        assert_ne!(code, 0);
+        assert_eq!(v["error"]["code"], "label_not_found", "{v}");
+        // Back to working: allowed for a library in this repository.
+        ok(&board, &run, daemon, &["lib", "pin", &target, "--working"]);
+        if daemon {
+            ok(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
+#[test]
+fn a_library_in_another_repository_is_fetched_pinned_updated_and_refused_when_rewritten() {
+    for daemon in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let run = d.path().join("run");
+        let libs = d.path().join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        let (lib, parts) = library(&libs, &run, daemon);
+        let comp = parts.iter().find(|p| p.starts_with("r_")).unwrap().clone();
+        ok(&lib, &run, daemon, &["release", "propose", "--all"]);
+        git(&libs, &["add", "-A"]);
+        git(&libs, &["commit", "-q", "-m", "library A"]);
+        let top = d.path().join("boards");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = breakout_in_git(&top, &run);
+        let url = format!("file://{}", libs.display());
+        let v = ok(
+            &board,
+            &run,
+            daemon,
+            &["lib", "add", "passives", "--url", &url, "--path", "lib"],
+        );
+        assert!(v["library"]["project"].is_string(), "{v}");
+        // At working: library_foreign_working; pinned: locked.
+        let target = format!("passives/{comp}");
+        let (code, v) = ryueda(&board, &run, daemon, &["lib", "pin", &target, "--working"]);
+        assert_ne!(code, 0);
+        assert_eq!(v["error"]["code"], "library_foreign_working", "{v}");
+        ok(&board, &run, daemon, &["lib", "pin", &target, "--latest"]);
+        assert!(board.join("ryueda.lock").exists());
+        place_from_passives(&board, &comp);
+        let (_, check) = ryueda(&board, &run, daemon, &["check"]);
+        let report = match check.get("result") {
+            Some(r) => r.clone(),
+            None => check["error"]["details"]["report"].clone(),
+        };
+        assert!(
+            report.is_object() && report.get("deps").is_none(),
+            "{check}"
+        );
+        // The library releases B; fetched, outdated, updated.
+        edit_footprint_of(&lib, &comp, "edited");
+        ok(&lib, &run, daemon, &["release", "propose", "--all"]);
+        git(&libs, &["add", "-A"]);
+        git(&libs, &["commit", "-q", "-m", "library B"]);
+        let f = ok(&board, &run, daemon, &["lib", "fetch"]);
+        assert_eq!(f["fetched"][0]["branches"][0]["changed"], true, "{f}");
+        let o = ok(&board, &run, daemon, &["lib", "outdated"]);
+        assert_eq!(o["outdated"][0]["latest"], "B", "{o}");
+        let dry = ok(&board, &run, daemon, &["lib", "update", "--dry-run"]);
+        assert_eq!(dry["moved"][0]["to"], "B", "{dry}");
+        let v = ok(&board, &run, daemon, &["lib", "update"]);
+        assert_eq!(v["lock_changed"], true, "{v}");
+        let diff = ok(&board, &run, daemon, &["diff"]);
+        assert!(
+            diff.get("pins").is_some() && diff.get("deps").is_some(),
+            "{diff}"
+        );
+        let u = ok(&board, &run, daemon, &["lib", "uses"]);
+        assert_eq!(u["working"][0]["places"][0]["alias"], "passives", "{u}");
+        assert_eq!(u["working"][0]["places"][0]["label"], "B", "{u}");
+        // The library's history rewritten: B released again at another
+        // commit. The pin is refused until updated.
+        git(&libs, &["reset", "-q", "--hard", "HEAD~1"]);
+        edit_footprint_of(&lib, &comp, "edited again");
+        ok(&lib, &run, daemon, &["release", "propose", "--all"]);
+        git(&libs, &["add", "-A"]);
+        git(&libs, &["commit", "-q", "-m", "library B again"]);
+        ok(&board, &run, daemon, &["lib", "fetch"]);
+        let (_, check) = ryueda(&board, &run, daemon, &["check"]);
+        assert!(
+            check.to_string().contains("dependency_rewritten"),
+            "{check}"
+        );
+        // Updating is the decision: the lock moves to what it has now.
+        let v = ok(&board, &run, daemon, &["lib", "update"]);
+        assert_eq!(v["lock_changed"], true, "{v}");
+        let (_, check) = ryueda(&board, &run, daemon, &["check"]);
+        assert!(
+            !check.to_string().contains("dependency_rewritten"),
+            "{check}"
+        );
+        if daemon {
+            ok(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
