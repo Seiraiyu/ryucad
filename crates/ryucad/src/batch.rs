@@ -327,7 +327,8 @@ mod tests {
     use crate::annotation::propose::PROPOSABLE;
     use crate::annotation::propose::tests::{on_disk, proposable_requests, twin};
     use crate::proto::BatchOp;
-    use crate::testing::call;
+    use crate::testing::{call, call_live};
+    use ryu_session::job::Job;
     use serde_json::json;
     use std::collections::BTreeSet;
 
@@ -755,5 +756,95 @@ mod tests {
         // Nothing changed: nothing to rebuild.
         let v = call(&mut s, "batch", edit(4)).unwrap();
         assert_eq!(v["rebuild"]["parts"], json!([]));
+    }
+
+    #[test]
+    fn a_batch_is_one_activity_entry_and_one_undo() {
+        let (dir, mut s) = twin();
+        let mut live = Live::new();
+        let before = on_disk(dir.path());
+        call_live(&mut s, &mut live, None, "batch", json!({"ops": [
+            {"method": "feature.edit", "params": {"part": "plate", "id": "slab", "params": {"y": 30}}},
+            {"method": "part.create", "params": {"part": "bolt"}},
+            {"method": "feature.add", "params": {"part": "bolt", "type": "sphere", "id": "head",
+                                                 "params": {"radius": 3}}}
+        ]}))
+        .unwrap();
+        let log = |s: &mut Session, live: &mut Live| {
+            call_live(s, live, None, "activity.log", json!({})).unwrap()["entries"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        let e = log(&mut s, &mut live);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(e[0]["method"], "batch");
+        assert_eq!(e[0]["params"]["ops"].as_array().unwrap().len(), 3);
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert_eq!(on_disk(dir.path()), before, "one undo takes the batch back");
+        // A batch that changes nothing logs nothing.
+        let n = log(&mut s, &mut live).len();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "batch",
+            json!({"ops": [
+                {"method": "materials.set", "params": {"name": "steel", "density": "7850 kg/m^3"}}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(log(&mut s, &mut live).len(), n);
+    }
+
+    /// A write that fails part way leaves what it wrote, logged, so undo
+    /// takes it back (design 603, "Error handling").
+    #[cfg(unix)]
+    #[test]
+    fn a_write_that_fails_part_way_is_logged_and_undone() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut s) = twin();
+        let mut live = Live::new();
+        let before = on_disk(dir.path());
+        let locked = dir.path().join("parts/plate/features");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root writes anyway: then there is nothing to test.
+        if std::fs::write(locked.join("probe"), b"").is_ok() {
+            std::fs::remove_file(locked.join("probe")).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipped: this user writes into a read-only folder");
+            return;
+        }
+        // `pin`'s new file is written first (by path), then `plate`'s fails.
+        let e = call_live(&mut s, &mut live, None, "batch", json!({"ops": [
+            {"method": "feature.add", "params": {"part": "pin", "type": "sphere", "id": "knob",
+                                                 "params": {"radius": 1}}},
+            {"method": "feature.add", "params": {"part": "plate", "type": "sphere", "id": "knob",
+                                                 "params": {"radius": 1}}}
+        ]}))
+        .unwrap_err();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(e.code, Code::Io, "{e:?}");
+        assert!(dir.path().join("parts/pin/features/knob.json").is_file());
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        assert_eq!(log["entries"][0]["method"], "batch", "{log}");
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert_eq!(on_disk(dir.path()), before);
+    }
+
+    #[test]
+    fn a_cancel_stops_a_batch_between_its_ops_and_writes_nothing() {
+        let (dir, mut s) = twin();
+        let before = on_disk(dir.path());
+        s.set_job(Job::cancelled_at(2));
+        let e = call(&mut s, "batch", json!({"ops": [
+            {"method": "feature.edit", "params": {"part": "plate", "id": "slab", "params": {"y": 30}}},
+            {"method": "feature.edit", "params": {"part": "plate", "id": "slab", "params": {"z": 6}}},
+            {"method": "materials.set", "params": {"name": "alu", "density": "2.7 g/cm^3"}}
+        ]}))
+        .unwrap_err();
+        s.set_job(Job::default());
+        assert_eq!(e.code, Code::Cancelled);
+        assert_eq!(on_disk(dir.path()), before);
     }
 }

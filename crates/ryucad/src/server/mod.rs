@@ -646,8 +646,11 @@ pub fn answer_live(
         }
         r => r,
     };
-    if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
-    {
+    // A batch whose write pass failed part way has written what it wrote:
+    // that is logged too, so `undo` takes it back (design 603). A refused
+    // batch wrote nothing, so logs nothing.
+    let logged = result.is_ok() || method == "batch";
+    if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, logged) {
         let files = activity::diff(&files_before, &session.files());
         let who = l.caller(me);
         if !files.is_empty() {
