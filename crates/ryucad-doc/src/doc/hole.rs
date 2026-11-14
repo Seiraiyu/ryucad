@@ -1,6 +1,6 @@
-//! Hole features: simple, counterbored or countersunk holes drilled at a
-//! sketch's points into the solids they name, against the sketch's
-//! normal. A hole always cuts.
+//! Hole features: holes drilled at a sketch's points, or at places given
+//! by geometric references, into the solids they name. A hole always
+//! cuts.
 
 use super::files::{Obj, invalid};
 use super::geometry::GeomRef;
@@ -12,6 +12,7 @@ use crate::expr::Env;
 use crate::units::{Field, Quantity, Unit};
 use ryu_standards::thread::{self as builtin, Pitch, Standard, Unknown};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 /// The feature format that holds a hole's thread, fastener, fit or
 /// tolerance (ryucad 28). A hole holding none of them stays at 3, or 7
@@ -27,12 +28,23 @@ pub const INTENT_FORMAT: u64 = 23;
 /// this is 25.
 pub const GEOMETRY_FORMAT: u64 = 25;
 
-/// A hole at each of a sketch's points.
+/// The feature format that holds a hole's places (holes with no sketch)
+/// and a pattern's fill (ryucad 28.C). A hole drilled at a sketch, and
+/// every other pattern, stays at its format. Taken in the order stages
+/// merge: if another stage holds 26 when this merges, move this to the
+/// next free number; nothing else names it.
+pub const PLACES_FORMAT: u64 = 26;
+
+/// A hole at each of a sketch's points, or at each of its places.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hole {
-    pub sketch: Id,
+    /// The sketch whose points it drills at; `None` for a hole at places.
+    pub sketch: Option<Id>,
     /// Points of the sketch; empty means every point no curve uses.
     pub points: Vec<Id>,
+    /// Where it drills with no sketch, by place ID (ryucad 28.C); empty
+    /// for a hole at a sketch.
+    pub places: BTreeMap<Id, Place>,
     pub form: HoleForm,
     /// The bore's diameter: derived when the hole has a thread or a
     /// fastener and leaves it out, an override when it writes it.
@@ -496,6 +508,193 @@ impl Far {
     }
 }
 
+/// Where one hole of a hole feature is, with no sketch (design 533,
+/// Placement without sketches). Every reference is a geometric one; what
+/// kind each must be (a planar face, a straight edge) is checked when it
+/// is rebuilt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Place {
+    pub kind: PlaceKind,
+    /// Overrides the drilling direction: any axis. Never on a coaxial
+    /// place.
+    pub direction: Option<GeomRef>,
+    /// Drills the other way.
+    pub reverse: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlaceKind {
+    /// At a point (a vertex, a circular edge's centre, a sketch or datum
+    /// point, `origin`). With a planar `face` the point lies on it; with
+    /// a cylindrical or conical one the hole is radial, at the point's
+    /// foot on it; with none, the point lies on exactly one face of the
+    /// targets.
+    At { at: GeomRef, face: Option<GeomRef> },
+    /// Inside a planar face, `distance` from each of two straight edges.
+    Edges {
+        face: GeomRef,
+        from: [(GeomRef, Quantity); 2],
+    },
+    /// On the axis of a cylindrical or conical face, a circular edge or
+    /// any axis.
+    Coaxial { of: GeomRef },
+}
+
+impl Place {
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({});
+        match &self.kind {
+            PlaceKind::At { at, face } => {
+                v["at"] = at.to_json();
+                if let Some(f) = face {
+                    v["face"] = f.to_json();
+                }
+            }
+            PlaceKind::Edges { face, from } => {
+                v["face"] = face.to_json();
+                v["from"] = json!(
+                    from.iter()
+                        .map(|(e, d)| json!({"edge": e.to_json(), "distance": d.text()}))
+                        .collect::<Vec<_>>()
+                );
+            }
+            PlaceKind::Coaxial { of } => v["coaxial"] = of.to_json(),
+        }
+        if let Some(d) = &self.direction {
+            v["direction"] = d.to_json();
+        }
+        if self.reverse {
+            v["reverse"] = json!(true);
+        }
+        v
+    }
+
+    fn read(v: &Value, at: &str, default: Unit, env: &Env) -> Result<Place> {
+        let mut o = Obj::new(v, at)?;
+        let g = |o: &mut Obj, k: &str| -> Result<Option<GeomRef>> {
+            o.take_opt(k)
+                .map(|x| GeomRef::from_json(&x, &format!("{at}/{k}")))
+                .transpose()
+        };
+        let point = g(&mut o, "at")?;
+        let face = g(&mut o, "face")?;
+        let coaxial = g(&mut o, "coaxial")?;
+        let from = o.take_opt("from");
+        let direction = g(&mut o, "direction")?;
+        let reverse = match o.take_opt("reverse") {
+            None => false,
+            Some(Value::Bool(b)) => b,
+            Some(_) => {
+                return Err(invalid(
+                    &format!("{at}/reverse"),
+                    "reverse is true or false",
+                ));
+            }
+        };
+        o.finish()?;
+        let kinds = [point.is_some(), from.is_some(), coaxial.is_some()];
+        if kinds.iter().filter(|k| **k).count() != 1 {
+            return Err(invalid(
+                at,
+                "a place is one of {at, face?}, {face, from: [two edges]} or {coaxial}",
+            ));
+        }
+        let kind = if let Some(of) = coaxial {
+            if face.is_some() {
+                return Err(invalid(
+                    &format!("{at}/face"),
+                    "a coaxial place takes no face",
+                ));
+            }
+            if direction.is_some() {
+                return Err(invalid(
+                    &format!("{at}/direction"),
+                    "a coaxial place drills along its axis: give reverse, not a direction",
+                ));
+            }
+            PlaceKind::Coaxial { of }
+        } else if let Some(from) = from {
+            let face = face.ok_or_else(|| {
+                invalid(
+                    &format!("{at}/face"),
+                    "a place from two edges gives the face they bound",
+                )
+            })?;
+            let p = format!("{at}/from");
+            let a = from
+                .as_array()
+                .filter(|a| a.len() == 2)
+                .ok_or_else(|| invalid(&p, "from holds two {edge, distance}"))?;
+            let mut two = Vec::with_capacity(2);
+            for (i, x) in a.iter().enumerate() {
+                let at_i = format!("{p}/{i}");
+                let mut e = Obj::new(x, &at_i)?;
+                let edge = GeomRef::from_json(&e.take("edge")?, &format!("{at_i}/edge"))?;
+                let d = nonneg(
+                    &e.take("distance")?,
+                    default,
+                    env,
+                    &format!("{at_i}/distance"),
+                    "a distance from an edge",
+                )?;
+                e.finish()?;
+                two.push((edge, d));
+            }
+            let [a, b]: [(GeomRef, Quantity); 2] = two.try_into().expect("two");
+            PlaceKind::Edges { face, from: [a, b] }
+        } else {
+            PlaceKind::At {
+                at: point.expect("one kind"),
+                face,
+            }
+        };
+        Ok(Place {
+            kind,
+            direction,
+            reverse,
+        })
+    }
+
+    /// Its geometric references, each with its role under `places.<key>`.
+    fn geometry<'a>(&'a self, key: &Id, out: &mut Vec<(String, &'a GeomRef)>) {
+        let r = |k: &str| format!("places.{key}.{k}");
+        match &self.kind {
+            PlaceKind::At { at, face } => {
+                out.push((r("at"), at));
+                if let Some(f) = face {
+                    out.push((r("face"), f));
+                }
+            }
+            PlaceKind::Edges { face, from } => {
+                out.push((r("face"), face));
+                out.push((r("from.0"), &from[0].0));
+                out.push((r("from.1"), &from[1].0));
+            }
+            PlaceKind::Coaxial { of } => out.push((r("coaxial"), of)),
+        }
+        if let Some(d) = &self.direction {
+            out.push((r("direction"), d));
+        }
+    }
+}
+
+/// Reads `places`: a non-empty object of places by ID.
+fn places_from_json(v: &Value, default: Unit, env: &Env) -> Result<BTreeMap<Id, Place>> {
+    let o = v.as_object().filter(|o| !o.is_empty()).ok_or_else(|| {
+        invalid(
+            "/places",
+            "places is an object of places by ID, at least one",
+        )
+    })?;
+    let mut out = BTreeMap::new();
+    for (k, x) in o {
+        let at = format!("/places/{k}");
+        let id = Id::parse(k, "place").map_err(|e| e.with("pointer", &at))?;
+        out.insert(id, Place::read(x, &at, default, env)?);
+    }
+    Ok(out)
+}
+
 /// What the hole's mouth is.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HoleForm {
@@ -866,11 +1065,21 @@ fn bad_size(at: &str, msg: &str, q: &Quantity) -> Error {
 impl Hole {
     pub fn fields(&self) -> Value {
         let mut v = json!({
-            "sketch": self.sketch,
             "form": self.form.type_name(),
             "depth": self.depth.to_json(),
             "targets": self.targets,
         });
+        if let Some(s) = &self.sketch {
+            v["sketch"] = json!(s);
+        }
+        if !self.places.is_empty() {
+            v["places"] = Value::Object(
+                self.places
+                    .iter()
+                    .map(|(k, p)| (k.to_string(), p.to_json()))
+                    .collect(),
+            );
+        }
         if let Some(d) = &self.diameter {
             v["diameter"] = json!(d.text());
         }
@@ -937,6 +1146,12 @@ impl Hole {
             || self.thread.as_ref().is_some_and(|t| t.taper_wall)
     }
 
+    /// Whether it is drilled at places (ryucad 28.C): written at
+    /// `PLACES_FORMAT`.
+    pub fn has_places(&self) -> bool {
+        !self.places.is_empty()
+    }
+
     /// Whether its JSON holds anything [`Hole::has_geometry`] counts.
     pub fn json_has_geometry(v: &Value) -> bool {
         matches!(
@@ -953,12 +1168,42 @@ impl Hole {
     #[doc(hidden)]
     pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Hole> {
         let length = Field::Length(default);
-        let sketch = o.take("sketch")?;
-        let sketch = sketch
-            .as_str()
-            .ok_or_else(|| invalid("/sketch", "sketch is a sketch feature's ID"))?;
-        let sketch = Id::parse(sketch, "feature").map_err(|e| e.with("pointer", "/sketch"))?;
+        let sketch = o
+            .take_opt("sketch")
+            .map(|s| {
+                let s = s
+                    .as_str()
+                    .ok_or_else(|| invalid("/sketch", "sketch is a sketch feature's ID"))?;
+                Id::parse(s, "feature").map_err(|e| e.with("pointer", "/sketch"))
+            })
+            .transpose()?;
         let points = points_from_json(o.take_opt("points"))?;
+        let places = o
+            .take_opt("places")
+            .map(|v| places_from_json(&v, default, env))
+            .transpose()?
+            .unwrap_or_default();
+        match (&sketch, places.is_empty()) {
+            (Some(_), false) => {
+                return Err(invalid(
+                    "/places",
+                    "a hole is drilled at a sketch's points or at places, not both",
+                ));
+            }
+            (None, true) => {
+                return Err(invalid(
+                    "/sketch",
+                    "a hole is drilled at a sketch's points (sketch) or at places (places)",
+                ));
+            }
+            _ => {}
+        }
+        if sketch.is_none() && !points.is_empty() {
+            return Err(invalid(
+                "/points",
+                "points are a sketch's: a hole at places has none",
+            ));
+        }
         let thread = o
             .take_opt("thread")
             .map(|t| Thread::read(&t, default, env))
@@ -1140,6 +1385,7 @@ impl Hole {
         let hole = Hole {
             sketch,
             points,
+            places,
             form,
             diameter,
             depth,
@@ -1308,12 +1554,16 @@ impl Hole {
     }
 
     /// Its geometric references, each with its role: an up-to target's
-    /// `depth`.
+    /// `depth`, and each place's `places.<key>.<field>`.
     pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
-        match &self.depth {
-            Depth::UpTo { target, .. } => vec![("depth".to_owned(), target)],
-            _ => Vec::new(),
+        let mut out = Vec::new();
+        if let Depth::UpTo { target, .. } = &self.depth {
+            out.push(("depth".to_owned(), target));
         }
+        for (k, p) in &self.places {
+            p.geometry(k, &mut out);
+        }
+        out
     }
 }
 
@@ -2032,5 +2282,143 @@ mod tests {
             (e.details["pointer"].as_str(), e.details["reason"].as_str()),
             (Some("/thread/class"), Some("external_class"))
         );
+    }
+
+    fn hole_of(v: Value) -> Result<Hole> {
+        let mut o = Obj::new(&v, "").unwrap();
+        let h = Hole::from_fields(&mut o, Unit::Mm, &Env::empty())?;
+        o.finish()?;
+        Ok(h)
+    }
+
+    const F: &str = "0123456789abcdef0123456789abcdef";
+    const E: &str = "fedcba9876543210fedcba9876543210";
+    const G: &str = "00112233445566778899aabbccddeeff";
+
+    #[test]
+    fn places_round_trip_in_every_kind() {
+        let v = json!({
+            "form": "simple", "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
+            "places": {
+                "a": {"at": {"feature": "b", "name": F}},
+                "b": {"at": {"feature": "pt"}, "face": {"feature": "b", "name": E},
+                      "direction": "z", "reverse": true},
+                "c": {"face": {"feature": "b", "name": E},
+                      "from": [{"edge": {"feature": "b", "name": F}, "distance": "10 mm"},
+                               {"edge": {"feature": "b", "name": G}, "distance": "d"}]},
+                "d": {"coaxial": {"feature": "b", "name": G}}
+            }
+        });
+        let p = [("d".to_owned(), crate::expr::Expr::parse("12 mm").unwrap())].into();
+        let env = Env::new(&p);
+        let mut o = Obj::new(&v, "").unwrap();
+        let h = Hole::from_fields(&mut o, Unit::Mm, &env).unwrap();
+        o.finish().unwrap();
+        assert_eq!(h.sketch, None);
+        assert!(h.points.is_empty());
+        assert_eq!(h.places.len(), 4);
+        assert!(h.has_places());
+        assert_eq!(h.fields(), v);
+        // Its roles, in key order, each place's in field order.
+        let roles: Vec<String> = h.geometry().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(
+            roles,
+            [
+                "places.a.at",
+                "places.b.at",
+                "places.b.face",
+                "places.b.direction",
+                "places.c.face",
+                "places.c.from.0",
+                "places.c.from.1",
+                "places.d.coaxial",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hole_is_at_a_sketch_or_at_places() {
+        let base = json!({"form": "simple", "diameter": "5 mm", "depth": "through_all",
+                          "targets": ["b"]});
+        let place = json!({"a": {"at": "origin"}});
+        let mut both = base.clone();
+        both["sketch"] = json!("s");
+        both["places"] = place.clone();
+        let e = hole_of(both).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidDocument, Some("/places"))
+        );
+        let e = hole_of(base.clone()).unwrap_err();
+        assert_eq!(e.details["pointer"], "/sketch");
+        let mut pts = base.clone();
+        pts["places"] = place.clone();
+        pts["points"] = json!(["p1"]);
+        assert_eq!(hole_of(pts).unwrap_err().details["pointer"], "/points");
+        let mut empty = base.clone();
+        empty["places"] = json!({});
+        assert_eq!(hole_of(empty).unwrap_err().details["pointer"], "/places");
+    }
+
+    #[test]
+    fn a_place_is_one_of_its_kinds() {
+        let base = json!({"form": "simple", "diameter": "5 mm", "depth": "through_all",
+                          "targets": ["b"]});
+        let refused = |p: Value| -> (Code, String) {
+            let mut v = base.clone();
+            v["places"] = json!({"a": p});
+            let e = hole_of(v).unwrap_err();
+            (
+                e.code,
+                e.details["pointer"].as_str().unwrap_or_default().to_owned(),
+            )
+        };
+        let face = json!({"feature": "b", "name": E});
+        let edge = |n: &str| json!({"edge": {"feature": "b", "name": n}, "distance": "5 mm"});
+        // Nothing to place it by; two kinds at once; from without a face.
+        assert_eq!(refused(json!({})).1, "/places/a");
+        assert_eq!(
+            refused(json!({"at": "origin", "coaxial": face})).1,
+            "/places/a"
+        );
+        assert_eq!(
+            refused(json!({"from": [edge(F), edge(G)]})).1,
+            "/places/a/face"
+        );
+        // From needs exactly two edges, each a distance of zero or more.
+        assert_eq!(
+            refused(json!({"face": face, "from": [edge(F)]})).1,
+            "/places/a/from"
+        );
+        let mut neg = edge(G);
+        neg["distance"] = json!("-1 mm");
+        assert_eq!(
+            refused(json!({"face": face, "from": [edge(F), neg]})).1,
+            "/places/a/from/1/distance"
+        );
+        // A coaxial place drills along its axis: no direction.
+        assert_eq!(
+            refused(json!({"coaxial": face, "direction": "z"})).1,
+            "/places/a/direction"
+        );
+        // A face alone is no place.
+        assert_eq!(refused(json!({"face": face})).1, "/places/a");
+        // Keys are IDs.
+        let mut bad = base.clone();
+        bad["places"] = json!({"no good": {"at": "origin"}});
+        assert_eq!(
+            hole_of(bad).unwrap_err().details["pointer"],
+            "/places/no good"
+        );
+    }
+
+    #[test]
+    fn a_sketch_hole_reads_and_writes_as_before() {
+        let v = json!({"sketch": "s", "points": ["p1", "p2"], "form": "simple",
+                       "diameter": "5 mm", "depth": "through_all", "targets": ["b"]});
+        let h = hole_of(v.clone()).unwrap();
+        assert_eq!(h.sketch, Some(Id::parse("s", "feature").unwrap()));
+        assert!(h.places.is_empty() && !h.has_places());
+        assert_eq!(h.fields(), v);
     }
 }
