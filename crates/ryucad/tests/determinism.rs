@@ -5786,6 +5786,129 @@ fn hole_geometry_section(golden: &mut Golden) {
     }
 }
 
+/// Part `hp` (ryucad 28.C): holes at every kind of place, and a fill of
+/// hole seeds clipped to a face, with a skip; every body, the rebuild's
+/// hash and every hole's row.
+fn hole_places_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut g = golden.section("hole_places");
+    let (_dir, mut s) = hole_project("hp");
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("hp");
+        hole_call(s, "feature.add", f)
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "plate", "params": {"x": 80, "y": 50, "z": 12}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "tube", "params": {"radius": 10, "height": 30},
+               "placement": {"origin": [120, 0, 0]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "bore", "operation": "cut", "targets": ["tube"],
+               "params": {"radius": 7, "height": 30}, "placement": {"origin": [120, 0, 0]}}),
+    );
+    let body = |s: &mut ryucad::session::Session, f: &str| -> serde_json::Value {
+        hole_call(s, "inspect", json!({"part": "hp", "feature": f}))["bodies"][0].clone()
+    };
+    let plate = body(&mut s, "plate");
+    let top = plate["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+        })
+        .map(|f| format!("hp/plate/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    let point = |name: &serde_json::Value| -> [f64; 3] {
+        let v = plate["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == *name)
+            .unwrap();
+        [0, 1, 2].map(|k| v["point"][k].as_f64().unwrap())
+    };
+    // The top's edge along x = 0 (axis 0) or along y = 0 (axis 1).
+    let edge = |axis: usize| -> String {
+        plate["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| {
+                let (a, b) = (point(&e["start"]), point(&e["end"]));
+                a[2] == 0.012 && b[2] == 0.012 && a[axis] == 0.0 && b[axis] == 0.0
+            })
+            .map(|e| format!("hp/plate/{}", e["name"].as_str().unwrap()))
+            .unwrap()
+    };
+    let tube = body(&mut s, "tube");
+    let outer = tube["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .map(|f| format!("hp/tube/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    for (id, at) in [
+        ("q1", ["8 mm", "8 mm", "12 mm"]),
+        ("q2", ["130 mm", "0 mm", "15 mm"]),
+    ] {
+        add(
+            &mut s,
+            json!({"type": "point", "id": id, "by": "coordinates", "coordinates": at}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "at", "spec": "M6x1.0-6H THRU",
+               "targets": ["plate"], "places": {"a": {"at": "hp/q1"}}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "ed", "spec": "DIA 5 8 DEEP", "targets": ["plate"],
+               "places": {"a": {"face": top, "from": [{"edge": edge(0), "distance": 76},
+                                                      {"edge": edge(1), "distance": 3}]}}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "rd", "spec": "DIA 3 THRU NEXT", "targets": ["tube"],
+               "places": {"a": {"at": "hp/q2", "face": outer}}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "fl", "features": ["at"], "form": "fill",
+               "face": top, "direction": "x", "spacing": 15, "spacing2": 12,
+               "margin": 2, "skip": [[1, 1]]}),
+    );
+    let part = Id::parse("hp", "part").unwrap();
+    let result = s.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (id, o) in &result.features {
+        let o = o.as_ref().unwrap();
+        g.str(id.as_str());
+        for (solid, b) in o.solids() {
+            g.str(solid.as_str());
+            g.str(&b.body.dump());
+        }
+        if o.solids().is_empty() {
+            g.str(o.hash());
+        }
+    }
+    g.str(&result.hash);
+    let holes = ryucad::holes::list(&mut s, &part, None).unwrap();
+    for r in &holes.rows {
+        g.str(&ryucad::doc::canonical::to_string(&r.to_json(Unit::Mm)));
+    }
+}
+
 /// Part `hc` (ryucad 28.B): one of each hole check's findings in a 60 x
 /// 40 x 12 mm plate; the canonical answer of `holes.check`.
 fn hole_checks_section(golden: &mut Golden) {
@@ -7331,6 +7454,7 @@ sections! {
     hole_specs => hole_specs_section(&mut golden),
     hole_geometry => hole_geometry_section(&mut golden),
     hole_checks => hole_checks_section(&mut golden),
+    hole_places => hole_places_section(&mut golden),
     sketch_drawing => sketch_drawing_section(&mut golden),
     diff => diff_section(&mut golden),
     merge => merge_section(&mut golden),
