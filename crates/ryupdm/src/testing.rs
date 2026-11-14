@@ -96,6 +96,16 @@ impl Product for Toy {
             unit: Unit::parse(manifest["default_unit"].as_str()?)?,
         })
     }
+    fn defaults(src: &dyn Source, part: &Id) -> Result<BTreeMap<String, Value>> {
+        let Some(bytes) = src.read(&format!("things/{part}.json"))? else {
+            return Ok(BTreeMap::new());
+        };
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        Ok(v.get("name")
+            .and_then(Value::as_str)
+            .map(|n| BTreeMap::from([("name".to_owned(), json!(n))]))
+            .unwrap_or_default())
+    }
 }
 
 /// A part ID.
