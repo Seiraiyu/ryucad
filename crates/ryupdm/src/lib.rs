@@ -39,6 +39,7 @@ pub mod config;
 #[cfg(feature = "cad")]
 pub mod content;
 pub mod deps;
+pub mod git;
 pub mod history;
 #[cfg(feature = "cad")]
 pub mod items;
