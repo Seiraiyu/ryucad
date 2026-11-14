@@ -10,12 +10,14 @@ pub use ryupdm::{PDM_CONFIG, RELEASES};
 /// The folder of parts' PDM properties, beside the manifest.
 pub const PROPERTIES: &str = "properties";
 
+pub mod cmd;
 pub mod content;
 
 use crate::conn::{BLOCKS, CLASSES, DESIGNS, RAILS};
 use crate::error::{Code, Error, Result};
 use crate::id::Id;
 use crate::project::{MANIFEST, Manifest, ProjectKind};
+use crate::session::Session;
 use crate::source::Source;
 use ryupdm::product::{Identity, PartFiles, Product};
 use serde_json::Value;
@@ -55,6 +57,88 @@ pub(crate) fn manifest(src: &dyn Source) -> Result<Manifest> {
         Error::new(Code::ProjectNotFound, format!("no {MANIFEST}")).with("path", MANIFEST)
     })?;
     Manifest::read(&bytes)
+}
+
+/// The product's name in ryupdm's messages.
+pub(crate) const NAME: &str = <crate::Eda as ryu_git::Layout>::NAME;
+
+/// What guards a PDM write: BLAKE3 over the project's revision and every
+/// byte of `ryupdm.json`, `properties/` and `releases/` (the project's
+/// revision covers none of them). 32 hex digits.
+pub fn revision(session: &Session) -> String {
+    let files = session.files();
+    let mut h = blake3::Hasher::new();
+    h.update(session.project().revision.as_bytes());
+    for (path, bytes) in files.iter().filter(|(p, _)| pdm_file(p)) {
+        h.update(&(path.len() as u64).to_le_bytes());
+        h.update(path.as_bytes());
+        h.update(&(bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
+    }
+    h.finalize().to_hex()[..32].to_owned()
+}
+
+/// Whether `path` (relative to the project) is one of ryupdm's files:
+/// `ryupdm.json`, a properties file or a release record.
+pub fn pdm_file(path: &str) -> bool {
+    path == PDM_CONFIG
+        || path.starts_with(&format!("{PROPERTIES}/"))
+        || path.starts_with(&format!("{RELEASES}/"))
+}
+
+/// Refuses a PDM write when `expected` isn't the PDM revision now.
+pub fn check_revision(session: &Session, expected: Option<&str>) -> Result<()> {
+    crate::server::check_revision("the project's PDM files", &revision(session), expected)
+}
+
+/// Writes `files` (each path's text, or `None` to delete it) as one
+/// change, judged as every ryueda write is.
+pub(crate) fn write(
+    session: &mut Session,
+    what: &str,
+    files: Vec<(String, Option<String>)>,
+) -> Result<()> {
+    crate::write::commit(session, what, crate::write::Writes(files))
+}
+
+/// The project's repository and its release branch as read, from the
+/// session's copy while the refs haven't moved; `not_a_git_repo` outside
+/// a repository.
+pub fn history(session: &mut Session) -> Result<(crate::git::Repo, ryupdm::history::Releases)> {
+    let repo: crate::git::Repo = ryu_git::repo::repo(session.root())?;
+    let config = ryupdm::config::Config::read_in(&session.snapshot(), NAME)?;
+    let key = ryupdm::release::refs_key(repo.gix(), &config)?;
+    if let Some((k, r)) = &session.pdm
+        && *k == key
+    {
+        return Ok((repo, r.clone()));
+    }
+    let releases = ryupdm::history::Releases::read(repo.gix(), repo.prefix(), &config)?;
+    session.pdm = Some((key, releases.clone()));
+    Ok((repo, releases))
+}
+
+/// The release branch, or nothing official outside a repository.
+pub fn releases_or_none(session: &mut Session) -> ryupdm::history::Releases {
+    history(session).map(|(_, r)| r).unwrap_or_default()
+}
+
+/// A part's state, for `props.get`: in work outside a repository.
+pub fn state_of(session: &mut Session, part: &Id) -> Value {
+    let releases = releases_or_none(session);
+    ryupdm::state::derive_for::<crate::Eda>(&session.snapshot(), part, &releases).to_json()
+}
+
+/// Whether `id` looks like one `name::random` drew (10 base32
+/// characters with a digit or at most one vowel): a design that should
+/// get a readable ID before its first property or release (design 629).
+pub fn random_looking(id: &Id) -> bool {
+    let s = id.as_str();
+    s.len() == 10
+        && s.bytes()
+            .all(|c| c.is_ascii_lowercase() || (b'2'..=b'7').contains(&c))
+        && (s.bytes().any(|c| c.is_ascii_digit())
+            || s.bytes().filter(|c| b"aeiou".contains(c)).count() <= 1)
 }
 
 /// What a part of this project is: `design` or `component`.
