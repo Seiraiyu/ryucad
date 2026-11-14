@@ -153,9 +153,14 @@ mod tests {
         let mut o = header_in(&ok, "toy.thing", 2, "ryueda").unwrap();
         assert_eq!(o.take("x").unwrap(), json!(1));
         o.finish().unwrap();
-        let e = header_in(&json!({"format": 1, "kind": "other"}), "toy.thing", 2, "ryueda")
-            .err()
-            .unwrap();
+        let e = header_in(
+            &json!({"format": 1, "kind": "other"}),
+            "toy.thing",
+            2,
+            "ryueda",
+        )
+        .err()
+        .unwrap();
         assert_eq!(e.code, Code::InvalidDocument);
         assert_eq!(e.details["pointer"], json!("/kind"));
     }

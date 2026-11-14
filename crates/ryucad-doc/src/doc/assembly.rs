@@ -11,8 +11,8 @@ use super::files::{Obj, invalid, number};
 use super::id::{Id, ProjectId};
 use super::import::{ProductRef, count, import_path};
 use super::sketch::clean;
-pub use ryu_doc::units::snap_origin;
 use crate::error::Result;
+pub use ryu_doc::units::snap_origin;
 use serde_json::{Value, json};
 
 /// Which revision of a part an instance places: the part's files as they

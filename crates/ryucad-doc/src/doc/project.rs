@@ -1237,7 +1237,13 @@ mod tests {
         ] {
             assert!(project_file(yes), "{yes}");
         }
-        for no in ["README", "parts/p", "parts/p/a/b/c.json", "releases/p", "imports/a/b"] {
+        for no in [
+            "README",
+            "parts/p",
+            "parts/p/a/b/c.json",
+            "releases/p",
+            "imports/a/b",
+        ] {
             assert!(!project_file(no), "{no}");
         }
         assert_eq!(
