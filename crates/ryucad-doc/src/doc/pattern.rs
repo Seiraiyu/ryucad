@@ -49,6 +49,19 @@ pub enum Kind {
     },
     /// The mirror image in `plane`: one instance, `[1, 0]`.
     Mirror { plane: MirrorPlane },
+    /// A rectangular lattice of hole seeds over a planar face, clipped to
+    /// it (ryucad 28.C): `spacing` along `direction` (in the face's plane;
+    /// the face's own x when left out), `spacing2` across (`spacing` when
+    /// left out), every instance whose mouths lie inside the face less
+    /// `margin`. Its instances are signed from the seed, and only its
+    /// rebuild knows them.
+    Fill {
+        face: GeomRef,
+        direction: Option<GeomRef>,
+        spacing: Quantity,
+        spacing2: Option<Quantity>,
+        margin: Option<Quantity>,
+    },
 }
 
 /// One direction of a linear pattern: `count` in all, `spacing` apart.
@@ -109,18 +122,20 @@ fn direction(v: &Value, at: &str) -> Result<Direction> {
 }
 
 impl Kind {
-    pub const NAMES: [&str; 3] = ["linear", "circular", "mirror"];
+    pub const NAMES: [&str; 4] = ["linear", "circular", "mirror", "fill"];
 
     pub fn type_name(&self) -> &'static str {
         match self {
             Kind::Linear { .. } => "linear",
             Kind::Circular { .. } => "circular",
             Kind::Mirror { .. } => "mirror",
+            Kind::Fill { .. } => "fill",
         }
     }
 
     /// How many instances along each way, the seed's included: `[n, 1]`
-    /// for one direction or round an axis, `[2, 1]` for a mirror.
+    /// for one direction or round an axis, `[2, 1]` for a mirror, `[1, 1]`
+    /// for a fill (whose instances only its rebuild knows).
     pub fn counts(&self) -> [u32; 2] {
         let n = |q: &Quantity| q.number() as u32;
         match self {
@@ -129,6 +144,7 @@ impl Kind {
             }
             Kind::Circular { count, .. } => [n(count), 1],
             Kind::Mirror { .. } => [2, 1],
+            Kind::Fill { .. } => [1, 1],
         }
     }
 }
@@ -223,6 +239,25 @@ impl Pattern {
                 v["angle"] = json!(angle.text());
             }
             Kind::Mirror { plane } => v["plane"] = plane.to_json(),
+            Kind::Fill {
+                face,
+                direction,
+                spacing,
+                spacing2,
+                margin,
+            } => {
+                v["face"] = face.to_json();
+                if let Some(d) = direction {
+                    v["direction"] = d.to_json();
+                }
+                v["spacing"] = json!(spacing.text());
+                if let Some(s) = spacing2 {
+                    v["spacing2"] = json!(s.text());
+                }
+                if let Some(m) = margin {
+                    v["margin"] = json!(m.text());
+                }
+            }
         }
         if !self.skip.is_empty() {
             let two = matches!(
@@ -230,7 +265,7 @@ impl Pattern {
                 Kind::Linear {
                     second: Some(_),
                     ..
-                }
+                } | Kind::Fill { .. }
             );
             let skip: Vec<Value> = self
                 .skip
@@ -277,10 +312,40 @@ impl Pattern {
             Some("mirror") => Kind::Mirror {
                 plane: GeomRef::from_json(&o.take("plane")?, "/plane")?,
             },
+            Some("fill") => {
+                let face = GeomRef::from_json(&o.take("face")?, "/face")?;
+                let direction = o
+                    .take_opt("direction")
+                    .map(|d| direction(&d, "/direction"))
+                    .transpose()?;
+                let spacing1 = spacing(&o.take("spacing")?, default, env, "/spacing")?;
+                let spacing2 = o
+                    .take_opt("spacing2")
+                    .map(|s| spacing(&s, default, env, "/spacing2"))
+                    .transpose()?;
+                let margin = o
+                    .take_opt("margin")
+                    .map(|m| {
+                        let q = Quantity::from_json_in(&m, default, &|n| env.get(n))
+                            .map_err(|e| e.with("pointer", "/margin"))?;
+                        if q.meters() < 0.0 {
+                            return Err(bad("/margin", "a fill's margin is zero or more", &q));
+                        }
+                        Ok(q)
+                    })
+                    .transpose()?;
+                Kind::Fill {
+                    face,
+                    direction,
+                    spacing: spacing1,
+                    spacing2,
+                    margin,
+                }
+            }
             _ => {
                 return Err(invalid(
                     "/form",
-                    "a pattern's form is linear, circular or mirror",
+                    "a pattern's form is linear, circular, mirror or fill",
                 ));
             }
         };
@@ -305,6 +370,7 @@ impl Pattern {
                     "a mirror has one instance, and nothing to skip",
                 ));
             }
+            Some(v) if matches!(kind, Kind::Fill { .. }) => fill_skip_from_json(&v)?,
             Some(v) => {
                 let two = matches!(
                     kind,
@@ -357,6 +423,14 @@ impl Pattern {
             }
             Kind::Circular { axis, .. } => out.push(("axis".to_owned(), axis)),
             Kind::Mirror { plane } => out.push(("plane".to_owned(), plane)),
+            Kind::Fill {
+                face, direction, ..
+            } => {
+                out.push(("face".to_owned(), face));
+                if let Some(d) = direction {
+                    out.push(("direction".to_owned(), d));
+                }
+            }
         }
         out
     }
@@ -404,11 +478,46 @@ pub(crate) fn skip_from_json(v: &Value, counts: [u32; 2], two: bool) -> Result<V
     Ok(out)
 }
 
-/// The expression strings of a pattern: spacings and counts (its angle is
-/// any feature's `angle`).
+/// Reads a fill's `skip`: `[i, j]` pairs of signed indices, each once,
+/// never the seed's; any index (which a fill keeps, only its rebuild
+/// knows).
+fn fill_skip_from_json(v: &Value) -> Result<Vec<Instance>> {
+    let a = v
+        .as_array()
+        .ok_or_else(|| invalid("/skip", "skip is an array of [i, j] instance indices"))?;
+    let index = |x: &Value| x.as_i64().and_then(|i| i32::try_from(i).ok());
+    let mut out: Vec<Instance> = Vec::with_capacity(a.len());
+    for (k, x) in a.iter().enumerate() {
+        let at = format!("/skip/{k}");
+        let i = match x {
+            Value::Array(p) if p.len() == 2 => index(&p[0]).zip(index(&p[1])).map(|(i, j)| [i, j]),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            invalid(
+                &at,
+                "a fill's instance to skip is [i, j], each a whole number",
+            )
+        })?;
+        if i == [0, 0] {
+            return Err(invalid(
+                &at,
+                "instance [0, 0] is the seed, which can't be skipped",
+            ));
+        }
+        if out.contains(&i) {
+            return Err(invalid(&at, &format!("instance {i:?} is skipped twice")));
+        }
+        out.push(i);
+    }
+    Ok(out)
+}
+
+/// The expression strings of a pattern: spacings, counts and a fill's
+/// margin (its angle is any feature's `angle`).
 pub fn expression_strings<'a>(k: &str, field: &'a mut Value) -> Option<&'a mut String> {
     match (k, field) {
-        ("spacing" | "spacing2" | "count" | "count2", Value::String(s)) => Some(s),
+        ("spacing" | "spacing2" | "count" | "count2" | "margin", Value::String(s)) => Some(s),
         _ => None,
     }
 }
@@ -560,5 +669,57 @@ mod tests {
         let mut w = f.to_json();
         assert!(crate::doc::files::rename_in_feature(&mut w, "n", "rows"));
         assert_eq!(w["count"], "rows + 1");
+    }
+
+    const FACE: &str = "0123456789abcdef0123456789abcdef";
+
+    fn fill(extra: Value) -> Result<Pattern> {
+        let mut v = json!({"form": "fill", "features": ["h"], "targets": ["b"],
+                           "face": {"feature": "b", "name": FACE}, "spacing": "20 mm"});
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        let mut o = Obj::new(&v, "")?;
+        let p = Pattern::from_fields(&mut o, Unit::Mm, &Env::empty())?;
+        o.finish()?;
+        Ok(p)
+    }
+
+    #[test]
+    fn a_fill_round_trips_and_skips_both_ways() {
+        let p = fill(
+            json!({"direction": "x", "spacing2": "15 mm", "margin": "2 mm",
+                            "skip": [[-1, 0], [2, -3]]}),
+        )
+        .unwrap();
+        assert_eq!(p.kind.type_name(), "fill");
+        assert_eq!(p.skip, vec![[-1, 0], [2, -3]]);
+        // Its instances depend on its face: none from the file.
+        assert!(p.instances().is_empty());
+        let f = p.fields();
+        assert_eq!(f["skip"], json!([[-1, 0], [2, -3]]));
+        assert_eq!(f["margin"], "2 mm");
+        assert_eq!(
+            Pattern::from_fields(&mut Obj::new(&f, "").unwrap(), Unit::Mm, &Env::empty()).unwrap(),
+            p
+        );
+        let roles: Vec<String> = p.geometry().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["face", "direction"]);
+    }
+
+    #[test]
+    fn a_fill_is_refused_what_it_cant_take() {
+        let e = |x: Value| {
+            fill(x).unwrap_err().details["pointer"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(e(json!({"skip": [[0, 0]]})), "/skip/0");
+        assert_eq!(e(json!({"skip": [3]})), "/skip/0"); // always [i, j]
+        assert_eq!(e(json!({"skip": [[1, 1], [1, 1]]})), "/skip/1");
+        assert_eq!(e(json!({"spacing": "0 mm"})), "/spacing");
+        assert_eq!(e(json!({"margin": "-1 mm"})), "/margin");
+        assert_eq!(e(json!({"count": 3})), "/count"); // a fill has no count
     }
 }

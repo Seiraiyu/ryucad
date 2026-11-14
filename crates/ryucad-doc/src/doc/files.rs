@@ -662,7 +662,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             ("tolerance", x @ Value::Object(_)) => {
                 out.extend(super::hole::expression_strings("tolerance", x));
             }
-            (k @ ("spacing" | "spacing2" | "count" | "count2"), x) => {
+            (k @ ("spacing" | "spacing2" | "count" | "count2" | "margin"), x) => {
                 out.extend(super::pattern::expression_strings(k, x));
             }
             ("extent", Value::Object(e)) => {
@@ -1214,6 +1214,11 @@ impl Feature {
         // Highest first, as `feature_format`.
         if let Feature::Hole(h) = self
             && h.has_places()
+        {
+            return super::hole::PLACES_FORMAT;
+        }
+        if let Feature::Pattern(p) = self
+            && matches!(p.kind, super::pattern::Kind::Fill { .. })
         {
             return super::hole::PLACES_FORMAT;
         }
@@ -3059,6 +3064,24 @@ mod tests {
             "from": {"feature": "shaft", "name": "fedcba9876543210fedcba9876543210"},
             "depth": "l"});
         assert!(feature_names(&c).contains("l"));
+    }
+
+    #[test]
+    fn a_fill_is_format_26_and_its_margin_an_expression() {
+        let v = json!({"format": 26, "kind": FEATURE_KIND, "type": "pattern", "form": "fill",
+            "features": ["h"], "targets": ["b"],
+            "face": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"},
+            "spacing": "s", "margin": "s / 4"});
+        assert_eq!(feature_format(&v), 26);
+        let p = [("s".to_owned(), crate::expr::Expr::parse("20 mm").unwrap())].into();
+        let f = Feature::from_json(&v, Unit::Mm, &Env::new(&p)).unwrap();
+        assert_eq!(f.format(), 26);
+        let at: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
+        assert!(at.iter().any(|x| x == "/margin"), "{at:?}");
+        // A linear pattern stays 3.
+        let lin = json!({"kind": FEATURE_KIND, "type": "pattern", "form": "linear",
+            "features": ["h"], "targets": ["b"], "direction": "x", "spacing": "5 mm", "count": 3});
+        assert_eq!(feature_format(&lin), 3);
     }
 
     #[test]

@@ -226,6 +226,7 @@ pub fn motions(
                 .map(|x| (x, Motion::Mirror(plane)))
                 .collect())
         }
+        Kind::Fill { .. } => Err(Error::new(Code::Internal, "fills come with Task 13")),
     }
 }
 

@@ -85,7 +85,8 @@ impl Follow {
                 _ => None,
             },
             Feature::Pattern(_) => {
-                matches!(r, "direction" | "direction2" | "axis" | "plane").then_some(Carrier)
+                matches!(r, "direction" | "direction2" | "axis" | "plane" | "face")
+                    .then_some(Carrier)
             }
             Feature::Datum(_) => match r {
                 "curve" => Some(One),

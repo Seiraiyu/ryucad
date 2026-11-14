@@ -39,6 +39,22 @@ fn pattern_report(part: &Id, x: &crate::doc::pattern::Pattern) -> Value {
             v["angle"] = angle.report();
         }
         Kind::Mirror { .. } => {}
+        // A fill's spacings and margin (ryucad 28.C); its face and
+        // direction are references, below.
+        Kind::Fill {
+            spacing,
+            spacing2,
+            margin,
+            ..
+        } => {
+            v["spacing"] = spacing.report();
+            if let Some(s) = spacing2 {
+                v["spacing2"] = s.report();
+            }
+            if let Some(m) = margin {
+                v["margin"] = m.report();
+            }
+        }
     }
     for (role, r) in x.geometry() {
         v[role] = json!(r.text(part));

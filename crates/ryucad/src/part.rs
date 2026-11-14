@@ -265,6 +265,7 @@ pub(crate) fn part_report(
                     Kind::Linear { .. } => "linear",
                     Kind::Circular { .. } => "circular",
                     Kind::Mirror { .. } => "mirror",
+                    Kind::Fill { .. } => "fill",
                 },
                 Feature::InstancePattern(p) => p.form.type_name(),
                 _ => return None,
