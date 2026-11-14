@@ -504,3 +504,87 @@ fn a_redrawn_sketch_fails_the_fillet_naming_what_it_lost() {
     );
     assert_eq!(e.details["removed_by"], "e");
 }
+
+#[test]
+fn a_place_added_among_keyed_places_renames_nothing() {
+    let (_dir, mut s) = plate(&[]);
+    for (id, x) in [("qa", "8 mm"), ("qb", "20 mm"), ("qc", "32 mm")] {
+        add(
+            &mut s,
+            json!({"type": "point", "id": id, "by": "coordinates",
+                   "coordinates": [x, "15 mm", "10 mm"]}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "diameter": 3, "depth": "through_all",
+               "places": {"a": {"at": "p/qa"}, "c": {"at": "p/qc"}}}),
+    );
+    builds(&mut s);
+    let before = names(&mut s);
+    edit(
+        &mut s,
+        "h",
+        json!({"places": {"a": {"at": "p/qa"}, "b": {"at": "p/qb"}, "c": {"at": "p/qc"}}}),
+    );
+    builds(&mut s);
+    let after = names(&mut s);
+    let (added, lost) = changed(&before, &after);
+    assert!(lost.is_empty(), "{lost:?}");
+    // What is new is hole h's: place b's bore, and the edges it leaves in
+    // the plate's top.
+    assert!(added.iter().any(|o| o["point"] == "b"), "{added:?}");
+    assert!(added.iter().all(|o| o["feature"] == "h"), "{added:?}");
+    assert!(
+        added
+            .iter()
+            .all(|o| o.get("point").is_none_or(|p| p == "b")),
+        "{added:?}"
+    );
+}
+
+#[test]
+fn a_fills_added_row_renames_nothing_of_the_others() {
+    let (_dir, mut s) = plate(&[[5.0, 5.0]]);
+    let top = {
+        let b = body(&mut s, Some("b"));
+        b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+            })
+            .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+            .unwrap()
+    };
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "t", "diameter": 2,
+               "depth": "through_all"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "f", "features": ["h"], "form": "fill",
+               "face": top, "direction": "x", "spacing": 10}),
+    );
+    builds(&mut s);
+    let before = names(&mut s);
+    // One more row's room along y.
+    edit(&mut s, "b", json!({"params": {"y": 40}}));
+    builds(&mut s);
+    let after = names(&mut s);
+    let (added, lost) = changed(&before, &after);
+    // The box's far wall moved (its own names hold); nothing of the
+    // fill's instances is lost, and the new row's are new.
+    let lost_fill: Vec<&Value> = lost.iter().filter(|o| o["feature"] == "f").collect();
+    assert!(lost_fill.is_empty(), "{lost_fill:?}");
+    assert!(
+        added
+            .iter()
+            .any(|o| o["feature"] == "f" && o["instance"][1] == 3),
+        "{added:?}"
+    );
+}

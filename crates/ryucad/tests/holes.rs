@@ -346,3 +346,222 @@ fn a_near_chamfer_or_a_far_side_renames_nothing_that_was_there() {
         assert!(after.len() > before.len(), "{k} adds its faces");
     }
 }
+
+/// The plate's straight edges on its top face, as references, with their
+/// ends' points.
+fn top_edges(s: &mut Session) -> Vec<(String, [f64; 3], [f64; 3])> {
+    let body = must(s, "inspect", json!({"part": "p", "feature": "b"}))["bodies"][0].clone();
+    let at = |name: &Value| -> [f64; 3] {
+        let v = body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == *name)
+            .unwrap();
+        [0, 1, 2].map(|k| v["point"][k].as_f64().unwrap())
+    };
+    body["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                format!("p/b/{}", e["name"].as_str().unwrap()),
+                at(&e["start"]),
+                at(&e["end"]),
+            )
+        })
+        .filter(|(_, a, b)| a[2] == 0.01 && b[2] == 0.01)
+        .collect()
+}
+
+#[test]
+fn every_placement_against_its_volume() {
+    let (_dir, mut s) = plate(&[]);
+    let body = must(&mut s, "inspect", json!({"part": "p", "feature": "b"}))["bodies"][0].clone();
+    let top = format!("p/b/{}", face(&body, 1.0));
+    let plate = 40.0 * 30.0 * 10.0;
+    let mut removed = 0.0;
+    // At a datum point on the top: blind, flush.
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "point", "id": "q",
+               "by": "coordinates", "coordinates": ["8 mm", "8 mm", "10 mm"]}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "hole", "id": "a",
+               "diameter": 4, "depth": {"blind": 6}, "places": {"a": {"at": "p/q"}}}),
+    );
+    removed += PI * 4.0 * 6.0;
+    near(volume(&mut s), plate - removed);
+    // From the edges along x = 0 and y = 0: 30 mm and 20 mm in.
+    let edges = top_edges(&mut s);
+    let along_y = edges
+        .iter()
+        .find(|e| e.1[0] == 0.0 && e.2[0] == 0.0)
+        .unwrap()
+        .0
+        .clone();
+    let along_x = edges
+        .iter()
+        .find(|e| e.1[1] == 0.0 && e.2[1] == 0.0)
+        .unwrap()
+        .0
+        .clone();
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "hole", "id": "e",
+               "diameter": 3, "depth": "through_all",
+               "places": {"a": {"face": top, "from": [{"edge": along_y, "distance": 30},
+                                                     {"edge": along_x, "distance": 20}]}}}),
+    );
+    removed += PI * 2.25 * 10.0;
+    near(volume(&mut s), plate - removed);
+    // Coaxial with hole e's bore, from its top rim: counterbored 1 mm deep.
+    let rows = must(&mut s, "holes.list", json!({"part": "p"}));
+    let wall = rows["holes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["ref"] == "p/e/a")
+        .unwrap()["faces"]["wall"]
+        .clone();
+    // One face is written as its reference, several as a list.
+    let wall = wall
+        .as_str()
+        .or_else(|| wall[0].as_str())
+        .unwrap()
+        .to_owned();
+    let cb = |reverse: bool| {
+        json!({"part": "p", "type": "hole", "id": "cb",
+               "form": "counterbore", "diameter": 3, "counterbore": {"diameter": 6, "depth": 1},
+               "depth": {"blind": 2}, "places": {"a": {"coaxial": wall, "reverse": reverse}}})
+    };
+    // The bore's frame may run either way: the one that drills down from
+    // the top rim removes the counterbore's ring at the top.
+    must(&mut s, "feature.add", cb(true));
+    let v = volume(&mut s);
+    let want = plate - removed - PI * (9.0 - 2.25) * 1.0;
+    if (v - want).abs() >= 2e-4 * want {
+        must(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "cb", "places": {"a": {"coaxial": wall}}}),
+        );
+    }
+    removed += PI * (9.0 - 2.25) * 1.0;
+    near(volume(&mut s), plate - removed);
+    let v = call(&mut s, "check", json!({"part": "p"}));
+    assert!(v.is_ok(), "{v:?}");
+}
+
+#[test]
+fn a_radial_hole_in_a_tube() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "cylinder", "id": "b",
+               "params": {"radius": 10, "height": 40}}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "cylinder", "id": "bore",
+               "operation": "cut", "targets": ["b"], "params": {"radius": 8, "height": 40}}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "point", "id": "q",
+               "by": "coordinates", "coordinates": ["20 mm", "0 mm", "20 mm"]}),
+    );
+    let body = must(&mut s, "inspect", json!({"part": "p", "feature": "b"}))["bodies"][0].clone();
+    let outer = body["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["surface"]["type"] == "cylinder")
+        .max_by(|a, b| {
+            a["surface"]["radius"]
+                .as_f64()
+                .unwrap()
+                .total_cmp(&b["surface"]["radius"].as_f64().unwrap())
+        })
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "hole", "id": "r",
+               "spec": "M3x0.5-6H THRU NEXT", "places": {"a": {"at": "p/q", "face": outer}}}),
+    );
+    let tube = PI * (100.0 - 64.0) * 40.0;
+    let v = volume(&mut s);
+    // The near wall alone: about a Ø2.5 bore through 2 mm, never the far wall's.
+    assert!(v < tube && v > tube - PI * 1.5625 * 2.6, "{v} vs {tube}");
+    let rows = must(&mut s, "holes.list", json!({"part": "p"}));
+    let r = &rows["holes"][0];
+    assert_eq!(r["spec"], "M3x0.5-6H THRU NEXT");
+    let axis: Vec<f64> = r["axis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap())
+        .collect();
+    assert!((axis[0] + 1.0).abs() < 1e-12, "{axis:?}");
+}
+
+#[test]
+fn a_dowel_skipped_from_a_fill_and_drilled_alone() {
+    let (_dir, mut s) = plate(&[[5.0, 5.0]]);
+    let body = must(&mut s, "inspect", json!({"part": "p", "feature": "b"}))["bodies"][0].clone();
+    let top = format!("p/b/{}", face(&body, 1.0));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "hole", "id": "h", "sketch": "s",
+               "spec": "M3x0.5-6H THRU"}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "pattern", "id": "f",
+               "features": ["h"], "form": "fill", "face": top, "direction": "x",
+               "spacing": 10, "skip": [[1, 1]]}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "point", "id": "d",
+               "by": "coordinates", "coordinates": ["15 mm", "15 mm", "10 mm"]}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "hole", "id": "dowel",
+               "spec": "DIA 3 H7 THRU", "places": {"a": {"at": "p/d"}}}),
+    );
+    // 4 × 3 on a 10 mm grid from (5, 5), less the skip, and the dowel.
+    let rows = must(&mut s, "holes.list", json!({"part": "p"}));
+    let rows = rows["holes"].as_array().unwrap();
+    assert_eq!(rows.len(), 12, "{rows:?}");
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r["spec"] == "M3x0.5-6H THRU")
+            .count(),
+        11
+    );
+    let plate = 40.0 * 30.0 * 10.0;
+    near(
+        volume(&mut s),
+        plate - 11.0 * PI * 1.25 * 1.25 * 10.0 - PI * 2.25 * 10.0,
+    );
+}
