@@ -2947,6 +2947,14 @@ fn schematics_from_the_cli() {
     assert_eq!(list["instructions"][0]["holds"], json!(true), "{list}");
     assert_eq!(list["instructions"][0]["state"], "held", "{list}");
     assert!(list["instructions"][0]["why"].is_null(), "{list}");
+    // Each instruction names what it speaks of by reference path (plan
+    // 3.D: the window's Show frames them).
+    assert_eq!(
+        list["instructions"][0]["refs"],
+        json!(["breakout/j1", "breakout/r1"]),
+        "{list}"
+    );
+    assert_eq!(list["instructions"][1]["refs"], json!(["breakout/sda"]), "{list}");
     // Every part crowded beside J1 (design 519): left of it they come
     // nearer but not within the reach, so it is pulled and says how far is
     // left; below it nothing comes nearer, so it is laid out without, moves
