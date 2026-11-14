@@ -1426,11 +1426,15 @@ fn edit_driven(v: &mut Value, op: u8, arg: u8) {
     let o = v.as_object_mut().unwrap();
     match op % 5 {
         0 => {
-            o.insert("on".into(), json!({"instance": [format!("lid{}", arg % 3)], "feature": "holes"}));
+            o.insert(
+                "on".into(),
+                json!({"instance": [format!("lid{}", arg % 3)], "feature": "holes"}),
+            );
         }
         1 => {
             let f = ["holes", "grid", "layout"][usize::from(arg % 3)];
-            o.entry("on").or_insert_with(|| json!({"instance": ["lid"]}))["feature"] = json!(f);
+            o.entry("on")
+                .or_insert_with(|| json!({"instance": ["lid"]}))["feature"] = json!(f);
         }
         2 => {
             o.insert("form".into(), json!("points"));
@@ -1449,12 +1453,11 @@ fn edit_driven(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
-/// Edits an insert: its label (or `working`), its placement's origin, its
-/// axes turned, its placement dropped; or a delete of bodies: a solid
-/// added, the first taken out, the list replaced.
 /// A hole's geometry (ryucad 28.B): its near chamfer set or taken away,
 /// a far countersink or counterbore, its thread's class, or through all
-/// or to the next wall.
+/// or to the next wall. The file is restamped at the lowest format that
+/// holds it, as the driver writes it: without `near` or the far side, the
+/// hole falls back below ryucad 28.B's format.
 fn edit_hole_geometry(v: &mut Value, op: u8, arg: u8) {
     let o = v.as_object_mut().unwrap();
     match op % 4 {
@@ -1489,12 +1492,21 @@ fn edit_hole_geometry(v: &mut Value, op: u8, arg: u8) {
             );
         }
         _ => {
-            let d = if arg % 2 == 0 { "through_all" } else { "through_next" };
+            let d = if arg % 2 == 0 {
+                "through_all"
+            } else {
+                "through_next"
+            };
             o.insert("depth".into(), json!(d));
         }
     }
+    let format = ryucad::doc::files::feature_format(v);
+    v["format"] = json!(format);
 }
 
+/// Edits an insert: its label (or `working`), its placement's origin, its
+/// axes turned, its placement dropped; or a delete of bodies: a solid
+/// added, the first taken out, the list replaced.
 fn edit_insert(v: &mut Value, op: u8, arg: u8) {
     let o = v.as_object_mut().unwrap();
     if o.get("type").and_then(Value::as_str) == Some("delete_body") {
@@ -1746,8 +1758,6 @@ fuzz_target!(|data: &[u8]| {
                          "target": "h", "tool": {"body": "t"}}),
             32 => json!({"format": 20, "kind": "ryucad.feature", "type": "delete_face",
                          "target": "b", "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
-            // An insert when the edits leave no odd byte over, else a
-            // delete of bodies.
             36 => json!({"format": 25, "kind": "ryucad.feature", "type": "hole",
                 "sketch": "t", "form": "simple", "depth": "through_all", "targets": ["b"],
                 "thread": {"standard": "iso_metric", "size": "M6"},
@@ -1755,6 +1765,8 @@ fuzz_target!(|data: &[u8]| {
             35 => json!({"format": 24, "kind": "ryucad.feature", "type": "instance_pattern",
                 "form": "feature", "instances": ["s0"],
                 "on": {"instance": ["lid"], "feature": "holes"}}),
+            // An insert when the edits leave no odd byte over, else a
+            // delete of bodies.
             34 if rest.len() % 2 == 0 => json!({"format": 21, "kind": "ryucad.feature",
                 "type": "insert", "part": "pcb", "rev": {"label": "A"},
                 "placement": {"origin": ["0 mm", "0 mm", "1 mm"], "x": [1, 0, 0], "z": [0, 0, 1]}}),

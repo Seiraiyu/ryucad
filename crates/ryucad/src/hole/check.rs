@@ -755,6 +755,32 @@ pub fn check(
     Ok((out, checked))
 }
 
+impl Options {
+    /// The checks' options from a request's: each the default when left
+    /// out, and refused unless a finite number above 0 (`holes.check` and
+    /// `check --holes` alike).
+    pub fn new(edge_factor: Option<f64>, min_engagement: Option<f64>) -> Result<Options> {
+        let d = Options::default();
+        let opts = Options {
+            edge_factor: edge_factor.unwrap_or(d.edge_factor),
+            min_engagement: min_engagement.unwrap_or(d.min_engagement),
+        };
+        for (k, x) in [
+            ("edge_factor", opts.edge_factor),
+            ("min_engagement", opts.min_engagement),
+        ] {
+            if !(x > 0.0 && x.is_finite()) {
+                return Err(crate::error::Error::new(
+                    crate::error::Code::InvalidParam,
+                    format!("{k} is a number above 0, not {x}"),
+                )
+                .with("param", k));
+            }
+        }
+        Ok(opts)
+    }
+}
+
 /// `holes.check`.
 pub fn request(
     session: &mut Session,
@@ -765,23 +791,7 @@ pub fn request(
     rev: Option<&str>,
 ) -> Result<Value> {
     let pid = Id::parse(part, "part")?;
-    let d = Options::default();
-    let opts = Options {
-        edge_factor: edge_factor.unwrap_or(d.edge_factor),
-        min_engagement: min_engagement.unwrap_or(d.min_engagement),
-    };
-    for (k, x) in [
-        ("edge_factor", opts.edge_factor),
-        ("min_engagement", opts.min_engagement),
-    ] {
-        if !(x > 0.0 && x.is_finite()) {
-            return Err(crate::error::Error::new(
-                crate::error::Code::InvalidParam,
-                format!("{k} is a number above 0, not {x}"),
-            )
-            .with("param", k));
-        }
-    }
+    let opts = Options::new(edge_factor, min_engagement)?;
     let (findings, checked) = check(session, &pid, solid, opts, rev)?;
     let passed = !findings.iter().any(|f| f.severity() == "error");
     Ok(json!({
@@ -1129,6 +1139,31 @@ pub(crate) mod tests {
 
     /// Rebuilds, edits, listing holes, an import and a plain check never
     /// run the hole checks; asking does, once.
+    #[test]
+    fn check_holes_refuses_factors_as_holes_check_does() {
+        let (_dir, mut s) = drilled();
+        for (k, x) in [
+            ("edge_factor", json!(-1.0)),
+            ("edge_factor", json!(0.0)),
+            ("min_engagement", json!(-0.5)),
+        ] {
+            for (method, mut params) in [
+                ("holes.check", json!({"part": "p"})),
+                ("check", json!({"holes": true})),
+            ] {
+                params[k] = x.clone();
+                let e = call(&mut s, method, params).unwrap_err();
+                assert_eq!(
+                    (e.code, &e.details["param"]),
+                    (crate::error::Code::InvalidParam, &json!(k)),
+                    "{method} {k} {x}"
+                );
+            }
+        }
+        // Unasked, the factors aren't read at all.
+        call(&mut s, "check", json!({"edge_factor": -1.0})).unwrap();
+    }
+
     #[test]
     fn nothing_runs_the_hole_checks_unasked() {
         let (_dir, mut s) = drilled();

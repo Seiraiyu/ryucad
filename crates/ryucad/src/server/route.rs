@@ -579,20 +579,19 @@ pub(crate) fn dispatch(
             holes,
             edge_factor,
             min_engagement,
-        } => crate::check::run(
-            session,
-            part.as_deref(),
-            against.as_deref(),
-            results,
-            interference,
-            holes.then(|| {
-                let d = crate::hole::check::Options::default();
-                crate::hole::check::Options {
-                    edge_factor: edge_factor.unwrap_or(d.edge_factor),
-                    min_engagement: min_engagement.unwrap_or(d.min_engagement),
-                }
+        } => holes
+            .then(|| crate::hole::check::Options::new(edge_factor, min_engagement))
+            .transpose()
+            .and_then(|holes| {
+                crate::check::run(
+                    session,
+                    part.as_deref(),
+                    against.as_deref(),
+                    results,
+                    interference,
+                    holes,
+                )
             }),
-        ),
         Request::Diff {
             from,
             to,

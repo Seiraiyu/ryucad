@@ -3223,7 +3223,7 @@ struct FieldArgs {
     #[arg(long, value_name = "QUANTITY", conflicts_with_all = ["far_countersink_diameter", "far_countersink_angle"])]
     far_counterbore_depth: Option<String>,
     /// Takes the far side away.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["far_countersink_diameter", "far_countersink_angle", "far_counterbore_diameter", "far_counterbore_depth"])]
     no_far: bool,
     /// A tapped pipe thread's wall: taper (1:16 from the project's gauge plane), or "" for straight.
     #[arg(long, value_name = "taper")]
@@ -7321,6 +7321,29 @@ mod tests {
             .expect("a thread")
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[test]
+    fn taking_a_side_away_conflicts_with_setting_it() {
+        on_cli_stack(|| {
+            for (no, set) in [
+                ("--no-near", "--near-diameter"),
+                ("--no-near", "--near-angle"),
+                ("--no-far", "--far-countersink-diameter"),
+                ("--no-far", "--far-countersink-angle"),
+                ("--no-far", "--far-counterbore-diameter"),
+                ("--no-far", "--far-counterbore-depth"),
+            ] {
+                let e = Cli::try_parse_from(["ryucad", "feature", "edit", "p", "h", no, set, "8"])
+                    .err()
+                    .unwrap_or_else(|| panic!("{no} with {set} parses"));
+                assert_eq!(
+                    e.kind(),
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "{no} {set}"
+                );
+            }
+        });
     }
 
     #[test]
