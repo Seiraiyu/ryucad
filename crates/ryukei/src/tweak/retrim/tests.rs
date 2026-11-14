@@ -405,3 +405,91 @@ fn ftc_07s_partly_smooth_ellipse_is_met_along_it() {
         true,
     );
 }
+
+/// The bent rod's rim deleted needs its stop (design 642): without stops
+/// the run, carried past the bend, meets the bend's torus uncertain;
+/// with them the rung is built again with the run stopped at their seam,
+/// met along it, and the rod ends square. The public delete goes the same
+/// way.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_bent_rods_rim_needs_its_stop() {
+    use super::{Stops, retrim_with};
+    let (rod, rim) = crate::testing::bent_rod();
+    let changes = Changes {
+        deleted: std::collections::BTreeSet::from([rim]),
+        ..Changes::default()
+    };
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let never = retrim_with(OpKey(0x19a4), &rod, &changes, Stops::Never, &m);
+    assert!(
+        matches!(
+            never,
+            Err(crate::Error::InvalidTweak(
+                crate::TweakError::Uncertain { .. }
+            ))
+        ),
+        "{never:?}"
+    );
+    let (o, _) = retrim_with(OpKey(0x19a4), &rod, &changes, Stops::AfterHeld, &m).unwrap();
+    assert_eq!(crate::check::check(&o), []);
+    assert_eq!(o.faces().count(), rod.faces().count() - 1);
+    let spec = crate::tweak::DeleteBlends {
+        max_size: Some(0.1),
+        faces: Vec::new(),
+        options: Default::default(),
+    };
+    let (d, _) = crate::tweak::delete_blends(OpKey(0x19a4), &rod, &spec).unwrap();
+    assert_eq!(d.dump_unnamed(), o.dump_unnamed());
+}
+
+/// Design 642's fallback: a stopped build whose walk fails, or that stops
+/// nothing, leaves the first build's answer; a stopped build's own
+/// refusal is the rung's; without stops, or where the first build didn't
+/// refuse at a held pair, nothing is built again.
+#[test]
+fn a_stopped_rung_answers_only_where_its_walk_closes() {
+    use super::{Rung, Stops, settle};
+    use crate::TweakError;
+    let held = || {
+        Rung::Held(
+            TweakError::Uncertain {
+                at: Name::from_u128(1),
+            }
+            .into(),
+        )
+    };
+    let walked = || {
+        Rung::Walked(
+            TweakError::GapNotHealed {
+                face: Name::from_u128(2),
+            }
+            .into(),
+        )
+    };
+    let uncertain = |r: Rung| matches!(r, Rung::Done(r) if matches!(*r, Err(crate::Error::InvalidTweak(TweakError::Uncertain { .. }))));
+    assert!(uncertain(settle(held(), Stops::AfterHeld, walked)));
+    assert!(uncertain(settle(held(), Stops::AfterHeld, || {
+        Rung::Unstopped
+    })));
+    assert!(matches!(
+        settle(held(), Stops::AfterHeld, || Rung::Next(
+            TweakError::HealAmbiguous {
+                face: Name::from_u128(3)
+            }
+            .into()
+        )),
+        Rung::Next(crate::Error::InvalidTweak(TweakError::HealAmbiguous { .. }))
+    ));
+    assert!(uncertain(settle(held(), Stops::Never, || panic!(
+        "built with stops"
+    ))));
+    assert!(matches!(
+        settle(walked(), Stops::AfterHeld, || panic!("built with stops")),
+        Rung::Walked(_)
+    ));
+}
