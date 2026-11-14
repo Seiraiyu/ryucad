@@ -481,6 +481,47 @@ pub fn propose(
     }))
 }
 
+/// `release.obsolete`: writes an obsolete record for `part`'s latest
+/// official revision, which must be `label`. The part may be gone.
+pub fn obsolete(
+    session: &mut Session,
+    participant: &str,
+    part: &str,
+    label: &str,
+    note: Option<String>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let id = Id::parse(part, "part")?;
+    super::check_revision(session, expected)?;
+    let (repo, releases) = super::history(session)?;
+    ryupdm::history::check_folder(repo.prefix())?;
+    let files = session.snapshot();
+    let config = Config::read_in(&files, NAME)?;
+    let records = Records::read_in(&files, NAME)?;
+    ryupdm::release::obsolete_target(&config, &records, &releases, &id, label)?;
+    let record = Record::Obsolete(ryupdm::record::Obsolete {
+        project: session.project().manifest.project.clone(),
+        part: id.clone(),
+        label: label.to_owned(),
+        released_by: ryupdm::release::released_by(repo.gix(), participant),
+        note,
+    });
+    super::write(
+        session,
+        "the obsolete record",
+        vec![(
+            record.path(),
+            Some(crate::canonical::to_string(&record.to_json())),
+        )],
+    )?;
+    let (_, releases) = super::history(session)?;
+    let s = ryupdm::state::derive_for::<crate::Eda>(&session.snapshot(), &id, &releases);
+    Ok(
+        json!({"path": record.path(), "record": record.to_json(), "state": s.to_json(),
+              "pdm_revision": super::revision(session)}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +699,23 @@ mod tests {
         crate::git::tests::git(s.root(), &["commit", "-q", "-m", "A"]);
         let v = propose(&mut s, "agent", &[], true, None, None, false).unwrap();
         assert_eq!(v["proposed"], json!([]), "{v}");
+        assert_eq!(
+            obsolete(&mut s, "agent", "r_100k", "B", None, None)
+                .unwrap_err()
+                .code,
+            Code::InvalidParam
+        );
+        let v = obsolete(
+            &mut s,
+            "agent",
+            "r_100k",
+            "A",
+            Some("replaced".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v["record"]["kind"], "ryupdm.obsolete", "{v}");
+        assert!(s.root().join("releases/r_100k/A.obsolete.json").is_file());
     }
 
     #[test]
