@@ -516,6 +516,25 @@ pub fn diff(
     Ok(v)
 }
 
+/// `check`'s `bom` findings for the working files: each design's
+/// `bom_unidentified`, in design order; none in a project without
+/// `ryupdm.json` (a project without PDM checks as it always has).
+pub fn findings(session: &crate::session::Session) -> Vec<Value> {
+    if !session.files().contains_key(super::PDM_CONFIG) {
+        return Vec::new();
+    }
+    let p = session.project();
+    let mut out = Vec::new();
+    for d in p.conn.designs.keys() {
+        let Ok(n) = crate::netlist::flatten(p, d) else {
+            continue;
+        };
+        let all: Vec<&Occurrence> = n.occurrences.iter().collect();
+        out.extend(unidentified(d, &lines_of(p, &all, 1)));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,5 +707,30 @@ mod tests {
             (v["from"].as_str(), v["to"].as_str()),
             (Some("working"), Some("working"))
         );
+    }
+
+    #[test]
+    fn checks_bom_section_appears_only_with_pdm() {
+        let (_d, mut s) = crate::pdm::cmd::tests::session(crate::project::ProjectKind::Design);
+        assert!(findings(&s).is_empty(), "no ryupdm.json, no bom findings");
+        // A component without a maker part number, so there is one.
+        let at = s.root().join("library/components/r_100k.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&at).unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("mpn");
+        crate::source::write_atomic(&at, crate::canonical::to_string(&v)).unwrap();
+        s.reload().unwrap();
+        assert!(findings(&s).is_empty(), "still no ryupdm.json");
+        crate::pdm::cmd::init(&mut s).unwrap();
+        let with = findings(&s);
+        assert!(!with.is_empty());
+        let ask = Ask {
+            design: None,
+            rev: None,
+            format: None,
+            build: false,
+            by_block: false,
+        };
+        let lines = get(&mut s, &ask).unwrap();
+        assert_eq!(with.len(), lines["findings"].as_array().unwrap().len());
     }
 }

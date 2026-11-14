@@ -390,7 +390,7 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
         .with("param", "against")),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
-            crate::erc::check_project(p, &cats, &[], &[], &[]).map(Answer::json)
+            crate::erc::check_project(p, &cats, &[], &[], &[], &[]).map(Answer::json)
         }
         Request::Describe {
             design,
@@ -1241,8 +1241,9 @@ fn dispatch(
             // check` is the command for them; the working files' are here.
             let release = crate::pdm::release::findings(session, false).unwrap_or_default();
             let deps = crate::libdeps::findings(session).unwrap_or_default();
+            let bom = crate::pdm::bom::findings(session);
             match (
-                crate::erc::check(session.root(), &cats, &release, &deps),
+                crate::erc::check(session.root(), &cats, &release, &deps, &bom),
                 diff,
             ) {
                 (Ok(mut v), Some(d)) => {

@@ -972,7 +972,7 @@ mod tests {
         // ryueda check reports nothing of releases while none is wrong.
         let cats = s.catalogues().unwrap();
         let f = findings(&mut s, false).unwrap();
-        let v = crate::erc::check_project(s.project(), &cats, &[], &f, &[]).unwrap();
+        let v = crate::erc::check_project(s.project(), &cats, &[], &f, &[], &[]).unwrap();
         assert!(v.get("release").is_none(), "{v}");
         let at = s.root().join("library/components/r_100k.json");
         let mut v: Value = serde_json::from_slice(&std::fs::read(&at).unwrap()).unwrap();
@@ -990,7 +990,7 @@ mod tests {
         assert!(codes.contains(&"release_stale"), "{codes:?}");
         // `ryueda check` reports them as its `release` section.
         let f = findings(&mut s, false).unwrap();
-        let e = crate::erc::check_project(s.project(), &cats, &[], &f, &[]).unwrap_err();
+        let e = crate::erc::check_project(s.project(), &cats, &[], &f, &[], &[]).unwrap_err();
         assert!(
             e.details["report"]["release"]
                 .as_array()
