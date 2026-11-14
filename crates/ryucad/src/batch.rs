@@ -65,7 +65,7 @@ pub fn run(
         answers.push(json!({"method": op.method, "result": result}));
     }
     if ask.prune {
-        prune(&mut capture, live.as_deref_mut(), me, &kept)?;
+        prune(&mut capture, live, me, &kept)?;
     }
     let (assemblies, warnings) = solve_deferred(session, &mut capture)?;
     session.job().check()?;
@@ -1045,8 +1045,8 @@ mod tests {
             Vec::<Value>::new()
         );
         let d = c.take_deferred().unwrap();
-        assert_eq!(d.parts.into_iter().collect::<Vec<_>>(), [bolt.clone()]);
-        assert_eq!(d.assembled.into_iter().collect::<Vec<_>>(), [frame.clone()]);
+        assert_eq!(d.parts.into_iter().collect::<Vec<_>>(), vec![bolt.clone()]);
+        assert_eq!(d.assembled.into_iter().collect::<Vec<_>>(), vec![frame.clone()]);
         // Taken, it solves again as it always has.
         assert!(!c.defers_solves());
         assert_eq!(crate::mate::current(&mut c, &bolt).unwrap(), want);

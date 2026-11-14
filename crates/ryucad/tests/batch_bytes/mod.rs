@@ -140,16 +140,18 @@ fn op(b: u8, x: u8) -> (&'static str, Value) {
         ),
         _ => (
             "feature.move",
-            json!({"part": "a", "id": "c", "first": x % 2 == 0}),
+            json!({"part": "a", "id": "c", "first": x.is_multiple_of(2)}),
         ),
     }
 }
 
 pub fn check(data: &[u8]) {
     let ops: Vec<(&str, Value)> = data
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .take(8)
-        .map(|c| op(c[0], c[1]))
+        .map(|&[a, b]| op(a, b))
         .collect();
     if ops.is_empty() {
         return;

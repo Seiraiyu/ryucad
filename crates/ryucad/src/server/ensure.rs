@@ -235,7 +235,7 @@ fn apply(
     if let Some(props) = &ask.props {
         dispatch(
             session,
-            live.as_deref_mut(),
+            live,
             me,
             Request::PropsSet {
                 part: ask.part.clone(),

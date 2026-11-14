@@ -158,7 +158,6 @@ fn dry(session: &Session, pid: &Id, fid: &Id, f: &Feature) -> Result<Value> {
     Ok(json!({"dry_run": true, "feature": feature_report(p, unit, fid, f)}))
 }
 
-#[allow(clippy::too_many_arguments)]
 /// What `feature.add` makes of `given`, placed at `at` in `list`: the
 /// kind's own steps in the order they have always had, nothing checked
 /// against the rest of the part and nothing written. Its `took`, when the
@@ -224,6 +223,7 @@ pub(super) fn built(
     Ok((f, took))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn feature_add(
     session: &mut Session,
     part: &str,
