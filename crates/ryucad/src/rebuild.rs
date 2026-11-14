@@ -706,7 +706,8 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
 }
 
 /// A pattern instance as its origins name it: `[i, j]` for a linear
-/// pattern in two directions, else `[i]`.
+/// pattern in two directions and a fill (always two-way, ryucad 28.C),
+/// else `[i]`.
 pub(crate) fn instance_json(
     p: &crate::doc::pattern::Pattern,
     [i, j]: crate::doc::pattern::Instance,
@@ -716,7 +717,7 @@ pub(crate) fn instance_json(
         crate::doc::pattern::Kind::Linear {
             second: Some(_),
             ..
-        }
+        } | crate::doc::pattern::Kind::Fill { .. }
     ) {
         json!([i, j])
     } else {

@@ -913,6 +913,59 @@ mod tests {
     }
 
     #[test]
+    fn a_fills_instances_are_rows_with_signed_indices() {
+        // The Ø2 seed at (10, 10) and columns 4.6 mm apart: [-1, 0] at
+        // x = 5.4 mm.
+        let (_dir, mut s, top) = crate::pattern::fill::tests::plate(2.0);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "pattern", "id": "f",
+                   "features": ["h"], "form": "fill", "face": format!("p/b/{top}"),
+                   "direction": "x", "spacing": 4.6, "spacing2": 50}),
+        )
+        .unwrap();
+        let holes = list(&mut s, &id("p"), None).unwrap();
+        let back = holes
+            .rows
+            .iter()
+            .find(|r| r.reference == "p/f/h/p1/-1,0")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{:?}",
+                    holes.rows.iter().map(|r| &r.reference).collect::<Vec<_>>()
+                )
+            });
+        assert!((back.position - Point3::new(0.0054, 0.010, 0.010)).length() < 1e-12);
+        assert_eq!(
+            back.pattern.as_ref().map(|(_, i)| i.clone()),
+            Some(json!([-1, 0]))
+        );
+        assert!(back.faces.contains_key("wall"), "{:?}", back.faces);
+    }
+
+    #[test]
+    fn a_fill_repeats_holes_only() {
+        let (_dir, mut s, top) = crate::pattern::fill::tests::plate(5.0);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "boss",
+                   "operation": "join", "targets": ["b"], "params": {"x": 2, "y": 2, "z": 12}}),
+        )
+        .unwrap();
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "pattern", "id": "f",
+                   "features": ["boss"], "form": "fill", "face": format!("p/b/{top}"),
+                   "spacing": 20}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e:?}");
+    }
+
+    #[test]
     fn holes_at_places_and_their_patterns_are_rows() {
         let (_dir, mut s, _) = crate::hole::place::tests::part();
         crate::hole::tests::put_at(

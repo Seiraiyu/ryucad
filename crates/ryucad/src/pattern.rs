@@ -74,6 +74,19 @@ pub fn check_seeds(part: &Part, id: &Id, p: &Pattern) -> Result<Operation> {
             // Its file's fault, or its absence, is the order check's.
             _ => continue,
         };
+        // A fill's lattice is of hole places (ryucad 28.C).
+        if matches!(p.kind, Kind::Fill { .. }) && !matches!(f, Feature::Hole(_)) {
+            return Err(Error::new(
+                Code::ReferenceWrongKind,
+                format!(
+                    "pattern {id}: its seed {seed} is a {}; a fill repeats holes",
+                    f.type_name()
+                ),
+            )
+            .with("feature", id)
+            .with("seed", seed)
+            .with("pointer", at));
+        }
         let whole = match f {
             Feature::Mirror(_) => Some("a mirror, which copies a whole solid"),
             Feature::Thicken(_) => {
