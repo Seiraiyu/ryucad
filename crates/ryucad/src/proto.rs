@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 /// The protocol version. A CLI and a daemon talk only when theirs match.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// What `ryucad version` reports. Future cache keys are built from it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1795,6 +1795,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         expected_revisions: BTreeMap<String, String>,
     },
+    /// Runs model edits (`batch::BATCHABLE`) in order as one checked,
+    /// logged, undoable change: all in memory first, the first refusal
+    /// stopping it with nothing written, then one write pass and one
+    /// rebuild of each part it changed (design 603).
+    #[serde(rename = "batch")]
+    Batch {
+        ops: Vec<BatchOp>,
+        /// The project revision the batch was written against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        /// Rebuild what it changed after writing (left out: yes).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rebuild: Option<bool>,
+    },
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
     /// Cancels the caller's running long request `token`: the
@@ -2702,6 +2718,7 @@ impl Request {
                 | Request::Redo { .. }
                 | Request::DoctorRepair { .. }
                 | Request::MergeResolve { .. }
+                | Request::Batch { dry_run: false, .. }
         )
     }
 
@@ -2771,6 +2788,47 @@ pub fn parse_rpc_request(line: &str) -> (Value, Result<Request>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_is_one_request_of_ops() {
+        let r = Request::from_rpc(
+            "batch",
+            Some(
+                json!({"ops": [{"method": "part.create", "params": {"part": "p"}}],
+                        "expect": "r1", "rebuild": false}),
+            ),
+        )
+        .unwrap();
+        let Request::Batch {
+            ops,
+            expect,
+            dry_run,
+            rebuild,
+        } = &r
+        else {
+            panic!("{r:?}")
+        };
+        assert_eq!(
+            (ops.len(), expect.as_deref(), *dry_run, *rebuild),
+            (1, Some("r1"), false, Some(false))
+        );
+        assert!(r.mutates());
+        assert_eq!(r.method(), "batch");
+        // Left out, the flags aren't written.
+        let bare = Request::from_rpc("batch", Some(json!({"ops": []}))).unwrap();
+        assert_eq!(bare.params(), json!({"ops": []}));
+        // A dry run reads the model without the write lock.
+        let dry = Request::from_rpc("batch", Some(json!({"ops": [], "dry_run": true}))).unwrap();
+        assert!(!dry.mutates());
+        // An op is a method and params, nothing else.
+        let e = Request::from_rpc(
+            "batch",
+            Some(json!({"ops": [{"method": "x", "param": {}}]})),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidDocument);
+        assert_eq!(PROTOCOL_VERSION, 3);
+    }
 
     #[test]
     fn import_takes_search_folders() {
