@@ -79,6 +79,56 @@ pub struct Broke {
     pub withdraw: bool,
 }
 
+/// How a product's `merge status` lists a [`Broke`]: what `pdm_broke`'s
+/// item says, the same in every product.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plan {
+    /// `<path>#pdm_broke/<code>`, then `/<property>` for a property's.
+    pub id: String,
+    /// `{part, property?, label?, parts?}`.
+    pub concerns: Value,
+    /// `["value"]` for a property's fault: settled with a value.
+    pub choices: Vec<&'static str>,
+    pub message: String,
+    /// For a proposal settled by withdrawing it, the repair's summary;
+    /// the repair deletes `path`.
+    pub withdraw: Option<String>,
+}
+
+impl Broke {
+    /// The item a product's `merge status` lists for this fault.
+    pub fn plan(&self) -> Plan {
+        let mut id = format!("{}#pdm_broke/{}", self.path, self.code);
+        let mut concerns = json!({"part": self.part});
+        if let Some(p) = &self.property {
+            id = format!("{id}/{p}");
+            concerns["property"] = json!(p);
+        }
+        if let Some(l) = &self.label {
+            concerns["label"] = json!(l);
+        }
+        if let Some(others) = self.details.get("parts") {
+            concerns["parts"] = others.clone();
+        }
+        Plan {
+            id,
+            concerns,
+            choices: if self.property.is_some() {
+                vec!["value"]
+            } else {
+                Vec::new()
+            },
+            message: format!("{} (neither side had this)", self.message),
+            withdraw: self.withdraw.then(|| {
+                format!(
+                    "withdraw the proposal {}: delete it, so the merged part can be proposed again",
+                    self.path
+                )
+            }),
+        }
+    }
+}
+
 /// What a faulty file depends on: a file, or every file under a folder.
 enum Dep {
     File(String),
@@ -546,6 +596,63 @@ mod tests {
         assert_eq!(
             validate(&base, &ours, &theirs, &merged, &Releases::default()),
             []
+        );
+    }
+}
+
+// The core's own: no project read, so no `cad`.
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    #[test]
+    fn a_broken_property_takes_a_value_and_a_stale_proposal_is_withdrawn() {
+        let p = Id::parse("q", "part").unwrap();
+        let b = Broke {
+            code: "part_number_duplicate".into(),
+            part: p.clone(),
+            path: "parts/q/properties.json".into(),
+            property: Some("number".into()),
+            label: None,
+            message: "part q: number \"1\" is also part s's".into(),
+            details: json!({"parts": ["s"]}),
+            cause: Cause::Ours,
+            files: vec!["parts/q/properties.json".into()],
+            withdraw: false,
+        };
+        let plan = b.plan();
+        assert_eq!(
+            plan.id,
+            "parts/q/properties.json#pdm_broke/part_number_duplicate/number"
+        );
+        assert_eq!(
+            plan.concerns,
+            json!({"part": "q", "property": "number", "parts": ["s"]})
+        );
+        assert_eq!(plan.choices, ["value"]);
+        assert_eq!(
+            plan.message,
+            "part q: number \"1\" is also part s's (neither side had this)"
+        );
+        assert_eq!(plan.withdraw, None);
+        let s = Broke {
+            code: "release_stale".into(),
+            path: "releases/p/A.json".into(),
+            property: None,
+            label: Some("A".into()),
+            details: json!({}),
+            withdraw: true,
+            ..b
+        };
+        let plan = s.plan();
+        assert_eq!(plan.id, "releases/p/A.json#pdm_broke/release_stale");
+        assert_eq!(plan.concerns, json!({"part": "q", "label": "A"}));
+        assert!(plan.choices.is_empty());
+        assert_eq!(
+            plan.withdraw.as_deref(),
+            Some(
+                "withdraw the proposal releases/p/A.json: delete it, so the merged part can be proposed again"
+            )
         );
     }
 }
