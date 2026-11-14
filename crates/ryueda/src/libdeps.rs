@@ -386,8 +386,19 @@ pub fn fetch(
             .with("alias", n));
         }
     }
-    let wanted = by_url(&m, aliases);
-    let got = match session.fetched.take() {
+    fetch_repos(session, by_url(&m, aliases), job)
+}
+
+/// Fetches each of `wanted`'s repositories (by url: its aliases and
+/// folders): what the daemon fetched without the lock, else fetched now
+/// under it (an alias that arrived since the daemon looked). A failure
+/// stops there, its error naming the repositories already fetched.
+fn fetch_repos(
+    session: &mut Session,
+    wanted: std::collections::BTreeMap<String, (Vec<String>, Vec<String>)>,
+    job: &ryu_session::job::Job,
+) -> Result<Value> {
+    let mut got = match session.fetched.take() {
         Some(pre) => pre,
         None => {
             let repos: Vec<(String, Vec<String>)> = wanted
@@ -399,11 +410,22 @@ pub fn fetch(
         }
     };
     let mut out = Vec::new();
-    for (url, (names, _)) in wanted {
-        let Some((_, r)) = got.get(&url) else {
-            continue;
+    for (url, (names, paths)) in wanted {
+        let r = match got.remove(&url) {
+            Some((_, r)) => r,
+            None => {
+                let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+                crate::pin::with_reader(&*session.pins, |r| r.cache.fetch(&url, &refs))
+            }
         };
-        let f = r.clone()?;
+        let f = match r {
+            Ok(f) => f,
+            Err(e) => {
+                // What was fetched may resolve pins now, failure or not.
+                session.reload_pins()?;
+                return Err(e.with("fetched", &out));
+            }
+        };
         out.push(json!({
             "url": url,
             "aliases": names,
@@ -434,7 +456,9 @@ pub struct Update<'a> {
 /// `to` or its component's latest official label that isn't obsolete;
 /// the lock written again, renewing those aliases' projects' labels (what
 /// makes a rewritten history this command's decision); what moved, what
-/// the lock moved, and the ERC errors the move would bring.
+/// the lock moved, and the ERC errors the move would bring. A component
+/// with no current label stays where it is, listed in `skipped`; a local
+/// label `to` names is resolved first, so no pin is written to fail.
 pub fn update(
     session: &mut Session,
     ask: Update,
@@ -455,16 +479,22 @@ pub fn update(
             .with("alias", n));
         }
     }
-    let fetched = if ask.offline || by_url(&m, ask.aliases).is_empty() {
+    // Only the url aliases are fetched: a local one named beside them
+    // isn't `fetch`'s.
+    let foreign = by_url(&m, ask.aliases);
+    let fetched = if ask.offline || foreign.is_empty() {
         session.fetched = None;
         None
     } else {
-        Some(fetch(session, ask.aliases, job)?)
+        Some(fetch_repos(session, foreign, job)?)
     };
+    let root = session.root().to_path_buf();
+    let old = session.lock();
     let chosen =
         |alias: &Id| ask.aliases.is_empty() || ask.aliases.iter().any(|n| n == alias.as_str());
     let mut next = m.clone();
     let mut moved = Vec::new();
+    let mut skipped = Vec::new();
     for (alias, a) in &m.libraries {
         if !chosen(alias) {
             continue;
@@ -472,8 +502,19 @@ pub fn update(
         for (c, from) in &a.labels {
             let to = match ask.to {
                 Some(l) => l.to_owned(),
-                None => latest(session, alias, a, c)?,
+                None => match latest(session, alias, a, c) {
+                    Ok(l) => l,
+                    Err(e) if e.code == Code::LabelNotFound => {
+                        skipped.push(json!({"alias": alias, "component": c, "label": from,
+                                            "code": e.code, "reason": e.message}));
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
             };
+            if ask.to.is_some() && a.url.is_none() && &to != from {
+                session.pins.pin(&root, alias, a, c, &to, old.as_ref())?;
+            }
             if &to != from {
                 next.libraries
                     .get_mut(alias)
@@ -490,7 +531,6 @@ pub fn update(
         .filter(|(alias, a)| chosen(alias) && a.url.is_some())
         .filter_map(|(_, a)| a.project.clone())
         .collect();
-    let old = session.lock();
     let lock = if wanted_labels(&next).is_empty() {
         Lock::default()
     } else {
@@ -530,6 +570,7 @@ pub fn update(
     let mut v = json!({
         "dry_run": ask.dry_run,
         "moved": moved,
+        "skipped": skipped,
         "relocked": relocked,
         "failing": failing,
         "lock_changed": lock_changed,
@@ -1272,6 +1313,11 @@ pub(crate) mod tests {
         assert_eq!(s.project().revision, before);
         let e = fetch(&mut s, &["nope".into()], &job).unwrap_err();
         assert_eq!(e.code, Code::LibraryMissing);
+        // The daemon fetched nothing for it (an alias that arrived since):
+        // fetched now regardless.
+        s.fetched = Some(Prefetched::new());
+        let v = fetch(&mut s, &[], &job).unwrap();
+        assert_eq!(v["fetched"][0]["url"], t.1, "{v}");
     }
 
     #[test]
@@ -1307,6 +1353,93 @@ pub(crate) mod tests {
         assert!(lock.label(&t.2, &id("r_100k"), "B").is_some());
         assert!(lock.label(&t.2, &id("r_100k"), "A").is_none());
         assert!(s.project().pinned[&("passives".into(), id("r_100k"))].is_ok());
+    }
+
+    #[test]
+    fn an_update_names_a_local_library_beside_one_in_another_repository() {
+        let (mut s, t) = board_pinned_foreign("A");
+        crate::pin::tests::release_again(&t, "r_100k", "B");
+        let mut m = s.project().manifest.clone();
+        m.libraries.insert(id("own"), Alias::local("../own"));
+        crate::source::write_atomic(&s.root().join(MANIFEST), m.to_text()).unwrap();
+        s.reload().unwrap();
+        let job = ryu_session::job::Job::default();
+        let names = ["own".to_owned(), "passives".to_owned()];
+        let ask = Update {
+            aliases: &names,
+            to: None,
+            offline: false,
+            dry_run: false,
+        };
+        let v = update(&mut s, ask, None, &job).unwrap();
+        assert_eq!(
+            v["moved"],
+            json!([{"alias": "passives", "component": "r_100k", "from": "A", "to": "B"}])
+        );
+        assert_eq!(v["fetched"][0]["aliases"], json!(["passives"]), "{v}");
+        // fetch itself still refuses a local alias.
+        let e = fetch(&mut s, &names, &job).unwrap_err();
+        assert_eq!(e.code, Code::LibraryMissing);
+    }
+
+    #[test]
+    fn an_update_leaves_a_component_with_no_current_label_and_says_so() {
+        let (_d, board, mut fake) = crate::project::tests::pinned_board();
+        fake.release("r_100k", "B");
+        fake.obsolete("c_100n", "A");
+        fake.obsolete("c_100n", "B");
+        let mut s = Session::open_with_pins(&board, Box::new(fake)).unwrap();
+        let job = ryu_session::job::Job::default();
+        let v = update(
+            &mut s,
+            Update {
+                aliases: &[],
+                to: None,
+                offline: true,
+                dry_run: false,
+            },
+            None,
+            &job,
+        )
+        .unwrap();
+        assert_eq!(
+            v["moved"],
+            json!([{"alias": "passives", "component": "r_100k", "from": "A", "to": "B"}])
+        );
+        assert_eq!(v["skipped"][0]["component"], "c_100n", "{v}");
+        assert_eq!(v["skipped"][0]["label"], "B", "{v}");
+        assert_eq!(v["skipped"][0]["code"], "label_not_found", "{v}");
+        let labels = &s.project().manifest.libraries[&id("passives")].labels;
+        assert_eq!(
+            (
+                labels[&id("r_100k")].as_str(),
+                labels[&id("c_100n")].as_str()
+            ),
+            ("B", "B")
+        );
+    }
+
+    #[test]
+    fn an_update_to_a_local_label_that_doesnt_resolve_writes_nothing() {
+        let (_d, board, fake) = crate::project::tests::pinned_board();
+        let mut s = Session::open_with_pins(&board, Box::new(fake)).unwrap();
+        let before = s.project().revision.clone();
+        let job = ryu_session::job::Job::default();
+        let ask = |to| Update {
+            aliases: &[],
+            to: Some(to),
+            offline: true,
+            dry_run: false,
+        };
+        let e = update(&mut s, ask("Z"), None, &job).unwrap_err();
+        assert_eq!(e.code, Code::LabelNotFound, "{e:?}");
+        assert_eq!(s.project().revision, before);
+        // Every pin resolves at A: c_100n moves, r_100k is there already.
+        let v = update(&mut s, ask("A"), None, &job).unwrap();
+        assert_eq!(
+            v["moved"],
+            json!([{"alias": "passives", "component": "c_100n", "from": "B", "to": "A"}])
+        );
     }
 
     #[test]

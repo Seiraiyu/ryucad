@@ -578,6 +578,48 @@ fn edit_footprint_of(lib: &Path, comp: &str, text: &str) {
     .unwrap();
 }
 
+/// `board` released at A (numbered, every own component given a maker
+/// part number) and committed, so the release is official.
+fn release_board(top: &Path, board: &Path, run: &Path, daemon: bool) {
+    let _ = ryueda(board, run, daemon, &["pdm", "init"]);
+    ok(
+        board,
+        run,
+        daemon,
+        &["props", "set", "board", "number=200-0001"],
+    );
+    let list = ok(board, run, daemon, &["libcomp", "list"]);
+    for c in list["libcomps"].as_array().unwrap() {
+        if c["mpn"].as_str().unwrap_or_default().is_empty() {
+            let id = c["id"].as_str().unwrap();
+            ok(
+                board,
+                run,
+                daemon,
+                &[
+                    "libcomp",
+                    "edit",
+                    id,
+                    "--manufacturer",
+                    "Yageo",
+                    "--mpn",
+                    &format!("TEST-{id}"),
+                ],
+            );
+        }
+    }
+    let dry = ok(
+        board,
+        run,
+        daemon,
+        &["release", "propose", "board", "--dry-run"],
+    );
+    assert_eq!(dry["parts"][0]["ready"], true, "{dry}");
+    ok(board, run, daemon, &["release", "propose", "board"]);
+    git(top, &["add", "-A"]);
+    git(top, &["commit", "-q", "-m", "board A"]);
+}
+
 #[test]
 fn a_design_places_a_sibling_librarys_components_by_label() {
     for daemon in [false, true] {
@@ -607,6 +649,16 @@ fn a_design_places_a_sibling_librarys_components_by_label() {
             &["release", "propose", "board", "--dry-run"],
         );
         assert!(!dry.to_string().contains("component_not_released"), "{dry}");
+        release_board(&top, &board, &run, daemon);
+        let u = ok(&board, &run, daemon, &["lib", "uses"]);
+        let r = &u["released"][0];
+        assert_eq!(
+            (r["design"].as_str(), r["label"].as_str()),
+            (Some("board"), Some("A")),
+            "{u}"
+        );
+        assert_eq!(r["places"][0]["alias"], "passives", "{u}");
+        assert_eq!(r["places"][0]["label"], "A", "{u}");
         // The library moves on: the footprint edited, its parts released at B.
         edit_footprint_of(&lib, &comp, "edited");
         ok(&lib, &run, daemon, &["release", "propose", "--all"]);
@@ -627,6 +679,14 @@ fn a_design_places_a_sibling_librarys_components_by_label() {
             (Some("A"), Some("B")),
             "{v}"
         );
+        // At the commit, still A; working, B; the release, A.
+        let at = ok(&board, &run, daemon, &["lib", "uses", "--rev", "HEAD"]);
+        assert!(at["commit"].is_string(), "{at}");
+        assert_eq!(at["working"][0]["places"][0]["label"], "A", "{at}");
+        assert_eq!(at["released"][0]["label"], "A", "{at}");
+        let u = ok(&board, &run, daemon, &["lib", "uses"]);
+        assert_eq!(u["working"][0]["places"][0]["label"], "B", "{u}");
+        assert_eq!(u["released"][0]["places"][0]["label"], "A", "{u}");
         // A label that isn't official: refused, nothing written.
         let (code, v) = ryueda(
             &board,
@@ -695,8 +755,21 @@ fn a_library_in_another_repository_is_fetched_pinned_updated_and_refused_when_re
         assert_eq!(o["outdated"][0]["latest"], "B", "{o}");
         let dry = ok(&board, &run, daemon, &["lib", "update", "--dry-run"]);
         assert_eq!(dry["moved"][0]["to"], "B", "{dry}");
+        let files =
+            || ["ryueda.json", "ryueda.lock"].map(|f| std::fs::read(board.join(f)).unwrap());
+        let before = files();
         let v = ok(&board, &run, daemon, &["lib", "update"]);
         assert_eq!(v["lock_changed"], true, "{v}");
+        // One change: undo (the daemon's) restores the manifest and the
+        // lock, redo both.
+        let after = files();
+        assert_ne!(before, after);
+        if daemon {
+            ok(&board, &run, true, &["undo"]);
+            assert!(files() == before, "undo of lib update");
+            ok(&board, &run, true, &["redo"]);
+            assert!(files() == after, "redo of lib update");
+        }
         let diff = ok(&board, &run, daemon, &["diff"]);
         assert!(
             diff.get("pins").is_some() && diff.get("deps").is_some(),
