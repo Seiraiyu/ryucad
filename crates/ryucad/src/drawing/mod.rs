@@ -164,8 +164,9 @@ pub struct SheetBuilt {
     /// what picking a curve in the app chooses.
     pub sources: BTreeMap<usize, String>,
     /// The hole features its views show, each once: its part, its hole,
-    /// a view showing it and a wall's reference there (for the lint).
-    pub holes: Vec<(Id, Id, Key, String)>,
+    /// a view showing it, a wall's reference there, and whether it is
+    /// tapped (for the lint).
+    pub holes: Vec<(Id, Id, Key, String, bool)>,
 }
 
 /// A drawing built against the model.

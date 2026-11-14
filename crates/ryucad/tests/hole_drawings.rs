@@ -345,3 +345,61 @@ fn a_hole_table_naming_no_hole_is_refused_and_one_on_an_assembly_view_too() {
     assert_eq!(json!(e.code), "invalid_param", "{e}");
     assert_eq!(e.details["reason"], "assembly_view", "{e}");
 }
+
+#[test]
+fn a_tapped_hole_sized_only_by_a_diameter_wants_its_thread_called_out() {
+    let (_d, mut s) = plate(&[[10.0, 15.0], [30.0, 15.0]]);
+    drill(&mut s, "t", &["p1"], "M6x1.0-6H THRU");
+    drill(&mut s, "h", &["p2"], "DIA 6 THRU");
+    // Nothing called out: each hole once, as uncalled; no thread finding.
+    let g = get(&mut s);
+    assert_eq!(codes(&g, "dwg_hole_uncalled"), 2, "{}", g["findings"]);
+    assert_eq!(codes(&g, "dwg_thread_uncalled"), 0);
+    // A diameter on each wall: the plain hole is called, the tapped one's
+    // thread isn't.
+    for r in ["p/t/p1", "p/h/p2"] {
+        let w = wall(&mut s, r);
+        annotate(&mut s, json!({"type": "diameter", "view": "v1", "of": w})).unwrap();
+    }
+    let g = get(&mut s);
+    assert_eq!(codes(&g, "dwg_hole_uncalled"), 0);
+    assert_eq!(codes(&g, "dwg_thread_uncalled"), 1, "{}", g["findings"]);
+    let f = g["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "dwg_thread_uncalled")
+        .unwrap()
+        .clone();
+    assert_eq!(f["details"]["hole"], "t");
+    assert_eq!(f["fixes"][0][0]["value"]["type"], "hole_callout");
+    // A hole table calls both out, threads and all.
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "point", "id": "o",
+        "by": "coordinates", "coordinates": ["0 mm", "0 mm", "10 mm"]}),
+    );
+    let g = annotate(
+        &mut s,
+        json!({"type": "hole_table", "view": "v1", "origin": "o"}),
+    )
+    .unwrap();
+    assert_eq!(codes(&g, "dwg_thread_uncalled"), 0, "{}", g["findings"]);
+    assert_eq!(
+        ryucad::drawing::lint::rule("dwg_thread_uncalled").map(|r| r.weight),
+        Some(3)
+    );
+}
+
+#[test]
+fn a_hole_listed_in_a_table_is_called_out() {
+    let (_d, mut s) = filled();
+    assert!(codes(&get(&mut s), "dwg_hole_uncalled") > 0);
+    let g = annotate(
+        &mut s,
+        json!({"type": "hole_table", "view": "v1", "origin": "o"}),
+    )
+    .unwrap();
+    assert_eq!(codes(&g, "dwg_hole_uncalled"), 0, "{}", g["findings"]);
+}

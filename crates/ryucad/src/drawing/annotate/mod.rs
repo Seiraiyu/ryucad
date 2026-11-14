@@ -404,20 +404,24 @@ pub(super) fn all(
                 .or(o["feature"].as_str())
                 .and_then(|f| Id::parse(f, "feature").ok());
             let Some(hole) = hole else { continue };
-            let Ok((part, _)) = part_of(session, plan, src, *b) else {
+            let Ok((part, rev)) = part_of(session, plan, src, *b) else {
                 continue;
             };
             if sheets[si]
                 .holes
                 .iter()
-                .any(|(p, h, _, _)| *p == part && *h == hole)
+                .any(|(p, h, _, _, _)| *p == part && *h == hole)
             {
                 continue;
             }
+            let tapped = session.node(&part, &rev).ok().is_some_and(|(p, _, _)| {
+                matches!(p.features.get(&hole),
+                    Some(Ok(crate::doc::files::Feature::Hole(h))) if h.thread.is_some())
+            });
             let label = src[*b].2.split_once('/').map_or("", |x| x.1);
             sheets[si]
                 .holes
-                .push((part, hole, plan.key, format!("{label}/{name}")));
+                .push((part, hole, plan.key, format!("{label}/{name}"), tapped));
         }
     }
     // The general tolerance, above the title block.
