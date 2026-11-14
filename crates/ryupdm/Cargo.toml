@@ -1,6 +1,6 @@
 [package]
 name = "ryupdm"
-description = "Local product data management for ryucad projects: part properties, revisions and releases"
+description = "Product data management for ryu projects: part properties, revisions and releases"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
@@ -26,7 +26,11 @@ getrandom = "0.3"
 miniz_oxide = "0.8"
 # Part number patterns: Rust's regex syntax, ASCII classes (`\d` is 0-9).
 regex-lite = "0.1"
-ryucad-doc = { path = "../ryucad-doc" }
+ryu-doc = { path = "../ryu-doc" }
+# Layouts: a product's manifest, root files and folders (`product`).
+ryu-git = { path = "../ryu-git" }
+# ryucad's files, for ryucad's half (`cad`) only.
+ryucad-doc = { path = "../ryucad-doc", optional = true }
 serde = "1"
 # HTTPS for fetching dependencies: rustls with ring and web PKI roots, as
 # ryucad's review client (see its Cargo.toml for why ring).
@@ -40,6 +44,11 @@ tempfile = "3"
 ryupdm = { path = ".", features = ["testing"] }
 
 [features]
+# ryucad's half: its product (`cad::Cad`), content hash, item numbers,
+# structure, BOMs, where-used and locks. The service and ryucad build it;
+# ryueda doesn't (design 629).
+default = ["cad"]
+cad = ["dep:ryucad-doc"]
 # Signing attestations (`attest::sign`) and a test key, for this crate's
 # tests, ryucad's scenarios and goldens, and the fuzz targets.
 testing = []

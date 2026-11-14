@@ -27,9 +27,10 @@ use crate::approvals::{Approvals, Rule};
 use crate::attest::{self, Verdict};
 use crate::config::Config;
 use crate::record::{Kind, parse_name};
-use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::project::{PDM_CONFIG, RELEASES, ROOT_FILES};
-use ryucad_doc::error::{Code, Error, Result};
+use crate::{PDM_CONFIG, RELEASES};
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::Id;
+use ryucad_doc::doc::project::ROOT_FILES;
 use std::collections::BTreeMap;
 
 /// The prefix of every tag ryupdm derives from a record.
@@ -525,7 +526,7 @@ fn judged(
         // A record that doesn't read is doctor's; it names no project here.
         let Some(project) = std::str::from_utf8(&bytes)
             .ok()
-            .and_then(|t| ryucad_doc::doc::canonical::parse(t).ok())
+            .and_then(|t| ryu_doc::canonical::parse(t).ok())
             .and_then(|v| crate::record::Record::from_json(&v, kind).ok())
             .map(|r| r.project().clone())
         else {
@@ -630,7 +631,7 @@ fn legacy(
                 let bytes = repo.find_object(o.blob).map_err(git_error)?.data.clone();
                 let Some(project) = std::str::from_utf8(&bytes)
                     .ok()
-                    .and_then(|t| ryucad_doc::doc::canonical::parse(t).ok())
+                    .and_then(|t| ryu_doc::canonical::parse(t).ok())
                     .and_then(|v| crate::record::Record::from_json(&v, kind).ok())
                     .map(|r| r.project().clone())
                 else {
@@ -1219,7 +1220,7 @@ pub(crate) mod tests {
         put(
             d,
             "ryupdm.json",
-            &ryucad_doc::doc::canonical::to_string(&serde_json::json!({
+            &ryu_doc::canonical::to_string(&serde_json::json!({
                 "approvals": {
                     "keys": {attest::test_key_id(): attest::hex(&public)},
                     "rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]
@@ -1255,7 +1256,7 @@ pub(crate) mod tests {
             missing: vec![],
             outcome: Outcome::Approved,
             part: Id::parse(part, "part").unwrap(),
-            project: ryucad_doc::doc::id::ProjectId::parse(PROJECT).unwrap(),
+            project: ryu_doc::id::ProjectId::parse(PROJECT).unwrap(),
             proposed_by: User {
                 id: 2,
                 login: "dana".into(),
@@ -1298,7 +1299,7 @@ pub(crate) mod tests {
     /// A record of `part`'s `label` that reads, as canonical text.
     pub(crate) fn record_text(part: &str, label: &str, kind: Kind) -> String {
         use crate::record::{BuiltWith, Obsolete, Record, Release, ReleasedBy};
-        let project = ryucad_doc::doc::id::ProjectId::parse(PROJECT).unwrap();
+        let project = ryu_doc::id::ProjectId::parse(PROJECT).unwrap();
         let part = Id::parse(part, "part").unwrap();
         let by = ReleasedBy {
             name: None,
@@ -1330,7 +1331,7 @@ pub(crate) mod tests {
                 note: None,
             }),
         };
-        ryucad_doc::doc::canonical::to_string(&r.to_json())
+        ryu_doc::canonical::to_string(&r.to_json())
     }
 
     fn record(part: &str, label: &str) -> String {
@@ -1391,12 +1392,11 @@ pub(crate) mod tests {
         commit(d, "rules and release A at once");
         assert!(read(d).approvals.is_empty());
         // A record with no rule matching it is judged as before.
-        let mut v: serde_json::Value = ryucad_doc::doc::canonical::parse(
-            &std::fs::read_to_string(d.join("ryupdm.json")).unwrap(),
-        )
-        .unwrap();
+        let mut v: serde_json::Value =
+            ryu_doc::canonical::parse(&std::fs::read_to_string(d.join("ryupdm.json")).unwrap())
+                .unwrap();
         v["approvals"]["rules"][0]["parts"] = serde_json::json!(["motor-*"]);
-        put(d, "ryupdm.json", &ryucad_doc::doc::canonical::to_string(&v));
+        put(d, "ryupdm.json", &ryu_doc::canonical::to_string(&v));
         commit(d, "rules for motors");
         put(d, "releases/p/B.json", &record("p", "B"));
         commit(d, "release B");

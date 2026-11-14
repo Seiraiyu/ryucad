@@ -7,13 +7,13 @@ use super::{Cache, prefix_of};
 use crate::config::Config;
 use crate::history::{Releases, git_error};
 use crate::record::{Kind, Records};
-use ryucad_doc::doc::canonical;
+use ryu_doc::canonical;
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::{Id, ProjectId};
 use ryucad_doc::doc::deps::Dependencies;
 use ryucad_doc::doc::files::Manifest;
-use ryucad_doc::doc::id::{Id, ProjectId};
 use ryucad_doc::doc::lock::{Lock, Locked, LockedLabel};
 use ryucad_doc::doc::project::{IMPORTS, MANIFEST};
-use ryucad_doc::error::{Code, Error, Result};
 use std::collections::BTreeMap;
 
 /// A label of another project, read.

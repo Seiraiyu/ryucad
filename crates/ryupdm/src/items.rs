@@ -6,11 +6,11 @@
 //! another part's removal moves no number. Only a request changes one
 //! ([`renumbered`], [`compacted`]).
 
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::Id;
+use ryu_doc::source::{Kind, Source};
 use ryucad_doc::doc::files::{Feature, Items, MAX_ITEM, PartKind};
-use ryucad_doc::doc::id::Id;
 use ryucad_doc::doc::project::Part;
-use ryucad_doc::doc::source::{Kind, Source};
-use ryucad_doc::error::{Code, Error, Result};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -368,7 +368,7 @@ mod tests {
     use super::*;
     use crate::state::tests::id;
     use crate::structure::tests::{block, files, instance};
-    use ryucad_doc::doc::canonical;
+    use ryu_doc::canonical;
     use ryucad_doc::doc::project::Project;
     use serde_json::json;
     use std::path::Path;
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn another_projects_part_has_a_number_of_its_own() {
-        let lib = ryucad_doc::doc::id::ProjectId::from_bytes([7; 16]);
+        let lib = ryu_doc::id::ProjectId::from_bytes([7; 16]);
         let mut theirs = instance("bolt", json!({"label": "A"}));
         theirs["project"] = json!(lib);
         let f = files(&[
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn a_number_each_side_gave_another_part_is_a_collision() {
-        use ryucad_doc::doc::canonical;
+        use ryu_doc::canonical;
         let asm = |items: serde_json::Value| {
             let v = json!({"features": [], "format": 3, "items": items,
                            "kind": "ryucad.part", "part_kind": "assembly"});

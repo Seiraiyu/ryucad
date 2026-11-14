@@ -7,10 +7,10 @@ use super::read::{Reader, not_fetched};
 use super::{HEAD_REF, config_at};
 use crate::label;
 use crate::record::{Kind, parse_name};
+use ryu_doc::error::Result;
+use ryu_doc::id::{Id, ProjectId};
 use ryucad_doc::doc::files::PartKind;
-use ryucad_doc::doc::id::{Id, ProjectId};
 use ryucad_doc::doc::project::Project;
-use ryucad_doc::error::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -174,7 +174,7 @@ mod tests {
         let u = url(up.path());
         let pid = ProjectId::parse(PROJECT).unwrap();
         let e = parts(&mut cache.reader(), &pid, &u, "lib").unwrap_err();
-        assert_eq!(e.code, ryucad_doc::error::Code::DependencyNotFetched);
+        assert_eq!(e.code, ryu_doc::error::Code::DependencyNotFetched);
         // B released, A made obsolete.
         let mut f = project();
         f.insert("parts/p/features/a.json".into(), b"{\"x\": 2}\n".to_vec());
@@ -231,7 +231,7 @@ mod tests {
         let mut f = project();
         f.insert(
             "ryucad.json".into(),
-            ryucad_doc::doc::canonical::to_string(&serde_json::json!({
+            ryu_doc::canonical::to_string(&serde_json::json!({
                 "default_unit": "mm", "format": 3, "kind": "ryucad.project", "project": fork,
                 "forked_from": {"project": PROJECT, "commit": "a".repeat(40)}}))
             .into_bytes(),

@@ -30,11 +30,11 @@ use crate::label;
 use crate::props;
 use crate::record::{Entry, Kind, Record, Records};
 use crate::state;
+use ryu_doc::error::Result;
+use ryu_doc::id::{Id, ProjectId};
+use ryu_doc::source::Source;
 use ryucad_doc::doc::files::Manifest;
-use ryucad_doc::doc::id::{Id, ProjectId};
 use ryucad_doc::doc::project::MANIFEST;
-use ryucad_doc::doc::source::Source;
-use ryucad_doc::error::Result;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -175,7 +175,7 @@ pub fn run(
     let parts: Vec<Id> = src
         .list("parts")?
         .into_iter()
-        .filter(|(_, k)| *k == ryucad_doc::doc::source::Kind::Dir)
+        .filter(|(_, k)| *k == ryu_doc::source::Kind::Dir)
         .filter_map(|(n, _)| Id::parse(&n, "part").ok())
         .collect();
     let official = |e: &Entry| releases.official.get(&e.path);
@@ -658,8 +658,8 @@ struct Staged<'a> {
 }
 
 impl Source for Staged<'_> {
-    fn list(&self, dir: &str) -> Result<Vec<(String, ryucad_doc::doc::source::Kind)>> {
-        use ryucad_doc::doc::source::Kind as K;
+    fn list(&self, dir: &str) -> Result<Vec<(String, ryu_doc::source::Kind)>> {
+        use ryu_doc::source::Kind as K;
         let prefix = if dir.is_empty() {
             String::new()
         } else {
@@ -710,8 +710,8 @@ impl Source for Staged<'_> {
 /// A commit that stages no record and no file of a part with records is
 /// passed at once. Withdrawing a proposal (deleting its record) is fine.
 pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
+    use crate::RELEASES;
     use crate::history::git_error;
-    use ryucad_doc::doc::project::RELEASES;
     let mut index = BTreeMap::new();
     if let Ok(file) = repo.open_index() {
         for e in file.entries() {
@@ -887,7 +887,7 @@ mod tests {
     use super::*;
     use crate::history::tests::{commit, git, put};
     use crate::state::tests::{add, obsolete, project, release_now};
-    use ryucad_doc::doc::source::Folder;
+    use ryu_doc::source::Folder;
     use std::path::Path;
 
     fn codes(found: &[Finding]) -> Vec<(&'static str, String)> {
@@ -1196,11 +1196,7 @@ mod tests {
             "approvals": {"keys": {attest::test_key_id(): attest::hex(&public)},
                           "rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]},
             "format": 2, "kind": "ryupdm.config"});
-        crate::history::tests::put(
-            d,
-            "ryupdm.json",
-            &ryucad_doc::doc::canonical::to_string(&rules),
-        );
+        crate::history::tests::put(d, "ryupdm.json", &ryu_doc::canonical::to_string(&rules));
         crate::history::tests::commit(d, "rules");
         let text = |l: &str| crate::history::tests::record_text("p", l, Kind::Release);
         crate::history::tests::put(d, "releases/p/A.json", &text("A"));

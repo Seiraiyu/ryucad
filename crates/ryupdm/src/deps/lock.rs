@@ -9,12 +9,12 @@ use super::read::{Reader, not_fetched};
 use super::{HEAD_REF, config_at};
 use crate::record::Kind;
 use crate::structure::occurrences;
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::{Id, ProjectId};
 use ryucad_doc::doc::assembly::Rev;
 use ryucad_doc::doc::deps::Dependencies;
-use ryucad_doc::doc::id::{Id, ProjectId};
 use ryucad_doc::doc::lock::{Lock, Locked, LockedLabel};
 use ryucad_doc::doc::project::Project;
-use ryucad_doc::error::{Code, Error, Result};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
@@ -380,7 +380,7 @@ mod tests {
     use super::*;
     use crate::history::tests::git;
     use crate::state::tests::{PROJECT, add, id, project};
-    use ryucad_doc::doc::canonical;
+    use ryu_doc::canonical;
     use ryucad_doc::doc::deps::Dependency;
     use serde_json::json;
 

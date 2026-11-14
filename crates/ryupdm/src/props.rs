@@ -17,14 +17,14 @@
 //! faults of the part: it still rebuilds, but can't be released.
 
 use crate::config::{Config, Decl, Type};
-use ryucad_doc::doc::assembly::snap_origin;
-use ryucad_doc::doc::files::header;
-use ryucad_doc::doc::id::Id;
+use crate::header;
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::expr::{Expr, no_parameters};
+use ryu_doc::id::Id;
+use ryu_doc::source::{Source, join};
+use ryu_doc::units::Unit;
+use ryu_doc::units::snap_origin;
 use ryucad_doc::doc::project::{PROPERTIES, Project};
-use ryucad_doc::doc::source::{Source, join};
-use ryucad_doc::error::{Code, Error, Result};
-use ryucad_doc::expr::{Expr, no_parameters};
-use ryucad_doc::units::Unit;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
@@ -224,7 +224,7 @@ pub fn fits(decl: &Decl, value: &Value, unit: Unit) -> Option<String> {
             };
             // A bare number takes the project's unit, as in feature files;
             // anything else is an expression that reads no parameters.
-            let q = ryucad_doc::units::Quantity::parse(s, unit)
+            let q = ryu_doc::units::Quantity::parse(s, unit)
                 .ok()
                 .filter(|q| q.dim() == *dim)
                 .map(|_| ());
@@ -463,7 +463,7 @@ impl Pdm {
 mod tests {
     use super::*;
     use crate::config::Pattern;
-    use ryucad_doc::doc::canonical;
+    use ryu_doc::canonical;
 
     fn id(s: &str) -> Id {
         Id::parse(s, "part").unwrap()

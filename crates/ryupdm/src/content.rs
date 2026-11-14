@@ -30,13 +30,13 @@
 //!    much as its geometry does, so a part without drawings hashes as it
 //!    always has (plan 9.A).
 
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::Id;
+use ryu_doc::source::{Kind, Source, join};
 use ryucad_doc::doc::files::{ParametersFile, PartFile, feature_names};
-use ryucad_doc::doc::id::Id;
 use ryucad_doc::doc::project::{
     MANIFEST, PARAMETERS, PROJECT_PARAMETERS_TAG, project_reads, shadowed,
 };
-use ryucad_doc::doc::source::{Kind, Source, join};
-use ryucad_doc::error::{Code, Error, Result};
 use std::collections::BTreeSet;
 
 /// The first piece of every content hash: a new definition gets a new tag.
@@ -337,8 +337,7 @@ mod tests {
         let f = files();
         let h = hash(&f, &id("p")).unwrap();
         let mut d = DrawingFile::new("P", Size::AnsiB);
-        let text =
-            |d: &DrawingFile| ryucad_doc::doc::canonical::to_string(&d.to_json()).into_bytes();
+        let text = |d: &DrawingFile| ryu_doc::canonical::to_string(&d.to_json()).into_bytes();
         let mut drawn = f.clone();
         drawn.insert("parts/p/drawings/main.json".into(), text(&d));
         // Something in `drawings/` that isn't a drawing changes nothing.
@@ -389,7 +388,7 @@ mod tests {
 
     #[test]
     fn the_same_files_hash_alike_from_any_folder() {
-        use ryucad_doc::doc::source::Folder;
+        use ryu_doc::source::Folder;
         let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         for dir in [one.path(), two.path().join("deeper").as_path()] {
             for (at, bytes) in files() {

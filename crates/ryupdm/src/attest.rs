@@ -11,11 +11,12 @@
 //! canonical bytes, so the same attestation and key give the same tag.
 
 use crate::approvals::{Rule, Unmet};
+use crate::header;
 use crate::record::Kind;
-use ryucad_doc::doc::canonical;
-use ryucad_doc::doc::files::{Obj, header, invalid};
-use ryucad_doc::doc::id::{Id, ProjectId};
-use ryucad_doc::error::Result;
+use ryu_doc::canonical;
+use ryu_doc::error::Result;
+use ryu_doc::files::{Obj, invalid};
+use ryu_doc::id::{Id, ProjectId};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -877,8 +878,8 @@ mod tests {
     fn an_attestation_round_trips_canonically() {
         let a = sample();
         let text = a.canonical();
-        assert!(ryucad_doc::doc::canonical::is_canonical(&text));
-        let v = ryucad_doc::doc::canonical::parse(&text).unwrap();
+        assert!(ryu_doc::canonical::is_canonical(&text));
+        let v = ryu_doc::canonical::parse(&text).unwrap();
         assert_eq!(v["kind"], "ryupdm.attestation");
         assert_eq!(v["format"], 1);
         assert_eq!(v["record_kind"], "release");
@@ -894,7 +895,7 @@ mod tests {
             rule: u.rules[0].clone(),
             needed: 1,
         }];
-        let v = ryucad_doc::doc::canonical::parse(&u.canonical()).unwrap();
+        let v = ryu_doc::canonical::parse(&u.canonical()).unwrap();
         assert_eq!(
             (v["outcome"].as_str(), v.get("pull")),
             (Some("unapproved"), None)
@@ -904,7 +905,7 @@ mod tests {
 
     #[test]
     fn attestation_faults_are_refused() {
-        let good = ryucad_doc::doc::canonical::parse(&sample().canonical()).unwrap();
+        let good = ryu_doc::canonical::parse(&sample().canonical()).unwrap();
         for (key, bad) in [
             ("commit", json!("abc")),
             ("rules_at", json!("4".repeat(41))),
@@ -1084,7 +1085,7 @@ mod tests {
     fn an_approval_through_a_team_is_format_2() {
         let a = through_a_team();
         assert_eq!(a.format(), 2);
-        let v = ryucad_doc::doc::canonical::parse(&a.canonical()).unwrap();
+        let v = ryu_doc::canonical::parse(&a.canonical()).unwrap();
         assert_eq!(
             (&v["format"], &v["approvals"][0]["via"]),
             (&json!(2), &json!(["@acme/quality"]))
@@ -1097,7 +1098,7 @@ mod tests {
         let mut one = v.clone();
         one["format"] = json!(1);
         assert!(Attestation::from_json(&one).is_err());
-        let plain = ryucad_doc::doc::canonical::parse(&sample().canonical()).unwrap();
+        let plain = ryu_doc::canonical::parse(&sample().canonical()).unwrap();
         let mut two = plain.clone();
         two["format"] = json!(2);
         assert!(Attestation::from_json(&two).is_err());
@@ -1176,10 +1177,10 @@ mod tests {
     fn a_newer_attestation_is_unknown_not_invalid() {
         let c = Case::new();
         // A format 3 a later ryupdm might write, signed properly.
-        let mut v = ryucad_doc::doc::canonical::parse(&c.a.canonical()).unwrap();
+        let mut v = ryu_doc::canonical::parse(&c.a.canonical()).unwrap();
         v["format"] = json!(3);
         v["new_field"] = json!(true);
-        let text = ryucad_doc::doc::canonical::to_string(&v);
+        let text = ryu_doc::canonical::to_string(&v);
         let mut signed = DOMAIN.to_vec();
         signed.extend_from_slice(text.as_bytes());
         let sig = Signature {

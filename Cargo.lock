@@ -5169,6 +5169,8 @@ dependencies = [
  "gix-transport",
  "miniz_oxide 0.8.9",
  "regex-lite",
+ "ryu-doc",
+ "ryu-git",
  "ryucad-doc",
  "ryupdm",
  "serde",

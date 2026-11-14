@@ -19,10 +19,10 @@
 use crate::config::Scheme;
 use crate::label;
 use crate::structure::{Node, Reader, driven_keys, occurrences_with};
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::{Id, ProjectId};
 use ryucad_doc::doc::assembly::{Rev, snap_origin};
 use ryucad_doc::doc::files::{PartKind, item_key};
-use ryucad_doc::doc::id::{Id, ProjectId};
-use ryucad_doc::error::{Code, Error, Result};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -958,7 +958,7 @@ pub(crate) mod tests {
     use crate::state::tests::id;
     use crate::structure::tests::{block, files, instance};
     use crate::structure::{Cache, Reader};
-    use ryucad_doc::doc::canonical;
+    use ryu_doc::canonical;
     use ryucad_doc::doc::project::Project;
     use std::path::Path;
 

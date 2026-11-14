@@ -4,10 +4,10 @@
 //! repository was made from; merge validation reads a merge's sides from
 //! the bare repository's commits.
 
-use ryucad_doc::doc::canonical;
-use ryucad_doc::doc::id::{Id, ProjectId};
+use ryu_doc::canonical;
+use ryu_doc::id::{Id, ProjectId};
+use ryu_doc::source::Folder;
 use ryucad_doc::doc::project::Project;
-use ryucad_doc::doc::source::Folder;
 use ryupdm::check::{self, History};
 use ryupdm::config::Config;
 use ryupdm::history::{self, Releases};

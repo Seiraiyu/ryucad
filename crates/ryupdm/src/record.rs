@@ -27,13 +27,14 @@
 //! doesn't know, and this build reads a format 2 record as
 //! `format_too_new`, never as a release it half understands.
 
+use crate::RELEASES;
 use crate::config::Config;
+use crate::header;
 use crate::props::Properties;
-use ryucad_doc::doc::files::{Obj, header, invalid};
-use ryucad_doc::doc::id::{Id, ProjectId};
-use ryucad_doc::doc::project::RELEASES;
-use ryucad_doc::doc::source::{self, Source, join};
-use ryucad_doc::error::{Code, Error, Result};
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::files::{Obj, invalid};
+use ryu_doc::id::{Id, ProjectId};
+use ryu_doc::source::{self, Source, join};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
@@ -501,7 +502,7 @@ fn read_one(src: &dyn Source, path: &str, part: &Id, label: &str, kind: Kind) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryucad_doc::doc::canonical;
+    use ryu_doc::canonical;
 
     fn id(s: &str) -> Id {
         Id::parse(s, "part").unwrap()

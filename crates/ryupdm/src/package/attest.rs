@@ -10,10 +10,11 @@
 
 use super::BuiltWith;
 use crate::attest::{Clause, Signature, check_signature, is_hex, is_time, split_message};
-use ryucad_doc::doc::canonical;
-use ryucad_doc::doc::files::{Obj, header, invalid};
-use ryucad_doc::doc::id::{Id, ProjectId};
-use ryucad_doc::error::Result;
+use crate::header;
+use ryu_doc::canonical;
+use ryu_doc::error::Result;
+use ryu_doc::files::{Obj, invalid};
+use ryu_doc::id::{Id, ProjectId};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 

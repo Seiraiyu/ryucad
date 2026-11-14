@@ -28,11 +28,12 @@ use crate::config::Config;
 use crate::history::Releases;
 use crate::props::Pdm;
 use crate::record::{Entry, Record, Records};
+use crate::{PDM_CONFIG, RELEASES};
+use ryu_doc::error::Code;
+use ryu_doc::id::Id;
+use ryu_doc::source::{self, Source, join};
 use ryucad_doc::doc::files::Manifest;
-use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::project::{MANIFEST, PDM_CONFIG, RELEASES, without_conflicts};
-use ryucad_doc::doc::source::{self, Source, join};
-use ryucad_doc::error::Code;
+use ryucad_doc::doc::project::{MANIFEST, without_conflicts};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -340,7 +341,7 @@ pub fn validate(
 mod tests {
     use super::*;
     use crate::state::tests::{add, official, project, release_now};
-    use ryucad_doc::doc::canonical;
+    use ryu_doc::canonical;
 
     type Files = BTreeMap<String, Vec<u8>>;
 

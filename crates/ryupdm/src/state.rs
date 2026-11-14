@@ -18,9 +18,9 @@ use crate::history::Releases;
 use crate::label;
 use crate::props;
 use crate::record::{Entry, Kind, Record, Records};
-use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::source::Source;
-use ryucad_doc::error::{Code, Error, Result};
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::id::Id;
+use ryu_doc::source::Source;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -156,7 +156,7 @@ pub fn parts(src: &dyn Source, records: &Result<Records>) -> Vec<Id> {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|(n, k)| {
-            (k == ryucad_doc::doc::source::Kind::Dir)
+            (k == ryu_doc::source::Kind::Dir)
                 .then(|| Id::parse(&n, "part").ok())
                 .flatten()
         })
@@ -266,8 +266,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::history::Official;
     use crate::record::{BuiltWith, Obsolete, Release, ReleasedBy};
-    use ryucad_doc::doc::canonical;
-    use ryucad_doc::doc::id::ProjectId;
+    use ryu_doc::canonical;
+    use ryu_doc::id::ProjectId;
     use std::collections::BTreeMap;
 
     pub(crate) const PROJECT: &str = "0123456789abcdef0123456789abcdef";

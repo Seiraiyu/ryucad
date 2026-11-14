@@ -4,9 +4,9 @@
 //! verification of a release tag ([`crate::attest`]) agree by
 //! construction.
 
-use ryucad_doc::doc::files::Obj;
-use ryucad_doc::doc::id::Id;
-use ryucad_doc::error::{Code, Error, Result};
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::files::Obj;
+use ryu_doc::id::Id;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -422,7 +422,7 @@ impl Unmet {
         let mut o = Obj::new(v, at)?;
         let needed = o.take("needed")?;
         let needed = needed.as_u64().filter(|n| *n >= 1).ok_or_else(|| {
-            ryucad_doc::doc::files::invalid(
+            ryu_doc::files::invalid(
                 &format!("{at}/needed"),
                 "needed must be a whole number from 1",
             )
