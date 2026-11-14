@@ -1035,6 +1035,11 @@ pub enum Code {
     /// ryueda: an error the merged project holds that neither side did
     /// and no other item explains, blamed on a side; `merge status`'s kind.
     MergeFaults,
+    /// ryueda: a design places another project's library component at
+    /// `working`, which a release can't pin (design 629). A problem of
+    /// `release_not_ready`, never a `check` fault: working from a sibling
+    /// library is the normal way to develop. Pins arrive with plan 10.C.
+    ComponentNotReleased,
 }
 
 impl Code {
@@ -1511,6 +1516,15 @@ mod tests {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);
         }
+    }
+
+    #[test]
+    fn eda_pdm_codes() {
+        assert_eq!(
+            serde_json::to_value(Code::ComponentNotReleased).unwrap(),
+            "component_not_released"
+        );
+        assert_eq!(Code::ComponentNotReleased.exit_code(), 1);
     }
 
     #[test]

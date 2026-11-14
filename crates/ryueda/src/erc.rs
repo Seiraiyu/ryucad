@@ -1067,23 +1067,32 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
 /// (the report in its details) on any error a waiver doesn't accept.
 ///
 /// With the working files, doctor's issues too (those the loader doesn't
-/// already report: `unknown_file` is one of its faults).
-pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<Value> {
+/// already report: `unknown_file` is one of its faults), and `release`,
+/// the release findings (`crate::pdm::release::findings`).
+pub fn check(
+    root: &std::path::Path,
+    cats: &crate::parts::Catalogues,
+    release: &[Value],
+) -> Result<Value> {
     let p = Project::load(root)?;
     let doctor: Vec<Fault> = crate::doctor::diagnose(root, &p)
         .iter()
         .filter(|i| !matches!(i.code, Code::UnknownFile | Code::MergeConflict))
         .map(crate::doctor::Issue::fault)
         .collect();
-    check_project(&p, cats, &doctor)
+    check_project(&p, cats, &doctor, release)
 }
 
 /// `check` of a loaded project, with doctor's issues `doctor`: the working
-/// files' (from [`check`]) or a revision's (none: no folder to doctor).
+/// files' (from [`check`]) or a revision's (none: no folder to doctor),
+/// and the release findings `release` (each with its `severity`), in a
+/// `release` section only when there are any: a project without PDM
+/// reports as it always has.
 pub fn check_project(
     p: &Project,
     cats: &crate::parts::Catalogues,
     doctor: &[Fault],
+    release: &[Value],
 ) -> Result<Value> {
     let faults = p.faults();
     let erc = erc(p, None)?;
@@ -1092,21 +1101,24 @@ pub fn check_project(
     let style = crate::stylelint::faults(p, &crate::lint::prefs(p));
     let supply = crate::supply::findings(p, cats)?;
     let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
+    let release_errors = release.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| f.is_error()).count() as u64
         + symbols.iter().filter(|f| f.is_error()).count() as u64
         + style.iter().filter(|f| f.is_error()).count() as u64
         + doctor.iter().filter(|f| f.is_error()).count() as u64
-        + supply_errors;
+        + supply_errors
+        + release_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| !f.is_error()).count() as u64
         + symbols.iter().filter(|f| !f.is_error()).count() as u64
         + style.iter().filter(|f| !f.is_error()).count() as u64
         + doctor.iter().filter(|f| !f.is_error()).count() as u64
-        + (supply.len() as u64 - supply_errors);
-    let report = json!({
+        + (supply.len() as u64 - supply_errors)
+        + (release.len() as u64 - release_errors);
+    let mut report = json!({
         "faults": fault::list(&faults),
         "erc": erc,
         "schematic": fault::list(&schematic),
@@ -1117,6 +1129,9 @@ pub fn check_project(
         "errors": errors,
         "warnings": warnings,
     });
+    if !release.is_empty() {
+        report["release"] = json!(release);
+    }
     if errors > 0 {
         return Err(crate::error::Error::new(
             Code::CheckFailed,
