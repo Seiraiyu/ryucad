@@ -379,7 +379,7 @@ fn attempt(
     // Kept faces tangent along an input edge meet along it (#652): those
     // left as they are, and the faces outside the region, held by `held`.
     let seams: crate::intersect::Seams = w
-        .seams(body, &held)
+        .seams(body, &held, stopped)
         .into_iter()
         .filter(|(k, _)| pairs.contains(k))
         .collect();
