@@ -15,7 +15,7 @@ pub(super) fn assemble(
     geoms: &[Option<FaceGeom>],
     samples: &[Option<EdgeSamples>],
     work: &[Option<FaceWork>],
-) -> BodyMesh {
+) -> (BodyMesh, Vec<f64>) {
     let mut mesh = BodyMesh {
         positions: Vec::new(),
         corners: Vec::new(),
@@ -24,6 +24,8 @@ pub(super) fn assemble(
         edges: Vec::new(),
         faults: Vec::new(),
     };
+    // Each triangle's certified turn, in `mesh.triangles`' order.
+    let mut turns: Vec<f64> = Vec::new();
     // Vertices, then edge samples.
     let mut vertex_at = vec![u32::MAX; b.vertices.slot_count()];
     for v in b.vertices() {
@@ -59,7 +61,17 @@ pub(super) fn assemble(
             mesh.faults.push(FaceFault { face: f, kind });
             continue;
         }
-        let d = w.domain.as_ref().expect("a domain");
+        // A face of no width (see `no_width`) has no domain and no
+        // triangles.
+        let Some(d) = w.domain.as_ref() else {
+            let (c, t) = (mesh.corners.len() as u32, mesh.triangles.len() as u32);
+            mesh.faces.push(FaceMesh {
+                face: f,
+                corners: c..c,
+                triangles: t..t,
+            });
+            continue;
+        };
         let g = geoms[f.index()].as_ref().expect("live face");
         let corner_start = mesh.corners.len() as u32;
         let triangle_start = mesh.triangles.len() as u32;
@@ -67,7 +79,7 @@ pub(super) fn assemble(
         let mut free_at: BTreeMap<u32, u32> = BTreeMap::new();
         let mut corner_of: BTreeMap<u32, u32> = BTreeMap::new();
         // The face's triangles by position.
-        let mut kept: Vec<([u32; 3], [u32; 3])> = Vec::new();
+        let mut kept: Vec<([u32; 3], [u32; 3], u32)> = Vec::new();
         for t in 0..d.cdt.triangle_count() as u32 {
             if !d.inside[t as usize] {
                 continue;
@@ -86,7 +98,7 @@ pub(super) fn assemble(
             if at[0] == at[1] || at[1] == at[2] || at[2] == at[0] {
                 continue;
             }
-            kept.push((c, at));
+            kept.push((c, at, t));
         }
         // Near a pole a point can meet the pole's row at two places, with
         // points between: once the row is welded into one position, the
@@ -103,7 +115,7 @@ pub(super) fn assemble(
             (k, even)
         };
         let mut wound: BTreeMap<[u32; 3], Vec<(usize, bool)>> = BTreeMap::new();
-        for (i, &(_, at)) in kept.iter().enumerate() {
+        for (i, &(_, at, _)) in kept.iter().enumerate() {
             let (k, even) = key(at);
             wound.entry(k).or_default().push((i, even));
         }
@@ -116,7 +128,7 @@ pub(super) fn assemble(
                 drop[b] = true;
             }
         }
-        for (i, &(c, at)) in kept.iter().enumerate() {
+        for (i, &(c, at, t)) in kept.iter().enumerate() {
             if drop[i] {
                 continue;
             }
@@ -141,6 +153,7 @@ pub(super) fn assemble(
                     (mesh.corners.len() - 1) as u32
                 })
             });
+            turns.push(w.turns.get(t as usize).copied().unwrap_or(f64::NAN));
             mesh.triangles.push(if g.forward {
                 ids
             } else {
@@ -153,5 +166,5 @@ pub(super) fn assemble(
             triangles: triangle_start..mesh.triangles.len() as u32,
         });
     }
-    mesh
+    (mesh, turns)
 }

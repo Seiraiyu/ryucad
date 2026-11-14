@@ -31,7 +31,8 @@ pub enum MeshCheckFault {
 /// Checks a mesh against the body it was made from: indices in range,
 /// every face's triangles on its own corners, wound with its parameters,
 /// without degenerate triangles, every welded edge used by exactly two
-/// triangles in opposite directions (once, on a laminar edge of a sheet),
+/// triangles in opposite directions (once, on a laminar edge of a sheet
+/// or an edge of a face of no width, meshed as no triangles),
 /// and edge polylines from vertex to
 /// vertex. A mesh with face faults fails here with the holes they leave.
 pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault>> {
@@ -97,9 +98,23 @@ pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault
         }
     }
     // A sheet's laminar edges bound one face: their segments have one use.
+    // So do the edges of a face of no width meshed as no triangles (see
+    // the mesher's `no_width`): the faces either side meet along both, a
+    // slit of no width. Only such a face: one whose triangles were all
+    // lost another way is a hole, and reported as one.
+    let empty: BTreeSet<FaceId> = mesh
+        .faces
+        .iter()
+        .filter(|fm| fm.triangles.is_empty() && slit_face(body, mesh, fm.face))
+        .map(|fm| fm.face)
+        .collect();
     let mut boundary: BTreeSet<(u32, u32)> = BTreeSet::new();
     for p in &mesh.edges {
-        if body.is_laminar(p.edge) {
+        let slit = !empty.is_empty()
+            && body
+                .edge_fins(p.edge)
+                .any(|f| empty.contains(&body.loops[body.fins[f].loop_].face));
+        if body.is_laminar(p.edge) || slit {
             for w in p.positions.windows(2) {
                 boundary.insert((w[0].min(w[1]), w[0].max(w[1])));
             }
@@ -134,4 +149,53 @@ pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault
         }
     }
     if out.is_empty() { Ok(()) } else { Err(out) }
+}
+
+/// Whether face `f`, meshed as no triangles, is a face of no width (see
+/// the mesher's `no_width`), re-derived from the body and the mesh: one
+/// loop of two edges between the same two vertices, each edge's samples
+/// within both edges' tolerances of the other edge's curve. The slack is
+/// twice the larger sagitta either polyline has from its own curve (its
+/// segments' midpoints), so a lens of a line and a shallow arc, whose
+/// middle sits a whole sagitta off the line, isn't one. A face whose
+/// triangles were lost another way is a hole (#796).
+fn slit_face(body: &Body, mesh: &BodyMesh, f: FaceId) -> bool {
+    use crate::geom::Point3;
+    let mut loops = body.face_loops(f);
+    let (Some(l), None) = (loops.next(), loops.next()) else {
+        return false;
+    };
+    let fins: Vec<_> = body.loop_fins(l).collect();
+    let [x, y] = fins[..] else {
+        return false;
+    };
+    let (ex, ey) = (body.fins[x].edge, body.fins[y].edge);
+    let (Some(a), Some(c)) = (body.edge(ex), body.edge(ey)) else {
+        return false;
+    };
+    let ends = |s, e| if s < e { [s, e] } else { [e, s] };
+    if ex == ey || a.start == a.end || ends(a.start, a.end) != ends(c.start, c.end) {
+        return false;
+    }
+    let line = |e: EdgeId| -> Option<Vec<Point3>> {
+        let p = mesh.edges.iter().find(|p| p.edge == e)?;
+        p.positions
+            .iter()
+            .map(|&k| mesh.positions.get(k as usize).copied())
+            .collect()
+    };
+    let (Some(pa), Some(pc)) = (line(ex), line(ey)) else {
+        return false;
+    };
+    let (ca, cc) = (&body.curves[a.curve], &body.curves[c.curve]);
+    let sag = |q: &[Point3], curve: &crate::geom::Curve| {
+        q.windows(2)
+            .map(|s| curve.distance(s[0].lerp(s[1], 0.5)))
+            .fold(0.0, f64::max)
+    };
+    let reach = a.tolerance.get()
+        + c.tolerance.get()
+        + 2.0 * sag(&pa, ca).max(sag(&pc, cc))
+        + crate::tol::LINEAR_RESOLUTION;
+    pa.iter().all(|&p| cc.distance(p) <= reach) && pc.iter().all(|&p| ca.distance(p) <= reach)
 }

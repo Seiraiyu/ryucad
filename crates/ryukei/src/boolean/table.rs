@@ -1921,6 +1921,11 @@ fn pcurve_of(
         Member::Edge(e) => face_of_edge(ops, e),
         Member::Stretch { pair, .. } => pairs[pair].a,
     };
+    // A straight edge near a plane: its projection, the edge's tolerance
+    // grown to how far it lies off (#804).
+    if let Some((found, gap)) = crate::pcurve::line_near_plane(surface, &ge.curve, ge.interval) {
+        return Ok((found, ge.tolerance.max(gap * 1.0001 + 1e-12)));
+    }
     // A tolerant edge lies measurably off another operand's coincident
     // face: fitted as healing and merging fit one (design 299).
     let (n, bound) = crate::intersect::fit_pcurve(surface, &ge.curve, ge.interval, m)

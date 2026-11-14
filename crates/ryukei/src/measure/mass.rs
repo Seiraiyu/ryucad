@@ -29,7 +29,7 @@ use crate::MeasureError;
 use crate::geom::{Curve, Point2, Point3, Surface, UnitVector3, Vector2, Vector3};
 use crate::intersect::face_box;
 use crate::math;
-use crate::mesh::{BodyMesh, FaceMesh, MeshParams, tessellate_in};
+use crate::mesh::{BodyMesh, FaceMesh, MeshParams, tessellate_turns_in};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId, FaceId, Sense};
 use crate::work::{Meter, Work};
@@ -158,6 +158,9 @@ type Sides = HashMap<(u32, u32), Vec<(EdgeId, f64, f64)>>;
 struct Meshed<'a> {
     body: &'a Body,
     mesh: BodyMesh,
+    /// Each of `mesh`'s triangles' certified normal turn, from the mesher
+    /// (see [`crate::mesh::tessellate_turns_in`]).
+    turns: Vec<f64>,
     coarse: BodyMesh,
     chord: f64,
     origin: Point3,
@@ -176,18 +179,18 @@ impl<'a> Meshed<'a> {
             .ok_or(MeasureError::NotAnEntity)?;
         let size = (bbox.max() - bbox.min()).length();
         let chord = chord.unwrap_or(size * 1e-5).max(10.0 * LINEAR_RESOLUTION);
-        let meshed = |params: MeshParams| -> Result<BodyMesh, Error> {
-            let mesh = tessellate_in(body, &params, meter).map_err(|e| match e {
+        let meshed = |params: MeshParams| -> Result<(BodyMesh, Vec<f64>), Error> {
+            let (mesh, turns) = tessellate_turns_in(body, &params, meter).map_err(|e| match e {
                 Error::MeshTooLarge { .. } => Error::from(MeasureError::Unsupported),
                 e => e,
             })?;
             if !mesh.faults.is_empty() {
                 return Err(MeasureError::Unsupported.into());
             }
-            Ok(mesh)
+            Ok((mesh, turns))
         };
-        let mesh = meshed(MeshParams::new(chord, ANGLE))?;
-        let coarse = meshed(MeshParams::new(
+        let (mesh, turns) = meshed(MeshParams::new(chord, ANGLE))?;
+        let (coarse, _) = meshed(MeshParams::new(
             (size * 1e-3).max(10.0 * LINEAR_RESOLUTION),
             COARSE_ANGLE,
         ))?;
@@ -211,6 +214,7 @@ impl<'a> Meshed<'a> {
         Ok(Self {
             body,
             mesh,
+            turns,
             coarse,
             chord,
             origin,
@@ -511,6 +515,9 @@ impl<'a> Meshed<'a> {
     /// triangle whose turn isn't bounded below a quarter turn (a piece
     /// the angle test waived as smaller than the chord, near a pole) takes
     /// `ANGLE`'s, the turn the mesh was made to (#308). Zero on a plane.
+    /// Each turn is the one the mesher certified the triangle at (the
+    /// bounds over its parameter box, [`crate::mesh::triangle_turn`]'s bit
+    /// for bit), so the triangles aren't bounded twice.
     fn turn_allowance(&self, fm: &FaceMesh) -> f64 {
         if self.planar(fm.face) {
             return 0.0;
@@ -518,13 +525,26 @@ impl<'a> Meshed<'a> {
         let b = self.body;
         let surface = &b.surfaces[b.faces[fm.face].surface];
         let worst = 1.0 / math::cos(ANGLE) - 1.0;
-        let tris = &self.mesh.triangles[fm.triangles.start as usize..fm.triangles.end as usize];
+        let range = fm.triangles.start as usize..fm.triangles.end as usize;
+        let tris = &self.mesh.triangles[range.clone()];
         tris.iter()
-            .map(|t| {
+            .zip(&self.turns[range])
+            .map(|(t, &kept)| {
                 let c = t.map(|k| self.mesh.corners[k as usize]);
                 let [p, q, r] = c.map(|c| self.mesh.positions[c.position as usize]);
                 let area = (q - p).cross(r - p).length() / 2.0;
-                let theta = crate::mesh::triangle_turn(surface, c.map(|c| c.uv));
+                // A sound mesh's triangles all passed; one that didn't
+                // (none known) is bounded here.
+                let theta = if kept.is_nan() {
+                    crate::mesh::triangle_turn(surface, c.map(|c| c.uv))
+                } else {
+                    debug_assert_eq!(
+                        kept.to_bits(),
+                        crate::mesh::triangle_turn(surface, c.map(|c| c.uv)).to_bits(),
+                        "the mesher's turn is the bound's"
+                    );
+                    kept
+                };
                 let k = if theta < core::f64::consts::FRAC_PI_2 {
                     1.0 / math::cos(theta) - 1.0
                 } else {
