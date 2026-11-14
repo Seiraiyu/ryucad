@@ -778,3 +778,29 @@ fn a_minimum_on_a_fold_along_the_first_split() {
     );
     projects_to(&s, Point3::new(6.0, -3.835294117647059, 6.0), (4.2514, 4.0));
 }
+
+/// The `edit` target's find of 2026-11-11 (run 42952227583,
+/// `crash-7c8b16c0…`): a delete on a blended body whose re-trim resolved
+/// to a body with an inward region, which `repair::resolve`'s debug
+/// assertion caught ("a resolved body is invalid: [NotOutward { region:
+/// RegionId(1) }]"). Since 16.C (#745) `resolve` leaves an inside-out
+/// result to its caller and the re-trim refuses it as `FaceCollapses`.
+/// The edit answers: a typed refusal, or a body that checks.
+#[test]
+fn the_edit_targets_inward_region_find_answers() {
+    let data = bytes("000b000b000b000b00000b000b40000b000b000000");
+    let case = ryukei_testkit::edit_bytes::edit_case(&data).expect("an edit");
+    let w = ryukei::work::Work::unlimited();
+    let start = std::time::Instant::now();
+    let r = ryukei_testkit::edit_bytes::run(&case, OpKey(0xed1), &w);
+    println!(
+        "edit 2026-11-11: {:?} in {:.1} s",
+        r.as_ref().map(|_| ()),
+        start.elapsed().as_secs_f64()
+    );
+    match r {
+        Ok((body, _)) => assert_eq!(check(&body), []),
+        Err(Error::InvalidTweak(_)) => {}
+        Err(e) => panic!("unexpected {e:?}"),
+    }
+}
