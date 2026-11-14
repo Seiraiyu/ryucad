@@ -137,7 +137,7 @@ jobs:
           tool: nextest
       - if: matrix.os == 'ubuntu-latest'
         name: a software graphics adapter (lavapipe) for ryucad-app's tests
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers ${{ matrix.burst == 1 && 'xvfb' || '' }}
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers ${{ matrix.burst == 1 && 'xvfb libxkbcommon-x11-0' || '' }}
       # The window tests take ryucad-test, built here with their own
       # profile and features, instead of building ryucad again in each
       # test's process (#555, crates/ryucad-app/tests/common/mod.rs).

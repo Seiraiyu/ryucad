@@ -118,6 +118,9 @@ fn abnormal(trace: &str) -> Vec<&str> {
     trace
         .lines()
         .filter(|l| SIGNS.iter().any(|s| l.contains(s)))
+        // Adapters wgpu passes over while it looks for one: a Windows
+        // runner's Vulkan loader finds no driver, then WARP draws.
+        .filter(|l| !l.contains(" ERROR wgpu_hal::"))
         .collect()
 }
 
@@ -257,4 +260,10 @@ fn heartbeats_are_read() {
     );
     assert!(abnormal(t).is_empty());
     assert_eq!(abnormal("1 2 panicked on thread 'main': x").len(), 1);
+    let vulkan = "1 2 ERROR wgpu_hal::vulkan::instance: vkCreateInstance: Found no drivers!";
+    assert!(abnormal(vulkan).is_empty());
+    assert_eq!(
+        abnormal("1 2 ERROR eframe::native::run: Exiting because of error").len(),
+        1
+    );
 }
