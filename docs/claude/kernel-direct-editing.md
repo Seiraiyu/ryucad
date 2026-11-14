@@ -185,6 +185,7 @@ The design is document 551 in the Coxswain planning project `ryucad-ryukei`; thi
   - Every pair against a NURBS face is tangent only partly along its edge (`classify::tangent` refuses `PartlySmooth`), with NURBS pcurves.
   - With all of them set aside, a non-tangent plane/plane pair at the frontier refuses behind them in both bodies.
   - So `KNOWN_REFUSED` keeps both, and question 820's carry-stop trial was skipped with the coxswain's agreement: settling FTC 07's torus pairs would leave its five partly smooth pairs, and FTC 10's four are all partly smooth. Frontier and partly smooth seams are ryukei 19's.
+  - Plan 19.A holds frontier and partly smooth seams and stops runs at their iso seams (below).
 - **The pinned editions** (#658, Tasks 11–13): `17 defeatured, 9 refused, 2 past the deadline, 5 with no blend under 2 mm`, 16.C's tally exactly. `PINNED_DEFEATURED` asserts that those 17 stay defeatured. Design 551 expected #652's AP242 twins there, but they don't build. The causes still standing:
   - **Frontier and partly smooth seams:** STC 07, STC 10, FTC 07 and FTC 10 in their AP242 editions, CTC 02 in both AP203 editions, and linkrods. CTC 02 with PMI is a single frontier seam, a closed ellipse tangent all along; with that one pair set aside, the delete builds.
   - **FTC 09 AP242:** the split of a cone face that runs down to its own apex fails (`split::split`, a pole).
@@ -209,3 +210,53 @@ The design is document 551 in the Coxswain planning project `ryucad-ryukei`; thi
   - Unit tests: `intersect::known`'s (a plane tangent to a cylinder met along the line to the faces' ends; turned 0.3 rad, and 10 µm into the tube, withheld; a cylinder carried past its torus seam withheld), `known_seams_hash`, `beside::rails_tests`, `face::swap_tests`, `retrim::body`'s `kept_faces_tangent_along_a_round_record_their_seams`, and `flat`'s `a_middle_flat_span_is_never_split`.
   - The NIST cut: `retrim::tests::ftc_07s_seam_pair_crossing_past_its_seam_is_withheld` (`nist_ftc_07_seam_input.body` and `nist_ftc_07_seam_work.body`).
   - ryustep's `defeature.rs`: `ftc_07s_and_ftc_10s_blends_are_deleted` (ignored: frontier and partly smooth seams), `KNOWN_REFUSED`, and `pinned_bodies_defeature` with `PINNED_DEFEATURED`.
+
+## Held seams and iso stops (decided in ryukei phase 19.A)
+
+Design 642, plan 19.A (#652, #658).
+
+- **Held seams.** `tweak::retrim::held` records each input edge that meets all of these:
+  - it has two fins, both with pcurves;
+  - its two faces both stay (outside the region, or `still`), and at least one of them is a working face;
+  - `classify::tangent` calls it tangent all along (`Ok(true)`) or in places (`PartlySmooth`).
+
+  Each held seam has a kind. It is *frontier* when one face is outside, *fixed* when every face round both ends stays (a closed edge's one vertex is its end), and *running* otherwise. An absorbed face counts as not staying. `WorkBody::seams` builds the table's `Seams` from the held seams, outside faces included, and `seam_for` no longer judges tangency.
+- **Met along the edge.**
+  - A frontier or fixed seam is the edge itself, never run on, whatever its curve and pcurves (`SeamKind`, `known::run_on`). A running seam keeps 18.C's rule.
+  - `known_seam` certifies first by keep-off (18.C's), then by the section plane. The section plane needs the seams on one planar curve (`beside::section_plane`) and each face on its own side of that plane outside the strip (`face_beside_rails`, and `beside::opposite_sides`, which the check now shares). A face carried past the seam crosses the plane, so the second certificate holds only for faces that end at it.
+- **Refitted pcurves** (a departure from design 642's "the input's own pcurves"). `pcurve_certified` takes only lines and polynomial splines. Where a seam's pcurve is a conic (CTC 02's `Ellipse2` on its NURBS face) or a rational spline (FTC 07's partly smooth ellipse), `known::refit` fits one to the seam's curve on that surface (`fit_pcurve_within`, certified) and moves it by whole periods to where the edge's own pcurve lies.
+  - The refit is asked for the edge's own tolerance, not `SEAM_SLACK`, which still bounds what is accepted. The fit reports at least what it is asked for, so asked for the slack, the seam took ten times its tolerance, and a delete's next re-trim ten times that (CTC 02: `ToleranceTooLarge`, 6.9e-4 m).
+  - No new tolerance rule, and no golden moved.
+- **Iso stops.** `held::iso_stops` ends a working face's rect half a strip past a held seam with fixed ends. The margin is half of `known::seam_strip`, from the input faces' box and the edge's tolerance, so no more than what `known_seam` takes. A stop applies only where all of these hold:
+  - the seam's pcurve on the face is iso (`held::iso`: a `Line2` along a parameter, or a `Nurbs2` whose control points share that coordinate bit for bit);
+  - the pcurve lies at the end of the face's own box;
+  - every fin running along that end is such a seam;
+  - the direction isn't a whole period.
+
+  The margin in parameters is the model-space margin divided by `first_bound`'s bound on `|P_u|` or `|P_v|`.
+- **The retry with stops.** A rung is built as before. Where it refuses `Uncertain` at a pair with held seams (`Rung::Held`), `settle` builds it again with stops, under its own `Scope::Rung` cap. The stopped build's answer stands, except where its walk fails or nothing stops (`Rung::Walked`, `Rung::Unstopped`). Then the first build's `Uncertain` stands, since building it again would only repeat it. Stops never come from the first build, so bodies that built before keep their bits. `retrim_with(…, Stops::Never, …)` is the tests' re-trim without stops.
+- **Census II** (#652, #658; on main's code with failing pairs skipped):
+  - **FTC 07:** seven pairs.
+    - Pairs 1 and 2: an outside cylinder against a NURBS run, frontier, `PartlySmooth`, both pcurves iso.
+    - Pairs 3 and 4: an outside torus against a cylinder run, frontier, `Ok(true)`.
+    - Pair 5: NURBS/plane, running, `PartlySmooth`; the plane is one-signed over the NURBS face (keep-off).
+    - Pairs 6 and 7: NURBS/cylinder ellipses, running, `PartlySmooth`, rational pcurves, both faces on both sides of the plane.
+  - **FTC 10:** four running `PartlySmooth` pairs: two sphere/NURBS (keep-off) and two cylinder/NURBS along splines (no section plane).
+  - **The pinned editions:** CTC 02 with PMI has one frontier ellipse (keep-off). CTC 02's geometry-only edition and STC 07 have tangent `Uncertain` pairs, which aren't held. FTC 07 AP242 has 41 held pairs and 178 failing pairs that share no edge. Linkrods has 14 held pairs, 3 of them partly smooth splines with no plane.
+- **What 19.A settles.** FTC 07's pairs 1 and 2 and FTC 10's sphere pairs are held and met, so the deletes refuse later and faster. FTC 07 went from 85.2 s to 42.5 s, and FTC 10 from 51.0 s to 15.5 s. FTC 07's AP242 edition, past the deadline on main, now refuses in 30 s. The bent-rod twin builds through its stop.
+- **What it doesn't settle** (19.B):
+  - **FTC 07's torus pairs 3 and 4.** The run is a whole turn: its own pcurves span 2π, so `delete_turn` leaves it whole, and its seam with the torus is a quarter of its end circle. Stopped past the seam, the rest of its rim crosses the plane outside the seam's strip. The cut test `ftc_07s_seam_pair_is_met_once_its_run_stops` is ignored with that cause.
+  - **FTC 07's NURBS/cylinder pairs 6 and 7**, which need plane stops.
+  - **FTC 10's next refusal** at `a289199e…`, a pair only reached now.
+  - **CTC 02 with PMI.** Its ellipse is met, but a later re-trim of the same delete refuses at a cylinder/cylinder pair with no seam. Census II couldn't see it, since it skipped the ellipse pair as apart. So it stays out of `PINNED_DEFEATURED`, and Decision 12 didn't hold.
+  - **CTC 02's geometry-only edition**, whose bends' `tangent` is `Uncertain`, so they aren't held.
+- **Testing.**
+  - **Unit tests** cover kinds (`run_on` keeps a frontier or fixed seam's interval), iso pcurves, the section plane, iso stops and the fallback (`settle`). The section plane's test stops its cylinder 0.05 mm past the seam, because faces that both end exactly on a closed seam leave `placed` only a contact.
+  - **The bent-rod twin** (`ryukei_testkit::held_seams`, and `testing::bent_rod` in the crate, pinned together by `ROD_DUMP_HASH`). Without stops its rim's delete refuses `Uncertain`; with them it builds, check-clean, within 0.2% of Pappus. `tests/work.rs` bounds the stopped delete at 9,871,280 units, the same on one thread and on eight.
+  - **NIST cuts:** CTC 02's closed frontier ellipse, FTC 07's partly smooth ellipse (a running seam), and FTC 07's torus/cylinder pair stopped (ignored, above).
+  - **Goldens.** Section `held_seams` was added. No other ryukei or ryucad section moved.
+  - **Measured** on cox-worker-2, one thread, load 1–2, branch `3def2acf` against main `de314a93`.
+    - Committed deletes: none slower, same results.
+    - Pinned: main 17 defeatured / 9 refused / 2 past the deadline / 5 with no blend in 629.6 s; the branch 17 / 10 / 1 / 5 in 421.0 s. The only slower body is CTC 02 with PMI (2.9 to 15.8 s), which refuses further along.
+    - `edit_props` built 78 edits on the branch and on main, with the same refusals.
+    - The fuzzing line comes from Task 15's run.
