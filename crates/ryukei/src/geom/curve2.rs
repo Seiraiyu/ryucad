@@ -340,6 +340,32 @@ impl Curve2 {
             Self::Nurbs2(n) => Self::Nurbs2(Arc::new(n.mapped(f))),
         }
     }
+
+    /// The curve with its parameter plane moved by `d`, as a plane's or a
+    /// cylinder's pcurves move when its origin slides along it
+    /// ([`crate::topo::Body::transformed`], #800). Its own parameter is
+    /// unchanged.
+    pub(crate) fn shifted(&self, d: Vector2) -> Self {
+        let frame = |fr: &Frame2| Frame2 {
+            origin: fr.origin + d,
+            ..*fr
+        };
+        match self {
+            Self::Line2(l) => Self::Line2(Line2 {
+                origin: l.origin + d,
+                dir: l.dir,
+            }),
+            Self::Circle2(c) => Self::Circle2(Circle2 {
+                frame: frame(&c.frame),
+                ..*c
+            }),
+            Self::Ellipse2(e) => Self::Ellipse2(Ellipse2 {
+                frame: frame(&e.frame),
+                ..*e
+            }),
+            Self::Nurbs2(n) => Self::Nurbs2(Arc::new(n.mapped(|p| p + d))),
+        }
+    }
 }
 
 #[cfg(test)]

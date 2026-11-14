@@ -4443,6 +4443,61 @@ fn meshes_are_made_before_the_lock_is_taken() {
     });
 }
 
+/// #801: a part's `mesh.get` takes several of its solids in
+/// `features`, so the window asks for a part's bodies by the batch and
+/// the daemon meshes them side by side, outside its lock.
+#[test]
+fn a_parts_mesh_get_takes_several_solids() {
+    crate::config::tests::with_config(|_| {
+        let (_dir, s) = with_part();
+        let mut slot = Some(s);
+        for (id, r) in [("a", 1), ("b", 2), ("c", 3)] {
+            call(
+                slot.as_mut().unwrap(),
+                "feature.add",
+                json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+            )
+            .unwrap();
+        }
+        let v = call(
+            slot.as_mut().unwrap(),
+            "mesh.get",
+            json!({"part": "p", "features": ["a", "c"], "quality": "coarse"}),
+        )
+        .unwrap();
+        let got: Vec<&str> = v["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["feature"].as_str().unwrap())
+            .collect();
+        assert_eq!(got, ["a", "c"]);
+        // Made together before the lock, as an assembly's are.
+        let req = Request::from_rpc(
+            "mesh.get",
+            Some(
+                json!({"part": "p", "features": ["a", "b"], "quality": "normal",
+                        "transfer": "compact"}),
+            ),
+        )
+        .unwrap();
+        let job = prepare(&mut slot, &req).expect("two meshes to make");
+        let put = job();
+        let s = slot.as_mut().unwrap();
+        let before = s.caches().meshes().len();
+        put(s);
+        assert_eq!(s.caches().meshes().len(), before + 2);
+        // A name that isn't a solid is refused, as with `feature`.
+        let e = call(
+            slot.as_mut().unwrap(),
+            "mesh.get",
+            json!({"part": "p", "features": ["a", "nope"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+    });
+}
+
 #[test]
 fn a_repair_is_logged_and_can_be_undone() {
     let (dir, mut s) = with_part();

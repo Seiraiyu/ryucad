@@ -162,6 +162,18 @@ pub struct FeatureFields {
     /// at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sketch: Option<String>,
+    /// A hole's places with no sketch (ryucad 28.C): an object by place
+    /// ID, each `{at, face?}`, `{face, from: [{edge, distance}, …]}` or
+    /// `{coaxial}`, with `direction?` and `reverse?`; references as text
+    /// (`<part>/<feature>/<name>`, `<part>/<datum>`, `x`) or as files hold
+    /// them; whole, replacing the hole's places; `{}` or `""` takes them
+    /// away (a sketch must then be given).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub places: Option<Value>,
+    /// A fill pattern's margin from its face's boundary (ryucad 28.C);
+    /// `""` takes it away. A fill's face is `face`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin: Option<Value>,
     /// An entity on each loop to sweep (for a sweep of a face, an edge or
     /// vertex of it by name); empty means every closed loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2537,8 +2549,9 @@ pub enum Request {
         part: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feature: Option<String>,
-        /// Several of an assembly's occurrences (paths), meshed side by
-        /// side and answered together: a window fetching 10,000 bodies.
+        /// Several solids of a part, or occurrences of an assembly
+        /// (paths), meshed side by side and answered together: a window
+        /// fetching 10,000 bodies (#801: a part's too).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         features: Vec<String>,
         /// coarse, normal or fine; the user's display quality by default.

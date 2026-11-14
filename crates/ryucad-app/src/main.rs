@@ -34,6 +34,8 @@ fn main() -> ExitCode {
         println!("{v}");
         return ExitCode::SUCCESS;
     }
+    // How the app started and ended, in the runtime folder (#799).
+    platform::begin_trace(&args.join(" "));
     if args.first().is_some_and(|a| a == "--smoke") {
         let dir = args
             .get(1)
@@ -48,6 +50,10 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE,
             ),
         };
+        platform::trace(&format!(
+            "exited: {}",
+            doc["error"]["code"].as_str().unwrap_or("ok")
+        ));
         println!("{doc}");
         return code;
     }
@@ -62,6 +68,7 @@ fn main() -> ExitCode {
             "ryucad-app: unexpected argument '{}'\n\n{USAGE}",
             args.join(" ")
         );
+        platform::trace("exited: usage");
         return ExitCode::from(2);
     }
     // Before winit opens the display, and before any thread starts.
@@ -76,6 +83,7 @@ fn main() -> ExitCode {
     let daemon = match find_ryucad() {
         Ok(d) => d,
         Err(e) => {
+            platform::trace(&format!("exited: {}", e.message));
             platform::fatal("ryucad can't start", &e.message);
             return ExitCode::FAILURE;
         }
@@ -97,8 +105,12 @@ fn main() -> ExitCode {
         Box::new(move |cc| Ok(Box::new(App::open(&cc.egui_ctx, dir.as_deref(), &daemon)))),
     );
     match run {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            platform::trace("exited: the window closed");
+            ExitCode::SUCCESS
+        }
         Err(e) => {
+            platform::trace(&format!("exited: {e}"));
             // No display, or no adapter: each said once (#740).
             let (title, message) = platform::cant_run(&e.to_string());
             platform::fatal(title, &message);

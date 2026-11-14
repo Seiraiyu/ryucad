@@ -83,7 +83,8 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// limits (ryucad 26), 23 a hole's
 /// thread, fastener, fit and tolerance (ryucad 28), 24 an instance
 /// pattern that follows a part's features or a sketch's points (ryucad
-/// 25.C), 25 a hole's new geometry and cosmetic threads (ryucad 28.B). A
+/// 25.C), 25 a hole's new geometry and cosmetic threads (ryucad 28.B), 26
+/// a hole at places and a fill pattern (ryucad 28.C). A
 /// feature is written at the lowest format that holds it, so one with
 /// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
@@ -100,6 +101,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::edit::FORMAT,
         super::hole::INTENT_FORMAT,
         super::hole::GEOMETRY_FORMAT,
+        super::hole::PLACES_FORMAT,
         super::insert::FORMAT,
         super::mate::LIMITS_FORMAT,
         super::mate::DRIVEN_FORMAT,
@@ -651,7 +653,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             }
             (
                 k @ ("counterbore" | "countersink" | "counterdrill" | "spotface" | "near" | "far"
-                | "depth" | "bottom" | "thread"),
+                | "depth" | "bottom" | "thread" | "places"),
                 x,
             ) => {
                 out.extend(super::hole::expression_strings(k, x));
@@ -660,7 +662,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             ("tolerance", x @ Value::Object(_)) => {
                 out.extend(super::hole::expression_strings("tolerance", x));
             }
-            (k @ ("spacing" | "spacing2" | "count" | "count2"), x) => {
+            (k @ ("spacing" | "spacing2" | "count" | "count2" | "margin"), x) => {
                 out.extend(super::pattern::expression_strings(k, x));
             }
             ("extent", Value::Object(e)) => {
@@ -771,9 +773,14 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
     let ty = v.get("type").and_then(Value::as_str);
-    // Highest first: a cosmetic thread and a hole's new geometry are 25,
-    // a following instance pattern 24, a hole with intent 23, whatever
-    // else they hold.
+    // Highest first: a hole at places and a fill pattern are 26, a
+    // cosmetic thread and a hole's new geometry 25, a following instance
+    // pattern 24, a hole with intent 23, whatever else they hold.
+    if (ty == Some("hole") && v.get("places").is_some())
+        || (ty == Some("pattern") && v.get("form").and_then(Value::as_str) == Some("fill"))
+    {
+        return super::hole::PLACES_FORMAT;
+    }
     if ty == Some("cosmetic_thread") {
         return super::thread::FORMAT;
     }
@@ -1205,6 +1212,16 @@ impl Feature {
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
         // Highest first, as `feature_format`.
+        if let Feature::Hole(h) = self
+            && h.has_places()
+        {
+            return super::hole::PLACES_FORMAT;
+        }
+        if let Feature::Pattern(p) = self
+            && matches!(p.kind, super::pattern::Kind::Fill { .. })
+        {
+            return super::hole::PLACES_FORMAT;
+        }
         if let Feature::CosmeticThread(_) = self {
             return super::thread::FORMAT;
         }
@@ -1799,7 +1816,7 @@ impl Feature {
         match self {
             Feature::Extrude(e) => vec![&e.sketch],
             Feature::Revolve(r) => vec![&r.sketch],
-            Feature::Hole(h) => vec![&h.sketch],
+            Feature::Hole(h) => h.sketch.iter().collect(),
             Feature::Sweep(w) => w.profile.sketch().into_iter().collect(),
             Feature::Loft(l) => l.sketches(),
             Feature::Planar(p) => p.profile.sketch().into_iter().collect(),
@@ -3047,6 +3064,66 @@ mod tests {
             "from": {"feature": "shaft", "name": "fedcba9876543210fedcba9876543210"},
             "depth": "l"});
         assert!(feature_names(&c).contains("l"));
+    }
+
+    #[test]
+    fn a_fill_is_format_26_and_its_margin_an_expression() {
+        let v = json!({"format": 26, "kind": FEATURE_KIND, "type": "pattern", "form": "fill",
+            "features": ["h"], "targets": ["b"],
+            "face": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"},
+            "spacing": "s", "margin": "s / 4"});
+        assert_eq!(feature_format(&v), 26);
+        let p = [("s".to_owned(), crate::expr::Expr::parse("20 mm").unwrap())].into();
+        let f = Feature::from_json(&v, Unit::Mm, &Env::new(&p)).unwrap();
+        assert_eq!(f.format(), 26);
+        let at: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
+        assert!(at.iter().any(|x| x == "/margin"), "{at:?}");
+        // A linear pattern stays 3.
+        let lin = json!({"kind": FEATURE_KIND, "type": "pattern", "form": "linear",
+            "features": ["h"], "targets": ["b"], "direction": "x", "spacing": "5 mm", "count": 3});
+        assert_eq!(feature_format(&lin), 3);
+    }
+
+    #[test]
+    fn a_places_distances_are_expressions() {
+        let v = json!({"format": 26, "kind": FEATURE_KIND, "type": "hole", "form": "simple",
+            "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
+            "places": {"a": {"face": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"},
+                "from": [{"edge": {"feature": "b", "name": "fedcba9876543210fedcba9876543210"}, "distance": "e"},
+                         {"edge": {"feature": "b", "name": "00112233445566778899aabbccddeeff"}, "distance": "2 * e"}]}}});
+        let at: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
+        for p in ["/places/a/from/0/distance", "/places/a/from/1/distance"] {
+            assert!(at.iter().any(|x| x == p), "{p} in {at:?}");
+        }
+        assert!(feature_names(&v).contains("e"));
+    }
+
+    #[test]
+    fn a_hole_at_places_is_format_26_and_sketch_holes_keep_theirs() {
+        use crate::units::Unit;
+        let env = crate::expr::Env::empty();
+        const { assert!(FEATURE_FORMAT >= super::super::hole::PLACES_FORMAT) };
+        let v = json!({"kind": "ryucad.feature", "type": "hole", "form": "simple",
+                       "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
+                       "places": {"a": {"at": "origin"}}});
+        assert_eq!(feature_format(&v), super::super::hole::PLACES_FORMAT);
+        let mut w = v.clone();
+        w["format"] = json!(26);
+        let f = Feature::from_json(&w, Unit::Mm, &env).unwrap();
+        assert_eq!(f.format(), 26);
+        // Places win over a hole's geometry and intent: highest first.
+        w["near"] = json!({"diameter": "7 mm"});
+        assert_eq!(feature_format(&w), 26);
+        // A hole at places reads no sketch.
+        assert!(f.profiles().is_empty());
+        // Sketch holes keep 3, 23 and 25.
+        let plain = json!({"kind": "ryucad.feature", "type": "hole", "sketch": "s",
+                           "form": "simple", "diameter": "5 mm", "depth": "through_all",
+                           "targets": ["b"]});
+        assert_eq!(feature_format(&plain), 3);
+        let mut g = plain.clone();
+        g["depth"] = json!("through_next");
+        assert_eq!(feature_format(&g), 25);
     }
 
     #[test]

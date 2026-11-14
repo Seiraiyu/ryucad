@@ -14,7 +14,7 @@ use crate::live::Style;
 use crate::mesh;
 use crate::part::{feature, feature_id, part_id, part_kind};
 use crate::proto::Answer;
-use crate::scene::{flat_meshed, meshes, model_points, occurrence_meshes};
+use crate::scene::{flat_meshed, meshes_of, model_points, occurrence_meshes};
 use crate::session::Session;
 use crate::solid::Solids;
 use crate::view::CameraArg;
@@ -50,8 +50,8 @@ pub(crate) fn mesh_pending(
             .collect();
         (quality, items)
     } else {
-        let one = one_of(only).ok()?;
-        let (pid, only, quality) = mesh_args(part, one, quality).ok()?;
+        let (pid, _, quality) = mesh_args(part, None, quality).ok()?;
+        let only = solid_ids(only).ok()?;
         let p = session.project().part(&pid).ok()?;
         let solids = Solids::of(p);
         let features: BTreeMap<Id, Feature> = p
@@ -63,7 +63,7 @@ pub(crate) fn mesh_pending(
         let items = result
             .shown(&solids)
             .into_iter()
-            .filter(|s| only.as_ref().is_none_or(|o| o == s.solid))
+            .filter(|s| only.as_ref().is_none_or(|o| o.contains(s.solid)))
             .filter_map(|s| {
                 let (f, b) = s.state?;
                 Some((features.get(f)?.clone(), b.as_ref().clone()))
@@ -260,7 +260,7 @@ fn mesh_args(
 }
 
 /// What a `mesh.get` asks for: a solid or occurrence (`feature`), several
-/// of an assembly's occurrences (`features`), or (`None`) everything.
+/// solids or occurrences (`features`), or (`None`) everything.
 pub(crate) fn wanted(feature: Option<&str>, features: &[String]) -> Option<BTreeSet<String>> {
     let all: BTreeSet<String> = feature
         .map(str::to_owned)
@@ -270,18 +270,11 @@ pub(crate) fn wanted(feature: Option<&str>, features: &[String]) -> Option<BTree
     (!all.is_empty()).then_some(all)
 }
 
-/// The one solid a part's `mesh.get` names, if any: several are an
-/// assembly's occurrences only.
-fn one_of(only: Option<&BTreeSet<String>>) -> Result<Option<&str>> {
-    match only.map(|w| w.iter().collect::<Vec<_>>()).as_deref() {
-        None => Ok(None),
-        Some([one]) => Ok(Some(one.as_str())),
-        Some(_) => Err(Error::new(
-            Code::InvalidParam,
-            "features names several of an assembly's occurrences; a part's solid is feature",
-        )
-        .with("pointer", "/features")),
-    }
+/// The solids a part's `mesh.get` names: one (`feature`), several
+/// (`features`, #801), or (`None`) all.
+fn solid_ids(only: Option<&BTreeSet<String>>) -> Result<Option<BTreeSet<Id>>> {
+    only.map(|w| w.iter().map(|f| Id::solid_key(f, "feature")).collect())
+        .transpose()
 }
 
 /// Display meshes, each with its label.
@@ -398,8 +391,9 @@ pub(crate) fn mesh_binary(
         let (encoding, b) = bytes(&bodies, compact);
         return Ok(Answer::bytes(result, encoding, b));
     }
-    let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
-    let bodies = meshes(session, &pid, only.as_ref(), quality)?;
+    let (pid, _, quality) = mesh_args(part, None, quality)?;
+    let only = solid_ids(only)?;
+    let bodies = meshes_of(session, &pid, only.as_ref(), quality)?;
     let mut result = json!({"part": pid, "quality": quality.as_str()});
     with_warnings(&mut result, mesh_warnings(&bodies));
     let (encoding, b) = bytes(&bodies, compact);
@@ -499,9 +493,10 @@ pub(crate) fn mesh_get(
         with_warnings(&mut v, warnings);
         return Ok(v);
     }
-    let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
+    let (pid, _, quality) = mesh_args(part, None, quality)?;
+    let only = solid_ids(only)?;
     let mut warnings = Vec::new();
-    let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
+    let bodies: Vec<Value> = meshes_of(session, &pid, only.as_ref(), quality)?
         .into_iter()
         .map(|(id, r)| match r {
             Ok(m) => {

@@ -6,6 +6,7 @@
 //! `ryucad::Cad` and ryueda's `ryueda::Eda` do.
 
 pub mod drivers;
+pub mod git_env;
 pub mod repo;
 #[cfg(test)]
 pub(crate) mod testing;

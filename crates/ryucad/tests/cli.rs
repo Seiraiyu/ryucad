@@ -2053,7 +2053,7 @@ fn doctor_repairs_a_damaged_project() {
 /// Runs git in `dir` with a fixed identity and time, so the same commits
 /// in two repositories have the same IDs, and its output.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
+    let out = ryupdm::git_env::isolated()
         .args([
             "-c",
             "user.name=Test",
@@ -2526,7 +2526,7 @@ fn merges_through_the_cli() {
     p.ok(&["feature", "edit", "p", "b", "--param", "x=12"]);
     p.git(&["commit", "-q", "-am", "ours"]);
     for root in [&p.direct, &p.daemon] {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["merge", "--no-edit", "theirs"])
             .current_dir(root)
@@ -3706,6 +3706,238 @@ fn review_against_a_fake_service() {
     assert_eq!(
         serde_json::from_str::<Value>(&posted.body).unwrap(),
         serde_json::json!({"ref": "p/b/0123456789abcdef0123456789abcdef", "body": "too thin here"})
+    );
+}
+
+/// A body's planar face whose outward normal is `z` along z, as a
+/// reference `<part>/<feature>/<name>`.
+fn plane_face(body: &Value, of: &str, z: f64) -> String {
+    body["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == z
+        })
+        .map(|f| format!("{of}/{}", f["name"].as_str().unwrap()))
+        .unwrap()
+}
+
+/// A body's vertex `name`'s point.
+fn vertex_point(body: &Value, name: &Value) -> [f64; 3] {
+    let v = body["vertices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == *name)
+        .unwrap();
+    [0, 1, 2].map(|k| v["point"][k].as_f64().unwrap())
+}
+
+#[test]
+fn holes_at_places_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=40", "--param", "y=30",
+        "--param", "z=10",
+    ]);
+    let body = p.ok(&["inspect", "plate", "b"])["bodies"][0].clone();
+    let top = plane_face(&body, "plate/b", 1.0);
+    // The top's edges along x = 0 and along y = 0.
+    let edge = |axis: usize| -> String {
+        body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| {
+                let (a, b) = (
+                    vertex_point(&body, &e["start"]),
+                    vertex_point(&body, &e["end"]),
+                );
+                a[2] == 0.01 && b[2] == 0.01 && a[axis] == 0.0 && b[axis] == 0.0
+            })
+            .map(|e| format!("plate/b/{}", e["name"].as_str().unwrap()))
+            .unwrap()
+    };
+    // Two points at once, keyed a and b, then one from two edges.
+    for (id, at) in [("q1", "10mm,10mm,10mm"), ("q2", "30mm,10mm,10mm")] {
+        p.ok(&[
+            "feature",
+            "add",
+            "plate",
+            "point",
+            "--id",
+            id,
+            "--by",
+            "coordinates",
+            "--coordinates",
+            at,
+        ]);
+    }
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "h",
+        "--spec",
+        "M6x1.0-6H THRU",
+        "--at",
+        "plate/q1",
+        "--at",
+        "plate/q2",
+    ]);
+    assert_eq!(
+        h["feature"]["places"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    let e = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "g",
+        "--diameter",
+        "3",
+        "--depth",
+        "4",
+        "--face",
+        &top,
+        "--from-edge",
+        &format!("{}=20", edge(0)),
+        "--from-edge",
+        &format!("{}=15", edge(1)),
+    ]);
+    assert_eq!(
+        e["feature"]["places"]["a"]["from"][1]["distance"]["value"],
+        "15 mm"
+    );
+    let holes = p.ok(&["holes", "plate"]);
+    let refs: Vec<&str> = holes["holes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["ref"].as_str().unwrap())
+        .collect();
+    assert_eq!(refs, ["plate/h/a", "plate/h/b", "plate/g/a"]);
+}
+
+/// #722's plate again, with one hole and a fill: 100 × M6 on the 20 mm
+/// grid, the seed at (10, 10) mm and the lattice running up and right.
+#[test]
+fn the_fixture_plate_of_issue_722_by_a_fill() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=200", "--param", "y=200",
+        "--param", "z=12",
+    ]);
+    let body = p.ok(&["inspect", "plate", "b"])["bodies"][0].clone();
+    let top = plane_face(&body, "plate/b", 1.0);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "point",
+        "--id",
+        "c",
+        "--by",
+        "coordinates",
+        "--coordinates",
+        "10mm,10mm,12mm",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "h",
+        "--spec",
+        "M6x1.0-6H THRU",
+        "--at",
+        "plate/c",
+    ]);
+    let f = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "pattern",
+        "--id",
+        "grid",
+        "--seed",
+        "h",
+        "--form",
+        "fill",
+        "--fill-face",
+        &top,
+        "--direction",
+        "x",
+        "--spacing",
+        "20",
+        "--margin",
+        "2",
+    ]);
+    assert_eq!(f["feature"]["form"], "fill");
+    assert_eq!(f["feature"]["margin"]["value"], "2 mm");
+    let holes = p.ok(&["holes", "plate"]);
+    let rows = holes["holes"].as_array().unwrap();
+    assert_eq!(rows.len(), 100);
+    assert!(rows.iter().all(|r| r["spec"] == "M6x1.0-6H THRU"));
+    let last = rows
+        .iter()
+        .find(|r| r["pattern"]["instance"] == json!([9, 9]))
+        .unwrap();
+    assert_eq!(last["ref"], "plate/grid/h/a/9,9");
+    // A dowel where one hole of the grid was: skipped there, drilled alone.
+    p.ok(&["feature", "edit", "plate", "grid", "--skip", "4,4"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "point",
+        "--id",
+        "d",
+        "--by",
+        "coordinates",
+        "--coordinates",
+        "90mm,90mm,12mm",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "dowel",
+        "--spec",
+        "DIA 6 H7 THRU",
+        "--at",
+        "plate/d",
+    ]);
+    let holes = p.ok(&["holes", "plate", "--group"]);
+    let groups = holes["groups"].as_array().unwrap();
+    let count = |spec: &str| {
+        groups
+            .iter()
+            .find(|g| g["spec"] == spec)
+            .unwrap_or_else(|| panic!("{spec} in {holes}"))["count"]
+            .clone()
+    };
+    assert_eq!(
+        (count("M6x1.0-6H THRU"), count("DIA 6 H7 THRU")),
+        (json!(99), json!(1))
     );
 }
 
