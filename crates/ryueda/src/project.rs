@@ -36,7 +36,15 @@ pub const PARTS: &str = "parts.json";
 /// The Git attributes file, beside the manifest.
 pub const ATTRIBUTES: &str = ".gitattributes";
 /// The files at a project's root that it is made of.
-pub const ROOT_FILES: [&str; 6] = [MANIFEST, ATTRIBUTES, ERC, LINT, PARTS, STYLE];
+pub const ROOT_FILES: [&str; 7] = [
+    MANIFEST,
+    ATTRIBUTES,
+    ERC,
+    LINT,
+    PARTS,
+    STYLE,
+    crate::pdm::PDM_CONFIG,
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -977,7 +985,7 @@ impl Project {
             return out;
         };
         out.push((MANIFEST.to_owned(), meta));
-        for file in [ERC, LINT, PARTS, STYLE] {
+        for file in [ERC, LINT, PARTS, STYLE, crate::pdm::PDM_CONFIG] {
             if let Ok(meta) = std::fs::metadata(root.join(file))
                 && meta.is_file()
             {
@@ -990,6 +998,13 @@ impl Project {
             crate::conn::CLASSES,
         ] {
             out.extend(files_of(root, folder));
+        }
+        // PDM: properties, and each part's release records.
+        out.extend(files_of(root, crate::pdm::PROPERTIES));
+        for (part, meta) in listed(root, crate::pdm::RELEASES) {
+            if meta.is_dir() {
+                out.extend(files_of(root, &join(crate::pdm::RELEASES, &part)));
+            }
         }
         for (block, meta) in listed(root, crate::conn::BLOCKS) {
             let dir = join(crate::conn::BLOCKS, &block);

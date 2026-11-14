@@ -12,12 +12,14 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The folders a project is made of, below its root.
-pub const FOLDERS: [&str; 5] = [
+pub const FOLDERS: [&str; 7] = [
     crate::conn::DESIGNS,
     crate::conn::RAILS,
     crate::conn::CLASSES,
     crate::conn::BLOCKS,
     library::DIR,
+    crate::pdm::PROPERTIES,
+    crate::pdm::RELEASES,
 ];
 
 impl ryu_git::Layout for crate::Eda {
@@ -37,7 +39,8 @@ pub type Repo = ryu_git::Repo<crate::Eda>;
 /// ([`crate::project::Project::tracked`]): the root files, a file of
 /// `designs/`, `rails/` or `classes/`, a block's files and its parts'
 /// (`blocks/<b>/<f>`, `blocks/<b>/<dir>/<f>`), and the library's
-/// (`library/<f>`, `library/<dir>/<f>`).
+/// (`library/<f>`, `library/<dir>/<f>`), and PDM's (`properties/<f>`,
+/// `releases/<part>/<f>`; `ryupdm.json` is a root file).
 pub fn project_file(rel: &str) -> bool {
     if ROOT_FILES.contains(&rel) {
         return true;
@@ -49,9 +52,10 @@ pub fn project_file(rel: &str) -> bool {
             crate::conn::RAILS,
             crate::conn::CLASSES,
             library::DIR,
+            crate::pdm::PROPERTIES,
         ]
         .contains(d),
-        [d, _, _] => *d == crate::conn::BLOCKS || *d == library::DIR,
+        [d, _, _] => *d == crate::conn::BLOCKS || *d == library::DIR || *d == crate::pdm::RELEASES,
         [d, _, _, _] => *d == crate::conn::BLOCKS,
         _ => false,
     }
@@ -348,6 +352,21 @@ pub(crate) mod tests {
             "designs/x/d.json",
             "blocks/b/components/x/c.json",
             "library/a/b/c.json",
+        ] {
+            assert!(!project_file(f), "{f}");
+        }
+        for f in [
+            "ryupdm.json",
+            "properties/d.json",
+            "releases/d/A.json",
+            "releases/d/A.obsolete.json",
+        ] {
+            assert!(project_file(f), "{f}");
+        }
+        for f in [
+            "properties/x/y.json",
+            "releases/d.json",
+            "releases/d/x/A.json",
         ] {
             assert!(!project_file(f), "{f}");
         }
