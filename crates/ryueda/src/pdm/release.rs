@@ -199,6 +199,76 @@ fn design_problems(session: &mut Session, part: &Id, r: &mut Readiness) -> Resul
     Ok(())
 }
 
+/// The files a part's revision reads (`ryupdm::history::part_files_for`):
+/// the root files, `ryupdm.json`, the part's own files and its
+/// product's folders. Results are worked out over these alone, as
+/// `release check --results` reads them at a commit, so both agree.
+pub(crate) fn part_source(
+    files: &ryu_session::fresh::Files,
+    part: &Id,
+) -> std::collections::BTreeMap<String, Vec<u8>> {
+    use ryu_git::Layout;
+    let own = <crate::Eda as Product>::part_files(part);
+    files
+        .iter()
+        .filter(|(p, _)| {
+            <crate::Eda as Layout>::ROOT_FILES.contains(&p.as_str())
+                || p.as_str() == super::PDM_CONFIG
+                || own.files.iter().any(|f| f == *p)
+                || own.folders.iter().any(|d| {
+                    p.strip_prefix(d.as_str())
+                        .is_some_and(|r| r.starts_with('/'))
+                })
+        })
+        .map(|(p, b)| (p.clone(), b.to_vec()))
+        .collect()
+}
+
+/// BLAKE3 of `v`'s canonical JSON, in hex.
+fn hex(v: &Value) -> String {
+    blake3::hash(crate::canonical::to_string(v).as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+/// A release's `results` (evidence, not identity): for a design,
+/// `netlist`, BLAKE3 of the flattened netlist's canonical JSON, and
+/// `erc`, of its configured findings; none for a component. Worked out
+/// over `src` (a part's files, [`part_source`]), the project at `root`.
+pub fn results(
+    root: &std::path::Path,
+    src: &dyn crate::source::Source,
+    part: &Id,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let p = crate::project::Project::load_from(root, src, &std::collections::BTreeMap::new())?;
+    let mut out = std::collections::BTreeMap::new();
+    if p.manifest.project_kind == ProjectKind::Design {
+        let n = crate::netlist::flatten(&p, part)?;
+        out.insert("netlist".to_owned(), hex(&n.to_json()));
+        out.insert(
+            "erc".to_owned(),
+            hex(&json!(crate::erc::check_design(&p, part)?)),
+        );
+    }
+    Ok(out)
+}
+
+/// Works results out again for `release_result_changed`.
+pub(crate) struct Again {
+    pub(crate) root: std::path::PathBuf,
+}
+
+impl ryupdm::check::Results for Again {
+    fn bodies(
+        &mut self,
+        src: &dyn ryu_doc::source::Source,
+        part: &Id,
+        _content: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        results(&self.root, src, part)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +351,29 @@ mod tests {
             codes(&r.problems).contains(&"component_not_released".to_owned()),
             "{:?}",
             r.problems
+        );
+    }
+
+    #[test]
+    fn a_designs_results_are_its_netlists_and_ercs_hashes_and_a_components_none() {
+        let (_d, s) = session(ProjectKind::Design);
+        let files = s.snapshot();
+        let r = results(s.root(), &files, &id("d")).unwrap();
+        assert_eq!(r.keys().collect::<Vec<_>>(), ["erc", "netlist"]);
+        assert!(r.values().all(|h| h.len() == 64));
+        assert_eq!(
+            results(s.root(), &files, &id("d")).unwrap(),
+            r,
+            "deterministic"
+        );
+        // A part's own files give the same results.
+        let own = part_source(&files, &id("d"));
+        assert_eq!(results(s.root(), &own, &id("d")).unwrap(), r);
+        let (_l, l) = session(ProjectKind::Library);
+        assert!(
+            results(l.root(), &l.snapshot(), &id("r_100k"))
+                .unwrap()
+                .is_empty()
         );
     }
 }

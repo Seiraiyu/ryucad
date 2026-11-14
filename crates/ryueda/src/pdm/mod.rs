@@ -28,19 +28,21 @@ const LIB_COMPONENTS: &str = "library/components";
 const LIB_SYMBOLS: &str = "library/symbols";
 const LIB_FOOTPRINTS: &str = "library/footprints";
 
-/// The folders a part's revision reads besides the root files: what
-/// the content hashes read (never `library/models/`, whose bytes a
-/// footprint names by BLAKE3), and the properties.
-const PART_FOLDERS: [&str; 8] = [
+/// The folders a part's revision reads besides the root files: what the
+/// content hashes read, what ERC reads to work a design's results out
+/// again at a commit (the whole library: a footprint's model must be
+/// there, though no hash reads its bytes), and the properties.
+const PART_FOLDERS: [&str; 6] = [
     DESIGNS,
     BLOCKS,
     RAILS,
     CLASSES,
-    LIB_COMPONENTS,
-    LIB_SYMBOLS,
-    LIB_FOOTPRINTS,
+    crate::library::DIR,
     PROPERTIES,
 ];
+
+/// The folders one part's revision reads ([`Product::part_files`]).
+const READ_FOLDERS: [&str; 4] = [BLOCKS, RAILS, CLASSES, crate::library::DIR];
 
 /// The folders whose files may belong to any part ([`Product::shared`]).
 const SHARED_FOLDERS: [&str; 6] = [
@@ -185,7 +187,7 @@ impl Product for crate::Eda {
                 format!("{DESIGNS}/{part}.json"),
                 Self::properties_path(part),
             ],
-            folders: SHARED_FOLDERS.map(String::from).to_vec(),
+            folders: READ_FOLDERS.map(String::from).to_vec(),
         }
     }
 
@@ -326,16 +328,9 @@ pub(crate) mod tests {
             <crate::Eda as Product>::part_files(&id("d")),
             PartFiles {
                 files: vec!["designs/d.json".into(), "properties/d.json".into()],
-                folders: [
-                    "blocks",
-                    "rails",
-                    "classes",
-                    "library/components",
-                    "library/symbols",
-                    "library/footprints"
-                ]
-                .map(String::from)
-                .to_vec(),
+                folders: ["blocks", "rails", "classes", "library"]
+                    .map(String::from)
+                    .to_vec(),
             }
         );
         let v: Value = serde_json::from_slice(&f[MANIFEST]).unwrap();
