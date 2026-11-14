@@ -125,6 +125,10 @@ pub struct Deps {
     pub failed: Option<Error>,
     /// The last fetch's summary: `fetched 2 repositories, 1 changed`.
     pub fetched: Option<String>,
+    pub(crate) deps_waiting: bool,
+    pub(crate) deps_again: bool,
+    /// Place from dependency…, while open.
+    pub picker: Option<Picker>,
 }
 
 impl Deps {

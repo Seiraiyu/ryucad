@@ -35,6 +35,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod caches;
+
+pub use caches::Caches;
+pub(crate) use caches::Moved;
+
 /// Set, a daemon doesn't watch its folder and checks every file on every
 /// request (tests compare both ways; a filesystem whose events lie can be
 /// told).
@@ -49,25 +54,25 @@ pub struct Session {
     /// Each part's rebuild, and its results by feature keyed by their
     /// inputs' hash, so a rebuild reuses every feature whose inputs haven't
     /// changed; the same for parts read at release labels.
-    pub(crate) store: Store,
+    store: Store,
     /// Parts as release labels have them, loaded from the commit where
     /// each record became official, by part and commit.
     pinned_parts: BTreeMap<(Id, String), Part>,
     /// The dependency cache this session reads other projects' releases
     /// from: `None` until first asked for, then [`crate::deps::cache`]'s
     /// (tests give one of their own).
-    pub(crate) deps_cache: Option<ryupdm::deps::Cache>,
+    deps_cache: Option<ryupdm::deps::Cache>,
     /// A reader over it, keeping its repositories open and each release
     /// branch read once per tip.
     deps_reader: Option<ryupdm::deps::read::Reader>,
     /// Fetches the daemon made without its lock for the request it is
     /// answering ([`crate::deps::prepare`]), taken by that request.
-    pub(crate) prefetched: crate::deps::Prefetched,
+    prefetched: crate::deps::Prefetched,
     /// Other projects' labels as resolved, by project, part and label,
     /// each with the lock entry it was resolved from: read again when that
     /// entry changes or a fetch moves the cache.
     #[allow(clippy::type_complexity)]
-    pub(crate) foreign_pins: BTreeMap<
+    foreign_pins: BTreeMap<
         (crate::doc::id::ProjectId, Id, String),
         (String, Result<crate::assembly::Pinned>),
     >,
@@ -76,43 +81,14 @@ pub struct Session {
     /// it came from. Names are only added, so a reference whose name has
     /// gone can still say what it named.
     known: BTreeMap<(Id, Id), BTreeMap<ryukei::name::Name, Known>>,
-    /// Display meshes of rebuilt bodies.
-    pub meshes: crate::mesh::Cache,
-    /// The last flat patterns asked for (`flat.get`, DXF exports,
-    /// `render --flat`), by the shown body and the options.
-    pub flats: crate::sheet_metal::flat::Cache,
-    /// What intersecting pairs of placed solids found, for `interference`.
-    pub interference: crate::interference::Cache,
-    /// Drawing views' projections, by their placed bodies and the view.
-    pub projections: crate::drawing::Cache,
-    /// Section views' cut bodies and caps, by body, pose and cut.
-    pub sections: crate::drawing::section::Cache,
-    /// Mass properties worked out, for `mass`.
-    pub mass: crate::mass::Cache,
-    /// Blends recognised, for `blends`, by body hash and tolerance.
-    pub blends: crate::blends::Cache,
-    /// Distances between placed solids, for `clearance`.
-    pub clearance: crate::clearance::Cache,
-    /// The last sweeps' answers (`assembly.sweep`), by what they swept.
-    pub sweeps: crate::motion::Cache,
+    /// What the session keeps only to answer faster (see [`Caches`]).
+    caches: Caches,
     /// A revision's session: its files never change, and it never reads
     /// the disk.
     frozen: bool,
     /// The revisions requests have named, by the project folder's tree,
     /// most recently used first.
     revisions: Vec<(String, Session)>,
-    /// The last merge status, by the key of what it was computed from.
-    pub(crate) merge_status: Option<(String, serde_json::Value)>,
-    /// The release branch as last read, by the key of the refs it was
-    /// read from (see [`crate::release::history`]).
-    pub(crate) releases: Option<(String, ryupdm::history::Releases)>,
-    /// Release states as last published, by part revision.
-    pub(crate) states: Option<crate::release::States>,
-    /// Bodies of released content as this build rebuilds them, by content
-    /// hash, for `release_result_changed`.
-    pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
-    /// Parts read at commits for BOMs and where-used, by commit and part.
-    pub(crate) structure: ryupdm::structure::Cache,
     /// A daemon's watch of the folder: `None` checks every file on
     /// every request.
     watching: Option<Watching>,
@@ -128,22 +104,16 @@ pub struct Session {
     /// folders: what a compare, diff or merge preview with a worktree
     /// reads, checked as this session's own files are.
     worktrees: BTreeMap<PathBuf, Stamps>,
-    /// How many project files each worktree's working files change from
-    /// its head, by the head and a digest of the files.
-    pub(crate) worktree_changes: BTreeMap<String, usize>,
-    /// The last merge previews, by the key of what each was made from,
-    /// most recently made first.
-    pub(crate) previews: Vec<(String, serde_json::Value)>,
     /// The request being answered's progress and cancel (design 199): no
     /// job between requests. A revision's session takes its owner's when
     /// a request names it ([`Session::at`]).
-    pub job: Job,
+    job: Job,
     /// The work units each imported body may heal in: the user's
     /// `heal.budget`, read when the session opens and before each request.
-    pub heal_budget: u64,
+    heal_budget: u64,
     /// The work units each direct edit may spend: the user's
     /// `edit.budget`, read when the session opens and before each request.
-    pub edit_budget: u64,
+    edit_budget: u64,
     /// What the budget last counted the session holding besides parts'
     /// rebuilds, by what it was counted from (the epoch, the names learnt,
     /// the models and verdicts kept, the files kept open): counted again
@@ -151,9 +121,6 @@ pub struct Session {
     fixed_key: Option<[u64; 7]>,
     /// Where this session's writes go (see [`Sink`]).
     sink: Sink,
-    /// Warnings the revision a request named gives its answer (a stale
-    /// `annotation:<id>`), taken by `server::answer_live`.
-    pub(crate) rev_warnings: Vec<Value>,
 }
 
 /// How a revision names another worktree's working files:
@@ -235,6 +202,7 @@ impl Session {
         self.store.summaries.clear();
         self.store.holes.clear();
         self.revisions.clear();
+        self.caches.changed(Moved::Budget);
     }
 
     /// Loads the project at `root`.
@@ -266,35 +234,19 @@ impl Session {
             prefetched: Default::default(),
             foreign_pins: BTreeMap::new(),
             known: BTreeMap::new(),
-            meshes: crate::mesh::Cache::default(),
-            flats: Default::default(),
-            interference: crate::interference::Cache::default(),
-            projections: crate::drawing::Cache::default(),
-            sections: crate::drawing::section::Cache::default(),
-            mass: crate::mass::Cache::default(),
-            blends: crate::blends::Cache::default(),
-            clearance: crate::clearance::Cache::default(),
-            sweeps: crate::motion::Cache::default(),
+            caches: Caches::default(),
             frozen: false,
             revisions: Vec::new(),
-            merge_status: None,
-            releases: None,
-            states: None,
-            release_results: BTreeMap::new(),
-            structure: ryupdm::structure::Cache::new(),
             watching: None,
             epoch: 0,
             labels: None,
             cycles: None,
             worktrees: BTreeMap::new(),
-            worktree_changes: BTreeMap::new(),
-            previews: Vec::new(),
             fixed_key: None,
             job: Job::default(),
             heal_budget: heal_budget(),
             edit_budget: edit_budget(),
             sink: Sink::Disk,
-            rev_warnings: Vec::new(),
         };
         Ok(s)
     }
@@ -350,7 +302,7 @@ impl Session {
             return;
         }
         self.note_fixed();
-        let meshes = self.meshes.bytes() as u64;
+        let meshes = self.caches.mesh_bytes();
         if self.store.held(&self.project, meshes) > self.store.budget.max {
             for (_, r) in &mut self.revisions {
                 let project = &r.project;
@@ -374,8 +326,7 @@ impl Session {
             self.known.len() as u64,
             self.known.values().map(|n| n.len() as u64).sum(),
             self.store.models.len() as u64,
-            (self.interference.len() + self.clearance.len() + self.mass.len() + self.blends.len())
-                as u64,
+            self.caches.verdicts(),
             crate::import::opened_bytes(),
             self.store.results.len() as u64,
         ];
@@ -407,7 +358,7 @@ impl Session {
     /// The budget's state for `daemon status`: its bound, what it holds,
     /// how many parts' rebuilds it has let go, and how many it holds.
     pub fn budget_status(&self) -> Value {
-        let held = self.store.held(&self.project, self.meshes.bytes() as u64);
+        let held = self.store.held(&self.project, self.caches.mesh_bytes());
         let mut v = self.store.budget.to_json(held);
         v["parts_held"] = json!(
             self.store
@@ -416,7 +367,7 @@ impl Session {
                 .filter(|id| crate::assembly::is_leaf(&self.project, id))
                 .count()
         );
-        v["meshes_bytes"] = json!(self.meshes.bytes());
+        v["meshes_bytes"] = json!(self.caches.meshes().bytes());
         v
     }
 
@@ -437,7 +388,7 @@ impl Session {
     /// The session with `disk` beneath its caches: results it doesn't
     /// hold are read from it, and what it builds is written to it.
     pub fn with_disk(mut self, disk: Option<Arc<crate::cache::Disk>>) -> Session {
-        self.meshes.disk = disk.clone();
+        self.caches.set_disk(disk.clone());
         self.store.disk = disk;
         self
     }
@@ -478,35 +429,19 @@ impl Session {
             prefetched: Default::default(),
             foreign_pins: from.foreign_pins.clone(),
             known: from.known.clone(),
-            meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),
-            flats: Default::default(),
-            interference: from.interference.clone(),
-            projections: from.projections.clone(),
-            sections: from.sections.clone(),
-            mass: from.mass.clone(),
-            blends: from.blends.clone(),
-            clearance: from.clearance.clone(),
-            sweeps: from.sweeps.clone(),
+            caches: from.caches.for_revision(from.store.disk.clone()),
             frozen: true,
             revisions: Vec::new(),
-            merge_status: None,
-            releases: None,
-            states: None,
-            release_results: BTreeMap::new(),
-            structure: from.structure.clone(),
             watching: None,
             epoch: 0,
             labels: None,
             cycles: None,
             worktrees: BTreeMap::new(),
-            worktree_changes: BTreeMap::new(),
-            previews: Vec::new(),
             fixed_key: None,
             job: from.job.clone(),
             heal_budget: from.heal_budget,
             edit_budget: from.edit_budget,
             sink: Sink::Disk,
-            rev_warnings: Vec::new(),
         })
     }
 
@@ -522,7 +457,7 @@ impl Session {
         }
         if let Some((_, files, stale)) = self.annotation_files(rev)? {
             if !stale.is_empty() {
-                self.rev_warnings.push(stale_warning(rev, &stale));
+                self.caches.note_rev_warning(stale_warning(rev, &stale));
             }
             return self.at_files(rev, files);
         }
@@ -929,11 +864,82 @@ impl Session {
             .summaries
             .retain(|id, (key, ..)| current(id, key));
         self.store.budget.retain(|id| live.contains_key(id));
+        self.caches.changed(Moved::Files);
     }
 
     /// How many times the files have changed under this session.
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// What the session keeps only to answer faster (see [`Caches`]).
+    pub fn caches(&self) -> &Caches {
+        &self.caches
+    }
+
+    /// [`Session::caches`], to fill or let go of.
+    pub fn caches_mut(&mut self) -> &mut Caches {
+        &mut self.caches
+    }
+
+    /// The request being answered's progress and cancel (no job between
+    /// requests).
+    pub fn job(&self) -> &Job {
+        &self.job
+    }
+
+    /// Takes `job` for the request about to be answered, and
+    /// `Job::default()` after it.
+    pub fn set_job(&mut self, job: Job) {
+        self.job = job;
+    }
+
+    /// The work units each imported body may heal in.
+    pub fn heal_budget(&self) -> u64 {
+        self.heal_budget
+    }
+
+    /// The work units each direct edit may spend.
+    pub fn edit_budget(&self) -> u64 {
+        self.edit_budget
+    }
+
+    /// Each part's rebuild and its results, as the session holds them.
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Keeps `part`'s holes beside the rebuild of `hash` they were found
+    /// in (see [`crate::holes::list`]).
+    pub(crate) fn put_holes(&mut self, part: Id, hash: String, holes: Arc<crate::holes::Holes>) {
+        self.store.holes.insert(part, (hash, holes));
+    }
+
+    /// Fetches made for the request being answered, to take.
+    pub(crate) fn prefetched_mut(&mut self) -> &mut crate::deps::Prefetched {
+        &mut self.prefetched
+    }
+
+    /// Other projects' labels as resolved (see the field).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn foreign_pins_mut(
+        &mut self,
+    ) -> &mut BTreeMap<
+        (crate::doc::id::ProjectId, Id, String),
+        (String, Result<crate::assembly::Pinned>),
+    > {
+        &mut self.foreign_pins
+    }
+
+    /// The dependency cache this session reads, if it has one yet.
+    pub(crate) fn held_deps_cache(&self) -> Option<ryupdm::deps::Cache> {
+        self.deps_cache.clone()
+    }
+
+    /// The dependency cache's slot, for tests that give one of their own.
+    #[cfg(test)]
+    pub(crate) fn deps_cache_slot(&mut self) -> &mut Option<ryupdm::deps::Cache> {
+        &mut self.deps_cache
     }
 
     /// Each assembly's (and each part inserting another's) key for
@@ -1365,8 +1371,7 @@ impl Session {
     pub(crate) fn deps_fetched(&mut self) {
         self.deps_reader = None;
         self.foreign_pins.clear();
-        self.structure
-            .retain(|(project, _, _), _| project.is_none());
+        self.caches.changed(Moved::Fetched);
     }
 
     /// The rebuild of `part` this session holds, if it holds one: what
@@ -2755,5 +2760,158 @@ mod tests {
         let mut s = Session::open(dir.path()).unwrap();
         fs::remove_file(dir.path().join(MANIFEST)).unwrap();
         assert!(s.refresh().is_err());
+    }
+
+    /// The rules ryucad 27.E moves into `Caches`, as main had them: a
+    /// change of files, a new budget and a trim let nothing that is kept
+    /// by content go (only the store's rebuilds), and a session over other
+    /// files starts from its owner's verdicts with meshes of its own.
+    mod cache_rules {
+        use super::*;
+        use crate::config::tests::with_config;
+        use crate::testing::{call, with_part};
+        use serde_json::json;
+
+        /// Part `p` with spheres `a` and `b`, both meshed.
+        fn two_spheres() -> (tempfile::TempDir, Session) {
+            let (dir, mut s) = with_part();
+            for (id, r) in [("a", 1), ("b", 2)] {
+                call(
+                    &mut s,
+                    "feature.add",
+                    json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+                )
+                .unwrap();
+            }
+            call(
+                &mut s,
+                "mesh.get",
+                json!({"part": "p", "quality": "coarse"}),
+            )
+            .unwrap();
+            (dir, s)
+        }
+
+        fn p() -> Id {
+            crate::part::part_id("p").unwrap()
+        }
+
+        #[test]
+        fn a_change_of_files_keeps_what_is_kept_by_content() {
+            with_config(|_| {
+                let (dir, mut s) = two_spheres();
+                assert_eq!(s.caches().meshes().len(), 2);
+                let epoch = s.epoch();
+                // Behind the session's back, as an editor writes.
+                let mut other = Session::open(dir.path()).unwrap();
+                call(
+                    &mut other,
+                    "feature.edit",
+                    json!({"part": "p", "id": "a", "params": {"radius": 3}}),
+                )
+                .unwrap();
+                assert!(s.refresh().unwrap());
+                assert!(s.epoch() > epoch);
+                assert_eq!(
+                    s.caches().meshes().len(),
+                    2,
+                    "a change of files let a mesh go"
+                );
+                assert!(s.cached(&p()).is_none(), "the stale rebuild stayed");
+            });
+        }
+
+        #[test]
+        fn a_new_budget_keeps_what_is_kept_by_content() {
+            with_config(|_| {
+                let (_dir, mut s) = two_spheres();
+                assert!(s.cached(&p()).is_some());
+                s.set_heal_budget(s.heal_budget + 1);
+                assert_eq!(s.caches().meshes().len(), 2, "a new budget let a mesh go");
+                assert!(s.cached(&p()).is_none(), "the rebuild stayed");
+            });
+        }
+
+        #[test]
+        fn a_trim_keeps_what_is_kept_by_content() {
+            with_config(|_| {
+                let (_dir, s) = with_part();
+                let mut s = s.with_budget(1);
+                for (id, r) in [("a", 1), ("b", 2)] {
+                    call(
+                        &mut s,
+                        "feature.add",
+                        json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+                    )
+                    .unwrap();
+                }
+                call(
+                    &mut s,
+                    "mesh.get",
+                    json!({"part": "p", "quality": "coarse"}),
+                )
+                .unwrap();
+                let meshes = s.caches().meshes().len();
+                assert!(meshes > 0);
+                s.trim();
+                assert_eq!(s.caches().meshes().len(), meshes, "a trim let a mesh go");
+                assert!(s.cached(&p()).is_none(), "the trim kept the rebuild");
+            });
+        }
+
+        #[test]
+        fn a_session_over_other_files_starts_from_its_owners_verdicts() {
+            with_config(|_| {
+                let (_dir, mut s) = two_spheres();
+                call(&mut s, "blends.get", json!({"part": "p", "solid": "a"})).unwrap();
+                let blends = s.caches().blends().len();
+                assert!(blends > 0);
+                let r = s.over(s.snapshot()).unwrap();
+                assert_eq!(
+                    r.caches().blends().len(),
+                    blends,
+                    "the verdicts weren't shared"
+                );
+                assert_eq!(r.caches().meshes().len(), 0, "a revision meshes afresh");
+                assert!(!r.caches().has_state());
+            });
+        }
+    }
+
+    /// The lines of `src`'s struct at `head` that show a field.
+    fn shown_fields<'a>(file: &str, src: &'a str, head: &str) -> Vec<&'a str> {
+        let start = src.find(head).unwrap_or_else(|| panic!("{file}: no{head}"));
+        let body = &src[start..];
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("a struct ends at a column-0 brace")];
+        body.lines()
+            .filter(|l| l.starts_with("    pub"))
+            .map(str::trim)
+            .collect()
+    }
+
+    /// `Session` and `Caches` show no field (ryucad 27.E): other modules
+    /// reach what they mean to through their methods.
+    #[test]
+    fn the_session_and_its_caches_show_no_field() {
+        let shown = shown_fields(
+            "session/caches.rs",
+            include_str!("session/caches.rs"),
+            "\npub struct Caches {",
+        );
+        assert!(
+            shown.is_empty(),
+            "session/caches.rs: fields other modules reach: {shown:?}"
+        );
+        let shown = shown_fields(
+            "session.rs",
+            include_str!("session.rs"),
+            "\npub struct Session {",
+        );
+        assert!(
+            shown.is_empty(),
+            "session.rs: fields other modules reach: {shown:?}"
+        );
     }
 }

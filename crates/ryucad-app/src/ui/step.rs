@@ -99,7 +99,7 @@ pub fn import(
     view: egui::Rect,
 ) {
     let gate = ws.control("import");
-    let Some(i) = &mut ws.import else {
+    let Some(i) = &mut ws.exchange.import else {
         return;
     };
     let title = if i.update.is_some() {
@@ -169,7 +169,7 @@ pub fn import(
         ws.run_import();
     }
     if !open || close {
-        ws.import = None;
+        ws.exchange.import = None;
     }
 }
 
@@ -183,7 +183,7 @@ pub fn ask_os(parent: &eframe::Frame, how: Browse, ws: &Workspace) -> Option<std
             .add_filter("STEP", &["step", "stp"])
             .set_title("Import a STEP file")
             .pick_file(),
-        Browse::Save => crate::ui::export::ask_os(parent, &ws.export.as_ref()?.choices),
+        Browse::Save => crate::ui::export::ask_os(parent, &ws.exchange.export.as_ref()?.choices),
         Browse::SaveCsv => d
             .add_filter("CSV", &["csv"])
             .set_title("Export the BOM as CSV")

@@ -1,0 +1,38 @@
+#!/usr/bin/env -S python3 -I
+"""The merge round's ryueda: runs the real one (ROUND_RYUEDA) and logs
+every call to ROUND_LOG as a JSON line. ROUND_ROLE `branch` may run
+anything; `merge` may only read and settle a merge (`merge`, `diff`,
+`render`, `describe`, `check`, `compare`, `daemon`, `--help`): any other
+call is refused with ryueda's envelope, code `round_role`, exit 2."""
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+MERGE = {"merge", "diff", "render", "describe", "check", "compare", "daemon", "--help", "-h", "help"}
+
+
+def main():
+    args = sys.argv[1:]
+    words = [a for a in args if not a.startswith("-")] or args[:1]
+    role = os.environ.get("ROUND_ROLE", "branch")
+    entry = {"t": time.time(), "args": args, "role": role}
+    if role == "merge" and words and words[0] not in MERGE:
+        entry["refused"] = True
+        out = {"ok": False, "warnings": [], "error": {"code": "round_role", "details": {},
+               "message": "this session settles the merge: merge status, merge resolve, diff, render, describe and check are yours"}}
+        print(json.dumps(out))
+        with open(os.environ["ROUND_LOG"], "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        sys.exit(2)
+    p = subprocess.run([os.environ["ROUND_RYUEDA"], *args])
+    entry["refused"] = False
+    entry["code"] = p.returncode
+    with open(os.environ["ROUND_LOG"], "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    sys.exit(p.returncode)
+
+
+main()

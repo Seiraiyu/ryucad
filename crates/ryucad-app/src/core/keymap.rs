@@ -7,10 +7,9 @@
 //! these commands.
 
 use super::nav::Navigation;
-use eframe::egui;
 
 /// One preset entry: a command id and its chord.
-pub type Binding = (&'static str, &'static str);
+pub use ryu_app::keys::Binding;
 
 /// ryucad's own: FreeCAD's number keys for the standard views (0 iso,
 /// 1 front, 2 top, 3 right, 4 back, 5 bottom, 6 left), N normal to.
@@ -69,34 +68,14 @@ pub fn preset(style: Navigation) -> &'static [Binding] {
     }
 }
 
-/// Takes a press of `s` out of this frame's input: by the key it types,
-/// or by where it sits on the keyboard (Shift+1 types `!` on most
-/// layouts, which no shortcut on 1 would otherwise see).
-pub fn consume(i: &mut egui::InputState, s: &egui::KeyboardShortcut) -> bool {
-    if i.consume_shortcut(s) {
-        return true;
-    }
-    let mut found = false;
-    i.events.retain(|e| match e {
-        egui::Event::Key {
-            physical_key: Some(k),
-            pressed: true,
-            modifiers,
-            ..
-        } if !found && *k == s.logical_key && modifiers.matches_logically(s.modifiers) => {
-            found = true;
-            false
-        }
-        _ => true,
-    });
-    found
-}
+/// Takes a press of a shortcut out of this frame's input (`ryu_app`'s).
+pub use ryu_app::keys::consume;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::keys::{Chord, Keymap};
-    use eframe::egui::{Key, KeyboardShortcut, Modifiers};
+    use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 
     const STYLES: [Navigation; 3] = [
         Navigation::Ryucad,

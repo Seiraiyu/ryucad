@@ -943,7 +943,7 @@ fn search_dirs(root: &std::path::Path, search: &[String]) -> Vec<std::path::Path
 /// `import`: plans every file change and, unless `dry_run`, makes them.
 pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
     // Its rebuilds heal the file's bodies.
-    session.job.phase(ryu_session::job::Phase::Heal);
+    session.job().phase(ryu_session::job::Phase::Heal);
     if ask.update.is_some() {
         return reimport(session, ask);
     }
@@ -1110,8 +1110,8 @@ fn import_opened(
     // PDM names need the project's ID; Git's attributes keep the file's
     // bytes once it is there.
     // A cancel stops it up to here; once a file is written it finishes.
-    session.job.check()?;
-    session.job.writing();
+    session.job().check()?;
+    session.job().writing();
     if plan.iter().any(|pl| !pl.properties.is_empty()) {
         crate::pdm::ensure_id(session)?;
     }
@@ -1304,8 +1304,8 @@ fn reimport_opened(
         }
     }
     // A cancel stops it up to here; once a file is written it finishes.
-    session.job.check()?;
-    session.job.writing();
+    session.job().check()?;
+    session.job().writing();
     if u.planned.iter().any(|pl| !pl.properties.is_empty()) {
         crate::pdm::ensure_id(session)?;
     }
@@ -1554,8 +1554,8 @@ fn import_tree(
         }
     }
     // A cancel stops it up to here; once a file is written it finishes.
-    session.job.check()?;
-    session.job.writing();
+    session.job().check()?;
+    session.job().writing();
     if all.iter().any(|pl| !pl.properties.is_empty()) {
         crate::pdm::ensure_id(session)?;
     }

@@ -150,7 +150,7 @@ pub fn of(
         "bends": bends,
     })
     .to_string();
-    if let Some(f) = s.flats.get(&key) {
+    if let Some(f) = s.caches_mut().flats_mut().get(&key) {
         return Ok((commit, f));
     }
     let options = SheetOptions::default();
@@ -288,9 +288,9 @@ pub fn of(
                 overrides,
             };
             let key = crate::rebuild::op_key(&pid, &solid);
-            s.job.check()?;
+            s.job().check()?;
             let u = ryukei::sheet_metal::unfold(key, &built.body, &model, &spec).map_err(kernel)?;
-            s.job.check()?;
+            s.job().check()?;
             let body = crate::rebuild::finish(
                 &solid,
                 "flat",
@@ -319,7 +319,7 @@ pub fn of(
         }
     };
     let f = Arc::new(f);
-    s.flats.put(key, Arc::clone(&f));
+    s.caches_mut().flats_mut().put(key, Arc::clone(&f));
     Ok((commit, f))
 }
 

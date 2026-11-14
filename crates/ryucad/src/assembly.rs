@@ -1845,7 +1845,11 @@ fn nodes(
                 {
                     let r = match &inst.rev {
                         Rev::Working => session.rebuilt(&inst.part)?.clone(),
-                        rev => match session.store.pinned.get(&(inst.part.clone(), rev.clone())) {
+                        rev => match session
+                            .store()
+                            .pinned
+                            .get(&(inst.part.clone(), rev.clone()))
+                        {
                             Some((_, r)) => r.clone(),
                             None => continue,
                         },
@@ -1932,10 +1936,10 @@ pub(crate) mod tests {
         }
         let top = Id::parse("top", "part").unwrap();
         let first = s.rebuilt(&top).unwrap().hash.clone();
-        let walked = s.store.walked;
+        let walked = s.store().walked;
         // Nothing changed: the same result, with nothing walked again.
         assert_eq!(s.rebuilt(&top).unwrap().hash, first);
-        assert_eq!(s.store.walked, walked);
+        assert_eq!(s.store().walked, walked);
         // A file below it changed: walked again (by the edit, which keeps
         // the assemblies it reaches current, or by the rebuild after it),
         // to the new result.
@@ -1946,7 +1950,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let after = s.rebuilt(&top).unwrap().hash.clone();
-        assert!(s.store.walked > walked, "walked again");
+        assert!(s.store().walked > walked, "walked again");
         assert_ne!(after, first);
         // A session of its own from nothing agrees.
         let mut t = Session::open(s.root()).unwrap();
@@ -2840,7 +2844,7 @@ pub(crate) mod tests {
         // pair as released.
         assert_eq!(paths(&m), ["p/two bolt"]);
         let pinned = s
-            .store
+            .store()
             .pinned
             .get(&(id("pair"), Rev::Label("A".to_owned())))
             .unwrap()

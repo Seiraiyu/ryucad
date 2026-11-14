@@ -758,7 +758,7 @@ pub(crate) fn sized(ui: &mut egui::Ui, edit: egui::TextEdit<'_>, width: f32) -> 
 /// against the revision it was read at.
 pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
     let gate = ws.control("sketch.edit");
-    let Some(f) = &mut ws.dimension else {
+    let Some(f) = &mut ws.forms.dimension else {
         return;
     };
     form::heading(ui, Some(Icon::RULER), &f.constraint, f.dirty());
@@ -849,12 +849,13 @@ fn surface_toggle(rows: &mut Rows<'_>, form: &mut crate::core::edit::Form) {
 /// form was read at; Revert (or Esc) puts back what was read. A dimension
 /// chosen by its label shows instead.
 pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
-    if ws.dimension.is_some() {
+    if ws.forms.dimension.is_some() {
         dimension(ui, ws);
         return;
     }
     // Another project's part: whose, by its dependency's name.
     let dependency = ws
+        .forms
         .form
         .as_ref()
         .and_then(|f| f.foreign.as_ref())
@@ -862,6 +863,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     let gate = ws.control("feature.edit");
     // A draft's faces' angles, as the rebuild certified them.
     let angles = ws
+        .forms
         .form
         .as_ref()
         .and_then(|f| {
@@ -877,16 +879,17 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     // An insert's source's newest official label, and what moving its pin
     // changes (design 521).
     let newest = ws
+        .forms
         .form
         .as_ref()
         .filter(|f| f.foreign.is_none())
         .and_then(|f| f.of.as_ref())
-        .and_then(|of| ws.states.by_part.get(of))
+        .and_then(|of| ws.pdm.states.by_part.get(of))
         .filter(|s| matches!(s["state"].as_str(), Some("released" | "modified")))
         .and_then(|s| s["label"].as_str())
         .map(str::to_owned);
-    let preview = ws.insert_preview.clone();
-    let Some(form) = &mut ws.form else {
+    let preview = ws.forms.insert_preview.clone();
+    let Some(form) = &mut ws.forms.form else {
         crate::ui::tiles::empty(
             ui,
             crate::ui::icon::Icon::SLIDERS_HORIZONTAL,

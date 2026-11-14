@@ -1,31 +1,17 @@
 //! Who else is attached, and what each of them selects, looks at,
-//! highlights and says they are doing: the session as the window knows
-//! it.
+//! highlights and says they are doing: `ryu_app::people`' (ryueda 3.C),
+//! with what a ryucad window shows ([`CadView`]).
 
-use ryucad::live::{Kind, Style};
+use ryu_app::people::strings;
 use ryucad::view::Camera;
 use serde_json::Value;
-use std::collections::BTreeMap;
 
-/// A group of highlighted entities.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Highlight {
-    pub style: Style,
-    pub label: Option<String>,
-    pub entities: Vec<String>,
-}
+pub use ryu_app::people::Highlight;
 
-/// One participant.
+/// What else a participant's ryucad window shows.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Person {
-    pub id: String,
-    pub kind: Kind,
-    pub name: String,
-    /// What they say they are doing, and the entities it is about.
-    pub status: Option<(String, Vec<String>)>,
-    pub selection: Vec<String>,
+pub struct CadView {
     pub camera: Option<Camera>,
-    pub highlights: Vec<Highlight>,
     /// The Git revision they compare the working files against.
     pub compare: Option<String>,
     /// The part or assembly their window shows; `None` for the project's
@@ -45,44 +31,10 @@ pub struct Person {
     pub mode: ryucad::live::Mode,
 }
 
-fn strings(v: &Value) -> Vec<String> {
-    v.as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|s| s.as_str().map(str::to_owned))
-        .collect()
-}
-
-impl Person {
-    /// A participant as `participant.list` and `participant.changed` give
-    /// it; `None` if it isn't one.
-    pub fn from_json(v: &Value) -> Option<Person> {
-        let status = v["status"].is_object().then(|| {
-            (
-                v["status"]["text"].as_str().unwrap_or_default().to_owned(),
-                strings(&v["status"]["entities"]),
-            )
-        });
-        let highlights = v["highlights"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|h| {
-                Some(Highlight {
-                    style: serde_json::from_value(h["style"].clone()).ok()?,
-                    label: h["label"].as_str().map(str::to_owned),
-                    entities: strings(&h["entities"]),
-                })
-            })
-            .collect();
-        Some(Person {
-            id: v["id"].as_str()?.to_owned(),
-            kind: serde_json::from_value(v["kind"].clone()).ok()?,
-            name: v["name"].as_str()?.to_owned(),
-            status,
-            selection: strings(&v["selection"]),
+impl ryu_app::people::View for CadView {
+    fn from_json(v: &Value) -> Self {
+        CadView {
             camera: serde_json::from_value(v["camera"].clone()).ok(),
-            highlights,
             compare: v["compare"]["rev"].as_str().map(str::to_owned),
             focus: v["focus"].as_str().map(str::to_owned),
             hidden: strings(&v["hidden"]),
@@ -90,55 +42,22 @@ impl Person {
             mode: serde_json::from_value(v["mode"].clone()).unwrap_or_default(),
             explode: crate::core::explode::Shown::from_json(&v["explode"]),
             motion: crate::core::motion::Shown::from_json(&v["motion"]),
-        })
-    }
-}
-
-/// Everyone attached, by ID.
-#[derive(Debug, Default)]
-pub struct People {
-    pub all: BTreeMap<String, Person>,
-    /// Bumped whenever anyone changes, so views know to redraw.
-    pub generation: u64,
-}
-
-impl People {
-    /// Replaces everyone from a `participants` list.
-    pub fn reset(&mut self, list: &Value) {
-        self.all = list
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Person::from_json)
-            .map(|p| (p.id.clone(), p))
-            .collect();
-        self.generation += 1;
-    }
-
-    /// Takes a `participant.changed` notification.
-    pub fn changed(&mut self, params: &Value) {
-        let id = params["participant"]["id"].as_str().unwrap_or_default();
-        if params["left"] == true {
-            self.all.remove(id);
-        } else if let Some(p) = Person::from_json(&params["participant"]) {
-            self.all.insert(p.id.clone(), p);
         }
-        self.generation += 1;
     }
-
-    pub fn get(&self, id: &str) -> Option<&Person> {
-        self.all.get(id)
-    }
-
-    /// Everyone but `me`.
-    pub fn others<'a>(&'a self, me: &'a str) -> impl Iterator<Item = &'a Person> {
-        self.all.values().filter(move |p| p.id != me)
+    fn followable(&self) -> bool {
+        self.camera.is_some()
     }
 }
+
+/// One participant.
+pub type Person = ryu_app::people::Person<CadView>;
+/// Everyone attached, by ID.
+pub type People = ryu_app::people::People<CadView>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryucad::live::Style;
     use serde_json::json;
 
     #[test]

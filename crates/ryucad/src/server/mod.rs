@@ -18,28 +18,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-// Old paths, kept while ryucad 27 runs beside other stages (design 541,
-// "Paths kept"); 27.F removes the ones nothing uses.
-#[allow(unused_imports)]
-pub(crate) use crate::budget::{mesh_budget, render_budget};
-#[allow(unused_imports)]
-pub(crate) use crate::diff::diff;
-#[allow(unused_imports)]
-pub(crate) use crate::geometry::{geom_json, normal_to_face, normal_to_face_at};
-#[allow(unused_imports)]
-pub use crate::part::connector_text;
-#[allow(unused_imports)]
-pub(crate) use crate::part::{
-    check_revision, feature, feature_id, insert_at, no_feature, order, part_id, part_kind,
-    part_report, proposed, reference_texts, sweeps_of,
-};
-#[allow(unused_imports)]
-pub(crate) use crate::save::save;
-#[allow(unused_imports)]
-pub(crate) use crate::scene::{
-    DrawExplode, DrawMotion, RenderAsk, Scene, draw_body, ghost, render, render_flat,
-    render_for_package, render_noting, render_scene, sketches,
-};
+use crate::budget::mesh_budget;
+use crate::part::part_report;
+use crate::scene::{DrawExplode, DrawMotion, RenderAsk, render_noting};
 
 mod annotation;
 mod assembly;
@@ -55,11 +36,6 @@ mod view;
 use part::rebuild;
 pub(crate) use route::dispatch;
 use view::{flat_alone, mesh_binary, mesh_flat_binary, mesh_pending, wanted};
-// Old paths (design 541, "Paths kept"); 27.F removes the ones nothing uses.
-#[allow(unused_imports)]
-pub use crate::scene::{meshes, model_points, occurrence_meshes};
-#[allow(unused_imports)]
-pub use feature::feature_report;
 
 /// Creates a project in `root`. Not a session request: there is no
 /// project to open until this has run.
@@ -627,7 +603,7 @@ pub fn answer_live(
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
     // A stale annotation's revision says so in the answer.
-    let notes = std::mem::take(&mut session.rev_warnings);
+    let notes = session.caches_mut().take_rev_warnings();
     let result = match result {
         Ok(mut a) if !notes.is_empty() && a.raw.is_none() => {
             let mut list = a
@@ -710,13 +686,13 @@ pub fn handle_job_raw(
 ) -> Result<Answer> {
     let watch = live.is_some();
     guarded(slot, root, watch, |s| {
-        s.job = job.clone();
+        s.set_job(job.clone());
         // A `config set heal.budget` or `edit.budget` in another process
         // reaches this session at its next request.
         s.set_heal_budget(crate::session::heal_budget());
         s.set_edit_budget(crate::session::edit_budget());
         let a = answer_live(s, live, me, req);
-        s.job = Job::default();
+        s.set_job(Job::default());
         // A write a cancel came too late for says so, as a daemon's does.
         // A failure written as text is a failure, which settling leaves.
         let a = match a {
@@ -758,7 +734,7 @@ pub fn prepare_job(
     {
         return Some(Box::new(move || {
             let got = fetch();
-            Box::new(move |s: &mut Session| s.prefetched = got)
+            Box::new(move |s: &mut Session| *s.prefetched_mut() = got)
         }));
     }
     let Request::MeshGet {
@@ -793,7 +769,7 @@ pub fn prepare_job(
     let (budget, job) = (mesh_budget(), job.clone());
     Some(Box::new(move || {
         let made = pending.make_for(&job);
-        Box::new(move |s: &mut Session| s.meshes.put(made, budget))
+        Box::new(move |s: &mut Session| s.caches_mut().meshes_mut().put(made, budget))
     }))
 }
 

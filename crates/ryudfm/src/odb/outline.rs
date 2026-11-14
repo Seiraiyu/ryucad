@@ -109,12 +109,28 @@ impl Outline {
                     return Err(bad("a polygon that doesn't close"));
                 }
                 let c = Contour::new(edges).map_err(|_| bad("a polygon with no edges"))?;
-                let want = if island { Dir::Ccw } else { Dir::Cw };
-                let c = if c.orientation() == want {
-                    c
-                } else {
-                    c.reversed()
+                // ODB++ runs islands clockwise and holes counterclockwise,
+                // the model the other way, so a polygon is reversed unless
+                // it already runs the model's way. One with no area runs
+                // neither way and is reversed like the rest, as the writer
+                // reverses every polygon: else it would turn over on every
+                // round trip (fuzz odb, ryucad plan 30.A). The sign is
+                // exact when every edge is straight.
+                let sign = match c.polygon_area2() {
+                    Some(a) => a.signum() as i32,
+                    None => {
+                        let a = c.area2();
+                        if a > 0.0 {
+                            1
+                        } else if a < 0.0 {
+                            -1
+                        } else {
+                            0
+                        }
+                    }
                 };
+                let model_way = if island { sign > 0 } else { sign < 0 };
+                let c = if model_way { c } else { c.reversed() };
                 if island {
                     self.regions.push(Region::solid(c));
                 } else {
@@ -148,6 +164,23 @@ mod tests {
             o.line(&tokens(l).unwrap(), &mut nums, i as u32 + 1)?;
         }
         Ok(o)
+    }
+
+    #[test]
+    fn an_island_with_no_area_is_reversed_like_the_rest() {
+        // ODB++ runs islands clockwise and the writer reverses every
+        // island it writes; one with no area runs neither way, so it is
+        // taken as written ODB++'s way and reversed too (fuzz odb, 30.A).
+        let o = read("OB 0 0 I\nOS 0 0\nOS 1 0\nOS 0 0\nOE").unwrap();
+        let r = o.finish(5).unwrap();
+        let inch = 25_400_000;
+        let ends: Vec<Point> = r[0].outer.edges().iter().map(Edge::end).collect();
+        assert_eq!(
+            ends,
+            [Point::new(inch, 0), Point::new(0, 0), Point::new(0, 0)]
+        );
+        // Read back as written, it turns back to the file's order.
+        assert_eq!(r[0].outer.reversed().edges()[0].end(), Point::new(0, 0));
     }
 
     #[test]

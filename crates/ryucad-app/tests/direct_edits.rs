@@ -39,16 +39,24 @@ fn open(p: &Project) -> Workspace {
 /// The form of `id`, once `feature.show` has answered.
 fn form(ws: &mut Workspace, id: &str) -> Form {
     ws.open_form(Some(key(id)));
-    assert!(ws.wait_until(WAIT, |ws| ws.form.as_ref().is_some_and(|f| f.feature == id)));
-    ws.form.clone().unwrap()
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.forms.form.as_ref().is_some_and(|f| f.feature == id)
+    }));
+    ws.forms.form.clone().unwrap()
 }
 
 /// Saves `f` and waits for the window to settle.
 fn save(ws: &mut Workspace, f: Form) {
-    ws.form = Some(f);
+    ws.forms.form = Some(f);
     ws.save_form();
-    assert!(ws.wait_until(WAIT, |ws| ws.idle()
-        && ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .forms
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+    }));
 }
 
 #[test]
@@ -89,9 +97,12 @@ fn direct_edits_are_read_and_a_chosen_one_paints_what_it_modified_and_made() {
     // Chosen, the delete paints the top it healed, not the bore it took.
     ws.choose(Some(key("x")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.feature == key("x"))
+        ws.model
+            .made
+            .as_ref()
+            .is_some_and(|m| m.feature == key("x"))
     }));
-    let made = ws.made.clone().unwrap();
+    let made = ws.model.made.clone().unwrap();
     let painted = &made.faces[&key("b")];
     assert!(painted.contains(&hex(&top)), "{painted:?}");
     for f in &bore {
@@ -100,9 +111,12 @@ fn direct_edits_are_read_and_a_chosen_one_paints_what_it_modified_and_made() {
     // Chosen, the resize paints the fillet it remade.
     ws.choose(Some(key("r")));
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.made.as_ref().is_some_and(|m| m.feature == key("r"))
+        ws.model
+            .made
+            .as_ref()
+            .is_some_and(|m| m.feature == key("r"))
     }));
-    let made = ws.made.clone().unwrap();
+    let made = ws.model.made.clone().unwrap();
     assert!(made.faces[&key("b")].contains(&hex(&round)), "{made:?}");
 }
 

@@ -2925,8 +2925,8 @@ pub(crate) fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activ
     if let Some((named, files, stale)) = session.annotation_files(rev)? {
         if !stale.is_empty() {
             session
-                .rev_warnings
-                .push(crate::session::stale_warning(rev, &stale));
+                .caches_mut()
+                .note_rev_warning(crate::session::stale_warning(rev, &stale));
         }
         return Ok((named, files));
     }
@@ -3006,7 +3006,7 @@ pub(crate) fn diff(
     v["from"] = a;
     v["to"] = b;
     if model {
-        let job = session.job.clone();
+        let job = session.job().clone();
         let stage = job.begin(Phase::Rebuild, "revisions", 2);
         stage.step(|| from.to_owned())?;
         let from = rebuilt_at(session, from)?;

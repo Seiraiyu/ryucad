@@ -148,3 +148,19 @@ fn every_standard_symbol_but_the_trapezoid_has_a_name() {
         }
     }
 }
+
+/// A name the reader didn't know in mils may be a standard symbol in
+/// microns; written into a millimetre file it keeps its mils (fuzz odb,
+/// ryucad plan 30.A).
+#[test]
+fn a_name_unknown_in_mils_is_written_in_mils() {
+    let name = "rect106.2992x459267717";
+    assert!(StandardSymbol::parse(name, Units::Inch.names()).is_none());
+    assert!(StandardSymbol::parse(name, Units::Mm.names()).is_some());
+    let f = Features::new(vec![Symbol::Unknown(name.into())], Vec::new());
+    let text = write_features(&f);
+    assert!(text.contains(&format!("$0 {name} I\n")), "{text}");
+    let back = read_back(&text);
+    assert_eq!(back.symbols(), f.symbols());
+    assert_eq!(write_features(&back), text);
+}

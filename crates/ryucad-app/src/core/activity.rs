@@ -3,6 +3,7 @@
 //! `activity.appended`. Entries stay as the daemon reports them.
 
 use serde_json::Value;
+use std::time::Instant;
 
 /// How many entries the window asks for when it opens.
 pub const LOADED: usize = 200;
@@ -13,6 +14,16 @@ pub struct Activity {
     pub entries: Vec<Value>,
     /// Bumped whenever an entry arrives or changes.
     pub generation: u64,
+    /// The project's Git history (`history.log`), once asked for.
+    pub history: Option<Value>,
+    /// When it was last asked for, whether an answer is on its way, and
+    /// whether it was wanted again meanwhile.
+    pub(crate) history_at: Option<Instant>,
+    pub(crate) history_waiting: bool,
+    pub(crate) history_again: bool,
+    /// The activity feed's filter: one participant's ID, `external`, or
+    /// everyone.
+    pub feed_only: Option<String>,
 }
 
 /// Whether `undo` applies to an entry: a change or a redo not undone yet.

@@ -88,23 +88,7 @@ pub fn drawings(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         )
     };
     // Zoom at the pointer, pan with the middle or right button.
-    if r.hovered() {
-        let (scroll, at) = ui.input(|i| (i.smooth_scroll_delta.y, i.pointer.hover_pos()));
-        if scroll != 0.0
-            && let Some(at) = at
-        {
-            let f = ryu_math::exp(f64::from(scroll) / 200.0);
-            cam.zoom_at(
-                f,
-                [f64::from(at.x - rect.left()), f64::from(at.y - rect.top())],
-                px,
-            );
-        }
-    }
-    if r.dragged_by(egui::PointerButton::Middle) || r.dragged_by(egui::PointerButton::Secondary) {
-        let d = r.drag_delta();
-        cam.pan([f64::from(d.x), f64::from(d.y)]);
-    }
+    ryu_app::canvas::navigate(ui, &r, rect, &mut cam);
     // A left drag moves what it starts on, in Direct edit; on nothing it
     // pans.
     let id = ui.scope_id().with("drawing drag");

@@ -24,7 +24,7 @@ pub fn branches(ui: &mut egui::Ui, ws: &mut Workspace) {
     if ui.small_button("Refresh").clicked() {
         ws.load_branches();
     }
-    let compared = ws.compare.as_ref().map(|c| c.named().to_owned());
+    let compared = ws.comparing.compare.as_ref().map(|c| c.named().to_owned());
     let (mut open, mut compare, mut show, mut checkout) = (None, None, None, None);
     let b = &ws.branches;
     ui.strong("Branches");
