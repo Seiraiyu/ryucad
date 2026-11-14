@@ -24,6 +24,7 @@ general_booleans 28949919b652ece3
 geom 90cad8ca80df54df
 global_offsets 23255e45dfb40675
 heal 2d003d2e0f174a87
+held_seams 0dcc5501ef6cd55b
 helix faa69ae5dc869245
 hidden_lines 276ce7f53486bf55
 intersections 0de828fe8eecc846
