@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn designators_sort_by_letters_then_number() {
         let mut v = vec!["R10", "C1", "R2", "R1", "U1A"];
-        v.sort_by(|a, b| designator_key(a).cmp(&designator_key(b)));
+        v.sort_by_key(|a| designator_key(a));
         assert_eq!(v, ["C1", "R1", "R2", "R10", "U1A"]);
     }
 

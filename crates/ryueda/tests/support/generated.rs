@@ -163,7 +163,7 @@ pub fn seeded(dir: &Path, seed: u64) {
     write(dir, 1, 1); // manifest, symbol, footprint, rails, design `d`, block `ch`
     let comps = 1 + next(&mut s) % 6;
     for c in 0..comps {
-        let mpn = if next(&mut s) % 4 == 0 {
+        let mpn = if next(&mut s).is_multiple_of(4) {
             "".to_owned()
         } else {
             format!("MPN-{c}")
@@ -182,10 +182,10 @@ pub fn seeded(dir: &Path, seed: u64) {
     let parts = 1 + next(&mut s) % 40;
     for i in 0..parts {
         let mut v = json!({"of": {"id": format!("c{}", next(&mut s) % comps)}, "refdes": format!("R{}", i + 1)});
-        if next(&mut s) % 5 == 0 {
+        if next(&mut s).is_multiple_of(5) {
             v["value"] = json!(format!("{}R", next(&mut s) % 3));
         }
-        if next(&mut s) % 6 == 0 {
+        if next(&mut s).is_multiple_of(6) {
             v["parameters"] = json!({"dnp": "1"});
         }
         put(

@@ -309,23 +309,22 @@ pub fn answer(session: &mut crate::session::Session, ask: &Ask) -> crate::error:
     let (mut working, mut released, mut problems) = (Vec::new(), Vec::new(), Vec::new());
     let mut seen = vec![root.clone()];
     let repo: Option<crate::git::Repo> = ryu_git::repo::repo(&root).ok();
-    if let Some(repo) = repo {
-        if let Some(top) = repo.gix().workdir().map(Path::to_path_buf) {
-            for dir in others_under(&top, &root) {
-                let shown = dir
-                    .strip_prefix(&top)
-                    .map(|r| r.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_else(|_| dir.display().to_string());
-                working.extend(working_rows(&dir, &shown, &lib, &ask.filter, &mut problems));
-                released.extend(released_rows(
-                    &dir,
-                    &shown,
-                    &lib,
-                    &ask.filter,
-                    &mut problems,
-                ));
-                seen.push(dir);
-            }
+    let top = repo.and_then(|r| r.gix().workdir().map(Path::to_path_buf));
+    if let Some(top) = top {
+        for dir in others_under(&top, &root) {
+            let shown = dir
+                .strip_prefix(&top)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| dir.display().to_string());
+            working.extend(working_rows(&dir, &shown, &lib, &ask.filter, &mut problems));
+            released.extend(released_rows(
+                &dir,
+                &shown,
+                &lib,
+                &ask.filter,
+                &mut problems,
+            ));
+            seen.push(dir);
         }
     }
     let folders = folders(&root, ask.within, ask.no_dependents);
