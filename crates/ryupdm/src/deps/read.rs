@@ -6,13 +6,20 @@
 use super::{Cache, prefix_of};
 use crate::config::Config;
 use crate::history::{Releases, git_error};
-use crate::record::{Kind, Records};
+use crate::record::Kind;
+#[cfg(feature = "cad")]
+use crate::record::Records;
 use ryu_doc::canonical;
 use ryu_doc::error::{Code, Error, Result};
 use ryu_doc::id::{Id, ProjectId};
+#[cfg(feature = "cad")]
+use ryu_doc::lock::Lock;
+use ryu_doc::lock::{Locked, LockedLabel};
+#[cfg(feature = "cad")]
 use ryucad_doc::doc::deps::Dependencies;
+#[cfg(feature = "cad")]
 use ryucad_doc::doc::files::Manifest;
-use ryucad_doc::doc::lock::{Lock, Locked, LockedLabel};
+#[cfg(feature = "cad")]
 use ryucad_doc::doc::project::{IMPORTS, MANIFEST};
 use std::collections::BTreeMap;
 
@@ -40,15 +47,105 @@ pub struct Reader {
     releases: BTreeMap<(String, String, String, ProjectId), Releases>,
 }
 
+/// What a product tells an agent to run, in the reader's messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Commands {
+    pub fetch: &'static str,
+    pub update: &'static str,
+    /// Writes the lock again offline.
+    pub relock: &'static str,
+    /// The lock's file.
+    pub lock: &'static str,
+}
+
+/// ryucad's, as its messages have always said.
+pub const CAD: Commands = Commands {
+    fetch: "ryucad deps fetch",
+    update: "ryucad deps update",
+    relock: "ryucad deps update --offline",
+    lock: "ryucad.lock",
+};
+
 /// `dependency_not_fetched` for `project` at `url`, saying what to run.
-pub fn not_fetched(project: &ProjectId, url: &str, what: &str) -> Error {
+pub fn not_fetched_with(project: &ProjectId, url: &str, what: &str, c: &Commands) -> Error {
     Error::new(
         Code::DependencyNotFetched,
-        format!("{what} isn't in this machine's dependency cache: run `ryucad deps fetch`"),
+        format!(
+            "{what} isn't in this machine's dependency cache: run `{}`",
+            c.fetch
+        ),
     )
     .with("project", project)
     .with("url", url)
-    .with("command", "ryucad deps fetch")
+    .with("command", c.fetch)
+}
+
+/// ryucad's `dependency_not_fetched`.
+pub fn not_fetched(project: &ProjectId, url: &str, what: &str) -> Error {
+    not_fetched_with(project, url, what, &CAD)
+}
+
+/// Where `project`'s release `label` of `part` became official on its
+/// release branch as fetched, and the content hash its record names
+/// there: `label_not_official` for a record on the branch's history but
+/// not official, `label_not_found` otherwise. For any product; ryucad's
+/// lock keeps its own copy (`deps::lock::official`) so its answers can't
+/// move.
+pub fn official_with(
+    reader: &mut Reader,
+    project: &ProjectId,
+    locked: &Locked,
+    part: &Id,
+    label: &str,
+    c: &Commands,
+) -> Result<LockedLabel> {
+    let what = format!("{part}@{label} of {project}");
+    let path = crate::record::path(part, label, Kind::Release);
+    let Some(releases) =
+        reader.releases(project, &locked.url, &locked.path, &locked.release_branch)?
+    else {
+        return Err(not_fetched_with(project, &locked.url, &what, c));
+    };
+    let Some(o) = releases.official.get(&path) else {
+        let code = if releases.modified.contains_key(&path) {
+            Code::LabelNotOfficial
+        } else {
+            Code::LabelNotFound
+        };
+        return Err(Error::new(
+            code,
+            format!(
+                "{what} isn't an official release on {}'s {} as fetched",
+                locked.url, locked.release_branch
+            ),
+        )
+        .with("project", project)
+        .with("part", part)
+        .with("label", label));
+    };
+    let (commit, blob) = (o.commit.clone(), o.blob);
+    let repo = reader.repo(&locked.url)?.expect("its releases were read");
+    let data = repo.find_object(blob).map_err(git_error)?.data.clone();
+    let content = release_content(&data, &path)?;
+    Ok(LockedLabel { commit, content })
+}
+
+/// The content hash a release record's bytes name.
+pub(crate) fn release_content(data: &[u8], path: &str) -> Result<String> {
+    let text = std::str::from_utf8(data).map_err(|_| {
+        Error::new(Code::InvalidDocument, format!("{path} isn't UTF-8")).with("path", path)
+    })?;
+    let v = canonical::parse(text)?;
+    crate::record::Record::from_json(&v, Kind::Release)?
+        .release()
+        .map(|r| r.content.clone())
+        .ok_or_else(|| {
+            Error::new(
+                Code::InvalidDocument,
+                format!("{path} isn't a release record"),
+            )
+            .with("path", path)
+        })
 }
 
 impl Reader {
@@ -106,6 +203,7 @@ impl Reader {
         Ok(self.releases.get(&key))
     }
 
+    #[cfg(feature = "cad")]
     /// `part`'s release `label` of `project`, which the lock holds as
     /// `locked`: its files at the locked commit, checked. Without the
     /// cache's repository or the commit, `dependency_not_fetched`; a
@@ -215,6 +313,157 @@ impl Reader {
     }
 }
 
+/// A locked label as checked: where it is, its content hash, and whether
+/// the release branch as fetched holds an obsolete record for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Verified {
+    pub commit: String,
+    pub content: String,
+    pub obsolete: bool,
+}
+
+impl Reader {
+    /// `part`'s release `label` of `project` as `locked` holds it,
+    /// checked as [`Reader::label`] checks ryucad's, for any product `P`,
+    /// reading only the manifest and the records at the locked commit:
+    /// `dependency_unlocked`, `dependency_not_fetched`,
+    /// `dependency_project_mismatch`, `label_not_found` or
+    /// `dependency_rewritten`, in that order.
+    pub fn verify_for<P: crate::product::Product>(
+        &mut self,
+        project: &ProjectId,
+        locked: &Locked,
+        part: &Id,
+        label: &str,
+        c: &Commands,
+    ) -> Result<Verified> {
+        let what = format!("{part}@{label} of {project}");
+        let Some(l) = locked
+            .labels
+            .get(&(part.clone(), label.to_owned()))
+            .cloned()
+        else {
+            return Err(Error::new(
+                Code::DependencyUnlocked,
+                format!(
+                    "{what} isn't in {}: write the lock again (`{}`)",
+                    c.lock, c.relock
+                ),
+            )
+            .with("project", project)
+            .with("part", part)
+            .with("label", label));
+        };
+        let url = locked.url.clone();
+        let prefix = prefix_of(&locked.path);
+        let rec_path = crate::record::path(part, label, Kind::Release);
+        let (manifest, record) = {
+            let Some(repo) = self.repo(&url)? else {
+                return Err(not_fetched_with(project, &url, &what, c));
+            };
+            let commit_ok = gix::ObjectId::from_hex(l.commit.as_bytes())
+                .ok()
+                .is_some_and(|id| repo.has_object(id));
+            if !commit_ok {
+                return Err(not_fetched_with(project, &url, &what, c));
+            }
+            (
+                crate::history::file_at(&repo, &l.commit, &prefix, P::MANIFEST)?,
+                crate::history::file_at(&repo, &l.commit, &prefix, &rec_path)?,
+            )
+        };
+        let found = manifest
+            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|t| canonical::parse(&t).ok())
+            .and_then(|v| P::identity(&v))
+            .and_then(|i| i.project);
+        if found.as_ref() != Some(project) {
+            let held = found
+                .as_ref()
+                .map_or("no project with an ID".to_owned(), |p| format!("project {p}"));
+            return Err(Error::new(
+                Code::DependencyProjectMismatch,
+                format!("{url} holds {held} at {:?}, not {project}", locked.path),
+            )
+            .with("project", project)
+            .with("url", &url)
+            .with("path", &locked.path)
+            .with("found", found));
+        }
+        let Some(record) = record else {
+            return Err(Error::new(
+                Code::LabelNotFound,
+                format!("{what} has no record at {}", l.commit),
+            )
+            .with("project", project)
+            .with("part", part)
+            .with("label", label));
+        };
+        let text = std::str::from_utf8(&record).map_err(|_| {
+            Error::new(Code::InvalidDocument, format!("{rec_path} isn't UTF-8"))
+                .with("path", &rec_path)
+        })?;
+        let v = canonical::parse(text)?;
+        let rec = crate::record::Record::from_json_in(&v, Kind::Release, P::NAME)?;
+        if rec.project() != project {
+            return Err(Error::new(
+                Code::DependencyProjectMismatch,
+                format!("{what}'s record names project {}", rec.project()),
+            )
+            .with("project", project)
+            .with("found", rec.project()));
+        }
+        let rewritten = |why: String| {
+            Error::new(
+                Code::DependencyRewritten,
+                format!(
+                    "{what}: {why}; decide, then move to what it has now (`{}`)",
+                    c.update
+                ),
+            )
+            .with("project", project)
+            .with("part", part)
+            .with("label", label)
+            .with("url", &url)
+            .with("locked", &l.commit)
+        };
+        let content = rec.release().map(|r| r.content.clone()).unwrap_or_default();
+        if content != l.content {
+            return Err(rewritten(format!(
+                "its record names content {content} where the lock has {}",
+                l.content
+            )));
+        }
+        let Some(releases) = self.releases(project, &url, &locked.path, &locked.release_branch)?
+        else {
+            return Err(not_fetched_with(project, &url, &what, c));
+        };
+        match releases.official.get(&rec_path) {
+            Some(o) if o.commit == l.commit => {}
+            Some(o) => {
+                return Err(rewritten(format!(
+                    "its release branch {} makes it official at {}, not {}",
+                    locked.release_branch, o.commit, l.commit
+                )));
+            }
+            None => {
+                return Err(rewritten(format!(
+                    "its release branch {} no longer holds its record",
+                    locked.release_branch
+                )));
+            }
+        }
+        let obsolete = releases
+            .official
+            .contains_key(&crate::record::path(part, label, Kind::Obsolete));
+        Ok(Verified {
+            commit: l.commit,
+            content: l.content,
+            obsolete,
+        })
+    }
+}
+
 /// The project the record at `path` (its blob `blob`) names, if it reads.
 fn naming(repo: &gix::Repository, path: &str, blob: gix::ObjectId) -> Option<ProjectId> {
     let (_, kind) = crate::record::parse_name(path.rsplit('/').next()?)?;
@@ -225,6 +474,7 @@ fn naming(repo: &gix::Repository, path: &str, blob: gix::ObjectId) -> Option<Pro
         .map(|r| r.project().clone())
 }
 
+#[cfg(feature = "cad")]
 /// Other projects' releases as a project's lock has them, read from the
 /// dependency cache: what a [`crate::structure::Reader`] follows foreign
 /// instances through. A project the lock lacks is `dependency_unlocked`
@@ -241,6 +491,7 @@ pub struct Through<'a> {
     pub local: Option<Local<'a>>,
 }
 
+#[cfg(feature = "cad")]
 /// A project's own repository, holding its locked labels' commits.
 #[derive(Clone, Copy)]
 pub struct Local<'a> {
@@ -250,6 +501,7 @@ pub struct Local<'a> {
     pub prefix: &'a str,
 }
 
+#[cfg(feature = "cad")]
 impl crate::structure::Others for Through<'_> {
     fn commit(&self, project: &ProjectId, part: &Id, label: &str) -> Option<String> {
         self.lock
@@ -307,6 +559,7 @@ impl crate::structure::Others for Through<'_> {
     }
 }
 
+#[cfg(feature = "cad")]
 /// The files reading `part` at `l.commit` needs: its own, the project's
 /// root files, the imported files its import features name, and its
 /// records.
@@ -342,6 +595,7 @@ fn label_files(
     Ok(files)
 }
 
+#[cfg(feature = "cad")]
 /// `dependency_project_mismatch` unless the manifest in `files` names
 /// `project`.
 pub fn check_project(
@@ -373,7 +627,7 @@ pub fn check_project(
     .with("found", found))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cad"))]
 pub(crate) mod tests {
     use super::super::tests::url;
     use super::*;
@@ -597,5 +851,119 @@ pub(crate) mod tests {
             .unwrap_err();
         assert_eq!(e.code, Code::DependencyRewritten);
         assert!(e.message.contains(&again), "{e}");
+    }
+}
+
+#[cfg(test)]
+mod neutral {
+    use super::*;
+
+    #[test]
+    fn a_products_commands_name_themselves() {
+        let p = ProjectId::parse(&"1".repeat(32)).unwrap();
+        const EDA: Commands = Commands {
+            fetch: "ryueda lib fetch",
+            update: "ryueda lib update",
+            relock: "ryueda lib update --offline",
+            lock: "ryueda.lock",
+        };
+        let e = not_fetched_with(&p, "file:///x", "r@A of p", &EDA);
+        assert_eq!(e.code, Code::DependencyNotFetched);
+        assert!(e.message.contains("ryueda lib fetch"), "{}", e.message);
+        assert_eq!(e.details["command"], "ryueda lib fetch");
+        // ryucad's message is as it was.
+        let c = not_fetched(&p, "file:///x", "r@A of p");
+        assert!(
+            c.message.ends_with("run `ryucad deps fetch`"),
+            "{}",
+            c.message
+        );
+    }
+
+    /// A repository with a toy project at `lib/` whose part `r` is
+    /// released as `A` on `main` (content `"0"` x 64): (its folder, its
+    /// URL, the project, the commit).
+    pub(crate) fn toy_release() -> (tempfile::TempDir, String, ProjectId, String) {
+        use crate::history::tests::{git, record_text};
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join("lib/releases/r")).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        let project = ProjectId::parse(crate::testing::PROJECT).unwrap();
+        let manifest = serde_json::json!({
+            "kind": "toy.project", "format": 1, "project": project.to_string(),
+            "default_unit": "mm",
+        });
+        std::fs::write(repo.join("lib/toy.json"), canonical::to_string(&manifest)).unwrap();
+        std::fs::write(
+            repo.join("lib/releases/r/A.json"),
+            record_text("r", "A", Kind::Release),
+        )
+        .unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "A"]);
+        let commit = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        let url = format!("file://{}", repo.display());
+        (d, url, project, commit)
+    }
+
+    #[test]
+    fn a_locked_label_is_verified_for_any_product() {
+        let t = toy_release();
+        let mut r = Reader::new(Cache::new(t.0.path().join("cache")));
+        r.cache.fetch(&t.1, &["lib"]).unwrap();
+        let part = Id::parse("r", "part").unwrap();
+        let mut locked = Locked {
+            url: t.1.clone(),
+            path: "lib".into(),
+            release_branch: "main".into(),
+            via: Vec::new(),
+            labels: BTreeMap::new(),
+        };
+        const C: Commands = CAD;
+        type Toy = crate::testing::Toy;
+        // Not in the lock: dependency_unlocked, naming the product's lock.
+        let e = r
+            .verify_for::<Toy>(&t.2, &locked, &part, "A", &C)
+            .unwrap_err();
+        assert_eq!(e.code, Code::DependencyUnlocked);
+        let l = official_with(&mut r, &t.2, &locked, &part, "A", &C).unwrap();
+        assert_eq!(l.commit, t.3);
+        assert_eq!(l.content, "0".repeat(64));
+        // B was never released: label_not_found.
+        let e = official_with(&mut r, &t.2, &locked, &part, "B", &C).unwrap_err();
+        assert_eq!(e.code, Code::LabelNotFound);
+        locked.labels.insert((part.clone(), "A".into()), l.clone());
+        let v = r
+            .verify_for::<Toy>(&t.2, &locked, &part, "A", &C)
+            .unwrap();
+        assert_eq!((v.commit.as_str(), v.obsolete), (t.3.as_str(), false));
+        // Another content hash in the lock: dependency_rewritten.
+        locked
+            .labels
+            .get_mut(&(part.clone(), "A".into()))
+            .unwrap()
+            .content = "d".repeat(64);
+        let e = r
+            .verify_for::<Toy>(&t.2, &locked, &part, "A", &C)
+            .unwrap_err();
+        assert_eq!(e.code, Code::DependencyRewritten);
+        // Another project: dependency_project_mismatch.
+        let other = ProjectId::parse(&"2".repeat(32)).unwrap();
+        let mut lk = locked.clone();
+        lk.labels
+            .get_mut(&(part.clone(), "A".into()))
+            .unwrap()
+            .content = "0".repeat(64);
+        let e = r
+            .verify_for::<Toy>(&other, &lk, &part, "A", &C)
+            .unwrap_err();
+        assert_eq!(e.code, Code::DependencyProjectMismatch);
+        // Not fetched: another cache.
+        let mut empty = Reader::new(Cache::new(t.0.path().join("none")));
+        let e = empty
+            .verify_for::<Toy>(&t.2, &lk, &part, "A", &C)
+            .unwrap_err();
+        assert_eq!(e.code, Code::DependencyNotFetched);
     }
 }
