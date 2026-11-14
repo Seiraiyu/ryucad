@@ -275,4 +275,28 @@ mod tests {
         );
         assert!(codes(&other).contains(&"release_project_mismatch"));
     }
+
+    #[test]
+    fn a_toy_merge_that_shares_a_number_blames_both() {
+        use crate::merge::{Cause, validate_for};
+        let base = project(&[("a", "{}"), ("b", "{}")]);
+        let mut ours = base.clone();
+        ours.insert("properties/a.json".into(), numbered("1"));
+        let mut theirs = base.clone();
+        theirs.insert("properties/b.json".into(), numbered("1"));
+        let mut merged = ours.clone();
+        merged.insert("properties/b.json".into(), numbered("1"));
+        let broke = validate_for::<Toy>(&base, &ours, &theirs, &merged, &Default::default());
+        let got: Vec<(&str, &str, Cause)> = broke
+            .iter()
+            .map(|b| (b.code.as_str(), b.path.as_str(), b.cause))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("part_number_duplicate", "properties/a.json", Cause::Theirs),
+                ("part_number_duplicate", "properties/b.json", Cause::Ours),
+            ]
+        );
+    }
 }

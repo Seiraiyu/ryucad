@@ -26,14 +26,13 @@
 use crate::check::sequence;
 use crate::config::Config;
 use crate::history::Releases;
+use crate::product::Product;
 use crate::props::Pdm;
 use crate::record::{Entry, Record, Records};
 use crate::{PDM_CONFIG, RELEASES};
 use ryu_doc::error::Code;
 use ryu_doc::id::Id;
 use ryu_doc::source::{self, Source, join};
-use ryucad_doc::doc::files::Manifest;
-use ryucad_doc::doc::project::{MANIFEST, without_conflicts};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -103,32 +102,18 @@ struct Fault {
 /// and the property or label.
 type Key = (String, Id, String);
 
-/// The parts `src` has folders for.
-fn parts(src: &dyn Source) -> Vec<Id> {
-    src.list("parts")
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(_, k)| *k == source::Kind::Dir)
-        .filter_map(|(n, _)| Id::parse(&n, "part").ok())
-        .collect()
-}
-
 /// Every PDM fault in the project `src` holds that a merge can introduce,
 /// with `releases` saying which records are official. None when the
 /// settings can't be read: a conflicted `ryupdm.json` is a structural
 /// conflict, and nothing can be judged against it.
-fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
+fn faults<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
     let mut out = BTreeMap::new();
     let Ok(config) = Config::read(src) else {
         return out;
     };
-    let unit = crate::read_json(src, MANIFEST)
-        .ok()
-        .flatten()
-        .and_then(|v| Manifest::from_json(&without_conflicts(&v)).ok())
-        .map(|m| m.default_unit);
+    let unit = crate::product::identity::<P>(src).map(|i| i.unit);
     if let Some(unit) = unit {
-        let pdm = Pdm::of(src, parts(src), unit);
+        let pdm = Pdm::of_for::<P>(src, P::parts(src).unwrap_or_default(), unit);
         for (part, pp) in &pdm.parts {
             for e in &pp.faults {
                 let property = e.details["property"].as_str().unwrap_or_default();
@@ -139,12 +124,12 @@ fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
                         .into_iter()
                         .flatten()
                         .filter_map(|p| Id::parse(p.as_str()?, "part").ok())
-                        .map(|p| Dep::File(crate::props::path(&p)))
+                        .map(|p| Dep::File(crate::props::path_for::<P>(&p)))
                         .collect()
                 } else {
                     vec![
                         Dep::File(PDM_CONFIG.to_owned()),
-                        Dep::File(MANIFEST.to_owned()),
+                        Dep::File(P::MANIFEST.to_owned()),
                     ]
                 };
                 out.insert(
@@ -152,7 +137,7 @@ fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
                     Fault {
                         code,
                         part: part.clone(),
-                        path: crate::props::path(part),
+                        path: crate::props::path_for::<P>(part),
                         property: Some(property.to_owned()),
                         label: None,
                         message: e.message.clone(),
@@ -194,8 +179,8 @@ fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
         }
         // A part a merge left unreadable is a structural conflict.
         let (Ok(content), Ok(props)) = (
-            crate::content::hash(src, &part),
-            crate::props::read(src, &part),
+            P::content(src, &part),
+            crate::props::read_for::<P>(src, &part),
         ) else {
             continue;
         };
@@ -224,11 +209,14 @@ fn faults(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fault> {
                     ),
                     details: json!({"path": e.path, "changes": changes}),
                     withdraw: true,
-                    depends: vec![
-                        Dep::Under(join("parts", part.as_str())),
-                        Dep::File(MANIFEST.to_owned()),
-                        Dep::File(PDM_CONFIG.to_owned()),
-                    ],
+                    depends: {
+                        let own = P::part_files(&part);
+                        let mut d: Vec<Dep> = own.folders.into_iter().map(Dep::Under).collect();
+                        d.extend(own.files.into_iter().map(Dep::File));
+                        d.push(Dep::File(P::MANIFEST.to_owned()));
+                        d.push(Dep::File(PDM_CONFIG.to_owned()));
+                        d
+                    },
                 },
             );
         }
@@ -277,11 +265,8 @@ fn changed(side: &dyn Source, base: &dyn Source, deps: &[Dep], skip: &str) -> Ve
     out
 }
 
-/// The PDM faults of the merge `merged` that neither `ours` nor `theirs`
-/// has, each blamed on the side whose change completes it (see the module
-/// docs). `base` is the merge base (an empty source when there is none);
-/// `releases` the release branch as read, which says which records are
-/// official. In the order of their code, part, and property or label.
+/// [`validate_for`] for ryucad.
+#[cfg(feature = "cad")]
 pub fn validate(
     base: &dyn Source,
     ours: &dyn Source,
@@ -289,9 +274,24 @@ pub fn validate(
     merged: &dyn Source,
     releases: &Releases,
 ) -> Vec<Broke> {
-    let (o, t) = (faults(ours, releases), faults(theirs, releases));
+    validate_for::<crate::cad::Cad>(base, ours, theirs, merged, releases)
+}
+
+/// The PDM faults of the merge `merged` of a project of `P` that neither
+/// `ours` nor `theirs` has, each blamed on the side whose change completes it (see the module
+/// docs). `base` is the merge base (an empty source when there is none);
+/// `releases` the release branch as read, which says which records are
+/// official. In the order of their code, part, and property or label.
+pub fn validate_for<P: Product>(
+    base: &dyn Source,
+    ours: &dyn Source,
+    theirs: &dyn Source,
+    merged: &dyn Source,
+    releases: &Releases,
+) -> Vec<Broke> {
+    let (o, t) = (faults::<P>(ours, releases), faults::<P>(theirs, releases));
     let mut out = Vec::new();
-    for (key, f) in faults(merged, releases) {
+    for (key, f) in faults::<P>(merged, releases) {
         if o.contains_key(&key) || t.contains_key(&key) {
             continue;
         }
