@@ -98,9 +98,7 @@ pub const ROOT_FILES: [&str; 8] = [
 /// parameters it reads.
 pub const PROJECT_PARAMETERS_TAG: &str = "ryucad.project_parameters";
 
-/// The key under which a file a merge couldn't settle lists its conflicts,
-/// by JSON pointer. No file kind uses it otherwise.
-pub const CONFLICTS: &str = "conflicts";
+pub use ryu_doc::files::CONFLICTS;
 
 #[derive(Clone, Debug)]
 pub struct Project {
@@ -373,41 +371,10 @@ pub use crate::doc::source::relative;
 /// conflicts, naming their pointers, and a feature's `type` where no
 /// conflict is about it, so a failed feature can still say what it is.
 pub fn conflicted(v: &Value, at: &str) -> Option<Error> {
-    let listed = v.as_object()?.get(CONFLICTS)?;
-    let pointers: Vec<&str> = listed
-        .as_object()
-        .map(|o| o.keys().map(String::as_str).collect())
-        .unwrap_or_default();
-    let at_list = if pointers.is_empty() {
-        String::new()
-    } else {
-        format!(" at {}", pointers.join(", "))
-    };
-    let ty = v
-        .get("type")
-        .and_then(Value::as_str)
-        .filter(|_| v.get("kind").and_then(Value::as_str) == Some("ryucad.feature"))
-        .filter(|_| !pointers.iter().any(|p| p.is_empty() || *p == "/type"));
-    let e = Error::new(
-        Code::MergeConflict,
-        format!("{at} has unresolved merge conflicts{at_list}; see `ryucad merge status`"),
-    )
-    .with("path", at)
-    .with("pointers", &pointers);
-    Some(match ty {
-        Some(t) => e.with("type", t),
-        None => e,
-    })
+    ryu_doc::files::conflicted_in(v, at, "ryucad")
 }
 
-/// `v` without its merge conflicts: the values the merge left in place.
-pub fn without_conflicts(v: &Value) -> Value {
-    let mut v = v.clone();
-    if let Some(o) = v.as_object_mut() {
-        o.remove(CONFLICTS);
-    }
-    v
-}
+pub use ryu_doc::files::without_conflicts;
 
 /// Reads and parses the JSON file at `at` (relative to the root); errors
 /// carry that path. A file with merge conflicts is `merge_conflict`.

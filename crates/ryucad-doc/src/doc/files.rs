@@ -1924,97 +1924,15 @@ pub fn number(x: f64) -> Value {
     }
 }
 
-/// `invalid_document` at the JSON pointer `at`.
 #[doc(hidden)]
-pub fn invalid(at: &str, msg: &str) -> Error {
-    Error::new(Code::InvalidDocument, msg).with("pointer", at)
-}
+pub use ryu_doc::files::{Obj, invalid};
 
-/// Checks `kind` and `format` (at most `newest`), migrating older formats,
-/// and returns the remaining fields.
+/// Checks `kind` and `format` (at most `newest`), and returns the
+/// remaining fields: [`ryu_doc::files::header_in`] naming ryucad. Each
+/// later format adds its migration where the kind is read.
 #[doc(hidden)]
 pub fn header<'a>(v: &'a Value, kind: &str, newest: u64) -> Result<Obj<'a>> {
-    let mut o = Obj::new(v, "")?;
-    let k = o.take("kind")?;
-    if k.as_str() != Some(kind) {
-        return Err(invalid(
-            "/kind",
-            &format!("expected kind {kind:?}, found {k}"),
-        ));
-    }
-    let f = o.take("format")?;
-    let format = f
-        .as_u64()
-        .filter(|f| *f >= 1)
-        .ok_or_else(|| invalid("/format", "format must be a positive integer"))?;
-    if format > newest {
-        return Err(Error::new(
-            Code::FormatTooNew,
-            format!(
-                "this file has format {format}; this ryucad reads up to {newest}. Upgrade ryucad"
-            ),
-        )
-        .with("format", format)
-        .with("supported", newest));
-    }
-    migrate(format, newest);
-    Ok(o)
-}
-
-/// Brings an older format up to `newest`, one step at a time. Each later
-/// format adds a `format => step` arm that rewrites the fields in place.
-/// Feature format 2 only adds expressions, which format 1 files don't
-/// have, so it needs no step.
-fn migrate(format: u64, newest: u64) {
-    debug_assert!(format <= newest);
-}
-
-/// The fields of a JSON object, taken one by one so leftovers are errors.
-#[doc(hidden)]
-pub struct Obj<'a> {
-    map: BTreeMap<&'a str, &'a Value>,
-    at: String,
-}
-
-impl<'a> Obj<'a> {
-    pub fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
-        let map = v
-            .as_object()
-            .ok_or_else(|| invalid(at, "expected a JSON object"))?;
-        Ok(Obj {
-            map: map.iter().map(|(k, v)| (k.as_str(), v)).collect(),
-            at: at.to_owned(),
-        })
-    }
-
-    /// Whether a field is there, not yet taken.
-    pub fn has(&self, key: &str) -> bool {
-        self.map.contains_key(key)
-    }
-
-    /// A field that may be left out.
-    pub fn take_opt(&mut self, key: &str) -> Option<Value> {
-        self.map.remove(key).cloned()
-    }
-
-    pub fn take(&mut self, key: &str) -> Result<Value> {
-        self.map.remove(key).cloned().ok_or_else(|| {
-            invalid(
-                &format!("{}/{key}", self.at),
-                &format!("missing field {key:?}"),
-            )
-        })
-    }
-
-    pub fn finish(self) -> Result<()> {
-        match self.map.keys().next() {
-            None => Ok(()),
-            Some(k) => Err(invalid(
-                &format!("{}/{k}", self.at),
-                &format!("unexpected field {k:?}"),
-            )),
-        }
-    }
+    ryu_doc::files::header_in(v, kind, newest, "ryucad")
 }
 
 fn triple<T>(v: &Value, at: &str, item: impl Fn(&Value, &str) -> Result<T>) -> Result<[T; 3]> {
