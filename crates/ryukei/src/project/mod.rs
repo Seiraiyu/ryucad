@@ -35,3 +35,13 @@ pub use section::{SECTION_TOOL, Section, section, section_with};
 pub(crate) use silhouette::silhouettes_in;
 pub use silhouette::{Silhouette, Silhouettes, silhouettes, silhouettes_with};
 pub use view::View;
+
+/// Scratch (plan 17.C, Task 2): nanoseconds by phase.
+pub static PROFILE: [std::sync::atomic::AtomicU64; 24] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 24];
+pub(crate) fn lap(k: usize, since: std::time::Instant) {
+    PROFILE[k].fetch_add(
+        since.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}

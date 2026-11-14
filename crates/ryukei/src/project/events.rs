@@ -128,7 +128,21 @@ fn meet(
         range: rb,
     };
     let (sa, sb) = (ra.map(|t| ma.apply(t)), rb.map(|t| mb.apply(t)));
-    match crossings_in((ca, sa), (cb, sb), tol, m) {
+    let __k = {
+        use crate::geom::Curve2 as C;
+        let conic = |c: &C| matches!(c, C::Circle2(_) | C::Ellipse2(_));
+        match (ca, cb) {
+            (C::Nurbs2(_), _) | (_, C::Nurbs2(_)) => 10,
+            (C::Line2(_), C::Line2(_)) => 7,
+            (C::Line2(_), y) | (y, C::Line2(_)) if conic(y) => 8,
+            (x, y) if conic(x) && conic(y) => 9,
+            _ => 10,
+        }
+    };
+    let __t = std::time::Instant::now();
+    let __found = crossings_in((ca, sa), (cb, sb), tol, m);
+    super::lap(__k, __t);
+    match __found {
         Some(found) => {
             for meeting in found {
                 match meeting {

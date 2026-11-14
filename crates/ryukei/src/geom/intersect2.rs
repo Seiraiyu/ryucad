@@ -487,7 +487,8 @@ fn subdivided(
         let system = System::new(pa, pb, tol);
         let mut cells = Vec::new();
         let mut budget = MEET_CELLS;
-        system.solve(
+        let __t = std::time::Instant::now();
+        let __r = system.solve(
             [0.0, 1.0],
             [0.0, 1.0],
             0,
@@ -497,8 +498,13 @@ fn subdivided(
             (&ca, i),
             (&cb, j),
             m,
-        )?;
-        for cluster in clusters(cells, m)? {
+        );
+        crate::project::lap(11, __t);
+        __r?;
+        let __t = std::time::Instant::now();
+        let __c = clusters(cells, m);
+        crate::project::lap(12, __t);
+        for cluster in __c? {
             out.push(system.cluster(&cluster, tol, (&ca, i), (&cb, j))?);
         }
     }

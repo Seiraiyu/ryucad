@@ -89,6 +89,16 @@ fn probe(name: &str, body: &Body, v: &View) -> f64 {
         ok(sil.is_ok()),
         ok(edges.is_ok())
     );
+    let slots: Vec<String> = ryukei::project::PROFILE
+        .iter()
+        .map(|a| {
+            format!(
+                "{:.3}",
+                a.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 * 1e-9
+            )
+        })
+        .collect();
+    println!("  slots: {}", slots.join(" "));
     w
 }
 

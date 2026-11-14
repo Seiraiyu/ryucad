@@ -104,7 +104,10 @@ fn of_face(body: &Body, f: FaceId, view: &View, m: &Meter) -> Result<FaceOut, Fa
         face_rect(body, f).ok_or(Failure::Uncertain)?
     };
     let t = view.towards().get();
-    let raws = match closed_form(surface, t, rect, m)? {
+    let __t = std::time::Instant::now();
+    let __closed = closed_form(surface, t, rect, m);
+    super::lap(13, __t);
+    let raws = match __closed? {
         Some(Closed::EdgeOn) => {
             return Ok(FaceOut {
                 edge_on: true,
@@ -119,7 +122,10 @@ fn of_face(body: &Body, f: FaceId, view: &View, m: &Meter) -> Result<FaceOut, Fa
                     ..FaceOut::default()
                 });
             }
-            traced(body, f, surface, t, m)?
+            let __t = std::time::Instant::now();
+            let __tr = traced(body, f, surface, t, m);
+            super::lap(14, __t);
+            __tr?
         }
     };
     let mut stretches: Vec<(Raw, [f64; 2])> = Vec::new();

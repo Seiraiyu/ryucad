@@ -42,7 +42,10 @@ pub(crate) fn fit_contour(
     traced: &Traced,
     m: &Meter,
 ) -> Result<ContourFit, Failure> {
-    m.capped(Scope::Fit, || fitted(surface, towards, traced, m))
+    let __t = std::time::Instant::now();
+    let __r = m.capped(Scope::Fit, || fitted(surface, towards, traced, m));
+    crate::project::lap(15, __t);
+    __r
 }
 
 fn fitted(
@@ -60,19 +63,31 @@ fn fitted(
     if anchors.len() < 2 {
         return Err(Failure::Uncertain);
     }
-    let mut pts = presampled(surface, &field, anchors.clone(), m)?;
+    let __t = std::time::Instant::now();
+    let pts0 = presampled(surface, &field, anchors.clone(), m);
+    crate::project::lap(16, __t);
+    let mut pts = pts0?;
     let mut best: Option<ContourFit> = None;
     for _ in 0..ROUNDS {
-        let pc = hermite(&field, &pts)?;
+        let __t = std::time::Instant::now();
+        let pc = hermite(&field, &pts);
+        crate::project::lap(17, __t);
+        let pc = pc?;
         let range = pc.domain();
+        let __t = std::time::Instant::now();
         let lifted = fit_along(
             surface,
             &Curve2::Nurbs2(Arc::new(pc.clone())),
             [0.0, 1.0],
             range,
             m,
-        )?;
-        let spans = bounds(&field, &lifted.pcurve, &anchors, m)?;
+        );
+        crate::project::lap(18, __t);
+        let lifted = lifted?;
+        let __t = std::time::Instant::now();
+        let spans = bounds(&field, &lifted.pcurve, &anchors, m);
+        crate::project::lap(19, __t);
+        let spans = spans?;
         let worst = spans.iter().map(|s| s.1).fold(0.0, f64::max);
         let fit = ContourFit {
             curve: lifted.curve,

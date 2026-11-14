@@ -168,6 +168,7 @@ fn project(
         .collect::<Result<_, _>>()?;
     let bodies: Vec<&Body> = owned.iter().map(|c| c.as_ref()).collect();
     let originals: Vec<&Body> = placed.iter().map(|p| p.body).collect();
+    let __t = std::time::Instant::now();
     let mut silhouettes = Vec::with_capacity(bodies.len());
     for &b in &bodies {
         silhouettes.push(if options.silhouettes {
@@ -176,7 +177,10 @@ fn project(
             Silhouettes::default()
         });
     }
+    super::lap(0, __t);
+    let __t = std::time::Instant::now();
     let items = items(&bodies, &originals, &silhouettes, view, m)?;
+    super::lap(1, __t);
     // Every image piece, by item and image.
     let imgs: Vec<(usize, usize)> = items
         .iter()
@@ -188,7 +192,10 @@ fn project(
     let met: Vec<(&ImageCurve, f64)> = (0..imgs.len())
         .map(|g| (image(g), item(g).tolerance))
         .collect();
+    let __t = std::time::Instant::now();
     let mut ev = events(&met, m);
+    super::lap(2, __t);
+    let __t = std::time::Instant::now();
     // A silhouette changes visibility at its image's cusps, and an edge
     // where a silhouette of its face ends on it, with no image crossing
     // (plan 10.C's property test: a torus's contour, race bodies 15 and
@@ -245,6 +252,8 @@ fn project(
             }
         }
     }
+    super::lap(3, __t);
+    let __t = std::time::Instant::now();
     // Where a curve passes through another body (a press fit), its
     // visibility changes with no image event.
     let stretches: Vec<Stretch> = (0..imgs.len())
@@ -268,6 +277,8 @@ fn project(
         ev.cuts[g].extend(p.cuts);
         ev.unsure[g].extend(p.unsure);
     }
+    super::lap(4, __t);
+    let __t = std::time::Instant::now();
     let mut spans: Vec<Span> = Vec::new();
     let mut first = Vec::with_capacity(imgs.len() + 1);
     for g in 0..imgs.len() {
@@ -286,6 +297,8 @@ fn project(
     first.push(spans.len());
     let tols: Vec<f64> = (0..imgs.len()).map(|g| item(g).tolerance).collect();
     let overlaps = link(&spans, &first, &ev.overlaps, &tols);
+    super::lap(5, __t);
+    let __t = std::time::Instant::now();
     let scene = Scene::new(view, &bodies);
     let order: Vec<usize> = (0..spans.len()).collect();
     let judged = m.par_map(&order, |m, &s| {
@@ -305,6 +318,7 @@ fn project(
         let visibility = judge(&scene, &it.curve, &piece, &ray, span.flagged, m);
         (piece, depth(&it.curve, span.range, view), visibility)
     });
+    super::lap(6, __t);
     let pieces = judged
         .into_iter()
         .zip(overlaps)

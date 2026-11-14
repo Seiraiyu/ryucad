@@ -661,16 +661,27 @@ impl<'a> Tracer<'a> {
             return Err(Failure::Uncertain);
         }
         let (sc, tc) = (self.s_cuts.clone(), self.t_cuts.clone());
+        let __t = std::time::Instant::now();
         for s in sc.windows(2) {
             for t in tc.windows(2) {
                 let cell = [[s[0], s[1]], [t[0], t[1]]];
                 if self.reaches(cell) {
-                    self.subdivide(cell, 0)?;
+                    if let Err(e) = self.subdivide(cell, 0) {
+                        crate::project::lap(20, __t);
+                        return Err(e);
+                    }
                 }
             }
         }
-        let arcs = self.arcs()?;
-        self.link(arcs)
+        crate::project::lap(20, __t);
+        let __t = std::time::Instant::now();
+        let arcs = self.arcs();
+        crate::project::lap(21, __t);
+        let arcs = arcs?;
+        let __t = std::time::Instant::now();
+        let r = self.link(arcs);
+        crate::project::lap(22, __t);
+        r
     }
 
     /// Whether the surface over a cell may reach the region.
