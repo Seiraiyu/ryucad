@@ -145,6 +145,28 @@ pub fn field_of(e: &Error) -> Option<String> {
 /// "Forms per kind"): read from its `feature.show`, its fields, and what
 /// it gives `feature.edit`. A `Form` holds at most one (its `type`'s) and
 /// asks it.
+/// The tree's icon of a feature of type `ty` doing `op`, a pattern of
+/// `form`, when its kind has a form here (design 541: the tree asks the
+/// kinds' modules).
+pub fn icon(ty: &str, op: Option<&str>, form: Option<&str>) -> Option<&'static str> {
+    [
+        extrude::icon,
+        blend::icon,
+        hole::icon,
+        pattern::icon,
+        mate::icon,
+        datum::icon,
+        sweep::icon,
+        loft::icon,
+        body::icon,
+        sheet_metal::icon,
+        surface::icon,
+        tweak::icon,
+    ]
+    .into_iter()
+    .find_map(|f| f(ty, op, form))
+}
+
 pub trait FeatureForm {
     /// This kind's form from a `feature.show` of type `ty`; `None` for a
     /// type it doesn't own.

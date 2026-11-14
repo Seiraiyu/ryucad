@@ -659,6 +659,17 @@ impl FeatureForm for SheetMetalForm {
     }
 }
 
+/// The tree's icon of a type this kind owns.
+pub(crate) fn icon(ty: &str, _op: Option<&str>, _form: Option<&str>) -> Option<&'static str> {
+    Some(match ty {
+        "base_flange" => "base-flange",
+        "flange" => "edge-flange",
+        "unfold" => "unfold",
+        "refold" => "refold",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

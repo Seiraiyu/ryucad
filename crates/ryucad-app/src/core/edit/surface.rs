@@ -362,6 +362,17 @@ impl FeatureForm for SurfaceForm {
     }
 }
 
+/// The tree's icon of a type this kind owns.
+pub(crate) fn icon(ty: &str, _op: Option<&str>, _form: Option<&str>) -> Option<&'static str> {
+    Some(match ty {
+        "fill" => "fill",
+        "extract" => "extract",
+        "sew" => "sew",
+        "thicken" => "thicken",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

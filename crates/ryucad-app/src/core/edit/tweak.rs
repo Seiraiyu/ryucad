@@ -656,6 +656,19 @@ impl FeatureForm for TweakForm {
     }
 }
 
+/// The tree's icon of a type this kind owns.
+pub(crate) fn icon(ty: &str, _op: Option<&str>, _form: Option<&str>) -> Option<&'static str> {
+    Some(match ty {
+        "draft" => "draft",
+        "move_face" => "move-face",
+        "replace_face" => "replace-face",
+        "delete_face" => "delete-face",
+        "delete_blend" => "delete-blend",
+        "resize_blend" => "resize-blend",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

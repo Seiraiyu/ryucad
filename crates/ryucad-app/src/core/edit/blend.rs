@@ -153,3 +153,12 @@ impl FeatureForm for BlendForm {
         g.sizes.iter_mut().find(|(key, _)| key == k).map(|(_, f)| f)
     }
 }
+
+/// The tree's icon of a type this kind owns.
+pub(crate) fn icon(ty: &str, _op: Option<&str>, _form: Option<&str>) -> Option<&'static str> {
+    Some(match ty {
+        "fillet" => "fillet",
+        "chamfer" => "chamfer",
+        _ => return None,
+    })
+}

@@ -312,3 +312,14 @@ impl FeatureForm for SplitForm {
         Ok(())
     }
 }
+
+/// The tree's icon of a type this kind owns.
+pub(crate) fn icon(ty: &str, _op: Option<&str>, _form: Option<&str>) -> Option<&'static str> {
+    Some(match ty {
+        "shell" => "shell",
+        "offset" => "offset",
+        "mirror" => "mirror-body",
+        "split" => "split",
+        _ => return None,
+    })
+}

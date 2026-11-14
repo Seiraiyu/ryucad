@@ -200,3 +200,17 @@ impl FeatureForm for PatternForm {
         self.given(out)
     }
 }
+
+/// The tree's icon of a type this kind owns.
+pub(crate) fn icon(ty: &str, _op: Option<&str>, form: Option<&str>) -> Option<&'static str> {
+    matches!(ty, "pattern" | "instance_pattern").then(|| pattern_icon(form))
+}
+
+/// The icon of a pattern by its form.
+fn pattern_icon(form: Option<&str>) -> &'static str {
+    match form {
+        Some("circular") => "pattern-circular",
+        Some("mirror") => "flip-horizontal",
+        _ => "pattern-linear",
+    }
+}

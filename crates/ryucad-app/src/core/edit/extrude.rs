@@ -61,3 +61,14 @@ impl FeatureForm for ExtentForm {
         Ok(())
     }
 }
+
+/// The tree's icon of a type this kind owns.
+pub(crate) fn icon(ty: &str, op: Option<&str>, _form: Option<&str>) -> Option<&'static str> {
+    Some(match ty {
+        "extrude" if op == Some("cut") => "extrude-cut",
+        "extrude" => "extrude",
+        "revolve" if op == Some("cut") => "revolve-cut",
+        "revolve" => "revolve",
+        _ => return None,
+    })
+}
