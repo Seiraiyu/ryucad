@@ -213,3 +213,135 @@ fn top_face(s: &mut Session) -> String {
         .unwrap();
     format!("p/b/{name}")
 }
+
+/// The plate drilled by a fill of M3 holes 10 mm apart from (5, 5), less
+/// [1, 1], an H7 dowel at (15, 15) where the skipped one was, and datum
+/// point `o` at the plate's top corner.
+fn filled() -> (tempfile::TempDir, Session) {
+    let (d, mut s) = plate(&[[5.0, 5.0]]);
+    drill(&mut s, "h", &["p1"], "M3x0.5-6H THRU");
+    let top = top_face(&mut s);
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "f", "features": ["h"], "form": "fill",
+               "face": top, "direction": "x", "spacing": 10, "skip": [[1, 1]]}),
+    );
+    for (id, at) in [
+        ("dp", ["15 mm", "15 mm", "10 mm"]),
+        ("o", ["0 mm", "0 mm", "10 mm"]),
+    ] {
+        add(
+            &mut s,
+            json!({"type": "point", "id": id, "by": "coordinates", "coordinates": at}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "dowel", "spec": "DIA 3 H7 THRU",
+               "places": {"a": {"at": "p/dp"}}}),
+    );
+    (d, s)
+}
+
+#[test]
+fn a_hole_table_groups_by_spec_and_orders_by_x_then_y() {
+    let (_d, mut s) = filled();
+    let g = annotate(
+        &mut s,
+        json!({"type": "hole_table", "view": "v1", "origin": "o"}),
+    )
+    .unwrap();
+    let t = ann(&g, "t1");
+    assert_eq!(t["text"], "hole table of p, 12 holes", "{t}");
+    let v = &t["value"];
+    assert_eq!(
+        v["groups"],
+        json!([{"tag": "A", "spec": "DIA 3 H7 THRU", "count": 1},
+               {"tag": "B", "spec": "M3x0.5-6H THRU", "count": 11}])
+    );
+    let rows: Vec<(String, f64, f64)> = v["holes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["tag"].as_str().unwrap().to_owned(),
+                (r["x"].as_f64().unwrap() * 1e3).round(),
+                (r["y"].as_f64().unwrap() * 1e3).round(),
+            )
+        })
+        .collect();
+    let want: Vec<(String, f64, f64)> = [
+        ("A1", 15, 15),
+        ("B1", 5, 5),
+        ("B2", 5, 15),
+        ("B3", 5, 25),
+        ("B4", 15, 5),
+        ("B5", 15, 25),
+        ("B6", 25, 5),
+        ("B7", 25, 15),
+        ("B8", 25, 25),
+        ("B9", 35, 5),
+        ("B10", 35, 15),
+        ("B11", 35, 25),
+    ]
+    .iter()
+    .map(|(t, x, y)| ((*t).to_owned(), f64::from(*x), f64::from(*y)))
+    .collect();
+    assert_eq!(rows, want);
+    assert_eq!(v["holes"][0]["ref"], "p/dowel/a");
+    // Only what it names: the dowel by its reference, the fill by its ID.
+    let g = annotate(
+        &mut s,
+        json!({"type": "hole_table", "view": "v1", "origin": "o", "holes": ["p/dowel/a"]}),
+    )
+    .unwrap();
+    assert_eq!(ann(&g, "t2")["value"]["rows"], 1);
+    let g = annotate(
+        &mut s,
+        json!({"type": "hole_table", "view": "v1", "origin": "o", "holes": ["f"]}),
+    )
+    .unwrap();
+    assert_eq!(
+        ann(&g, "t3")["value"]["rows"],
+        10,
+        "the fill's instances, not its seed"
+    );
+}
+
+#[test]
+fn a_hole_table_naming_no_hole_is_refused_and_one_on_an_assembly_view_too() {
+    let (_d, mut s) = filled();
+    let e = annotate(
+        &mut s,
+        json!({"type": "hole_table", "view": "v1", "origin": "o", "holes": ["nope"]}),
+    )
+    .unwrap_err();
+    assert_eq!(json!(e.code), "not_found", "{e}");
+    assert_eq!(e.details["reason"], "no_hole", "{e}");
+    assert_eq!(e.details["pointer"], "/annotations/t1");
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "a", "kind": "assembly"}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "a", "type": "instance", "id": "i", "of": "p", "fixed": true}),
+    );
+    must(
+        &mut s,
+        "drawing.create",
+        json!({"part": "a", "drawing": "d", "name": "A", "views": "standard"}),
+    );
+    let e = call(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "a", "drawing": "d", "ops": [{"op": "add", "kind": "annotation",
+               "value": {"type": "hole_table", "view": "v1", "origin": "i/b/0123456789abcdef0123456789abcdef"}}]}),
+    )
+    .unwrap_err();
+    assert_eq!(json!(e.code), "invalid_param", "{e}");
+    assert_eq!(e.details["reason"], "assembly_view", "{e}");
+}

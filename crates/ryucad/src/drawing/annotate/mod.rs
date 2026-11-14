@@ -867,10 +867,27 @@ fn build_one(
             let corner = written.map(|w| addp(vb.at, w));
             bom_table(session, ctx, a, &plan.of, Some(&plan.rev), sheet, corner)
         }
-        Kind::HoleTable { .. } => Err(Error::new(
-            Code::InvalidParam,
-            "hole tables are built from Task 5 of plan 28.D",
-        )),
+        Kind::HoleTable { origin, holes } => {
+            // One part's holes: an assembly view is refused before its
+            // origin is looked for.
+            if src
+                .iter()
+                .any(|(_, _, label)| label.split('/').count() != 2)
+            {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "view {} draws an assembly: a hole table lists one part's holes",
+                        vb.key
+                    ),
+                )
+                .with("reason", "assembly_view"));
+            }
+            let r = get("origin", origin)?;
+            hole_table(
+                session, ctx, plan, src, vb, sheet, &m, units, &r, holes, written,
+            )
+        }
         Kind::FeatureControlFrame {
             characteristic,
             rows,
@@ -2393,6 +2410,265 @@ fn parse_csv(text: &str) -> Vec<Vec<String>> {
         rows.push(row);
     }
     rows
+}
+
+/// Whether a hole table's `name` names row `r`: its reference, or the
+/// hole, pattern or mirror feature that made it.
+fn row_named(r: &crate::holes::Row, name: &str) -> bool {
+    r.reference == name
+        || r.feature.as_str() == name
+        || r.pattern.as_ref().is_some_and(|(p, _)| p.as_str() == name)
+        || r.mirror.as_ref().is_some_and(|m| m.as_str() == name)
+}
+
+/// A hole table's group letters: A … Z, AA, AB, ….
+fn letters(mut i: usize) -> String {
+    let mut s = String::new();
+    loop {
+        s.insert(0, char::from(b'A' + (i % 26) as u8));
+        if i < 26 {
+            return s;
+        }
+        i = i / 26 - 1;
+    }
+}
+
+/// One hole of a hole table.
+struct Listed {
+    spec: String,
+    cells: Vec<Run>,
+    x: f64,
+    y: f64,
+    at: P,
+    r: f64,
+    reference: String,
+    feature: Id,
+}
+
+/// A hole table (design 533, Drawings): the holes of the view's part
+/// (those `names` names, else every one), grouped by canonical spec in
+/// spec order, each group a letter and its holes numbered by X, then Y
+/// (then reference) from `origin` in the view's frame; columns TAG, X, Y
+/// and SPEC (the callout's lines, no count); each hole's tag up and right
+/// of its mouth on the view; blocks side by side where it would run below
+/// the drawing area. Its upper left corner is `written` (from the view's
+/// centre), else 10 mm right of the view's box, level with its top. The
+/// view draws a part (`build_one` refuses an assembly's).
+#[allow(clippy::too_many_arguments)]
+fn hole_table(
+    session: &mut Session,
+    ctx: &Context,
+    plan: &Plan,
+    src: &Source,
+    vb: &ViewBuilt,
+    sheet: &SheetBuilt,
+    m: &Map,
+    units: &text::Units,
+    origin: &Resolved,
+    names: &[String],
+    written: Option<P>,
+) -> Result<Out> {
+    let holes = crate::holes::at(session, &plan.of, &plan.rev)?;
+    let (part, _, _) = session.node(&plan.of, &plan.rev)?;
+    if let Some(n) = names
+        .iter()
+        .find(|n| !holes.rows.iter().any(|r| row_named(r, n)))
+    {
+        return Err(
+            Error::new(Code::NotFound, format!("{} has no hole {n}", plan.of))
+                .with("hole", n.as_str())
+                .with("reason", "no_hole"),
+        );
+    }
+    let o = origin.feat.point();
+    let mut listed: Vec<Listed> = Vec::new();
+    for r in &holes.rows {
+        if !names.is_empty() && !names.iter().any(|n| row_named(r, n)) {
+            continue;
+        }
+        let Some((_, pose, _)) = src
+            .iter()
+            .find(|(_, _, l)| l.rsplit('/').next() == Some(r.solid.as_str()))
+        else {
+            continue;
+        };
+        let Some(Ok(crate::doc::files::Feature::Hole(h))) = part.features.get(&r.feature) else {
+            continue;
+        };
+        let q = pose.apply_point(r.position);
+        let q = [q.x, q.y, q.z];
+        let d = feat::sub(q, o);
+        let mut cells = Vec::new();
+        for (i, l) in hole::lines(h, &r.sizes, units, ctx.standard, 1)
+            .into_iter()
+            .enumerate()
+        {
+            if i > 0 {
+                cells.push(Run::Text(" ".into()));
+            }
+            cells.extend(l);
+        }
+        listed.push(Listed {
+            spec: r.spec.clone(),
+            cells,
+            x: feat::dot(d, plan.frame.x),
+            y: feat::dot(d, plan.frame.y),
+            at: m.sheet(q),
+            r: crate::hole::mouth_radius(&r.sizes),
+            reference: r.reference.clone(),
+            feature: r.feature.clone(),
+        });
+    }
+    listed.sort_by(|a, b| {
+        a.spec
+            .cmp(&b.spec)
+            .then(a.x.total_cmp(&b.x))
+            .then(a.y.total_cmp(&b.y))
+            .then(a.reference.cmp(&b.reference))
+    });
+    let mut tags = Vec::with_capacity(listed.len());
+    let (mut group, mut n) = (0usize, 0usize);
+    for (i, l) in listed.iter().enumerate() {
+        if i > 0 && listed[i - 1].spec != l.spec {
+            group += 1;
+            n = 0;
+        }
+        n += 1;
+        tags.push(format!("{}{n}", letters(group)));
+    }
+    let tsz = 2.5;
+    let pad = 1.5;
+    let rh = 6.0;
+    const HEADER: [&str; 4] = ["TAG", "X", "Y", "SPEC"];
+    let num = |v: f64| units.number(v, units.precision, false);
+    let rows: Vec<[Vec<Run>; 4]> = listed
+        .iter()
+        .zip(&tags)
+        .map(|(l, t)| {
+            [
+                vec![Run::Text(t.clone())],
+                vec![Run::Text(num(l.x))],
+                vec![Run::Text(num(l.y))],
+                l.cells.clone(),
+            ]
+        })
+        .collect();
+    let mut widths = HEADER.map(|h| symbol::width(&[Run::Text(h.into())], tsz) + 2.0 * pad);
+    for r in &rows {
+        for (c, cell) in r.iter().enumerate() {
+            widths[c] = widths[c].max(symbol::width(cell, tsz) + 2.0 * pad);
+        }
+    }
+    let width: f64 = widths.iter().sum();
+    let corner = written
+        .map(|w| addp(vb.at, w))
+        .unwrap_or([vb.bounds[1][0] + 10.0, vb.bounds[1][1]]);
+    let per = (((corner[1] - sheet.area[0][1]) / rh).floor() as usize)
+        .saturating_sub(1)
+        .max(1);
+    let st = ctx.style;
+    let text_stroke = st.stroke(LineKind::Dimension);
+    let mut items = Vec::new();
+    let mut boxes = Vec::new();
+    let chunks: Vec<&[[Vec<Run>; 4]]> = if rows.is_empty() {
+        vec![&[][..]]
+    } else {
+        rows.chunks(per).collect()
+    };
+    for (b, chunk) in chunks.iter().enumerate() {
+        let left = corner[0] + b as f64 * (width + 4.0);
+        let right = left + width;
+        let lines_n = chunk.len() + 1;
+        let lo = [left, corner[1] - rh * lines_n as f64];
+        let hi = [right, corner[1]];
+        items.push(stroke(
+            st,
+            LineKind::Visible,
+            &[lo, [hi[0], lo[1]], hi, [lo[0], hi[1]], lo],
+            Colour::BLACK,
+        ));
+        boxes.push([lo, hi]);
+        for j in 1..lines_n {
+            let y = corner[1] - rh * j as f64;
+            items.push(stroke(
+                st,
+                LineKind::Thin,
+                &[[left, y], [right, y]],
+                Colour::BLACK,
+            ));
+        }
+        let mut x = left;
+        for (c, w) in widths.iter().enumerate() {
+            if c > 0 {
+                items.push(stroke(
+                    st,
+                    LineKind::Thin,
+                    &[[x, lo[1]], [x, hi[1]]],
+                    Colour::BLACK,
+                ));
+            }
+            let cells = std::iter::once(vec![Run::Text(HEADER[c].into())])
+                .chain(chunk.iter().map(|r| r[c].clone()));
+            for (j, cell) in cells.enumerate() {
+                let y = corner[1] - rh * (j + 1) as f64 + (rh - tsz * symbol::CAP) / 2.0;
+                items.extend(symbol::draw(
+                    &cell,
+                    [x + pad, y],
+                    tsz,
+                    0.0,
+                    Anchor::Start,
+                    Colour::BLACK,
+                    &text_stroke,
+                ));
+            }
+            x += w;
+        }
+    }
+    // Each hole's tag up and right of its mouth, clear of its circle.
+    for (l, t) in listed.iter().zip(&tags) {
+        let off = l.r * m.k * std::f64::consts::FRAC_1_SQRT_2 + 1.0;
+        items.push(Item::Text {
+            text: t.clone(),
+            at: [l.at[0] + off, l.at[1] + off],
+            size: tsz,
+            angle: 0.0,
+            anchor: Anchor::Start,
+            colour: Colour::BLACK,
+        });
+    }
+    let mut groups: Vec<Value> = Vec::new();
+    for (l, t) in listed.iter().zip(&tags) {
+        let g = t.trim_end_matches(|c: char| c.is_ascii_digit());
+        match groups.last_mut() {
+            Some(x) if x["tag"] == g => {
+                x["count"] = json!(x["count"].as_u64().unwrap_or(0) + 1);
+            }
+            _ => groups.push(json!({"tag": g, "spec": l.spec, "count": 1})),
+        }
+    }
+    let rows_json: Vec<Value> = listed
+        .iter()
+        .zip(&tags)
+        .map(|(l, t)| json!({"tag": t, "ref": l.reference, "x": l.x, "y": l.y}))
+        .collect();
+    let mut seen: Vec<(Id, Id)> = Vec::new();
+    for l in &listed {
+        let k = (plan.of.clone(), l.feature.clone());
+        if !seen.contains(&k) {
+            seen.push(k);
+        }
+    }
+    Ok(Out {
+        items,
+        report: json!({"of": plan.of, "rows": listed.len(), "groups": groups,
+                       "holes": rows_json, "blocks": chunks.len()}),
+        text: format!("hole table of {}, {} holes", plan.of, listed.len()),
+        at: sub(corner, vb.at),
+        at_placed: written.is_none(),
+        boxes,
+        listed: seen,
+        ..Out::default()
+    })
 }
 
 /// A feature control frame of `rows` (one, or two for a composite frame
