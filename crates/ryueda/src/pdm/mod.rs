@@ -12,6 +12,7 @@ pub const PROPERTIES: &str = "properties";
 
 pub mod cmd;
 pub mod content;
+pub mod diff;
 pub mod release;
 
 use crate::conn::{BLOCKS, CLASSES, DESIGNS, RAILS};
