@@ -1046,7 +1046,10 @@ mod tests {
         );
         let d = c.take_deferred().unwrap();
         assert_eq!(d.parts.into_iter().collect::<Vec<_>>(), vec![bolt.clone()]);
-        assert_eq!(d.assembled.into_iter().collect::<Vec<_>>(), vec![frame.clone()]);
+        assert_eq!(
+            d.assembled.into_iter().collect::<Vec<_>>(),
+            vec![frame.clone()]
+        );
         // Taken, it solves again as it always has.
         assert!(!c.defers_solves());
         assert_eq!(crate::mate::current(&mut c, &bolt).unwrap(), want);
@@ -1098,6 +1101,70 @@ mod tests {
         );
         assert!(v["ops"][0]["result"].get("assemblies").is_none(), "{v}");
         assert_eq!(v.get("assemblies"), alone.get("assemblies"), "{v}\n{alone}");
+    }
+
+    /// An ensure that only drops a part's trailing feature solves the mated
+    /// assemblies over it, writing what `feature.delete` writes alone.
+    #[test]
+    fn an_ensure_that_only_drops_features_solves_the_assemblies_over_it() {
+        // The revolute standing the pin on the plate, and a `lift` raising
+        // the plate's top 2 mm, the pin solved onto it.
+        let current = || {
+            let (dir, mut s, a, b) = crate::mate::current_tests::placed();
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "mate", "id": "m1", "form": "revolute",
+                       "a": a, "b": b, "a_offset": {"origin": ["20 mm", 0, 0]},
+                       "b_offset": {"flip": true}}),
+            )
+            .unwrap();
+            let top = crate::mate::tests::face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "plate", "type": "move_face", "id": "lift", "direction": "z",
+                       "distance": "2 mm", "faces": [format!("plate/slab/{top}")]}),
+            )
+            .unwrap();
+            (dir, s)
+        };
+        let z = |s: &mut Session| {
+            let show = call(s, "feature.show", json!({"part": "frame", "id": "pin"})).unwrap();
+            show["pose"]["origin_m"][2].as_f64().unwrap()
+        };
+        let (a_dir, mut a) = current();
+        let (b_dir, mut b) = current();
+        assert!((z(&mut a) - 0.007).abs() < 1e-9, "{}", z(&mut a));
+        let (a0, b0) = (on_disk(a_dir.path()), on_disk(b_dir.path()));
+        let ensure = json!({"method": "part.ensure", "params": {"part": "plate", "features": [
+            {"id": "slab", "type": "box", "params": {"x": 100, "y": 50, "z": 5}}]}});
+        let v = call(&mut a, "batch", json!({"ops": [ensure], "rebuild": false})).unwrap();
+        assert_eq!(v["ops"][0]["result"]["features"]["lift"], "deleted", "{v}");
+        assert_eq!(
+            v["ops"][0]["result"]["features"]["slab"], "unchanged",
+            "{v}"
+        );
+        let alone = call(
+            &mut b,
+            "feature.delete",
+            json!({"part": "plate", "id": "lift"}),
+        )
+        .unwrap();
+        same(
+            change(&a0, &on_disk(a_dir.path())),
+            change(&b0, &on_disk(b_dir.path())),
+            "dropped",
+        );
+        assert!(
+            alone.get("assemblies").is_some(),
+            "the example moves the pin: {alone}"
+        );
+        assert_eq!(v.get("assemblies"), alone.get("assemblies"), "{v}\n{alone}");
+        // The pin is back on the plate's own top, and frame is current.
+        assert!((z(&mut a) - 0.005).abs() < 1e-9, "{}", z(&mut a));
+        let frame = crate::part::part_id("frame").unwrap();
+        assert!(!a.rebuilt(&frame).unwrap().solve.as_ref().unwrap().stale());
     }
 
     /// An instance or mate write that would leave mates that held unable

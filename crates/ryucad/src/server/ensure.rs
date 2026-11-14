@@ -367,6 +367,7 @@ fn predicted(session: &mut Session, pid: &Id, prefix: &[Id], e: &Entry) -> Optio
 /// Takes `pid`'s features other than `kept` out of its list and its
 /// folder, unchecked (unlisted files too, so an id declared again is
 /// free): what the declaration adds again is checked as it is added.
+/// The assemblies over `pid` are solved again as after `feature.delete`.
 fn clear(session: &mut Session, pid: &Id, kept: &[Id]) -> Result<()> {
     let p = session.project().part(pid)?;
     let gone: Vec<Id> = p
@@ -378,6 +379,10 @@ fn clear(session: &mut Session, pid: &Id, kept: &[Id]) -> Result<()> {
     if gone.is_empty() && order(p)? == kept {
         return Ok(());
     }
+    // What it takes out moves the part as `feature.delete` would, so the
+    // assemblies over it are solved again as they would be: noted for a
+    // batch's solve at its end, kept current otherwise.
+    let assemblies = crate::mate::current(session, pid)?;
     // The list first: a crash then leaves unlisted files, never a listed
     // feature with no file (the batch writes lists after content anyway).
     crate::save::save(session, pid, &[], kept.to_vec())?;
@@ -385,7 +390,9 @@ fn clear(session: &mut Session, pid: &Id, kept: &[Id]) -> Result<()> {
         let path = feature_path(session.root(), pid, f);
         session.remove_file(&path)?;
     }
-    session.reload()
+    session.reload()?;
+    crate::mate::keep_current(session, &assemblies)?;
+    Ok(())
 }
 
 /// One declared feature: its id, its `feature.add`, and for a sketch the
