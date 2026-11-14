@@ -91,6 +91,15 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
         SPEC.title(pane).unwrap_or(pane).into()
     }
+
+    /// Every tile has its tab, as ryucad-app's: its name for screen
+    /// readers and the window tests, and a handle to move it by.
+    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
+        egui_tiles::SimplificationOptions {
+            all_panes_must_have_tabs: true,
+            ..Default::default()
+        }
+    }
 }
 
 fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
