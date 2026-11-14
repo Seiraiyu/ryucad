@@ -20,9 +20,14 @@ parts.search.capacitor 5be75fa2b26f83eabfcd01291ce286c7
 parts.search.like e1035f75997d04ad056b470f50a16999
 parts.search.resistor a4d933aa8d4db78a5a774af86b274f4e
 parts.supply dd736c99f67f9b57a7a2ed86738a3270
+pdm.breakout.bom 7aba47ff0dae2d09f1a1f0d07a03c9ed
+pdm.breakout.bom.by_block 40e6537d730def77bb29fce2f3705402
+pdm.breakout.bom.csv 6c8cf869e94f52b1207a376025983bb9
+pdm.breakout.bom.diff abe1f40377db2ad41b4619b044ac76bb
 pdm.breakout.content 0de905ee04f88155360a37622e31b986
 pdm.breakout.defaults 4b778e7f75f2cc04d01a42e4acfd46eb
 pdm.breakout.dry_run b51e61bc8fee25a51627e27cd31bbaff
+pdm.buck.bom faa477ce3dbe55c85aece608fb9d183b
 pdm.pins cf6d84446e1c3328b546f967dcb23ab8
 pdm.pins.lock 2d176fea988493abd7df18a094197696
 schematic.breakout.annotate.across e2180ca93ea43f4ec2f19b2b55f8ddfe

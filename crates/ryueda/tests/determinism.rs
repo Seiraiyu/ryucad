@@ -149,6 +149,48 @@ fn pdm(golden: &mut Golden, board: &Path) {
     let one = dry(1);
     assert_eq!(dry(8), one, "one thread and eight");
     golden.json("pdm.breakout.dry_run", &one);
+    // The BOM, its CSV and a diff after one value changes (design 629),
+    // at one thread and at eight.
+    let bom = |threads: usize, args: &[&str]| ryueda(board, threads, args);
+    let one = bom(1, &["bom"]);
+    assert_eq!(bom(8, &["bom"]), one, "one thread and eight");
+    golden.json("pdm.breakout.bom", &one);
+    let csv = bom(1, &["bom", "--format", "csv"]);
+    golden.json("pdm.breakout.bom.csv", &csv["csv"]);
+    golden.json("pdm.breakout.bom.by_block", &bom(1, &["bom", "--by-block"]));
+    git(board, &["add", "-A"]);
+    git(
+        board,
+        &[
+            "-c",
+            "user.name=g",
+            "-c",
+            "user.email=g@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "golden",
+        ],
+    );
+    let first = std::fs::read_dir(board.join("blocks"))
+        .unwrap()
+        .flat_map(|b| {
+            std::fs::read_dir(b.unwrap().path().join("components"))
+                .into_iter()
+                .flatten()
+        })
+        .map(|f| f.unwrap().path())
+        .min()
+        .unwrap();
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&first).unwrap()).unwrap();
+    v["value"] = Value::from("47k");
+    std::fs::write(&first, ryueda::canonical::to_string(&v)).unwrap();
+    let mut diff = bom(1, &["bom", "diff"]);
+    diff.as_object_mut().unwrap().remove("from_commit");
+    assert_eq!(diff["summary"]["added"], 1, "{diff}");
+    golden.json("pdm.breakout.bom.diff", &diff);
 }
 
 /// Library labels (design 629): the breakout's content hash with one
@@ -297,6 +339,9 @@ fn netlists_and_erc_are_bit_exact() {
             ryueda(&at, 1, &args);
         }
         schematic(&mut golden, &at, name);
+        if name == "buck" {
+            golden.json("pdm.buck.bom", &ryueda(&at, 1, &["bom"]));
+        }
     }
     // Part data (design 347): library searches over a seeded library, and
     // the identification findings of a design placing some of it, one
