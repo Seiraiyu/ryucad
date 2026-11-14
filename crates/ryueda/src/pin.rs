@@ -143,6 +143,7 @@ fn label_error(
 
 /// The library holding `component` and the objects it names, read from
 /// `files` (a library project's files by path, as a commit has them).
+#[cfg(test)]
 pub(crate) fn from_files(
     files: &BTreeMap<String, Vec<u8>>,
     alias: &Id,

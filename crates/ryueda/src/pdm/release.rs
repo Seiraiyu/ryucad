@@ -243,7 +243,12 @@ pub fn results(
     src: &dyn crate::source::Source,
     part: &Id,
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    let p = crate::project::Project::load_from(root, src, &std::collections::BTreeMap::new())?;
+    let p = crate::project::Project::load_from(
+        root,
+        src,
+        &std::collections::BTreeMap::new(),
+        &crate::pin::NoPins,
+    )?;
     let mut out = std::collections::BTreeMap::new();
     if p.manifest.project_kind == ProjectKind::Design {
         let n = crate::netlist::flatten(&p, part)?;

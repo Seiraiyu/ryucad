@@ -861,7 +861,7 @@ pub fn import(session: &mut Session, opts: &Options, expected: Option<&str>) -> 
         after_files.insert(path.clone(), bytes.clone());
     }
     let aliases = resolve(session.root(), &p.manifest);
-    let after = Project::load_from(session.root(), &after_files, &aliases)?;
+    let after = Project::load_from(session.root(), &after_files, &aliases, &crate::pin::NoPins)?;
     let faults = written_faults(after.library(&alias)?, &planned);
 
     let written: Vec<&str> = writes.iter().map(|(p, _)| p.as_str()).collect();

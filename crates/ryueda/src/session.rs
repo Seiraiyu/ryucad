@@ -100,7 +100,12 @@ impl Session {
             return Ok((commit, p));
         }
         let r = crate::git::revision(&self.root, &commit)?;
-        let p = std::sync::Arc::new(Project::load_from(&self.root, &r.files, &r.aliases)?);
+        let p = std::sync::Arc::new(Project::load_from(
+            &self.root,
+            &r.files,
+            &r.aliases,
+            &crate::pin::NoPins,
+        )?);
         self.revisions.insert(0, (key, p.clone()));
         self.revisions.truncate(REVISIONS);
         Ok((commit, p))
@@ -189,7 +194,7 @@ fn load(root: &Path, stamps: &Stamps) -> Result<Project> {
         .with("path", root)
     })?;
     let aliases = resolve(root, &Manifest::read(bytes)?);
-    Project::load_from(root, &files, &aliases)
+    Project::load_from(root, &files, &aliases, &crate::pin::NoPins)
 }
 
 /// Every file the project's state depends on, read now: what undo checks

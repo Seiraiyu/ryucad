@@ -274,7 +274,7 @@ pub(crate) mod tests {
         assert_eq!(r.commit.len(), 40);
         assert!(r.files.contains_key("../lib/library/symbols/r.json"));
         assert!(r.files.contains_key("ryueda.json"));
-        let p = Project::load_from(&board, &r.files, &r.aliases).unwrap();
+        let p = Project::load_from(&board, &r.files, &r.aliases, &crate::pin::NoPins).unwrap();
         assert_eq!(p.revision, first.revision);
         assert_eq!(
             p.library("passives").unwrap().revision,

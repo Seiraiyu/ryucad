@@ -447,7 +447,12 @@ pub(crate) fn project_over(root: &Path, files: &Files) -> Result<Project> {
         .map(|b| crate::project::Manifest::read(b))
         .transpose()?
         .ok_or_else(|| Error::new(Code::ProjectNotFound, "the merge left no manifest"))?;
-    Project::load_from(root, files, &crate::project::resolve(root, &manifest))
+    Project::load_from(
+        root,
+        files,
+        &crate::project::resolve(root, &manifest),
+        &crate::pin::NoPins,
+    )
 }
 
 /// What settling a layout needs beyond the files: the project's folder,

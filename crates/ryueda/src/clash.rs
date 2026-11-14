@@ -106,7 +106,7 @@ pub(crate) fn erc_on(side: &[Finding], f: &Finding) -> bool {
 /// aliases as that commit has them.
 fn side(root: &Path, commit: &str) -> Result<Project> {
     let r = crate::git::revision(root, commit)?;
-    Project::load_from(root, &r.files, &r.aliases)
+    Project::load_from(root, &r.files, &r.aliases, &crate::pin::NoPins)
 }
 
 /// The merge's sides, loaded.
