@@ -14,7 +14,7 @@ use ryucad::view::{CameraArg, ProjectionArg};
 use ryucad::{cancel, client, daemon, server};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -881,6 +881,41 @@ enum Command {
     /// Cancel this agent's running long request by its token (what
     /// Ctrl+C sends): it stops before its next feature, body or pair.
     Cancel { token: String },
+    /// Run many model edits as one checked, logged, undoable change: one
+    /// write pass, and one rebuild of each part it changed and the
+    /// assemblies over it.
+    ///
+    /// FILE (or - for stdin) holds {"ops": [{"method": M, "params": {…}}, …],
+    /// "expect"?: REVISION, "dry_run"?: true, "rebuild"?: false}, or a bare
+    /// array of ops; the flags override it. An op is any model edit (what
+    /// `annotations propose` takes: feature, sketch, param, assembly move,
+    /// appearance, materials, props, bom renumber, views, explodes, motions,
+    /// drawings) or part.create or part.delete, with the params `--json`
+    /// help and the protocol name. Each op sees what the ones before it
+    /// wrote. The first refusal stops the batch and nothing is written
+    /// (its error says which op, in details.op). The answer gives each op's
+    /// own answer, each part's status (created, updated, unchanged or
+    /// deleted, judged from the bytes) and revision, the files written,
+    /// and the project's revision for the next --expect. `undo` takes back
+    /// the whole batch.
+    Batch {
+        /// The batch's JSON file, or - for stdin.
+        #[arg(value_name = "FILE")]
+        file: String,
+        /// Fail with `conflict` unless the project is still at this
+        /// revision (a batch's answer gives it as `revision`).
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+        /// Run the ops and answer what they would do; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Rebuild what the batch changed (the default).
+        #[arg(long, overrides_with = "no_rebuild")]
+        rebuild: bool,
+        /// Write without rebuilding.
+        #[arg(long, overrides_with = "rebuild")]
+        no_rebuild: bool,
+    },
     /// Undo this agent's latest change, or the activity entry --entry.
     Undo {
         #[arg(long, value_name = "SEQ")]
@@ -4546,6 +4581,7 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Worktree(WorktreeCmd::Add { .. } | WorktreeCmd::Remove { .. })
         | Command::Watch { .. }
         | Command::Cancel { .. }
+        | Command::Batch { .. }
         | Command::Open { .. } => {
             return None;
         }
@@ -5963,6 +5999,57 @@ fn no_daemon(cli: &Cli) -> bool {
     cli.no_daemon || std::env::var("RYUCAD_NO_DAEMON").is_ok_and(|v| v == "1")
 }
 
+/// The request `ryucad batch` sends: its file's JSON (stdin's for `-`),
+/// an object or a bare array of ops, with the flags over it. `None` for
+/// every other command. A file that isn't JSON, or JSON that isn't a
+/// batch, is `usage`.
+fn batch_request(cmd: &Command, here: &Path) -> Result<Option<Request>> {
+    let Command::Batch {
+        file,
+        expect,
+        dry_run,
+        rebuild,
+        no_rebuild,
+    } = cmd
+    else {
+        return Ok(None);
+    };
+    let text = if file == "-" {
+        let mut t = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
+            .map_err(|e| Error::new(Code::Io, format!("stdin: {e}")))?;
+        t
+    } else {
+        let path = here.join(file);
+        std::fs::read_to_string(&path).map_err(|e| Error::io(&path, &e))?
+    };
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| Error::new(Code::Usage, format!("the batch isn't JSON: {e}")))?;
+    let mut params = match v {
+        Value::Array(_) => json!({ "ops": v }),
+        Value::Object(_) => v,
+        _ => {
+            return Err(Error::new(
+                Code::Usage,
+                "a batch is an object with ops, or an array of ops",
+            ));
+        }
+    };
+    if let Some(e) = expect {
+        params["expect"] = json!(e);
+    }
+    if *dry_run {
+        params["dry_run"] = json!(true);
+    }
+    if *rebuild {
+        params["rebuild"] = json!(true);
+    }
+    if *no_rebuild {
+        params["rebuild"] = json!(false);
+    }
+    Request::from_rpc("batch", Some(params)).map(Some)
+}
+
 /// The agent participant to act as.
 /// Refusals of `ryucad annotations` the parser can't make: a point with
 /// no place, a request that isn't JSON.
@@ -6217,10 +6304,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             }
             // The daemon's folder isn't the caller's: every path the
             // request names is made absolute against `here` (`-C`'s).
-            let req = client::absolute(
-                request(cmd).expect("every other command is a request"),
-                &here,
-            )?;
+            let req = match batch_request(cmd, &here)? {
+                Some(r) => r,
+                None => request(cmd).expect("every other command is a request"),
+            };
+            let req = client::absolute(req, &here)?;
             let root = find_root(&here)?;
             let me = participant(cli);
             let req = client::with_author(req, me.as_deref());
@@ -7763,6 +7851,51 @@ mod tests {
                 (f.topology.as_deref(), f.blends.as_deref()),
                 (Some("change"), Some("rebuild"))
             );
+        });
+    }
+
+    #[test]
+    fn a_batch_is_its_files_json_with_the_flags_over_it() {
+        on_cli_stack(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("b.json"),
+                r#"[{"method": "part.create", "params": {"part": "p"}}]"#,
+            )
+            .unwrap();
+            let c = Cli::try_parse_from([
+                "ryucad",
+                "batch",
+                "b.json",
+                "--dry-run",
+                "--no-rebuild",
+                "--expect",
+                "r1",
+            ])
+            .unwrap();
+            let r = batch_request(&c.command, dir.path()).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(&r).unwrap(),
+                json!({"method": "batch", "params": {
+                    "ops": [{"method": "part.create", "params": {"part": "p"}}],
+                    "expect": "r1", "dry_run": true, "rebuild": false}})
+            );
+            std::fs::write(
+                dir.path().join("o.json"),
+                r#"{"ops": [], "rebuild": false}"#,
+            )
+            .unwrap();
+            let c = Cli::try_parse_from(["ryucad", "batch", "o.json", "--rebuild"]).unwrap();
+            let r = batch_request(&c.command, dir.path()).unwrap().unwrap();
+            assert_eq!(r.params(), json!({"ops": [], "rebuild": true}));
+            std::fs::write(dir.path().join("x.json"), "3").unwrap();
+            let c = Cli::try_parse_from(["ryucad", "batch", "x.json"]).unwrap();
+            assert_eq!(
+                batch_request(&c.command, dir.path()).unwrap_err().code,
+                Code::Usage
+            );
+            let c = Cli::try_parse_from(["ryucad", "part", "list"]).unwrap();
+            assert!(batch_request(&c.command, dir.path()).unwrap().is_none());
         });
     }
 }

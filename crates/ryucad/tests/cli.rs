@@ -1500,6 +1500,7 @@ fn every_protocol_method_has_a_command() {
         ("check", &["check"]),
         ("merge.status", &["merge", "status"]),
         ("merge.resolve", &["merge", "resolve"]),
+        ("batch", &["batch"]),
         ("merge.preview", &["merge", "preview"]),
         ("worktree.list", &["worktree", "list"]),
         ("branch.list", &["branch", "list"]),
