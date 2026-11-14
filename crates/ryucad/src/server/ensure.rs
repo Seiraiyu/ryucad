@@ -47,7 +47,7 @@ impl Ask {
 }
 
 /// `part.ensure`: in a capture session (a batch's), the end state built
-/// there.
+/// there; alone, a one-op batch.
 pub(crate) fn run(
     session: &mut Session,
     live: Option<&mut Live>,
@@ -57,10 +57,72 @@ pub(crate) fn run(
     if session.captures() {
         return apply(session, live, me, ask);
     }
-    Err(Error::new(
-        Code::Usage,
-        "part.ensure is answered in a batch until Task 9",
-    ))
+    alone(session, live, me, ask)
+}
+
+/// `part.ensure` alone: a one-op batch, so one capture, one write pass,
+/// one activity entry, one `undo` and the rebuild of what it changed,
+/// answered as the op's own answer with the batch's status, revision,
+/// rebuild, solves and warnings.
+fn alone(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    ask: Ask,
+) -> Result<Value> {
+    let pid = part_id(&ask.part)?;
+    let op = crate::proto::BatchOp {
+        method: "part.ensure".into(),
+        params: Some(ask.to_params()),
+    };
+    let mut v = crate::batch::run(
+        session,
+        live,
+        me,
+        crate::batch::Ask {
+            ops: vec![op],
+            expect: None,
+            dry_run: false,
+            rebuild: true,
+            prune: false,
+        },
+    )
+    .map_err(unwrapped)?;
+    let mut out = v["ops"][0]["result"].take();
+    let part = &v["parts"][pid.as_str()];
+    out["status"] = part["status"].clone();
+    out["revision"] = part["revision"].clone();
+    for key in ["rebuild", "assemblies"] {
+        if let Some(x) = v.get(key) {
+            out[key] = x.clone();
+        }
+    }
+    if let Some(Value::Array(w)) = v.get("warnings") {
+        let mut all = out["warnings"].as_array().cloned().unwrap_or_default();
+        all.extend(w.iter().cloned());
+        out["warnings"] = json!(all);
+    }
+    Ok(out)
+}
+
+/// A refusal of the one-op batch an ensure alone runs as, read as the
+/// request's own: no `op` or `method`, and a pointer into its params as
+/// one into the request.
+fn unwrapped(mut e: Error) -> Error {
+    let p = e
+        .details
+        .get("pointer")
+        .and_then(Value::as_str)
+        .and_then(|p| p.strip_prefix("/ops/0/params"))
+        .map(str::to_owned);
+    if let Some(d) = e.details.as_object_mut() {
+        d.remove("op");
+        d.remove("method");
+    }
+    match p {
+        Some(p) => e.with("pointer", p),
+        None => e,
+    }
 }
 
 /// The part made as declared, in a capture session: made if missing; its
@@ -424,7 +486,7 @@ fn at_feature(e: Error, j: usize) -> Error {
 mod tests {
     use super::*;
     use crate::annotation::propose::tests::{on_disk, twin};
-    use crate::testing::call;
+    use crate::testing::{call, call_live};
 
     fn pointer(e: &Error) -> &str {
         e.details["pointer"].as_str().unwrap()
@@ -655,6 +717,52 @@ mod tests {
         assert_eq!(kept_of(&mut s, d.clone()), 3);
         let r = ensure(&mut s, d).unwrap();
         assert_eq!(r["written"], 0, "{r}");
+    }
+
+    #[test]
+    fn an_ensure_alone_is_one_change() {
+        let (dir, mut s) = twin();
+        let mut live = Live::new();
+        let before = on_disk(dir.path());
+        let mut d = plate();
+        d["features"][0]["params"]["y"] = json!(30);
+        let v = call_live(&mut s, &mut live, None, "part.ensure", d).unwrap();
+        assert_eq!(
+            (v["status"].clone(), v["features"]["slab"].clone()),
+            (json!("updated"), json!("updated")),
+            "{v}"
+        );
+        assert_eq!(
+            v["revision"],
+            json!(
+                s.project()
+                    .part(&crate::part::part_id("plate").unwrap())
+                    .unwrap()
+                    .revision
+            )
+        );
+        assert_eq!(v["rebuild"]["failed"], 0, "{v}");
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        assert_eq!(log["entries"].as_array().unwrap().len(), 1, "{log}");
+        assert_eq!(log["entries"][0]["method"], "part.ensure");
+        // Unchanged: no entry.
+        let mut d = plate();
+        d["features"][0]["params"]["y"] = json!(30);
+        let v = call_live(&mut s, &mut live, None, "part.ensure", d).unwrap();
+        assert_eq!(v["status"], "unchanged");
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        assert_eq!(log["entries"].as_array().unwrap().len(), 1);
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert_eq!(on_disk(dir.path()), before);
+        // A refusal reads as its own.
+        let e = call(
+            &mut s,
+            "part.ensure",
+            json!({"part": "plate", "features": [{"type": "box"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/features/0/id", "{e:?}");
+        assert!(e.details.get("op").is_none());
     }
 
     #[test]
