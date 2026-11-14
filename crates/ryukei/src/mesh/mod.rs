@@ -146,6 +146,9 @@ struct FaceWork {
     requests: Vec<(EdgeId, f64)>,
     too_large: bool,
     triangles: u64,
+    /// Refinement's certified turn for each triangle of the domain (see
+    /// `Refined::turns`).
+    turns: Vec<f64>,
 }
 
 /// Meshes a body. See the module documentation.
@@ -168,6 +171,20 @@ pub(crate) fn tessellate_in(
     params: &MeshParams,
     m: &Meter,
 ) -> Result<BodyMesh, Error> {
+    tessellate_turns_in(body, params, m).map(|(mesh, _)| mesh)
+}
+
+/// [`tessellate_in`], with each triangle's certified normal turn in the
+/// mesh's triangle order: the turn the angle test passed it at, which is
+/// [`triangle_turn`]'s for its corners' parameters, bit for bit (NaN for a
+/// triangle refinement never passed, which a sound mesh doesn't have).
+/// Mass's area bound reads it rather than bounding every triangle again
+/// (#308).
+pub(crate) fn tessellate_turns_in(
+    body: &Body,
+    params: &MeshParams,
+    m: &Meter,
+) -> Result<(BodyMesh, Vec<f64>), Error> {
     let targets = params.targets()?;
     debug_assert!(crate::check::check_topology(body).is_empty());
     let faces: Vec<FaceId> = body.faces().collect();
@@ -521,6 +538,7 @@ fn mesh_face(
         requests: Vec::new(),
         too_large: false,
         triangles: 0,
+        turns: Vec::new(),
     };
     let mut edges: Vec<EdgeId> = b
         .face_loops(g.face)
@@ -593,6 +611,7 @@ fn mesh_face(
         None => {}
     }
     w.requests = r.requests;
+    w.turns = r.turns;
     w.domain = Some(d);
     w
 }
