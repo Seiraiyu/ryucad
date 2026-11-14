@@ -18,6 +18,7 @@
 pub mod check;
 pub mod derive;
 pub mod exits;
+pub mod place;
 pub mod spec;
 
 use crate::doc::files::Feature;

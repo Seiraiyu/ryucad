@@ -912,6 +912,14 @@ pub enum Code {
     /// minor or tap drill) within its class's limits widened by 0.1 mm;
     /// the face, its diameter and the range are in the details.
     ThreadSizeMismatch,
+    /// A hole's place isn't on the face it names, or on any face of the
+    /// hole's targets, or (from two edges) lies outside the face: the
+    /// place, and its distance from the face when there is one
+    /// (`distance_m`), are in the details (ryucad 28.C).
+    HolePlaceOffFace,
+    /// A hole's place lies on several faces of its targets and names
+    /// none: the faces it lies on are in the details (`faces`).
+    HolePlaceAmbiguous,
     /// A warning: a USD export wrote a sheet as its mesh alone, the
     /// BrepArray writer having refused it (`solid`, `face`, `reason`;
     /// until ryucad 24.E every sheet was written so).
@@ -1261,6 +1269,19 @@ mod tests {
             json!("thread_size_mismatch")
         );
         assert_eq!(Code::ThreadSizeMismatch.exit_code(), 1);
+        assert_eq!(json!(Code::HolePlaceOffFace), json!("hole_place_off_face"));
+        assert_eq!(
+            json!(Code::HolePlaceAmbiguous),
+            json!("hole_place_ambiguous")
+        );
+        assert_eq!(
+            Code::HolePlaceOffFace.exit_code(),
+            Code::ReferenceWrongKind.exit_code()
+        );
+        assert_eq!(
+            Code::HolePlaceAmbiguous.exit_code(),
+            Code::ReferenceWrongKind.exit_code()
+        );
     }
 
     #[test]
