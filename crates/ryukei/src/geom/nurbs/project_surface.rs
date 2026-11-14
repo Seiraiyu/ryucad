@@ -626,11 +626,20 @@ impl NurbsSurface {
     /// the steps run out. A step the line search cut short from a long one
     /// proves nothing, however little it moved the point, unless it was cut
     /// to nothing.
+    ///
+    /// With `tie`, a step that the squared distance can't tell from no
+    /// step (within its rounding) is taken when it shrinks the gradient:
+    /// near a minimum a step changes the squared distance by the square of
+    /// its length, so a descent can stall a nanometre off the foot,
+    /// halving steps it can't judge (a fold on a split line, the `nurbs`
+    /// target's find of 2026-11-06). Only [`Self::newton`]'s second try
+    /// uses it.
     fn descend(
         &self,
         p: Vector3,
         (mut u, mut v): (f64, f64),
         bounds: [[f64; 2]; 2],
+        tie: bool,
     ) -> (f64, f64, SurfaceEval, bool) {
         let clamp = |x: f64, k: usize| x.max(bounds[k][0]).min(bounds[k][1]);
         let mut e = self.eval(u, v);
@@ -657,7 +666,12 @@ impl NurbsSurface {
                     full = (ne.point - e.point).length();
                 }
                 let nr = ne.point.to_vector() - p;
-                if nr.dot(nr) <= r.dot(r) {
+                let (r2, nr2) = (r.dot(r), nr.dot(nr));
+                let tied = tie && nr2 - r2 <= 4.0 * f64::EPSILON * r2 && {
+                    let (hu, hv) = (nr.dot(ne.du), nr.dot(ne.dv));
+                    hu * hu + hv * hv < gu * gu + gv * gv
+                };
+                if nr2 <= r2 || tied {
                     next = Some((nu, nv, ne, nr));
                     break;
                 }
@@ -695,7 +709,9 @@ impl NurbsSurface {
     /// where the Hessian is positive semidefinite, strictly inside the
     /// grown range or on the domain's own boundary where the range was cut.
     /// Convergence, not a small gradient, is the test: where the surface
-    /// folds over, `Su` vanishes and the gradient's direction is noise.
+    /// folds over, `Su` vanishes and the gradient's direction is noise. A
+    /// descent that doesn't converge goes on once with ties broken by the
+    /// gradient ([`Self::descend`]).
     fn newton(&self, p: Vector3, range: [[f64; 2]; 2]) -> Option<(f64, f64)> {
         let limits = self.newton_bounds();
         let bounds: [[f64; 2]; 2] = core::array::from_fn(|k| {
@@ -707,7 +723,12 @@ impl NurbsSurface {
             (range[0][0] + range[0][1]) / 2.0,
             (range[1][0] + range[1][1]) / 2.0,
         );
-        let (u, v, _, converged) = self.descend(p, middle, bounds);
+        let (mut u, mut v, _, mut converged) = self.descend(p, middle, bounds, false);
+        if !converged {
+            // Stalled where the distance can't judge the steps: once more
+            // from there, the gradient breaking its ties.
+            (u, v, _, converged) = self.descend(p, (u, v), bounds, true);
+        }
         let inside = |x: f64, k: usize| {
             bounds[k][0] < x && x < bounds[k][1] || x == limits[k][0] || x == limits[k][1]
         };
@@ -853,7 +874,7 @@ impl NurbsSurface {
                     }
                 }
             }
-            let (.., e, _) = self.descend(p, seed.1, self.newton_bounds());
+            let (.., e, _) = self.descend(p, seed.1, self.newton_bounds(), false);
             bound = bound.min(seed.0).min(dist(e.point.to_vector()));
         }
         let mut exhausted = false;
@@ -1199,6 +1220,30 @@ mod tests {
         let p = Point3::new(6.0, 1.9058823529411768, -6.0);
         let foot = s.project(p);
         assert!(foot.distance <= sampled(&s, p, 300) + 1e-12, "{foot:?}");
+    }
+
+    #[test]
+    fn a_minimum_on_the_fold_at_the_first_split() {
+        // Each row a parabola whose ends coincide: a triangle folded back on
+        // itself along v = 4, the patch's first split line, with the
+        // nearest point an ordinary minimum on the fold. Found by fuzzing
+        // (2026-11-06).
+        let ku = KnotVector::clamped(1, &[3.0, 5.0], &[2, 2]).unwrap();
+        let kv = KnotVector::clamped(2, &[3.0, 5.0], &[3, 3]).unwrap();
+        let q = Point3::new(6.0, 6.0, 6.0);
+        let points = vec![
+            q,
+            Point3::new(6.0, 5.905882352941177, 6.0),
+            q,
+            q,
+            Point3::new(-3.835294117647059, -6.0, -5.576470588235294),
+            q,
+        ];
+        let s = NurbsSurface::new([ku, kv], points, Some(vec![5.0; 6])).unwrap();
+        let p = Point3::new(6.0, -3.835294117647059, 6.0);
+        let foot = s.project(p);
+        assert!(foot.distance <= sampled(&s, p, 400) + 1e-12, "{foot:?}");
+        assert!((foot.param.1 - 4.0).abs() < 1e-6, "{foot:?}");
     }
 
     #[test]

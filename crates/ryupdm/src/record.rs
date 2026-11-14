@@ -32,7 +32,6 @@
 
 use crate::RELEASES;
 use crate::config::Config;
-use crate::header;
 use crate::props::Properties;
 use ryu_doc::error::{Code, Error, Result};
 use ryu_doc::files::{Obj, invalid};
@@ -312,6 +311,11 @@ impl Record {
     /// Reads a record of `kind`. Whether it belongs where it was found is
     /// [`Records::read`]'s to say.
     pub fn from_json(v: &Value, kind: Kind) -> Result<Record> {
+        Record::from_json_in(v, kind, crate::NAMED)
+    }
+
+    /// [`Record::from_json`], as `product` reads it.
+    pub fn from_json_in(v: &Value, kind: Kind, product: &str) -> Result<Record> {
         // Only a release naming its product is format 2: any other record
         // reads exactly as format 1's reader read it, a newer one as
         // `format_too_new`.
@@ -323,7 +327,7 @@ impl Record {
             FORMAT
         };
         let format = v.get("format").and_then(Value::as_u64).unwrap_or(FORMAT);
-        let mut o = header(v, kind.file_kind(), newest)?;
+        let mut o = crate::header_in(v, kind.file_kind(), newest, product)?;
         let project = o.take("project")?;
         let project = project
             .as_str()
@@ -376,7 +380,8 @@ impl Record {
         let commit = text(&b.take("commit")?, "/built_with/commit")?;
         let built_with = if format >= PRODUCT_FORMAT {
             let product = text(&b.take("product")?, "/built_with/product")?;
-            if product == crate::NAMED {
+            // The record's own product, not the reader's.
+            if product == "ryucad" {
                 return Err(invalid(
                     "/built_with/product",
                     "ryucad's release records are format 1",
@@ -487,6 +492,11 @@ impl Records {
     /// The records under `releases/`. Folders that aren't part IDs and
     /// files that aren't records' names are left out (doctor reports them).
     pub fn read(src: &dyn Source) -> Result<Records> {
+        Records::read_in(src, crate::NAMED)
+    }
+
+    /// [`Records::read`], as `product` reads them.
+    pub fn read_in(src: &dyn Source, product: &str) -> Result<Records> {
         let mut entries = Vec::new();
         for (dir, kind) in src.list(RELEASES)? {
             let (Ok(part), true) = (Id::parse(&dir, "part"), kind == source::Kind::Dir) else {
@@ -502,7 +512,7 @@ impl Records {
                     .read(&path)
                     .map_err(|e| e.with("path", &path))?
                     .unwrap_or_default();
-                let record = read_one(src, &path, &part, &label, rkind);
+                let record = read_one(src, &path, &part, &label, rkind, product);
                 entries.push(Entry {
                     path,
                     part: part.clone(),
@@ -535,9 +545,16 @@ impl Records {
 }
 
 /// The record at `path`, which its name says is `part`'s `label`.
-fn read_one(src: &dyn Source, path: &str, part: &Id, label: &str, kind: Kind) -> Result<Record> {
-    let v = crate::read_json(src, path)?.unwrap_or_default();
-    let r = Record::from_json(&v, kind).map_err(|e| e.with("path", path))?;
+fn read_one(
+    src: &dyn Source,
+    path: &str,
+    part: &Id,
+    label: &str,
+    kind: Kind,
+    product: &str,
+) -> Result<Record> {
+    let v = crate::read_json_in(src, path, product)?.unwrap_or_default();
+    let r = Record::from_json_in(&v, kind, product).map_err(|e| e.with("path", path))?;
     let wrong = |pointer: &str, what: &str| {
         Error::new(
             Code::InvalidDocument,

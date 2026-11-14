@@ -2556,6 +2556,7 @@ dependencies = [
  "ryu-part21",
  "ryu-session",
  "ryueda-parts",
+ "ryupdm",
  "ryusch",
  "serde",
  "serde_json",

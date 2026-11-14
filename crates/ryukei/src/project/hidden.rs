@@ -199,6 +199,16 @@ fn project(
             ev.cuts[g].extend(cusps(&it.curve, image(g).range, view));
         }
     }
+    // Each edge's image pieces in increasing `g`: a silhouette's end meets
+    // only its own edge's pieces, in the order the scan over every piece
+    // met them (plan 17.C, #608).
+    let mut of_edge: std::collections::HashMap<(usize, EdgeId), Vec<usize>> =
+        std::collections::HashMap::new();
+    for g in 0..imgs.len() {
+        if let Source::Edge { body: eb, edge, .. } = item(g).source {
+            of_edge.entry((eb as usize, edge)).or_default().push(g);
+        }
+    }
     for (b, sil) in silhouettes.iter().enumerate() {
         let body = bodies[b];
         for s in &sil.branches {
@@ -210,11 +220,9 @@ fn project(
                         let Some(at) = on_edge(body, e, x, s.tolerance) else {
                             continue;
                         };
-                        for g in 0..imgs.len() {
-                            let hit = matches!(item(g).source,
-                                Source::Edge { body: eb, edge, .. } if eb as usize == b && edge == e);
+                        for &g in of_edge.get(&(b, e)).map_or(&[][..], Vec::as_slice) {
                             let [r0, r1] = image(g).range;
-                            if !hit || at <= r0.min(r1) || at >= r0.max(r1) {
+                            if at <= r0.min(r1) || at >= r0.max(r1) {
                                 continue;
                             }
                             // Not where the piece already ends or is cut

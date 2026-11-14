@@ -19,20 +19,35 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
     };
     let format = v.get("format").map(one).unwrap_or_default();
     let mut lines = Vec::new();
-    let body: Map<String, Value> = o
+    let mut last = Vec::new();
+    let mut body: Map<String, Value> = o
         .iter()
         .filter(|(k, _)| *k != "kind" && *k != "format")
         .map(|(k, x)| (k.clone(), x.clone()))
         .collect();
+    // ryupdm's settings and records read as ryupdm writes them.
+    let flat = |at: &str, v: &Value, out: &mut Vec<String>| flatten(at, v, out);
+    if ryupdm::git::textconv(kind, &mut body, &mut lines, &mut last, &flat) {
+        flatten("", &Value::Object(body), &mut lines);
+    } else {
+        others(kind, body, &mut lines);
+    }
+    lines.sort();
+    let mut out = format!("{kind} format {format}\n");
+    for l in lines.into_iter().chain(last) {
+        out.push_str(&l);
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
+/// The lines of a ryueda file of `kind`, unsorted.
+fn others(kind: &str, body: Map<String, Value>, lines: &mut Vec<String>) {
     match kind {
-        "ryueda.component" => component(&body, &mut lines),
-        "ryueda.block" => block(&body, &mut lines),
-        "ryueda.layout" => layout(&body, &mut lines),
-        "ryueda.symbol" => members(
-            &body,
-            &[("pins", "pin"), ("graphics", "graphic")],
-            &mut lines,
-        ),
+        "ryueda.component" => component(&body, lines),
+        "ryueda.block" => block(&body, lines),
+        "ryueda.layout" => layout(&body, lines),
+        "ryueda.symbol" => members(&body, &[("pins", "pin"), ("graphics", "graphic")], lines),
         "ryueda.footprint" => members(
             &body,
             &[
@@ -40,19 +55,12 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
                 ("graphics", "graphic"),
                 ("keepouts", "keepout"),
             ],
-            &mut lines,
+            lines,
         ),
-        "ryueda.style" => style(&body, &mut lines),
-        "ryueda.net" | "ryueda.rail" => net(&body, &mut lines),
-        _ => flatten("", &Value::Object(body), &mut lines),
+        "ryueda.style" => style(&body, lines),
+        "ryueda.net" | "ryueda.rail" => net(&body, lines),
+        _ => flatten("", &Value::Object(body), lines),
     }
-    lines.sort();
-    let mut out = format!("{kind} format {format}\n");
-    for l in lines {
-        out.push_str(&l);
-        out.push('\n');
-    }
-    out.into_bytes()
 }
 
 /// A value on one line: strings bare, arrays of scalars joined by `, `,
@@ -269,6 +277,27 @@ fn layout(o: &Map<String, Value>, out: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_records_read_as_ryupdm_writes_them() {
+        let v = serde_json::json!({"built_with": {"commit": "c", "product": "ryueda", "version": "0.5.0"},
+            "content": "ab", "format": 2, "kind": "ryupdm.release", "label": "A", "part": "d",
+            "project": "p", "properties": {}, "released_by": {"name": "Ann", "participant": "agent"},
+            "results": {"erc": "e1", "netlist": "n1"}, "supersedes": null});
+        let text = String::from_utf8(textconv(crate::canonical::to_string(&v).as_bytes())).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "ryupdm.release format 2");
+        assert!(
+            lines.iter().any(|l| l.starts_with("released_by = Ann")),
+            "{text}"
+        );
+        // Results come last, after the sorted lines.
+        assert_eq!(
+            &lines[lines.len() - 2..],
+            ["results.erc = e1", "results.netlist = n1"],
+            "{text}"
+        );
+    }
 
     fn conv(json: &str) -> String {
         String::from_utf8(textconv(json.as_bytes())).unwrap()

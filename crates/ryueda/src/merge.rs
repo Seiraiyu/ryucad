@@ -258,7 +258,9 @@ fn format_of(kind: &str, v: &Value, ours: &Value, theirs: &Value) -> u64 {
             }
         }
         crate::project::KIND => {
-            if v["properties"].as_object().is_some_and(|o| !o.is_empty())
+            if v.get("forked_from").is_some_and(|f| !f.is_null()) {
+                crate::project::FORMAT_3
+            } else if v["properties"].as_object().is_some_and(|o| !o.is_empty())
                 || v.get("schematic").is_some()
             {
                 crate::project::FORMAT_2
@@ -289,6 +291,8 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
     });
     let mut value = match &b {
         None => walk.whole(None, &o, &t),
+        // A release or obsolete record is one value: two at one path conflict whole.
+        Some(b) if ryupdm::git::whole(&kind) => walk.whole(Some(b), &o, &t),
         Some(b) if kind == crate::libcomp::KIND => libcomp(&mut walk, b, &o, &t),
         Some(b) => walk
             .value("", Some(b), Some(&o), Some(&t))
@@ -322,7 +326,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         | conn::INSTANCE_KIND
         | conn::RAIL_KIND
         | conn::CLASS_KIND => conn::newest(kind),
-        crate::project::KIND => crate::project::FORMAT_2,
+        crate::project::KIND => crate::project::FORMAT_3,
         crate::erc::KIND => crate::erc::FORMAT,
         crate::lint::KIND => crate::lint::FORMAT,
         crate::style::KIND => crate::style::FORMAT,
@@ -332,6 +336,10 @@ pub fn newest(kind: &str) -> Option<u64> {
         crate::footprint::KIND => crate::footprint::FORMAT,
         crate::libcomp::KIND => crate::libcomp::FORMAT,
         crate::schem::LAYOUT_KIND => crate::schem::LAYOUT_FORMAT,
+        ryupdm::config::KIND => ryupdm::config::FORMAT,
+        ryupdm::props::KIND => ryupdm::props::FORMAT,
+        ryupdm::record::RELEASE_KIND => ryupdm::record::PRODUCT_FORMAT,
+        ryupdm::record::OBSOLETE_KIND => ryupdm::record::FORMAT,
         _ => return None,
     })
 }
@@ -465,6 +473,41 @@ pub fn settle(v: &Value, pointer: &str, kind: Kind, x: Option<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pdm_files_merge_as_ryupdm_says() {
+        let rec = |label: &str, note: &str| {
+            json!({"built_with": {"commit": "c", "product": "ryueda", "version": "0"},
+                   "content": "0".repeat(64), "format": 2, "kind": "ryupdm.release",
+                   "label": label, "note": note, "part": "d", "project": "01".repeat(16),
+                   "properties": {}, "released_by": {"participant": "agent"},
+                   "results": {}, "supersedes": null})
+        };
+        // Two different records at one path are one conflict, whole,
+        // whether both sides added it or a base had one.
+        let m = merge(None, &rec("A", "ours"), &rec("A", "theirs"));
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), [""], "{m:?}");
+        let m = merge(
+            Some(&rec("A", "base")),
+            &rec("A", "ours"),
+            &rec("A", "theirs"),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), [""], "{m:?}");
+        // Settings merge per key: two keys added on two sides both stay.
+        let base = json!({"format": 4, "kind": "ryupdm.config"});
+        let mut ours = base.clone();
+        ours["approvals"] = json!({"keys": {"k1": "aa"}, "rules": []});
+        let mut theirs = base.clone();
+        theirs["approvals"] = json!({"keys": {"k2": "bb"}, "rules": []});
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{m:?}");
+        assert_eq!(
+            m.value["approvals"]["keys"],
+            json!({"k1": "aa", "k2": "bb"})
+        );
+        assert_eq!(newest("ryupdm.release"), Some(2));
+        assert_eq!(newest("ryupdm.config"), Some(ryupdm::config::FORMAT));
+    }
 
     fn comp(extra: Value) -> Value {
         let mut v = json!({"kind": "ryueda.component", "format": 1, "of": {"id": "r_0402"},

@@ -23,7 +23,6 @@
 
 use crate::PDM_CONFIG;
 use crate::approvals::Approvals;
-use crate::header;
 use ryu_doc::error::{Code, Error, Result};
 use ryu_doc::files::{Obj, invalid};
 use ryu_doc::source::Source;
@@ -429,7 +428,12 @@ impl Config {
     }
 
     pub fn from_json(v: &Value) -> Result<Config> {
-        let mut o = header(v, KIND, FORMAT)?;
+        Config::from_json_in(v, crate::NAMED)
+    }
+
+    /// The settings in `v`, as `product` reads them.
+    pub fn from_json_in(v: &Value, product: &str) -> Result<Config> {
+        let mut o = crate::header_in(v, KIND, FORMAT, product)?;
         let mut c = Config::default();
         // `header` has checked the format is a whole number up to FORMAT.
         let declared = v["format"].as_u64().unwrap_or(1);
@@ -518,12 +522,18 @@ impl Config {
         Ok(c)
     }
 
-    /// The project's settings: the defaults when it has no `ryupdm.json`.
-    pub fn read(src: &dyn Source) -> Result<Config> {
-        match crate::read_json(src, PDM_CONFIG)? {
+    /// The project's settings as `product` reads them: the defaults when
+    /// it has no `ryupdm.json`.
+    pub fn read_in(src: &dyn Source, product: &str) -> Result<Config> {
+        match crate::read_json_in(src, PDM_CONFIG, product)? {
             None => Ok(Config::default()),
-            Some(v) => Config::from_json(&v).map_err(|e| e.with("path", PDM_CONFIG)),
+            Some(v) => Config::from_json_in(&v, product).map_err(|e| e.with("path", PDM_CONFIG)),
         }
+    }
+
+    /// [`Config::read_in`] for ryucad.
+    pub fn read(src: &dyn Source) -> Result<Config> {
+        Config::read_in(src, crate::NAMED)
     }
 }
 
