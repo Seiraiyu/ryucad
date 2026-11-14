@@ -174,4 +174,17 @@ mod tests {
         assert_ne!(Toy::content(&g, &id("a")).unwrap(), h);
         assert!(Toy::content(&f, &id("b")).is_err());
     }
+
+    #[test]
+    fn a_toys_properties_are_judged() {
+        use crate::props::{Pdm, read_for};
+        let mut f = project(&[("a", "{}"), ("b", "{}")]);
+        f.insert("properties/a.json".into(), numbered("1"));
+        f.insert("properties/b.json".into(), numbered("1"));
+        assert_eq!(read_for::<Toy>(&f, &id("a")).unwrap().number(), Some("1"));
+        let pdm = Pdm::of_for::<Toy>(&f, Toy::parts(&f).unwrap(), Unit::Mm);
+        for p in ["a", "b"] {
+            assert_eq!(pdm.parts[&id(p)].faults[0].code, Code::PartNumberDuplicate);
+        }
+    }
 }
