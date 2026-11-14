@@ -473,7 +473,7 @@ pub struct Workspace {
     asked_at: BTreeMap<String, Option<String>>,
     /// Parts the tree, as it draws, found it wants loaded (its rows
     /// opened): loaded once it is drawn ([`Workspace::load_wanted`]).
-    pub wanted: std::cell::RefCell<BTreeSet<String>>,
+    pub wanted: std::sync::Mutex<BTreeSet<String>>,
     /// The faces the feature chosen in the tree made, by the solid that
     /// shows them; and the feature, once asked for.
     pub made: Option<Made>,
@@ -5892,13 +5892,16 @@ impl Workspace {
     /// Notes, while the tree draws, that `id` should be loaded.
     pub fn want(&self, id: &str) {
         if !self.model.parts.contains_key(id) {
-            self.wanted.borrow_mut().insert(id.to_owned());
+            self.wanted
+                .lock()
+                .expect("never poisoned")
+                .insert(id.to_owned());
         }
     }
 
     /// Loads what the tree wanted as it drew.
     pub fn load_wanted(&mut self) {
-        let wanted = std::mem::take(&mut *self.wanted.borrow_mut());
+        let wanted = std::mem::take(&mut *self.wanted.lock().expect("never poisoned"));
         for id in wanted {
             self.load_part(&id);
         }
