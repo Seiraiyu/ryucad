@@ -25,8 +25,6 @@ use ryukei::topo::{Body, RegionKind};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-// The old public paths (design 541, "Paths kept"); 27.F removes them.
-pub use crate::feature::delete_body::{delete_body, delete_report};
 
 /// What a shell or offset acts on as its view of it holds it, and the
 /// faces it names, by name: the open ones, and each grouped one with its

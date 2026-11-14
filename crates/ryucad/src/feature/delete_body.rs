@@ -60,7 +60,7 @@ pub(crate) fn check_delete(
     let q = proposed(session.project().part(pid)?, list, &[(id, f)]);
     let solids = Solids::of(&q);
     let r = session.rebuilt(pid)?;
-    crate::body::delete_body(&q, &solids, id, d, r).map(|_| ())
+    delete_body(&q, &solids, id, d, r).map(|_| ())
 }
 
 /// Deletes: solids taken out of the part's result (ryucad 25).
