@@ -604,3 +604,43 @@ fn an_iso_stopped_run_takes_no_plane_stop() {
         free_hash(&o)
     );
 }
+
+/// A plane stop at a running seam that cuts off what the result needs
+/// fails the walk at its clipped cut, and the first answer stands
+/// (question 916): 18.C's rounded block, its top raised so the round
+/// runs on past its moved end, re-trims to the same body with stops and
+/// without.
+#[test]
+fn a_running_seams_stop_never_changes_a_body_that_builds() {
+    use super::{Stops, retrim_with};
+    use crate::blend::{BlendKind, EdgeBlend, blend};
+    let b0 = block();
+    let (px, py) = (face_of(&b0, FaceRole::PlusX), face_of(&b0, FaceRole::PlusY));
+    let edge = b0
+        .edges()
+        .find(|&e| {
+            let fs: Vec<FaceId> = b0
+                .edge_fins(e)
+                .map(|fin| b0.loops[b0.fins[fin].loop_].face)
+                .collect();
+            fs.contains(&px) && fs.contains(&py)
+        })
+        .unwrap();
+    let (b, _) = blend(
+        K,
+        &b0,
+        &[EdgeBlend {
+            edge: b0.edges[edge].name,
+            kind: BlendKind::Fillet { radius: 0.1 },
+        }],
+    )
+    .unwrap();
+    let changes = raised(&b, 0.2);
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let never =
+        retrim_with(OpKey(0x19b8), &b, &changes, Stops::Never, &m).map(|(o, _)| o.dump_unnamed());
+    let after = retrim_with(OpKey(0x19b8), &b, &changes, Stops::AfterHeld, &m)
+        .map(|(o, _)| o.dump_unnamed());
+    assert_eq!(format!("{never:?}"), format!("{after:?}"));
+}

@@ -149,9 +149,12 @@ pub(crate) fn margin(body: &Body, h: &Held) -> f64 {
     0.5 * crate::intersect::seam_strip(size, tol)
 }
 
-/// Whether running seams take plane stops (plan 19.B, Decision 4;
-/// question 916).
-pub(crate) const RUNNING_PLANE_STOPS: bool = false;
+/// Whether running seams take plane stops (plan 19.B, Decision 4).
+/// Running seams take plane stops too (question 916, option 0): a stop
+/// that cuts off what the result needs leaves a kept piece on its
+/// clipped cut, the walk fails, and `settle` keeps the first answer.
+/// Iso stops stay fixed-ends only.
+pub(crate) const RUNNING_PLANE_STOPS: bool = true;
 
 /// Working face `f`'s stop plane at held seam `h` (design 642's plane
 /// stop): the plane `h`'s edge lies on (`section_plane`), where `f`'s
@@ -720,11 +723,10 @@ mod tests {
         let mut same = h;
         same.faces = [h.faces[0], h.faces[0]];
         assert!(stop_plane(&s, h.faces[0], &same, &m).is_none());
-        // Before Task 8, a running seam has none (Decision 4 as designed).
+        // Question 916: a running seam takes a plane stop too; the walk's
+        // clipped cut and `settle`'s fallback guard it.
         h.kind = SeamKind::Running;
-        if !RUNNING_PLANE_STOPS {
-            assert!(stop_plane(&s, h.faces[0], &h, &m).is_none());
-        }
+        assert!(stop_plane(&s, h.faces[0], &h, &m).is_some());
     }
 
     #[test]
