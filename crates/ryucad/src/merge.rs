@@ -77,13 +77,6 @@ fn manifest_atom(at: &str) -> bool {
     matches!(seg.as_slice(), ["", "dependencies", _])
 }
 
-/// A lock's label is one value: two branches locking one label at
-/// different commits conflict there, not in its commit and content apart.
-fn lock_atom(at: &str) -> bool {
-    let seg: Vec<&str> = at.split('/').collect();
-    matches!(seg.as_slice(), ["", "projects", _, "labels", _])
-}
-
 /// The newest format of each file kind this build reads; kinds it doesn't
 /// model (ryupdm's) are merged by the generic rule at any format.
 pub fn newest(kind: &str) -> Option<u64> {
@@ -145,14 +138,14 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
     );
     let mut walk = walk(match kind.as_str() {
         crate::doc::files::PROJECT_KIND => Some(manifest_atom as fn(&str) -> bool),
-        crate::doc::lock::KIND => Some(lock_atom),
+        crate::doc::lock::KIND => Some(ryupdm::git::lock_atom),
         crate::doc::annotation::KIND => Some(annotation_atom),
         crate::doc::drawing::KIND => Some(drawing_atom),
         crate::doc::files::FEATURE_KIND => Some(feature_atom),
         _ => None,
     });
     let mut value = match kind.as_str() {
-        "ryupdm.release" | "ryupdm.obsolete" => walk.whole(b.as_ref(), &o, &t),
+        k if ryupdm::git::whole(k) => walk.whole(b.as_ref(), &o, &t),
         crate::doc::files::FEATURE_KIND => feature(&mut walk, b.as_ref(), &o, &t),
         crate::doc::files::PART_KIND => part(&mut walk, b.as_ref(), &o, &t),
         crate::doc::annotation::KIND => annotation(&mut walk, b.as_ref(), &o, &t),

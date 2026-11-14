@@ -3,9 +3,11 @@
 //! what the generator says it wrote: the flat BOM's totals, a diff's
 //! rows, and where-used's counts.
 
+#![cfg(feature = "cad")]
+
+use ryu_doc::id::Id;
 use ryucad_doc::doc::assembly::Rev;
 use ryucad_doc::doc::fixtures::{Structure, structure};
-use ryucad_doc::doc::id::Id;
 use ryucad_doc::doc::project::Project;
 use ryupdm::bom::{diff, flat, tree};
 use ryupdm::config::Config;
@@ -283,8 +285,8 @@ fn flat_totals_follow_other_projects_parts() {
 
 #[test]
 fn where_used_of_another_projects_part_counts_what_the_flat_bom_counts() {
+    use ryu_doc::id::ProjectId;
     use ryucad_doc::doc::fixtures::projects;
-    use ryucad_doc::doc::id::ProjectId;
     for seed in 0..100 {
         let mut b = bytes(seed);
         b.extend(bytes(seed + 7000));

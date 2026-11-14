@@ -185,7 +185,7 @@ fn boolean_scoped_in(
     // (design 551, #585); operands without the case are as they were.
     let (ops, split) = flat::split_operands(ops, key);
     let named = |f: Fail| error(&ops, f);
-    let table = table::build_capped(&ops, table::Scope::Operands, pair, m).map_err(named)?;
+    let table = table::build_capped(&ops, table::Scope::Operands, pair, None, m).map_err(named)?;
     let pieces = crate::split::split_all(&ops, &table, m).map_err(named)?;
     let (kept, built) = if sheet {
         // Only the sheet's pieces are kept, by their class against the

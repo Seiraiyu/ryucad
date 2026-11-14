@@ -404,6 +404,7 @@ fn where_used_over_ten_checkouts_of_a_hundred_releases_within_a_second() {
                     ryucad: "0".into(),
                     ryukei: "0".into(),
                     commit: "c".into(),
+                    product: None,
                 },
                 released_by: ryupdm::record::ReleasedBy {
                     name: None,

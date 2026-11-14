@@ -29,6 +29,7 @@ hidden_lines 276ce7f53486bf55
 intersections 0de828fe8eecc846
 interval ceed4e3c202ab503
 inverted_offsets 37903436f975181d
+known_seams 8035231e647c230f
 lofts 64937bf887d4cde3
 math 48b722fd5e6bf4a3
 measure 48dd3b0f6fc5f52b

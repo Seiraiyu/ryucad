@@ -254,6 +254,28 @@ pub fn literal_unit(s: &str) -> Option<(f64, Dim)> {
     }
 }
 
+/// An origin's component as a pose is written: the shortest decimal
+/// within a few units in its last place, so a sum of typed lengths
+/// (`45 mm + 5 mm` is `0.049999999999999996` m) or a length typed in
+/// millimetres reads as typed (issue #108); `-0` is `0`. Rust formats
+/// and parses floats exactly, so this is the same on every platform.
+pub fn snap_origin(x: f64) -> f64 {
+    let x = if x == 0.0 { 0.0 } else { x };
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    let reach = 4.0 * f64::EPSILON * x.abs();
+    for digits in 0..17 {
+        let short: f64 = format!("{x:.digits$e}")
+            .parse()
+            .expect("a float's own text reads back");
+        if (short - x).abs() <= reach {
+            return short;
+        }
+    }
+    x
+}
+
 /// The SI prefixes an electrical unit may carry, and their factors as the
 /// f64s nearest the exact decimals. `u`, `µ` (U+00B5) and `μ` (U+03BC)
 /// are all micro; output writes `u`.
@@ -616,6 +638,15 @@ fn number_len(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origins_snap_to_their_shortest_decimal() {
+        assert_eq!(snap_origin(0.049999999999999996), 0.05);
+        assert_eq!(snap_origin(0.008000000000003199), 0.0080000000000032);
+        assert_eq!(snap_origin(1.0 / 3.0).to_bits(), (1.0f64 / 3.0).to_bits());
+        assert_eq!(snap_origin(-0.0).to_bits(), 0.0f64.to_bits());
+        assert!(snap_origin(f64::NAN).is_nan());
+    }
 
     #[test]
     fn dimensions_read_back_their_names() {

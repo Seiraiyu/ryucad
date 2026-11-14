@@ -17,14 +17,14 @@
 //! faults of the part: it still rebuilds, but can't be released.
 
 use crate::config::{Config, Decl, Type};
-use ryucad_doc::doc::assembly::snap_origin;
-use ryucad_doc::doc::files::header;
-use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::project::{PROPERTIES, Project};
-use ryucad_doc::doc::source::{Source, join};
-use ryucad_doc::error::{Code, Error, Result};
-use ryucad_doc::expr::{Expr, no_parameters};
-use ryucad_doc::units::Unit;
+use crate::header;
+use crate::product::Product;
+use ryu_doc::error::{Code, Error, Result};
+use ryu_doc::expr::{Expr, no_parameters};
+use ryu_doc::id::Id;
+use ryu_doc::source::Source;
+use ryu_doc::units::Unit;
+use ryu_doc::units::snap_origin;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
@@ -169,14 +169,26 @@ pub fn amount(text: &str, uom: &str) -> std::result::Result<f64, String> {
     }
 }
 
-/// Where a part's properties live, relative to the project.
-pub fn path(part: &Id) -> String {
-    join(&join("parts", part.as_str()), PROPERTIES)
+/// Where `part`'s properties live, relative to the project of `P`.
+pub fn path_for<P: Product>(part: &Id) -> String {
+    P::properties_path(part)
 }
 
-/// The part's properties: none when it has no file.
+/// Where a ryucad part's properties live: `parts/<part>/properties.json`.
+#[cfg(feature = "cad")]
+pub fn path(part: &Id) -> String {
+    path_for::<crate::cad::Cad>(part)
+}
+
+/// [`read_for`] for ryucad.
+#[cfg(feature = "cad")]
 pub fn read(src: &dyn Source, part: &Id) -> Result<Properties> {
-    let at = path(part);
+    read_for::<crate::cad::Cad>(src, part)
+}
+
+/// The part's properties in a project of `P`: none when it has no file.
+pub fn read_for<P: Product>(src: &dyn Source, part: &Id) -> Result<Properties> {
+    let at = path_for::<P>(part);
     match crate::read_json(src, &at)? {
         None => Ok(Properties::default()),
         Some(v) => Properties::from_json(&v).map_err(|e| e.with("path", &at)),
@@ -224,7 +236,7 @@ pub fn fits(decl: &Decl, value: &Value, unit: Unit) -> Option<String> {
             };
             // A bare number takes the project's unit, as in feature files;
             // anything else is an expression that reads no parameters.
-            let q = ryucad_doc::units::Quantity::parse(s, unit)
+            let q = ryu_doc::units::Quantity::parse(s, unit)
                 .ok()
                 .filter(|q| q.dim() == *dim)
                 .map(|_| ());
@@ -401,7 +413,8 @@ pub struct Pdm {
 impl Pdm {
     /// Reads `project`'s settings and its parts' properties from `src`, the
     /// files `project` was loaded from.
-    pub fn read(src: &dyn Source, project: &Project) -> Pdm {
+    #[cfg(feature = "cad")]
+    pub fn read(src: &dyn Source, project: &ryucad_doc::doc::project::Project) -> Pdm {
         Pdm::of(
             src,
             project.parts.keys().cloned(),
@@ -409,15 +422,25 @@ impl Pdm {
         )
     }
 
-    /// [`Pdm::read`] for the parts `parts` of the project `src` holds,
-    /// whose default unit is `unit`: for files no project was loaded from
-    /// (a merge's sides).
+    /// [`Pdm::of_for`] for ryucad.
+    #[cfg(feature = "cad")]
     pub fn of(src: &dyn Source, parts: impl IntoIterator<Item = Id>, unit: Unit) -> Pdm {
+        Pdm::of_for::<crate::cad::Cad>(src, parts, unit)
+    }
+
+    /// Every part's properties among `parts` of the project of `P` that
+    /// `src` holds, whose default unit is `unit`, checked against its
+    /// settings: for files no project was loaded from (a merge's sides).
+    pub fn of_for<P: Product>(
+        src: &dyn Source,
+        parts: impl IntoIterator<Item = Id>,
+        unit: Unit,
+    ) -> Pdm {
         let config = Config::read(src);
         let mut parts: BTreeMap<Id, PartProperties> = parts
             .into_iter()
             .map(|id| {
-                let file = read(src, &id);
+                let file = read_for::<P>(src, &id);
                 let faults = match (&config, &file) {
                     (Ok(c), Ok(p)) => check(c, unit, &id, p),
                     _ => Vec::new(),
@@ -463,7 +486,10 @@ impl Pdm {
 mod tests {
     use super::*;
     use crate::config::Pattern;
-    use ryucad_doc::doc::canonical;
+    #[cfg(feature = "cad")]
+    use ryu_doc::canonical;
+    #[cfg(feature = "cad")]
+    use ryucad_doc::doc::project::Project;
 
     fn id(s: &str) -> Id {
         Id::parse(s, "part").unwrap()
@@ -621,6 +647,7 @@ mod tests {
         assert_eq!(dups[&c].code, Code::PartNumberDuplicate);
     }
 
+    #[cfg(feature = "cad")]
     fn project(files: &[(&str, Value)]) -> (Project, BTreeMap<String, Vec<u8>>) {
         let mut src: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         src.insert(
@@ -644,6 +671,7 @@ mod tests {
         (p, src)
     }
 
+    #[cfg(feature = "cad")]
     #[test]
     fn a_project_is_read_and_judged_whole() {
         let number = |n: &str| json!({"format": 1, "kind": KIND, "number": n});
