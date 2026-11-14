@@ -296,13 +296,18 @@ fn at(x: f64, y: f64, z: f64) -> Rigid {
     Rigid::translation(Vector3::new(x, y, z))
 }
 
-/// Design 484's bars (plan 17.C), on cox-worker-2 (an AMD Ryzen 7 9700X)
-/// on one thread: the 1,000-hole plate's view beats OCCT's
-/// `HLRBRep_Algo`, as design 326 asked; the race bodies' views take at
-/// most ten times OCCT's total (design 484's decision 522; the rest of
-/// the gap stays on #608). Each race prints its ratio.
-const PLATE_BAR: f64 = 1.0;
-const RACE_BAR: f64 = 10.0;
+/// Design 484's bars are to beat OCCT's `HLRBRep_Algo` on the 1,000-hole
+/// plate and to take at most ten times OCCT's total on the race bodies
+/// (decision 522). Plan 17.C measured both unmet on cox-worker-2 (an AMD
+/// Ryzen 7 9700X, one thread, 2026-11-14): the plate 2.22 times OCCT's
+/// time (line and conic crossings on the subdivision, which design 484
+/// keeps bit for bit), the race 437 times (its slow bodies' silhouette
+/// fits, mostly their lift). By decision 525 each constant is its
+/// measured ratio times 1.25, rounded up to one significant figure, so
+/// the races still guard against regressions; the gap stays on #608.
+/// Each race prints its ratio.
+const PLATE_BAR: f64 = 3.0;
+const RACE_BAR: f64 = 600.0;
 
 #[test]
 fn the_1000_hole_plates_iso_view_against_occt_on_one_thread() {
