@@ -36,7 +36,8 @@ use std::collections::BTreeMap;
 /// The prefix of every tag ryupdm derives from a record.
 pub const TAG_PREFIX: &str = "ryupdm/";
 
-pub(crate) fn git_error(e: impl std::fmt::Display) -> Error {
+/// `io` naming a Git repository read that failed.
+pub fn git_error(e: impl std::fmt::Display) -> Error {
     Error::new(Code::Io, format!("reading the Git repository: {e}"))
 }
 
@@ -257,6 +258,33 @@ pub(crate) fn entry(
         .lookup_entry(full.split('/'))
         .map_err(git_error)?
         .map(|e| e.object_id()))
+}
+
+/// The file `path` (relative to the project at `prefix`) in commit
+/// `commit` (hex), or `None` when there is none or it is a folder: what
+/// a product reads of one object at a label without reading the whole
+/// project.
+pub fn file_at(
+    repo: &gix::Repository,
+    commit: &str,
+    prefix: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>> {
+    let id = gix::ObjectId::from_hex(commit.as_bytes()).map_err(git_error)?;
+    let tree = repo
+        .find_commit(id)
+        .map_err(git_error)?
+        .tree_id()
+        .map_err(git_error)?
+        .detach();
+    let Some(blob) = entry(repo, tree, prefix, path)? else {
+        return Ok(None);
+    };
+    let obj = repo.find_object(blob).map_err(git_error)?;
+    if obj.kind != gix::object::Kind::Blob {
+        return Ok(None);
+    }
+    Ok(Some(obj.data.clone()))
 }
 
 /// Every blob under the tree `id`, by path below it starting with `at`.
@@ -918,6 +946,38 @@ impl Releases {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    #[test]
+    fn a_file_at_a_commit_is_read_below_a_prefix() {
+        let d = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(d.path())
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "{args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(d.path().join("lib/library")).unwrap();
+        std::fs::write(d.path().join("lib/library/x.json"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        let repo = gix::open(d.path()).unwrap();
+        let head = repo.head_id().unwrap().to_string();
+        assert_eq!(
+            file_at(&repo, &head, "lib/", "library/x.json").unwrap(),
+            Some(b"one\n".to_vec())
+        );
+        assert_eq!(file_at(&repo, &head, "lib/", "library/y.json").unwrap(), None);
+        // A folder is no file.
+        assert_eq!(file_at(&repo, &head, "lib/", "library").unwrap(), None);
+    }
     use super::*;
     use std::path::Path;
     use std::process::Command;
