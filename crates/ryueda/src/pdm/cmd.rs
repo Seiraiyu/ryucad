@@ -5,6 +5,7 @@
 
 use super::{NAME, PDM_CONFIG, check_revision, revision, write};
 use crate::error::{Code, Error, Result};
+use crate::id::Id;
 use crate::session::Session;
 use ryupdm::config::{CORE, Config, Decl, Pattern, Scheme, branch_name, property_name};
 use ryupdm::product::Product;
@@ -267,6 +268,143 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
     config(session)
 }
 
+/// The part `part` names, if the project has it: a design in a design
+/// project, a library component in a library project.
+pub(crate) fn part_id(session: &Session, part: &str) -> Result<Id> {
+    let id = Id::parse(part, "part")?;
+    if !<crate::Eda as Product>::parts(&session.snapshot())?.contains(&id) {
+        let kind = super::kind_name(session.project().manifest.project_kind);
+        return Err(Error::new(Code::NotFound, format!("no {kind} {id}")).with("part", &id));
+    }
+    Ok(id)
+}
+
+/// A notice for a design about to get its first property or release
+/// with a random-looking ID, which its tags will carry (design 629).
+pub(crate) fn notice(session: &Session, id: &Id) -> Option<Value> {
+    (session.project().manifest.project_kind == crate::project::ProjectKind::Design
+        && super::random_looking(id))
+    .then(|| {
+        json!({
+            "code": "design_id_random",
+            "message": format!(
+                "design {id} has a random ID, which its tags (ryupdm/{id}/<label>) will carry: create designs with --id to give them readable ones"
+            ),
+        })
+    })
+}
+
+/// `props.get`: every core and declared property, set or not, with its
+/// declaration, its value and where the value comes from (`properties`,
+/// or `product`: a default from ryueda's own files), and its faults; then
+/// any set but unknown; and the part's release state.
+pub fn get(session: &mut Session, part: &str) -> Result<Value> {
+    let id = part_id(session, part)?;
+    let files = session.snapshot();
+    let pdm = pdm_of(&files, session.project().manifest.default_unit);
+    let c = pdm.config?;
+    let pp = &pdm.parts[&id];
+    let file = pp.file.clone()?;
+    let faults_of = |name: &str| -> Vec<&Error> {
+        pp.faults
+            .iter()
+            .filter(|e| e.details["property"] == name)
+            .collect()
+    };
+    let shown = |name: &str| -> Option<(Value, &'static str)> {
+        match (file.values.get(name), pp.defaults.get(name)) {
+            (Some(v), _) => Some((v.clone(), "properties")),
+            (None, Some(v)) => Some((v.clone(), "product")),
+            _ => None,
+        }
+    };
+    let mut list: Vec<Value> = c
+        .decls()
+        .into_iter()
+        .map(|(name, decl)| {
+            let mut v = json!({"name": name, "core": CORE.contains(&name.as_str()),
+                               "declaration": decl.to_json(), "faults": faults_of(&name)});
+            if let Some((x, from)) = shown(&name) {
+                v["value"] = x;
+                v["from"] = json!(from);
+            }
+            v
+        })
+        .collect();
+    list.extend(
+        file.values
+            .iter()
+            .filter(|(n, _)| c.decl(n).is_none())
+            .map(|(name, x)| {
+                json!({"name": name, "core": false, "declaration": null, "value": x,
+                       "from": "properties", "faults": faults_of(name)})
+            }),
+    );
+    let faults = pp.faults.clone();
+    let mut v = json!({
+        "part": id,
+        "kind": super::kind_name(session.project().manifest.project_kind),
+        "properties": list,
+        "faults": faults,
+        "state": super::state_of(session, &id),
+        "pdm_revision": revision(session),
+    });
+    if let Some(n) = notice(session, &id) {
+        v["notices"] = json!([n]);
+    }
+    Ok(v)
+}
+
+/// `props.set`: sets properties, or clears those given as `null`, as one
+/// change, guarded by the PDM revision. Text is read as each property's
+/// type (`"3"` as a whole number). A file left with no values is deleted.
+pub fn set(
+    session: &mut Session,
+    part: &str,
+    values: Map<String, Value>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let id = part_id(session, part)?;
+    check_revision(session, expected)?;
+    if values.is_empty() {
+        return Err(Error::new(
+            Code::Usage,
+            "give at least one property: NAME=VALUE, or NAME= to clear it",
+        ));
+    }
+    let mut files = session.snapshot();
+    let c = Config::read_in(&files, NAME)?;
+    let mut file = ryupdm::props::read_for::<crate::Eda>(&files, &id)?;
+    for (name, v) in values {
+        if v.is_null() {
+            file.values.remove(&name);
+            continue;
+        }
+        let v = match c.decl(&name) {
+            Some(d) => ryupdm::props::coerce(&d, v),
+            None => v,
+        };
+        file.values.insert(name, v);
+    }
+    let at = ryupdm::props::path_for::<crate::Eda>(&id);
+    let text = (!file.values.is_empty()).then(|| crate::canonical::to_string(&file.to_json()));
+    match &text {
+        Some(t) => files.insert(at.clone(), t.clone().into_bytes().into()),
+        None => files.remove(&at),
+    };
+    // A duplicate number is reported on both parts: say it of this one.
+    let added = added_faults(session, &files);
+    if let Some(e) = added
+        .iter()
+        .find(|e| e.details["part"] == id.as_str())
+        .or(added.first())
+    {
+        return Err(e.clone());
+    }
+    write(session, "properties", vec![(at, text)])?;
+    get(session, part)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -330,5 +468,53 @@ pub(crate) mod tests {
             s.project().manifest.forked_from.as_ref().unwrap().project,
             old
         );
+    }
+
+    fn property(v: &Value, name: &str) -> Value {
+        v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == name)
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn properties_are_set_cleared_and_shown_with_their_defaults() {
+        let (_d, mut s) = session(ProjectKind::Design);
+        init(&mut s).unwrap();
+        let v = get(&mut s, "d").unwrap();
+        let name = property(&v, "name");
+        assert_eq!(
+            (name["value"].as_str(), name["from"].as_str()),
+            (Some("Breakout"), Some("product"))
+        );
+        assert_eq!(v["kind"], "design");
+        assert_eq!(v["state"]["state"], "in_work");
+        let mut set_to = Map::new();
+        set_to.insert("number".into(), json!("100-0001"));
+        set_to.insert("name".into(), json!("Breakout board"));
+        let v = set(&mut s, "d", set_to, None).unwrap();
+        let name = property(&v, "name");
+        assert_eq!(
+            (name["value"].as_str(), name["from"].as_str()),
+            (Some("Breakout board"), Some("properties"))
+        );
+        assert!(s.root().join("properties/d.json").is_file());
+        // An unknown property is refused, nothing written.
+        let mut bad = Map::new();
+        bad.insert("colour".into(), json!("red"));
+        assert_eq!(
+            set(&mut s, "d", bad, None).unwrap_err().code,
+            Code::PropertyUnknown
+        );
+        // Clearing every value deletes the file.
+        let mut clear = Map::new();
+        clear.insert("number".into(), Value::Null);
+        clear.insert("name".into(), Value::Null);
+        set(&mut s, "d", clear, None).unwrap();
+        assert!(!s.root().join("properties/d.json").exists());
+        assert_eq!(get(&mut s, "nope").unwrap_err().code, Code::NotFound);
     }
 }
