@@ -455,3 +455,46 @@ fn where_used_over_ten_checkouts_of_a_hundred_releases_within_a_second() {
     );
     assert!(fastest < 1000.0 * slack(), "{fastest:.0} ms");
 }
+/// Plan 31.B's measurement for design 603: a batch's ops each solve the
+/// assemblies they reach, as single writes do. This times batches of 1,
+/// 10 and 50 parameter writes to the 1,000-mate assembly and prints the
+/// cost per op; plan 31.C decides from it whether solving once at the
+/// batch's end is needed for #810's bar. Printed, never asserted.
+#[test]
+#[ignore = "a measurement for plan 31.C: --ignored --nocapture"]
+fn a_batch_solves_the_assembly_once_per_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = project(dir.path());
+    s.rebuilt(&id("asm")).unwrap();
+    let mut line = Vec::new();
+    for (round, n) in [1usize, 10, 50].into_iter().enumerate() {
+        let ops: Vec<Value> = (0..n)
+            .map(|i| {
+                let mut p = serde_json::Map::new();
+                p.insert(
+                    format!("t{i}"),
+                    serde_json::json!(format!("{} mm", round + 1)),
+                );
+                serde_json::json!({"method": "param.set",
+                                   "params": {"part": "asm", "parameters": p}})
+            })
+            .collect();
+        let t = Instant::now();
+        let v = bar_project::must(
+            &mut s,
+            "batch",
+            serde_json::json!({"ops": ops, "rebuild": false}),
+        );
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(v["parts"]["asm"]["status"], "updated", "{v}");
+        line.push(format!(
+            "{n} ops {ms:.0} ms ({:.1} ms an op)",
+            ms / n as f64
+        ));
+    }
+    println!(
+        "batches of param.set on the 1,000-mate assembly, on {}: {}",
+        machine(),
+        line.join(", ")
+    );
+}
