@@ -90,6 +90,7 @@ fn main() -> ExitCode {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
+        platform::trace("exited: help");
         return ExitCode::SUCCESS;
     }
     // A flag it doesn't know, or more than one folder, is a mistake, not
