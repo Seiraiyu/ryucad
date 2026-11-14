@@ -89,6 +89,11 @@ pub struct Built {
     pub measure: Option<Measure>,
     /// A hole callout's hole feature (and its part), for the lint.
     pub hole: Option<(Id, Id)>,
+    /// Whether a hole callout calls its hole's thread out.
+    pub thread: bool,
+    /// The hole features (and their parts) a hole table lists, for the
+    /// lint: each called out, its thread too.
+    pub listed: Vec<(Id, Id)>,
     /// A balloon's occurrence path.
     pub balloon: Option<String>,
 }
@@ -108,6 +113,10 @@ struct Out {
     boxes: Vec<[P; 2]>,
     measure: Option<Measure>,
     hole: Option<(Id, Id)>,
+    /// Whether its hole callout calls out a thread (a tapped hole's).
+    thread: bool,
+    /// The hole features (and their parts) a hole table lists.
+    listed: Vec<(Id, Id)>,
 }
 
 /// A text's size in the drawing's standard: ISO 3.5 mm, ASME 3 mm (0.12
@@ -285,6 +294,8 @@ pub(super) fn all(
                     hidden,
                     measure: out.measure,
                     hole: out.hole,
+                    thread: out.thread,
+                    listed: out.listed,
                     balloon: match &a.kind {
                         Kind::Balloon { of } => Some(of.clone()),
                         _ => None,
@@ -340,6 +351,8 @@ pub(super) fn all(
                     hidden: Vec::new(),
                     measure: None,
                     hole: None,
+                    thread: false,
+                    listed: Vec::new(),
                     balloon: None,
                 }
             }
@@ -733,7 +746,7 @@ fn build_one(
         }
         Kind::HoleCallout { of } => {
             let r = get("of", of)?;
-            let (lines, hole, report, tip) =
+            let (lines, hole, report, tip, thread) =
                 hole_callout(session, plan, src, &r, &m, units, ctx.standard)?;
             let style = a.style.as_ref().expect("a callout");
             let mut lines = lines;
@@ -751,6 +764,7 @@ fn build_one(
             out.report = report;
             out.report["text"] = json!(out.text);
             out.hole = Some(hole);
+            out.thread = thread;
             Ok(out)
         }
         Kind::CentreMark { of } => {
@@ -1636,7 +1650,7 @@ fn leader_place(
 
 /// The part (and its revision) whose solid `prefix` (`<solid>`, or
 /// `<instance>/…/<solid>`) names, in `plan`'s view.
-fn part_of(
+pub(in crate::drawing) fn part_of(
     session: &mut Session,
     plan: &Plan,
     src: &Source,
@@ -1760,7 +1774,11 @@ fn chamfer_text(
 }
 
 /// A hole callout: its lines, its hole (part, feature), what it reports,
-/// and where its leader meets the hole (on its circle seen end on).
+/// where its leader meets the hole (on its circle seen end on), and
+/// whether it calls a thread out. The hole is the row of the part's holes
+/// whose faces hold the entity, so a pattern's, a fill's and a mirror's
+/// copies all call out their hole feature, and the count is that
+/// feature's rows in the entity's solid.
 #[allow(clippy::type_complexity)]
 fn hole_callout(
     session: &mut Session,
@@ -1770,98 +1788,34 @@ fn hole_callout(
     m: &Map,
     units: &text::Units,
     standard: Standard,
-) -> Result<(Vec<Vec<Run>>, (Id, Id), Value, Option<P>)> {
-    use crate::doc::hole::{Depth, HoleForm};
+) -> Result<(Vec<Vec<Run>>, (Id, Id), Value, Option<P>, bool)> {
     let not = || {
         Error::new(Code::InvalidParam, format!("{} is no hole's face", r.text))
             .with("reason", "not_a_hole")
     };
-    let o = origin_of(src, r).ok_or_else(not)?;
-    let hid = o["seed"]
-        .as_str()
-        .filter(|_| o.get("instance").is_some())
-        .or(o["feature"].as_str())
-        .and_then(|f| Id::parse(f, "feature").ok())
-        .ok_or_else(not)?;
     let body = r.body.ok_or_else(not)?;
+    let name = r.name.clone().ok_or_else(not)?;
+    let solid = src[body]
+        .2
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
     let (pid, rev) = part_of(session, plan, src, body)?;
+    let holes = crate::holes::at(session, &pid, &rev)?;
+    let row = holes.of_face(&solid, &name).ok_or_else(not)?.0;
+    let hid = row.feature.clone();
     let (part, _, _) = session.node(&pid, &rev)?;
     let Some(Ok(crate::doc::files::Feature::Hole(h))) = part.features.get(&hid) else {
         return Err(not());
     };
-    // Its sizes as rebuild builds them: written, or derived.
-    let sizes =
-        crate::hole::derive::derive(h, part.hole_standards.as_deref()).map_err(|_| not())?;
-    // How many of its bores the solid has: walls by hole, instance, point.
-    let mut bores = std::collections::BTreeSet::new();
-    for (_, origin) in src[body].0.origins.iter() {
-        if origin["segment"] != "wall" {
-            continue;
-        }
-        let of_hole = origin["feature"] == hid.as_str() || origin["seed"] == hid.as_str();
-        if of_hole {
-            bores.insert((
-                origin["feature"].to_string(),
-                origin["instance"].to_string(),
-                origin["point"].to_string(),
-            ));
-        }
-    }
-    let n = bores.len().max(1);
-    let x = if standard == Standard::Asme {
-        "X"
-    } else {
-        "×"
-    };
-    let len = |v: f64| {
-        units.number(
-            v,
-            units.precision.max(text::needs(v / units.unit.factor())),
-            false,
-        )
-    };
-    let mut first = Vec::new();
-    if n > 1 {
-        first.push(Run::Text(format!("{n}{x} ")));
-    }
-    first.push(Run::Symbol(Symbol::Diameter));
-    first.push(Run::Text(len(sizes.drill.si)));
-    let depth = match &h.depth {
-        Depth::ThroughAll => Some("THRU".to_owned()),
-        Depth::Blind(d) | Depth::Tip(d) => Some(len(d.meters())),
-        Depth::UpTo { .. } | Depth::ThroughNext => None,
-    };
-    match &h.depth {
-        Depth::ThroughAll => first.push(Run::Text(" THRU".into())),
-        Depth::Blind(_) | Depth::Tip(_) => {
-            first.push(Run::Text(" ".into()));
-            first.push(Run::Symbol(Symbol::Depth));
-            first.push(Run::Text(depth.clone().unwrap_or_default()));
-        }
-        Depth::UpTo { .. } | Depth::ThroughNext => {}
-    }
-    let mut lines = vec![first];
-    match (&h.form, &sizes.counterbore, &sizes.countersink) {
-        (HoleForm::Counterbore { .. }, Some((diameter, depth)), _) => lines.push(vec![
-            Run::Symbol(Symbol::Counterbore),
-            Run::Text(" ".into()),
-            Run::Symbol(Symbol::Diameter),
-            Run::Text(format!("{} ", len(diameter.si))),
-            Run::Symbol(Symbol::Depth),
-            Run::Text(len(depth.si)),
-        ]),
-        (HoleForm::Countersink { .. }, _, Some((diameter, angle))) => lines.push(vec![
-            Run::Symbol(Symbol::Countersink),
-            Run::Text(" ".into()),
-            Run::Symbol(Symbol::Diameter),
-            Run::Text(format!(
-                "{} {x} {}°",
-                len(diameter.si),
-                text::decimal(angle.si.to_degrees(), 0, false)
-            )),
-        ]),
-        _ => {}
-    }
+    let n = holes
+        .rows
+        .iter()
+        .filter(|x| x.feature == hid && x.solid.as_str() == solid)
+        .count()
+        .max(1);
+    let lines = hole::lines(h, &row.sizes, units, standard, n);
     // The bore's circle seen end on: the leader meets it at 45°.
     let tip = match &r.feat {
         Feat::Round {
@@ -1873,11 +1827,21 @@ fn hole_callout(
         }
         _ => None,
     };
-    let report = json!({
+    let mut report = json!({
         "hole": hid, "part": pid, "count": n, "form": h.form.type_name(),
-        "diameter": sizes.drill.si, "depth": h.depth.type_name(),
+        "diameter": row.sizes.drill.si, "depth": h.depth.type_name(),
     });
-    Ok((lines, (pid, hid), report, tip))
+    if let Some(t) = &row.sizes.thread {
+        report["thread"] = json!(t.designation);
+    }
+    if let Some(f) = &row.sizes.fit {
+        report["fit"] = match &f.class {
+            Some(c) => json!(c),
+            None => json!([f.upper.si, f.lower.si]),
+        };
+    }
+    let thread = row.sizes.thread.is_some();
+    Ok((lines, (pid, hid), report, tip, thread))
 }
 
 /// A note: its lines (fields filled as the title block's) at `at`, the
