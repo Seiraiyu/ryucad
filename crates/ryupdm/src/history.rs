@@ -1212,6 +1212,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(feature = "cad")]
     #[test]
     fn a_project_below_the_root_and_a_bare_repository() {
         let dir = repo();

@@ -15,8 +15,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod http;
+#[cfg(feature = "cad")]
 pub mod lock;
+#[cfg(feature = "cad")]
 pub mod parts;
+#[cfg(feature = "cad")]
 pub mod read;
 
 /// Where the cache keeps what a fetch found at the remote's `HEAD`.
@@ -85,6 +88,7 @@ impl Cache {
     }
 
     /// A reader of what this cache holds.
+    #[cfg(feature = "cad")]
     pub fn reader(&self) -> read::Reader {
         read::Reader::new(self.clone())
     }
@@ -217,6 +221,7 @@ pub fn config_at(repo: &gix::Repository, rev: &str, prefix: &str) -> Result<Conf
 
 /// The manifest of the project at `prefix` (`""` or `a/b`) in the commit
 /// `rev` names; `None` when there is no project there or it doesn't read.
+#[cfg(feature = "cad")]
 pub fn manifest_at(
     repo: &gix::Repository,
     rev: &str,

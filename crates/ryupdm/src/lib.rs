@@ -30,14 +30,17 @@
 
 pub mod approvals;
 pub mod attest;
+#[cfg(feature = "cad")]
 pub mod bom;
 #[cfg(feature = "cad")]
 pub mod cad;
 pub mod check;
 pub mod config;
+#[cfg(feature = "cad")]
 pub mod content;
 pub mod deps;
 pub mod history;
+#[cfg(feature = "cad")]
 pub mod items;
 pub mod label;
 pub mod merge;
@@ -46,9 +49,11 @@ pub mod product;
 pub mod props;
 pub mod record;
 pub mod state;
+#[cfg(feature = "cad")]
 pub mod structure;
 #[cfg(test)]
 pub(crate) mod testing;
+#[cfg(feature = "cad")]
 pub mod where_used;
 
 /// ryupdm's settings, beside a project's manifest, in every product.

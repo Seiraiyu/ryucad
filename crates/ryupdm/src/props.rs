@@ -486,6 +486,7 @@ impl Pdm {
 mod tests {
     use super::*;
     use crate::config::Pattern;
+    #[cfg(feature = "cad")]
     use ryu_doc::canonical;
     #[cfg(feature = "cad")]
     use ryucad_doc::doc::project::Project;
@@ -646,6 +647,7 @@ mod tests {
         assert_eq!(dups[&c].code, Code::PartNumberDuplicate);
     }
 
+    #[cfg(feature = "cad")]
     fn project(files: &[(&str, Value)]) -> (Project, BTreeMap<String, Vec<u8>>) {
         let mut src: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         src.insert(
@@ -669,6 +671,7 @@ mod tests {
         (p, src)
     }
 
+    #[cfg(feature = "cad")]
     #[test]
     fn a_project_is_read_and_judged_whole() {
         let number = |n: &str| json!({"format": 1, "kind": KIND, "number": n});

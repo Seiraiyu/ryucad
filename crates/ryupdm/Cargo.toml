@@ -41,7 +41,8 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # Seeded projects for the structure property tests.
 ryucad-doc = { path = "../ryucad-doc", features = ["test-support"] }
 tempfile = "3"
-ryupdm = { path = ".", features = ["testing"] }
+# `testing` for this crate's own tests; `cad` stays as the build asks.
+ryupdm = { path = ".", default-features = false, features = ["testing"] }
 
 [features]
 # ryucad's half: its product (`cad::Cad`), content hash, item numbers,

@@ -337,7 +337,9 @@ pub fn validate_for<P: Product>(
     out
 }
 
-#[cfg(test)]
+// ryucad's tests: they read ryucad's projects (`cad`); the core's own
+// are in `crate::testing`, over a toy product.
+#[cfg(all(test, feature = "cad"))]
 mod tests {
     use super::*;
     use crate::state::tests::{add, official, project, release_now};

@@ -3,6 +3,8 @@
 //! what the generator says it wrote: the flat BOM's totals, a diff's
 //! rows, and where-used's counts.
 
+#![cfg(feature = "cad")]
+
 use ryu_doc::id::Id;
 use ryucad_doc::doc::assembly::Rev;
 use ryucad_doc::doc::fixtures::{Structure, structure};

@@ -284,7 +284,9 @@ pub fn of_for<P: Product>(
     }
 }
 
-#[cfg(test)]
+// ryucad's tests: they read ryucad's projects (`cad`); the core's own
+// are in `crate::testing`, over a toy product.
+#[cfg(all(test, feature = "cad"))]
 pub(crate) mod tests {
     use super::*;
     use crate::history::Official;

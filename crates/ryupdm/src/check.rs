@@ -896,7 +896,9 @@ fn path_part_label(path: &str) -> (Id, String) {
     (part, label)
 }
 
-#[cfg(test)]
+// ryucad's tests: they read ryucad's projects (`cad`); the core's own
+// are in `crate::testing`, over a toy product.
+#[cfg(all(test, feature = "cad"))]
 mod tests {
     use super::*;
     use crate::history::tests::{commit, git, put};

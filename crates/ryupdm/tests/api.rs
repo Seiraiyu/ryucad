@@ -4,6 +4,8 @@
 //! repository was made from; merge validation reads a merge's sides from
 //! the bare repository's commits.
 
+#![cfg(feature = "cad")]
+
 use ryu_doc::canonical;
 use ryu_doc::id::{Id, ProjectId};
 use ryu_doc::source::Folder;
