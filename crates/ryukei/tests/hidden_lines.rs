@@ -7,9 +7,10 @@ use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
 use ryukei::geom::{Curve, Frame, Plane, Point3, Rigid, Surface, Vector3};
 use ryukei::name::OpKey;
 use ryukei::project::{
-    Class, Piece, Placed, Projection, Source, View, ViewOptions, Visibility, view,
+    Class, Piece, Placed, Projection, Source, View, ViewOptions, Visibility, view, view_with,
 };
 use ryukei::topo::Body;
+use ryukei::work::Work;
 use ryukei::{Error, ViewError, primitive, sheet};
 use ryukei_testkit::projection::{Oracle, judge, placed_bodies, size};
 
@@ -587,8 +588,8 @@ fn refused_at(body: &Body, e: &Error) -> String {
 /// The race bodies' isometric views on one thread (design 484's bar):
 /// every refusal takes at most 10 s with `RYUKEI_BARS=1` on the bar
 /// machine (cox-worker-2), 100 s otherwise; each is printed with what it
-/// refused on and its time, and the total. Minutes: plan 17.B's bars
-/// run it with `--ignored`.
+/// refused on and its time, and the total. Minutes: plans 17.B's and
+/// 17.C's bars run it with `--ignored`.
 #[test]
 #[ignore = "minutes: the bars run it"]
 fn race_views_refuse_quickly() {
@@ -634,14 +635,17 @@ fn race_views_refuse_quickly() {
 }
 
 /// The crankcase twin with all nine bosses from the drawing's front, top
-/// and right (design 484): no piece the mesh contradicts. Design 484's
-/// bar, at most a tenth of the pieces uncertain, isn't met (#643): the
-/// bosses come in pairs mirrored in the plane of the view and the axis
-/// (40° and 320°, …), so a ray from a piece meets its twin's edge exactly
-/// and `point_in_face` puts the hit on that edge (`OnEdge`); every ray of
-/// those pieces is unsure. Plan 17.B's count on cox-worker-4: 656 of
-/// 1,571 pieces uncertain from the front, 1,701 of 2,023 from the top,
-/// 131 of 1,163 from the right, as many as the crankcase's own views.
+/// and right (design 484): no piece the mesh contradicts, and at most a
+/// tenth of the pieces uncertain in each view (#643). The bosses come in
+/// pairs mirrored in the plane of the view and the axis (40° and 320°,
+/// …), so a ray from a piece meets its twin's edge exactly: plan 17.C
+/// settles such a ray by the edge's two faces' crossings, and certifies a
+/// saddle's spline image lying on the rim's circle as an overlap. Plan
+/// 17.B's count on cox-worker-4 was 656 of 1,571 pieces uncertain from
+/// the front, 1,701 of 2,023 from the top, 131 of 1,163 from the right;
+/// plan 17.C's is 37 of 1,571, 13 of 1,786 and 49 of 1,061. What remains
+/// is mostly rays through edges in a pattern the two-face rule leaves
+/// unsure (Task 10's tally on #643).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release only: booleans of saddles")]
 fn the_crankcase_twins_views_agree_with_the_mesh() {
@@ -660,9 +664,72 @@ fn the_crankcase_twins_views_agree_with_the_mesh() {
             .filter(|q| q.visibility == Visibility::Uncertain)
             .count();
         eprintln!("{t:?}: {uncertain} of {} pieces uncertain", p.pieces.len());
+        assert!(
+            uncertain * 10 <= p.pieces.len(),
+            "{t:?}: {uncertain} of {}",
+            p.pieces.len()
+        );
         let bodies = placed_bodies(&placed);
         let o = Oracle::new(&bodies, &v, size(&bodies) * 1e-3).unwrap();
         let j = judge(&p, &bodies, &o);
         assert!(j.wrong.is_empty(), "{t:?}: {:?}", j.wrong);
+    }
+}
+
+/// #643 (plan 17.C): the crankcase twin seen from the drawing's front,
+/// where the bosses at 40° and 320° (and each such pair) are mirror
+/// images in a plane square to the view, so their saddles' images
+/// coincide and a ray from the back saddle leaves through the front
+/// saddle's edge. At most a tenth of its pieces uncertain, none the mesh
+/// contradicts.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: booleans of saddles")]
+fn the_crankcase_twins_front_view_mostly_certifies() {
+    let body = crankcase_twin(&[0.0, 40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0]);
+    let v = View::new(Vector3::new(0.0, -1.0, 0.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let placed = [at(&body)];
+    let p = view(&placed, &v, &ViewOptions::default()).unwrap();
+    let uncertain = p
+        .pieces
+        .iter()
+        .filter(|q| q.visibility == Visibility::Uncertain)
+        .count();
+    eprintln!("front: {uncertain} of {} pieces uncertain", p.pieces.len());
+    assert!(
+        uncertain * 10 <= p.pieces.len(),
+        "{uncertain} of {}",
+        p.pieces.len()
+    );
+    let bodies = placed_bodies(&placed);
+    let o = Oracle::new(&bodies, &v, size(&bodies) * 1e-3).unwrap();
+    let j = judge(&p, &bodies, &o);
+    assert!(j.wrong.is_empty(), "{:?}", j.wrong);
+}
+
+/// #767 (plan 17.C): race bodies 16, 56 and 229, spline revolutions whose
+/// formula's branches `fit_contour` couldn't certify whole, drawn from
+/// ryucad's isometric corner: drawn with no piece the mesh contradicts,
+/// or refused `Uncertain`.
+#[test]
+#[ignore = "minutes: the trace after a failed fit (#767)"]
+fn the_slow_revolutions_draw_or_refuse() {
+    let bodies = ryukei_testkit::race::bodies(200);
+    let v = look(Vector3::new(1.0, -1.0, 1.0));
+    for i in [16, 56, 229] {
+        let placed = [at(&bodies[i])];
+        let w = Work::unlimited();
+        match view_with(&placed, &v, &ViewOptions::default(), &w) {
+            Ok(p) => {
+                let bs = placed_bodies(&placed);
+                let o = Oracle::new(&bs, &v, size(&bs) * 1e-3).unwrap();
+                let j = judge(&p, &bs, &o);
+                assert!(j.wrong.is_empty(), "race {i}: {:?}", j.wrong);
+                eprintln!("race {i}: drawn, {} units", w.spent());
+            }
+            Err(Error::InvalidView(ViewError::Uncertain { .. })) => {
+                eprintln!("race {i}: refused, {} units", w.spent());
+            }
+            Err(e) => panic!("race {i}: {e:?}"),
+        }
     }
 }
