@@ -643,6 +643,14 @@ pub fn check(session: &mut Session, again: bool) -> Result<Value> {
     Ok(report)
 }
 
+/// `release.sync`: the tag of every official release, created where
+/// missing and moved where it points elsewhere; never pushed or deleted.
+/// Records under approval rules are left to the hosted service.
+pub fn sync(session: &mut Session) -> Result<Value> {
+    let (repo, releases) = super::history(session)?;
+    ryupdm::release::sync(repo.gix(), &releases, NAME)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,6 +828,9 @@ mod tests {
         crate::git::tests::git(s.root(), &["commit", "-q", "-m", "A"]);
         let v = propose(&mut s, "agent", &[], true, None, None, false).unwrap();
         assert_eq!(v["proposed"], json!([]), "{v}");
+        let v = sync(&mut s).unwrap();
+        assert_eq!(v["created"][0]["tag"], "ryupdm/r_100k/A", "{v}");
+        assert_eq!(sync(&mut s).unwrap()["unchanged"], 1);
         assert_eq!(
             obsolete(&mut s, "agent", "r_100k", "B", None, None)
                 .unwrap_err()
