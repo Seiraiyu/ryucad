@@ -1613,11 +1613,22 @@ fn points_from_json(v: Option<Value>) -> Result<Vec<Id>> {
 }
 
 /// The expression strings of a hole: its diameter, its counterbore's or
-/// countersink's sizes, a blind depth, an up-to offset and a drill
-/// point's angle.
+/// countersink's sizes, a blind depth, an up-to offset, a drill
+/// point's angle, and each place's distances from its edges.
 pub fn expression_strings<'a>(k: &str, field: &'a mut Value) -> Vec<&'a mut String> {
     let mut out = Vec::new();
     match (k, field) {
+        ("places", Value::Object(o)) => {
+            for place in o.values_mut() {
+                if let Some(Value::Array(from)) = place.get_mut("from") {
+                    for e in from {
+                        if let Some(Value::String(s)) = e.get_mut("distance") {
+                            out.push(s);
+                        }
+                    }
+                }
+            }
+        }
         ("counterbore" | "countersink" | "counterdrill" | "spotface", Value::Object(o)) => {
             for x in o.values_mut() {
                 if let Value::String(s) = x {

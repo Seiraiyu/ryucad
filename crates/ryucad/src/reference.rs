@@ -61,7 +61,15 @@ impl Follow {
             },
             Feature::Extrude(_) => (r == "target").then_some(Carrier),
             Feature::Revolve(_) => (r == "axis").then_some(Carrier),
-            Feature::Hole(_) => (r == "depth").then_some(Carrier),
+            // A place's point, face, axis and direction follow their
+            // carrier; the edges it is dimensioned from are extent
+            // (ryucad 28.C).
+            Feature::Hole(_) => match r.strip_prefix("places.").and_then(|x| x.split_once('.')) {
+                Some((_, "at" | "face" | "coaxial" | "direction")) => Some(Carrier),
+                Some((_, "from.#")) => Some(One),
+                Some(_) => None,
+                None => (r == "depth").then_some(Carrier),
+            },
             // Its faces as a set, its start edge as an extent.
             Feature::CosmeticThread(_) => match r {
                 "faces.#" => Some(All),
@@ -746,6 +754,31 @@ pub fn line(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_holes_places_have_their_follow_classes() {
+        use super::Follow;
+        use crate::doc::files::Feature;
+        let v = json!({"format": 26, "kind": "ryucad.feature", "type": "hole",
+            "form": "simple", "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
+            "places": {
+                "a": {"at": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"},
+                      "direction": "z"},
+                "b2": {"face": {"feature": "b", "name": "fedcba9876543210fedcba9876543210"},
+                       "from": [{"edge": {"feature": "b", "name": "00112233445566778899aabbccddeeff"}, "distance": "1 mm"},
+                                {"edge": {"feature": "b", "name": "ffeeddccbbaa99887766554433221100"}, "distance": "1 mm"}]},
+                "c": {"coaxial": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}}}});
+        let f = Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap();
+        for (role, _) in f.geometry() {
+            let want = if role.contains(".from.") {
+                Follow::One
+            } else {
+                Follow::Carrier
+            };
+            assert_eq!(Follow::classify(&f, &role), Some(want), "{role}");
+        }
+        assert_eq!(Follow::classify(&f, "places.a.nonsense"), None);
+    }
+
     use crate::error::Code;
     use crate::session::Session;
     use crate::sketch::tests::{edge_between, face_along, rectangle_ops, vertex_at, with_box};

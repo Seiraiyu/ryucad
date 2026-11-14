@@ -653,7 +653,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             }
             (
                 k @ ("counterbore" | "countersink" | "counterdrill" | "spotface" | "near" | "far"
-                | "depth" | "bottom" | "thread"),
+                | "depth" | "bottom" | "thread" | "places"),
                 x,
             ) => {
                 out.extend(super::hole::expression_strings(k, x));
@@ -3059,6 +3059,20 @@ mod tests {
             "from": {"feature": "shaft", "name": "fedcba9876543210fedcba9876543210"},
             "depth": "l"});
         assert!(feature_names(&c).contains("l"));
+    }
+
+    #[test]
+    fn a_places_distances_are_expressions() {
+        let v = json!({"format": 26, "kind": FEATURE_KIND, "type": "hole", "form": "simple",
+            "diameter": "5 mm", "depth": "through_all", "targets": ["b"],
+            "places": {"a": {"face": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"},
+                "from": [{"edge": {"feature": "b", "name": "fedcba9876543210fedcba9876543210"}, "distance": "e"},
+                         {"edge": {"feature": "b", "name": "00112233445566778899aabbccddeeff"}, "distance": "2 * e"}]}}});
+        let at: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
+        for p in ["/places/a/from/0/distance", "/places/a/from/1/distance"] {
+            assert!(at.iter().any(|x| x == p), "{p} in {at:?}");
+        }
+        assert!(feature_names(&v).contains("e"));
     }
 
     #[test]
