@@ -215,6 +215,7 @@ pub fn answer(
         l.announce(&before);
         publish(l, session);
         publish_merge(l, session);
+        publish_pdm(l, session);
     }
     result
 }
@@ -383,7 +384,7 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
         .with("param", "against")),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
-            crate::erc::check_project(p, &cats, &[]).map(Answer::json)
+            crate::erc::check_project(p, &cats, &[], &[]).map(Answer::json)
         }
         Request::Describe {
             design,
@@ -679,6 +680,76 @@ fn dispatch(
                 crate::parts::show_finish(pl, &cats, job)
             }
         },
+        Request::ReleasePropose {
+            parts,
+            all,
+            note,
+            expected_revision,
+            dry_run,
+        } => {
+            let who = caller_name(live, me);
+            crate::pdm::release::propose(
+                session,
+                &who,
+                &parts,
+                all,
+                note,
+                expected_revision.as_deref(),
+                dry_run,
+            )
+        }
+        Request::ReleaseObsolete {
+            part,
+            label,
+            note,
+            expected_revision,
+        } => {
+            let who = caller_name(live, me);
+            crate::pdm::release::obsolete(
+                session,
+                &who,
+                &part,
+                &label,
+                note,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::ReleaseList { part } => crate::pdm::release::list(session, part.as_deref()),
+        Request::ReleaseCheck { results } => crate::pdm::release::check(session, results),
+        Request::ReleaseSync {} => crate::pdm::release::sync(session),
+        Request::PdmInit {} => crate::pdm::cmd::init(session),
+        Request::PdmNewId { expected_revision } => {
+            crate::pdm::cmd::new_id(session, expected_revision.as_deref())
+        }
+        Request::PdmConfig {} => crate::pdm::cmd::config(session),
+        Request::PdmConfigure {
+            revisions,
+            release_branch,
+            pattern,
+            properties,
+            approvals,
+            bump,
+            force,
+            expected_revision,
+        } => crate::pdm::cmd::configure(
+            session,
+            crate::pdm::cmd::Change {
+                revisions,
+                release_branch,
+                pattern,
+                properties,
+                approvals,
+                bump,
+                force,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::PropsGet { part } => crate::pdm::cmd::get(session, &part),
+        Request::PropsSet {
+            part,
+            properties,
+            expected_revision,
+        } => crate::pdm::cmd::set(session, &part, properties, expected_revision.as_deref()),
         Request::PartsConfigure {
             assembly,
             build_quantity,
@@ -1079,7 +1150,10 @@ fn dispatch(
                 None => None,
             };
             let cats = session.catalogues()?;
-            match (crate::erc::check(session.root(), &cats), diff) {
+            // A revision's release findings need its history: `release
+            // check` is the command for them; the working files' are here.
+            let release = crate::pdm::release::findings(session, false).unwrap_or_default();
+            match (crate::erc::check(session.root(), &cats, &release), diff) {
                 (Ok(mut v), Some(d)) => {
                     v["against"] = d;
                     Ok(v)
@@ -1732,6 +1806,34 @@ pub fn publish_merge(live: &mut Live<Eda>, session: &mut Session) {
     live.seen.merge_failed = failed;
 }
 
+/// Tells `pdm` subscribers which parts' release states or tags moved
+/// (`pdm.changed`, `{parts: [{part, state, tags}]}`). Worked out only
+/// while someone watches and the PDM revision or the release branch's
+/// refs moved; the first look tells nobody anything.
+pub fn publish_pdm(live: &mut Live<Eda>, session: &mut Session) {
+    if !live.hub.is_watched() {
+        live.seen.pdm = None;
+        return;
+    }
+    let key = crate::pdm::release::key(session);
+    if live.seen.pdm.as_ref().is_some_and(|(was, _)| *was == key) {
+        return;
+    }
+    let now = crate::pdm::release::summary(session);
+    if let Some((_, seen)) = &live.seen.pdm {
+        let changed: Vec<&Value> = now
+            .iter()
+            .filter(|(p, v)| seen.get(*p) != Some(*v))
+            .map(|(_, v)| v)
+            .collect();
+        if !changed.is_empty() {
+            live.hub
+                .send(Topic::Pdm, "pdm.changed", &json!({"parts": changed}));
+        }
+    }
+    live.seen.pdm = Some((key, now));
+}
+
 /// Brings the session and what subscribers know up to date with the
 /// files: before a subscription, and while anyone watches.
 pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
@@ -1745,6 +1847,7 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
         live.announce(&before);
         publish(live, s);
         publish_merge(live, s);
+        publish_pdm(live, s);
         Ok(())
     });
 }

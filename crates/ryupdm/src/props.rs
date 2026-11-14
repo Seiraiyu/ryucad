@@ -17,7 +17,6 @@
 //! faults of the part: it still rebuilds, but can't be released.
 
 use crate::config::{Config, Decl, Type};
-use crate::header;
 use crate::product::Product;
 use ryu_doc::error::{Code, Error, Result};
 use ryu_doc::expr::{Expr, no_parameters};
@@ -58,7 +57,12 @@ impl Properties {
     /// Reads the file's shape: its kind and format, then every other key
     /// as a property. Whether they fit the settings is [`check`]'s.
     pub fn from_json(v: &Value) -> Result<Properties> {
-        header(v, KIND, FORMAT)?;
+        Properties::from_json_in(v, crate::NAMED)
+    }
+
+    /// [`Properties::from_json`], as `product` reads them.
+    pub fn from_json_in(v: &Value, product: &str) -> Result<Properties> {
+        crate::header_in(v, KIND, FORMAT, product)?;
         let values = v
             .as_object()
             .expect("header checked it is an object")
@@ -189,9 +193,9 @@ pub fn read(src: &dyn Source, part: &Id) -> Result<Properties> {
 /// The part's properties in a project of `P`: none when it has no file.
 pub fn read_for<P: Product>(src: &dyn Source, part: &Id) -> Result<Properties> {
     let at = path_for::<P>(part);
-    match crate::read_json(src, &at)? {
+    match crate::read_json_in(src, &at, P::NAME)? {
         None => Ok(Properties::default()),
-        Some(v) => Properties::from_json(&v).map_err(|e| e.with("path", &at)),
+        Some(v) => Properties::from_json_in(&v, P::NAME).map_err(|e| e.with("path", &at)),
     }
 }
 
@@ -399,6 +403,30 @@ pub struct PartProperties {
     pub file: Result<Properties>,
     /// What is wrong with them, in name order, a duplicate number last.
     pub faults: Vec<Error>,
+    /// What the product's files give where the file sets nothing
+    /// ([`crate::product::Product::defaults`]); empty for ryucad.
+    pub defaults: BTreeMap<String, Value>,
+}
+
+impl PartProperties {
+    /// The properties a release and a BOM read: the file's, over the
+    /// product's defaults. `None` when the file can't be read.
+    pub fn effective(&self) -> Option<Properties> {
+        let file = self.file.as_ref().ok()?;
+        let mut values = self.defaults.clone();
+        values.extend(file.values.iter().map(|(k, v)| (k.clone(), v.clone())));
+        Some(Properties { values })
+    }
+
+    /// Whether `name`'s value comes from the product's files, not the
+    /// properties file (`from: product` in answers).
+    pub fn from_product(&self, name: &str) -> bool {
+        self.defaults.contains_key(name)
+            && self
+                .file
+                .as_ref()
+                .is_ok_and(|f| !f.values.contains_key(name))
+    }
 }
 
 /// Every part's properties in a project, checked against its settings.
@@ -436,7 +464,7 @@ impl Pdm {
         parts: impl IntoIterator<Item = Id>,
         unit: Unit,
     ) -> Pdm {
-        let config = Config::read(src);
+        let config = Config::read_in(src, P::NAME);
         let mut parts: BTreeMap<Id, PartProperties> = parts
             .into_iter()
             .map(|id| {
@@ -445,7 +473,15 @@ impl Pdm {
                     (Ok(c), Ok(p)) => check(c, unit, &id, p),
                     _ => Vec::new(),
                 };
-                (id, PartProperties { file, faults })
+                let defaults = P::defaults(src, &id).unwrap_or_default();
+                (
+                    id,
+                    PartProperties {
+                        file,
+                        faults,
+                        defaults,
+                    },
+                )
             })
             .collect();
         if config.is_ok() {
@@ -742,5 +778,38 @@ mod tests {
         assert_eq!(bare.to_json()["format"], 1);
         assert_eq!(missing(&config, &bare), ["number", "amount"]);
         assert_eq!(missing(&config, &tube), ["number"]);
+    }
+
+    #[test]
+    fn a_products_defaults_fill_what_the_file_leaves_out() {
+        use crate::testing::{Toy, id, project};
+        let mut f = project(&[("a", r#"{"name": "Bolt"}"#), ("b", "{}")]);
+        f.insert(
+            "properties/a.json".into(),
+            br#"{"description": "M3", "format": 1, "kind": "ryupdm.properties"}"#.to_vec(),
+        );
+        let pdm = Pdm::of_for::<Toy>(&f, [id("a"), id("b")], Unit::Mm);
+        let a = &pdm.parts[&id("a")];
+        assert_eq!(a.defaults.get("name"), Some(&json!("Bolt")));
+        let e = a.effective().unwrap();
+        assert_eq!(e.values["name"], json!("Bolt"));
+        assert_eq!(e.values["description"], json!("M3"));
+        assert!(a.from_product("name") && !a.from_product("description"));
+        // Set in the file, the file's value wins.
+        f.insert(
+            "properties/a.json".into(),
+            br#"{"format": 1, "kind": "ryupdm.properties", "name": "Screw"}"#.to_vec(),
+        );
+        let pdm = Pdm::of_for::<Toy>(&f, [id("a")], Unit::Mm);
+        assert_eq!(
+            pdm.parts[&id("a")].effective().unwrap().values["name"],
+            json!("Screw")
+        );
+        assert!(!pdm.parts[&id("a")].from_product("name"));
+        // A thing with no name has no defaults.
+        let pdm = Pdm::of_for::<Toy>(&f, [id("b")], Unit::Mm);
+        assert!(pdm.parts[&id("b")].defaults.is_empty());
+        // A default is never judged: it can't be unknown or ill-fitting.
+        assert!(pdm.parts[&id("b")].faults.is_empty());
     }
 }

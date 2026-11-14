@@ -19,6 +19,8 @@ pub enum Topic {
     /// `merge.changed`: a merge in progress started, ended, or what it
     /// leaves to settle changed (design 518).
     Merge,
+    /// `pdm.changed`: parts' release states or tags changed (design 629).
+    Pdm,
 }
 
 impl ryu_session::notify::Topics for Topic {
@@ -28,6 +30,7 @@ impl ryu_session::notify::Topics for Topic {
         Topic::Activity,
         Topic::Progress,
         Topic::Merge,
+        Topic::Pdm,
     ];
     const PARTICIPANTS: Topic = Topic::Participants;
     const ACTIVITY: Topic = Topic::Activity;
@@ -45,4 +48,7 @@ pub struct Seen {
     /// Git's waiting files when the last status told failed: told again
     /// once they move.
     pub merge_failed: Option<String>,
+    /// The key the parts' release states were last read at (the PDM
+    /// revision and the release branch's refs), and each part's value.
+    pub pdm: Option<(String, BTreeMap<String, serde_json::Value>)>,
 }

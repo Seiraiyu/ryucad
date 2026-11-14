@@ -250,6 +250,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "eda_pdm"
+path = "fuzz_targets/eda_pdm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "eda_merge"
 path = "fuzz_targets/eda_merge.rs"
 test = false

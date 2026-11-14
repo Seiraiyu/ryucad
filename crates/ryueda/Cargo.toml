@@ -33,12 +33,18 @@ pdf-writer = "0.15"
 ryu-math = { path = "../ryu-math" }
 # Git: revisions, attributes and textconv (design 518).
 ryu-git = { path = "../ryu-git" }
+# Product data management (design 629): ryupdm's core only. Its `cad`
+# feature is ryucad's half and pulls ryucad's file format; CI's
+# `ryupdm-core` job proves the core builds without it.
+ryupdm = { path = "../ryupdm", default-features = false }
 ryu-session = { path = "../ryu-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
+# Attestations signed with the test key, for approvals verified offline.
+ryupdm = { path = "../ryupdm", default-features = false, features = ["testing"] }
 assert_cmd = "2"
 # Catalogue fixtures in their sources' shapes, written by us.
 ryueda-parts = { path = "../ryueda-parts", features = ["testing"] }
