@@ -3,15 +3,23 @@
 //! its latest release, and its labels latest first. What an agent places
 //! from, and what the app's picker lists.
 
+#[cfg(feature = "cad")]
 use super::read::{Reader, not_fetched};
+#[cfg(feature = "cad")]
 use super::{HEAD_REF, config_at};
 use crate::label;
 use crate::record::{Kind, parse_name};
+#[cfg(feature = "cad")]
 use ryu_doc::error::Result;
-use ryu_doc::id::{Id, ProjectId};
+use ryu_doc::id::Id;
+#[cfg(feature = "cad")]
+use ryu_doc::id::ProjectId;
+#[cfg(feature = "cad")]
 use ryucad_doc::doc::files::PartKind;
+#[cfg(feature = "cad")]
 use ryucad_doc::doc::project::Project;
 use std::collections::BTreeMap;
+#[cfg(feature = "cad")]
 use std::path::Path;
 
 /// One label of a part, as the branch has it.
@@ -70,25 +78,14 @@ pub fn latest(
         .collect()
 }
 
-/// The parts `project` (at `url`, folder `path`) has released on its
-/// release branch as fetched, in part ID order: `dependency_not_fetched`
-/// before a fetch.
-pub fn parts(
-    reader: &mut Reader,
-    project: &ProjectId,
-    url: &str,
-    path: &str,
-) -> Result<(String, Option<String>, Vec<ReleasedPart>)> {
-    let Some(repo) = reader.repo(url)? else {
-        return Err(not_fetched(project, url, &format!("project {project}")));
-    };
-    let config = config_at(&repo, HEAD_REF, path)?;
-    let branch = config.release_branch.clone();
-    let Some(releases) = reader.releases(project, url, path, &branch)?.cloned() else {
-        return Ok((branch, None, Vec::new()));
-    };
-    let tip = releases.branch.as_ref().map(|b| b.tip.clone());
-    // Each part's labels, and which are obsolete.
+/// Each part's official labels on `releases`, latest first in `scheme`'s
+/// order, each `released` (the latest that isn't obsolete), `superseded`
+/// or `obsolete`, with where it became official. A part with only an
+/// obsolete record has none.
+pub fn released(
+    releases: &crate::history::Releases,
+    scheme: crate::config::Scheme,
+) -> BTreeMap<Id, Vec<Released>> {
     let mut by: BTreeMap<Id, BTreeMap<String, (Option<String>, bool)>> = BTreeMap::new();
     for (p, o) in &releases.official {
         let mut seg = p.split('/').skip(1);
@@ -104,32 +101,58 @@ pub fn parts(
             Kind::Obsolete => e.1 = true,
         }
     }
+    by.into_iter()
+        .filter_map(|(part, labels)| {
+            let mut list: Vec<(String, String, bool)> = labels
+                .into_iter()
+                .filter_map(|(l, (commit, obsolete))| Some((l, commit?, obsolete)))
+                .collect();
+            list.sort_by_key(|(l, _, _)| {
+                std::cmp::Reverse((label::index(scheme, l).unwrap_or(0), l.clone()))
+            });
+            let latest = list.iter().position(|(_, _, obsolete)| !obsolete);
+            let out: Vec<Released> = list
+                .iter()
+                .enumerate()
+                .map(|(i, (l, c, obsolete))| Released {
+                    label: l.clone(),
+                    state: if *obsolete {
+                        "obsolete"
+                    } else if Some(i) == latest {
+                        "released"
+                    } else {
+                        "superseded"
+                    },
+                    commit: c.clone(),
+                })
+                .collect();
+            (!out.is_empty()).then_some((part, out))
+        })
+        .collect()
+}
+
+/// The parts `project` (at `url`, folder `path`) has released on its
+/// release branch as fetched, in part ID order: `dependency_not_fetched`
+/// before a fetch.
+#[cfg(feature = "cad")]
+pub fn parts(
+    reader: &mut Reader,
+    project: &ProjectId,
+    url: &str,
+    path: &str,
+) -> Result<(String, Option<String>, Vec<ReleasedPart>)> {
+    let Some(repo) = reader.repo(url)? else {
+        return Err(not_fetched(project, url, &format!("project {project}")));
+    };
+    let config = config_at(&repo, HEAD_REF, path)?;
+    let branch = config.release_branch.clone();
+    let Some(releases) = reader.releases(project, url, path, &branch)?.cloned() else {
+        return Ok((branch, None, Vec::new()));
+    };
+    let tip = releases.branch.as_ref().map(|b| b.tip.clone());
     let prefix = super::prefix_of(path);
     let mut out = Vec::new();
-    for (part, labels) in by {
-        let mut list: Vec<(String, String, bool)> = labels
-            .into_iter()
-            .filter_map(|(l, (commit, obsolete))| Some((l, commit?, obsolete)))
-            .collect();
-        list.sort_by_key(|(l, _, _)| {
-            std::cmp::Reverse((label::index(config.revisions, l).unwrap_or(0), l.clone()))
-        });
-        let latest = list.iter().position(|(_, _, obsolete)| !obsolete);
-        let labels: Vec<Released> = list
-            .iter()
-            .enumerate()
-            .map(|(i, (l, c, obsolete))| Released {
-                label: l.clone(),
-                state: if *obsolete {
-                    "obsolete"
-                } else if Some(i) == latest {
-                    "released"
-                } else {
-                    "superseded"
-                },
-                commit: c.clone(),
-            })
-            .collect();
+    for (part, labels) in released(&releases, config.revisions) {
         let Some(first) = labels.first() else {
             continue;
         };
@@ -157,7 +180,7 @@ pub fn parts(
     Ok((branch, tip, out))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cad"))]
 mod tests {
     use super::super::Cache;
     use super::super::read::tests::{commit, library};
@@ -251,5 +274,39 @@ mod tests {
         };
         assert_eq!(labels(&fork), ["B"]);
         assert_eq!(labels(&ProjectId::parse(PROJECT).unwrap()), ["A"]);
+    }
+}
+
+#[cfg(test)]
+mod neutral {
+    use super::*;
+
+    #[test]
+    fn released_lists_each_parts_labels_latest_first_with_their_states() {
+        use crate::history::{Official, Releases};
+        let mut r = Releases::default();
+        let blob = gix::ObjectId::null(gix::hash::Kind::Sha1);
+        let o = |c: &str| Official {
+            commit: c.repeat(40),
+            blob,
+            shallow: false,
+        };
+        r.official.insert("releases/r/A.json".into(), o("a"));
+        r.official.insert("releases/r/B.json".into(), o("b"));
+        r.official.insert("releases/r/B.obsolete.json".into(), o("c"));
+        r.official.insert("releases/c/A.json".into(), o("d"));
+        // Only an obsolete record: no labels.
+        r.official.insert("releases/x/A.obsolete.json".into(), o("e"));
+        let scheme = crate::config::Config::default().revisions;
+        let got = released(&r, scheme);
+        let r_id = Id::parse("r", "part").unwrap();
+        let states: Vec<(&str, &str)> = got[&r_id]
+            .iter()
+            .map(|l| (l.label.as_str(), l.state))
+            .collect();
+        assert_eq!(states, [("B", "obsolete"), ("A", "released")]);
+        assert_eq!(got[&r_id][0].commit, "b".repeat(40));
+        assert!(!got.contains_key(&Id::parse("x", "part").unwrap()));
+        assert_eq!(latest(&r, scheme)[&r_id], "A");
     }
 }
