@@ -24,11 +24,11 @@ const MAX_SPLITS: u32 = 48;
 /// Newton or bisection steps per root.
 const MAX_STEPS: u32 = 64;
 
-/// A coefficient whose size is below this fraction of the sizes of the
-/// terms that make it (before they cancel) counts as zero: rounding can't
-/// decide its sign. Each coefficient has its own threshold
+/// Below this fraction of the largest product term a coefficient counts
+/// as zero: rounding can't decide its sign. A coefficient is signed too
+/// when it is above this fraction of the sizes of its own terms
 /// ([`curve_poly`]), so a light end of a rational piece isn't judged by
-/// its heavy end's terms.
+/// its heavy end's terms alone.
 const ZERO: f64 = 1e-12;
 
 /// `C(n, k)` in f64, by the multiplicative formula (exact while the
@@ -44,26 +44,29 @@ pub(crate) fn deriv<T: Copy + Sub<Output = T> + Mul<f64, Output = T>>(c: &[T]) -
     c.windows(2).map(|w| (w[1] - w[0]) * n).collect()
 }
 
-/// The product of a vector-valued and a scalar Bernstein polynomial, and
-/// each coefficient's size before its terms cancel, from the sizes of the
-/// factors' coefficients (`a_size`, `w_size`).
+/// The product of a vector-valued and a scalar Bernstein polynomial, the
+/// size of its largest term, and each coefficient's size before its terms
+/// cancel, from the sizes of the factors' coefficients (`a_size`,
+/// `w_size`).
 pub(crate) fn mul_by<V: Coords>(
     a: &[V],
     a_size: &[f64],
     w: &[f64],
     w_size: &[f64],
-) -> (Vec<V>, Vec<f64>) {
+) -> (Vec<V>, f64, Vec<f64>) {
     let (m, n) = (a.len() - 1, w.len() - 1);
     let mut c = vec![V::ZERO; m + n + 1];
+    let mut big: f64 = 0.0;
     let mut size = vec![0.0; m + n + 1];
     for (i, &ai) in a.iter().enumerate() {
         for (j, &wj) in w.iter().enumerate() {
             let k = binom(m, i) * binom(n, j) / binom(m + n, i + j);
             c[i + j] = c[i + j] + ai * (wj * k);
+            big = big.max(math::sqrt(ai.dot(ai)) * wj * k);
             size[i + j] += a_size[i] * w_size[j] * k;
         }
     }
-    (c, size)
+    (c, big, size)
 }
 
 /// The sizes of a derivative's coefficients before they cancel: `n (c[i+1]
@@ -200,12 +203,13 @@ fn paired<'a>(g: &'a [f64], z: &'a [f64]) -> impl DoubleEndedIterator<Item = (f6
 /// The Bernstein coefficients of `(A - pW)·(A'W - AW')` on a piece, and
 /// each coefficient's zero threshold. Writing the second factor with
 /// `A - pW` in place of `A` gives the same polynomial with smaller terms.
-/// Each threshold scales with the terms that make that coefficient
-/// before they cancel (the control point and `p` too, not only their
-/// difference): where the curve stands still (a collapsed control
-/// polygon), `A'W - AW'` is rounding noise however small it is; where
-/// the weights are far apart, a light end's coefficient is as small as
-/// its own terms, not the heavy end's.
+/// The threshold scales with the terms before they cancel: where the
+/// curve stands still (a collapsed control polygon), `A'W - AW'` is
+/// rounding noise however small it is. It is the piece's largest term's,
+/// or a coefficient's own terms' where those are smaller (the control
+/// point and `p`, not only their difference): where the weights are far
+/// apart, a light end's coefficient is as small as its own terms, and
+/// the heavy end's would hide its sign (the `nurbs` target, 2026-11-04).
 fn curve_poly<V: Coords>(pts: &[Hom<V>], p: V) -> (Vec<f64>, Vec<f64>) {
     let a: Vec<V> = pts.iter().map(|h| (h.p - p) * h.w).collect();
     let w: Vec<f64> = pts.iter().map(|h| h.w).collect();
@@ -217,13 +221,15 @@ fn curve_poly<V: Coords>(pts: &[Hom<V>], p: V) -> (Vec<f64>, Vec<f64>) {
         .map(|h| (math::sqrt(h.p.dot(h.p)) + p_size) * h.w.abs())
         .collect();
     let w_size: Vec<f64> = w.iter().map(|x| x.abs()).collect();
-    let (da, da_size) = mul_by(&deriv(&a), &deriv_sizes(&a_size), &w, &w_size);
-    let (dw, dw_size) = mul_by(&a, &a_size, &deriv(&w), &deriv_sizes(&w_size));
+    let (da, big_da, da_size) = mul_by(&deriv(&a), &deriv_sizes(&a_size), &w, &w_size);
+    let (dw, big_dw, dw_size) = mul_by(&a, &a_size, &deriv(&w), &deriv_sizes(&w_size));
     let b: Vec<V> = da.iter().zip(&dw).map(|(&x, &y)| x - y).collect();
     let b_size: Vec<f64> = da_size.iter().zip(&dw_size).map(|(x, y)| x + y).collect();
+    let size = a.iter().map(|&x| math::sqrt(x.dot(x))).fold(0.0, f64::max);
+    let zero = ZERO * size * big_da.max(big_dw);
     let zeros = mul_sizes(&a_size, &b_size)
         .into_iter()
-        .map(|s| ZERO * s)
+        .map(|s| (ZERO * s).min(zero))
         .collect();
     (mul_dot(&a, &b), zeros)
 }
