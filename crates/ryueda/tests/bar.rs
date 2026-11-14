@@ -143,7 +143,12 @@ fn a_netlist_diff_and_a_clean_merges_status_are_within_their_bars() {
             .env("GIT_COMMITTER_EMAIL", "t@example.com")
             .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
             .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
-            .args(["-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(args)
             .output()
             .unwrap();
@@ -158,7 +163,8 @@ fn a_netlist_diff_and_a_clean_merges_status_are_within_their_bars() {
     git(&["commit", "-q", "-m", "base"]);
     let rename = |path: &str, name: &str| {
         let at = board.join(path);
-        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&at).unwrap()).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&at).unwrap()).unwrap();
         v["name"] = serde_json::json!(name);
         std::fs::write(&at, ryueda::canonical::to_string(&v)).unwrap();
     };

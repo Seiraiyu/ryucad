@@ -2946,8 +2946,22 @@ fn corpus_branches(
     let board = circuit(&top, name);
     let s = |x: &str| x.to_owned();
     let mut base = vec![
-        vec![s("net"), s("add"), s(block), s("AUX_A"), s("--id"), s("aux_a")],
-        vec![s("net"), s("add"), s(block), s("AUX_B"), s("--id"), s("aux_b")],
+        vec![
+            s("net"),
+            s("add"),
+            s(block),
+            s("AUX_A"),
+            s("--id"),
+            s("aux_a"),
+        ],
+        vec![
+            s("net"),
+            s("add"),
+            s(block),
+            s("AUX_B"),
+            s("--id"),
+            s("aux_b"),
+        ],
     ];
     for (id, net) in [("c80", "AUX_A"), ("c81", "AUX_B")] {
         base.push(vec![
@@ -2965,7 +2979,11 @@ fn corpus_branches(
         base.push(vec![s("connect"), format!("{block}/{id}/2"), s("rail:GND")]);
     }
     for args in &base {
-        ryueda(&board, 1, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        ryueda(
+            &board,
+            1,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
     }
     ryueda(&board, 1, &["layout"]);
     let commit = |m: &str| {
@@ -2976,12 +2994,20 @@ fn corpus_branches(
     let before = files(&board);
     gitrepo::git(&top, &["checkout", "-q", "-b", "theirs"]);
     for args in theirs {
-        ryueda(&board, 1, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        ryueda(
+            &board,
+            1,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
     }
     commit("theirs");
     gitrepo::git(&top, &["checkout", "-q", "main"]);
     for args in ours {
-        ryueda(&board, 1, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        ryueda(
+            &board,
+            1,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
     }
     commit("ours");
     let _ = gitrepo::git_try(&top, &[], &["merge", "--no-commit", "-q", "theirs"]);
@@ -3147,7 +3173,14 @@ fn corpus_branches_merge_by_their_first_repairs() {
         // (a value, a net's name): clean but for the layout and the name.
         let dir = tempfile::tempdir().unwrap();
         let ours = vec![
-            vec![s("net"), s("add"), s(block), s("TEST"), s("--id"), s("test_o")],
+            vec![
+                s("net"),
+                s("add"),
+                s(block),
+                s("TEST"),
+                s("--id"),
+                s("test_o"),
+            ],
             vec![
                 s("component"),
                 s("edit"),
@@ -3157,7 +3190,14 @@ fn corpus_branches_merge_by_their_first_repairs() {
             ],
         ];
         let theirs = vec![
-            vec![s("net"), s("add"), s(block), s("TEST"), s("--id"), s("test_t")],
+            vec![
+                s("net"),
+                s("add"),
+                s(block),
+                s("TEST"),
+                s("--id"),
+                s("test_t"),
+            ],
             vec![
                 s("net"),
                 s("rename"),
