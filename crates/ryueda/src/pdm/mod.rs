@@ -126,6 +126,31 @@ impl Product for crate::Eda {
         content::hash(src, part)
     }
 
+    /// A library component's `name` (its `value`), `description` and
+    /// `make_buy` (`buy`: every library component is bought), and a
+    /// design's `name`, where `properties/` doesn't set them (design 629).
+    fn defaults(src: &dyn Source, part: &Id) -> Result<std::collections::BTreeMap<String, Value>> {
+        let mut out = std::collections::BTreeMap::new();
+        match manifest(src)?.project_kind {
+            ProjectKind::Library => {
+                let c = content::libcomp(src, part)?;
+                if !c.value.is_empty() {
+                    out.insert("name".to_owned(), Value::from(c.value));
+                }
+                if !c.description.is_empty() {
+                    out.insert("description".to_owned(), Value::from(c.description));
+                }
+                out.insert("make_buy".to_owned(), Value::from("buy"));
+            }
+            ProjectKind::Design => {
+                if let Ok((_, d)) = content::design_of(src, part) {
+                    out.insert("name".to_owned(), Value::from(d.name));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn identity(manifest: &Value) -> Option<Identity> {
         let m = Manifest::read(crate::canonical::to_string(manifest).as_bytes()).ok()?;
         Some(Identity {
@@ -274,5 +299,24 @@ pub(crate) mod tests {
             "{:?}",
             d.iter().map(|i| &i.files).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn components_and_designs_give_their_names_as_defaults() {
+        let l = board(ProjectKind::Library);
+        let d = <crate::Eda as Product>::defaults(&l, &id("r_100k")).unwrap();
+        let c = content::libcomp(&l, &id("r_100k")).unwrap();
+        assert_eq!(d["name"], serde_json::json!(c.value));
+        assert_eq!(d.get("description").is_some(), !c.description.is_empty());
+        assert_eq!(d["make_buy"], "buy");
+        let f = board(ProjectKind::Design);
+        let d = <crate::Eda as Product>::defaults(&f, &id("d")).unwrap();
+        assert_eq!(
+            d,
+            BTreeMap::from([("name".to_owned(), serde_json::json!("Breakout"))])
+        );
+        // Through ryupdm: the defaults fill what properties/ leaves out.
+        let pdm = ryupdm::props::Pdm::of_for::<crate::Eda>(&f, [id("d")], crate::units::Unit::Mm);
+        assert!(pdm.parts[&id("d")].from_product("name"));
     }
 }
