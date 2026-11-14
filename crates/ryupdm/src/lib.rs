@@ -63,15 +63,24 @@ pub const PDM_CONFIG: &str = "ryupdm.json";
 /// The folder of release records, beside a project's manifest.
 pub const RELEASES: &str = "releases";
 
-/// The product named in the messages of readers that aren't yet told
-/// which product reads them: ryupdm's own files (settings, properties,
-/// records, attestations, packages). Plan 10.B threads the product
-/// through them; until then every message reads as it always has.
+/// The product named in the messages of readers not told which product
+/// reads them: ryucad, whose callers predate the `_in` readers. Every
+/// `…_for::<P>` passes `P::NAME`.
 pub(crate) const NAMED: &str = "ryucad";
 
-/// [`ryu_doc::files::header_in`] for ryupdm's own files.
+/// [`ryu_doc::files::header_in`] for ryupdm's own files, read by `product`.
+pub(crate) fn header_in<'a>(
+    v: &'a Value,
+    kind: &str,
+    newest: u64,
+    product: &str,
+) -> Result<ryu_doc::files::Obj<'a>> {
+    ryu_doc::files::header_in(v, kind, newest, product)
+}
+
+/// [`header_in`] for readers not told their product.
 pub(crate) fn header<'a>(v: &'a Value, kind: &str, newest: u64) -> Result<ryu_doc::files::Obj<'a>> {
-    ryu_doc::files::header_in(v, kind, newest, NAMED)
+    header_in(v, kind, newest, NAMED)
 }
 
 use ryu_doc::canonical;
@@ -89,8 +98,9 @@ pub fn new_project_id() -> Result<ProjectId> {
 }
 
 /// The JSON of the file at `at` (relative to the project), `None` when it
-/// isn't there. A file a merge left with conflicts is `merge_conflict`.
-pub(crate) fn read_json(src: &dyn Source, at: &str) -> Result<Option<Value>> {
+/// isn't there. A file a merge left with conflicts is `merge_conflict`,
+/// whose message names `product`'s `merge status`.
+pub(crate) fn read_json_in(src: &dyn Source, at: &str, product: &str) -> Result<Option<Value>> {
     let Some(bytes) = src.read(at).map_err(|e| e.with("path", at))? else {
         return Ok(None);
     };
@@ -98,10 +108,15 @@ pub(crate) fn read_json(src: &dyn Source, at: &str) -> Result<Option<Value>> {
         Error::new(Code::InvalidJson, format!("{at} is not UTF-8")).with("path", at)
     })?;
     let v = canonical::parse(text).map_err(|e| e.with("path", at))?;
-    match ryu_doc::files::conflicted_in(&v, at, NAMED) {
+    match ryu_doc::files::conflicted_in(&v, at, product) {
         Some(e) => Err(e),
         None => Ok(Some(v)),
     }
+}
+
+/// [`read_json_in`] for readers not told their product.
+pub(crate) fn read_json(src: &dyn Source, at: &str) -> Result<Option<Value>> {
+    read_json_in(src, at, NAMED)
 }
 
 #[cfg(test)]

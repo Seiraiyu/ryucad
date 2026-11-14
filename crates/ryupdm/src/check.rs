@@ -170,8 +170,8 @@ pub fn run_for<P: Product>(
     history: Option<History<'_>>,
     mut results: Option<&mut dyn Results>,
 ) -> Result<Vec<Finding>> {
-    let config = Config::read(src)?;
-    let records = Records::read(src)?;
+    let config = Config::read_in(src, P::NAME)?;
+    let records = Records::read_in(src, P::NAME)?;
     let none = Releases::default();
     let releases = history.as_ref().map_or(&none, |h| h.releases);
     let identity = crate::product::identity::<P>(src);
@@ -306,7 +306,7 @@ pub fn run_for<P: Product>(
             let content = P::content(&then, &part);
             let changes = match (
                 &content,
-                Config::read(&then),
+                Config::read_in(&then, P::NAME),
                 props::read_for::<P>(&then, &part),
             ) {
                 (Ok(c), Ok(cfg), Ok(p)) => r.changes(c, &cfg, &p),
@@ -780,12 +780,12 @@ pub fn staged_for<P: Product>(repo: &gix::Repository, prefix: &str) -> Result<Ve
         }
     }
     let src = Staged { repo, files: index };
-    let records = Records::read(&src)?;
+    let records = Records::read_in(&src, P::NAME)?;
     let has_records = |p: &Id| records.of(p).next().is_some();
     if records_changed.is_empty() && !parts_touched.iter().any(has_records) {
         return Ok(Vec::new());
     }
-    let config = Config::read(&src)?;
+    let config = Config::read_in(&src, P::NAME)?;
     let official: BTreeMap<String, gix::ObjectId> =
         match crate::history::branch(repo, &config.release_branch)? {
             Some(b) => crate::history::records_at(repo, &b.tip, prefix)?,

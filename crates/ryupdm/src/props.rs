@@ -17,7 +17,6 @@
 //! faults of the part: it still rebuilds, but can't be released.
 
 use crate::config::{Config, Decl, Type};
-use crate::header;
 use crate::product::Product;
 use ryu_doc::error::{Code, Error, Result};
 use ryu_doc::expr::{Expr, no_parameters};
@@ -58,7 +57,12 @@ impl Properties {
     /// Reads the file's shape: its kind and format, then every other key
     /// as a property. Whether they fit the settings is [`check`]'s.
     pub fn from_json(v: &Value) -> Result<Properties> {
-        header(v, KIND, FORMAT)?;
+        Properties::from_json_in(v, crate::NAMED)
+    }
+
+    /// [`Properties::from_json`], as `product` reads them.
+    pub fn from_json_in(v: &Value, product: &str) -> Result<Properties> {
+        crate::header_in(v, KIND, FORMAT, product)?;
         let values = v
             .as_object()
             .expect("header checked it is an object")
@@ -189,9 +193,9 @@ pub fn read(src: &dyn Source, part: &Id) -> Result<Properties> {
 /// The part's properties in a project of `P`: none when it has no file.
 pub fn read_for<P: Product>(src: &dyn Source, part: &Id) -> Result<Properties> {
     let at = path_for::<P>(part);
-    match crate::read_json(src, &at)? {
+    match crate::read_json_in(src, &at, P::NAME)? {
         None => Ok(Properties::default()),
-        Some(v) => Properties::from_json(&v).map_err(|e| e.with("path", &at)),
+        Some(v) => Properties::from_json_in(&v, P::NAME).map_err(|e| e.with("path", &at)),
     }
 }
 
@@ -436,7 +440,7 @@ impl Pdm {
         parts: impl IntoIterator<Item = Id>,
         unit: Unit,
     ) -> Pdm {
-        let config = Config::read(src);
+        let config = Config::read_in(src, P::NAME);
         let mut parts: BTreeMap<Id, PartProperties> = parts
             .into_iter()
             .map(|id| {
