@@ -463,39 +463,20 @@ impl Form {
         // what their seeds do.
         let repeats = matches!(ty.as_str(), "hole" | "pattern");
         let targets = (acts || repeats).then(|| Picks::new("targets", strings(&v["targets"])));
-        let extent = (ty == "extrude").then(|| {
-            let e = &v["extent"];
-            ExtentForm {
-                ty: Choice::new(
-                    "extent",
-                    &["blind", "symmetric", "up_to", "through_all"],
-                    text(&e["type"]),
-                ),
-                length: Field::new("length", text(&e["length"])),
-                both: Flag {
-                    name: "both ways".to_owned(),
-                    read: e["both"] == true,
-                    chosen: e["both"] == true,
-                },
-            }
-        });
+        let extent = ExtentForm::read(&ty, v);
         let boolean = ty == "boolean";
-        let blend = matches!(ty.as_str(), "fillet" | "chamfer").then(|| BlendForm::from_show(v));
-        let hole = (ty == "hole").then(|| HoleForm::from_show(v));
-        let pattern = matches!(ty.as_str(), "pattern" | "instance_pattern")
-            .then(|| PatternForm::from_show(v));
-        let mate = (ty == "mate").then(|| MateForm::from_show(v));
-        let datum = crate::core::datums::kind_of(&ty).map(|_| DatumForm::from_show(v));
-        let sweep = (ty == "sweep").then(|| SweepForm::from_show(v));
-        let loft = (ty == "loft").then(|| LoftForm::from_show(v));
-        let shell = (ty == "shell").then(|| ShellForm::from_show(v));
-        let offset = (ty == "offset").then(|| BodyOffsetForm::from_show(v));
-        let mirror = (ty == "mirror").then(|| MirrorForm {
-            solid: text(&v["solid"]),
-            plane: text(&v["plane"]),
-        });
-        let split = (ty == "split").then(|| SplitForm::from_show(v));
-        let sheet = SheetMetalForm::from_show(&ty, v);
+        let blend = BlendForm::read(&ty, v);
+        let hole = HoleForm::read(&ty, v);
+        let pattern = PatternForm::read(&ty, v);
+        let mate = MateForm::read(&ty, v);
+        let datum = DatumForm::read(&ty, v);
+        let sweep = SweepForm::read(&ty, v);
+        let loft = LoftForm::read(&ty, v);
+        let shell = ShellForm::read(&ty, v);
+        let offset = BodyOffsetForm::read(&ty, v);
+        let mirror = MirrorForm::read(&ty, v);
+        let split = SplitForm::read(&ty, v);
+        let sheet = SheetMetalForm::read(&ty, v);
         let surface = matches!(ty.as_str(), "extrude" | "revolve" | "sweep" | "loft").then(|| {
             let on = v["surface"] == true;
             Flag {
@@ -504,8 +485,8 @@ impl Form {
                 chosen: on,
             }
         });
-        let surface_form = SurfaceForm::from_show(&ty, v);
-        let tweak = TweakForm::from_show(&ty, v);
+        let surface_form = SurfaceForm::read(&ty, v);
+        let tweak = TweakForm::read(&ty, v);
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -608,84 +589,109 @@ impl Form {
         self.origin.iter().any(|f| !f.read.is_empty())
     }
 
+    /// The one kind's form this feature has, if any (a `type` reads at
+    /// most one: `every_type_reads_at_most_one_kinds_form`).
+    fn kind(&self) -> Option<&dyn FeatureForm> {
+        self.kinds().into_iter().next()
+    }
+
+    /// Every kind's form this feature has: never more than one.
+    fn kinds(&self) -> Vec<&dyn FeatureForm> {
+        fn k<T: FeatureForm>(f: &Option<T>) -> Option<&dyn FeatureForm> {
+            f.as_ref().map(|f| f as &dyn FeatureForm)
+        }
+        [
+            k(&self.extent),
+            k(&self.blend),
+            k(&self.hole),
+            k(&self.pattern),
+            k(&self.mate),
+            k(&self.datum),
+            k(&self.sweep),
+            k(&self.loft),
+            k(&self.shell),
+            k(&self.offset),
+            k(&self.mirror),
+            k(&self.split),
+            k(&self.sheet),
+            k(&self.surface_form),
+            k(&self.tweak),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The parameters' and placement's fields, and the kind's form,
+    /// borrowed apart so both can be written.
+    fn parts_mut(&mut self) -> (Vec<&mut Field>, Option<&mut dyn FeatureForm>) {
+        fn k<T: FeatureForm>(f: &mut Option<T>) -> Option<&mut dyn FeatureForm> {
+            f.as_mut().map(|f| f as &mut dyn FeatureForm)
+        }
+        let Form {
+            params,
+            origin,
+            z,
+            x,
+            extent,
+            blend,
+            hole,
+            pattern,
+            mate,
+            datum,
+            sweep,
+            loft,
+            shell,
+            offset,
+            mirror,
+            split,
+            sheet,
+            surface_form,
+            tweak,
+            ..
+        } = self;
+        let mut base: Vec<&mut Field> = Vec::new();
+        base.extend(params.iter_mut());
+        base.extend(origin.iter_mut());
+        base.extend(z.iter_mut());
+        base.extend(x.iter_mut());
+        let kind = [
+            k(extent),
+            k(blend),
+            k(hole),
+            k(pattern),
+            k(mate),
+            k(datum),
+            k(sweep),
+            k(loft),
+            k(shell),
+            k(offset),
+            k(mirror),
+            k(split),
+            k(sheet),
+            k(surface_form),
+            k(tweak),
+        ]
+        .into_iter()
+        .flatten()
+        .next();
+        (base, kind)
+    }
+
     fn fields(&self) -> impl Iterator<Item = &Field> {
         self.params
             .iter()
             .chain(&self.origin)
             .chain(&self.z)
             .chain(&self.x)
-            .chain(self.blend.iter().flat_map(BlendForm::sizes))
-            .chain(self.hole.iter().flat_map(HoleForm::fields))
-            .chain(self.pattern.iter().flat_map(PatternForm::fields))
-            .chain(self.mate.iter().flat_map(MateForm::fields))
-            .chain(self.datum.iter().flat_map(DatumForm::fields))
-            .chain(self.sweep.iter().flat_map(SweepForm::fields))
-            .chain(self.loft.iter().flat_map(LoftForm::fields))
-            .chain(self.shell.iter().flat_map(ShellForm::fields))
-            .chain(self.offset.iter().flat_map(BodyOffsetForm::fields))
-            .chain(self.sheet.iter().flat_map(SheetMetalForm::fields))
-            .chain(self.surface_form.iter().flat_map(SurfaceForm::fields))
-            .chain(self.tweak.iter().flat_map(TweakForm::fields))
+            .chain(self.kind().into_iter().flat_map(|k| k.kind_fields()))
     }
 
     /// Every field, to place errors and keep what was typed.
     fn fields_mut(&mut self) -> Vec<&mut Field> {
-        let mut out: Vec<&mut Field> = Vec::new();
-        out.extend(self.params.iter_mut());
-        out.extend(self.origin.iter_mut());
-        out.extend(self.z.iter_mut());
-        out.extend(self.x.iter_mut());
-        if let Some(e) = &mut self.extent {
-            out.push(&mut e.length);
-        }
-        if let Some(b) = &mut self.blend {
-            for g in &mut b.groups {
-                out.extend(g.sizes.iter_mut().map(|(_, f)| f));
-            }
-        }
-        if let Some(h) = &mut self.hole {
-            out.extend(h.sizes.iter_mut().map(|(_, f)| f));
-            out.push(&mut h.length);
-        }
-        if let Some(p) = &mut self.pattern {
-            out.extend(p.sizes.iter_mut().map(|(_, f)| f));
-            out.push(&mut p.skip);
-        }
-        if let Some(m) = &mut self.mate {
-            out.push(&mut m.angle);
-            out.push(&mut m.distance);
-            for o in [&mut m.a, &mut m.b] {
-                out.extend(o.origin.iter_mut());
-                out.push(&mut o.rotate);
-            }
-        }
-        if let Some(d) = &mut self.datum {
-            out.extend(d.sizes.iter_mut());
-            out.extend(d.coordinates.iter_mut().flatten());
-        }
-        if let Some(w) = &mut self.sweep {
-            out.push(&mut w.twist);
-            out.push(&mut w.scale);
-        }
-        if let Some(l) = &mut self.loft {
-            out.extend(l.start.iter_mut().chain(&mut l.end).map(|t| &mut t.weight));
-        }
-        if let Some(s) = &mut self.shell {
-            out.push(&mut s.thickness);
-            out.extend(s.groups.iter_mut().map(|g| &mut g.quantity));
-        }
-        if let Some(o) = &mut self.offset {
-            out.push(&mut o.distance);
-            out.extend(o.groups.iter_mut().map(|g| &mut g.quantity));
-        }
-        if let Some(s) = &mut self.sheet {
-            out.extend(s.fields_mut());
-        }
-        if let Some(s) = &mut self.surface_form {
-            out.extend(s.fields_mut());
-        }
-        if let Some(t) = &mut self.tweak {
-            out.extend(t.fields_mut());
+        let (mut out, kind) = self.parts_mut();
+        if let Some(k) = kind {
+            out.extend(k.kind_fields_mut());
         }
         out
     }
@@ -717,43 +723,12 @@ impl Form {
         self.error = (!placed).then_some(e);
     }
 
-    /// The field at a pointer into a blend's groups or a mate's offsets.
+    /// The field at a pointer into the kind's form: a blend's groups, a
+    /// shell's or offset's faces, a mate's offsets, a tweak's, sheet
+    /// metal's or a surface's own.
     fn at_pointer(&mut self, pointer: &str) -> Option<&mut Field> {
         let steps: Vec<&str> = pointer.strip_prefix('/')?.split('/').collect();
-        match steps.as_slice() {
-            // A draft's or move's group's angle or distance.
-            ["groups", ..] if self.tweak.is_some() => {
-                self.tweak.as_mut()?.at_pointer(steps.as_slice())
-            }
-            ["groups", i, k] => {
-                let i: usize = i.parse().ok()?;
-                let g = self.blend.as_mut()?.groups.get_mut(i)?;
-                g.sizes.iter_mut().find(|(key, _)| key == k).map(|(_, f)| f)
-            }
-            // A shell's or offset's group by its whole pointer, since the
-            // top-level `thickness` and `distance` share the last step.
-            ["faces", i, "thickness"] => {
-                let i: usize = i.parse().ok()?;
-                Some(&mut self.shell.as_mut()?.groups.get_mut(i)?.quantity)
-            }
-            ["faces", i, "distance"] => {
-                let i: usize = i.parse().ok()?;
-                Some(&mut self.offset.as_mut()?.groups.get_mut(i)?.quantity)
-            }
-            [side @ ("a" | "b"), "offset", rest @ ..] => {
-                let m = self.mate.as_mut()?;
-                let o = if *side == "a" { &mut m.a } else { &mut m.b };
-                match rest {
-                    ["origin", n] => o.origin.get_mut(n.parse::<usize>().ok()?),
-                    ["rotate", ..] => Some(&mut o.rotate),
-                    _ => None,
-                }
-            }
-            // A thicken's group's side.
-            steps if self.surface_form.is_some() => self.surface_form.as_mut()?.at_pointer(steps),
-            // A sheet metal feature's end, override or relief size.
-            steps => self.sheet.as_mut()?.at_pointer(steps),
-        }
+        self.parts_mut().1?.kind_at_pointer(&steps)
     }
 
     /// After a conflict, what this window typed goes back over the values
@@ -793,21 +768,8 @@ impl Form {
                 .into_iter()
                 .flatten()
                 .any(Picks::dirty)
-            || self.extent.as_ref().is_some_and(ExtentForm::dirty)
-            || self.blend.as_ref().is_some_and(BlendForm::dirty)
-            || self.hole.as_ref().is_some_and(HoleForm::dirty)
-            || self.pattern.as_ref().is_some_and(PatternForm::dirty)
-            || self.mate.as_ref().is_some_and(MateForm::dirty)
-            || self.datum.as_ref().is_some_and(DatumForm::dirty)
-            || self.sweep.as_ref().is_some_and(SweepForm::dirty)
-            || self.loft.as_ref().is_some_and(LoftForm::dirty)
-            || self.shell.as_ref().is_some_and(ShellForm::dirty)
-            || self.offset.as_ref().is_some_and(BodyOffsetForm::dirty)
-            || self.split.as_ref().is_some_and(SplitForm::dirty)
-            || self.sheet.as_ref().is_some_and(SheetMetalForm::dirty)
+            || self.kind().is_some_and(|k| k.kind_dirty())
             || self.surface.as_ref().is_some_and(Flag::dirty)
-            || self.surface_form.as_ref().is_some_and(SurfaceForm::dirty)
-            || self.tweak.as_ref().is_some_and(TweakForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -841,52 +803,11 @@ impl Form {
         {
             p.chosen.clone_from(&p.read);
         }
-        if let Some(e) = &mut self.extent {
-            e.ty.chosen.clone_from(&e.ty.read);
-            e.length.text.clone_from(&e.length.read);
-            e.both.chosen = e.both.read;
-        }
-        if let Some(b) = &mut self.blend {
-            b.revert();
-        }
-        if let Some(h) = &mut self.hole {
-            h.revert();
-        }
-        if let Some(p) = &mut self.pattern {
-            p.revert();
-        }
-        if let Some(m) = &mut self.mate {
-            m.revert();
-        }
-        if let Some(d) = &mut self.datum {
-            d.revert();
-        }
-        if let Some(w) = &mut self.sweep {
-            w.revert();
-        }
-        if let Some(l) = &mut self.loft {
-            l.revert();
-        }
-        if let Some(s) = &mut self.shell {
-            s.revert();
-        }
-        if let Some(o) = &mut self.offset {
-            o.revert();
-        }
-        if let Some(s) = &mut self.split {
-            s.revert();
-        }
-        if let Some(t) = &mut self.tweak {
-            t.revert();
-        }
-        if let Some(s) = &mut self.sheet {
-            s.revert();
+        if let Some(k) = self.parts_mut().1 {
+            k.kind_revert();
         }
         if let Some(f) = &mut self.surface {
             f.chosen = f.read;
-        }
-        if let Some(s) = &mut self.surface_form {
-            s.revert();
         }
         // A refusal was about a value now put back (#532).
         for f in self.fields_mut() {
@@ -916,70 +837,20 @@ impl Form {
             Some("new") => None,
             _ => picked(&self.targets),
         };
-        let extent = self.extent.as_ref().filter(|e| e.dirty()).map(|e| {
-            let mut v = json!({"type": e.ty.chosen});
-            match e.ty.chosen.as_str() {
-                "blind" | "symmetric" => v["length"] = json!(e.length.text.trim()),
-                "through_all" => v["both"] = json!(e.both.chosen),
-                _ => {}
-            }
-            v
-        });
-        let blend = self.blend.as_ref();
         let mut out = FeatureFields {
             operation,
             targets,
-            extent,
             op: chosen(&self.op),
             target: chosen(&self.target),
             tools: picked(&self.tools),
             solids: picked(&self.solids),
-            groups: blend
-                .filter(|b| b.groups_dirty())
-                .map(BlendForm::groups_json),
-            propagate: blend
-                .filter(|b| b.propagate.dirty())
-                .map(|b| b.propagate.chosen),
             rev: chosen(&self.rev),
             fixed: self.fixed.as_ref().filter(|f| f.dirty()).map(|f| f.chosen),
             surface: surfaced,
             ..FeatureFields::default()
         };
-        if let Some(s) = &self.surface_form {
-            s.given(&mut out);
-        }
-        if let Some(h) = &self.hole {
-            h.given(&mut out);
-        }
-        if let Some(p) = &self.pattern {
-            p.given(&mut out)?;
-        }
-        if let Some(m) = &self.mate {
-            m.given(&mut out);
-        }
-        if let Some(d) = &self.datum {
-            d.given(&mut out);
-        }
-        if let Some(w) = &self.sweep {
-            w.given(&mut out);
-        }
-        if let Some(l) = &self.loft {
-            l.given(&mut out);
-        }
-        if let Some(s) = &self.shell {
-            s.given(&mut out);
-        }
-        if let Some(o) = &self.offset {
-            o.given(&mut out);
-        }
-        if let Some(s) = &self.split {
-            s.given(&mut out);
-        }
-        if let Some(s) = &self.sheet {
-            s.given(&mut out);
-        }
-        if let Some(t) = &self.tweak {
-            t.given(&mut out);
+        if let Some(k) = self.kind() {
+            k.kind_given(&mut out)?;
         }
         Ok(out)
     }
@@ -1184,6 +1055,67 @@ impl DimForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Design 541's forms per kind: a `Form` asks its one kind's form, so no
+    /// type may read two.
+    #[test]
+    fn every_type_reads_at_most_one_kinds_form() {
+        let types = [
+            "box",
+            "cylinder",
+            "cone",
+            "sphere",
+            "torus",
+            "sketch",
+            "extrude",
+            "revolve",
+            "boolean",
+            "fillet",
+            "chamfer",
+            "hole",
+            "pattern",
+            "instance_pattern",
+            "import",
+            "instance",
+            "mate",
+            "plane",
+            "axis",
+            "point",
+            "path",
+            "helix",
+            "sweep",
+            "loft",
+            "shell",
+            "offset",
+            "mirror",
+            "split",
+            "base_flange",
+            "flange",
+            "unfold",
+            "refold",
+            "planar",
+            "fill",
+            "extract",
+            "sew",
+            "thicken",
+            "draft",
+            "move_face",
+            "replace_face",
+            "delete_face",
+            "delete_blend",
+            "resize_blend",
+            "insert",
+            "delete_body",
+        ];
+        for ty in types {
+            let f = Form::from_show("p", &json!({"id": "f", "type": ty, "revision": "1"}));
+            assert!(
+                f.kinds().len() <= 1,
+                "{ty} reads {} kinds' forms",
+                f.kinds().len()
+            );
+        }
+    }
 
     #[test]
     fn a_deletes_solids_are_taken_out_one_by_one() {
