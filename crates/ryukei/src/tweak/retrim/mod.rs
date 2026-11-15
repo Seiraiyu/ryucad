@@ -213,7 +213,7 @@ pub(crate) fn retrim_with(
         // Each build under its own cap: one that can't settle refuses
         // `Uncertain` in bounded units, as the caps do.
         Some(m.capped(crate::work::Scope::Rung, || {
-            attempt(key, body, changes, &region, &bx, which, m)
+            attempt(key, body, changes, &region, &bx, rung, which, m)
         }))
     })
 }
@@ -287,12 +287,15 @@ fn laminar_free(body: &Body, region: &Region) -> Result<(), Error> {
 }
 
 /// One rung: the working body, the table, the walk, the result's checks.
+/// `rung` says how a near box is doubled (rung 1) in a narrowed build.
+#[allow(clippy::too_many_arguments)]
 fn attempt(
     key: OpKey,
     body: &Body,
     changes: &Changes,
     region: &Region,
     bx: &crate::geom::Box3,
+    rung: usize,
     which: Build,
     m: &Meter,
 ) -> Rung {
@@ -312,6 +315,9 @@ fn attempt(
     // The seams kept faces were tangent along, all along or in places,
     // across the frontier too (design 642).
     let held = held::held(body, region, &still);
+    // A narrowed build's gaps, for its working faces' near boxes (plan
+    // 20.B).
+    let gaps = narrowed.then(|| near::Gaps::of(body, changes, region));
     // Whether a narrowed build narrowed anything.
     let mut narrowing = false;
     for &f in region
@@ -328,60 +334,71 @@ fn attempt(
             .get(&f)
             .copied()
             .unwrap_or(body.faces[f].sense);
-        match working::working(
-            body,
-            f,
-            changes.surface.get(&f),
-            sense,
-            working::same_params(mo),
-            bx,
-        ) {
-            Ok(mut w) => {
-                // Its turn as a first build gives it, and in a narrowed
-                // build read round the circle (design 669). A face
-                // standing for others on its surface covers them all: its
-                // whole turn (NIST FTC 09's hole halves).
-                let turned = |circular: bool| {
-                    let mut r = w.rect;
-                    if !absorbing.contains(&f) {
-                        for (k, t) in working::delete_turn(body, changes, f, &w.surface, circular)
-                            .into_iter()
-                            .enumerate()
-                        {
-                            if let Some(t) = t {
-                                r[k] = t;
-                            }
-                        }
+        let over = |b: &crate::geom::Box3| {
+            working::working(
+                body,
+                f,
+                changes.surface.get(&f),
+                sense,
+                working::same_params(mo),
+                b,
+            )
+        };
+        // Its turn as a first build gives it, and in a narrowed build
+        // read round the circle (design 669). A face standing for others
+        // on its surface covers them all: its whole turn (NIST FTC 09's
+        // hole halves).
+        let turned = |w: &working::Working, circular: bool| {
+            let mut r = w.rect;
+            if !absorbing.contains(&f) {
+                for (k, t) in working::delete_turn(body, changes, f, &w.surface, circular)
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Some(t) = t {
+                        r[k] = t;
                     }
-                    r
-                };
-                let first = turned(false);
-                let round = narrowed.then(|| turned(true));
-                w.rect = first;
-                // Built narrowed: turned round the circle, then ended at
-                // its held seams whose ends can't move (design 642), iso
-                // stops first and plane stops where none applied.
-                if let Some(round) = round {
-                    w.rect = held::iso_stops(body, f, &held, &w.surface, round);
-                    if let Some(cut) = held::plane_stops(
-                        body::sheet_key(key, body.faces[f].name),
-                        body,
-                        f,
-                        &held,
-                        &w.surface,
-                        round,
-                        w.rect,
-                        bx,
-                        m,
-                    ) {
-                        w.cut = Some(cut);
-                    }
-                    narrowing |= w.rect != first || w.cut.is_some();
                 }
-                ws.insert(f, w);
             }
+            r
+        };
+        let mut w = match over(bx) {
+            Ok(w) => w,
             Err(e) => return done(Err(e)),
+        };
+        let first = turned(&w, false);
+        w.rect = first;
+        if let Some(gaps) = &gaps {
+            // Built narrowed: carried over its near box only (plan 20.B),
+            // turned round the circle, then ended at its held seams whose
+            // ends can't move (design 642), iso stops first and plane
+            // stops where none applied.
+            let before = w.surface.clone();
+            let near = near::near_box(body, gaps, f, bx, rung);
+            if near != *bx {
+                w = match over(&near) {
+                    Ok(w) => w,
+                    Err(e) => return done(Err(e)),
+                };
+            }
+            let round = turned(&w, true);
+            w.rect = held::iso_stops(body, f, &held, &w.surface, round);
+            if let Some(cut) = held::plane_stops(
+                body::sheet_key(key, body.faces[f].name),
+                body,
+                f,
+                &held,
+                &w.surface,
+                round,
+                w.rect,
+                bx,
+                m,
+            ) {
+                w.cut = Some(cut);
+            }
+            narrowing |= w.rect != first || w.surface != before || w.cut.is_some();
         }
+        ws.insert(f, w);
     }
     // A narrowed retry that narrows nothing would only repeat the first.
     if which == Build::Retry && !narrowing {

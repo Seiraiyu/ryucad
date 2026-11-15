@@ -743,17 +743,17 @@ fn a_retry_that_narrows_nothing_is_never_built() {
     // unmetered: a unit test.
     let m = crate::work::Meter::free();
     assert!(matches!(
-        attempt(K, &b, &changes, &region, &bx, Build::Retry, &m),
+        attempt(K, &b, &changes, &region, &bx, 0, Build::Retry, &m),
         Rung::Unchanged
     ));
     let dump = |r: Rung| match r {
         Rung::Done(r) => r.ok().map(|(o, _)| o.dump_unnamed()),
         _ => None,
     };
-    let first = dump(attempt(K, &b, &changes, &region, &bx, Build::First, &m));
+    let first = dump(attempt(K, &b, &changes, &region, &bx, 0, Build::First, &m));
     assert!(first.is_some(), "the raised block builds");
     assert_eq!(
-        dump(attempt(K, &b, &changes, &region, &bx, Build::Only, &m)),
+        dump(attempt(K, &b, &changes, &region, &bx, 0, Build::Only, &m)),
         first
     );
 }

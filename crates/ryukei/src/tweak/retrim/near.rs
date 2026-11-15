@@ -15,7 +15,6 @@ use std::collections::{BTreeMap, BTreeSet};
 /// A region's changed faces in gaps: faces sharing a vertex are one gap
 /// (plan 20.B, Decision 1). Each gap's box and its reach.
 #[derive(Clone, Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct Gaps {
     /// Each changed face's gap.
     pub(crate) of: BTreeMap<FaceId, usize>,
@@ -27,7 +26,6 @@ pub(crate) struct Gaps {
 
 impl Gaps {
     /// The gaps of `region`'s changed faces, numbered by their least face.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn of(body: &Body, changes: &Changes, region: &Region) -> Gaps {
         let mut at: BTreeMap<VertexId, Vec<FaceId>> = BTreeMap::new();
         for &f in &region.changed {
@@ -87,7 +85,6 @@ impl Gaps {
 /// none), doubled about its middle at rung 1 as the rung's box is, and
 /// kept inside the rung's box `x` (already doubled at rung 1); `x` itself
 /// where they don't meet.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn near_box(body: &Body, gaps: &Gaps, f: FaceId, x: &Box3, rung: usize) -> Box3 {
     let mut touched = BTreeSet::new();
     if let Some(&k) = gaps.of.get(&f) {
@@ -117,7 +114,6 @@ pub(crate) fn near_box(body: &Body, gaps: &Gaps, f: FaceId, x: &Box3, rung: usiz
 }
 
 /// Where boxes `a` and `x` overlap, or `None`.
-#[cfg_attr(not(test), allow(dead_code))]
 fn within(a: &Box3, x: &Box3) -> Option<Box3> {
     use crate::geom::Point3;
     let lo = Point3::new(

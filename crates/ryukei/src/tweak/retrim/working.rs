@@ -501,4 +501,40 @@ pub(crate) mod tests {
         }
         assert!(periodic > 0);
     }
+
+    #[test]
+    fn a_cylinder_over_its_near_box_is_no_longer_than_the_box() {
+        // The rounded block's quarter cylinder beside its low corner,
+        // carried over a box twenty times its size and over a near box.
+        let (r, low, _) = super::super::near::tests::rounded();
+        let cyl = r
+            .face_loops(low)
+            .flat_map(|l| r.loop_fins(l))
+            .flat_map(|fin| r.edge_fins(r.fins[fin].edge))
+            .map(|x| r.loops[r.fins[x].loop_].face)
+            .find(|&g| matches!(r.surfaces[r.faces[g].surface], Surface::Cylinder(_)))
+            .unwrap();
+        let huge = Box3::new(
+            Point3::new(-10.0, -10.0, -10.0),
+            Point3::new(10.0, 10.0, 10.0),
+        );
+        let near = crate::intersect::face_box(&r, cyl)
+            .union(&crate::intersect::face_box(&r, low))
+            .grow(0.1);
+        let sense = r.faces[cyl].sense;
+        let wide = working(&r, cyl, None, sense, true, &huge).unwrap();
+        let narrow = working(&r, cyl, None, sense, true, &near).unwrap();
+        // Along the axis (v): the near box's projection, a sixteenth
+        // each way, not the huge box's.
+        let len = |w: &Working| w.rect[1][1] - w.rect[1][0];
+        assert!(
+            len(&narrow) < len(&wide) / 10.0,
+            "{:?} {:?}",
+            narrow.rect,
+            wide.rect
+        );
+        let d = near.max() - near.min();
+        let span = d.x.max(d.y).max(d.z);
+        assert!(len(&narrow) <= span * (1.0 + 2.0 / 16.0) + 1e-12);
+    }
 }
