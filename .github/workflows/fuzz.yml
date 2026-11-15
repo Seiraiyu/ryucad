@@ -32,6 +32,26 @@ jobs:
       # default everywhere else.
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo install cargo-fuzz --locked
+      # Room to build (plan 30.D). Every run lost 3 to 5 of its 37 jobs in
+      # Build, with no log ("lost communication with the server"), at two
+      # jobs; the runner starves under ASan's compile. Swap on the runner's
+      # spare disk lets a peak page out instead of killing the runner, and
+      # the SDKs the fuzz build never uses free the root disk its target
+      # dir fills.
+      - name: Swap and disk
+        run: |
+          free -m; df -h / /mnt || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          # 16 GB on /mnt where the runner has it, else 8 GB on /.
+          f=/mnt/fuzz.swap; g=16
+          if [ "$(df -BG --output=avail /mnt 2>/dev/null | tail -1 | tr -dc 0-9)" -lt 24 ] 2>/dev/null \
+             || ! mountpoint -q /mnt; then f=/fuzz.swap; g=8; fi
+          sudo swapoff -a
+          sudo fallocate -l ${g}G $f
+          sudo chmod 600 $f
+          sudo mkswap $f
+          sudo swapon $f
+          free -m; df -h / /mnt || true
       # Built apart from the run, so a build failure is told from a find.
       # Two jobs, not the runner's four: 30.A's dispatches lost 4 of about
       # 38 jobs mid-build, with no log ("lost communication"), and every
@@ -40,9 +60,18 @@ jobs:
       - name: Build
         id: build
         working-directory: fuzz
+        shell: bash
         env:
           CARGO_BUILD_JOBS: 2
-        run: cargo +nightly fuzz build ${{ matrix.target }}
+        # A line a minute of memory, swap and disk, so a build that starves
+        # says how far it got.
+        run: |
+          (while sleep 60; do
+            echo "resources $(date -u +%H:%M:%S) mem $(free -m | awk '/^Mem/{print $3"/"$2}') MB, swap $(free -m | awk '/^Swap/{print $3}') MB, disk $(df -m --output=avail / | tail -1) MB free"
+          done) &
+          s=$!
+          trap 'kill $s' EXIT
+          cargo +nightly fuzz build ${{ matrix.target }}
       - name: Fuzz for 10 minutes
         id: fuzz
         working-directory: fuzz
