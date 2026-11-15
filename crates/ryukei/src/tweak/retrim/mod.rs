@@ -11,6 +11,7 @@
 pub(crate) mod body;
 pub(crate) mod held;
 pub(crate) mod names;
+pub(crate) mod near;
 pub(crate) mod region;
 pub(crate) mod seeds;
 pub(crate) mod walk;
@@ -220,17 +221,25 @@ pub(crate) fn retrim_with(
 /// How far a changed face's vertex moves, at most, and at least ten
 /// resolutions.
 fn reach(body: &Body, changes: &Changes) -> f64 {
+    reach_of(body, changes, &|_| true)
+}
+
+/// [`reach`] over the changed faces `keep` takes (a near box's gap, plan
+/// 20.B). Over every face it is `reach`, bit for bit: the same faces in
+/// the same order.
+pub(crate) fn reach_of(body: &Body, changes: &Changes, keep: &dyn Fn(FaceId) -> bool) -> f64 {
     let mut r: f64 = 10.0 * crate::tol::LINEAR_RESOLUTION;
     // A gap is as wide as the box of the faces taken away.
     if let Some(g) = changes
         .deleted
         .iter()
+        .filter(|&&f| keep(f))
         .map(|&f| crate::intersect::face_box(body, f))
         .reduce(|a, b| a.union(&b))
     {
         r = r.max(g.min().distance(g.max()));
     }
-    for (&f, mo) in &changes.motion {
+    for (&f, mo) in changes.motion.iter().filter(|&(&f, _)| keep(f)) {
         // An offset moves every point by its distance (`apply` needs the
         // normal for that, which a vertex alone doesn't give).
         if let crate::tweak::Motion::Offset(d) = mo {
