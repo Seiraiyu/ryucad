@@ -1,5 +1,6 @@
 //! Held seams (design 642, #652): input edges along which two faces that
-//! both stay where they were are tangent, all along or in places, with at
+//! both stay where they were are tangent, all along or in places, or bend
+//! in a way `classify::tangent` can't settle (question 917), with at
 //! least one of them a working face. The table meets each such pair
 //! along the edge (`intersect::known_seam`), and where one still refuses
 //! the re-trim builds the rung again with stops at the seams whose ends
@@ -24,18 +25,22 @@ pub(crate) struct Held {
     pub(crate) kind: SeamKind,
 }
 
-/// Whether the faces of edge `e` are tangent along it all along or in
-/// places: `classify::tangent` is `Ok(true)` or refuses `PartlySmooth`
-/// (design 642, Decision 1). A transversal edge (`Ok(false)`) is met by a
-/// trace; an uncertain bend isn't held.
+/// Whether the faces of edge `e` may meet along it alone: tangent all
+/// along or in places (`classify::tangent` is `Ok(true)` or refuses
+/// `PartlySmooth`), or a bend it can't settle (`Uncertain`; question
+/// 917): neither certificate assumes tangency, each proves the faces
+/// meet only along the seam. A transversal edge (`Ok(false)`) is met by
+/// a trace (design 642, Decision 1).
 pub(crate) fn held_tangent(body: &Body, e: EdgeId) -> bool {
     matches!(
         crate::tweak::classify::tangent(body, e),
         Ok(true)
-            | Err(Error::InvalidTweak(TweakError::Unsupported {
-                case: TweakCase::PartlySmooth,
-                ..
-            }))
+            | Err(Error::InvalidTweak(
+                TweakError::Unsupported {
+                    case: TweakCase::PartlySmooth,
+                    ..
+                } | TweakError::Uncertain { .. }
+            ))
     )
 }
 
@@ -43,9 +48,9 @@ pub(crate) fn held_tangent(body: &Body, e: EdgeId) -> bool {
 /// every edge with two fins, both with pcurves, on two faces that both
 /// stay (outside the region, or `still`: in it and left as they are),
 /// at least one a region face (a working face), tangent along it all
-/// along or in places ([`held_tangent`]). Each is `Frontier` where one
-/// face is outside, `Fixed` where every face round both its ends stays,
-/// else `Running`.
+/// along or in places, or an uncertain bend ([`held_tangent`]). Each is
+/// `Frontier` where one face is outside, `Fixed` where every face round
+/// both its ends stays, else `Running`.
 pub(crate) fn held(body: &Body, region: &Region, still: &dyn Fn(FaceId) -> bool) -> Vec<Held> {
     let stays = |f: FaceId| !region.faces.contains(&f) || still(f);
     let face = |fin: FinId| body.loops[body.fins[fin].loop_].face;
@@ -793,5 +798,50 @@ mod tests {
         assert!(
             plane_stops(OpKey(0x19b9), &s, f, &[h], &surface, rect, shorter, &bx, &m).is_none()
         );
+    }
+
+    /// Question 917: an edge whose bend `classify::tangent` can't settle is
+    /// held; neither certificate assumes tangency. A transversal edge
+    /// (`Ok(false)`) still isn't.
+    #[test]
+    fn an_uncertain_bend_is_held_and_a_transversal_edge_is_not() {
+        use crate::tweak::retrim::tests::block;
+        // The block's edges are transversal: none held.
+        let b = block();
+        assert!(b.edges().all(|e| !held_tangent(&b, e)));
+        // The NIST cut 19.A committed for FTC 07's partly smooth ellipse is
+        // held as before.
+        let input = crate::codec::decode_body(include_bytes!(
+            "../../../tests/data/nist_ftc_07_partly_input.body"
+        ))
+        .unwrap();
+        let e = input
+            .edges()
+            .find(|&e| input.edge_fins(e).count() == 2)
+            .unwrap();
+        assert!(held_tangent(&input, e));
+    }
+
+    /// STC 07's plane/NURBS pair at a frontier (census III, plan 19.B):
+    /// `classify::tangent` can't settle its bend, and it is held.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "slow in a debug build: CI runs it in release"
+    )]
+    fn stc_07s_uncertain_bend_is_held() {
+        let input = crate::codec::decode_body(include_bytes!(
+            "../../../tests/data/nist_stc_07_bend_input.body"
+        ))
+        .unwrap();
+        let e = input
+            .edges()
+            .find(|&e| input.edge_fins(e).count() == 2)
+            .unwrap();
+        assert!(matches!(
+            crate::tweak::classify::tangent(&input, e),
+            Err(crate::Error::InvalidTweak(crate::TweakError::Uncertain { .. }))
+        ));
+        assert!(held_tangent(&input, e));
     }
 }
