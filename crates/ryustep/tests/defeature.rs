@@ -622,17 +622,20 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 }
 
 /// Pinned editions that must defeature and check clean, by file and
-/// representation: every edition plan 18.C saw defeatured (16.C's 17). A
-/// refusal or a deadline for any of them fails. Design 551 expected #652's
-/// AP242 twins (STC 07 #11020, STC 10 #3044, FTC 07 #13541) here too; their
-/// seams lie on the frontier or are only partly smooth, so the known seams
-/// don't settle them (#652, #658: ryukei 19 adds them when they build).
-/// CTC 02 with PMI (#295) isn't here either: plan 19.A's held seams meet
-/// its closed frontier ellipse, but a later re-trim of the same delete
-/// then fails to trace a cylinder/cylinder pair with no seam (#658).
+/// representation: the 17 plan 18.C saw defeatured (16.C's), and the
+/// seam-cause editions plan 19.B's held seams and stops settle: CTC 02's
+/// geometry-only edition (#20754), its bends' `Uncertain` tangency now
+/// held (question 917). A refusal or a deadline for any of them fails.
+/// Still out (#652, #658): FTC 07 AP242 #13541 (a pair of working faces
+/// with no shared edge refuses `Uncertain`); STC 07 #11020 (its held bend
+/// takes the stopped build past the deadline, where main refused in 71 s);
+/// STC 10 #3044 (a torus/cylinder pair with no shared edge); CTC 02 with
+/// PMI #295 (carried near-tangent cylinders with no shared edge, recorded
+/// under question 882); linkrods #11 (past the deadline on main too).
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
+    ("nist_ctc_02_asme1_rc.stp", 20754),
     ("nist_ctc_03_asme1_ap203.stp", 154),
     ("nist_ctc_03_asme1_rc.stp", 13),
     ("nist_ctc_04_asme1_ap203.stp", 559),
