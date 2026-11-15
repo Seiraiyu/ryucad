@@ -51,6 +51,7 @@ pub fn ryueda_cmd(dir: &Path, run: &Path, daemon: bool, args: &[&str]) -> Comman
         .env("RYUEDA_IDLE_TIMEOUT", "60")
         .env("RYUEDA_CONFIG_DIR", run.with_file_name("config"))
         .env("RYUEDA_CACHE_DIR", run.with_file_name("cache"))
+        .env("RYUEDA_DEPS_DIR", run.with_file_name("deps"))
         .env("RYUEDA_ID_SEED", "git")
         .env("GIT_CONFIG_GLOBAL", run.with_file_name("gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")

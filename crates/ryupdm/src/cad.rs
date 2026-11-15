@@ -3,7 +3,7 @@
 //! drawings and `properties.json`); its content hash is
 //! [`crate::content::hash`]; the manifest is `ryucad.json`.
 
-use crate::product::{Identity, PartFiles, Product};
+use crate::product::{Identity, PartFiles, PartKind, Product};
 use ryu_doc::error::Result;
 use ryu_doc::id::Id;
 use ryu_doc::source::{Kind, Source, join};
@@ -27,12 +27,17 @@ impl ryu_git::Layout for Cad {
 impl Product for Cad {
     const PART_FOLDERS: &'static [&'static str] = &["parts"];
 
-    fn parts(src: &dyn Source) -> Result<Vec<Id>> {
+    /// Each folder under `parts/`, with the kind its `part.json` gives.
+    fn parts(src: &dyn Source) -> Result<Vec<(Id, PartKind)>> {
         Ok(src
             .list("parts")?
             .into_iter()
             .filter(|(_, k)| *k == Kind::Dir)
             .filter_map(|(n, _)| Id::parse(&n, "part").ok())
+            .map(|id| {
+                let kind = kind_of(src, &id);
+                (id, kind)
+            })
             .collect())
     }
 
@@ -69,6 +74,26 @@ impl Product for Cad {
     }
 }
 
+/// What `parts/<part>/part.json` says the part is: `assembly` when its
+/// `part_kind` says so, else `part`, ryucad's default and what a file
+/// that can't be read is taken for (its content hash names the fault).
+fn kind_of(src: &dyn Source, part: &Id) -> PartKind {
+    let path = join(&join("parts", part.as_str()), "part.json");
+    let v: Option<Value> = src
+        .read(&path)
+        .ok()
+        .flatten()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    match v
+        .as_ref()
+        .and_then(|v| v.get("part_kind"))
+        .and_then(Value::as_str)
+    {
+        Some("assembly") => PartKind::Assembly,
+        _ => PartKind::Part,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,7 +123,18 @@ mod tests {
             f.insert(format!("parts/{p}/part.json"), b"{}".to_vec());
         }
         f.insert("parts/loose.json".into(), b"{}".to_vec());
-        assert_eq!(Cad::parts(&f).unwrap(), [id("a"), id("b")]);
+        f.insert(
+            "parts/b/part.json".into(),
+            br#"{"format":2,"kind":"ryucad.part","part_kind":"assembly","features":[]}"#.to_vec(),
+        );
+        assert_eq!(
+            Cad::parts(&f).unwrap(),
+            [(id("a"), PartKind::Part), (id("b"), PartKind::Assembly)]
+        );
+        assert_eq!(
+            crate::product::part_ids::<Cad>(&f).unwrap(),
+            [id("a"), id("b")]
+        );
         assert_eq!(Cad::properties_path(&id("p")), "parts/p/properties.json");
         assert_eq!(
             Cad::part_files(&id("p")),

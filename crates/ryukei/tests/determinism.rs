@@ -3710,6 +3710,26 @@ fn known_seams_section(golden: &mut Golden) {
     }
 }
 
+/// ryukei 19.A's held seams (design 642, #652): the bent rod with its
+/// start rim filleted (`ryukei_testkit::held_seams`), the rim deleted.
+/// The run, carried past the bend, crosses the bend's torus, which stays
+/// outside the region: a frontier seam with fixed ends, met along it once
+/// the run stops there (an iso stop). The result's body, created names
+/// and mesh, or the refusal's bytes.
+fn held_seams_section(golden: &mut Golden) {
+    use ryukei::tweak::delete_blends;
+    use ryukei_testkit::held_seams::{bent_rod, spec};
+    let mut s = golden.section("held_seams");
+    match delete_blends(OpKey(0x19a0), &bent_rod(), &spec()) {
+        Ok((o, j)) => hash_body(&mut s, &o, &j),
+        Err(e) => {
+            for byte in format!("{e:?}").bytes() {
+                s.u64(u64::from(byte));
+            }
+        }
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3807,6 +3827,7 @@ sections! {
     crossing_beside => crossing_beside_section,
     flat_pieces => flat_pieces_section,
     known_seams => known_seams_section,
+    held_seams => held_seams_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline

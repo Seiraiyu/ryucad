@@ -13,6 +13,32 @@ use ryucad_app::ui::platform;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// The system's allocator, which writes to the trace when an allocation
+/// fails, before Rust's runtime aborts (#799).
+#[global_allocator]
+static ALLOC: ryucad_app::ui::exits::TracedAlloc = ryucad_app::ui::exits::TracedAlloc;
+
+/// Windows runs an executable's TLS callbacks as the process detaches
+/// (`ExitProcess`, which `std::process::exit` calls), after every other
+/// thread has gone: the trace says so if `main` didn't end it (#799).
+#[cfg(windows)]
+#[used]
+#[unsafe(link_section = ".CRT$XLY")]
+static ON_DETACH: unsafe extern "system" fn(*mut std::ffi::c_void, u32, *mut std::ffi::c_void) =
+    on_detach;
+
+#[cfg(windows)]
+unsafe extern "system" fn on_detach(
+    _: *mut std::ffi::c_void,
+    reason: u32,
+    _: *mut std::ffi::c_void,
+) {
+    // DLL_PROCESS_DETACH.
+    if reason == 0 {
+        ryucad_app::ui::exits::win::detaching();
+    }
+}
+
 const USAGE: &str = "Usage: ryucad-app [DIR]
 
 Opens the ryucad project in or above DIR, or the start window without one.
@@ -34,6 +60,13 @@ fn main() -> ExitCode {
         println!("{v}");
         return ExitCode::SUCCESS;
     }
+    // How the app started and ended, in the runtime folder (#799).
+    platform::begin_trace(&args.join(" "));
+    #[cfg(debug_assertions)]
+    if let Some(how) = std::env::var_os("RYUCAD_APP_FAIL") {
+        platform::crash_reports();
+        ryucad_app::ui::exits::fail_for_tests(&how.to_string_lossy());
+    }
     if args.first().is_some_and(|a| a == "--smoke") {
         let dir = args
             .get(1)
@@ -48,11 +81,16 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE,
             ),
         };
+        platform::trace(&format!(
+            "exited: {}",
+            doc["error"]["code"].as_str().unwrap_or("ok")
+        ));
         println!("{doc}");
         return code;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
+        platform::trace("exited: help");
         return ExitCode::SUCCESS;
     }
     // A flag it doesn't know, or more than one folder, is a mistake, not
@@ -62,6 +100,7 @@ fn main() -> ExitCode {
             "ryucad-app: unexpected argument '{}'\n\n{USAGE}",
             args.join(" ")
         );
+        platform::trace("exited: usage");
         return ExitCode::from(2);
     }
     // Before winit opens the display, and before any thread starts.
@@ -76,6 +115,7 @@ fn main() -> ExitCode {
     let daemon = match find_ryucad() {
         Ok(d) => d,
         Err(e) => {
+            platform::trace(&format!("exited: {}", e.message));
             platform::fatal("ryucad can't start", &e.message);
             return ExitCode::FAILURE;
         }
@@ -89,16 +129,30 @@ fn main() -> ExitCode {
             .with_maximized(saved.is_some_and(|g| g.maximized)),
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: platform::wgpu_options(),
+        // eframe's loop returns here when it ends, never calling
+        // `process::exit` itself: every end gets its trace line (#799).
+        run_and_return: true,
         ..Default::default()
     };
+    // `alive: …` in the trace while the window runs (#799).
+    ryucad_app::ui::exits::heartbeat();
     let run = eframe::run_native(
         "ryucad",
         options,
-        Box::new(move |cc| Ok(Box::new(App::open(&cc.egui_ctx, dir.as_deref(), &daemon)))),
+        Box::new(move |cc| {
+            if let Some(gpu) = &cc.wgpu_render_state {
+                ryucad_app::ui::exits::watch_device(&gpu.device);
+            }
+            Ok(Box::new(App::open(&cc.egui_ctx, dir.as_deref(), &daemon)))
+        }),
     );
     match run {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            platform::trace("exited: the window closed");
+            ExitCode::SUCCESS
+        }
         Err(e) => {
+            platform::trace(&format!("exited: {e}"));
             // No display, or no adapter: each said once (#740).
             let (title, message) = platform::cant_run(&e.to_string());
             platform::fatal(title, &message);

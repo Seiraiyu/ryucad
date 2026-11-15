@@ -101,3 +101,115 @@ pub(crate) fn footed_corner_region() -> Box3 {
     let [x, y] = corner_faces();
     face_box(b, x).union(&face_box(b, y))
 }
+
+/// ryukei 19.A's twin of #652's seams: `ryukei_testkit::held_seams`'s
+/// bent rod (see there), built the same way, and its rim fillet's face.
+pub(crate) fn bent_rod() -> (Body, FaceId) {
+    use crate::geom::{Circle, Circle2, Curve, Frame2, Line, Vector2};
+    use crate::sweep::{AlongOptions, Path, PathSegment, along};
+    use core::f64::consts::{FRAC_PI_2, TAU};
+    let (radius, bend_r, rim_r) = (0.3, 1.0, 0.05);
+    let f2 = Frame2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0), true).unwrap();
+    let round = Loop {
+        key: LoopKey(1),
+        segments: vec![Segment {
+            key: SegmentKey(1),
+            curve: Curve2::Circle2(Circle2::new(f2, radius).unwrap()),
+            t0: 0.0,
+            t1: TAU,
+        }],
+    };
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap(),
+        loops: vec![round],
+    })
+    .unwrap();
+    let bend = Frame::new(
+        Point3::new(2.0, bend_r, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let part = |key, curve, range| PathSegment {
+        key: SegmentKey(key),
+        curve,
+        range,
+    };
+    let path = Path {
+        segments: vec![
+            part(
+                1,
+                Curve::Line(Line::new(Point3::ORIGIN, Vector3::new(1.0, 0.0, 0.0)).unwrap()),
+                [0.0, 2.0],
+            ),
+            part(
+                2,
+                Curve::Circle(Circle::new(bend, bend_r).unwrap()),
+                [-FRAC_PI_2, 0.0],
+            ),
+            part(
+                3,
+                Curve::Line(
+                    Line::new(
+                        Point3::new(2.0 + bend_r, bend_r, 0.0),
+                        Vector3::new(0.0, 1.0, 0.0),
+                    )
+                    .unwrap(),
+                ),
+                [0.0, 2.0],
+            ),
+        ],
+    };
+    let (rod, _) = along(OpKey(0x19a1), &profile, &path, &AlongOptions::default()).unwrap();
+    let cap = rod
+        .faces()
+        .find(|&f| {
+            matches!(rod.surfaces[rod.faces[f].surface], Surface::Plane(_))
+                && face_box(&rod, f).max().x.abs() < 1e-6
+        })
+        .unwrap();
+    let rim = rod
+        .edges()
+        .find(|&e| {
+            rod.edge_fins(e)
+                .any(|fin| rod.loops[rod.fins[fin].loop_].face == cap)
+        })
+        .unwrap();
+    let (out, _) = blend(
+        OpKey(0x19a2),
+        &rod,
+        &[EdgeBlend {
+            edge: rod.edges[rim].name,
+            kind: BlendKind::Fillet { radius: rim_r },
+        }],
+    )
+    .unwrap();
+    let fillet = out
+        .faces()
+        .find(|&f| {
+            matches!(&out.surfaces[out.faces[f].surface],
+                Surface::Torus(t) if (t.minor() - rim_r).abs() < 1e-12)
+        })
+        .expect("the rim fillet");
+    (out, fillet)
+}
+
+#[cfg(test)]
+mod rod_tests {
+    /// The crate's rod is the testkit's (design 642's twin).
+    #[test]
+    fn the_crates_bent_rod_is_the_testkits() {
+        let (rod, _) = super::bent_rod();
+        let h = ryukei_testkit::held_seams::fnv(rod.dump_unnamed().as_bytes());
+        assert_eq!(
+            h,
+            ryukei_testkit::held_seams::ROD_DUMP_HASH,
+            "rod: {h:#018x}"
+        );
+    }
+}

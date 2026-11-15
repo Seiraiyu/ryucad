@@ -2,7 +2,8 @@
 //! file merged as `ryueda git merge-driver` merges them. The first byte
 //! picks the reading: below 0x80, raw (three versions split at 0xff
 //! bytes, so anything at all reaches the driver); else a seeded file of
-//! one of five kinds (a component, a net, a block, a style, a layout) and
+//! one of six kinds (a component, a net, a block, a style, a layout, a
+//! `ryueda.lock`, whose clean merges read as a lock) and
 //! two sides' edits to it, two bytes an edit, the sides split at a 0xfe
 //! byte. Merging never panics and gives the same bytes twice; a merge by
 //! value is canonical JSON whose record holds as many conflicts as it
@@ -27,7 +28,10 @@ fn base(kind: usize) -> Value {
                     "ports": {"p1": {"name": "P1", "direction": "in"}}}),
         3 => json!({"kind": "ryueda.style", "format": 1,
                     "palette": {"wire": {"light": "#000000", "dark": "#ffffff"}}}),
-        _ => json!({"kind": "ryueda.layout", "format": 5, "placed": {}}),
+        4 => json!({"kind": "ryueda.layout", "format": 5, "placed": {}}),
+        _ => json!({"kind": "ryueda.lock", "format": 1, "projects": {
+            "02020202020202020202020202020202": {"labels": {"r/A": locked(0)},
+                "path": "lib", "release_branch": "main", "url": "file:///libs", "via": []}}}),
     }
 }
 
@@ -50,6 +54,11 @@ fn toggle(v: &mut Value, field: &str, x: u8) {
         }
         _ => v[field] = json!(set),
     }
+}
+
+/// A locked label at a commit of `x`'s.
+fn locked(x: u8) -> Value {
+    json!({"commit": format!("{:040x}", u32::from(x) + 1), "content": "c".repeat(64)})
 }
 
 fn remove(v: &mut Value, key: &str) {
@@ -100,6 +109,19 @@ fn edited(kind: usize, b: &Value, edits: &[u8]) -> Value {
             (3, 1) => remove(&mut v["palette"], &format!("c{}", x % 4)),
             (3, 2) => toggle(&mut v, "locks", x),
             (3, _) => v["rules"] = json!([{"select": format!("s{}", x % 3)}]),
+            (5, op) => {
+                let labels = &mut v["projects"]["02020202020202020202020202020202"]["labels"];
+                let key = format!(
+                    "{}/{}",
+                    ["r", "c", "u"][usize::from(x) % 3],
+                    ["A", "B"][usize::from(x / 3) % 2]
+                );
+                match op % 3 {
+                    0 => labels[key.as_str()] = locked(x),
+                    1 => remove(labels, &key),
+                    _ => labels[key.as_str()] = locked(x / 2),
+                }
+            }
             (_, 0) => {
                 v["placed"][format!("r{}", x % 4)] =
                     json!({"sheet": "s1", "at": [i64::from(x) * 1_270_000, 0]})
@@ -119,7 +141,11 @@ fn edited(kind: usize, b: &Value, edits: &[u8]) -> Value {
 /// Merges, checks what every merge must hold, and answers the bytes.
 fn check(b: &[u8], o: &[u8], t: &[u8], readable: bool) -> Vec<u8> {
     let (out, outcome) = bytes(b, o, t);
-    assert_eq!(bytes(b, o, t), (out.clone(), outcome), "the same bytes twice");
+    assert_eq!(
+        bytes(b, o, t),
+        (out.clone(), outcome),
+        "the same bytes twice"
+    );
     let n = match outcome {
         Outcome::Text(_) => {
             assert!(!readable, "a readable file fell back to lines");
@@ -158,7 +184,7 @@ fuzz_target!(|data: &[u8]| {
         check(b, o, t, false);
         return;
     }
-    let kind = usize::from(mode) % 5;
+    let kind = usize::from(mode) % 6;
     let mut sides = rest.splitn(2, |b| *b == 0xfe);
     let (eo, et) = (
         sides.next().unwrap_or_default(),
@@ -169,6 +195,9 @@ fuzz_target!(|data: &[u8]| {
     let text = |v: &Value| ryueda::canonical::to_string(v).into_bytes();
     let (bb, ob, tb) = (text(&b), text(&o), text(&t));
     let out = check(&bb, &ob, &tb, true);
+    if kind == 5 && !String::from_utf8_lossy(&out).contains("\"conflicts\"") {
+        ryueda::libdeps::read_lock(&out).expect("a clean merge of locks reads as a lock");
+    }
     if o == b {
         assert_eq!(out, tb, "ours unchanged gives theirs");
     }

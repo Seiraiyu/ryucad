@@ -37,6 +37,8 @@ impl Issue {
             Code::UnknownFile => "unknown_file",
             Code::ModelOrphaned => "model_orphaned",
             Code::MergeConflict => "merge_conflict",
+            Code::DependencyUnlocked => "dependency_unlocked",
+            Code::LockUnused => "lock_unused",
             _ => "unknown",
         }
     }
@@ -133,7 +135,14 @@ fn issue(
 /// Every issue of the project at `root` (loaded as `p`), sorted by code
 /// then files.
 pub fn diagnose(root: &Path, p: &Project) -> Vec<Issue> {
+    diagnose_with(root, p, &crate::pin::Pins::default())
+}
+
+/// [`diagnose`], other repositories read through `pins`' dependency
+/// cache (a session's).
+pub fn diagnose_with(root: &Path, p: &Project, pins: &dyn crate::pin::Resolve) -> Vec<Issue> {
     let mut out = Vec::new();
+    deps_issues(root, p, pins, &mut out);
     git_issues(root, &mut out);
     canonical_issues(root, &mut out);
     conflict_issues(root, &mut out);
@@ -161,6 +170,82 @@ pub fn diagnose(root: &Path, p: &Project) -> Vec<Issue> {
             .then_with(|| a.files.cmp(&b.files))
     });
     out
+}
+
+/// `ryueda.lock` against the manifest's pins of libraries in other
+/// repositories: labels it lacks (`dependency_unlocked`, after a merge or
+/// a hand edit) and labels nothing pins (`lock_unused`), each one issue
+/// listing them, repaired by writing the lock again from the dependency
+/// cache as fetched (`deps_lock`, never fetching). A project that pins
+/// nothing elsewhere and has no lock is skipped; a lock a merge left
+/// conflicted is `merge_conflict`'s.
+fn deps_issues(root: &Path, p: &Project, pins: &dyn crate::pin::Resolve, out: &mut Vec<Issue>) {
+    use crate::project::LOCK;
+    let m = &p.manifest;
+    let bytes = std::fs::read(root.join(LOCK)).ok();
+    let wanted = crate::libdeps::wanted_labels(m);
+    if wanted.is_empty() && bytes.is_none() {
+        return;
+    }
+    let old = match bytes.as_deref().map(crate::libdeps::read_lock) {
+        Some(Err(e)) if e.code == Code::MergeConflict || e.code == Code::FormatTooNew => return,
+        Some(r) => r.ok(),
+        None => None,
+    };
+    let (unlocked, unused) = crate::libdeps::judge(m, &old.clone().unwrap_or_default());
+    if unlocked.is_empty() && unused.is_empty() {
+        return;
+    }
+    let lock = if wanted.is_empty() {
+        Ok(ryu_doc::lock::Lock::default())
+    } else {
+        crate::pin::with_reader(pins, |r| {
+            crate::libdeps::relock(r, m, old.as_ref(), &Default::default())
+        })
+    };
+    let repairs: Vec<Repair> = match &lock {
+        Ok(l) => vec![Repair::new(
+            "deps_lock",
+            "write",
+            root,
+            &[LOCK],
+            format!("write {LOCK} again from the dependency cache as fetched"),
+            vec![Change {
+                path: LOCK.to_owned(),
+                content: crate::libdeps::lock_text(l).map(String::into_bytes),
+            }],
+        )],
+        Err(_) => Vec::new(),
+    };
+    let fetch = if repairs.is_empty() {
+        ": run `ryueda lib fetch`, then doctor again"
+    } else {
+        ""
+    };
+    let list = |w: &[crate::libdeps::Wanted]| -> String {
+        w.iter()
+            .map(|(p, c, l)| format!("{c}@{l} of {p}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !unlocked.is_empty() {
+        out.push(issue(
+            Code::DependencyUnlocked,
+            "error",
+            vec![LOCK.to_owned()],
+            format!("{LOCK} lacks {}{fetch}", list(&unlocked)),
+            repairs.clone(),
+        ));
+    }
+    if !unused.is_empty() {
+        out.push(issue(
+            Code::LockUnused,
+            "warning",
+            vec![LOCK.to_owned()],
+            format!("{LOCK} holds {}, which nothing pins{fetch}", list(&unused)),
+            repairs,
+        ));
+    }
 }
 
 fn git_issues(root: &Path, out: &mut Vec<Issue>) {
@@ -391,7 +476,12 @@ fn orphaned_models(root: &Path, p: &Project, out: &mut Vec<Issue>) {
 
 /// `doctor`: every issue with its repairs. Writes nothing.
 pub fn report(root: &Path, p: &Project) -> Value {
-    let issues = diagnose(root, p);
+    report_with(root, p, &crate::pin::Pins::default())
+}
+
+/// [`report`] through `pins` (a session's).
+pub fn report_with(root: &Path, p: &Project, pins: &dyn crate::pin::Resolve) -> Value {
+    let issues = diagnose_with(root, p, pins);
     let errors = issues.iter().filter(|i| i.severity == "error").count();
     json!({
         "healthy": issues.is_empty(),
@@ -404,7 +494,17 @@ pub fn report(root: &Path, p: &Project) -> Value {
 /// The repairs `ids` names, planned now, in order; `repair_conflict` for
 /// one no fresh diagnosis offers (the files changed, or it never was).
 pub fn planned(root: &Path, p: &Project, ids: &[String]) -> Result<Vec<Repair>> {
-    let all: Vec<Repair> = diagnose(root, p)
+    planned_with(root, p, ids, &crate::pin::Pins::default())
+}
+
+/// [`planned`] through `pins` (a session's).
+pub fn planned_with(
+    root: &Path,
+    p: &Project,
+    ids: &[String],
+    pins: &dyn crate::pin::Resolve,
+) -> Result<Vec<Repair>> {
+    let all: Vec<Repair> = diagnose_with(root, p, pins)
         .into_iter()
         .flat_map(|i| i.repairs)
         .collect();

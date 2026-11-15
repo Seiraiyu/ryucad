@@ -34,6 +34,48 @@ pub struct Session {
     /// The last [`SCENES`] scenes drawn, by their ask and the revisions
     /// they were drawn from, most recently used first.
     pub(crate) scenes: Vec<(String, std::sync::Arc<String>)>,
+    /// The release branch as last read and the refs it was read at
+    /// ([`crate::pdm::history`]): read again only when they move.
+    pub(crate) pdm: Option<(String, ryupdm::history::Releases)>,
+    /// Resolves the manifest's pins (design 629): [`crate::pin::Pins`],
+    /// which keeps what it read by commit.
+    pub(crate) pins: Box<dyn crate::pin::Resolve + Send>,
+    /// The refs the pinned libraries' release branches were read at
+    /// ([`pins_key`]): when they move, the project is read again.
+    pins_key: String,
+    /// What a long request's lock-free fetches got
+    /// ([`crate::libdeps::prepare`]), taken by its answer.
+    pub(crate) fetched: Option<crate::libdeps::Prefetched>,
+}
+
+/// The refs every same-repository pinned library's release branch is
+/// read at, joined: when they move, a label may have become official or
+/// obsolete, and the project is read again. Empty, without opening the
+/// repository, for a project that pins nothing in it.
+fn pins_key(root: &Path, m: &Manifest) -> String {
+    let mut pinned = m
+        .libraries
+        .values()
+        .filter(|a| a.url.is_none() && !a.labels.is_empty())
+        .peekable();
+    if pinned.peek().is_none() {
+        return String::new();
+    }
+    let Ok(repo) = ryu_git::repo::repo::<crate::Eda>(root) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for a in pinned {
+        let lib = path_of(root, &a.path);
+        if let Ok(c) =
+            ryupdm::config::Config::read_in(&crate::source::Folder(&lib), crate::pdm::NAME)
+            && let Ok(k) = ryupdm::release::refs_key(repo.gix(), &c)
+        {
+            out.push_str(&k);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// `rel` (relative to the project, with `/`) as a path under `root`.
@@ -69,9 +111,18 @@ impl Session {
 
     /// Loads the project at `root`.
     pub fn open(root: &Path) -> Result<Session> {
+        Session::open_with_pins(root, Box::new(crate::pin::Pins::default()))
+    }
+
+    /// Loads the project at `root`, its pins resolved by `pins`.
+    pub(crate) fn open_with_pins(
+        root: &Path,
+        pins: Box<dyn crate::pin::Resolve + Send>,
+    ) -> Result<Session> {
         let mut stamps = Stamps::default();
         stamps.scan(root, listed(root))?;
-        let project = load(root, &stamps)?;
+        let project = load(root, &stamps, &*pins)?;
+        let pins_key = pins_key(root, &project.manifest);
         Ok(Session {
             root: root.to_path_buf(),
             project,
@@ -81,6 +132,10 @@ impl Session {
             revisions: Vec::new(),
             merge_status: None,
             scenes: Vec::new(),
+            pdm: None,
+            pins,
+            pins_key,
+            fetched: None,
         })
     }
 
@@ -96,7 +151,12 @@ impl Session {
             return Ok((commit, p));
         }
         let r = crate::git::revision(&self.root, &commit)?;
-        let p = std::sync::Arc::new(Project::load_from(&self.root, &r.files, &r.aliases)?);
+        let p = std::sync::Arc::new(Project::load_from(
+            &self.root,
+            &r.files,
+            &r.aliases,
+            &*self.pins,
+        )?);
         self.revisions.insert(0, (key, p.clone()));
         self.revisions.truncate(REVISIONS);
         Ok((commit, p))
@@ -139,9 +199,24 @@ impl Session {
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
         let changes = self.stamps.scan(&self.root, listed(&self.root))?;
         if !changes.is_empty() {
-            self.project = load(&self.root, &self.stamps)?;
+            self.project = load(&self.root, &self.stamps, &*self.pins)?;
+            self.pins_key = pins_key(&self.root, &self.project.manifest);
+        } else {
+            let key = pins_key(&self.root, &self.project.manifest);
+            if key != self.pins_key {
+                self.project = load(&self.root, &self.stamps, &*self.pins)?;
+                self.pins_key = key;
+            }
         }
         Ok(changes)
+    }
+
+    /// Reads the project again over the same files: what resolves its
+    /// pins may have changed (a fetch into the dependency cache).
+    pub(crate) fn reload_pins(&mut self) -> Result<()> {
+        self.project = load(&self.root, &self.stamps, &*self.pins)?;
+        self.pins_key = pins_key(&self.root, &self.project.manifest);
+        Ok(())
     }
 
     /// Takes in what this session just wrote.
@@ -157,9 +232,19 @@ impl Session {
         if changes.iter().all(|(p, _)| written.contains(p)) {
             self.project = project;
         } else {
-            self.project = load(&self.root, &self.stamps)?;
+            self.project = load(&self.root, &self.stamps, &*self.pins)?;
         }
+        self.pins_key = pins_key(&self.root, &self.project.manifest);
         Ok(())
+    }
+
+    /// `ryueda.lock` as the working files hold it, if it reads.
+    pub fn lock(&self) -> Option<ryu_doc::lock::Lock> {
+        self.files()
+            .get(crate::project::LOCK)
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(|t| crate::canonical::parse(t).ok())
+            .and_then(|v| ryu_doc::lock::Lock::from_json_as(&v, crate::project::LOCK_KIND).ok())
     }
 
     /// Every file the project's state depends on, as last read.
@@ -175,7 +260,7 @@ impl Session {
 }
 
 /// The project from the stamps' bytes, its aliases resolved on disk.
-fn load(root: &Path, stamps: &Stamps) -> Result<Project> {
+fn load(root: &Path, stamps: &Stamps, pins: &dyn crate::pin::Resolve) -> Result<Project> {
     let files = stamps.snapshot();
     let bytes = files.get(MANIFEST).ok_or_else(|| {
         Error::new(
@@ -185,7 +270,7 @@ fn load(root: &Path, stamps: &Stamps) -> Result<Project> {
         .with("path", root)
     })?;
     let aliases = resolve(root, &Manifest::read(bytes)?);
-    Project::load_from(root, &files, &aliases)
+    Project::load_from(root, &files, &aliases, pins)
 }
 
 /// Every file the project's state depends on, read now: what undo checks
@@ -202,6 +287,27 @@ pub fn current(root: &Path) -> Result<Files> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_session_resolves_pins_and_sees_a_new_official_label() {
+        let (d, board) = crate::pin::tests::released_library_and_board();
+        let mut s = Session::open(&board).unwrap();
+        let key = (
+            String::from("passives"),
+            crate::id::Id::parse("r_100k", "c").unwrap(),
+        );
+        assert!(
+            s.project().pinned[&key].is_ok(),
+            "{:?}",
+            s.project().pinned[&key]
+        );
+        assert!(!s.project().pinned[&key].as_ref().unwrap().obsolete);
+        // Obsolete A on the library's release branch: no file the session
+        // watches changes, and the next request sees it.
+        crate::pin::tests::obsolete(d.path(), "lib", "r_100k", "A");
+        s.refresh_changes().unwrap();
+        assert!(s.project().pinned[&key].as_ref().unwrap().obsolete);
+    }
     use super::*;
     use crate::project::ProjectKind;
     use crate::project::tests::{library_in, manifest};

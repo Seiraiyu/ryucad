@@ -17,9 +17,7 @@ use std::time::Duration;
 pub mod http;
 #[cfg(feature = "cad")]
 pub mod lock;
-#[cfg(feature = "cad")]
 pub mod parts;
-#[cfg(feature = "cad")]
 pub mod read;
 
 /// Where the cache keeps what a fetch found at the remote's `HEAD`.
@@ -88,7 +86,6 @@ impl Cache {
     }
 
     /// A reader of what this cache holds.
-    #[cfg(feature = "cad")]
     pub fn reader(&self) -> read::Reader {
         read::Reader::new(self.clone())
     }

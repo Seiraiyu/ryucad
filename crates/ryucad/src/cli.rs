@@ -917,7 +917,9 @@ enum Command {
     /// own answer, each part's status (created, updated, unchanged or
     /// deleted, judged from the bytes) and revision, the files written,
     /// and the project's revision for the next --expect. `undo` takes back
-    /// the whole batch.
+    /// the whole batch. With --prune (or "prune": true), every part no
+    /// part.ensure or part.create op names is deleted, through part
+    /// delete's checks.
     Batch {
         /// The batch's JSON file, or - for stdin.
         #[arg(value_name = "FILE")]
@@ -935,6 +937,9 @@ enum Command {
         /// Write without rebuilding.
         #[arg(long, overrides_with = "rebuild")]
         no_rebuild: bool,
+        /// Delete every part no part.ensure or part.create op names.
+        #[arg(long)]
+        prune: bool,
     },
     /// Undo this agent's latest change, or the activity entry --entry.
     Undo {
@@ -1289,6 +1294,25 @@ enum PartCmd {
         expect: Expect,
     },
     List,
+    /// Make the part exactly as FILE declares it, writing only what
+    /// differs (design 603). FILE (or - for stdin) holds {"kind"?: "part"
+    /// | "assembly", "params"?: {NAME: EXPRESSION}, "features": [{"id":
+    /// ID, "type": TYPE, …feature add's params}, …], "props"?: {…}}: the
+    /// whole ordered feature list (one left out is deleted), each with its
+    /// id, a sketch's sketch-edit ops as "ops"; params the whole
+    /// parameters file (left out: left alone; {}: none); props as `props
+    /// set` takes them. The answer says created, updated, unchanged or
+    /// deleted for the part, each feature, the parameters and the
+    /// properties. Usually an op of `ryucad batch`, where many parts are
+    /// one change.
+    Ensure {
+        part: String,
+        /// The declaration's JSON file, or - for stdin.
+        #[arg(long, value_name = "FILE")]
+        from: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 // Parsed once per run; the size difference costs nothing.
@@ -1467,7 +1491,9 @@ enum FeatureCmd {
     /// a sheet; a sew (--sheet, repeated, --tolerance, --no-solid) of
     /// sheets into one body; a thicken (--sheet, or --face repeated;
     /// --front, --back, --face-sides, --operation and --target) of a sheet
-    /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore,
+    /// or a body's faces into a solid; or a hole (--sketch, --point, or at
+    /// places: --at REF (repeat), --face, --from-edge REF=LENGTH (twice),
+    /// --coaxial REF, --direction, --reverse; --diameter, --depth, --form counterbore,
     /// countersink, counterdrill or spotface, --bottom, --near-diameter and
     /// --near-angle, a far side --far-countersink-* or --far-counterbore-*;
     /// or --spec, --thread with --pitch, --tpi, --class,
@@ -1475,7 +1501,9 @@ enum FeatureCmd {
     /// --fastener-fit, --fit) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
-    /// --angle) or mirror (--plane), skipping instances (--skip); an insert of
+    /// --angle), mirror (--plane) or a fill of hole seeds (--form fill,
+    /// --fill-face, --spacing, --spacing2, --direction, --margin), skipping
+    /// instances (--skip, i,j for a fill, signed); an insert of
     /// another part's solids (--of <part>, --rev working|label:L, --origin,
     /// --z, --x); a delete_body (--solid, repeated) taking solids out of the
     /// part's result; or, in an assembly, an instance (--of, --rev, --origin, --z,
@@ -3348,7 +3376,7 @@ struct FieldArgs {
     reverse2: Option<bool>,
     /// An instance a pattern leaves out: i, or i,j with two directions; repeat for
     /// several.
-    #[arg(long = "skip", value_name = "INDEX", value_parser = instance)]
+    #[arg(long = "skip", value_name = "INDEX", value_parser = instance, allow_hyphen_values = true)]
     skip: Vec<Value>,
     /// Leave no instance out again, when editing.
     #[arg(long, conflicts_with = "skip")]
@@ -3455,9 +3483,25 @@ struct FieldArgs {
     /// Give no face of a thicken a front and back of its own.
     #[arg(long, conflicts_with = "face_sides")]
     no_face_sides: bool,
-    /// Where on its curve a normal_to plane is: start, end or a point.
-    #[arg(long, value_name = "POINT")]
-    at: Option<String>,
+    /// Where on its curve a normal_to plane is: start, end or a point. A
+    /// hole's place at a point (repeat for several, keyed a, b, … in
+    /// order), with --face naming the face it is on, or the cylindrical or
+    /// conical face it drills radially.
+    #[arg(long = "at", value_name = "REFERENCE")]
+    at: Vec<String>,
+    /// A fill pattern's face: a planar face <part>/<feature>/<name>.
+    #[arg(long, value_name = "REFERENCE")]
+    fill_face: Option<String>,
+    /// A fill pattern's margin from its face's boundary.
+    #[arg(long, value_name = "LENGTH")]
+    margin: Option<String>,
+    /// A hole's place from an edge of --face: REFERENCE=LENGTH; give two.
+    #[arg(long = "from-edge", value_name = "REFERENCE=LENGTH", value_parser = param)]
+    from_edge: Vec<(String, String)>,
+    /// A hole's place on the axis of a cylindrical or conical face, a
+    /// circular edge or any axis.
+    #[arg(long, value_name = "REFERENCE")]
+    coaxial: Option<String>,
     /// A plane a midplane or a planes axis is between, or what an intersection point
     /// meets; repeat for the second.
     #[arg(long = "between", value_name = "REFERENCE")]
@@ -3913,7 +3957,50 @@ fn json_object(s: &str) -> core::result::Result<Value, String> {
 }
 
 impl FieldArgs {
-    fn to_fields(&self) -> FeatureFields {
+    fn to_fields(&self, ty: Option<&str>) -> FeatureFields {
+        // A hole's places (ryucad 28.C): a hole's flags, or on an edit
+        // (whose type the CLI doesn't know) --from-edge, --coaxial, several
+        // --at, or one with no --by (a datum's --at comes with its
+        // construction).
+        let hole_places = ty == Some("hole")
+            || !self.from_edge.is_empty()
+            || self.coaxial.is_some()
+            || self.at.len() > 1
+            || (self.at.len() == 1 && self.by.is_none() && ty.is_none());
+        let shared = |mut p: Value| -> Value {
+            if let Some(d) = &self.direction {
+                p["direction"] = json!(d);
+            }
+            if self.reverse == Some(true) {
+                p["reverse"] = json!(true);
+            }
+            p
+        };
+        let places = if !hole_places {
+            None
+        } else if let Some(c) = &self.coaxial {
+            Some(json!({"a": shared(json!({"coaxial": c}))}))
+        } else if !self.from_edge.is_empty() {
+            let from: Vec<Value> = self
+                .from_edge
+                .iter()
+                .map(|(e, d)| json!({"edge": e, "distance": d}))
+                .collect();
+            Some(json!({"a": shared(json!({"face": self.face.first(), "from": from}))}))
+        } else if !self.at.is_empty() {
+            let mut m = Map::new();
+            for (i, a) in self.at.iter().enumerate() {
+                let mut p = json!({"at": a});
+                if let Some(f) = self.face.first() {
+                    p["face"] = json!(f);
+                }
+                m.insert(place_key(i), shared(p));
+            }
+            Some(Value::Object(m))
+        } else {
+            None
+        };
+        let built = places.is_some();
         // A fill's sides given in order (--tangent after an --edge, several
         // --curve, or --curve beside --edge) go as sides; a lone --curve is
         // a datum's, --edge alone a blend's edges.
@@ -3983,8 +4070,11 @@ impl FieldArgs {
             // One --face is a chamfer's, a sketch's or a sweep's `face`;
             // several are a move's `faces`, beside any --face-distance
             // groups; with --with they are a replacement's groups.
-            face: (self.with_groups.is_empty() && self.face.len() == 1)
-                .then(|| self.face[0].clone()),
+            face: self.fill_face.clone().or_else(|| {
+                (!built && self.with_groups.is_empty() && self.face.len() == 1)
+                    .then(|| self.face[0].clone())
+            }),
+            margin: self.margin.clone().map(Value::String),
             face_list: None,
             tolerance: self.tolerance.clone().map(Value::String),
             sheets: (!self.sheets.is_empty()).then(|| self.sheets.clone()),
@@ -4032,7 +4122,7 @@ impl FieldArgs {
                 (!self.loops.is_empty()).then(|| self.loops.clone())
             },
             extent: (!extent.is_empty()).then_some(Value::Object(extent)),
-            reverse: self.reverse,
+            reverse: if built { None } else { self.reverse },
             surface: self.surface,
             axis: self.axis.clone(),
             angle: self.angle.clone().map(Value::String),
@@ -4128,6 +4218,8 @@ impl FieldArgs {
             features: (!self.seeds.is_empty()).then(|| self.seeds.clone()),
             direction: if self.outward {
                 Some("outward".to_owned())
+            } else if built {
+                None
             } else {
                 self.direction.clone()
             },
@@ -4180,7 +4272,12 @@ impl FieldArgs {
             about: self.about.clone(),
             through: self.through.clone(),
             curve: (self.curve.len() == 1 && !ordered).then(|| self.curve[0].clone()),
-            at: self.at.clone(),
+            at: if built {
+                None
+            } else {
+                self.at.first().cloned()
+            },
+            places,
             between: (!self.between.is_empty()).then(|| self.between.clone()),
             coordinates: self
                 .coordinates
@@ -4560,6 +4657,15 @@ fn bend_override(s: &str) -> core::result::Result<Value, String> {
     }
 }
 
+/// The CLI's key for its `i`th place: a, b, … z, a1, b1, … z1, a2, …
+fn place_key(i: usize) -> String {
+    let letter = (b'a' + (i % 26) as u8) as char;
+    match i / 26 {
+        0 => letter.to_string(),
+        n => format!("{letter}{n}"),
+    }
+}
+
 fn param(s: &str) -> core::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
@@ -4597,9 +4703,10 @@ fn triple(s: &str) -> core::result::Result<[String; 3], String> {
 
 /// A pattern instance's index: `i`, or `i,j` along two directions.
 fn instance(s: &str) -> core::result::Result<Value, String> {
+    // Signed: a fill's lattice runs both ways from its seed (ryucad 28.C).
     let n = |x: &str| {
         x.trim()
-            .parse::<u32>()
+            .parse::<i32>()
             .map_err(|_| format!("{x:?} is not an instance's index"))
     };
     match s.split_once(',') {
@@ -4679,6 +4786,7 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Watch { .. }
         | Command::Cancel { .. }
         | Command::Batch { .. }
+        | Command::Part(PartCmd::Ensure { .. })
         | Command::Open { .. } => {
             return None;
         }
@@ -4788,7 +4896,7 @@ fn request(cmd: &Command) -> Option<Request> {
             ty: ty.clone(),
             params: params.to_map(),
             placement: placement.to_arg(),
-            fields: placement.frame(fields.to_fields()),
+            fields: placement.frame(fields.to_fields(Some(ty.as_str()))),
             id: id.clone(),
             position: position.to_position(),
             expected_revision: expect.revision.clone(),
@@ -4812,7 +4920,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 id: id.clone(),
                 params,
                 placement: placement.to_arg(),
-                fields: placement.frame(fields.to_fields()),
+                fields: placement.frame(fields.to_fields(None)),
                 expressions: expressions
                     .iter()
                     .map(|(k, v)| (k.clone(), json!(v)))
@@ -6129,21 +6237,12 @@ fn batch_request(cmd: &Command, here: &Path) -> Result<Option<Request>> {
         dry_run,
         rebuild,
         no_rebuild,
+        prune,
     } = cmd
     else {
         return Ok(None);
     };
-    let text = if file == "-" {
-        let mut t = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
-            .map_err(|e| Error::new(Code::Io, format!("stdin: {e}")))?;
-        t
-    } else {
-        let path = here.join(file);
-        std::fs::read_to_string(&path).map_err(|e| Error::io(&path, &e))?
-    };
-    let v: Value = serde_json::from_str(&text)
-        .map_err(|e| Error::new(Code::Usage, format!("the batch isn't JSON: {e}")))?;
+    let v = json_input(file, here, "the batch")?;
     let mut params = match v {
         Value::Array(_) => json!({ "ops": v }),
         Value::Object(_) => v,
@@ -6166,7 +6265,54 @@ fn batch_request(cmd: &Command, here: &Path) -> Result<Option<Request>> {
     if *no_rebuild {
         params["rebuild"] = json!(false);
     }
+    if *prune {
+        params["prune"] = json!(true);
+    }
     Request::from_rpc("batch", Some(params)).map(Some)
+}
+
+/// FILE's JSON, or stdin's for `-`; `usage` when it isn't JSON.
+fn json_input(file: &str, here: &Path, what: &str) -> Result<Value> {
+    let text = if file == "-" {
+        let mut t = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
+            .map_err(|e| Error::new(Code::Io, format!("stdin: {e}")))?;
+        t
+    } else {
+        let path = here.join(file);
+        std::fs::read_to_string(&path).map_err(|e| Error::io(&path, &e))?
+    };
+    serde_json::from_str(&text)
+        .map_err(|e| Error::new(Code::Usage, format!("{what} isn't JSON: {e}")))
+}
+
+/// The request `ryucad part ensure` sends: its file's declaration with
+/// the part (a file naming another is `usage`) and `--expect` over it.
+/// `None` for every other command.
+fn ensure_request(cmd: &Command, here: &Path) -> Result<Option<Request>> {
+    let Command::Part(PartCmd::Ensure { part, from, expect }) = cmd else {
+        return Ok(None);
+    };
+    let mut v = json_input(from, here, "the declaration")?;
+    let Some(o) = v.as_object_mut() else {
+        return Err(Error::new(
+            Code::Usage,
+            "a declaration is an object with features",
+        ));
+    };
+    if let Some(p) = o.get("part").and_then(Value::as_str)
+        && p != part
+    {
+        return Err(Error::new(
+            Code::Usage,
+            format!("the file declares part {p}, not {part}"),
+        ));
+    }
+    o.insert("part".into(), json!(part));
+    if let Some(r) = &expect.revision {
+        o.insert("expected_revision".into(), json!(r));
+    }
+    Request::from_rpc("part.ensure", Some(v)).map(Some)
 }
 
 /// The agent participant to act as.
@@ -6425,7 +6571,10 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             // request names is made absolute against `here` (`-C`'s).
             let req = match batch_request(cmd, &here)? {
                 Some(r) => r,
-                None => request(cmd).expect("every other command is a request"),
+                None => match ensure_request(cmd, &here)? {
+                    Some(r) => r,
+                    None => request(cmd).expect("every other command is a request"),
+                },
             };
             let req = client::absolute(req, &here)?;
             let root = find_root(&here)?;
@@ -7679,7 +7828,7 @@ mod tests {
             let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
                 panic!()
             };
-            let f = fields.to_fields();
+            let f = fields.to_fields(None);
             assert_eq!(f.faces, Some(json!(["p/b/aa", "p/b/bb"])));
             assert_eq!(f.front, Some(json!("2mm")));
             assert_eq!(
@@ -7704,7 +7853,7 @@ mod tests {
             let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
                 panic!()
             };
-            let f = fields.to_fields();
+            let f = fields.to_fields(None);
             assert_eq!(
                 f.sheets.as_deref(),
                 Some(&["a".to_owned(), "b".to_owned()][..])
@@ -7988,7 +8137,7 @@ mod tests {
             let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
                 panic!()
             };
-            let f = fields.to_fields();
+            let f = fields.to_fields(None);
             assert_eq!(
                 (f.topology.as_deref(), f.blends.as_deref()),
                 (Some("change"), Some("rebuild"))
@@ -8013,6 +8162,7 @@ mod tests {
                 "--no-rebuild",
                 "--expect",
                 "r1",
+                "--prune",
             ])
             .unwrap();
             let r = batch_request(&c.command, dir.path()).unwrap().unwrap();
@@ -8020,7 +8170,7 @@ mod tests {
                 serde_json::to_value(&r).unwrap(),
                 json!({"method": "batch", "params": {
                     "ops": [{"method": "part.create", "params": {"part": "p"}}],
-                    "expect": "r1", "dry_run": true, "rebuild": false}})
+                    "expect": "r1", "dry_run": true, "rebuild": false, "prune": true}})
             );
             std::fs::write(
                 dir.path().join("o.json"),

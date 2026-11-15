@@ -1283,6 +1283,47 @@ pub fn near_line(v: &Value) -> Option<String> {
     })
 }
 
+/// A hole's place as one textconv line (ryucad 28.C): `at pt, direction
+/// z, reverse`, `face b/<name>, from b/<name> 10 mm, from b/<name> 5 mm`,
+/// `coaxial b/<name>`; references as textconv writes every other one.
+pub fn place_line(v: &Value) -> Option<String> {
+    let r = |x: &Value| -> Option<String> {
+        match x {
+            Value::String(s) => Some(s.clone()),
+            _ => crate::diff::reference(x),
+        }
+    };
+    let mut parts = Vec::new();
+    if let Some(x) = v.get("at") {
+        parts.push(format!("at {}", r(x)?));
+    }
+    if let Some(x) = v.get("coaxial") {
+        parts.push(format!("coaxial {}", r(x)?));
+    }
+    if let Some(x) = v.get("face") {
+        parts.push(format!("face {}", r(x)?));
+    }
+    for e in v
+        .get("from")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        parts.push(format!(
+            "from {} {}",
+            r(e.get("edge")?)?,
+            e.get("distance")?.as_str()?
+        ));
+    }
+    if let Some(x) = v.get("direction") {
+        parts.push(format!("direction {}", r(x)?));
+    }
+    if v.get("reverse") == Some(&Value::Bool(true)) {
+        parts.push("reverse".into());
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
 /// A hole's far side as textconv writes it: `countersink 8 mm, 90 deg`.
 pub fn far_line(v: &Value) -> Option<String> {
     let (k, x) = v.as_object()?.iter().next()?;

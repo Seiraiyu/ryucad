@@ -95,6 +95,49 @@ enum Command {
     /// project's libraries.
     #[command(subcommand)]
     Parts(PartsCmd),
+    /// Product data management (ryupdm): the settings in ryupdm.json.
+    /// Not `project edit --property`, which sets designator properties.
+    #[command(subcommand)]
+    Pdm(PdmCmd),
+    /// A part's PDM properties (number, name, description, ...): a
+    /// design's in a design project, a library component's in a library
+    /// project.
+    #[command(subcommand)]
+    Props(PropsCmd),
+    /// Release designs or library components: records proposed, made
+    /// obsolete, listed, checked and tagged.
+    #[command(subcommand)]
+    Release(ReleaseCmd),
+    /// Where a library component is used (PDM), run in its library
+    /// project: designs of this repository's projects, of other checkouts
+    /// (--in, else the pdm.dependents preference) and their releases.
+    WhereUsed {
+        part: String,
+        /// Only designs placing this release label.
+        #[arg(long, conflicts_with = "working")]
+        label: Option<String>,
+        /// Only designs placing it at working.
+        #[arg(long)]
+        working: bool,
+        /// Only direct placements (every placement in a design is).
+        #[arg(long)]
+        direct: bool,
+        /// Folders of other checkouts to search; repeat for more.
+        #[arg(long = "in", value_name = "FOLDER")]
+        within: Vec<PathBuf>,
+        /// Search no other checkout, the preference's included.
+        #[arg(long)]
+        no_dependents: bool,
+    },
+    /// A design's bill of materials (PDM): one line per purchasable
+    /// part with designators, maker, part number, alternates and offers;
+    /// `bom diff` compares two revisions'.
+    Bom {
+        #[command(subcommand)]
+        cmd: Option<BomCmd>,
+        #[command(flatten)]
+        show: BomShow,
+    },
     /// Create, edit, show, list or delete functional blocks: their
     /// names, ports and buses.
     #[command(subcommand)]
@@ -622,12 +665,65 @@ enum LibCmd {
     /// project, inside the same repository.
     Add {
         alias: String,
-        path: String,
+        /// The library project's folder, relative to this project.
+        #[arg(required_unless_present = "url", conflicts_with = "url")]
+        path: Option<String>,
+        /// A library in another repository: its URL (fetched into the
+        /// dependency cache).
+        #[arg(long)]
+        url: Option<String>,
+        /// With --url, the library project's folder in that repository
+        /// (its root by default).
+        #[arg(long = "path", requires = "url", value_name = "FOLDER")]
+        in_repo: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
     /// Every library with its revision, what it holds and its faults.
     List,
+    /// Fetch the repositories of libraries in other repositories (all, or
+    /// the aliases named) into the dependency cache.
+    Fetch { aliases: Vec<String> },
+    /// Move pins (of the aliases named, or all) to each component's latest
+    /// official label, or --to a label, and write ryueda.lock again.
+    Update {
+        aliases: Vec<String>,
+        #[arg(long)]
+        to: Option<String>,
+        /// From the dependency cache as fetched: no fetch.
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Each pinned component with a newer official label than its pin.
+    Outdated,
+    /// What each design places from other projects (alias, component,
+    /// label, counts), at --rev and in each official release.
+    Uses {
+        #[command(flatten)]
+        rev: Rev,
+    },
+    /// What a library alias's project has released, by component, with
+    /// each one's labels latest first.
+    Parts { alias: String },
+    /// Pin library components (<alias>/<component>) at a release label,
+    /// each one's latest official label, or back to working (a library
+    /// in this repository only).
+    Pin {
+        #[arg(required = true)]
+        components: Vec<String>,
+        #[arg(long, conflicts_with_all = ["latest", "working"])]
+        label: Option<String>,
+        #[arg(long, conflicts_with = "working")]
+        latest: bool,
+        #[arg(long)]
+        working: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
     /// Judge a library's symbols by the standards that apply to it
     /// (`ryueda standards`): each symbol's class, score and findings, with
     /// symbol edit ops that fix them. This project's own library by
@@ -888,6 +984,165 @@ impl CompArgs {
             alternate_offers: (!alternate_offers.is_empty()).then_some(alternate_offers),
         })
     }
+}
+
+#[derive(Subcommand)]
+// Configure's flags, parsed once per run.
+#[allow(clippy::large_enum_variant)]
+enum PdmCmd {
+    /// Write the default settings to ryupdm.json (keeps any it has).
+    Init,
+    /// Give a copied project an ID of its own (a fork): its records under
+    /// the old ID are read as the upstream's history, and its own labels
+    /// continue past them.
+    NewId {
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The settings, with their defaults filled in, and the PDM revision.
+    Config,
+    /// Change the settings; what isn't given stays.
+    Configure {
+        /// How revisions are labelled: letters (A, B, ...), numeric (1, 2,
+        /// ...) or numeric2 (01, 02, ...). Fixed once any part is released.
+        #[arg(long)]
+        revisions: Option<String>,
+        /// The branch whose history makes releases official.
+        #[arg(long, value_name = "BRANCH")]
+        release_branch: Option<String>,
+        /// The pattern every part number must match whole (Rust regex
+        /// syntax), or "" for none.
+        #[arg(long, value_name = "REGEX")]
+        pattern: Option<String>,
+        /// Declare a custom property:
+        /// voltage='{"type":"quantity","dim":"voltage"}'. Types: string,
+        /// text, integer, number, quantity (with "dim"), boolean, enum
+        /// (with "values"); "required" (false) and "revising" (true) are
+        /// optional.
+        #[arg(long = "property", value_name = "NAME=JSON", value_parser = declaration)]
+        properties: Vec<(String, Value)>,
+        /// Remove a custom property's declaration.
+        #[arg(long = "remove-property", value_name = "NAME")]
+        remove: Vec<String>,
+        /// Who must approve releases, as ryupdm.json holds it:
+        /// '{"rules":[{"count":1,"from":["alice","bob"],"parts":["*"]}]}'.
+        #[arg(long, value_name = "JSON", value_parser = json_object, conflicts_with = "no_approvals")]
+        approvals: Option<Value>,
+        /// Remove the approval rules.
+        #[arg(long)]
+        no_approvals: bool,
+        /// What the hosted review service does about newer releases of
+        /// other projects' parts this project places: none (show a notice)
+        /// or pr (also open a pull request moving to them).
+        #[arg(long, value_name = "none|pr")]
+        bump: Option<String>,
+        /// Write even if parts' properties stop fitting the settings.
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Args)]
+struct BomShow {
+    /// The design: the project's only one if left out.
+    design: Option<String>,
+    /// A Git revision (main, HEAD~2, a hash), or label:<L> for the
+    /// design's release L: the working files by default.
+    #[arg(long, value_name = "REV")]
+    rev: Option<String>,
+    /// Lines by block occurrence (<design>:<instance path>).
+    #[arg(long)]
+    by_block: bool,
+    /// Quantities times parts.json's build_quantity.
+    #[arg(long)]
+    build: bool,
+    /// json (the default) or csv.
+    #[arg(long)]
+    format: Option<String>,
+    /// Write the CSV to this file (implies --format csv).
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum BomCmd {
+    /// What changed in a design's BOM between two revisions: lines added,
+    /// removed and changed (revision, quantity, designators, value,
+    /// footprint, maker and part number, alternates, properties).
+    Diff {
+        design: Option<String>,
+        /// The revision to compare from: HEAD by default.
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// The revision to compare to: working by default.
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCmd {
+    /// Write the record of each part's next revision (a design's in a
+    /// design project, a library component's in a library project): its
+    /// content hash, revising properties and results. A proposal until the
+    /// release branch holds it; nothing is committed.
+    Propose {
+        parts: Vec<String>,
+        /// Every part in work or modified; those not ready are listed with
+        /// their problems.
+        #[arg(long)]
+        all: bool,
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+        /// Write nothing: say the label each would take and every reason it
+        /// would be refused.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Write an obsolete record for a part's latest official revision.
+    Obsolete {
+        part: String,
+        label: String,
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Every release record (or one part's): official at which commit or
+    /// still proposed, its tag, and each part's state.
+    List { part: Option<String> },
+    /// Check every record against the parts, the release branch and the
+    /// tags; fails (exit 1) on any error.
+    Check {
+        /// Also work official releases' netlists and ERC out again and
+        /// compare.
+        #[arg(long)]
+        results: bool,
+    },
+    /// Create the local tag ryupdm/<part>/<label> of every official
+    /// release that has none, and move those that point elsewhere.
+    /// Nothing is pushed or deleted.
+    Sync,
+}
+
+#[derive(Subcommand)]
+enum PropsCmd {
+    /// Every PDM property of a part, set or not, with where its value
+    /// comes from (properties/ or the part's own file) and its faults.
+    Show { part: String },
+    /// Set PDM properties: number=100-0042 description="10k 0402"; NAME=
+    /// clears one. Values are read as each property's type.
+    Set {
+        part: String,
+        #[arg(value_name = "NAME=VALUE", value_parser = pair, required = true)]
+        values: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1785,6 +2040,20 @@ fn ops(s: &str) -> core::result::Result<Ops, String> {
     }
 }
 
+/// `NAME=JSON`, the JSON parsed.
+fn declaration(s: &str) -> core::result::Result<(String, Value), String> {
+    let (k, v) = pair(s)?;
+    let v = serde_json::from_str(&v).map_err(|e| format!("not JSON: {e}"))?;
+    Ok((k, v))
+}
+
+fn json_object(s: &str) -> core::result::Result<Value, String> {
+    match serde_json::from_str::<Value>(s) {
+        Ok(v @ Value::Object(_)) => Ok(v),
+        _ => Err("expected a JSON object".to_owned()),
+    }
+}
+
 fn pair(s: &str) -> core::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -1869,13 +2138,52 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Lib(LibCmd::Add {
             alias,
             path,
+            url,
+            in_repo,
             expect,
         }) => Request::LibAdd {
             alias: alias.clone(),
-            path: path.clone(),
+            path: path.clone().or_else(|| in_repo.clone()).unwrap_or_default(),
+            url: url.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Lib(LibCmd::Fetch { aliases }) => Request::LibFetch {
+            aliases: aliases.clone(),
+        },
+        Command::Lib(LibCmd::Update {
+            aliases,
+            to,
+            offline,
+            dry_run,
+            expect,
+        }) => Request::LibUpdate {
+            aliases: aliases.clone(),
+            to: to.clone(),
+            offline: *offline,
+            dry_run: *dry_run,
             expected_revision: expect.expect.clone(),
         },
         Command::Lib(LibCmd::List) => Request::LibList {},
+        Command::Lib(LibCmd::Outdated) => Request::LibOutdated {},
+        Command::Lib(LibCmd::Uses { rev }) => Request::LibUses {
+            rev: rev.rev.clone(),
+        },
+        Command::Lib(LibCmd::Parts { alias }) => Request::LibParts {
+            alias: alias.clone(),
+        },
+        Command::Lib(LibCmd::Pin {
+            components,
+            label,
+            latest,
+            working,
+            expect,
+        }) => Request::LibPin {
+            components: components.clone(),
+            label: label.clone(),
+            latest: *latest,
+            working: *working,
+            expected_revision: expect.expect.clone(),
+        },
         Command::Lib(LibCmd::Check {
             library,
             symbol,
@@ -2084,6 +2392,115 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         },
         Command::Parts(PartsCmd::Sources) => Request::PartsSources {},
         Command::Parts(PartsCmd::Refresh { force, .. }) => Request::PartsRefresh { force: *force },
+        Command::Release(ReleaseCmd::Propose {
+            parts,
+            all,
+            note,
+            dry_run,
+            expect,
+        }) => Request::ReleasePropose {
+            parts: parts.clone(),
+            all: *all,
+            note: note.clone(),
+            expected_revision: expect.expect.clone(),
+            dry_run: *dry_run,
+        },
+        Command::Release(ReleaseCmd::Obsolete {
+            part,
+            label,
+            note,
+            expect,
+        }) => Request::ReleaseObsolete {
+            part: part.clone(),
+            label: label.clone(),
+            note: note.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Release(ReleaseCmd::List { part }) => Request::ReleaseList { part: part.clone() },
+        Command::Release(ReleaseCmd::Check { results }) => {
+            Request::ReleaseCheck { results: *results }
+        }
+        Command::Release(ReleaseCmd::Sync) => Request::ReleaseSync {},
+        Command::Bom { cmd: None, show } => Request::BomGet {
+            design: show.design.clone(),
+            rev: show.rev.clone(),
+            format: show
+                .format
+                .clone()
+                .or_else(|| show.out.as_ref().map(|_| "csv".to_owned())),
+            build: show.build,
+            by_block: show.by_block,
+        },
+        Command::Bom { cmd: Some(BomCmd::Diff { design, from, to }), .. } => Request::BomDiff {
+            design: design.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        },
+        Command::WhereUsed {
+            part,
+            label,
+            working,
+            direct,
+            within,
+            no_dependents,
+        } => Request::BomWhereUsed {
+            part: part.clone(),
+            label: label.clone(),
+            working: *working,
+            direct: *direct,
+            within: all(within),
+            no_dependents: *no_dependents,
+        },
+        Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
+        Command::Pdm(PdmCmd::NewId { expect }) => Request::PdmNewId {
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Pdm(PdmCmd::Config) => Request::PdmConfig {},
+        Command::Pdm(PdmCmd::Configure {
+            revisions,
+            release_branch,
+            pattern,
+            properties,
+            remove,
+            approvals,
+            no_approvals,
+            bump,
+            force,
+            expect,
+        }) => Request::PdmConfigure {
+            revisions: revisions.clone(),
+            release_branch: release_branch.clone(),
+            pattern: pattern.clone(),
+            properties: properties
+                .iter()
+                .cloned()
+                .chain(remove.iter().map(|n| (n.clone(), Value::Null)))
+                .collect(),
+            approvals: if *no_approvals {
+                Some(Value::Bool(false))
+            } else {
+                approvals.clone()
+            },
+            bump: bump.clone(),
+            force: *force,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Props(PropsCmd::Show { part }) => Request::PropsGet { part: part.clone() },
+        Command::Props(PropsCmd::Set {
+            part,
+            values,
+            expect,
+        }) => Request::PropsSet {
+            part: part.clone(),
+            properties: values
+                .iter()
+                .map(|(k, v)| {
+                    let v = if v.is_empty() { Value::Null } else { json!(v) };
+                    (k.clone(), v)
+                })
+                .collect(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Parts(PartsCmd::Configure {
             assembly,
             build_quantity,
@@ -3117,6 +3534,27 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     // A report written as text (lib check's, #711) is read back here, in
     // a process that ends once it prints it.
     let a = a.into_json()?;
+    if let Command::Bom {
+        cmd: None,
+        show: BomShow { out: Some(out), .. },
+    } = cmd
+    {
+        let mut result = a.result;
+        let csv = result
+            .as_object_mut()
+            .and_then(|o| o.remove("csv"))
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    "--out writes CSV: leave out --format or give csv",
+                )
+                .with("param", "format")
+            })?;
+        ryueda::source::write_atomic(&here.join(out), csv.as_bytes())?;
+        result["out"] = json!(out);
+        return Ok(result);
+    }
     let Some(bytes) = a.binary else {
         return Ok(a.result);
     };
@@ -3256,6 +3694,27 @@ fn hook_check(here: &std::path::Path) -> ExitCode {
         }
     };
     let mut failed = false;
+    // The commit guard (design 629): a commit that would leave a proposal
+    // stale or change an official record, merge or not.
+    match ryupdm::release::guard_for::<ryueda::Eda>(here) {
+        Ok(found) => {
+            for (root, list) in found {
+                failed = true;
+                eprintln!(
+                    "ryueda: this commit would leave {} release problem(s) in {}:",
+                    list.len(),
+                    root.display()
+                );
+                for f in &list {
+                    eprintln!("  {}: {}", f.code, f.message);
+                }
+            }
+        }
+        Err(e) => {
+            failed = true;
+            eprintln!("ryueda: checking the release records staged: {}", e.message);
+        }
+    }
     for root in projects {
         let at = root.display();
         match server::handle_safely(&mut None, None, None, &root, Request::MergeStatus {}) {

@@ -1054,6 +1054,9 @@ pub struct Model {
     /// How many meshes were fetched: an unchanged body is never fetched
     /// twice.
     pub fetched: u64,
+    /// How many `mesh.get`s the workspace's `fetch` sent: a part's bodies
+    /// go by the batch, as an assembly's do (#801).
+    pub mesh_requests: u64,
     /// How many bytes answers brought after their lines: meshes, mostly.
     pub received: u64,
     /// What the model was last read at: its revision and the draft's

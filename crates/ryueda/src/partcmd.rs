@@ -33,10 +33,11 @@ fn alias_of(r: &LibRef) -> &str {
     r.library.as_ref().map_or(SELF, Id::as_str)
 }
 
-/// The library component a component places, and its symbol.
+/// The library component a component places, and its symbol: a pinned
+/// one's as its label has them.
 pub fn placed<'a>(p: &'a Project, of: &LibRef) -> Result<(&'a LibComp, &'a Symbol)> {
     let lc = p.libcomp(SELF, of)?;
-    Ok((lc, p.symbol(alias_of(of), &lc.symbol)?))
+    Ok((lc, p.placed_symbol(of, &lc.symbol)?))
 }
 
 /// The footprint `text` names among those `lc` (in library `alias`)

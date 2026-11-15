@@ -912,6 +912,14 @@ pub enum Code {
     /// minor or tap drill) within its class's limits widened by 0.1 mm;
     /// the face, its diameter and the range are in the details.
     ThreadSizeMismatch,
+    /// A hole's place isn't on the face it names, or on any face of the
+    /// hole's targets, or (from two edges) lies outside the face: the
+    /// place, and its distance from the face when there is one
+    /// (`distance_m`), are in the details (ryucad 28.C).
+    HolePlaceOffFace,
+    /// A hole's place lies on several faces of its targets and names
+    /// none: the faces it lies on are in the details (`faces`).
+    HolePlaceAmbiguous,
     /// A warning: a USD export wrote a sheet as its mesh alone, the
     /// BrepArray writer having refused it (`solid`, `face`, `reason`;
     /// until ryucad 24.E every sheet was written so).
@@ -1035,6 +1043,27 @@ pub enum Code {
     /// ryueda: an error the merged project holds that neither side did
     /// and no other item explains, blamed on a side; `merge status`'s kind.
     MergeFaults,
+    /// ryueda: a design places another project's library component at
+    /// `working`, which a release can't pin (design 629); `ryueda lib pin`
+    /// gives it a label. A problem of `release_not_ready`, never a `check`
+    /// fault: working from a sibling library is the normal way to develop.
+    ComponentNotReleased,
+    /// ryueda: a design places another project's component at a label an
+    /// obsolete record names (design 629). A warning in `check`; it still
+    /// places, and a release refuses it.
+    ComponentObsolete,
+    /// ryueda: a pinned label older than the component's latest official
+    /// one. A warning in `check` and `lib outdated`; never fails.
+    ComponentOutdated,
+    /// ryueda: a component of a library in another repository at
+    /// `working`: only its released labels reach this project (`ryueda
+    /// lib pin`).
+    LibraryForeignWorking,
+    /// ryueda: a populated BOM line whose library component has no maker
+    /// part number (design 629): `part_unidentified` as the BOM sees it,
+    /// once per line. A warning in `check`'s `bom` section; a problem of
+    /// `release_not_ready`.
+    BomUnidentified,
 }
 
 impl Code {
@@ -1261,6 +1290,19 @@ mod tests {
             json!("thread_size_mismatch")
         );
         assert_eq!(Code::ThreadSizeMismatch.exit_code(), 1);
+        assert_eq!(json!(Code::HolePlaceOffFace), json!("hole_place_off_face"));
+        assert_eq!(
+            json!(Code::HolePlaceAmbiguous),
+            json!("hole_place_ambiguous")
+        );
+        assert_eq!(
+            Code::HolePlaceOffFace.exit_code(),
+            Code::ReferenceWrongKind.exit_code()
+        );
+        assert_eq!(
+            Code::HolePlaceAmbiguous.exit_code(),
+            Code::ReferenceWrongKind.exit_code()
+        );
     }
 
     #[test]
@@ -1509,6 +1551,24 @@ mod tests {
             (Code::MergeFaults, "merge_faults"),
         ] {
             assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+        }
+    }
+
+    #[test]
+    fn eda_pdm_codes() {
+        assert_eq!(
+            serde_json::to_value(Code::ComponentNotReleased).unwrap(),
+            "component_not_released"
+        );
+        assert_eq!(Code::ComponentNotReleased.exit_code(), 1);
+        for (c, name) in [
+            (Code::ComponentObsolete, "component_obsolete"),
+            (Code::ComponentOutdated, "component_outdated"),
+            (Code::LibraryForeignWorking, "library_foreign_working"),
+            (Code::BomUnidentified, "bom_unidentified"),
+        ] {
+            assert_eq!(serde_json::to_value(c).unwrap(), name);
             assert_eq!(c.exit_code(), 1);
         }
     }

@@ -50,7 +50,7 @@ impl Repo {
     }
 
     fn git(&self, dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)

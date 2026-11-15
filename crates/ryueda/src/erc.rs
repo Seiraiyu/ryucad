@@ -502,19 +502,14 @@ fn refdes_checks(f: &mut Found, n: &Netlist) {
 fn library_errors(p: &Project, of: &str) -> (Vec<Fault>, Vec<Fault>) {
     let mut pads = Vec::new();
     let mut other = Vec::new();
-    let Some((alias, id)) = of
-        .strip_prefix("lib/")
-        .and_then(|s| s.split_once("/libcomp/"))
-    else {
+    let Some(r) = of_ref(of) else {
         return (pads, other);
     };
-    let Ok(lib) = p.library(alias) else {
+    // A pinned component's own library, as its label has it.
+    let Ok(lib) = p.home(&r) else {
         return (pads, other);
     };
-    let Some(l) = Id::parse(id, "libcomp")
-        .ok()
-        .and_then(|i| lib.components.get(&i))
-    else {
+    let Some(l) = lib.components.get(&r.id) else {
         return (pads, other);
     };
     for x in l.faults.iter().filter(|x| x.is_error()) {
@@ -524,7 +519,6 @@ fn library_errors(p: &Project, of: &str) -> (Vec<Fault>, Vec<Fault>) {
         }
     }
     if let Ok(c) = &l.item {
-        let alias = if alias == SELF { SELF } else { alias };
         let symbol_faults = c
             .symbol
             .library
@@ -536,7 +530,7 @@ fn library_errors(p: &Project, of: &str) -> (Vec<Fault>, Vec<Fault>) {
         other.extend(symbol_faults.into_iter().filter(Fault::is_error));
         for u in &c.footprints {
             let fp_lib = match &u.footprint.library {
-                None => p.library(alias).ok(),
+                None => Some(lib),
                 Some(a) => p.library(a.as_str()).ok(),
             };
             if let Some(fl) = fp_lib.and_then(|l| l.footprints.get(&u.footprint.id)) {
@@ -591,15 +585,27 @@ fn library_checks(f: &mut Found, p: &Project, n: &Netlist) {
 
 /// The library component an occurrence's `of` (`lib/<alias>/libcomp/<id>`)
 /// names, as loaded.
-pub(crate) fn placed_libcomp<'a>(
+pub fn placed_libcomp<'a>(
     p: &'a Project,
     of: &str,
 ) -> Option<&'a crate::library::Loaded<crate::libcomp::LibComp>> {
+    let r = of_ref(of)?;
+    p.home(&r).ok()?.components.get(&r.id)
+}
+
+/// The placement reference an occurrence's `of`
+/// (`lib/<alias>/libcomp/<id>`) is.
+pub fn of_ref(of: &str) -> Option<crate::libcomp::LibRef> {
     let (alias, id) = of.strip_prefix("lib/")?.split_once("/libcomp/")?;
-    p.library(alias)
-        .ok()?
-        .components
-        .get(&Id::parse(id, "libcomp").ok()?)
+    let library = if alias == SELF {
+        None
+    } else {
+        Some(Id::parse(alias, "alias").ok()?)
+    };
+    Some(crate::libcomp::LibRef {
+        library,
+        id: Id::parse(id, "libcomp").ok()?,
+    })
 }
 
 /// A placed component's own parameters, if its file reads.
@@ -640,6 +646,15 @@ fn by_libcomp(n: &Netlist) -> BTreeMap<&str, Vec<&crate::netlist::Occurrence>> {
         by.entry(&o.of).or_default().push(o);
     }
     by
+}
+
+/// Whether occurrence `o` is marked `dnp` (itself or its library
+/// component, when that loads).
+pub fn occurrence_dnp(p: &Project, o: &crate::netlist::Occurrence) -> bool {
+    match placed_libcomp(p, &o.of).and_then(|l| l.item.as_ref().ok()) {
+        Some(c) => is_dnp(p, o, c),
+        None => dnp([component_parameters(p, o), None]),
+    }
 }
 
 /// Whether occurrence `o` of library component `c` is marked `dnp`.
@@ -1067,23 +1082,46 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
 /// (the report in its details) on any error a waiver doesn't accept.
 ///
 /// With the working files, doctor's issues too (those the loader doesn't
-/// already report: `unknown_file` is one of its faults).
-pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<Value> {
+/// already report: `unknown_file` is one of its faults), and `release`,
+/// the release findings (`crate::pdm::release::findings`).
+pub fn check(
+    root: &std::path::Path,
+    cats: &crate::parts::Catalogues,
+    release: &[Value],
+    deps: &[Value],
+    bom: &[Value],
+) -> Result<Value> {
     let p = Project::load(root)?;
     let doctor: Vec<Fault> = crate::doctor::diagnose(root, &p)
         .iter()
-        .filter(|i| !matches!(i.code, Code::UnknownFile | Code::MergeConflict))
+        .filter(|i| {
+            !matches!(
+                i.code,
+                Code::UnknownFile
+                    | Code::MergeConflict
+                    | Code::DependencyUnlocked
+                    | Code::LockUnused
+            )
+        })
         .map(crate::doctor::Issue::fault)
         .collect();
-    check_project(&p, cats, &doctor)
+    check_project(&p, cats, &doctor, release, deps, bom)
 }
 
 /// `check` of a loaded project, with doctor's issues `doctor`: the working
-/// files' (from [`check`]) or a revision's (none: no folder to doctor).
+/// files' (from [`check`]) or a revision's (none: no folder to doctor),
+/// and the release findings `release` (each with its `severity`), in a
+/// `release` section only when there are any: a project without PDM
+/// reports as it always has. `deps`, the library labels' findings
+/// (`crate::libdeps::findings`), are a `deps` section likewise, and
+/// `bom`, the BOM's findings (`crate::pdm::bom::findings`), a `bom` one.
 pub fn check_project(
     p: &Project,
     cats: &crate::parts::Catalogues,
     doctor: &[Fault],
+    release: &[Value],
+    deps: &[Value],
+    bom: &[Value],
 ) -> Result<Value> {
     let faults = p.faults();
     let erc = erc(p, None)?;
@@ -1092,21 +1130,30 @@ pub fn check_project(
     let style = crate::stylelint::faults(p, &crate::lint::prefs(p));
     let supply = crate::supply::findings(p, cats)?;
     let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
+    let release_errors = release.iter().filter(|f| f["severity"] == "error").count() as u64;
+    let deps_errors = deps.iter().filter(|f| f["severity"] == "error").count() as u64;
+    let bom_errors = bom.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| f.is_error()).count() as u64
         + symbols.iter().filter(|f| f.is_error()).count() as u64
         + style.iter().filter(|f| f.is_error()).count() as u64
         + doctor.iter().filter(|f| f.is_error()).count() as u64
-        + supply_errors;
+        + supply_errors
+        + release_errors
+        + deps_errors
+        + bom_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| !f.is_error()).count() as u64
         + symbols.iter().filter(|f| !f.is_error()).count() as u64
         + style.iter().filter(|f| !f.is_error()).count() as u64
         + doctor.iter().filter(|f| !f.is_error()).count() as u64
-        + (supply.len() as u64 - supply_errors);
-    let report = json!({
+        + (supply.len() as u64 - supply_errors)
+        + (release.len() as u64 - release_errors)
+        + (deps.len() as u64 - deps_errors)
+        + (bom.len() as u64 - bom_errors);
+    let mut report = json!({
         "faults": fault::list(&faults),
         "erc": erc,
         "schematic": fault::list(&schematic),
@@ -1117,6 +1164,15 @@ pub fn check_project(
         "errors": errors,
         "warnings": warnings,
     });
+    if !release.is_empty() {
+        report["release"] = json!(release);
+    }
+    if !deps.is_empty() {
+        report["deps"] = json!(deps);
+    }
+    if !bom.is_empty() {
+        report["bom"] = json!(bom);
+    }
     if errors > 0 {
         return Err(crate::error::Error::new(
             Code::CheckFailed,

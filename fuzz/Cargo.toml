@@ -250,6 +250,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "eda_pdm"
+path = "fuzz_targets/eda_pdm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "eda_merge"
 path = "fuzz_targets/eda_merge.rs"
 test = false
@@ -322,6 +329,13 @@ bench = false
 [[bin]]
 name = "hole_spec"
 path = "fuzz_targets/hole_spec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "batch"
+path = "fuzz_targets/batch.rs"
 test = false
 doc = false
 bench = false

@@ -758,3 +758,21 @@ fn recognising_and_editing_blends_is_bounded() {
     });
     eprintln!("blends: recognise {read} units, delete {deleted}, resize {resized}");
 }
+
+/// A delete that builds its rung again with stops (design 642): the bent
+/// rod's rim, the same units on one thread and on eight.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_stopped_delete_is_bounded() {
+    use ryukei::tweak::delete_blends_with;
+    use ryukei_testkit::held_seams::{bent_rod, spec};
+    let rod = bent_rod();
+    let spec = spec();
+    let spent = bounded("delete (stopped)", |w| {
+        delete_blends_with(OpKey(9), &rod, &spec, w)
+    });
+    eprintln!("delete (stopped): {spent} units");
+}

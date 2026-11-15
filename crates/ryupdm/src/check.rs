@@ -170,15 +170,15 @@ pub fn run_for<P: Product>(
     history: Option<History<'_>>,
     mut results: Option<&mut dyn Results>,
 ) -> Result<Vec<Finding>> {
-    let config = Config::read(src)?;
-    let records = Records::read(src)?;
+    let config = Config::read_in(src, P::NAME)?;
+    let records = Records::read_in(src, P::NAME)?;
     let none = Releases::default();
     let releases = history.as_ref().map_or(&none, |h| h.releases);
     let identity = crate::product::identity::<P>(src);
     let project: Option<ProjectId> = identity.as_ref().and_then(|i| i.project.clone());
     // Records naming the ID a fork had are its upstream's history.
     let inherited = identity.and_then(|i| i.forked_from);
-    let parts: Vec<Id> = P::parts(src)?;
+    let parts: Vec<Id> = crate::product::part_ids::<P>(src)?;
     let official = |e: &Entry| releases.official.get(&e.path);
     let mut out = Vec::new();
     for part in records.parts() {
@@ -306,7 +306,7 @@ pub fn run_for<P: Product>(
             let content = P::content(&then, &part);
             let changes = match (
                 &content,
-                Config::read(&then),
+                Config::read_in(&then, P::NAME),
                 props::read_for::<P>(&then, &part),
             ) {
                 (Ok(c), Ok(cfg), Ok(p)) => r.changes(c, &cfg, &p),
@@ -750,6 +750,12 @@ pub fn staged_for<P: Product>(repo: &gix::Repository, prefix: &str) -> Result<Ve
                     crate::history::blobs(repo, t, &format!("{dir}/"), &mut all)?;
                 }
             }
+            // Root files, so one left as it was isn't read as changed.
+            for name in P::ROOT_FILES {
+                if let Some(id) = crate::history::entry(repo, tree, prefix, name)? {
+                    all.insert((*name).to_owned(), id);
+                }
+            }
             all
         }
         Err(_) => BTreeMap::new(),
@@ -758,6 +764,7 @@ pub fn staged_for<P: Product>(repo: &gix::Repository, prefix: &str) -> Result<Ve
     let paths: std::collections::BTreeSet<&String> = index.keys().chain(head.keys()).collect();
     let mut records_changed: Vec<String> = Vec::new();
     let mut parts_touched: std::collections::BTreeSet<Id> = Default::default();
+    let mut touch_all = false;
     for p in paths {
         if !changed(p) {
             continue;
@@ -776,16 +783,24 @@ pub fn staged_for<P: Product>(repo: &gix::Repository, prefix: &str) -> Result<Ve
                 if let Some(id) = P::part_of(p) {
                     parts_touched.insert(id);
                 }
+                // Both: a ryueda library component is a part in a library
+                // project and placed by designs in a design project.
+                if P::shared(p) {
+                    touch_all = true;
+                }
             }
         }
     }
     let src = Staged { repo, files: index };
-    let records = Records::read(&src)?;
+    let records = Records::read_in(&src, P::NAME)?;
+    if touch_all {
+        parts_touched.extend(records.parts());
+    }
     let has_records = |p: &Id| records.of(p).next().is_some();
     if records_changed.is_empty() && !parts_touched.iter().any(has_records) {
         return Ok(Vec::new());
     }
-    let config = Config::read(&src)?;
+    let config = Config::read_in(&src, P::NAME)?;
     let official: BTreeMap<String, gix::ObjectId> =
         match crate::history::branch(repo, &config.release_branch)? {
             Some(b) => crate::history::records_at(repo, &b.tip, prefix)?,

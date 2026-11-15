@@ -18,6 +18,9 @@ pub(crate) struct Working {
     /// piece reaching the side of a face that couldn't is
     /// `ExtensionUnsupported`, not `RegionTooSmall`.
     pub(crate) extendable: bool,
+    /// The working face's sheet where a plane stop cut it (plan 19.B):
+    /// one face, its every edge a side. `None`: the rect's sheet.
+    pub(crate) cut: Option<Body>,
 }
 
 /// Whether `s` is a bounded surface `carried_by` takes.
@@ -119,6 +122,7 @@ pub(crate) fn working(
         rect,
         sense,
         extendable,
+        cut: None,
     })
 }
 
@@ -182,7 +186,7 @@ pub(crate) fn delete_turn(
 }
 
 /// The span of fin `fin`'s pcurve in direction `k`.
-fn fin_span(body: &Body, fin: crate::topo::FinId, k: usize) -> Option<[f64; 2]> {
+pub(crate) fn fin_span(body: &Body, fin: crate::topo::FinId, k: usize) -> Option<[f64; 2]> {
     let fi = &body.fins[fin];
     let pc = fi.pcurve?;
     let [s0, s1] = body.edges[fi.edge].interval.map(|t| pc.param(t));
@@ -196,7 +200,7 @@ fn fin_span(body: &Body, fin: crate::topo::FinId, k: usize) -> Option<[f64; 2]> 
 
 /// The span of face `f`'s pcurves in direction `k`; `None` for a face
 /// with a loop that is a lone vertex, or a pcurve missing.
-fn own_span(body: &Body, f: FaceId, k: usize) -> Option<[f64; 2]> {
+pub(crate) fn own_span(body: &Body, f: FaceId, k: usize) -> Option<[f64; 2]> {
     let mut t = [f64::INFINITY, f64::NEG_INFINITY];
     for l in body.face_loops(f) {
         if body.loops[l].vertex.is_some() {

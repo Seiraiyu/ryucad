@@ -85,6 +85,14 @@ fn three(v: &Value) -> Option<[f64; 3]> {
 }
 
 impl Entry {
+    /// The part it was made on: its marks', else its first pin's.
+    pub fn part(&self) -> Option<&str> {
+        self.marks
+            .as_ref()
+            .map(|m| m.part.as_str())
+            .or_else(|| self.pins.first().map(|p| p.part.as_str()))
+    }
+
     /// What a screen reader says of its row (#749): number, author,
     /// state, comment.
     pub fn spoken(&self, number: Option<usize>) -> String {

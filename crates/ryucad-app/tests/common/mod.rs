@@ -113,9 +113,12 @@ pub fn ryucad() -> &'static Daemon {
         // in its config, so doctor finds the same Git setup whether the
         // target folder sits inside a checkout (as in CI) or not.
         let dir = shared();
-        let init = Command::new("git").args(["init", "-q"]).arg(dir).status();
+        let init = ryupdm::git_env::isolated()
+            .args(["init", "-q"])
+            .arg(dir)
+            .status();
         assert!(init.unwrap().success(), "git init");
-        let install = Command::new(&daemon.exe)
+        let install = ryucad_cmd(&daemon.exe)
             .args(["git", "install"])
             .current_dir(dir)
             .status();
@@ -241,6 +244,17 @@ fn beside() -> PathBuf {
     path
 }
 
+/// The `ryucad` binary at `path`, with no `GIT_` variable inherited: a
+/// `GIT_DIR` from `git bisect run` or a hook would point its Git at
+/// another repository (#721).
+pub fn ryucad_cmd(path: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(path);
+    for v in ryupdm::git_env::inherited() {
+        cmd.env_remove(v);
+    }
+    cmd
+}
+
 /// A graphics adapter to draw with, software ones included. Without one
 /// the tests that draw pass with a note, unless `RYUCAD_REQUIRE_GPU` is
 /// set (CI sets it where lavapipe or WARP is installed).
@@ -282,7 +296,7 @@ impl Project {
 
     /// Runs the CLI in the project as the agent `agent`; returns its JSON.
     pub fn cli(&self, args: &[&str]) -> Value {
-        let out = Command::new(&ryucad().exe)
+        let out = ryucad_cmd(&ryucad().exe)
             .args(args)
             .current_dir(&self.root)
             .output()
@@ -300,7 +314,7 @@ impl Project {
     /// Runs Git in the project, as someone with a fixed identity (CI has
     /// none).
     pub fn git(&self, args: &[&str]) {
-        let out = Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
             .current_dir(&self.root)
@@ -312,7 +326,7 @@ impl Project {
     /// [`Project::git`] for a command that may fail (a merge that stops
     /// for conflicts): whether it succeeded.
     pub fn try_git(&self, args: &[&str]) -> bool {
-        Command::new("git")
+        ryupdm::git_env::isolated()
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
             .current_dir(&self.root)
@@ -1020,7 +1034,7 @@ impl Project {
 
 impl Drop for Project {
     fn drop(&mut self) {
-        let _ = Command::new(&ryucad().exe)
+        let _ = ryucad_cmd(&ryucad().exe)
             .args(["daemon", "stop"])
             .current_dir(&self.root)
             .output();

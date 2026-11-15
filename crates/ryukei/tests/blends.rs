@@ -136,6 +136,159 @@ fn a_holes_rim() {
     );
 }
 
+/// A plate 1 × 1 × 0.2 drilled through its middle by a circle of radius
+/// 0.1 made of two arcs, as NIST FTC 09's holes are: the hole's wall is
+/// two half cylinders on one circle, and its rim two half circles (#723).
+fn halved_hole() -> Body {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Circle2, Curve2, Frame, Frame2, Point2, Vector2, Vector3};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    let plate = primitive::block(OpKey(1), 1.0, 1.0, 0.2, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let arc = |key: u128, t0: f64| {
+        let f = Frame2::new(Point2::new(0.5, 0.5), Vector2::new(1.0, 0.0), true).unwrap();
+        Segment {
+            key: SegmentKey(key),
+            curve: Curve2::Circle2(Circle2::new(f, 0.1).unwrap()),
+            t0,
+            t1: t0 + PI,
+        }
+    };
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![arc(11, 0.0), arc(12, PI)],
+        }],
+    })
+    .unwrap();
+    let rod = extrude(OpKey(2), &profile, Vector3::new(0.0, 0.0, 1.0), -0.5, 0.7)
+        .unwrap()
+        .0;
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &rod,
+        place: Rigid::IDENTITY,
+    };
+    boolean(OpKey(3), BooleanOp::Subtract, &plate, &[tool])
+        .unwrap()
+        .0
+}
+
+#[test]
+fn a_halved_holes_rim_is_filleted() {
+    let b = halved_hole();
+    let rim = circles_at(&b, 0.2);
+    assert_eq!(rim.len(), 2, "the rim is two half circles");
+    let (r, _) = blend(K, &b, &[fillet(rim[0], 0.02), fillet(rim[1], 0.02)]).unwrap();
+    assert_eq!(check_intersections(&r), []);
+    let (area, d) = corner(0.02);
+    near(
+        volume(&r, 1e-5),
+        0.2 - PI * 0.01 * 0.2 - 2.0 * PI * (0.1 + d) * area,
+        2e-6,
+    );
+}
+
+#[test]
+fn a_halved_holes_rim_is_chamfered() {
+    use ryukei::blend::Chamfer;
+    let b = halved_hole();
+    let rim = circles_at(&b, 0.2);
+    assert_eq!(rim.len(), 2, "the rim is two half circles");
+    let chamfer = |edge| EdgeBlend {
+        edge,
+        kind: BlendKind::Chamfer(Chamfer::Equal { distance: 0.02 }),
+    };
+    let (r, _) = blend(K, &b, &[chamfer(rim[0]), chamfer(rim[1])]).unwrap();
+    assert_eq!(check_intersections(&r), []);
+    // A right triangle of legs 0.02, its centroid 0.02 / 3 out from the wall.
+    let area = 0.02 * 0.02 / 2.0;
+    near(
+        volume(&r, 1e-5),
+        0.2 - PI * 0.01 * 0.2 - 2.0 * PI * (0.1 + 0.02 / 3.0) * area,
+        2e-6,
+    );
+}
+
+/// The same plate drilled by a stadium (two lines of 0.2 and two half
+/// circles of radius 0.1): smooth joins round a hole's rim, an inner
+/// loop, each between faces on their own surfaces (#723).
+#[test]
+fn a_stadium_holes_rim_is_filleted() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Circle2, Curve2, Frame, Frame2, Line2, Point2, Vector2, Vector3};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    use std::f64::consts::FRAC_PI_2;
+    let plate = primitive::block(OpKey(1), 1.0, 1.0, 0.2, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let line = |key: u128, a: (f64, f64), b: (f64, f64)| {
+        let (a, b) = (Point2::new(a.0, a.1), Point2::new(b.0, b.1));
+        Segment {
+            key: SegmentKey(key),
+            curve: Curve2::Line2(Line2::through(a, b).unwrap()),
+            t0: 0.0,
+            t1: a.distance(b),
+        }
+    };
+    let arc = |key: u128, x: f64, t0: f64| {
+        let f = Frame2::new(Point2::new(x, 0.5), Vector2::new(1.0, 0.0), true).unwrap();
+        Segment {
+            key: SegmentKey(key),
+            curve: Curve2::Circle2(Circle2::new(f, 0.1).unwrap()),
+            t0,
+            t1: t0 + PI,
+        }
+    };
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![
+                line(11, (0.4, 0.4), (0.6, 0.4)),
+                arc(12, 0.6, -FRAC_PI_2),
+                line(13, (0.6, 0.6), (0.4, 0.6)),
+                arc(14, 0.4, FRAC_PI_2),
+            ],
+        }],
+    })
+    .unwrap();
+    let rod = extrude(OpKey(2), &profile, Vector3::new(0.0, 0.0, 1.0), -0.5, 0.7)
+        .unwrap()
+        .0;
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &rod,
+        place: Rigid::IDENTITY,
+    };
+    let b = boolean(OpKey(3), BooleanOp::Subtract, &plate, &[tool])
+        .unwrap()
+        .0;
+    let rim = edges_at(&b, 0.2)
+        .into_iter()
+        .filter(|&n| {
+            let e = b.edges().find(|&e| b.edge(e).unwrap().name == n).unwrap();
+            let ed = b.edge(e).unwrap();
+            [ed.start, ed.end].iter().all(|&v| {
+                let p = b.vertex(v).unwrap().point;
+                p.x > 0.25 && p.x < 0.75 && p.y > 0.35 && p.y < 0.65
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rim.len(), 4, "the rim is two lines and two half circles");
+    let blends: Vec<EdgeBlend> = rim.iter().map(|&e| fillet(e, 0.02)).collect();
+    let (r, _) = blend(K, &b, &blends).unwrap();
+    assert_eq!(check_intersections(&r), []);
+    let (area, d) = corner(0.02);
+    near(
+        volume(&r, 1e-5),
+        0.2 - (0.04 + PI * 0.01) * 0.2 - (0.4 + 2.0 * PI * (0.1 + d)) * area,
+        2e-6,
+    );
+}
+
 #[test]
 fn a_bosss_foot_is_filled() {
     use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};

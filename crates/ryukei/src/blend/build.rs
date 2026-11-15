@@ -58,8 +58,9 @@ pub(crate) struct Made {
     /// End edges: the edge, its segment, the end face (none at an open
     /// end) and the name of the vertex the blend took away there.
     pub(crate) ends: Vec<(EdgeId, usize, Option<FaceId>, Name)>,
-    /// Sections: the edge and the segments either side.
-    pub(crate) sections: Vec<(EdgeId, [usize; 2])>,
+    /// Sections: the edge, the segments either side and the name of the
+    /// vertex the blend took away there.
+    pub(crate) sections: Vec<(EdgeId, [usize; 2], Name)>,
     /// Vertices the blend took away, by their names, and the segments at
     /// them.
     pub(crate) replaced: Vec<(Name, Vec<usize>)>,
@@ -587,6 +588,7 @@ fn chain_build(
             continue;
         };
         let v = chain.vertices[vi];
+        let old = body.vertices[v].name;
         let corner = path.corners[vi].ok_or_else(inconsistent)?;
         let before = (vi + n - 1) % n;
         let face = face_of(body, fins[before][0]);
@@ -605,7 +607,7 @@ fn chain_build(
         };
         let segs = segments_at(plan, chain, vi);
         made.sections
-            .push((edge, [first_seg + segs[0], first_seg + segs[1]]));
+            .push((edge, [first_seg + segs[0], first_seg + segs[1]], old));
         work.vertices.insert(corner);
     }
     // Plain joins on one curve become one edge again.

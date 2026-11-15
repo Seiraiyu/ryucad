@@ -3070,7 +3070,8 @@ fn merged_as_well_as_each_side(board: &Path, before: &std::collections::BTreeMap
     let at = |c: &str| ryueda::git::revision(board, c).unwrap();
     let (ours, theirs) = (at(&ours_c), at(&theirs_c));
     let load = |r: &ryueda::git::Revision| {
-        ryueda::project::Project::load_from(board, &r.files, &r.aliases).unwrap()
+        ryueda::project::Project::load_from(board, &r.files, &r.aliases, &ryueda::pin::NoPins)
+            .unwrap()
     };
     let allowed: BTreeSet<String> = codes(&load(&ours))
         .union(&codes(&load(&theirs)))

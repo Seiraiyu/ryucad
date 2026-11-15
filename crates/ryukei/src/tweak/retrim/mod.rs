@@ -9,6 +9,7 @@
 //! material is guessed: the walk only counts.
 
 pub(crate) mod body;
+pub(crate) mod held;
 pub(crate) mod names;
 pub(crate) mod region;
 pub(crate) mod seeds;
@@ -31,10 +32,48 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use walk::WalkError;
 
-/// One rung of the retry ladder: whether it may go on to the next.
-enum Rung {
+/// One build of a rung of the retry ladder: whether it may go on to the
+/// next.
+pub(crate) enum Rung {
     Done(Box<Result<(Body, Journal), Error>>),
     Next(Error),
+    /// The walk couldn't close: climbs the ladder as `Next`; a stopped
+    /// build's never answers (design 642).
+    Walked(Error),
+    /// `Uncertain` at a pair with held seams: answers as `Done` unless the
+    /// rung is built again with stops.
+    Held(Error),
+    /// A build with stops that stops nothing: never built.
+    Unstopped,
+}
+
+/// Whether a rung may be built again with its working faces stopped at
+/// held seams (design 642).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stops {
+    /// Never: each rung is built once (the tests' re-trim without stops).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Never,
+    /// Once its first build refuses `Uncertain` at a held pair.
+    AfterHeld,
+}
+
+/// A rung's answer from its first build and, where that refused at a held
+/// pair and `stops` allows, its build with stops (`again`): the stopped
+/// build's answer, except that one whose walk fails, or that stops
+/// nothing, leaves the first answer standing (design 642's fallback; the
+/// first build without stops would only repeat it, Decision 8).
+pub(crate) fn settle(first: Rung, stops: Stops, again: impl FnOnce() -> Rung) -> Rung {
+    let Rung::Held(e) = first else {
+        return first;
+    };
+    if stops == Stops::Never {
+        return done(Err(e));
+    }
+    match again() {
+        Rung::Walked(_) | Rung::Unstopped | Rung::Held(_) => done(Err(e)),
+        r => r,
+    }
 }
 
 /// A rung that answers.
@@ -42,16 +81,30 @@ fn done(r: Result<(Body, Journal), Error>) -> Rung {
     Rung::Done(Box::new(r))
 }
 
+/// [`retrim_with`] with stops after a held pair refuses.
+pub(crate) fn retrim(
+    key: OpKey,
+    body: &Body,
+    changes: &Changes,
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
+    retrim_with(key, body, changes, Stops::AfterHeld, m)
+}
+
 /// `body` tweaked by `changes` with its topology free to change, named
 /// from `key`. Refusals: `NotASolid` for a sheet, `LaminarFace` for a
 /// region face with a laminar edge, `GapNotHealed`, `HealAmbiguous`,
 /// `RegionTooSmall` and `ExtensionUnsupported` from the walk,
 /// `SelfIntersecting`, `Uncertain` and `ToleranceTooLarge` from the
-/// result's checks.
-pub(crate) fn retrim(
+/// result's checks. Where a rung's first build refuses `Uncertain` at a
+/// pair with held seams, `stops` says whether it is built once more with
+/// its working faces stopped at them, under its own `Scope::Rung` cap
+/// (design 642).
+pub(crate) fn retrim_with(
     key: OpKey,
     body: &Body,
     changes: &Changes,
+    stops: Stops,
     m: &Meter,
 ) -> Result<(Body, Journal), Error> {
     body.require_solid("re-trim")?;
@@ -82,13 +135,19 @@ pub(crate) fn retrim(
         if rung == 1 {
             bx = doubled(&bx);
         }
-        // Each rung under its own cap: one that can't settle refuses
+        // Each build under its own cap: one that can't settle refuses
         // `Uncertain` in bounded units, as the caps do.
-        match m.capped(crate::work::Scope::Rung, || {
-            attempt(key, body, changes, &region, &bx, m)
-        }) {
+        let build = |stopped: bool| {
+            m.capped(crate::work::Scope::Rung, || {
+                attempt(key, body, changes, &region, &bx, stopped, m)
+            })
+        };
+        match settle(build(false), stops, || build(true)) {
             Rung::Done(r) => return *r,
-            Rung::Next(e) => last = Some(e),
+            Rung::Next(e) | Rung::Walked(e) => last = Some(e),
+            // `settle` answers both of these; kept for the match.
+            Rung::Held(e) => return Err(e),
+            Rung::Unstopped => {}
         }
     }
     Err(last.expect("one rung ran"))
@@ -161,11 +220,26 @@ fn attempt(
     changes: &Changes,
     region: &Region,
     bx: &crate::geom::Box3,
+    stopped: bool,
     m: &Meter,
 ) -> Rung {
     let mut ws = BTreeMap::new();
     let absorbed = absorbed(body, changes, region);
     let absorbing: std::collections::BTreeSet<FaceId> = absorbed.values().copied().collect();
+    // Faces left as they are: on their own surfaces, standing for
+    // themselves.
+    let still = |f: FaceId| {
+        region.faces.contains(&f)
+            && !changes.deleted.contains(&f)
+            && !changes.motion.contains_key(&f)
+            && !changes.surface.contains_key(&f)
+            && !absorbed.contains_key(&f)
+    };
+    // The seams kept faces were tangent along, all along or in places,
+    // across the frontier too (design 642).
+    let held = held::held(body, region, &still);
+    // Whether a build with stops stopped anything.
+    let mut stopping = false;
     for &f in region
         .faces
         .iter()
@@ -201,10 +275,36 @@ fn attempt(
                         }
                     }
                 }
+                // Built again with stops: the working face ends at its held
+                // seams whose ends can't move (design 642).
+                if stopped {
+                    let before = w.rect;
+                    w.rect = held::iso_stops(body, f, &held, &w.surface, w.rect);
+                    stopping |= w.rect != before;
+                    // Where no iso stop did, a plane stop (plan 19.B).
+                    if let Some(cut) = held::plane_stops(
+                        body::sheet_key(key, body.faces[f].name),
+                        body,
+                        f,
+                        &held,
+                        &w.surface,
+                        before,
+                        w.rect,
+                        bx,
+                        m,
+                    ) {
+                        w.cut = Some(cut);
+                        stopping = true;
+                    }
+                }
                 ws.insert(f, w);
             }
             Err(e) => return done(Err(e)),
         }
+    }
+    // A build with stops that stops nothing would only repeat the first.
+    if stopped && !stopping {
+        return Rung::Unstopped;
     }
     let w = match work_body(key, body, region, &ws, m) {
         Ok(w) => w,
@@ -292,16 +392,9 @@ fn attempt(
     };
     let pairs = w.pairs();
     // Kept faces tangent along an input edge meet along it (#652): those
-    // left as they are, on their own surfaces, standing for themselves.
-    let still = |f: FaceId| {
-        region.faces.contains(&f)
-            && !changes.deleted.contains(&f)
-            && !changes.motion.contains_key(&f)
-            && !changes.surface.contains_key(&f)
-            && !absorbed.contains_key(&f)
-    };
+    // left as they are, and the faces outside the region, held by `held`.
     let seams: crate::intersect::Seams = w
-        .seams(body, &still)
+        .seams(body, &held, stopped)
         .into_iter()
         .filter(|(k, _)| pairs.contains(k))
         .collect();
@@ -314,7 +407,7 @@ fn attempt(
         (_, Some((e @ WalkError::Halted { .. }, f))) => {
             return done(Err(walk_error(&w, e, f)));
         }
-        (_, Some((e, f))) => return Rung::Next(walk_error(&w, e, f)),
+        (_, Some((e, f))) => return Rung::Walked(walk_error(&w, e, f)),
         (Ok(Some(r)), None) => r,
         (Ok(None), None) => {
             let least = region.changed.iter().map(|&f| body.faces[f].name).min();
@@ -328,7 +421,20 @@ fn attempt(
         (Err(Fail::Inconsistent), None) => {
             return done(Err(Error::Topology(TopologyError::Inconsistent)));
         }
-        (Err(Fail::Uncertain(a, _) | Fail::Unsupported(a, _)), None) => {
+        (Err(Fail::Uncertain(a, b)), None) => {
+            let e: Error = TweakError::Uncertain {
+                at: name_of(a.face),
+            }
+            .into();
+            // At a held pair the rung may be built again with stops
+            // (design 642); a stopped build's refusal is its answer.
+            let pair = (a.face.min(b.face), a.face.max(b.face));
+            if !stopped && seams.contains_key(&pair) {
+                return Rung::Held(e);
+            }
+            return done(Err(e));
+        }
+        (Err(Fail::Unsupported(a, _)), None) => {
             return done(Err(TweakError::Uncertain {
                 at: name_of(a.face),
             }

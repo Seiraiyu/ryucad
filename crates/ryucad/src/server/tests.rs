@@ -4443,6 +4443,61 @@ fn meshes_are_made_before_the_lock_is_taken() {
     });
 }
 
+/// #801: a part's `mesh.get` takes several of its solids in
+/// `features`, so the window asks for a part's bodies by the batch and
+/// the daemon meshes them side by side, outside its lock.
+#[test]
+fn a_parts_mesh_get_takes_several_solids() {
+    crate::config::tests::with_config(|_| {
+        let (_dir, s) = with_part();
+        let mut slot = Some(s);
+        for (id, r) in [("a", 1), ("b", 2), ("c", 3)] {
+            call(
+                slot.as_mut().unwrap(),
+                "feature.add",
+                json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+            )
+            .unwrap();
+        }
+        let v = call(
+            slot.as_mut().unwrap(),
+            "mesh.get",
+            json!({"part": "p", "features": ["a", "c"], "quality": "coarse"}),
+        )
+        .unwrap();
+        let got: Vec<&str> = v["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["feature"].as_str().unwrap())
+            .collect();
+        assert_eq!(got, ["a", "c"]);
+        // Made together before the lock, as an assembly's are.
+        let req = Request::from_rpc(
+            "mesh.get",
+            Some(
+                json!({"part": "p", "features": ["a", "b"], "quality": "normal",
+                        "transfer": "compact"}),
+            ),
+        )
+        .unwrap();
+        let job = prepare(&mut slot, &req).expect("two meshes to make");
+        let put = job();
+        let s = slot.as_mut().unwrap();
+        let before = s.caches().meshes().len();
+        put(s);
+        assert_eq!(s.caches().meshes().len(), before + 2);
+        // A name that isn't a solid is refused, as with `feature`.
+        let e = call(
+            slot.as_mut().unwrap(),
+            "mesh.get",
+            json!({"part": "p", "features": ["a", "nope"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+    });
+}
+
 #[test]
 fn a_repair_is_logged_and_can_be_undone() {
     let (dir, mut s) = with_part();
@@ -4831,4 +4886,60 @@ fn part_create_and_delete_run_captured() {
     assert!(c.captures() && !s.captures());
     let names: Vec<&str> = c.project().parts.keys().map(|i| i.as_str()).collect();
     assert_eq!(names, ["q"]);
+}
+
+/// What `feature::built` makes is what `feature.add` writes (plan 31.C).
+#[test]
+fn feature_adds_build_is_what_it_writes() {
+    let (_dir, mut s) = crate::annotation::propose::tests::twin();
+    let rig = crate::part::part_id("rig").unwrap();
+    let pin = crate::part::part_id("pin").unwrap();
+    for (pid, v) in [
+        (
+            &pin,
+            json!({"part": "pin", "type": "box", "id": "b", "params": {"x": 3, "y": "4 mm", "z": 1}}),
+        ),
+        (
+            &pin,
+            json!({"part": "pin", "type": "cylinder", "id": "c", "params": {"radius": 1, "height": 2},
+                   "placement": {"origin": [1, 2, 3]}}),
+        ),
+        (
+            &pin,
+            json!({"part": "pin", "type": "sketch", "id": "k", "plane": "yz"}),
+        ),
+        (
+            &rig,
+            json!({"part": "rig", "type": "instance", "id": "p2", "of": "pin",
+                   "placement": {"origin": [0, 20, 0]}}),
+        ),
+    ] {
+        let Request::FeatureAdd {
+            ty,
+            params,
+            placement,
+            fields,
+            id,
+            ..
+        } = Request::from_rpc("feature.add", Some(v.clone())).unwrap()
+        else {
+            unreachable!()
+        };
+        let list = crate::part::order(s.project().part(pid).unwrap()).unwrap();
+        let at = list.len();
+        let given = crate::feature::Given {
+            params,
+            placement,
+            fields,
+        };
+        let (f, _) =
+            super::feature::built(&mut s, pid, &ty, given, id.as_deref(), &list, at).unwrap();
+        call(&mut s, "feature.add", v).unwrap();
+        let fid = crate::part::feature_id(id.as_deref().unwrap()).unwrap();
+        let written = s.project().part(pid).unwrap().features[&fid]
+            .as_ref()
+            .unwrap()
+            .to_json();
+        assert_eq!(f.to_json(), written, "{ty}");
+    }
 }

@@ -39,6 +39,22 @@ fn pattern_report(part: &Id, x: &crate::doc::pattern::Pattern) -> Value {
             v["angle"] = angle.report();
         }
         Kind::Mirror { .. } => {}
+        // A fill's spacings and margin (ryucad 28.C); its face and
+        // direction are references, below.
+        Kind::Fill {
+            spacing,
+            spacing2,
+            margin,
+            ..
+        } => {
+            v["spacing"] = spacing.report();
+            if let Some(s) = spacing2 {
+                v["spacing2"] = s.report();
+            }
+            if let Some(m) = margin {
+                v["margin"] = m.report();
+            }
+        }
     }
     for (role, r) in x.geometry() {
         v[role] = json!(r.text(part));
@@ -46,7 +62,7 @@ fn pattern_report(part: &Id, x: &crate::doc::pattern::Pattern) -> Value {
     v
 }
 
-pub(crate) const PATTERN: [&str; 15] = [
+pub(crate) const PATTERN: [&str; 17] = [
     "form",
     "features",
     "direction",
@@ -62,11 +78,14 @@ pub(crate) const PATTERN: [&str; 15] = [
     "plane",
     "skip",
     "targets",
+    "face",
+    "margin",
 ];
 
 /// A pattern from `current`'s fields (none for a new one, whose form,
 /// left out, is what its fields say: a mirror with a plane, circular with
-/// an axis, else linear) with what was given laid over them. A new form
+/// an axis, a fill with a face, else linear) with what was given laid
+/// over them. A new form
 /// keeps only the fields it takes; references (a direction, an axis, a
 /// plane) are given as text and kept as a file holds them; `direction2`
 /// `""` drops the second direction, and no skips, or false, is the
@@ -82,6 +101,7 @@ pub(crate) fn pattern_from(
     let f = &given.fields;
     let fresh = || {
         let form = match (&f.plane, &f.axis) {
+            _ if f.face.is_some() => "fill",
             (Some(_), _) => "mirror",
             (None, Some(_)) => "circular",
             _ => "linear",
@@ -105,6 +125,7 @@ pub(crate) fn pattern_from(
                 "skip",
             ],
             "circular" => &["axis", "count", "angle", "skip"],
+            "fill" => &["face", "direction", "spacing", "spacing2", "margin", "skip"],
             _ => &[],
         };
         o.retain(|k, _| {
@@ -122,6 +143,7 @@ pub(crate) fn pattern_from(
         ("direction2", &f.direction2),
         ("axis", &f.axis),
         ("plane", &f.plane),
+        ("face", &f.face),
     ] {
         if let Some(t) = x.as_deref().filter(|t| !t.is_empty()) {
             o.insert(k.into(), entity(t, &format!("/{k}"))?);
@@ -137,6 +159,15 @@ pub(crate) fn pattern_from(
         if let Some(x) = x {
             o.insert(k.into(), x.clone());
         }
+    }
+    match &f.margin {
+        Some(Value::String(s)) if s.is_empty() => {
+            o.remove("margin");
+        }
+        Some(x) => {
+            o.insert("margin".into(), x.clone());
+        }
+        None => {}
     }
     for (k, x) in [("reverse", f.reverse), ("reverse2", f.reverse2)] {
         match x {
@@ -186,6 +217,10 @@ pub(crate) fn pattern_from(
             ),
         ],
         Some("mirror") => &[("plane", "an origin plane or a planar face")],
+        Some("fill") => &[
+            ("face", "the planar face the lattice fills"),
+            ("spacing", "the distance between rows"),
+        ],
         _ => &[],
     };
     let form = o.get("form").and_then(Value::as_str).unwrap_or_default();
@@ -343,7 +378,7 @@ pub(crate) fn build_pattern(
         &Id,
         (
             crate::hole::derive::Sizes,
-            &crate::sketch::Solved,
+            Option<&crate::sketch::Solved>,
             &crate::doc::hole::Hole,
         ),
     > = BTreeMap::new();
@@ -353,13 +388,27 @@ pub(crate) fn build_pattern(
         {
             let sizes = crate::hole::derive::derive(h, part.hole_standards.as_deref())
                 .map_err(crate::hole::derive::at_rebuild)?;
-            let solved = crate::rebuild::sketch_input(part, seed, &h.sketch, before)?;
+            let solved = match &h.sketch {
+                Some(sk) => Some(crate::rebuild::sketch_input(part, seed, sk, before)?),
+                None => None,
+            };
             inputs.insert(*seed, (sizes, solved, h));
         }
     }
     let mut exit_tools: BTreeMap<&Id, crate::hole::ExitTools> = BTreeMap::new();
     for (seed, (sizes, solved, h)) in &inputs {
-        let t = crate::hole::ExitTools::new(part, seed, h, sizes, solved, &target_bodies, before)?;
+        let t = match solved {
+            Some(solved) => crate::hole::ExitTools::new(
+                part,
+                seed,
+                h,
+                sizes,
+                crate::hole::Drill::of_sketch(solved)?,
+                &target_bodies,
+                before,
+            )?,
+            None => crate::hole::ExitTools::at_places(part, seed, h, sizes, &target_bodies),
+        };
         exit_tools.insert(*seed, t);
     }
     // Each instance's own tool where its exit gives it one, in the order

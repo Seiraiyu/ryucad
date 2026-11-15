@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod scripted;
+
 use ryucad::proto::Request;
 use ryucad::server::handle;
 use ryucad::session::Session;

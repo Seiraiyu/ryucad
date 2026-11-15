@@ -25,11 +25,19 @@ impl ryu_session::Serve for Eda {
     type Session = Session;
     type Request = Request;
     type Version = VersionInfo;
-    /// Part catalogues' downloads and distributors' calls: progress in
-    /// phase `fetch`, cancelled between files and calls, their work done
+    /// Part catalogues' downloads and distributors' calls, and fetches of
+    /// libraries in other repositories: progress in phase `fetch`,
+    /// cancelled between files, calls and repositories, their work done
     /// with the lock released.
-    const LONG: &'static [&'static str] =
-        &["parts.sync", "parts.refresh", "parts.search", "parts.show"];
+    const LONG: &'static [&'static str] = &[
+        "parts.sync",
+        "parts.refresh",
+        "parts.search",
+        "parts.show",
+        "lib.add",
+        "lib.fetch",
+        "lib.update",
+    ];
 
     fn version() -> VersionInfo {
         VersionInfo::current()
