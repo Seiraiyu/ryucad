@@ -11,6 +11,8 @@
 //! an instance or changing a spacing, angle or count renames nothing that
 //! remains.
 
+pub mod fill;
+
 use crate::doc::files::Feature;
 use crate::doc::geometry::GeomRef;
 use crate::doc::id::Id;
@@ -45,7 +47,8 @@ pub fn instance_key(
         piece(p.as_str());
     }
     piece(&i.to_string());
-    if j > 0 {
+    // The same as `j > 0` for every index an unsigned pattern had.
+    if j != 0 {
         piece(&j.to_string());
     }
     bytes.pop();
@@ -71,6 +74,19 @@ pub fn check_seeds(part: &Part, id: &Id, p: &Pattern) -> Result<Operation> {
             // Its file's fault, or its absence, is the order check's.
             _ => continue,
         };
+        // A fill's lattice is of hole places (ryucad 28.C).
+        if matches!(p.kind, Kind::Fill { .. }) && !matches!(f, Feature::Hole(_)) {
+            return Err(Error::new(
+                Code::ReferenceWrongKind,
+                format!(
+                    "pattern {id}: its seed {seed} is a {}; a fill repeats holes",
+                    f.type_name()
+                ),
+            )
+            .with("feature", id)
+            .with("seed", seed)
+            .with("pointer", at));
+        }
         let whole = match f {
             Feature::Mirror(_) => Some("a mirror, which copies a whole solid"),
             Feature::Thicken(_) => {
@@ -225,11 +241,28 @@ pub fn motions(
                 .map(|x| (x, Motion::Mirror(plane)))
                 .collect())
         }
+        Kind::Fill {
+            face,
+            direction,
+            spacing,
+            spacing2,
+            margin,
+        } => {
+            let s1 = spacing.meters();
+            let s2 = spacing2.as_ref().map_or(s1, crate::units::Quantity::meters);
+            let m = margin.as_ref().map_or(0.0, crate::units::Quantity::meters);
+            Ok(
+                fill::lattice(part, id, p, face, direction.as_ref(), (s1, s2), m, before)?
+                    .into_iter()
+                    .map(|(i, r)| (i, Motion::Rigid(r)))
+                    .collect(),
+            )
+        }
     }
 }
 
 /// Where a pattern's references resolve.
-fn at<'a>(part: &'a Part, id: &'a Id, before: &'a dyn Results) -> At<'a> {
+pub(crate) fn at<'a>(part: &'a Part, id: &'a Id, before: &'a dyn Results) -> At<'a> {
     At {
         part,
         order: part.order(),
@@ -371,6 +404,35 @@ mod tests {
             .filter(|(_, o)| o["feature"] == f)
             .map(|(n, o)| (n.clone(), o["instance"].to_string()))
             .collect()
+    }
+
+    #[test]
+    fn instance_keys_hold_for_unsigned_and_sign_for_negative() {
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let (p, f, s) = (id("p"), id("grid"), id("h"));
+        let pt = Id::parse("p1", "entity").unwrap();
+        // The same bytes as before for every index a pattern had.
+        let old = |i: u32, j: u32| {
+            let mut b = b"ryucad.tool\0p\0grid\0h\0p1\0".to_vec();
+            b.extend_from_slice(i.to_string().as_bytes());
+            if j > 0 {
+                b.push(0);
+                b.extend_from_slice(j.to_string().as_bytes());
+            }
+            b
+        };
+        for (i, j) in [(1u32, 0u32), (0, 1), (9, 9), (99_999, 0)] {
+            assert_eq!(
+                super::instance_key(&p, &f, &s, Some(&pt), [i as i32, j as i32]),
+                ryukei::name::ToolKey(ryukei::name::OpKey::from_bytes(&old(i, j)).0),
+                "{i}, {j}"
+            );
+        }
+        // A fill's negative indices are their own keys: row -1 isn't row 0.
+        let a = super::instance_key(&p, &f, &s, Some(&pt), [-1, 0]);
+        let b = super::instance_key(&p, &f, &s, Some(&pt), [1, 0]);
+        let c = super::instance_key(&p, &f, &s, Some(&pt), [1, -1]);
+        assert!(a != b && b != c && a != c);
     }
 
     #[test]

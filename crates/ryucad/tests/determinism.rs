@@ -17,6 +17,8 @@
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
 
+mod common;
+
 use ryucad::doc::files::{Feature, PartFile, Placement, Primitive, PrimitiveType};
 use ryucad::doc::id::Id;
 use ryucad::doc::project::Part;
@@ -1944,7 +1946,7 @@ fn compare_section(golden: &mut Golden) {
     let mut s = golden.section("compare");
     let (dir, mut session) = showcase();
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args([
                 "-c",
                 "user.name=Test",
@@ -5786,6 +5788,129 @@ fn hole_geometry_section(golden: &mut Golden) {
     }
 }
 
+/// Part `hp` (ryucad 28.C): holes at every kind of place, and a fill of
+/// hole seeds clipped to a face, with a skip; every body, the rebuild's
+/// hash and every hole's row.
+fn hole_places_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut g = golden.section("hole_places");
+    let (_dir, mut s) = hole_project("hp");
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("hp");
+        hole_call(s, "feature.add", f)
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "plate", "params": {"x": 80, "y": 50, "z": 12}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "tube", "params": {"radius": 10, "height": 30},
+               "placement": {"origin": [120, 0, 0]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "bore", "operation": "cut", "targets": ["tube"],
+               "params": {"radius": 7, "height": 30}, "placement": {"origin": [120, 0, 0]}}),
+    );
+    let body = |s: &mut ryucad::session::Session, f: &str| -> serde_json::Value {
+        hole_call(s, "inspect", json!({"part": "hp", "feature": f}))["bodies"][0].clone()
+    };
+    let plate = body(&mut s, "plate");
+    let top = plate["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+        })
+        .map(|f| format!("hp/plate/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    let point = |name: &serde_json::Value| -> [f64; 3] {
+        let v = plate["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == *name)
+            .unwrap();
+        [0, 1, 2].map(|k| v["point"][k].as_f64().unwrap())
+    };
+    // The top's edge along x = 0 (axis 0) or along y = 0 (axis 1).
+    let edge = |axis: usize| -> String {
+        plate["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| {
+                let (a, b) = (point(&e["start"]), point(&e["end"]));
+                a[2] == 0.012 && b[2] == 0.012 && a[axis] == 0.0 && b[axis] == 0.0
+            })
+            .map(|e| format!("hp/plate/{}", e["name"].as_str().unwrap()))
+            .unwrap()
+    };
+    let tube = body(&mut s, "tube");
+    let outer = tube["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .map(|f| format!("hp/tube/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    for (id, at) in [
+        ("q1", ["8 mm", "8 mm", "12 mm"]),
+        ("q2", ["130 mm", "0 mm", "15 mm"]),
+    ] {
+        add(
+            &mut s,
+            json!({"type": "point", "id": id, "by": "coordinates", "coordinates": at}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "at", "spec": "M6x1.0-6H THRU",
+               "targets": ["plate"], "places": {"a": {"at": "hp/q1"}}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "ed", "spec": "DIA 5 8 DEEP", "targets": ["plate"],
+               "places": {"a": {"face": top, "from": [{"edge": edge(0), "distance": 76},
+                                                      {"edge": edge(1), "distance": 3}]}}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "rd", "spec": "DIA 3 THRU NEXT", "targets": ["tube"],
+               "places": {"a": {"at": "hp/q2", "face": outer}}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "fl", "features": ["at"], "form": "fill",
+               "face": top, "direction": "x", "spacing": 15, "spacing2": 12,
+               "margin": 2, "skip": [[1, 1]]}),
+    );
+    let part = Id::parse("hp", "part").unwrap();
+    let result = s.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (id, o) in &result.features {
+        let o = o.as_ref().unwrap();
+        g.str(id.as_str());
+        for (solid, b) in o.solids() {
+            g.str(solid.as_str());
+            g.str(&b.body.dump());
+        }
+        if o.solids().is_empty() {
+            g.str(o.hash());
+        }
+    }
+    g.str(&result.hash);
+    let holes = ryucad::holes::list(&mut s, &part, None).unwrap();
+    for r in &holes.rows {
+        g.str(&ryucad::doc::canonical::to_string(&r.to_json(Unit::Mm)));
+    }
+}
+
 /// Part `hc` (ryucad 28.B): one of each hole check's findings in a 60 x
 /// 40 x 12 mm plate; the canonical answer of `holes.check`.
 fn hole_checks_section(golden: &mut Golden) {
@@ -5889,7 +6014,7 @@ fn drilled_solids_are_sound() {
 fn deps_projects() -> (tempfile::TempDir, tempfile::TempDir) {
     use serde_json::json;
     let git = |dir: &std::path::Path, args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
@@ -5983,7 +6108,7 @@ fn packages_section(golden: &mut Golden) {
     use serde_json::{Value, json};
     let mut s = golden.section("packages");
     let git = |dir: &std::path::Path, args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
@@ -7298,6 +7423,82 @@ fn properties_move_no_geometry_instance() {
     }
 }
 
+/// Design 603's `script` section: the scripted project (8 leaves, 24
+/// instances) built by one batch of ensures and, over a copy of the same
+/// empty project, request by request: the same files, byte for byte,
+/// whose parts' files and rebuild hashes are hashed.
+fn script_section(golden: &mut Golden) {
+    use std::collections::BTreeMap;
+    fn files(root: &std::path::Path, rel: &str, out: &mut BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(root.join(rel)).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let r = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if e.file_type().unwrap().is_dir() {
+                files(root, &r, out);
+            } else {
+                out.insert(r, std::fs::read(e.path()).unwrap());
+            }
+        }
+    }
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            if e.file_type().unwrap().is_dir() {
+                copy(&e.path(), &to.join(e.file_name()));
+            } else {
+                std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let mut s = golden.section("script");
+    let script = common::scripted::Script::new(8, 24);
+    let dir = tempfile::tempdir().unwrap();
+    let (a_root, b_root) = (dir.path().join("a"), dir.path().join("b"));
+    std::fs::create_dir(&a_root).unwrap();
+    ryucad::server::init(&a_root, None).unwrap();
+    {
+        let mut a = ryucad::session::Session::open(&a_root).unwrap();
+        common::must(&mut a, "pdm.init", serde_json::json!({}));
+    }
+    copy(&a_root, &b_root);
+    let mut a = ryucad::session::Session::open(&a_root).unwrap();
+    let mut b = ryucad::session::Session::open(&b_root).unwrap();
+    common::must(&mut a, "batch", script.batch());
+    for (m, p) in script.singles() {
+        common::must(&mut b, &m, p);
+    }
+    let (mut fa, mut fb) = (BTreeMap::new(), BTreeMap::new());
+    files(&a_root, "", &mut fa);
+    files(&b_root, "", &mut fb);
+    assert_eq!(fa.keys().collect::<Vec<_>>(), fb.keys().collect::<Vec<_>>());
+    for (k, v) in &fa {
+        assert!(fb[k] == *v, "{k} differs between the batch and one by one");
+    }
+    for p in &script.parts {
+        let id = Id::parse(&p.id, "part").unwrap();
+        s.str(&p.id);
+        for (k, v) in fa.range(format!("parts/{}/", p.id)..format!("parts/{}0", p.id)) {
+            s.str(k);
+            s.bytes(v);
+        }
+        let (ha, hb) = (
+            a.rebuilt(&id).unwrap().hash.clone(),
+            b.rebuilt(&id).unwrap().hash.clone(),
+        );
+        assert_eq!(ha, hb, "{}", p.id);
+        s.str(&ha);
+    }
+}
+
 sections! {
     golden;
     units => units_section(&mut golden),
@@ -7331,6 +7532,7 @@ sections! {
     hole_specs => hole_specs_section(&mut golden),
     hole_geometry => hole_geometry_section(&mut golden),
     hole_checks => hole_checks_section(&mut golden),
+    hole_places => hole_places_section(&mut golden),
     sketch_drawing => sketch_drawing_section(&mut golden),
     diff => diff_section(&mut golden),
     merge => merge_section(&mut golden),
@@ -7377,4 +7579,5 @@ sections! {
     drawings => drawings_section(&mut golden),
     drawing_sections => drawing_sections_section(&mut golden),
     drawing_annotations => drawing_annotations_section(&mut golden),
+    script => script_section(&mut golden),
 }

@@ -2,7 +2,8 @@
 # Drives a built ryueda binary through a short agent session: a project,
 # the committed KiCad test library imported (a dry run, then for real), a
 # small design (rails, a block, three resistors wired between them, a
-# net of its own), its netlist, ERC and check, undo and redo through the
+# net of its own), its netlist, ERC and check, a library component
+# released (PDM) in a repository of its own, undo and redo through the
 # daemon, the activity log, the daemon's status and stop, and a run in
 # process.
 #
@@ -83,6 +84,29 @@ has '"R3"' "the netlist places R3"
 run erc
 has '"errors":0,"findings":[],"warnings":0}' "ERC finds nothing"
 run check
+# PDM (design 629): a library project in a repository of its own, its
+# imported resistor numbered, proposed for release and listed.
+mkdir -p "$work/pdm/lib"
+cp -R "$kicad" "$work/pdm/lib/kicad"
+git -C "$work/pdm" init -q -b main
+cd "$work/pdm/lib"
+run init --library
+run import kicad kicad/symbols/Ryu_Test.kicad_sym kicad/footprints/Ryu_Test.pretty --models kicad/3dmodels
+rm -rf kicad
+run pdm init
+run props set ryu_test_r number=100-0001
+git -C "$work/pdm" add -A
+git -C "$work/pdm" -c user.name=smoke -c user.email=smoke@example.com -c commit.gpgsign=false commit -q -m start
+run release propose ryu_test_r
+has '"label":"A"' "the resistor is proposed as A"
+run release list
+has '"status":"proposed"' "the record is listed as proposed"
+run where-used ryu_test_r --no-dependents
+has '"working":[]' "no design places the resistor yet"
+run daemon stop
+cd "$work/project"
+run bom
+has '"columns":["number","name","description","part","revision","quantity","uom","make_buy","refdes"' "the design's BOM has ryupdm's and ryueda's columns"
 run undo
 [ ! -f designs/d.json ] || { echo "FAIL undo left the design" && exit 1; }
 run redo

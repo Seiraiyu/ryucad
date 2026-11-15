@@ -1714,7 +1714,34 @@ fn together_within(a: &Carrier, b: &Carrier, reach: f64) -> bool {
     }) || [0.25, 0.5, 0.75].iter().all(|&f| {
         let p = b.curve.point(b.range[0] + (b.range[1] - b.range[0]) * f);
         param_on(a, p, reach).is_some()
-    })
+    }) || overlapping(a, b, reach)
+}
+
+/// Whether two carriers run along each other over part of each (#652,
+/// FTC 10: a plane crossed where two faces tangent along a line meet it,
+/// their stretches overlapping end over end): an end of each lies on the
+/// other, those ends lie apart, and the middle between them lies on both.
+/// Carriers only meeting end to end don't.
+fn overlapping(a: &Carrier, b: &Carrier, reach: f64) -> bool {
+    let ends = |c: &Carrier| [c.range[0], c.range[1]].map(|t| (t, c.curve.point(t)));
+    for (ta, pa) in ends(a) {
+        if param_on(b, pa, reach).is_none() {
+            continue;
+        }
+        for (_, pb) in ends(b) {
+            let Some(sa) = param_on(a, pb, reach) else {
+                continue;
+            };
+            if pa.distance(pb) <= 4.0 * reach {
+                continue;
+            }
+            let mid = a.curve.point(0.5 * (ta + sa));
+            if param_on(b, mid, reach).is_some() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Shares vertices between related carriers until nothing changes.
@@ -2073,6 +2100,11 @@ fn pcurve_of(
         Member::Edge(e) => face_of_edge(ops, e),
         Member::Stretch { pair, .. } => pairs[pair].a,
     };
+    // A straight edge near a plane: its projection, the edge's tolerance
+    // grown to how far it lies off (#804).
+    if let Some((found, gap)) = crate::pcurve::line_near_plane(surface, &ge.curve, ge.interval) {
+        return Ok((found, ge.tolerance.max(gap * 1.0001 + 1e-12)));
+    }
     // A tolerant edge lies measurably off another operand's coincident
     // face: fitted as healing and merging fit one (design 299).
     let (n, bound) = crate::intersect::fit_pcurve(surface, &ge.curve, ge.interval, m)
@@ -2092,6 +2124,38 @@ mod tests {
     use crate::geom::{Rigid, Surface, Vector3};
     use crate::name::OpKey;
     use crate::primitive;
+
+    /// Stretches along one line overlapping end over end run together
+    /// (#652, FTC 10's plane crossed where two faces tangent along a line
+    /// meet it): neither holds three points of the other, yet left
+    /// unrelated their pieces lie on each other and the face's split
+    /// can't order them. Stretches only meeting end to end, or apart,
+    /// don't.
+    #[test]
+    fn stretches_overlapping_end_over_end_run_together() {
+        use crate::geom::{Line, Point3};
+        let carrier = |x0: f64, x1: f64| Carrier {
+            member: Member::Stretch { pair: 0, index: 0 },
+            curve: Curve::Line(
+                Line::new(Point3::new(0.0, 0.023, 0.0375), Vector3::new(1.0, 0.0, 0.0)).unwrap(),
+            ),
+            range: [x0, x1],
+            closed: false,
+            tolerance: 1e-8,
+            points: Vec::new(),
+        };
+        // Overlapping by half of each: a quarter point of each off the
+        // other.
+        let (a, b) = (carrier(0.0, 0.1), carrier(0.05, 0.15));
+        assert!(together(&a, &b) && together(&b, &a));
+        // End to end, or apart.
+        let (c, d) = (carrier(0.0, 0.1), carrier(0.1, 0.2));
+        assert!(!together(&c, &d) && !together(&d, &c));
+        let e = carrier(0.1001, 0.2);
+        assert!(!together(&c, &e));
+        // One holding the other, as before.
+        assert!(together(&carrier(0.0, 0.1), &carrier(0.02, 0.04)));
+    }
 
     /// `close_pairs` finds exactly the pairs whose boxes, each grown by
     /// both tolerances and `SLACK`, meet, in the nested loop's order, as a

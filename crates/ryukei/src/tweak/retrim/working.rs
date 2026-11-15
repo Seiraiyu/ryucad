@@ -18,6 +18,9 @@ pub(crate) struct Working {
     /// piece reaching the side of a face that couldn't is
     /// `ExtensionUnsupported`, not `RegionTooSmall`.
     pub(crate) extendable: bool,
+    /// The working face's sheet where a plane stop cut it (plan 19.B):
+    /// one face, its every edge a side. `None`: the rect's sheet.
+    pub(crate) cut: Option<Body>,
 }
 
 /// Whether `s` is a bounded surface `carried_by` takes.
@@ -119,6 +122,7 @@ pub(crate) fn working(
         rect,
         sense,
         extendable,
+        cut: None,
     })
 }
 
@@ -132,11 +136,17 @@ pub(crate) fn working(
 /// cylinders put their back three quarters across the pocket, and the
 /// walk's choices among those pieces passed `CHOICES` (NIST FTC 08's
 /// pocket floor, #653).
+///
+/// In a narrowed build (`circular`, design 669) the span is read round
+/// the circle ([`own_hull`]), so a quarter face whose pcurves straddle
+/// the period's seam is carried a quarter turn and a little more, not a
+/// whole one; elsewhere it is [`own_span`], as before.
 pub(crate) fn delete_turn(
     body: &Body,
     changes: &Changes,
     f: FaceId,
     surface: &Surface,
+    circular: bool,
 ) -> [Option<[f64; 2]>; 2] {
     let (pu, pv) = surface.periods();
     let periods = [pu, pv];
@@ -146,7 +156,12 @@ pub(crate) fn delete_turn(
     }
     for k in 0..2 {
         let Some(p) = periods[k] else { continue };
-        let Some([a, b]) = own_span(body, f, k) else {
+        let span = if circular {
+            own_hull(body, f, k, p)
+        } else {
+            own_span(body, f, k)
+        };
+        let Some([a, b]) = span else {
             continue;
         };
         let g = (b - a) / 16.0;
@@ -182,7 +197,7 @@ pub(crate) fn delete_turn(
 }
 
 /// The span of fin `fin`'s pcurve in direction `k`.
-fn fin_span(body: &Body, fin: crate::topo::FinId, k: usize) -> Option<[f64; 2]> {
+pub(crate) fn fin_span(body: &Body, fin: crate::topo::FinId, k: usize) -> Option<[f64; 2]> {
     let fi = &body.fins[fin];
     let pc = fi.pcurve?;
     let [s0, s1] = body.edges[fi.edge].interval.map(|t| pc.param(t));
@@ -196,7 +211,7 @@ fn fin_span(body: &Body, fin: crate::topo::FinId, k: usize) -> Option<[f64; 2]> 
 
 /// The span of face `f`'s pcurves in direction `k`; `None` for a face
 /// with a loop that is a lone vertex, or a pcurve missing.
-fn own_span(body: &Body, f: FaceId, k: usize) -> Option<[f64; 2]> {
+pub(crate) fn own_span(body: &Body, f: FaceId, k: usize) -> Option<[f64; 2]> {
     let mut t = [f64::INFINITY, f64::NEG_INFINITY];
     for l in body.face_loops(f) {
         if body.loops[l].vertex.is_some() {
@@ -210,6 +225,48 @@ fn own_span(body: &Body, f: FaceId, k: usize) -> Option<[f64; 2]> {
     (t[0] < t[1]).then_some(t)
 }
 
+/// Face `f`'s own span in periodic direction `k`, of period `p`, read
+/// round the circle (design 669): each fin's span moved by whole periods
+/// to start within one period of the plain span's start (as `seam_for`
+/// moves a pcurve into its face's box), then the largest gap between
+/// them round the circle left out; the hull is the arc that remains, as
+/// `[a, b]` with `b` past `a`. Where it is no shorter than [`own_span`]'s,
+/// it is that span, bit for bit, so a face whose pcurves don't straddle
+/// the period's seam reads as before. `None` where `own_span` is.
+pub(crate) fn own_hull(body: &Body, f: FaceId, k: usize, p: f64) -> Option<[f64; 2]> {
+    let plain = own_span(body, f, k)?;
+    let base = plain[0];
+    let mut arcs: Vec<[f64; 2]> = Vec::new();
+    for l in body.face_loops(f) {
+        for fin in body.loop_fins(l) {
+            let [lo, hi] = fin_span(body, fin, k)?;
+            let shift = -((lo - base) / p).floor() * p;
+            arcs.push([lo + shift, hi + shift]);
+        }
+    }
+    arcs.sort_by(|x, y| x[0].total_cmp(&y[0]).then(x[1].total_cmp(&y[1])));
+    // The largest gap between the arcs, with the arc after it and how far
+    // they reached before it; then the gap that wraps round past the last.
+    let mut reach = arcs[0][1];
+    let mut gap: Option<(f64, usize, f64)> = None;
+    for (i, a) in arcs.iter().enumerate().skip(1) {
+        if a[0] > reach && gap.is_none_or(|g| a[0] - reach > g.0) {
+            gap = Some((a[0] - reach, i, reach));
+        }
+        reach = reach.max(a[1]);
+    }
+    let wrap = arcs[0][0] + p - reach;
+    let hull = match gap {
+        Some((g, i, end)) if g > wrap => [arcs[i][0], end + p],
+        _ => [arcs[0][0], reach],
+    };
+    Some(if hull[1] - hull[0] < plain[1] - plain[0] {
+        hull
+    } else {
+        plain
+    })
+}
+
 /// Whether a face moved by `motion` keeps its surface's parameters.
 pub(crate) fn same_params(motion: Option<&crate::tweak::Motion>) -> bool {
     matches!(
@@ -219,7 +276,7 @@ pub(crate) fn same_params(motion: Option<&crate::tweak::Motion>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::tests::{K, block, face_of};
     use super::*;
     use crate::geom::Point3;
@@ -335,9 +392,15 @@ mod tests {
             ..Default::default()
         };
         let surface = &r.surfaces[r.faces[cyl].surface];
-        let [a, z] = delete_turn(&r, &changes, cyl, surface)[0].unwrap();
+        let [a, z] = delete_turn(&r, &changes, cyl, surface, false)[0].unwrap();
         let quarter = core::f64::consts::FRAC_PI_2;
         assert!(z - a >= quarter && z - a < 1.5 * quarter, "{a} {z}");
+        // Its pcurves don't straddle the period's seam: read round the
+        // circle, its turn is the same, bit for bit (design 669).
+        assert_eq!(
+            delete_turn(&r, &changes, cyl, surface, true),
+            delete_turn(&r, &changes, cyl, surface, false)
+        );
         // A deleted side, along the cylinder's generator, takes the
         // whole turn: the cylinder may have to grow round to meet it.
         let side = r
@@ -349,11 +412,129 @@ mod tests {
             .unwrap();
         let mut sided = changes.clone();
         sided.deleted.insert(side);
-        assert_eq!(delete_turn(&r, &sided, cyl, surface), [None; 2]);
+        assert_eq!(delete_turn(&r, &sided, cyl, surface, false), [None; 2]);
         // A face moved anywhere takes the whole turn.
         changes
             .motion
             .insert(cyl, crate::tweak::Motion::Offset(0.01));
-        assert_eq!(delete_turn(&r, &changes, cyl, surface), [None; 2]);
+        assert_eq!(delete_turn(&r, &changes, cyl, surface, false), [None; 2]);
+    }
+
+    /// A unit cylinder's quarter sheet over u in [0, π/2], its side at
+    /// u = 0 stored a period up at 2π, as a file writes a quarter whose
+    /// pcurves straddle the period's seam (FTC 07's runs, #652). Shared
+    /// with `held`'s and `retrim`'s tests.
+    pub(crate) fn straddling_quarter() -> (Body, FaceId) {
+        use crate::geom::{Cylinder, Frame, Vector2, Vector3};
+        use core::f64::consts::{FRAC_PI_2, TAU};
+        let frame = Frame::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let s = Surface::Cylinder(Cylinder::new(frame, 1.0).unwrap());
+        let (mut b, _) = crate::sheet::from_surface(K, &s, [[0.0, FRAC_PI_2], [0.0, 1.0]]).unwrap();
+        let f = b.faces().next().unwrap();
+        let fins: Vec<_> = b.face_loops(f).flat_map(|l| b.loop_fins(l)).collect();
+        let mut moved = 0;
+        for fin in fins {
+            let Some([lo, hi]) = fin_span(&b, fin, 0) else {
+                continue;
+            };
+            // The iso side at u = 0: moved one period up.
+            if lo == 0.0 && hi == 0.0 {
+                let pc = b.fins[fin].pcurve.unwrap();
+                let c = crate::intersect::shifted(&b.curves2[pc.curve], Vector2::new(TAU, 0.0))
+                    .unwrap();
+                b.curves2[pc.curve] = c;
+                moved += 1;
+            }
+        }
+        assert_eq!(moved, 1, "the side at u = 0");
+        (b, f)
+    }
+
+    #[test]
+    fn a_straddling_quarter_reads_as_a_quarter_round_the_circle() {
+        use core::f64::consts::{FRAC_PI_2, PI, TAU};
+        let (b, f) = straddling_quarter();
+        // Read plainly, its pcurves span the whole turn.
+        let [lo, hi] = own_span(&b, f, 0).unwrap();
+        assert!(hi - lo > 1.5 * PI, "{lo} {hi}");
+        // Round the circle, a quarter: [0, π/2], or the same arc a
+        // period on, whichever way the side at 2π falls.
+        let [a, z] = own_hull(&b, f, 0, TAU).unwrap();
+        assert!((z - a - FRAC_PI_2).abs() < 1e-12, "{a} {z}");
+        assert!(a.abs() < 1e-12 || (a - TAU).abs() < 1e-12, "{a} {z}");
+    }
+
+    #[test]
+    fn a_face_that_doesnt_straddle_reads_as_before() {
+        use crate::blend::{BlendKind, EdgeBlend, blend};
+        // The rounded block's quarter cylinders, balls and planes (as in
+        // `a_deletes_quarter_cylinder_is_carried_less_than_a_turn`).
+        let b = block();
+        let edges: Vec<EdgeBlend> = b
+            .edges()
+            .map(|e| EdgeBlend {
+                edge: b.edges[e].name,
+                kind: BlendKind::Fillet { radius: 0.05 },
+            })
+            .collect();
+        let (r, _) = blend(crate::name::OpKey(3), &b, &edges).unwrap();
+        let mut periodic = 0;
+        for f in r.faces() {
+            let s = &r.surfaces[r.faces[f].surface];
+            let (pu, pv) = s.periods();
+            for (k, p) in [pu, pv].into_iter().enumerate() {
+                let Some(p) = p else { continue };
+                periodic += 1;
+                let plain = own_span(&r, f, k);
+                let hull = own_hull(&r, f, k, p);
+                assert_eq!(
+                    plain.map(|s| s.map(f64::to_bits)),
+                    hull.map(|s| s.map(f64::to_bits)),
+                    "{f:?} {k}"
+                );
+            }
+        }
+        assert!(periodic > 0);
+    }
+
+    #[test]
+    fn a_cylinder_over_its_near_box_is_no_longer_than_the_box() {
+        // The rounded block's quarter cylinder beside its low corner,
+        // carried over a box twenty times its size and over a near box.
+        let (r, low, _) = super::super::near::tests::rounded();
+        let cyl = r
+            .face_loops(low)
+            .flat_map(|l| r.loop_fins(l))
+            .flat_map(|fin| r.edge_fins(r.fins[fin].edge))
+            .map(|x| r.loops[r.fins[x].loop_].face)
+            .find(|&g| matches!(r.surfaces[r.faces[g].surface], Surface::Cylinder(_)))
+            .unwrap();
+        let huge = Box3::new(
+            Point3::new(-10.0, -10.0, -10.0),
+            Point3::new(10.0, 10.0, 10.0),
+        );
+        let near = crate::intersect::face_box(&r, cyl)
+            .union(&crate::intersect::face_box(&r, low))
+            .grow(0.1);
+        let sense = r.faces[cyl].sense;
+        let wide = working(&r, cyl, None, sense, true, &huge).unwrap();
+        let narrow = working(&r, cyl, None, sense, true, &near).unwrap();
+        // Along the axis (v): the near box's projection, a sixteenth
+        // each way, not the huge box's.
+        let len = |w: &Working| w.rect[1][1] - w.rect[1][0];
+        assert!(
+            len(&narrow) < len(&wide) / 10.0,
+            "{:?} {:?}",
+            narrow.rect,
+            wide.rect
+        );
+        let d = near.max() - near.min();
+        let span = d.x.max(d.y).max(d.z);
+        assert!(len(&narrow) <= span * (1.0 + 2.0 / 16.0) + 1e-12);
     }
 }

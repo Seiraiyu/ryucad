@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Every kind `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     "value",
     "delete_edit",
     "order",
@@ -37,7 +37,47 @@ pub const KINDS: [&str; 13] = [
     "annotate_conflict",
     "name_clash",
     "merge_faults",
+    "pdm_broke",
 ];
+
+/// What the merge broke in PDM (`ryupdm::merge::validate_for`): each
+/// fault the merged files have that neither side had, blamed on the side
+/// whose change completes it. A stale or out-of-sequence proposal has the
+/// repair `withdraw`, which deletes its record; a property fault is
+/// settled by `props set`.
+fn pdm_broke(root: &Path, repo: &Repo, state: &MergeState, working: &Files) -> Result<Vec<Value>> {
+    let working = own(working);
+    // Without settings or records there is nothing PDM could break.
+    if !working.keys().any(|p| crate::pdm::pdm_file(p)) {
+        return Ok(Vec::new());
+    }
+    let s = sides(root, state)?;
+    let config = ryupdm::config::Config::read_in(&working, crate::pdm::NAME).unwrap_or_default();
+    let releases =
+        ryupdm::history::Releases::read(repo.gix(), repo.prefix(), &config).unwrap_or_default();
+    Ok(
+        ryupdm::merge::validate_for::<crate::Eda>(&s.base, &s.ours, &s.theirs, &working, &releases)
+            .into_iter()
+            .map(|b| {
+                let plan = b.plan();
+                let mut c = item(
+                    plan.id.clone(),
+                    "pdm_broke",
+                    b.files.clone(),
+                    plan.concerns,
+                    b.cause.as_str(),
+                    plan.message,
+                );
+                c["error"] = json!({"code": b.code, "message": b.message, "details": b.details});
+                if let Some(summary) = plan.withdraw {
+                    c["repairs"] =
+                        json!([{"id": "withdraw", "summary": summary, "files": [b.path]}]);
+                }
+                c
+            })
+            .collect(),
+    )
+}
 
 /// The error for a request that needs a merge when there is none.
 pub fn not_merging(root: &Path) -> Error {
@@ -407,7 +447,12 @@ pub(crate) fn project_over(root: &Path, files: &Files) -> Result<Project> {
         .map(|b| crate::project::Manifest::read(b))
         .transpose()?
         .ok_or_else(|| Error::new(Code::ProjectNotFound, "the merge left no manifest"))?;
-    Project::load_from(root, files, &crate::project::resolve(root, &manifest))
+    Project::load_from(
+        root,
+        files,
+        &crate::project::resolve(root, &manifest),
+        &crate::pin::Pins::default(),
+    )
 }
 
 /// What settling a layout needs beyond the files: the project's folder,
@@ -694,6 +739,10 @@ fn findings(
     conflicts.extend(std::mem::take(&mut found.clashes));
     conflicts.extend(std::mem::take(&mut found.faults));
     conflicts.extend(layouts(root, state, working, project, held)?);
+    // What the merge broke in PDM, once every file merged.
+    if !blocked {
+        conflicts.extend(pdm_broke(root, repo, state, working)?);
+    }
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
@@ -875,6 +924,16 @@ fn settle(
             }
             ("refdes_clash" | "name_clash" | "delete_edit" | "id_collision", "repair") => {
                 semantic.push((found.clone(), r.repair.clone().unwrap_or_default()));
+            }
+            ("pdm_broke", "repair") if r.repair.as_deref() == Some("withdraw") => {
+                let Some(withdrawn) = found["repairs"][0]["files"][0].as_str() else {
+                    return Err(Error::new(
+                        Code::RepairConflict,
+                        format!("{} has no withdraw now: run merge status again", r.conflict),
+                    )
+                    .with("conflict", &r.conflict));
+                };
+                files.remove(withdrawn);
             }
             ("layout_stale", "repair") => {
                 let id = r.repair.clone().unwrap_or_default();

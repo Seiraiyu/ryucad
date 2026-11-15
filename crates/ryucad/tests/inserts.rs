@@ -168,7 +168,7 @@ fn issue_41_an_enclosure_is_modelled_against_an_inserted_board() {
 
 /// Runs git in `dir` with a fixed identity.
 fn git(dir: &std::path::Path, args: &[&str]) {
-    let st = std::process::Command::new("git")
+    let st = ryupdm::git_env::isolated()
         .args([
             "-c",
             "user.name=Test",

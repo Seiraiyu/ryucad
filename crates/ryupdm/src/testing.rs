@@ -19,7 +19,7 @@ pub(crate) const PROJECT: &str = "0123456789abcdef0123456789abcdef";
 impl ryu_git::Layout for Toy {
     const NAME: &'static str = "toy";
     const MANIFEST: &'static str = "toy.json";
-    const ROOT_FILES: &'static [&'static str] = &["toy.json", "ryupdm.json"];
+    const ROOT_FILES: &'static [&'static str] = &["toy.json", "ryupdm.json", "common.json"];
     const FOLDERS: &'static [&'static str] = &["things", "properties", "releases"];
     fn project_file(rel: &str) -> bool {
         Self::ROOT_FILES.contains(&rel)
@@ -43,12 +43,13 @@ fn file_id(path: &str) -> Option<Id> {
 impl Product for Toy {
     const PART_FOLDERS: &'static [&'static str] = &["things", "properties"];
 
-    fn parts(src: &dyn Source) -> Result<Vec<Id>> {
+    fn parts(src: &dyn Source) -> Result<Vec<(Id, crate::product::PartKind)>> {
         Ok(src
             .list("things")?
             .into_iter()
             .filter(|(_, k)| *k == Kind::File)
             .filter_map(|(n, _)| file_id(&format!("things/{n}")))
+            .map(|id| (id, crate::product::PartKind::Component))
             .collect())
     }
 
@@ -78,8 +79,14 @@ impl Product for Toy {
         let thing = src.read(&at)?.ok_or_else(|| {
             Error::new(Code::NotFound, format!("no {at}")).with("path", at.as_str())
         })?;
+        // A project's shared file, when it has one, after the thing.
+        let common = src.read("common.json")?;
+        let mut pieces: Vec<&[u8]> = vec![b"toy.content.1".as_slice(), unit.as_bytes(), &thing];
+        if let Some(c) = &common {
+            pieces.push(c);
+        }
         let mut h = blake3::Hasher::new();
-        for piece in [b"toy.content.1".as_slice(), unit.as_bytes(), &thing] {
+        for piece in pieces {
             h.update(&(piece.len() as u64).to_le_bytes());
             h.update(piece);
         }
@@ -96,6 +103,25 @@ impl Product for Toy {
             unit: Unit::parse(manifest["default_unit"].as_str()?)?,
         })
     }
+    fn shared(path: &str) -> bool {
+        path == "common.json"
+    }
+
+    fn defaults(src: &dyn Source, part: &Id) -> Result<BTreeMap<String, Value>> {
+        let Some(bytes) = src.read(&format!("things/{part}.json"))? else {
+            return Ok(BTreeMap::new());
+        };
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        Ok(v.get("name")
+            .and_then(Value::as_str)
+            .map(|n| BTreeMap::from([("name".to_owned(), json!(n))]))
+            .unwrap_or_default())
+    }
+}
+
+/// The project in the folder `dir`, as a source.
+pub(crate) fn folder(dir: &std::path::Path) -> ryu_doc::source::Folder<'_> {
+    ryu_doc::source::Folder(dir)
 }
 
 /// A part ID.
@@ -145,7 +171,14 @@ mod tests {
     #[test]
     fn a_toys_parts_are_its_things() {
         let f = project(&[("b", "{}"), ("a", "{}")]);
-        assert_eq!(Toy::parts(&f).unwrap(), [id("a"), id("b")]);
+        use crate::product::PartKind;
+        assert_eq!(
+            Toy::parts(&f).unwrap(),
+            [
+                (id("a"), PartKind::Component),
+                (id("b"), PartKind::Component)
+            ]
+        );
         assert_eq!(Toy::properties_path(&id("a")), "properties/a.json");
         assert_eq!(Toy::part_of("things/a.json"), Some(id("a")));
         assert_eq!(Toy::part_of("properties/a.json"), Some(id("a")));
@@ -182,7 +215,7 @@ mod tests {
         f.insert("properties/a.json".into(), numbered("1"));
         f.insert("properties/b.json".into(), numbered("1"));
         assert_eq!(read_for::<Toy>(&f, &id("a")).unwrap().number(), Some("1"));
-        let pdm = Pdm::of_for::<Toy>(&f, Toy::parts(&f).unwrap(), Unit::Mm);
+        let pdm = Pdm::of_for::<Toy>(&f, crate::product::part_ids::<Toy>(&f).unwrap(), Unit::Mm);
         for p in ["a", "b"] {
             assert_eq!(pdm.parts[&id(p)].faults[0].code, Code::PartNumberDuplicate);
         }
@@ -274,6 +307,39 @@ mod tests {
             .into_bytes(),
         );
         assert!(codes(&other).contains(&"release_project_mismatch"));
+    }
+
+    #[test]
+    fn a_shared_file_staged_touches_every_part_with_records() {
+        use crate::check::staged_for;
+        use crate::history::tests::{commit, git, put};
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path();
+        // A work branch: the record stays proposed (the release branch is main).
+        git(dir, &["init", "-q", "-b", "work"]);
+        for (p, b) in &project(&[("a", "{}")]) {
+            put(dir, p, std::str::from_utf8(b).unwrap());
+        }
+        put(dir, "common.json", "{\"v\": 1}\n");
+        let content = Toy::content(&folder(dir), &id("a")).unwrap();
+        put(
+            dir,
+            "releases/a/A.json",
+            std::str::from_utf8(&record("a", "A", &content)).unwrap(),
+        );
+        commit(dir, "a proposed");
+        // Nothing staged: nothing found, the root files read as unchanged.
+        let repo = gix::open(dir).unwrap();
+        assert_eq!(staged_for::<Toy>(&repo, "").unwrap().len(), 0);
+        put(dir, "common.json", "{\"v\": 2}\n");
+        git(dir, &["add", "common.json"]);
+        let repo = gix::open(dir).unwrap();
+        let found = staged_for::<Toy>(&repo, "").unwrap();
+        assert_eq!(
+            found.iter().map(|f| f.code).collect::<Vec<_>>(),
+            ["release_stale"],
+            "{found:?}"
+        );
     }
 
     #[test]

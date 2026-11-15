@@ -19,20 +19,32 @@ use crate::session::Session;
 use crate::solid::Solids;
 use crate::view::{DEFAULT_PROJECTION, StandardView};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-/// The display meshes of a part's solids as the model shows them,
-/// `(solid, body, mesh)` by founder; a solid that never built has its
-/// error instead. `only` keeps one solid; a sketch has none.
+/// [`meshes_of`] for one solid, or (`None`) all.
 pub fn meshes(
     session: &mut Session,
     part: &Id,
     only: Option<&Id>,
     quality: mesh::Quality,
 ) -> Result<Vec<(Id, Result<mesh::Meshed>)>> {
+    let one = only.map(|f| BTreeSet::from([f.clone()]));
+    meshes_of(session, part, one.as_ref(), quality)
+}
+
+/// The display meshes of a part's solids as the model shows them,
+/// `(solid, body, mesh)` by founder, made side by side; a solid that
+/// never built has its error instead. `only` keeps those solids (#801:
+/// the window asks for a part's by the batch); a sketch has none.
+pub fn meshes_of(
+    session: &mut Session,
+    part: &Id,
+    only: Option<&BTreeSet<Id>>,
+    quality: mesh::Quality,
+) -> Result<Vec<(Id, Result<mesh::Meshed>)>> {
     let p = session.project().part(part)?;
     let solids = Solids::of(p);
-    if let Some(f) = only {
+    for f in only.into_iter().flatten() {
         // An inserted solid's key names no feature of its own: its
         // insert's family holds it (design 521).
         let sketch = !f.is_path() && feature(p, f)?.sketch().is_some();
@@ -51,7 +63,7 @@ pub fn meshes(
     let built: Vec<(Id, Result<(Id, crate::rebuild::Built)>)> = result
         .shown(&solids)
         .into_iter()
-        .filter(|s| only.is_none_or(|o| o == s.solid))
+        .filter(|s| only.is_none_or(|o| o.contains(s.solid)))
         .map(|s| {
             let r = match (s.state, s.error) {
                 (Some((f, b)), _) => Ok((f.clone(), b.as_ref().clone())),

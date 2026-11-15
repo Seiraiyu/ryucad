@@ -23,6 +23,9 @@ pub const KIND: &str = "ryueda.project";
 pub const FORMAT: u64 = 1;
 /// A manifest with properties or schematic settings.
 pub const FORMAT_2: u64 = 2;
+/// A manifest naming the project it was forked from (`pdm new-id`;
+/// design 629); 10.C's library pins and URLs are format 3 too.
+pub const FORMAT_3: u64 = 3;
 /// The alias of a project's own library, never written.
 pub const SELF: &str = "self";
 /// ERC's severities and waivers, beside the manifest.
@@ -35,8 +38,21 @@ pub const STYLE: &str = crate::style::FILE;
 pub const PARTS: &str = "parts.json";
 /// The Git attributes file, beside the manifest.
 pub const ATTRIBUTES: &str = ".gitattributes";
+/// Which commit each pinned label of a library in another repository
+/// resolved to (design 629): ryupdm's lock, this kind.
+pub const LOCK: &str = "ryueda.lock";
+pub const LOCK_KIND: &str = "ryueda.lock";
 /// The files at a project's root that it is made of.
-pub const ROOT_FILES: [&str; 6] = [MANIFEST, ATTRIBUTES, ERC, LINT, PARTS, STYLE];
+pub const ROOT_FILES: [&str; 8] = [
+    MANIFEST,
+    ATTRIBUTES,
+    ERC,
+    LINT,
+    PARTS,
+    STYLE,
+    crate::pdm::PDM_CONFIG,
+    LOCK,
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +88,19 @@ pub struct Manifest {
     /// How schematics are drawn (format 2): the sheet's paper.
     #[serde(default, skip_serializing_if = "Schematic::is_default")]
     pub schematic: Schematic,
+    /// The project this one was copied from, once `pdm new-id` gave it an
+    /// ID of its own (format 3): its records naming that ID are the
+    /// upstream's history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkedFrom>,
+}
+
+/// The project a fork's ID replaced, and the commit it was at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkedFrom {
+    pub project: ProjectId,
+    pub commit: String,
 }
 
 /// A project's schematic settings.
@@ -252,11 +281,44 @@ impl Sheet {
     }
 }
 
-/// A library project, by its folder relative to this one.
+/// A library project: by its folder relative to this one, in this
+/// repository; or, with `url`, in another repository at `path` inside it
+/// (`""` for its root). `labels` pins components (design 629).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Alias {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The library project's ID: written with `url`, and once one of its
+    /// components is pinned (format 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectId>,
+    /// Each pinned component's label (format 3).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<Id, String>,
+}
+
+impl Alias {
+    /// A library project in this repository, nothing pinned.
+    pub fn local(path: &str) -> Alias {
+        Alias {
+            path: path.to_owned(),
+            url: None,
+            project: None,
+            labels: BTreeMap::new(),
+        }
+    }
+
+    /// Whether it is in another repository.
+    pub fn is_foreign(&self) -> bool {
+        self.url.is_some()
+    }
+
+    /// Whether it needs format 3.
+    fn is_format_3(&self) -> bool {
+        self.url.is_some() || self.project.is_some() || !self.labels.is_empty()
+    }
 }
 
 impl Manifest {
@@ -268,6 +330,7 @@ impl Manifest {
             libraries: BTreeMap::new(),
             properties: BTreeMap::new(),
             schematic: Schematic::default(),
+            forked_from: None,
         }
     }
 
@@ -275,7 +338,7 @@ impl Manifest {
     /// in for the project's own library, so writes would land in another
     /// project, outside the activity log.
     pub fn read(bytes: &[u8]) -> Result<Manifest> {
-        let m: Manifest = doc::read(bytes, MANIFEST, KIND, FORMAT_2)?;
+        let m: Manifest = doc::read(bytes, MANIFEST, KIND, FORMAT_3)?;
         if let Some(f) = crate::props::faults(&m.properties, "/properties").first() {
             return Err(f.error.clone().with("path", MANIFEST));
         }
@@ -287,14 +350,64 @@ impl Manifest {
             .with("path", MANIFEST)
             .with("pointer", format!("/libraries/{SELF}")));
         }
+        for (alias, a) in &m.libraries {
+            let at = format!("/libraries/{alias}");
+            if a.url.is_some() && a.project.is_none() {
+                return Err(Error::new(
+                    Code::InvalidDocument,
+                    format!(
+                        "{MANIFEST}: library {alias} is in another repository and names no project"
+                    ),
+                )
+                .with("path", MANIFEST)
+                .with("pointer", format!("{at}/project")));
+            }
+            if a.url.as_deref().is_some_and(|u| u.trim().is_empty()) {
+                return Err(Error::new(
+                    Code::InvalidDocument,
+                    format!("{MANIFEST}: library {alias}'s url is empty"),
+                )
+                .with("path", MANIFEST)
+                .with("pointer", format!("{at}/url")));
+            }
+            if a.url.is_some()
+                && !a.path.is_empty()
+                && (!path_ok(&a.path) || a.path.split('/').any(|s| s == ".."))
+            {
+                return Err(Error::new(
+                    Code::InvalidDocument,
+                    format!(
+                        "{MANIFEST}: library {alias}'s path {:?} isn't folder names joined by /",
+                        a.path
+                    ),
+                )
+                .with("path", MANIFEST)
+                .with("pointer", format!("{at}/path")));
+            }
+            if let Some((c, _)) = a.labels.iter().find(|(_, l)| l.trim().is_empty()) {
+                return Err(Error::new(
+                    Code::InvalidDocument,
+                    format!("{MANIFEST}: {alias}/{c} is pinned to no label"),
+                )
+                .with("path", MANIFEST)
+                .with("pointer", format!("{at}/labels/{c}")));
+            }
+        }
         Ok(m)
     }
 
     /// Its canonical text: format 2 only when it holds what format 1
     /// can't.
     pub fn to_text(&self) -> String {
-        let newer = !self.properties.is_empty() || self.schematic != Schematic::default();
-        doc::to_string(self, KIND, if newer { FORMAT_2 } else { FORMAT })
+        let format =
+            if self.forked_from.is_some() || self.libraries.values().any(Alias::is_format_3) {
+                FORMAT_3
+            } else if !self.properties.is_empty() || self.schematic != Schematic::default() {
+                FORMAT_2
+            } else {
+                FORMAT
+            };
+        doc::to_string(self, KIND, format)
     }
 }
 
@@ -319,10 +432,24 @@ pub fn resolve(root: &Path, m: &Manifest) -> BTreeMap<Id, Result<String>> {
     m.libraries
         .iter()
         .map(|(alias, a)| {
+            let found = match &a.url {
+                Some(url) => Err(Error::new(
+                    Code::LibraryForeignWorking,
+                    format!(
+                        "library {alias} is in another repository ({url}): only its pinned components are read; pin them with `ryueda lib pin`"
+                    ),
+                )),
+                None => resolve_one(
+                    root,
+                    &a.path,
+                    a.project.as_ref(),
+                    canonical.as_deref().ok(),
+                    fence.as_deref(),
+                ),
+            };
             (
                 alias.clone(),
-                resolve_one(root, &a.path, canonical.as_deref().ok(), fence.as_deref())
-                    .map_err(|e| e.with("alias", alias).with("path", &a.path)),
+                found.map_err(|e| e.with("alias", alias).with("path", &a.path)),
             )
         })
         .collect()
@@ -344,6 +471,7 @@ fn missing(why: &str) -> Error {
 fn resolve_one(
     root: &Path,
     path: &str,
+    expected: Option<&ProjectId>,
     canonical: Option<&Path>,
     fence: Option<&Path>,
 ) -> Result<String> {
@@ -375,6 +503,19 @@ fn resolve_one(
             "{path} is a design project, not a library project"
         )));
     }
+    if let Some(want) = expected
+        && m.project != *want
+    {
+        return Err(Error::new(
+            Code::DependencyProjectMismatch,
+            format!(
+                "{path} holds project {}, not {want}, which the manifest names",
+                m.project
+            ),
+        )
+        .with("project", want)
+        .with("found", &m.project));
+    }
     if !m.libraries.is_empty() {
         return Err(Error::new(
             Code::LibraryNested,
@@ -395,6 +536,9 @@ pub struct Project {
     pub revision: String,
     /// `self` and every alias, each its library or why it can't be used.
     pub libraries: BTreeMap<String, Result<Library>>,
+    /// Each pinned component, by (alias, component), as its label has it
+    /// or why it can't be read: a library of its own (design 629).
+    pub pinned: BTreeMap<(String, Id), Result<std::sync::Arc<crate::pin::Pinned>>>,
     /// Designs, blocks, rails and classes.
     pub conn: Connectivity,
     /// `erc.json`, read (empty when there is none) with its faults.
@@ -463,6 +607,7 @@ impl Project {
         root: &Path,
         src: &dyn Source,
         aliases: &BTreeMap<Id, Result<String>>,
+        pins: &dyn crate::pin::Resolve,
     ) -> Result<Project> {
         let bytes = src.read(MANIFEST)?.ok_or_else(|| {
             Error::new(
@@ -589,6 +734,20 @@ impl Project {
             };
             libraries.insert(alias.to_string(), lib);
         }
+        let lock = src
+            .read(LOCK)?
+            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|t| crate::canonical::parse(&t).ok())
+            .and_then(|v| ryu_doc::lock::Lock::from_json_as(&v, LOCK_KIND).ok());
+        let mut pinned = BTreeMap::new();
+        for (alias, a) in &manifest.libraries {
+            for (c, label) in &a.labels {
+                pinned.insert(
+                    (alias.to_string(), c.clone()),
+                    pins.pin(root, alias, a, c, label, lock.as_ref()),
+                );
+            }
+        }
         let org_style = manifest.schematic.style_from.as_ref().map(|alias| {
             let base = libraries
                 .get(alias.as_str())
@@ -635,6 +794,7 @@ impl Project {
             manifest,
             revision,
             libraries,
+            pinned,
             conn: Connectivity::default(),
             erc,
             lint,
@@ -705,7 +865,12 @@ impl Project {
         let bytes =
             std::fs::read(root.join(MANIFEST)).map_err(|e| Error::io(&root.join(MANIFEST), &e))?;
         let aliases = resolve(root, &Manifest::read(&bytes)?);
-        Project::load_from(root, &crate::source::Folder(root), &aliases)
+        Project::load_from(
+            root,
+            &crate::source::Folder(root),
+            &aliases,
+            &crate::pin::Pins::default(),
+        )
     }
 
     /// The library `alias` names, or why it can't be used.
@@ -815,10 +980,58 @@ impl Project {
     }
 
     /// The library component a file in library `from` names (a design's
-    /// files are `self`'s).
+    /// files are `self`'s): a pinned one as its label has it.
     pub fn libcomp(&self, from: &str, r: &LibRef) -> Result<&LibComp> {
-        let lib = self.reached(from, r)?;
+        let lib = if from == SELF {
+            self.home(r)?
+        } else {
+            self.reached(from, r)?
+        };
         self.object(lib, &lib.components, ObjKind::Libcomp, &r.id)
+    }
+
+    /// A pinned placement's own library, as its label has it (or why it
+    /// can't be read); `None` when `of` isn't pinned.
+    fn pinned_library(&self, of: &LibRef) -> Option<Result<&Library>> {
+        let alias = of.library.as_ref().filter(|a| a.as_str() != SELF)?;
+        let p = self.pinned.get(&(alias.to_string(), of.id.clone()))?;
+        Some(
+            p.as_ref()
+                .map(|p| &p.library)
+                .map_err(|e| e.clone().with("alias", alias).with("component", &of.id)),
+        )
+    }
+
+    /// The library a placement `of` (a design's reference) reads from: a
+    /// pinned component's own, as its label has it; else the alias's at
+    /// `working`, or `self`.
+    pub fn home(&self, of: &LibRef) -> Result<&Library> {
+        match self.pinned_library(of) {
+            Some(lib) => lib,
+            None => self.reached(SELF, of),
+        }
+    }
+
+    /// The symbol placed component `of` names (`r`, from its library).
+    pub fn placed_symbol(&self, of: &LibRef, r: &LibRef) -> Result<&Symbol> {
+        match self.pinned_library(of) {
+            Some(lib) => {
+                let lib = lib?;
+                self.object(lib, &lib.symbols, ObjKind::Symbol, &r.id)
+            }
+            None => self.symbol(of.library.as_ref().map_or(SELF, Id::as_str), r),
+        }
+    }
+
+    /// A footprint placed component `of` lists (`r`, from its library).
+    pub fn placed_footprint(&self, of: &LibRef, r: &LibRef) -> Result<&Footprint> {
+        match self.pinned_library(of) {
+            Some(lib) => {
+                let lib = lib?;
+                self.object(lib, &lib.footprints, ObjKind::Footprint, &r.id)
+            }
+            None => self.footprint(of.library.as_ref().map_or(SELF, Id::as_str), r),
+        }
     }
 
     /// The footprint a file in library `from` names.
@@ -865,6 +1078,9 @@ impl Project {
         for (alias, lib) in &self.libraries {
             let lib = match lib {
                 Ok(l) => l,
+                // A library in another repository has no working library:
+                // the placements that read it report it themselves.
+                Err(e) if e.code == Code::LibraryForeignWorking => continue,
                 Err(e) => {
                     out.push(Fault {
                         severity: Severity::Error,
@@ -977,7 +1193,7 @@ impl Project {
             return out;
         };
         out.push((MANIFEST.to_owned(), meta));
-        for file in [ERC, LINT, PARTS, STYLE] {
+        for file in [ERC, LINT, PARTS, STYLE, crate::pdm::PDM_CONFIG, LOCK] {
             if let Ok(meta) = std::fs::metadata(root.join(file))
                 && meta.is_file()
             {
@@ -990,6 +1206,13 @@ impl Project {
             crate::conn::CLASSES,
         ] {
             out.extend(files_of(root, folder));
+        }
+        // PDM: properties, and each part's release records.
+        out.extend(files_of(root, crate::pdm::PROPERTIES));
+        for (part, meta) in listed(root, crate::pdm::RELEASES) {
+            if meta.is_dir() {
+                out.extend(files_of(root, &join(crate::pdm::RELEASES, &part)));
+            }
         }
         for (block, meta) in listed(root, crate::conn::BLOCKS) {
             let dir = join(crate::conn::BLOCKS, &block);
@@ -1125,14 +1348,104 @@ pub(crate) mod tests {
     pub fn manifest(dir: &Path, kind: ProjectKind, libraries: &[(&str, &str)]) {
         let mut m = Manifest::new(pid(1), Unit::Mm, kind);
         for (alias, path) in libraries {
-            m.libraries.insert(
-                Id::parse(alias, "alias").unwrap(),
-                Alias {
-                    path: (*path).into(),
-                },
-            );
+            m.libraries
+                .insert(Id::parse(alias, "alias").unwrap(), Alias::local(path));
         }
         write_atomic(&dir.join(MANIFEST), m.to_text()).unwrap();
+    }
+
+    #[test]
+    fn an_alias_with_pins_or_a_url_is_format_3_and_one_without_as_before() {
+        let mut m = Manifest::new(pid(1), Unit::Mm, ProjectKind::Design);
+        m.libraries.insert(
+            Id::parse("passives", "a").unwrap(),
+            Alias::local("../passives"),
+        );
+        let before = m.to_text();
+        assert!(before.contains("\"format\": 1"), "{before}");
+        assert!(
+            before.contains(
+                "\"libraries\": {\n    \"passives\": {\n      \"path\": \"../passives\"\n    }"
+            ),
+            "{before}"
+        );
+        let a = m
+            .libraries
+            .get_mut(&Id::parse("passives", "a").unwrap())
+            .unwrap();
+        a.labels
+            .insert(Id::parse("r_4k7", "c").unwrap(), "B".into());
+        a.project = Some(pid(2));
+        let text = m.to_text();
+        assert!(text.contains("\"format\": 3"), "{text}");
+        assert_eq!(Manifest::read(text.as_bytes()).unwrap(), m);
+        // Pinned to nothing: refused.
+        let mut bad = m.clone();
+        bad.libraries
+            .get_mut(&Id::parse("passives", "a").unwrap())
+            .unwrap()
+            .labels
+            .insert(Id::parse("c_1u", "c").unwrap(), " ".into());
+        let e = Manifest::read(bad.to_text().as_bytes()).unwrap_err();
+        assert_eq!(e.details["pointer"], "/libraries/passives/labels/c_1u");
+    }
+
+    #[test]
+    fn a_url_alias_names_its_project() {
+        let mut m = Manifest::new(pid(1), Unit::Mm, ProjectKind::Design);
+        let mut a = Alias::local("lib");
+        a.url = Some("file:///libs".into());
+        m.libraries.insert(Id::parse("passives", "a").unwrap(), a);
+        let e = Manifest::read(m.to_text().as_bytes()).unwrap_err();
+        assert_eq!(e.code, Code::InvalidDocument);
+        assert_eq!(e.details["pointer"], "/libraries/passives/project");
+        let a = m
+            .libraries
+            .get_mut(&Id::parse("passives", "a").unwrap())
+            .unwrap();
+        a.project = Some(pid(2));
+        a.path = "../up".into();
+        let e = Manifest::read(m.to_text().as_bytes()).unwrap_err();
+        assert_eq!(e.details["pointer"], "/libraries/passives/path");
+    }
+
+    #[test]
+    fn a_url_alias_has_no_working_library_and_is_no_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        let mut m = Manifest::read(&std::fs::read(board.join(MANIFEST)).unwrap()).unwrap();
+        let mut a = Alias::local("");
+        a.url = Some("file:///libs".into());
+        a.project = Some(pid(2));
+        m.libraries.insert(Id::parse("passives", "a").unwrap(), a);
+        write_atomic(&board.join(MANIFEST), m.to_text()).unwrap();
+        let p = Project::load(&board).unwrap();
+        assert_eq!(
+            p.library("passives").unwrap_err().code,
+            Code::LibraryForeignWorking
+        );
+        assert_eq!(p.faults(), []);
+    }
+
+    #[test]
+    fn an_alias_naming_a_project_must_find_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (board, lib) = (dir.path().join("board"), dir.path().join("lib"));
+        manifest(&lib, ProjectKind::Library, &[]);
+        manifest(&board, ProjectKind::Design, &[("passives", "../lib")]);
+        let mut m = Manifest::read(&std::fs::read(board.join(MANIFEST)).unwrap()).unwrap();
+        let found = resolve(&board, &m);
+        assert!(found[&Id::parse("passives", "a").unwrap()].is_ok());
+        m.libraries
+            .get_mut(&Id::parse("passives", "a").unwrap())
+            .unwrap()
+            .project = Some(pid(2));
+        let e = resolve(&board, &m)
+            .remove(&Id::parse("passives", "a").unwrap())
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, Code::DependencyProjectMismatch);
     }
 
     /// The test library's files written under `dir`.
@@ -1141,6 +1454,31 @@ pub(crate) mod tests {
         for (p, b) in files(STEP) {
             write_atomic(&dir.join(p), b).unwrap();
         }
+    }
+
+    #[test]
+    fn a_fork_names_where_it_came_from_at_format_3() {
+        let mut m = Manifest::new(pid(7), Unit::Mm, ProjectKind::Design);
+        assert!(m.to_text().contains("\"format\": 1"));
+        m.forked_from = Some(ForkedFrom {
+            project: pid(6),
+            commit: "a".repeat(40),
+        });
+        let text = m.to_text();
+        assert!(text.contains("\"format\": 3"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "\"forked_from\": {{\n    \"commit\": \"{}\",\n    \"project\": \"{}\"",
+                "a".repeat(40),
+                "06".repeat(16)
+            )),
+            "{text}"
+        );
+        assert_eq!(Manifest::read(text.as_bytes()).unwrap(), m);
+        // An older ryueda refuses it as too new rather than misreading it.
+        let e = crate::doc::read::<serde_json::Value>(text.as_bytes(), MANIFEST, KIND, FORMAT_2)
+            .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::FormatTooNew);
     }
 
     #[test]
@@ -1334,9 +1672,7 @@ pub(crate) mod tests {
         let mut m = Manifest::new(pid(7), Unit::Mm, ProjectKind::Design);
         m.libraries.insert(
             Id::parse(SELF, "alias").unwrap(),
-            Alias {
-                path: "../passives".into(),
-            },
+            Alias::local("../passives"),
         );
         let e = Manifest::read(m.to_text().as_bytes()).unwrap_err();
         assert_eq!(
@@ -1382,6 +1718,212 @@ pub(crate) mod tests {
                 .iter()
                 .any(|f| f.error.code == Code::StandardsInvalid)
         );
+    }
+
+    /// The test library's files with a second component, `c_100n` (a copy
+    /// of `r_100k`), each footprint named `name` when given.
+    pub(crate) fn pinned_files(name: Option<&str>) -> BTreeMap<String, Vec<u8>> {
+        let mut f = crate::library::tests::files(crate::library::tests::STEP);
+        let r = f["library/components/r_100k.json"].clone();
+        f.insert("library/components/c_100n.json".into(), r);
+        if let Some(name) = name {
+            for (p, b) in f.iter_mut() {
+                if p.starts_with("library/footprints/") {
+                    let mut v: serde_json::Value = serde_json::from_slice(b).unwrap();
+                    v["name"] = name.into();
+                    *b = crate::canonical::to_string(&v).into_bytes();
+                }
+            }
+        }
+        f
+    }
+
+    /// A pin as a resolver would read it from `files`.
+    pub(crate) fn pinned_from(
+        files: &BTreeMap<String, Vec<u8>>,
+        c: &str,
+        label: &str,
+    ) -> std::sync::Arc<crate::pin::Pinned> {
+        let id = |s: &str| Id::parse(s, "id").unwrap();
+        let lib = crate::pin::from_files(files, &id("passives"), label, &id(c)).unwrap();
+        std::sync::Arc::new(crate::pin::Pinned {
+            alias: id("passives"),
+            component: id(c),
+            label: label.into(),
+            project: pid(2),
+            commit: "a".repeat(40),
+            content: "c".repeat(64),
+            obsolete: false,
+            library: lib,
+        })
+    }
+
+    /// A resolver over fixed pins of library `passives` (project 2), with
+    /// the releases they come from.
+    #[derive(Clone)]
+    pub(crate) struct Fake {
+        pub pins: BTreeMap<(String, String), std::sync::Arc<crate::pin::Pinned>>,
+        pub releases: ryupdm::history::Releases,
+    }
+
+    impl Fake {
+        pub(crate) fn new() -> Fake {
+            Fake {
+                pins: BTreeMap::new(),
+                releases: ryupdm::history::Releases::default(),
+            }
+        }
+
+        fn record(&mut self, c: &str, label: &str, kind: ryupdm::record::Kind) {
+            let id = Id::parse(c, "id").unwrap();
+            let n = self.releases.official.len();
+            self.releases.official.insert(
+                ryupdm::record::path(&id, label, kind),
+                ryupdm::history::Official {
+                    commit: format!("{:040x}", n + 1),
+                    blob: gix::ObjectId::null(gix::hash::Kind::Sha1),
+                    shallow: false,
+                },
+            );
+        }
+
+        /// `c` released at `label`, readable as a pin.
+        pub(crate) fn release(&mut self, c: &str, label: &str) {
+            self.record(c, label, ryupdm::record::Kind::Release);
+            self.pins.insert(
+                (c.into(), label.into()),
+                pinned_from(&pinned_files(Some(&format!("at {label}"))), c, label),
+            );
+        }
+
+        /// `c`'s `label` made obsolete.
+        pub(crate) fn obsolete(&mut self, c: &str, label: &str) {
+            self.record(c, label, ryupdm::record::Kind::Obsolete);
+            if let Some(p) = self.pins.get_mut(&(c.into(), label.into())) {
+                std::sync::Arc::make_mut(p).obsolete = true;
+            }
+        }
+    }
+
+    impl crate::pin::Resolve for Fake {
+        fn pin(
+            &self,
+            _: &Path,
+            alias: &Id,
+            _: &Alias,
+            c: &Id,
+            label: &str,
+            _: Option<&ryu_doc::lock::Lock>,
+        ) -> Result<std::sync::Arc<crate::pin::Pinned>> {
+            self.pins
+                .get(&(c.to_string(), label.to_owned()))
+                .cloned()
+                .ok_or_else(|| Error::new(Code::LabelNotFound, format!("{alias}/{c}@{label}")))
+        }
+
+        fn releases_of(
+            &self,
+            _: &Path,
+            _: &Alias,
+        ) -> Result<(
+            ryupdm::config::Config,
+            std::sync::Arc<ryupdm::history::Releases>,
+        )> {
+            Ok((
+                ryupdm::config::Config::default(),
+                std::sync::Arc::new(self.releases.clone()),
+            ))
+        }
+
+        fn file_at(&self, _: &Path, _: &Alias, _: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+            Ok(pinned_files(None).get(rel).cloned())
+        }
+    }
+
+    /// The breakout (with its own library) in a design project whose
+    /// manifest names library `passives` (project 2) at `../passives`,
+    /// pinning `r_100k` at A and `c_100n` at B, and whose `r1` places
+    /// `passives/r_100k`; and a resolver releasing `r_100k` at A and
+    /// `c_100n` at A and B.
+    pub(crate) fn pinned_board() -> (tempfile::TempDir, PathBuf, Fake) {
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        library_in(&board);
+        design_in(&board);
+        let mut m = Manifest::read(&std::fs::read(board.join(MANIFEST)).unwrap()).unwrap();
+        let mut a = Alias::local("../passives");
+        a.project = Some(pid(2));
+        a.labels
+            .insert(Id::parse("r_100k", "c").unwrap(), "A".into());
+        a.labels
+            .insert(Id::parse("c_100n", "c").unwrap(), "B".into());
+        m.libraries.insert(Id::parse("passives", "a").unwrap(), a);
+        write_atomic(&board.join(MANIFEST), m.to_text()).unwrap();
+        let r1 = board.join("blocks/top/components/r1.json");
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&r1).unwrap()).unwrap();
+        v["of"] = serde_json::json!({"library": "passives", "id": "r_100k"});
+        write_atomic(&r1, crate::canonical::to_string(&v)).unwrap();
+        let mut fake = Fake::new();
+        fake.release("r_100k", "A");
+        fake.release("c_100n", "A");
+        fake.release("c_100n", "B");
+        (dir, board, fake)
+    }
+
+    #[test]
+    fn pinned_components_read_their_own_objects() {
+        let mut fake = Fake::new();
+        fake.release("r_100k", "A");
+        fake.release("c_100n", "B");
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        let mut m = Manifest::read(&std::fs::read(board.join(MANIFEST)).unwrap()).unwrap();
+        let mut a = Alias::local("../passives");
+        a.project = Some(pid(2));
+        a.labels
+            .insert(Id::parse("r_100k", "c").unwrap(), "A".into());
+        a.labels
+            .insert(Id::parse("c_100n", "c").unwrap(), "B".into());
+        m.libraries.insert(Id::parse("passives", "a").unwrap(), a);
+        write_atomic(&board.join(MANIFEST), m.to_text()).unwrap();
+        let aliases = resolve(&board, &m);
+        let p =
+            Project::load_from(&board, &crate::source::Folder(&board), &aliases, &fake).unwrap();
+        let of = |c: &str| LibRef {
+            library: Some(Id::parse("passives", "a").unwrap()),
+            id: Id::parse(c, "c").unwrap(),
+        };
+        // Each sees its own footprint, though they share its ID.
+        for (c, name) in [("r_100k", "at A"), ("c_100n", "at B")] {
+            let lc = p.libcomp(SELF, &of(c)).unwrap();
+            let fp = p
+                .placed_footprint(&of(c), &lc.footprints[0].footprint)
+                .unwrap();
+            assert_eq!(fp.name, name);
+            assert!(p.placed_symbol(&of(c), &lc.symbol).is_ok());
+            assert_eq!(
+                p.home(&of(c)).unwrap().base,
+                format!("@passives/{}", &name[3..])
+            );
+        }
+        // ../passives isn't there: the working library is missing, the
+        // pins read regardless, and a pin that doesn't resolve says why.
+        assert!(p.library("passives").is_err());
+        let e = p.home(&of("c_1u")).unwrap_err();
+        assert_eq!(e.code, Code::LibraryMissing);
+        let mut m2 = m.clone();
+        m2.libraries
+            .get_mut(&Id::parse("passives", "a").unwrap())
+            .unwrap()
+            .labels
+            .insert(Id::parse("c_1u", "c").unwrap(), "Z".into());
+        write_atomic(&board.join(MANIFEST), m2.to_text()).unwrap();
+        let p =
+            Project::load_from(&board, &crate::source::Folder(&board), &aliases, &fake).unwrap();
+        assert_eq!(p.home(&of("c_1u")).unwrap_err().code, Code::LabelNotFound);
     }
 
     /// Writes the test design's files (`design::tests::files`) in `dir`.

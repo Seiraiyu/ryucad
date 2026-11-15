@@ -141,8 +141,8 @@ pub fn ordered<'a>(
 /// read into `releases` (`Releases::default()` outside a repository: then
 /// nothing is official).
 pub fn derive_for<P: Product>(src: &dyn Source, part: &Id, releases: &Releases) -> State {
-    let config = Config::read(src);
-    let records = Records::read(src);
+    let config = Config::read_in(src, P::NAME);
+    let records = Records::read_in(src, P::NAME);
     match (config, records) {
         (Ok(c), Ok(r)) => of_for::<P>(src, &c, &r, part, releases),
         (Err(e), _) | (_, Err(e)) => unknown(e),
@@ -158,7 +158,7 @@ pub fn derive(src: &dyn Source, part: &Id, releases: &Releases) -> State {
 /// The parts [`derive_all_for`] gives states for: every part the
 /// project of `P` has and every part a record names, in order.
 pub fn parts_for<P: Product>(src: &dyn Source, records: &Result<Records>) -> Vec<Id> {
-    let mut parts: Vec<Id> = P::parts(src).unwrap_or_default();
+    let mut parts: Vec<Id> = crate::product::part_ids::<P>(src).unwrap_or_default();
     if let Ok(r) = records {
         parts.extend(r.parts());
     }
@@ -182,8 +182,8 @@ pub fn derive_all(src: &dyn Source, releases: &Releases) -> BTreeMap<Id, State> 
 
 /// [`derive_for`] for every part the project has or a record names.
 pub fn derive_all_for<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Id, State> {
-    let config = Config::read(src);
-    let records = Records::read(src);
+    let config = Config::read_in(src, P::NAME);
+    let records = Records::read_in(src, P::NAME);
     parts_for::<P>(src, &records)
         .into_iter()
         .map(|p| {
@@ -510,5 +510,30 @@ pub(crate) mod tests {
                 ("p".into(), "in work".into())
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod core_tests {
+    use super::*;
+
+    #[test]
+    fn a_settings_file_too_new_names_the_product_reading_it() {
+        use crate::testing::{Toy, id, project};
+        let mut f = project(&[("a", "{}")]);
+        f.insert(
+            "ryupdm.json".into(),
+            br#"{"format": 99, "kind": "ryupdm.config"}"#.to_vec(),
+        );
+        let s = derive_for::<Toy>(&f, &id("a"), &Releases::default());
+        let Status::Unknown(e) = s.status else {
+            panic!("{s:?}")
+        };
+        assert_eq!(e.code, ryu_doc::error::Code::FormatTooNew);
+        assert!(e.message.contains("this toy reads up to"), "{}", e.message);
+        assert!(e.message.ends_with("Upgrade toy"), "{}", e.message);
+        // The reader not told its product still names ryucad, as it always has.
+        let e = Config::read(&f).unwrap_err();
+        assert!(e.message.ends_with("Upgrade ryucad"), "{}", e.message);
     }
 }

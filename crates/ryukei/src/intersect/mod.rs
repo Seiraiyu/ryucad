@@ -24,7 +24,7 @@ mod general;
 pub(crate) mod implicit;
 mod inface;
 mod known;
-pub(crate) use known::{Seam, Seams, known_seam};
+pub(crate) use known::{Seam, SeamKind, Seams, known_seam, seam_strip};
 mod pipe;
 mod pipe_cs;
 mod seam;
@@ -41,8 +41,8 @@ mod winding;
 pub(crate) use beside::CELLS as BESIDE_CELLS;
 pub use beside::beside;
 pub(crate) use beside::{
-    CONE_PARTS, face_beside, face_off_ball, faces_apart, normal_cones, parameter_box,
-    section_plane, sine_apart,
+    CONE_PARTS, face_beside, face_off_ball, faces_apart, normal_cones, opposite_sides,
+    parameter_box, section_plane, sine_apart,
 };
 #[cfg(test)]
 pub(crate) use beside::{Tangency, tangency};
@@ -58,7 +58,7 @@ pub(crate) use face::{
     region_outside_boxes, shifted, shifts,
 };
 pub(crate) use fit::{
-    fit_along, fit_on, fit_on_feet, fit_pcurve, fit_pcurve_by, fit_pcurve_tolerant,
+    first_bound, fit_along, fit_on, fit_on_feet, fit_pcurve, fit_pcurve_by, fit_pcurve_tolerant,
     fit_pcurve_within, pcurve_certified,
 };
 pub(crate) use implicit::curve_distance;

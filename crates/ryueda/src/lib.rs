@@ -31,6 +31,7 @@ pub mod git;
 pub mod kicad;
 pub mod libcmd;
 pub mod libcomp;
+pub mod libdeps;
 pub mod library;
 pub mod lint;
 pub mod merge;
@@ -42,6 +43,8 @@ pub mod output;
 pub mod partcmd;
 pub mod parts;
 pub mod pdf;
+pub mod pdm;
+pub mod pin;
 pub mod project;
 pub mod props;
 pub mod proto;
@@ -96,8 +99,9 @@ impl ryu_session::Product for Eda {
 impl ryu_session::prefs::Schema for Eda {
     const CONFIG_DIR_VAR: &'static str = "RYUEDA_CONFIG_DIR";
 
-    /// The daemon's own keys, and the window's (plan 3.D): `ui.*` and
-    /// `app.window`, which only the app reads.
+    /// How often a watched daemon checks the files, how long a catalogue
+    /// serves, the folders where-used searches, and the window's keys
+    /// (plan 3.D): `ui.*` and `app.window`, which only the app reads.
     fn accepts(name: &str, value: &serde_json::Value) -> bool {
         let one_of = |words: &[&str]| value.as_str().is_some_and(|s| words.contains(&s));
         match name {
@@ -107,6 +111,10 @@ impl ryu_session::prefs::Schema for Eda {
             "parts.max_age" => value
                 .as_u64()
                 .is_some_and(|n| (3_600..=365 * 86_400).contains(&n)),
+            // Folders where-used searches for other checkouts (design 629).
+            "pdm.dependents" => value
+                .as_array()
+                .is_some_and(|a| a.iter().all(serde_json::Value::is_string)),
             "ui.theme" => one_of(&["system", "light", "dark"]),
             "ui.style" => one_of(&["drafting", "graphite", "studio"]),
             "ui.contrast" => one_of(&["normal", "high"]),
@@ -128,6 +136,7 @@ impl ryu_session::prefs::Schema for Eda {
             "ui.notify" => Some(json!("all")),
             "ui.layout" | "ui.keys" => Some(json!({})),
             "ui.flash_changes" | "ui.follow_shows" => Some(json!(true)),
+            "pdm.dependents" => Some(json!([])),
             _ => None,
         }
     }

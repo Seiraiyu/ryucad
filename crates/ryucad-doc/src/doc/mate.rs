@@ -907,7 +907,12 @@ impl InstancePattern {
                     "a pattern that follows a part skips nothing: list the points it takes",
                 ));
             }
-            Some(v) => skip_from_json(&v, form.counts().expect("not driven"), two)?,
+            // Unsigned: an instance pattern's indices never run back
+            // (`skip_from_json` reads none below zero).
+            Some(v) => skip_from_json(&v, form.counts().expect("not driven"), two)?
+                .into_iter()
+                .map(|[i, j]| [i as u32, j as u32])
+                .collect(),
         };
         Ok(InstancePattern {
             form,

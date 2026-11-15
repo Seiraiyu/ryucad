@@ -25,6 +25,7 @@ use crate::scene::{DrawExplode, DrawMotion, RenderAsk, render_noting};
 mod annotation;
 mod assembly;
 mod cache;
+mod ensure;
 mod feature;
 mod git;
 mod part;
@@ -625,7 +626,8 @@ pub fn answer_live(
     // A batch whose write pass failed part way has written what it wrote:
     // that is logged too, so `undo` takes it back (design 603). A refused
     // batch wrote nothing, so logs nothing.
-    let logged = result.is_ok() || method == "batch";
+    // So is an ensure, which is one batch.
+    let logged = result.is_ok() || method == "batch" || method == "part.ensure";
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, logged) {
         let files = activity::diff(&files_before, &session.files());
         let who = l.caller(me);

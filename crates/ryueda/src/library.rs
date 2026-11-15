@@ -370,6 +370,73 @@ impl Library {
     }
 }
 
+/// Gives each component of `lib` the faults its checks find against the
+/// symbol and footprints it names, all in `lib`: a pinned component's
+/// library (a library project's files name only their own library, so a
+/// reference to another is `library_nested`).
+pub(crate) fn judge_own(lib: &mut Library) {
+    let own = |r: &crate::libcomp::LibRef| {
+        r.library
+            .as_ref()
+            .is_none_or(|l| l.as_str() == crate::project::SELF)
+    };
+    let nested = |r: &crate::libcomp::LibRef| {
+        Error::new(
+            Code::LibraryNested,
+            format!(
+                "a library project's files name only their own library, not {}'s",
+                r.id
+            ),
+        )
+    };
+    let mut found = Vec::new();
+    for (id, c) in &lib.components {
+        let Ok(c) = &c.item else { continue };
+        let symbol = if own(&c.symbol) {
+            lib.symbols.get(&c.symbol.id).map_or_else(
+                || {
+                    Err(Error::new(
+                        Code::NotFound,
+                        format!("{} isn't in the library", c.symbol.id),
+                    ))
+                },
+                |l| l.item.as_ref().map_err(Clone::clone),
+            )
+        } else {
+            Err(nested(&c.symbol))
+        };
+        let fps: Vec<Result<&Footprint>> = c
+            .footprints
+            .iter()
+            .map(|u| {
+                if !own(&u.footprint) {
+                    return Err(nested(&u.footprint));
+                }
+                lib.footprints.get(&u.footprint.id).map_or_else(
+                    || {
+                        Err(Error::new(
+                            Code::NotFound,
+                            format!("{} isn't in the library", u.footprint.id),
+                        ))
+                    },
+                    |l| l.item.as_ref().map_err(Clone::clone),
+                )
+            })
+            .collect();
+        let path = lib.path(ObjKind::Libcomp, id);
+        let faults: Vec<Fault> = c
+            .check(symbol, &fps)
+            .into_iter()
+            .chain(c.check_data())
+            .map(|f| f.with("path", &path))
+            .collect();
+        found.push((id.clone(), faults));
+    }
+    for (id, faults) in found {
+        lib.components.get_mut(&id).expect("judged").faults = faults;
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

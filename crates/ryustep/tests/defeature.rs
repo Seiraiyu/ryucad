@@ -55,7 +55,23 @@ const MAX_SIZE: f64 = 2e-3;
 /// issue: NIST FTC 07 and FTC 10, kept faces tangent along a seam whose
 /// carried working faces meet uncertain (plan 16.C, question 517). Plan
 /// 18.C's known seams don't reach them: their seams lie on the frontier
-/// or are only partly smooth (#652, ryukei 19).
+/// or are only partly smooth (#652, ryukei 19). Ryukei 19's held seams
+/// and stops settle FTC 07's seams, but both still end at a pair of
+/// working faces carried far along their straight directions that cross
+/// nearly tangent with no edge between them, which no seam certificate
+/// meets (plan 19.B, question 882: FTC 07's cone/cylinder past its
+/// stopped run, FTC 10's cylinder continuing its torus's tube). Plan
+/// 20.A's narrowed build gets FTC 07 to rung 2, where a cylinder and a
+/// NURBS face (`18dae4b7`/`33b57350`) carried with no shared edge refuse
+/// `Uncertain`; FTC 10's narrowed retry refuses at a plane paired with
+/// itself. Plan 20.B's near boxes part both pairs (their cuts' tests), and
+/// its related overlapping stretches settle the plane (its split tied two
+/// stretches lying on each other). What stops each now (#652, plan 20.B):
+/// FTC 07's narrowed walks clip at faces of the grown ring touching no
+/// change, and rung 3 refuses at a torus and a plane touching none,
+/// overlapping; FTC 10's walk is `HealAmbiguous` at a kept 1 mm ball slit
+/// by a carried NURBS face's curve ending inside it, as its first builds
+/// at rungs 0 and 1 are.
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -561,10 +577,22 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 ///
 /// Plan 18.C's known seams settle none of them: every failing pair has a
 /// face outside the region across a frontier edge, or an edge tangent
-/// only partly (`PartlySmooth`) with NURBS pcurves, and a plane/plane pair
-/// beside the frontier refuses behind them (#652's census; ryukei 19).
+/// only partly (`PartlySmooth`) with NURBS pcurves (#652's census; ryukei
+/// 19).
+///
+/// Plans 19.A and 19.B hold those seams and stop the working faces at
+/// them (iso and plane stops, box-apart parts). What stops both now is
+/// recorded on #652 (plan 19.B, question 882): FTC 07's stopped build
+/// walks into its quarter runs carried a whole turn, and past that a
+/// cone and a cylinder carried about 0.5 m cross nearly tangent with no
+/// edge between them; FTC 10's working cylinder continues its torus's
+/// tube straight on, tangent to it along an inner circle. The plane/plane
+/// pair census I saw was an artefact of its skipped pairs.
+///
+/// Plan 20.B parts those pairs (near boxes; the tube contact in narrowed
+/// builds) and recorded what stops both next (see [`KNOWN_REFUSED`]).
 #[test]
-#[ignore = "#652: frontier and partly smooth seams, carried past, meet uncertain (ryukei 19)"]
+#[ignore = "#652: walks clipped at ring faces and a kept ball slit by a carried face (recorded in ryukei 20.B)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
@@ -608,14 +636,35 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 }
 
 /// Pinned editions that must defeature and check clean, by file and
-/// representation: every edition plan 18.C saw defeatured (16.C's 17). A
-/// refusal or a deadline for any of them fails. Design 551 expected #652's
-/// AP242 twins (STC 07 #11020, STC 10 #3044, FTC 07 #13541) here too; their
-/// seams lie on the frontier or are only partly smooth, so the known seams
-/// don't settle them (#652, #658: ryukei 19 adds them when they build).
+/// representation: the 17 plan 18.C saw defeatured (16.C's), and the
+/// seam-cause editions plan 19.B's held seams and stops settle: CTC 02's
+/// geometry-only edition (#20754), its bends' `Uncertain` tangency now
+/// held (question 917). A refusal or a deadline for any of them fails.
+/// Still out (#652, #658): FTC 07 AP242 #13541 (a pair of working faces
+/// with no shared edge refuses `Uncertain`, after its narrowed retry at
+/// a cylinder/cone pair); STC 07 #11020 (the rung's ordered sum, plan
+/// 20.A, bounds its builds: refused `Uncertain` in 106 s, inside the
+/// deadline);
+/// STC 10 #3044 (a torus/cylinder pair with no shared edge, then its
+/// narrowed retry at a sphere paired with itself); CTC 02 with PMI #295
+/// (carried near-tangent cylinders with no shared edge, recorded under
+/// question 882); linkrods #11 (still past the deadline: its first build,
+/// now bounded by the ordered sum, takes 65 s, one NURBS/torus pair
+/// costing about 4 µs a unit, and the narrowed retry of its held NURBS
+/// pair 52 s more).
+///
+/// Plan 20.B's near boxes part FTC 07 AP242's first pair, STC 10's and
+/// CTC 02 with PMI's, and none of the five defeatures yet (#652, #658):
+/// FTC 07 AP242's retry refuses at a cylinder and a cone carried with no
+/// shared edge (`79b561f3`/`178d3260`, overlapping); STC 10's split can't
+/// group two sphere faces holding a lone pole; CTC 02 with PMI's retry
+/// refuses at a plane and a NURBS face touching no change, overlapping
+/// (`74fca8b1`/`b150cb1a`); STC 07 still refuses inside the deadline and
+/// linkrods still runs past it (122 s), as on main.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
+    ("nist_ctc_02_asme1_rc.stp", 20754),
     ("nist_ctc_03_asme1_ap203.stp", 154),
     ("nist_ctc_03_asme1_rc.stp", 13),
     ("nist_ctc_04_asme1_ap203.stp", 559),
@@ -749,7 +798,7 @@ fn pinned_bodies_defeature() {
                 .iter()
                 .any(|(f, r)| name.ends_with(f) && *r == rep);
             if blends == 0 {
-                assert!(!must, "{name} #{rep}: must defeature (plan 18.C)");
+                assert!(!must, "{name} #{rep}: must defeature (plans 18.C, 19.A)");
                 none += 1;
                 continue;
             }
@@ -780,7 +829,10 @@ fn pinned_bodies_defeature() {
                     defeatured += 1;
                 }
                 Err(Error::InvalidTweak(e)) => {
-                    assert!(!must, "{name} #{rep}: must defeature (plan 18.C): {e:?}");
+                    assert!(
+                        !must,
+                        "{name} #{rep}: must defeature (plans 18.C, 19.A): {e:?}"
+                    );
                     println!(
                         "{name} #{rep}: {blends} blends, refused {e:?} in {:.2} s",
                         t.elapsed().as_secs_f64()
@@ -790,7 +842,7 @@ fn pinned_bodies_defeature() {
                 Err(Error::Cancelled) => {
                     assert!(
                         !must,
-                        "{name} #{rep}: must defeature (plan 18.C), past the deadline"
+                        "{name} #{rep}: must defeature (plans 18.C, 19.A), past the deadline"
                     );
                     println!(
                         "{name} #{rep}: {blends} blends, past the deadline ({:.2} s)",

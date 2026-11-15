@@ -235,6 +235,40 @@ fn save(session: &mut Session, part: &Id, file: &ParametersFile) -> Result<()> {
     session.reload()
 }
 
+/// The parameters file of `part` made exactly `values` (`part.ensure`,
+/// plan 31.C): each a name and an expression, checked as `param.set`
+/// checks them, pointers at `/params/<name>`; none removes the file. The
+/// features aren't judged here: the ensure adds them again after.
+pub(crate) fn replace(
+    session: &mut Session,
+    part: &str,
+    values: &Map<String, Value>,
+) -> Result<()> {
+    let pid = part_id(part)?;
+    let mut file = ParametersFile {
+        parameters: Default::default(),
+    };
+    for (k, v) in values {
+        let at = format!("/params/{k}");
+        let name = expr::parameter_name(k).map_err(|e| e.with("pointer", &at))?;
+        let e = expression(v).map_err(|e| e.with("pointer", &at))?;
+        file.parameters.insert(name, e);
+    }
+    let env = Env::within(&file.parameters, &session.project().env);
+    for name in file.parameters.keys() {
+        env.get(name)
+            .map_err(|e| e.with("pointer", format!("/params/{name}")))?;
+    }
+    if !file.parameters.is_empty() {
+        return save(session, &pid, &file);
+    }
+    if session.project().part(&pid)?.parameters.is_some() {
+        session.remove_file(&parameters_path(session.root(), &pid))?;
+        session.reload()?;
+    }
+    Ok(())
+}
+
 /// `param.set`: sets or adds parameters, each an expression.
 pub fn set(
     session: &mut Session,

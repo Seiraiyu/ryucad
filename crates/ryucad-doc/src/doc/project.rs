@@ -577,7 +577,7 @@ impl Project {
 /// be read is `lock_invalid`, naming why.
 #[allow(clippy::type_complexity)]
 fn load_lock(src: &dyn Source) -> Result<(Option<Result<super::lock::Lock>>, Option<Vec<u8>>)> {
-    use super::lock::{LOCK, Lock};
+    use super::lock::{CadLock, LOCK, Lock};
     let Some(bytes) = src.read(LOCK).map_err(|e| e.with("path", LOCK))? else {
         return Ok((None, None));
     };
@@ -1884,7 +1884,7 @@ mod tests {
 
     #[test]
     fn the_lock_defines_the_assemblies_placing_other_projects_parts() {
-        use crate::doc::lock::{LOCK, Lock};
+        use crate::doc::lock::{CadLock, LOCK, Lock};
         let dir = sample();
         let root = dir.path();
         let lib = crate::doc::id::ProjectId::from_bytes([7; 16]);

@@ -1523,6 +1523,7 @@ fn every_protocol_method_has_a_command() {
         ("project.info", &["version"]),
         ("part.create", &["part", "create"]),
         ("part.delete", &["part", "delete"]),
+        ("part.ensure", &["part", "ensure"]),
         ("part.list", &["part", "list"]),
         ("feature.add", &["feature", "add"]),
         ("feature.edit", &["feature", "edit"]),
@@ -2052,7 +2053,7 @@ fn doctor_repairs_a_damaged_project() {
 /// Runs git in `dir` with a fixed identity and time, so the same commits
 /// in two repositories have the same IDs, and its output.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
+    let out = ryupdm::git_env::isolated()
         .args([
             "-c",
             "user.name=Test",
@@ -2525,7 +2526,7 @@ fn merges_through_the_cli() {
     p.ok(&["feature", "edit", "p", "b", "--param", "x=12"]);
     p.git(&["commit", "-q", "-am", "ours"]);
     for root in [&p.direct, &p.daemon] {
-        let out = std::process::Command::new("git")
+        let out = ryupdm::git_env::isolated()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["merge", "--no-edit", "theirs"])
             .current_dir(root)
@@ -3705,6 +3706,238 @@ fn review_against_a_fake_service() {
     assert_eq!(
         serde_json::from_str::<Value>(&posted.body).unwrap(),
         serde_json::json!({"ref": "p/b/0123456789abcdef0123456789abcdef", "body": "too thin here"})
+    );
+}
+
+/// A body's planar face whose outward normal is `z` along z, as a
+/// reference `<part>/<feature>/<name>`.
+fn plane_face(body: &Value, of: &str, z: f64) -> String {
+    body["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == z
+        })
+        .map(|f| format!("{of}/{}", f["name"].as_str().unwrap()))
+        .unwrap()
+}
+
+/// A body's vertex `name`'s point.
+fn vertex_point(body: &Value, name: &Value) -> [f64; 3] {
+    let v = body["vertices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == *name)
+        .unwrap();
+    [0, 1, 2].map(|k| v["point"][k].as_f64().unwrap())
+}
+
+#[test]
+fn holes_at_places_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=40", "--param", "y=30",
+        "--param", "z=10",
+    ]);
+    let body = p.ok(&["inspect", "plate", "b"])["bodies"][0].clone();
+    let top = plane_face(&body, "plate/b", 1.0);
+    // The top's edges along x = 0 and along y = 0.
+    let edge = |axis: usize| -> String {
+        body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| {
+                let (a, b) = (
+                    vertex_point(&body, &e["start"]),
+                    vertex_point(&body, &e["end"]),
+                );
+                a[2] == 0.01 && b[2] == 0.01 && a[axis] == 0.0 && b[axis] == 0.0
+            })
+            .map(|e| format!("plate/b/{}", e["name"].as_str().unwrap()))
+            .unwrap()
+    };
+    // Two points at once, keyed a and b, then one from two edges.
+    for (id, at) in [("q1", "10mm,10mm,10mm"), ("q2", "30mm,10mm,10mm")] {
+        p.ok(&[
+            "feature",
+            "add",
+            "plate",
+            "point",
+            "--id",
+            id,
+            "--by",
+            "coordinates",
+            "--coordinates",
+            at,
+        ]);
+    }
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "h",
+        "--spec",
+        "M6x1.0-6H THRU",
+        "--at",
+        "plate/q1",
+        "--at",
+        "plate/q2",
+    ]);
+    assert_eq!(
+        h["feature"]["places"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    let e = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "g",
+        "--diameter",
+        "3",
+        "--depth",
+        "4",
+        "--face",
+        &top,
+        "--from-edge",
+        &format!("{}=20", edge(0)),
+        "--from-edge",
+        &format!("{}=15", edge(1)),
+    ]);
+    assert_eq!(
+        e["feature"]["places"]["a"]["from"][1]["distance"]["value"],
+        "15 mm"
+    );
+    let holes = p.ok(&["holes", "plate"]);
+    let refs: Vec<&str> = holes["holes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["ref"].as_str().unwrap())
+        .collect();
+    assert_eq!(refs, ["plate/h/a", "plate/h/b", "plate/g/a"]);
+}
+
+/// #722's plate again, with one hole and a fill: 100 × M6 on the 20 mm
+/// grid, the seed at (10, 10) mm and the lattice running up and right.
+#[test]
+fn the_fixture_plate_of_issue_722_by_a_fill() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "b", "--param", "x=200", "--param", "y=200",
+        "--param", "z=12",
+    ]);
+    let body = p.ok(&["inspect", "plate", "b"])["bodies"][0].clone();
+    let top = plane_face(&body, "plate/b", 1.0);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "point",
+        "--id",
+        "c",
+        "--by",
+        "coordinates",
+        "--coordinates",
+        "10mm,10mm,12mm",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "h",
+        "--spec",
+        "M6x1.0-6H THRU",
+        "--at",
+        "plate/c",
+    ]);
+    let f = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "pattern",
+        "--id",
+        "grid",
+        "--seed",
+        "h",
+        "--form",
+        "fill",
+        "--fill-face",
+        &top,
+        "--direction",
+        "x",
+        "--spacing",
+        "20",
+        "--margin",
+        "2",
+    ]);
+    assert_eq!(f["feature"]["form"], "fill");
+    assert_eq!(f["feature"]["margin"]["value"], "2 mm");
+    let holes = p.ok(&["holes", "plate"]);
+    let rows = holes["holes"].as_array().unwrap();
+    assert_eq!(rows.len(), 100);
+    assert!(rows.iter().all(|r| r["spec"] == "M6x1.0-6H THRU"));
+    let last = rows
+        .iter()
+        .find(|r| r["pattern"]["instance"] == json!([9, 9]))
+        .unwrap();
+    assert_eq!(last["ref"], "plate/grid/h/a/9,9");
+    // A dowel where one hole of the grid was: skipped there, drilled alone.
+    p.ok(&["feature", "edit", "plate", "grid", "--skip", "4,4"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "point",
+        "--id",
+        "d",
+        "--by",
+        "coordinates",
+        "--coordinates",
+        "90mm,90mm,12mm",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "hole",
+        "--id",
+        "dowel",
+        "--spec",
+        "DIA 6 H7 THRU",
+        "--at",
+        "plate/d",
+    ]);
+    let holes = p.ok(&["holes", "plate", "--group"]);
+    let groups = holes["groups"].as_array().unwrap();
+    let count = |spec: &str| {
+        groups
+            .iter()
+            .find(|g| g["spec"] == spec)
+            .unwrap_or_else(|| panic!("{spec} in {holes}"))["count"]
+            .clone()
+    };
+    assert_eq!(
+        (count("M6x1.0-6H THRU"), count("DIA 6 H7 THRU")),
+        (json!(99), json!(1))
     );
 }
 
@@ -10275,4 +10508,92 @@ fn following_instance_patterns_from_the_cli() {
         .collect();
     assert_eq!(keys, ["screws:p1", "screws:p4"]);
     assert_eq!(f["driver"], "lid/layout");
+}
+
+/// `ryucad part ensure` (plan 31.C), both ways: created, then unchanged;
+/// a feature left out is deleted; a missing id is refused with its
+/// pointer; `batch --prune` deletes what no ensure named; through the
+/// daemon one `undo` takes the prune back.
+#[test]
+fn ensure_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.write(
+        "plate.json",
+        r#"{"params": {"w": "40 mm"}, "features": [
+        {"id": "slab", "type": "box", "params": {"x": "w", "y": 20, "z": 5}},
+        {"id": "knob", "type": "sphere", "params": {"radius": 2}}]}"#,
+    );
+    let v = p.ok(&["part", "ensure", "plate", "--from", "plate.json"]);
+    assert_eq!(
+        (v["status"].clone(), v["params"].clone()),
+        (json!("created"), json!("created")),
+        "{v}"
+    );
+    assert_eq!(v["features"], json!({"slab": "created", "knob": "created"}));
+    let again = p.ok(&["part", "ensure", "plate", "--from", "plate.json"]);
+    assert_eq!(again["status"], "unchanged", "{again}");
+    p.write(
+        "slab.json",
+        r#"{"params": {"w": "40 mm"}, "features": [
+        {"id": "slab", "type": "box", "params": {"x": "w", "y": 20, "z": 5}}]}"#,
+    );
+    let v = p.ok(&["part", "ensure", "plate", "--from", "slab.json"]);
+    assert_eq!(
+        v["features"],
+        json!({"slab": "unchanged", "knob": "deleted"}),
+        "{v}"
+    );
+    p.write("noid.json", r#"{"features": [{"type": "box"}]}"#);
+    let e = p.fails(
+        &["part", "ensure", "plate", "--from", "noid.json"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["pointer"], "/features/0/id", "{e}");
+    p.write("other.json", r#"{"part": "bolt", "features": []}"#);
+    p.fails(
+        &["part", "ensure", "plate", "--from", "other.json"],
+        "usage",
+        2,
+    );
+    p.ok(&["part", "create", "spare"]);
+    p.write(
+        "pruned.json",
+        r#"{"ops": [{"method": "part.ensure", "params": {"part": "plate",
+        "params": {"w": "40 mm"}, "features": [
+        {"id": "slab", "type": "box", "params": {"x": "w", "y": 20, "z": 5}}]}}]}"#,
+    );
+    let v = p.ok(&["batch", "pruned.json", "--prune"]);
+    assert_eq!(v["parts"]["spare"]["status"], "deleted", "{v}");
+    let (code, u) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    let list = p.run_in(&p.daemon, "", &["part", "list"]).1;
+    assert!(list.to_string().contains("\"spare\""), "{list}");
+}
+
+/// An ensure through a stdio session, both ways: created, then unchanged
+/// with nothing written.
+#[test]
+fn ensure_through_a_stdio_session() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let line = r#"{"jsonrpc":"2.0","id":ID,"method":"batch","params":{"ops":[{"method":"part.ensure","params":{"part":"p","features":[{"id":"b","type":"box","params":{"x":"10","y":"20","z":"5"}}]}}],"rebuild":false}}"#;
+    let (one, two) = (line.replace("ID", "1"), line.replace("ID", "2"));
+    let lines = [one.as_str(), two.as_str()];
+    let (a_code, a) = p.script(&p.direct, "", &lines);
+    let (b_code, b) = p.script(&p.daemon, "", &lines);
+    assert_eq!((a_code, b_code), (0, 0));
+    assert_eq!(a, b, "in process vs daemon");
+    assert_eq!(
+        a[0].0["result"]["ops"][0]["result"]["status"], "created",
+        "{}",
+        a[0].0
+    );
+    assert_eq!(
+        a[1].0["result"]["parts"]["p"]["status"], "unchanged",
+        "{}",
+        a[1].0
+    );
+    assert_eq!(a[1].0["result"]["written"], 0);
 }

@@ -596,7 +596,10 @@ pub(crate) fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Re
         }
         return Ok(());
     }
-    let sketch = f.profiles()[0];
+    // A hole at places reads no sketch (ryucad 28.C).
+    let Some(&sketch) = f.profiles().first() else {
+        return Ok(());
+    };
     check_sketch(part, order, id, sketch)?;
     let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
         return Ok(());

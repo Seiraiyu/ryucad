@@ -10,13 +10,20 @@
 //! | straight edge | the part origin projected onto its line | along its curve | the part's x made perpendicular, else y |
 //! | circular edge | the circle's centre | the circle's axis | the circle's x |
 //! | planar face | the part origin projected onto it | outward normal | the part's x made perpendicular, else y |
-//! | cylindrical or conical face | the part origin projected onto the axis | the surface's axis | the surface's x |
+//! | cylindrical or conical face | the part origin projected onto the axis | the surface's axis, either way for a revolute or cylindrical mate (below) | the surface's x |
 //! | spherical face | the centre | the part's z | the part's x |
 //! | `origin` | the part origin | z | x |
 //!
 //! Anything else (a NURBS or swept face, a torus, an ellipse or a spline
 //! edge) is `connector_unsupported`. The offset then moves the frame in
 //! its own axes, turns it about its z and turns it over about its x.
+//!
+//! A revolute or cylindrical mate with neither connector flipped turns a
+//! cylindrical or conical face's frame over about its x where its z
+//! points against the other connector's at the poses the instances hold:
+//! such an axis has no way of its own (a hole's points down its drill, a
+//! cut's along its placement), and the mate would turn the part over to
+//! agree (#770).
 //! Connectors on parts deeper in subassemblies are carried through the
 //! poses that place them.
 
@@ -198,6 +205,9 @@ pub struct Found {
     /// Where its entity went, when a later feature of its part split or
     /// merged it and the connector followed (design 447).
     pub followed: Option<crate::reference::Trail>,
+    /// Whether its frame is a cylindrical or conical face's: its axis has
+    /// no way of its own (#770).
+    pub axial: bool,
 }
 
 /// What a connector is resolved in: an assembly's instances, by ID, and
@@ -285,8 +295,8 @@ pub fn resolve(owner: &Id, role: &str, c: &Connector, scope: &dyn Scope) -> Resu
             ),
         ));
     };
-    let (on_part, followed) = match &c.at {
-        At::Origin => (Pose::IDENTITY, None),
+    let (on_part, followed, axial) = match &c.at {
+        At::Origin => (Pose::IDENTITY, None, false),
         At::Datum(d) => (
             datum(o, d).map_err(|(code, msg)| {
                 fail(code, msg)
@@ -294,6 +304,7 @@ pub fn resolve(owner: &Id, role: &str, c: &Connector, scope: &dyn Scope) -> Resu
                     .with("rev", o.rev.to_json())
             })?,
             None,
+            false,
         ),
         At::Entity(r) => entity(o, r).map_err(|miss| {
             let mut e = fail(miss.code, miss.message)
@@ -319,6 +330,7 @@ pub fn resolve(owner: &Id, role: &str, c: &Connector, scope: &dyn Scope) -> Resu
         copy,
         frame: offset(&frame, &c.offset),
         followed,
+        axial,
     })
 }
 
@@ -369,14 +381,27 @@ impl Miss {
     }
 }
 
+/// Whether entity `e` of `body` is a cylindrical or conical face, whose
+/// connector axis has no way of its own (#770).
+pub fn axial(body: &Body, e: EntityId) -> bool {
+    match e {
+        EntityId::Face(f) => matches!(
+            body.face(f).and_then(|face| body.surface(face.surface)),
+            Some(Surface::Cylinder(_) | Surface::Cone(_))
+        ),
+        _ => false,
+    }
+}
+
 /// The frame of the entity `r` names in occurrence `o`, in its part's
-/// coordinates, and where it went if the connector followed it: a face or
+/// coordinates, where it went if the connector followed it (a face or
 /// edge a later feature of the part split, every piece on the old surface
-/// or curve, gives the first piece's frame (`Carrier`, design 447).
+/// or curve, gives the first piece's frame: `Carrier`, design 447), and
+/// whether it is [`axial`].
 fn entity(
     o: &Occurrence,
     r: &crate::doc::reference::Reference,
-) -> core::result::Result<(Pose, Option<crate::reference::Trail>), Miss> {
+) -> core::result::Result<(Pose, Option<crate::reference::Trail>, bool), Miss> {
     use crate::reference::{Follow, Followed};
     let rev = o.rev.text();
     let Some(s) = o.solids.iter().find(|s| s.founder == r.feature) else {
@@ -418,7 +443,7 @@ fn entity(
             format!("is on {what}, which defines no connector frame"),
         )
     })?;
-    Ok((frame, followed))
+    Ok((frame, followed, axial(&s.built.body, e)))
 }
 
 #[cfg(test)]

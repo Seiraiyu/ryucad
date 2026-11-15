@@ -22,6 +22,8 @@ pub struct Ask {
     pub expect: Option<String>,
     pub dry_run: bool,
     pub rebuild: bool,
+    /// Delete every part no `part.ensure` or `part.create` op named.
+    pub prune: bool,
 }
 
 /// `batch`.
@@ -35,8 +37,12 @@ pub fn run(
     session.check_project_revision(ask.expect.as_deref())?;
     let working = session.snapshot();
     let mut capture = session.capturing(working.clone())?;
+    // Each assembly is solved once, at the end (plan 31.C).
+    capture.defer_solves();
     let mut answers = Vec::with_capacity(requests.len());
     let mut named = BTreeSet::new();
+    // What `prune` keeps: the parts the ensures and creates name.
+    let mut kept: BTreeSet<Id> = BTreeSet::new();
     for (i, (op, req)) in ask.ops.iter().zip(requests).enumerate() {
         // A cancel stops a batch between its ops (and inside one, through
         // the job the capture shares), before anything is written.
@@ -48,11 +54,20 @@ pub fn run(
             .and_then(Value::as_str)
         {
             named.insert(p.to_owned());
+            if matches!(op.method.as_str(), "part.ensure" | "part.create")
+                && let Ok(id) = crate::part::part_id(p)
+            {
+                kept.insert(id);
+            }
         }
         let result = crate::server::dispatch(&mut capture, live.as_deref_mut(), me, req)
             .map_err(|e| at_op(e, i, &op.method))?;
         answers.push(json!({"method": op.method, "result": result}));
     }
+    if ask.prune {
+        prune(&mut capture, live, me, &kept)?;
+    }
+    let (assemblies, warnings) = solve_deferred(session, &mut capture)?;
     session.job().check()?;
     let writes = changed(&working, capture.captured());
     let parts = statuses(&named, &working, &writes);
@@ -67,6 +82,12 @@ pub fn run(
     };
     let mut answer = json!({"ops": answers, "parts": parts_now, "written": written,
                             "revision": revision});
+    if !assemblies.is_empty() {
+        answer["assemblies"] = json!(assemblies);
+    }
+    if !warnings.is_empty() {
+        answer["warnings"] = json!(warnings);
+    }
     if ask.dry_run {
         answer["dry_run"] = json!(true);
     } else if ask.rebuild {
@@ -75,13 +96,126 @@ pub fn run(
     Ok(answer)
 }
 
+/// `prune`: deletes in the capture, through `part.delete` and its
+/// checks, every part not `kept`, one no other part places or inserts at
+/// working first. When none left can go, the first one's own refusal
+/// (`has_dependents`) refuses the batch.
+fn prune(
+    capture: &mut Session,
+    mut live: Option<&mut Live>,
+    me: Option<&str>,
+    kept: &BTreeSet<Id>,
+) -> Result<()> {
+    loop {
+        let doomed: Vec<Id> = capture
+            .project()
+            .parts
+            .keys()
+            .filter(|p| !kept.contains(*p))
+            .cloned()
+            .collect();
+        let Some(first) = doomed.first() else {
+            return Ok(());
+        };
+        let next = doomed
+            .iter()
+            .find(|p| !placed_by_another(capture.project(), p))
+            .unwrap_or(first)
+            .clone();
+        crate::server::dispatch(
+            capture,
+            live.as_deref_mut(),
+            me,
+            Request::PartDelete {
+                part: next.to_string(),
+                expected_revision: None,
+            },
+        )
+        .map_err(|e| e.with("prune", true).with("pointer", "/prune"))?;
+    }
+}
+
+/// Whether another part places `part` as an instance or inserts it, at
+/// working: what `part.delete` refuses.
+fn placed_by_another(project: &crate::doc::project::Project, part: &Id) -> bool {
+    use crate::doc::assembly::Rev;
+    use crate::doc::files::Feature;
+    project
+        .parts
+        .iter()
+        .filter(|(id, _)| *id != part)
+        .any(|(_, p)| {
+            p.features.values().any(|f| match f {
+                Ok(Feature::Instance(i)) => i.part == *part && i.rev == Rev::Working,
+                Ok(Feature::Insert(i)) => i.part == *part && i.rev == Rev::Working,
+                _ => false,
+            })
+        })
+}
+
+/// The solves the ops deferred (plan 31.C), each assembly once: every
+/// assembly the written parts reach whose poses held in the working files
+/// (converged, not stale), or that the batch made, is solved as the files
+/// now are and its poses written in the capture, as `mate::keep_current`
+/// writes them after a single write. An assembly the batch wrote
+/// instances or mates to, whose mates held and now can't, refuses the
+/// batch, as `mate::refuse_overconstrained` refuses that write alone.
+/// Answers the solves' reports and the failing mates' warnings.
+fn solve_deferred(
+    working: &mut Session,
+    capture: &mut Session,
+) -> Result<(Vec<Value>, Vec<Value>)> {
+    let Some(d) = capture.take_deferred() else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let mut reached: Vec<Id> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for p in d.parts.iter().chain(&d.assembled) {
+        if !capture.project().parts.contains_key(p) {
+            continue;
+        }
+        for a in crate::mate::reached(capture.project(), p) {
+            if seen.insert(a.clone()) {
+                reached.push(a);
+            }
+        }
+    }
+    let held_before = |w: &mut Session, a: &Id, stale_too: bool| -> Result<bool> {
+        if !w.project().parts.contains_key(a) {
+            return Ok(true); // made by the batch
+        }
+        Ok(w.rebuilt(a)?
+            .solve
+            .as_ref()
+            .is_none_or(|s| s.report.converged && (stale_too || !s.stale())))
+    };
+    for a in &d.assembled {
+        if !capture.project().parts.contains_key(a) || !held_before(working, a, true)? {
+            continue;
+        }
+        if let Some(e) = crate::mate::overconstrained(a, capture.rebuilt(a)?) {
+            return Err(e);
+        }
+    }
+    let mut held = Vec::new();
+    for a in &reached {
+        if held_before(working, a, false)? {
+            held.push(a.clone());
+        }
+    }
+    let solved = crate::mate::keep_current(capture, &held)?;
+    let warnings = crate::mate::failing_warnings(capture, &reached, "");
+    Ok((solved, warnings))
+}
+
 /// The requests a batch may hold: the model edits a person may propose
 /// (`annotation::PROPOSABLE`), and making and deleting parts. Undo,
 /// releases, PDM settings, dependencies, imports, branch switches,
 /// doctor's repairs, merge resolutions and another batch can't be.
-pub const BATCHABLE: [&str; 27] = [
+pub const BATCHABLE: [&str; 28] = [
     "part.create",
     "part.delete",
+    "part.ensure",
     "feature.add",
     "feature.edit",
     "feature.delete",
@@ -120,7 +254,7 @@ pub fn requests(ops: &[BatchOp]) -> Result<Vec<Request>> {
                 return Err(Error::new(
                     Code::InvalidParam,
                     format!(
-                        "op {i}: {:?} can't be batched: only model edits and part.create and part.delete can (batch::BATCHABLE)",
+                        "op {i}: {:?} can't be batched: only model edits and part.create, part.delete and part.ensure can (batch::BATCHABLE)",
                         op.method
                     ),
                 )
@@ -400,7 +534,7 @@ mod tests {
         let want: BTreeSet<&str> = PROPOSABLE
             .iter()
             .copied()
-            .chain(["part.create", "part.delete"])
+            .chain(["part.create", "part.delete", "part.ensure"])
             .collect();
         assert_eq!(BATCHABLE.iter().copied().collect::<BTreeSet<_>>(), want);
         assert_eq!(BATCHABLE.len(), want.len(), "no method twice");
@@ -537,6 +671,11 @@ mod tests {
         let mut asks = proposable_requests();
         asks.push(("part.create", json!({"part": "bolt", "kind": "assembly"})));
         asks.push(("part.delete", json!({"part": "rig"})));
+        asks.push((
+            "part.ensure",
+            json!({"part": "pin", "features": [
+                {"id": "shank", "type": "cylinder", "params": {"radius": 3, "height": 10}}]}),
+        ));
         let methods: BTreeSet<&str> = asks.iter().map(|(m, _)| *m).collect();
         assert_eq!(methods, BATCHABLE.iter().copied().collect::<BTreeSet<_>>());
         for (method, params) in asks {
@@ -883,6 +1022,223 @@ mod tests {
         assert_eq!(log["entries"][0]["method"], "batch", "{log}");
         call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
         assert_eq!(on_disk(dir.path()), before);
+    }
+
+    #[test]
+    fn a_deferring_capture_notes_what_it_would_solve_and_solves_nothing() {
+        let (_dir, mut s) = crate::mate::tests::hinged();
+        let bolt = crate::part::part_id("bolt").unwrap();
+        let frame = crate::part::part_id("frame").unwrap();
+        let want = crate::mate::current(&mut s, &bolt).unwrap();
+        let mut c = s.capturing(s.snapshot()).unwrap();
+        assert!(!c.defers_solves());
+        c.defer_solves();
+        assert!(c.defers_solves());
+        assert_eq!(
+            crate::mate::current(&mut c, &bolt).unwrap(),
+            Vec::<Id>::new()
+        );
+        let p = c.project().part(&frame).unwrap().clone();
+        crate::mate::refuse_overconstrained(&mut c, p).unwrap();
+        assert_eq!(
+            crate::mate::failing_warnings(&mut c, std::slice::from_ref(&frame), ""),
+            Vec::<Value>::new()
+        );
+        let d = c.take_deferred().unwrap();
+        assert_eq!(d.parts.into_iter().collect::<Vec<_>>(), vec![bolt.clone()]);
+        assert_eq!(
+            d.assembled.into_iter().collect::<Vec<_>>(),
+            vec![frame.clone()]
+        );
+        // Taken, it solves again as it always has.
+        assert!(!c.defers_solves());
+        assert_eq!(crate::mate::current(&mut c, &bolt).unwrap(), want);
+        // A disk session never defers.
+        let mut d = s;
+        d.defer_solves();
+        assert!(!d.defers_solves());
+    }
+
+    /// One op that moves a mated assembly writes in a batch what it writes
+    /// alone, solved once at the batch's end, and its answer moves the
+    /// solve's report to the batch's.
+    #[test]
+    fn a_batch_solves_its_assemblies_once_at_its_end() {
+        // A revolute standing the pin on the plate, its poses written, as
+        // mate's `writes_keep_assemblies_current` makes it.
+        let current = || {
+            let (dir, mut s, a, b) = crate::mate::current_tests::placed();
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "mate", "id": "m1", "form": "revolute",
+                       "a": a, "b": b, "a_offset": {"origin": ["20 mm", 0, 0]},
+                       "b_offset": {"flip": true}}),
+            )
+            .unwrap();
+            (dir, s)
+        };
+        // The plate's top rises, so the pin standing on it must move.
+        let edit = json!({"part": "plate", "id": "slab", "params": {"z": 8}});
+        let (a_dir, mut a) = current();
+        let (b_dir, mut b) = current();
+        let (a0, b0) = (on_disk(a_dir.path()), on_disk(b_dir.path()));
+        let v = call(
+            &mut a,
+            "batch",
+            json!({"ops": [{"method": "feature.edit", "params": edit}], "rebuild": false}),
+        )
+        .unwrap();
+        let alone = call(&mut b, "feature.edit", edit.clone()).unwrap();
+        same(
+            change(&a0, &on_disk(a_dir.path())),
+            change(&b0, &on_disk(b_dir.path())),
+            "solved",
+        );
+        assert!(
+            alone.get("assemblies").is_some(),
+            "the example moves the pin: {alone}"
+        );
+        assert!(v["ops"][0]["result"].get("assemblies").is_none(), "{v}");
+        assert_eq!(v.get("assemblies"), alone.get("assemblies"), "{v}\n{alone}");
+    }
+
+    /// An ensure that only drops a part's trailing feature solves the mated
+    /// assemblies over it, writing what `feature.delete` writes alone.
+    #[test]
+    fn an_ensure_that_only_drops_features_solves_the_assemblies_over_it() {
+        // The revolute standing the pin on the plate, and a `lift` raising
+        // the plate's top 2 mm, the pin solved onto it.
+        let current = || {
+            let (dir, mut s, a, b) = crate::mate::current_tests::placed();
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "mate", "id": "m1", "form": "revolute",
+                       "a": a, "b": b, "a_offset": {"origin": ["20 mm", 0, 0]},
+                       "b_offset": {"flip": true}}),
+            )
+            .unwrap();
+            let top = crate::mate::tests::face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "plate", "type": "move_face", "id": "lift", "direction": "z",
+                       "distance": "2 mm", "faces": [format!("plate/slab/{top}")]}),
+            )
+            .unwrap();
+            (dir, s)
+        };
+        let z = |s: &mut Session| {
+            let show = call(s, "feature.show", json!({"part": "frame", "id": "pin"})).unwrap();
+            show["pose"]["origin_m"][2].as_f64().unwrap()
+        };
+        let (a_dir, mut a) = current();
+        let (b_dir, mut b) = current();
+        assert!((z(&mut a) - 0.007).abs() < 1e-9, "{}", z(&mut a));
+        let (a0, b0) = (on_disk(a_dir.path()), on_disk(b_dir.path()));
+        let ensure = json!({"method": "part.ensure", "params": {"part": "plate", "features": [
+            {"id": "slab", "type": "box", "params": {"x": 100, "y": 50, "z": 5}}]}});
+        let v = call(&mut a, "batch", json!({"ops": [ensure], "rebuild": false})).unwrap();
+        assert_eq!(v["ops"][0]["result"]["features"]["lift"], "deleted", "{v}");
+        assert_eq!(
+            v["ops"][0]["result"]["features"]["slab"], "unchanged",
+            "{v}"
+        );
+        let alone = call(
+            &mut b,
+            "feature.delete",
+            json!({"part": "plate", "id": "lift"}),
+        )
+        .unwrap();
+        same(
+            change(&a0, &on_disk(a_dir.path())),
+            change(&b0, &on_disk(b_dir.path())),
+            "dropped",
+        );
+        assert!(
+            alone.get("assemblies").is_some(),
+            "the example moves the pin: {alone}"
+        );
+        assert_eq!(v.get("assemblies"), alone.get("assemblies"), "{v}\n{alone}");
+        // The pin is back on the plate's own top, and frame is current.
+        assert!((z(&mut a) - 0.005).abs() < 1e-9, "{}", z(&mut a));
+        let frame = crate::part::part_id("frame").unwrap();
+        assert!(!a.rebuilt(&frame).unwrap().solve.as_ref().unwrap().stale());
+    }
+
+    /// An instance or mate write that would leave mates that held unable
+    /// to hold refuses the batch at its end, as it refuses alone.
+    #[test]
+    fn an_overconstraining_batch_is_refused_at_its_end() {
+        let (dir, mut s) = crate::mate::tests::hinged();
+        let top = crate::mate::tests::face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+        let foot = crate::mate::tests::face(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+        // Fastened at the plate's origin, against the revolute's 20 × 10 mm.
+        let mate = json!({"part": "frame", "type": "mate", "id": "m2", "form": "fastened",
+            "a": format!("frame/base/slab/{top}"), "b": format!("frame/pin/shank/{foot}"),
+            "b_offset": {"flip": true}});
+        let before = on_disk(dir.path());
+        let e = call(
+            &mut s,
+            "batch",
+            json!({"ops": [{"method": "feature.add", "params": mate}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::AssemblyOverconstrained, "{e:?}");
+        assert_eq!(e.details["part"], "frame");
+        assert_eq!(on_disk(dir.path()), before);
+        // The example is a real conflict: alone it is refused too.
+        let e = call(&mut s, "feature.add", mate).unwrap_err();
+        assert_eq!(e.code, Code::AssemblyOverconstrained, "{e:?}");
+    }
+
+    #[test]
+    fn prune_deletes_what_no_ensure_named_unplaced_first() {
+        let pin = json!({"method": "part.ensure", "params": {"part": "pin", "features": [
+            {"id": "shank", "type": "cylinder", "params": {"radius": 2, "height": 10}}]}});
+        // Not asked: nothing else goes.
+        let (_dir, mut s) = twin();
+        let v = call(&mut s, "batch", json!({"ops": [pin], "rebuild": false})).unwrap();
+        assert_eq!(v["parts"].as_object().unwrap().len(), 1, "{v}");
+        // Asked: rig first (it places plate), then plate; pin stays.
+        let v = call(
+            &mut s,
+            "batch",
+            json!({"ops": [pin], "prune": true, "rebuild": false}),
+        )
+        .unwrap();
+        let st = |p: &str| v["parts"][p]["status"].clone();
+        assert_eq!(
+            (st("pin"), st("rig"), st("plate")),
+            (json!("unchanged"), json!("deleted"), json!("deleted")),
+            "{v}"
+        );
+        assert_eq!(s.project().parts.len(), 1);
+        // A kept assembly placing what isn't named: refused, nothing written.
+        let (dir, mut s) = twin();
+        let before = on_disk(dir.path());
+        let rig = json!({"method": "part.ensure", "params": {"part": "rig", "features": [
+            {"id": "base", "type": "instance", "of": "plate", "fixed": true},
+            {"id": "p1", "type": "instance", "of": "pin", "placement": {"origin": [10, 10, 5]}}]}});
+        let e = call(&mut s, "batch", json!({"ops": [rig], "prune": true})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e:?}");
+        assert_eq!(
+            (e.details["prune"].clone(), e.details["pointer"].clone()),
+            (json!(true), json!("/prune"))
+        );
+        assert_eq!(on_disk(dir.path()), before);
+        // part.create names a part too.
+        let (_dir, mut s) = twin();
+        let v = call(
+            &mut s,
+            "batch",
+            json!({"ops": [pin, {"method": "part.create", "params": {"part": "new"}}],
+                   "prune": true, "rebuild": false}),
+        )
+        .unwrap();
+        assert_eq!(v["parts"]["new"]["status"], "created", "{v}");
+        assert_eq!(s.project().parts.len(), 2);
     }
 
     #[test]

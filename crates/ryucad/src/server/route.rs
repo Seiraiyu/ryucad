@@ -31,6 +31,26 @@ pub(crate) fn dispatch(
             part,
             expected_revision,
         } => part_delete(session, &part, expected_revision.as_deref()),
+        Request::PartEnsure {
+            part,
+            kind,
+            params,
+            features,
+            props,
+            expected_revision,
+        } => super::ensure::run(
+            session,
+            live,
+            me,
+            super::ensure::Ask {
+                part,
+                kind,
+                params,
+                features,
+                props,
+                expected: expected_revision,
+            },
+        ),
         Request::PartList {} => Ok(part_list(session)),
         Request::FeatureAdd {
             part,
@@ -516,6 +536,7 @@ pub(crate) fn dispatch(
             expect,
             dry_run,
             rebuild,
+            prune,
         } => crate::batch::run(
             session,
             live,
@@ -525,6 +546,7 @@ pub(crate) fn dispatch(
                 expect,
                 dry_run,
                 rebuild: rebuild.unwrap_or(true),
+                prune,
             },
         ),
         Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(

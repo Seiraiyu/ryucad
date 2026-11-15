@@ -18,6 +18,7 @@
 
 use crate::config::Scheme;
 use crate::label;
+use crate::lines::{custom, field};
 use crate::structure::{Node, Reader, driven_keys, occurrences_with};
 use ryu_doc::error::{Code, Error, Result};
 use ryu_doc::id::{Id, ProjectId};
@@ -575,26 +576,6 @@ pub const CSV_COLUMNS: [&str; 11] = [
     "material",
     "description",
 ];
-
-/// One field as RFC 4180 writes it: quoted when it holds a comma, a
-/// quote or a line break, quotes doubled.
-fn field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_owned()
-    }
-}
-
-/// The declared properties' names, in the order the settings give them.
-fn custom(config: &crate::config::Config) -> Vec<String> {
-    config
-        .decls()
-        .into_iter()
-        .map(|(n, _)| n)
-        .filter(|n| !crate::config::CORE.contains(&n.as_str()))
-        .collect()
-}
 
 /// The last column, the name of a row's project, which a CSV has only when
 /// some row is another project's part: CSVs of BOMs within one project

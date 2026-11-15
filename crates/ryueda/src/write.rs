@@ -85,8 +85,16 @@ pub fn proposed(session: &Session, writes: &Writes) -> Result<Project> {
             }
         }
     }
-    let aliases = resolve(session.root(), &session.project().manifest);
-    Project::load_from(session.root(), &files, &aliases)
+    // A write of the manifest (a library added or pinned) resolves the
+    // aliases it names.
+    let written = writes
+        .0
+        .iter()
+        .find(|(p, t)| p == crate::project::MANIFEST && t.is_some())
+        .and_then(|(_, t)| crate::project::Manifest::read(t.as_deref()?.as_bytes()).ok());
+    let manifest = written.as_ref().unwrap_or(&session.project().manifest);
+    let aliases = resolve(session.root(), manifest);
+    Project::load_from(session.root(), &files, &aliases, &*session.pins)
 }
 
 /// Puts `writes` on disk if they add no error to the project, and takes

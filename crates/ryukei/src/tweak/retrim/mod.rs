@@ -9,7 +9,9 @@
 //! material is guessed: the walk only counts.
 
 pub(crate) mod body;
+pub(crate) mod held;
 pub(crate) mod names;
+pub(crate) mod near;
 pub(crate) mod region;
 pub(crate) mod seeds;
 pub(crate) mod walk;
@@ -31,10 +33,112 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use walk::WalkError;
 
-/// One rung of the retry ladder: whether it may go on to the next.
-enum Rung {
+/// One build of a rung of the retry ladder: whether it may go on to the
+/// next.
+pub(crate) enum Rung {
     Done(Box<Result<(Body, Journal), Error>>),
     Next(Error),
+    /// The walk couldn't close: climbs the ladder as `Next`.
+    Walked(Error),
+    /// A first build's `Uncertain` at a pair of its table, held or not
+    /// (design 669): answers as `Done` unless the rung is built again
+    /// narrowed.
+    Uncertain(Error),
+    /// A narrowed retry that narrows no working face: never built.
+    Unchanged,
+}
+
+/// Whether a rung may be built again narrowed (design 669).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Narrow {
+    /// Never: each rung is built once (the tests' re-trim without
+    /// narrowing).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Never,
+    /// Once its first build refuses `Uncertain` at a pair of its table.
+    AfterUncertain,
+}
+
+/// Which build of a rung `attempt` makes (design 669).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Build {
+    /// The rung's first build: as before, bit for bit.
+    First,
+    /// Built again narrowed after the first refused `Uncertain`:
+    /// `Unchanged` where no narrowing changes a working face.
+    Retry,
+    /// A rung above one built narrowed: its one build, narrowed, built
+    /// whether or not a narrowing changes anything.
+    Only,
+}
+
+impl Build {
+    /// Whether this build applies the narrowings.
+    pub(crate) fn narrowed(self) -> bool {
+        self != Build::First
+    }
+}
+
+/// A rung's answer from its first build and, where that refused
+/// `Uncertain` at a pair of its table and `narrow` allows, its narrowed
+/// build (`again`); and whether the rung was built narrowed. A narrowed
+/// build that narrows nothing leaves the first answer standing; any other
+/// narrowed outcome is the rung's, a failed walk or `Next` climbing
+/// (design 669; plan 20.A, Decision 5).
+pub(crate) fn settle(first: Rung, narrow: Narrow, again: impl FnOnce() -> Rung) -> (Rung, bool) {
+    let Rung::Uncertain(e) = first else {
+        return (first, false);
+    };
+    if narrow == Narrow::Never {
+        return (done(Err(e)), false);
+    }
+    match again() {
+        Rung::Unchanged => (done(Err(e)), false),
+        // `attempt` answers a narrowed build's own `Uncertain` as `Done`;
+        // kept for the match.
+        Rung::Uncertain(e) => (done(Err(e)), true),
+        r => (r, true),
+    }
+}
+
+/// The ladder (design 669): rungs 0 to 3 in order, each built by
+/// `build(rung, which)`, `None` once the region can't grow. Each rung's
+/// first build, and after an `Uncertain` its narrowed retry
+/// ([`settle`]); once a rung was built narrowed, every later rung is built
+/// narrowed only: its first build would carry the same faces farther over
+/// a bigger region. `Next` and failed walks climb, and the last answers
+/// when the ladder ends.
+pub(crate) fn climb(
+    narrow: Narrow,
+    mut build: impl FnMut(usize, Build) -> Option<Rung>,
+) -> Result<(Body, Journal), Error> {
+    let mut last = None;
+    let mut narrowed = false;
+    for rung in 0..4 {
+        let r = if narrowed {
+            let Some(r) = build(rung, Build::Only) else {
+                break;
+            };
+            r
+        } else {
+            let Some(first) = build(rung, Build::First) else {
+                break;
+            };
+            let (r, now) = settle(first, narrow, || {
+                build(rung, Build::Retry).expect("a rung built once builds again")
+            });
+            narrowed = now;
+            r
+        };
+        match r {
+            Rung::Done(r) => return *r,
+            Rung::Next(e) | Rung::Walked(e) => last = Some(e),
+            // `settle` answers it; kept for the match.
+            Rung::Uncertain(e) => return Err(e),
+            Rung::Unchanged => {}
+        }
+    }
+    Err(last.expect("one rung ran"))
 }
 
 /// A rung that answers.
@@ -42,16 +146,31 @@ fn done(r: Result<(Body, Journal), Error>) -> Rung {
     Rung::Done(Box::new(r))
 }
 
+/// [`retrim_with`], built again narrowed after an `Uncertain`.
+pub(crate) fn retrim(
+    key: OpKey,
+    body: &Body,
+    changes: &Changes,
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
+    retrim_with(key, body, changes, Narrow::AfterUncertain, m)
+}
+
 /// `body` tweaked by `changes` with its topology free to change, named
 /// from `key`. Refusals: `NotASolid` for a sheet, `LaminarFace` for a
 /// region face with a laminar edge, `GapNotHealed`, `HealAmbiguous`,
 /// `RegionTooSmall` and `ExtensionUnsupported` from the walk,
 /// `SelfIntersecting`, `Uncertain` and `ToleranceTooLarge` from the
-/// result's checks.
-pub(crate) fn retrim(
+/// result's checks. Where a rung's first build refuses `Uncertain` at a
+/// pair of its table, `narrow` says whether it is built again narrowed
+/// (period-aware turns and stops at held seams), under its own
+/// `Scope::Rung` cap; once one is, every later rung is built narrowed
+/// only (design 669).
+pub(crate) fn retrim_with(
     key: OpKey,
     body: &Body,
     changes: &Changes,
+    narrow: Narrow,
     m: &Meter,
 ) -> Result<(Body, Journal), Error> {
     body.require_solid("re-trim")?;
@@ -65,49 +184,67 @@ pub(crate) fn retrim(
     let reach = reach(body, changes);
     // The ladder: the region and its box; the box doubled; the region
     // grown by a ring, twice. It stops once the region is every face.
-    let mut last = None;
-    for rung in 0..4 {
-        // Polled, never charged: a rung's working faces and their sheets
-        // are unmetered (13.D: NIST FTC 10's blends ran 17 minutes past a
-        // cancel here).
-        m.poll().map_err(|_| Error::Cancelled)?;
-        if rung >= 2 {
-            if region.whole(body) {
-                break;
+    // `at` is the rung the region and box were made for.
+    let mut at: Option<(usize, crate::geom::Box3)> = None;
+    climb(narrow, |rung, which| {
+        if at.map(|a| a.0) != Some(rung) {
+            // Polled, never charged: a rung's working faces and their
+            // sheets are unmetered (13.D: NIST FTC 10's blends ran 17
+            // minutes past a cancel here).
+            if m.poll().is_err() {
+                return Some(done(Err(Error::Cancelled)));
             }
-            region = region.grown(body);
+            if rung >= 2 {
+                if region.whole(body) {
+                    return None;
+                }
+                region = region.grown(body);
+            }
+            if let Err(e) = laminar_free(body, &region) {
+                return Some(done(Err(e)));
+            }
+            let mut bx = region_box(body, &region, reach);
+            if rung == 1 {
+                bx = doubled(&bx);
+            }
+            at = Some((rung, bx));
         }
-        laminar_free(body, &region)?;
-        let mut bx = region_box(body, &region, reach);
-        if rung == 1 {
-            bx = doubled(&bx);
-        }
-        // Each rung under its own cap: one that can't settle refuses
+        let bx = at.map(|a| a.1).expect("made above");
+        // Each build under its own cap: one that can't settle refuses
         // `Uncertain` in bounded units, as the caps do.
-        match m.capped(crate::work::Scope::Rung, || {
-            attempt(key, body, changes, &region, &bx, m)
-        }) {
-            Rung::Done(r) => return *r,
-            Rung::Next(e) => last = Some(e),
-        }
-    }
-    Err(last.expect("one rung ran"))
+        Some(m.capped(crate::work::Scope::Rung, || {
+            let build = || attempt(key, body, changes, &region, &bx, rung, which, m);
+            if which.narrowed() {
+                build()
+            } else {
+                m.first_build(build)
+            }
+        }))
+    })
 }
 
 /// How far a changed face's vertex moves, at most, and at least ten
 /// resolutions.
 fn reach(body: &Body, changes: &Changes) -> f64 {
+    reach_of(body, changes, &|_| true)
+}
+
+/// [`reach`] over the changed faces `keep` takes (a near box's gap, plan
+/// 20.B). Over every face it is `reach`, bit for bit: the same faces in
+/// the same order.
+pub(crate) fn reach_of(body: &Body, changes: &Changes, keep: &dyn Fn(FaceId) -> bool) -> f64 {
     let mut r: f64 = 10.0 * crate::tol::LINEAR_RESOLUTION;
     // A gap is as wide as the box of the faces taken away.
     if let Some(g) = changes
         .deleted
         .iter()
+        .filter(|&&f| keep(f))
         .map(|&f| crate::intersect::face_box(body, f))
         .reduce(|a, b| a.union(&b))
     {
         r = r.max(g.min().distance(g.max()));
     }
-    for (&f, mo) in &changes.motion {
+    for (&f, mo) in changes.motion.iter().filter(|&(&f, _)| keep(f)) {
         // An offset moves every point by its distance (`apply` needs the
         // normal for that, which a vertex alone doesn't give).
         if let crate::tweak::Motion::Offset(d) = mo {
@@ -155,17 +292,36 @@ fn laminar_free(body: &Body, region: &Region) -> Result<(), Error> {
 }
 
 /// One rung: the working body, the table, the walk, the result's checks.
+/// `rung` says how a near box is doubled (rung 1) in a narrowed build.
+#[allow(clippy::too_many_arguments)]
 fn attempt(
     key: OpKey,
     body: &Body,
     changes: &Changes,
     region: &Region,
     bx: &crate::geom::Box3,
+    rung: usize,
+    which: Build,
     m: &Meter,
 ) -> Rung {
+    let narrowed = which.narrowed();
     let mut ws = BTreeMap::new();
     let absorbed = absorbed(body, changes, region);
     let absorbing: std::collections::BTreeSet<FaceId> = absorbed.values().copied().collect();
+    // Faces left as they are: on their own surfaces, standing for
+    // themselves.
+    let still = |f: FaceId| {
+        region.faces.contains(&f)
+            && !changes.deleted.contains(&f)
+            && !changes.motion.contains_key(&f)
+            && !changes.surface.contains_key(&f)
+            && !absorbed.contains_key(&f)
+    };
+    // The seams kept faces were tangent along, all along or in places,
+    // across the frontier too (design 642).
+    let held = held::held(body, region, &still);
+    // Whether a narrowed build narrowed anything.
+    let mut narrowing = false;
     for &f in region
         .faces
         .iter()
@@ -180,31 +336,75 @@ fn attempt(
             .get(&f)
             .copied()
             .unwrap_or(body.faces[f].sense);
-        match working::working(
-            body,
-            f,
-            changes.surface.get(&f),
-            sense,
-            working::same_params(mo),
-            bx,
-        ) {
-            Ok(mut w) => {
-                // A face standing for others on its surface covers them
-                // all: its whole turn (NIST FTC 09's hole halves).
-                if !absorbing.contains(&f) {
-                    for (k, t) in working::delete_turn(body, changes, f, &w.surface)
-                        .into_iter()
-                        .enumerate()
-                    {
-                        if let Some(t) = t {
-                            w.rect[k] = t;
-                        }
+        let over = |b: &crate::geom::Box3| {
+            working::working(
+                body,
+                f,
+                changes.surface.get(&f),
+                sense,
+                working::same_params(mo),
+                b,
+            )
+        };
+        // Its turn as a first build gives it, and in a narrowed build
+        // read round the circle (design 669). A face standing for others
+        // on its surface covers them all: its whole turn (NIST FTC 09's
+        // hole halves).
+        let turned = |w: &working::Working, circular: bool| {
+            let mut r = w.rect;
+            if !absorbing.contains(&f) {
+                for (k, t) in working::delete_turn(body, changes, f, &w.surface, circular)
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Some(t) = t {
+                        r[k] = t;
                     }
                 }
-                ws.insert(f, w);
             }
+            r
+        };
+        let mut w = match over(bx) {
+            Ok(w) => w,
             Err(e) => return done(Err(e)),
+        };
+        let first = turned(&w, false);
+        w.rect = first;
+        if narrowed {
+            // Built narrowed: carried over its near box only (plan 20.B),
+            // turned round the circle, then ended at its held seams whose
+            // ends can't move (design 642), iso stops first and plane
+            // stops where none applied.
+            let before = w.surface.clone();
+            let near = near::near_box(body, changes, region, f, bx, rung);
+            if near != *bx {
+                w = match over(&near) {
+                    Ok(w) => w,
+                    Err(e) => return done(Err(e)),
+                };
+            }
+            let round = turned(&w, true);
+            w.rect = held::iso_stops(body, f, &held, &w.surface, round);
+            if let Some(cut) = held::plane_stops(
+                body::sheet_key(key, body.faces[f].name),
+                body,
+                f,
+                &held,
+                &w.surface,
+                round,
+                w.rect,
+                bx,
+                m,
+            ) {
+                w.cut = Some(cut);
+            }
+            narrowing |= w.rect != first || w.surface != before || w.cut.is_some();
         }
+        ws.insert(f, w);
+    }
+    // A narrowed retry that narrows nothing would only repeat the first.
+    if which == Build::Retry && !narrowing {
+        return Rung::Unchanged;
     }
     let w = match work_body(key, body, region, &ws, m) {
         Ok(w) => w,
@@ -292,16 +492,9 @@ fn attempt(
     };
     let pairs = w.pairs();
     // Kept faces tangent along an input edge meet along it (#652): those
-    // left as they are, on their own surfaces, standing for themselves.
-    let still = |f: FaceId| {
-        region.faces.contains(&f)
-            && !changes.deleted.contains(&f)
-            && !changes.motion.contains_key(&f)
-            && !changes.surface.contains_key(&f)
-            && !absorbed.contains_key(&f)
-    };
+    // left as they are, and the faces outside the region, held by `held`.
     let seams: crate::intersect::Seams = w
-        .seams(body, &still)
+        .seams(body, &held, narrowed)
         .into_iter()
         .filter(|(k, _)| pairs.contains(k))
         .collect();
@@ -314,7 +507,7 @@ fn attempt(
         (_, Some((e @ WalkError::Halted { .. }, f))) => {
             return done(Err(walk_error(&w, e, f)));
         }
-        (_, Some((e, f))) => return Rung::Next(walk_error(&w, e, f)),
+        (_, Some((e, f))) => return Rung::Walked(walk_error(&w, e, f)),
         (Ok(Some(r)), None) => r,
         (Ok(None), None) => {
             let least = region.changed.iter().map(|&f| body.faces[f].name).min();
@@ -328,7 +521,19 @@ fn attempt(
         (Err(Fail::Inconsistent), None) => {
             return done(Err(Error::Topology(TopologyError::Inconsistent)));
         }
-        (Err(Fail::Uncertain(a, _) | Fail::Unsupported(a, _)), None) => {
+        (Err(Fail::Uncertain(a, _)), None) => {
+            let e: Error = TweakError::Uncertain {
+                at: name_of(a.face),
+            }
+            .into();
+            // A first build's `Uncertain` at any pair may be built again
+            // narrowed (design 669); a narrowed build's is its answer.
+            if which == Build::First {
+                return Rung::Uncertain(e);
+            }
+            return done(Err(e));
+        }
+        (Err(Fail::Unsupported(a, _)), None) => {
             return done(Err(TweakError::Uncertain {
                 at: name_of(a.face),
             }
