@@ -652,6 +652,15 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// now bounded by the ordered sum, takes 65 s, one NURBS/torus pair
 /// costing about 4 µs a unit, and the narrowed retry of its held NURBS
 /// pair 52 s more).
+///
+/// Plan 20.B's near boxes part FTC 07 AP242's first pair, STC 10's and
+/// CTC 02 with PMI's, and none of the five defeatures yet (#652, #658):
+/// FTC 07 AP242's retry refuses at a cylinder and a cone carried with no
+/// shared edge (`79b561f3`/`178d3260`, overlapping); STC 10's split can't
+/// group two sphere faces holding a lone pole; CTC 02 with PMI's retry
+/// refuses at a plane and a NURBS face touching no change, overlapping
+/// (`74fca8b1`/`b150cb1a`); STC 07 still refuses inside the deadline and
+/// linkrods still runs past it (122 s), as on main.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
