@@ -15,7 +15,10 @@
 //! [`Halt::Stopped`], which travels as [`Failure::Uncertain`], and every
 //! later charge on that meter halts too. Parallel work goes through
 //! [`Meter::par_map`]: each task gets a fresh meter whose limit is the whole
-//! budget, and their counts are added to the parent in order. [`run`] sums
+//! budget, and their counts are added to the parent in order. Under a
+//! finite cap a map answers as its tasks run one after another in order
+//! would: each task's room is what the tasks before it left (design 669),
+//! so a rung's cap bounds its pairs' sum. [`run`] sums
 //! the call's count and replaces whatever the call returned with
 //! [`Error::BudgetExceeded`] when the count passed the budget, else with
 //! [`Error::Cancelled`] when a task halted. So whether a budget is
@@ -212,7 +215,8 @@ const UNION: u64 = 1 << 24;
 /// `delete_faces`, `blend_edits`, `tweaks`, `drafts`, `edit_props`,
 /// `work`, `fuzz_regressions`, `tweak_props` and ryustep's `defeature`
 /// with its pinned bodies). Every rung past it refused: FTC 07's spent
-/// 95,573,843.
+/// 95,573,843. Under design 669's ordered sum it bounds the rung's
+/// parallel pairs together, not each alone.
 const RUNG: u64 = 1 << 24;
 
 static FREE: Work<'static> = Work::unlimited();
@@ -334,7 +338,11 @@ impl<'a> Meter<'a> {
 
     /// `f` over `items` in parallel, each with a meter of its own, the
     /// results in order. The tasks' counts are added to this meter in
-    /// order, and it halts if they pass the budget together.
+    /// order, and it halts if they pass the budget together. Under a
+    /// finite cap the tasks get, and are charged, exactly what running
+    /// them one after another in order would give them ([`in_order`],
+    /// design 669); under none each gets everything, as a budget gives
+    /// each task the whole budget.
     pub(crate) fn par_map<T, R>(
         &self,
         items: &[T],
@@ -349,28 +357,20 @@ impl<'a> Meter<'a> {
         let halted = self.halted.get() || self.spent.get() > work.budget;
         let scope = self.scope.get();
         let cap = self.cap.get();
-        let room = if cap == u64::MAX {
-            u64::MAX
-        } else {
-            cap.saturating_sub(self.spent.get())
+        // One task on a fresh meter given `room`: its result, count and halt.
+        let one = |t: &T, room: u64| {
+            let m = Meter::with_enclosures(work, enclosures);
+            m.halted.set(halted);
+            m.cap.set(room);
+            m.scope.set(scope);
+            let r = f(&m, t);
+            (r, m.spent.get(), m.halted.get())
         };
-        let done: Vec<(R, u64, bool)> = items
-            .par_iter()
-            .map(|t| {
-                let m = Meter::with_enclosures(work, enclosures);
-                m.halted.set(halted);
-                m.cap.set(room);
-                m.scope.set(scope);
-                let r = f(&m, t);
-                (r, m.spent.get(), m.halted.get())
-            })
-            .collect();
-        if room != u64::MAX {
-            let sum = done.iter().fold(0u64, |s, d| s.saturating_add(d.1));
-            if sum > room {
-                stats::overran(scope, room, sum);
-            }
-        }
+        let done: Vec<(R, u64, bool)> = if cap == u64::MAX {
+            items.par_iter().map(|t| one(t, u64::MAX)).collect()
+        } else {
+            in_order(items, cap.saturating_sub(self.spent.get()), scope, &one)
+        };
         let mut out = Vec::with_capacity(done.len());
         for (r, s, h) in done {
             self.spent.set(self.spent.get().saturating_add(s));
@@ -384,6 +384,76 @@ impl<'a> Meter<'a> {
         }
         out
     }
+}
+
+/// A capped parallel map's tasks as running them one after another in
+/// item order would give them (design 669): task `i`'s room is `room`
+/// less what tasks `0..i` spent. Tasks run in waves of the pool's threads,
+/// each given the room left when its wave starts. A task whose count stays
+/// within its in-order room, or whose wave gave it exactly that room, ran
+/// as the sequential run would (its charges don't depend on its limit
+/// until they pass it), and keeps its result. The first that passed its
+/// room runs again alone with exactly that room, and every later task with
+/// what is then left: none, so each answers at its first charge. Only
+/// discarded speculative work, at most one wave's room, depends on the
+/// thread count, and it is never counted.
+fn in_order<T, R>(
+    items: &[T],
+    room: u64,
+    scope: Option<Scope>,
+    one: &(impl Fn(&T, u64) -> (R, u64, bool) + Sync),
+) -> Vec<(R, u64, bool)>
+where
+    T: Sync,
+    R: Send,
+{
+    let wave = rayon::current_num_threads().max(1);
+    let mut out: Vec<(R, u64, bool)> = Vec::with_capacity(items.len());
+    let mut used: u64 = 0;
+    let mut start = 0;
+    'waves: while start < items.len() {
+        let given = room.saturating_sub(used);
+        let end = (start + wave).min(items.len());
+        let ran: Vec<(R, u64, bool)> = items[start..end]
+            .par_iter()
+            .map(|t| one(t, given))
+            .collect();
+        for (k, r) in ran.into_iter().enumerate() {
+            let mine = room.saturating_sub(used);
+            // The first task whose count crosses the room: noted for
+            // `work-stats` (plan 20.A, Task 2), however many threads ran.
+            if used <= room && r.1 > mine {
+                stats::overran(scope, room, used.saturating_add(r.1));
+            }
+            if r.1 <= mine || given == mine {
+                used = used.saturating_add(r.1);
+                out.push(r);
+                continue;
+            }
+            let i = start + k;
+            let again = one(&items[i], mine);
+            used = used.saturating_add(again.1);
+            out.push(again);
+            if room.saturating_sub(used) == 0 {
+                // No room for any later task: each answers alike whatever
+                // ran before it, so they run together.
+                out.extend(
+                    items[i + 1..]
+                        .par_iter()
+                        .map(|t| one(t, 0))
+                        .collect::<Vec<_>>(),
+                );
+                return out;
+            }
+            // A task run again with its room passes it again (the charge
+            // that passed it is the same), so this isn't reached; were it,
+            // the tasks after it go on in order.
+            start = i + 1;
+            continue 'waves;
+        }
+        start = end;
+    }
+    out
 }
 
 /// Runs a long call under `work`: `f` with a meter of its own, then the
@@ -621,16 +691,89 @@ mod tests {
     }
 
     #[test]
-    fn tasks_inherit_what_is_left_of_a_cap() {
+    fn tasks_share_what_is_left_of_a_cap_in_order() {
         let w = Work::unlimited();
         let m = Meter::new(&w);
         let r = m.capped_by(10, || {
             m.charge(5).unwrap();
             m.par_map(&[4u64, 5, 6], |m, &k| (0..k).all(|_| m.charge(1).is_ok()))
         });
-        // Five units of the cap were left for each.
-        assert_eq!(r, [true, true, false]);
+        // Five units were left: four for the first; one for the second,
+        // which stops at its second charge; none for the third, which
+        // stops at its first (design 669).
+        assert_eq!(r, [true, false, false]);
+        assert_eq!(m.spent(), 5 + 4 + 2 + 1);
         assert!(!m.halted());
+    }
+
+    /// The tasks `items` one after another on one meter under `cap`: what
+    /// a capped map must answer on any thread count (design 669).
+    fn sequential(cap: u64, items: &[u64]) -> (Vec<bool>, u64) {
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        let r = m.capped_by(cap, || {
+            items
+                .iter()
+                .map(|&k| (0..k).all(|_| m.charge(1).is_ok()))
+                .collect()
+        });
+        (r, m.spent())
+    }
+
+    #[test]
+    fn a_capped_map_answers_as_its_tasks_in_order_on_any_thread_count() {
+        let up: Vec<u64> = (0..64).collect();
+        let down: Vec<u64> = (0..64).rev().collect();
+        for items in [&up, &down] {
+            let want = sequential(1000, items);
+            for threads in [1, 2, 8] {
+                let got = pool(threads).install(|| {
+                    let w = Work::unlimited();
+                    let m = Meter::new(&w);
+                    let r = m.capped_by(1000, || {
+                        m.par_map(items, |m, &k| (0..k).all(|_| m.charge(1).is_ok()))
+                    });
+                    assert!(!m.halted());
+                    (r, m.spent())
+                });
+                assert_eq!(got, want, "{threads} threads");
+            }
+        }
+        // In item order: tasks 0 to 44 spend 990 units; task 45 has 10
+        // left and stops at its 11th charge; the 18 after it at their
+        // first.
+        let (r, spent) = sequential(1000, &up);
+        assert!(r[..45].iter().all(|&ok| ok));
+        assert!(r[45..].iter().all(|&ok| !ok));
+        assert_eq!(spent, 990 + 11 + 18);
+    }
+
+    /// STC 07's shape (#658): a rung of pairs, each able to spend a
+    /// trace's cap, that together pass the rung's. The rung's map spends
+    /// its cap and at most one charge a task past it, on any thread count.
+    #[test]
+    fn a_rungs_pairs_spend_its_cap_between_them() {
+        const STEP: u64 = 1024;
+        // 16 pairs of 4M units: four times the rung's cap.
+        let pairs = vec![1u64 << 22; 16];
+        for threads in [1, 8] {
+            let (ok, spent) = pool(threads).install(|| {
+                let w = Work::unlimited();
+                let m = Meter::new(&w);
+                let r = m.capped(Scope::Rung, || {
+                    m.par_map(&pairs, |m, &k| {
+                        m.capped(Scope::Trace, || {
+                            (0..k / STEP).all(|_| m.charge(STEP).is_ok())
+                        })
+                    })
+                });
+                (r.iter().filter(|&&x| x).count(), m.spent())
+            });
+            // Four pairs fill the cap exactly; the twelve after it each
+            // stop at their first charge.
+            assert_eq!(ok, 4, "{threads} threads");
+            assert_eq!(spent, RUNG + 12 * STEP, "{threads} threads");
+        }
     }
 
     #[test]
