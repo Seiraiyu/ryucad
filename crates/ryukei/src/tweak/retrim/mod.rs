@@ -320,9 +320,6 @@ fn attempt(
     // The seams kept faces were tangent along, all along or in places,
     // across the frontier too (design 642).
     let held = held::held(body, region, &still);
-    // A narrowed build's gaps, for its working faces' near boxes (plan
-    // 20.B).
-    let gaps = narrowed.then(|| near::Gaps::of(body, changes, region));
     // Whether a narrowed build narrowed anything.
     let mut narrowing = false;
     for &f in region
@@ -373,13 +370,13 @@ fn attempt(
         };
         let first = turned(&w, false);
         w.rect = first;
-        if let Some(gaps) = &gaps {
+        if narrowed {
             // Built narrowed: carried over its near box only (plan 20.B),
             // turned round the circle, then ended at its held seams whose
             // ends can't move (design 642), iso stops first and plane
             // stops where none applied.
             let before = w.surface.clone();
-            let near = near::near_box(body, gaps, f, bx, rung);
+            let near = near::near_box(body, changes, region, f, bx, rung);
             if near != *bx {
                 w = match over(&near) {
                     Ok(w) => w,
