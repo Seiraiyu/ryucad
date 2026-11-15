@@ -40,9 +40,9 @@
 pub const FUZZ_BUDGET: u64 = 1 << 27;
 
 /// How long a fuzz case may run before it is cancelled: inside the
-/// targets' timeouts (600 s for sweep, offset, tweak, edit, projection,
-/// self_union and tolerant, which `fuzz.yml` passes; 1,200 s for blend),
-/// with room for what follows the cancel.
+/// targets' timeouts (600 s for feature, sweep, offset, tweak, edit,
+/// projection, self_union and tolerant, which `fuzz.yml` passes; 1,200 s
+/// for blend), with room for what follows the cancel.
 pub const FUZZ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(450);
 
 /// One fuzz case's work: the calls it runs share one [`FUZZ_BUDGET`], and
@@ -50,7 +50,7 @@ pub const FUZZ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45
 /// deterministic, but a fuzz case needn't be: a runaway ends as a typed
 /// refusal (`Cancelled` or `BudgetExceeded`), never the target's timeout.
 pub struct FuzzCase {
-    cancel: std::sync::atomic::AtomicBool,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     spent: std::sync::atomic::AtomicU64,
 }
 
@@ -72,6 +72,13 @@ impl FuzzCase {
     pub fn spent(&self) -> u64 {
         self.spent.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// The flag the case's watchdog sets at its deadline, for callers
+    /// whose cancels take an `Arc` (ryucad's `Job`): a cancel stops their
+    /// kernel calls as it stops this case's own.
+    pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.cancel.clone()
+    }
 }
 
 /// Runs one fuzz case with its watchdog; prints the units it spent when
@@ -85,7 +92,7 @@ pub fn fuzz_case_within<R>(deadline: std::time::Duration, case: impl FnOnce(&Fuz
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc::{RecvTimeoutError, channel};
     let c = FuzzCase {
-        cancel: AtomicBool::new(false),
+        cancel: std::sync::Arc::new(AtomicBool::new(false)),
         spent: AtomicU64::new(0),
     };
     let (done, wait) = channel::<()>();
@@ -141,6 +148,21 @@ mod fuzz_case_tests {
                 Err(ryukei::Error::BudgetExceeded { .. })
             ));
         });
+    }
+
+    #[test]
+    fn the_shared_flag_is_the_watchdogs() {
+        use std::sync::atomic::Ordering;
+        let flag = fuzz_case_within(std::time::Duration::from_millis(10), |c| {
+            let f = c.cancel_flag();
+            let start = std::time::Instant::now();
+            while !f.load(Ordering::Relaxed) {
+                assert!(start.elapsed().as_secs() < 10, "never cancelled");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            f
+        });
+        assert!(flag.load(Ordering::Relaxed));
     }
 
     #[test]
