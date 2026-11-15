@@ -226,6 +226,9 @@ pub(crate) struct Meter<'a> {
     halted: Cell<bool>,
     /// The count at which charges answer [`Halt::Capped`].
     cap: Cell<u64>,
+    /// The innermost [`Meter::capped`] scope, read only by `work-stats`.
+    #[cfg_attr(not(feature = "work-stats"), allow(dead_code))]
+    scope: Cell<Option<Scope>>,
     /// The operation's enclosures, shared by every meter of the call.
     enclosures: &'a Enclosures,
 }
@@ -243,6 +246,7 @@ impl<'a> Meter<'a> {
             spent: Cell::new(0),
             halted: Cell::new(false),
             cap: Cell::new(u64::MAX),
+            scope: Cell::new(None),
             enclosures,
         }
     }
@@ -311,7 +315,9 @@ impl<'a> Meter<'a> {
     /// charges answer `Capped` until it returns.
     pub(crate) fn capped<R>(&self, scope: Scope, f: impl FnOnce() -> R) -> R {
         let before = self.spent.get();
+        let outer = self.scope.replace(Some(scope));
         let r = self.capped_by(scope.limit(), f);
+        self.scope.set(outer);
         stats::seen(scope, self.spent.get() - before);
         r
     }
@@ -341,6 +347,7 @@ impl<'a> Meter<'a> {
         let work = self.work;
         let enclosures = self.enclosures;
         let halted = self.halted.get() || self.spent.get() > work.budget;
+        let scope = self.scope.get();
         let cap = self.cap.get();
         let room = if cap == u64::MAX {
             u64::MAX
@@ -353,10 +360,17 @@ impl<'a> Meter<'a> {
                 let m = Meter::with_enclosures(work, enclosures);
                 m.halted.set(halted);
                 m.cap.set(room);
+                m.scope.set(scope);
                 let r = f(&m, t);
                 (r, m.spent.get(), m.halted.get())
             })
             .collect();
+        if room != u64::MAX {
+            let sum = done.iter().fold(0u64, |s, d| s.saturating_add(d.1));
+            if sum > room {
+                stats::overran(scope, room, sum);
+            }
+        }
         let mut out = Vec::with_capacity(done.len());
         for (r, s, h) in done {
             self.spent.set(self.spent.get().saturating_add(s));
@@ -412,6 +426,15 @@ pub mod stats {
     #[cfg(feature = "work-stats")]
     pub(crate) use on::seen;
 
+    #[cfg(not(feature = "work-stats"))]
+    pub(crate) fn overran(_: Option<Scope>, _: u64, _: u64) {}
+
+    #[cfg(feature = "work-stats")]
+    pub(crate) use on::overran;
+
+    #[cfg(feature = "work-stats")]
+    pub use on::overruns;
+
     #[cfg(feature = "work-stats")]
     pub use on::report;
 
@@ -442,6 +465,32 @@ pub mod stats {
                 // interleave between processes or threads.
                 let _ = f.write_all(format!("{} {units}\n", s.name()).as_bytes());
             }
+        }
+
+        static OVERRUNS: AtomicU64 = AtomicU64::new(0);
+
+        /// Notes a capped parallel map whose tasks together passed the
+        /// room it started with (design 669): `overran <scope> <room>
+        /// <sum> <thread>` to the file `RYUKEI_WORK_STATS` names. The
+        /// thread is libtest's test name where the map ran on it.
+        pub(crate) fn overran(s: Option<Scope>, room: u64, sum: u64) {
+            OVERRUNS.fetch_add(1, Ordering::Relaxed);
+            if let Some(path) = std::env::var_os("RYUKEI_WORK_STATS")
+                && let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            {
+                let scope = s.map_or("none", Scope::name);
+                let thread = std::thread::current();
+                let name = thread.name().unwrap_or("?");
+                let _ = f.write_all(format!("overran {scope} {room} {sum} {name}\n").as_bytes());
+            }
+        }
+
+        /// How many capped maps have overrun in this process.
+        pub fn overruns() -> u64 {
+            OVERRUNS.load(Ordering::Relaxed)
         }
 
         /// Each scope's largest spend so far in this process.
@@ -552,6 +601,23 @@ mod tests {
         let r = tasks(&m);
         assert!(r[1..].iter().all(|&ok| !ok));
         assert_eq!(m.spent(), 2);
+    }
+
+    /// Design 669: a capped map whose tasks together pass the room it
+    /// started with is noted, with the innermost scope's name, for the
+    /// ordered sum's census (plan 20.A, Task 2).
+    #[cfg(feature = "work-stats")]
+    #[test]
+    fn a_capped_map_past_its_room_is_noted() {
+        let before = stats::overruns();
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        m.capped(Scope::Rung, || {
+            m.capped_by(10, || {
+                m.par_map(&[6u64, 6], |m, &k| (0..k).all(|_| m.charge(1).is_ok()))
+            })
+        });
+        assert!(stats::overruns() > before);
     }
 
     #[test]
