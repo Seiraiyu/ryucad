@@ -643,6 +643,105 @@ fn crossing_cylinders(f: &Frame, r1: f64, g: &Frame, r2: f64, out: &mut Out) -> 
     Some(())
 }
 
+/// A cylinder continuing a torus's tube (plan 20.B, question 931): the
+/// cylinder's radius is the torus's minor radius, and its axis is the
+/// tangent to the major circle at a point `p`, in the torus's middle
+/// plane, each within [`LINEAR_RESOLUTION`] (and square to the torus's
+/// axis within [`ANGULAR_RESOLUTION`]). They meet tangentially all along
+/// the minor circle at `p`, and across a closed loop on the cylinder's
+/// inner half through that circle's top and bottom ([`tube_loop`]). Not
+/// one of [`exact`]'s pairs: tried only once the trace fails
+/// (`ss::meet`), so every pair that traces keeps its result. `None` for
+/// any other cylinder and torus.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn tube(a: &Surface, b: &Surface, region: &Box3) -> Option<(Vec<Raw>, Vec<Point3>)> {
+    let (sc, st) = match (a, b) {
+        (Surface::Cylinder(_), Surface::Torus(_)) => (a, b),
+        (Surface::Torus(_), Surface::Cylinder(_)) => (b, a),
+        _ => return None,
+    };
+    let (Surface::Cylinder(c), Surface::Torus(t)) = (sc, st) else {
+        return None;
+    };
+    let (fc, ft) = (sc.frame()?, st.frame()?);
+    let (big, r) = (t.major(), t.minor());
+    let (dir, axis) = (fc.z().get(), ft.z().get());
+    let gap_r = (c.radius() - r).abs();
+    if gap_r > LINEAR_RESOLUTION || dir.dot(axis).abs() > ANGULAR_RESOLUTION {
+        return None;
+    }
+    // The cylinder's axis in the torus's middle plane, its point nearest
+    // the torus's axis on the major circle.
+    let lift = off_plane(ft, fc.origin());
+    let centre = ft.origin();
+    let o = fc.origin();
+    let foot = o + dir * (centre - o).dot(dir);
+    let out = foot - centre;
+    let radial = out - axis * out.dot(axis);
+    let gap_big = (radial.length() - big).abs();
+    if lift > LINEAR_RESOLUTION || gap_big > LINEAR_RESOLUTION {
+        return None;
+    }
+    let n = radial.normalize()?.get();
+    let gap = gap_r.max(lift).max(gap_big);
+    let p = centre + n * big;
+    let mut found = Out::new(region);
+    found.circle(Frame::new(p, dir, n).ok()?, r, true, gap);
+    let lp = tube_loop(p, n, dir, axis, big, r)?;
+    found.closed(Curve::Nurbs(Arc::new(lp)), false, gap);
+    Some(found.finish())
+}
+
+/// The tube contact's loop (see [`tube`]): `p − r sin²α n + 2√(R r) sin α
+/// t + r cos α √(1 + sin²α) z` over `α` in `[0, 2π]`, as cubic Hermite
+/// spans through its exact points and tangents, fine enough that the
+/// Hermite error bound, `h⁴/384` times the fourth derivative (at most
+/// about `2√(R r) + 16 r`), is a quarter resolution. `ss::with_pcurves`
+/// then grows the branch's tolerance to its certified pcurve bounds.
+#[cfg_attr(not(test), allow(dead_code))]
+fn tube_loop(
+    p: Point3,
+    n: Vector3,
+    t: Vector3,
+    z: Vector3,
+    big: f64,
+    r: f64,
+) -> Option<NurbsCurve> {
+    let k = 2.0 * math::sqrt(big * r);
+    let size = k + 16.0 * r;
+    let h = math::sqrt(math::sqrt(96.0 * LINEAR_RESOLUTION / size));
+    let spans = ((TAU / h).ceil() as usize).max(16);
+    let at = |a: f64| -> (Point3, Vector3) {
+        let (s, c) = math::sin_cos(a);
+        let q = math::sqrt(1.0 + s * s);
+        let point = p + n * (-r * s * s) + t * (k * s) + z * (r * c * q);
+        let d = n * (-2.0 * r * s * c) + t * (k * c) + z * (-2.0 * r * s * s * s / q);
+        (point, d)
+    };
+    let step = TAU / spans as f64;
+    let mut breaks: Vec<f64> = (0..=spans).map(|i| step * i as f64).collect();
+    breaks[spans] = TAU;
+    let mut points = Vec::with_capacity(3 * spans + 1);
+    for i in 0..spans {
+        let (a, b) = (breaks[i], breaks[i + 1]);
+        let w = b - a;
+        let (pa, da) = at(a);
+        // The loop closes: its last end is its first, bit for bit.
+        let (pb, db) = if i + 1 == spans { at(0.0) } else { at(b) };
+        if i == 0 {
+            points.push(pa);
+        }
+        points.push(pa + da * (w / 3.0));
+        points.push(pb - db * (w / 3.0));
+        points.push(pb);
+    }
+    let mut mults = vec![3; spans + 1];
+    mults[0] = 4;
+    mults[spans] = 4;
+    let knots = KnotVector::clamped(3, &breaks, &mults).ok()?;
+    NurbsCurve::new(knots, points, None).ok()
+}
+
 /// Two cones sharing an apex, not coaxial: the rulings along directions
 /// `d` with `d·z1 = cos α1` and `d·z2 = cos α2`, or the apex alone.
 fn apex_cones(f: &Frame, x: &Cone, g: &Frame, y: &Cone, out: &mut Out) -> Option<()> {
@@ -1299,5 +1398,53 @@ mod tests {
             kinds(&meet(&a, &shared).0),
             [("line", false), ("line", false)]
         );
+    }
+
+    #[test]
+    fn a_cylinder_continuing_a_torus_tube_has_a_closed_form() {
+        // Radii 3 and 1 about z; the cylinder of radius 1 along the
+        // tangent at (3, 0, 0).
+        let t = torus((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 3.0, 1.0);
+        let c = cylinder((3.0, 0.0, 0.0), (0.0, 1.0, 0.0), 1.0);
+        // Not a pair `exact` takes: only the fallback does (plan 20.B).
+        assert!(exact(&c, &t, &region()).is_none());
+        for (a, b) in [(&c, &t), (&t, &c)] {
+            let (raws, points) = tube(a, b, &region()).expect("a tube contact");
+            assert!(points.is_empty());
+            let got: Vec<(bool, bool)> = raws
+                .iter()
+                .map(|r| (matches!(r.curve, Curve::Circle(_)), r.tangent))
+                .collect();
+            assert_eq!(got, [(true, true), (false, false)]);
+            for r in &raws {
+                for k in 0..=512 {
+                    let s = r.range[0] + (r.range[1] - r.range[0]) * f64::from(k) / 512.0;
+                    let q = r.curve.point(s);
+                    for surf in [&c, &t] {
+                        assert!(
+                            surf.distance(q) <= 1e-8,
+                            "{q:?} off by {}",
+                            surf.distance(q)
+                        );
+                    }
+                }
+            }
+            // The loop reaches 2√(Rr) = 2√3 along the axis, each way.
+            let ys: Vec<f64> = (0..=1024)
+                .map(|k| raws[1].curve.point(TAU * f64::from(k) / 1024.0).y)
+                .collect();
+            let hi = ys.iter().copied().fold(f64::MIN, f64::max);
+            let lo = ys.iter().copied().fold(f64::MAX, f64::min);
+            assert!((hi - 2.0 * math::sqrt(3.0)).abs() < 1e-4, "{hi}");
+            assert!((lo + 2.0 * math::sqrt(3.0)).abs() < 1e-4, "{lo}");
+        }
+        // A cylinder a resolution too wide, or its axis off the tangent,
+        // is no tube contact.
+        let wide = cylinder((3.0, 0.0, 0.0), (0.0, 1.0, 0.0), 1.0 + 1e-6);
+        assert!(tube(&wide, &t, &region()).is_none());
+        let off = cylinder((3.0 + 1e-6, 0.0, 0.0), (0.0, 1.0, 0.0), 1.0);
+        assert!(tube(&off, &t, &region()).is_none());
+        let tilted = cylinder((3.0, 0.0, 0.0), (0.0, 1.0, 1e-6), 1.0);
+        assert!(tube(&tilted, &t, &region()).is_none());
     }
 }
