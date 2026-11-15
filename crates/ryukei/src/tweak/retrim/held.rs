@@ -561,7 +561,7 @@ mod tests {
         };
         let bx = region_box(&rod, &r, reach);
         let mut w = working(&rod, run, None, rod.faces[run].sense, true, &bx).unwrap();
-        for (k, t) in delete_turn(&rod, &changes, run, &w.surface)
+        for (k, t) in delete_turn(&rod, &changes, run, &w.surface, false)
             .into_iter()
             .enumerate()
         {

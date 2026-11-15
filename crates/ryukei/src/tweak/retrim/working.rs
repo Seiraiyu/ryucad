@@ -136,11 +136,17 @@ pub(crate) fn working(
 /// cylinders put their back three quarters across the pocket, and the
 /// walk's choices among those pieces passed `CHOICES` (NIST FTC 08's
 /// pocket floor, #653).
+///
+/// In a narrowed build (`circular`, design 669) the span is read round
+/// the circle ([`own_hull`]), so a quarter face whose pcurves straddle
+/// the period's seam is carried a quarter turn and a little more, not a
+/// whole one; elsewhere it is [`own_span`], as before.
 pub(crate) fn delete_turn(
     body: &Body,
     changes: &Changes,
     f: FaceId,
     surface: &Surface,
+    circular: bool,
 ) -> [Option<[f64; 2]>; 2] {
     let (pu, pv) = surface.periods();
     let periods = [pu, pv];
@@ -150,7 +156,12 @@ pub(crate) fn delete_turn(
     }
     for k in 0..2 {
         let Some(p) = periods[k] else { continue };
-        let Some([a, b]) = own_span(body, f, k) else {
+        let span = if circular {
+            own_hull(body, f, k, p)
+        } else {
+            own_span(body, f, k)
+        };
+        let Some([a, b]) = span else {
             continue;
         };
         let g = (b - a) / 16.0;
@@ -381,9 +392,15 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let surface = &r.surfaces[r.faces[cyl].surface];
-        let [a, z] = delete_turn(&r, &changes, cyl, surface)[0].unwrap();
+        let [a, z] = delete_turn(&r, &changes, cyl, surface, false)[0].unwrap();
         let quarter = core::f64::consts::FRAC_PI_2;
         assert!(z - a >= quarter && z - a < 1.5 * quarter, "{a} {z}");
+        // Its pcurves don't straddle the period's seam: read round the
+        // circle, its turn is the same, bit for bit (design 669).
+        assert_eq!(
+            delete_turn(&r, &changes, cyl, surface, true),
+            delete_turn(&r, &changes, cyl, surface, false)
+        );
         // A deleted side, along the cylinder's generator, takes the
         // whole turn: the cylinder may have to grow round to meet it.
         let side = r
@@ -395,12 +412,12 @@ pub(crate) mod tests {
             .unwrap();
         let mut sided = changes.clone();
         sided.deleted.insert(side);
-        assert_eq!(delete_turn(&r, &sided, cyl, surface), [None; 2]);
+        assert_eq!(delete_turn(&r, &sided, cyl, surface, false), [None; 2]);
         // A face moved anywhere takes the whole turn.
         changes
             .motion
             .insert(cyl, crate::tweak::Motion::Offset(0.01));
-        assert_eq!(delete_turn(&r, &changes, cyl, surface), [None; 2]);
+        assert_eq!(delete_turn(&r, &changes, cyl, surface, false), [None; 2]);
     }
 
     /// A unit cylinder's quarter sheet over u in [0, π/2], its side at

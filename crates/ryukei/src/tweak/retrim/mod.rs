@@ -266,7 +266,7 @@ fn attempt(
                 // A face standing for others on its surface covers them
                 // all: its whole turn (NIST FTC 09's hole halves).
                 if !absorbing.contains(&f) {
-                    for (k, t) in working::delete_turn(body, changes, f, &w.surface)
+                    for (k, t) in working::delete_turn(body, changes, f, &w.surface, false)
                         .into_iter()
                         .enumerate()
                     {
