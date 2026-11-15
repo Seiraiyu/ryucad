@@ -487,7 +487,7 @@ fn ftc_07s_partly_smooth_ellipse_is_met_along_it() {
     ignore = "slow in a debug build: CI runs it in release"
 )]
 fn a_bent_rods_rim_needs_its_stop() {
-    use super::{Stops, retrim_with};
+    use super::{Narrow, retrim_with};
     let (rod, rim) = crate::testing::bent_rod();
     let changes = Changes {
         deleted: std::collections::BTreeSet::from([rim]),
@@ -495,7 +495,7 @@ fn a_bent_rods_rim_needs_its_stop() {
     };
     // unmetered: a unit test.
     let m = crate::work::Meter::free();
-    let never = retrim_with(OpKey(0x19a4), &rod, &changes, Stops::Never, &m);
+    let never = retrim_with(OpKey(0x19a4), &rod, &changes, Narrow::Never, &m);
     assert!(
         matches!(
             never,
@@ -505,7 +505,7 @@ fn a_bent_rods_rim_needs_its_stop() {
         ),
         "{never:?}"
     );
-    let (o, _) = retrim_with(OpKey(0x19a4), &rod, &changes, Stops::AfterHeld, &m).unwrap();
+    let (o, _) = retrim_with(OpKey(0x19a4), &rod, &changes, Narrow::AfterUncertain, &m).unwrap();
     assert_eq!(crate::check::check(&o), []);
     assert_eq!(o.faces().count(), rod.faces().count() - 1);
     let spec = crate::tweak::DeleteBlends {
@@ -517,50 +517,126 @@ fn a_bent_rods_rim_needs_its_stop() {
     assert_eq!(d.dump_unnamed(), o.dump_unnamed());
 }
 
-/// Design 642's fallback: a stopped build whose walk fails, or that stops
-/// nothing, leaves the first build's answer; a stopped build's own
-/// refusal is the rung's; without stops, or where the first build didn't
-/// refuse at a held pair, nothing is built again.
+fn uncertain_rung() -> super::Rung {
+    super::Rung::Uncertain(
+        crate::TweakError::Uncertain {
+            at: Name::from_u128(1),
+        }
+        .into(),
+    )
+}
+
+fn walked_rung() -> super::Rung {
+    super::Rung::Walked(
+        crate::TweakError::RegionTooSmall {
+            face: Name::from_u128(2),
+        }
+        .into(),
+    )
+}
+
+fn answers_uncertain(r: &super::Rung) -> bool {
+    matches!(r, super::Rung::Done(r) if matches!(**r, Err(crate::Error::InvalidTweak(crate::TweakError::Uncertain { .. }))))
+}
+
+/// Design 669's retry: a first build's `Uncertain` at any table pair is
+/// built again narrowed; one that narrows nothing leaves it; any other
+/// narrowed outcome is the rung's, a failed walk or `Next` climbing.
 #[test]
-fn a_stopped_rung_answers_only_where_its_walk_closes() {
-    use super::{Rung, Stops, settle};
+fn a_narrowed_rung_answers_unless_it_narrows_nothing() {
+    use super::{Narrow, Rung, settle};
+    let (r, narrowed) = settle(uncertain_rung(), Narrow::AfterUncertain, || Rung::Unchanged);
+    assert!(answers_uncertain(&r) && !narrowed);
+    let (r, narrowed) = settle(uncertain_rung(), Narrow::AfterUncertain, walked_rung);
+    assert!(matches!(r, Rung::Walked(_)) && narrowed);
+    let (r, narrowed) = settle(uncertain_rung(), Narrow::AfterUncertain, || {
+        Rung::Next(
+            crate::TweakError::HealAmbiguous {
+                face: Name::from_u128(3),
+            }
+            .into(),
+        )
+    });
+    assert!(matches!(r, Rung::Next(_)) && narrowed);
+    let (r, narrowed) = settle(uncertain_rung(), Narrow::Never, || panic!("built narrowed"));
+    assert!(answers_uncertain(&r) && !narrowed);
+    let (r, narrowed) = settle(walked_rung(), Narrow::AfterUncertain, || {
+        panic!("built narrowed")
+    });
+    assert!(matches!(r, Rung::Walked(_)) && !narrowed);
+}
+
+/// Design 669's ladder: once a rung was built narrowed, every later rung
+/// is built narrowed only; first builds whose walks fail climb as before;
+/// the ladder ends where the region can't grow.
+#[test]
+fn a_narrowed_ladder_climbs_and_stays_narrowed() {
+    use super::{Build, Narrow, Rung, climb};
     use crate::TweakError;
-    let held = || {
-        Rung::Held(
-            TweakError::Uncertain {
-                at: Name::from_u128(1),
-            }
-            .into(),
-        )
-    };
-    let walked = || {
-        Rung::Walked(
-            TweakError::GapNotHealed {
-                face: Name::from_u128(2),
-            }
-            .into(),
-        )
-    };
-    let uncertain = |r: Rung| matches!(r, Rung::Done(r) if matches!(*r, Err(crate::Error::InvalidTweak(TweakError::Uncertain { .. }))));
-    assert!(uncertain(settle(held(), Stops::AfterHeld, walked)));
-    assert!(uncertain(settle(held(), Stops::AfterHeld, || {
-        Rung::Unstopped
-    })));
+    // Rung 0's first build refuses at a pair with no seam; its narrowed
+    // walk fails; rungs 1 to 3 are built narrowed only, and walk short.
+    let mut calls = Vec::new();
+    let r = climb(Narrow::AfterUncertain, |rung, b| {
+        calls.push((rung, b));
+        Some(match (rung, b) {
+            (0, Build::First) => uncertain_rung(),
+            _ => walked_rung(),
+        })
+    });
+    assert_eq!(
+        calls,
+        [
+            (0, Build::First),
+            (0, Build::Retry),
+            (1, Build::Only),
+            (2, Build::Only),
+            (3, Build::Only)
+        ]
+    );
     assert!(matches!(
-        settle(held(), Stops::AfterHeld, || Rung::Next(
-            TweakError::HealAmbiguous {
-                face: Name::from_u128(3)
-            }
-            .into()
-        )),
-        Rung::Next(crate::Error::InvalidTweak(TweakError::HealAmbiguous { .. }))
+        r,
+        Err(crate::Error::InvalidTweak(
+            TweakError::RegionTooSmall { .. }
+        ))
     ));
-    assert!(uncertain(settle(held(), Stops::Never, || panic!(
-        "built with stops"
-    ))));
+    // A retry that narrows nothing: the first `Uncertain` answers.
+    let mut calls = Vec::new();
+    let r = climb(Narrow::AfterUncertain, |rung, b| {
+        calls.push((rung, b));
+        Some(match b {
+            Build::First => uncertain_rung(),
+            _ => Rung::Unchanged,
+        })
+    });
+    assert_eq!(calls, [(0, Build::First), (0, Build::Retry)]);
     assert!(matches!(
-        settle(walked(), Stops::AfterHeld, || panic!("built with stops")),
-        Rung::Walked(_)
+        r,
+        Err(crate::Error::InvalidTweak(TweakError::Uncertain { .. }))
+    ));
+    // Without narrowing, rung 0's `Uncertain` answers.
+    let mut calls = Vec::new();
+    let r = climb(Narrow::Never, |rung, b| {
+        calls.push((rung, b));
+        Some(uncertain_rung())
+    });
+    assert_eq!(calls, [(0, Build::First)]);
+    assert!(r.is_err());
+    // First builds' failed walks climb, first builds all the way, until
+    // the region can't grow (`None` at rung 2).
+    let mut calls = Vec::new();
+    let r = climb(Narrow::AfterUncertain, |rung, b| {
+        calls.push((rung, b));
+        (rung < 2).then(walked_rung)
+    });
+    assert_eq!(
+        calls,
+        [(0, Build::First), (1, Build::First), (2, Build::First)]
+    );
+    assert!(matches!(
+        r,
+        Err(crate::Error::InvalidTweak(
+            TweakError::RegionTooSmall { .. }
+        ))
     ));
 }
 
@@ -587,7 +663,7 @@ const BENT_ROD_DELETED_HASH: u64 = 0xcd93_79f0_14d0_8ffc;
     ignore = "slow in a debug build: CI runs it in release"
 )]
 fn an_iso_stopped_run_takes_no_plane_stop() {
-    use super::{Stops, retrim_with};
+    use super::{Narrow, retrim_with};
     let (rod, rim) = crate::testing::bent_rod();
     let changes = Changes {
         deleted: std::collections::BTreeSet::from([rim]),
@@ -595,7 +671,7 @@ fn an_iso_stopped_run_takes_no_plane_stop() {
     };
     // unmetered: a unit test.
     let m = crate::work::Meter::free();
-    let (o, _) = retrim_with(OpKey(0x19a4), &rod, &changes, Stops::AfterHeld, &m).unwrap();
+    let (o, _) = retrim_with(OpKey(0x19a4), &rod, &changes, Narrow::AfterUncertain, &m).unwrap();
     // `held_seams`' golden pins the same body; here, its hash.
     assert_eq!(
         free_hash(&o),
@@ -615,7 +691,7 @@ fn an_iso_stopped_run_takes_no_plane_stop() {
 /// build refuses at a running seam is still wanted for a test of its own.
 #[test]
 fn a_body_that_builds_is_the_same_with_stops_allowed() {
-    use super::{Stops, retrim_with};
+    use super::{Narrow, retrim_with};
     use crate::blend::{BlendKind, EdgeBlend, blend};
     let b0 = block();
     let (px, py) = (face_of(&b0, FaceRole::PlusX), face_of(&b0, FaceRole::PlusY));
@@ -642,8 +718,8 @@ fn a_body_that_builds_is_the_same_with_stops_allowed() {
     // unmetered: a unit test.
     let m = crate::work::Meter::free();
     let never =
-        retrim_with(OpKey(0x19b8), &b, &changes, Stops::Never, &m).map(|(o, _)| o.dump_unnamed());
-    let after = retrim_with(OpKey(0x19b8), &b, &changes, Stops::AfterHeld, &m)
+        retrim_with(OpKey(0x19b8), &b, &changes, Narrow::Never, &m).map(|(o, _)| o.dump_unnamed());
+    let after = retrim_with(OpKey(0x19b8), &b, &changes, Narrow::AfterUncertain, &m)
         .map(|(o, _)| o.dump_unnamed());
     assert_eq!(format!("{never:?}"), format!("{after:?}"));
 }
