@@ -181,12 +181,18 @@ pub(crate) fn stop_plane(body: &Body, f: FaceId, h: &Held, m: &Meter) -> Option<
     let x = &body.edges[h.edge];
     let tol = x.tolerance.get().max(crate::tol::LINEAR_RESOLUTION);
     let surface = |k: FaceId| &body.surfaces[body.faces[k].surface];
-    let Surface::Plane(p) = section_plane(&body.curves[x.curve], x.interval, tol, surface(f), surface(g))?
+    let Surface::Plane(p) = section_plane(
+        &body.curves[x.curve],
+        x.interval,
+        tol,
+        surface(f),
+        surface(g),
+    )?
     else {
         return None;
     };
     let d = margin(body, h);
-    let plane = Surface::Plane(p.clone());
+    let plane = Surface::Plane(p);
     let side =
         |k: FaceId| face_beside(body, k, &plane, &[h.edge], &[], 2.0 * d, BESIDE_CELLS, m).ok();
     let (sf, sg) = (side(f)?, side(g)?);
@@ -275,7 +281,7 @@ fn divided_behind(key: OpKey, sheet: &Body, stop: &Plane, bx: &Box3, m: &Meter) 
     };
     let (tool, _) = crate::sheet::from_surface_in(
         OpKey(key.0 ^ 0x19b),
-        &Surface::Plane(stop.clone()),
+        &Surface::Plane(*stop),
         [[u - reach, u + reach], [v - reach, v + reach]],
         m,
     )
@@ -715,7 +721,10 @@ mod tests {
             };
             let (own, other) = (off_seam(f), off_seam(g));
             assert!(!own.is_empty() && own.iter().all(|&x| x < 0.0), "{own:?}");
-            assert!(!other.is_empty() && other.iter().all(|&x| x > 0.0), "{other:?}");
+            assert!(
+                !other.is_empty() && other.iter().all(|&x| x > 0.0),
+                "{other:?}"
+            );
         }
     }
 
@@ -840,7 +849,9 @@ mod tests {
             .unwrap();
         assert!(matches!(
             crate::tweak::classify::tangent(&input, e),
-            Err(crate::Error::InvalidTweak(crate::TweakError::Uncertain { .. }))
+            Err(crate::Error::InvalidTweak(
+                crate::TweakError::Uncertain { .. }
+            ))
         ));
         assert!(held_tangent(&input, e));
     }
