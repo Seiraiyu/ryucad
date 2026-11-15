@@ -306,11 +306,35 @@ fn divided_behind(key: OpKey, sheet: &Body, stop: &Plane, bx: &Box3, m: &Meter) 
     (back.faces().count() == 1).then(|| back.clone())
 }
 
+/// `x` moved by whole periods `p` (none, one down or one up) to lie
+/// nearest `span`, unmoved on a tie (design 669: a straddling face's
+/// coordinates read in its hull's).
+fn nearest(x: f64, span: [f64; 2], p: f64) -> f64 {
+    let gap = |y: f64| {
+        if y < span[0] {
+            span[0] - y
+        } else if y > span[1] {
+            y - span[1]
+        } else {
+            0.0
+        }
+    };
+    let mut best = x;
+    for y in [x - p, x + p] {
+        if gap(y) < gap(best) {
+            best = y;
+        }
+    }
+    best
+}
+
 /// Working face `f`'s parameter box `rect` on `surface` with its iso stops
 /// (design 642). For each of `held` with fixed ends (`Frontier` or
 /// `Fixed`) on `f` whose pcurve on `f` is iso ([`iso`]) at an end of
-/// `f`'s own parameter box (its pcurves' span, `working::own_span`, within
-/// the margin in parameters), where every fin of `f` whose pcurve runs
+/// `f`'s own parameter box (its pcurves' span, `working::own_span`, or in
+/// a periodic direction `working::own_hull`, with every coordinate moved
+/// by whole periods to lie nearest it where the face straddles the
+/// period's seam, design 669; within the margin in parameters), where every fin of `f` whose pcurve runs
 /// along that end (its span across lies within the margin of it) is such
 /// a seam, the box ends the margin past the seam: `margin / L`, `L` the
 /// certified bound on `|P_u|` or `|P_v|` over `rect`
@@ -360,9 +384,28 @@ pub(crate) fn iso_stops(
         if !(bound[k].is_finite() && bound[k] > 0.0) {
             continue;
         }
-        let Some([lo, hi]) = super::working::own_span(body, f, k) else {
+        let Some(plain) = super::working::own_span(body, f, k) else {
             continue;
         };
+        // In a periodic direction the face's span read round the circle
+        // (design 669). Where that is the plain span, every coordinate
+        // reads as stored, as 19.A did, bit for bit; where it straddles
+        // the period's seam, each is moved by whole periods to lie
+        // nearest it (question 937).
+        let (span, p) = match periods[k] {
+            Some(p) => match super::working::own_hull(body, f, k, p) {
+                Some(s) => (s, Some(p)),
+                None => continue,
+            },
+            None => (plain, None),
+        };
+        let straddles = span.map(f64::to_bits) != plain.map(f64::to_bits);
+        let read = |x: f64| match p {
+            Some(p) if straddles => nearest(x, span, p),
+            _ => x,
+        };
+        let [lo, hi] = span;
+        let c = read(c);
         let d = margin(body, h) / bound[k];
         let (high, low) = ((c - hi).abs() <= d, (c - lo).abs() <= d);
         // Neither end, or a box too thin to tell which.
@@ -373,7 +416,7 @@ pub(crate) fn iso_stops(
         let whole = fins
             .iter()
             .all(|&(x, g)| match super::working::fin_span(body, g, k) {
-                Some([a, b]) if (a - c).abs() <= d && (b - c).abs() <= d => {
+                Some([a, b]) if (read(a) - c).abs() <= d && (read(b) - c).abs() <= d => {
                     stopping.contains_key(&x)
                 }
                 Some(_) => true,
@@ -561,7 +604,7 @@ mod tests {
         };
         let bx = region_box(&rod, &r, reach);
         let mut w = working(&rod, run, None, rod.faces[run].sense, true, &bx).unwrap();
-        for (k, t) in delete_turn(&rod, &changes, run, &w.surface)
+        for (k, t) in delete_turn(&rod, &changes, run, &w.surface, false)
             .into_iter()
             .enumerate()
         {
@@ -854,5 +897,42 @@ mod tests {
             ))
         ));
         assert!(held_tangent(&input, e));
+    }
+
+    /// A straddling quarter's seam side, stored a period up at 2π, is the
+    /// low end of its hull (design 669, question 937): the stop is the
+    /// margin before it. Read plainly, the side was the far end of a whole
+    /// turn, past the rect, and stopped nothing.
+    #[test]
+    fn an_iso_stop_reads_a_straddling_face_modulo_the_period() {
+        use core::f64::consts::TAU;
+        let (b, f) = super::super::working::tests::straddling_quarter();
+        // The side stored at 2π: its edge.
+        let side = b
+            .face_loops(f)
+            .flat_map(|l| b.loop_fins(l))
+            .find(|&fin| {
+                matches!(super::super::working::fin_span(&b, fin, 0),
+                    Some([lo, hi]) if lo == hi && lo > 6.0)
+            })
+            .unwrap();
+        let h = Held {
+            edge: b.fins[side].edge,
+            faces: [f, f],
+            kind: SeamKind::Frontier,
+        };
+        let s = b.surfaces[b.faces[f].surface].clone();
+        let [a, z] = super::super::working::own_hull(&b, f, 0, TAU).unwrap();
+        let g = (z - a) / 16.0;
+        let rect = [[a - g, z + g], [-0.1, 1.1]];
+        let stopped = iso_stops(&b, f, &[h], &s, rect);
+        let d = margin(&b, &h);
+        assert!(stopped[0][0] > rect[0][0], "{stopped:?}");
+        assert!(
+            (stopped[0][0] - (a - d)).abs() < 1e-9,
+            "{stopped:?} {a} {d}"
+        );
+        assert_eq!(stopped[0][1], rect[0][1]);
+        assert_eq!(stopped[1], rect[1]);
     }
 }
