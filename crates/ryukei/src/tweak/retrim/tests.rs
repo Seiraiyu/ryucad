@@ -743,17 +743,17 @@ fn a_retry_that_narrows_nothing_is_never_built() {
     // unmetered: a unit test.
     let m = crate::work::Meter::free();
     assert!(matches!(
-        attempt(K, &b, &changes, &region, &bx, Build::Retry, &m),
+        attempt(K, &b, &changes, &region, &bx, 0, Build::Retry, &m),
         Rung::Unchanged
     ));
     let dump = |r: Rung| match r {
         Rung::Done(r) => r.ok().map(|(o, _)| o.dump_unnamed()),
         _ => None,
     };
-    let first = dump(attempt(K, &b, &changes, &region, &bx, Build::First, &m));
+    let first = dump(attempt(K, &b, &changes, &region, &bx, 0, Build::First, &m));
     assert!(first.is_some(), "the raised block builds");
     assert_eq!(
-        dump(attempt(K, &b, &changes, &region, &bx, Build::Only, &m)),
+        dump(attempt(K, &b, &changes, &region, &bx, 0, Build::Only, &m)),
         first
     );
 }
@@ -792,4 +792,119 @@ fn ftc_07s_run_is_a_quarter_round_the_circle() {
             "{c} {d} in {a} {z}"
         );
     }
+}
+
+/// A committed cut's pair (plan 20.B): carried over the rung's box (the
+/// work cut) the pair is `Uncertain` in a first build within a rung's
+/// cap; carried over their near boxes, with every input face but the pair
+/// counted deleted, their working faces' boxes are apart, so the table
+/// never meets them.
+fn apart_over_near_boxes(input: &[u8], work: &[u8]) {
+    use crate::codec::decode_body;
+    let input = decode_body(input).unwrap();
+    let work = decode_body(work).unwrap();
+    let pair: Vec<FaceId> = work.faces().collect();
+    assert_eq!(pair.len(), 2);
+    let inputs: Vec<FaceId> = pair
+        .iter()
+        .map(|&w| match input.by_name(work.faces[w].name) {
+            Some(EntityId::Face(f)) => f,
+            _ => panic!("no input face for {w:?}"),
+        })
+        .collect();
+    // Over the rung's box: uncertain in a first build (no tube contact
+    // there), within a rung's cap.
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let met = m.first_build(|| {
+        m.capped(crate::work::Scope::Rung, || {
+            crate::intersect::face_face_in((&work, pair[0]), (&work, pair[1]), &m)
+        })
+    });
+    assert!(met.is_err(), "met over the rung's box: {met:?}");
+    // Every other input face is changed.
+    let changes = Changes {
+        deleted: input.faces().filter(|f| !inputs.contains(f)).collect(),
+        ..Changes::default()
+    };
+    let region = super::region::Region {
+        changed: changes.deleted.clone(),
+        faces: input.faces().collect(),
+        frontier: Default::default(),
+    };
+    let x = (0..2)
+        .map(|k| crate::intersect::face_box(&work, pair[k]))
+        .reduce(|a, b| a.union(&b))
+        .unwrap();
+    let boxes: Vec<_> = inputs
+        .iter()
+        .map(|&f| {
+            let near = super::near::near_box(&input, &changes, &region, f, &x, 0);
+            let w = super::working::working(&input, f, None, input.faces[f].sense, true, &near)
+                .unwrap();
+            let (sheet, _) = crate::sheet::from_surface(K, &w.surface, w.rect).unwrap();
+            let sf = sheet.faces().next().unwrap();
+            crate::intersect::face_box(&sheet, sf)
+        })
+        .collect();
+    assert!(!boxes[0].intersects(&boxes[1]), "{boxes:?}");
+}
+
+/// FTC 07 rd's rung-2 pair after 20.A (#652, census IV): cylinder
+/// `18dae4b7` and NURBS `33b57350`, both working, no shared edge, the
+/// cylinder carried 0.34 m from an input 0.4 mm tall.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ftc_07s_carried_pair_is_apart_over_near_boxes() {
+    apart_over_near_boxes(
+        include_bytes!("../../../tests/data/nist_ftc_07_near_input.body"),
+        include_bytes!("../../../tests/data/nist_ftc_07_near_work.body"),
+    );
+}
+
+/// FTC 10's rung-2 pair (#652, census V): torus `a289199e` and the
+/// cylinder `24401201` continuing its tube, touching no deleted face,
+/// the cylinder carried 0.5 m along its axis.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ftc_10s_tube_pair_is_apart_over_near_boxes() {
+    apart_over_near_boxes(
+        include_bytes!("../../../tests/data/nist_ftc_10_near_input.body"),
+        include_bytes!("../../../tests/data/nist_ftc_10_near_work.body"),
+    );
+}
+
+/// STC 10 #3044's rung-2 pair (#658, census V): torus `e550357e` and
+/// cylinder `872b2691`, FTC 10's shape in another edition.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn stc_10s_tube_pair_is_apart_over_near_boxes() {
+    apart_over_near_boxes(
+        include_bytes!("../../../tests/data/nist_stc_10_near_input.body"),
+        include_bytes!("../../../tests/data/nist_stc_10_near_work.body"),
+    );
+}
+
+/// CTC 02 with PMI's rung-3 pair (#658, censuses IV and V): cylinders
+/// `a9b6e499` (6 mm) and `8031cb1f` (1.42 mm), axes 2° apart, each
+/// carried about 0.9 m along y.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ctc_02s_carried_cylinders_are_apart_over_near_boxes() {
+    apart_over_near_boxes(
+        include_bytes!("../../../tests/data/nist_ctc_02_near_input.body"),
+        include_bytes!("../../../tests/data/nist_ctc_02_near_work.body"),
+    );
 }

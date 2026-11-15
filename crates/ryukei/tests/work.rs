@@ -320,6 +320,23 @@ fn re_trims_are_bounded() {
     eprintln!("re-trim: {spent} units");
 }
 
+/// The near boxes' twin (plan 20.B): bounded, the same units on one
+/// thread and eight, each rung build within its cap.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_near_boxes_twin_is_bounded() {
+    use ryukei_testkit::near_boxes::{drilled, spec};
+    let d = drilled();
+    let spec = spec(&d);
+    let spent = bounded("near boxes' twin", |w| {
+        ryukei::tweak::delete_faces_with(OpKey(0x20b5), &d, &spec, w)
+    });
+    println!("near boxes' twin: {spent} units");
+}
+
 #[test]
 fn thickening_a_sheet_is_bounded() {
     use ryukei::name::{FaceRole, Name, Role};

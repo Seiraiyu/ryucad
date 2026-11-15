@@ -3730,6 +3730,27 @@ fn held_seams_section(golden: &mut Golden) {
     }
 }
 
+/// ryukei 20.B's near boxes (design 669): the bar drilled from both ends
+/// (`ryukei_testkit::near_boxes`), both floor fillets and the channel
+/// between them deleted, one set. Over rung 0's box the walls cross at the
+/// bar's middle and the first build refuses `Uncertain`; the narrowed
+/// build carries each over its near box and builds. The result's body,
+/// created names and mesh, or the refusal's bytes.
+fn near_boxes_section(golden: &mut Golden) {
+    use ryukei::tweak::delete_faces;
+    use ryukei_testkit::near_boxes::{drilled, spec};
+    let mut s = golden.section("near_boxes");
+    let d = drilled();
+    match delete_faces(OpKey(0x20b5), &d, &spec(&d)) {
+        Ok((o, j)) => hash_body(&mut s, &o, &j),
+        Err(e) => {
+            for byte in format!("{e:?}").bytes() {
+                s.u64(u64::from(byte));
+            }
+        }
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3828,6 +3849,7 @@ sections! {
     flat_pieces => flat_pieces_section,
     known_seams => known_seams_section,
     held_seams => held_seams_section,
+    near_boxes => near_boxes_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline

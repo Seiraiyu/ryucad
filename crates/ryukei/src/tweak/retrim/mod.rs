@@ -11,6 +11,7 @@
 pub(crate) mod body;
 pub(crate) mod held;
 pub(crate) mod names;
+pub(crate) mod near;
 pub(crate) mod region;
 pub(crate) mod seeds;
 pub(crate) mod walk;
@@ -212,7 +213,12 @@ pub(crate) fn retrim_with(
         // Each build under its own cap: one that can't settle refuses
         // `Uncertain` in bounded units, as the caps do.
         Some(m.capped(crate::work::Scope::Rung, || {
-            attempt(key, body, changes, &region, &bx, which, m)
+            let build = || attempt(key, body, changes, &region, &bx, rung, which, m);
+            if which.narrowed() {
+                build()
+            } else {
+                m.first_build(build)
+            }
         }))
     })
 }
@@ -220,17 +226,25 @@ pub(crate) fn retrim_with(
 /// How far a changed face's vertex moves, at most, and at least ten
 /// resolutions.
 fn reach(body: &Body, changes: &Changes) -> f64 {
+    reach_of(body, changes, &|_| true)
+}
+
+/// [`reach`] over the changed faces `keep` takes (a near box's gap, plan
+/// 20.B). Over every face it is `reach`, bit for bit: the same faces in
+/// the same order.
+pub(crate) fn reach_of(body: &Body, changes: &Changes, keep: &dyn Fn(FaceId) -> bool) -> f64 {
     let mut r: f64 = 10.0 * crate::tol::LINEAR_RESOLUTION;
     // A gap is as wide as the box of the faces taken away.
     if let Some(g) = changes
         .deleted
         .iter()
+        .filter(|&&f| keep(f))
         .map(|&f| crate::intersect::face_box(body, f))
         .reduce(|a, b| a.union(&b))
     {
         r = r.max(g.min().distance(g.max()));
     }
-    for (&f, mo) in &changes.motion {
+    for (&f, mo) in changes.motion.iter().filter(|&(&f, _)| keep(f)) {
         // An offset moves every point by its distance (`apply` needs the
         // normal for that, which a vertex alone doesn't give).
         if let crate::tweak::Motion::Offset(d) = mo {
@@ -278,12 +292,15 @@ fn laminar_free(body: &Body, region: &Region) -> Result<(), Error> {
 }
 
 /// One rung: the working body, the table, the walk, the result's checks.
+/// `rung` says how a near box is doubled (rung 1) in a narrowed build.
+#[allow(clippy::too_many_arguments)]
 fn attempt(
     key: OpKey,
     body: &Body,
     changes: &Changes,
     region: &Region,
     bx: &crate::geom::Box3,
+    rung: usize,
     which: Build,
     m: &Meter,
 ) -> Rung {
@@ -319,60 +336,71 @@ fn attempt(
             .get(&f)
             .copied()
             .unwrap_or(body.faces[f].sense);
-        match working::working(
-            body,
-            f,
-            changes.surface.get(&f),
-            sense,
-            working::same_params(mo),
-            bx,
-        ) {
-            Ok(mut w) => {
-                // Its turn as a first build gives it, and in a narrowed
-                // build read round the circle (design 669). A face
-                // standing for others on its surface covers them all: its
-                // whole turn (NIST FTC 09's hole halves).
-                let turned = |circular: bool| {
-                    let mut r = w.rect;
-                    if !absorbing.contains(&f) {
-                        for (k, t) in working::delete_turn(body, changes, f, &w.surface, circular)
-                            .into_iter()
-                            .enumerate()
-                        {
-                            if let Some(t) = t {
-                                r[k] = t;
-                            }
-                        }
+        let over = |b: &crate::geom::Box3| {
+            working::working(
+                body,
+                f,
+                changes.surface.get(&f),
+                sense,
+                working::same_params(mo),
+                b,
+            )
+        };
+        // Its turn as a first build gives it, and in a narrowed build
+        // read round the circle (design 669). A face standing for others
+        // on its surface covers them all: its whole turn (NIST FTC 09's
+        // hole halves).
+        let turned = |w: &working::Working, circular: bool| {
+            let mut r = w.rect;
+            if !absorbing.contains(&f) {
+                for (k, t) in working::delete_turn(body, changes, f, &w.surface, circular)
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Some(t) = t {
+                        r[k] = t;
                     }
-                    r
-                };
-                let first = turned(false);
-                let round = narrowed.then(|| turned(true));
-                w.rect = first;
-                // Built narrowed: turned round the circle, then ended at
-                // its held seams whose ends can't move (design 642), iso
-                // stops first and plane stops where none applied.
-                if let Some(round) = round {
-                    w.rect = held::iso_stops(body, f, &held, &w.surface, round);
-                    if let Some(cut) = held::plane_stops(
-                        body::sheet_key(key, body.faces[f].name),
-                        body,
-                        f,
-                        &held,
-                        &w.surface,
-                        round,
-                        w.rect,
-                        bx,
-                        m,
-                    ) {
-                        w.cut = Some(cut);
-                    }
-                    narrowing |= w.rect != first || w.cut.is_some();
                 }
-                ws.insert(f, w);
             }
+            r
+        };
+        let mut w = match over(bx) {
+            Ok(w) => w,
             Err(e) => return done(Err(e)),
+        };
+        let first = turned(&w, false);
+        w.rect = first;
+        if narrowed {
+            // Built narrowed: carried over its near box only (plan 20.B),
+            // turned round the circle, then ended at its held seams whose
+            // ends can't move (design 642), iso stops first and plane
+            // stops where none applied.
+            let before = w.surface.clone();
+            let near = near::near_box(body, changes, region, f, bx, rung);
+            if near != *bx {
+                w = match over(&near) {
+                    Ok(w) => w,
+                    Err(e) => return done(Err(e)),
+                };
+            }
+            let round = turned(&w, true);
+            w.rect = held::iso_stops(body, f, &held, &w.surface, round);
+            if let Some(cut) = held::plane_stops(
+                body::sheet_key(key, body.faces[f].name),
+                body,
+                f,
+                &held,
+                &w.surface,
+                round,
+                w.rect,
+                bx,
+                m,
+            ) {
+                w.cut = Some(cut);
+            }
+            narrowing |= w.rect != first || w.surface != before || w.cut.is_some();
         }
+        ws.insert(f, w);
     }
     // A narrowed retry that narrows nothing would only repeat the first.
     if which == Build::Retry && !narrowing {

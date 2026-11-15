@@ -535,3 +535,39 @@ fn a_bent_rods_rim_is_deleted() {
     let want = PI * RADIUS * RADIUS * (4.0 + FRAC_PI_2);
     assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
 }
+
+/// ryukei 20.B's twin (design 669): the bar drilled from both ends, both
+/// floors filleted, a channel from floor to floor. Ten faces drilled: the
+/// bar's six, each hole's wall and floor; twelve with the two fillets;
+/// thirteen with the channel's wall, which cuts both fillets.
+#[test]
+fn the_twin_is_drilled_and_filleted() {
+    use ryukei_testkit::near_boxes::{deleted, drilled, drilled_bare, filleted};
+    assert_eq!(drilled_bare().counts().faces, 10);
+    assert_eq!(filleted().counts().faces, 12);
+    let d = drilled();
+    assert_eq!(d.counts().faces, 13);
+    assert_eq!(check(&d), []);
+    assert_eq!(deleted(&d).len(), 3);
+}
+
+/// The twin's carried pair (#652, #658): the fillets and the channel are
+/// one set, so rung 0's box grows by about the bar's length; over it the
+/// two walls touch at the bar's middle with no edge between them, and the
+/// first build refuses `Uncertain`. Over their near boxes (each wall
+/// touches only its own fillet) they never meet: the narrowed build
+/// builds, and the result checks clean.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_twins_carried_pair_is_never_met() {
+    use ryukei_testkit::near_boxes::{drilled, spec};
+    let d = drilled();
+    let r = ryukei::tweak::delete_faces(OpKey(0x20b5), &d, &spec(&d));
+    let (o, _) = r.unwrap_or_else(|e| panic!("refused: {e:?}"));
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    assert_eq!(o.counts().faces, 10);
+}
