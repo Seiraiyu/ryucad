@@ -108,6 +108,36 @@ enum Command {
     /// obsolete, listed, checked and tagged.
     #[command(subcommand)]
     Release(ReleaseCmd),
+    /// Where a library component is used (PDM), run in its library
+    /// project: designs of this repository's projects, of other checkouts
+    /// (--in, else the pdm.dependents preference) and their releases.
+    WhereUsed {
+        part: String,
+        /// Only designs placing this release label.
+        #[arg(long, conflicts_with = "working")]
+        label: Option<String>,
+        /// Only designs placing it at working.
+        #[arg(long)]
+        working: bool,
+        /// Only direct placements (every placement in a design is).
+        #[arg(long)]
+        direct: bool,
+        /// Folders of other checkouts to search; repeat for more.
+        #[arg(long = "in", value_name = "FOLDER")]
+        within: Vec<PathBuf>,
+        /// Search no other checkout, the preference's included.
+        #[arg(long)]
+        no_dependents: bool,
+    },
+    /// A design's bill of materials (PDM): one line per purchasable
+    /// part with designators, maker, part number, alternates and offers;
+    /// `bom diff` compares two revisions'.
+    Bom {
+        #[command(subcommand)]
+        cmd: Option<BomCmd>,
+        #[command(flatten)]
+        show: BomShow,
+    },
     /// Create, edit, show, list or delete functional blocks: their
     /// names, ports and buses.
     #[command(subcommand)]
@@ -1011,6 +1041,44 @@ enum PdmCmd {
         force: bool,
         #[command(flatten)]
         expect: Expect,
+    },
+}
+
+#[derive(Args)]
+struct BomShow {
+    /// The design: the project's only one if left out.
+    design: Option<String>,
+    /// A Git revision (main, HEAD~2, a hash), or label:<L> for the
+    /// design's release L: the working files by default.
+    #[arg(long, value_name = "REV")]
+    rev: Option<String>,
+    /// Lines by block occurrence (<design>:<instance path>).
+    #[arg(long)]
+    by_block: bool,
+    /// Quantities times parts.json's build_quantity.
+    #[arg(long)]
+    build: bool,
+    /// json (the default) or csv.
+    #[arg(long)]
+    format: Option<String>,
+    /// Write the CSV to this file (implies --format csv).
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum BomCmd {
+    /// What changed in a design's BOM between two revisions: lines added,
+    /// removed and changed (revision, quantity, designators, value,
+    /// footprint, maker and part number, alternates, properties).
+    Diff {
+        design: Option<String>,
+        /// The revision to compare from: HEAD by default.
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// The revision to compare to: working by default.
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
     },
 }
 
@@ -2353,6 +2421,36 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             Request::ReleaseCheck { results: *results }
         }
         Command::Release(ReleaseCmd::Sync) => Request::ReleaseSync {},
+        Command::Bom { cmd: None, show } => Request::BomGet {
+            design: show.design.clone(),
+            rev: show.rev.clone(),
+            format: show
+                .format
+                .clone()
+                .or_else(|| show.out.as_ref().map(|_| "csv".to_owned())),
+            build: show.build,
+            by_block: show.by_block,
+        },
+        Command::Bom { cmd: Some(BomCmd::Diff { design, from, to }), .. } => Request::BomDiff {
+            design: design.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        },
+        Command::WhereUsed {
+            part,
+            label,
+            working,
+            direct,
+            within,
+            no_dependents,
+        } => Request::BomWhereUsed {
+            part: part.clone(),
+            label: label.clone(),
+            working: *working,
+            direct: *direct,
+            within: all(within),
+            no_dependents: *no_dependents,
+        },
         Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
         Command::Pdm(PdmCmd::NewId { expect }) => Request::PdmNewId {
             expected_revision: expect.expect.clone(),
@@ -3436,6 +3534,27 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     // A report written as text (lib check's, #711) is read back here, in
     // a process that ends once it prints it.
     let a = a.into_json()?;
+    if let Command::Bom {
+        cmd: None,
+        show: BomShow { out: Some(out), .. },
+    } = cmd
+    {
+        let mut result = a.result;
+        let csv = result
+            .as_object_mut()
+            .and_then(|o| o.remove("csv"))
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    "--out writes CSV: leave out --format or give csv",
+                )
+                .with("param", "format")
+            })?;
+        ryueda::source::write_atomic(&here.join(out), csv.as_bytes())?;
+        result["out"] = json!(out);
+        return Ok(result);
+    }
     let Some(bytes) = a.binary else {
         return Ok(a.result);
     };

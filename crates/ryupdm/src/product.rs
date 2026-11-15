@@ -33,6 +33,42 @@ pub struct PartFiles {
     pub folders: Vec<String>,
 }
 
+/// What a part is, as its product says (design 629): ryucad's parts and
+/// assemblies, ryueda's designs and library components. ryuplm's `item`
+/// joins the same way. Written by name (`part`, `assembly`, `design`,
+/// `component`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartKind {
+    Part,
+    Assembly,
+    Design,
+    Component,
+}
+
+impl PartKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PartKind::Part => "part",
+            PartKind::Assembly => "assembly",
+            PartKind::Design => "design",
+            PartKind::Component => "component",
+        }
+    }
+
+    /// The kind `s` names, `None` for any other text.
+    pub fn parse(s: &str) -> Option<PartKind> {
+        [
+            PartKind::Part,
+            PartKind::Assembly,
+            PartKind::Design,
+            PartKind::Component,
+        ]
+        .into_iter()
+        .find(|k| k.as_str() == s)
+    }
+}
+
 /// A product whose projects ryupdm manages.
 pub trait Product: ryu_git::Layout {
     /// The folders below the project holding its parts' files, which a
@@ -40,8 +76,8 @@ pub trait Product: ryu_git::Layout {
     /// besides the root files and `releases/`.
     const PART_FOLDERS: &'static [&'static str];
 
-    /// The project's releasable parts, in ID order.
-    fn parts(src: &dyn Source) -> Result<Vec<Id>>;
+    /// The project's releasable parts and their kinds, in ID order.
+    fn parts(src: &dyn Source) -> Result<Vec<(Id, PartKind)>>;
 
     /// Where `part`'s properties live, relative to the project.
     fn properties_path(part: &Id) -> String;
@@ -78,6 +114,11 @@ pub trait Product: ryu_git::Layout {
     }
 }
 
+/// The project's parts' IDs alone ([`Product::parts`]).
+pub fn part_ids<P: Product>(src: &dyn Source) -> Result<Vec<Id>> {
+    Ok(P::parts(src)?.into_iter().map(|(id, _)| id).collect())
+}
+
 /// The identity of the project `src` holds, `None` when it has no
 /// manifest or the manifest doesn't read (a conflicted one included:
 /// `read_json` refuses it).
@@ -86,4 +127,24 @@ pub fn identity<P: Product>(src: &dyn Source) -> Option<Identity> {
         .ok()
         .flatten()
         .and_then(|v| P::identity(&v))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PartKind;
+
+    #[test]
+    fn part_kinds_read_and_write_by_name() {
+        for (k, s) in [
+            (PartKind::Part, "part"),
+            (PartKind::Assembly, "assembly"),
+            (PartKind::Design, "design"),
+            (PartKind::Component, "component"),
+        ] {
+            assert_eq!(k.as_str(), s);
+            assert_eq!(PartKind::parse(s), Some(k));
+            assert_eq!(serde_json::to_value(k).unwrap(), s);
+        }
+        assert_eq!(PartKind::parse("item"), None);
+    }
 }

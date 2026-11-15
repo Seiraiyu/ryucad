@@ -163,7 +163,11 @@ fn faults<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fa
     };
     let unit = crate::product::identity::<P>(src).map(|i| i.unit);
     if let Some(unit) = unit {
-        let pdm = Pdm::of_for::<P>(src, P::parts(src).unwrap_or_default(), unit);
+        let pdm = Pdm::of_for::<P>(
+            src,
+            crate::product::part_ids::<P>(src).unwrap_or_default(),
+            unit,
+        );
         for (part, pp) in &pdm.parts {
             for e in &pp.faults {
                 let property = e.details["property"].as_str().unwrap_or_default();

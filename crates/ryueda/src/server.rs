@@ -390,7 +390,7 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
         .with("param", "against")),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
-            crate::erc::check_project(p, &cats, &[], &[], &[]).map(Answer::json)
+            crate::erc::check_project(p, &cats, &[], &[], &[], &[]).map(Answer::json)
         }
         Request::Describe {
             design,
@@ -578,6 +578,49 @@ fn dispatch(
         Request::LibOutdated {} => crate::libdeps::outdated(session),
         Request::LibUses { rev } => crate::libdeps::uses(session, rev.as_deref()),
         Request::LibParts { alias } => crate::libdeps::parts(session, &alias),
+        Request::BomGet {
+            design,
+            rev,
+            format,
+            build,
+            by_block,
+        } => crate::pdm::bom::get(
+            session,
+            &crate::pdm::bom::Ask {
+                design: design.as_deref(),
+                rev: rev.as_deref(),
+                format: format.as_deref(),
+                build,
+                by_block,
+            },
+        ),
+        Request::BomWhereUsed {
+            part,
+            label,
+            working,
+            direct,
+            within,
+            no_dependents,
+        } => {
+            let filter = match (label, working) {
+                (Some(l), _) => crate::pdm::where_used::Filter::Label(l),
+                (None, true) => crate::pdm::where_used::Filter::Working,
+                (None, false) => crate::pdm::where_used::Filter::Any,
+            };
+            crate::pdm::where_used::answer(
+                session,
+                &crate::pdm::where_used::Ask {
+                    part: &part,
+                    filter,
+                    direct,
+                    within: &within,
+                    no_dependents,
+                },
+            )
+        }
+        Request::BomDiff { design, from, to } => {
+            crate::pdm::bom::diff(session, design.as_deref(), from.as_deref(), to.as_deref())
+        }
         Request::LibPin {
             components,
             label,
@@ -1222,8 +1265,9 @@ fn dispatch(
             // check` is the command for them; the working files' are here.
             let release = crate::pdm::release::findings(session, false).unwrap_or_default();
             let deps = crate::libdeps::findings(session).unwrap_or_default();
+            let bom = crate::pdm::bom::findings(session);
             match (
-                crate::erc::check(session.root(), &cats, &release, &deps),
+                crate::erc::check(session.root(), &cats, &release, &deps, &bom),
                 diff,
             ) {
                 (Ok(mut v), Some(d)) => {
