@@ -60,7 +60,11 @@ const MAX_SIZE: f64 = 2e-3;
 /// working faces carried far along their straight directions that cross
 /// nearly tangent with no edge between them, which no seam certificate
 /// meets (plan 19.B, question 882: FTC 07's cone/cylinder past its
-/// stopped run, FTC 10's cylinder continuing its torus's tube).
+/// stopped run, FTC 10's cylinder continuing its torus's tube). Plan
+/// 20.A's narrowed build gets FTC 07 to rung 2, where a cylinder and a
+/// NURBS face (`18dae4b7`/`33b57350`) carried with no shared edge refuse
+/// `Uncertain`; FTC 10's narrowed retry refuses at a plane paired with
+/// itself. Near boxes are 20.B's.
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -627,14 +631,17 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// geometry-only edition (#20754), its bends' `Uncertain` tangency now
 /// held (question 917). A refusal or a deadline for any of them fails.
 /// Still out (#652, #658): FTC 07 AP242 #13541 (a pair of working faces
-/// with no shared edge refuses `Uncertain`); STC 07 #11020 (its held bend
-/// settles, so the ladder climbs to rung 2, whose builds' parallel pairs
-/// each stay within the rung's cap but add up past it: past the deadline,
-/// 165 s with none, where main refused in 71 s; a rung's cap bounds each
-/// pair, not their sum, as for linkrods);
-/// STC 10 #3044 (a torus/cylinder pair with no shared edge); CTC 02 with
-/// PMI #295 (carried near-tangent cylinders with no shared edge, recorded
-/// under question 882); linkrods #11 (past the deadline on main too).
+/// with no shared edge refuses `Uncertain`, after its narrowed retry at
+/// a cylinder/cone pair); STC 07 #11020 (the rung's ordered sum, plan
+/// 20.A, bounds its builds: refused `Uncertain` in 106 s, inside the
+/// deadline);
+/// STC 10 #3044 (a torus/cylinder pair with no shared edge, then its
+/// narrowed retry at a sphere paired with itself); CTC 02 with PMI #295
+/// (carried near-tangent cylinders with no shared edge, recorded under
+/// question 882); linkrods #11 (still past the deadline: its first build,
+/// now bounded by the ordered sum, takes 65 s, one NURBS/torus pair
+/// costing about 4 µs a unit, and the narrowed retry of its held NURBS
+/// pair 52 s more).
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
