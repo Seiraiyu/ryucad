@@ -628,7 +628,10 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// held (question 917). A refusal or a deadline for any of them fails.
 /// Still out (#652, #658): FTC 07 AP242 #13541 (a pair of working faces
 /// with no shared edge refuses `Uncertain`); STC 07 #11020 (its held bend
-/// takes the stopped build past the deadline, where main refused in 71 s);
+/// settles, so the ladder climbs to rung 2, whose builds' parallel pairs
+/// each stay within the rung's cap but add up past it: past the deadline,
+/// 165 s with none, where main refused in 71 s; a rung's cap bounds each
+/// pair, not their sum, as for linkrods);
 /// STC 10 #3044 (a torus/cylinder pair with no shared edge); CTC 02 with
 /// PMI #295 (carried near-tangent cylinders with no shared edge, recorded
 /// under question 882); linkrods #11 (past the deadline on main too).
