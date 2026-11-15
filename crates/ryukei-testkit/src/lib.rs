@@ -189,6 +189,7 @@ mod lcg;
 pub mod mesh;
 pub mod near_boxes;
 pub mod nurbs;
+pub mod nurbs_bytes;
 pub mod nurbs_race;
 pub mod offset_bytes;
 pub mod projection;
