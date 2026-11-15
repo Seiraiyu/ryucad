@@ -18,6 +18,9 @@ pub(crate) struct Working {
     /// piece reaching the side of a face that couldn't is
     /// `ExtensionUnsupported`, not `RegionTooSmall`.
     pub(crate) extendable: bool,
+    /// The working face's sheet where a plane stop cut it (plan 19.B):
+    /// one face, its every edge a side. `None`: the rect's sheet.
+    pub(crate) cut: Option<Body>,
 }
 
 /// Whether `s` is a bounded surface `carried_by` takes.
@@ -119,6 +122,7 @@ pub(crate) fn working(
         rect,
         sense,
         extendable,
+        cut: None,
     })
 }
 

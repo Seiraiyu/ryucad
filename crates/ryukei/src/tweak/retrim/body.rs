@@ -39,7 +39,7 @@ pub(crate) struct WorkBody {
 }
 
 /// A face's sheet key: unique per face within the re-trim.
-fn sheet_key(key: OpKey, face: Name) -> OpKey {
+pub(crate) fn sheet_key(key: OpKey, face: Name) -> OpKey {
     OpKey(Name::derive(key, Role::Edit(EditRole::Edge), &[face]).to_u128())
 }
 
@@ -83,8 +83,15 @@ pub(crate) fn work_body(
         m.poll().map_err(|_| Error::Cancelled)?;
         let name = body.faces[f].name;
         // Its fitted sides charge the meter and stop at its cancel.
-        let (s, _) = crate::sheet::from_surface_in(sheet_key(key, name), &w.surface, w.rect, m)
-            .map_err(|_| Error::from(TweakError::ExtensionUnsupported { face: name }))?;
+        // A plane stop's cut sheet where one applied (plan 19.B).
+        let s = match &w.cut {
+            Some(c) => c.clone(),
+            None => {
+                crate::sheet::from_surface_in(sheet_key(key, name), &w.surface, w.rect, m)
+                    .map_err(|_| Error::from(TweakError::ExtensionUnsupported { face: name }))?
+                    .0
+            }
+        };
         let only: BTreeSet<FaceId> = s.faces().collect();
         let c = crate::sheet::copy(&mut lay, &s, &only);
         let k = c.faces[0].1;
@@ -215,8 +222,9 @@ impl WorkBody {
     /// fins' pcurves, moved by whole periods into those faces' parameter
     /// boxes ([`seam_for`]); by the pair, in face order. A working surface
     /// holds its face's surface, carried past its domain with the same
-    /// parameters, so it holds the edge's curve and pcurve.
-    pub(crate) fn seams(&self, input: &Body, held: &[super::held::Held]) -> Seams {
+    /// parameters, so it holds the edge's curve and pcurve. In a stopped
+    /// build (`stopped`), each marked so (plan 19.B).
+    pub(crate) fn seams(&self, input: &Body, held: &[super::held::Held], stopped: bool) -> Seams {
         let back: BTreeMap<FaceId, FaceId> = self.origin.iter().map(|(&w, &i)| (i, w)).collect();
         let mut out = Seams::new();
         for h in held {
@@ -228,6 +236,7 @@ impl WorkBody {
             else {
                 continue;
             };
+            seam.stopped = stopped;
             let key = if wa < wb {
                 (wa, wb)
             } else {
@@ -278,6 +287,7 @@ pub(crate) fn seam_for(
         tolerance: x.tolerance.get(),
         pcurves: [lift(wa, pa)?, lift(wb, pb)?],
         kind,
+        stopped: false,
     })
 }
 
@@ -339,7 +349,7 @@ mod tests {
         let w = work_body(K, &b, &r, &ws, &crate::work::Meter::free()).unwrap();
         let still = |f: FaceId| r.faces.contains(&f) && f != top;
         let held = super::super::held::held(&b, &r, &still);
-        let seams = w.seams(&b, &held);
+        let seams = w.seams(&b, &held, false);
         // The round is tangent to the two sides it joins, each along a
         // line; no other kept pair is tangent along an edge.
         assert_eq!(seams.len(), 2, "{seams:?}");
@@ -350,7 +360,7 @@ mod tests {
             assert!(matches!(list[0].curve, crate::geom::Curve::Line(_)));
         }
         // The top, changed, records none.
-        let none = w.seams(&b, &super::super::held::held(&b, &r, &|_| false));
+        let none = w.seams(&b, &super::super::held::held(&b, &r, &|_| false), false);
         assert!(none.is_empty());
     }
 

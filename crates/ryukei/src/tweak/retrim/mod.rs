@@ -281,6 +281,21 @@ fn attempt(
                     let before = w.rect;
                     w.rect = held::iso_stops(body, f, &held, &w.surface, w.rect);
                     stopping |= w.rect != before;
+                    // Where no iso stop did, a plane stop (plan 19.B).
+                    if let Some(cut) = held::plane_stops(
+                        body::sheet_key(key, body.faces[f].name),
+                        body,
+                        f,
+                        &held,
+                        &w.surface,
+                        before,
+                        w.rect,
+                        bx,
+                        m,
+                    ) {
+                        w.cut = Some(cut);
+                        stopping = true;
+                    }
                 }
                 ws.insert(f, w);
             }
@@ -379,7 +394,7 @@ fn attempt(
     // Kept faces tangent along an input edge meet along it (#652): those
     // left as they are, and the faces outside the region, held by `held`.
     let seams: crate::intersect::Seams = w
-        .seams(body, &held)
+        .seams(body, &held, stopped)
         .into_iter()
         .filter(|(k, _)| pairs.contains(k))
         .collect();

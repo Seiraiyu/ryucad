@@ -27,7 +27,9 @@
 //! withholds the rule: the caller traces the pair as before.
 
 use super::Failure;
-use super::beside::{face_beside_rails, opposite_sides, section_plane};
+use super::beside::{
+    face_beside_rails, face_beside_rails_near, face_boxes, opposite_sides, section_plane,
+};
 use super::face::{FaceMeet, face_box, max_tolerance, overlap, placed, shifted, surface_of};
 use super::fit::{fit_pcurve_within, pcurve_certified};
 use super::ss::Branch;
@@ -61,6 +63,10 @@ pub(crate) struct Seam {
     pub(crate) pcurves: [(Curve2, [f64; 2]); 2],
     /// Whether its ends can move.
     pub(crate) kind: SeamKind,
+    /// Whether the pair is met in a stopped build (plan 19.B, Decision
+    /// 1): the section plane then leaves out parts apart from the other
+    /// face's box.
+    pub(crate) stopped: bool,
 }
 
 /// Known seams by pair of one body's faces, each pair and each seam's
@@ -91,6 +97,10 @@ pub(crate) fn seam_strip(size: f64, tolerance: f64) -> f64 {
 /// ([`opposite_sides`]), under the same ladder of part limits. A face
 /// carried past the seam crosses the plane, so this holds only for faces
 /// that end at it (an outside face, or a working face stopped there).
+/// With `near` (a stopped pair, plan 19.B), each face's parts apart from
+/// the other face's box are left out: `near[0]` for `a`'s, `near[1]` for
+/// `b`'s.
+#[allow(clippy::too_many_arguments)]
 fn section_apart(
     a: (&Body, FaceId),
     b: (&Body, FaceId),
@@ -98,6 +108,7 @@ fn section_apart(
     seams: &[Seam],
     rails: [&[(&Curve2, [f64; 2])]; 2],
     strip: f64,
+    near: Option<[Vec<Box3>; 2]>,
     m: &Meter,
 ) -> bool {
     let Some((first, rest)) = seams.split_first() else {
@@ -116,10 +127,15 @@ fn section_apart(
         return false;
     };
     LADDER.into_iter().any(|cells| {
-        let side = |f: (&Body, FaceId), r: &[(&Curve2, [f64; 2])]| {
-            face_beside_rails(f.0, f.1, &plane, r, strip, cells, m).ok()
+        let side = |f: (&Body, FaceId), r: &[(&Curve2, [f64; 2])], n: Option<&[Box3]>| match n {
+            Some(n) => face_beside_rails_near(f.0, f.1, &plane, n, r, strip, cells, m).ok(),
+            None => face_beside_rails(f.0, f.1, &plane, r, strip, cells, m).ok(),
         };
-        match (side(a, rails[0]), side(b, rails[1])) {
+        let (na, nb) = match &near {
+            Some([x, y]) => (Some(&x[..]), Some(&y[..])),
+            None => (None, None),
+        };
+        match (side(a, rails[0], na), side(b, rails[1], nb)) {
             (Some(x), Some(y)) => opposite_sides(x, y),
             _ => false,
         }
@@ -169,6 +185,21 @@ pub(crate) fn known_seam(
             .collect()
     };
     let (ra, rb) = (rails(0), rails(1));
+    // A stopped pair's parts apart from the other face's box have no
+    // say in the section plane (plan 19.B, Decision 1): its certified
+    // boxes over a grid of its parameters, which a stop's rim past a
+    // part-rim seam lies outside where `face_box` holds it.
+    // Each face's box the tighter certified one where it has one.
+    let near = seams.iter().any(|s| s.stopped).then(|| {
+        let boxes = |f: (&Body, FaceId), loose: &Box3| -> Vec<Box3> {
+            face_boxes(f.0, f.1, m)
+                .unwrap_or_else(|| vec![*loose])
+                .iter()
+                .map(|x| x.grow(slack))
+                .collect()
+        };
+        [boxes(b, &bb), boxes(a, &ba)]
+    });
     let keeps_off = |f: (&Body, FaceId), other: &Surface, r: &[(&Curve2, [f64; 2])], cells| {
         face_beside_rails(f.0, f.1, other, r, strip, cells, m).is_ok()
     };
@@ -178,7 +209,7 @@ pub(crate) fn known_seam(
     let apart = LADDER
         .into_iter()
         .any(|cells| keeps_off(a, sb, &ra, cells) || keeps_off(b, sa, &rb, cells))
-        || section_apart(a, b, [sa, sb], seams, [&ra, &rb], strip, m);
+        || section_apart(a, b, [sa, sb], seams, [&ra, &rb], strip, near, m);
     if !apart {
         return Err(Failure::Uncertain);
     }
@@ -359,6 +390,7 @@ mod tests {
                 (line2((PI, 0.0), (0.0, 1.0)), [0.0, 1.0]),
             ],
             kind: SeamKind::Running,
+            stopped: false,
         };
         (a, b, seam)
     }
@@ -506,6 +538,7 @@ mod tests {
                 (line2((2.0 * PI, 0.0), (-1.0, 0.0)), [0.0, 1.0]),
             ],
             kind: SeamKind::Running,
+            stopped: false,
         };
         // Against sampling: 1 mm past the seam, the cylinder's outer
         // point lies outside the tube and its inner point inside.
@@ -591,6 +624,7 @@ mod tests {
                 (line2((2.0 * PI, 0.0), (-1.0, 0.0)), [0.0, 1.0]),
             ],
             kind: SeamKind::Fixed,
+            stopped: false,
         };
         // Against sampling: 1 mm before the seam on the run, the inner
         // point lies inside the tube carried on past u = 0, the outer

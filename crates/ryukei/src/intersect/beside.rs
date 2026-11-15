@@ -197,13 +197,63 @@ pub(crate) fn face_beside_rails(
     cells: usize,
     m: &Meter,
 ) -> Result<[bool; 2], Failure> {
+    rails_in(body, face, other, None, rails, strip, cells, m)
+}
+
+/// [`face_beside_rails`], leaving out every part of the face whose
+/// certified box lies apart from every box of `near` (plan 19.B,
+/// Decision 1): such a part can't meet a face inside them, whichever side
+/// of `other` it lies on. `Ok` certifies that the face meets `other`
+/// nowhere outside the strip within `near`. The section plane's
+/// certificate for a pair with a stopped face, `near` the other face's
+/// boxes ([`face_boxes`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn face_beside_rails_near(
+    body: &Body,
+    face: FaceId,
+    other: &Surface,
+    near: &[Box3],
+    rails: &[(&Curve2, [f64; 2])],
+    strip: f64,
+    cells: usize,
+    m: &Meter,
+) -> Result<[bool; 2], Failure> {
+    rails_in(body, face, other, Some(near), rails, strip, cells, m)
+}
+
+/// [`face_beside_rails`] and [`face_beside_rails_near`]: with `near`
+/// `None`, every part of the face has a say.
+#[allow(clippy::too_many_arguments)]
+fn rails_in(
+    body: &Body,
+    face: FaceId,
+    other: &Surface,
+    near: Option<&[Box3]>,
+    rails: &[(&Curve2, [f64; 2])],
+    strip: f64,
+    cells: usize,
+    m: &Meter,
+) -> Result<[bool; 2], Failure> {
     if rails.is_empty() {
         return Err(Failure::Uncertain);
     }
     let surface = &body.surfaces[body.faces[face].surface];
     let boundary = boundary_of(body, face).ok_or(Failure::Uncertain)?;
     let periods = surface.periods();
-    let keep = |c: Cell| !outside(body, face, &boundary, periods, c);
+    let sheet = Sheet::of(surface);
+    // A part reaches `near` unless its certified box is apart from each
+    // of its boxes on some axis; a part with no box reaches it.
+    let reaches = |c: Cell| {
+        let Some(near) = near else { return true };
+        let Some(p) = sheet.jet_box_in(c, m.enclosures()) else {
+            return true;
+        };
+        near.iter().any(|n| {
+            let (lo, hi) = (n.min().to_array(), n.max().to_array());
+            (0..3).all(|k| p[k].v.lo() <= hi[k] && p[k].v.hi() >= lo[k])
+        })
+    };
+    let keep = |c: Cell| reaches(c) && !outside(body, face, &boundary, periods, c);
     run(
         surface,
         other,
@@ -363,6 +413,41 @@ fn image_box(j: &JVec<Interval>) -> Box3 {
         Point3::new(j[0].v.lo(), j[1].v.lo(), j[2].v.lo()),
         Point3::new(j[0].v.hi(), j[1].v.hi(), j[2].v.hi()),
     )
+}
+
+/// Parts each way of a face's parameter box [`face_boxes`] takes.
+const TIGHT_PARTS: u32 = 16;
+
+/// Certified boxes holding face `face` between them, tighter than
+/// [`super::face_box`]: its surface's certified box
+/// (`Sheet::jet_box_in`) over each part of a [`TIGHT_PARTS`]-square grid
+/// of its parameter box, leaving out the parts certified outside it
+/// ([`outside`]). `None` where a fin has no pcurve or a kept part has no
+/// box. Plan 19.B's box-apart rule takes them for a stopped pair, where a
+/// curved face's one box holds the whole of a stop past a seam that is
+/// only part of its rim (FTC 07's torus and run).
+pub(crate) fn face_boxes(body: &Body, face: FaceId, m: &Meter) -> Option<Vec<Box3>> {
+    let surface = &body.surfaces[body.faces[face].surface];
+    let boundary = boundary_of(body, face)?;
+    let periods = surface.periods();
+    let sheet = Sheet::of(surface);
+    let [[u0, u1], [v0, v1]] = parameter_box(body, face);
+    let n = f64::from(TIGHT_PARTS);
+    let mut out = Vec::new();
+    for i in 0..TIGHT_PARTS {
+        for j in 0..TIGHT_PARTS {
+            let at = |a: f64, b: f64, k: u32| a + (b - a) * f64::from(k) / n;
+            let c = [
+                [at(u0, u1, i), at(u0, u1, i + 1)],
+                [at(v0, v1, j), at(v0, v1, j + 1)],
+            ];
+            if outside(body, face, &boundary, periods, c) {
+                continue;
+            }
+            out.push(image_box(&sheet.jet_box_in(c, m.enclosures())?));
+        }
+    }
+    Some(out)
 }
 
 /// The cone of one part from its enclosed jets: the unit normal
@@ -1466,5 +1551,37 @@ mod rails_tests {
             &m,
         );
         assert!(r.is_err(), "{r:?}");
+    }
+
+    /// Plan 19.B, Decision 1: a whole-turn tube whose rim lies a hair past
+    /// the plane z = 0 all round, its seam a quarter of that circle. Seen
+    /// whole, the tube crosses the plane outside the seam's strip; near a
+    /// face over that quarter alone, only the tube's part below the plane
+    /// has a say.
+    #[test]
+    fn a_part_apart_from_the_other_face_has_no_side() {
+        use core::f64::consts::{FRAC_PI_2, TAU};
+        let frame = Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let tube = Surface::Cylinder(Cylinder::new(frame, 1.0).unwrap());
+        let (b, _) =
+            crate::sheet::from_surface(OpKey(0x19b2), &tube, [[0.0, TAU], [-1.0, 0.01]]).unwrap();
+        let f = b.faces().next().unwrap();
+        let plane = Surface::Plane(Plane::new(frame));
+        let rail = rail();
+        let rails = [(&rail, [0.0, FRAC_PI_2])];
+        let m = Meter::free(); // unmetered: a test
+        let strip = 0.05;
+        assert!(face_beside_rails(&b, f, &plane, &rails, strip, CELLS, &m).is_err());
+        // A face over the seam's quarter, reaching below the plane.
+        let near = Box3::new(Point3::new(0.0, 0.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+        assert_eq!(
+            face_beside_rails_near(&b, f, &plane, &[near], &rails, strip, CELLS, &m).ok(),
+            Some([true, false])
+        );
     }
 }

@@ -331,13 +331,15 @@ fn ftc_07s_seam_pair_crossing_past_its_seam_is_withheld() {
 /// circle's plane outside the strip, the torus on the other: met along
 /// the circle by the section plane.
 ///
-/// Not yet (plan 19.A, Task 11): the run is a whole turn (its own pcurves
-/// span 2π, so `delete_turn` leaves it whole) and its seam with this torus
-/// a quarter of its end circle. Stopped half a strip past the seam, the
-/// rest of its rim lies past the circle's plane outside the seam's strip,
-/// so the run is on both sides of it (the torus on one): 19.B's plane stop.
+/// The run is a whole turn and the seam a quarter of its end circle, so
+/// the rest of the stopped rim lies past the circle's plane, but apart
+/// from the torus face: the section plane leaves those parts out on a
+/// stopped pair (plan 19.B, Decision 1).
 #[test]
-#[ignore = "#652: a whole-turn run stopped past a quarter-arc seam crosses its plane; 19.B's plane stop"]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
 fn ftc_07s_seam_pair_is_met_once_its_run_stops() {
     use crate::codec::decode_body;
     use crate::geom::Surface;
@@ -383,7 +385,9 @@ fn ftc_07s_seam_pair_is_met_once_its_run_stops() {
     } else {
         (torus, (&sheet, sf))
     };
-    let seam = super::body::seam_for(&input, e, x, y, SeamKind::Frontier).expect("pcurves");
+    let mut seam = super::body::seam_for(&input, e, x, y, SeamKind::Frontier).expect("pcurves");
+    // As the stopped build marks it (plan 19.B, Decision 1).
+    seam.stopped = true;
     // unmetered: a unit test.
     let m = crate::work::Meter::free();
     assert!(known_seam(x, y, &[seam], &m).is_ok());
@@ -558,4 +562,88 @@ fn a_stopped_rung_answers_only_where_its_walk_closes() {
         settle(walked(), Stops::AfterHeld, || panic!("built with stops")),
         Rung::Walked(_)
     ));
+}
+
+/// FNV-1a of `b`'s `dump_unnamed` (as `ryukei-testkit`'s `fnv`, which the
+/// crate can't depend on).
+fn free_hash(b: &Body) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &x in b.dump_unnamed().as_bytes() {
+        h ^= u64::from(x);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// The bent rod's rim deleted with stops, as plan 19.A built it.
+const BENT_ROD_DELETED_HASH: u64 = 0xcd93_79f0_14d0_8ffc;
+
+/// A plane stop goes only where no iso stop did (plan 19.B, Decision 3):
+/// the bent rod's run, stopped by its iso stop, takes no plane stop, and
+/// its rim's delete builds as 19.A's did, bit for bit.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn an_iso_stopped_run_takes_no_plane_stop() {
+    use super::{Stops, retrim_with};
+    let (rod, rim) = crate::testing::bent_rod();
+    let changes = Changes {
+        deleted: std::collections::BTreeSet::from([rim]),
+        ..Changes::default()
+    };
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let (o, _) = retrim_with(OpKey(0x19a4), &rod, &changes, Stops::AfterHeld, &m).unwrap();
+    // `held_seams`' golden pins the same body; here, its hash.
+    assert_eq!(
+        free_hash(&o),
+        BENT_ROD_DELETED_HASH,
+        "the bent rod's delete moved: {:#x}",
+        free_hash(&o)
+    );
+}
+
+/// A body whose first build settles is the same with stops allowed and
+/// without (question 916): 18.C's rounded block, its top raised so the
+/// round runs on past its moved end. Its first build builds, so `settle`
+/// never runs the stopped build here and no plane stop is taken; plane
+/// stops at running seams are covered by `held`'s `RUNNING_PLANE_STOPS`
+/// and stop-plane tests and by 19.A's
+/// `a_stopped_rung_answers_only_where_its_walk_closes`. A body whose first
+/// build refuses at a running seam is still wanted for a test of its own.
+#[test]
+fn a_body_that_builds_is_the_same_with_stops_allowed() {
+    use super::{Stops, retrim_with};
+    use crate::blend::{BlendKind, EdgeBlend, blend};
+    let b0 = block();
+    let (px, py) = (face_of(&b0, FaceRole::PlusX), face_of(&b0, FaceRole::PlusY));
+    let edge = b0
+        .edges()
+        .find(|&e| {
+            let fs: Vec<FaceId> = b0
+                .edge_fins(e)
+                .map(|fin| b0.loops[b0.fins[fin].loop_].face)
+                .collect();
+            fs.contains(&px) && fs.contains(&py)
+        })
+        .unwrap();
+    let (b, _) = blend(
+        K,
+        &b0,
+        &[EdgeBlend {
+            edge: b0.edges[edge].name,
+            kind: BlendKind::Fillet { radius: 0.1 },
+        }],
+    )
+    .unwrap();
+    let changes = raised(&b, 0.2);
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let never =
+        retrim_with(OpKey(0x19b8), &b, &changes, Stops::Never, &m).map(|(o, _)| o.dump_unnamed());
+    let after = retrim_with(OpKey(0x19b8), &b, &changes, Stops::AfterHeld, &m)
+        .map(|(o, _)| o.dump_unnamed());
+    assert_eq!(format!("{never:?}"), format!("{after:?}"));
 }
