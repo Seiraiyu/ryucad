@@ -235,6 +235,10 @@ pub(crate) struct Meter<'a> {
     scope: Cell<Option<Scope>>,
     /// The operation's enclosures, shared by every meter of the call.
     enclosures: &'a Enclosures,
+    /// Inside a re-trim rung's first build (plan 20.B): no tube contact
+    /// after a failed trace there, so every body built today keeps its
+    /// first build's answer.
+    first_build: Cell<bool>,
 }
 
 impl<'a> Meter<'a> {
@@ -252,6 +256,7 @@ impl<'a> Meter<'a> {
             cap: Cell::new(u64::MAX),
             scope: Cell::new(None),
             enclosures,
+            first_build: Cell::new(false),
         }
     }
 
@@ -315,6 +320,19 @@ impl<'a> Meter<'a> {
         Ok(())
     }
 
+    /// Runs `f` as a re-trim rung's first build (plan 20.B).
+    pub(crate) fn first_build<R>(&self, f: impl FnOnce() -> R) -> R {
+        let outer = self.first_build.replace(true);
+        let r = f();
+        self.first_build.set(outer);
+        r
+    }
+
+    /// Whether this is inside a re-trim rung's first build.
+    pub(crate) fn in_first_build(&self) -> bool {
+        self.first_build.get()
+    }
+
     /// Runs `f` under `scope`'s cap: once it has spent the scope's units,
     /// charges answer `Capped` until it returns.
     pub(crate) fn capped<R>(&self, scope: Scope, f: impl FnOnce() -> R) -> R {
@@ -357,12 +375,14 @@ impl<'a> Meter<'a> {
         let halted = self.halted.get() || self.spent.get() > work.budget;
         let scope = self.scope.get();
         let cap = self.cap.get();
+        let first_build = self.first_build.get();
         // One task on a fresh meter given `room`: its result, count and halt.
         let one = |t: &T, room: u64| {
             let m = Meter::with_enclosures(work, enclosures);
             m.halted.set(halted);
             m.cap.set(room);
             m.scope.set(scope);
+            m.first_build.set(first_build);
             let r = f(&m, t);
             (r, m.spent.get(), m.halted.get())
         };

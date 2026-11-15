@@ -653,7 +653,6 @@ fn crossing_cylinders(f: &Frame, r1: f64, g: &Frame, r2: f64, out: &mut Out) -> 
 /// one of [`exact`]'s pairs: tried only once the trace fails
 /// (`ss::meet`), so every pair that traces keeps its result. `None` for
 /// any other cylinder and torus.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn tube(a: &Surface, b: &Surface, region: &Box3) -> Option<(Vec<Raw>, Vec<Point3>)> {
     let (sc, st) = match (a, b) {
         (Surface::Cylinder(_), Surface::Torus(_)) => (a, b),
@@ -698,7 +697,6 @@ pub(crate) fn tube(a: &Surface, b: &Surface, region: &Box3) -> Option<(Vec<Raw>,
 /// Hermite error bound, `h⁴/384` times the fourth derivative (at most
 /// about `2√(R r) + 16 r`), is a quarter resolution. `ss::with_pcurves`
 /// then grows the branch's tolerance to its certified pcurve bounds.
-#[cfg_attr(not(test), allow(dead_code))]
 fn tube_loop(
     p: Point3,
     n: Vector3,
@@ -1446,5 +1444,19 @@ mod tests {
         assert!(tube(&off, &t, &region()).is_none());
         let tilted = cylinder((3.0, 0.0, 0.0), (0.0, 1.0, 1e-6), 1.0);
         assert!(tube(&tilted, &t, &region()).is_none());
+    }
+
+    #[test]
+    fn a_tube_contact_is_found_once_the_trace_fails() {
+        let t = torus((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 3.0, 1.0);
+        let c = cylinder((3.0, 0.0, 0.0), (0.0, 1.0, 0.0), 1.0);
+        // Through the public intersector: the tangent circle and the
+        // loop, each on both surfaces within its tolerance, either way
+        // round (`meet` checks both).
+        let (branches, _) = meet(&c, &t);
+        assert_eq!(kinds(&branches), [("circle", true), ("nurbs", false)]);
+        for b in &branches {
+            assert!(b.tolerance <= 1e-7, "{}", b.tolerance);
+        }
     }
 }

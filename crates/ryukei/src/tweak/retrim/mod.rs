@@ -213,7 +213,12 @@ pub(crate) fn retrim_with(
         // Each build under its own cap: one that can't settle refuses
         // `Uncertain` in bounded units, as the caps do.
         Some(m.capped(crate::work::Scope::Rung, || {
-            attempt(key, body, changes, &region, &bx, rung, which, m)
+            let build = || attempt(key, body, changes, &region, &bx, rung, which, m);
+            if which.narrowed() {
+                build()
+            } else {
+                m.first_build(build)
+            }
         }))
     })
 }
