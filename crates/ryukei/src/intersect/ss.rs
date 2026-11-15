@@ -131,21 +131,25 @@ pub(crate) fn meet(
             });
         }
     }
-    if let Some((raws, mut points)) = ss_exact::exact(a, b, region) {
-        let mut branches = Vec::new();
-        for raw in raws {
-            for piece in split_at_poles(raw, [a, b]) {
-                // A sliver the region clips off a curve is a point.
-                if let Some(p) = sliver(&piece) {
-                    points.push(p);
-                    continue;
-                }
-                branches.push(with_pcurves(piece, [a, b], m)?);
-            }
-        }
-        return Ok(SurfaceHit::Meet { branches, points });
+    if let Some((raws, points)) = ss_exact::exact(a, b, region) {
+        return exact_hit(raws, points, [a, b], m);
     }
-    let topo = trace(a, b, region, m)?;
+    let topo = match trace(a, b, region, m) {
+        Ok(t) => t,
+        // A cylinder continuing a torus's tube is tangent to it all along
+        // a circle, where no trace certifies (#652, FTC 10; plan 20.B):
+        // its closed form, tried only once the trace has failed, so every
+        // pair that traces keeps its result; and never in a re-trim
+        // rung's first build, whose `Uncertain` the narrowed retry
+        // answers today (19.A's bent rod), so it keeps its bits.
+        Err(Failure::Uncertain) if !m.in_first_build() => {
+            return match ss_exact::tube(a, b, region) {
+                Some((raws, points)) => exact_hit(raws, points, [a, b], m),
+                None => Err(Failure::Uncertain),
+            };
+        }
+        Err(e) => return Err(e),
+    };
     // The tracer takes the surface of lower rank as its first.
     let swapped = rank(a) > rank(b);
     let order = if swapped { [b, a] } else { [a, b] };
@@ -159,6 +163,28 @@ pub(crate) fn meet(
     }
     let mut points = topo.points;
     let branches = fitted(&chains, order, swapped, &mut points, m)?;
+    Ok(SurfaceHit::Meet { branches, points })
+}
+
+/// A closed form's branches with their pcurves (split at poles, slivers
+/// as points), as [`meet`] answers it.
+fn exact_hit(
+    raws: Vec<Raw>,
+    mut points: Vec<Point3>,
+    surfaces: [&Surface; 2],
+    m: &Meter,
+) -> Result<SurfaceHit, Failure> {
+    let mut branches = Vec::new();
+    for raw in raws {
+        for piece in split_at_poles(raw, surfaces) {
+            // A sliver the region clips off a curve is a point.
+            if let Some(p) = sliver(&piece) {
+                points.push(p);
+                continue;
+            }
+            branches.push(with_pcurves(piece, surfaces, m)?);
+        }
+    }
     Ok(SurfaceHit::Meet { branches, points })
 }
 

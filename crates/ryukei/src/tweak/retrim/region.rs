@@ -31,7 +31,7 @@ fn vertex_faces(body: &Body, v: VertexId) -> BTreeSet<FaceId> {
 }
 
 /// The vertices of face `f` (its edges' ends, and a lone vertex).
-fn face_vertices(body: &Body, f: FaceId) -> BTreeSet<VertexId> {
+pub(crate) fn face_vertices(body: &Body, f: FaceId) -> BTreeSet<VertexId> {
     let mut out = BTreeSet::new();
     for l in body.face_loops(f) {
         if let Some(v) = body.loops[l].vertex {

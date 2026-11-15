@@ -60,7 +60,18 @@ const MAX_SIZE: f64 = 2e-3;
 /// working faces carried far along their straight directions that cross
 /// nearly tangent with no edge between them, which no seam certificate
 /// meets (plan 19.B, question 882: FTC 07's cone/cylinder past its
-/// stopped run, FTC 10's cylinder continuing its torus's tube).
+/// stopped run, FTC 10's cylinder continuing its torus's tube). Plan
+/// 20.A's narrowed build gets FTC 07 to rung 2, where a cylinder and a
+/// NURBS face (`18dae4b7`/`33b57350`) carried with no shared edge refuse
+/// `Uncertain`; FTC 10's narrowed retry refuses at a plane paired with
+/// itself. Plan 20.B's near boxes part both pairs (their cuts' tests), and
+/// its related overlapping stretches settle the plane (its split tied two
+/// stretches lying on each other). What stops each now (#652, plan 20.B):
+/// FTC 07's narrowed walks clip at faces of the grown ring touching no
+/// change, and rung 3 refuses at a torus and a plane touching none,
+/// overlapping; FTC 10's walk is `HealAmbiguous` at a kept 1 mm ball slit
+/// by a carried NURBS face's curve ending inside it, as its first builds
+/// at rungs 0 and 1 are.
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -577,8 +588,11 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 /// edge between them; FTC 10's working cylinder continues its torus's
 /// tube straight on, tangent to it along an inner circle. The plane/plane
 /// pair census I saw was an artefact of its skipped pairs.
+///
+/// Plan 20.B parts those pairs (near boxes; the tube contact in narrowed
+/// builds) and recorded what stops both next (see [`KNOWN_REFUSED`]).
 #[test]
-#[ignore = "#652: carried near-tangent pairs with no shared edge (recorded in ryukei 19.B)"]
+#[ignore = "#652: walks clipped at ring faces and a kept ball slit by a carried face (recorded in ryukei 20.B)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
@@ -627,14 +641,26 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// geometry-only edition (#20754), its bends' `Uncertain` tangency now
 /// held (question 917). A refusal or a deadline for any of them fails.
 /// Still out (#652, #658): FTC 07 AP242 #13541 (a pair of working faces
-/// with no shared edge refuses `Uncertain`); STC 07 #11020 (its held bend
-/// settles, so the ladder climbs to rung 2, whose builds' parallel pairs
-/// each stay within the rung's cap but add up past it: past the deadline,
-/// 165 s with none, where main refused in 71 s; a rung's cap bounds each
-/// pair, not their sum, as for linkrods);
-/// STC 10 #3044 (a torus/cylinder pair with no shared edge); CTC 02 with
-/// PMI #295 (carried near-tangent cylinders with no shared edge, recorded
-/// under question 882); linkrods #11 (past the deadline on main too).
+/// with no shared edge refuses `Uncertain`, after its narrowed retry at
+/// a cylinder/cone pair); STC 07 #11020 (the rung's ordered sum, plan
+/// 20.A, bounds its builds: refused `Uncertain` in 106 s, inside the
+/// deadline);
+/// STC 10 #3044 (a torus/cylinder pair with no shared edge, then its
+/// narrowed retry at a sphere paired with itself); CTC 02 with PMI #295
+/// (carried near-tangent cylinders with no shared edge, recorded under
+/// question 882); linkrods #11 (still past the deadline: its first build,
+/// now bounded by the ordered sum, takes 65 s, one NURBS/torus pair
+/// costing about 4 µs a unit, and the narrowed retry of its held NURBS
+/// pair 52 s more).
+///
+/// Plan 20.B's near boxes part FTC 07 AP242's first pair, STC 10's and
+/// CTC 02 with PMI's, and none of the five defeatures yet (#652, #658):
+/// FTC 07 AP242's retry refuses at a cylinder and a cone carried with no
+/// shared edge (`79b561f3`/`178d3260`, overlapping); STC 10's split can't
+/// group two sphere faces holding a lone pole; CTC 02 with PMI's retry
+/// refuses at a plane and a NURBS face touching no change, overlapping
+/// (`74fca8b1`/`b150cb1a`); STC 07 still refuses inside the deadline and
+/// linkrods still runs past it (122 s), as on main.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
