@@ -48,23 +48,32 @@ jobs:
         working-directory: fuzz
         # bash, for pipefail: the log is kept for the report below.
         shell: bash
-        # ASan's quarantine (256 MB by default) held most of the offset
-        # target's gigabyte a case (#746: 41 MB without the sanitizer, 199
-        # MB with a 16 MB quarantine): it runs with a 64 MB one.
+        # Memory (design 600, plan 30.C). Most out-of-memory kills were
+        # ASan's, not the code's: at each kill the live heap was 2 to 10%
+        # of RSS, the rest ASan's 256 MB quarantine, its stack depot (about
+        # 2 GB of self_union's 2.6 GB alone), its allocator's free lists
+        # for millions of small chunks (never returned to the OS) and its
+        # shadow. Every target runs with a 64 MB quarantine and its free
+        # pages returned each second. Each -rss_limit_mb is the largest
+        # session peak measured, times 1.5, rounded up to a power of two,
+        # at least libFuzzer's 2,048 and at most 6,144: an hour on
+        # cox-worker-4 under these options for feature (3,038 MB), sweep
+        # (2,718 MB), self_union (2,577) and offset (1,839, #746); for
+        # tolerant the nightlies' 2,027 (its hour stops at #905's crashes);
+        # and the largest `rss:` of the last 15 runs' green jobs for the
+        # rest (boolean 2,215, sheet 1,819, drawing 1,423). The peaks are
+        # in docs/claude/kernel-work.md (Fuzzing memory). -malloc_limit_mb
+        # keeps one allocation over 2 GB loud whatever the RSS limit. The
+        # sweep, offset, tweak, edit, projection, self_union and tolerant
+        # targets run each case under ryukei_testkit::FUZZ_DEADLINE (450
+        # s), so they take a 600 s timeout; the rest keep libFuzzer's 1,200 s.
         env:
-          ASAN_OPTIONS: ${{ matrix.target == 'offset' && 'quarantine_size_mb=64' || '' }}
-        # libFuzzer's own memory grows past 4 GB on the boolean and blend
-        # targets, past 2 GB on sweep's (issue #160: every input it held
-        # then builds in under a second and a few megabytes in release), and
-        # the offset target builds on blends and booleans, as the export
-        # sheet and sheet_metal targets' bodies do, and the tweak target builds
-        # on blends and booleans as the offset target does, as the projection
-        # target does. The sweep, offset, tweak, edit and projection targets run each case under ryukei_testkit::FUZZ_DEADLINE
-        # (450 s), so their cases end within 600 s; blend's keep libFuzzer's default 1,200 s.
+          ASAN_OPTIONS: quarantine_size_mb=64:allocator_release_to_os_interval_ms=1000
+          RSS_LIMIT_MB: ${{ fromJSON('{"feature":6144,"sweep":4096,"boolean":4096,"offset":4096,"tolerant":4096,"self_union":4096,"sheet":4096,"drawing":4096}')[matrix.target] || 2048 }}
+          TIMEOUT_S: ${{ fromJSON('{"sweep":600,"offset":600,"tweak":600,"edit":600,"projection":600,"self_union":600,"tolerant":600}')[matrix.target] || 1200 }}
         run: >-
           cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
-          ${{ (matrix.target == 'boolean' || matrix.target == 'blend' || matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak' || matrix.target == 'edit' || matrix.target == 'export' || matrix.target == 'sheet' || matrix.target == 'sheet_metal' || matrix.target == 'projection') && '-rss_limit_mb=6144' || '' }}
-          ${{ (matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak' || matrix.target == 'edit') && '-timeout=600' || '' }}
+          -rss_limit_mb=$RSS_LIMIT_MB -malloc_limit_mb=2048 -timeout=$TIMEOUT_S
           2>&1 | tee "$RUNNER_TEMP/fuzz.log"
       - name: Upload crashes
         if: failure()
