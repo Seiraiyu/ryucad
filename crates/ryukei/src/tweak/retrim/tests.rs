@@ -723,3 +723,37 @@ fn a_body_that_builds_is_the_same_with_stops_allowed() {
         .map(|(o, _)| o.dump_unnamed());
     assert_eq!(format!("{never:?}"), format!("{after:?}"));
 }
+
+/// Design 669: a retry that narrows nothing is never built, and a rung
+/// built narrowed only, where nothing narrows, is its first build to the
+/// bit. The block's top raised: no held seam, no straddling face.
+#[test]
+fn a_retry_that_narrows_nothing_is_never_built() {
+    use super::{Build, Rung, attempt};
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes
+        .motion
+        .keys()
+        .chain(&changes.deleted)
+        .copied()
+        .collect();
+    let region = super::region::region(&b, &changed);
+    let bx = super::body::region_box(&b, &region, super::reach(&b, &changes));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    assert!(matches!(
+        attempt(K, &b, &changes, &region, &bx, Build::Retry, &m),
+        Rung::Unchanged
+    ));
+    let dump = |r: Rung| match r {
+        Rung::Done(r) => r.ok().map(|(o, _)| o.dump_unnamed()),
+        _ => None,
+    };
+    let first = dump(attempt(K, &b, &changes, &region, &bx, Build::First, &m));
+    assert!(first.is_some(), "the raised block builds");
+    assert_eq!(
+        dump(attempt(K, &b, &changes, &region, &bx, Build::Only, &m)),
+        first
+    );
+}

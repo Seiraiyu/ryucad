@@ -303,8 +303,8 @@ fn attempt(
     // The seams kept faces were tangent along, all along or in places,
     // across the frontier too (design 642).
     let held = held::held(body, region, &still);
-    // Whether a build with stops narrowed anything.
-    let mut stopping = false;
+    // Whether a narrowed build narrowed anything.
+    let mut narrowing = false;
     for &f in region
         .faces
         .iter()
@@ -328,47 +328,54 @@ fn attempt(
             bx,
         ) {
             Ok(mut w) => {
-                // A face standing for others on its surface covers them
-                // all: its whole turn (NIST FTC 09's hole halves).
-                if !absorbing.contains(&f) {
-                    for (k, t) in working::delete_turn(body, changes, f, &w.surface, false)
-                        .into_iter()
-                        .enumerate()
-                    {
-                        if let Some(t) = t {
-                            w.rect[k] = t;
+                // Its turn as a first build gives it, and in a narrowed
+                // build read round the circle (design 669). A face
+                // standing for others on its surface covers them all: its
+                // whole turn (NIST FTC 09's hole halves).
+                let turned = |circular: bool| {
+                    let mut r = w.rect;
+                    if !absorbing.contains(&f) {
+                        for (k, t) in working::delete_turn(body, changes, f, &w.surface, circular)
+                            .into_iter()
+                            .enumerate()
+                        {
+                            if let Some(t) = t {
+                                r[k] = t;
+                            }
                         }
                     }
-                }
-                // Built again with stops: the working face ends at its held
-                // seams whose ends can't move (design 642).
-                if narrowed {
-                    let before = w.rect;
-                    w.rect = held::iso_stops(body, f, &held, &w.surface, w.rect);
-                    stopping |= w.rect != before;
-                    // Where no iso stop did, a plane stop (plan 19.B).
+                    r
+                };
+                let first = turned(false);
+                let round = narrowed.then(|| turned(true));
+                w.rect = first;
+                // Built narrowed: turned round the circle, then ended at
+                // its held seams whose ends can't move (design 642), iso
+                // stops first and plane stops where none applied.
+                if let Some(round) = round {
+                    w.rect = held::iso_stops(body, f, &held, &w.surface, round);
                     if let Some(cut) = held::plane_stops(
                         body::sheet_key(key, body.faces[f].name),
                         body,
                         f,
                         &held,
                         &w.surface,
-                        before,
+                        round,
                         w.rect,
                         bx,
                         m,
                     ) {
                         w.cut = Some(cut);
-                        stopping = true;
                     }
+                    narrowing |= w.rect != first || w.cut.is_some();
                 }
                 ws.insert(f, w);
             }
             Err(e) => return done(Err(e)),
         }
     }
-    // A build with stops that stops nothing would only repeat the first.
-    if which == Build::Retry && !stopping {
+    // A narrowed retry that narrows nothing would only repeat the first.
+    if which == Build::Retry && !narrowing {
         return Rung::Unchanged;
     }
     let w = match work_body(key, body, region, &ws, m) {
