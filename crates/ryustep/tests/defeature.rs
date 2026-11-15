@@ -55,7 +55,12 @@ const MAX_SIZE: f64 = 2e-3;
 /// issue: NIST FTC 07 and FTC 10, kept faces tangent along a seam whose
 /// carried working faces meet uncertain (plan 16.C, question 517). Plan
 /// 18.C's known seams don't reach them: their seams lie on the frontier
-/// or are only partly smooth (#652, ryukei 19).
+/// or are only partly smooth (#652, ryukei 19). Ryukei 19's held seams
+/// and stops settle FTC 07's seams, but both still end at a pair of
+/// working faces carried far along their straight directions that cross
+/// nearly tangent with no edge between them, which no seam certificate
+/// meets (plan 19.B, question 882: FTC 07's cone/cylinder past its
+/// stopped run, FTC 10's cylinder continuing its torus's tube).
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -561,10 +566,19 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 ///
 /// Plan 18.C's known seams settle none of them: every failing pair has a
 /// face outside the region across a frontier edge, or an edge tangent
-/// only partly (`PartlySmooth`) with NURBS pcurves, and a plane/plane pair
-/// beside the frontier refuses behind them (#652's census; ryukei 19).
+/// only partly (`PartlySmooth`) with NURBS pcurves (#652's census; ryukei
+/// 19).
+///
+/// Plans 19.A and 19.B hold those seams and stop the working faces at
+/// them (iso and plane stops, box-apart parts). What stops both now is
+/// recorded on #652 (plan 19.B, question 882): FTC 07's stopped build
+/// walks into its quarter runs carried a whole turn, and past that a
+/// cone and a cylinder carried about 0.5 m cross nearly tangent with no
+/// edge between them; FTC 10's working cylinder continues its torus's
+/// tube straight on, tangent to it along an inner circle. The plane/plane
+/// pair census I saw was an artefact of its skipped pairs.
 #[test]
-#[ignore = "#652: frontier and partly smooth seams, carried past, meet uncertain (ryukei 19)"]
+#[ignore = "#652: carried near-tangent pairs with no shared edge (recorded in ryukei 19.B)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
