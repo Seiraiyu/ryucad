@@ -757,3 +757,39 @@ fn a_retry_that_narrows_nothing_is_never_built() {
         first
     );
 }
+
+/// FTC 07's quarter run (#652; census III): its pcurves straddle the
+/// period's seam (one side stored at u = 5.5065, the other at 0.7767, its
+/// rims over [-0.7767, 0.7767]), so read plainly it spans nearly the
+/// whole turn, and round the circle (design 669) it is its rims' arc,
+/// just under a quarter (89°), starting at the side moved a period down.
+#[test]
+fn ftc_07s_run_is_a_quarter_round_the_circle() {
+    use crate::codec::decode_body;
+    use crate::geom::Surface;
+    use core::f64::consts::{PI, TAU};
+    let input = decode_body(include_bytes!(
+        "../../../tests/data/nist_ftc_07_seam_input.body"
+    ))
+    .unwrap();
+    let run = input
+        .faces()
+        .find(|&f| matches!(input.surfaces[input.faces[f].surface], Surface::Cylinder(_)))
+        .expect("the run");
+    let [lo, hi] = super::working::own_span(&input, run, 0).unwrap();
+    assert!(hi - lo > 1.5 * PI, "read plainly: {lo} {hi}");
+    let [a, z] = super::working::own_hull(&input, run, 0, TAU).unwrap();
+    assert!(
+        z - a > 0.45 * PI && z - a < 0.6 * PI,
+        "round the circle: {a} {z}"
+    );
+    // Every fin's span lies in the hull, read a whole period at most away.
+    for fin in input.face_loops(run).flat_map(|l| input.loop_fins(l)) {
+        let [c, d] = super::working::fin_span(&input, fin, 0).unwrap();
+        let shift = ((a - c) / TAU).ceil() * TAU;
+        assert!(
+            c + shift >= a - 1e-12 && d + shift <= z + 1e-12,
+            "{c} {d} in {a} {z}"
+        );
+    }
+}
