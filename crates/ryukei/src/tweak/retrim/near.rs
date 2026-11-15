@@ -80,6 +80,59 @@ impl Gaps {
     }
 }
 
+/// Working face `f`'s near box at `rung` (design 669, plan 20.B): `f`'s
+/// box joined with the boxes of the gaps it touches (one holding a face
+/// that shares a vertex with `f`, or `f` itself), grown by the largest of
+/// their reaches (`reach`'s floor, ten resolutions, where it touches
+/// none), doubled about its middle at rung 1 as the rung's box is, and
+/// kept inside the rung's box `x` (already doubled at rung 1); `x` itself
+/// where they don't meet.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn near_box(body: &Body, gaps: &Gaps, f: FaceId, x: &Box3, rung: usize) -> Box3 {
+    let mut touched = BTreeSet::new();
+    if let Some(&k) = gaps.of.get(&f) {
+        touched.insert(k);
+    }
+    for v in face_vertices(body, f) {
+        for e in body.vertex_edges(v) {
+            for fin in body.edge_fins(e) {
+                let g = body.loops[body.fins[fin].loop_].face;
+                if let Some(&k) = gaps.of.get(&g) {
+                    touched.insert(k);
+                }
+            }
+        }
+    }
+    let mut b = face_box(body, f);
+    let mut r: f64 = 10.0 * crate::tol::LINEAR_RESOLUTION;
+    for k in touched {
+        b = b.union(&gaps.boxes[k]);
+        r = r.max(gaps.reach[k]);
+    }
+    let mut n = b.grow(r);
+    if rung == 1 {
+        n = super::body::doubled(&n);
+    }
+    within(&n, x).unwrap_or(*x)
+}
+
+/// Where boxes `a` and `x` overlap, or `None`.
+#[cfg_attr(not(test), allow(dead_code))]
+fn within(a: &Box3, x: &Box3) -> Option<Box3> {
+    use crate::geom::Point3;
+    let lo = Point3::new(
+        a.min().x.max(x.min().x),
+        a.min().y.max(x.min().y),
+        a.min().z.max(x.min().z),
+    );
+    let hi = Point3::new(
+        a.max().x.min(x.max().x),
+        a.max().y.min(x.max().y),
+        a.max().z.min(x.max().z),
+    );
+    (lo.x <= hi.x && lo.y <= hi.y && lo.z <= hi.z).then(|| Box3::new(lo, hi))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::super::region::region;
@@ -169,5 +222,92 @@ pub(crate) mod tests {
             gaps.reach[0].to_bits(),
             super::super::reach(&r, &changes).to_bits()
         );
+    }
+
+    /// The region's box for `changes`, as `retrim_with` makes it at rung 0.
+    fn rung_box(r: &Body, changes: &Changes, region: &Region) -> Box3 {
+        super::super::body::region_box(r, region, super::super::reach(r, changes))
+    }
+
+    fn holds(outer: &Box3, inner: &Box3) -> bool {
+        let (a, b) = (outer.min(), outer.max());
+        let (c, d) = (inner.min(), inner.max());
+        a.x <= c.x && a.y <= c.y && a.z <= c.z && d.x <= b.x && d.y <= b.y && d.z <= b.z
+    }
+
+    #[test]
+    fn a_face_beside_a_deleted_corner_is_carried_past_it_not_across_the_body() {
+        let (r, low, high) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low, high]),
+            ..Default::default()
+        };
+        let region = region(&r, &BTreeSet::from([low, high]));
+        let gaps = Gaps::of(&r, &changes, &region);
+        let x = rung_box(&r, &changes, &region);
+        let ball = crate::intersect::face_box(&r, low);
+        let far = crate::intersect::face_box(&r, high);
+        let mut beside = 0;
+        for &f in region.faces.iter().filter(|f| !changes.deleted.contains(f)) {
+            let n = near_box(&r, &gaps, f, &x, 0);
+            // Inside the rung's box, holding the face's own box.
+            assert!(holds(&x, &n), "{f:?}");
+            assert!(holds(&n, &crate::intersect::face_box(&r, f)), "{f:?}");
+            // A face round the low corner holds its ball, and stops well
+            // short of the far corner's.
+            if crate::intersect::face_box(&r, f).intersects(&ball.grow(1e-9)) {
+                beside += 1;
+                assert!(holds(&n, &ball), "{f:?}");
+                assert!(!n.intersects(&far), "{f:?}: {n:?}");
+            }
+        }
+        assert!(beside >= 3, "{beside}");
+    }
+
+    #[test]
+    fn a_face_touching_no_gap_keeps_its_own_box() {
+        let (r, low, _) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low]),
+            ..Default::default()
+        };
+        // Rung 2's region: grown by a ring.
+        let region = region(&r, &BTreeSet::from([low])).grown(&r);
+        let gaps = Gaps::of(&r, &changes, &region);
+        let x = rung_box(&r, &changes, &region);
+        let lone = region
+            .faces
+            .iter()
+            .copied()
+            .find(|&f| {
+                face_vertices(&r, f)
+                    .iter()
+                    .all(|&v| !face_vertices(&r, low).contains(&v))
+            })
+            .expect("a face of the ring touching no gap");
+        let n = near_box(&r, &gaps, lone, &x, 2);
+        let own = crate::intersect::face_box(&r, lone);
+        assert_eq!(n, own.grow(10.0 * crate::tol::LINEAR_RESOLUTION));
+    }
+
+    #[test]
+    fn rung_one_doubles_a_near_box_inside_its_doubled_box() {
+        let (r, low, high) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low, high]),
+            ..Default::default()
+        };
+        let region = region(&r, &BTreeSet::from([low, high]));
+        let gaps = Gaps::of(&r, &changes, &region);
+        let x = super::super::body::doubled(&rung_box(&r, &changes, &region));
+        let f = region
+            .faces
+            .iter()
+            .copied()
+            .find(|f| !changes.deleted.contains(f))
+            .unwrap();
+        let (n0, n1) = (near_box(&r, &gaps, f, &x, 0), near_box(&r, &gaps, f, &x, 1));
+        assert!(holds(&n1, &n0));
+        assert!(holds(&x, &n1));
     }
 }
