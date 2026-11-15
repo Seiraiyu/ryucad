@@ -605,13 +605,16 @@ fn an_iso_stopped_run_takes_no_plane_stop() {
     );
 }
 
-/// A plane stop at a running seam that cuts off what the result needs
-/// fails the walk at its clipped cut, and the first answer stands
-/// (question 916): 18.C's rounded block, its top raised so the round
-/// runs on past its moved end, re-trims to the same body with stops and
-/// without.
+/// A body whose first build settles is the same with stops allowed and
+/// without (question 916): 18.C's rounded block, its top raised so the
+/// round runs on past its moved end. Its first build builds, so `settle`
+/// never runs the stopped build here and no plane stop is taken; plane
+/// stops at running seams are covered by `held`'s `RUNNING_PLANE_STOPS`
+/// and stop-plane tests and by 19.A's
+/// `a_stopped_rung_answers_only_where_its_walk_closes`. A body whose first
+/// build refuses at a running seam is still wanted for a test of its own.
 #[test]
-fn a_running_seams_stop_never_changes_a_body_that_builds() {
+fn a_body_that_builds_is_the_same_with_stops_allowed() {
     use super::{Stops, retrim_with};
     use crate::blend::{BlendKind, EdgeBlend, blend};
     let b0 = block();

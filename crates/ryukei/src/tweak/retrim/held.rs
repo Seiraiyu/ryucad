@@ -729,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn a_running_seam_or_a_crossing_face_has_no_stop_plane() {
+    fn a_running_seam_has_a_stop_plane_and_a_face_paired_with_itself_none() {
         let (s, mut h) = oblique_pair();
         // unmetered: a unit test.
         let m = Meter::free();
