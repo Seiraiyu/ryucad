@@ -9,10 +9,15 @@
 use crate::blend_bytes::{BlendCase, blend_case};
 use crate::boolean_bytes::{Case, boolean_case};
 use crate::euler_script::Bytes;
+use ryukei::BooleanError;
 use ryukei::Error;
+use ryukei::blend::blend_with;
 use ryukei::blend::{BlendKind, Chamfer, EdgeBlend};
+use ryukei::boolean::boolean_with;
+use ryukei::check::{Fault, check, check_intersections_with};
 use ryukei::geom::{Rigid, Vector3};
 use ryukei::heal::{HealOptions, heal, seamed};
+use ryukei::mesh::{MeshParams, check_mesh, tessellate_with};
 use ryukei::name::{Name, OpKey};
 use ryukei::topo::{Body, EdgeId, EntityId};
 
@@ -207,6 +212,94 @@ pub fn tolerant_blend_case(data: &[u8]) -> Option<TolerantBlend> {
         tolerant: BlendCase { body, blends },
         exact,
         by,
+    })
+}
+
+/// What the `tolerant` fuzz target made of its bytes (plan 30.C).
+#[derive(Debug)]
+pub enum TolerantRun {
+    /// The bytes build no case, or healing refused a twin.
+    NoCase,
+    /// The boolean or blend refused it, or the fuzz case's budget or
+    /// deadline did: a typed refusal, never a bug.
+    Refused(Error),
+    /// A body that passed every check, meshed or too large to mesh.
+    Built,
+}
+
+/// The `tolerant` fuzz target's case, under one [`crate::fuzz_case`]: an
+/// even first byte takes the rest as a tolerant boolean
+/// ([`tolerant_case`]), an odd one as a tolerant blend
+/// ([`tolerant_blend_case`]); the result is checked and meshed. Building
+/// the twins (their healing) comes before the case's work, as it did in
+/// the target. Panics on any bug, as the target did.
+pub fn tolerant_run(data: &[u8]) -> TolerantRun {
+    let Some((&first, rest)) = data.split_first() else {
+        return TolerantRun::NoCase;
+    };
+    let boolean_case = if first % 2 == 0 {
+        tolerant_case(rest)
+    } else {
+        None
+    };
+    let blend_case = if first % 2 == 1 {
+        tolerant_blend_case(rest)
+    } else {
+        None
+    };
+    if boolean_case.is_none() && blend_case.is_none() {
+        return TolerantRun::NoCase;
+    }
+    crate::fuzz_case(|work| {
+        let stopped = |e: &Error| matches!(e, Error::BudgetExceeded { .. } | Error::Cancelled);
+        let body = if let Some(case) = &boolean_case {
+            let c = &case.tolerant;
+            match work.run(|w| boolean_with(OpKey(9), c.op, &c.target, &c.tools(), w)) {
+                Ok((body, _)) => body,
+                Err(
+                    e @ Error::InvalidBoolean(
+                        BooleanError::Uncertain { .. }
+                        | BooleanError::Unsupported { .. }
+                        | BooleanError::NonManifold { .. }
+                        | BooleanError::ToleranceTooLarge { .. },
+                    ),
+                ) => return TolerantRun::Refused(e),
+                Err(e) if stopped(&e) => return TolerantRun::Refused(e),
+                Err(e) => panic!("unexpected {e:?}"),
+            }
+        } else {
+            let c = &blend_case.as_ref().expect("one of the two").tolerant;
+            match work.run(|w| blend_with(OpKey(0xb1e), &c.body, &c.blends, w)) {
+                Ok((body, _)) => body,
+                Err(e @ Error::InvalidBlend(_)) => return TolerantRun::Refused(e),
+                Err(e) if stopped(&e) => return TolerantRun::Refused(e),
+                Err(e) => panic!("unexpected {e:?}"),
+            }
+        };
+        assert_eq!(check(&body), []);
+        match work.run(|w| check_intersections_with(&body, w)) {
+            Ok(faults) => {
+                for fault in faults {
+                    assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
+                }
+            }
+            Err(e) if stopped(&e) => return TolerantRun::Refused(e),
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+        let params = MeshParams {
+            max_triangles: 200_000,
+            ..MeshParams::new(1e-2, 0.5)
+        };
+        match work.run(|w| tessellate_with(&body, &params, w)) {
+            Ok(m) => {
+                assert_eq!(m.faults, []);
+                assert_eq!(check_mesh(&body, &m), Ok(()));
+            }
+            Err(Error::MeshTooLarge { .. }) => {}
+            Err(e) if stopped(&e) => return TolerantRun::Refused(e),
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+        TolerantRun::Built
     })
 }
 
