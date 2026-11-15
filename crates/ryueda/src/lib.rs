@@ -99,8 +99,8 @@ impl ryu_session::Product for Eda {
 impl ryu_session::prefs::Schema for Eda {
     const CONFIG_DIR_VAR: &'static str = "RYUEDA_CONFIG_DIR";
 
-    /// The one preference so far: how often a watched daemon checks the
-    /// files.
+    /// How often a watched daemon checks the files, how long a catalogue
+    /// serves, and the folders where-used searches.
     fn accepts(name: &str, value: &serde_json::Value) -> bool {
         match name {
             "daemon.poll_ms" => value.as_u64().is_some_and(|n| (10..=10_000).contains(&n)),
@@ -109,6 +109,10 @@ impl ryu_session::prefs::Schema for Eda {
             "parts.max_age" => value
                 .as_u64()
                 .is_some_and(|n| (3_600..=365 * 86_400).contains(&n)),
+            // Folders where-used searches for other checkouts (design 629).
+            "pdm.dependents" => value
+                .as_array()
+                .is_some_and(|a| a.iter().all(serde_json::Value::is_string)),
             _ => false,
         }
     }
@@ -117,6 +121,7 @@ impl ryu_session::prefs::Schema for Eda {
         match name {
             "daemon.poll_ms" => Some(serde_json::json!(250)),
             "parts.max_age" => Some(serde_json::json!(crate::parts::MAX_AGE)),
+            "pdm.dependents" => Some(serde_json::json!([])),
             _ => None,
         }
     }

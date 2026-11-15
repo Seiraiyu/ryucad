@@ -585,7 +585,7 @@ fn library_checks(f: &mut Found, p: &Project, n: &Netlist) {
 
 /// The library component an occurrence's `of` (`lib/<alias>/libcomp/<id>`)
 /// names, as loaded.
-pub(crate) fn placed_libcomp<'a>(
+pub fn placed_libcomp<'a>(
     p: &'a Project,
     of: &str,
 ) -> Option<&'a crate::library::Loaded<crate::libcomp::LibComp>> {
@@ -595,7 +595,7 @@ pub(crate) fn placed_libcomp<'a>(
 
 /// The placement reference an occurrence's `of`
 /// (`lib/<alias>/libcomp/<id>`) is.
-pub(crate) fn of_ref(of: &str) -> Option<crate::libcomp::LibRef> {
+pub fn of_ref(of: &str) -> Option<crate::libcomp::LibRef> {
     let (alias, id) = of.strip_prefix("lib/")?.split_once("/libcomp/")?;
     let library = if alias == SELF {
         None
@@ -650,7 +650,7 @@ fn by_libcomp(n: &Netlist) -> BTreeMap<&str, Vec<&crate::netlist::Occurrence>> {
 
 /// Whether occurrence `o` is marked `dnp` (itself or its library
 /// component, when that loads).
-pub(crate) fn occurrence_dnp(p: &Project, o: &crate::netlist::Occurrence) -> bool {
+pub fn occurrence_dnp(p: &Project, o: &crate::netlist::Occurrence) -> bool {
     match placed_libcomp(p, &o.of).and_then(|l| l.item.as_ref().ok()) {
         Some(c) => is_dnp(p, o, c),
         None => dnp([component_parameters(p, o), None]),
@@ -1089,6 +1089,7 @@ pub fn check(
     cats: &crate::parts::Catalogues,
     release: &[Value],
     deps: &[Value],
+    bom: &[Value],
 ) -> Result<Value> {
     let p = Project::load(root)?;
     let doctor: Vec<Fault> = crate::doctor::diagnose(root, &p)
@@ -1104,7 +1105,7 @@ pub fn check(
         })
         .map(crate::doctor::Issue::fault)
         .collect();
-    check_project(&p, cats, &doctor, release, deps)
+    check_project(&p, cats, &doctor, release, deps, bom)
 }
 
 /// `check` of a loaded project, with doctor's issues `doctor`: the working
@@ -1112,13 +1113,15 @@ pub fn check(
 /// and the release findings `release` (each with its `severity`), in a
 /// `release` section only when there are any: a project without PDM
 /// reports as it always has. `deps`, the library labels' findings
-/// (`crate::libdeps::findings`), are a `deps` section likewise.
+/// (`crate::libdeps::findings`), are a `deps` section likewise, and
+/// `bom`, the BOM's findings (`crate::pdm::bom::findings`), a `bom` one.
 pub fn check_project(
     p: &Project,
     cats: &crate::parts::Catalogues,
     doctor: &[Fault],
     release: &[Value],
     deps: &[Value],
+    bom: &[Value],
 ) -> Result<Value> {
     let faults = p.faults();
     let erc = erc(p, None)?;
@@ -1129,6 +1132,7 @@ pub fn check_project(
     let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
     let release_errors = release.iter().filter(|f| f["severity"] == "error").count() as u64;
     let deps_errors = deps.iter().filter(|f| f["severity"] == "error").count() as u64;
+    let bom_errors = bom.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| f.is_error()).count() as u64
@@ -1137,7 +1141,8 @@ pub fn check_project(
         + doctor.iter().filter(|f| f.is_error()).count() as u64
         + supply_errors
         + release_errors
-        + deps_errors;
+        + deps_errors
+        + bom_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| !f.is_error()).count() as u64
@@ -1146,7 +1151,8 @@ pub fn check_project(
         + doctor.iter().filter(|f| !f.is_error()).count() as u64
         + (supply.len() as u64 - supply_errors)
         + (release.len() as u64 - release_errors)
-        + (deps.len() as u64 - deps_errors);
+        + (deps.len() as u64 - deps_errors)
+        + (bom.len() as u64 - bom_errors);
     let mut report = json!({
         "faults": fault::list(&faults),
         "erc": erc,
@@ -1163,6 +1169,9 @@ pub fn check_project(
     }
     if !deps.is_empty() {
         report["deps"] = json!(deps);
+    }
+    if !bom.is_empty() {
+        report["bom"] = json!(bom);
     }
     if errors > 0 {
         return Err(crate::error::Error::new(

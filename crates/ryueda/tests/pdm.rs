@@ -705,6 +705,135 @@ fn a_design_places_a_sibling_librarys_components_by_label() {
 }
 
 #[test]
+fn boms_diffs_and_where_used_at_labels_and_in_checkouts() {
+    for daemon in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let (top, run) = (d.path().join("repo"), d.path().join("run"));
+        std::fs::create_dir_all(&top).unwrap();
+        let (lib, parts) = library(&top, &run, daemon);
+        let comp = parts.iter().find(|p| p.starts_with("r_")).unwrap().clone();
+        ok(&lib, &run, daemon, &["release", "propose", "--all"]);
+        git(&top, &["add", "-A"]);
+        git(&top, &["commit", "-q", "-m", "library A"]);
+        let board = board_placing(&top, &run, daemon, &comp);
+        ok(
+            &board,
+            &run,
+            daemon,
+            &["lib", "pin", &format!("passives/{comp}"), "--latest"],
+        );
+        release_board(&top, &board, &run, daemon);
+        // The BOM: the passives line at A, with its number from the library.
+        let bom = ok(&board, &run, daemon, &["bom"]);
+        let line = bom["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["part"].as_str().unwrap().ends_with(&format!(":{comp}")))
+            .unwrap_or_else(|| panic!("{bom}"))
+            .clone();
+        assert_eq!(line["revision"], "A", "{line}");
+        assert!(
+            line["properties"]["number"]
+                .as_str()
+                .unwrap()
+                .starts_with("100-"),
+            "{line}"
+        );
+        assert_eq!(line["from"]["number"], "properties");
+        assert!(line["quantity"].as_u64().unwrap() > 0);
+        let at = ok(&board, &run, daemon, &["bom", "--rev", "label:A"]);
+        assert_eq!(
+            at["lines"], bom["lines"],
+            "the release reads as the working files"
+        );
+        ok(&board, &run, daemon, &["bom", "--out", "bom.csv"]);
+        let csv = std::fs::read_to_string(board.join("bom.csv")).unwrap();
+        assert!(
+            csv.lines().count() == bom["lines"].as_array().unwrap().len() + 1,
+            "{csv}"
+        );
+        // The library moves to B; the pin follows; the diff says so.
+        edit_footprint_of(&lib, &comp, "edited");
+        ok(&lib, &run, daemon, &["release", "propose", "--all"]);
+        git(&top, &["add", "-A"]);
+        git(&top, &["commit", "-q", "-m", "library B"]);
+        ok(
+            &board,
+            &run,
+            daemon,
+            &["lib", "pin", &format!("passives/{comp}"), "--latest"],
+        );
+        let diff = ok(&board, &run, daemon, &["bom", "diff"]);
+        assert_eq!(diff["summary"]["changed"], 1, "{diff}");
+        assert_eq!(
+            diff["changed"][0]["revision"],
+            json!({"from": "A", "to": "B"}),
+            "{diff}"
+        );
+        git(&top, &["add", "-A"]);
+        git(&top, &["commit", "-q", "-m", "board at B"]);
+        // Where-used, in the library: the board's working design at B, and
+        // its release A.
+        let w = ok(
+            &lib,
+            &run,
+            daemon,
+            &["where-used", &comp, "--no-dependents"],
+        );
+        assert_eq!(w["working"][0]["design"], "board", "{w}");
+        assert_eq!(w["working"][0]["label"], "B", "{w}");
+        assert_eq!(w["working"][0]["folder"], "board", "{w}");
+        let r = &w["released"][0];
+        assert_eq!(
+            (
+                r["design"].as_str(),
+                r["release"].as_str(),
+                r["label"].as_str()
+            ),
+            (Some("board"), Some("A"), Some("A")),
+            "{w}"
+        );
+        let only_a = ok(
+            &lib,
+            &run,
+            daemon,
+            &["where-used", &comp, "--label", "A", "--no-dependents"],
+        );
+        assert!(only_a["working"].as_array().unwrap().is_empty(), "{only_a}");
+        // Another checkout of the repository, searched with --in.
+        let other = d.path().join("other");
+        git(
+            d.path(),
+            &[
+                "clone",
+                "-q",
+                top.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        let w = ok(
+            &lib,
+            &run,
+            daemon,
+            &["where-used", &comp, "--in", other.to_str().unwrap()],
+        );
+        assert!(
+            w["working"].as_array().unwrap().iter().any(|r| r["folder"]
+                .as_str()
+                .unwrap()
+                .starts_with(other.to_str().unwrap())),
+            "{w}"
+        );
+        assert_eq!(w["dependents"].as_array().unwrap().len(), 1, "{w}");
+        if daemon {
+            ok(&board, &run, true, &["daemon", "stop"]);
+            ok(&lib, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
+#[test]
 fn a_library_in_another_repository_is_fetched_pinned_updated_and_refused_when_rewritten() {
     for daemon in [false, true] {
         let d = tempfile::tempdir().unwrap();

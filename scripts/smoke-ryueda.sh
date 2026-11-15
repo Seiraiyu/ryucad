@@ -96,8 +96,12 @@ run release propose ryu_test_r
 has '"label":"A"' "the resistor is proposed as A"
 run release list
 has '"status":"proposed"' "the record is listed as proposed"
+run where-used ryu_test_r --no-dependents
+has '"working":[]' "no design places the resistor yet"
 run daemon stop
 cd "$work/project"
+run bom
+has '"columns":["number","name","description","part","revision","quantity","uom","make_buy","refdes"' "the design's BOM has ryupdm's and ryueda's columns"
 run undo
 [ ! -f designs/d.json ] || { echo "FAIL undo left the design" && exit 1; }
 run redo

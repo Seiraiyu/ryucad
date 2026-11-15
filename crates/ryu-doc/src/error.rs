@@ -1059,6 +1059,11 @@ pub enum Code {
     /// `working`: only its released labels reach this project (`ryueda
     /// lib pin`).
     LibraryForeignWorking,
+    /// ryueda: a populated BOM line whose library component has no maker
+    /// part number (design 629): `part_unidentified` as the BOM sees it,
+    /// once per line. A warning in `check`'s `bom` section; a problem of
+    /// `release_not_ready`.
+    BomUnidentified,
 }
 
 impl Code {
@@ -1561,6 +1566,7 @@ mod tests {
             (Code::ComponentObsolete, "component_obsolete"),
             (Code::ComponentOutdated, "component_outdated"),
             (Code::LibraryForeignWorking, "library_foreign_working"),
+            (Code::BomUnidentified, "bom_unidentified"),
         ] {
             assert_eq!(serde_json::to_value(c).unwrap(), name);
             assert_eq!(c.exit_code(), 1);

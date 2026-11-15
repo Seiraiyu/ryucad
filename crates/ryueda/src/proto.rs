@@ -139,6 +139,47 @@ pub enum Request {
     /// each one's labels latest first.
     #[serde(rename = "lib.parts")]
     LibParts { alias: String },
+    /// A design's BOM: lines by component, label, value and footprint
+    /// (design 629), flat or by block occurrence, as JSON or CSV.
+    #[serde(rename = "bom.get")]
+    BomGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        build: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        by_block: bool,
+    },
+    /// What changed in a design's BOM between two revisions.
+    #[serde(rename = "bom.diff")]
+    BomDiff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
+    /// Where a library project's component is used: by designs in this
+    /// repository, in other checkouts, and in their releases.
+    #[serde(rename = "bom.where_used")]
+    BomWhereUsed {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        working: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        direct: bool,
+        #[serde(default, rename = "in", skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_dependents: bool,
+    },
     /// Pins components of library aliases (`<alias>/<component>`) at a
     /// release label, each one's latest official label (`latest`), or
     /// unpins them (`working`, a library in this repository only).

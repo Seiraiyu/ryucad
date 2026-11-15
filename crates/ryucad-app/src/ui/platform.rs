@@ -288,6 +288,7 @@ pub fn choose(
     if let Ok(mut name) = ADAPTER.lock() {
         let info = a.get_info();
         *name = format!("{} ({:?})", info.name, info.backend);
+        trace(&format!("adapter: {name}"));
     }
     if candidates[i].software {
         SOFTWARE.store(true, Ordering::Relaxed);
@@ -372,6 +373,7 @@ static FRAMES: AtomicU32 = AtomicU32::new(0);
 /// Notes a frame of the window, before it is drawn.
 pub fn note_frame() {
     FRAMES.fetch_add(1, Ordering::Relaxed);
+    super::exits::frame_begins();
 }
 
 /// Whether a panic is wgpu refusing the window before it has drawn its
@@ -396,10 +398,10 @@ pub fn crash_reports() {
                 "ryucad can't draw its window",
                 &format!("{m}\n\n{NO_ADAPTER}"),
             );
-            trace("exited: can't draw the window");
-            std::process::exit(1);
+            trace("can't draw the window");
+            super::exits::exit(1);
         }
-        let at = std::time::SystemTime::now()
+        let at_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let report = format!(
@@ -408,53 +410,25 @@ pub fn crash_reports() {
             std::backtrace::Backtrace::force_capture()
         );
         let what = info.payload_as_str().unwrap_or("?");
-        if let Ok(dir) = ryucad::endpoint::runtime_dir() {
-            let path = dir.join(format!("ryucad-app-crash-{at}.log"));
-            if std::fs::write(&path, report).is_ok() {
-                eprintln!("ryucad-app: crashed; report in {}", path.display());
-                trace(&format!("panicked: {what}; report in {}", path.display()));
-            } else {
-                trace(&format!("panicked: {what}; the report couldn't be written"));
+        let at = info.location();
+        let report = match ryucad::endpoint::runtime_dir() {
+            Ok(dir) => {
+                let path = dir.join(format!("ryucad-app-crash-{at_secs}.log"));
+                if std::fs::write(&path, report).is_ok() {
+                    eprintln!("ryucad-app: crashed; report in {}", path.display());
+                    format!("report in {}", path.display())
+                } else {
+                    "the report couldn't be written".to_owned()
+                }
             }
-        } else {
-            trace(&format!(
-                "panicked: {what}; no runtime folder for the report"
-            ));
-        }
+            Err(_) => "no runtime folder for the report".to_owned(),
+        };
+        super::exits::panicked(what, at, &report);
         default(info);
     }));
 }
 
-/// The trace's cap: past it the old one becomes `ryucad-app.old.log`.
-const TRACE_CAP: u64 = 1 << 20;
-
-/// The app's trace (#799): `ryucad-app.log` in the runtime folder
-/// (`%LOCALAPPDATA%\ryucad\run` on Windows), where the crash reports go.
-pub fn trace_path() -> Option<std::path::PathBuf> {
-    ryucad::endpoint::runtime_dir()
-        .ok()
-        .map(|d| d.join("ryucad-app.log"))
-}
-
-/// Appends a line to the trace: seconds since the epoch, the process,
-/// the line. Never fails the app.
-pub fn trace(line: &str) {
-    use std::io::Write;
-    let Some(path) = trace_path() else { return };
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > TRACE_CAP) {
-        let _ = std::fs::rename(&path, path.with_file_name("ryucad-app.old.log"));
-    }
-    let at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "{at} {} {line}", std::process::id());
-    }
-}
+pub use super::exits::{trace, trace_path};
 
 /// eframe's, wgpu's and winit's warnings and errors, into the trace:
 /// eframe says why it ends the event loop only through `log`.
@@ -477,9 +451,12 @@ impl log::Log for TraceLog {
 /// the trace file, so what Rust's runtime prints as it aborts -- a stack
 /// overflow, an allocation that failed, a panic's message -- is kept.
 pub fn begin_trace(what: &str) {
+    super::exits::install();
     let _ = log::set_logger(&TraceLog).map(|()| log::set_max_level(log::LevelFilter::Warn));
     #[cfg(windows)]
     stderr_to_trace();
+    #[cfg(windows)]
+    let what = format!("{what} (in {})", super::exits::win::job());
     trace(&format!(
         "ryucad-app {} started: {what}",
         env!("CARGO_PKG_VERSION")

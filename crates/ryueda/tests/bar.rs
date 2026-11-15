@@ -4,7 +4,10 @@
 //! read through a warm daemon take under 50 ms. With `RYUEDA_BARS=1` the
 //! bars are asserted as they are, else ten times looser (a shared CI
 //! runner is no measuring instrument). Run with `--nocapture` to see the
-//! times.
+//! times. Design 629's bars too: a 10,000-occurrence BOM through a warm
+//! daemon in 50 ms, `release propose --all` of 10,000 library components
+//! in 10 s, `release list` over them in 1 s, and where-used over 10
+//! checkouts in 1 s.
 
 #[path = "support/generated.rs"]
 mod generated;
@@ -354,4 +357,138 @@ fn an_edited_sheet_is_drawn_again_within_its_bar() {
         after["owners"].as_array().unwrap().len()
     );
     assert!(drawn < bar(Duration::from_millis(150)), "{drawn:?}");
+}
+
+/// Design 629's bars: the BOM of the 10,000-occurrence design through a
+/// warm daemon within 50 ms; `release propose --all` of 10,000 library
+/// components within 10 s and `release list` over them within 1 s; and
+/// where-used over 10 checkouts within 1 s.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test bar"
+)]
+fn boms_releases_and_where_used_are_within_their_bars() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let at = |cwd: &std::path::Path, args: &[&str]| -> serde_json::Value {
+        let mut cmd = Command::cargo_bin("ryueda").unwrap();
+        cmd.current_dir(cwd)
+            .env("RYUEDA_RUNTIME_DIR", &run)
+            .env("RYUEDA_CONFIG_DIR", dir.path().join("config"))
+            .env("RYUEDA_IDLE_TIMEOUT", "120")
+            .env_remove("RYUEDA_NO_DAEMON");
+        for v in ryueda_parts::distributor::env_vars() {
+            cmd.env_remove(v);
+        }
+        let out = cmd.args(args).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["ok"], true, "{args:?}: {v}");
+        v["result"].clone()
+    };
+    // The BOM, warm.
+    let board = dir.path().join("board");
+    generated::write(&board, 100, 100);
+    at(&board, &["bom"]);
+    let mut worst = Duration::ZERO;
+    for _ in 0..5 {
+        let start = Instant::now();
+        at(&board, &["bom"]);
+        worst = worst.max(start.elapsed());
+    }
+    println!("a 10,000-occurrence BOM through a warm daemon: {worst:?} at worst of five");
+    assert!(worst < bar(Duration::from_millis(50)), "{worst:?}");
+    // 10,000 components released at once, then listed.
+    let repo = dir.path().join("repo");
+    let lib = repo.join("lib");
+    generated::library(&lib, 10_000);
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    at(&lib, &["pdm", "init"]);
+    git(&["add", "-A"]);
+    git(&[
+        "-c",
+        "user.name=b",
+        "-c",
+        "user.email=b@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "lib",
+    ]);
+    let start = Instant::now();
+    let v = at(&lib, &["release", "propose", "--all"]);
+    let proposed = start.elapsed();
+    println!("release propose --all of 10,000 components: {proposed:?}");
+    assert_eq!(
+        v["proposed"].as_array().unwrap().len(),
+        10_000,
+        "{}",
+        v["refused"]
+    );
+    assert!(proposed < bar(Duration::from_secs(10)), "{proposed:?}");
+    git(&["add", "-A"]);
+    git(&[
+        "-c",
+        "user.name=b",
+        "-c",
+        "user.email=b@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "A",
+    ]);
+    at(&lib, &["release", "list"]);
+    let start = Instant::now();
+    at(&lib, &["release", "list"]);
+    let listed = start.elapsed();
+    println!("release list over 10,000 released components: {listed:?}");
+    assert!(listed < bar(Duration::from_secs(1)), "{listed:?}");
+    // Where-used over 10 checkouts, each a 1,000-occurrence design
+    // placing the library's c00000 at working by its project ID.
+    // A folder holding both, as a workspace of checkouts does, so the
+    // library resolves from each (`resolve`'s fence is the nearest folder
+    // with `.git`).
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+    let others = dir.path().join("others");
+    for k in 0..10 {
+        let b = others.join(format!("b{k}"));
+        generated::write(&b, 10, 100);
+        generated::place_from(
+            &b,
+            "lib",
+            "../../repo/lib",
+            "fedcba9876543210fedcba9876543210",
+            "c00000",
+        );
+    }
+    let o = others.to_str().unwrap().to_owned();
+    at(&lib, &["where-used", "c00000", "--in", &o]);
+    let start = Instant::now();
+    let v = at(&lib, &["where-used", "c00000", "--in", &o]);
+    let searched = start.elapsed();
+    println!("where-used over 10 checkouts: {searched:?}");
+    assert_eq!(v["working"].as_array().unwrap().len(), 10, "{v}");
+    assert!(searched < bar(Duration::from_secs(1)), "{searched:?}");
+    for cwd in [&board, &lib] {
+        let _ = Command::cargo_bin("ryueda")
+            .unwrap()
+            .current_dir(cwd)
+            .env("RYUEDA_RUNTIME_DIR", &run)
+            .args(["daemon", "stop"])
+            .output();
+    }
 }

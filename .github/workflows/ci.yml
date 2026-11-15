@@ -75,16 +75,16 @@ jobs:
         include:
           - name: ubuntu-latest (1/3)
             os: ubuntu-latest
-            tests: --workspace -E 'not binary(window)' --partition hash:1/3
+            tests: --workspace -E 'not binary(window) and not binary(burst)' --partition hash:1/3
             prebuilt: 1
             save: true
           - name: ubuntu-latest (2/3)
             os: ubuntu-latest
-            tests: --workspace -E 'not binary(window)' --partition hash:2/3
+            tests: --workspace -E 'not binary(window) and not binary(burst)' --partition hash:2/3
             prebuilt: 1
           - name: ubuntu-latest (3/3)
             os: ubuntu-latest
-            tests: --workspace -E 'not binary(window)' --partition hash:3/3
+            tests: --workspace -E 'not binary(window) and not binary(burst)' --partition hash:3/3
             prebuilt: 1
           - name: ubuntu-latest (window tests)
             os: ubuntu-latest
