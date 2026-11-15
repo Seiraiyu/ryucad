@@ -93,13 +93,15 @@ jobs:
         # rest (boolean 2,215, sheet 1,819, drawing 1,423). The peaks are
         # in docs/claude/kernel-work.md (Fuzzing memory). -malloc_limit_mb
         # keeps one allocation over 2 GB loud whatever the RSS limit. The
-        # sweep, offset, tweak, edit, projection, self_union and tolerant
-        # targets run each case under ryukei_testkit::FUZZ_DEADLINE (450
-        # s), so they take a 600 s timeout; the rest keep libFuzzer's 1,200 s.
+        # feature, sweep, offset, tweak, edit, projection, self_union and
+        # tolerant targets run each case under ryukei_testkit::FUZZ_DEADLINE
+        # (450 s; feature's rebuilds, interference and sweeps through their
+        # job's cancel, plan 30.D, #769), so they take a 600 s timeout; the
+        # rest keep libFuzzer's 1,200 s.
         env:
           ASAN_OPTIONS: quarantine_size_mb=64:allocator_release_to_os_interval_ms=1000
           RSS_LIMIT_MB: ${{ fromJSON('{"feature":6144,"sweep":4096,"boolean":4096,"offset":4096,"tolerant":4096,"self_union":4096,"sheet":4096,"drawing":4096}')[matrix.target] || 2048 }}
-          TIMEOUT_S: ${{ fromJSON('{"sweep":600,"offset":600,"tweak":600,"edit":600,"projection":600,"self_union":600,"tolerant":600}')[matrix.target] || 1200 }}
+          TIMEOUT_S: ${{ fromJSON('{"feature":600,"sweep":600,"offset":600,"tweak":600,"edit":600,"projection":600,"self_union":600,"tolerant":600}')[matrix.target] || 1200 }}
         run: >-
           cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
           -rss_limit_mb=$RSS_LIMIT_MB -malloc_limit_mb=2048 -timeout=$TIMEOUT_S
