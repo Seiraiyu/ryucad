@@ -35,7 +35,14 @@ fn main() {
     {
         println!("cargo:rerun-if-changed={path}");
     }
-    if let Some(packed) = git(&["rev-parse", "--git-path", "packed-refs"]) {
+    // Only if it exists: Cargo reruns a build script whose watched file is
+    // missing on every build, and a fresh fetch (actions/checkout) has no
+    // packed-refs, so each fuzz job's run step rebuilt this crate, twice,
+    // after its build step had (9.5 minutes a job, plan 30.D). Packing a
+    // loose ref deletes it, which the watch above sees.
+    if let Some(packed) = git(&["rev-parse", "--git-path", "packed-refs"])
+        && std::path::Path::new(&packed).exists()
+    {
         println!("cargo:rerun-if-changed={packed}");
     }
 }
