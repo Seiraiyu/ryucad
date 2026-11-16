@@ -629,7 +629,7 @@ fn notifications_in_one_poll_ask_the_doctor_once() {
     let mut ws = open(&p);
     ws.diagnose();
     assert!(ws.wait_until(WAIT, |w| w.idle() && w.session.doctor.is_some()));
-    let doctors = |p: &Project| methods(&p)["doctor"]["count"].as_u64().unwrap_or(0);
+    let doctors = |p: &Project| methods(p)["doctor"]["count"].as_u64().unwrap_or(0);
     let before = doctors(&p);
     // Three writes, each published on its own (the daemon goes quiet
     // between them), while the window doesn't poll.
@@ -764,7 +764,7 @@ fn burst(p: &Project, ws: &mut Workspace, parts: &[&str], n: usize) -> (f64, ser
     }
     assert!(ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()));
     assert!(ws.wait_until(WAIT, |w| w.idle()));
-    let t = methods(&p);
+    let t = methods(p);
     (secs, t)
 }
 

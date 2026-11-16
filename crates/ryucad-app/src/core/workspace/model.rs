@@ -530,13 +530,11 @@ impl Workspace {
         self.send(req, Route::Model(model::Asked::Rebuild(id.to_owned(), rev)));
     }
 
-    /// [`Workspace::ask_part`] for a part a notification says changed: a
-    /// report on its way may be older than the change, so the part is
-    /// asked again once it comes, once however many notifications said
-    /// so (#849).
-    /// [`Workspace::ask_part_again`] for each of `ids`, those not on their
-    /// way asked in one rebuild of the project when there are several and
-    /// the project is one the window loads whole ([`LOAD_WHOLE`]):
+    /// [`Workspace::ask_part`] for parts a notification says changed. One
+    /// whose report is on its way may be older than the change, so it is
+    /// asked again once that comes, once however many notifications said
+    /// so. The rest are asked in one rebuild of the project when there are
+    /// several and the project is one the window loads whole ([`LOAD_WHOLE`]):
     /// one request, and one turn at the daemon's lock, per poll, however
     /// many parts a burst's publish named (#849).
     pub(super) fn ask_parts_again(&mut self, ids: Vec<String>) {
@@ -566,14 +564,6 @@ impl Workspace {
             rev: rev.clone(),
         };
         self.send(req, Route::Model(model::Asked::Rebuilds(ask, rev)));
-    }
-
-    pub(super) fn ask_part_again(&mut self, id: &str) {
-        if self.model.loading.contains(id) {
-            self.model.again.insert(id.to_owned());
-        } else {
-            self.ask_part(id);
-        }
     }
 }
 
