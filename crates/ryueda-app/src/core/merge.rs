@@ -96,6 +96,42 @@ impl Merge {
         }
     }
 
+    /// Unsettled items by the block they concern.
+    pub fn blocks(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut out = std::collections::BTreeMap::new();
+        for c in self.conflicts() {
+            if let Some(b) = block_of(c) {
+                *out.entry(b).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
+    /// Unsettled items by the sheet of `block` they are on: a layout
+    /// area's sheets, else the sheets seen drawing its references.
+    pub fn sheets(
+        &self,
+        block: &str,
+        nav: &crate::core::nav::Navigator,
+    ) -> std::collections::BTreeMap<String, usize> {
+        let mut out = std::collections::BTreeMap::new();
+        for c in self
+            .conflicts()
+            .iter()
+            .filter(|c| block_of(c).as_deref() == Some(block))
+        {
+            let mut on: std::collections::BTreeSet<String> =
+                owned(&c["concerns"]["sheets"]).into_iter().collect();
+            for r in owned(&c["concerns"]["refs"]) {
+                on.extend(nav.reach(block, &r));
+            }
+            for s in on {
+                *out.entry(s).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
     /// What Git is in the middle of: `merge`, `cherry-pick`, `revert` or
     /// `rebase`.
     pub fn step(&self) -> &str {
@@ -894,5 +930,30 @@ pub(crate) mod tests {
         assert_eq!(q["rev"], json!("b".repeat(40)));
         assert!(q.get("compare").is_none(), "a side is drawn plain");
         assert_eq!(peeked(p.clone(), None), p);
+    }
+
+    #[test]
+    fn blocks_and_sheets_count_their_unsettled_items() {
+        let mut nav = crate::core::nav::Navigator::default();
+        let sc = crate::core::scene::Scene::from_json(&crate::core::scene::tests::small()).unwrap();
+        nav.scene(&sc);
+        let m = Merge::of(json!({"conflicts": [
+            {"id": "blocks/top/components/r1.json#/value", "kind": "value",
+             "concerns": {"block": "top", "refs": ["top/r1"]}},
+            {"id": "top#area:1", "kind": "layout_conflict",
+             "concerns": {"block": "top", "sheets": ["s2"], "refs": []}},
+            {"id": "refdes:d/R1", "kind": "refdes_clash",
+             "concerns": {"design": "d", "refs": ["top/r1", "top/r9"]}},
+            {"id": "erc.json#", "kind": "modify_delete", "concerns": {"refs": []}}
+        ]}));
+        assert_eq!(
+            m.blocks().into_iter().collect::<Vec<_>>(),
+            [("top".to_owned(), 3)]
+        );
+        assert_eq!(
+            m.sheets("top", &nav).into_iter().collect::<Vec<_>>(),
+            [("s1".to_owned(), 2), ("s2".to_owned(), 1)]
+        );
+        assert!(m.sheets("other", &nav).is_empty());
     }
 }
