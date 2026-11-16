@@ -708,6 +708,30 @@ pub fn answer(session: &mut crate::session::Session, ask: &Ask) -> Result<crate:
     )))
 }
 
+/// `scene --rev` as the session answers it (plan 13.A): the sheet as
+/// revision `commit`'s project `p` draws it, kept in the session's scenes
+/// by the ask and the commit. The server adds `commit` to the answer.
+pub fn answer_at(
+    session: &mut crate::session::Session,
+    p: &Project,
+    commit: &str,
+    ask: &Ask,
+) -> Result<crate::proto::Answer> {
+    use ryu_session::rpc::Raw;
+    let key = format!("{ask:?}\u{0}@{commit}");
+    let text = match session.scene(&key) {
+        Some(t) => t,
+        None => {
+            let t = std::sync::Arc::new(scene(p, ask)?);
+            session.keep_scene(key, t.clone());
+            t
+        }
+    };
+    Ok(crate::proto::Answer::raw(Raw::Result(
+        text.as_ref().clone(),
+    )))
+}
+
 /// Where a view is (plan 3.B): the design whose layer is drawn, the
 /// block, its sheet's ID and the layer as asked.
 #[derive(Clone, Debug, PartialEq, Eq)]

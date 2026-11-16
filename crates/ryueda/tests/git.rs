@@ -637,6 +637,61 @@ fn render_compare_paints_what_changed() {
     }
 }
 
+/// `scene --rev` (plan 13.A): the sheet as the revision draws it, read
+/// only, with the commit; the working sheet hasn't what was deleted.
+#[test]
+fn a_scene_reads_a_revision_both_ways() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let refs = |v: &Value| -> Vec<String> {
+            v["result"]["owners"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["ref"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let (code, then) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["scene", "--block", "breakout", "--rev", "HEAD"],
+        );
+        assert_eq!(code, 0, "{then}");
+        assert_eq!(then["result"]["commit"].as_str().unwrap().len(), 40);
+        let (code, now) = ryueda(&board, &run, daemon, &["scene", "--block", "breakout"]);
+        assert_eq!(code, 0, "{now}");
+        assert!(now["result"].get("commit").is_none());
+        assert!(
+            refs(&then).contains(&"breakout/c3".to_owned()),
+            "deleted since HEAD"
+        );
+        assert!(!refs(&now).contains(&"breakout/c3".to_owned()));
+        assert!(
+            refs(&now).contains(&"breakout/r3".to_owned()),
+            "added since HEAD"
+        );
+        assert!(!refs(&then).contains(&"breakout/r3".to_owned()));
+        // `--rev working` is the working sheet.
+        let (_, w) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["scene", "--block", "breakout", "--rev", "working"],
+        );
+        assert_eq!(w["result"]["owners"], now["result"]["owners"]);
+        let (_, bad) = ryueda(&board, &run, daemon, &["scene", "--rev", "nope"]);
+        assert_eq!(bad["error"]["code"], "rev_not_found", "{bad}");
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
 #[test]
 fn output_compare_pages_only_changed_sheets() {
     let dir = tempfile::tempdir().unwrap();

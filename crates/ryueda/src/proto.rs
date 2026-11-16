@@ -1030,6 +1030,11 @@ pub enum Request {
         layer: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         theme: Option<ryusch::style::Theme>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression (plan 13.A). The answer
+        /// names its `commit`; a window shows it read only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// A design's designators numbered in canvas order (plan 2.F): the
     /// unannotated ones (`unannotated`, by default) or every unlocked one
@@ -1312,7 +1317,8 @@ impl Request {
             | Request::NetShow { rev, .. }
             | Request::SymbolShow { rev, .. }
             | Request::LibcompShow { rev, .. }
-            | Request::LibCheck { rev, .. } => rev.as_deref(),
+            | Request::LibCheck { rev, .. }
+            | Request::Scene { rev, .. } => rev.as_deref(),
             _ => None,
         };
         rev.filter(|r| *r != "working")

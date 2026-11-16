@@ -472,6 +472,8 @@ enum Command {
         /// light (the default) or dark.
         #[arg(long, value_parser = ["light", "dark"])]
         theme: Option<String>,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
@@ -3152,7 +3154,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             sheet,
             layer,
             theme,
+            rev,
         } => Request::Scene {
+            rev: rev.rev.clone(),
             design: design.clone(),
             block: block.clone(),
             sheet: sheet.clone(),
