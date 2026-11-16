@@ -1114,6 +1114,7 @@ impl Workspace {
                 self.model.on_lost();
                 self.comparing.on_lost();
                 self.session.on_lost();
+                self.view.on_lost();
                 self.activity.on_lost();
                 self.branches.on_lost();
                 self.retry = Some(Retry {

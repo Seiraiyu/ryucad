@@ -26,6 +26,9 @@ pub struct View {
     pub(super) looks_read: BTreeMap<BodyKey, Arc<crate::core::appearance::Look>>,
     /// The last appearance reading asked for: an older answer is dropped.
     pub(super) looks_asked: u64,
+    /// A reading is on its way; another was wanted meanwhile (#849).
+    pub(super) looks_waiting: bool,
+    pub(super) looks_again: bool,
     /// The planes this window cuts with, and the gizmo's drag.
     pub sections: crate::core::section::Sections,
     /// Tools > Measure: on or off, its picks and what they measured.
@@ -127,6 +130,13 @@ impl Workspace {
 
     /// Reads how the bodies the window shows look (`appearance.get`).
     pub(super) fn read_appearance(&mut self) {
+        // One reading on its way at a time; one wanted meanwhile is
+        // asked once it comes (#849).
+        if self.view.looks_waiting {
+            self.view.looks_again = true;
+            return;
+        }
+        self.view.looks_waiting = true;
         self.view.looks_asked += 1;
         let req = Request::AppearanceGet {
             part: self.model.focus.clone(),
@@ -309,6 +319,17 @@ impl View {
     /// Takes the answer to one of this sub-state's requests (design
     /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
     pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
+        let looks = matches!(why, Asked::Appearance(_));
+        self.answer_one(why, answer, fx);
+        if looks {
+            self.looks_waiting = false;
+            if std::mem::take(&mut self.looks_again) {
+                fx.then(Then::ReadAppearance);
+            }
+        }
+    }
+
+    fn answer_one(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::Views(part), Ok(a)) => {
                 if self.views.part.as_deref() == Some(part.as_str()) {
@@ -369,6 +390,12 @@ impl View {
             }
             (_, Err(e)) => fx.fail(e),
         }
+    }
+
+    /// What was asked for may never be answered (#849).
+    pub(super) fn on_lost(&mut self) {
+        self.looks_waiting = false;
+        self.looks_again = false;
     }
 }
 

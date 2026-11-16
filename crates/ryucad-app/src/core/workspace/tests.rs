@@ -321,3 +321,30 @@ fn a_part_changed_while_asked_is_asked_again_once() {
         fx.recorded()
     );
 }
+
+/// Appearance asked for again while a reading was on its way is asked
+/// once that reading comes (#849).
+#[test]
+fn an_appearance_wanted_again_asks_again() {
+    let mut view = view::View {
+        looks_waiting: true,
+        looks_again: true,
+        looks_asked: 1,
+        ..Default::default()
+    };
+    let mut fx = Effects::default();
+    view.answer(
+        view::Asked::Appearance(1),
+        answered(json!({"bodies": []})),
+        &mut fx,
+    );
+    assert!(!view.looks_waiting && !view.looks_again);
+    assert!(
+        matches!(
+            fx.recorded().last(),
+            Some(Effect::Then(Then::ReadAppearance))
+        ),
+        "{:?}",
+        fx.recorded()
+    );
+}
