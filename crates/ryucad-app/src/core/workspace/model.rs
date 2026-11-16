@@ -332,6 +332,25 @@ impl Workspace {
         self.send(req, Route::Model(model::Asked::Made(key, revision)));
     }
 
+    /// Asks for `part`'s holes, if they are older than the part and not
+    /// already on their way.
+    pub(super) fn fetch_holes(&mut self, part: &str) {
+        if let Some(revision) = self.model.ask_holes(part) {
+            let req = Request::HolesList {
+                part: part.to_owned(),
+                solid: None,
+                csv: false,
+                group: false,
+                reference: None,
+                rev: self.model_rev(),
+            };
+            self.send(
+                req,
+                Route::Model(model::Asked::Holes(part.to_owned(), revision)),
+            );
+        }
+    }
+
     /// Fetches the drawings of `part`'s sketches, paths and helices that
     /// are missing or older than the part, one per request.
     pub(super) fn fetch_sketches(&mut self, part: &str) {
@@ -353,20 +372,7 @@ impl Workspace {
             };
             self.send(req, Route::Model(model::Asked::Path(key, revision)));
         }
-        if let Some(revision) = self.model.ask_holes(part) {
-            let req = Request::HolesList {
-                part: part.to_owned(),
-                solid: None,
-                csv: false,
-                group: false,
-                reference: None,
-                rev: self.model_rev(),
-            };
-            self.send(
-                req,
-                Route::Model(model::Asked::Holes(part.to_owned(), revision)),
-            );
-        }
+        self.fetch_holes(part);
     }
 
     /// Fetches display meshes by the batch (`MESH_BATCH` to a request, a
@@ -705,6 +711,9 @@ impl Model {
                 };
                 t.revision = revision;
                 self.take_holes(&part, t);
+                if self.holes_again.remove(&part) {
+                    fx.then(Then::FetchHoles(part));
+                }
             }
             (Asked::Sweep(key, _), a) => {
                 if self.made_for.as_ref() == Some(&key) {
@@ -872,5 +881,7 @@ impl Model {
     pub(super) fn on_lost(&mut self) {
         self.asked.clear();
         self.sketches_asked.clear();
+        self.holes_asked.clear();
+        self.holes_again.clear();
     }
 }

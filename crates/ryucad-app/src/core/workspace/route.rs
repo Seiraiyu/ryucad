@@ -50,6 +50,7 @@ pub(super) enum Then {
     /// window follows its explode and motion.
     ExplodeShown,
     FetchGhosts,
+    FetchHoles(String),
     FollowDraft,
     FollowFocus,
     FollowSections,
@@ -163,6 +164,7 @@ impl Workspace {
                 self.follow_motion();
             }
             Then::FetchGhosts => self.fetch_ghosts(),
+            Then::FetchHoles(part) => self.fetch_holes(&part),
             Then::FollowDraft => self.follow_draft(),
             Then::FollowFocus => self.follow_focus(),
             Then::FollowSections => self.follow_sections(),

@@ -388,3 +388,25 @@ fn drawing_lists_wanted_again_ask_again() {
         fx.recorded()
     );
 }
+
+/// A part's holes wanted at a newer revision while an ask was on its way
+/// are asked once it comes, not alongside it (#849).
+#[test]
+fn holes_wanted_again_ask_once_the_answer_comes() {
+    let mut model = Model::default();
+    model.holes_asked.insert("p".to_owned(), "r1".to_owned());
+    model.holes_again.insert("p".to_owned());
+    let mut fx = Effects::default();
+    model.answer(
+        model::Asked::Holes("p".to_owned(), "r1".to_owned()),
+        answered(json!({"holes": []})),
+        Some(None),
+        &mut fx,
+    );
+    assert!(model.holes_asked.is_empty() && model.holes_again.is_empty());
+    assert!(
+        matches!(fx.recorded().last(), Some(Effect::Then(Then::FetchHoles(p))) if p == "p"),
+        "{:?}",
+        fx.recorded()
+    );
+}
