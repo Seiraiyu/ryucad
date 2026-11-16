@@ -1,5 +1,6 @@
 //! References inside a board: `<step>/<layer>/<index>` for a feature,
-//! `<step>/comp/<refdes>` for a component, `<step>/net/<name>` for a net.
+//! `<step>/comp/<refdes>` for a component, `<step>/comp/<refdes>/<pin>`
+//! for a component's pin, `<step>/net/<name>` for a net.
 //! The second segments `comp` and `net` are read as those kinds, so a
 //! layer named `comp` or `net` has no feature references; a net's name
 //! may hold `/`. In a project they are prefixed by the board's ID. They
@@ -18,6 +19,11 @@ pub enum Ref {
     Component {
         step: String,
         refdes: String,
+    },
+    Pin {
+        step: String,
+        refdes: String,
+        pin: String,
     },
     Net {
         step: String,
@@ -41,6 +47,7 @@ impl fmt::Display for Ref {
         match self {
             Ref::Feature { step, layer, index } => write!(f, "{step}/{layer}/{index}"),
             Ref::Component { step, refdes } => write!(f, "{step}/comp/{refdes}"),
+            Ref::Pin { step, refdes, pin } => write!(f, "{step}/comp/{refdes}/{pin}"),
             Ref::Net { step, name } => write!(f, "{step}/net/{name}"),
         }
     }
@@ -57,9 +64,21 @@ impl FromStr for Ref {
             return Err(err());
         }
         Ok(match second {
-            "comp" if !rest.contains('/') => Ref::Component {
-                step: step.into(),
-                refdes: rest.into(),
+            "comp" => match rest.split_once('/') {
+                None => Ref::Component {
+                    step: step.into(),
+                    refdes: rest.into(),
+                },
+                Some((refdes, pin))
+                    if !refdes.is_empty() && !pin.is_empty() && !pin.contains('/') =>
+                {
+                    Ref::Pin {
+                        step: step.into(),
+                        refdes: refdes.into(),
+                        pin: pin.into(),
+                    }
+                }
+                Some(_) => return Err(err()),
             },
             "net" => Ref::Net {
                 step: step.into(),
@@ -91,6 +110,7 @@ mod tests {
         for s in [
             "pcb/top/12",
             "pcb/comp/U1",
+            "pcb/comp/U1/12",
             "pcb/net/GND",
             "pcb/net/A/B",
             "panel/drill/0",
@@ -112,6 +132,14 @@ mod tests {
                 name: "A/B".into()
             }
         );
+        assert_eq!(
+            "pcb/comp/U1/A3".parse::<Ref>().unwrap(),
+            Ref::Pin {
+                step: "pcb".into(),
+                refdes: "U1".into(),
+                pin: "A3".into()
+            }
+        );
     }
 
     #[test]
@@ -124,7 +152,9 @@ mod tests {
             "pcb/top/01",
             "/top/1",
             "pcb//1",
-            "pcb/comp/U1/2",
+            "pcb/comp/U1/",
+            "pcb/comp//1",
+            "pcb/comp/U1/1/2",
             "pcb/top/-1",
         ] {
             assert!(s.parse::<Ref>().is_err(), "{s}");
