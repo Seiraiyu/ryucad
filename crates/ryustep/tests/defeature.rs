@@ -71,7 +71,12 @@ const MAX_SIZE: f64 = 2e-3;
 /// change, and rung 3 refuses at a torus and a plane touching none,
 /// overlapping; FTC 10's walk is `HealAmbiguous` at a kept 1 mm ball slit
 /// by a carried NURBS face's curve ending inside it, as its first builds
-/// at rungs 0 and 1 are.
+/// at rungs 0 and 1 are. Plan 21.A pins those faces touching no change in
+/// narrowed builds, so FTC 07's ring clip and its torus/plane pair are
+/// never met; it now refuses at rung 2, in half the time, where a carried
+/// NURBS face touching a change (`33b57350`) meets a pinned thin plane
+/// (`f19ffa9e`) `Uncertain`, with no edge between them (#652, recorded for
+/// a later stage). FTC 10's slit is left to ryukei 21.C.
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -590,9 +595,10 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 /// pair census I saw was an artefact of its skipped pairs.
 ///
 /// Plan 20.B parts those pairs (near boxes; the tube contact in narrowed
-/// builds) and recorded what stops both next (see [`KNOWN_REFUSED`]).
+/// builds) and recorded what stops both next; plan 21.A's pins move FTC
+/// 07 on to its next cause (see [`KNOWN_REFUSED`]).
 #[test]
-#[ignore = "#652: walks clipped at ring faces and a kept ball slit by a carried face (recorded in ryukei 20.B)"]
+#[ignore = "#652: FTC 10's kept ball slit by a carried face (ryukei 21.C); FTC 07's carried NURBS meets a pinned plane (recorded in 21.A)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
