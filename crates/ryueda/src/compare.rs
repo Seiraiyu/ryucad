@@ -187,18 +187,10 @@ pub fn marks(
         if m.is_empty() {
             continue;
         }
-        let n = |f: &dyn Fn(&Mark) -> bool| m.marks.values().filter(|x| f(x)).count();
-        let (added, moved) = (
-            n(&|x| *x == Mark::Added),
-            n(&|x| matches!(x, Mark::Moved { .. })),
-        );
-        let changed = m.marks.len() - added - moved;
+        let c = m.counts();
         m.strip = format!(
-            "Against {rev}: {added} added, {changed} changed, {moved} moved, {} removed",
-            m.ghosts
-                .iter()
-                .filter(|g| !m.marks.contains_key(*g))
-                .count()
+            "Against {rev}: {} added, {} changed, {} moved, {} removed",
+            c.added, c.changed, c.moved, c.removed
         );
     }
     out
