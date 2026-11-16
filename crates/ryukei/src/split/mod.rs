@@ -819,12 +819,25 @@ impl Arrangement<'_> {
         }
         let swap = !winding.is_empty() && !along_u;
         let mut pieces: Vec<Piece> = Vec::new();
+        // A slit: a cycle that runs every arc of it both ways (a tree of
+        // arcs inside the face, walked round). It bounds nothing, so it is
+        // a hole of the piece around it whatever its area: exactly it is
+        // zero, but between tolerant vertices the gaps leave it a little
+        // either way, and as an outer boundary it made a piece of its own
+        // that merging then grew into the whole face (#909: a torus
+        // touched along a circle and a line came out as two tori).
+        let slit = |c: &[usize]| {
+            c.iter()
+                .all(|&d| self.darts[d].twin.is_some_and(|t| c.contains(&t)))
+        };
         // Outer boundaries: counterclockwise cycles that close.
         let outers: Vec<usize> = (0..lifted.len())
-            .filter(|&i| lifted[i].wind == [0, 0] && lifted[i].area > 0.0)
+            .filter(|&i| lifted[i].wind == [0, 0] && lifted[i].area > 0.0 && !slit(&cycles[i]))
             .collect();
         let holes: Vec<usize> = (0..lifted.len())
-            .filter(|&i| lifted[i].wind == [0, 0] && lifted[i].area <= 0.0)
+            .filter(|&i| {
+                lifted[i].wind == [0, 0] && (lifted[i].area <= 0.0 || slit(&cycles[i]))
+            })
             .collect();
         for &o in &outers {
             if lifted[o].area.abs() < 1e-24 {

@@ -920,3 +920,17 @@ fn a_tolerant_boolean_whose_face_lost_its_domain() {
     )));
     assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
 }
+
+/// #909: the `tolerant` target's find of 2026-11-15 (run 43751287168,
+/// `crash-a723a281…`), a mutation of #890's input: the same
+/// torus and cone, with other tolerant directions. The result's faces 0
+/// and 1 overlapped (`check_intersections`: `FacesOverlap`). It must
+/// refuse typed or build a sound body.
+#[test]
+fn a_tolerant_cone_on_a_torus_whose_faces_overlapped() {
+    let out = tolerant_run(&bytes(concat!(
+        "1a4949ebebebebebebebebebebebebebebebebebebebebebebebebebebebebebeb",
+        "ebebebebebebebebebebebebebebebebebffffffffffdfffffffebebebebebeb",
+    )));
+    assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+}
