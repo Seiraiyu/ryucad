@@ -410,3 +410,34 @@ fn holes_wanted_again_ask_once_the_answer_comes() {
         fx.recorded()
     );
 }
+
+/// One rebuild of the project answers each part it was asked for as its
+/// own rebuild would, and asks again a part wanted meanwhile (#849).
+#[test]
+fn one_rebuild_answers_each_part_asked() {
+    let mut model = Model::default();
+    for p in ["a", "b"] {
+        model.loading.insert(p.to_owned());
+    }
+    model.again.insert("b".to_owned());
+    let mut fx = Effects::default();
+    model.answer(
+        model::Asked::Rebuilds(vec!["a".to_owned(), "b".to_owned()], None),
+        answered(json!({"parts": [{"part": "a"}, {"part": "b"}, {"part": "c"}]})),
+        Some(None),
+        &mut fx,
+    );
+    assert!(model.loading.is_empty() && model.again.is_empty());
+    let changed: Vec<&str> = (fx.recorded().iter())
+        .filter_map(|e| match e {
+            Effect::Then(Then::PartChanged(r)) => r["part"].as_str(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(changed, ["a", "b"]);
+    assert!(
+        matches!(fx.recorded().last(), Some(Effect::Then(Then::AskPart(p))) if p == "b"),
+        "{:?}",
+        fx.recorded()
+    );
+}

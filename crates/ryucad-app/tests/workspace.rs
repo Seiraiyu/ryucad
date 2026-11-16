@@ -9,6 +9,21 @@ use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(30);
 
+/// The daemon's timings by method (#849), asked until it isn't busy:
+/// `daemon status` reads them only when nobody holds or waits for the
+/// session's lock.
+fn methods(p: &Project) -> serde_json::Value {
+    let t = Instant::now();
+    loop {
+        let v = p.ok(&["daemon", "status", "--timings"]);
+        if v["timings"].is_object() {
+            return v["timings"]["methods"].clone();
+        }
+        assert!(t.elapsed() < WAIT, "always busy: {v}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn open(p: &Project) -> Workspace {
     common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap()
 }
@@ -614,11 +629,7 @@ fn notifications_in_one_poll_ask_the_doctor_once() {
     let mut ws = open(&p);
     ws.diagnose();
     assert!(ws.wait_until(WAIT, |w| w.idle() && w.session.doctor.is_some()));
-    let doctors = |p: &Project| {
-        p.ok(&["daemon", "status", "--timings"])["timings"]["methods"]["doctor"]["count"]
-            .as_u64()
-            .unwrap_or(0)
-    };
+    let doctors = |p: &Project| methods(&p)["doctor"]["count"].as_u64().unwrap_or(0);
     let before = doctors(&p);
     // Three writes, each published on its own (the daemon goes quiet
     // between them), while the window doesn't poll.
@@ -685,7 +696,7 @@ fn a_burst_costs_each_reader_about_one_request_per_publish() {
     // The last publish, and the window's reads after it.
     std::thread::sleep(Duration::from_millis(600));
     assert!(ws.wait_until(WAIT, |w| w.idle()));
-    let t = &p.ok(&["daemon", "status", "--timings"])["timings"]["methods"];
+    let t = methods(&p);
     let n = |m: &str| t[m]["count"].as_u64().unwrap_or(0);
     let publishes = t["daemon.publish"]["publishes"].as_u64().unwrap_or(0);
     assert!(publishes >= 1, "{t}");
@@ -699,6 +710,79 @@ fn a_burst_costs_each_reader_about_one_request_per_publish() {
     assert!(
         n("rebuild") <= publishes + 4,
         "rebuild: {}: {t}",
+        n("rebuild")
+    );
+}
+
+/// Runs `n` sphere writes through one `ryucad session --stdio`, spread over
+/// `parts`, while `ws` is polled as a window's frames poll it; then waits
+/// for the last publish and the reads after it. Returns the burst's
+/// seconds and the daemon's timings by method.
+fn burst(p: &Project, ws: &mut Workspace, parts: &[&str], n: usize) -> (f64, serde_json::Value) {
+    let root = p.root.clone();
+    let parts: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
+    let t = Instant::now();
+    let script = std::thread::spawn(move || {
+        use std::io::{BufRead, Write};
+        let mut child = common::ryucad_cmd(&ryucad().exe)
+            .args(["session", "--stdio"])
+            .current_dir(&root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        for i in 0..n {
+            let line = serde_json::json!({"jsonrpc": "2.0", "id": i, "method": "feature.add",
+                "params": {"part": parts[i % parts.len()], "id": format!("b{i:02}"),
+                           "type": "sphere", "params": {"radius": 1 + i % 4},
+                           "placement": {"origin": [i * 10, 0, 0]}}});
+            writeln!(stdin, "{line}").unwrap();
+            let mut a = String::new();
+            out.read_line(&mut a).unwrap();
+            assert!(a.contains("\"result\""), "{a}");
+        }
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+    });
+    while !script.is_finished() {
+        ws.pump();
+        ws.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    script.join().unwrap();
+    let secs = t.elapsed().as_secs_f64();
+    let quiet = Instant::now();
+    while quiet.elapsed() < Duration::from_millis(1500) {
+        ws.pump();
+        ws.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    assert!(ws.wait_until(WAIT, |w| w.idle()));
+    let t = methods(&p);
+    (secs, t)
+}
+
+/// A burst over several parts the window holds costs one rebuild per
+/// poll, not one per part a publish names (#849).
+#[test]
+fn a_burst_over_parts_is_read_in_one_rebuild_per_poll() {
+    let p = Project::new();
+    for part in ["p", "q", "r"] {
+        p.ok(&["part", "create", part]);
+    }
+    let mut ws = open(&p);
+    ws.diagnose();
+    assert!(ws.wait_until(WAIT, |w| w.idle() && w.model.listed.len() == 3));
+    let (_, t) = burst(&p, &mut ws, &["p", "q", "r"], 60);
+    let n = |m: &str| t[m]["count"].as_u64().unwrap_or(0);
+    let publishes = t["daemon.publish"]["publishes"].as_u64().unwrap_or(0);
+    assert!(publishes >= 1, "{t}");
+    // Three parts a publish: one rebuild each would be three times this.
+    assert!(
+        n("rebuild") <= publishes + 4,
+        "rebuild: {} for {publishes} publishes: {t}",
         n("rebuild")
     );
 }

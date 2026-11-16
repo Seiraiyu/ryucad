@@ -1005,11 +1005,11 @@ impl Workspace {
         if s.drawing_list {
             self.read_drawing_list();
         }
-        for id in &s.parts {
-            if self.model.listed.contains_key(id) {
-                self.ask_part_again(id);
-            }
-        }
+        let parts: Vec<String> = (s.parts.iter())
+            .filter(|id| self.model.listed.contains_key(*id))
+            .cloned()
+            .collect();
+        self.ask_parts_again(parts);
         if s.diff {
             self.ask_diff();
         }
@@ -1142,8 +1142,9 @@ impl Workspace {
     /// handles"), then carries out what it left.
     fn answer(&mut self, why: Route, answer: Result<Answer>) {
         // Only a rebuild's answer is judged by the revision drawn.
-        let drawn =
-            matches!(why, Route::Model(model::Asked::Rebuild(..))).then(|| self.model_rev());
+        let rebuild =
+            |a: &model::Asked| matches!(a, model::Asked::Rebuild(..) | model::Asked::Rebuilds(..));
+        let drawn = matches!(&why, Route::Model(a) if rebuild(a)).then(|| self.model_rev());
         let mut fx = Effects::default();
         match why {
             Route::Proposal(inner, rough) => self.proposed(*inner, rough, answer),
