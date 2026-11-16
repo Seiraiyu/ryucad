@@ -110,3 +110,16 @@ class Versions(unittest.TestCase):
     def test_a_binary_that_isnt_ryucad(self):
         with self.assertRaises(ryucad.Incompatible):
             ryucad.connect(exe=[sys.executable, "-c", "print('hello')"])
+
+
+class Binary(unittest.TestCase):
+    def test_binary_answers_are_read_exactly(self):
+        with fake() as cad:
+            got = cad.call("bytes", pattern="a\r\n\x00\xff\n", times=3)
+            self.assertEqual(got.data, b"a\r\n\x00\xff\n" * 3)
+            self.assertEqual(got["binary"]["length"], 18)
+            big = cad.call("bytes", pattern="0123456789abcdef", times=65536)
+            self.assertEqual(len(big.data), 1 << 20)
+            # The stream is still in step.
+            self.assertEqual(cad.call("after")["method"], "after")
+            self.assertIsNone(cad.call("after").data)

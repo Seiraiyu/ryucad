@@ -159,7 +159,25 @@ class Session:
             raise self._broken(f"a line that isn't JSON: {line[:200]!r}") from None
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
             raise self._broken(f"a line that isn't JSON-RPC 2.0: {line[:200]!r}")
-        return message, None
+        return message, self._binary(message)
+
+    def _binary(self, message: dict[str, Any]) -> bytes | None:
+        """The bytes an answer announcing ``binary: {length}`` is followed
+        by, read exactly (as the session's own ``Frame::of`` judges it)."""
+        result = message.get("result")
+        announced = result.get("binary") if isinstance(result, dict) else None
+        length = announced.get("length") if isinstance(announced, dict) else None
+        if not isinstance(length, int) or isinstance(length, bool) or length < 0:
+            return None
+        chunks: list[bytes] = []
+        left = length
+        while left:
+            chunk = self._out.read(left)
+            if not chunk:
+                raise self._ended()
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
 
     def _ended(self) -> SessionClosed:
         """The session's process has gone: waits for it, and every later
