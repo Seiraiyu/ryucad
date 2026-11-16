@@ -1950,6 +1950,10 @@ enum GitCmd {
     /// Print a ryueda file as one line per value, for `git diff` (Git's
     /// textconv): plain text, not JSON.
     Textconv { file: PathBuf },
+    /// The .gitattributes lines ryueda's drivers need, relative to a
+    /// project folder, as JSON: what `init` and `git install` write, for a
+    /// tool that sets up a clone itself (the hosted review service).
+    Attributes,
     /// Merge three versions of a ryueda file value by value, for Git's
     /// merge (`merge.ryueda.driver`): writes the result over OURS and exits
     /// 0, or 1 when conflicts are left in it. Prints nothing.
@@ -3394,6 +3398,10 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
+        Command::Git(GitCmd::Attributes) => Ok(json!({
+            "schema": ryueda::OUTPUT_SCHEMA,
+            "lines": ryueda::drivers::LINES,
+        })),
         Command::Git(GitCmd::Textconv { .. }) => unreachable!("answered in main"),
         Command::Git(GitCmd::MergeDriver { .. }) => unreachable!("answered in main"),
         // Keys go straight to the user's config folder: never through a

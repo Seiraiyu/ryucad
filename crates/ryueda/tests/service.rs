@@ -264,3 +264,29 @@ fn framed_renders_line_up() {
         }
     }
 }
+
+/// `git attributes` answers the lines ryueda's driver needs: every line
+/// `init` writes into a project's .gitattributes, and nothing else.
+#[test]
+fn git_attributes_are_the_lines_init_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(top.join("board")).unwrap();
+    git(&top, &["init", "-q"]);
+    ok(&top.join("board"), &run, false, &["init"]);
+    // Outside any project, as the service asks it.
+    let v = ok(dir.path(), &run, false, &["git", "attributes"]);
+    assert_eq!(v["schema"], 1);
+    let lines: Vec<&str> = v["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert_eq!(lines, ryueda::drivers::LINES.to_vec());
+    let written = std::fs::read_to_string(top.join("board/.gitattributes")).unwrap();
+    for l in &lines {
+        assert!(written.lines().any(|w| w == *l), "{l} in {written}");
+    }
+}
