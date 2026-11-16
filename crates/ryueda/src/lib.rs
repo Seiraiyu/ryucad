@@ -18,6 +18,7 @@ pub use ryu_doc::{canonical, error, expr, id, source, units};
 pub const OUTPUT_SCHEMA: u64 = 1;
 
 pub mod activity;
+pub mod anchor;
 pub mod annotate;
 pub mod cascade;
 pub mod clash;
