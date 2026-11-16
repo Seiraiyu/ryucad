@@ -2,3 +2,4 @@
 //! feature): never committed, so their goldens hash the files they make.
 
 pub mod scale;
+pub mod scripted;

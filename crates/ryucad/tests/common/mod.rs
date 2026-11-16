@@ -3,6 +3,9 @@
 
 #![allow(dead_code)]
 
+// `ryucad::bench::scripted`, which needs the `bench` feature these tests
+// build without: the same file.
+#[path = "../../src/bench/scripted.rs"]
 pub mod scripted;
 
 use ryucad::proto::Request;
