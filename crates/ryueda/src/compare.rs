@@ -196,13 +196,15 @@ pub fn marks(
     out
 }
 
-/// Block `b` of the revision's project `then`, laid out, with the
+/// What the revision's block lays out to: `Ok(None)` when the revision
+/// hasn't the block, `Err` when it doesn't lay out there; with the
 /// designators of the layer the working drawing shows (`layer`'s design
-/// and path), or `None` when the revision hasn't the block or it doesn't
-/// lay out there.
-pub fn laid_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Option<Laid> {
-    let tb = then.conn.blocks.get(b)?;
-    let mut l = schem::lay(then, tb, None, &[], ryusch::input::Relayout::None).ok()?;
+/// and path), else the first.
+pub fn lay_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Result<Option<Laid>> {
+    let Some(tb) = then.conn.blocks.get(b) else {
+        return Ok(None);
+    };
+    let mut l = schem::lay(then, tb, None, &[], ryusch::input::Relayout::None)?;
     let all = schem::layers(then, b);
     let same = layer
         .and_then(|x| {
@@ -213,7 +215,13 @@ pub fn laid_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Option
     if let Some(t) = same {
         l.built.designators(&t.refdes);
     }
-    Some(l)
+    Ok(Some(l))
+}
+
+/// [`lay_then`], none when the revision hasn't the block or it doesn't
+/// lay out there.
+pub fn laid_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Option<Laid> {
+    lay_then(then, b, layer).ok().flatten()
 }
 
 /// `render --compare`: block `block`'s canvas (or one sheet) from the
