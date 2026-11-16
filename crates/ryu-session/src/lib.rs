@@ -18,6 +18,7 @@ pub mod job;
 pub mod live;
 pub mod notify;
 pub mod prefs;
+pub mod publish;
 pub mod rpc;
 pub mod timings;
 

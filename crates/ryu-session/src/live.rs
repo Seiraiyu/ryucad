@@ -139,6 +139,9 @@ pub struct Live<P: Product> {
     pub poll_ms: u64,
     /// What the daemon spent answering, by method (#849).
     pub timings: crate::timings::Timings,
+    /// What requests changed that subscribers haven't heard of yet, and
+    /// when the watcher tells them (#849).
+    pub coalesce: crate::publish::Coalesce,
 }
 
 impl<P: Product> Default for Live<P> {
@@ -155,6 +158,7 @@ impl<P: Product> Default for Live<P> {
             ),
             poll_ms: 0,
             timings: Default::default(),
+            coalesce: Default::default(),
         }
     }
 }
@@ -169,6 +173,7 @@ impl<P: Product> std::fmt::Debug for Live<P> {
             .field("log", &self.log)
             .field("poll_ms", &self.poll_ms)
             .field("timings", &self.timings)
+            .field("coalesce", &self.coalesce)
             .finish()
     }
 }
