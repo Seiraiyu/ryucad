@@ -5,10 +5,11 @@
 
 use super::*;
 
-/// The least time between two doctor reports a change asks for: the
-/// daemon's default `daemon.publish_max_ms`, so a burst asks about once
-/// per publish (#849).
-pub const DOCTOR_EVERY: Duration = Duration::from_millis(1000);
+/// How long the project must go without a change before a change's doctor
+/// report is asked (#849): twice the daemon's default
+/// `daemon.publish_max_ms`, since a burst's publishes come about that far
+/// apart, so a script's burst is diagnosed once, when it goes quiet.
+pub const DOCTOR_QUIET: Duration = Duration::from_millis(2000);
 
 /// This window's session state.
 #[derive(Default)]
@@ -26,9 +27,8 @@ pub struct Session {
     /// meanwhile, so the badges need another.
     pub(super) doctor_waiting: bool,
     pub(super) doctor_again: bool,
-    /// When a report was last asked for, and when one deferred to keep
-    /// to [`DOCTOR_EVERY`] is due (#849).
-    pub(super) doctor_at: Option<Instant>,
+    /// When a report a change wants is due: [`DOCTOR_QUIET`] after the
+    /// last change (#849).
     pub(super) doctor_due: Option<Instant>,
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
@@ -82,7 +82,6 @@ impl Workspace {
     /// Diagnoses the project (`doctor`).
     pub fn diagnose(&mut self) {
         self.session.doctor_waiting = true;
-        self.session.doctor_at = Some(Instant::now());
         self.send(Request::Doctor {}, Route::Session(session::Asked::Doctor));
     }
 
@@ -125,33 +124,32 @@ impl Workspace {
         }
     }
 
-    /// Asks for the doctor's report again after a change: one on its way
-    /// at a time, and at most one per [`DOCTOR_EVERY`], so a script's
-    /// burst costs the daemon a report a second, not one per publish
-    /// (#849). One deferred is asked by [`Workspace::doctor_tick`].
+    /// Asks for the doctor's report again after a change, once the
+    /// project has gone [`DOCTOR_QUIET`] without another (#849): still
+    /// coalesced, never skipped, so every burst is diagnosed at its end,
+    /// and a script's writes don't wait on reports in the middle of it.
+    /// [`Workspace::doctor_tick`] asks it when due.
     pub(super) fn diagnose_again(&mut self) {
-        if self.session.doctor_waiting {
-            self.session.doctor_again = true;
-            return;
-        }
-        let now = Instant::now();
-        match self.session.doctor_at {
-            Some(at) if now.saturating_duration_since(at) < DOCTOR_EVERY => {
-                self.session.doctor_due = Some(at + DOCTOR_EVERY);
-            }
-            _ => {
-                self.session.doctor_due = None;
+        self.session.doctor_due = Some(Instant::now() + DOCTOR_QUIET);
+    }
+
+    /// Asks a change's doctor's report once it is due: one on its way at
+    /// a time, another asked when it comes if wanted meanwhile.
+    pub(super) fn doctor_tick(&mut self, now: Instant) {
+        if self.session.doctor_due.is_some_and(|due| now >= due) {
+            self.session.doctor_due = None;
+            if self.session.doctor_waiting {
+                self.session.doctor_again = true;
+            } else {
                 self.diagnose();
             }
         }
     }
 
-    /// Asks a deferred doctor's report once it is due.
-    pub(super) fn doctor_tick(&mut self, now: Instant) {
-        if self.session.doctor_due.is_some_and(|due| now >= due) {
-            self.session.doctor_due = None;
-            self.diagnose_again();
-        }
+    /// Whether a doctor's report a change wants is waiting for the
+    /// project to go quiet (#849).
+    pub fn doctor_pending(&self) -> bool {
+        self.session.doctor_due.is_some()
     }
 
     /// Applies repairs from the last report (`doctor.repair`); the answer

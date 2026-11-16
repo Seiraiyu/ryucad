@@ -647,6 +647,8 @@ fn notifications_in_one_poll_ask_the_doctor_once() {
         std::thread::sleep(Duration::from_millis(500));
     }
     ws.pump();
+    // Asked once the project has gone quiet (`DOCTOR_QUIET`).
+    assert!(ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()));
     assert!(ws.wait_until(WAIT, |w| w.idle()));
     assert_eq!(doctors(&p) - before, 1);
 }
@@ -695,6 +697,7 @@ fn a_burst_costs_each_reader_about_one_request_per_publish() {
     script.join().unwrap();
     // The last publish, and the window's reads after it.
     std::thread::sleep(Duration::from_millis(600));
+    assert!(ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()));
     assert!(ws.wait_until(WAIT, |w| w.idle()));
     let t = methods(&p);
     let n = |m: &str| t[m]["count"].as_u64().unwrap_or(0);
@@ -759,6 +762,7 @@ fn burst(p: &Project, ws: &mut Workspace, parts: &[&str], n: usize) -> (f64, ser
         ws.tick(Instant::now());
         std::thread::sleep(Duration::from_millis(16));
     }
+    assert!(ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()));
     assert!(ws.wait_until(WAIT, |w| w.idle()));
     let t = methods(&p);
     (secs, t)
@@ -787,10 +791,10 @@ fn a_burst_over_parts_is_read_in_one_rebuild_per_poll() {
     );
 }
 
-/// A burst asks the doctor at most about once a second
-/// (`DOCTOR_EVERY`, #849), whatever the publishes.
+/// A burst asks the doctor once it goes quiet (`DOCTOR_QUIET`, #849):
+/// still once at its end, not once a publish in the middle of it.
 #[test]
-fn a_burst_asks_the_doctor_about_once_a_second() {
+fn a_burst_asks_the_doctor_once_it_goes_quiet() {
     let p = Project::new();
     p.ok(&["part", "create", "p"]);
     let mut ws = open(&p);
@@ -799,8 +803,10 @@ fn a_burst_asks_the_doctor_about_once_a_second() {
     let before = methods(&p)["doctor"]["count"].as_u64().unwrap_or(0);
     let (secs, t) = burst(&p, &mut ws, &["p"], 60);
     let doctors = t["doctor"]["count"].as_u64().unwrap_or(0) - before;
-    // The burst's seconds and the second after it, plus the last.
-    let allowed = secs.ceil() as u64 + 2;
-    assert!(doctors >= 1, "{t}");
-    assert!(doctors <= allowed, "{doctors} doctors in {secs:.1} s: {t}");
+    let publishes = t["daemon.publish"]["publishes"].as_u64().unwrap_or(0);
+    // One at the end; a second only if the burst paused long enough.
+    assert!(
+        (1..=2).contains(&doctors),
+        "{doctors} doctors in {secs:.1} s, {publishes} publishes: {t}"
+    );
 }
