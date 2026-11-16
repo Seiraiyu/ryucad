@@ -163,6 +163,9 @@ enum Why {
     PropsInstructions(String),
     /// A write (undo, redo): its failure toasts.
     Write(&'static str),
+    /// The window's own Go to (`view.show`) of a reference: its failure
+    /// toasts; its answer selects the reference, the view moved or not.
+    GoTo(String),
     People,
     Quiet,
 }
@@ -374,8 +377,10 @@ impl Window {
     }
 
     /// Opens a reference's sheet, selects it and frames it: `view.show` to
-    /// this window's own participant, adopted when it comes back. `block:`
-    /// places open a block's first sheet.
+    /// this window's own participant, its view adopted when it comes back
+    /// and the reference selected on its answer, so a Go to that moves
+    /// nothing (the same one again, something else picked between) still
+    /// selects. `block:` places open a block's first sheet.
     pub fn go_to(&mut self, reference: &str) {
         if let Some(b) = reference.strip_prefix("block:") {
             self.show(Some(b.to_owned()), None, None);
@@ -385,7 +390,7 @@ impl Window {
         self.sent.show();
         self.send(
             req("view.show", json!({"ref": reference, "participant": me})),
-            Why::Write("Show"),
+            Why::GoTo(reference.to_owned()),
         );
     }
 
@@ -622,6 +627,7 @@ impl Window {
                 match why {
                     Why::Scene => self.scene_error = Some(e),
                     Why::Write(title) => self.toasts.error(title, &e, 0, now),
+                    Why::GoTo(_) => self.toasts.error("Show", &e, 0, now),
                     Why::Check => self.checked = None,
                     _ => {}
                 }
@@ -730,6 +736,14 @@ impl Window {
                 }
             }
             Why::People => self.people.reset(&v["participants"]),
+            Why::GoTo(r) => {
+                // The session selected it with the show: the window takes
+                // the same, as the participant's view may not have moved.
+                if self.selection != [r.as_str()] {
+                    self.selection = vec![r];
+                    self.ask_props();
+                }
+            }
             Why::Write(_) | Why::Quiet => {}
         }
     }

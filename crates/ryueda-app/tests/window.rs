@@ -120,6 +120,46 @@ fn a_pick_is_read_by_the_agent() {
 }
 
 #[test]
+fn the_same_go_to_again_selects_after_another_pick() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let root = breakout("again");
+    let mut h = window(&root);
+    frames(&mut h, |a| {
+        shown(a).is_some_and(|(b, _)| b == "breakout")
+            && a.opened().is_some_and(|w| w.camera.is_some())
+    });
+    let props_of = |a: &App, r: &str| {
+        a.opened().is_some_and(|w| {
+            w.selection == [r]
+                && w.props.as_ref().is_some_and(|p| {
+                    p.reference == r && p.rows.iter().any(|(k, _)| k == "Designator")
+                })
+        })
+    };
+    h.state_mut().opened_mut().unwrap().go_to("breakout/r1");
+    frames(&mut h, |a| props_of(a, "breakout/r1"));
+    // Something else picked (the canvas's call; framed on R1, C2 may be
+    // off it), the view left where it is.
+    h.state_mut()
+        .opened_mut()
+        .unwrap()
+        .pick(Some("breakout/c2".into()), false);
+    frames(&mut h, |a| props_of(a, "breakout/c2"));
+    let end = Instant::now() + Duration::from_secs(5);
+    while agent(&root, "selection.get", json!({}))["selection"] != json!(["breakout/c2"]) {
+        assert!(Instant::now() < end, "the pick never reached the session");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The same Go to again: nothing moves, but R1 is selected again.
+    h.state_mut().opened_mut().unwrap().go_to("breakout/r1");
+    frames(&mut h, |a| props_of(a, "breakout/r1"));
+}
+
+#[test]
 fn an_agent_shows_the_person_what_it_means() {
     let _one = one_at_a_time();
     if !gpu() {
