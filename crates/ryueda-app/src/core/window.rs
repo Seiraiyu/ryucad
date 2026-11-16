@@ -82,23 +82,61 @@ impl Throttle {
     }
 }
 
-/// How many of the views a window sent it remembers: the session's
-/// echoes of them can arrive after the window has sent newer ones.
+/// How many `view.set`s a window remembers: the session's echoes of
+/// them can arrive after the window has sent newer ones.
 const SENT_VIEWS: usize = 8;
 
-/// Whether a window adopts its participant's view as the session now has
-/// it: when it shows a sheet, is none of the views the window recently
-/// sent (`sent`, newest last), and is the window's own Go to or (with
-/// `follow_shows`) another's show. An echo of an older `view.set`, come
-/// back after a newer one went, is the window's own and never adopted:
-/// adopting it would move the window back and take the session's
-/// selection, which may not yet hold the window's latest pick.
-pub fn adopts(now: &SheetView, sent: &[SheetView], me: &str, follow_shows: bool) -> bool {
-    let place = |v: &SheetView| (v.block.clone(), v.sheet.clone(), v.layer.clone(), v.camera);
-    if now.block.is_none() || now.sheet.is_none() || sent.iter().any(|s| place(s) == place(now)) {
-        return false;
+/// The views a window sent with `view.set`, newest last, and whether it
+/// adopts its participant's view as a `participant.changed` brings it.
+#[derive(Debug, Default)]
+pub struct Sent {
+    views: Vec<SheetView>,
+}
+
+impl Sent {
+    /// The window sent `v` with `view.set`.
+    pub fn set(&mut self, v: SheetView) {
+        self.views.retain(|s| *s != v);
+        self.views.push(v);
+        if self.views.len() > SENT_VIEWS {
+            self.views.remove(0);
+        }
     }
-    now.shown_by.as_deref() == Some(me) || follow_shows
+
+    /// The window sent its own Go to (`view.show`): what comes back next
+    /// is the show, even where it lands on a view the window once sent.
+    pub fn show(&mut self) {
+        self.views.clear();
+    }
+
+    /// Whether the window adopts its participant's view, `before` and
+    /// `now` this notification: when the notification moved it, it shows
+    /// a sheet, and it is the window's own Go to or (with `follow_shows`)
+    /// another's show. A view marked the window's own that is one of its
+    /// recent `view.set`s is an echo, never adopted, even one come back
+    /// after a newer send went: adopting it would move the window back
+    /// and take the session's selection, which may not yet hold the
+    /// window's latest pick. A notification that leaves the view as it
+    /// was (a selection, someone else) adopts nothing, so a view once
+    /// adopted isn't adopted again; a later show to the same place is,
+    /// since the view moved away between.
+    pub fn adopts(
+        &self,
+        before: Option<&SheetView>,
+        now: &SheetView,
+        me: &str,
+        follow_shows: bool,
+    ) -> bool {
+        if now.block.is_none() || now.sheet.is_none() || before == Some(now) {
+            return false;
+        }
+        if now.shown_by.as_deref() == Some(me) {
+            let place =
+                |v: &SheetView| (v.block.clone(), v.sheet.clone(), v.layer.clone(), v.camera);
+            return !self.views.iter().any(|s| place(s) == place(now));
+        }
+        follow_shows
+    }
 }
 
 fn result(a: Result<Answer>) -> Result<Value> {
@@ -173,8 +211,8 @@ pub struct Window {
     pub hover: Option<String>,
     select: Throttle,
     view: Throttle,
-    /// The views this window last sent, newest last ([`SENT_VIEWS`]).
-    sent_views: Vec<SheetView>,
+    /// The views this window sent with `view.set`.
+    sent: Sent,
     pub following: Option<String>,
     pub follow_shows: bool,
     pub flash: Flash,
@@ -229,7 +267,7 @@ impl Window {
             hover: None,
             select: Throttle::default(),
             view: Throttle::default(),
-            sent_views: Vec::new(),
+            sent: Sent::default(),
             following: None,
             follow_shows: crate::core::prefs::flag("ui.follow_shows"),
             flash: Flash::default(),
@@ -344,6 +382,7 @@ impl Window {
             return;
         }
         let me = self.me().to_owned();
+        self.sent.show();
         self.send(
             req("view.show", json!({"ref": reference, "participant": me})),
             Why::Write("Show"),
@@ -478,7 +517,7 @@ impl Window {
             .clone()
             .and_then(|id| self.people.get(&id).map(|p| p.view.clone()))
         {
-            self.adopt(&p, false);
+            self.adopt(&p);
         }
     }
 
@@ -730,23 +769,26 @@ impl Window {
                 }
             }
             "participant.changed" => {
-                self.people.changed(params);
                 let me = self.me().to_owned();
+                let before = self.people.get(&me).map(|p| p.view.clone());
+                self.people.changed(params);
                 if let Some(mine) = self.people.get(&me).map(|p| p.view.clone())
-                    && adopts(&mine, &self.sent_views, &me, self.follow_shows)
+                    && self
+                        .sent
+                        .adopts(before.as_ref(), &mine, &me, self.follow_shows)
                 {
                     let selection = self
                         .people
                         .get(&me)
                         .map(|p| p.selection.clone())
                         .unwrap_or_default();
-                    self.adopt(&mine, true);
+                    self.adopt(&mine);
                     self.selection = selection;
                     self.ask_props();
                 }
                 if let Some(f) = self.following.clone() {
                     match self.people.get(&f).map(|p| p.view.clone()) {
-                        Some(v) => self.adopt(&v, false),
+                        Some(v) => self.adopt(&v),
                         None => self.following = None,
                     }
                 }
@@ -767,18 +809,9 @@ impl Window {
         }
     }
 
-    /// Remembers `v` as sent, dropping the oldest past [`SENT_VIEWS`].
-    fn sent(&mut self, v: SheetView) {
-        self.sent_views.retain(|s| *s != v);
-        self.sent_views.push(v);
-        if self.sent_views.len() > SENT_VIEWS {
-            self.sent_views.remove(0);
-        }
-    }
-
     /// Takes `v`'s sheet and camera; `frame` frames its camera's box as
     /// the show framed it.
-    fn adopt(&mut self, v: &SheetView, mine: bool) {
+    fn adopt(&mut self, v: &SheetView) {
         if v.block.is_none() {
             return;
         }
@@ -790,9 +823,6 @@ impl Window {
         self.shown.sheet = v.sheet.clone();
         self.shown.layer = v.layer.clone();
         self.camera = v.camera.map(from_nm);
-        if mine {
-            self.sent(v.clone());
-        }
         if place_moved {
             self.ask_scene();
         }
@@ -831,7 +861,7 @@ impl Window {
             if let Some(c) = &self.camera {
                 p["camera"] = to_nm(c);
             }
-            self.sent(v);
+            self.sent.set(v);
             self.send(req("view.set", p), Why::Quiet);
         }
         let flash = self.flash.due().then_some(Duration::from_millis(33));
@@ -980,44 +1010,117 @@ mod tests {
         );
     }
 
+    fn at(sheet: &str, camera: i64, by: Option<&str>) -> SheetView {
+        SheetView {
+            block: Some("top".into()),
+            sheet: Some(sheet.into()),
+            camera: Some(([camera, 0], 100)),
+            shown_by: by.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn a_window_adopts_shows_it_didn_t_send() {
-        let sent = SheetView {
-            block: Some("top".into()),
-            sheet: Some("s1".into()),
-            ..Default::default()
-        };
-        let mut shown = sent.clone();
+        let mut sent = Sent::default();
+        let start = at("s1", 0, Some("me"));
+        sent.set(at("s1", 0, None));
         assert!(
-            !adopts(&shown, std::slice::from_ref(&sent), "me", true),
+            !sent.adopts(None, &start, "me", true),
             "its own view comes back"
         );
-        shown.sheet = Some("s2".into());
-        shown.shown_by = Some("me".into());
+        let go = at("s2", 0, Some("me"));
         assert!(
-            adopts(&shown, std::slice::from_ref(&sent), "me", false),
+            sent.adopts(Some(&start), &go, "me", false),
             "its own Go to, always"
         );
-        shown.shown_by = Some("agent".into());
-        assert!(adopts(&shown, std::slice::from_ref(&sent), "me", true));
+        let agent = at("s2", 0, Some("agent"));
+        assert!(sent.adopts(Some(&start), &agent, "me", true));
         assert!(
-            !adopts(&shown, std::slice::from_ref(&sent), "me", false),
+            !sent.adopts(Some(&start), &agent, "me", false),
             "ui.follow_shows off"
+        );
+        assert!(
+            !sent.adopts(Some(&agent), &agent, "me", true),
+            "a notification that leaves the view as it was"
         );
         let empty = SheetView::default();
         assert!(
-            !adopts(&empty, std::slice::from_ref(&sent), "me", true),
+            !sent.adopts(Some(&start), &empty, "me", true),
             "a view that shows nothing"
         );
-        // An older send's echo, back after a newer send (a pan) went:
-        // still the window's own.
-        let mut panned = sent.clone();
-        panned.camera = Some(([1, 2], 3));
-        let mut echo = sent.clone();
+    }
+
+    #[test]
+    fn an_older_send_s_echo_is_never_adopted() {
+        // The window sends a view without a camera, then (the canvas
+        // laid out) with one: the first's echo arrives after the second
+        // went.
+        let mut sent = Sent::default();
+        let mut bare = at("s1", 0, None);
+        bare.camera = None;
+        sent.set(bare.clone());
+        sent.set(at("s1", 5, None));
+        let mut echo = bare;
         echo.shown_by = Some("me".into());
+        assert!(!sent.adopts(None, &echo, "me", true));
+        assert!(!sent.adopts(Some(&echo), &at("s1", 5, Some("me")), "me", true));
+    }
+
+    #[test]
+    fn go_to_r1_pan_go_to_r1_adopts_both() {
+        let mut sent = Sent::default();
+        let r1 = at("s2", 7, Some("me"));
+        sent.show();
+        assert!(sent.adopts(Some(&at("s1", 0, Some("me"))), &r1, "me", true));
+        // Adopted, the window sends where it is, then pans.
+        sent.set(at("s2", 7, None));
+        sent.set(at("s2", 9, None));
+        let panned = at("s2", 9, Some("me"));
         assert!(
-            !adopts(&echo, &[sent.clone(), panned], "me", true),
-            "an older send's echo"
+            !sent.adopts(Some(&r1), &panned, "me", true),
+            "the pan's echo"
         );
+        sent.show();
+        assert!(
+            sent.adopts(Some(&panned), &r1, "me", false),
+            "the same Go to again"
+        );
+    }
+
+    #[test]
+    fn r1_r2_r1_adopts_each() {
+        // The window's own Go tos.
+        let mut sent = Sent::default();
+        let (r1, r2) = (at("s1", 7, Some("me")), at("s2", 3, Some("me")));
+        let mut was = at("s1", 0, Some("me"));
+        for v in [&r1, &r2, &r1] {
+            sent.show();
+            assert!(sent.adopts(Some(&was), v, "me", false), "{v:?}");
+            sent.set(SheetView {
+                shown_by: None,
+                ..v.clone()
+            });
+            was = v.clone();
+        }
+        // An agent's shows, the window sending where each left it.
+        let mut sent = Sent::default();
+        let (r1, r2) = (at("s1", 7, Some("agent")), at("s2", 3, Some("agent")));
+        let mut was = at("s1", 0, Some("me"));
+        for v in [&r1, &r2, &r1] {
+            assert!(sent.adopts(Some(&was), v, "me", true), "{v:?}");
+            sent.set(SheetView {
+                shown_by: None,
+                ..v.clone()
+            });
+            let echo = SheetView {
+                shown_by: Some("me".into()),
+                ..v.clone()
+            };
+            assert!(!sent.adopts(Some(v), &echo, "me", true), "its echo");
+            was = echo;
+        }
+        // The same agent show twice, nothing between: nothing moves.
+        assert!(!sent.adopts(Some(&r1), &r1, "me", true));
     }
 }
