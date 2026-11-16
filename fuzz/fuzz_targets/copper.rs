@@ -1,13 +1,19 @@
 //! Rings from bytes combined every way, grown and shrunk: every result
 //! is simple polygons in order (`poly::faults`), points clear of every
 //! input edge are classified as the exact windings say, and one thread
-//! and eight give the same polygons. Plan 1.C adds connectivity.
+//! and eight give the same polygons. Then a two-layer layout of the same
+//! rings: connectivity never panics, one thread and eight agree, and
+//! inserting and removing items equals building again.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ryu_board::geom::Point;
-use ryu_copper::measure::Verdict;
+use ryu_board::geom::{Point, Region};
+use ryu_board::model::{Polarity, Side};
+use ryu_board::shape::{Shape, polygon};
+use ryu_copper::connect::Copper;
+use ryu_copper::layout::{Hole, HoleShape, Item, Layer, Layout};
+use ryu_copper::measure::{BodyOptions, Verdict};
 use ryu_copper::poly::{self, FillRule, FlattenOptions, Op, Rings};
 
 /// Rings from bytes: the first byte picks a scale (1 nm, crowding every
@@ -57,6 +63,57 @@ fn clear(r: &Rings, x: Point) -> bool {
     })
 }
 
+/// A two-layer layout of the operands: `a`'s rings as copper regions,
+/// alternating layers; `b`'s as negative regions drawn after them on the
+/// first layer, and a hole at each one's first vertex through both,
+/// plated every other one.
+fn layout_of(a: &Rings, b: &Rings, scale: i64) -> Layout<u32> {
+    let mut l = Layout::default();
+    for (name, side) in [("top", Side::Top), ("bottom", Side::Bottom)] {
+        l.layers.push(Layer {
+            name: name.into(),
+            side,
+            copper: true,
+        });
+    }
+    let region = |r: &Vec<Point>, polarity| {
+        polygon(r)
+            .ok()
+            .map(|c| Shape::regions(polarity, [Region::solid(c)]))
+    };
+    for (k, r) in a.rings.iter().enumerate() {
+        if let Some(shape) = region(r, Polarity::Positive) {
+            let it = Item {
+                layer: k % 2,
+                shape,
+                net: None,
+            };
+            l.items.insert(k as u32, it);
+        }
+    }
+    for (k, r) in b.rings.iter().enumerate() {
+        if let Some(shape) = region(r, Polarity::Negative) {
+            let it = Item {
+                layer: 0,
+                shape,
+                net: None,
+            };
+            l.items.insert(100 + k as u32, it);
+        }
+        let hole = Hole {
+            shape: HoleShape::Round {
+                at: r[0],
+                d: 3 * scale,
+            },
+            span: (0, 1),
+            plated: k % 2 == 0,
+            backdrilled: vec![],
+        };
+        l.holes.insert(k as u32, hole);
+    }
+    l
+}
+
 fuzz_target!(|data: &[u8]| {
     let Some((a, b, scale)) = operands(data) else {
         return;
@@ -99,4 +156,37 @@ fuzz_target!(|data: &[u8]| {
         let faults = poly::faults(&p);
         assert!(faults.is_empty(), "{faults:?}");
     }
+    // Connectivity of the same rings.
+    let l = layout_of(&a, &b, scale);
+    let build = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let c = Copper::new(&l, BodyOptions::default());
+                (c.islands(), c.uncertain())
+            })
+    };
+    let whole = build(1);
+    assert_eq!(whole, build(8));
+    let empty = Layout {
+        layers: l.layers.clone(),
+        ..Layout::default()
+    };
+    let mut c = Copper::new(&empty, BodyOptions::default());
+    for (k, h) in &l.holes {
+        c.insert_hole(*k, h.clone());
+    }
+    for (k, it) in &l.items {
+        c.insert_item(*k, it.clone());
+    }
+    assert_eq!((c.islands(), c.uncertain()), whole);
+    let mut half = l.clone();
+    for k in l.items.keys().step_by(2) {
+        half.items.remove(k);
+        c.remove_item(k);
+    }
+    let fresh = Copper::new(&half, BodyOptions::default());
+    assert_eq!((c.islands(), c.uncertain()), (fresh.islands(), fresh.uncertain()));
 });
