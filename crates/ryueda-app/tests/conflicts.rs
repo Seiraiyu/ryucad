@@ -309,6 +309,103 @@ fn show_ours_and_theirs_read_each_side() {
     });
 }
 
+/// A side shown ends with the merge: committed (unsettled, past the
+/// hook), the scene is the working sheet's again.
+#[test]
+fn a_side_shown_ends_with_the_merge() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (top, board) = merging("cf-side-ends", OURS, THEIRS);
+    let mut h = window(&board);
+    frames(&mut h, |a| {
+        kinds(a).iter().any(|k| k == "refdes_clash") && quiet(a)
+    });
+    let clash = row_of(h.state(), "refdes_clash");
+    h.state_mut()
+        .opened_mut()
+        .unwrap()
+        .show_side(&clash, "theirs");
+    frames(&mut h, |a| {
+        a.opened()
+            .and_then(|w| w.scene.as_ref())
+            .is_some_and(|s| s.read_only())
+    });
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-q", "--no-verify", "--no-edit"]);
+    frames(&mut h, |a| {
+        a.opened().is_some_and(|w| {
+            w.merge.is_none()
+                && w.peek.is_none()
+                && w.idle()
+                && w.scene.as_ref().is_some_and(|s| !s.read_only())
+        })
+    });
+    h.step();
+    assert!(h.query_by_label("Conflicts").is_none(), "the tile closed");
+}
+
+/// A resolve asked for after the last one's answer but before the
+/// revisions after it waits for them, rather than going with the old
+/// ones and being refused with `conflict`.
+#[test]
+fn a_quick_second_resolve_waits_for_the_revisions() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (_top, board) = merging("cf-quick", OURS, THEIRS);
+    let mut h = window(&board);
+    frames(&mut h, |a| {
+        kinds(a).iter().any(|k| k == "refdes_clash")
+            && quiet(a)
+            && a.opened().unwrap().revisions.project.is_some()
+    });
+    let m = h.state().opened().unwrap().merge.clone().unwrap();
+    let (singles, _) = groups(rows(&m.status));
+    // The clash's Renumber, then another item of the same block (its
+    // layout's Take ours), guarded by the block's revision the first moves.
+    let picks: Vec<Batch> = singles
+        .iter()
+        .filter(|r| r.block.as_deref() == Some("breakout"))
+        .filter_map(|r| {
+            r.actions
+                .iter()
+                .find(|a| a.recommended)
+                .or_else(|| r.actions.first())
+                .map(|a| Batch::one(r, a))
+        })
+        .take(2)
+        .collect();
+    assert_eq!(picks.len(), 2, "two items to settle: {}", m.status);
+    let second_ids = picks[1].ids();
+    let w = h.state_mut().opened_mut().unwrap();
+    let before = w.revisions.clone();
+    w.resolve(picks[0].clone());
+    // Taking events one at a time: stops on the resolve's answer, before
+    // the `project.info` it asks is answered.
+    assert!(w.wait_until(Duration::from_secs(30), |w| {
+        w.merge.as_ref().is_none_or(|m| !m.resolving)
+    }));
+    assert!(w.revisions_due && w.revisions == before, "the gap");
+    assert!(w.resolve_busy(), "the panel's buttons are off");
+    w.resolve(picks[1].clone());
+    assert!(
+        w.merge.as_ref().is_some_and(|m| !m.resolving),
+        "held, not sent"
+    );
+    assert!(w.wait_until(Duration::from_secs(30), |w| {
+        w.idle()
+            && !w.revisions_due
+            && w.merge.as_ref().is_some_and(|m| {
+                !m.resolving && second_ids.iter().all(|id| m.conflict(id).is_none())
+            })
+    }));
+    let m = w.merge.as_ref().unwrap();
+    assert!(m.refused.is_none(), "refused: {:?}", m.refused);
+}
+
 #[test]
 fn a_manifest_record_opens_conflicts_alone() {
     let _one = one_at_a_time();

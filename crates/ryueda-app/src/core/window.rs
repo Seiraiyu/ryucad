@@ -269,6 +269,11 @@ pub struct Window {
     pub merge: Option<Merge>,
     /// The revisions `--expect` names, from `project.info`.
     pub revisions: Revisions,
+    /// A resolve was answered and the `project.info` after it isn't yet:
+    /// `revisions` are the ones before it, so no resolve is sent.
+    pub revisions_due: bool,
+    /// A resolve asked for while `revisions_due`: sent once they come.
+    held: Option<Batch>,
     /// The project doesn't open: `ryueda.json` holds a merge's record.
     pub unloaded: bool,
     /// When `merge.status` was last asked while unloaded.
@@ -339,6 +344,8 @@ impl Window {
             history: None,
             merge: None,
             revisions: Revisions::default(),
+            revisions_due: false,
+            held: None,
             unloaded: false,
             merge_polled: None,
             peek: None,
@@ -384,12 +391,17 @@ impl Window {
     }
 
     /// Settles a batch from the conflict panel: one `merge.resolve`,
-    /// guarded by the revisions read, one at a time.
+    /// guarded by the revisions read, one at a time. Asked for before
+    /// the last resolve's revisions are read, it waits for them.
     pub fn resolve(&mut self, b: Batch) {
-        let Some(m) = self.merge.as_mut() else { return };
-        if m.resolving {
+        if self.merge.as_ref().is_none_or(|m| m.resolving) {
             return;
         }
+        if self.revisions_due {
+            self.held = Some(b);
+            return;
+        }
+        let Some(m) = self.merge.as_mut() else { return };
         m.resolving = true;
         m.refused = None;
         let r = crate::core::merge::resolution(&b, &self.revisions, self.unloaded);
@@ -585,6 +597,31 @@ impl Window {
             .or_else(|| self.shown.sheet.clone());
         let layer = self.shown.layer.clone();
         self.show(block, sheet, layer);
+    }
+
+    /// Whether the panel may send a resolve now.
+    pub fn resolve_busy(&self) -> bool {
+        self.revisions_due || self.merge.as_ref().is_some_and(|m| m.resolving)
+    }
+
+    /// Takes the merge as now read; when it has ended, a side shown goes
+    /// back to the working sheet (a commit writes no file, so nothing
+    /// else redraws it) and a held resolve is dropped.
+    fn merge_now(&mut self, m: Option<Merge>) {
+        self.merge = m;
+        if self.merge.is_none() {
+            self.held = None;
+            self.back_to_working();
+        }
+    }
+
+    /// `project.info` answered: a resolve waiting on its revisions goes.
+    fn revisions_read(&mut self) {
+        if std::mem::take(&mut self.revisions_due)
+            && let Some(b) = self.held.take()
+        {
+            self.resolve(b);
+        }
     }
 
     /// The bar's Back to working.
@@ -952,14 +989,16 @@ impl Window {
                             Some(History::failed(&crate::core::scene::code_word(e.code)));
                     }
                     Why::MergeStatus => {
-                        self.merge = Merge::answered(self.merge.as_ref(), Err(e));
+                        self.merge_now(Merge::answered(self.merge.as_ref(), Err(e)));
                     }
                     Why::Resolve(ids) => {
                         self.toasts.error("Resolve", &e, 0, now);
-                        self.merge = Merge::resolved(self.merge.as_ref(), ids, Err(e));
+                        self.merge_now(Merge::resolved(self.merge.as_ref(), ids, Err(e)));
                         self.ask_merge();
+                        self.revisions_due = true;
                         self.send(req("project.info", json!({})), Why::ProjectInfo);
                     }
+                    Why::ProjectInfo => self.revisions_read(),
                     _ => {}
                 }
                 return;
@@ -1116,10 +1155,14 @@ impl Window {
                     self.compare_moved();
                 }
             }
-            Why::MergeStatus => self.merge = Merge::answered(self.merge.as_ref(), Ok(v)),
-            Why::ProjectInfo => self.revisions = Revisions::read(&v),
+            Why::MergeStatus => self.merge_now(Merge::answered(self.merge.as_ref(), Ok(v))),
+            Why::ProjectInfo => {
+                self.revisions = Revisions::read(&v);
+                self.revisions_read();
+            }
             Why::Resolve(ids) => {
-                self.merge = Merge::resolved(self.merge.as_ref(), ids, Ok(v));
+                self.merge_now(Merge::resolved(self.merge.as_ref(), ids, Ok(v)));
+                self.revisions_due = true;
                 self.send(req("project.info", json!({})), Why::ProjectInfo);
                 if self.unloaded {
                     // The manifest may be settled: try the project again.
@@ -1208,10 +1251,7 @@ impl Window {
                 );
             }
             "merge.changed" => {
-                self.merge = Merge::noted(self.merge.as_ref(), params);
-                if self.merge.is_none() {
-                    self.peek = None;
-                }
+                self.merge_now(Merge::noted(self.merge.as_ref(), params));
             }
             "resync" => {
                 self.send(req("participant.list", json!({})), Why::People);

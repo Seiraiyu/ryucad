@@ -582,7 +582,7 @@ fn conflicts(ui: &mut egui::Ui, w: &mut Window, local: &mut Local, copy: &mut Op
     ui.horizontal_wrapped(|ui| {
         ui.strong(format!("{} in progress", m.step()));
         ui.label(m.summary());
-        if m.resolving {
+        if w.resolve_busy() {
             ui.spinner();
         }
     });
@@ -607,7 +607,7 @@ fn conflicts(ui: &mut egui::Ui, w: &mut Window, local: &mut Local, copy: &mut Op
     {
         w.undo();
     }
-    let busy = m.resolving;
+    let busy = w.resolve_busy();
     let (singles, groups) = groups(rows(&m.status));
     let mut send: Option<Batch> = None;
     let mut show: Option<(Row, Option<&'static str>)> = None;
