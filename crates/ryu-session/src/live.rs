@@ -137,6 +137,8 @@ pub struct Live<P: Product> {
     pub log: crate::activity::Log,
     /// How often a watched daemon checks the files, in milliseconds.
     pub poll_ms: u64,
+    /// What the daemon spent answering, by method (#849).
+    pub timings: crate::timings::Timings,
 }
 
 impl<P: Product> Default for Live<P> {
@@ -152,6 +154,7 @@ impl<P: Product> Default for Live<P> {
                 P::BULKY,
             ),
             poll_ms: 0,
+            timings: Default::default(),
         }
     }
 }
@@ -165,6 +168,7 @@ impl<P: Product> std::fmt::Debug for Live<P> {
             .field("seen", &self.seen)
             .field("log", &self.log)
             .field("poll_ms", &self.poll_ms)
+            .field("timings", &self.timings)
             .finish()
     }
 }

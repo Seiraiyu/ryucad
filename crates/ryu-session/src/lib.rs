@@ -19,6 +19,7 @@ pub mod live;
 pub mod notify;
 pub mod prefs;
 pub mod rpc;
+pub mod timings;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
