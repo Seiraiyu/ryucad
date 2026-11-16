@@ -1,0 +1,15 @@
+{
+  "fasteners": {
+    "house_cap": {
+      "M8": {
+        "clearance": {
+          "close": "8.6 mm",
+          "loose": "10.3 mm",
+          "normal": "9.2 mm"
+        }
+      }
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.hole_standards"
+}

@@ -26,7 +26,7 @@
           "findings": {
             "dwg_hole_uncalled": 3
           },
-          "pdf": "7b9c02ca50315a41d9033c2c1600b3f94e2113f7e1557f52a5a5d39d30bf9fb9",
+          "pdf": "9f6eb7f6ae2f09cbd5ea70e0027dbdc12e8d5b435fcd54ea48e0565d8f41e16b",
           "scores": {
             "s1": 91
           },
@@ -36,7 +36,7 @@
               "pieces": {
                 "hidden": 0,
                 "uncertain": 0,
-                "visible": 1117
+                "visible": 1125
               },
               "scale": "1:1",
               "type": "base"
@@ -45,10 +45,12 @@
         },
         "housing/main": {
           "annotations": {
-            "d1": "12X ⌀5.00 ↧14.00"
+            "d1": "12X M6X1-6H ↧10.00 ⌀5.00 ↧14.00",
+            "d2": "4X ⌀9.20 THRU",
+            "t1": "hole table of housing, 16 holes"
           },
           "findings": {},
-          "pdf": "ac259ef7b14c8da8dbbd2345353bab1ae1213b6327eb7d09dcb337678fbbd95a",
+          "pdf": "e32a3e14ad9941687f59ff8ac83cb935a647e668a816a4751553753fc400b32c",
           "scores": {
             "s1": 100
           },
@@ -58,7 +60,7 @@
               "pieces": {
                 "hidden": 0,
                 "uncertain": 0,
-                "visible": 29
+                "visible": 33
               },
               "scale": "1:2",
               "type": "base"
@@ -68,7 +70,7 @@
               "pieces": {
                 "hidden": 0,
                 "uncertain": 0,
-                "visible": 56
+                "visible": 60
               },
               "scale": "1:2",
               "type": "projected"
@@ -78,7 +80,7 @@
               "pieces": {
                 "hidden": 0,
                 "uncertain": 0,
-                "visible": 34
+                "visible": 40
               },
               "scale": "1:2",
               "type": "projected"
@@ -88,7 +90,7 @@
               "pieces": {
                 "hidden": 0,
                 "uncertain": 0,
-                "visible": 159
+                "visible": 167
               },
               "scale": "1:2",
               "type": "projected"
@@ -98,7 +100,7 @@
               "pieces": {
                 "hidden": 0,
                 "uncertain": 0,
-                "visible": 30
+                "visible": 38
               },
               "scale": "1:2",
               "type": "section"
@@ -341,17 +343,17 @@
         "housing": {
           "dependency_failed": 0,
           "failed": {},
-          "features": 9,
+          "features": 12,
           "kind": "part",
           "solids": {
             "shell": {
               "counts": {
-                "edges": 72,
-                "faces": 45,
-                "vertices": 72
+                "edges": 92,
+                "faces": 61,
+                "vertices": 92
               },
-              "hash": "f83406f63bc2d9c12de1196f8aa92ef7",
-              "shown": "bolts"
+              "hash": "1774b9fc61a4eda1967a65001b849b25",
+              "shown": "mounts"
             }
           }
         },

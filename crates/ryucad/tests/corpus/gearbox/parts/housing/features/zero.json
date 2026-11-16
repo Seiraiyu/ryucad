@@ -1,0 +1,11 @@
+{
+  "at": [
+    "0 mm",
+    "0 mm",
+    "0 mm"
+  ],
+  "by": "coordinates",
+  "format": 7,
+  "kind": "ryucad.feature",
+  "type": "point"
+}

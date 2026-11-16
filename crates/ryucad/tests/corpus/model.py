@@ -1,7 +1,9 @@
 """Drives ryucad's CLI as an agent would, for the corpus scripts beside
 this file: each builds one project into an empty folder through the
 commands an agent sends, reading their JSON answers, never writing a
-project file itself.
+project file itself but the ones no command writes (`hole_standards.json`,
+which design 533 has an agent edit as a file), which it writes
+canonically.
 
     python3 -I crates/ryucad/tests/corpus/<name>.py <ryucad> <folder>
 
@@ -67,6 +69,15 @@ class Project:
         if not answer["ok"]:
             raise Failed(f"ryucad {' '.join(map(str, args))}: {json.dumps(answer['error'])}")
         return answer["result"]
+
+    def write_json(self, name, value):
+        """Writes `name` (beside the manifest) as ryucad's canonical JSON:
+        keys sorted, two spaces, one scalar a line, a trailing newline.
+        Only for files no command writes, as an agent edits them; strings,
+        objects and arrays only (no floats to format)."""
+        text = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+        with open(os.path.join(self.folder, name), "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
 
     def part(self, pid, assembly=False):
         if assembly:

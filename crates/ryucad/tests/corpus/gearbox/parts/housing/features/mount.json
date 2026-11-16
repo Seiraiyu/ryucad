@@ -1,0 +1,38 @@
+{
+  "depth": "through_all",
+  "fastener": {
+    "size": "M8",
+    "standard": "house_cap"
+  },
+  "form": "simple",
+  "format": 26,
+  "kind": "ryucad.feature",
+  "places": {
+    "a": {
+      "face": {
+        "feature": "shell",
+        "name": "8fb46a6602056bf05871bc5c75f48a89"
+      },
+      "from": [
+        {
+          "distance": "16 mm",
+          "edge": {
+            "feature": "shell",
+            "name": "9b4cd1fb3988ab27ca657d20ea6fbbb3"
+          }
+        },
+        {
+          "distance": "14 mm",
+          "edge": {
+            "feature": "shell",
+            "name": "0ff30b0ce5fc053f79ea12471a430f68"
+          }
+        }
+      ]
+    }
+  },
+  "targets": [
+    "shell"
+  ],
+  "type": "hole"
+}
