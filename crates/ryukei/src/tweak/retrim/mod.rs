@@ -451,13 +451,14 @@ fn attempt_with(
         // seeds by rule 3 too, not one face alone (#692: a drilled plate's
         // side deleted closed from the hole's wall alone, its plug).
         if outside.is_empty() && !changes.deleted.is_empty() && changes.motion.is_empty() {
-            let (same, _) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
-            if same.len() > 1 {
-                tries = vec![same];
+            let fs = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            if fs.same.len() > 1 {
+                tries = vec![fs.same];
             }
         }
         if !outside.is_empty() {
-            let (same, moved) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            let fs = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            let (same, moved) = (fs.same, fs.moved);
             if !same.is_empty() || !moved.is_empty() {
                 let mut with_same = outside.clone();
                 with_same.extend(&same);

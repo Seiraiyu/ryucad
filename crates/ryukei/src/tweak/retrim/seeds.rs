@@ -190,7 +190,7 @@ pub(crate) fn shell_seeds(
             if m.charge(1).is_err() {
                 return out;
             }
-            let found = candidates(body, changes, w, arr, &ops, table, pieces, wf);
+            let (found, _) = candidates(body, changes, w, arr, &ops, table, pieces, wf);
             if let [one] = found.as_slice() {
                 out.push(*one);
                 break;
@@ -198,6 +198,16 @@ pub(crate) fn shell_seeds(
         }
     }
     out
+}
+
+/// Rule 3's seeds ([`face_seeds`]): the unchanged faces', the moved
+/// faces', and which of either the shortcut alone chose (a deleting face's
+/// one unclipped piece, its inner point not tested: plan 21.C).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FaceSeeds {
+    pub(crate) same: Vec<usize>,
+    pub(crate) moved: Vec<usize>,
+    pub(crate) shortcut: BTreeSet<usize>,
 }
 
 /// Design 399's rule 3: each region face with no frontier edge (all its
@@ -215,7 +225,7 @@ pub(crate) fn face_seeds(
     table: &Table,
     pieces: &[Piece],
     m: &Meter,
-) -> (Vec<usize>, Vec<usize>) {
+) -> FaceSeeds {
     let ops = [w.body.clone()];
     // A face with an edge on the frontier the outside faces seed; an edge
     // with a pinned face doesn't count (plan 21.A), so a working face is
@@ -241,27 +251,31 @@ pub(crate) fn face_seeds(
         .map(|&wf| (body.faces[w.origin[&wf]].name, wf))
         .collect();
     faces.sort();
-    let (mut same, mut moved) = (Vec::new(), Vec::new());
+    let mut out = FaceSeeds::default();
     for (_, wf) in faces {
         if m.charge(1).is_err() {
             break;
         }
-        let found = candidates(body, changes, w, arr, &ops, table, pieces, wf);
+        let (found, short) = candidates(body, changes, w, arr, &ops, table, pieces, wf);
         if let [one] = found.as_slice() {
+            if short {
+                out.shortcut.insert(*one);
+            }
             if changes.motion.contains_key(&w.origin[&wf]) {
-                moved.push(*one);
+                out.moved.push(*one);
             } else {
-                same.push(*one);
+                out.same.push(*one);
             }
         }
     }
-    (same, moved)
+    out
 }
 
 /// Face `wf`'s candidate pieces: those using no clipped edge whose inner
 /// point lies inside the old face; where faces are deleted, a face with
 /// one piece using no clipped edge takes it (a face growing over the gap
-/// has its inner points in the strip it grew by).
+/// has its inner points in the strip it grew by); and whether the shortcut
+/// chose them (plan 21.C).
 #[allow(clippy::too_many_arguments)]
 fn candidates(
     body: &Body,
@@ -272,7 +286,7 @@ fn candidates(
     table: &Table,
     pieces: &[Piece],
     wf: FaceId,
-) -> Vec<usize> {
+) -> (Vec<usize>, bool) {
     let unclipped: Vec<usize> = pieces
         .iter()
         .enumerate()
@@ -286,18 +300,21 @@ fn candidates(
         .map(|(i, _)| i)
         .collect();
     if !changes.deleted.is_empty() && unclipped.len() == 1 {
-        return unclipped;
+        return (unclipped, true);
     }
-    unclipped
-        .into_iter()
-        .filter(|&i| inside_old(body, changes, w, ops, table, &pieces[i]))
-        .collect()
+    (
+        unclipped
+            .into_iter()
+            .filter(|&i| inside_old(body, changes, w, ops, table, &pieces[i]))
+            .collect(),
+        false,
+    )
 }
 
 /// Whether piece `p`'s inner point, taken back to its face's old surface,
 /// lies inside the old face (the first of four inner points that is
 /// inside or outside, not on the boundary, decides).
-fn inside_old(
+pub(crate) fn inside_old(
     body: &Body,
     changes: &Changes,
     w: &WorkBody,
@@ -478,5 +495,64 @@ mod tests {
         let mut holds = |_: usize| false;
         let (fewer, _) = walk_again(&a, &tries, &BTreeSet::from([2]), &mut holds, &free()).unwrap();
         assert_eq!(fewer, vec![0]);
+    }
+
+    /// Plan 21.C: a deleting face's one unclipped piece is a shortcut
+    /// seed, and `face_seeds` says so. Every edge of the block rounded and
+    /// every round deleted: the region is every face, and each plane's
+    /// one closed piece seeds the walk by the shortcut.
+    #[test]
+    fn a_deleting_faces_one_unclipped_piece_is_a_shortcut_seed() {
+        let b = block();
+        let edges: Vec<crate::blend::EdgeBlend> = b
+            .edges()
+            .map(|e| crate::blend::EdgeBlend {
+                edge: b.edges[e].name,
+                kind: crate::blend::BlendKind::Fillet { radius: 0.05 },
+            })
+            .collect();
+        let (r, _) = crate::blend::blend(crate::name::OpKey(0x13b7), &b, &edges).unwrap();
+        let deleted: BTreeSet<FaceId> = r
+            .faces()
+            .filter(|&f| {
+                !matches!(
+                    r.surfaces[r.faces[f].surface],
+                    crate::geom::Surface::Plane(_)
+                )
+            })
+            .collect();
+        assert_eq!(deleted.len(), 20);
+        let changes = Changes {
+            deleted: deleted.clone(),
+            ..Changes::default()
+        };
+        let reg = region(&r, &deleted);
+        let bx = region_box(&r, &reg, 0.1);
+        let ws: BTreeMap<FaceId, super::super::working::Working> = reg
+            .faces
+            .iter()
+            .filter(|f| !deleted.contains(f))
+            .map(|&f| {
+                (
+                    f,
+                    working(&r, f, None, r.faces[f].sense, true, &bx).unwrap(),
+                )
+            })
+            .collect();
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let w = work_body(K, &r, &reg, &ws, &m).unwrap();
+        let ops = [w.body.clone()];
+        let table = build_in(&ops, Scope::Pairs(&w.pairs()), &m).unwrap();
+        let pieces = split_all(&ops, &table, &m).unwrap();
+        let arr = arrangement(&w, &table, &pieces);
+        assert!(outside_seeds(&w, &pieces).is_empty());
+        let fs = face_seeds(&r, &changes, &w, &arr, &table, &pieces, &m);
+        assert_eq!(fs.same.len(), 6);
+        assert!(fs.moved.is_empty());
+        assert_eq!(
+            fs.shortcut,
+            fs.same.iter().copied().collect::<BTreeSet<_>>()
+        );
     }
 }
