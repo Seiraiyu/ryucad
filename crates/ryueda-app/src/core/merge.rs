@@ -77,6 +77,25 @@ impl Merge {
         Some(Merge::of(params["status"].clone()).keeping(old))
     }
 
+    /// A resolve's answer (its `status`), or its refusal: kept on the
+    /// rows it named, the status as it was until it is read again.
+    pub fn resolved(
+        old: Option<&Merge>,
+        ids: Vec<String>,
+        a: Result<Value, Error>,
+    ) -> Option<Merge> {
+        match a {
+            Ok(v) => Merge::answered(None, Ok(v["status"].clone())),
+            Err(e) if matches!(e.code, Code::NotMerging | Code::NotAGitRepo) => None,
+            Err(e) => {
+                let mut m = old.cloned().unwrap_or_else(|| Merge::broken(e.clone()));
+                m.resolving = false;
+                m.refused = Some((ids, e));
+                Some(m)
+            }
+        }
+    }
+
     /// What Git is in the middle of: `merge`, `cherry-pick`, `revert` or
     /// `rebase`.
     pub fn step(&self) -> &str {
@@ -786,5 +805,46 @@ pub(crate) mod tests {
             panic!("merge.resolve")
         };
         assert!(expected_revisions.is_empty(), "unloaded: nothing to guard");
+    }
+
+    #[test]
+    fn a_resolves_answer_settles_or_keeps_its_refusal() {
+        let mut m = Merge::of(status());
+        m.resolving = true;
+        let ids = vec!["refdes:board/R5".to_owned()];
+        let mut after = status();
+        after["conflicts"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|c| c["id"] != "refdes:board/R5");
+        let done = Merge::resolved(
+            Some(&m),
+            ids.clone(),
+            Ok(json!({"resolved": ids, "status": after})),
+        )
+        .unwrap();
+        assert!(!done.resolving && done.refused.is_none());
+        assert!(done.conflict("refdes:board/R5").is_none());
+        let refused = Merge::resolved(
+            Some(&m),
+            ids.clone(),
+            Err(Error::new(Code::Conflict, "moved")),
+        )
+        .unwrap();
+        assert!(!refused.resolving);
+        assert_eq!(
+            refused.refused_for("refdes:board/R5").unwrap().code,
+            Code::Conflict
+        );
+        assert_eq!(
+            refused.conflicts().len(),
+            6,
+            "the status as it was until read again"
+        );
+        // The merge committed meanwhile: none.
+        assert_eq!(
+            Merge::resolved(None, ids, Err(Error::new(Code::NotMerging, "no"))),
+            None
+        );
     }
 }

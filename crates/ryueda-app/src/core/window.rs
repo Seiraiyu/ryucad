@@ -9,6 +9,7 @@ use crate::core::flash::Flash;
 use crate::core::history::History;
 use crate::core::link::{Daemon, Event, Link, Wake};
 use crate::core::lists::{self, Entry, Findings, Instruction, Properties, Subject};
+use crate::core::merge::{Batch, Merge, Revisions};
 use crate::core::nav::Navigator;
 use crate::core::people::{People, SheetView};
 use crate::core::product::Eda;
@@ -184,6 +185,12 @@ enum Why {
         rev: String,
         netlist: bool,
     },
+    /// `merge.status`, aside.
+    MergeStatus,
+    /// `project.info`: the revisions a resolve is guarded by.
+    ProjectInfo,
+    /// `merge.resolve` from the panel, with the conflicts it named.
+    Resolve(Vec<String>),
     Quiet,
 }
 
@@ -258,6 +265,12 @@ pub struct Window {
     changes_again: bool,
     /// The History tab: `history.log`'s commits, or its refusal.
     pub history: Option<History>,
+    /// The merge in progress, if any (design 688, Conflict panel).
+    pub merge: Option<Merge>,
+    /// The revisions `--expect` names, from `project.info`.
+    pub revisions: Revisions,
+    /// The project doesn't open: `ryueda.json` holds a merge's record.
+    pub unloaded: bool,
 }
 
 impl Window {
@@ -317,6 +330,9 @@ impl Window {
             changes_asked: false,
             changes_again: false,
             history: None,
+            merge: None,
+            revisions: Revisions::default(),
+            unloaded: false,
         };
         w.ask_all();
         Ok(w)
@@ -348,6 +364,26 @@ impl Window {
             Why::Activity,
         );
         self.ask_history();
+        self.ask_merge();
+        self.send(req("project.info", json!({})), Why::ProjectInfo);
+    }
+
+    /// Reads the merge's status again, aside.
+    fn ask_merge(&mut self) {
+        self.send_aside(req("merge.status", json!({})), Why::MergeStatus);
+    }
+
+    /// Settles a batch from the conflict panel: one `merge.resolve`,
+    /// guarded by the revisions read, one at a time.
+    pub fn resolve(&mut self, b: Batch) {
+        let Some(m) = self.merge.as_mut() else { return };
+        if m.resolving {
+            return;
+        }
+        m.resolving = true;
+        m.refused = None;
+        let r = crate::core::merge::resolution(&b, &self.revisions, self.unloaded);
+        self.send(r, Why::Resolve(b.ids()));
     }
 
     /// Reads the project's Git history again, aside.
@@ -830,6 +866,15 @@ impl Window {
                         self.history =
                             Some(History::failed(&crate::core::scene::code_word(e.code)));
                     }
+                    Why::MergeStatus => {
+                        self.merge = Merge::answered(self.merge.as_ref(), Err(e));
+                    }
+                    Why::Resolve(ids) => {
+                        self.toasts.error("Resolve", &e, 0, now);
+                        self.merge = Merge::resolved(self.merge.as_ref(), ids, Err(e));
+                        self.ask_merge();
+                        self.send(req("project.info", json!({})), Why::ProjectInfo);
+                    }
                     _ => {}
                 }
                 return;
@@ -974,6 +1019,16 @@ impl Window {
                     self.compare_moved();
                 }
             }
+            Why::MergeStatus => self.merge = Merge::answered(self.merge.as_ref(), Ok(v)),
+            Why::ProjectInfo => self.revisions = Revisions::read(&v),
+            Why::Resolve(ids) => {
+                self.merge = Merge::resolved(self.merge.as_ref(), ids, Ok(v));
+                self.send(req("project.info", json!({})), Why::ProjectInfo);
+                if self.unloaded {
+                    // The manifest may be settled: try the project again.
+                    self.ask_scene();
+                }
+            }
             Why::Write(_) | Why::Quiet => {}
         }
     }
@@ -997,6 +1052,7 @@ impl Window {
                 }
                 self.send(req("design.list", json!({})), Why::Designs);
                 self.send(req("erc", json!({})), Why::Erc);
+                self.send(req("project.info", json!({})), Why::ProjectInfo);
                 if self.blink.of.is_some() {
                     self.ask_changes();
                 }
@@ -1053,6 +1109,9 @@ impl Window {
                     req("activity.log", json!({"limit": ACTIVITY})),
                     Why::Activity,
                 );
+            }
+            "merge.changed" => {
+                self.merge = Merge::noted(self.merge.as_ref(), params);
             }
             "resync" => {
                 self.send(req("participant.list", json!({})), Why::People);
@@ -1257,6 +1316,13 @@ mod tests {
     fn every_request_the_window_sends_parses() {
         for (m, p) in [
             ("design.list", json!({})),
+            ("merge.status", json!({})),
+            ("project.info", json!({})),
+            (
+                "merge.resolve",
+                json!({"resolutions": [{"conflict": "refdes:d/R5", "choice": "repair", "repair": "renumber"}],
+                       "expected_revisions": {"project": "p1"}}),
+            ),
             ("netlist", json!({"design": "d"})),
             ("libcomp.list", json!({})),
             ("lint.get", json!({})),
