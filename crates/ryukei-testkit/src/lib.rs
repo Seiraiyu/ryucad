@@ -112,6 +112,9 @@ pub fn fuzz_case_within<R>(deadline: std::time::Duration, case: impl FnOnce(&Fuz
             if wait.recv_timeout(deadline) == Err(RecvTimeoutError::Timeout) {
                 cancel.store(true, Ordering::Relaxed);
                 *fired.lock().expect("unpoisoned") = Some(std::time::Instant::now());
+                if std::env::var_os("RYUKEI_FUZZ_DEADLINE_S").is_some() {
+                    eprintln!("cancelled at the deadline");
+                }
             }
         });
         let out = case(&c);

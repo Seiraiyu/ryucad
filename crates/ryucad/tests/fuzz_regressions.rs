@@ -188,3 +188,82 @@ fn the_revolute_mate_769_finds_its_interference() {
     let s = start.elapsed().as_secs_f64();
     assert!(s < RUNAWAY, "{s} s");
 }
+
+/// Part `fz`, the base, then `written` as its feature `f`.
+fn part_files(written: &str) -> BTreeMap<String, Vec<u8>> {
+    let mut files = project_files(written);
+    files.retain(|k, _| !k.starts_with("parts/asm/") && !k.starts_with("parts/sub/"));
+    let mut list: Vec<Id> = BASE
+        .iter()
+        .map(|(i, _)| Id::parse(i, "feature").unwrap())
+        .collect();
+    list.push(Id::parse("f", "feature").unwrap());
+    files.insert(
+        "parts/fz/part.json".to_owned(),
+        canonical::to_string(&PartFile::new(list).to_json()).into_bytes(),
+    );
+    files.insert(
+        "parts/fz/features/f.json".to_owned(),
+        canonical::to_string(&canonical::parse(written).unwrap()).into_bytes(),
+    );
+    files
+}
+
+/// #851's loft `e5a86bea…`: a cut lofted from sketch `s` to a face of
+/// `b`. Under ASan its rebuild ran 806 s, 356 s past the `feature`
+/// target's 450 s deadline, in the loft's self-check and the cut's
+/// boolean: face pairs along rims compared every pair of their edges
+/// with nothing to stop them (plan 30.D). A cancel at any point of the
+/// rebuild must end it within `LATENCY` in release.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_loft_851_stops_soon_after_a_cancel() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const LATENCY: f64 = 0.3;
+    let seed = r#"{"format":8,"kind":"ryucad.feature","type":"loft","sections":[{"sketch":"s"},{"face":{"feature":"b","name":"4dea6ff41f82679b674048865c452961"}}],"end_tangent":{"direction":"y"},"operation":"cut","targets":["b"]}"#;
+    let files = part_files(seed);
+    let project = ryucad::doc::project::Project::load_from(std::path::Path::new("/fz"), &files)
+        .expect("the project loads");
+    let part = Id::parse("fz", "part").unwrap();
+    let pins = ryucad::assembly::pins(&project, |part, rev, _within| {
+        Err(Error::new(
+            Code::LabelNotFound,
+            format!("{part} has no {}", rev.text()),
+        ))
+    });
+    // Uncancelled: how long the whole rebuild takes.
+    let start = std::time::Instant::now();
+    let mut r = Rebuild::new(&project, &pins, Store::default());
+    r.result(&part).expect("the part rebuilds");
+    let whole = start.elapsed().as_secs_f64();
+    eprintln!("whole rebuild {whole:.2} s");
+    let mut worst: f64 = 0.0;
+    for k in 1..=16 {
+        let at = whole * f64::from(k) / 17.0;
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut r = Rebuild::new(&project, &pins, Store::default());
+        r.job = ryucad::motion::Job::new("t", "t", "rebuild", Arc::clone(&flag));
+        let fired = std::thread::scope(|s| {
+            let f = Arc::clone(&flag);
+            let timer = s.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs_f64(at));
+                f.store(true, Ordering::SeqCst);
+                std::time::Instant::now()
+            });
+            let _ = r.result(&part);
+            let end = std::time::Instant::now();
+            let fired = timer.join().unwrap();
+            end.checked_duration_since(fired)
+        });
+        if let Some(late) = fired {
+            let late = late.as_secs_f64();
+            eprintln!("cancel at {at:.2} s: stopped {late:.3} s later");
+            worst = worst.max(late);
+        }
+    }
+    assert!(
+        worst <= LATENCY,
+        "a cancel took {worst:.3} s to stop the rebuild"
+    );
+}
