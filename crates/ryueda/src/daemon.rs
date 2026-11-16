@@ -53,7 +53,7 @@ impl ryu_session::Serve for Eda {
 
     fn control(req: &Request) -> Control {
         match req {
-            Request::DaemonStatus {} => Control::Status,
+            Request::DaemonStatus {} => Control::Status { timings: false },
             Request::DaemonShutdown {} => Control::Shutdown,
             Request::RequestCancel { token, name } => Control::Cancel {
                 token: token.clone(),

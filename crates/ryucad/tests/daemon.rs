@@ -107,7 +107,7 @@ fn serves_requests_and_shuts_down() {
     let f = fixture();
     let mut child = f.start(60);
     let conn = f.connect().unwrap();
-    let status = ask(&conn, &Request::DaemonStatus {}).unwrap();
+    let status = ask(&conn, &Request::DaemonStatus { timings: false }).unwrap();
     assert_eq!(status["pid"], child.id());
     assert_eq!(status["version"]["protocol"], 3);
     ask(
@@ -392,7 +392,10 @@ fn a_project_reached_through_a_link_finds_its_daemon() {
         daemon.connect(&link).unwrap()
     });
     assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
-    let status = conn.call(&Request::DaemonStatus {}).unwrap().unwrap();
+    let status = conn
+        .call(&Request::DaemonStatus { timings: false })
+        .unwrap()
+        .unwrap();
     assert_eq!(status["root"], serde_json::json!(f.root));
     // The CLI, run in the canonical folder, finds the same daemon.
     let again = cli(&f, &["daemon", "status"]);
@@ -1209,5 +1212,29 @@ fn a_human_writes_only_in_the_mode_that_allows_it() {
         ask(&conn, &edit).unwrap_err().code,
         ryucad::error::Code::ParticipantMode
     );
+    cli(&f, &["daemon", "stop"]);
+}
+
+/// `daemon status --timings` says what the daemon spent by method
+/// (#849); without the flag the answer has no timings.
+#[test]
+fn daemon_status_reports_timings_when_asked() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let plain = cli(&f, &["daemon", "status"]);
+    assert!(plain["result"].get("timings").is_none(), "{plain}");
+    let v = cli(&f, &["daemon", "status", "--timings"]);
+    let m = &v["result"]["timings"]["methods"];
+    assert_eq!(m["feature.add"]["count"], 1, "{v}");
+    assert!(m["feature.add"]["held_ms"].as_f64().unwrap() > 0.0, "{v}");
+    assert!(m["feature.add"]["wait_ms"].is_number(), "{v}");
+    // Nobody watched: the request noted the state itself.
+    assert_eq!(m["feature.add"]["publishes"], 1, "{v}");
     cli(&f, &["daemon", "stop"]);
 }

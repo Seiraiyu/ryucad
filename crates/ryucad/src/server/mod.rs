@@ -643,7 +643,9 @@ pub fn answer_live(
             l.prune(|r| r.resolve(session).is_ok());
         }
         l.announce(&before);
+        let t = std::time::Instant::now();
         publish(l, session);
+        l.timings.publish(&method, t.elapsed());
         // What the request used may go now that it has answered.
         session.trim();
     }

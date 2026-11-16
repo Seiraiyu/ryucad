@@ -242,7 +242,9 @@ pub(crate) mod testing {
         fn control(req: &Request) -> crate::daemon::Control {
             use crate::daemon::Control;
             match req.0.as_str() {
-                "daemon.status" => Control::Status,
+                "daemon.status" => Control::Status {
+                    timings: req.1["timings"] == true,
+                },
                 "daemon.shutdown" => Control::Shutdown,
                 "subscribe" => Control::Subscribe(Vec::new()),
                 "session.hello" => Control::Hello { window: false },

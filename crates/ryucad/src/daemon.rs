@@ -80,7 +80,7 @@ impl ryu_session::Serve for Cad {
 
     fn control(req: &Request) -> Control {
         match req {
-            Request::DaemonStatus {} => Control::Status,
+            Request::DaemonStatus { timings } => Control::Status { timings: *timings },
             Request::DaemonShutdown {} => Control::Shutdown,
             Request::Subscribe { topics } => Control::Subscribe(topics.clone()),
             Request::SessionHello {

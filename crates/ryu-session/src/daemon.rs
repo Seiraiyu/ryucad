@@ -27,8 +27,9 @@ pub const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
 
 /// What the loop does with a request before the product sees it.
 pub enum Control {
-    /// `daemon.status`: answered by the loop.
-    Status,
+    /// `daemon.status`: answered by the loop. With `timings`, what the
+    /// daemon spent by method too (#849).
+    Status { timings: bool },
     /// `daemon.shutdown`: answered, then the daemon stops.
     Shutdown,
     /// `subscribe` to these topics (all when empty).
@@ -247,7 +248,7 @@ fn stop<P: Serve>(state: &State<P>, why: &str) -> ! {
     std::process::exit(0)
 }
 
-fn status<P: Serve>(state: &State<P>) -> Value {
+fn status<P: Serve>(state: &State<P>, timings: bool) -> Value {
     let mut v = json!({
         "pid": std::process::id(),
         "root": state.root,
@@ -266,6 +267,9 @@ fn status<P: Serve>(state: &State<P>) -> Value {
     if let Some(c) = &core {
         v["participants"] = participants(&c.live);
         v["last_activity"] = last_activity(&c.live);
+        if timings {
+            v["timings"] = c.live.timings.to_json();
+        }
     }
     match core.as_ref().map(|c| c.session.as_ref()) {
         Some(Some(s)) => {
@@ -391,7 +395,7 @@ fn serve<P: Serve>(
         let mut shutdown = false;
         let mut subscribed = None;
         let result = match req.map(|(m, ask, r)| (P::control(&r), m, ask, r)) {
-            Ok((Control::Status, ..)) => Ok(Answer::json(status(state))),
+            Ok((Control::Status { timings }, ..)) => Ok(Answer::json(status(state, timings))),
             Ok((Control::Shutdown, ..)) => {
                 shutdown = true;
                 Ok(Answer::json(
