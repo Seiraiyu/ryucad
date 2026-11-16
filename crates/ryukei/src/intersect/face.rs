@@ -2225,6 +2225,79 @@ mod tests {
         let m = Meter::free();
         assert_eq!(met_in_a_rung(&work, pair, &m), Err(Failure::Uncertain));
     }
+
+    /// Plan 21.B: a cylinder of radius 10 mm about z, and a cone about an
+    /// axis 1° off it in the xz plane, half-angle 2°, `radius` at the
+    /// origin; each a sheet over a fifth of a turn round +x, 40 mm along
+    /// its axis.
+    fn cylinder_and_cone(radius: f64) -> (Body, Body) {
+        use crate::geom::{Cone, Cylinder, Frame, Point3};
+        let o = Point3::new(0.0, 0.0, 0.0);
+        let z = Vector3::new(0.0, 0.0, 1.0);
+        let x = Vector3::new(1.0, 0.0, 0.0);
+        let cylinder =
+            Surface::Cylinder(Cylinder::new(Frame::new(o, z, x).unwrap(), 0.01).unwrap());
+        let (s, c) = crate::math::sin_cos(1f64.to_radians());
+        let frame = Frame::new(o, Vector3::new(s, 0.0, c), Vector3::new(c, 0.0, -s)).unwrap();
+        let cone = Surface::Cone(Cone::new(frame, radius, 2f64.to_radians()).unwrap());
+        let rect = [[-0.6, 0.6], [-0.02, 0.02]];
+        let (a, _) = crate::sheet::from_surface(OpKey(1), &cylinder, rect).unwrap();
+        let (b, _) = crate::sheet::from_surface(OpKey(2), &cone, rect).unwrap();
+        (a, b)
+    }
+
+    /// The cone 12 mm at the origin: over the sheet it is 11.3 to 12.7 mm
+    /// from its own axis, which is within 0.35 mm of z, so it keeps about
+    /// a millimetre off the cylinder. Each face takes one sign in the
+    /// other's implicit form.
+    #[test]
+    fn a_cone_kept_off_a_cylinder_keeps_off_it() {
+        let (a, b) = cylinder_and_cone(0.012);
+        let (fa, fb) = (faces_of(&a)[0], faces_of(&b)[0]);
+        let (sa, sb) = (
+            &a.surfaces[a.faces[fa].surface],
+            &b.surfaces[b.faces[fb].surface],
+        );
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let one = |s: Result<[bool; 2], Failure>| matches!(s, Ok(s) if s != [true, true]);
+        assert!(one(super::super::beside::face_keeps_off(
+            &a,
+            fa,
+            sb,
+            1 << 12,
+            &m
+        )));
+        assert!(one(super::super::beside::face_keeps_off(
+            &b,
+            fb,
+            sa,
+            1 << 12,
+            &m
+        )));
+    }
+
+    /// The cone 10 mm at the origin: it leaves the cylinder's radius at
+    /// the middle, inside below and outside above, so neither keeps off.
+    #[test]
+    fn a_cone_crossing_a_cylinder_doesnt_keep_off_it() {
+        let (a, b) = cylinder_and_cone(0.01);
+        let (fa, fb) = (faces_of(&a)[0], faces_of(&b)[0]);
+        let (sa, sb) = (
+            &a.surfaces[a.faces[fa].surface],
+            &b.surfaces[b.faces[fb].surface],
+        );
+        // unmetered: a unit test.
+        let m = Meter::free();
+        for cells in [1 << 9, 1 << 12, super::super::BESIDE_CELLS] {
+            for r in [
+                super::super::beside::face_keeps_off(&a, fa, sb, cells, &m),
+                super::super::beside::face_keeps_off(&b, fb, sa, cells, &m),
+            ] {
+                assert!(matches!(r, Ok([true, true]) | Err(_)), "{cells}: {r:?}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
