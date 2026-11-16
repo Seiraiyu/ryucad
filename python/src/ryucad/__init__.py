@@ -11,10 +11,46 @@ Methods, params and answers are the protocol's, as ``ryucad <command>
 """
 
 from ._codes import EXIT, Code
+from ._errors import (
+    AssemblyOverconstrained,
+    Cancelled,
+    Conflict,
+    DaemonError,
+    Error,
+    ExternalError,
+    FixableError,
+    HasDependents,
+    Incompatible,
+    NotFound,
+    NotInstalled,
+    ProjectError,
+    ProtocolError,
+    RebuildFailed,
+    RyucadError,
+    SessionClosed,
+    UsageError,
+)
 from ._meta import VERSION as __version__
 
 __all__ = [
     "Code",
     "EXIT",
+    "AssemblyOverconstrained",
+    "Cancelled",
+    "Conflict",
+    "DaemonError",
+    "Error",
+    "ExternalError",
+    "FixableError",
+    "HasDependents",
+    "Incompatible",
+    "NotFound",
+    "NotInstalled",
+    "ProjectError",
+    "ProtocolError",
+    "RebuildFailed",
+    "RyucadError",
+    "SessionClosed",
+    "UsageError",
     "__version__",
 ]
