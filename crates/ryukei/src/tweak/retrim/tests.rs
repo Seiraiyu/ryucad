@@ -908,3 +908,60 @@ fn ctc_02s_carried_cylinders_are_apart_over_near_boxes() {
         include_bytes!("../../../tests/data/nist_ctc_02_near_work.body"),
     );
 }
+
+/// A committed cut's untouched pair (plan 21.A, census VI): carried over
+/// the rung's box (the work cut) and met, as main's narrowed build meets
+/// them, the pair is `Uncertain` within a rung's cap. Task 7 adds that
+/// once pinned they are never met.
+fn untouched_pair(input: &[u8], work: &[u8]) -> (Body, Vec<FaceId>) {
+    use crate::codec::decode_body;
+    let input = decode_body(input).unwrap();
+    let work = decode_body(work).unwrap();
+    let pair: Vec<FaceId> = work.faces().collect();
+    assert_eq!(pair.len(), 2);
+    let inputs: Vec<FaceId> = pair
+        .iter()
+        .map(|&w| match input.by_name(work.faces[w].name) {
+            Some(EntityId::Face(f)) => f,
+            _ => panic!("no input face for {w:?}"),
+        })
+        .collect();
+    // unmetered but capped: a rung's cap, as the re-trim gives it.
+    let m = crate::work::Meter::free();
+    let met = m.capped(crate::work::Scope::Rung, || {
+        crate::intersect::face_face_in((&work, pair[0]), (&work, pair[1]), &m)
+    });
+    assert!(met.is_err(), "met over the rung's box: {met:?}");
+    (input, inputs)
+}
+
+/// FTC 07 rd's rung-3 pair after 20.B (#652, census V and VI): torus
+/// `14131c92` and plane `9d1d527c`, both touching no change, overlapping,
+/// sharing no input edge (census VI).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ftc_07s_untouched_pair_is_pinned() {
+    untouched_pair(
+        include_bytes!("../../../tests/data/nist_ftc_07_pinned_input.body"),
+        include_bytes!("../../../tests/data/nist_ftc_07_pinned_work.body"),
+    );
+}
+
+/// CTC 02 with PMI's retry pair after 20.B (#658, #295): plane
+/// `74fca8b1`, working, and NURBS `b150cb1a`, outside rung 3's region,
+/// both touching no change, tangent along their shared frontier edge
+/// (census VI).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ctc_02s_untouched_pair_is_pinned() {
+    untouched_pair(
+        include_bytes!("../../../tests/data/nist_ctc_02_pinned_input.body"),
+        include_bytes!("../../../tests/data/nist_ctc_02_pinned_work.body"),
+    );
+}
