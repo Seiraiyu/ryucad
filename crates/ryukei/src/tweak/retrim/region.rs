@@ -122,7 +122,6 @@ impl Region {
     /// they are, with the faces outside, and the frontier runs between
     /// them and the rest. The region itself, to the bit, where `pins` is
     /// empty.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn without(&self, body: &Body, pins: &BTreeSet<FaceId>) -> Region {
         if pins.is_empty() {
             return self.clone();

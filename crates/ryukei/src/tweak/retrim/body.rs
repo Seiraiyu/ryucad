@@ -190,7 +190,6 @@ impl WorkBody {
     /// The working body with the input faces `pins` marked pinned (plan
     /// 21.A). The caller built it over the region less them
     /// (`Region::without`), so each is a copied face standing for itself.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn pinning(mut self, pins: &BTreeSet<FaceId>) -> WorkBody {
         self.pinned = self
             .origin

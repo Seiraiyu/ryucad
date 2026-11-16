@@ -965,3 +965,75 @@ fn ctc_02s_untouched_pair_is_pinned() {
         include_bytes!("../../../tests/data/nist_ctc_02_pinned_work.body"),
     );
 }
+
+/// Plan 21.A: the block's top raised 0.2, over the whole body (rung 2's
+/// region). The bottom touches no change: a narrowed build pins it and
+/// builds the taller box, as the first build does.
+#[test]
+fn a_raised_blocks_bottom_is_pinned_and_it_builds_the_taller_box() {
+    use super::{Build, Rung, attempt};
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    assert!(whole.whole(&b));
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let built = |r: Rung| match r {
+        Rung::Done(r) => r.ok().map(|(o, _)| o),
+        _ => None,
+    };
+    let first = built(attempt(K, &b, &changes, &whole, &bx, 2, Build::First, &m))
+        .expect("the first build builds");
+    let pinned = built(attempt(K, &b, &changes, &whole, &bx, 2, Build::Only, &m))
+        .expect("the pinned build builds");
+    assert_eq!(crate::check::check(&pinned), []);
+    assert!((volume(&pinned) - volume(&first)).abs() < 1e-9);
+    assert!((volume(&pinned) - 1.0 * 0.6 * 0.6).abs() < 1e-9);
+    // The bottom, pinned, is its input face: its name and its surface.
+    let bottom = face_of(&b, FaceRole::MinusZ);
+    let Some(EntityId::Face(o)) = pinned.by_name(b.faces[bottom].name) else {
+        panic!("no bottom");
+    };
+    assert_eq!(
+        pinned.surfaces[pinned.faces[o].surface],
+        b.surfaces[b.faces[bottom].surface]
+    );
+}
+
+/// Plan 21.A: a wrong pin gives a refusal, never a wrong body. The same
+/// raised block with its +x side pinned, which has to grow to the new
+/// top: the walk fails and the rung climbs.
+#[test]
+fn a_pin_that_must_grow_fails_its_walk() {
+    use super::{Build, Rung, attempt_with};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let side = BTreeSet::from([face_of(&b, FaceRole::PlusX)]);
+    let r = attempt_with(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        Some(&side),
+        &m,
+    );
+    let what = match &r {
+        Rung::Done(d) => format!("done: {:?}", d.as_ref().as_ref().map(|_| ())),
+        Rung::Next(e) => format!("next: {e:?}"),
+        Rung::Walked(e) => format!("walked: {e:?}"),
+        Rung::Uncertain(e) => format!("uncertain: {e:?}"),
+        Rung::Unchanged => "unchanged".into(),
+    };
+    assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)), "{what}");
+}
