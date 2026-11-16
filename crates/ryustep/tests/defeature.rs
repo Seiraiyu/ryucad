@@ -78,7 +78,9 @@ const MAX_SIZE: f64 = 2e-3;
 /// (`f19ffa9e`) `Uncertain`, with no edge between them (#652; moved to
 /// ryukei 22, "Working faces against pins and near-box limits": working
 /// NURBS `33b57350` growing into pin `f19ffa9e`). FTC 10's slit is left to
-/// ryukei 21.C.
+/// ryukei 21.C. Plan 21.B's certified miss changes neither: FTC 07 refuses
+/// at the same rung-2 pair in the same time as on main, and FTC 10 as
+/// before.
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -679,6 +681,15 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// 07 now refuses in 64 s; FTC 07 AP242 (21.B), STC 10
 /// (21.D) and FTC 10 (21.C) refuse as before; linkrods is still past the
 /// deadline (out of scope, question 984).
+///
+/// Plan 21.B tries a certified miss after a failed trace at faces sharing
+/// nothing, outside first builds: the same 18 defeature, bit for bit as
+/// on main, and none more. FTC 07 AP242 #13541 still refuses at its retry
+/// pair in 36 s: its cylinder and cone (`79b561f3`/`178d3260`) are each
+/// certified to cross the other's surface, the pin grazing the bore's
+/// wall, so neither keeps off the other; it needs an exact cylinder/cone
+/// intersection (#658; moved to ryukei 22). STC 10 (21.D) and FTC 10
+/// (21.C) refuse as before.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
