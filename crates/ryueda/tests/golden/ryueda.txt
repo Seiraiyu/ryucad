@@ -117,10 +117,10 @@ schematic.rp2040.mitayi.dark.svg 02d47ce37dde5e77370060cef694496c
 schematic.rp2040.mitayi.describe 145da93e74938e2d53a8fb1e653ae1f4
 schematic.rp2040.mitayi.explain 16cb1458d0f830d4d3405620deb0dcf0
 schematic.rp2040.mitayi.layout ee0308138d0608c3c79012cb95120b0a
-schematic.rp2040.mitayi.s1.scene.dark 891abf3fa008a5519b18cea0919acede
-schematic.rp2040.mitayi.s1.scene.light 2e492d920591536793bea41b6ad336ff
-schematic.rp2040.mitayi.s2.scene.dark 440a119114b9ff98472522e35a984ae6
-schematic.rp2040.mitayi.s2.scene.light 23bae9bbe83ff96bd8a86b7b26d75c31
+schematic.rp2040.mitayi.s1.scene.dark 849c2813dd6f843e5b60326b3dd899b0
+schematic.rp2040.mitayi.s1.scene.light 4f0040b40e96b6914c2b1e4cbf42c30f
+schematic.rp2040.mitayi.s2.scene.dark e991f1b45880fa75d982cf384b92c2c2
+schematic.rp2040.mitayi.s2.scene.light be01b2936b01afd01da7199b93b61204
 schematic.rp2040.mitayi.s3.scene.dark 3085e6cb19a716f71e8c311ec10cb3d7
 schematic.rp2040.mitayi.s3.scene.light d7912d3f997660197cd1d7d75e551e2d
 schematic.rp2040.mitayi.svg 95f834e451b72c7e5b09f0414a0ff084

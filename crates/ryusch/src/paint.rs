@@ -476,6 +476,14 @@ fn bus_items(
                     items.push(text_item(name, p, SIZE, anchor, vertical, colour));
                 }
             }
+            // #878: the entry's stub and its name are its net's, so a net
+            // drawn only through a bus has an owner on the sheet.
+            let owner = if block.net(&e.net).is_some() {
+                e.net.as_str()
+            } else {
+                key.as_str()
+            };
+            own(owners, items.len(), owner);
         }
         for pts in columns.values() {
             if let Some([a, b]) = crate::bus::spine(pts)
@@ -1223,6 +1231,28 @@ mod tests {
             assert!(texts.contains(&format!("QSPI_SD{i}").as_str()), "{texts:?}");
         }
         assert!(texts.contains(&"QSPI_SD[0..3]"));
+        // #878: each entry's stub and its net's name are its net's; the
+        // spine, the trunk and the bundle's name stay the bus's.
+        assert_eq!(p.owners.len(), p.items.len(), "one owner per item");
+        for (it, o) in p.items.iter().zip(&p.owners) {
+            match it {
+                Item::Polyline { points, .. } if points.len() == 3 => {
+                    let o = o.as_deref().unwrap();
+                    assert!(o.starts_with('d'), "an entry's stub is its net's: {o}");
+                }
+                Item::Text { text, .. }
+                    if text.starts_with("QSPI_SD") && text != "QSPI_SD[0..3]" =>
+                {
+                    let i = text.trim_start_matches("QSPI_SD");
+                    assert_eq!(o.as_deref(), Some(format!("d{i}").as_str()), "{text}");
+                }
+                Item::Bus { .. } => assert_eq!(o.as_deref(), Some("bus:q")),
+                Item::Text { text, .. } if text == "QSPI_SD[0..3]" => {
+                    assert_eq!(o.as_deref(), Some("bus:q"));
+                }
+                _ => {}
+            }
+        }
     }
 
     #[test]

@@ -120,10 +120,18 @@ pub fn marks(
             mark(&mut out, &at.sheet, part.key.clone(), *m);
         }
     }
-    // Nets whose file is new or differs: their wires and labels.
+    // Nets whose file is new or differs: their wires, labels and bus
+    // entries (#878: an entry's stub is its net's).
     for (net, m) in &nets {
         for sheet in new.routes.get(net).into_iter().flat_map(|s| s.keys()) {
             mark(&mut out, sheet, net.clone(), *m);
+        }
+        for by_sheet in new.buses.values() {
+            for (sheet, drawn) in by_sheet {
+                if drawn.entries.iter().any(|e| e.net == *net) {
+                    mark(&mut out, sheet, net.clone(), *m);
+                }
+            }
         }
         for l in new.labels.get(net).into_iter().flatten() {
             mark(&mut out, &l.sheet, format!("label:{net}@{}", l.on), *m);
