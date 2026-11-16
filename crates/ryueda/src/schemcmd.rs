@@ -1219,6 +1219,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                &[],
             )
             .unwrap();
             (String::from_utf8(a.binary.unwrap()).unwrap(), a.result)
@@ -1254,6 +1255,7 @@ mod tests {
             None,
             false,
             Default::default(),
+            &[],
         )
         .unwrap_err();
         assert_eq!(e.code, Code::NotFound);
@@ -1270,6 +1272,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                &[],
             )
             .unwrap();
             (String::from_utf8(a.binary.unwrap()).unwrap(), a.result)
