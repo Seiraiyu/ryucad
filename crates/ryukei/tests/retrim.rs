@@ -494,3 +494,80 @@ fn an_offset_past_the_opposite_side_collapses() {
         );
     }
 }
+
+/// ryukei 19.A's twin: the testkit's rod, pinned (`ROD_DUMP_HASH`): six
+/// faces, a cylinder, a torus, a cylinder, two caps and the rim's torus.
+#[test]
+fn the_bent_rod_is_pinned() {
+    use ryukei_testkit::held_seams::{ROD_DUMP_HASH, bent_rod, fnv};
+    let rod = bent_rod();
+    assert_eq!(rod.counts().faces, 6);
+    assert_eq!(ryukei::check::check(&rod), []);
+    let h = fnv(rod.dump_unnamed().as_bytes());
+    assert_eq!(h, ROD_DUMP_HASH, "rod: {h:#018x}");
+}
+
+/// ryukei 19.A's twin (design 642): the bent rod's rim deleted through
+/// the public `delete_blends`. Its straight run is carried past the bend,
+/// where it crosses the bend's torus; stopped at their seam it is met
+/// along it, and the rod ends square: every check clean, one face fewer,
+/// the volume Pappus gives for a bar of radius 0.3 along 4 + π/2.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_bent_rods_rim_is_deleted() {
+    use core::f64::consts::{FRAC_PI_2, PI};
+    use ryukei::check::{check, check_intersections};
+    use ryukei::mesh::{MeshParams, tessellate};
+    use ryukei::name::OpKey;
+    use ryukei::tweak::delete_blends;
+    use ryukei_testkit::held_seams::{RADIUS, bent_rod, spec};
+    let rod = bent_rod();
+    let (o, _) = delete_blends(OpKey(0x19a3), &rod, &spec()).unwrap();
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    assert_eq!(o.counts().faces, rod.counts().faces - 1);
+    let m = tessellate(&o, &MeshParams::new(2e-4, 0.3)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    let (v, _) = ryukei_testkit::mesh::volume_and_area(&m);
+    let want = PI * RADIUS * RADIUS * (4.0 + FRAC_PI_2);
+    assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
+}
+
+/// ryukei 20.B's twin (design 669): the bar drilled from both ends, both
+/// floors filleted, a channel from floor to floor. Ten faces drilled: the
+/// bar's six, each hole's wall and floor; twelve with the two fillets;
+/// thirteen with the channel's wall, which cuts both fillets.
+#[test]
+fn the_twin_is_drilled_and_filleted() {
+    use ryukei_testkit::near_boxes::{deleted, drilled, drilled_bare, filleted};
+    assert_eq!(drilled_bare().counts().faces, 10);
+    assert_eq!(filleted().counts().faces, 12);
+    let d = drilled();
+    assert_eq!(d.counts().faces, 13);
+    assert_eq!(check(&d), []);
+    assert_eq!(deleted(&d).len(), 3);
+}
+
+/// The twin's carried pair (#652, #658): the fillets and the channel are
+/// one set, so rung 0's box grows by about the bar's length; over it the
+/// two walls touch at the bar's middle with no edge between them, and the
+/// first build refuses `Uncertain`. Over their near boxes (each wall
+/// touches only its own fillet) they never meet: the narrowed build
+/// builds, and the result checks clean.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_twins_carried_pair_is_never_met() {
+    use ryukei_testkit::near_boxes::{drilled, spec};
+    let d = drilled();
+    let r = ryukei::tweak::delete_faces(OpKey(0x20b5), &d, &spec(&d));
+    let (o, _) = r.unwrap_or_else(|e| panic!("refused: {e:?}"));
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    assert_eq!(o.counts().faces, 10);
+}

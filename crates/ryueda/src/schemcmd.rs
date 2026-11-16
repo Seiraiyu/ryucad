@@ -642,6 +642,7 @@ fn listing(names: &Names, laid: &Laid) -> Vec<Value> {
                 "holds": verdict == ryusch::instr::Verdict::Held,
                 "state": verdict.state(),
             });
+            v["refs"] = json!(instruction_refs(names, laid, i));
             if let Some(why) = verdict.why() {
                 v["why"] = json!(match blocker(laid, i) {
                     Some(b) => format!("{why}; {b}"),
@@ -651,6 +652,25 @@ fn listing(names: &Names, laid: &Laid) -> Vec<Value> {
             v
         })
         .collect()
+}
+
+/// What an instruction speaks of, by reference path: a net
+/// instruction's net, else its parts and the part or pin it is relative
+/// to (named, by region or by pin), sorted, each once.
+fn instruction_refs(names: &Names, laid: &Laid, ins: &Instruction) -> Vec<String> {
+    let block = &names.b.id;
+    let mut out: Vec<String> = match ins {
+        Instruction::Net { net, .. } => vec![schem::ref_path(block, net)],
+        _ => ins
+            .subjects()
+            .into_iter()
+            .flat_map(|s| ryusch::instr::parts_named(&laid.built.input, s))
+            .map(|p| schem::ref_path(block, &laid.built.input.parts[p].key))
+            .collect(),
+    };
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// What the engine found standing where `ins` wanted one of its parts.

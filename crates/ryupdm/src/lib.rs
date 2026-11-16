@@ -48,6 +48,7 @@ pub mod history;
 #[cfg(feature = "cad")]
 pub mod items;
 pub mod label;
+pub mod lines;
 pub mod merge;
 pub mod package;
 pub mod product;

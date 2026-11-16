@@ -86,17 +86,115 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
-    /// Names a library project by alias, at a path relative to this one.
+    /// Names a library project by alias, at a path relative to this one;
+    /// or, with `url`, at `path` (`""` for its root) in another
+    /// repository, fetched into the dependency cache.
     #[serde(rename = "lib.add")]
     LibAdd {
         alias: String,
+        #[serde(default)]
         path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Fetches the repositories of libraries in other repositories (all,
+    /// or the aliases named) into the dependency cache; writes nothing.
+    #[serde(rename = "lib.fetch")]
+    LibFetch {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        aliases: Vec<String>,
+    },
+    /// Moves pins (of the aliases named, or all) to `to` or each
+    /// component's latest official label, and writes the lock again.
+    #[serde(rename = "lib.update")]
+    LibUpdate {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        aliases: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        /// From the cache as fetched, fetching nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        offline: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
     /// Every library with its revision, what it holds and its faults.
     #[serde(rename = "lib.list")]
     LibList {},
+    /// Each pin older than its component's latest official label.
+    #[serde(rename = "lib.outdated")]
+    LibOutdated {},
+    /// What each design places from other projects, at a revision and in
+    /// each official release of it.
+    #[serde(rename = "lib.uses")]
+    LibUses {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// What a library alias's project has released, by component, with
+    /// each one's labels latest first.
+    #[serde(rename = "lib.parts")]
+    LibParts { alias: String },
+    /// A design's BOM: lines by component, label, value and footprint
+    /// (design 629), flat or by block occurrence, as JSON or CSV.
+    #[serde(rename = "bom.get")]
+    BomGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        build: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        by_block: bool,
+    },
+    /// What changed in a design's BOM between two revisions.
+    #[serde(rename = "bom.diff")]
+    BomDiff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
+    /// Where a library project's component is used: by designs in this
+    /// repository, in other checkouts, and in their releases.
+    #[serde(rename = "bom.where_used")]
+    BomWhereUsed {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        working: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        direct: bool,
+        #[serde(default, rename = "in", skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_dependents: bool,
+    },
+    /// Pins components of library aliases (`<alias>/<component>`) at a
+    /// release label, each one's latest official label (`latest`), or
+    /// unpins them (`working`, a library in this repository only).
+    #[serde(rename = "lib.pin")]
+    LibPin {
+        components: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        latest: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        working: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// A library's symbols judged by the standards that apply to it (this
     /// project's own library by default, or one symbol).
     #[serde(rename = "lib.check")]
@@ -932,6 +1030,17 @@ pub enum Request {
         layer: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         theme: Option<ryusch::style::Theme>,
+        /// The working sheet marked against this Git revision (plan
+        /// 13.A): each owner's `mark`, the revision's `ghosts`, moved
+        /// parts' `leaders`, the `counts` and each sheet's, decided as
+        /// `render --compare` decides them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression (plan 13.A). The answer
+        /// names its `commit`; a window shows it read only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// A design's designators numbered in canvas order (plan 2.F): the
     /// unannotated ones (`unannotated`, by default) or every unlocked one
@@ -1072,6 +1181,14 @@ pub enum Request {
     CompareGet {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
+    },
+    /// The project's Git commits, newest first (those that changed its
+    /// folder), and the working files that differ from `HEAD` (plan
+    /// 13.A); `not_a_git_repo` outside a repository.
+    #[serde(rename = "history.log")]
+    HistoryLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
     },
     /// A participant's selection by reference path, and what each names:
     /// `participant`, else the one human (an agent asks what the person
@@ -1214,7 +1331,8 @@ impl Request {
             | Request::NetShow { rev, .. }
             | Request::SymbolShow { rev, .. }
             | Request::LibcompShow { rev, .. }
-            | Request::LibCheck { rev, .. } => rev.as_deref(),
+            | Request::LibCheck { rev, .. }
+            | Request::Scene { rev, .. } => rev.as_deref(),
             _ => None,
         };
         rev.filter(|r| *r != "working")
@@ -1225,6 +1343,8 @@ impl Request {
         matches!(
             self,
             Request::LibAdd { .. }
+                | Request::LibPin { .. }
+                | Request::LibUpdate { dry_run: false, .. }
                 | Request::DoctorRepair { .. }
                 | Request::MergeResolve { .. }
                 | Request::ProjectEdit { .. }
@@ -1307,7 +1427,15 @@ mod tests {
         use ryu_session::Serve;
         assert_eq!(
             crate::Eda::LONG,
-            ["parts.sync", "parts.refresh", "parts.search", "parts.show"]
+            [
+                "parts.sync",
+                "parts.refresh",
+                "parts.search",
+                "parts.show",
+                "lib.add",
+                "lib.fetch",
+                "lib.update"
+            ]
         );
         let r = Request::from_rpc(
             "request.cancel",
@@ -1343,7 +1471,22 @@ mod tests {
             Request::LibAdd {
                 alias: "passives".into(),
                 path: "../passives".into(),
+                url: None,
                 expected_revision: Some("r".into()),
+            },
+            Request::LibPin {
+                components: vec!["passives/r_4k7".into()],
+                label: Some("B".into()),
+                latest: false,
+                working: false,
+                expected_revision: None,
+            },
+            Request::LibUpdate {
+                aliases: vec![],
+                to: None,
+                offline: true,
+                dry_run: true,
+                expected_revision: None,
             },
             Request::Undo { entry: None },
             Request::PdmInit {},

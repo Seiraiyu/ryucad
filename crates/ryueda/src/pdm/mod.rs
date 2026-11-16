@@ -10,10 +10,12 @@ pub use ryupdm::{PDM_CONFIG, RELEASES};
 /// The folder of parts' PDM properties, beside the manifest.
 pub const PROPERTIES: &str = "properties";
 
+pub mod bom;
 pub mod cmd;
 pub mod content;
 pub mod diff;
 pub mod release;
+pub mod where_used;
 
 use crate::conn::{BLOCKS, CLASSES, DESIGNS, RAILS};
 use crate::error::{Code, Error, Result};
@@ -145,12 +147,18 @@ pub fn random_looking(id: &Id) -> bool {
             || s.bytes().filter(|c| b"aeiou".contains(c)).count() <= 1)
 }
 
-/// What a part of this project is: `design` or `component`.
-pub fn kind_name(kind: ProjectKind) -> &'static str {
+/// What a part of this project is: a design project's designs are
+/// `design`, a library project's components `component`.
+pub fn part_kind(kind: ProjectKind) -> ryupdm::product::PartKind {
     match kind {
-        ProjectKind::Design => "design",
-        ProjectKind::Library => "component",
+        ProjectKind::Design => ryupdm::product::PartKind::Design,
+        ProjectKind::Library => ryupdm::product::PartKind::Component,
     }
+}
+
+/// [`part_kind`]'s name: `design` or `component`.
+pub fn kind_name(kind: ProjectKind) -> &'static str {
+    part_kind(kind).as_str()
 }
 
 /// The ID a part's file (`<folder>/<id>.json`) names, if `path` is one.
@@ -163,8 +171,9 @@ impl Product for crate::Eda {
     const PART_FOLDERS: &'static [&'static str] = &PART_FOLDERS;
 
     /// A design project's designs, a library project's components.
-    fn parts(src: &dyn Source) -> Result<Vec<Id>> {
-        let folder = match manifest(src)?.project_kind {
+    fn parts(src: &dyn Source) -> Result<Vec<(Id, ryupdm::product::PartKind)>> {
+        let kind = manifest(src)?.project_kind;
+        let folder = match kind {
             ProjectKind::Design => DESIGNS,
             ProjectKind::Library => LIB_COMPONENTS,
         };
@@ -175,7 +184,7 @@ impl Product for crate::Eda {
             .filter_map(|(n, _)| file_id(&format!("{folder}/{n}"), folder))
             .collect();
         out.sort();
-        Ok(out)
+        Ok(out.into_iter().map(|id| (id, part_kind(kind))).collect())
     }
 
     fn properties_path(part: &Id) -> String {
@@ -283,9 +292,20 @@ pub(crate) mod tests {
     #[test]
     fn a_design_projects_parts_are_its_designs_a_librarys_its_components() {
         let f = board(ProjectKind::Design);
-        assert_eq!(<crate::Eda as Product>::parts(&f).unwrap(), [id("d")]);
         let l = board(ProjectKind::Library);
-        assert_eq!(<crate::Eda as Product>::parts(&l).unwrap(), [id("r_100k")]);
+        use ryupdm::product::PartKind;
+        assert_eq!(
+            <crate::Eda as Product>::parts(&f).unwrap(),
+            [(id("d"), PartKind::Design)]
+        );
+        assert_eq!(
+            <crate::Eda as Product>::parts(&l).unwrap(),
+            [(id("r_100k"), PartKind::Component)]
+        );
+        assert_eq!(
+            part_kind(ProjectKind::Library).as_str(),
+            kind_name(ProjectKind::Library)
+        );
         assert_eq!(
             <crate::Eda as Product>::properties_path(&id("d")),
             "properties/d.json"

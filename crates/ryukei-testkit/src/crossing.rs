@@ -18,6 +18,13 @@ use ryukei::primitive;
 use ryukei::topo::{Body, Sense};
 use std::collections::BTreeMap;
 
+use ryukei::Error;
+use ryukei::check::{Fault, check, check_intersections_with};
+use ryukei::codec::encode_body;
+use ryukei::heal::{HealOptions, heal_with};
+use ryukei::mesh::{MeshParams, check_mesh, tessellate_with};
+use ryukei::repair::self_union_with;
+
 /// Two shapes as one, each keeping its own shells and solids.
 pub fn joined(a: &Shape, b: &Shape) -> Shape {
     let mut s = a.clone();
@@ -248,6 +255,98 @@ pub fn crossing_case(data: &[u8]) -> Option<Crossing> {
     Some(Crossing {
         shape: one_solid(shape?),
         parts,
+    })
+}
+
+/// What the `self_union` fuzz target made of its bytes (plan 30.C).
+#[derive(Debug)]
+pub enum SelfUnionRun {
+    /// The bytes build no case.
+    NoCase,
+    /// Healing, a self-union, or the fuzz case's budget or deadline
+    /// refused it: a typed refusal, never a bug.
+    Refused(Error),
+    /// A body that passed every check, meshed or too large to mesh.
+    Built,
+}
+
+/// The `self_union` fuzz target's case, under one
+/// [`crate::fuzz_case`]: `data` read by [`crossing_case`], healed, given
+/// to `self_union` where healing left it crossing, checked, meshed, and
+/// given to `self_union` again, which must change nothing. Every call
+/// shares the case's [`crate::FUZZ_BUDGET`] and stops at
+/// [`crate::FUZZ_DEADLINE`], so a case that runs away (#884) ends typed.
+/// Panics on any bug, as the target did.
+pub fn self_union_run(data: &[u8]) -> SelfUnionRun {
+    let Some(case) = crossing_case(data) else {
+        return SelfUnionRun::NoCase;
+    };
+    crate::fuzz_case(|work| {
+        let typed = |e: &Error| {
+            matches!(
+                e,
+                Error::InvalidHeal(_)
+                    | Error::InvalidRepair(_)
+                    | Error::BudgetExceeded { .. }
+                    | Error::Cancelled
+            )
+        };
+        let healed =
+            match work.run(|w| heal_with(OpKey(7), &case.shape, &HealOptions::default(), w)) {
+                Ok((b, _, _)) => b,
+                Err(e) if typed(&e) => return SelfUnionRun::Refused(e),
+                Err(e) => panic!("unexpected {e:?}"),
+            };
+        // Shells crossing with no vertex of either inside the other heal as
+        // they are: a caller's self-union repairs them.
+        let crossing = match work.run(|w| check_intersections_with(&healed, w)) {
+            Ok(faults) => faults
+                .iter()
+                .any(|f| !matches!(f, Fault::CannotCheck { .. })),
+            Err(e) if typed(&e) => return SelfUnionRun::Refused(e),
+            Err(e) => panic!("unexpected {e:?}"),
+        };
+        let body = if crossing {
+            match work.run(|w| self_union_with(OpKey(9), &healed, w)) {
+                Ok((b, _)) => b,
+                Err(e) if typed(&e) => return SelfUnionRun::Refused(e),
+                Err(e) => panic!("unexpected {e:?}"),
+            }
+        } else {
+            healed
+        };
+        assert_eq!(check(&body), []);
+        match work.run(|w| check_intersections_with(&body, w)) {
+            Ok(faults) => {
+                for fault in faults {
+                    assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
+                }
+            }
+            Err(e) if typed(&e) => return SelfUnionRun::Refused(e),
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+        let params = MeshParams {
+            max_triangles: 200_000,
+            ..MeshParams::new(1e-2, 0.5)
+        };
+        match work.run(|w| tessellate_with(&body, &params, w)) {
+            Ok(m) => {
+                assert_eq!(m.faults, []);
+                assert_eq!(check_mesh(&body, &m), Ok(()));
+            }
+            Err(Error::MeshTooLarge { .. }) => {}
+            Err(e) if typed(&e) => return SelfUnionRun::Refused(e),
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+        match work.run(|w| self_union_with(OpKey(9), &body, w)) {
+            Ok((again, journal)) => {
+                assert!(journal.is_empty());
+                assert_eq!(encode_body(&again), encode_body(&body));
+            }
+            Err(e) if typed(&e) => return SelfUnionRun::Refused(e),
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+        SelfUnionRun::Built
     })
 }
 

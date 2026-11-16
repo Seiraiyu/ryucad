@@ -160,7 +160,7 @@ The design is document 444 in the Coxswain planning project `ryucad-ryukei`; thi
   - The pinned corpus (`pinned_bodies_defeature`, tightening on): `pinned corpus: 17 defeatured, 9 refused, 2 past the deadline, 5 with no blend under 2 mm, in 642.3 s` (load 3.2 before, 4.6 after, beside other builds). Defeatured: CTC 01, 03, 04 and 05, FTC 06, 08 and 09 in their AP203 editions, CTC 01 and 03 to 05 with PMI, and the AP242 CTC 05, FTC 06, FTC 08, STC 06, STC 08 and STC 09 (0.14 to 5.4 s). Refused: FTC 07 and 10, and STC 07 and 10, their AP242 twins (`Uncertain`, 30 to 97 s; FTC 07's AP242 edition past the deadline: #652's tangent seams); CTC 02 in two editions (`Uncertain`, 2.9 and 67 s); FTC 09's AP242 edition (`Uncertain`, 1.1 s); FTC 11's AP242 edition (`GapNotHealed`, 0.8 s); OCCT's `linkrods.step` past the deadline (#658 holds each).
   - #647's bytes refuse `Uncertain` in 3.5 s (3,489,400 units); `edit_props`' seed 76 refuses `RegionTooSmall` in 24.0 s; `edit_props` builds 40 of 78 edits, none past the deadline.
 - **Limits.**
-  - FTC 07 and FTC 10 (#652): see Known seams (phase 18).
+  - FTC 07 and FTC 10 (#652): see Plane stops and the bars (phase 19.B).
   - A hole whose wall is two half cylinders can't have its rim filleted or chamfered (`blend` refuses `Topology(Inconsistent)`, #723).
 - **Testing.** `blend_recognition.rs`' `a_ribs_full_round_is_no_fillet`; `delete_faces.rs`' `far_apart_sets_grow_as_one_after_another` and `deleting_a_drilled_plates_side_is_refused`; `retrim.rs`' `an_offset_past_the_opposite_side_collapses` and the groove's names; `drafts.rs`' `a_wall_drafted_past_its_neighbour_keeping_topology_loses_an_edge`; `fuzz_regressions.rs`' `the_edit_targets_first_find_answers`; unit tests in `tweak::retrim::{walk, working, body}`, `work` and `check`; ryustep's `defeature.rs`: `ftc_09s_split_holes_lose_their_countersinks`, `a_delete_checks_only_its_own_pairs`, `ftc_08s_pocket_floor_loses_its_fillets`, `ftc_07s_and_ftc_10s_blends_are_deleted` (ignored, #652), the committed corpus's bar with `KNOWN_REFUSED`, and `pinned_bodies_defeature` (ignored until the corpus is fetched).
 
@@ -185,8 +185,10 @@ The design is document 551 in the Coxswain planning project `ryucad-ryukei`; thi
   - Every pair against a NURBS face is tangent only partly along its edge (`classify::tangent` refuses `PartlySmooth`), with NURBS pcurves.
   - With all of them set aside, a non-tangent plane/plane pair at the frontier refuses behind them in both bodies.
   - So `KNOWN_REFUSED` keeps both, and question 820's carry-stop trial was skipped with the coxswain's agreement: settling FTC 07's torus pairs would leave its five partly smooth pairs, and FTC 10's four are all partly smooth. Frontier and partly smooth seams are ryukei 19's.
+  - Plan 19.A holds frontier and partly smooth seams and stops runs at their iso seams (below).
 - **The pinned editions** (#658, Tasks 11–13): `17 defeatured, 9 refused, 2 past the deadline, 5 with no blend under 2 mm`, 16.C's tally exactly. `PINNED_DEFEATURED` asserts that those 17 stay defeatured. Design 551 expected #652's AP242 twins there, but they don't build. The causes still standing:
   - **Frontier and partly smooth seams:** STC 07, STC 10, FTC 07 and FTC 10 in their AP242 editions, CTC 02 in both AP203 editions, and linkrods. CTC 02 with PMI is a single frontier seam, a closed ellipse tangent all along; with that one pair set aside, the delete builds.
+  - Ryukei phase 19 holds these seams. Where each edition stands now is under Plane stops and the bars (phase 19.B).
   - **FTC 09 AP242:** the split of a cone face that runs down to its own apex fails (`split::split`, a pole).
   - **FTC 11 AP242:** the walk is ambiguous in the delete's second re-trim, then `Clipped` (`GapNotHealed`).
   - **linkrods:** every one of its eight chains runs past 150 s. A rung's cap bounds each parallel task of its table (`Meter::par_map` gives each the room left), not their sum, and chain 6's rung spent 84.4M units under `RUNG`'s 16.8M.
@@ -209,3 +211,147 @@ The design is document 551 in the Coxswain planning project `ryucad-ryukei`; thi
   - Unit tests: `intersect::known`'s (a plane tangent to a cylinder met along the line to the faces' ends; turned 0.3 rad, and 10 µm into the tube, withheld; a cylinder carried past its torus seam withheld), `known_seams_hash`, `beside::rails_tests`, `face::swap_tests`, `retrim::body`'s `kept_faces_tangent_along_a_round_record_their_seams`, and `flat`'s `a_middle_flat_span_is_never_split`.
   - The NIST cut: `retrim::tests::ftc_07s_seam_pair_crossing_past_its_seam_is_withheld` (`nist_ftc_07_seam_input.body` and `nist_ftc_07_seam_work.body`).
   - ryustep's `defeature.rs`: `ftc_07s_and_ftc_10s_blends_are_deleted` (ignored: frontier and partly smooth seams), `KNOWN_REFUSED`, and `pinned_bodies_defeature` with `PINNED_DEFEATURED`.
+
+## Held seams and iso stops (decided in ryukei phase 19.A)
+
+Design 642, plan 19.A (#652, #658).
+
+- **Held seams.** `tweak::retrim::held` records each input edge that meets all of these:
+  - it has two fins, both with pcurves;
+  - its two faces both stay (outside the region, or `still`), and at least one of them is a working face;
+  - `classify::tangent` calls it tangent all along (`Ok(true)`) or in places (`PartlySmooth`).
+
+  Each held seam has a kind. It is *frontier* when one face is outside, *fixed* when every face round both ends stays (a closed edge's one vertex is its end), and *running* otherwise. An absorbed face counts as not staying. `WorkBody::seams` builds the table's `Seams` from the held seams, outside faces included, and `seam_for` no longer judges tangency.
+- **Met along the edge.**
+  - A frontier or fixed seam is the edge itself, never run on, whatever its curve and pcurves (`SeamKind`, `known::run_on`). A running seam keeps 18.C's rule.
+  - `known_seam` certifies first by keep-off (18.C's), then by the section plane. The section plane needs the seams on one planar curve (`beside::section_plane`) and each face on its own side of that plane outside the strip (`face_beside_rails`, and `beside::opposite_sides`, which the check now shares). A face carried past the seam crosses the plane, so the second certificate holds only for faces that end at it.
+- **Refitted pcurves** (a departure from design 642's "the input's own pcurves"). `pcurve_certified` takes only lines and polynomial splines. Where a seam's pcurve is a conic (CTC 02's `Ellipse2` on its NURBS face) or a rational spline (FTC 07's partly smooth ellipse), `known::refit` fits one to the seam's curve on that surface (`fit_pcurve_within`, certified) and moves it by whole periods to where the edge's own pcurve lies.
+  - The refit is asked for the edge's own tolerance, not `SEAM_SLACK`, which still bounds what is accepted. The fit reports at least what it is asked for, so asked for the slack, the seam took ten times its tolerance, and a delete's next re-trim ten times that (CTC 02: `ToleranceTooLarge`, 6.9e-4 m).
+  - No new tolerance rule, and no golden moved.
+- **Iso stops.** `held::iso_stops` ends a working face's rect half a strip past a held seam with fixed ends. The margin is half of `known::seam_strip`, from the input faces' box and the edge's tolerance, so no more than what `known_seam` takes. A stop applies only where all of these hold:
+  - the seam's pcurve on the face is iso (`held::iso`: a `Line2` along a parameter, or a `Nurbs2` whose control points share that coordinate bit for bit);
+  - the pcurve lies at the end of the face's own box;
+  - every fin running along that end is such a seam;
+  - the direction isn't a whole period.
+
+  The margin in parameters is the model-space margin divided by `first_bound`'s bound on `|P_u|` or `|P_v|`.
+- **The retry with stops.** A rung is built as before. Where it refuses `Uncertain` at a pair with held seams (`Rung::Held`), `settle` builds it again with stops, under its own `Scope::Rung` cap. The stopped build's answer stands, except where its walk fails or nothing stops (`Rung::Walked`, `Rung::Unstopped`). Then the first build's `Uncertain` stands, since building it again would only repeat it. Stops never come from the first build, so bodies that built before keep their bits. `retrim_with(…, Stops::Never, …)` is the tests' re-trim without stops.
+- **Census II** (#652, #658; on main's code with failing pairs skipped):
+  - **FTC 07:** seven pairs.
+    - Pairs 1 and 2: an outside cylinder against a NURBS run, frontier, `PartlySmooth`, both pcurves iso.
+    - Pairs 3 and 4: an outside torus against a cylinder run, frontier, `Ok(true)`.
+    - Pair 5: NURBS/plane, running, `PartlySmooth`; the plane is one-signed over the NURBS face (keep-off).
+    - Pairs 6 and 7: NURBS/cylinder ellipses, running, `PartlySmooth`, rational pcurves, both faces on both sides of the plane.
+  - **FTC 10:** four running `PartlySmooth` pairs: two sphere/NURBS (keep-off) and two cylinder/NURBS along splines (no section plane).
+  - **The pinned editions:** CTC 02 with PMI has one frontier ellipse (keep-off). CTC 02's geometry-only edition and STC 07 have tangent `Uncertain` pairs, which aren't held. FTC 07 AP242 has 41 held pairs and 178 failing pairs that share no edge. Linkrods has 14 held pairs, 3 of them partly smooth splines with no plane.
+- **What 19.A settles.** FTC 07's pairs 1 and 2 and FTC 10's sphere pairs are held and met, so the deletes refuse later and faster. FTC 07 went from 85.2 s to 42.5 s, and FTC 10 from 51.0 s to 15.5 s. FTC 07's AP242 edition, past the deadline on main, now refuses in 30 s. The bent-rod twin builds through its stop.
+- **What it doesn't settle** (19.B):
+  - **FTC 07's torus pairs 3 and 4.** The run is a whole turn: its own pcurves span 2π, so `delete_turn` leaves it whole, and its seam with the torus is a quarter of its end circle. Stopped past the seam, the rest of its rim crosses the plane outside the seam's strip. The cut test `ftc_07s_seam_pair_is_met_once_its_run_stops` is ignored with that cause.
+  - **FTC 07's NURBS/cylinder pairs 6 and 7**, which need plane stops.
+  - **FTC 10's next refusal** at `a289199e…`, a pair only reached now.
+  - **CTC 02 with PMI.** Its ellipse is met, but a later re-trim of the same delete refuses at a cylinder/cylinder pair with no seam. Census II couldn't see it, since it skipped the ellipse pair as apart. So it stays out of `PINNED_DEFEATURED`, and Decision 12 didn't hold.
+  - **CTC 02's geometry-only edition**, whose bends' `tangent` is `Uncertain`, so they aren't held.
+- **Testing.**
+  - **Unit tests** cover kinds (`run_on` keeps a frontier or fixed seam's interval), iso pcurves, the section plane, iso stops and the fallback (`settle`). The section plane's test stops its cylinder 0.05 mm past the seam, because faces that both end exactly on a closed seam leave `placed` only a contact.
+  - **The bent-rod twin** (`ryukei_testkit::held_seams`, and `testing::bent_rod` in the crate, pinned together by `ROD_DUMP_HASH`). Without stops its rim's delete refuses `Uncertain`; with them it builds, check-clean, within 0.2% of Pappus. `tests/work.rs` bounds the stopped delete at 9,871,280 units, the same on one thread and on eight.
+  - **NIST cuts:** CTC 02's closed frontier ellipse, FTC 07's partly smooth ellipse (a running seam), and FTC 07's torus/cylinder pair stopped (ignored, above).
+  - **Goldens.** Section `held_seams` was added. No other ryukei or ryucad section moved.
+  - **Measured** on cox-worker-2, one thread, load 1–2, branch `3def2acf` against main `de314a93`.
+    - Committed deletes: none slower, same results.
+    - Pinned: main 17 defeatured / 9 refused / 2 past the deadline / 5 with no blend in 629.6 s; the branch 17 / 10 / 1 / 5 in 421.0 s. The only slower body is CTC 02 with PMI (2.9 to 15.8 s), which refuses further along.
+    - `edit_props` built 78 edits on the branch and on main, with the same refusals.
+    - Fuzzing: the `edit` target ran 30 minutes on cox-worker-4 (Docker, 8 GB) with no crash, timeout or OOM: 5,217 runs, at about 2.9 a second, and a corpus of 654.
+
+## Plane stops and the bars (decided in ryukei phase 19.B)
+
+Design 642, plan 19.B (#652, #658).
+
+- **Box-apart parts.** On a pair met in a stopped build (`Seam::stopped`, set by `WorkBody::seams`), the section plane leaves out each part of a face whose certified box lies apart from every one of the other face's boxes (`beside::face_beside_rails_near`). Those boxes are `beside::face_boxes`: the surface's certified box (`Sheet::jet_box_in`) over each part of a 16 × 16 grid of the face's parameter box, leaving out parts certified outside the face, each grown by the pair's tolerance. Such a part can't meet the other face.
+  - FTC 07's torus/run pair needed the grid. The stopped run crosses the seam's plane along its whole end circle, while the seam is a quarter of it. The torus face's one box (`face_box`) holds the whole circle; its grid boxes don't.
+  - Keep-off and unstopped builds are unchanged.
+- **Plane stops.** `held::stop_plane` is the seam's plane (`section_plane`) where both input faces are certified on opposite sides of it outside the strip (twice `margin`), moved the margin towards the other face. `held::plane_cut` divides the working face's rect sheet by a plane sheet over the region box (`boolean::divide_in`) and keeps the one face behind it (`Working::cut`, used by `work_body`). Every edge of the cut sheet is clipped and scaffolding. `plane_stops` applies a face's stop planes in edge order, and only where no iso stop moved the face's rect at all: per face, where plan 19.B's Decision 3 said per seam, the more conservative of the two.
+  - At the resolution the strip round a seam is narrow (3 mm on a 5 m tube for a 1e-8 seam), and a seam whose pcurve the division fitted can't be told apart from it there. So plane stops certify on seams with a file's tolerance, not on exact ones (`held.rs`' oblique pair takes 1e-6).
+- **Running seams** take plane stops too (question 916, option 0: `RUNNING_PLANE_STOPS`). A stop that cuts off what the result needs leaves a kept piece on its clipped cut, the walk fails, and `settle` keeps the first answer. Iso stops stay fixed-ends only.
+- **Uncertain bends are held** (question 917, option 0: `held_tangent` also takes `classify::tangent`'s `Uncertain`). Neither certificate assumes tangency. A transversal edge (`Ok(false)`) still isn't held. Pairs that settle under `SEAM_TRACE_FIRST` settle as before.
+- **Census III** (main `469e857d`, one thread, with failing pairs skipped) and a trace of the real flow on the branch (nothing skipped), both on #652 and #658:
+  - **FTC 07's runs are quarter cylinders, not whole turns.** Their pcurves straddle the period's seam (sides at u = 5.51 and 0.78). `working::own_span`'s plain min/max reads them as a whole period, so `delete_turn` carries them a whole turn. 19.A's section above calls them whole turns; it was this reading.
+  - The plane/plane frontier pair census I saw was an artefact of its skipped pairs (Task 10).
+  - FTC 07's NURBS/cylinder pairs fail against cylinders they share no edge with, so they have no ellipse seam (plan 19.B's Task 7, deferred).
+- **What stopped FTC 07, FTC 10 and CTC 02 next** (recorded under question 882; see Limits below):
+  - **FTC 07:** rung 0 refuses `Held` at the torus/run pair. The stopped build meets both torus seams, but its walk refuses `Ambiguous` at the other run: carried a whole turn and stopped past its quarter-arc seams, the run's strip past them joins the rest of the turn. Two experiments (not committed) got further. `own_span` as a circular hull, with iso values compared modulo the period, left the stopped walk `RegionTooSmall`: the run's tangent outside plane isn't carried at rung 0. Then a stopped build whose walk fails climbing the ladder instead of answering with the first `Uncertain` reached rung 2, which refuses at a cone and a cylinder carried about 0.5 m that cross nearly tangent with no shared edge.
+  - **FTC 10:** rung 2 refuses at torus `a289199e` / cylinder `24401201`. The working cylinder, carried about 0.25 m, continues the torus's tube straight on and is tangent to it along a minor circle inside the torus face (equal radii, no shared edge).
+  - **CTC 02 with PMI (#295):** rung 3 refuses at two cylinders with axes 2° apart, each carried about 0.9 m, crossing nearly tangent far from both input faces (no shared edge).
+- **Bars** (cox-worker-2, AMD Ryzen 7 9700X, one thread, release, 2026-11-15 01:40–01:57 UTC, load 1.9–2.9; branch `80a5081f` against main `66d87d0c`):
+
+  | Bar | Result |
+  |---|---|
+  | Blend deletes, committed (#652) | FTC 07 refused `Uncertain` in 22.7 s (main 42.5 s), FTC 10 in 15.5 s (main 15.5 s). `KNOWN_REFUSED` stays and `ftc_07s_and_ftc_10s_blends_are_deleted` stays ignored. Unmet: carried near-tangent pairs with no shared edge (question 882) |
+  | Blend deletes, pinned (#658) | `18 defeatured, 8 refused, 2 past the deadline, 5 with no blend under 2 mm, in 389.9 s` (main 17 / 10 / 1 / 5 in 421.0 s). CTC 02's geometry-only edition (#20754) builds in 3.2 s (main refused it in 64.3 s) and joins `PINNED_DEFEATURED`; the 17 stay. FTC 07 AP242, STC 10, CTC 02 with PMI and linkrods are as on main. Partly met |
+  | No delete slower | Every committed body within 1% of main. Of the pinned, only STC 07 #11020 moved: refused in 71.5 s on main, past the deadline (120 s) on the branch; with no deadline it refuses `Uncertain` in 165 s (below, Limits). It didn't build on main either |
+  | Goldens | Every ryukei, ryucad, ryusketch, ryumate and ryustep section unmoved. Met |
+  | Property suites | `edit_props`, `blend_props`, `boolean_props`, `heal_props`, `tolerant_boolean_props` and `general_props` pass. `edit_props` gives main's 78 outcomes exactly (40 built). Met |
+  | Fuzzing | `edit`, 30 minutes under ASan on cox-worker-4 (Docker, 8 GB, at `80a5081f`, load 13–47 beside another fuzz run): 3,212 runs at about 1.8 a second, corpus 1 → 679 files, no crash, timeout or OOM. Met |
+
+- **Testing.**
+  - Unit tests: `beside::rails_tests::a_part_apart_from_the_other_face_has_no_side`; `held`'s `a_stop_plane_lies_the_margin_past_the_seam_towards_the_other_face`, `a_running_seam_has_a_stop_plane_and_a_face_paired_with_itself_none`, `a_plane_cut_keeps_the_working_face_behind_its_stop`, `plane_stops_cut_a_face_whose_seam_lies_on_no_iso_line`, `an_uncertain_bend_is_held_and_a_transversal_edge_is_not` and `stc_07s_uncertain_bend_is_held`; `retrim::tests`' `an_iso_stopped_run_takes_no_plane_stop` (the bent rod's delete pinned by `BENT_ROD_DELETED_HASH`) and `a_body_that_builds_is_the_same_with_stops_allowed` (its first build settles, so it takes no plane stop).
+  - NIST cuts: `ftc_07s_seam_pair_is_met_once_its_run_stops` (now run in release builds) and `nist_stc_07_bend_input.body` (census III's plane/NURBS pair `f9366bce`/`c68684aa`).
+  - ryustep's `defeature.rs`: `KNOWN_REFUSED` (FTC 07 and FTC 10), `ftc_07s_and_ftc_10s_blends_are_deleted` (ignored with the recorded cause) and `PINNED_DEFEATURED` (18).
+- **Limits** (question 882's rule; bars unmet):
+  - **Carried near-tangent pairs with no shared edge** (FTC 07 at rung 2, FTC 10, CTC 02 with PMI; #652, #658). Working faces carried far along their own straight directions (0.25 to 0.9 m) meet each other nearly tangent, away from any input edge, so no held seam and no certificate applies. A later stage needs a rule bounding how far a working face is carried, or one certifying such pairs apart near the input faces.
+  - **Straddling periodic faces** (FTC 07): settled in phase 20.A (below).
+  - **A stopped build's failed walk answers with the first `Uncertain`**: settled in phase 20.A (below).
+  - **STC 07 #11020: a rung's cap bounds each parallel pair, not their sum**: settled in phase 20.A (below); STC 07 now refuses inside the deadline.
+
+## Ordered sums and the narrowed build (decided in ryukei phase 20.A)
+
+Design 669, plan 20.A (#652, #658).
+
+- **Census IV** (on #652 and #658; cox-worker-2, one thread, near boxes by design 669's rule as drafted, never committed). On main: FTC 07 rd refuses at rung 0 at torus `297daf90` / cylinder `0b3042ff` (OVERLAP, one shared edge); FTC 10 rb at rung 2 at torus `a289199e` / cylinder `24401201` (**OVERLAP**, no shared edge); CTC 02 with PMI at rung 3 at cylinders `a9b6e499` / `8031cb1f` (**APART**); STC 10 at rung 2 at torus `e550357e` / cylinder `872b2691` (OVERLAP); FTC 07 AP242 at rung 0 at NURBS `783471c2` / cylinder `91346e59` (OVERLAP). On the branch: FTC 07 rd climbs narrowed to rung 2 and refuses at cylinder `18dae4b7` / NURBS `33b57350` (OVERLAP, no shared edge; not the cone/cylinder 19.B expected); FTC 10's and STC 10's narrowed retries refuse at a face paired with itself (a plane, a sphere); FTC 07 AP242's at cylinder `79b561f3` / cone `178d3260` (OVERLAP). Question 931's trigger fires: FTC 10's torus/cylinder near boxes overlap. Every near box there is nearly the rung's box, because it grows by the global `reach` (the diagonal of every deleted face, about 0.18 m on FTC 10). Cuts of FTC 07's pairs were kept for 20.B.
+- **A rung's cap bounds its sum.** `Meter::par_map`'s ordered sum (see `kernel-work.md`) gives a rung's table, classification and split at most `RUNG` between them; every rung build of the census stays within `RUNG` plus a charge. STC 07 #11020: past the deadline on main (rung 2's first build 38.0M units, 96.5 s) and refused `Uncertain` in 105.6 s on the branch (16.78M in 41.5 s, then the narrowed retry's 16.78M in 58 s). linkrods #11: past the deadline on both (first build 26.0M in 117 s on main; 16.78M in 64.5 s on the branch, then the narrowed retry of its held NURBS pair, 11.3M in 52 s). One NURBS/torus pair costs about 4 µs a unit there, which the sum doesn't bound.
+- **The narrowed build.** `Narrow` and `settle` replace 19's `Stops`: a rung whose first build refuses `Uncertain` at any table pair (`Rung::Uncertain`, held or not) is built again narrowed (`Build::Retry`) under its own `Scope::Rung` cap, unless no narrowing changes a working face (`Rung::Unchanged`). Its answer stands, except that a failed walk or a `Next` climbs (question 936), and every later rung is then built narrowed only (`Build::Only`; `climb`). The narrowings: period-aware turns and 19's iso and plane stops; 20.B adds near boxes. First builds are as before, bit for bit.
+- **Period-aware turns.** `working::own_hull` reads a face's span in a periodic direction round the circle: each fin's span moved by whole periods to start within a period of the plain span's start, then the largest gap between them left out. Where that is no shorter than `own_span`'s min/max it is that, bit for bit. `delete_turn(…, circular)` uses it in narrowed builds only (question 929). FTC 07's run, whose pcurves straddle the period's seam (sides at u = 5.5065 and 0.7767), reads as [−0.7767, 0.7767], just under a quarter, not a whole turn.
+- **Iso stops modulo the period.** Where a face straddles, `iso_stops` moves the seam's iso coordinate and each fin's by whole periods (none, one down or one up) to lie nearest the hull, then compares within the stop's margin as 19.A does (question 937). Where nothing straddles it is 19.A's to the bit.
+- **Bars** (cox-worker-2, AMD Ryzen 7 9700X, release, 2026-11-15; branch `6abb8a5e` against main `22f60a8e`; one thread for the deletes, load 0.8 to 3.4 at their starts):
+
+  | Bar | Result |
+  |---|---|
+  | Ordered sum | `work`'s tests on 1, 2 and 8 threads; `tests/work.rs`'s figures match main's |
+  | STC 07 and linkrods | STC 07 refused in 105.6 s (met); linkrods past the deadline, 122 s (unmet, above) |
+  | No delete slower | Committed: 7 defeatured, 2 refused on both, defeatured bodies within 5%. Pinned: main 18 defeatured, 8 refused, 2 past the deadline, 391 s; branch 18, 9, 1, 464 s. No body that defeatures moved; the refusals take about twice as long (FTC 07 rd 22.8 to 42.0 s, FTC 10 rb 15.6 to 31.8 s, STC 10 12.5 to 26.7 s) after their narrowed retries |
+  | Goldens | every section unmoved |
+  | Property suites | `edit_props` 40 built and 38 refused on both; `blend_props`, `boolean_props`, `general_props`, `heal_props`, `tolerant_boolean_props` pass |
+  | Fuzzing | `edit` (ASan, cox-worker-4, Docker, 8 GB, 2 jobs), 30 min: 2,875 runs (about 1.6 a second), corpus 1 to 750 entries, no crash, timeout or OOM |
+
+- **Testing.** `work`'s `tasks_share_what_is_left_of_a_cap_in_order`, `a_capped_map_answers_as_its_tasks_in_order_on_any_thread_count`, `a_rungs_pairs_spend_its_cap_between_them` and (with `work-stats`) `a_capped_map_past_its_room_is_noted`; `working`'s `a_straddling_quarter_reads_as_a_quarter_round_the_circle` and `a_face_that_doesnt_straddle_reads_as_before`; `held`'s `an_iso_stop_reads_a_straddling_face_modulo_the_period`; `retrim::tests`' `a_narrowed_rung_answers_unless_it_narrows_nothing`, `a_narrowed_ladder_climbs_and_stays_narrowed`, `a_retry_that_narrows_nothing_is_never_built` and `ftc_07s_run_is_a_quarter_round_the_circle`. `BENT_ROD_DELETED_HASH` and every golden unmoved.
+- **Left for 20.B:** near boxes (tighter than the drafted rule's global `reach`), the twin and the `near_boxes` golden; what stops FTC 07 rd (rung 2, cylinder/NURBS with no shared edge), FTC 10 and STC 10 (a narrowed face paired with itself) and CTC 02 with PMI (rung 3, cylinders apart); `KNOWN_REFUSED`; linkrods' per-unit cost.
+
+## Near boxes and the bars (decided in ryukei phase 20.B)
+
+Design 669, plan 20.B (#652, #658).
+
+- **Near boxes by the faces touched.** A narrowed build carries each working face over its near box only (`tweak::retrim::near`): its own box joined with the boxes of the changed faces it touches (shares a vertex with, or is), grown by those faces' reach alone (`retrim::reach_of`, `reach` over a subset: over every face it is `reach`, bit for bit), doubled at rung 1, inside the rung's box. A face touching no change keeps its own box and ten resolutions. Plane stops still divide within the rung's box. First builds are as before, bit for bit.
+- **Not per gap (a departure from the plan's Decision 1, question 946).** The plan grew a near box by the reach of the gaps it touched (changed faces joined where they share a vertex). But `delete_faces_in` grows each edge-connected set of deleted faces in its own re-trim, so a delete's changed faces are always one gap and its reach is the body's: the near box was the rung's box. The coxswain chose the touched faces' reach (2026-11-15). Growing a face also by its kept neighbours' reach was tried for FTC 07 and only moved its clipped walk to the next face of the ring; it isn't in.
+- **The twin** (`ryukei_testkit::near_boxes`): two holes drilled from a bar's ends, 2° apart, their axes 0.1 mm less than the radii's sum apart at the middle; both floors filleted and joined by a 3 mm channel, so the fillets and the channel are one set (reach 0.743 m). On main the delete refuses `Uncertain` (the carried walls cross at the middle; walls only touching there trace clean); on the branch each wall touches only its own fillet and the delete builds. 63,743 units, the same on one thread and eight; the `near_boxes` golden.
+- **The tube contact** (see `kernel-intersections.md`): tried once a trace fails, and never inside a re-trim rung's first build (`Meter::first_build`, inherited by `par_map`'s tasks). A departure from the plan's Decision 2: tried in first builds it settled 19.A's bent rod (a cylinder continuing a torus) there, whose first build refuses today and whose narrowed retry builds it, and moved `held_seams`. Gated, nothing that builds moves; the bent rod's narrowed retry spends 4 more units on it (9,871,284), its result the same.
+- **Overlapping stretches run together.** `boolean::table::together` also relates two carriers lying along each other over part of each (an end of each on the other, apart, their middle on both), so they share vertices and their pieces are one edge. Left unrelated, FTC 10's and STC 10's retries crossed a plane where two faces tangent along a line meet it, and the plane's split couldn't order the two stretches lying on each other (`Uncertain` at the plane paired with itself). Every golden is unmoved.
+- **Census V** (cox-worker-2, 2026-11-15, branch `3b4b721e` with hooks never committed, one thread, load 1 to 2). Near boxes part the pairs the plan aimed at: FTC 07 rd's census-IV pair (cylinder `18dae4b7` / NURBS `33b57350`), FTC 10's and STC 10's torus/cylinder pairs at rung 2 (`a289199e`/`24401201`, `e550357e`/`872b2691`), FTC 07 AP242's rung-0 NURBS/cylinder (`783471c2`/`91346e59`) and CTC 02 with PMI's rung-3 cylinders (`a9b6e499`/`8031cb1f`); each has a committed cut that fails with the rung's box. "CTC 02 with PMI #295" is `AP203 with PMI/nist_ctc_02_asme1_ap203.stp`; the AP242 edition's #1341 builds but doesn't check clean, on main as on the branch.
+- **What stops each body now** (recorded unmet; design 669's cases a plan can't settle):
+  - FTC 10 rb: rungs 0 and 1 (first builds) and rung 2's narrowed retry walk `HealAmbiguous` at sphere `d0eb13c5`, a kept 1 mm ball slit by the curve where a carried 0.27 m NURBS face (`a497893e`) meets it, the curve ending inside the ball; the seeds keep a piece of each, three uses of one edge. A walk and seed rule, not a near box.
+  - STC 10 #3044: rung 2's narrowed retry, past the plane, can't group two sphere faces holding a lone pole vertex (`split::group`, `f188a714`, `df1863ee`).
+  - FTC 07 rd: rungs 0 and 1 narrowed walk clipped at cylinder `7ae04fcd`'s angular sides (20.A's turn, as in census IV); rung 2 clipped at faces of the grown ring touching no change (NURBS `4290b75c`), which a near box leaves at their own box; rung 3 refuses at torus `14131c92` / plane `9d1d527c`, both touching no change, overlapping.
+  - FTC 07 AP242 #13541: the retry refuses at cylinder `79b561f3` / cone `178d3260`, overlapping with no shared edge, as in census IV.
+  - CTC 02 with PMI #295: past its cylinders, the retry refuses at plane `74fca8b1` / NURBS `b150cb1a`, both touching no change, overlapping.
+- **Bars** (cox-worker-2, AMD Ryzen 7 9700X, release, 2026-11-15; branch `86be98c8` and its successors against main `51555f3c`; one thread for the deletes, load 0.8 to 1.9 at their starts):
+
+  | Bar | Result |
+  |---|---|
+  | Blend deletes, committed | 7 defeatured; FTC 07 refused `Uncertain` in 63.5 s, FTC 10 `HealAmbiguous` in 45.1 s, both inside 120 s; `KNOWN_REFUSED` and the ignored test kept with the recorded causes (unmet) |
+  | Blend deletes, pinned | main and branch 18 defeatured, 9 refused, 1 past the deadline (470 s, 518 s); FTC 07 AP242, STC 10 and CTC 02 with PMI refuse at their next pairs (unmet, above); STC 07 refused in 106.6 s; linkrods past the deadline, 122 s (unmet, 20.A) |
+  | No delete slower | no body that defeatures on main refused or slower: the short ones that read 1.25 to 1.42 times in the pinned run timed equal alternately, three runs each; the refusals take longer (FTC 07 rd 42.6 to 61.9 s, FTC 10 rb 32.4 to 45.0 s, FTC 07 AP242 36.4 to 50.3 s) |
+  | Ordered sum | `work`'s tests on 1, 2 and 8 threads; `tests/work.rs` matches main but the bent rod's stopped delete, 4 units more (the tube contact in its narrowed retry, the result the same); the twin 63,743 units |
+  | Goldens | every section of ryukei, ryucad, ryusketch, ryumate and ryustep unmoved; `near_boxes` new |
+  | Property suites | `edit_props` 40 built and 38 refused, seed for seed as main; `blend_props`, `boolean_props`, `heal_props`, `tolerant_boolean_props`, `general_props`, `intersect_props`, `general_booleans`, `booleans`, `blends`, `retrim` pass |
+  | Fuzzing | `edit` (cox-worker-4, Docker, 8 GB, 2 jobs), 30 min: 3,105 runs, corpus 790 entries, no crash, timeout or OOM |
+
+- **Testing.** `near`'s `reach_of_every_face_is_the_bodys_reach`, `a_face_at_one_end_of_a_long_set_is_carried_past_that_end_only`, `a_face_beside_a_deleted_corner_is_carried_past_it_not_across_the_body`, `a_face_touching_no_gap_keeps_its_own_box` and `rung_one_doubles_a_near_box_inside_its_doubled_box`; `working`'s `a_cylinder_over_its_near_box_is_no_longer_than_the_box`; `retrim::tests`' `ftc_07s_carried_pair_is_apart_over_near_boxes`, `ftc_10s_tube_pair_is_apart_over_near_boxes`, `stc_10s_tube_pair_is_apart_over_near_boxes` and `ctc_02s_carried_cylinders_are_apart_over_near_boxes` (cuts `nist_*_near_*.body`); `ss_exact`'s `a_cylinder_continuing_a_torus_tube_has_a_closed_form` and `a_tube_contact_is_found_once_the_trace_fails`; `table`'s `stretches_overlapping_end_over_end_run_together`; `tests/retrim.rs`' `the_twin_is_drilled_and_filleted` and `the_twins_carried_pair_is_never_met`; `tests/work.rs`' `the_near_boxes_twin_is_bounded`; the `near_boxes` golden.
+- **Limits** (bars unmet, #652 and #658 to a later stage): the five causes above; faces of a grown ring touching no change get no room in a near box; linkrods' per-unit cost (20.A).

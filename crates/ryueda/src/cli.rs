@@ -61,6 +61,13 @@ struct Rev {
 enum Command {
     /// This build's version.
     Version,
+    /// Open a project (this folder by default) in the desktop app,
+    /// ryueda-app; RYUEDA_APP names another.
+    Open {
+        /// The folder to open: this one (or -C's) by default.
+        #[arg(id = "folder", value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Create a project in this folder, or with --library a library
     /// project, which other projects name with `lib add`.
     Init {
@@ -108,6 +115,36 @@ enum Command {
     /// obsolete, listed, checked and tagged.
     #[command(subcommand)]
     Release(ReleaseCmd),
+    /// Where a library component is used (PDM), run in its library
+    /// project: designs of this repository's projects, of other checkouts
+    /// (--in, else the pdm.dependents preference) and their releases.
+    WhereUsed {
+        part: String,
+        /// Only designs placing this release label.
+        #[arg(long, conflicts_with = "working")]
+        label: Option<String>,
+        /// Only designs placing it at working.
+        #[arg(long)]
+        working: bool,
+        /// Only direct placements (every placement in a design is).
+        #[arg(long)]
+        direct: bool,
+        /// Folders of other checkouts to search; repeat for more.
+        #[arg(long = "in", value_name = "FOLDER")]
+        within: Vec<PathBuf>,
+        /// Search no other checkout, the preference's included.
+        #[arg(long)]
+        no_dependents: bool,
+    },
+    /// A design's bill of materials (PDM): one line per purchasable
+    /// part with designators, maker, part number, alternates and offers;
+    /// `bom diff` compares two revisions'.
+    Bom {
+        #[command(subcommand)]
+        cmd: Option<BomCmd>,
+        #[command(flatten)]
+        show: BomShow,
+    },
     /// Create, edit, show, list or delete functional blocks: their
     /// names, ports and buses.
     #[command(subcommand)]
@@ -435,6 +472,12 @@ enum Command {
         /// light (the default) or dark.
         #[arg(long, value_parser = ["light", "dark"])]
         theme: Option<String>,
+        /// Mark what changed since this Git revision: each owner's mark,
+        /// what is gone as ghosts, moved parts' leaders and the counts.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
@@ -635,12 +678,65 @@ enum LibCmd {
     /// project, inside the same repository.
     Add {
         alias: String,
-        path: String,
+        /// The library project's folder, relative to this project.
+        #[arg(required_unless_present = "url", conflicts_with = "url")]
+        path: Option<String>,
+        /// A library in another repository: its URL (fetched into the
+        /// dependency cache).
+        #[arg(long)]
+        url: Option<String>,
+        /// With --url, the library project's folder in that repository
+        /// (its root by default).
+        #[arg(long = "path", requires = "url", value_name = "FOLDER")]
+        in_repo: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
     /// Every library with its revision, what it holds and its faults.
     List,
+    /// Fetch the repositories of libraries in other repositories (all, or
+    /// the aliases named) into the dependency cache.
+    Fetch { aliases: Vec<String> },
+    /// Move pins (of the aliases named, or all) to each component's latest
+    /// official label, or --to a label, and write ryueda.lock again.
+    Update {
+        aliases: Vec<String>,
+        #[arg(long)]
+        to: Option<String>,
+        /// From the dependency cache as fetched: no fetch.
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Each pinned component with a newer official label than its pin.
+    Outdated,
+    /// What each design places from other projects (alias, component,
+    /// label, counts), at --rev and in each official release.
+    Uses {
+        #[command(flatten)]
+        rev: Rev,
+    },
+    /// What a library alias's project has released, by component, with
+    /// each one's labels latest first.
+    Parts { alias: String },
+    /// Pin library components (<alias>/<component>) at a release label,
+    /// each one's latest official label, or back to working (a library
+    /// in this repository only).
+    Pin {
+        #[arg(required = true)]
+        components: Vec<String>,
+        #[arg(long, conflicts_with_all = ["latest", "working"])]
+        label: Option<String>,
+        #[arg(long, conflicts_with = "working")]
+        latest: bool,
+        #[arg(long)]
+        working: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
     /// Judge a library's symbols by the standards that apply to it
     /// (`ryueda standards`): each symbol's class, score and findings, with
     /// symbol edit ops that fix them. This project's own library by
@@ -958,6 +1054,44 @@ enum PdmCmd {
         force: bool,
         #[command(flatten)]
         expect: Expect,
+    },
+}
+
+#[derive(Args)]
+struct BomShow {
+    /// The design: the project's only one if left out.
+    design: Option<String>,
+    /// A Git revision (main, HEAD~2, a hash), or label:<L> for the
+    /// design's release L: the working files by default.
+    #[arg(long, value_name = "REV")]
+    rev: Option<String>,
+    /// Lines by block occurrence (<design>:<instance path>).
+    #[arg(long)]
+    by_block: bool,
+    /// Quantities times parts.json's build_quantity.
+    #[arg(long)]
+    build: bool,
+    /// json (the default) or csv.
+    #[arg(long)]
+    format: Option<String>,
+    /// Write the CSV to this file (implies --format csv).
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum BomCmd {
+    /// What changed in a design's BOM between two revisions: lines added,
+    /// removed and changed (revision, quantity, designators, value,
+    /// footprint, maker and part number, alternates, properties).
+    Diff {
+        design: Option<String>,
+        /// The revision to compare from: HEAD by default.
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// The revision to compare to: working by default.
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
     },
 }
 
@@ -1836,6 +1970,12 @@ enum GitCmd {
         /// The file's path in the repository, as Git names it.
         path: Option<String>,
     },
+    /// The project's Git commits, newest first, and what is uncommitted.
+    /// Read-only.
+    Log {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2017,13 +2157,52 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Lib(LibCmd::Add {
             alias,
             path,
+            url,
+            in_repo,
             expect,
         }) => Request::LibAdd {
             alias: alias.clone(),
-            path: path.clone(),
+            path: path.clone().or_else(|| in_repo.clone()).unwrap_or_default(),
+            url: url.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Lib(LibCmd::Fetch { aliases }) => Request::LibFetch {
+            aliases: aliases.clone(),
+        },
+        Command::Lib(LibCmd::Update {
+            aliases,
+            to,
+            offline,
+            dry_run,
+            expect,
+        }) => Request::LibUpdate {
+            aliases: aliases.clone(),
+            to: to.clone(),
+            offline: *offline,
+            dry_run: *dry_run,
             expected_revision: expect.expect.clone(),
         },
         Command::Lib(LibCmd::List) => Request::LibList {},
+        Command::Lib(LibCmd::Outdated) => Request::LibOutdated {},
+        Command::Lib(LibCmd::Uses { rev }) => Request::LibUses {
+            rev: rev.rev.clone(),
+        },
+        Command::Lib(LibCmd::Parts { alias }) => Request::LibParts {
+            alias: alias.clone(),
+        },
+        Command::Lib(LibCmd::Pin {
+            components,
+            label,
+            latest,
+            working,
+            expect,
+        }) => Request::LibPin {
+            components: components.clone(),
+            label: label.clone(),
+            latest: *latest,
+            working: *working,
+            expected_revision: expect.expect.clone(),
+        },
         Command::Lib(LibCmd::Check {
             library,
             symbol,
@@ -2087,6 +2266,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             before: *before,
         },
         Command::Participants => Request::ParticipantList {},
+        Command::Git(GitCmd::Log { limit }) => Request::HistoryLog {
+            limit: Some(*limit),
+        },
         Command::Compare { rev: None, off: false, participant } => Request::CompareGet {
             participant: participant.clone(),
         },
@@ -2261,6 +2443,36 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             Request::ReleaseCheck { results: *results }
         }
         Command::Release(ReleaseCmd::Sync) => Request::ReleaseSync {},
+        Command::Bom { cmd: None, show } => Request::BomGet {
+            design: show.design.clone(),
+            rev: show.rev.clone(),
+            format: show
+                .format
+                .clone()
+                .or_else(|| show.out.as_ref().map(|_| "csv".to_owned())),
+            build: show.build,
+            by_block: show.by_block,
+        },
+        Command::Bom { cmd: Some(BomCmd::Diff { design, from, to }), .. } => Request::BomDiff {
+            design: design.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        },
+        Command::WhereUsed {
+            part,
+            label,
+            working,
+            direct,
+            within,
+            no_dependents,
+        } => Request::BomWhereUsed {
+            part: part.clone(),
+            label: label.clone(),
+            working: *working,
+            direct: *direct,
+            within: all(within),
+            no_dependents: *no_dependents,
+        },
         Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
         Command::Pdm(PdmCmd::NewId { expect }) => Request::PdmNewId {
             expected_revision: expect.expect.clone(),
@@ -2955,7 +3167,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             sheet,
             layer,
             theme,
+            compare,
+            rev,
         } => Request::Scene {
+            compare: compare.clone(),
+            rev: rev.rev.clone(),
             design: design.clone(),
             block: block.clone(),
             sheet: sheet.clone(),
@@ -3157,6 +3373,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             repairs: repairs.clone(),
         },
         Command::Version
+        | Command::Open { .. }
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
@@ -3186,6 +3403,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Open { dir } => {
+            let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
+            let dir = ryueda::source::plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
+            client::open(&dir)
+        }
         Command::Init { unit, library } => {
             let root =
                 ryueda::source::plain(here.canonicalize().map_err(|e| Error::io(&here, &e))?);
@@ -3344,6 +3566,27 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     // A report written as text (lib check's, #711) is read back here, in
     // a process that ends once it prints it.
     let a = a.into_json()?;
+    if let Command::Bom {
+        cmd: None,
+        show: BomShow { out: Some(out), .. },
+    } = cmd
+    {
+        let mut result = a.result;
+        let csv = result
+            .as_object_mut()
+            .and_then(|o| o.remove("csv"))
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    "--out writes CSV: leave out --format or give csv",
+                )
+                .with("param", "format")
+            })?;
+        ryueda::source::write_atomic(&here.join(out), csv.as_bytes())?;
+        result["out"] = json!(out);
+        return Ok(result);
+    }
     let Some(bytes) = a.binary else {
         return Ok(a.result);
     };

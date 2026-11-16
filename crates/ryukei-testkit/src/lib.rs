@@ -40,7 +40,8 @@
 pub const FUZZ_BUDGET: u64 = 1 << 27;
 
 /// How long a fuzz case may run before it is cancelled: inside the
-/// targets' timeouts (600 s for sweep and offset, 1,200 s for blend),
+/// targets' timeouts (600 s for sweep, offset, tweak, edit, projection,
+/// self_union and tolerant, which `fuzz.yml` passes; 1,200 s for blend),
 /// with room for what follows the cancel.
 pub const FUZZ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(450);
 
@@ -161,8 +162,10 @@ pub mod euler_script;
 pub mod exact;
 mod golden;
 pub mod heal_bytes;
+pub mod held_seams;
 mod lcg;
 pub mod mesh;
+pub mod near_boxes;
 pub mod nurbs;
 pub mod nurbs_race;
 pub mod offset_bytes;

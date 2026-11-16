@@ -165,6 +165,64 @@ impl Drop for Pair {
 }
 
 #[test]
+fn open_starts_the_app_named_by_ryueda_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    // A stand-in app that writes the folder it was given.
+    #[cfg(unix)]
+    let app = {
+        let p = dir.path().join("fake-app");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\necho \"$1\" > '{}'\n",
+                dir.path().join("opened").display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    };
+    #[cfg(windows)]
+    let app = {
+        let p = dir.path().join("fake-app.cmd");
+        std::fs::write(
+            &p,
+            format!("@echo %1> \"{}\"\r\n", dir.path().join("opened").display()),
+        )
+        .unwrap();
+        p
+    };
+    let out = ryueda(&run)
+        .current_dir(dir.path())
+        .env("RYUEDA_APP", &app)
+        .args(["open"])
+        .output()
+        .unwrap();
+    let (code, v) = parse(out, dir.path());
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["opened"], "new");
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !dir.path().join("opened").is_file() {
+        assert!(std::time::Instant::now() < end, "the app never ran");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // No app anywhere: app_not_installed, exit 4.
+    let out = ryueda(&run)
+        .current_dir(dir.path())
+        .env("RYUEDA_APP", dir.path().join("nothing"))
+        .env("PATH", "")
+        .args(["open"])
+        .output()
+        .unwrap();
+    let (code, v) = parse(out, dir.path());
+    assert_eq!(code, 4, "{v}");
+    assert_eq!(v["error"]["code"], "app_not_installed");
+}
+
+#[test]
 fn version_names_ryueda() {
     let out = Command::cargo_bin("ryueda")
         .unwrap()
@@ -720,6 +778,12 @@ fn every_protocol_method_has_a_command() {
         ("project.edit", &["project", "edit"]),
         ("lib.add", &["lib", "add"]),
         ("lib.list", &["lib", "list"]),
+        ("lib.pin", &["lib", "pin"]),
+        ("lib.outdated", &["lib", "outdated"]),
+        ("lib.parts", &["lib", "parts"]),
+        ("lib.fetch", &["lib", "fetch"]),
+        ("lib.update", &["lib", "update"]),
+        ("lib.uses", &["lib", "uses"]),
         ("symbol.create", &["symbol", "create"]),
         ("symbol.edit", &["symbol", "edit"]),
         ("symbol.show", &["symbol", "show"]),
@@ -801,6 +865,9 @@ fn every_protocol_method_has_a_command() {
         ("release.list", &["release", "list"]),
         ("release.check", &["release", "check"]),
         ("release.sync", &["release", "sync"]),
+        ("bom.get", &["bom"]),
+        ("bom.diff", &["bom", "diff"]),
+        ("bom.where_used", &["where-used"]),
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
@@ -823,6 +890,7 @@ fn every_protocol_method_has_a_command() {
         ("participant.list", &["participants"]),
         ("compare.set", &["compare"]),
         ("compare.get", &["compare"]),
+        ("history.log", &["git", "log"]),
         ("selection.get", &["selection"]),
         ("selection.set", &["select"]),
         ("highlight.set", &["highlight"]),
@@ -2986,6 +3054,18 @@ fn schematics_from_the_cli() {
     assert_eq!(list["instructions"][0]["holds"], json!(true), "{list}");
     assert_eq!(list["instructions"][0]["state"], "held", "{list}");
     assert!(list["instructions"][0]["why"].is_null(), "{list}");
+    // Each instruction names what it speaks of by reference path (plan
+    // 3.D: the window's Show frames them).
+    assert_eq!(
+        list["instructions"][0]["refs"],
+        json!(["breakout/j1", "breakout/r1"]),
+        "{list}"
+    );
+    assert_eq!(
+        list["instructions"][1]["refs"],
+        json!(["breakout/sda"]),
+        "{list}"
+    );
     // Every part crowded beside J1 (design 519): left of it they come
     // nearer but not within the reach, so it is pulled and says how far is
     // left; below it nothing comes nearer, so it is laid out without, moves
@@ -4374,4 +4454,30 @@ fn place_help_lists_every_form() {
             assert!(flat.contains(&head), "place --help lacks {head:?} ({form})");
         }
     }
+}
+
+#[test]
+fn bom_answers_lines_and_writes_csv_to_out() {
+    let p = Pair::breakout();
+    let v = p.ok(&["bom"]);
+    assert_eq!(v["schema"], 1);
+    assert!(!v["lines"].as_array().unwrap().is_empty(), "{v}");
+    let v = p.ok(&["bom", "--out", "bom.csv"]);
+    assert_eq!(v["out"], "bom.csv");
+    assert!(v.get("csv").is_none());
+    for top in [&p.direct, &p.daemon] {
+        let text = fs::read_to_string(top.join("board/bom.csv")).unwrap();
+        assert!(
+            text.starts_with("number,name,description,part,revision,quantity,uom,make_buy,refdes,"),
+            "{text}"
+        );
+    }
+    let v = p.ok(&["bom", "--by-block"]);
+    assert!(v["blocks"].is_array());
+    p.fails(&["bom", "--format", "xml"], "invalid_param", 1);
+    p.fails(
+        &["bom", "--out", "x.csv", "--format", "json"],
+        "invalid_param",
+        1,
+    );
 }

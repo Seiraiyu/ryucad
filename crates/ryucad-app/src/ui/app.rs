@@ -914,6 +914,15 @@ impl eframe::App for App {
         self.keep_on_screen(ui.ctx());
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
+        // What the window showed, for the trace's heartbeat (#799).
+        let (listed, loaded, meshes, asked) = match &self.screen {
+            Screen::Opened(o) => {
+                let m = &o.ws.model;
+                (m.listed.len(), m.parts.len(), m.meshes.len(), m.asked.len())
+            }
+            _ => (0, 0, 0, 0),
+        };
+        crate::ui::exits::frame_ends(listed, loaded, meshes, asked);
         self.keep_geometry(ui.ctx());
         if let Some(why) = self.pick.take() {
             let dir = match &mut self.choose_folder {

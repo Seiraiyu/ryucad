@@ -120,10 +120,18 @@ pub fn marks(
             mark(&mut out, &at.sheet, part.key.clone(), *m);
         }
     }
-    // Nets whose file is new or differs: their wires and labels.
+    // Nets whose file is new or differs: their wires, labels and bus
+    // entries (#878: an entry's stub is its net's).
     for (net, m) in &nets {
         for sheet in new.routes.get(net).into_iter().flat_map(|s| s.keys()) {
             mark(&mut out, sheet, net.clone(), *m);
+        }
+        for by_sheet in new.buses.values() {
+            for (sheet, drawn) in by_sheet {
+                if drawn.entries.iter().any(|e| e.net == *net) {
+                    mark(&mut out, sheet, net.clone(), *m);
+                }
+            }
         }
         for l in new.labels.get(net).into_iter().flatten() {
             mark(&mut out, &l.sheet, format!("label:{net}@{}", l.on), *m);
@@ -179,30 +187,24 @@ pub fn marks(
         if m.is_empty() {
             continue;
         }
-        let n = |f: &dyn Fn(&Mark) -> bool| m.marks.values().filter(|x| f(x)).count();
-        let (added, moved) = (
-            n(&|x| *x == Mark::Added),
-            n(&|x| matches!(x, Mark::Moved { .. })),
-        );
-        let changed = m.marks.len() - added - moved;
+        let c = m.counts();
         m.strip = format!(
-            "Against {rev}: {added} added, {changed} changed, {moved} moved, {} removed",
-            m.ghosts
-                .iter()
-                .filter(|g| !m.marks.contains_key(*g))
-                .count()
+            "Against {rev}: {} added, {} changed, {} moved, {} removed",
+            c.added, c.changed, c.moved, c.removed
         );
     }
     out
 }
 
-/// Block `b` of the revision's project `then`, laid out, with the
+/// What the revision's block lays out to: `Ok(None)` when the revision
+/// hasn't the block, `Err` when it doesn't lay out there; with the
 /// designators of the layer the working drawing shows (`layer`'s design
-/// and path), or `None` when the revision hasn't the block or it doesn't
-/// lay out there.
-pub fn laid_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Option<Laid> {
-    let tb = then.conn.blocks.get(b)?;
-    let mut l = schem::lay(then, tb, None, &[], ryusch::input::Relayout::None).ok()?;
+/// and path), else the first.
+pub fn lay_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Result<Option<Laid>> {
+    let Some(tb) = then.conn.blocks.get(b) else {
+        return Ok(None);
+    };
+    let mut l = schem::lay(then, tb, None, &[], ryusch::input::Relayout::None)?;
     let all = schem::layers(then, b);
     let same = layer
         .and_then(|x| {
@@ -213,7 +215,13 @@ pub fn laid_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Option
     if let Some(t) = same {
         l.built.designators(&t.refdes);
     }
-    Some(l)
+    Ok(Some(l))
+}
+
+/// [`lay_then`], none when the revision hasn't the block or it doesn't
+/// lay out there.
+pub fn laid_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Option<Laid> {
+    lay_then(then, b, layer).ok().flatten()
 }
 
 /// `render --compare`: block `block`'s canvas (or one sheet) from the

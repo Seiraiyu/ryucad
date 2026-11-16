@@ -158,7 +158,7 @@ pub fn derive(src: &dyn Source, part: &Id, releases: &Releases) -> State {
 /// The parts [`derive_all_for`] gives states for: every part the
 /// project of `P` has and every part a record names, in order.
 pub fn parts_for<P: Product>(src: &dyn Source, records: &Result<Records>) -> Vec<Id> {
-    let mut parts: Vec<Id> = P::parts(src).unwrap_or_default();
+    let mut parts: Vec<Id> = crate::product::part_ids::<P>(src).unwrap_or_default();
     if let Ok(r) = records {
         parts.extend(r.parts());
     }

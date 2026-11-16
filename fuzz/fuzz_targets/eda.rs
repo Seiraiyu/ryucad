@@ -175,7 +175,12 @@ fn pools() -> &'static (rayon::ThreadPool, rayon::ThreadPool) {
 
 fuzz_target!(|data: &[u8]| {
     let files = project(&mut Bytes(data, 0));
-    let p = Project::load_from(std::path::Path::new("/fuzz"), &files, &BTreeMap::new())
+    let p = Project::load_from(
+        std::path::Path::new("/fuzz"),
+        &files,
+        &BTreeMap::new(),
+        &ryueda::pin::NoPins,
+    )
         .expect("a project whose manifest reads loads");
     let _ = p.faults();
     let d = Id::parse("d", "design").unwrap();
@@ -214,6 +219,49 @@ fuzz_target!(|data: &[u8]| {
             }
             (Err(a), Err(b)) => assert_eq!(a.code, b.code),
             (a, b) => panic!("one thread and eight disagree: {:?} vs {:?}", a.is_ok(), b.is_ok()),
+        }
+    }
+    // A compare of the first block against a second project (plan 13.A):
+    // the same files with the first component's file dropped, so
+    // something differs. A scene or a typed refusal, its ghosts on owners
+    // it names, the same on one thread and eight.
+    if let Some(block) = p.conn.blocks.keys().next() {
+        let mut other = files.clone();
+        if let Some(k) = other.keys().find(|k| k.contains("/components/")).cloned() {
+            other.remove(&k);
+        }
+        if let Ok(then) = Project::load_from(
+            std::path::Path::new("/fuzz"),
+            &other,
+            &BTreeMap::new(),
+            &ryueda::pin::NoPins,
+        ) {
+            let laid = ryueda::compare::lay_then(&then, block, None);
+            let ask = ryueda::scene::Ask {
+                block: Some(block.to_string()),
+                ..ryueda::scene::Ask::default()
+            };
+            let against = ryueda::scene::Against {
+                rev: "fuzz",
+                commit: "0000000000000000000000000000000000000000",
+                then: &then,
+                laid: &laid,
+            };
+            let draw = |pool: &rayon::ThreadPool| {
+                pool.install(|| ryueda::scene::scene_with(&p, &ask, Some(&against)))
+            };
+            match (draw(one), draw(eight)) {
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(a, b, "one thread and eight compare differently");
+                    let v: Value = serde_json::from_str(&a).expect("a compare scene is JSON");
+                    assert!(v["against"].is_object() && v["ghosts"].is_array(), "{v}");
+                    for g in v["ghosts"].as_array().unwrap() {
+                        assert!(g["ref"].is_string(), "{g}");
+                    }
+                }
+                (Err(a), Err(b)) => assert_eq!(a.code, b.code),
+                (a, b) => panic!("one thread and eight disagree: {:?} vs {:?}", a.is_ok(), b.is_ok()),
+            }
         }
     }
 });

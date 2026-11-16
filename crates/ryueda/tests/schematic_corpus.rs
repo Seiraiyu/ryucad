@@ -3070,7 +3070,8 @@ fn merged_as_well_as_each_side(board: &Path, before: &std::collections::BTreeMap
     let at = |c: &str| ryueda::git::revision(board, c).unwrap();
     let (ours, theirs) = (at(&ours_c), at(&theirs_c));
     let load = |r: &ryueda::git::Revision| {
-        ryueda::project::Project::load_from(board, &r.files, &r.aliases).unwrap()
+        ryueda::project::Project::load_from(board, &r.files, &r.aliases, &ryueda::pin::NoPins)
+            .unwrap()
     };
     let allowed: BTreeSet<String> = codes(&load(&ours))
         .union(&codes(&load(&theirs)))
@@ -3216,4 +3217,32 @@ fn corpus_branches_merge_by_their_first_repairs() {
         );
         merged_as_well_as_each_side(&board, &before);
     }
+}
+
+/// #878: a net the RP2040 draws only through bus entries (the QSPI data
+/// lines) has an owner on the sheet, with a box, so a window's selection,
+/// highlight and compare marks paint it.
+#[test]
+fn a_net_drawn_only_through_a_bus_has_an_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let rp = circuit(dir.path(), "rp2040");
+    ryueda(&rp, 1, &["layout"]);
+    let first = ryueda(&rp, 1, &["scene", "--block", "mitayi"]);
+    let sheets: Vec<String> = first["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["sheet"].as_str().unwrap().to_owned())
+        .collect();
+    let mut found = false;
+    for s in &sheets {
+        let v = ryueda(&rp, 1, &["scene", "--block", "mitayi", "--sheet", s]);
+        let owners = v["owners"].as_array().unwrap();
+        if let Some(o) = owners.iter().find(|o| o["ref"] == "mitayi/qspi_sd1") {
+            assert_eq!(o["kind"], "net", "{o}");
+            assert!(o["box"].is_array(), "{o}");
+            found = true;
+        }
+    }
+    assert!(found, "mitayi/qspi_sd1 is owned on some sheet");
 }

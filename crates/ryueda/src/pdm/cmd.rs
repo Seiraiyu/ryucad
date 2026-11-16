@@ -8,13 +8,12 @@ use crate::error::{Code, Error, Result};
 use crate::id::Id;
 use crate::session::Session;
 use ryupdm::config::{CORE, Config, Decl, Pattern, Scheme, branch_name, property_name};
-use ryupdm::product::Product;
 use ryupdm::props::Pdm;
 use serde_json::{Map, Value, json};
 
 /// Every part's properties in the files `files`, judged.
 pub(crate) fn pdm_of(files: &dyn crate::source::Source, unit: crate::units::Unit) -> Pdm {
-    let parts = <crate::Eda as Product>::parts(files).unwrap_or_default();
+    let parts = ryupdm::product::part_ids::<crate::Eda>(files).unwrap_or_default();
     Pdm::of_for::<crate::Eda>(files, parts, unit)
 }
 
@@ -272,7 +271,7 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
 /// project, a library component in a library project.
 pub(crate) fn part_id(session: &Session, part: &str) -> Result<Id> {
     let id = Id::parse(part, "part")?;
-    if !<crate::Eda as Product>::parts(&session.snapshot())?.contains(&id) {
+    if !ryupdm::product::part_ids::<crate::Eda>(&session.snapshot())?.contains(&id) {
         let kind = super::kind_name(session.project().manifest.project_kind);
         return Err(Error::new(Code::NotFound, format!("no {kind} {id}")).with("part", &id));
     }

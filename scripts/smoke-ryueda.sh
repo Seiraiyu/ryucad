@@ -7,16 +7,21 @@
 # daemon, the activity log, the daemon's status and stop, and a run in
 # process.
 #
-#   scripts/smoke-ryueda.sh path/to/ryueda [path/to/kicad]
+#   scripts/smoke-ryueda.sh path/to/ryueda [path/to/kicad] [path/to/ryueda-app]
 #
 # The KiCad files default to crates/ryueda/tests/data/kicad beside this
 # script; they are copied into the project and named by relative paths, so
 # no path is translated on Windows.
+# With the app, its --smoke frame is drawn on the session's project; no adapter is a skip unless RYUEDA_REQUIRE_GPU=1.
 set -eu
 
 exe=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 kicad=${2:-$(dirname "$0")/../crates/ryueda/tests/data/kicad}
 kicad=$(cd "$kicad" && pwd)
+app=""
+if [ -n "${3:-}" ]; then
+    app=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
+fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/project"
@@ -96,13 +101,34 @@ run release propose ryu_test_r
 has '"label":"A"' "the resistor is proposed as A"
 run release list
 has '"status":"proposed"' "the record is listed as proposed"
+run where-used ryu_test_r --no-dependents
+has '"working":[]' "no design places the resistor yet"
 run daemon stop
 cd "$work/project"
+run bom
+has '"columns":["number","name","description","part","revision","quantity","uom","make_buy","refdes"' "the design's BOM has ryupdm's and ryueda's columns"
 run undo
 [ ! -f designs/d.json ] || { echo "FAIL undo left the design" && exit 1; }
 run redo
 [ -f designs/d.json ] || { echo "FAIL redo didn't bring the design back" && exit 1; }
 run history
+if [ -n "$app" ]; then
+    out=$("$app" --smoke "$work/project") || true
+    case "$out" in
+        '{"ok":true'*) echo "ok   ryueda-app --smoke: $out" ;;
+        *"No graphics adapter"*)
+            if [ "${RYUEDA_REQUIRE_GPU:-}" = 1 ]; then
+                echo "FAIL ryueda-app --smoke: $out"
+                exit 1
+            fi
+            echo "skip ryueda-app --smoke: no graphics adapter"
+            ;;
+        *)
+            echo "FAIL ryueda-app --smoke: $out"
+            exit 1
+            ;;
+    esac
+fi
 run daemon status
 has '"running":true' "a daemon is running"
 run daemon stop

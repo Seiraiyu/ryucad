@@ -12,6 +12,8 @@
 #                           ryueda-v0.1.0 (default: the newest release)
 #   RYUEDA_HOME             install root (default: ~\.ryueda); the binary goes in bin\
 #   RYUEDA_NO_MODIFY_PATH   set to 1 to leave the user PATH alone
+#   RYUEDA_NO_APP           set to 1 to install the ryueda command only, not
+#                           the desktop app
 #   GH_TOKEN, GITHUB_TOKEN  a token for a private repository (else `gh auth token`)
 #   RYUEDA_DOWNLOAD_BASE    a directory laid out as <base>\releases (the API's
 #                           list of releases) and <base>\download\<tag>\<asset>;
@@ -161,6 +163,26 @@ function Install-Ryueda {
             & $exe git install --global *> $null
             if ($LASTEXITCODE -ne 0) {
                 Write-Host 'ryueda-install: warning: couldn''t register ryueda with Git; run: ryueda git install --global'
+            }
+        }
+
+        # The desktop app, unless only the command is wanted, and "Open in
+        # ryueda" on folders and folder backgrounds.
+        $appSrc = Join-Path $tmp "ryueda-$version-$target\ryueda-app.exe"
+        if ($env:RYUEDA_NO_APP -eq '1') {
+            Write-Host 'ryueda-install: RYUEDA_NO_APP=1: the desktop app is not installed'
+        } elseif (Test-Path $appSrc) {
+            $app = Join-Path $bin 'ryueda-app.exe'
+            Clear-OldCopy $app
+            Move-Aside $app
+            Copy-Item $appSrc $app
+            Clear-OldCopy $app
+            foreach ($key in @('HKCU:\Software\Classes\Directory\shell\ryueda',
+                               'HKCU:\Software\Classes\Directory\Background\shell\ryueda')) {
+                New-Item -Path "$key\command" -Force | Out-Null
+                Set-Item -Path $key -Value 'Open in ryueda'
+                Set-ItemProperty -Path $key -Name 'Icon' -Value "`"$app`""
+                Set-Item -Path "$key\command" -Value "`"$app`" `"%V`""
             }
         }
 

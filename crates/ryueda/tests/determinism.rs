@@ -130,6 +130,7 @@ fn pdm(golden: &mut Golden, board: &Path) {
     let id = ryueda::id::Id::parse("board", "part").unwrap();
     let content = <ryueda::Eda as Product>::content(&files, &id).unwrap();
     golden.json("pdm.breakout.content", &Value::String(content));
+    pins(golden, &files, &id);
     let defaults = <ryueda::Eda as Product>::defaults(&files, &id).unwrap();
     golden.json(
         "pdm.breakout.defaults",
@@ -148,6 +149,109 @@ fn pdm(golden: &mut Golden, board: &Path) {
     let one = dry(1);
     assert_eq!(dry(8), one, "one thread and eight");
     golden.json("pdm.breakout.dry_run", &one);
+    // The BOM, its CSV and a diff after one value changes (design 629),
+    // at one thread and at eight.
+    let bom = |threads: usize, args: &[&str]| ryueda(board, threads, args);
+    let one = bom(1, &["bom"]);
+    assert_eq!(bom(8, &["bom"]), one, "one thread and eight");
+    golden.json("pdm.breakout.bom", &one);
+    let csv = bom(1, &["bom", "--format", "csv"]);
+    golden.json("pdm.breakout.bom.csv", &csv["csv"]);
+    golden.json("pdm.breakout.bom.by_block", &bom(1, &["bom", "--by-block"]));
+    git(board, &["add", "-A"]);
+    git(
+        board,
+        &[
+            "-c",
+            "user.name=g",
+            "-c",
+            "user.email=g@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "golden",
+        ],
+    );
+    let first = std::fs::read_dir(board.join("blocks"))
+        .unwrap()
+        .flat_map(|b| {
+            std::fs::read_dir(b.unwrap().path().join("components"))
+                .into_iter()
+                .flatten()
+        })
+        .map(|f| f.unwrap().path())
+        .min()
+        .unwrap();
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&first).unwrap()).unwrap();
+    v["value"] = Value::from("47k");
+    std::fs::write(&first, ryueda::canonical::to_string(&v)).unwrap();
+    let mut diff = bom(1, &["bom", "diff"]);
+    diff.as_object_mut().unwrap().remove("from_commit");
+    assert_eq!(diff["summary"]["added"], 1, "{diff}");
+    golden.json("pdm.breakout.bom.diff", &diff);
+}
+
+/// Library labels (design 629): the breakout's content hash with one
+/// component placed from `passives` pinned at B (project 2…2 in this
+/// repository, so its piece is the project, component and label), at one
+/// thread and at eight; and a `ryueda.lock` of one label as written.
+fn pins(golden: &mut Golden, files: &ryu_session::fresh::Files, id: &ryueda::id::Id) {
+    use ryueda::id::{Id, ProjectId};
+    use ryueda::project::{Alias, MANIFEST, Manifest};
+    use ryupdm::product::Product;
+    let mut f = files.clone();
+    let (path, comp) = f
+        .iter()
+        .filter(|(p, _)| p.starts_with("blocks/") && p.contains("/components/"))
+        .find_map(|(p, b)| {
+            let v: Value = serde_json::from_slice(b).ok()?;
+            v["of"]
+                .get("library")
+                .is_none()
+                .then(|| (p.clone(), v["of"]["id"].as_str().unwrap().to_owned()))
+        })
+        .expect("a component placed from the board's own library");
+    let mut v: Value = serde_json::from_slice(&f[&path]).unwrap();
+    v["of"]["library"] = Value::from("passives");
+    f.insert(path, ryueda::canonical::to_string(&v).into_bytes().into());
+    let mut m = Manifest::read(&f[MANIFEST]).unwrap();
+    let mut a = Alias::local("../passives");
+    a.project = Some(ProjectId::parse(&"2".repeat(32)).unwrap());
+    a.labels.insert(Id::parse(&comp, "c").unwrap(), "B".into());
+    m.libraries.insert(Id::parse("passives", "a").unwrap(), a);
+    f.insert(MANIFEST.to_owned(), m.to_text().into_bytes().into());
+    let hash = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| <ryueda::Eda as Product>::content(&f, id).unwrap())
+    };
+    let one = hash(1);
+    assert_eq!(hash(8), one, "one thread and eight");
+    golden.json("pdm.pins", &Value::String(one));
+    let mut lock = ryu_doc::lock::Lock::default();
+    let mut locked = ryu_doc::lock::Locked {
+        url: "file:///libs".into(),
+        path: "lib".into(),
+        release_branch: "main".into(),
+        ..Default::default()
+    };
+    locked.labels.insert(
+        (Id::parse(&comp, "c").unwrap(), "B".into()),
+        ryu_doc::lock::LockedLabel {
+            commit: "1".repeat(40),
+            content: "2".repeat(64),
+        },
+    );
+    lock.projects
+        .insert(ProjectId::parse(&"2".repeat(32)).unwrap(), locked);
+    golden.json(
+        "pdm.pins.lock",
+        &Value::String(ryueda::libdeps::lock_text(&lock).unwrap()),
+    );
 }
 
 /// The sensor breakout entered by its script in `board` (made by `init`).
@@ -235,6 +339,9 @@ fn netlists_and_erc_are_bit_exact() {
             ryueda(&at, 1, &args);
         }
         schematic(&mut golden, &at, name);
+        if name == "buck" {
+            golden.json("pdm.buck.bom", &ryueda(&at, 1, &["bom"]));
+        }
     }
     // Part data (design 347): library searches over a seeded library, and
     // the identification findings of a design placing some of it, one
@@ -821,6 +928,57 @@ fn compared(golden: &mut Golden, dir: &Path) {
             format!("schematic.breakout.compare.{b}.svg"),
             blake3::hash(&svg).to_hex()[..32].to_owned(),
         );
+    }
+    // Each block's sheets as a window draws them against HEAD (plan
+    // 13.A), and as HEAD draws them, light and dark, alike on one thread
+    // and eight. The commit (the manifest's random project ID moves it)
+    // and the revisions are left out.
+    for b in blocks_of(dir) {
+        let first = ryueda(dir, 1, &["scene", "--block", &b, "--compare", "HEAD"]);
+        let sheets: Vec<(String, bool)> = first["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["sheet"].as_str().unwrap().to_owned(),
+                    s["removed"] == true,
+                )
+            })
+            .collect();
+        for (s, removed) in &sheets {
+            for theme in ["light", "dark"] {
+                for (what, flag) in [("compare", "--compare"), ("rev", "--rev")] {
+                    if *removed && what == "compare" {
+                        continue;
+                    }
+                    let args = [
+                        "scene",
+                        "--block",
+                        b.as_str(),
+                        "--sheet",
+                        s.as_str(),
+                        "--theme",
+                        theme,
+                        flag,
+                        "HEAD",
+                    ];
+                    let mut one = ryueda(dir, 1, &args);
+                    assert_eq!(ryueda(dir, 8, &args), one, "{b} {s} {theme} {what}");
+                    let o = one.as_object_mut().unwrap();
+                    o.remove("revision");
+                    o.remove("revisions");
+                    o.remove("commit");
+                    if let Some(a) = o.get_mut("against") {
+                        a["commit"] = Value::Null;
+                    }
+                    golden.json(
+                        &format!("schematic.breakout.{what}.{b}.{s}.scene.{theme}"),
+                        &one,
+                    );
+                }
+            }
+        }
     }
     ryueda(dir, 1, &["output", "--compare", "HEAD", "--out", "c.pdf"]);
     let pdf = std::fs::read(dir.join("c.pdf")).unwrap();

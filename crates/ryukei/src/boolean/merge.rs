@@ -113,12 +113,30 @@ pub(crate) fn merge(
                 done = false;
                 continue;
             }
-            // A closed edge alone in two loops of one face: a circle where a
-            // tool only touched a periodic face all round. The second loop
-            // leaves as a face of its own, and the edge goes between them.
+            // Two loops of one face along the same edges, one fin of each
+            // edge in each: a ring where a tool only touched a periodic
+            // face all round, one closed edge or, where a tolerant twin's
+            // vertices split it, several (#890). The second loop leaves as
+            // a face of its own and the edge goes between them; the ring's
+            // other edges then have one loop on both sides, and go by KEMR.
             let face = body.loop_(la).expect("live").face;
-            let alone = |l| body.loop_fins(l).count() == 1;
-            if body.loop_(lb).expect("live").face == face && alone(la) && alone(lb) {
+            let ring = |l| {
+                let mut edges: Vec<EdgeId> = body
+                    .loop_fins(l)
+                    .map(|f| body.fin(f).expect("live").edge)
+                    .collect();
+                edges.sort_unstable();
+                edges
+            };
+            let paired = |l| {
+                body.loop_fins(l)
+                    .all(|f| body.edge_fins(body.fin(f).expect("live").edge).count() == 2)
+            };
+            if body.loop_(lb).expect("live").face == face
+                && paired(la)
+                && ring(la) == ring(lb)
+                && ring(la).windows(2).all(|w| w[0] != w[1])
+            {
                 let m = euler::mfkrh(body, keys(), lb).map_err(topo)?.0;
                 let kept = euler::kef(body, keys(), e).map_err(topo)?.0.face;
                 let gone = if kept == face { m.face } else { face };

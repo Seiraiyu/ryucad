@@ -4996,6 +4996,7 @@ dependencies = [
  "egui_kittest",
  "egui_tiles",
  "image",
+ "libc",
  "log",
  "mimalloc",
  "png",
@@ -5062,6 +5063,7 @@ dependencies = [
  "clap",
  "divan",
  "getrandom 0.3.4",
+ "gix",
  "mimalloc",
  "pdf-writer",
  "proptest",
@@ -5082,6 +5084,27 @@ dependencies = [
  "tempfile",
  "ttf-parser",
  "ureq",
+]
+
+[[package]]
+name = "ryueda-app"
+version = "0.0.0"
+dependencies = [
+ "eframe",
+ "egui_kittest",
+ "egui_tiles",
+ "image",
+ "pollster 0.4.0",
+ "rfd",
+ "ryu-app",
+ "ryu-doc",
+ "ryu-math",
+ "ryu-session",
+ "ryueda",
+ "ryusch",
+ "serde_json",
+ "tempfile",
+ "winit",
 ]
 
 [[package]]

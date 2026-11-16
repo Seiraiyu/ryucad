@@ -1044,10 +1044,26 @@ pub enum Code {
     /// and no other item explains, blamed on a side; `merge status`'s kind.
     MergeFaults,
     /// ryueda: a design places another project's library component at
-    /// `working`, which a release can't pin (design 629). A problem of
-    /// `release_not_ready`, never a `check` fault: working from a sibling
-    /// library is the normal way to develop. Pins arrive with plan 10.C.
+    /// `working`, which a release can't pin (design 629); `ryueda lib pin`
+    /// gives it a label. A problem of `release_not_ready`, never a `check`
+    /// fault: working from a sibling library is the normal way to develop.
     ComponentNotReleased,
+    /// ryueda: a design places another project's component at a label an
+    /// obsolete record names (design 629). A warning in `check`; it still
+    /// places, and a release refuses it.
+    ComponentObsolete,
+    /// ryueda: a pinned label older than the component's latest official
+    /// one. A warning in `check` and `lib outdated`; never fails.
+    ComponentOutdated,
+    /// ryueda: a component of a library in another repository at
+    /// `working`: only its released labels reach this project (`ryueda
+    /// lib pin`).
+    LibraryForeignWorking,
+    /// ryueda: a populated BOM line whose library component has no maker
+    /// part number (design 629): `part_unidentified` as the BOM sees it,
+    /// once per line. A warning in `check`'s `bom` section; a problem of
+    /// `release_not_ready`.
+    BomUnidentified,
 }
 
 impl Code {
@@ -1546,6 +1562,15 @@ mod tests {
             "component_not_released"
         );
         assert_eq!(Code::ComponentNotReleased.exit_code(), 1);
+        for (c, name) in [
+            (Code::ComponentObsolete, "component_obsolete"),
+            (Code::ComponentOutdated, "component_outdated"),
+            (Code::LibraryForeignWorking, "library_foreign_working"),
+            (Code::BomUnidentified, "bom_unidentified"),
+        ] {
+            assert_eq!(serde_json::to_value(c).unwrap(), name);
+            assert_eq!(c.exit_code(), 1);
+        }
     }
 
     #[test]

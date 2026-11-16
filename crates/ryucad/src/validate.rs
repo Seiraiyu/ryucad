@@ -386,7 +386,7 @@ fn unlocked(
     ours: &Side,
     theirs: &Side,
 ) -> Vec<Value> {
-    use crate::doc::lock::LOCK;
+    use crate::doc::lock::{CadLock, LOCK};
     let Ok(j) = crate::deps::judged(at) else {
         return Vec::new();
     };

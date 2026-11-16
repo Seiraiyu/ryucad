@@ -43,12 +43,13 @@ fn file_id(path: &str) -> Option<Id> {
 impl Product for Toy {
     const PART_FOLDERS: &'static [&'static str] = &["things", "properties"];
 
-    fn parts(src: &dyn Source) -> Result<Vec<Id>> {
+    fn parts(src: &dyn Source) -> Result<Vec<(Id, crate::product::PartKind)>> {
         Ok(src
             .list("things")?
             .into_iter()
             .filter(|(_, k)| *k == Kind::File)
             .filter_map(|(n, _)| file_id(&format!("things/{n}")))
+            .map(|id| (id, crate::product::PartKind::Component))
             .collect())
     }
 
@@ -170,7 +171,14 @@ mod tests {
     #[test]
     fn a_toys_parts_are_its_things() {
         let f = project(&[("b", "{}"), ("a", "{}")]);
-        assert_eq!(Toy::parts(&f).unwrap(), [id("a"), id("b")]);
+        use crate::product::PartKind;
+        assert_eq!(
+            Toy::parts(&f).unwrap(),
+            [
+                (id("a"), PartKind::Component),
+                (id("b"), PartKind::Component)
+            ]
+        );
         assert_eq!(Toy::properties_path(&id("a")), "properties/a.json");
         assert_eq!(Toy::part_of("things/a.json"), Some(id("a")));
         assert_eq!(Toy::part_of("properties/a.json"), Some(id("a")));
@@ -207,7 +215,7 @@ mod tests {
         f.insert("properties/a.json".into(), numbered("1"));
         f.insert("properties/b.json".into(), numbered("1"));
         assert_eq!(read_for::<Toy>(&f, &id("a")).unwrap().number(), Some("1"));
-        let pdm = Pdm::of_for::<Toy>(&f, Toy::parts(&f).unwrap(), Unit::Mm);
+        let pdm = Pdm::of_for::<Toy>(&f, crate::product::part_ids::<Toy>(&f).unwrap(), Unit::Mm);
         for p in ["a", "b"] {
             assert_eq!(pdm.parts[&id(p)].faults[0].code, Code::PartNumberDuplicate);
         }

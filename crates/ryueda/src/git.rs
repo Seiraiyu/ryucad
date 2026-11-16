@@ -213,6 +213,17 @@ pub fn revision(root: &Path, rev: &str) -> Result<Revision> {
     })
 }
 
+/// `history.log` (plan 13.A): up to `limit` commits that changed the
+/// project at `root`, newest first (`id`, `author`, `time`, `subject`,
+/// `files`), and `uncommitted`, what `files` (the session's) holds that
+/// differs from `HEAD`. `not_a_git_repo` outside a repository.
+pub fn history(root: &Path, files: &Files, limit: usize) -> Result<serde_json::Value> {
+    let repo: Repo = ryu_git::repo::repo(root)?;
+    let commits = repo.log(None, limit)?;
+    let uncommitted = repo.uncommitted(files)?;
+    Ok(serde_json::json!({"commits": commits, "uncommitted": uncommitted}))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -274,7 +285,7 @@ pub(crate) mod tests {
         assert_eq!(r.commit.len(), 40);
         assert!(r.files.contains_key("../lib/library/symbols/r.json"));
         assert!(r.files.contains_key("ryueda.json"));
-        let p = Project::load_from(&board, &r.files, &r.aliases).unwrap();
+        let p = Project::load_from(&board, &r.files, &r.aliases, &crate::pin::NoPins).unwrap();
         assert_eq!(p.revision, first.revision);
         assert_eq!(
             p.library("passives").unwrap().revision,

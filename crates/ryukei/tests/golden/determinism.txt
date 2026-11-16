@@ -24,6 +24,7 @@ general_booleans 28949919b652ece3
 geom 90cad8ca80df54df
 global_offsets 23255e45dfb40675
 heal 2d003d2e0f174a87
+held_seams 0dcc5501ef6cd55b
 helix faa69ae5dc869245
 hidden_lines 276ce7f53486bf55
 intersections 0de828fe8eecc846
@@ -35,6 +36,7 @@ math 48b722fd5e6bf4a3
 measure 99cff4d3c98871da
 meshes c3ec100bac88e735
 mirror 7a7138508b9f3b90
+near_boxes 59a8b577773a774c
 nurbs_bodies 8827a1ca1af0b551
 nurbs_race bcceca76bea179c5
 offset_bodies eb19cbbe1a32ed46

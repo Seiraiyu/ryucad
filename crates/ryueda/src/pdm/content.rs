@@ -67,7 +67,9 @@ pub(crate) fn libcomp(src: &dyn Source, id: &Id) -> Result<LibComp> {
 }
 
 /// A reference to an object of this library, or `component_not_released`
-/// for one in another project (pins are plan 10.C's).
+/// for one in another project: a library component's objects are its own
+/// library's (a design's placements of other projects are their pins,
+/// read in [`design`]).
 fn local<'a>(r: &'a LibRef, what: &str) -> Result<&'a Id> {
     match &r.library {
         None => Ok(&r.id),
@@ -183,6 +185,7 @@ fn design(h: &mut Pieces, src: &dyn Source, m: &Manifest, part: &Id) -> Result<(
     let reached = reached(&conn, &d.root);
     let (mut rails, mut classes) = (BTreeSet::new(), BTreeSet::new());
     let mut placed: Vec<Id> = Vec::new();
+    let mut others: Vec<(Id, Id)> = Vec::new();
     let what = format!("design {part}");
     let mut rail = |n: &Node| {
         if let Node::Rail(r) = n {
@@ -218,7 +221,12 @@ fn design(h: &mut Pieces, src: &dyn Source, m: &Manifest, part: &Id) -> Result<(
             match &c.of.library {
                 None if !placed.contains(&c.of.id) => placed.push(c.of.id.clone()),
                 None => {}
-                Some(alias) => return Err(not_released(alias, &c.of.id, &what)),
+                Some(alias) => {
+                    let k = (alias.clone(), c.of.id.clone());
+                    if !others.contains(&k) {
+                        others.push(k);
+                    }
+                }
             }
         }
         for i in files
@@ -255,13 +263,127 @@ fn design(h: &mut Pieces, src: &dyn Source, m: &Manifest, part: &Id) -> Result<(
         h.needed(src, &object_path(crate::library::COMPONENTS, id))?;
         objects(h, src, id, &c)?;
     }
+    // Each other project's component placed, in the order first placed:
+    // its pin (design 629). A same-repository pin names one immutable
+    // record by (project, component, label); another repository's adds
+    // the content hash `ryueda.lock` holds for it.
+    for (alias, id) in &others {
+        let pin = m
+            .libraries
+            .get(alias)
+            .and_then(|a| Some((a, a.labels.get(id)?, a.project.as_ref()?)));
+        let Some((a, label, project)) = pin else {
+            return Err(not_released(alias, id, &what));
+        };
+        h.piece(b"pin");
+        h.piece(project.to_string().as_bytes());
+        h.piece(id.as_str().as_bytes());
+        h.piece(label.as_bytes());
+        if a.url.is_some() {
+            h.piece(foreign_content(src, project, id, label)?.as_bytes());
+        }
+    }
     Ok(())
+}
+
+/// The content hash `ryueda.lock` (in `src`) holds for `project`'s
+/// `id`@`label`: `dependency_unlocked` when it holds none.
+fn foreign_content(
+    src: &dyn Source,
+    project: &crate::id::ProjectId,
+    id: &Id,
+    label: &str,
+) -> Result<String> {
+    use crate::project::{LOCK, LOCK_KIND};
+    let lock = src
+        .read(LOCK)?
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|t| crate::canonical::parse(&t).ok())
+        .and_then(|v| ryu_doc::lock::Lock::from_json_as(&v, LOCK_KIND).ok());
+    lock.as_ref()
+        .and_then(|l| l.label(project, id, label))
+        .map(|l| l.content.clone())
+        .ok_or_else(|| {
+            Error::new(
+                Code::DependencyUnlocked,
+                format!("{id}@{label} of {project} isn't in {LOCK}: write it again (`ryueda lib update --offline`)"),
+            )
+            .with("project", project)
+            .with("component", id)
+            .with("label", label)
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pdm::tests::{board, id};
+
+    #[test]
+    fn a_pin_is_a_piece_and_an_unpinned_component_has_no_hash() {
+        let f = board(ProjectKind::Design);
+        let plain = hash(&f, &id("d")).unwrap();
+        let path = "blocks/top/components/r1.json";
+        let mut v: serde_json::Value = serde_json::from_slice(&f[path]).unwrap();
+        v["of"] = serde_json::json!({"library": "passives", "id": "r_100k"});
+        let mut g = f.clone();
+        g.insert(path.into(), crate::canonical::to_string(&v).into_bytes());
+        let with_pin = |label: Option<&str>, url: bool, lock: Option<&str>| {
+            let mut h = g.clone();
+            let mut m = Manifest::read(&h["ryueda.json"]).unwrap();
+            let mut a = crate::project::Alias::local("../passives");
+            if let Some(l) = label {
+                a.project = Some(crate::project::tests::pid(2));
+                a.labels.insert(id("r_100k"), l.into());
+            }
+            if url {
+                a.url = Some("file:///libs".into());
+                a.path = String::new();
+            }
+            m.libraries.insert(id("passives"), a);
+            h.insert("ryueda.json".into(), m.to_text().into_bytes());
+            if let Some(content) = lock {
+                let mut l = ryu_doc::lock::Lock::default();
+                let mut locked = ryu_doc::lock::Locked {
+                    url: "file:///libs".into(),
+                    ..Default::default()
+                };
+                locked.labels.insert(
+                    (id("r_100k"), "A".into()),
+                    ryu_doc::lock::LockedLabel {
+                        commit: "a".repeat(40),
+                        content: content.repeat(64),
+                    },
+                );
+                l.projects.insert(crate::project::tests::pid(2), locked);
+                h.insert(
+                    crate::project::LOCK.into(),
+                    crate::canonical::to_string(&l.to_json_as(crate::project::LOCK_KIND))
+                        .into_bytes(),
+                );
+            }
+            hash(&h, &id("d"))
+        };
+        assert_eq!(
+            with_pin(None, false, None).unwrap_err().code,
+            Code::ComponentNotReleased
+        );
+        let a = with_pin(Some("A"), false, None).unwrap();
+        let b = with_pin(Some("B"), false, None).unwrap();
+        assert_ne!(a, b, "the label is a piece");
+        assert_ne!(a, plain);
+        // Another repository's: the locked content hash is a piece too.
+        assert_eq!(
+            with_pin(Some("A"), true, None).unwrap_err().code,
+            Code::DependencyUnlocked
+        );
+        let c = with_pin(Some("A"), true, Some("c")).unwrap();
+        let d = with_pin(Some("A"), true, Some("d")).unwrap();
+        assert_ne!(c, d);
+        assert_ne!(c, a);
+        // A design without pins hashes as it did (its golden doesn't move).
+        assert_eq!(hash(&f, &id("d")).unwrap(), plain);
+    }
 
     #[test]
     fn a_components_hash_covers_it_its_symbol_and_footprints_only() {

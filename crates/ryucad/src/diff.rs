@@ -2167,7 +2167,7 @@ fn annotation_changes(from: &Files, to: &Files) -> Option<Value> {
 /// `to` commits), named as either side's manifest names the project;
 /// `None` when no label changed. A lock that doesn't read is no labels.
 fn lock_changes(from: &Files, to: &Files) -> Option<Value> {
-    use crate::doc::lock::{LOCK, Lock};
+    use crate::doc::lock::{CadLock, LOCK, Lock};
     let labels = |files: &Files| -> BTreeMap<(String, String), String> {
         json_at(files, LOCK)
             .and_then(|v| Lock::from_json(&v).ok())

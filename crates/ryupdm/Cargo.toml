@@ -31,7 +31,7 @@ ryu-doc = { path = "../ryu-doc" }
 ryu-git = { path = "../ryu-git" }
 # ryucad's files, for ryucad's half (`cad`) only.
 ryucad-doc = { path = "../ryucad-doc", optional = true }
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 # HTTPS for fetching dependencies: rustls with ring and web PKI roots, as
 # ryucad's review client (see its Cargo.toml for why ring).
 ureq = { version = "3", default-features = false, features = ["rustls"] }
