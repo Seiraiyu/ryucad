@@ -3,7 +3,7 @@
 
 use crate::core::geom::{Cut, band, fit};
 use crate::core::paint::marks;
-use crate::core::pick::pick;
+use crate::core::pick::{pick, pick_ghost};
 use crate::core::scene::{Anchor, P, Shape};
 use crate::core::window::Window;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke};
@@ -64,11 +64,20 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
     };
     let reach = REACH / cam.zoom;
     let alt = ui.input(|i| i.modifiers.alt);
-    // Hover and its tooltip.
-    let hovered = r
-        .hover_pos()
-        .and_then(|p| pick(sc, to_sheet(&cam, p), reach, alt));
-    let mut clicked: Option<(Option<String>, bool)> = None;
+    // Hover and its tooltip: something working, else a ghost (what only
+    // the compared revision draws).
+    let read_only = sc.read_only();
+    let hovered_any = r.hover_pos().and_then(|p| {
+        let at = to_sheet(&cam, p);
+        pick(sc, at, reach, alt)
+            .map(|x| (x, false))
+            .or_else(|| pick_ghost(sc, at, reach).map(|x| (x, true)))
+    });
+    let hovered = hovered_any
+        .as_ref()
+        .filter(|(_, ghost)| !ghost)
+        .map(|(x, _)| x.clone());
+    let mut clicked: Option<(Option<String>, bool, bool)> = None;
     let mut link: Option<String> = None;
     if r.double_clicked() {
         let at = r.interact_pointer_pos().map(|p| to_sheet(&cam, p));
@@ -81,11 +90,22 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
     } else if r.clicked() {
         let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
         let p = r.interact_pointer_pos().map(|p| to_sheet(&cam, p));
-        clicked = Some((p.and_then(|p| pick(sc, p, reach, alt)), add));
+        let working = p.and_then(|p| pick(sc, p, reach, alt));
+        let ghost = match &working {
+            Some(_) => None,
+            None => p.and_then(|p| pick_ghost(sc, p, reach)),
+        };
+        clicked = Some(match ghost {
+            Some(g) => (Some(g), add, true),
+            None => (working, add, false),
+        });
     }
-    if let Some(h) = &hovered {
+    let rev = w.blink.of.clone().unwrap_or_else(|| "the revision".into());
+    if let Some((h, ghost)) = &hovered_any {
         let pin = sc.pins.iter().find(|p| &p.reference == h);
         let tip = match pin {
+            _ if *ghost => format!("{h}\nremoved in working"),
+            _ if read_only => format!("{h}\nat {rev}, read only"),
             Some(p) => format!(
                 "{}\n{} {} ({})\nnet {}",
                 p.reference,
@@ -107,8 +127,15 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
     // the key; a cut of another length is never reused.
     let key = (
         format!(
-            "{:?}\u{0}{}\u{0}{}\u{0}{}\u{0}{:?}\u{0}{}",
-            sc.design, sc.block, sc.revision, sc.sheet, sc.layer, sc.theme
+            "{:?}\u{0}{}\u{0}{}\u{0}{}\u{0}{:?}\u{0}{}\u{0}{:?}\u{0}{:?}",
+            sc.design,
+            sc.block,
+            sc.revision,
+            sc.sheet,
+            sc.layer,
+            sc.theme,
+            sc.commit,
+            sc.against.as_ref().map(|a| &a.commit)
         ),
         band(cam.zoom),
     );
@@ -286,8 +313,12 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
         w.hover = hover;
     }
     w.moved(cam);
-    if let Some((pickd, add)) = clicked {
-        w.pick(pickd, add);
+    if let Some((picked, add, ghost)) = clicked {
+        if ghost || read_only {
+            w.describe(picked, ghost);
+        } else {
+            w.pick(picked, add);
+        }
     }
     if let Some(net) = link {
         w.follow_link(&net);

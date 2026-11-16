@@ -239,6 +239,8 @@ pub struct Window {
     pub blink: Blink,
     /// When `compare.get` was last asked while comparing.
     compare_polled: Option<Instant>,
+    /// A ghost or a revision's pick shown in Properties, never selected.
+    pub described: Option<String>,
 }
 
 impl Window {
@@ -293,6 +295,7 @@ impl Window {
             checked: None,
             blink: Blink::default(),
             compare_polled: None,
+            described: None,
         };
         w.ask_all();
         Ok(w)
@@ -448,6 +451,7 @@ impl Window {
     /// The person picked `reference` (or nothing): one, or with `add`
     /// added or taken out.
     pub fn pick(&mut self, reference: Option<String>, add: bool) {
+        self.described = None;
         match (reference, add) {
             (None, false) => self.selection.clear(),
             (None, true) => {}
@@ -462,6 +466,28 @@ impl Window {
         }
         self.select.due();
         self.ask_props();
+    }
+
+    /// The person picked a ghost, or something on the revision's sheet:
+    /// described in Properties, never sent as a selection.
+    pub fn describe(&mut self, reference: Option<String>, ghost: bool) {
+        let Some(r) = reference else {
+            self.described = None;
+            return;
+        };
+        let kind = self
+            .scene
+            .as_ref()
+            .and_then(|s| {
+                s.ghosts
+                    .iter()
+                    .find(|g| g.reference == r)
+                    .map(|g| g.kind.clone())
+                    .or_else(|| s.owner(&r).map(|i| s.owners[i].kind.clone()))
+            })
+            .unwrap_or_default();
+        self.props = Some(described(&r, &kind, self.blink.of.as_deref(), ghost));
+        self.described = Some(r);
     }
 
     /// The canvas moved its camera.
@@ -1040,6 +1066,21 @@ impl Window {
     }
 }
 
+/// What Properties shows for a pick that isn't selected (plan 13.A): a
+/// ghost (`ghost`, removed in working) or a pick on the revision's sheet
+/// (`rev`), its reference and kind.
+pub fn described(reference: &str, kind: &str, rev: Option<&str>, ghost: bool) -> Properties {
+    let mut p = Properties::new(reference);
+    p.rows.push(("Kind".into(), kind.into()));
+    let status = if ghost {
+        "removed in working".to_owned()
+    } else {
+        format!("at {}, read only", rev.unwrap_or("the revision"))
+    };
+    p.rows.push(("Status".into(), status));
+    p
+}
+
 /// What `scene` is asked for the shown sheet: its design, block, sheet
 /// and layer, the theme, and the blink's compare or revision.
 pub fn scene_params(shown: &Shown, dark: bool, blink: &Blink, sheet: Option<&str>) -> Value {
@@ -1112,6 +1153,21 @@ mod tests {
         ] {
             assert!(Request::from_rpc(m, Some(p.clone())).is_ok(), "{m} {p}");
         }
+    }
+
+    #[test]
+    fn a_ghost_or_a_revision_s_pick_is_described_never_selected() {
+        let p = described("top/c3", "component", Some("HEAD"), true);
+        assert_eq!(p.reference, "top/c3");
+        assert!(
+            p.rows
+                .contains(&("Status".to_owned(), "removed in working".to_owned()))
+        );
+        let p = described("top/r1", "component", Some("HEAD"), false);
+        assert!(
+            p.rows
+                .contains(&("Status".to_owned(), "at HEAD, read only".to_owned()))
+        );
     }
 
     #[test]

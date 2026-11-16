@@ -102,7 +102,7 @@ impl App {
                 let _ = prefs::set("ui.flash_changes", w.flash_on.into());
             }
             "edit.copy_ref" => {
-                if let Some(r) = w.selection.last() {
+                if let Some(r) = w.selection.last().or(w.described.as_ref()) {
                     ctx.copy_text(r.clone());
                 }
             }
