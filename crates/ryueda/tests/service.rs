@@ -264,6 +264,40 @@ fn framed_renders_line_up() {
     }
 }
 
+/// Over the protocol, as the daemon answers it, `render`'s `frame` with
+/// `fit` false is `invalid_param` on `frame` (the CLI's `--frame` needs
+/// `--fit`), at the working files, at a revision and with `compare`; with
+/// `fit` it renders.
+#[test]
+fn a_frame_without_fit_is_refused_over_the_protocol() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    let mut slot = None;
+    let mut ask = |params: Value| {
+        let req = ryueda::proto::Request::from_rpc("render", Some(params)).unwrap();
+        ryueda::server::handle_safely(&mut slot, None, None, &board, req)
+    };
+    for extra in [
+        json!({}),
+        json!({"rev": "HEAD"}),
+        json!({"compare": "HEAD"}),
+    ] {
+        let mut params = json!({"block": "breakout", "sheet": "s1", "frame": ["HEAD"]});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let e = ask(params.clone()).expect_err("frame without fit refuses");
+        assert_eq!(e.code, ryueda::error::Code::InvalidParam, "{extra}: {e:?}");
+        assert_eq!(e.details["param"], "frame", "{extra}: {e:?}");
+        params["fit"] = json!(true);
+        assert!(ask(params).is_ok(), "{extra}: framed with fit renders");
+    }
+}
+
 /// `git attributes` answers the lines ryueda's driver needs: every line
 /// `init` writes into a project's .gitattributes, and nothing else.
 #[test]

@@ -254,6 +254,7 @@ pub fn render(
     theme: ryusch::style::Theme,
     frames: &[&Project],
 ) -> Result<Answer> {
+    crate::schemcmd::frame_needs_fit(frames, fit)?;
     let b = crate::schemcmd::blocks(now, design, block)?[0];
     let mut laid = schem::lay(now, b, None, &[], ryusch::input::Relayout::None)?;
     let (_, shown) = crate::schemcmd::show_layer(now, b, &mut laid, layer)?;

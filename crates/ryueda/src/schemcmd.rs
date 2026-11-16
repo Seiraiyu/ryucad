@@ -1047,6 +1047,7 @@ pub fn render(
     theme: ryusch::style::Theme,
     frames: &[&Project],
 ) -> Result<Answer> {
+    frame_needs_fit(frames, fit)?;
     let b = blocks(p, design, block)?[0];
     let mut laid = schem::lay(p, b, None, &[], Relayout::None)?;
     let (layers, shown) = show_layer(p, b, &mut laid, layer)?;
@@ -1109,6 +1110,16 @@ pub fn render(
         v["scale"] = json!(px);
     }
     Ok(Answer::bytes(v, mime, bytes))
+}
+
+/// `render`'s `frame` crops a fitted picture: refused without `fit`, over
+/// the protocol as the CLI refuses `--frame` without `--fit`.
+pub fn frame_needs_fit(frames: &[&Project], fit: bool) -> Result<()> {
+    if frames.is_empty() || fit {
+        Ok(())
+    } else {
+        Err(Error::new(Code::InvalidParam, "--frame needs --fit").with("param", "frame"))
+    }
 }
 
 /// The view `render --fit --frame` crops sheet `sheet` to: what it draws
