@@ -639,3 +639,66 @@ fn notifications_in_one_poll_ask_the_doctor_once() {
     assert!(ws.wait_until(WAIT, |w| w.idle()));
     assert_eq!(doctors(&p) - before, 1);
 }
+
+/// In a script's burst, a window polled as its frames poll it asks each
+/// reader at most about once per publish (#849): counted by the daemon's
+/// `--timings`, so the bound is the same on any machine.
+#[test]
+fn a_burst_costs_each_reader_about_one_request_per_publish() {
+    let p = Project::new();
+    p.ok(&["part", "create", "p"]);
+    let mut ws = open(&p);
+    ws.diagnose();
+    ws.show_part("p");
+    assert!(ws.wait_until(WAIT, |w| w.idle() && w.session.doctor.is_some()));
+    let root = p.root.clone();
+    let script = std::thread::spawn(move || {
+        use std::io::{BufRead, Write};
+        let mut child = common::ryucad_cmd(&ryucad().exe)
+            .args(["session", "--stdio"])
+            .current_dir(&root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        for i in 0..60 {
+            let line = serde_json::json!({"jsonrpc": "2.0", "id": i, "method": "feature.add",
+                "params": {"part": "p", "id": format!("s{i:02}"), "type": "sphere",
+                           "params": {"radius": 1 + i % 4},
+                           "placement": {"origin": [i * 10, 0, 0]}}});
+            writeln!(stdin, "{line}").unwrap();
+            let mut a = String::new();
+            out.read_line(&mut a).unwrap();
+            assert!(a.contains("\"result\""), "{a}");
+        }
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+    });
+    while !script.is_finished() {
+        ws.pump();
+        ws.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    script.join().unwrap();
+    // The last publish, and the window's reads after it.
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(ws.wait_until(WAIT, |w| w.idle()));
+    let t = &p.ok(&["daemon", "status", "--timings"])["timings"]["methods"];
+    let n = |m: &str| t[m]["count"].as_u64().unwrap_or(0);
+    let publishes = t["daemon.publish"]["publishes"].as_u64().unwrap_or(0);
+    assert!(publishes >= 1, "{t}");
+    for m in ["doctor", "appearance.get", "drawing.list", "holes.list"] {
+        assert!(
+            n(m) <= publishes + 3,
+            "{m}: {} for {publishes} publishes: {t}",
+            n(m)
+        );
+    }
+    assert!(
+        n("rebuild") <= publishes + 4,
+        "rebuild: {}: {t}",
+        n("rebuild")
+    );
+}
