@@ -19,6 +19,10 @@ pub struct VersionInfo {
     pub commit: String,
     pub target: String,
     pub protocol: u32,
+    /// [`crate::OUTPUT_SCHEMA`]: the shape of the answers other tools
+    /// read (0 from a ryueda before it was said).
+    #[serde(default)]
+    pub schema_outputs: u64,
 }
 
 impl VersionInfo {
@@ -29,6 +33,7 @@ impl VersionInfo {
             commit: env!("RYUEDA_COMMIT").to_owned(),
             target: env!("RYUEDA_TARGET").to_owned(),
             protocol: PROTOCOL_VERSION,
+            schema_outputs: crate::OUTPUT_SCHEMA,
         }
     }
 
