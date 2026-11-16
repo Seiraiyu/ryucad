@@ -929,7 +929,7 @@ fn untouched_pair(input: &[u8], work: &[u8], shared: bool) {
             _ => panic!("no input face for {w:?}"),
         })
         .collect();
-    // unmetered but capped: a rung's cap, as the re-trim gives it.
+    // unmetered: a unit test, capped as a rung is.
     let m = crate::work::Meter::free();
     let met = m.capped(crate::work::Scope::Rung, || {
         crate::intersect::face_face_in((&work, pair[0]), (&work, pair[1]), &m)

@@ -552,6 +552,7 @@ mod tests {
         }
         assert!(met > 0);
         // Unpinned, the same working body has no pins.
+        // unmetered: a unit test.
         let plain = work_body(K, &b, &rest, &ws, &crate::work::Meter::free()).unwrap();
         assert!(plain.pinned.is_empty());
     }
