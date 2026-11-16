@@ -262,17 +262,14 @@ fn run(config: Config, calls: &[(String, Value)], each: bool) -> Run {
         through_stdio(&root, c, calls);
     }
     let secs = t.elapsed().as_secs_f64();
-    let out = cmd(&root, c)
-        .args(["daemon", "status", "--timings"])
-        .output()
-        .unwrap();
-    let status: Value = serde_json::from_slice(&out.stdout).unwrap();
-    let timings = status["result"]["timings"].clone();
+    // The window stops polling first: `daemon status` reads the timings
+    // only when nobody holds or waits for the lock.
     stop.store(true, Ordering::SeqCst);
     if let Some(w) = win {
         let frames = w.join().unwrap();
         assert!(frames > 0);
     }
+    let timings = timings(&root, c);
     if let Some(mut w) = watch {
         let _ = w.kill();
         let _ = w.wait();
@@ -285,6 +282,27 @@ fn run(config: Config, calls: &[(String, Value)], each: bool) -> Run {
         timings,
         model,
         activity,
+    }
+}
+
+/// The daemon's timings, asked until it isn't busy.
+fn timings(root: &Path, cache: &Path) -> Value {
+    let t = Instant::now();
+    loop {
+        let out = cmd(root, cache)
+            .args(["daemon", "status", "--timings"])
+            .output()
+            .unwrap();
+        let status: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let timings = &status["result"]["timings"];
+        if timings.is_object() {
+            return timings.clone();
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(60),
+            "always busy: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
