@@ -43,6 +43,7 @@ mod edit;
 pub(crate) mod fixtures;
 mod graph;
 mod hole;
+mod place;
 mod resolve;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,6 +60,7 @@ use crate::measure::{self, Body, BodyOptions, Verdict};
 use crate::poly::{self, FlattenOptions, Polygons};
 use crate::tree::grown;
 use graph::Graph;
+pub use place::Placement;
 pub use resolve::{group_touch, groups};
 
 /// A node of the contact graph.
