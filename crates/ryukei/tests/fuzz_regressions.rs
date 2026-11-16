@@ -935,6 +935,22 @@ fn a_tolerant_cone_on_a_torus_whose_faces_overlapped() {
     assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
 }
 
+/// The `tolerant` target's find in 30.D's second branch dispatch (run
+/// 43941742240, `crash-78d2ac85…`): a block less a sphere on its corner,
+/// tolerant by 1e-7. A meridian edge of the sphere runs into a vertex
+/// 1.03e-7 off its pole, within the vertex's 1.55e-7 tolerance; the
+/// sphere face asked for boundary samples ever nearer the pole, round
+/// after round, and ended `BoundaryNotResolved`. A face still asking after
+/// the last round now takes the mesher's second try (the vertex on the
+/// pole), with a few rounds more.
+#[test]
+fn a_tolerant_vertex_beside_a_pole_meshes() {
+    let out = tolerant_run(&bytes(
+        "f8f8f8d8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f825f8f8f8f8f8f8f8f8f8f8f8f8f8f8f80a303d",
+    ));
+    assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+}
+
 /// #905: the `tolerant` target's finds in 30.C's hour-long sessions
 /// (`crash-269db946…` minimised to 38 bytes, and `crash-fa0042c1…`).
 /// Tolerant unions of a block and a sphere of radius 0.75 on one of its

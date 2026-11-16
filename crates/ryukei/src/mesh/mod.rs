@@ -153,6 +153,9 @@ const HALVE_AFTER: usize = 3;
 /// round only halves the segments it asks about, so it takes about ten.
 const ROUNDS: usize = 12;
 
+/// Rounds more for a face given its second try after the last round.
+const SECOND_TRY_ROUNDS: usize = 4;
+
 /// One face's state between rounds.
 struct FaceWork {
     domain: Option<Domain>,
@@ -230,7 +233,11 @@ pub(crate) fn tessellate_turns_in(
     let mut split: Vec<Chord> = Vec::new();
     let mut todo: Vec<FaceId> = faces;
     let mut reseamed: Vec<bool> = vec![false; body.faces.slot_count()];
-    for round in 0..=ROUNDS {
+    // The last round: past `ROUNDS` only for faces given a second try
+    // there (below).
+    let mut last = ROUNDS;
+    let mut round = 0;
+    while round <= last {
         if m.halted() {
             return Err(Error::Cancelled);
         }
@@ -258,7 +265,7 @@ pub(crate) fn tessellate_turns_in(
         for (f, w) in done {
             if w.fault == Some(MeshFaultKind::BadDomain)
                 && !reseamed[f.index()]
-                && round < ROUNDS
+                && round < last
                 && let Some(g) = geoms[f.index()].as_ref().and_then(|g| g.reseamed(body))
             {
                 reseamed[f.index()] = true;
@@ -267,6 +274,25 @@ pub(crate) fn tessellate_turns_in(
                     body.face_loops(f)
                         .flat_map(|l| body.loop_fins(l).map(|fin| body.fins[fin].edge)),
                 );
+            } else if w.fault.is_none()
+                && !w.requests.is_empty()
+                && round == ROUNDS
+                && !reseamed[f.index()]
+                && let Some(g) = geoms[f.index()].as_ref().and_then(|g| g.reseamed(body))
+            {
+                // A face still asking for boundary samples after the last
+                // round takes the same second try, with a few rounds more:
+                // a tolerant vertex a hair off a sphere's pole, which its
+                // edge runs into, drew requests ever nearer the pole and
+                // never settled (plan 30.D). Every face that settles within
+                // the rounds meshes as it did.
+                reseamed[f.index()] = true;
+                geoms[f.index()] = Some(g);
+                moved.extend(
+                    body.face_loops(f)
+                        .flat_map(|l| body.loop_fins(l).map(|fin| body.fins[fin].edge)),
+                );
+                last = ROUNDS + SECOND_TRY_ROUNDS;
             }
             work[f.index()] = Some(w);
         }
@@ -276,7 +302,7 @@ pub(crate) fn tessellate_turns_in(
             .iter()
             .flat_map(|f| work[f.index()].as_ref().expect("meshed").requests.clone())
             .collect();
-        if requests.is_empty() && moved.is_empty() && round < ROUNDS {
+        if requests.is_empty() && moved.is_empty() && round < last {
             // Chords between boundary points drawn by two faces.
             let shared = shared_chords(body, &work);
             if !shared.is_empty() {
@@ -289,10 +315,11 @@ pub(crate) fn tessellate_turns_in(
                 split.extend(shared.into_iter().map(|(c, _)| c));
                 split.sort();
                 split.dedup();
+                round += 1;
                 continue;
             }
         }
-        if (requests.is_empty() && moved.is_empty()) || round == ROUNDS {
+        if (requests.is_empty() && moved.is_empty()) || round == last {
             break;
         }
         requests.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -330,6 +357,7 @@ pub(crate) fn tessellate_turns_in(
         redo.sort();
         redo.dedup();
         todo = redo;
+        round += 1;
     }
     let mut total: u64 = 0;
     let mut too_large = false;
