@@ -2,3 +2,5 @@
 
 mod graph;
 mod hole;
+mod resolve;
+pub use resolve::{group_touch, groups};
