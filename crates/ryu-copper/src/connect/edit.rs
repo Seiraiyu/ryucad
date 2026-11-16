@@ -286,8 +286,28 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
         }
         for (i, &l) in layers.iter().enumerate() {
             let after = self.touch(l, item, hole);
-            let (r_old, h_old) = &olds[i];
             let here = item.filter(|k| self.entries.get(*k).is_some_and(|e| e.layer == l));
+            // What the edit touches now may reach resolved items no
+            // cluster before it held (a hole drilled through an item
+            // other cutters already resolved): their cluster is reset too.
+            let (mut r_all, mut h_all) = olds[i].clone();
+            let mut now = after.items.clone();
+            now.extend(here.cloned());
+            let (r_now, h_now) = self.cluster(l, &now, &after.holes);
+            let extra: Vec<K> = r_now.difference(&r_all).cloned().collect();
+            let nodes: Vec<Node<K>> = extra.iter().flat_map(|k| self.nodes_of(k)).collect();
+            seeds.extend(self.forget(&nodes));
+            for k in &extra {
+                if let Some(e) = self.entries.get_mut(k) {
+                    e.resolved = None;
+                }
+            }
+            for h in &h_now {
+                self.hard[l].remove(h);
+            }
+            r_all.extend(r_now);
+            h_all.extend(h_now);
+            let (r_old, h_old) = (&r_all, &h_all);
             let mut items: BTreeSet<K> = r_old.clone();
             items.extend(after.cut.iter().cloned());
             items.extend(here.cloned());
@@ -408,6 +428,15 @@ mod tests {
         );
         put(&mut l, &mut c, "u", strip);
         assert!(c.is_resolved(&"t") && c.pieces(&"t") == 2);
+        // A hole drilled through the trace the strip already resolved:
+        // nothing the edit touched before it held the trace.
+        let w = Hole {
+            plated: false,
+            ..via(p(2_400_000, 0), 300_000, (0, 0))
+        };
+        drill(&mut l, &mut c, "w", w);
+        assert_eq!(c.pieces(&"t"), 3);
+        undrill(&mut l, &mut c, "w");
         take(&mut l, &mut c, "u");
         assert!(!c.is_resolved(&"t"));
         // An unplated hole through the trace, then gone.
