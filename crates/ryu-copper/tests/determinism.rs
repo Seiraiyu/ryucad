@@ -2,11 +2,12 @@
 //! `tests/golden/copper.txt` holds the hashes of seeded pieces' exact
 //! comparisons and distances, seeded shapes' distances and containment,
 //! an index's pairs and nearest items, booleans, offsets, flattening and
-//! merged layers, and a seeded layout's islands, uncertain contacts and
-//! netlist compare, the index, layers and connectivity built on one
-//! thread and on eight. After a deliberate change, regenerate with `UPDATE_GOLDEN=1
-//! cargo test -p ryu-copper --test determinism` and review the diff like
-//! any other change.
+//! merged layers, and a seeded layout's islands, uncertain contacts,
+//! netlist compare, gaps under 0.4 mm and point contacts, the index,
+//! layers and connectivity built on one thread and on eight. After a
+//! deliberate change, regenerate with `UPDATE_GOLDEN=1 cargo test -p
+//! ryu-copper --test determinism` and review the diff like any other
+//! change.
 
 use std::cmp::Ordering;
 
@@ -18,7 +19,7 @@ use ryu_copper::connect::Copper;
 use ryu_copper::index::Index;
 use ryu_copper::layout::{Hole, HoleShape, Item, Layer, Layout, NetPoint, PointSide};
 use ryu_copper::measure::core::{Core, SegP, edge_cores};
-use ryu_copper::measure::{self, Body, BodyOptions, Distance, Solid};
+use ryu_copper::measure::{self, Body, BodyOptions, Distance, Solid, Verdict};
 use ryu_copper::netlist;
 use ryu_copper::poly::{self, FillRule, FlattenOptions, Op, Polygons, Rings};
 
@@ -328,14 +329,19 @@ fn connect_layout() -> Layout<u32> {
 
 fn connect_sections(golden: &mut Golden, threads: usize) {
     let l = connect_layout();
-    let (islands, doubts, report) = rayon::ThreadPoolBuilder::new()
+    let (islands, doubts, report, gaps, contacts) = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
         .unwrap()
         .install(|| {
             let c = Copper::new(&l, BodyOptions::default());
             let report = netlist::compare(&c, &l.points);
-            (c.islands(), c.uncertain(), report)
+            let gaps: Vec<_> = (0..l.layers.len())
+                .flat_map(|layer| c.clearance(layer, 400_000))
+                .collect();
+            let islands = c.islands();
+            let contacts: Vec<_> = islands.iter().flat_map(|i| c.point_contacts(i)).collect();
+            (islands, c.uncertain(), report, gaps, contacts)
         });
     let mut s = golden.section(&format!("connect.islands.{threads}"));
     for i in &islands {
@@ -359,8 +365,86 @@ fn connect_sections(golden: &mut Golden, threads: usize) {
         s.str(&format!("{:?} {:?}", u.a, u.b));
         s.i64(u.bound);
     }
+    // By its fields: derived Debug text isn't promised across toolchains
+    // (#932's review), so this section moved once, in plan 1.D.
     let mut s = golden.section(&format!("netlist.compare.{threads}"));
-    s.str(&format!("{report:?}"));
+    s.str(if report.judged { "judged" } else { "unjudged" });
+    for o in &report.opens {
+        s.str("open");
+        s.str(&o.net);
+        for (id, keys) in &o.islands {
+            s.i64(id.0.into());
+            s.i64(id.1.into());
+            for k in keys {
+                s.i64((*k).into());
+            }
+            s.str(",");
+        }
+    }
+    for x in &report.shorts {
+        s.str("short");
+        s.i64(x.island.0.into());
+        s.i64(x.island.1.into());
+        for (net, keys) in &x.nets {
+            s.str(net);
+            for k in keys {
+                s.i64((*k).into());
+            }
+            s.str(",");
+        }
+        for (a, b) in &x.contacts {
+            s.i64((*a).into());
+            s.i64((*b).into());
+        }
+        s.str("|");
+        for h in &x.holes {
+            s.i64((*h).into());
+        }
+    }
+    for o in &report.off_copper {
+        s.str("off");
+        s.i64(o.key.into());
+        s.str(&o.net);
+        s.i64(o.at.x);
+        s.i64(o.at.y);
+        s.str(if o.uncertain { "?" } else { "." });
+    }
+    for m in &report.mismatches {
+        s.str("mismatch");
+        s.i64(m.island.0.into());
+        s.i64(m.island.1.into());
+        s.str(&m.net);
+        for (k, n) in &m.items {
+            s.i64((*k).into());
+            s.str(n);
+        }
+    }
+    let mut s = golden.section(&format!("connect.clearance.{threads}"));
+    for g in &gaps {
+        for v in [
+            g.layer as i64,
+            g.a.0.into(),
+            g.a.1.into(),
+            g.b.0.into(),
+            g.b.1.into(),
+        ] {
+            s.i64(v);
+        }
+        s.i64(g.distance.nm);
+        s.i64(g.distance.bound);
+        s.str(if g.distance.exact { "=" } else { "~" });
+        s.str(match g.verdict {
+            Verdict::Yes => "y",
+            Verdict::Uncertain => "?",
+            Verdict::No => "n",
+        });
+    }
+    let mut s = golden.section(&format!("connect.contacts.{threads}"));
+    for pc in &contacts {
+        s.i64(pc.layer as i64);
+        s.i64(pc.a.into());
+        s.i64(pc.b.into());
+    }
 }
 
 #[test]
@@ -427,7 +511,13 @@ fn measurement_is_bit_exact() {
             "{kind} differ between one thread and eight"
         );
     }
-    for kind in ["connect.islands", "connect.uncertain", "netlist.compare"] {
+    for kind in [
+        "connect.islands",
+        "connect.uncertain",
+        "netlist.compare",
+        "connect.clearance",
+        "connect.contacts",
+    ] {
         assert_eq!(
             sections[&format!("{kind}.1")],
             sections[&format!("{kind}.8")],
