@@ -357,6 +357,7 @@ jobs:
             df -h / && free -m
             sh scripts/fetch-dfm-corpus.sh
             cargo test -p ryudfm --release --test pinned -- --ignored --nocapture
+            cargo test -p ryudfm --release --test kicad_drc -- --ignored --nocapture
             RAYON_NUM_THREADS=2 RYUDFM_REQUIRE_CORPUS=1 cargo test -p ryudfm --release --test bar -- --nocapture
             df -h / && free -m
           push: never

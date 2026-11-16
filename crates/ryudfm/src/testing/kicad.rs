@@ -207,3 +207,152 @@ pub fn compare_islands_with_d356(cb: &crate::copper::CopperBoard, d356: &str) ->
     }
     out
 }
+
+/// How far from the clearance a gap only one of us reports is tolerated:
+/// KiCad's default maximum arc error (5 µm) and a micrometre of its
+/// reports' precision.
+pub const TOLERANCE: ryu_board::geom::Nm = 6_000;
+
+/// The net in a KiCad DRC item's description: `Track [GND] on F.Cu, ...`.
+fn drc_net(d: &str) -> String {
+    d.split_once('[')
+        .and_then(|(_, r)| r.split_once(']'))
+        .map(|(n, _)| n.to_string())
+        .unwrap_or_else(|| "<no net>".into())
+}
+
+/// The layer in a description, upper case as ODB++ names it: `... on F.Cu`.
+fn drc_layer(d: &str) -> Option<String> {
+    let (_, r) = d.rsplit_once(" on ")?;
+    Some(r.split([',', ' ']).next()?.to_ascii_uppercase())
+}
+
+/// The distance a violation's description gives: `... actual 0.1500 mm)`.
+fn drc_actual(d: &str) -> Option<ryu_board::geom::Nm> {
+    let i = d.find("actual ")?;
+    let num = d[i + 7..].split_whitespace().next()?;
+    nm_value(num, Unit::Mm).ok()
+}
+
+fn sorted_pair(a: String, b: String) -> (String, String) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// Our opens, shorts and gaps under `clearance` against KiCad's DRC report
+/// at that clearance (`kicad-cli pcb drc --format json`): nets open, pairs
+/// of nets shorted, and pairs of nets closer than the clearance on a
+/// layer. Gaps only one of us reports are tolerated within [`TOLERANCE`]
+/// of the clearance, and printed. Returns every other disagreement.
+pub fn compare_with_drc(
+    cb: &crate::copper::CopperBoard,
+    drc: &serde_json::Value,
+    clearance: ryu_board::geom::Nm,
+) -> Vec<String> {
+    let items = |v: &serde_json::Value| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|i| i["description"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let violations: Vec<serde_json::Value> =
+        drc["violations"].as_array().cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    // Opens.
+    let theirs: BTreeSet<String> = drc["unconnected_items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|v| items(v).into_iter().map(|d| drc_net(&d)))
+        .collect();
+    let ours: BTreeSet<String> = cb.report.opens.iter().map(|o| o.net.clone()).collect();
+    for n in theirs.difference(&ours) {
+        out.push(format!("net {n} open for KiCad, not for ryudfm"));
+    }
+    for n in ours.difference(&theirs) {
+        out.push(format!("net {n} open for ryudfm, not for KiCad"));
+    }
+    // Shorts.
+    let theirs: BTreeSet<(String, String)> = violations
+        .iter()
+        .filter(|v| v["type"] == "shorting_items")
+        .filter_map(|v| {
+            let d = items(v);
+            Some(sorted_pair(drc_net(d.first()?), drc_net(d.get(1)?)))
+        })
+        .collect();
+    let mut ours = BTreeSet::new();
+    for s in &cb.report.shorts {
+        for (i, (a, _)) in s.nets.iter().enumerate() {
+            for (b, _) in &s.nets[i + 1..] {
+                ours.insert(sorted_pair(a.clone(), b.clone()));
+            }
+        }
+    }
+    for p in theirs.symmetric_difference(&ours) {
+        let who = if ours.contains(p) { "ryudfm" } else { "KiCad" };
+        out.push(format!("{} and {} shorted for {who} alone", p.0, p.1));
+    }
+    // Gaps: by layer and pair of nets, KiCad's with the distance it gives.
+    type Gaps<T> = BTreeMap<(String, String, String), T>;
+    let theirs: Gaps<Option<ryu_board::geom::Nm>> = violations
+        .iter()
+        .filter(|v| v["type"] == "clearance")
+        .filter_map(|v| {
+            let d = items(v);
+            let (a, b) = sorted_pair(drc_net(d.first()?), drc_net(d.get(1)?));
+            let layer = drc_layer(d.first()?)?;
+            Some((
+                (layer, a, b),
+                drc_actual(v["description"].as_str().unwrap_or("")),
+            ))
+        })
+        .collect();
+    let net = |id: &ryu_copper::connect::IslandId<crate::copper::Key>| {
+        cb.nets
+            .get(id)
+            .and_then(|s| s.iter().next().cloned())
+            .or_else(|| cb.claims().get(id).and_then(|c| c.first().cloned()))
+            .unwrap_or_else(|| "<no net>".into())
+    };
+    let mut ours: Gaps<ryu_board::geom::Nm> = BTreeMap::new();
+    for l in 0..cb.built.copper.len() {
+        for g in cb.gaps(l, clearance).iter() {
+            let (a, b) = sorted_pair(net(&g.islands.0), net(&g.islands.1));
+            if a == b {
+                continue; // KiCad never checks clearance within a net.
+            }
+            let e = ours
+                .entry((cb.layer_name(l).to_ascii_uppercase(), a, b))
+                .or_insert(g.distance.nm);
+            *e = (*e).min(g.distance.nm);
+        }
+    }
+    for (k, d) in &ours {
+        if !theirs.contains_key(k) {
+            if *d >= clearance - TOLERANCE {
+                println!(
+                    "tolerated: ryudfm's gap {k:?} of {d} nm, within {TOLERANCE} nm of {clearance}"
+                );
+            } else {
+                out.push(format!("gap {k:?} of {d} nm for ryudfm, not for KiCad"));
+            }
+        }
+    }
+    for (k, actual) in &theirs {
+        if !ours.contains_key(k) {
+            match actual {
+                Some(a) if *a >= clearance - TOLERANCE => {
+                    println!("tolerated: KiCad's gap {k:?} of {a} nm")
+                }
+                _ => out.push(format!(
+                    "gap {k:?} of {actual:?} nm for KiCad, not for ryudfm"
+                )),
+            }
+        }
+    }
+    out
+}
