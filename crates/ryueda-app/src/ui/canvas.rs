@@ -33,6 +33,9 @@ fn layer_on(w: &Window, layer: Option<&str>) -> bool {
 }
 
 pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
+    if let Some(rev) = w.blink.of.clone() {
+        compare_bar(ui, w, &rev);
+    }
     let size = ui.available_size();
     let (rect, r) = ui.allocate_exact_size(size, Sense::click_and_drag());
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, "Schematic sheet"));
@@ -323,6 +326,54 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
     if let Some(net) = link {
         w.follow_link(&net);
     }
+}
+
+/// The compare bar over the sheet (design 688): what it is against, the
+/// counts in their colours, the sides, Stop, and why the revision's block
+/// doesn't lay out when it doesn't.
+fn compare_bar(ui: &mut egui::Ui, w: &mut Window, rev: &str) {
+    use crate::core::compare::Side;
+    let sc = w.scene.as_ref();
+    let diff = sc.and_then(|s| s.paper.diff);
+    let against = sc.and_then(|s| s.against.clone());
+    let counts = sc.and_then(|s| s.counts);
+    ui.horizontal(|ui| {
+        let short: String = against
+            .as_ref()
+            .map(|a| a.commit.chars().take(7).collect())
+            .unwrap_or_default();
+        ui.label(format!("Against {rev} ({short})"));
+        if let (Some(c), Some(d)) = (counts, diff) {
+            ui.colored_label(d.added, format!("{} added", c.added));
+            ui.colored_label(d.changed, format!("{} changed", c.changed));
+            ui.colored_label(d.changed, format!("{} moved", c.moved));
+            ui.colored_label(d.removed, format!("{} removed", c.removed));
+        }
+        if let Some(e) = against.as_ref().and_then(|a| a.invalid.as_ref()) {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "{rev} doesn't lay out: {}",
+                    e["message"].as_str().unwrap_or_default()
+                ),
+            );
+        }
+        for (side, label) in [
+            (Side::Both, "Both".to_owned()),
+            (Side::Working, "Working".to_owned()),
+            (Side::Rev, rev.to_owned()),
+        ] {
+            if ui.selectable_label(w.blink.side == side, label).clicked() {
+                w.side(side);
+            }
+        }
+        if w.blink.read_only() {
+            ui.weak("read only");
+        }
+        if ui.button("Stop").on_hover_text("Stop comparing").clicked() {
+            w.set_compare(None);
+        }
+    });
 }
 
 /// A text at `at` (screen), `size` points high, fitted to `width` points
