@@ -603,3 +603,39 @@ fn the_mate_dialog_previews_and_adds_a_mate() {
     ws.close_mate();
     assert!(ws.assembly.mating.is_none());
 }
+
+/// Notifications taken in one poll ask each reader once (#849): three
+/// `model.changed` waiting when the window polls cost one doctor, not two
+/// (one, then one more for the "again").
+#[test]
+fn notifications_in_one_poll_ask_the_doctor_once() {
+    let p = Project::new();
+    p.ok(&["part", "create", "p"]);
+    let mut ws = open(&p);
+    ws.diagnose();
+    assert!(ws.wait_until(WAIT, |w| w.idle() && w.session.doctor.is_some()));
+    let doctors = |p: &Project| {
+        p.ok(&["daemon", "status", "--timings"])["timings"]["methods"]["doctor"]["count"]
+            .as_u64()
+            .unwrap_or(0)
+    };
+    let before = doctors(&p);
+    // Three writes, each published on its own (the daemon goes quiet
+    // between them), while the window doesn't poll.
+    for r in 5..8 {
+        p.ok(&[
+            "feature",
+            "add",
+            "p",
+            "sphere",
+            "--id",
+            &format!("s{r}"),
+            "--param",
+            &format!("radius={r}"),
+        ]);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    ws.pump();
+    assert!(ws.wait_until(WAIT, |w| w.idle()));
+    assert_eq!(doctors(&p) - before, 1);
+}
