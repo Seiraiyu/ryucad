@@ -667,6 +667,14 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// refuses at a plane and a NURBS face touching no change, overlapping
 /// (`74fca8b1`/`b150cb1a`); STC 07 still refuses inside the deadline and
 /// linkrods still runs past it (122 s), as on main.
+///
+/// Plan 21.A pins narrowed builds' faces touching no change: the same 18
+/// defeature, bit for bit as on main, and none more (#652, #658). CTC 02
+/// with PMI's pair is never met, and its pinned retry clips a working
+/// plane touching the change at its near box (`1294043e`, `GapNotHealed`
+/// in 11 s); STC 07 now refuses in 64 s; FTC 07 AP242 (21.B), STC 10
+/// (21.D) and FTC 10 (21.C) refuse as before; linkrods is still past the
+/// deadline (out of scope, question 984).
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
