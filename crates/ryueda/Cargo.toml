@@ -37,12 +37,15 @@ ryu-git = { path = "../ryu-git" }
 # feature is ryucad's half and pulls ryucad's file format; CI's
 # `ryupdm-core` job proves the core builds without it.
 ryupdm = { path = "../ryupdm", default-features = false }
+# The hosted review service's client (design 667), shared with ryucad.
+ryu-review = { path = "../ryu-review" }
 ryu-session = { path = "../ryu-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
+ryu-review = { path = "../ryu-review", features = ["testing"] }
 # Attestations signed with the test key, for approvals verified offline.
 ryupdm = { path = "../ryupdm", default-features = false, features = ["testing"] }
 assert_cmd = "2"

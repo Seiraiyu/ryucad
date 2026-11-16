@@ -110,7 +110,8 @@ impl ryu_session::prefs::Schema for Eda {
     const CONFIG_DIR_VAR: &'static str = "RYUEDA_CONFIG_DIR";
 
     /// How often a watched daemon checks the files, how long a catalogue
-    /// serves, and the folders where-used searches.
+    /// serves, the folders where-used searches, and the hosted review
+    /// service `ryueda review` talks to.
     fn accepts(name: &str, value: &serde_json::Value) -> bool {
         match name {
             "daemon.poll_ms" => value.as_u64().is_some_and(|n| (10..=10_000).contains(&n)),
@@ -123,6 +124,8 @@ impl ryu_session::prefs::Schema for Eda {
             "pdm.dependents" => value
                 .as_array()
                 .is_some_and(|a| a.iter().all(serde_json::Value::is_string)),
+            // The hosted review service `ryueda review` talks to (design 667).
+            "review.url" => value.as_str().is_some_and(ryu_review::url_ok),
             _ => false,
         }
     }
@@ -132,7 +135,35 @@ impl ryu_session::prefs::Schema for Eda {
             "daemon.poll_ms" => Some(serde_json::json!(250)),
             "parts.max_age" => Some(serde_json::json!(crate::parts::MAX_AGE)),
             "pdm.dependents" => Some(serde_json::json!([])),
+            "review.url" => Some(serde_json::json!(ryu_review::DEFAULT_URL)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use ryu_session::prefs::Schema;
+    use serde_json::json;
+
+    #[test]
+    fn review_url_is_an_https_url_or_this_machine() {
+        assert!(crate::Eda::accepts(
+            "review.url",
+            &json!("https://review.example.com")
+        ));
+        assert!(crate::Eda::accepts(
+            "review.url",
+            &json!("http://127.0.0.1:9")
+        ));
+        assert!(!crate::Eda::accepts(
+            "review.url",
+            &json!("http://example.com")
+        ));
+        assert!(!crate::Eda::accepts("review.url", &json!(3)));
+        assert_eq!(
+            crate::Eda::default_of("review.url"),
+            Some(json!(ryu_review::DEFAULT_URL))
+        );
     }
 }
