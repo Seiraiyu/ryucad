@@ -1,9 +1,12 @@
 //! The app without a window: what it knows and how it learns it.
 
 pub mod activity;
+pub mod changes;
 pub mod command;
+pub mod compare;
 pub mod flash;
 pub mod geom;
+pub mod history;
 pub mod keys;
 pub mod link;
 pub mod lists;

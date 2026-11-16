@@ -27,6 +27,7 @@ impl Flash {
                 && o.sheet == new.sheet
                 && o.layer == new.layer
                 && o.theme == new.theme
+                && o.commit == new.commit
         }) else {
             self.started.clear();
             return;
@@ -40,6 +41,12 @@ impl Flash {
                 self.started.insert(o.reference.clone(), now);
             }
         }
+    }
+
+    /// Starts `reference` glowing at `at`: a write the window saw, or a
+    /// test's (a start ahead of now holds it at full strength).
+    pub fn start(&mut self, reference: &str, at: Instant) {
+        self.started.insert(reference.to_owned(), at);
     }
 
     /// How strongly `reference` glows: 1 when it changed, falling to 0
@@ -138,5 +145,30 @@ mod tests {
         let mut f = Flash::default();
         f.arrived(Some(&light), &dark, t0);
         assert!(f.glowing().next().is_none());
+    }
+
+    #[test]
+    fn a_revisions_sheet_starts_afresh() {
+        let t0 = Instant::now();
+        let working = Scene::from_json(&small()).unwrap();
+        let mut v = small();
+        v["commit"] = json!("c0ffee0000000000000000000000000000000000");
+        v["owners"][0]["hash"] = json!("then");
+        let then = Scene::from_json(&v).unwrap();
+        let mut f = Flash::default();
+        f.arrived(Some(&working), &then, t0);
+        assert!(f.glowing().next().is_none(), "blinking isn't a change");
+    }
+
+    #[test]
+    fn a_flash_started_by_hand_glows() {
+        let t0 = Instant::now();
+        let mut f = Flash::default();
+        f.start("top/r1", t0 + Duration::from_secs(3600));
+        assert_eq!(
+            f.strength("top/r1", t0),
+            1.0,
+            "held while its start is ahead"
+        );
     }
 }

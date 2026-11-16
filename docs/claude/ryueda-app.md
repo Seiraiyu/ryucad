@@ -48,3 +48,41 @@ The design is document 519 (phases 4 and 5) in the Coxswain planning project `ry
   - `UPDATE_SNAPSHOTS=1 cargo test -p ryueda-app --test snapshot`.
   - `RYUEDA_BARS=1 cargo test -p ryueda-app --release --test frames -- --ignored --nocapture` (hardware adapters).
   - `sh scripts/smoke-ryueda.sh target/release/ryueda "" target/release/ryueda-app`.
+
+## The compare view (decided in ryueda 13.A)
+
+The design is document 688 in the Coxswain planning project `ryucad-ryukei`; these are its phases 2 and 3, plan 13.A (document 690).
+
+- **Whose compare.** The window's compare is its participant's: `compare.set` from an agent (`ryueda compare HEAD`) or from the window's own View menu and History tab. The window follows it from `participant.changed` (`SheetView::compare`). Which side is drawn (`core::compare::Blink`) is the window's own view state, never sent: Both (the compare scene), Working (the plain sheet) or the revision's sheet alone (`scene --rev`, read only). A new compare, or none, starts from Both; `B` flips between the two lone sides. While comparing, the window reads `compare.get` every 5 s and when it regains focus, since a symbolic revision moves with no file changing; a moved commit draws again. After a reconnect the window tells the new session its compare again.
+- **What is drawn.** Everything comes from the daemon's scene:
+  - Compare colours are the scene's `paper.diff`, so a style recolours them.
+  - Ghosts are scene items drawn first, owned by no one, each naming its ghost (`Item::ghost`).
+  - Leaders are their part's, drawn last, in `diff_changed`.
+  - Marks in order, lowest first: the changed halo, compare colours, others' highlights, others' selections, hover, the window's selection.
+
+  The canvas's cut is kept by the compare's and the revision's commits too.
+- **Picks.** Where nothing working is nearer, a ghost is picked (`pick::pick_ghost`). It and any pick on a revision's sheet are described in Properties ("removed in working", "at <rev>, read only") and copied by Copy reference, never sent as a selection: the reference may name nothing in the working files.
+- **The navigator.** It marks each changed sheet and block with a dot in `diff_changed` and the counts on hover. It lists the sheets only the revision has, struck through, opening as the revision drew them. A revision's scene is a blink: it moves neither the navigator's sheets nor ends the compare; a plain scene of a block does.
+- **Changes and History tabs.**
+  - Changes reads `diff --layout` and `diff --netlist` from the compared revision, one read at a time, again when the compare or the project moves. It lists rows by block (verb, reference, change lines) and an Electrical section. Show selects a working entry, or frames a removed one's ghost on the sheet its layout entry names (as the revision drew it, when only the revision has the sheet). ERC rows have no Show: `diff --netlist`'s findings carry no references.
+  - History lists `history.log`'s commits (short id, author, UTC date, subject) each with Compare, and how many working files differ. Outside a repository it says the history is Git's.
+  - Properties lists a selected reference's changes ("Changes since <rev>").
+- **Commands.** View > Compare with HEAD, Compare with… (a revision typed, checked by the daemon, a refusal toasting), Stop comparing, Flip compared sides (`B`), all in the palette. The compare bar over the sheet shows `Against <rev> (<short>)`, the counts in their colours, Both / Working / `<rev>`, "read only" on the revision's side, Stop, and why the revision's block doesn't lay out when it doesn't.
+- **The changed flash is a halo (#879).** A changed owner's lines are widened by 3 points a side under it, in `diff_changed` (or ryu-session's changed colour without `paper.diff`), fading over 2 s. It never recolours, so it never reads as a selection, and it shows on white paper.
+- **Marks held to the paper (#879).** Every mark colour from `ryu-app` or `ryu-session` goes through `core::paint::on_paper`: under WCAG's 3:1 against the scene's paper, it is mixed toward black (light paper) or white (dark) in 5 % steps until it passes. The selection takes 4.5:1 and the hover 7.5:1 (`on_paper_at`), so they stay apart from each other and from the participants' colours for colour-blind eyes. `ryu-app`'s constants never change, so no ryucad picture moves.
+- **Colour isn't the only cue.** The vision test (`ryu_app::style::vision`, CIEDE2000 ≥ 10 under each vision, white and dark paper) holds:
+  - the selection and the hover against everything, but one pair: the selection vs ryu-session's participant 0 under protanopia on white (3.8);
+  - the diff roles among themselves under normal vision.
+
+  Red against green and amber under colour-blind vision, and the diff roles against ryu-session's shared participant palette, fall under 10. Every pair is listed with its ΔE beside the test and in #921, a design call for later (a colour-blind-safe diff palette moves every scene, SVG and PDF golden; the participant palette is ryucad's too). So diff marks are told apart by shape as well as colour: ghosts (removed) are dashed and unfilled, leaders (moved) dashed lines from where a part stood, added and changed owners solid. Colour alone isn't the cue for colour-blind readers.
+- **The tests' folder is a repository of its own (#920).** `ryueda init` sets up the repository a project is made in. The window tests' folder, under the target directory, sat inside the clone, so every run wrote the clone's shared hooks and drivers naming the test build's binary. `common::shared` runs `git init` in it first.
+- **Testing.**
+  - Unit tests in `core`: `compare`, `scene`'s compare fixture, `paint`, `pick`, `nav`, `changes`, `history`, `window`'s requests.
+  - `tests/compare.rs` against real daemons over the breakout committed and edited (`common::breakout_in_git`): an agent's compare, History's Compare, `B`, a removed component's Show, a reconnect, Properties' changes.
+  - `tests/snapshot.rs` adds `compare-light`, `compare-dark` and `halo-light`, and the compare bar's names.
+  - The 13.A pictures were made with cox-worker-3's own lavapipe (Mesa 26.0.8), which reproduces the devcontainer's `canvas-*` within the tolerance.
+- **Bars.** On cox-worker-3 (as 3.D's; load under 4, nothing else running), release, `RYUEDA_BARS=1`:
+  - the RP2040's largest sheet compared with `HEAD` through a warm daemon in 31.1 ms with the revision's lay-out kept (bar 100 ms), 11.8 ms kept whole (bar 50 ms);
+  - `diff --layout` 18.3 ms and `diff --netlist` 173.6 ms over 10,000 occurrences (bar 2 s each);
+  - the 500-part sheet with every owner marked and 100 ghosts at a median 8.5 ms a frame (118 frames a second; bar 60);
+  - a 500-part block's compare sheet drawn again 3.44 s after a value edit (bar 150 ms): unmet until #802, ignored as 3.D's.

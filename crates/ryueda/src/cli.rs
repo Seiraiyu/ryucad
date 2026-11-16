@@ -472,6 +472,12 @@ enum Command {
         /// light (the default) or dark.
         #[arg(long, value_parser = ["light", "dark"])]
         theme: Option<String>,
+        /// Mark what changed since this Git revision: each owner's mark,
+        /// what is gone as ghosts, moved parts' leaders and the counts.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
@@ -1964,6 +1970,12 @@ enum GitCmd {
         /// The file's path in the repository, as Git names it.
         path: Option<String>,
     },
+    /// The project's Git commits, newest first, and what is uncommitted.
+    /// Read-only.
+    Log {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2254,6 +2266,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             before: *before,
         },
         Command::Participants => Request::ParticipantList {},
+        Command::Git(GitCmd::Log { limit }) => Request::HistoryLog {
+            limit: Some(*limit),
+        },
         Command::Compare { rev: None, off: false, participant } => Request::CompareGet {
             participant: participant.clone(),
         },
@@ -3152,7 +3167,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             sheet,
             layer,
             theme,
+            compare,
+            rev,
         } => Request::Scene {
+            compare: compare.clone(),
+            rev: rev.rev.clone(),
             design: design.clone(),
             block: block.clone(),
             sheet: sheet.clone(),

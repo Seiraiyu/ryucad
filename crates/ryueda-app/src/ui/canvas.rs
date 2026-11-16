@@ -3,7 +3,7 @@
 
 use crate::core::geom::{Cut, band, fit};
 use crate::core::paint::marks;
-use crate::core::pick::pick;
+use crate::core::pick::{pick, pick_ghost};
 use crate::core::scene::{Anchor, P, Shape};
 use crate::core::window::Window;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke};
@@ -33,6 +33,9 @@ fn layer_on(w: &Window, layer: Option<&str>) -> bool {
 }
 
 pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
+    if let Some(rev) = w.blink.of.clone() {
+        compare_bar(ui, w, &rev);
+    }
     let size = ui.available_size();
     let (rect, r) = ui.allocate_exact_size(size, Sense::click_and_drag());
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, "Schematic sheet"));
@@ -64,11 +67,20 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
     };
     let reach = REACH / cam.zoom;
     let alt = ui.input(|i| i.modifiers.alt);
-    // Hover and its tooltip.
-    let hovered = r
-        .hover_pos()
-        .and_then(|p| pick(sc, to_sheet(&cam, p), reach, alt));
-    let mut clicked: Option<(Option<String>, bool)> = None;
+    // Hover and its tooltip: something working, else a ghost (what only
+    // the compared revision draws).
+    let read_only = sc.read_only();
+    let hovered_any = r.hover_pos().and_then(|p| {
+        let at = to_sheet(&cam, p);
+        pick(sc, at, reach, alt)
+            .map(|x| (x, false))
+            .or_else(|| pick_ghost(sc, at, reach).map(|x| (x, true)))
+    });
+    let hovered = hovered_any
+        .as_ref()
+        .filter(|(_, ghost)| !ghost)
+        .map(|(x, _)| x.clone());
+    let mut clicked: Option<(Option<String>, bool, bool)> = None;
     let mut link: Option<String> = None;
     if r.double_clicked() {
         let at = r.interact_pointer_pos().map(|p| to_sheet(&cam, p));
@@ -81,11 +93,22 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
     } else if r.clicked() {
         let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
         let p = r.interact_pointer_pos().map(|p| to_sheet(&cam, p));
-        clicked = Some((p.and_then(|p| pick(sc, p, reach, alt)), add));
+        let working = p.and_then(|p| pick(sc, p, reach, alt));
+        let ghost = match &working {
+            Some(_) => None,
+            None => p.and_then(|p| pick_ghost(sc, p, reach)),
+        };
+        clicked = Some(match ghost {
+            Some(g) => (Some(g), add, true),
+            None => (working, add, false),
+        });
     }
-    if let Some(h) = &hovered {
+    let rev = w.blink.of.clone().unwrap_or_else(|| "the revision".into());
+    if let Some((h, ghost)) = &hovered_any {
         let pin = sc.pins.iter().find(|p| &p.reference == h);
         let tip = match pin {
+            _ if *ghost => format!("{h}\nremoved in working"),
+            _ if read_only => format!("{h}\nat {rev}, read only"),
             Some(p) => format!(
                 "{}\n{} {} ({})\nnet {}",
                 p.reference,
@@ -107,8 +130,15 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
     // the key; a cut of another length is never reused.
     let key = (
         format!(
-            "{:?}\u{0}{}\u{0}{}\u{0}{}\u{0}{:?}\u{0}{}",
-            sc.design, sc.block, sc.revision, sc.sheet, sc.layer, sc.theme
+            "{:?}\u{0}{}\u{0}{}\u{0}{}\u{0}{:?}\u{0}{}\u{0}{:?}\u{0}{:?}",
+            sc.design,
+            sc.block,
+            sc.revision,
+            sc.sheet,
+            sc.layer,
+            sc.theme,
+            sc.commit,
+            sc.against.as_ref().map(|a| &a.commit)
         ),
         band(cam.zoom),
     );
@@ -144,6 +174,33 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
         sc.paper.colour,
     );
     let view = visible(&cam, px);
+    // Halos (#879) under everything the owners draw: each item's line
+    // widened by 3 points a side.
+    if !m.halos.is_empty() {
+        let halo: std::collections::BTreeMap<usize, Color32> = m.halos.iter().copied().collect();
+        for i in cut.visible(view) {
+            let it = &sc.items[i];
+            let Some(c) = it.owner.and_then(|o| halo.get(&o)) else {
+                continue;
+            };
+            if !layer_on(w, it.layer.as_deref()) {
+                continue;
+            }
+            let pts: Vec<Pos2> = cut.lines[i].iter().map(|p| screen(*p)).collect();
+            let width = match &it.shape {
+                Shape::Polyline { width, .. }
+                | Shape::Bus { width, .. }
+                | Shape::Arc { width, .. }
+                | Shape::Bezier { width, .. }
+                | Shape::Circle { width, .. } => *width,
+                _ => 0.0,
+            };
+            painter.add(egui::Shape::line(
+                pts,
+                Stroke::new(((width as f32) * zoom).max(1.0) + 6.0, *c),
+            ));
+        }
+    }
     for i in cut.visible(view) {
         let it = &sc.items[i];
         if !layer_on(w, it.layer.as_deref()) {
@@ -286,12 +343,64 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
         w.hover = hover;
     }
     w.moved(cam);
-    if let Some((pickd, add)) = clicked {
-        w.pick(pickd, add);
+    if let Some((picked, add, ghost)) = clicked {
+        if ghost || read_only {
+            w.describe(picked, ghost);
+        } else {
+            w.pick(picked, add);
+        }
     }
     if let Some(net) = link {
         w.follow_link(&net);
     }
+}
+
+/// The compare bar over the sheet (design 688): what it is against, the
+/// counts in their colours, the sides, Stop, and why the revision's block
+/// doesn't lay out when it doesn't.
+fn compare_bar(ui: &mut egui::Ui, w: &mut Window, rev: &str) {
+    use crate::core::compare::Side;
+    let sc = w.scene.as_ref();
+    let diff = sc.and_then(|s| s.paper.diff);
+    let against = sc.and_then(|s| s.against.clone());
+    let counts = sc.and_then(|s| s.counts);
+    ui.horizontal(|ui| {
+        let short: String = against
+            .as_ref()
+            .map(|a| a.commit.chars().take(7).collect())
+            .unwrap_or_default();
+        ui.label(format!("Against {rev} ({short})"));
+        if let (Some(c), Some(d)) = (counts, diff) {
+            ui.colored_label(d.added, format!("{} added", c.added));
+            ui.colored_label(d.changed, format!("{} changed", c.changed));
+            ui.colored_label(d.changed, format!("{} moved", c.moved));
+            ui.colored_label(d.removed, format!("{} removed", c.removed));
+        }
+        if let Some(e) = against.as_ref().and_then(|a| a.invalid.as_ref()) {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "{rev} doesn't lay out: {}",
+                    e["message"].as_str().unwrap_or_default()
+                ),
+            );
+        }
+        for (side, label) in [
+            (Side::Both, "Both".to_owned()),
+            (Side::Working, "Working".to_owned()),
+            (Side::Rev, rev.to_owned()),
+        ] {
+            if ui.selectable_label(w.blink.side == side, label).clicked() {
+                w.side(side);
+            }
+        }
+        if w.blink.read_only() {
+            ui.weak("read only");
+        }
+        if ui.button("Stop").on_hover_text("Stop comparing").clicked() {
+            w.set_compare(None);
+        }
+    });
 }
 
 /// A text at `at` (screen), `size` points high, fitted to `width` points
@@ -341,13 +450,7 @@ fn text_at(
     p.add(egui::epaint::TextShape::new(pos, galley, colour).with_angle(angle));
 }
 
-/// An error code as the CLI's envelope writes it (`not_found`).
-pub fn code_word(code: ryu_doc::error::Code) -> String {
-    serde_json::to_value(code)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default()
-}
+pub use crate::core::scene::code_word;
 
 /// A body's fill under a mark: a third of the way to the mark's colour,
 /// so the text drawn over it (pin names, values), which takes the mark's

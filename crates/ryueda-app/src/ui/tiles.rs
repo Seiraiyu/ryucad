@@ -9,13 +9,15 @@ use ryu_app::layout::{Dir, Home, Node, Spec, tabs};
 use ryu_app::shell::Pane;
 use std::time::Instant;
 
-const TILES: [(&str, &str); 6] = [
+const TILES: [(&str, &str); 8] = [
     ("navigator", "Navigator"),
     ("canvas", "Sheet"),
     ("properties", "Properties"),
     ("findings", "Findings"),
     ("instructions", "Instructions"),
     ("activity", "Activity"),
+    ("changes", "Changes"),
+    ("history", "History"),
 ];
 
 fn home(id: &str) -> Home {
@@ -37,7 +39,10 @@ fn default() -> Node {
                     Dir::Vertical,
                     vec![
                         (tabs(&["canvas"]), 600.0),
-                        (tabs(&["findings", "instructions", "activity"]), 200.0),
+                        (
+                            tabs(&["findings", "instructions", "activity", "changes", "history"]),
+                            200.0,
+                        ),
                     ],
                 ),
                 1000.0,
@@ -83,6 +88,8 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
                 "findings" => findings(ui, self.w),
                 "instructions" => instructions(ui, self.w),
                 "activity" => activity(ui, self.w),
+                "changes" => changes(ui, self.w),
+                "history" => history(ui, self.w, self.copy),
                 _ => {}
             });
         egui_tiles::UiResponse::None
@@ -108,7 +115,28 @@ fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
         .show_header(ui, |ui| {
             let here =
                 w.shown.block.as_deref() == Some(n.block.as_str()) && w.shown.layer == n.layer;
-            if ui.selectable_label(here, &n.label).clicked() {
+            let diff = w.scene.as_ref().and_then(|s| s.paper.diff);
+            let label = match diff.filter(|_| w.nav.block_changed(&n.block)) {
+                Some(d) => {
+                    let mut job = egui::text::LayoutJob::default();
+                    let style = ui.style().clone();
+                    egui::RichText::new(&n.label).append_to(
+                        &mut job,
+                        &style,
+                        egui::FontSelection::Default,
+                        egui::Align::Center,
+                    );
+                    egui::RichText::new(" ●").color(d.changed).append_to(
+                        &mut job,
+                        &style,
+                        egui::FontSelection::Default,
+                        egui::Align::Center,
+                    );
+                    egui::WidgetText::from(job)
+                }
+                None => egui::WidgetText::from(n.label.as_str()),
+            };
+            if ui.selectable_label(here, label).clicked() {
                 w.show(Some(n.block.clone()), None, n.layer.clone());
             }
         })
@@ -131,7 +159,36 @@ fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
                 } else {
                     name.clone()
                 };
-                if ui.selectable_label(here, mark).clicked() {
+                let changed = w.nav.changed(&n.block, &sid);
+                let diff = w.scene.as_ref().and_then(|s| s.paper.diff);
+                let text = match (changed, diff) {
+                    (Some(_), Some(d)) => {
+                        let mut job = egui::text::LayoutJob::default();
+                        let style = ui.style().clone();
+                        egui::RichText::new(&mark).append_to(
+                            &mut job,
+                            &style,
+                            egui::FontSelection::Default,
+                            egui::Align::Center,
+                        );
+                        egui::RichText::new(" ●").color(d.changed).append_to(
+                            &mut job,
+                            &style,
+                            egui::FontSelection::Default,
+                            egui::Align::Center,
+                        );
+                        egui::WidgetText::from(job)
+                    }
+                    _ => egui::WidgetText::from(mark),
+                };
+                let mut r = ui.selectable_label(here, text);
+                if let Some(c) = changed {
+                    r = r.on_hover_text(format!(
+                        "{} added, {} changed, {} moved, {} removed",
+                        c.added, c.changed, c.moved, c.removed
+                    ));
+                }
+                if r.clicked() {
                     w.show(Some(n.block.clone()), Some(sid.clone()), n.layer.clone());
                 }
                 for r in w.nav.regions(&n.block, &sid).to_vec() {
@@ -142,6 +199,21 @@ fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
                     if ui.small_button(format!("  {label}")).clicked() {
                         w.go_to(&r);
                     }
+                }
+            }
+            let diff = w.scene.as_ref().and_then(|s| s.paper.diff);
+            for (sid, name) in w.nav.removed(&n.block).to_vec() {
+                let text = egui::RichText::new(&name).strikethrough();
+                let text = match diff {
+                    Some(d) => text.color(d.removed),
+                    None => text,
+                };
+                if ui
+                    .selectable_label(false, text)
+                    .on_hover_text("Only the compared revision has this sheet: shown as it drew it")
+                    .clicked()
+                {
+                    w.show_removed(n.block.clone(), sid.clone());
                 }
             }
             if let Some(r) = &sel_net
@@ -228,6 +300,156 @@ fn properties(ui: &mut egui::Ui, w: &mut Window, copy: &mut Option<String>) {
         for t in &p.naming {
             ui.label(t);
         }
+    }
+    if let Some(c) = &w.changes {
+        let lines = c.lines_of(&p.reference);
+        if !lines.is_empty() {
+            ui.separator();
+            ui.strong(format!("Changes since {}", c.rev));
+            for l in &lines {
+                ui.label(l);
+            }
+        }
+    }
+}
+
+fn changes(ui: &mut egui::Ui, w: &mut Window) {
+    let Some(c) = w.changes.clone() else {
+        ui.weak("Not comparing. An agent shows you its work with:");
+        ui.horizontal(|ui| {
+            ui.monospace("ryueda compare HEAD");
+            if ui.small_button("Copy").clicked() {
+                ui.ctx().copy_text("ryueda compare HEAD".into());
+            }
+        });
+        return;
+    };
+    if !c.loaded() {
+        ui.spinner();
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("changes")
+        .show(ui, |ui| {
+            for (block, rows) in &c.blocks {
+                ui.strong(block);
+                for (i, r) in rows.iter().enumerate() {
+                    ui.push_id((block, i), |ui| {
+                        ui.horizontal(|ui| {
+                            let s = crate::core::changes::Changes::show(r);
+                            let ok = s != crate::core::changes::Show::Nowhere;
+                            if ui
+                                .add_enabled(ok, egui::Button::new("Show").small())
+                                .clicked()
+                            {
+                                w.show_change(&s);
+                            }
+                            ui.strong(&r.verb);
+                            ui.monospace(&r.reference);
+                            if let Some(n) = &r.name {
+                                ui.label(n);
+                            }
+                        });
+                        for l in &r.lines {
+                            ui.label(format!("    {l}"));
+                        }
+                    });
+                }
+            }
+            if !c.electrical.is_empty() {
+                ui.separator();
+                ui.strong("Electrical");
+                for (i, e) in c.electrical.iter().enumerate() {
+                    ui.push_id(("electrical", i), |ui| {
+                        ui.horizontal(|ui| {
+                            let b = ui.add_enabled(
+                                e.reference.is_some(),
+                                egui::Button::new("Show").small(),
+                            );
+                            if b.clicked()
+                                && let Some(r) = &e.reference
+                            {
+                                w.go_to(r);
+                            }
+                            ui.label(&e.text);
+                        });
+                    });
+                }
+            }
+        });
+}
+
+/// A commit's time as `YYYY-MM-DD` (UTC), from seconds since the Unix
+/// epoch, in integers.
+fn date(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn history(ui: &mut egui::Ui, w: &mut Window, copy: &mut Option<String>) {
+    let Some(h) = w.history.clone() else {
+        ui.spinner();
+        return;
+    };
+    if h.not_a_repo() {
+        ui.weak(
+            "This project's history is Git's: make its folder a repository, and commits show here.",
+        );
+        ui.horizontal(|ui| {
+            ui.monospace("git init");
+            if ui.small_button("Copy").clicked() {
+                *copy = Some("git init".into());
+            }
+        });
+        return;
+    }
+    if let Some(e) = &h.error {
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            format!("Can't read the history: {e}"),
+        );
+        return;
+    }
+    let compared = w.blink.of.clone();
+    let mut pick: Option<Option<String>> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("history")
+        .show(ui, |ui| {
+            if h.uncommitted > 0 {
+                ui.label(format!("{} uncommitted change(s)", h.uncommitted));
+            }
+            egui::Grid::new("history")
+                .num_columns(5)
+                .striped(true)
+                .show(ui, |ui| {
+                    for c in &h.commits {
+                        ui.monospace(&c.short);
+                        ui.label(&c.author);
+                        ui.weak(date(c.time));
+                        ui.label(&c.subject);
+                        let on = compared.as_deref() == Some(c.id.as_str());
+                        if ui
+                            .selectable_label(on, "Compare")
+                            .on_hover_text("Compare the working files with this commit")
+                            .clicked()
+                        {
+                            pick = Some((!on).then(|| c.id.clone()));
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    if let Some(rev) = pick {
+        w.set_compare(rev);
     }
 }
 
@@ -338,7 +560,9 @@ mod tests {
             [
                 "activity",
                 "canvas",
+                "changes",
                 "findings",
+                "history",
                 "instructions",
                 "navigator",
                 "properties"
@@ -347,5 +571,12 @@ mod tests {
         assert_eq!(SPEC.read(&d.to_value()).root, d);
         assert_eq!(SPEC.centre, "canvas");
         assert_eq!((SPEC.home)("findings"), Home::Bottom);
+    }
+
+    #[test]
+    fn a_commit_s_date_is_its_utc_day() {
+        assert_eq!(date(0), "1970-01-01");
+        assert_eq!(date(1_767_225_600), "2026-01-01");
+        assert_eq!(date(951_782_400), "2000-02-29");
     }
 }

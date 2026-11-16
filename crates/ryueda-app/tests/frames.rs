@@ -185,3 +185,96 @@ fn the_app_is_no_larger_than_ryucad_s_and_draws_within_two_seconds() {
     println!("a drawn sheet {took:?} after start");
     assert!(took <= bar(Duration::from_secs(2)), "{took:?}");
 }
+
+/// Design 688's bar: the 500-part sheet with every owner marked and 100
+/// ghosts at 60 frames a second, on a hardware adapter. The marks are put
+/// on the scene the window holds: the bar is the window's drawing, not
+/// the daemon's compare (its own bar is in ryueda's `bar.rs`).
+#[test]
+#[ignore = "release, hardware adapters: cargo test -p ryueda-app --release --test frames -- --ignored --nocapture"]
+fn a_marked_five_hundred_part_sheet_pans_at_60_frames_a_second() {
+    use ryueda_app::core::scene::{Diff, DiffColours, Ghost, Item};
+    let Some((adapter, _, _)) = ryueda_app::ui::smoke::headless() else {
+        assert!(!strict(), "no adapter");
+        return;
+    };
+    let info = adapter.get_info();
+    if strict() {
+        assert_ne!(
+            info.device_type,
+            eframe::wgpu::DeviceType::Cpu,
+            "the bar is for hardware: {} is software",
+            info.name
+        );
+    }
+    let root = five_hundred();
+    let mut h = window(&root, egui::vec2(1280.0, 800.0));
+    h.state_mut()
+        .opened_mut()
+        .unwrap()
+        .show(Some("ch".into()), None, None);
+    loaded(&mut h, "ch", Duration::from_secs(120));
+    {
+        let sc = h.state_mut().opened_mut().unwrap().scene.as_mut().unwrap();
+        sc.paper.diff = Some(DiffColours {
+            added: egui::Color32::from_rgb(0x1a, 0x7f, 0x37),
+            changed: egui::Color32::from_rgb(0x9a, 0x67, 0x00),
+            removed: egui::Color32::from_rgb(0xcf, 0x22, 0x2e),
+        });
+        for o in &mut sc.owners {
+            o.mark = Some(Diff::Changed);
+        }
+        let parts: Vec<Item> = sc
+            .items
+            .iter()
+            .filter(|it| it.owner.is_some_and(|o| sc.owners[o].kind == "component"))
+            .take(100)
+            .cloned()
+            .collect();
+        for (i, mut it) in parts.into_iter().enumerate() {
+            it.owner = None;
+            it.ghost = Some(i);
+            sc.ghosts.push(Ghost {
+                reference: format!("ch/ghost{i}"),
+                kind: "component".into(),
+                boxed: None,
+            });
+            sc.items.insert(i, it);
+        }
+    }
+    let rect = h.get_by_label("Schematic sheet").rect();
+    let mut times = Vec::new();
+    for f in 0..240 {
+        let t = f as f32 / 240.0;
+        let at = rect.center() + egui::vec2((t * 6.0).sin() * 200.0, (t * 4.0).cos() * 120.0);
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, if f % 60 < 30 { 20.0 } else { -20.0 }),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        let begin = Instant::now();
+        h.step();
+        let _ = h.render();
+        times.push(begin.elapsed().as_secs_f64() * 1e3);
+    }
+    let mut steady = times[10..].to_vec();
+    steady.sort_by(f64::total_cmp);
+    let median = steady[steady.len() / 2];
+    println!(
+        "{} ({:?}): 500 parts marked, 100 ghosts, median {median:.1} ms ({:.0} fps), worst {:.1} ms",
+        info.name,
+        info.backend,
+        1000.0 / median,
+        steady[steady.len() - 1]
+    );
+    if strict() {
+        assert!(
+            1000.0 / median >= 60.0,
+            "{:.0} frames a second",
+            1000.0 / median
+        );
+    }
+}

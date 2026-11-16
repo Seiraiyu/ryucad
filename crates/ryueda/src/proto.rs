@@ -1030,6 +1030,17 @@ pub enum Request {
         layer: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         theme: Option<ryusch::style::Theme>,
+        /// The working sheet marked against this Git revision (plan
+        /// 13.A): each owner's `mark`, the revision's `ghosts`, moved
+        /// parts' `leaders`, the `counts` and each sheet's, decided as
+        /// `render --compare` decides them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression (plan 13.A). The answer
+        /// names its `commit`; a window shows it read only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// A design's designators numbered in canvas order (plan 2.F): the
     /// unannotated ones (`unannotated`, by default) or every unlocked one
@@ -1170,6 +1181,14 @@ pub enum Request {
     CompareGet {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
+    },
+    /// The project's Git commits, newest first (those that changed its
+    /// folder), and the working files that differ from `HEAD` (plan
+    /// 13.A); `not_a_git_repo` outside a repository.
+    #[serde(rename = "history.log")]
+    HistoryLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
     },
     /// A participant's selection by reference path, and what each names:
     /// `participant`, else the one human (an agent asks what the person
@@ -1312,7 +1331,8 @@ impl Request {
             | Request::NetShow { rev, .. }
             | Request::SymbolShow { rev, .. }
             | Request::LibcompShow { rev, .. }
-            | Request::LibCheck { rev, .. } => rev.as_deref(),
+            | Request::LibCheck { rev, .. }
+            | Request::Scene { rev, .. } => rev.as_deref(),
             _ => None,
         };
         rev.filter(|r| *r != "working")

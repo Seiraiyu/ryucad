@@ -890,6 +890,7 @@ fn every_protocol_method_has_a_command() {
         ("participant.list", &["participants"]),
         ("compare.set", &["compare"]),
         ("compare.get", &["compare"]),
+        ("history.log", &["git", "log"]),
         ("selection.get", &["selection"]),
         ("selection.set", &["select"]),
         ("highlight.set", &["highlight"]),

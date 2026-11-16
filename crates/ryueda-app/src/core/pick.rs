@@ -130,6 +130,25 @@ pub fn distance(shape: &Shape, p: P) -> f64 {
     }
 }
 
+/// The ghost (what only the compared revision draws) under `p` within
+/// `reach`, nearest first.
+pub fn pick_ghost(scene: &Scene, p: P, reach: f64) -> Option<String> {
+    let mut best: Option<(f64, usize)> = None;
+    for it in &scene.items {
+        let Some(g) = it.ghost else { continue };
+        if let Some(b) = scene.ghosts[g].boxed
+            && !inside(p, b, reach)
+        {
+            continue;
+        }
+        let d = distance(&it.shape, p);
+        if d <= reach && best.is_none_or(|(x, _)| d < x) {
+            best = Some((d, g));
+        }
+    }
+    best.map(|(_, g)| scene.ghosts[g].reference.clone())
+}
+
 /// The reference under `p`, frontmost first and nearest within a rank,
 /// within `reach`; with `alt`, a pin's net instead of the pin.
 pub fn pick(scene: &Scene, p: P, reach: f64, alt: bool) -> Option<String> {
@@ -244,5 +263,22 @@ mod tests {
         assert_eq!(v, [[-0.75, 0.0], [0.25, 4.0]]);
         assert_eq!(box_distance([5.0, 0.0], [[0.0, 0.0], [2.0, 2.0]]), 3.0);
         assert_eq!(box_distance([1.0, 1.0], [[0.0, 0.0], [2.0, 2.0]]), 0.0);
+    }
+
+    #[test]
+    fn a_ghost_is_picked_only_where_nothing_working_is_nearer() {
+        use crate::core::scene::tests::compared;
+        let s = Scene::from_json(&compared()).unwrap();
+        // On the ghost's line, far from anything working.
+        assert_eq!(
+            pick(&s, [31.0, 1.0], 0.5, false),
+            None,
+            "nothing working there"
+        );
+        assert_eq!(
+            pick_ghost(&s, [31.27, 1.27], 0.5).as_deref(),
+            Some("top/c3")
+        );
+        assert_eq!(pick_ghost(&s, [100.0, 100.0], 0.5), None);
     }
 }

@@ -188,7 +188,7 @@ pub fn answer(
     };
     let result = match req.rev().map(str::to_owned) {
         Some(rev) => match session.at(&rev) {
-            Ok((commit, p)) => read_at(session, &p, req)
+            Ok((commit, p)) => read_at(session, &p, &commit, req)
                 .map(|a| with_commit(a, &commit))
                 .map_err(|e| e.with("commit", &commit)),
             Err(e) => Err(e),
@@ -360,6 +360,26 @@ fn working(
             sheet,
             layer,
             theme,
+            compare: Some(rev),
+            ..
+        } => crate::scene::answer_compare(
+            session,
+            &crate::scene::Ask {
+                design,
+                block,
+                sheet,
+                layer,
+                theme: theme.unwrap_or_default(),
+            },
+            &rev,
+        ),
+        Request::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+            ..
         } => crate::scene::answer(
             session,
             &crate::scene::Ask {
@@ -374,8 +394,8 @@ fn working(
     }
 }
 
-/// A read request answered from `p`, a revision's project.
-fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
+/// A read request answered from `p`, a revision's project at `commit`.
+fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Result<Answer> {
     match req {
         Request::Netlist { design, .. } => {
             crate::netlist::netlist(p, design.as_deref()).map(Answer::json)
@@ -403,6 +423,9 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             compare: Some(_), ..
         }
         | Request::Output {
+            compare: Some(_), ..
+        }
+        | Request::Scene {
             compare: Some(_), ..
         } => Err(Error::new(
             Code::InvalidParam,
@@ -452,6 +475,25 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             library.as_deref(),
             symbol.as_deref(),
             &crate::symlint::Listing { summary, codes },
+        ),
+        Request::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+            ..
+        } => crate::scene::answer_at(
+            session,
+            p,
+            commit,
+            &crate::scene::Ask {
+                design,
+                block,
+                sheet,
+                layer,
+                theme: theme.unwrap_or_default(),
+            },
         ),
         other => Err(Error::new(
             Code::InvalidParam,
@@ -1420,6 +1462,9 @@ fn dispatch(
         // With no daemon, nobody is attached.
         Request::ParticipantList {} => {
             Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        }
+        Request::HistoryLog { limit } => {
+            crate::git::history(session.root(), &session.files(), limit.unwrap_or(50))
         }
         Request::CompareGet { participant } => {
             // Whose compare.set would change: `participant`, else the one

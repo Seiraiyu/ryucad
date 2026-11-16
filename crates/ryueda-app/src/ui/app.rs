@@ -31,6 +31,10 @@ pub struct App {
     keymap: Keymap,
     look: (Look, Contrast),
     palette: Option<String>,
+    /// The Compare with… dialog's revision, while it is open.
+    compare_with: Option<String>,
+    /// Whether the window had the focus at the last frame.
+    focused: bool,
     recent: Vec<&'static str>,
 }
 
@@ -62,6 +66,8 @@ impl App {
             keymap: Keymap::new((), &prefs::get("ui.keys")),
             look,
             palette: None,
+            compare_with: None,
+            focused: true,
             recent: Vec::new(),
         }
     }
@@ -102,7 +108,7 @@ impl App {
                 let _ = prefs::set("ui.flash_changes", w.flash_on.into());
             }
             "edit.copy_ref" => {
-                if let Some(r) = w.selection.last() {
+                if let Some(r) = w.selection.last().or(w.described.as_ref()) {
                     ctx.copy_text(r.clone());
                 }
             }
@@ -111,6 +117,10 @@ impl App {
             "edit.redo" => w.redo(),
             "tools.palette" => self.palette = Some(String::new()),
             "tools.check" => w.run_check(),
+            "view.compare_head" => w.set_compare(Some("HEAD".into())),
+            "view.compare_with" => self.compare_with = Some(String::new()),
+            "view.compare_stop" => w.set_compare(None),
+            "view.blink" => w.flip(),
             _ => {}
         }
     }
@@ -250,6 +260,35 @@ impl App {
         }
     }
 
+    /// Compare with…: a revision typed, checked by the daemon (a refusal
+    /// toasts).
+    fn compare_with(&mut self, ctx: &egui::Context) {
+        let Some(mut rev) = self.compare_with.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut go = false;
+        egui::Window::new("Compare with")
+            .collapsible(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut rev)
+                        .hint_text("A revision: HEAD, main, a commit"),
+                );
+                r.request_focus();
+                go = ui.button("Compare").clicked()
+                    || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            });
+        if go && !rev.trim().is_empty() {
+            if let Some(w) = self.opened_mut() {
+                w.set_compare(Some(rev.trim().to_owned()));
+            }
+        } else if open && !ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.compare_with = Some(rev);
+        }
+    }
+
     fn people(&mut self, ui: &mut egui::Ui) {
         let Some(w) = self.opened_mut() else { return };
         let me = w.me().to_owned();
@@ -355,7 +394,14 @@ impl App {
         let ctx = ui.ctx().clone();
         let now = Instant::now();
         let dark = ctx.global_style().visuals.dark_mode;
+        // Focus regained: a compare's revision may have moved meanwhile.
+        let focused = ctx.input(|i| i.focused);
+        let regained = focused && !self.focused;
+        self.focused = focused;
         if let Some(w) = self.opened_mut() {
+            if regained {
+                w.focused();
+            }
             w.pump();
             w.set_dark(dark);
             if let Some(after) = w.tick(now) {
@@ -392,6 +438,7 @@ impl App {
             }
         });
         self.palette(&ctx);
+        self.compare_with(&ctx);
         self.toasts(&ctx);
     }
 

@@ -3,7 +3,10 @@
 //! selection and view, and what others show. `pump` takes events, `tick`
 //! sends what is due and reconnects.
 
+use crate::core::changes::{Changes, Show};
+use crate::core::compare::{Ask, Blink, Side};
 use crate::core::flash::Flash;
+use crate::core::history::History;
 use crate::core::link::{Daemon, Event, Link, Wake};
 use crate::core::lists::{self, Entry, Findings, Instruction, Properties, Subject};
 use crate::core::nav::Navigator;
@@ -26,6 +29,11 @@ pub const RETRY_FIRST: Duration = Duration::from_millis(250);
 pub const RETRY_MAX: Duration = Duration::from_secs(5);
 /// How many activity entries the tile lists.
 pub const ACTIVITY: usize = 100;
+/// How often a compare's revision is read again while comparing: a
+/// symbolic revision (`HEAD`) moves with no file changing.
+pub const COMPARE_EVERY: Duration = Duration::from_secs(5);
+/// How many commits the History tab lists.
+pub const HISTORY: usize = 50;
 
 pub type Toasts = ryu_app::toast::Toasts<Eda>;
 
@@ -167,6 +175,15 @@ enum Why {
     /// toasts; its answer selects the reference, the view moved or not.
     GoTo(String),
     People,
+    /// `compare.get` while comparing: its commit against the drawn one.
+    CompareGet,
+    /// `history.log`, for the History tab.
+    History,
+    /// `diff --layout` (or `--netlist`) from the compared revision.
+    Changes {
+        rev: String,
+        netlist: bool,
+    },
     Quiet,
 }
 
@@ -229,6 +246,18 @@ pub struct Window {
     pub props: Option<Properties>,
     /// The last `check`'s state: `None` never run, `Some(false)` running.
     pub checked: Option<bool>,
+    /// The participant's compare and the side drawn (design 688).
+    pub blink: Blink,
+    /// When `compare.get` was last asked while comparing.
+    compare_polled: Option<Instant>,
+    /// A ghost or a revision's pick shown in Properties, never selected.
+    pub described: Option<String>,
+    /// The Changes tab: the compare's changes, while comparing.
+    pub changes: Option<Changes>,
+    changes_asked: bool,
+    changes_again: bool,
+    /// The History tab: `history.log`'s commits, or its refusal.
+    pub history: Option<History>,
 }
 
 impl Window {
@@ -281,6 +310,13 @@ impl Window {
             activity: Vec::new(),
             props: None,
             checked: None,
+            blink: Blink::default(),
+            compare_polled: None,
+            described: None,
+            changes: None,
+            changes_asked: false,
+            changes_again: false,
+            history: None,
         };
         w.ask_all();
         Ok(w)
@@ -311,21 +347,149 @@ impl Window {
             req("activity.log", json!({"limit": ACTIVITY})),
             Why::Activity,
         );
+        self.ask_history();
+    }
+
+    /// Reads the project's Git history again, aside.
+    fn ask_history(&mut self) {
+        self.send_aside(req("history.log", json!({"limit": HISTORY})), Why::History);
     }
 
     fn scene_params(&self, sheet: Option<&str>) -> Value {
-        let mut p = json!({"theme": if self.dark { "dark" } else { "light" }});
-        for (k, v) in [
-            ("design", self.shown.design.as_deref()),
-            ("block", self.shown.block.as_deref()),
-            ("sheet", sheet),
-            ("layer", self.shown.layer.as_deref()),
-        ] {
-            if let Some(v) = v {
-                p[k] = json!(v);
+        scene_params(&self.shown, self.dark, &self.blink, sheet)
+    }
+
+    /// Compares with `rev`, or stops (`None`): `compare.set` for this
+    /// window's participant; the compare starts when `participant.changed`
+    /// says so, as an agent's does.
+    pub fn set_compare(&mut self, rev: Option<String>) {
+        let me = self.me().to_owned();
+        let p = match rev {
+            Some(r) => json!({"rev": r, "participant": me}),
+            None => json!({"off": true, "participant": me}),
+        };
+        self.send(req("compare.set", p), Why::Write("Compare"));
+    }
+
+    /// `B`: the revision alone, then the working sheet alone.
+    pub fn flip(&mut self) {
+        self.blink.flip();
+        self.blinked();
+    }
+
+    /// The compare bar's sides.
+    pub fn side(&mut self, side: Side) {
+        self.blink.set(side);
+        self.blinked();
+    }
+
+    fn blinked(&mut self) {
+        // The working side drawn again leaves a sheet only the revision
+        // has.
+        let block = self.shown.block.clone().unwrap_or_default();
+        if !self.blink.read_only()
+            && self
+                .nav
+                .removed(&block)
+                .iter()
+                .any(|(k, _)| Some(k) == self.shown.sheet.as_ref())
+        {
+            self.shown.sheet = None;
+        }
+        self.ask_scene();
+    }
+
+    /// Shows a sheet only the compared revision has, as it drew it.
+    pub fn show_removed(&mut self, block: String, sheet: String) {
+        self.blink.set(Side::Rev);
+        let layer = self.shown.layer.clone();
+        self.show(Some(block), Some(sheet), layer);
+    }
+
+    /// The window was focused: a compare's revision may have moved.
+    pub fn focused(&mut self) {
+        if self.blink.of.is_some() {
+            self.compare_polled = None;
+        }
+        self.ask_history();
+    }
+
+    /// The participant's compare moved (or the window's own did).
+    fn compare_moved(&mut self) {
+        self.flash.clear();
+        self.ask_scene();
+        self.ask_other_sheets();
+        self.ask_changes();
+    }
+
+    /// Reads the compare's changes again: `diff --layout` and `diff
+    /// --netlist` from the compared revision, one read at a time.
+    pub fn ask_changes(&mut self) {
+        let Some(rev) = self.blink.of.clone() else {
+            self.changes = None;
+            return;
+        };
+        if self.changes_asked {
+            self.changes_again = true;
+            return;
+        }
+        self.changes_asked = true;
+        if self.changes.as_ref().is_none_or(|c| c.rev != rev) {
+            self.changes = Some(Changes::new(&rev));
+        }
+        for netlist in [false, true] {
+            let p = if netlist {
+                json!({"from": rev, "netlist": true})
+            } else {
+                json!({"from": rev, "layout": true})
+            };
+            self.send_aside(
+                req("diff", p),
+                Why::Changes {
+                    rev: rev.clone(),
+                    netlist,
+                },
+            );
+        }
+    }
+
+    /// A Changes read came back (or failed): the next read goes once
+    /// both have.
+    fn changes_read(&mut self) {
+        let waiting = self
+            .pending
+            .values()
+            .any(|w| matches!(w, Why::Changes { .. }));
+        if !waiting {
+            self.changes_asked = false;
+            if std::mem::take(&mut self.changes_again) {
+                self.ask_changes();
             }
         }
-        p
+    }
+
+    /// A Changes row's Show (design 688): a working object selected and
+    /// framed, a removed one's ghost framed on the sheet its layout entry
+    /// names (as the revision drew it, when only the revision has it).
+    pub fn show_change(&mut self, s: &Show) {
+        match s {
+            Show::Working(r) => self.go_to(r),
+            Show::Removed {
+                block,
+                sheet,
+                reference,
+            } => {
+                self.frame_ref = Some(reference.clone());
+                if self.nav.removed(block).iter().any(|(k, _)| k == sheet) {
+                    self.blink.set(Side::Rev);
+                } else {
+                    self.blink.set(Side::Both);
+                }
+                let layer = self.shown.layer.clone();
+                self.show(Some(block.clone()), Some(sheet.clone()), layer);
+            }
+            Show::Nowhere => {}
+        }
     }
 
     /// Asks the shown sheet's scene.
@@ -334,8 +498,12 @@ impl Window {
         self.send(req("scene", p), Why::Scene);
     }
 
-    /// Asks the shown block's other sheets, aside.
+    /// Asks the shown block's other sheets, aside; not for a revision's
+    /// sheet (the navigator's counts come from the compare scene).
     fn ask_other_sheets(&mut self) {
+        if self.blink.read_only() {
+            return;
+        }
         let Some(sc) = &self.scene else { return };
         let others: Vec<String> = sc
             .sheets
@@ -397,6 +565,7 @@ impl Window {
     /// The person picked `reference` (or nothing): one, or with `add`
     /// added or taken out.
     pub fn pick(&mut self, reference: Option<String>, add: bool) {
+        self.described = None;
         match (reference, add) {
             (None, false) => self.selection.clear(),
             (None, true) => {}
@@ -411,6 +580,28 @@ impl Window {
         }
         self.select.due();
         self.ask_props();
+    }
+
+    /// The person picked a ghost, or something on the revision's sheet:
+    /// described in Properties, never sent as a selection.
+    pub fn describe(&mut self, reference: Option<String>, ghost: bool) {
+        let Some(r) = reference else {
+            self.described = None;
+            return;
+        };
+        let kind = self
+            .scene
+            .as_ref()
+            .and_then(|s| {
+                s.ghosts
+                    .iter()
+                    .find(|g| g.reference == r)
+                    .map(|g| g.kind.clone())
+                    .or_else(|| s.owner(&r).map(|i| s.owners[i].kind.clone()))
+            })
+            .unwrap_or_default();
+        self.props = Some(described(&r, &kind, self.blink.of.as_deref(), ghost));
+        self.described = Some(r);
     }
 
     /// The canvas moved its camera.
@@ -591,9 +782,12 @@ impl Window {
 
     /// Whether nothing is waiting on the daemon.
     pub fn idle(&self) -> bool {
-        self.pending
-            .values()
-            .all(|w| matches!(w, Why::OtherSheet | Why::Check))
+        self.pending.values().all(|w| {
+            matches!(
+                w,
+                Why::OtherSheet | Why::Check | Why::Changes { .. } | Why::History
+            )
+        })
     }
 
     fn handle(&mut self, e: Event) {
@@ -608,6 +802,8 @@ impl Window {
             Event::Lost if !self.lost => {
                 self.lost = true;
                 self.pending.clear();
+                // What was asked is gone with the link.
+                self.changes_asked = false;
                 self.toasts.lost(Instant::now());
                 self.retry = Some(Retry {
                     at: Instant::now() + RETRY_FIRST,
@@ -629,6 +825,11 @@ impl Window {
                     Why::Write(title) => self.toasts.error(title, &e, 0, now),
                     Why::GoTo(_) => self.toasts.error("Show", &e, 0, now),
                     Why::Check => self.checked = None,
+                    Why::Changes { .. } => self.changes_read(),
+                    Why::History => {
+                        self.history =
+                            Some(History::failed(&crate::core::scene::code_word(e.code)));
+                    }
                     _ => {}
                 }
                 return;
@@ -651,7 +852,13 @@ impl Window {
                         .owners
                         .iter()
                         .filter(|o| o.reference == r || o.net.as_deref() == Some(r.as_str()))
-                        .filter_map(|o| o.boxed);
+                        .filter_map(|o| o.boxed)
+                        .chain(
+                            sc.ghosts
+                                .iter()
+                                .filter(|g| g.reference == r)
+                                .filter_map(|g| g.boxed),
+                        );
                     self.frame = boxes.reduce(|a, b| {
                         [
                             [a[0][0].min(b[0][0]), a[0][1].min(b[0][1])],
@@ -744,6 +951,29 @@ impl Window {
                     self.ask_props();
                 }
             }
+            Why::History => self.history = Some(History::read(&v)),
+            Why::Changes { rev, netlist } => {
+                if let Some(c) = self.changes.as_mut().filter(|c| c.rev == rev) {
+                    if netlist {
+                        c.netlist(&v);
+                    } else {
+                        c.layout(&v);
+                    }
+                }
+                self.changes_read();
+            }
+            Why::CompareGet => {
+                let commit = v["compare"]["commit"].as_str().map(str::to_owned);
+                let drawn = self.scene.as_ref().and_then(|s| {
+                    s.against
+                        .as_ref()
+                        .map(|a| a.commit.clone())
+                        .or_else(|| s.commit.clone())
+                });
+                if commit.is_some() && drawn.is_some() && commit != drawn {
+                    self.compare_moved();
+                }
+            }
             Why::Write(_) | Why::Quiet => {}
         }
     }
@@ -767,6 +997,10 @@ impl Window {
                 }
                 self.send(req("design.list", json!({})), Why::Designs);
                 self.send(req("erc", json!({})), Why::Erc);
+                if self.blink.of.is_some() {
+                    self.ask_changes();
+                }
+                self.ask_history();
                 if let Some(b) = self.shown.block.clone() {
                     self.send(
                         req("layout.instructions", json!({"block": b})),
@@ -786,6 +1020,11 @@ impl Window {
                 let me = self.me().to_owned();
                 let before = self.people.get(&me).map(|p| p.view.clone());
                 self.people.changed(params);
+                let compare = self.people.get(&me).and_then(|p| p.view.compare.clone());
+                if self.blink.follow(compare.as_deref()) {
+                    self.compare_polled = None;
+                    self.compare_moved();
+                }
                 if let Some(mine) = self.people.get(&me).map(|p| p.view.clone())
                     && self
                         .sent
@@ -855,6 +1094,18 @@ impl Window {
                     .map_or(RETRY_FIRST, |r| r.at.saturating_duration_since(now)),
             );
         }
+        if self.blink.of.is_some()
+            && self
+                .compare_polled
+                .is_none_or(|t| now.saturating_duration_since(t) >= COMPARE_EVERY)
+        {
+            self.compare_polled = Some(now);
+            let me = self.me().to_owned();
+            self.send(
+                req("compare.get", json!({"participant": me})),
+                Why::CompareGet,
+            );
+        }
         if self.select.ready(now) {
             let refs = self.selection.clone();
             self.send(req("selection.set", json!({"refs": refs})), Why::Quiet);
@@ -879,7 +1130,8 @@ impl Window {
             self.send(req("view.set", p), Why::Quiet);
         }
         let flash = self.flash.due().then_some(Duration::from_millis(33));
-        [self.select.wait(now), self.view.wait(now), flash]
+        let compare = self.blink.of.as_ref().map(|_| COMPARE_EVERY);
+        [self.select.wait(now), self.view.wait(now), flash, compare]
             .into_iter()
             .flatten()
             .min()
@@ -902,6 +1154,7 @@ impl Window {
                 )
             }),
             shown_by: Some(self.me().to_owned()),
+            compare: self.blink.of.clone(),
         }
     }
 
@@ -951,7 +1204,48 @@ impl Window {
         self.view.due();
         self.view.reset();
         self.ask_all();
+        // A new session doesn't know this window's compare: tell it again.
+        if let Some(r) = self.blink.of.clone() {
+            self.set_compare(Some(r));
+        }
     }
+}
+
+/// What Properties shows for a pick that isn't selected (plan 13.A): a
+/// ghost (`ghost`, removed in working) or a pick on the revision's sheet
+/// (`rev`), its reference and kind.
+pub fn described(reference: &str, kind: &str, rev: Option<&str>, ghost: bool) -> Properties {
+    let mut p = Properties::new(reference);
+    p.rows.push(("Kind".into(), kind.into()));
+    let status = if ghost {
+        "removed in working".to_owned()
+    } else {
+        format!("at {}, read only", rev.unwrap_or("the revision"))
+    };
+    p.rows.push(("Status".into(), status));
+    p
+}
+
+/// What `scene` is asked for the shown sheet: its design, block, sheet
+/// and layer, the theme, and the blink's compare or revision.
+pub fn scene_params(shown: &Shown, dark: bool, blink: &Blink, sheet: Option<&str>) -> Value {
+    let mut p = json!({"theme": if dark { "dark" } else { "light" }});
+    for (k, v) in [
+        ("design", shown.design.as_deref()),
+        ("block", shown.block.as_deref()),
+        ("sheet", sheet),
+        ("layer", shown.layer.as_deref()),
+    ] {
+        if let Some(v) = v {
+            p[k] = json!(v);
+        }
+    }
+    match blink.ask() {
+        Ask::Plain => {}
+        Ask::Compare(r) => p["compare"] = json!(r),
+        Ask::Rev(r) => p["rev"] = json!(r),
+    }
+    p
 }
 
 #[cfg(test)]
@@ -987,9 +1281,61 @@ mod tests {
             ("undo", json!({})),
             ("redo", json!({})),
             ("participant.list", json!({})),
+            (
+                "scene",
+                json!({"block": "top", "sheet": "s1", "theme": "light", "compare": "HEAD"}),
+            ),
+            (
+                "scene",
+                json!({"block": "top", "sheet": "s1", "theme": "light", "rev": "HEAD"}),
+            ),
+            ("compare.set", json!({"rev": "HEAD", "participant": "p-1"})),
+            ("compare.set", json!({"off": true, "participant": "p-1"})),
+            ("compare.get", json!({"participant": "p-1"})),
+            ("diff", json!({"from": "HEAD", "layout": true})),
+            ("diff", json!({"from": "HEAD", "netlist": true})),
+            ("history.log", json!({"limit": 50})),
         ] {
             assert!(Request::from_rpc(m, Some(p.clone())).is_ok(), "{m} {p}");
         }
+    }
+
+    #[test]
+    fn a_ghost_or_a_revision_s_pick_is_described_never_selected() {
+        let p = described("top/c3", "component", Some("HEAD"), true);
+        assert_eq!(p.reference, "top/c3");
+        assert!(
+            p.rows
+                .contains(&("Status".to_owned(), "removed in working".to_owned()))
+        );
+        let p = described("top/r1", "component", Some("HEAD"), false);
+        assert!(
+            p.rows
+                .contains(&("Status".to_owned(), "at HEAD, read only".to_owned()))
+        );
+    }
+
+    #[test]
+    fn the_scene_asked_follows_the_blink() {
+        let shown = Shown {
+            block: Some("top".into()),
+            ..Shown::default()
+        };
+        let mut b = Blink::default();
+        let p = scene_params(&shown, false, &b, Some("s1"));
+        assert!(p.get("compare").is_none() && p.get("rev").is_none());
+        b.follow(Some("HEAD"));
+        assert_eq!(
+            scene_params(&shown, false, &b, Some("s1"))["compare"],
+            "HEAD"
+        );
+        b.set(Side::Rev);
+        let p = scene_params(&shown, true, &b, Some("s1"));
+        assert_eq!(
+            (p["rev"].as_str(), p["theme"].as_str()),
+            (Some("HEAD"), Some("dark"))
+        );
+        assert!(p.get("compare").is_none());
     }
 
     #[test]

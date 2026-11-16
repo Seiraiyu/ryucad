@@ -41,6 +41,12 @@ pub static COMMANDS: &[Command<Here>] = &[
     .toggle(),
     cmd("view.flash_changes", "Flash changes", Category::View).toggle(),
     cmd("view.theme", "Theme", Category::View).choices(),
+    cmd("view.compare_head", "Compare with HEAD", Category::View).icon("git-diff"),
+    cmd("view.compare_with", "Compare with…", Category::View),
+    cmd("view.compare_stop", "Stop comparing", Category::View),
+    cmd("view.blink", "Flip compared sides", Category::View)
+        .keys(&["B"])
+        .viewport(),
     cmd("edit.copy_ref", "Copy reference", Category::Edit)
         .keys(&["Mod+Shift+C"])
         .context(&[Here::Canvas, Here::Row]),
@@ -172,6 +178,24 @@ mod tests {
         ] {
             assert!(ryu_app::command::get(COMMANDS, want).is_some(), "{want}");
         }
+    }
+
+    #[test]
+    fn compare_commands_are_in_the_view_menu_and_b_flips() {
+        for id in [
+            "view.compare_head",
+            "view.compare_with",
+            "view.compare_stop",
+            "view.blink",
+        ] {
+            let c = COMMANDS
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap_or_else(|| panic!("{id}"));
+            assert_eq!(c.category, Category::View, "{id}");
+        }
+        let km = Keymap::new((), &serde_json::Value::Null);
+        assert_eq!(km.chords("view.blink")[0].text(), "B");
     }
 
     #[test]
