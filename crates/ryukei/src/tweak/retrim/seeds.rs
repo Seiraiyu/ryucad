@@ -3,7 +3,7 @@
 //! region face's piece holding a point of its old self.
 
 use super::body::WorkBody;
-use super::walk::Arrangement;
+use super::walk::{Arrangement, WalkError};
 use crate::boolean::classify::inner_point;
 use crate::boolean::table::{Boundary, GeId, Member, Table};
 use crate::geom::Point2;
@@ -74,6 +74,67 @@ pub(crate) fn conflicts(arr: &Arrangement, seeds: &[usize]) -> BTreeSet<usize> {
         .filter(|&(_, [r, f])| r + f > 2 || r > 1 || f > 1)
         .map(|(g, _)| g)
         .collect()
+}
+
+/// `seeds` less the seeds rule 3's shortcut alone chose (in `shortcut`)
+/// that use an edge the set is in conflict over ([`conflicts`]) and whose
+/// inner point doesn't lie inside their old face (`holds_old`, asked only
+/// of those): the weakest seeds yield (design 683, question 983). `None`
+/// where the set is in no conflict or no seed yields.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn yielded(
+    arr: &Arrangement,
+    seeds: &[usize],
+    shortcut: &BTreeSet<usize>,
+    holds_old: &mut dyn FnMut(usize) -> bool,
+) -> Option<Vec<usize>> {
+    let bad = conflicts(arr, seeds);
+    if bad.is_empty() {
+        return None;
+    }
+    let mut drop: BTreeSet<usize> = BTreeSet::new();
+    for &s in seeds {
+        if drop.contains(&s) || !shortcut.contains(&s) {
+            continue;
+        }
+        if arr.pieces[s].1.iter().any(|(g, _)| bad.contains(g)) && !holds_old(s) {
+            drop.insert(s);
+        }
+    }
+    if drop.is_empty() {
+        return None;
+    }
+    Some(
+        seeds
+            .iter()
+            .copied()
+            .filter(|s| !drop.contains(s))
+            .collect(),
+    )
+}
+
+/// After every try of `tries` failed: the first try from which a seed
+/// yields ([`yielded`]) walked once more without it (design 683, plan
+/// 21.C). Its seeds and answer where that walk closes or the meter halts
+/// it; `None` otherwise, where the first try's failure stands. A seed
+/// only says where the walk starts: a yielded seed's piece is kept only
+/// if the one closure reaches it.
+#[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::type_complexity)]
+pub(crate) fn walk_again(
+    arr: &Arrangement,
+    tries: &[Vec<usize>],
+    shortcut: &BTreeSet<usize>,
+    holds_old: &mut dyn FnMut(usize) -> bool,
+    m: &Meter,
+) -> Option<(Vec<usize>, Result<Vec<Option<bool>>, WalkError>)> {
+    for t in tries {
+        if let Some(fewer) = yielded(arr, t, shortcut, holds_old) {
+            let r = super::walk::walk(arr, &fewer, m);
+            return (r.is_ok() || matches!(r, Err(WalkError::Halted { .. }))).then_some((fewer, r));
+        }
+    }
+    None
 }
 
 /// Every piece of an outside face. Never a pinned face's (plan 21.A):
@@ -344,5 +405,78 @@ mod tests {
         };
         assert_eq!(conflicts(&a, &[0, 1]), BTreeSet::from([5]));
         assert!(conflicts(&a, &[0, 2]).is_empty());
+    }
+
+    use super::super::walk::walk;
+
+    fn free() -> Meter<'static> {
+        // unmetered: unit tests of a combinatorial walk.
+        Meter::free()
+    }
+
+    #[test]
+    fn a_slits_shortcut_seed_yields_and_the_walk_closes_without_it() {
+        let a = slit();
+        let tries = vec![vec![0, 2]];
+        // Every seed set fails: three uses of edge 0.
+        assert!(matches!(
+            walk(&a, &tries[0], &free()),
+            Err(WalkError::Ambiguous { .. })
+        ));
+        let shortcut = BTreeSet::from([2]);
+        let mut holds = |_: usize| false;
+        assert_eq!(yielded(&a, &tries[0], &shortcut, &mut holds), Some(vec![0]));
+        let (fewer, r) = walk_again(&a, &tries, &shortcut, &mut holds, &free()).unwrap();
+        assert_eq!(fewer, vec![0]);
+        // The ball and its partner kept; the NURBS's piece never reached.
+        assert_eq!(r.unwrap(), vec![Some(false), Some(false), None]);
+    }
+
+    #[test]
+    fn a_set_with_no_conflict_is_never_walked_again() {
+        // The slit alone, with C missing: Open, and no conflict.
+        let mut a = slit();
+        a.pieces[1].1.clear();
+        let tries = vec![vec![0]];
+        assert!(walk(&a, &tries[0], &free()).is_err());
+        let mut holds = |_: usize| false;
+        assert_eq!(
+            yielded(&a, &tries[0], &BTreeSet::from([0]), &mut holds),
+            None
+        );
+        assert!(walk_again(&a, &tries, &BTreeSet::from([0]), &mut holds, &free()).is_none());
+    }
+
+    #[test]
+    fn seeds_holding_their_old_faces_never_yield() {
+        let a = slit();
+        let tries = vec![vec![0, 2]];
+        // N chosen by rule 3 proper: not a shortcut seed.
+        let mut holds = |_: usize| false;
+        assert!(walk_again(&a, &tries, &BTreeSet::new(), &mut holds, &free()).is_none());
+        // N a shortcut seed whose inner point lies inside its old face.
+        let mut inside = |i: usize| i == 2;
+        assert!(walk_again(&a, &tries, &BTreeSet::from([2]), &mut inside, &free()).is_none());
+    }
+
+    #[test]
+    fn a_walk_again_that_fails_answers_nothing() {
+        // N yields, but B's edge 1 then has no partner: Open, so the first
+        // try's failure is reported by the caller.
+        let mut a = slit();
+        a.pieces[1].1.clear();
+        let tries = vec![vec![0, 2]];
+        let mut holds = |_: usize| false;
+        assert!(walk_again(&a, &tries, &BTreeSet::from([2]), &mut holds, &free()).is_none());
+    }
+
+    #[test]
+    fn the_first_try_that_yields_is_the_one_walked_again() {
+        // Try 0 has no shortcut seed; try 1 does.
+        let a = slit();
+        let tries = vec![vec![0, 1], vec![0, 2]];
+        let mut holds = |_: usize| false;
+        let (fewer, _) = walk_again(&a, &tries, &BTreeSet::from([2]), &mut holds, &free()).unwrap();
+        assert_eq!(fewer, vec![0]);
     }
 }
