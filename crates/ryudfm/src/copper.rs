@@ -10,12 +10,18 @@
 //! netlist's, else the components' pins. What has no shape is left out
 //! and listed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
-use ryu_board::geom::Point;
-use ryu_board::model::{AttrValue, Board, Context, FeatureKind, Side, Symbol, ToolKind};
+use crate::error::{Code, Error, Result};
+use ryu_board::geom::{Nm, Point};
+use ryu_board::model::{AttrValue, Board, Context, FeatureKind, Ref, Side, Symbol, ToolKind};
 use ryu_board::symbol::StandardSymbol;
+use ryu_copper::connect::{Copper, Gap, Island, IslandId, Node, Placement, PointContact};
 use ryu_copper::layout::{Hole, HoleShape, Item, Layer, Layout, NetPoint, PointSide};
+use ryu_copper::measure::BodyOptions;
+use ryu_copper::netlist::{self, Report};
+use ryu_copper::poly::{self, FlattenOptions, Polygons};
 
 /// ODB++'s name for the net of what is on none.
 pub const NO_NET: &str = "$NONE$";
@@ -251,6 +257,277 @@ pub fn layout(b: &Board) -> Built {
     }
 }
 
+/// A board's copper, as the session keeps it.
+pub struct CopperBoard {
+    pub board: Arc<Board>,
+    /// The layout's layers, holes and points; its items live in `copper`.
+    pub built: Built,
+    pub copper: Copper<Key>,
+    /// Where each point landed, in the points' order.
+    pub placed: Vec<Placement<Key>>,
+    pub report: Report<Key>,
+    /// The netlist's nets on each island.
+    pub nets: BTreeMap<IslandId<Key>, BTreeSet<String>>,
+    points: BTreeMap<Key, usize>,
+    contacts: Mutex<BTreeMap<IslandId<Key>, Contacts>>,
+    merged: Mutex<BTreeMap<usize, Arc<Polygons>>>,
+    gaps: Mutex<BTreeMap<(usize, Nm), Gaps>>,
+}
+
+/// An island's point contacts, as cached.
+type Contacts = Arc<Vec<PointContact<Key>>>;
+/// A layer's gaps under a distance, as cached.
+type Gaps = Arc<Vec<Gap<Key>>>;
+
+fn not_found(what: &str, text: &str) -> Error {
+    Error::new(Code::NotFound, format!("no {what} {text} on this board")).with(what, text)
+}
+
+impl CopperBoard {
+    /// Builds a board's copper: its layout, connectivity and compare.
+    pub fn new(board: Arc<Board>) -> CopperBoard {
+        let mut built = layout(&board);
+        let copper = Copper::new(&built.layout, BodyOptions::default());
+        built.layout.items.clear();
+        let placed = netlist::placements(&copper, &built.layout.points);
+        let report = netlist::compare_placed(&copper, &built.layout.points, &placed);
+        let mut nets: BTreeMap<IslandId<Key>, BTreeSet<String>> = BTreeMap::new();
+        for (p, at) in built.layout.points.iter().zip(&placed) {
+            if let Placement::On(id) = at {
+                nets.entry(*id).or_default().insert(p.net.clone());
+            }
+        }
+        let points = built
+            .layout
+            .points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.key, i))
+            .collect();
+        CopperBoard {
+            board,
+            built,
+            copper,
+            placed,
+            report,
+            nets,
+            points,
+            contacts: Mutex::default(),
+            merged: Mutex::default(),
+            gaps: Mutex::default(),
+        }
+    }
+
+    pub fn step_name(&self) -> &str {
+        &self.board.steps[self.built.step].name
+    }
+
+    /// A layout layer's board layer name.
+    pub fn layer_name(&self, layer: usize) -> &str {
+        &self.board.layers[self.built.copper[layer]].name
+    }
+
+    /// The copper layer named `name`: `not_found` for no layer,
+    /// `invalid_param` for one that isn't copper.
+    pub fn layer_of(&self, name: &str) -> Result<usize> {
+        let bl = self
+            .board
+            .layer(name)
+            .ok_or_else(|| not_found("layer", name))?;
+        self.built
+            .copper
+            .iter()
+            .position(|&c| c == bl)
+            .ok_or_else(|| {
+                Error::new(Code::InvalidParam, format!("{name} isn't a copper layer"))
+                    .with("layer", name)
+            })
+    }
+
+    /// A key's reference, prefixed by the board's ID in a project. A CAD
+    /// point's is its net's (see [`Self::point_json`]).
+    pub fn reference(&self, prefix: Option<&str>, key: Key) -> String {
+        let s = &self.board.steps[self.built.step];
+        let step = s.name.clone();
+        let r = match key {
+            Key::Feature { layer, index } => Ref::Feature {
+                step,
+                layer: self.board.layers[layer as usize].name.clone(),
+                index: index as usize,
+            },
+            Key::Pin { component, pin } => {
+                let c = &s.components[component as usize];
+                Ref::Pin {
+                    step,
+                    refdes: c.refdes.clone(),
+                    pin: c.pins[pin as usize].name.clone(),
+                }
+            }
+            Key::Cad { net, .. } => Ref::Net {
+                step,
+                name: s.nets[net as usize].name.clone(),
+            },
+        };
+        match prefix {
+            Some(p) => format!("{p}/{r}"),
+            None => r.to_string(),
+        }
+    }
+
+    /// A piece's (or an island's) name: its item's reference, with `#n`
+    /// for any piece but the first.
+    pub fn island_name(&self, prefix: Option<&str>, id: &(Key, u32)) -> String {
+        let r = self.reference(prefix, id.0);
+        if id.1 == 0 {
+            r
+        } else {
+            format!("{r}#{}", id.1)
+        }
+    }
+
+    /// A node's name: a piece's, or a hole's reference.
+    pub fn node_name(&self, prefix: Option<&str>, n: &Node<Key>) -> String {
+        match n {
+            Node::Piece(k, i) => self.island_name(prefix, &(*k, *i)),
+            Node::Hole(k) => self.reference(prefix, *k),
+        }
+    }
+
+    /// A netlist point as JSON: its reference (a CAD point's net, with
+    /// `cad_point`), its net and where it is.
+    pub fn point_json(&self, prefix: Option<&str>, key: Key) -> serde_json::Value {
+        let mut v = serde_json::json!({"ref": self.reference(prefix, key)});
+        if let Key::Cad { point, .. } = key {
+            v["cad_point"] = serde_json::json!(point);
+        }
+        if let Some(&i) = self.points.get(&key) {
+            let p = &self.built.layout.points[i];
+            v["net"] = serde_json::json!(p.net);
+            v["at"] = crate::inspect::point(p.at);
+        }
+        v
+    }
+
+    /// The key a feature or pin reference names.
+    pub fn key_of(&self, prefix: Option<&str>, text: &str, what: &str) -> Result<Key> {
+        let s = &self.board.steps[self.built.step];
+        let wrong_step = |step: &str| step != s.name;
+        match crate::inspect::parse_reference(prefix, text, what)? {
+            Ref::Feature { step, layer, index } if !wrong_step(&step) => {
+                let l = self
+                    .board
+                    .layer(&layer)
+                    .ok_or_else(|| not_found("layer", &layer))?;
+                if index >= s.layers[l].features().len() {
+                    return Err(not_found("feature", text));
+                }
+                Ok(Key::Feature {
+                    layer: l as u32,
+                    index: index as u32,
+                })
+            }
+            Ref::Pin { step, refdes, pin } if !wrong_step(&step) => {
+                let c = s
+                    .components
+                    .iter()
+                    .position(|c| c.refdes == refdes)
+                    .ok_or_else(|| not_found("pin", text))?;
+                let p = s.components[c]
+                    .pins
+                    .iter()
+                    .position(|p| p.name == pin)
+                    .ok_or_else(|| not_found("pin", text))?;
+                Ok(Key::Pin {
+                    component: c as u32,
+                    pin: p as u32,
+                })
+            }
+            _ => Err(not_found(what, text)),
+        }
+    }
+
+    /// The island an island's name (as [`Self::island_name`] gives it)
+    /// names.
+    pub fn island_of_name(&self, prefix: Option<&str>, text: &str) -> Result<IslandId<Key>> {
+        let (r, piece) = match text.rsplit_once('#') {
+            Some((r, n)) if n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() => {
+                (r, n.parse::<u32>().map_err(|_| not_found("island", text))?)
+            }
+            _ => (text, 0),
+        };
+        let key = self.key_of(prefix, r, "island")?;
+        let id = self
+            .copper
+            .island_of(&Node::Piece(key, piece))
+            .ok_or_else(|| not_found("island", text))?;
+        if id != (key, piece) {
+            return Err(Error::new(
+                Code::NotFound,
+                format!(
+                    "{text} is on island {}, not one",
+                    self.island_name(prefix, &id)
+                ),
+            )
+            .with("island", self.island_name(prefix, &id)));
+        }
+        Ok(id)
+    }
+
+    /// An island's point contacts, found once.
+    pub fn point_contacts(&self, island: &Island<Key>) -> Arc<Vec<PointContact<Key>>> {
+        if let Some(c) = self.contacts.lock().unwrap().get(&island.id) {
+            return Arc::clone(c);
+        }
+        let found = Arc::new(self.copper.point_contacts(island));
+        self.contacts
+            .lock()
+            .unwrap()
+            .insert(island.id, Arc::clone(&found));
+        found
+    }
+
+    /// A copper layer merged (its items in drawing order less its holes),
+    /// found once.
+    pub fn merged(&self, layer: usize) -> Arc<Polygons> {
+        if let Some(m) = self.merged.lock().unwrap().get(&layer) {
+            return Arc::clone(m);
+        }
+        let fo = FlattenOptions::new(self.copper.options().bound());
+        let parts: Vec<_> = self
+            .copper
+            .items()
+            .filter(|(_, it)| it.layer == layer)
+            .flat_map(|(_, it)| poly::flatten_shape(&it.shape, &fo))
+            .collect();
+        let holes: Vec<_> = self
+            .built
+            .layout
+            .holes
+            .values()
+            .filter(|h| h.span.0 <= layer && layer <= h.span.1)
+            .map(|h| poly::flatten_hole(&h.shape, &fo))
+            .collect();
+        let m = Arc::new(poly::merge_layer(&parts, &holes));
+        self.merged.lock().unwrap().insert(layer, Arc::clone(&m));
+        m
+    }
+
+    /// The gaps under `below` on a copper layer, found once per distance
+    /// (the last sixteen asked kept).
+    pub fn gaps(&self, layer: usize, below: Nm) -> Arc<Vec<Gap<Key>>> {
+        if let Some(g) = self.gaps.lock().unwrap().get(&(layer, below)) {
+            return Arc::clone(g);
+        }
+        let found = Arc::new(self.copper.clearance(layer, below));
+        let mut kept = self.gaps.lock().unwrap();
+        if kept.len() >= 16 {
+            kept.clear();
+        }
+        kept.insert((layer, below), Arc::clone(&found));
+        found
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +571,29 @@ mod tests {
         assert!(!built.layout.holes.is_empty());
         assert!(built.layout.holes.values().all(|h| h.span == (0, 1)));
         assert!(built.layout.holes.values().any(|h| h.plated));
+    }
+
+    #[test]
+    fn minimal_clean_s_copper() {
+        let cb = CopperBoard::new(Arc::new(read("minimal-clean.tgz")));
+        assert!(cb.report.judged);
+        assert!(!cb.copper.islands().is_empty());
+        for k in cb.copper.items().map(|(k, _)| *k).take(20) {
+            let text = cb.reference(Some("mc"), k);
+            assert!(text.starts_with("mc/pcb/"), "{text}");
+            assert_eq!(cb.key_of(Some("mc"), &text, "a").unwrap(), k);
+        }
+        for i in cb.copper.islands() {
+            let name = cb.island_name(None, &i.id);
+            assert_eq!(cb.island_of_name(None, &name).unwrap(), i.id);
+        }
+        // Every island holding points says which nets.
+        let on: usize = cb.nets.values().map(BTreeSet::len).sum();
+        assert!(on >= 3, "{:?}", cb.nets);
+        assert_eq!(
+            cb.key_of(None, "pcb/comp/NOPE/1", "a").unwrap_err().code,
+            crate::error::Code::NotFound
+        );
     }
 
     #[test]

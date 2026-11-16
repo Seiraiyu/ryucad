@@ -261,6 +261,26 @@ fn symbol_index(k: &FeatureKind) -> Option<u32> {
 
 /// The board as an inspection sees it: which step, and how references
 /// are written.
+/// A reference as given, less the board's prefix: `invalid_param` naming
+/// `what` when it isn't one.
+pub fn parse_reference(prefix: Option<&str>, text: &str, what: &str) -> Result<Ref> {
+    let bad = || {
+        Error::new(
+            Code::InvalidParam,
+            format!("{text:?} isn't a reference on this board"),
+        )
+        .with("param", what)
+    };
+    let rest = match prefix {
+        Some(p) => text
+            .strip_prefix(p)
+            .and_then(|r| r.strip_prefix('/'))
+            .ok_or_else(bad)?,
+        None => text,
+    };
+    rest.parse::<Ref>().map_err(|_| bad())
+}
+
 struct At<'a> {
     b: &'a Board,
     prefix: Option<&'a str>,
@@ -281,21 +301,7 @@ impl At<'_> {
 
     /// A reference as given, less the board's prefix.
     fn parse(&self, text: &str, what: &str) -> Result<Ref> {
-        let bad = || {
-            Error::new(
-                Code::InvalidParam,
-                format!("{text:?} isn't a reference on this board"),
-            )
-            .with("param", what)
-        };
-        let rest = match self.prefix {
-            Some(p) => text
-                .strip_prefix(p)
-                .and_then(|r| r.strip_prefix('/'))
-                .ok_or_else(bad)?,
-            None => text,
-        };
-        rest.parse::<Ref>().map_err(|_| bad())
+        parse_reference(self.prefix, text, what)
     }
 
     fn feature_ref(&self, layer: usize, index: usize) -> String {
