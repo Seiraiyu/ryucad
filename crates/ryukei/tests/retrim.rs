@@ -571,3 +571,40 @@ fn the_twins_carried_pair_is_never_met() {
     assert_eq!(check_intersections(&o), []);
     assert_eq!(o.counts().faces, 10);
 }
+/// ryukei 21.A's twin (design 683): the block with its +x top edge
+/// rounded (seven faces) and the blind slot (five more).
+#[test]
+fn the_pinned_twin_is_rounded_and_slotted() {
+    use ryukei_testkit::pinned_faces::{far_end, rounded, slotted};
+    assert_eq!(rounded().counts().faces, 7);
+    let s = slotted();
+    assert_eq!(s.counts().faces, 12);
+    assert_eq!(check(&s), []);
+    let _ = far_end(&s);
+}
+
+/// The twin's untouched pair (#652): the slot's far end deleted, the slot
+/// runs out through the round and the +x side, which no rung's region
+/// holds until the ladder's rings bring them in, touching no change.
+/// Pinned, they are cut and never met: the delete builds, checks clean,
+/// and has the volume of the run-out slot. Twelve faces: the round splits
+/// in two and the end is gone.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_pinned_twins_slot_runs_out() {
+    use ryukei_testkit::pinned_faces::{run_out_volume, slotted, spec};
+    let s = slotted();
+    let r = ryukei::tweak::delete_faces(OpKey(0x21a5), &s, &spec(&s));
+    let (o, _) = r.unwrap_or_else(|e| panic!("refused: {e:?}"));
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    assert_eq!(o.counts().faces, 12);
+    let m = tessellate(&o, &MeshParams::new(2e-5, 0.3)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    let (v, _) = ryukei_testkit::mesh::volume_and_area(&m);
+    let want = run_out_volume();
+    assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
+}

@@ -55,12 +55,13 @@ pub(crate) fn arrangement(w: &WorkBody, table: &Table, pieces: &[Piece]) -> Arra
     }
 }
 
-/// Every piece of an outside face.
+/// Every piece of an outside face. Never a pinned face's (plan 21.A):
+/// part of one may be cut away; rule 3 seeds it ([`face_seeds`]).
 pub(crate) fn outside_seeds(w: &WorkBody, pieces: &[Piece]) -> Vec<usize> {
     pieces
         .iter()
         .enumerate()
-        .filter(|(_, p)| !w.working.contains(&p.face.face))
+        .filter(|(_, p)| !w.working.contains(&p.face.face) && !w.pinned.contains(&p.face.face))
         .map(|(i, _)| i)
         .collect()
 }
@@ -118,7 +119,8 @@ pub(crate) fn shell_seeds(
 }
 
 /// Design 399's rule 3: each region face with no frontier edge (all its
-/// neighbours in the region) seeded by its one candidate piece, the one
+/// neighbours in the region), and each pinned face (plan 21.A), seeded
+/// by its one candidate piece, the one
 /// whose inner point, taken back to the face's old surface, lies inside
 /// the old face, using no clipped edge. A face with no candidate, or more
 /// than one, seeds nothing. The unchanged faces' seeds, then the moved
@@ -133,11 +135,27 @@ pub(crate) fn face_seeds(
     m: &Meter,
 ) -> (Vec<usize>, Vec<usize>) {
     let ops = [w.body.clone()];
-    let on_frontier: BTreeSet<FaceId> = w.frontier_faces.values().flatten().copied().collect();
+    // A face with an edge on the frontier the outside faces seed; an edge
+    // with a pinned face doesn't count (plan 21.A), so a working face is
+    // seeded as it was without pins.
+    let on_frontier: BTreeSet<FaceId> = w
+        .frontier_faces
+        .iter()
+        .filter(|(e, _)| {
+            !w.body.edge_fins(**e).any(|fin| {
+                w.pinned
+                    .contains(&w.body.loops[w.body.fins[fin].loop_].face)
+            })
+        })
+        .flat_map(|(_, fs)| fs.iter().copied())
+        .collect();
+    // Every pinned face by rule 3, frontier or not: its candidate piece
+    // holding its old interior (design 683).
     let mut faces: Vec<(crate::name::Name, FaceId)> = w
         .working
         .iter()
         .filter(|wf| !on_frontier.contains(&w.origin[wf]))
+        .chain(w.pinned.iter())
         .map(|&wf| (body.faces[w.origin[&wf]].name, wf))
         .collect();
     faces.sort();
