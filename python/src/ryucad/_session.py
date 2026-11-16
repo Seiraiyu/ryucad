@@ -125,15 +125,41 @@ class Session:
 
     def _answer(self, rid: int) -> Answer:
         while True:
-            answer = self._next(rid)
-            if answer is not None:
-                return answer
+            try:
+                answer = self._next(rid)
+            except Error:
+                self._raised = None
+                raise
+            if answer is None:
+                continue
+            raised, self._raised = self._raised, None
+            if raised is not None:
+                raise raised
+            return answer
+
+    def _notified(self, message: dict[str, Any]) -> None:
+        """A line that isn't an answer: a ``progress`` line goes to
+        ``on_progress`` (dropped without one), any other notification to
+        ``notifications``. An exception from ``on_progress`` is raised once
+        the answer is read, so the stream stays in step."""
+        if message.get("method") != "progress":
+            self.notifications.append(message)
+            return
+        params = message.get("params")
+        if self.on_progress is None or not isinstance(params, dict):
+            return
+        try:
+            self.on_progress(params)
+        except Exception as e:
+            if self._raised is None:
+                self._raised = e
 
     def _next(self, rid: int) -> Answer | None:
         """Reads one message: the answer to ``rid``, or None after a line
         that isn't an answer."""
         message, data = self._read()
         if "method" in message:
+            self._notified(message)
             return None
         if message.get("id") not in (rid, None):
             raise self._broken(f"an answer to {message.get('id')!r} while waiting for {rid}")

@@ -123,3 +123,33 @@ class Binary(unittest.TestCase):
             # The stream is still in step.
             self.assertEqual(cad.call("after")["method"], "after")
             self.assertIsNone(cad.call("after").data)
+
+
+class Notifications(unittest.TestCase):
+    def test_progress_goes_to_on_progress(self):
+        seen = []
+        with fake(on_progress=seen.append) as cad:
+            self.assertEqual(cad.call("progress", lines=3), {"progressed": True})
+            self.assertEqual(cad.notifications, [])
+        self.assertEqual(seen, [{"done": 0}, {"done": 1}, {"done": 2}])
+
+    def test_progress_without_a_callback_is_dropped(self):
+        with fake() as cad:
+            self.assertEqual(cad.call("progress"), {"progressed": True})
+            self.assertEqual(cad.notifications, [])
+
+    def test_notifications_are_kept_for_the_script(self):
+        with fake() as cad:
+            self.assertEqual(cad.call("notify"), {"notified": True})
+            self.assertEqual(cad.notifications, [
+                {"jsonrpc": "2.0", "method": "changed", "params": {"part": "p"}},
+            ])
+
+    def test_a_callback_that_raises_raises_after_the_answer(self):
+        def boom(params):
+            raise ValueError("boom")
+
+        with fake(on_progress=boom) as cad:
+            with self.assertRaises(ValueError):
+                cad.call("progress")
+            self.assertEqual(cad.call("after")["method"], "after")
