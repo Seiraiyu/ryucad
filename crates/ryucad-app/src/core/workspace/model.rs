@@ -666,6 +666,9 @@ impl Model {
                                 &json!({"part": id, "revision": l.revision, "error": e}),
                             );
                         }
+                        // One loaded at the listed revision is current
+                        // (#849: a burst's part lists asked every part).
+                        None if self.parts.get(id).is_some_and(|p| p.revision == l.revision) => {}
                         None if whole || shown.contains(id) || self.parts.contains_key(id) => {
                             fx.then(Then::AskPart(id.clone()));
                         }

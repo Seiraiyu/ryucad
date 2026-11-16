@@ -441,3 +441,28 @@ fn one_rebuild_answers_each_part_asked() {
         fx.recorded()
     );
 }
+
+/// A part list names a part loaded at the revision it lists: it isn't
+/// asked for again; one whose revision moved is (#849: each part list a
+/// burst read asked every part).
+#[test]
+fn a_part_list_asks_only_parts_that_moved() {
+    let mut model = Model::default();
+    model.apply_part(&json!({"part": "p", "revision": "r1", "features": []}));
+    model.apply_part(&json!({"part": "q", "revision": "r1", "features": []}));
+    let mut fx = Effects::default();
+    model.answer(
+        model::Asked::Parts,
+        answered(json!({"parts": [{"part": "p", "revision": "r1"},
+                                  {"part": "q", "revision": "r2"}]})),
+        None,
+        &mut fx,
+    );
+    let asked: Vec<&str> = (fx.recorded().iter())
+        .filter_map(|e| match e {
+            Effect::Then(Then::AskPart(p)) => Some(p.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, ["q"]);
+}

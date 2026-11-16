@@ -153,7 +153,10 @@ impl Workspace {
             Then::AskBomDiff => self.ask_bom_diff(),
             Then::AskDiff => self.ask_diff(),
             Then::AskDrag => self.ask_drag(),
-            Then::AskPart(id) => self.ask_part(&id),
+            // Asked with the poll's other parts, in one rebuild (#849).
+            Then::AskPart(id) => {
+                self.stale.parts.insert(id);
+            }
             Then::AskPreview => self.ask_preview(),
             Then::BomRead => self.bom_read(),
             Then::ChooseAnnotation(id) => self.choose_annotation(Some(&id)),
