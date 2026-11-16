@@ -1154,6 +1154,7 @@ pub fn check_project(
         + (deps.len() as u64 - deps_errors)
         + (bom.len() as u64 - bom_errors);
     let mut report = json!({
+        "schema": crate::OUTPUT_SCHEMA,
         "faults": fault::list(&faults),
         "erc": erc,
         "schematic": fault::list(&schematic),

@@ -178,7 +178,7 @@ pub fn layout(
             &laid.outcome.layout,
             ryusch::style::Theme::Light,
         );
-        let (mime, bytes, px) = picture(&laid, &[], &ask, &looks)?;
+        let (mime, bytes, px) = picture(&laid, &[], &ask, &looks, None)?;
         let mut v = json!({"blocks": out, "dry_run": dry_run, "format": ask.format});
         if let Some(px) = px {
             v["scale"] = json!(px);
@@ -606,7 +606,7 @@ pub fn place(
                 &laid.outcome.layout,
                 ryusch::style::Theme::Light,
             );
-            let (mime, bytes, px) = picture(&laid, &[], &ask, &looks)?;
+            let (mime, bytes, px) = picture(&laid, &[], &ask, &looks, None)?;
             v["format"] = json!(ask.format);
             if let Some(px) = px {
                 v["scale"] = json!(px);
@@ -893,11 +893,14 @@ pub fn looks(
 
 /// A layout drawn as `render` draws it, in `looks`: the bytes, their
 /// type, and the scale used (PNG).
+/// `view`: `None` crops by `ask.fit`; `Some` the box given (`render
+/// --frame`'s), `Some(None)` the whole canvas.
 fn picture(
     laid: &Laid,
     refs: &[&str],
     ask: &RenderAsk,
     looks: &BTreeMap<String, ryusch::style::Look>,
+    view: Option<Option<ryusch::geom::Rect>>,
 ) -> Result<(&'static str, Vec<u8>, Option<f32>)> {
     let layout = &laid.outcome.layout;
     let one: Vec<String> = match &ask.sheet {
@@ -919,9 +922,19 @@ fn picture(
     } else {
         one.iter().map(String::as_str).collect()
     };
-    let svg = ryusch::svg::draw_looks(&laid.built.input, layout, &refs, ask.fit, &|sid| {
-        looks.get(sid).cloned().unwrap_or_default()
-    });
+    let look_of = |sid: &str| looks.get(sid).cloned().unwrap_or_default();
+    let svg = match view {
+        None => ryusch::svg::draw_looks(&laid.built.input, layout, &refs, ask.fit, &look_of),
+        Some(v) => ryusch::svg::draw_within(
+            &laid.built.input,
+            layout,
+            &refs,
+            v,
+            &look_of,
+            &|sid, look| ryusch::paint::sheet_in(&laid.built.input, layout, sid, look),
+            None,
+        ),
+    };
     Ok(match ask.format {
         Format::Svg => ("image/svg+xml", svg.into_bytes(), None),
         Format::Png => {
@@ -1032,7 +1045,9 @@ pub fn render(
     scale: Option<f32>,
     fit: bool,
     theme: ryusch::style::Theme,
+    frames: &[&Project],
 ) -> Result<Answer> {
+    frame_needs_fit(frames, fit)?;
     let b = blocks(p, design, block)?[0];
     let mut laid = schem::lay(p, b, None, &[], Relayout::None)?;
     let (layers, shown) = show_layer(p, b, &mut laid, layer)?;
@@ -1067,6 +1082,18 @@ pub fn render(
         v["stale"] = json!(true);
     }
     let looks = looks(p, b, &laid.built, &laid.outcome.layout, theme);
+    let view = if frames.is_empty() {
+        None
+    } else {
+        let sid = which.first().ok_or_else(|| {
+            Error::new(Code::InvalidParam, "--frame crops one --sheet").with("param", "frame")
+        })?;
+        Some(framed(
+            &laid,
+            &frame_layouts(frames, &b.id, shown.as_ref()),
+            sid,
+        ))
+    };
     let (mime, bytes, px) = picture(
         &laid,
         &refs,
@@ -1077,11 +1104,49 @@ pub fn render(
             sheet: None,
         },
         &looks,
+        view,
     )?;
     if let Some(px) = px {
         v["scale"] = json!(px);
     }
     Ok(Answer::bytes(v, mime, bytes))
+}
+
+/// `render`'s `frame` crops a fitted picture: refused without `fit`, over
+/// the protocol as the CLI refuses `--frame` without `--fit`.
+pub fn frame_needs_fit(frames: &[&Project], fit: bool) -> Result<()> {
+    if frames.is_empty() || fit {
+        Ok(())
+    } else {
+        Err(Error::new(Code::InvalidParam, "--frame needs --fit").with("param", "frame"))
+    }
+}
+
+/// The view `render --fit --frame` crops sheet `sheet` to: what it draws
+/// in `laid` and in each of `others` (the frame revisions' layouts of the
+/// same block, `None` where a revision hasn't it), each from the sheet's
+/// corner ([`ryusch::svg::drawn_on`]), unioned and placed where the sheet
+/// is in `laid`. `None` when none of them draws it.
+pub fn framed(laid: &Laid, others: &[Option<Laid>], sheet: &str) -> Option<ryusch::geom::Rect> {
+    let at = laid.outcome.layout.sheets.get(sheet)?.at;
+    std::iter::once(laid)
+        .chain(others.iter().flatten())
+        .filter_map(|l| ryusch::svg::drawn_on(&l.built.input, &l.outcome.layout, sheet))
+        .reduce(ryusch::geom::Rect::union)
+        .map(|r| r.shift(at))
+}
+
+/// The frame revisions' layouts of block `b`, with the designators of
+/// the layer `shown` draws.
+pub fn frame_layouts(
+    frames: &[&Project],
+    b: &crate::id::Id,
+    shown: Option<&schem::Layer>,
+) -> Vec<Option<Laid>> {
+    frames
+        .iter()
+        .map(|p| crate::compare::laid_then(p, b, shown))
+        .collect()
 }
 
 /// The layout writes a connectivity write needs: every laid out block
@@ -1184,6 +1249,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                &[],
             )
             .unwrap();
             (String::from_utf8(a.binary.unwrap()).unwrap(), a.result)
@@ -1219,6 +1285,7 @@ mod tests {
             None,
             false,
             Default::default(),
+            &[],
         )
         .unwrap_err();
         assert_eq!(e.code, Code::NotFound);
@@ -1235,6 +1302,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                &[],
             )
             .unwrap();
             (String::from_utf8(a.binary.unwrap()).unwrap(), a.result)

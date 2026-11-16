@@ -84,6 +84,23 @@ fn objects(
     (parts, nets)
 }
 
+/// What a sheet's marks count, as its strip says them: items added,
+/// changed and moved, and those ghosted that nothing marks (removed).
+pub use ryusch::paint::Counts;
+
+/// [`Counts`] of `m` ([`Marks::counts`]).
+pub fn counts(m: &Marks) -> Counts {
+    m.counts()
+}
+
+/// The strip a marked sheet carries.
+fn strip(rev: &str, c: Counts) -> String {
+    format!(
+        "Against {rev}: {} added, {} changed, {} moved, {} removed",
+        c.added, c.changed, c.moved, c.removed
+    )
+}
+
 /// Block `block`'s marks by sheet: its working layout `now` against the
 /// revision's `then` (none when the revision hasn't the block), `rev` as
 /// the strip names it.
@@ -184,14 +201,9 @@ pub fn marks(
         }
     }
     for m in out.values_mut() {
-        if m.is_empty() {
-            continue;
+        if !m.is_empty() {
+            m.strip = strip(rev, counts(m));
         }
-        let c = m.counts();
-        m.strip = format!(
-            "Against {rev}: {} added, {} changed, {} moved, {} removed",
-            c.added, c.changed, c.moved, c.removed
-        );
     }
     out
 }
@@ -240,7 +252,9 @@ pub fn render(
     scale: Option<f32>,
     fit: bool,
     theme: ryusch::style::Theme,
+    frames: &[&Project],
 ) -> Result<Answer> {
+    crate::schemcmd::frame_needs_fit(frames, fit)?;
     let b = crate::schemcmd::blocks(now, design, block)?[0];
     let mut laid = schem::lay(now, b, None, &[], ryusch::input::Relayout::None)?;
     let (_, shown) = crate::schemcmd::show_layer(now, b, &mut laid, layer)?;
@@ -269,11 +283,24 @@ pub fn render(
     };
     let none = Marks::default();
     let to_ref = |k: &str| schem::ref_path(&b.id, k);
-    let svg = ryusch::svg::draw_with(
+    let view = if frames.is_empty() {
+        fit.then(|| ryusch::svg::drawn(&laid.built.input, layout, &refs))
+            .flatten()
+    } else {
+        let sid = which.first().ok_or_else(|| {
+            Error::new(Code::InvalidParam, "--frame crops one --sheet").with("param", "frame")
+        })?;
+        crate::schemcmd::framed(
+            &laid,
+            &crate::schemcmd::frame_layouts(frames, &b.id, shown.as_ref()),
+            sid,
+        )
+    };
+    let svg = ryusch::svg::draw_within(
         &laid.built.input,
         layout,
         &refs,
-        fit,
+        view,
         &|sid| looks.get(sid).cloned().unwrap_or_default(),
         &|sid, look| {
             let now = ryusch::paint::sheet_in(&laid.built.input, layout, sid, look);
@@ -323,4 +350,38 @@ pub fn render(
             Answer::bytes(v, "image/png", crate::schemcmd::png(&svg, px)?)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_are_what_the_strip_says() {
+        let mut m = Marks::default();
+        m.marks.insert("a".into(), Mark::Added);
+        m.marks.insert("b".into(), Mark::Changed);
+        m.marks.insert(
+            "c".into(),
+            Mark::Moved {
+                from: [0, 0],
+                to: [1, 0],
+            },
+        );
+        m.ghosts.insert("b".into());
+        m.ghosts.insert("d".into());
+        assert_eq!(
+            counts(&m),
+            Counts {
+                added: 1,
+                changed: 1,
+                moved: 1,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            strip("HEAD", counts(&m)),
+            "Against HEAD: 1 added, 1 changed, 1 moved, 1 removed"
+        );
+    }
 }

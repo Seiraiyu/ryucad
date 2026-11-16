@@ -107,3 +107,54 @@ pub fn git_try(dir: &Path, extra: &[&str], args: &[&str]) -> (bool, String) {
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
 }
+
+/// [`ryueda`] that must succeed: its result.
+fn must(dir: &Path, run: &Path, daemon: bool, args: &[&str]) -> Value {
+    let (code, v) = ryueda(dir, run, daemon, args);
+    assert_eq!(code, 0, "{args:?}: {v}");
+    v["result"].clone()
+}
+
+/// A library project `lib` with the breakout's library (its footprints,
+/// symbols and components) in a fresh repository, every component
+/// numbered and ryupdm set up, committed on `main`. Its parts' IDs, as
+/// `release propose --all --dry-run` lists them.
+pub fn library(top: &Path, run: &Path, daemon: bool) -> (PathBuf, Vec<String>) {
+    git(top, &["init", "-q", "-b", "main"]);
+    let lib = top.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    must(&lib, run, daemon, &["init", "--library"]);
+    for (path, text) in breakout::footprints() {
+        let at = lib.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+    for args in breakout::library() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        must(&lib, run, daemon, &args);
+    }
+    must(&lib, run, daemon, &["pdm", "init"]);
+    let dry = must(
+        &lib,
+        run,
+        daemon,
+        &["release", "propose", "--all", "--dry-run"],
+    );
+    let parts: Vec<String> = dry["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["part"].as_str().unwrap().to_owned())
+        .collect();
+    for (i, p) in parts.iter().enumerate() {
+        must(
+            &lib,
+            run,
+            daemon,
+            &["props", "set", p, &format!("number=100-{:04}", i + 1)],
+        );
+    }
+    git(top, &["add", "-A"]);
+    git(top, &["commit", "-q", "-m", "start"]);
+    (lib, parts)
+}

@@ -19,6 +19,10 @@ pub struct VersionInfo {
     pub commit: String,
     pub target: String,
     pub protocol: u32,
+    /// [`crate::OUTPUT_SCHEMA`]: the shape of the answers other tools
+    /// read (0 from a ryueda before it was said).
+    #[serde(default)]
+    pub schema_outputs: u64,
 }
 
 impl VersionInfo {
@@ -29,6 +33,7 @@ impl VersionInfo {
             commit: env!("RYUEDA_COMMIT").to_owned(),
             target: env!("RYUEDA_TARGET").to_owned(),
             protocol: PROTOCOL_VERSION,
+            schema_outputs: crate::OUTPUT_SCHEMA,
         }
     }
 
@@ -990,6 +995,11 @@ pub enum Request {
         /// parts with a leader, each item keyed by `data-ref` (SVG).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compare: Option<String>,
+        /// Crop a fitted sheet to what it draws here and at each of these
+        /// revisions (`working` for the files on disk), so a before and
+        /// an after line up (design 667). Needs `fit` and `sheet`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frame: Vec<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1011,6 +1021,15 @@ pub enum Request {
         compare: Option<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// Whether each thread anchor (`<design>:<block>/<object>`, or a
+    /// sheet `<design>:<block>/sheet:<id>`) stands at a revision: its
+    /// sheet and box, or what took it away (design 667).
+    #[serde(rename = "resolve")]
+    Resolve {
+        refs: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
@@ -1325,6 +1344,7 @@ impl Request {
             | Request::Check { rev, .. }
             | Request::Describe { rev, .. }
             | Request::Render { rev, .. }
+            | Request::Resolve { rev, .. }
             | Request::Output { rev, .. }
             | Request::BlockShow { rev, .. }
             | Request::ComponentShow { rev, .. }

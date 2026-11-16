@@ -596,6 +596,7 @@ struct Finding<'a> {
 /// What the scene says besides its items and owners.
 #[derive(Serialize)]
 struct Head<'a> {
+    schema: u64,
     block: &'a Id,
     design: Option<String>,
     layer: Option<Value>,
@@ -635,7 +636,8 @@ pub struct Against<'a> {
 
 /// One sheet of a block as a window draws it (design 519), as JSON text:
 /// laid out in memory exactly as `render` lays it out (nothing written),
-/// a layer's designators, the sheet's look in `ask.theme`; `items` (the
+/// a layer's designators, the sheet's look in `ask.theme`; `schema`
+/// ([`crate::OUTPUT_SCHEMA`]), `items` (the
 /// paper's border, zone marks and title block first, then the sheet's,
 /// in the sheet's frame, nanometres, y up), `owners`, `pins`, the sheet's
 /// lint `findings` and `score`, the `paper` (`size`, its `rect` in the
@@ -759,6 +761,7 @@ pub fn scene_with(p: &Project, ask: &Ask, against: Option<&Against>) -> Result<S
         ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
     let revs = revisions(p, b);
     let head = Head {
+        schema: crate::OUTPUT_SCHEMA,
         block: &b.id,
         design,
         layer: shown.as_ref().map(schem::Layer::to_json),

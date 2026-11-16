@@ -70,6 +70,33 @@ pub fn handle_safely(
     handle_job(slot, live, me, root, req, &ryu_session::job::Job::default())
 }
 
+/// Whether `req`'s answer is one the hosted review service reads
+/// (design 667): it says its schema, [`crate::OUTPUT_SCHEMA`]. `check`'s
+/// report and `scene`'s head say it where they are built; `bom`, `bom
+/// diff`, `where-used` and `release check` give ryupdm's.
+fn versioned(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::Diff { .. }
+            | Request::MergeStatus {}
+            | Request::ReleaseList { .. }
+            | Request::LibUses { .. }
+            | Request::LibUpdate { .. }
+            | Request::Render { .. }
+            | Request::Resolve { .. }
+    )
+}
+
+/// `a` saying [`crate::OUTPUT_SCHEMA`], when its result is an object.
+fn with_schema(mut a: Answer) -> Answer {
+    if a.raw.is_none()
+        && let Some(o) = a.result.as_object_mut()
+    {
+        o.insert("schema".into(), json!(crate::OUTPUT_SCHEMA));
+    }
+    a
+}
+
 /// [`handle_safely`] with a long request's job.
 pub fn handle_job(
     slot: &mut Option<Session>,
@@ -79,6 +106,7 @@ pub fn handle_job(
     req: Request,
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
+    let schema = versioned(&req);
     // A merge that left a record in the manifest leaves no project to
     // open: its status and resolutions are read from the files alone.
     let merge =
@@ -93,7 +121,7 @@ pub fn handle_job(
     .then(|| req.clone());
     let mut live = live;
     let r = guarded(slot, root, |s| answer(s, live.as_deref_mut(), me, req, job));
-    match (r, merge, sessionless) {
+    let r = match (r, merge, sessionless) {
         (Err(e), Some(req), _) if manifest_record(&e) => {
             crate::validate::unloaded(root, req).map(Answer::json)
         }
@@ -101,7 +129,8 @@ pub fn handle_job(
             live_only(live, req).map(Answer::json)
         }
         (r, _, _) => r,
-    }
+    };
+    if schema { r.map(with_schema) } else { r }
 }
 
 /// Whether `e` is a session refused because `ryueda.json` holds a merge's
@@ -262,6 +291,21 @@ pub fn answer(
     result
 }
 
+/// The projects `render --frame` names: each revision's (`working`, the
+/// working files', is `None` here and taken from the session by the
+/// caller).
+fn frame_projects(
+    session: &mut Session,
+    revs: &[String],
+) -> Result<Vec<Option<std::sync::Arc<Project>>>> {
+    revs.iter()
+        .map(|r| match r.as_str() {
+            "working" => Ok(None),
+            r => session.at(r).map(|(_, p)| Some(p)),
+        })
+        .collect()
+}
+
 /// A request answered from the working files.
 fn working(
     session: &mut Session,
@@ -281,9 +325,15 @@ fn working(
             fit,
             theme,
             compare: Some(rev),
+            frame,
             ..
         } => {
             let (commit, then) = session.at(&rev)?;
+            let at = frame_projects(session, &frame)?;
+            let frames: Vec<&Project> = at
+                .iter()
+                .map(|p| p.as_deref().unwrap_or(session.project()))
+                .collect();
             crate::compare::render(
                 session.project(),
                 &then,
@@ -297,6 +347,7 @@ fn working(
                 scale,
                 fit,
                 theme.unwrap_or_default(),
+                &frames,
             )
         }
         Request::Render {
@@ -308,18 +359,27 @@ fn working(
             scale,
             fit,
             theme,
+            frame,
             ..
-        } => crate::schemcmd::render(
-            session.project(),
-            design.as_deref(),
-            block.as_deref(),
-            sheet.as_deref(),
-            layer.as_deref(),
-            format.unwrap_or(crate::schemcmd::Format::Svg),
-            scale,
-            fit,
-            theme.unwrap_or_default(),
-        ),
+        } => {
+            let at = frame_projects(session, &frame)?;
+            let frames: Vec<&Project> = at
+                .iter()
+                .map(|p| p.as_deref().unwrap_or(session.project()))
+                .collect();
+            crate::schemcmd::render(
+                session.project(),
+                design.as_deref(),
+                block.as_deref(),
+                sheet.as_deref(),
+                layer.as_deref(),
+                format.unwrap_or(crate::schemcmd::Format::Svg),
+                scale,
+                fit,
+                theme.unwrap_or_default(),
+                &frames,
+            )
+        }
         Request::LayoutPlace {
             block,
             instructions,
@@ -433,6 +493,7 @@ fn working(
 /// A read request answered from `p`, a revision's project at `commit`.
 fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Result<Answer> {
     match req {
+        Request::Resolve { refs, .. } => crate::anchor::stand_all(p, &refs).map(Answer::json),
         Request::Netlist { design, .. } => {
             crate::netlist::netlist(p, design.as_deref()).map(Answer::json)
         }
@@ -477,18 +538,27 @@ fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Re
             scale,
             fit,
             theme,
+            frame,
             ..
-        } => crate::schemcmd::render(
-            p,
-            design.as_deref(),
-            block.as_deref(),
-            sheet.as_deref(),
-            layer.as_deref(),
-            format.unwrap_or(crate::schemcmd::Format::Svg),
-            scale,
-            fit,
-            theme.unwrap_or_default(),
-        ),
+        } => {
+            let at = frame_projects(session, &frame)?;
+            let frames: Vec<&Project> = at
+                .iter()
+                .map(|x| x.as_deref().unwrap_or(session.project()))
+                .collect();
+            crate::schemcmd::render(
+                p,
+                design.as_deref(),
+                block.as_deref(),
+                sheet.as_deref(),
+                layer.as_deref(),
+                format.unwrap_or(crate::schemcmd::Format::Svg),
+                scale,
+                fit,
+                theme.unwrap_or_default(),
+                &frames,
+            )
+        }
         Request::Output { design, layers, .. } => {
             crate::output::output(p, design.as_deref(), layers.unwrap_or_default())
                 .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes))
@@ -601,6 +671,7 @@ fn dispatch(
     job: &ryu_session::job::Job,
 ) -> Result<Value> {
     match req {
+        Request::Resolve { refs, .. } => crate::anchor::stand_all(session.project(), &refs),
         Request::ProjectInfo {} => Ok(info(session.project())),
         Request::Doctor {} => Ok(crate::doctor::report_with(
             session.root(),
@@ -1323,6 +1394,7 @@ fn dispatch(
                 layout,
                 library,
                 all,
+                sheets: netlist,
             },
         ),
         Request::Check { against, .. } => {

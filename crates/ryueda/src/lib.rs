@@ -8,7 +8,17 @@
 
 pub use ryu_doc::{canonical, error, expr, id, source, units};
 
+/// The version of the shape of the JSON that the hosted review service
+/// reads (design 667): `check`, `diff`, `merge status`, `release list`,
+/// `lib uses`, `lib update`, `scene`, `render`, `resolve` and `git
+/// attributes` say it as `"schema"`; `bom`, `bom diff`, `where-used` and
+/// `release check` give ryupdm's, by the same rule. Adding a field or a
+/// code doesn't change it; changing or removing one does. `version`
+/// answers it as `schema_outputs`, so a tool can ask once.
+pub const OUTPUT_SCHEMA: u64 = 1;
+
 pub mod activity;
+pub mod anchor;
 pub mod annotate;
 pub mod cascade;
 pub mod clash;
@@ -49,6 +59,7 @@ pub mod project;
 pub mod props;
 pub mod proto;
 pub mod refs;
+pub mod review;
 pub mod scene;
 pub mod schem;
 pub mod schemcmd;
@@ -100,8 +111,9 @@ impl ryu_session::prefs::Schema for Eda {
     const CONFIG_DIR_VAR: &'static str = "RYUEDA_CONFIG_DIR";
 
     /// How often a watched daemon checks the files, how long a catalogue
-    /// serves, the folders where-used searches, and the window's keys
-    /// (plan 3.D): `ui.*` and `app.window`, which only the app reads.
+    /// serves, the folders where-used searches, the hosted review service
+    /// `ryueda review` talks to, and the window's keys (plan 3.D): `ui.*`
+    /// and `app.window`, which only the app reads.
     fn accepts(name: &str, value: &serde_json::Value) -> bool {
         let one_of = |words: &[&str]| value.as_str().is_some_and(|s| words.contains(&s));
         match name {
@@ -115,6 +127,8 @@ impl ryu_session::prefs::Schema for Eda {
             "pdm.dependents" => value
                 .as_array()
                 .is_some_and(|a| a.iter().all(serde_json::Value::is_string)),
+            // The hosted review service `ryueda review` talks to (design 667).
+            "review.url" => value.as_str().is_some_and(ryu_review::url_ok),
             "ui.theme" => one_of(&["system", "light", "dark"]),
             "ui.style" => one_of(&["drafting", "graphite", "studio"]),
             "ui.contrast" => one_of(&["normal", "high"]),
@@ -137,15 +151,37 @@ impl ryu_session::prefs::Schema for Eda {
             "ui.layout" | "ui.keys" => Some(json!({})),
             "ui.flash_changes" | "ui.follow_shows" => Some(json!(true)),
             "pdm.dependents" => Some(json!([])),
+            "review.url" => Some(json!(ryu_review::DEFAULT_URL)),
             _ => None,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod prefs_tests {
     use ryu_session::prefs::Schema;
     use serde_json::json;
+
+    #[test]
+    fn review_url_is_an_https_url_or_this_machine() {
+        assert!(crate::Eda::accepts(
+            "review.url",
+            &json!("https://review.example.com")
+        ));
+        assert!(crate::Eda::accepts(
+            "review.url",
+            &json!("http://127.0.0.1:9")
+        ));
+        assert!(!crate::Eda::accepts(
+            "review.url",
+            &json!("http://example.com")
+        ));
+        assert!(!crate::Eda::accepts("review.url", &json!(3)));
+        assert_eq!(
+            crate::Eda::default_of("review.url"),
+            Some(json!(ryu_review::DEFAULT_URL))
+        );
+    }
 
     #[test]
     fn the_window_s_preferences_are_accepted_with_their_defaults() {
