@@ -4411,3 +4411,36 @@ fn bom_answers_lines_and_writes_csv_to_out() {
         1,
     );
 }
+
+/// `review` needs a Git clone (it asks no service before that), and a
+/// subcommand.
+#[test]
+fn review_needs_a_github_clone() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let p = dir.path().join("p");
+    fs::create_dir_all(&p).unwrap();
+    let (code, v) = {
+        let out = ryueda(&run)
+            .current_dir(&p)
+            .env("RYUEDA_REVIEW_TOKEN", "tok")
+            .args(["review", "status"])
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("not_a_git_repo")),
+        "{v}"
+    );
+    let out = ryueda(&run)
+        .current_dir(&p)
+        .args(["review"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

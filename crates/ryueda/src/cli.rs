@@ -586,6 +586,12 @@ enum Command {
     /// Register ryueda with Git: `git install`.
     #[command(subcommand)]
     Git(GitCmd),
+    /// The hosted review service for this clone's GitHub pull requests:
+    /// checks, sheets before and after, comments pinned to components,
+    /// nets and pins, and merging the base in. Needs a GitHub token
+    /// (RYUEDA_REVIEW_TOKEN, GH_TOKEN or gh).
+    #[command(subcommand)]
+    Review(ReviewCmd),
     /// What a merge in progress leaves to settle, and settling it.
     #[command(subcommand)]
     Merge(MergeCmd),
@@ -1976,6 +1982,50 @@ enum GitCmd {
         /// The file's path in the repository, as Git names it.
         path: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// The pull request's checks, renders and threads (the branch's own
+    /// pull request unless named).
+    Status { pr: Option<u64> },
+    /// Its comment threads; --open for those not resolved.
+    Threads {
+        pr: Option<u64>,
+        #[arg(long)]
+        open: bool,
+    },
+    /// Start a thread pinned to a thread anchor (<design>:<block>/<object>,
+    /// or <design>:<block>/sheet:<id>).
+    Comment {
+        #[arg(value_name = "REF")]
+        reference: String,
+        text: String,
+        #[arg(long)]
+        pr: Option<u64>,
+        /// The commit the anchor was read at (the pull request's head by
+        /// default).
+        #[arg(long)]
+        commit: Option<String>,
+    },
+    /// Reply in a thread.
+    Reply { thread: String, text: String },
+    /// Resolve a thread.
+    Resolve { thread: String },
+    /// Reopen a thread.
+    Reopen { thread: String },
+    /// Merge the base into the pull request's head with ryueda's driver
+    /// (Merge in), when GitHub's line merge conflicts and ryueda's doesn't.
+    Update { pr: Option<u64> },
+    /// Download the sheets before and after into a folder.
+    Renders {
+        pr: Option<u64>,
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
+    /// What the release records the pull request proposes still need,
+    /// and what blocks them.
+    Approvals { pr: Option<u64> },
 }
 
 #[derive(Subcommand)]
@@ -3376,6 +3426,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         | Command::Watch { .. }
         | Command::Daemon(_)
         | Command::Git(_)
+        | Command::Review(_)
         | Command::Parts(PartsCmd::Login { .. } | PartsCmd::Logout { .. }) => {
             return Ok(None);
         }
@@ -3412,6 +3463,44 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
+        Command::Review(cmd) => {
+            use ryu_review::Action;
+            let action = match cmd {
+                ReviewCmd::Status { pr } => Action::Status { pr: *pr },
+                ReviewCmd::Threads { pr, open } => Action::Threads {
+                    pr: *pr,
+                    open: *open,
+                },
+                ReviewCmd::Comment {
+                    reference,
+                    text,
+                    pr,
+                    commit,
+                } => Action::Comment {
+                    reference: reference.clone(),
+                    text: text.clone(),
+                    pr: *pr,
+                    commit: commit.clone(),
+                },
+                ReviewCmd::Reply { thread, text } => Action::Reply {
+                    thread: thread.clone(),
+                    text: text.clone(),
+                },
+                ReviewCmd::Resolve { thread } => Action::Resolve {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Reopen { thread } => Action::Reopen {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Update { pr } => Action::Update { pr: *pr },
+                ReviewCmd::Renders { pr, out } => Action::Renders {
+                    pr: *pr,
+                    out: here.join(out),
+                },
+                ReviewCmd::Approvals { pr } => Action::Approvals { pr: *pr },
+            };
+            ryueda::review::run(&here, action)
+        }
         Command::Git(GitCmd::Attributes) => Ok(json!({
             "schema": ryueda::OUTPUT_SCHEMA,
             "lines": ryueda::drivers::LINES,

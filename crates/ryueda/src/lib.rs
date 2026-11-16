@@ -59,6 +59,7 @@ pub mod project;
 pub mod props;
 pub mod proto;
 pub mod refs;
+pub mod review;
 pub mod scene;
 pub mod schem;
 pub mod schemcmd;
