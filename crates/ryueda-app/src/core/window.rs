@@ -9,6 +9,7 @@ use crate::core::flash::Flash;
 use crate::core::history::History;
 use crate::core::link::{Daemon, Event, Link, Wake};
 use crate::core::lists::{self, Entry, Findings, Instruction, Properties, Subject};
+use crate::core::merge::{Batch, Merge, Revisions};
 use crate::core::nav::Navigator;
 use crate::core::people::{People, SheetView};
 use crate::core::product::Eda;
@@ -184,6 +185,12 @@ enum Why {
         rev: String,
         netlist: bool,
     },
+    /// `merge.status`, aside.
+    MergeStatus,
+    /// `project.info`: the revisions a resolve is guarded by.
+    ProjectInfo,
+    /// `merge.resolve` from the panel, with the conflicts it named.
+    Resolve(Vec<String>),
     Quiet,
 }
 
@@ -258,6 +265,24 @@ pub struct Window {
     changes_again: bool,
     /// The History tab: `history.log`'s commits, or its refusal.
     pub history: Option<History>,
+    /// The merge in progress, if any (design 688, Conflict panel).
+    pub merge: Option<Merge>,
+    /// The revisions `--expect` names, from `project.info`.
+    pub revisions: Revisions,
+    /// A resolve was answered and the `project.info` after it isn't yet:
+    /// `revisions` are the ones before it, so no resolve is sent.
+    pub revisions_due: bool,
+    /// A resolve asked for while `revisions_due`: sent once they come.
+    held: Option<Batch>,
+    /// The project doesn't open: `ryueda.json` holds a merge's record.
+    pub unloaded: bool,
+    /// When `merge.status` was last asked while unloaded.
+    merge_polled: Option<Instant>,
+    /// A side of the merge shown read only (Show ours, Show theirs).
+    pub peek: Option<crate::core::merge::Peek>,
+    /// References to frame once the scene now asked for arrives (a
+    /// conflict's Show).
+    frame_refs: Vec<String>,
 }
 
 impl Window {
@@ -317,6 +342,14 @@ impl Window {
             changes_asked: false,
             changes_again: false,
             history: None,
+            merge: None,
+            revisions: Revisions::default(),
+            revisions_due: false,
+            held: None,
+            unloaded: false,
+            merge_polled: None,
+            peek: None,
+            frame_refs: Vec::new(),
         };
         w.ask_all();
         Ok(w)
@@ -348,6 +381,31 @@ impl Window {
             Why::Activity,
         );
         self.ask_history();
+        self.ask_merge();
+        self.send(req("project.info", json!({})), Why::ProjectInfo);
+    }
+
+    /// Reads the merge's status again, aside.
+    fn ask_merge(&mut self) {
+        self.send_aside(req("merge.status", json!({})), Why::MergeStatus);
+    }
+
+    /// Settles a batch from the conflict panel: one `merge.resolve`,
+    /// guarded by the revisions read, one at a time. Asked for before
+    /// the last resolve's revisions are read, it waits for them.
+    pub fn resolve(&mut self, b: Batch) {
+        if self.merge.as_ref().is_none_or(|m| m.resolving) {
+            return;
+        }
+        if self.revisions_due {
+            self.held = Some(b);
+            return;
+        }
+        let Some(m) = self.merge.as_mut() else { return };
+        m.resolving = true;
+        m.refused = None;
+        let r = crate::core::merge::resolution(&b, &self.revisions, self.unloaded);
+        self.send(r, Why::Resolve(b.ids()));
     }
 
     /// Reads the project's Git history again, aside.
@@ -356,7 +414,10 @@ impl Window {
     }
 
     fn scene_params(&self, sheet: Option<&str>) -> Value {
-        scene_params(&self.shown, self.dark, &self.blink, sheet)
+        crate::core::merge::peeked(
+            scene_params(&self.shown, self.dark, &self.blink, sheet),
+            self.peek.as_ref(),
+        )
     }
 
     /// Compares with `rev`, or stops (`None`): `compare.set` for this
@@ -492,6 +553,84 @@ impl Window {
         }
     }
 
+    /// A conflict's Show: its references selected and framed on the
+    /// working sheet that draws them (a layout area's first sheet).
+    pub fn show_conflict(&mut self, row: &crate::core::merge::Row) {
+        self.peek = None;
+        let Some(block) = row.block.clone().or_else(|| {
+            row.refs
+                .first()
+                .and_then(|r| r.split('/').next())
+                .map(str::to_owned)
+        }) else {
+            return;
+        };
+        let sheet = row.sheets.first().cloned().or_else(|| {
+            row.refs
+                .iter()
+                .find_map(|r| self.nav.reach(&block, r).into_iter().next())
+        });
+        if !row.refs.is_empty() && row.kind != "layout_conflict" {
+            self.selection = row.refs.clone();
+            self.select.due();
+            self.ask_props();
+        }
+        self.frame_refs = row.refs.clone();
+        let layer = self.shown.layer.clone();
+        self.camera = None;
+        self.show(Some(block), sheet, layer);
+    }
+
+    /// Show ours or Show theirs: the conflict's sheet as that side's
+    /// commit draws it, read only.
+    pub fn show_side(&mut self, row: &crate::core::merge::Row, side: &str) {
+        let Some(p) = self.merge.as_ref().and_then(|m| m.side(side)) else {
+            return;
+        };
+        self.peek = Some(p);
+        self.frame_refs = row.refs.clone();
+        let block = row.block.clone().or_else(|| self.shown.block.clone());
+        let sheet = row
+            .sheets
+            .first()
+            .cloned()
+            .or_else(|| self.shown.sheet.clone());
+        let layer = self.shown.layer.clone();
+        self.show(block, sheet, layer);
+    }
+
+    /// Whether the panel may send a resolve now.
+    pub fn resolve_busy(&self) -> bool {
+        self.revisions_due || self.merge.as_ref().is_some_and(|m| m.resolving)
+    }
+
+    /// Takes the merge as now read; when it has ended, a side shown goes
+    /// back to the working sheet (a commit writes no file, so nothing
+    /// else redraws it) and a held resolve is dropped.
+    fn merge_now(&mut self, m: Option<Merge>) {
+        self.merge = m;
+        if self.merge.is_none() {
+            self.held = None;
+            self.back_to_working();
+        }
+    }
+
+    /// `project.info` answered: a resolve waiting on its revisions goes.
+    fn revisions_read(&mut self) {
+        if std::mem::take(&mut self.revisions_due)
+            && let Some(b) = self.held.take()
+        {
+            self.resolve(b);
+        }
+    }
+
+    /// The bar's Back to working.
+    pub fn back_to_working(&mut self) {
+        if self.peek.take().is_some() {
+            self.ask_scene();
+        }
+    }
+
     /// Asks the shown sheet's scene.
     pub fn ask_scene(&mut self) {
         let p = self.scene_params(self.shown.sheet.clone().as_deref());
@@ -501,7 +640,7 @@ impl Window {
     /// Asks the shown block's other sheets, aside; not for a revision's
     /// sheet (the navigator's counts come from the compare scene).
     fn ask_other_sheets(&mut self) {
-        if self.blink.read_only() {
+        if self.blink.read_only() || self.peek.is_some() {
             return;
         }
         let Some(sc) = &self.scene else { return };
@@ -600,7 +739,15 @@ impl Window {
                     .or_else(|| s.owner(&r).map(|i| s.owners[i].kind.clone()))
             })
             .unwrap_or_default();
-        self.props = Some(described(&r, &kind, self.blink.of.as_deref(), ghost));
+        self.props = Some(described(
+            &r,
+            &kind,
+            self.peek
+                .as_ref()
+                .map(|p| p.side.as_str())
+                .or(self.blink.of.as_deref()),
+            ghost,
+        ));
         self.described = Some(r);
     }
 
@@ -688,6 +835,14 @@ impl Window {
             .find(|e| e.undo)
             .map_or_else(|| json!({}), |e| json!({"entry": e.seq}));
         self.send(req("undo", p), Why::Write("Undo"));
+    }
+
+    /// The entry Undo would take, when it is a resolve: the panel's Undo.
+    pub fn last_resolve(&self) -> Option<&Entry> {
+        self.activity
+            .iter()
+            .find(|e| e.undo)
+            .filter(|e| e.method == "merge.resolve")
     }
 
     /// Redoes the newest undo not redone yet.
@@ -821,7 +976,10 @@ impl Window {
             Ok(v) => v,
             Err(e) => {
                 match why {
-                    Why::Scene => self.scene_error = Some(e),
+                    Why::Scene => {
+                        self.unloaded = crate::core::merge::manifest_record(&e);
+                        self.scene_error = Some(e);
+                    }
                     Why::Write(title) => self.toasts.error(title, &e, 0, now),
                     Why::GoTo(_) => self.toasts.error("Show", &e, 0, now),
                     Why::Check => self.checked = None,
@@ -830,6 +988,17 @@ impl Window {
                         self.history =
                             Some(History::failed(&crate::core::scene::code_word(e.code)));
                     }
+                    Why::MergeStatus => {
+                        self.merge_now(Merge::answered(self.merge.as_ref(), Err(e)));
+                    }
+                    Why::Resolve(ids) => {
+                        self.toasts.error("Resolve", &e, 0, now);
+                        self.merge_now(Merge::resolved(self.merge.as_ref(), ids, Err(e)));
+                        self.ask_merge();
+                        self.revisions_due = true;
+                        self.send(req("project.info", json!({})), Why::ProjectInfo);
+                    }
+                    Why::ProjectInfo => self.revisions_read(),
                     _ => {}
                 }
                 return;
@@ -841,22 +1010,34 @@ impl Window {
                     return;
                 };
                 self.scene_error = None;
+                if std::mem::take(&mut self.unloaded) {
+                    // The manifest was settled: the project opens.
+                    self.scene = None;
+                    self.ask_all();
+                }
                 let moved = self.scene.as_ref().is_none_or(|o| o.block != sc.block);
                 if self.flash_on {
                     self.flash.arrived(self.scene.as_ref(), &sc, now);
                 }
                 self.nav.scene(&sc);
                 self.findings.sheet(&sc.findings);
-                if let Some(r) = self.frame_ref.take() {
+                let wanted: Vec<String> = self
+                    .frame_ref
+                    .take()
+                    .into_iter()
+                    .chain(std::mem::take(&mut self.frame_refs))
+                    .collect();
+                if !wanted.is_empty() {
+                    let hit = |r: &str| wanted.iter().any(|w| w == r);
                     let boxes = sc
                         .owners
                         .iter()
-                        .filter(|o| o.reference == r || o.net.as_deref() == Some(r.as_str()))
+                        .filter(|o| hit(&o.reference) || o.net.as_deref().is_some_and(hit))
                         .filter_map(|o| o.boxed)
                         .chain(
                             sc.ghosts
                                 .iter()
-                                .filter(|g| g.reference == r)
+                                .filter(|g| hit(&g.reference))
                                 .filter_map(|g| g.boxed),
                         );
                     self.frame = boxes.reduce(|a, b| {
@@ -974,6 +1155,20 @@ impl Window {
                     self.compare_moved();
                 }
             }
+            Why::MergeStatus => self.merge_now(Merge::answered(self.merge.as_ref(), Ok(v))),
+            Why::ProjectInfo => {
+                self.revisions = Revisions::read(&v);
+                self.revisions_read();
+            }
+            Why::Resolve(ids) => {
+                self.merge_now(Merge::resolved(self.merge.as_ref(), ids, Ok(v)));
+                self.revisions_due = true;
+                self.send(req("project.info", json!({})), Why::ProjectInfo);
+                if self.unloaded {
+                    // The manifest may be settled: try the project again.
+                    self.ask_scene();
+                }
+            }
             Why::Write(_) | Why::Quiet => {}
         }
     }
@@ -997,6 +1192,7 @@ impl Window {
                 }
                 self.send(req("design.list", json!({})), Why::Designs);
                 self.send(req("erc", json!({})), Why::Erc);
+                self.send(req("project.info", json!({})), Why::ProjectInfo);
                 if self.blink.of.is_some() {
                     self.ask_changes();
                 }
@@ -1054,6 +1250,9 @@ impl Window {
                     Why::Activity,
                 );
             }
+            "merge.changed" => {
+                self.merge_now(Merge::noted(self.merge.as_ref(), params));
+            }
             "resync" => {
                 self.send(req("participant.list", json!({})), Why::People);
                 self.ask_all();
@@ -1106,6 +1305,16 @@ impl Window {
                 Why::CompareGet,
             );
         }
+        if self.unloaded
+            && self
+                .merge_polled
+                .is_none_or(|t| now.saturating_duration_since(t) >= COMPARE_EVERY)
+        {
+            // No session publishes while the project doesn't open.
+            self.merge_polled = Some(now);
+            self.ask_merge();
+            self.ask_scene();
+        }
         if self.select.ready(now) {
             let refs = self.selection.clone();
             self.send(req("selection.set", json!({"refs": refs})), Why::Quiet);
@@ -1131,10 +1340,17 @@ impl Window {
         }
         let flash = self.flash.due().then_some(Duration::from_millis(33));
         let compare = self.blink.of.as_ref().map(|_| COMPARE_EVERY);
-        [self.select.wait(now), self.view.wait(now), flash, compare]
-            .into_iter()
-            .flatten()
-            .min()
+        let unloaded = self.unloaded.then_some(COMPARE_EVERY);
+        [
+            self.select.wait(now),
+            self.view.wait(now),
+            flash,
+            compare,
+            unloaded,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn view_now(&self) -> SheetView {
@@ -1257,6 +1473,13 @@ mod tests {
     fn every_request_the_window_sends_parses() {
         for (m, p) in [
             ("design.list", json!({})),
+            ("merge.status", json!({})),
+            ("project.info", json!({})),
+            (
+                "merge.resolve",
+                json!({"resolutions": [{"conflict": "refdes:d/R5", "choice": "repair", "repair": "renumber"}],
+                       "expected_revisions": {"project": "p1"}}),
+            ),
             ("netlist", json!({"design": "d"})),
             ("libcomp.list", json!({})),
             ("lint.get", json!({})),

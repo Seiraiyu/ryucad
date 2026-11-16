@@ -33,7 +33,9 @@ fn layer_on(w: &Window, layer: Option<&str>) -> bool {
 }
 
 pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
-    if let Some(rev) = w.blink.of.clone() {
+    if let Some(p) = w.peek.clone() {
+        side_bar(ui, w, &p);
+    } else if let Some(rev) = w.blink.of.clone() {
         compare_bar(ui, w, &rev);
     }
     let size = ui.available_size();
@@ -46,10 +48,15 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
         ui.put(
             rect,
             egui::Label::new(if w.lost {
-                "Lost the daemon: reconnecting"
+                "Lost the daemon: reconnecting".to_owned()
+            } else if w.unloaded {
+                "ryueda.json holds this merge's conflict record: settle it in Conflicts, and the sheet opens".to_owned()
+            } else if let Some(e) = &w.scene_error {
+                format!("Can't draw this sheet: {} ({})", e.message, code_word(e.code))
             } else {
-                "Drawing the sheet…"
+                "Drawing the sheet…".to_owned()
             }),
+
         );
         return;
     };
@@ -463,4 +470,16 @@ fn tint(fill: Color32, mark: Color32) -> Color32 {
         mix(fill.b(), mark.b()),
         fill.a().max(mark.a()),
     )
+}
+
+/// While a side of the merge is shown: which, at what commit, read only.
+fn side_bar(ui: &mut egui::Ui, w: &mut Window, p: &crate::core::merge::Peek) {
+    ui.horizontal(|ui| {
+        let short: String = p.commit.chars().take(7).collect();
+        let side = if p.side == "ours" { "Ours" } else { "Theirs" };
+        ui.label(format!("{side} ({short}), read only"));
+        if ui.button("Back to working").clicked() {
+            w.back_to_working();
+        }
+    });
 }

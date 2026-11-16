@@ -1385,10 +1385,9 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_manifest_record_is_settled_without_the_project() {
-        let dir = tempfile::tempdir().unwrap();
-        let r = dir.path();
+    /// `erc_conflict`'s merge, with a record in `ryueda.json` too: the
+    /// project doesn't open.
+    fn a_manifest_record(r: &Path) {
         erc_conflict(r);
         let mut m: Value =
             serde_json::from_slice(&std::fs::read(r.join("ryueda.json")).unwrap()).unwrap();
@@ -1397,6 +1396,66 @@ pub(crate) mod tests {
         m["conflicts"] =
             json!({"/properties/a": {"kind": "value", "base": "0", "ours": "1", "theirs": "2"}});
         std::fs::write(r.join("ryueda.json"), crate::canonical::to_string(&m)).unwrap();
+    }
+
+    #[test]
+    fn a_window_says_hello_over_a_manifest_record() {
+        use ryu_session::live::{Kind, Live};
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        a_manifest_record(r);
+        let mut live = Live::<crate::Eda>::new();
+        let job = ryu_session::job::Job::default();
+        let mut slot = None;
+        let mut ask =
+            |req| crate::server::handle_job(&mut slot, Some(&mut live), None, r, req, &job);
+        let hello = ask(crate::proto::Request::SessionHello {
+            kind: Kind::Human,
+            name: Some("Dana".into()),
+            participant: None,
+        })
+        .unwrap()
+        .result;
+        let me = hello["participant"].as_str().unwrap().to_owned();
+        assert!(hello["session"]["participants"].is_array(), "{hello}");
+        let list = ask(crate::proto::Request::ParticipantList {})
+            .unwrap()
+            .result;
+        assert!(
+            list["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == me.as_str()),
+            "{list}"
+        );
+        // The merge is answered from the files; anything else is refused.
+        let v = ask(crate::proto::Request::MergeStatus {}).unwrap().result;
+        assert_eq!(v["clean"], false, "{v}");
+        let scene = crate::proto::Request::from_rpc("scene", Some(json!({}))).unwrap();
+        assert_eq!(ask(scene).err().map(|e| e.code), Some(Code::MergeConflict));
+        // No live session (in process): hello is refused as before.
+        let e = crate::server::handle_job(
+            &mut None,
+            None,
+            None,
+            r,
+            crate::proto::Request::SessionHello {
+                kind: Kind::Human,
+                name: None,
+                participant: None,
+            },
+            &job,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::MergeConflict, "{}", e.message);
+    }
+
+    #[test]
+    fn a_manifest_record_is_settled_without_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        a_manifest_record(r);
         assert_eq!(
             Session::open(r).err().map(|e| e.code),
             Some(Code::MergeConflict)

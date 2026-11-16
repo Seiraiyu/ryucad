@@ -10,6 +10,8 @@
 pub mod breakout;
 #[path = "../../../ryueda/tests/support/draw.rs"]
 pub mod draw;
+#[path = "../../../ryueda/tests/support/rp2040.rs"]
+pub mod rp2040;
 
 use ryueda::proto::Request;
 use ryueda_app::core::link::Daemon;
@@ -53,9 +55,9 @@ pub fn shared() -> &'static Path {
 
 /// `git` in `dir` without anyone's config (`base` holds the empty one), a
 /// fixed identity and dates.
-fn git_in(base: &Path, dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .env("GIT_CONFIG_GLOBAL", base.join("no-gitconfig"))
+fn git_cmd(base: &Path, dir: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.env("GIT_CONFIG_GLOBAL", base.join("no-gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "Test")
         .env("GIT_AUTHOR_EMAIL", "t@example.com")
@@ -71,15 +73,69 @@ fn git_in(base: &Path, dir: &Path, args: &[&str]) {
             "-c",
             "core.autocrlf=false",
         ])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
+        .current_dir(dir);
+    c
+}
+
+fn git_in(base: &Path, dir: &Path, args: &[&str]) {
+    let out = git_cmd(base, dir).args(args).output().unwrap();
     assert!(
         out.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// [`git`] that may fail (a merge that stops, a commit a hook refuses):
+/// whether it succeeded.
+pub fn git_ok(dir: &Path, args: &[&str]) -> bool {
+    git_cmd(shared(), dir)
+        .args(args)
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// The repository `dir` is in.
+pub fn top_of(dir: &Path) -> PathBuf {
+    let out = git_cmd(shared(), dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
+}
+
+/// `ryueda` in `dir`, in process; it must succeed: its result.
+pub fn cli(dir: &Path, args: &[&str]) -> Value {
+    let out = Command::new(ryueda_exe())
+        .current_dir(dir)
+        .env("RYUEDA_NO_DAEMON", "1")
+        .args(args)
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{args:?}: {e}: {}", String::from_utf8_lossy(&out.stdout)));
+    assert_eq!(v["ok"], true, "{args:?}: {v}");
+    v["result"].clone()
+}
+
+/// The breakout entered by its script and laid out in `board`.
+fn breakout_files(board: &Path) {
+    cli(board, &["init"]);
+    for (path, text) in breakout::footprints() {
+        let at = board.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+    for args in breakout::script() {
+        cli(board, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+    cli(board, &["layout"]);
 }
 
 /// `git` in `dir` without anyone's config, a fixed identity and dates
@@ -168,26 +224,7 @@ pub fn breakout(name: &str) -> PathBuf {
     let board = shared().join(name);
     let _ = std::fs::remove_dir_all(&board);
     std::fs::create_dir_all(&board).unwrap();
-    let run = |args: &[&str]| {
-        let out = Command::new(ryueda_exe())
-            .current_dir(&board)
-            .env("RYUEDA_NO_DAEMON", "1")
-            .args(args)
-            .output()
-            .unwrap();
-        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(v["ok"], true, "{args:?}: {v}");
-    };
-    run(&["init"]);
-    for (path, text) in breakout::footprints() {
-        let at = board.join(path);
-        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-        std::fs::write(at, text).unwrap();
-    }
-    for args in breakout::script() {
-        run(&args.iter().map(String::as_str).collect::<Vec<_>>());
-    }
-    run(&["layout"]);
+    breakout_files(&board);
     std::fs::canonicalize(board).unwrap()
 }
 
@@ -263,4 +300,142 @@ pub fn gpu() -> bool {
 pub fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Ours: R5 (r8) on the rails and C98 on SCL.
+pub const OURS: &[&[&str]] = &[
+    &[
+        "component",
+        "add",
+        "breakout",
+        "--of",
+        "r_4k7",
+        "--id",
+        "r8",
+        "--refdes",
+        "R5",
+    ],
+    &["connect", "breakout/r8/1", "rail:3V3"],
+    &["connect", "breakout/r8/2", "rail:GND"],
+    &[
+        "component",
+        "add",
+        "breakout",
+        "--of",
+        "c_100n",
+        "--id",
+        "c98",
+        "--refdes",
+        "C98",
+    ],
+    &["connect", "breakout/c98/1", "SCL"],
+];
+
+/// Theirs: another R5 (r9), C97 on SCL, and R1 47k: a designator clash,
+/// and both sides' new parts laid out in the same free space.
+pub const THEIRS: &[&[&str]] = &[
+    &[
+        "component",
+        "add",
+        "breakout",
+        "--of",
+        "r_4k7",
+        "--id",
+        "r9",
+        "--refdes",
+        "R5",
+    ],
+    &["connect", "breakout/r9/1", "rail:3V3"],
+    &["connect", "breakout/r9/2", "rail:GND"],
+    &[
+        "component",
+        "add",
+        "breakout",
+        "--of",
+        "c_100n",
+        "--id",
+        "c97",
+        "--refdes",
+        "C97",
+    ],
+    &["connect", "breakout/c97/1", "SCL"],
+    &["component", "edit", "breakout/r1", "--value", "47k"],
+];
+
+/// A merge of the breakout begun in a repository of its own,
+/// `shared()/<name>`, with the board in `board/`: base, `theirs` and
+/// `main` (ours) committed, then `git merge --no-commit theirs`. Answers
+/// the repository and the board.
+///
+/// #920: `ryueda init` installs ryueda's merge driver and hook into the
+/// repository its folder is in. It runs here only after asserting that
+/// this is the test's own; no test runs `ryueda git install`.
+pub fn merging(name: &str, ours: &[&[&str]], theirs: &[&[&str]]) -> (PathBuf, PathBuf) {
+    let top = shared().join(name);
+    let _ = std::fs::remove_dir_all(&top);
+    std::fs::create_dir_all(&top).unwrap();
+    git(&top, &["init", "-q"]);
+    let top = std::fs::canonicalize(top).unwrap();
+    let board = top.join("board");
+    std::fs::create_dir_all(&board).unwrap();
+    assert_eq!(
+        top_of(&board),
+        top,
+        "#920: the board's repository must be the test's own"
+    );
+    breakout_files(&board);
+    let commit = |m: &str| {
+        git(&top, &["add", "-A"]);
+        git(&top, &["commit", "-q", "-m", m]);
+    };
+    commit("base");
+    git(&top, &["checkout", "-q", "-b", "theirs"]);
+    for args in theirs {
+        cli(&board, args);
+    }
+    commit("theirs");
+    git(&top, &["checkout", "-q", "main"]);
+    for args in ours {
+        cli(&board, args);
+    }
+    commit("ours");
+    // `--no-commit`: the merge stops whether or not the driver did.
+    let _ = git_ok(&top, &["merge", "--no-commit", "-q", "theirs"]);
+    (top, std::fs::canonicalize(board).unwrap())
+}
+
+/// A merge whose one record is in `ryueda.json`: each side sets the
+/// project's property `rev` differently.
+pub fn manifest_merging(name: &str) -> (PathBuf, PathBuf) {
+    merging(
+        name,
+        &[&["project", "edit", "--property", "rev=ours"]],
+        &[&["project", "edit", "--property", "rev=theirs"]],
+    )
+}
+
+/// The RP2040 board entered by its script and laid out, committed in a
+/// repository of its own, then edited: C1's value, C8 deleted, C2 moved.
+/// `ryueda init` runs before the board's `git init`, as `breakout` does
+/// (into `shared()`'s repository, never the clone: #920).
+pub fn rp2040_in_git(name: &str) -> PathBuf {
+    let board = shared().join(name);
+    let _ = std::fs::remove_dir_all(&board);
+    std::fs::create_dir_all(&board).unwrap();
+    cli(&board, &["init"]);
+    for args in rp2040::script() {
+        cli(&board, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+    cli(&board, &["layout"]);
+    git(&board, &["init", "-q"]);
+    git(&board, &["add", "."]);
+    git(&board, &["commit", "-q", "-m", "laid out"]);
+    for args in [
+        vec!["component", "edit", "mitayi/c1", "--value", "1uF"],
+        vec!["component", "delete", "mitayi/c8"],
+        vec!["place", "mitayi", "--move", "shift C2 right 4"],
+    ] {
+        cli(&board, &args);
+    }
+    std::fs::canonicalize(board).unwrap()
 }

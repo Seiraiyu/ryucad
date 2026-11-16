@@ -10,6 +10,7 @@ pub mod history;
 pub mod keys;
 pub mod link;
 pub mod lists;
+pub mod merge;
 pub mod nav;
 pub mod paint;
 pub mod people;

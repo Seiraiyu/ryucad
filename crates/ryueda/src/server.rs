@@ -83,17 +83,53 @@ pub fn handle_job(
     // open: its status and resolutions are read from the files alone.
     let merge =
         matches!(req, Request::MergeStatus {} | Request::MergeResolve { .. }).then(|| req.clone());
-    match (
-        guarded(slot, root, |s| answer(s, live, me, req, job)),
-        merge,
-    ) {
-        (Err(e), Some(req))
-            if e.code == Code::MergeConflict
-                && e.details.get("path").and_then(Value::as_str) == Some(MANIFEST) =>
-        {
+    // A window opening over that record says hello and lists who is
+    // there: both are the live session's, which needs no project (plan
+    // 13.B).
+    let sessionless = matches!(
+        req,
+        Request::SessionHello { .. } | Request::ParticipantList {}
+    )
+    .then(|| req.clone());
+    let mut live = live;
+    let r = guarded(slot, root, |s| answer(s, live.as_deref_mut(), me, req, job));
+    match (r, merge, sessionless) {
+        (Err(e), Some(req), _) if manifest_record(&e) => {
             crate::validate::unloaded(root, req).map(Answer::json)
         }
-        (r, _) => r,
+        (Err(e), _, Some(req)) if manifest_record(&e) && live.is_some() => {
+            live_only(live, req).map(Answer::json)
+        }
+        (r, _, _) => r,
+    }
+}
+
+/// Whether `e` is a session refused because `ryueda.json` holds a merge's
+/// conflict record.
+fn manifest_record(e: &Error) -> bool {
+    e.code == Code::MergeConflict && e.details.get("path").and_then(Value::as_str) == Some(MANIFEST)
+}
+
+/// `session.hello` and `participant.list`, from the live session alone.
+fn live_only(live: Option<&mut Live<Eda>>, req: Request) -> Result<Value> {
+    match req {
+        Request::SessionHello {
+            kind,
+            name,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("session.hello"))?;
+            let id = live.hello(kind, name.as_deref(), participant.as_deref())?;
+            Ok(json!({"participant": id, "session": live.list()}))
+        }
+        // With no daemon, nobody is attached.
+        Request::ParticipantList {} => {
+            Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        }
+        other => Err(Error::new(
+            Code::Internal,
+            format!("{} needs the project", other.method()),
+        )),
     }
 }
 
@@ -1450,19 +1486,7 @@ fn dispatch(
             let who = live.caller(me);
             activity::undo(live, session, &who, entry, true)
         }
-        Request::SessionHello {
-            kind,
-            name,
-            participant,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("session.hello"))?;
-            let id = live.hello(kind, name.as_deref(), participant.as_deref())?;
-            Ok(json!({"participant": id, "session": live.list()}))
-        }
-        // With no daemon, nobody is attached.
-        Request::ParticipantList {} => {
-            Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
-        }
+        req @ (Request::SessionHello { .. } | Request::ParticipantList {}) => live_only(live, req),
         Request::HistoryLog { limit } => {
             crate::git::history(session.root(), &session.files(), limit.unwrap_or(50))
         }

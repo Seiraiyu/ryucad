@@ -12,6 +12,7 @@ use common::{agent, daemon, gpu};
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use ryueda_app::core::merge::{Batch, rows};
 use ryueda_app::ui::app::App;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -277,4 +278,68 @@ fn a_marked_five_hundred_part_sheet_pans_at_60_frames_a_second() {
             1000.0 / median
         );
     }
+}
+
+/// What the machine is doing, for the bars' lines.
+fn load() -> String {
+    std::fs::read_to_string("/proc/loadavg").unwrap_or_else(|_| "unknown".into())
+}
+
+#[test]
+#[ignore = "release: cargo test -p ryueda-app --release --test frames -- --ignored --nocapture"]
+fn the_conflict_panel_draws_within_2_s_and_a_resolve_within_1_s() {
+    if !gpu() {
+        return;
+    }
+    let (_top, board) = common::merging("bar-conflicts", common::OURS, common::THEIRS);
+    // Warm: the daemon has worked the merge out once; the bar is the window's.
+    agent(&board, "merge.status", json!({}));
+    let clash = |a: &App| {
+        a.opened().and_then(|w| w.merge.as_ref()).is_some_and(|m| {
+            !m.resolving && m.conflicts().iter().any(|c| c["kind"] == "refdes_clash")
+        })
+    };
+    let start = Instant::now();
+    let mut h = window(&board, egui::vec2(1400.0, 900.0));
+    while !clash(h.state()) {
+        assert!(
+            start.elapsed() < bar(Duration::from_secs(2)) * 5,
+            "no status"
+        );
+        h.step();
+    }
+    h.step();
+    let drawn = start.elapsed();
+    assert!(h.query_by_label("Conflicts").is_some());
+    let row = {
+        let m = h.state().opened().unwrap().merge.as_ref().unwrap();
+        rows(&m.status)
+            .into_iter()
+            .find(|r| r.kind == "refdes_clash")
+            .unwrap()
+    };
+    let t = Instant::now();
+    h.state_mut()
+        .opened_mut()
+        .unwrap()
+        .resolve(Batch::one(&row, &row.actions[0]));
+    let busy = |a: &App| {
+        a.opened()
+            .and_then(|w| w.merge.as_ref())
+            .is_some_and(|m| m.resolving || m.conflict(&row.id).is_some())
+    };
+    while busy(h.state()) {
+        assert!(
+            t.elapsed() < bar(Duration::from_secs(1)) * 5,
+            "no new status"
+        );
+        h.step();
+    }
+    let resolved = t.elapsed();
+    eprintln!(
+        "the breakout's merge: the panel drawn {drawn:?} after the window opened, a resolve's status in {resolved:?} (load {})",
+        load().trim()
+    );
+    assert!(drawn <= bar(Duration::from_secs(2)), "{drawn:?}");
+    assert!(resolved <= bar(Duration::from_secs(1)), "{resolved:?}");
 }
