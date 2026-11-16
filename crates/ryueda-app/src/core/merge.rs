@@ -535,6 +535,41 @@ pub fn resolution(b: &Batch, revs: &Revisions, unloaded: bool) -> ryueda::proto:
     }
 }
 
+/// A side of the merge shown read only (Show ours, Show theirs): the
+/// sheet as that side's commit draws it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Peek {
+    /// `ours` or `theirs`.
+    pub side: String,
+    pub commit: String,
+}
+
+impl Merge {
+    /// `ours` or `theirs` at the merge's commit.
+    pub fn side(&self, side: &str) -> Option<Peek> {
+        if !matches!(side, "ours" | "theirs") {
+            return None;
+        }
+        let commit = self.status[side]["commit"].as_str()?;
+        Some(Peek {
+            side: side.to_owned(),
+            commit: commit.to_owned(),
+        })
+    }
+}
+
+/// A scene's params with a side shown: `rev` at its commit, and no
+/// compare.
+pub fn peeked(mut p: Value, peek: Option<&Peek>) -> Value {
+    if let Some(k) = peek {
+        if let Some(o) = p.as_object_mut() {
+            o.remove("compare");
+        }
+        p["rev"] = serde_json::json!(k.commit);
+    }
+    p
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -846,5 +881,18 @@ pub(crate) mod tests {
             Merge::resolved(None, ids, Err(Error::new(Code::NotMerging, "no"))),
             None
         );
+    }
+
+    #[test]
+    fn a_side_is_its_commit_asked_read_only() {
+        let m = Merge::of(status());
+        let theirs = m.side("theirs").unwrap();
+        assert_eq!((theirs.side.as_str(), theirs.commit.len()), ("theirs", 40));
+        assert!(m.side("base").is_none(), "only ours and theirs are shown");
+        let p = json!({"theme": "light", "block": "breakout", "compare": "HEAD"});
+        let q = peeked(p.clone(), Some(&theirs));
+        assert_eq!(q["rev"], json!("b".repeat(40)));
+        assert!(q.get("compare").is_none(), "a side is drawn plain");
+        assert_eq!(peeked(p.clone(), None), p);
     }
 }

@@ -271,6 +271,11 @@ pub struct Window {
     pub revisions: Revisions,
     /// The project doesn't open: `ryueda.json` holds a merge's record.
     pub unloaded: bool,
+    /// A side of the merge shown read only (Show ours, Show theirs).
+    pub peek: Option<crate::core::merge::Peek>,
+    /// References to frame once the scene now asked for arrives (a
+    /// conflict's Show).
+    frame_refs: Vec<String>,
 }
 
 impl Window {
@@ -333,6 +338,8 @@ impl Window {
             merge: None,
             revisions: Revisions::default(),
             unloaded: false,
+            peek: None,
+            frame_refs: Vec::new(),
         };
         w.ask_all();
         Ok(w)
@@ -392,7 +399,10 @@ impl Window {
     }
 
     fn scene_params(&self, sheet: Option<&str>) -> Value {
-        scene_params(&self.shown, self.dark, &self.blink, sheet)
+        crate::core::merge::peeked(
+            scene_params(&self.shown, self.dark, &self.blink, sheet),
+            self.peek.as_ref(),
+        )
     }
 
     /// Compares with `rev`, or stops (`None`): `compare.set` for this
@@ -528,6 +538,59 @@ impl Window {
         }
     }
 
+    /// A conflict's Show: its references selected and framed on the
+    /// working sheet that draws them (a layout area's first sheet).
+    pub fn show_conflict(&mut self, row: &crate::core::merge::Row) {
+        self.peek = None;
+        let Some(block) = row.block.clone().or_else(|| {
+            row.refs
+                .first()
+                .and_then(|r| r.split('/').next())
+                .map(str::to_owned)
+        }) else {
+            return;
+        };
+        let sheet = row.sheets.first().cloned().or_else(|| {
+            row.refs
+                .iter()
+                .find_map(|r| self.nav.reach(&block, r).into_iter().next())
+        });
+        if !row.refs.is_empty() && row.kind != "layout_conflict" {
+            self.selection = row.refs.clone();
+            self.select.due();
+            self.ask_props();
+        }
+        self.frame_refs = row.refs.clone();
+        let layer = self.shown.layer.clone();
+        self.camera = None;
+        self.show(Some(block), sheet, layer);
+    }
+
+    /// Show ours or Show theirs: the conflict's sheet as that side's
+    /// commit draws it, read only.
+    pub fn show_side(&mut self, row: &crate::core::merge::Row, side: &str) {
+        let Some(p) = self.merge.as_ref().and_then(|m| m.side(side)) else {
+            return;
+        };
+        self.peek = Some(p);
+        self.frame_refs = row.refs.clone();
+        let block = row.block.clone().or_else(|| self.shown.block.clone());
+        let sheet = row
+            .sheets
+            .first()
+            .cloned()
+            .or_else(|| self.shown.sheet.clone());
+        let layer = self.shown.layer.clone();
+        self.show(block, sheet, layer);
+    }
+
+    /// The bar's Back to working.
+    pub fn back_to_working(&mut self) {
+        if self.peek.take().is_some() {
+            self.ask_scene();
+        }
+    }
+
     /// Asks the shown sheet's scene.
     pub fn ask_scene(&mut self) {
         let p = self.scene_params(self.shown.sheet.clone().as_deref());
@@ -537,7 +600,7 @@ impl Window {
     /// Asks the shown block's other sheets, aside; not for a revision's
     /// sheet (the navigator's counts come from the compare scene).
     fn ask_other_sheets(&mut self) {
-        if self.blink.read_only() {
+        if self.blink.read_only() || self.peek.is_some() {
             return;
         }
         let Some(sc) = &self.scene else { return };
@@ -636,7 +699,15 @@ impl Window {
                     .or_else(|| s.owner(&r).map(|i| s.owners[i].kind.clone()))
             })
             .unwrap_or_default();
-        self.props = Some(described(&r, &kind, self.blink.of.as_deref(), ghost));
+        self.props = Some(described(
+            &r,
+            &kind,
+            self.peek
+                .as_ref()
+                .map(|p| p.side.as_str())
+                .or(self.blink.of.as_deref()),
+            ghost,
+        ));
         self.described = Some(r);
     }
 
@@ -892,16 +963,23 @@ impl Window {
                 }
                 self.nav.scene(&sc);
                 self.findings.sheet(&sc.findings);
-                if let Some(r) = self.frame_ref.take() {
+                let wanted: Vec<String> = self
+                    .frame_ref
+                    .take()
+                    .into_iter()
+                    .chain(std::mem::take(&mut self.frame_refs))
+                    .collect();
+                if !wanted.is_empty() {
+                    let hit = |r: &str| wanted.iter().any(|w| w == r);
                     let boxes = sc
                         .owners
                         .iter()
-                        .filter(|o| o.reference == r || o.net.as_deref() == Some(r.as_str()))
+                        .filter(|o| hit(&o.reference) || o.net.as_deref().is_some_and(hit))
                         .filter_map(|o| o.boxed)
                         .chain(
                             sc.ghosts
                                 .iter()
-                                .filter(|g| g.reference == r)
+                                .filter(|g| hit(&g.reference))
                                 .filter_map(|g| g.boxed),
                         );
                     self.frame = boxes.reduce(|a, b| {
@@ -1112,6 +1190,9 @@ impl Window {
             }
             "merge.changed" => {
                 self.merge = Merge::noted(self.merge.as_ref(), params);
+                if self.merge.is_none() {
+                    self.peek = None;
+                }
             }
             "resync" => {
                 self.send(req("participant.list", json!({})), Why::People);
