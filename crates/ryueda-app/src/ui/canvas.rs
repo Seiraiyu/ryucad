@@ -174,6 +174,33 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
         sc.paper.colour,
     );
     let view = visible(&cam, px);
+    // Halos (#879) under everything the owners draw: each item's line
+    // widened by 3 points a side.
+    if !m.halos.is_empty() {
+        let halo: std::collections::BTreeMap<usize, Color32> = m.halos.iter().copied().collect();
+        for i in cut.visible(view) {
+            let it = &sc.items[i];
+            let Some(c) = it.owner.and_then(|o| halo.get(&o)) else {
+                continue;
+            };
+            if !layer_on(w, it.layer.as_deref()) {
+                continue;
+            }
+            let pts: Vec<Pos2> = cut.lines[i].iter().map(|p| screen(*p)).collect();
+            let width = match &it.shape {
+                Shape::Polyline { width, .. }
+                | Shape::Bus { width, .. }
+                | Shape::Arc { width, .. }
+                | Shape::Bezier { width, .. }
+                | Shape::Circle { width, .. } => *width,
+                _ => 0.0,
+            };
+            painter.add(egui::Shape::line(
+                pts,
+                Stroke::new(((width as f32) * zoom).max(1.0) + 6.0, *c),
+            ));
+        }
+    }
     for i in cut.visible(view) {
         let it = &sc.items[i];
         if !layer_on(w, it.layer.as_deref()) {

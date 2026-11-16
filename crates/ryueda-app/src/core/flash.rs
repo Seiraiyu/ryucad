@@ -43,6 +43,12 @@ impl Flash {
         }
     }
 
+    /// Starts `reference` glowing at `at`: a write the window saw, or a
+    /// test's (a start ahead of now holds it at full strength).
+    pub fn start(&mut self, reference: &str, at: Instant) {
+        self.started.insert(reference.to_owned(), at);
+    }
+
     /// How strongly `reference` glows: 1 when it changed, falling to 0
     /// over [`GLOW`].
     pub fn strength(&self, reference: &str, now: Instant) -> f32 {
@@ -152,5 +158,17 @@ mod tests {
         let mut f = Flash::default();
         f.arrived(Some(&working), &then, t0);
         assert!(f.glowing().next().is_none(), "blinking isn't a change");
+    }
+
+    #[test]
+    fn a_flash_started_by_hand_glows() {
+        let t0 = Instant::now();
+        let mut f = Flash::default();
+        f.start("top/r1", t0 + Duration::from_secs(3600));
+        assert_eq!(
+            f.strength("top/r1", t0),
+            1.0,
+            "held while its start is ahead"
+        );
     }
 }

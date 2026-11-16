@@ -25,6 +25,8 @@ pub struct Mark {
 pub struct Marks {
     pub owners: Vec<Option<Mark>>,
     pub pins: Vec<(usize, Color32)>,
+    /// Owners with a changed halo, and its colour (its alpha the fade).
+    pub halos: Vec<(usize, Color32)>,
 }
 
 /// The owners a selected reference paints: its own, and for a net every
@@ -50,17 +52,21 @@ pub fn marks(
     let mut m = Marks {
         owners: vec![None; scene.owners.len()],
         pins: Vec::new(),
+        halos: Vec::new(),
     };
-    // Lowest precedence first; later writes win.
+    // Changed flashes (#879): a halo under the owner in the theme's
+    // diff_changed, fading; never a recolour, so never a selection.
+    let halo = scene
+        .paper
+        .diff
+        .map_or_else(|| color32(highlight(Style::Changed)), |d| d.changed);
     for (i, o) in scene.owners.iter().enumerate() {
         let s = flash.strength(&o.reference, now);
         if s > 0.0 {
-            m.owners[i] = Some(Mark {
-                fill: color32(highlight(Style::Changed)).gamma_multiply(s),
-                edge: None,
-            });
+            m.halos.push((i, halo.gamma_multiply(s)));
         }
     }
+    // Lowest precedence first; later writes win.
     // Compare colours (plan 13.A): over flashes, under everything else.
     if let Some(d) = scene.paper.diff {
         for (i, o) in scene.owners.iter().enumerate() {
@@ -196,24 +202,25 @@ mod tests {
     }
 
     #[test]
-    fn a_flash_fades_the_changed_colour() {
-        let s = Scene::from_json(&small()).unwrap();
+    fn a_flash_is_a_fading_halo_never_a_recolour() {
+        use crate::core::scene::tests::compared;
+        let s = Scene::from_json(&compared()).unwrap();
         let people = People::default();
-        let mut v = small();
-        v["owners"][0]["hash"] = json!("moved");
-        let new = Scene::from_json(&v).unwrap();
         let mut flash = crate::core::flash::Flash::default();
         let now = std::time::Instant::now();
-        flash.arrived(Some(&s), &new, now);
-        let m = marks(&new, "me", &[], None, &people, &flash, now);
-        assert_eq!(
-            m.owners[0].unwrap().fill,
-            color32(highlight(Style::Changed))
-        );
+        flash.start("top/label:sda@1", now);
+        let m = marks(&s, "me", &[], None, &people, &flash, now);
+        assert_eq!(m.owners[2], None, "a flash recolours nothing");
+        let changed = s.paper.diff.unwrap().changed;
+        assert_eq!(m.halos, [(2, changed)]);
         let later = now + std::time::Duration::from_secs(1);
-        let faded = marks(&new, "me", &[], None, &people, &flash, later).owners[0]
-            .unwrap()
-            .fill;
+        let faded = marks(&s, "me", &[], None, &people, &flash, later).halos[0].1;
         assert!(faded.a() < 255 && faded.a() > 0, "{faded:?}");
+        // A plain scene from before paper.diff: ryu-session's changed colour.
+        let mut v = crate::core::scene::tests::small();
+        v["paper"].as_object_mut().unwrap().remove("diff");
+        let plain = Scene::from_json(&v).unwrap();
+        let m = marks(&plain, "me", &[], None, &people, &flash, now);
+        assert_eq!(m.halos[0].1, color32(highlight(Style::Changed)));
     }
 }
