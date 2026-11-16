@@ -11,12 +11,14 @@
 
 mod flatten;
 mod layer;
+mod offset;
 mod rings;
 mod snap;
 mod sweep;
 
 pub use flatten::{FlattenOptions, disc, flatten_hole, flatten_shape};
 pub use layer::{merge_layer, merge_layers};
+pub use offset::{close, grow, open, shrink};
 
 use ryu_board::geom::{Nm, Point, Rect, orient};
 
