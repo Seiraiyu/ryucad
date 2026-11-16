@@ -1,8 +1,9 @@
 //! Bit-exact boards on every platform and CPU level:
 //! `tests/golden/ryudfm.txt` holds the hashes of each committed board's
-//! model, of every layer's shapes, and of its default renders (PNG from
-//! above and below, and SVG), for every board `manifest.txt` declares but
-//! the pinned ones. After a deliberate change, or a board added,
+//! model, of every layer's shapes, of its default renders (PNG from
+//! above and below, and SVG), and of its copper (islands, findings, gaps
+//! under 0.2 mm, merged layers and a merged render), for every board
+//! `manifest.txt` declares but the pinned ones. After a deliberate change, or a board added,
 //! regenerate with `UPDATE_GOLDEN=1 cargo test -p ryudfm --test
 //! determinism` and review the diff.
 
@@ -62,6 +63,68 @@ fn boards_are_bit_exact() {
                 .section(&format!("{}.render.{name}", d.name))
                 .bytes(&a.binary.unwrap());
         }
+        // The copper, from the board read again (renders above built its
+        // shapes; the copper is built from nothing).
+        let cb = ryudfm::copper::CopperBoard::new(std::sync::Arc::new(
+            read_path(&corpus.join(job), &options).unwrap(),
+        ));
+        {
+            let mut s = golden.section(&format!("{}.copper.islands", d.name));
+            for i in cb.copper.islands() {
+                for p in &i.pieces {
+                    s.str(&cb.island_name(None, p));
+                }
+                s.str("|");
+                for h in &i.holes {
+                    s.str(&cb.reference(None, *h));
+                }
+                s.str(";");
+            }
+        }
+        golden
+            .section(&format!("{}.copper.findings", d.name))
+            .str(&serde_json::to_string(&ryudfm::copper::findings(&cb, None)).unwrap());
+        {
+            let mut s = golden.section(&format!("{}.copper.clearance", d.name));
+            for l in 0..cb.built.copper.len() {
+                for g in cb.gaps(l, 200_000).iter() {
+                    s.str(&cb.island_name(None, &g.a));
+                    s.str(&cb.island_name(None, &g.b));
+                    s.i64(g.distance.nm);
+                    s.i64(g.distance.bound);
+                }
+            }
+        }
+        {
+            let mut s = golden.section(&format!("{}.copper.merged", d.name));
+            for l in 0..cb.built.copper.len() {
+                let m = cb.merged(l);
+                for p in &m.polygons {
+                    for r in p.rings() {
+                        for q in r {
+                            s.i64(q.x);
+                            s.i64(q.y);
+                        }
+                        s.str("|");
+                    }
+                }
+                s.i64(m.bound);
+            }
+        }
+        let a = ryudfm::render::render_copper(
+            &cb,
+            None,
+            &Args {
+                merged: true,
+                format: Some(Format::Png),
+                ..Args::default()
+            },
+            ryudfm::units::Unit::Mm,
+        )
+        .unwrap();
+        golden
+            .section(&format!("{}.copper.render", d.name))
+            .bytes(&a.binary.unwrap());
     }
     golden.finish();
 }
