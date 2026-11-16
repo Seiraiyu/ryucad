@@ -10,6 +10,8 @@
 pub mod breakout;
 #[path = "../../../ryueda/tests/support/draw.rs"]
 pub mod draw;
+#[path = "../../../ryueda/tests/support/rp2040.rs"]
+pub mod rp2040;
 
 use ryueda::proto::Request;
 use ryueda_app::core::link::Daemon;
@@ -410,4 +412,30 @@ pub fn manifest_merging(name: &str) -> (PathBuf, PathBuf) {
         &[&["project", "edit", "--property", "rev=ours"]],
         &[&["project", "edit", "--property", "rev=theirs"]],
     )
+}
+
+/// The RP2040 board entered by its script and laid out, committed in a
+/// repository of its own, then edited: C1's value, C8 deleted, C2 moved.
+/// `ryueda init` runs before the board's `git init`, as `breakout` does
+/// (into `shared()`'s repository, never the clone: #920).
+pub fn rp2040_in_git(name: &str) -> PathBuf {
+    let board = shared().join(name);
+    let _ = std::fs::remove_dir_all(&board);
+    std::fs::create_dir_all(&board).unwrap();
+    cli(&board, &["init"]);
+    for args in rp2040::script() {
+        cli(&board, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+    cli(&board, &["layout"]);
+    git(&board, &["init", "-q"]);
+    git(&board, &["add", "."]);
+    git(&board, &["commit", "-q", "-m", "laid out"]);
+    for args in [
+        vec!["component", "edit", "mitayi/c1", "--value", "1uF"],
+        vec!["component", "delete", "mitayi/c8"],
+        vec!["place", "mitayi", "--move", "shift C2 right 4"],
+    ] {
+        cli(&board, &args);
+    }
+    std::fs::canonicalize(board).unwrap()
 }

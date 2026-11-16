@@ -21,6 +21,10 @@ const CHANNEL: u8 = 24;
 const SHARE: f64 = 0.01;
 
 fn loaded(root: &Path, dark: bool) -> Harness<'static, App> {
+    loaded_block(root, dark, "breakout")
+}
+
+fn loaded_block(root: &Path, dark: bool, block: &str) -> Harness<'static, App> {
     let root = root.to_owned();
     let mut h = Harness::builder()
         .with_size(egui::vec2(W, H))
@@ -37,7 +41,7 @@ fn loaded(root: &Path, dark: bool) -> Harness<'static, App> {
         .state()
         .opened()
         .and_then(|w| w.scene.as_ref())
-        .is_some_and(|s| s.theme == want && s.block == "breakout")
+        .is_some_and(|s| s.theme == want && s.block == block)
         || !h.state().opened().is_some_and(|w| w.idle())
     {
         assert!(Instant::now() < end, "the sheet never drew");
@@ -273,4 +277,76 @@ fn the_conflict_panel_looks_as_it_did_and_is_named() {
         })
         .count();
     assert_eq!(unnamed, 0, "unnamed buttons");
+}
+
+/// Design 688's visual review: the breakout's and the RP2040's compare
+/// against HEAD and the breakout's merge, light and dark, as one contact
+/// sheet (`review-13b.png` in `RYUEDA_REVIEW_DIR`), for `cox visual`.
+#[test]
+#[ignore = "RYUEDA_REVIEW_DIR=<dir> cargo test -p ryueda-app --test snapshot review_pictures -- --ignored --test-threads=1"]
+fn review_pictures() {
+    let _one = one_at_a_time();
+    assert!(gpu(), "the review needs an adapter");
+    let dir =
+        std::path::PathBuf::from(std::env::var("RYUEDA_REVIEW_DIR").expect("RYUEDA_REVIEW_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wait = |h: &mut Harness<'static, App>, done: &dyn Fn(&App) -> bool| {
+        let end = Instant::now() + Duration::from_secs(120);
+        while !done(h.state()) {
+            assert!(Instant::now() < end, "never drew");
+            h.step();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        h.state_mut().opened_mut().unwrap().flash.clear();
+        for _ in 0..4 {
+            h.step();
+        }
+    };
+    let mut shots = Vec::new();
+    for (root, block) in [
+        (breakout_in_git("review-breakout"), "breakout"),
+        (common::rp2040_in_git("review-rp2040"), "mitayi"),
+    ] {
+        for dark in [false, true] {
+            let mut h = loaded_block(&root, dark, block);
+            agent(&root, "compare.set", json!({"rev": "HEAD"}));
+            wait(&mut h, &|a: &App| {
+                a.opened().is_some_and(|w| {
+                    w.idle() && w.scene.as_ref().is_some_and(|s| s.against.is_some())
+                })
+            });
+            shots.push(h.render().unwrap());
+            agent(&root, "compare.set", json!({"off": true}));
+        }
+    }
+    let (_top, board) = common::merging("review-merge", common::OURS, common::THEIRS);
+    for dark in [false, true] {
+        let root = board.clone();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(W, H))
+            .wgpu()
+            .build_eframe(move |cc| App::open(&cc.egui_ctx, &root, daemon()));
+        h.ctx.set_theme(if dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        wait(&mut h, &|a: &App| {
+            a.opened().is_some_and(|w| {
+                w.idle()
+                    && w.merge
+                        .as_ref()
+                        .is_some_and(|m| m.conflicts().iter().any(|c| c["kind"] == "refdes_clash"))
+            })
+        });
+        shots.push(h.render().unwrap());
+    }
+    // Light on the left, dark on the right; a row each.
+    let (w, h) = shots[0].dimensions();
+    let mut sheet = image::RgbaImage::new(w * 2, h * 3);
+    for (i, img) in shots.iter().enumerate() {
+        let (x, y) = (w * (i as u32 % 2), h * (i as u32 / 2));
+        image::imageops::overlay(&mut sheet, img, i64::from(x), i64::from(y));
+    }
+    sheet.save(dir.join("review-13b.png")).unwrap();
 }
