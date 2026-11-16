@@ -514,6 +514,21 @@ impl CopperBoard {
         m
     }
 
+    /// Whether an item is a trace: a line or an arc on a copper layer.
+    /// (Shapes don't say: a round pen's line is built as a region.)
+    pub fn is_trace(&self, key: &Key) -> bool {
+        let Key::Feature { layer, index } = *key else {
+            return false;
+        };
+        self.copper.item(key).is_some()
+            && self.board.steps[self.built.step].layers[layer as usize]
+                .features()
+                .get(index as usize)
+                .is_some_and(|f| {
+                    matches!(f.kind, FeatureKind::Line { .. } | FeatureKind::Arc { .. })
+                })
+    }
+
     /// The nets each island's items claim, found once.
     pub fn claims(&self) -> &BTreeMap<IslandId<Key>, Vec<String>> {
         self.claims.get_or_init(|| {

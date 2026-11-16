@@ -43,6 +43,10 @@ tempfile = "3"
 name = "read"
 harness = false
 
+[[bench]]
+name = "copper"
+harness = false
+
 # musl's allocator is slow under multithreaded allocation; ryucad's and
 # ryueda's release binaries take mimalloc for the same reason.
 [target.'cfg(target_env = "musl")'.dependencies]
