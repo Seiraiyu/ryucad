@@ -4650,6 +4650,7 @@ pub(crate) mod tests {
         // `painted_frame_model()` both call), without paints.
         let (model, _) = painted_frame_model();
         let data = ryustep::PartData {
+            aspects: Vec::new(),
             products: vec![ryustep::ProductData {
                 product: 0,
                 material: Some(ryustep::MaterialData {
