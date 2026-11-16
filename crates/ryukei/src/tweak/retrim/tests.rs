@@ -911,10 +911,13 @@ fn ctc_02s_carried_cylinders_are_apart_over_near_boxes() {
 
 /// A committed cut's untouched pair (plan 21.A, census VI): carried over
 /// the rung's box (the work cut) and met, as main's narrowed build meets
-/// them, the pair is `Uncertain` within a rung's cap. Task 7 adds that
-/// once pinned they are never met.
-fn untouched_pair(input: &[u8], work: &[u8]) -> (Body, Vec<FaceId>) {
+/// them, the pair is `Uncertain` within a rung's cap. Neither face of the
+/// input cut touches a change, and both are left as they are: a narrowed
+/// build pins both, copies them with their input edges, and never meets
+/// them. Where the pair shares an input edge (`shared`), it is kept.
+fn untouched_pair(input: &[u8], work: &[u8], shared: bool) {
     use crate::codec::decode_body;
+    use std::collections::BTreeSet;
     let input = decode_body(input).unwrap();
     let work = decode_body(work).unwrap();
     let pair: Vec<FaceId> = work.faces().collect();
@@ -932,12 +935,49 @@ fn untouched_pair(input: &[u8], work: &[u8]) -> (Body, Vec<FaceId>) {
         crate::intersect::face_face_in((&work, pair[0]), (&work, pair[1]), &m)
     });
     assert!(met.is_err(), "met over the rung's box: {met:?}");
-    (input, inputs)
+    // The input cut is the pair and every face sharing a vertex with
+    // either; census VI found no changed face among them, so none is
+    // changed here. Both faces of the pair are pinned.
+    let region = super::region::Region {
+        changed: BTreeSet::new(),
+        faces: input.faces().collect(),
+        frontier: Default::default(),
+    };
+    let still = |f: FaceId| region.faces.contains(&f);
+    let pins = super::near::pinned(&input, &region, &still, &BTreeSet::new());
+    for &f in &inputs {
+        assert!(pins.contains(&f), "{f:?} not pinned: {pins:?}");
+    }
+    // Built pinned: copied with their own edges, the shared ones too, and
+    // never a pair of the table.
+    let rest = region.without(&input, &pins);
+    let ws = BTreeMap::new();
+    // unmetered: a unit test.
+    let w = super::body::work_body(K, &input, &rest, &ws, &crate::work::Meter::free())
+        .unwrap()
+        .pinning(&pins);
+    let back: BTreeMap<FaceId, FaceId> = w.origin.iter().map(|(&wf, &i)| (i, wf)).collect();
+    let (a, b) = (back[&inputs[0]], back[&inputs[1]]);
+    assert!(w.pinned.contains(&a) && w.pinned.contains(&b));
+    assert!(!w.pairs().contains(&(a.min(b), a.max(b))));
+    let kept = w
+        .body
+        .edges()
+        .filter(|&e| {
+            let fs: Vec<FaceId> = w
+                .body
+                .edge_fins(e)
+                .map(|fin| w.body.loops[w.body.fins[fin].loop_].face)
+                .collect();
+            fs.contains(&a) && fs.contains(&b)
+        })
+        .count();
+    assert_eq!(kept > 0, shared, "the pair's shared input edges: {kept}");
 }
 
 /// FTC 07 rd's rung-3 pair after 20.B (#652, census V and VI): torus
 /// `14131c92` and plane `9d1d527c`, both touching no change, overlapping,
-/// sharing no input edge (census VI).
+/// sharing no input edge (census VI), so no shared edge is asserted.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -947,6 +987,7 @@ fn ftc_07s_untouched_pair_is_pinned() {
     untouched_pair(
         include_bytes!("../../../tests/data/nist_ftc_07_pinned_input.body"),
         include_bytes!("../../../tests/data/nist_ftc_07_pinned_work.body"),
+        false,
     );
 }
 
@@ -963,6 +1004,7 @@ fn ctc_02s_untouched_pair_is_pinned() {
     untouched_pair(
         include_bytes!("../../../tests/data/nist_ctc_02_pinned_input.body"),
         include_bytes!("../../../tests/data/nist_ctc_02_pinned_work.body"),
+        true,
     );
 }
 
