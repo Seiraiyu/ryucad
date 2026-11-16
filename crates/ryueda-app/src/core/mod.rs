@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod command;
+pub mod compare;
 pub mod flash;
 pub mod geom;
 pub mod keys;
