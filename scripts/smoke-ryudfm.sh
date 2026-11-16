@@ -1,7 +1,8 @@
 #!/bin/sh
 # Drives a built ryudfm binary through a short agent session: a project,
 # the committed minimal-clean board imported from its archive (a dry run,
-# then for real), inspected, rendered as PNG and SVG and checked, then
+# then for real), inspected, rendered as PNG and SVG and checked, its
+# copper's islands, gaps and a distance listed, merged copper drawn, then
 # updated from its folder, the update undone and redone through the
 # daemon, the activity log, the daemon's status and stop, and a check in
 # process.
@@ -65,6 +66,14 @@ run render minimal-clean --out top.png --size 400
 run render minimal-clean --side bottom --out bottom.svg --size 400
 [ -s bottom.svg ] || { echo "FAIL no SVG written" && exit 1; }
 run check
+run nets minimal-clean --limit 5
+has '"islands"' "nets lists the islands"
+run clearance minimal-clean --below 0.2
+has '"pairs"' "clearance lists pairs"
+run measure minimal-clean minimal-clean/pcb/net/GND minimal-clean/pcb/net/+5
+has '"distance_nm"' "measure gives a distance"
+run render minimal-clean --merged --out merged.png --size 400
+[ -s merged.png ] || { echo "FAIL no merged PNG written" && exit 1; }
 run import jobs/minimal-clean --update minimal-clean
 [ -d boards/minimal-clean/input ] || { echo "FAIL the update didn't commit the folder" && exit 1; }
 [ ! -f boards/minimal-clean/input.tgz ] || { echo "FAIL the update left the archive" && exit 1; }
