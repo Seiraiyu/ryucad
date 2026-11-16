@@ -136,6 +136,13 @@ pub trait Serve: Product + prefs::Schema {
     );
     /// How often a watched daemon checks the files, in milliseconds.
     fn poll_ms() -> u64;
+    /// `(quiet, max)` in milliseconds: a watched daemon publishes what
+    /// requests changed once no request has started or finished for
+    /// `quiet`, or `max` after the first unpublished change
+    /// ([`publish::Coalesce`], #849).
+    fn publish_ms() -> (u64, u64) {
+        (publish::QUIET_MS, publish::MAX_MS)
+    }
     /// A new app window said hello: ryucad puts the project first among
     /// the recent ones.
     fn window_opened(root: &std::path::Path);
@@ -272,6 +279,11 @@ pub(crate) mod testing {
             // answered: the order requests held the lock in (#849).
             if let Some(n) = req.1.get("order").and_then(Value::as_u64) {
                 session.get_or_insert_with(Vec::new).push(n.to_string());
+            }
+            // Marks a change for the watcher to publish (#849).
+            if req.0 == "mark" {
+                live.coalesce.mark(std::time::Instant::now());
+                return Ok(crate::rpc::Answer::json(json!({"method": "mark"})));
             }
             if req.0 == "long" || req.0 == "write" {
                 let stage = job.begin(crate::job::Phase::Rebuild, "units", 2000);
