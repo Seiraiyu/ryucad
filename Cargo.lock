@@ -4977,6 +4977,7 @@ dependencies = [
  "ryu-draw",
  "ryu-git",
  "ryu-math",
+ "ryu-review",
  "ryu-session",
  "ryu-standards",
  "ryucad-doc",

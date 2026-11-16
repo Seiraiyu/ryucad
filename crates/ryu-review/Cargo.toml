@@ -22,3 +22,7 @@ testing = []
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "client"
+required-features = ["testing"]
