@@ -4,7 +4,8 @@
 //! be read is an error (`source: project` for its file and input, `odb`
 //! for the reader's refusal), each fault the reader recorded an error and
 //! each warning a warning. Any error fails it with `check_failed`, the
-//! report in its details. Stage 2's rules join these findings.
+//! report in its details. The copper's netlist compare joins them
+//! (`source: copper`; `copper::findings`), and stage 2's rules will.
 
 use crate::codes;
 use crate::error::{Code, Error, Result};
@@ -96,7 +97,11 @@ pub fn project(session: &Session, only: Option<&str>) -> Result<Value> {
     let mut findings = Vec::new();
     for id in &ids {
         match fresh.board(id) {
-            Ok(b) => findings.extend(board(&b, Some(id))),
+            Ok(b) => {
+                findings.extend(board(&b, Some(id)));
+                let cb = crate::copper::CopperBoard::new(b);
+                findings.extend(crate::copper::findings(&cb, Some(id)));
+            }
             Err(e) => findings.push(refused(&e, Some(id))),
         }
     }
@@ -110,7 +115,12 @@ pub fn path(path: &std::path::Path, step: Option<&str>) -> Result<Value> {
         ..Default::default()
     };
     let findings = match crate::odb::read_path(path, &options) {
-        Ok(b) => board(&b, None),
+        Ok(b) => {
+            let mut f = board(&b, None);
+            let cb = crate::copper::CopperBoard::new(std::sync::Arc::new(b));
+            f.extend(crate::copper::findings(&cb, None));
+            f
+        }
         Err(e) => vec![refused(&codes::error(&e), None)],
     };
     report(json!({"path": path}), findings)

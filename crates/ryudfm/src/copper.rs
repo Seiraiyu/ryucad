@@ -528,6 +528,144 @@ impl CopperBoard {
     }
 }
 
+/// The compare's findings as `check` reports them (`source: copper`):
+/// opens and shorts are errors, the rest warnings.
+pub fn findings(cb: &CopperBoard, prefix: Option<&str>) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let finding = |code: Code, severity: &str, message: String, details: serde_json::Value| {
+        json!({
+            "code": code,
+            "severity": severity,
+            "source": "copper",
+            "board": prefix,
+            "message": message,
+            "details": details,
+        })
+    };
+    let points = |keys: &[Key]| -> Vec<serde_json::Value> {
+        keys.iter().map(|k| cb.point_json(prefix, *k)).collect()
+    };
+    let island = |id: &IslandId<Key>| cb.island_name(prefix, id);
+    let mut out = Vec::new();
+    match cb.built.source {
+        Source::Cad => {}
+        Source::Pins => out.push(finding(
+            Code::NetlistFromPins,
+            "warning",
+            "the job has no CAD netlist: its components' pins are compared".into(),
+            json!({"points": cb.built.layout.points.len()}),
+        )),
+        Source::None => out.push(finding(
+            Code::NetlistMissing,
+            "warning",
+            "the job has no CAD netlist and no pin with a net: no open or short is judged".into(),
+            json!({}),
+        )),
+    }
+    if !cb.built.left_out.is_empty() {
+        let n = cb.built.left_out.len();
+        out.push(finding(
+            Code::CopperIncomplete,
+            "warning",
+            format!(
+                "{n} copper or drill feature(s) have no shape and are left out; opens and shorts near them are in doubt"
+            ),
+            json!({
+                "count": n,
+                "left_out": cb.built.left_out.iter().take(100).map(|k| cb.reference(prefix, *k)).collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    for o in &cb.report.opens {
+        out.push(finding(
+            Code::NetOpen,
+            "error",
+            format!(
+                "net {} is open: its points lie on {} islands",
+                o.net,
+                o.islands.len()
+            ),
+            json!({
+                "net": o.net,
+                "islands": o.islands.iter().map(|(id, ks)| json!({"island": island(id), "points": points(ks)})).collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    for s in &cb.report.shorts {
+        out.push(finding(
+            Code::NetShort,
+            "error",
+            format!(
+                "island {} joins nets {}",
+                island(&s.island),
+                s.nets
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            json!({
+                "island": island(&s.island),
+                "nets": s.nets.iter().map(|(n, ks)| json!({"net": n, "points": points(ks)})).collect::<Vec<_>>(),
+                "contacts": s.contacts.iter().map(|(a, b)| [cb.reference(prefix, *a), cb.reference(prefix, *b)]).collect::<Vec<_>>(),
+                "holes": s.holes.iter().map(|h| cb.reference(prefix, *h)).collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    for o in &cb.report.off_copper {
+        out.push(finding(
+            Code::NetlistPointOffCopper,
+            "warning",
+            format!(
+                "a point of net {} lies on {}",
+                o.net,
+                if o.uncertain {
+                    "copper the bounds can't place"
+                } else {
+                    "no copper"
+                }
+            ),
+            json!({"net": o.net, "point": cb.point_json(prefix, o.key), "uncertain": o.uncertain}),
+        ));
+    }
+    for m in &cb.report.mismatches {
+        out.push(finding(
+            Code::NetClaimMismatch,
+            "warning",
+            format!(
+                "items on island {} of net {} claim other nets",
+                island(&m.island),
+                m.net
+            ),
+            json!({
+                "island": island(&m.island),
+                "net": m.net,
+                "items": m.items.iter().map(|(k, n)| json!({"item": cb.reference(prefix, *k), "claims": n})).collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    for u in cb.copper.uncertain() {
+        out.push(finding(
+            Code::CopperContactUncertain,
+            "warning",
+            format!(
+                "{} and {} lie within {} nm of touching: kept apart",
+                cb.node_name(prefix, &u.a),
+                cb.node_name(prefix, &u.b),
+                u.bound
+            ),
+            json!({
+                "layer": cb.layer_name(u.layer),
+                "a": cb.node_name(prefix, &u.a),
+                "b": cb.node_name(prefix, &u.b),
+                "bound_nm": u.bound,
+                "near_nm": crate::inspect::rect(u.near),
+            }),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
