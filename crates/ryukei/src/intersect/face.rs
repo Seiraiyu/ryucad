@@ -2406,6 +2406,29 @@ mod tests {
             }
         }
     }
+
+    /// FTC 07 AP242's pair met the other way round: the same answer (it
+    /// still refuses, census VI), inside a rung's cap: the certificate's
+    /// search is bounded (plan 21.B).
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "slow in a debug build: CI runs it in release"
+    )]
+    fn ftc_07_ap242s_pair_is_the_same_both_ways_and_inside_a_rungs_cap() {
+        let (work, [a, b]) = ftc_07_ap242_pair();
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let ab = met_in_a_rung(&work, [a, b], &m);
+        let spent = m.spent();
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let ba = met_in_a_rung(&work, [b, a], &m);
+        assert_eq!(ab, ba.map(FaceMeet::swapped));
+        assert_eq!(ab, Err(Failure::Uncertain));
+        assert!(spent < crate::work::Scope::Rung.limit(), "{spent} units");
+        eprintln!("FTC 07 AP242's pair: {spent} units");
+    }
 }
 
 #[cfg(test)]
