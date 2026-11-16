@@ -142,8 +142,10 @@ pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
             // made behind its back.
             if core.live.hub.is_watched() {
                 *lock(&watcher.last) = Instant::now();
+                let t = Instant::now();
                 let Core { session, live } = &mut *core;
                 P::settle(session, live, &watcher.root);
+                live.timings.publish("daemon.poll", t.elapsed());
             }
             if lock(&watcher.last).elapsed() >= watcher.idle {
                 stop(&watcher, "idle");
@@ -427,7 +429,9 @@ fn serve<P: Serve>(
                             }
                             w.running.clone_from(&key);
                         }
-                        let mut core = lock_prepared(&state.core, me.as_deref(), &req, &job);
+                        let (mut core, waited) =
+                            lock_prepared(&state.core, me.as_deref(), &req, &job);
+                        let holding = Instant::now();
                         let Core { session, live } = &mut *core;
                         let r = P::handle(session, live, me.as_deref(), &state.root, req, &job);
                         if window && r.is_ok() {
@@ -447,6 +451,7 @@ fn serve<P: Serve>(
                                 live.announce(&before);
                             }
                         }
+                        live.timings.request(&method, waited, holding.elapsed());
                         drop(core);
                         // A failure written as text is a failure: a cancel
                         // leaves it as it leaves an `Err`.
@@ -631,25 +636,29 @@ fn cancel_all<P: Serve>(state: &State<P>) -> usize {
 
 /// The lock, for answering `req`, once the slow work it prepares
 /// ([`Serve::prepare`]) is done without it, so other connections' requests
-/// don't wait on that work (#91).
+/// don't wait on that work (#91); and how long it waited for the lock.
 fn lock_prepared<'a, P: Serve>(
     core: &'a Mutex<Core<P>>,
     me: Option<&str>,
     req: &P::Request,
     job: &Job,
-) -> MutexGuard<'a, Core<P>> {
-    let prepared = {
+) -> (MutexGuard<'a, Core<P>>, Duration) {
+    let asked = Instant::now();
+    let (prepared, mut waited) = {
         let mut c = lock(core);
+        let waited = asked.elapsed();
         let Core { session, live } = &mut *c;
-        P::prepare(session, live, me, req, job)
+        (P::prepare(session, live, me, req, job), waited)
     };
     let made =
         prepared.and_then(|job| std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).ok());
+    let asked = Instant::now();
     let mut core = lock(core);
+    waited += asked.elapsed();
     if let (Some(put), Some(s)) = (made, core.session.as_mut()) {
         put(s);
     }
-    core
+    (core, waited)
 }
 
 /// Opens a subscription for the connection's participant.
@@ -957,6 +966,27 @@ mod tests {
         );
     }
 
+    /// Each request's wait for the lock and time holding it are summed
+    /// by method (#849).
+    #[test]
+    fn requests_are_timed_by_method() {
+        let dir = tempfile::tempdir().unwrap();
+        let (endpoint, state) = serving_state(dir.path());
+        let mut c = agent(&endpoint);
+        for _ in 0..3 {
+            c.call(&Basic {
+                method: "quick",
+                params: json!({}),
+            })
+            .unwrap()
+            .unwrap();
+        }
+        let core = lock(&state.core);
+        assert_eq!(core.live.timings.get("quick").count, 3);
+        // The hello was answered by the product too.
+        assert_eq!(core.live.timings.get("session.hello").count, 1);
+    }
+
     #[test]
     fn prepared_work_runs_without_the_lock() {
         let core = Arc::new(Mutex::new(Core::<Test> {
@@ -971,7 +1001,8 @@ mod tests {
                     None,
                     &Request("slow".into(), Value::Null),
                     &Job::default(),
-                );
+                )
+                .0;
                 core.session.clone().unwrap()
             })
         };
@@ -987,7 +1018,8 @@ mod tests {
             None,
             &Request("quick".into(), Value::Null),
             &Job::default(),
-        );
+        )
+        .0;
         assert!(other.session.as_ref().unwrap().is_empty());
         drop(other);
         *g = 2;
