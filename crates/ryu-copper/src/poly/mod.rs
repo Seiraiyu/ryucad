@@ -10,6 +10,7 @@
 //! canonical order, with the bound it lies within of the exact result.
 
 mod snap;
+mod sweep;
 
 use ryu_board::geom::{Nm, Point, Rect, orient};
 
