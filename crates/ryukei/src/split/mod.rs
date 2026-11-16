@@ -835,9 +835,7 @@ impl Arrangement<'_> {
             .filter(|&i| lifted[i].wind == [0, 0] && lifted[i].area > 0.0 && !slit(&cycles[i]))
             .collect();
         let holes: Vec<usize> = (0..lifted.len())
-            .filter(|&i| {
-                lifted[i].wind == [0, 0] && (lifted[i].area <= 0.0 || slit(&cycles[i]))
-            })
+            .filter(|&i| lifted[i].wind == [0, 0] && (lifted[i].area <= 0.0 || slit(&cycles[i])))
             .collect();
         for &o in &outers {
             if lifted[o].area.abs() < 1e-24 {

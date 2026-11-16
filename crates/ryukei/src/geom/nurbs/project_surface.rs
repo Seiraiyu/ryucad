@@ -1002,10 +1002,7 @@ impl NurbsSurface {
         feet.sort_by(|x, y| x.0.0.total_cmp(&y.0.0).then(x.0.1.total_cmp(&y.0.1)));
         // The least foot found, before `distinct` lets an earlier one
         // within resolution stand for it.
-        let least = feet
-            .iter()
-            .min_by(|x, y| x.2.total_cmp(&y.2))
-            .copied();
+        let least = feet.iter().min_by(|x, y| x.2.total_cmp(&y.2)).copied();
         let mut kept = distinct(feet);
         // `nearest` takes the first foot within resolution of the least
         // kept, and a kept foot stands for any within resolution of it, so

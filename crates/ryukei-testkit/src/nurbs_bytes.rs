@@ -53,14 +53,24 @@ pub fn knots(b: &mut Bytes, max_degree: usize) -> Option<KnotVector> {
 
 /// A point, now and then outside the size box.
 pub fn point(b: &mut Bytes) -> Point3 {
-    let r = if b.byte().is_multiple_of(32) { 600.0 } else { 6.0 };
+    let r = if b.byte().is_multiple_of(32) {
+        600.0
+    } else {
+        6.0
+    };
     Point3::new(b.range(-r, r), b.range(-r, r), b.range(-r, r))
 }
 
 /// Weights, now and then an invalid one.
 pub fn weights(b: &mut Bytes, n: usize) -> Vec<f64> {
     (0..n)
-        .map(|_| if b.byte().is_multiple_of(64) { -1.0 } else { b.range(0.05, 5.0) })
+        .map(|_| {
+            if b.byte().is_multiple_of(64) {
+                -1.0
+            } else {
+                b.range(0.05, 5.0)
+            }
+        })
         .collect()
 }
 
