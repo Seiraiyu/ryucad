@@ -1238,3 +1238,87 @@ fn daemon_status_reports_timings_when_asked() {
     assert_eq!(m["feature.add"]["publishes"], 1, "{v}");
     cli(&f, &["daemon", "stop"]);
 }
+
+impl Watch {
+    /// Every notification until none comes for `quiet`.
+    fn all(&self, quiet: Duration) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(v) = self.rx.recv_timeout(quiet) {
+            out.push(v);
+        }
+        out
+    }
+}
+
+/// `calls` through one `ryucad session --stdio`; their answers.
+fn stdio(f: &Fixture, calls: &[Value]) -> Vec<Value> {
+    let mut child = Command::new(cargo_bin("ryucad"))
+        .args(["session", "--stdio"])
+        .current_dir(&f.root)
+        .env(RUNTIME_DIR_VAR, &f.run)
+        .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
+        .env("RYUCAD_IDLE_TIMEOUT", "60")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut answers = Vec::new();
+    for (i, c) in calls.iter().enumerate() {
+        let line = serde_json::json!({"jsonrpc": "2.0", "id": i,
+                                      "method": c["method"], "params": c["params"]});
+        writeln!(stdin, "{line}").unwrap();
+        let mut a = String::new();
+        out.read_line(&mut a).unwrap();
+        answers.push(serde_json::from_str(&a).unwrap());
+    }
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    answers
+}
+
+/// A script's burst of writes is told to a watcher in a few
+/// `model.changed`, at most one per `daemon.publish_max_ms` of the burst
+/// plus one, the last naming every feature; each write still has its own
+/// `activity.appended` (#849).
+#[test]
+fn a_burst_of_writes_is_told_in_a_few_notifications() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    let w = Watch::new(&f, &["model", "activity"]);
+    let calls: Vec<Value> = (0..40)
+        .map(|i| {
+            serde_json::json!({"method": "feature.add", "params":
+            {"part": "p", "id": format!("s{i:02}"), "type": "sphere",
+             "params": {"radius": 1 + i % 5},
+             "placement": {"origin": [i * 10, 0, 0]}}})
+        })
+        .collect();
+    let t = Instant::now();
+    let answers = stdio(&f, &calls);
+    let secs = t.elapsed().as_secs_f64();
+    assert!(
+        answers.iter().all(|a| a.get("result").is_some()),
+        "{answers:?}"
+    );
+    let notes = w.all(Duration::from_secs(2));
+    let of = |m: &str| {
+        notes
+            .iter()
+            .filter(|v| v["method"] == m)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(of("activity.appended").len(), 40);
+    let changed = of("model.changed");
+    assert!(!changed.is_empty());
+    assert!(
+        changed.len() <= secs as usize + 2,
+        "{} in {secs:.1} s",
+        changed.len()
+    );
+    let last = &changed.last().unwrap()["params"]["parts"][0];
+    assert_eq!(last["features"].as_array().unwrap().len(), 40, "{last}");
+    cli(&f, &["daemon", "stop"]);
+}
