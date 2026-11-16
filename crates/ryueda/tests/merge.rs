@@ -26,10 +26,7 @@ fn ok(dir: &Path, run: &Path, daemon: bool, args: &[&str]) -> Value {
 fn items(dir: &Path, run: &Path, daemon: bool) -> Vec<Value> {
     let v = ok(dir, run, daemon, &["merge", "status"]);
     assert_eq!(v["schema"], 1, "{v}");
-    v["conflicts"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    v["conflicts"].as_array().cloned().unwrap_or_default()
 }
 
 /// Commits everything in `top`.

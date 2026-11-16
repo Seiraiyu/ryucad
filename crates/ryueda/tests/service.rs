@@ -75,7 +75,12 @@ fn server_answers_say_their_schema() {
         let top = dir.path().join("repo");
         std::fs::create_dir_all(&top).unwrap();
         let board = breakout_in_git(&top, &run);
-        ok(&board, &run, daemon, &["component", "edit", "breakout/r1", "--value", "10k"]);
+        ok(
+            &board,
+            &run,
+            daemon,
+            &["component", "edit", "breakout/r1", "--value", "10k"],
+        );
         for args in [
             vec!["diff"],
             vec!["diff", "--netlist", "--from", "HEAD", "--to", "working"],
@@ -91,4 +96,18 @@ fn server_answers_say_their_schema() {
             ryueda(&board, &run, true, &["daemon", "stop"]);
         }
     }
+}
+
+#[test]
+fn scene_says_its_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    for daemon in [false, true] {
+        let v = ok(&board, &run, daemon, &["scene", "--block", "breakout"]);
+        assert_eq!(v["schema"], 1, "{}", v["schema"]);
+    }
+    ryueda(&board, &run, true, &["daemon", "stop"]);
 }
