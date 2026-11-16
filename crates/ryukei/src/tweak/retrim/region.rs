@@ -23,7 +23,7 @@ fn edge_faces(body: &Body, e: EdgeId) -> impl Iterator<Item = FaceId> + '_ {
 }
 
 /// The faces round vertex `v`.
-fn vertex_faces(body: &Body, v: VertexId) -> BTreeSet<FaceId> {
+pub(crate) fn vertex_faces(body: &Body, v: VertexId) -> BTreeSet<FaceId> {
     body.vertex_edges(v)
         .into_iter()
         .flat_map(|e| edge_faces(body, e).collect::<Vec<_>>())
@@ -64,18 +64,9 @@ pub(crate) fn region(body: &Body, changed: &BTreeSet<FaceId>) -> Region {
 /// `faces` grown at pinches, and its frontier.
 fn closed(body: &Body, changed: BTreeSet<FaceId>, mut faces: BTreeSet<FaceId>) -> Region {
     loop {
-        let frontier = frontier(body, &faces);
-        let mut ends: BTreeMap<VertexId, usize> = BTreeMap::new();
-        for &e in &frontier {
-            *ends.entry(body.edges[e].start).or_default() += 1;
-            *ends.entry(body.edges[e].end).or_default() += 1;
-        }
-        let pinched: Vec<VertexId> = ends
-            .into_iter()
-            .filter(|&(_, n)| n > 2)
-            .map(|(v, _)| v)
-            .collect();
+        let pinched = pinches(body, &faces);
         if pinched.is_empty() {
+            let frontier = frontier(body, &faces);
             return Region {
                 changed,
                 faces,
@@ -86,6 +77,21 @@ fn closed(body: &Body, changed: BTreeSet<FaceId>, mut faces: BTreeSet<FaceId>) -
             faces.extend(vertex_faces(body, v));
         }
     }
+}
+
+/// The vertices where the frontier of `faces` pinches: each ends more
+/// than two of its edges (the working body is a sheet, and a sheet's
+/// boundary can't touch itself at a vertex). In vertex order.
+pub(crate) fn pinches(body: &Body, faces: &BTreeSet<FaceId>) -> Vec<VertexId> {
+    let mut ends: BTreeMap<VertexId, usize> = BTreeMap::new();
+    for e in frontier(body, faces) {
+        *ends.entry(body.edges[e].start).or_default() += 1;
+        *ends.entry(body.edges[e].end).or_default() += 1;
+    }
+    ends.into_iter()
+        .filter(|&(_, n)| n > 2)
+        .map(|(v, _)| v)
+        .collect()
 }
 
 /// The edges with a face in `faces` and a face outside it.
@@ -110,6 +116,24 @@ impl Region {
             }
         }
         closed(body, self.changed.clone(), faces)
+    }
+
+    /// The region less the faces `pins` (plan 21.A): those are built as
+    /// they are, with the faces outside, and the frontier runs between
+    /// them and the rest. The region itself, to the bit, where `pins` is
+    /// empty.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn without(&self, body: &Body, pins: &BTreeSet<FaceId>) -> Region {
+        if pins.is_empty() {
+            return self.clone();
+        }
+        let faces: BTreeSet<FaceId> = self.faces.difference(pins).copied().collect();
+        let frontier = frontier(body, &faces);
+        Region {
+            changed: self.changed.clone(),
+            faces,
+            frontier,
+        }
     }
 
     /// Whether the region holds every face of `body`.
@@ -163,5 +187,23 @@ mod tests {
         assert_eq!(r.faces.len(), 6);
         assert!(r.frontier.is_empty());
         assert!(r.whole(&b));
+    }
+
+    #[test]
+    fn a_region_without_its_pins_has_its_frontier_round_them() {
+        let b = block();
+        let top = face_of(&b, FaceRole::PlusZ);
+        let r = region(&b, &BTreeSet::from([top])).grown(&b);
+        assert!(r.frontier.is_empty());
+        let bottom = face_of(&b, FaceRole::MinusZ);
+        let w = r.without(&b, &BTreeSet::from([bottom]));
+        assert_eq!(w.faces.len(), 5);
+        assert!(!w.faces.contains(&bottom));
+        // The bottom's four edges.
+        assert_eq!(w.frontier.len(), 4);
+        assert_eq!(w.changed, r.changed);
+        assert!(pinches(&b, &w.faces).is_empty());
+        // Without pins: the region, to the bit.
+        assert_eq!(r.without(&b, &BTreeSet::new()), r);
     }
 }
