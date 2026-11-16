@@ -62,3 +62,33 @@ fn check_reports_say_their_schema() {
         }
     }
 }
+
+/// The answers the service reads through the server say their schema:
+/// diff (plain and --netlist), release list, render (plain and
+/// --compare), at the working files and at a revision. (`merge status`
+/// refuses outside a merge: `tests/merge.rs` asserts its schema.)
+#[test]
+fn server_answers_say_their_schema() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = breakout_in_git(&top, &run);
+        ok(&board, &run, daemon, &["component", "edit", "breakout/r1", "--value", "10k"]);
+        for args in [
+            vec!["diff"],
+            vec!["diff", "--netlist", "--from", "HEAD", "--to", "working"],
+            vec!["release", "list"],
+            vec!["render", "--out", "x.svg"],
+            vec!["render", "--rev", "HEAD", "--out", "x.svg"],
+            vec!["render", "--compare", "HEAD", "--out", "x.svg"],
+        ] {
+            let v = ok(&board, &run, daemon, &args);
+            assert_eq!(v["schema"], 1, "{args:?}: {v}");
+        }
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}

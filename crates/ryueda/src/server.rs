@@ -70,6 +70,32 @@ pub fn handle_safely(
     handle_job(slot, live, me, root, req, &ryu_session::job::Job::default())
 }
 
+/// Whether `req`'s answer is one the hosted review service reads
+/// (design 667): it says its schema, [`crate::OUTPUT_SCHEMA`]. `check`'s
+/// report and `scene`'s head say it where they are built; `bom`, `bom
+/// diff`, `where-used` and `release check` give ryupdm's.
+fn versioned(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::Diff { .. }
+            | Request::MergeStatus {}
+            | Request::ReleaseList { .. }
+            | Request::LibUses { .. }
+            | Request::LibUpdate { .. }
+            | Request::Render { .. }
+    )
+}
+
+/// `a` saying [`crate::OUTPUT_SCHEMA`], when its result is an object.
+fn with_schema(mut a: Answer) -> Answer {
+    if a.raw.is_none()
+        && let Some(o) = a.result.as_object_mut()
+    {
+        o.insert("schema".into(), json!(crate::OUTPUT_SCHEMA));
+    }
+    a
+}
+
 /// [`handle_safely`] with a long request's job.
 pub fn handle_job(
     slot: &mut Option<Session>,
@@ -79,11 +105,12 @@ pub fn handle_job(
     req: Request,
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
+    let schema = versioned(&req);
     // A merge that left a record in the manifest leaves no project to
     // open: its status and resolutions are read from the files alone.
     let merge =
         matches!(req, Request::MergeStatus {} | Request::MergeResolve { .. }).then(|| req.clone());
-    match (
+    let r = match (
         guarded(slot, root, |s| answer(s, live, me, req, job)),
         merge,
     ) {
@@ -94,7 +121,8 @@ pub fn handle_job(
             crate::validate::unloaded(root, req).map(Answer::json)
         }
         (r, _) => r,
-    }
+    };
+    if schema { r.map(with_schema) } else { r }
 }
 
 /// A long request's work, run by the daemon with its lock released: what
