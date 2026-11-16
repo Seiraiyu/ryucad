@@ -11,6 +11,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 ryu-board = { path = "../crates/ryu-board", features = ["testing"] }
+ryu-copper = { path = "../crates/ryu-copper" }
 ryucad = { path = "../crates/ryucad" }
 ryucad-doc = { path = "../crates/ryucad-doc", features = ["test-support"] }
 ryuformats = { path = "../crates/ryuformats" }
@@ -336,6 +337,13 @@ bench = false
 [[bin]]
 name = "batch"
 path = "fuzz_targets/batch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "copper"
+path = "fuzz_targets/copper.rs"
 test = false
 doc = false
 bench = false
