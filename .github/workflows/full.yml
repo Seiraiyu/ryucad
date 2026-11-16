@@ -217,6 +217,7 @@ jobs:
       - run: cargo test -p ryudfm --release --test bar -- --nocapture
       - run: cargo test -p ryu-copper --release --test index_props
       - run: cargo test -p ryu-copper --release --test poly_props
+      - run: cargo test -p ryu-copper --release --test connect_props
       - run: cargo bench --workspace --no-run
 
   kicad-corpus:

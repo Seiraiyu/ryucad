@@ -1,7 +1,13 @@
+connect.islands.1 a32ce4e50c24ea52
+connect.islands.8 a32ce4e50c24ea52
+connect.uncertain.1 37959b289744654a
+connect.uncertain.8 37959b289744654a
 index.nearest.1 be58bcc90f3e40e3
 index.nearest.8 be58bcc90f3e40e3
 index.pairs.1 6edd87113e8db6e9
 index.pairs.8 6edd87113e8db6e9
+netlist.compare.1 c817117f98579d1d
+netlist.compare.8 c817117f98579d1d
 pieces.compare df02b8bfec481c65
 pieces.distance 0c16bb42f0bb3e71
 poly.booleans 9035a581c8304d45

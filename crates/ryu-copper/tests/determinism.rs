@@ -1,8 +1,10 @@
 //! Bit-exact measurement on every platform and CPU level:
 //! `tests/golden/copper.txt` holds the hashes of seeded pieces' exact
 //! comparisons and distances, seeded shapes' distances and containment,
-//! and an index's pairs and nearest items, built on one thread and on
-//! eight. After a deliberate change, regenerate with `UPDATE_GOLDEN=1
+//! an index's pairs and nearest items, booleans, offsets, flattening and
+//! merged layers, and a seeded layout's islands, uncertain contacts and
+//! netlist compare, the index, layers and connectivity built on one
+//! thread and on eight. After a deliberate change, regenerate with `UPDATE_GOLDEN=1
 //! cargo test -p ryu-copper --test determinism` and review the diff like
 //! any other change.
 
@@ -12,10 +14,12 @@ use ryu_board::geom::{Arc, Dir, Edge, Point};
 use ryu_board::model::{Library, Side};
 use ryu_board::shape::feature_shape;
 use ryu_board::testing::{Golden, Lcg, Section, seeded_features};
+use ryu_copper::connect::Copper;
 use ryu_copper::index::Index;
-use ryu_copper::layout::{Item, Layer, Layout};
+use ryu_copper::layout::{Hole, HoleShape, Item, Layer, Layout, NetPoint, PointSide};
 use ryu_copper::measure::core::{Core, SegP, edge_cores};
 use ryu_copper::measure::{self, Body, BodyOptions, Distance, Solid};
+use ryu_copper::netlist;
 use ryu_copper::poly::{self, FillRule, FlattenOptions, Op, Polygons, Rings};
 
 fn point(g: &mut Lcg, reach: i64) -> Point {
@@ -263,6 +267,102 @@ fn layer_sections(golden: &mut Golden, threads: usize) {
     }
 }
 
+/// A sparse seeded layout (so a debug build stays quick) with claimed
+/// nets, holes (half on items: vias in pads, some back-drilled) and
+/// netlist points on items, from both sides and none.
+fn connect_layout() -> Layout<u32> {
+    let mut l = small_layout(0x636f_6e6e, 160);
+    let mut g = Lcg::new(0x686f_6c65);
+    let opts = BodyOptions::default();
+    let probes: Vec<Point> = l
+        .items
+        .values()
+        .filter_map(|it| {
+            Body::of_shape(&it.shape, &opts)
+                .solids
+                .first()
+                .map(Solid::probe)
+        })
+        .collect();
+    for (k, it) in l.items.iter_mut() {
+        it.net = Some(format!("N{}", k % 5));
+    }
+    for k in 0..50u32 {
+        let at = if g.coin() && !probes.is_empty() {
+            probes[g.range(0, probes.len() as i64 - 1) as usize]
+        } else {
+            point(&mut g, 20_000_000)
+        };
+        let d = g.range(100_000, 600_000);
+        let span = [(0, 0), (1, 1), (0, 1)][g.range(0, 2) as usize];
+        let backdrilled = if span == (0, 1) && g.coin() {
+            vec![(1, 1)]
+        } else {
+            vec![]
+        };
+        l.holes.insert(
+            10_000 + k,
+            Hole {
+                shape: HoleShape::Round { at, d },
+                span,
+                plated: g.range(0, 2) > 0,
+                backdrilled,
+            },
+        );
+    }
+    for (k, at) in probes.iter().enumerate().step_by(2) {
+        let side = match k % 3 {
+            0 => None,
+            1 => Some(PointSide::Top),
+            _ => Some(PointSide::Bottom),
+        };
+        l.points.push(NetPoint {
+            net: format!("N{}", k % 7),
+            at: *at,
+            side,
+            key: 20_000 + k as u32,
+        });
+    }
+    l
+}
+
+fn connect_sections(golden: &mut Golden, threads: usize) {
+    let l = connect_layout();
+    let (islands, doubts, report) = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| {
+            let c = Copper::new(&l, BodyOptions::default());
+            let report = netlist::compare(&c, &l.points);
+            (c.islands(), c.uncertain(), report)
+        });
+    let mut s = golden.section(&format!("connect.islands.{threads}"));
+    for i in &islands {
+        for (k, p) in &i.pieces {
+            s.i64((*k).into());
+            s.i64((*p).into());
+        }
+        s.str("|");
+        for h in &i.holes {
+            s.i64((*h).into());
+        }
+        s.str("|");
+        for c in &i.claims {
+            s.str(c);
+        }
+        s.str(";");
+    }
+    let mut s = golden.section(&format!("connect.uncertain.{threads}"));
+    for u in &doubts {
+        s.i64(u.layer as i64);
+        s.str(&format!("{:?} {:?}", u.a, u.b));
+        s.i64(u.bound);
+    }
+    let mut s = golden.section(&format!("netlist.compare.{threads}"));
+    s.str(&format!("{report:?}"));
+}
+
 #[test]
 fn measurement_is_bit_exact() {
     let mut golden = Golden::new(concat!(
@@ -313,6 +413,8 @@ fn measurement_is_bit_exact() {
     poly_sections(&mut golden);
     layer_sections(&mut golden, 1);
     layer_sections(&mut golden, 8);
+    connect_sections(&mut golden, 1);
+    connect_sections(&mut golden, 8);
     let sections = golden.sections_for_test();
     assert_eq!(
         sections["poly.layers.1"], sections["poly.layers.8"],
@@ -322,6 +424,13 @@ fn measurement_is_bit_exact() {
         assert_eq!(
             sections[&format!("index.{kind}.1")],
             sections[&format!("index.{kind}.8")],
+            "{kind} differ between one thread and eight"
+        );
+    }
+    for kind in ["connect.islands", "connect.uncertain", "netlist.compare"] {
+        assert_eq!(
+            sections[&format!("{kind}.1")],
+            sections[&format!("{kind}.8")],
             "{kind} differ between one thread and eight"
         );
     }

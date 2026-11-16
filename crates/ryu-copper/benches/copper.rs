@@ -1,6 +1,7 @@
 //! Exact comparisons and distances between seeded pieces and shapes, and
 //! the index over 1,000 seeded features: built, every pair within
-//! 100 µm, an edit with its queries; booleans, offsets and merged layers.
+//! 100 µm, an edit with its queries; booleans, offsets and merged layers;
+//! connectivity of a two-layer board, and an edit with its query.
 
 use ryu_board::geom::{Arc, Dir, Point};
 use ryu_board::model::{Library, Side};
@@ -202,4 +203,110 @@ fn merge_a_layer_of_2000_traces_and_pads(bencher: divan::Bencher) {
     }
     let opts = FlattenOptions::default();
     bencher.bench(|| poly::merge_layers(&l, &opts).len());
+}
+
+/// Two layers of 1,000 traces (round pens 100 to 300 µm wide, up to 3 mm
+/// long) and 1,000 round pads each on 20 mm, and 300 plated vias through
+/// both at pad centres: what connectivity meets on a board, most vias
+/// held by their pads.
+fn connected_board() -> Layout<u32> {
+    use ryu_board::geom::{Edge, Pen, Region, Stroke};
+    use ryu_board::model::Polarity;
+    use ryu_board::shape::{Part, Piece, Shape, circle};
+    use ryu_copper::layout::{Hole, HoleShape};
+    let mut g = Lcg::new(5);
+    let mut l: Layout<u32> = Layout::default();
+    for (name, side) in [("top", Side::Top), ("bottom", Side::Bottom)] {
+        l.layers.push(Layer {
+            name: name.into(),
+            side,
+            copper: true,
+        });
+    }
+    let mut centres = Vec::new();
+    for k in 0..4_000u32 {
+        let a = Point::new(g.range(0, 20_000_000), g.range(0, 20_000_000));
+        let shape = if k % 4 < 2 {
+            let b = a.offset(
+                g.range(-3_000_000, 3_000_000),
+                g.range(-3_000_000, 3_000_000),
+            );
+            Shape {
+                parts: vec![Part {
+                    polarity: Polarity::Positive,
+                    piece: Piece::Stroke(Stroke {
+                        path: vec![Edge::line(a, b)],
+                        pen: Pen::Round(g.range(100_000, 300_000)),
+                    }),
+                }],
+                ..Shape::default()
+            }
+        } else {
+            centres.push(a);
+            let pad = circle(a, g.range(250_000, 600_000)).unwrap();
+            Shape::regions(Polarity::Positive, [Region::solid(pad)])
+        };
+        l.items.insert(
+            k,
+            Item {
+                layer: (k % 2) as usize,
+                shape,
+                net: None,
+            },
+        );
+    }
+    for (k, at) in centres.iter().take(300).enumerate() {
+        l.holes.insert(
+            k as u32,
+            Hole {
+                shape: HoleShape::Round {
+                    at: *at,
+                    d: 200_000,
+                },
+                span: (0, 1),
+                plated: true,
+                backdrilled: vec![],
+            },
+        );
+    }
+    l
+}
+
+#[divan::bench(sample_count = 5, sample_size = 1)]
+fn connect_a_board_of_4000(bencher: divan::Bencher) {
+    use ryu_copper::connect::Copper;
+    let l = connected_board();
+    bencher.bench(|| Copper::new(&l, BodyOptions::default()).islands().len());
+}
+
+#[divan::bench]
+fn connect_edit_and_query(bencher: divan::Bencher) {
+    use ryu_board::geom::{Edge, Pen, Stroke};
+    use ryu_board::model::Polarity;
+    use ryu_board::shape::{Part, Piece, Shape};
+    use ryu_copper::connect::{Copper, Node};
+    let mut c = Copper::new(&connected_board(), BodyOptions::default());
+    let trace = Item {
+        layer: 0,
+        shape: Shape {
+            parts: vec![Part {
+                polarity: Polarity::Positive,
+                piece: Piece::Stroke(Stroke {
+                    path: vec![Edge::line(
+                        Point::new(10_000_000, 10_000_000),
+                        Point::new(12_000_000, 10_000_000),
+                    )],
+                    pen: Pen::Round(150_000),
+                }),
+            }],
+            ..Shape::default()
+        },
+        net: None,
+    };
+    bencher.bench_local(|| {
+        c.insert_item(u32::MAX, trace.clone());
+        let at = c.island_of(&Node::Piece(u32::MAX, 0));
+        c.remove_item(&u32::MAX);
+        at
+    });
 }
