@@ -9,6 +9,7 @@
 //! polygons, outer rings counterclockwise and holes clockwise, in a
 //! canonical order, with the bound it lies within of the exact result.
 
+mod rings;
 mod snap;
 mod sweep;
 
@@ -298,6 +299,75 @@ fn seg_dist2_within(a: Point, b: Point, p: Point, reach: i128) -> bool {
     lhs <= rhs
 }
 
+/// Combines two operands: `op` of `a` filled by `rule_a` and `b` filled by
+/// `rule_b`. The result's bound is the larger operand's plus a nanometre
+/// for the snapping.
+pub fn boolean(a: &Rings, rule_a: FillRule, b: &Rings, rule_b: FillRule, op: Op) -> Polygons {
+    let mut edges = Vec::new();
+    for (operand, rings) in [(0u8, a), (1u8, b)] {
+        for r in &rings.rings {
+            snap::ring_edges(r, operand, &mut edges);
+        }
+    }
+    let frags = snap::fragments(edges);
+    let sides = sweep::windings(&frags);
+    let inside = |w: [i32; 2]| op.apply(rule_a.inside(w[0]), rule_b.inside(w[1]));
+    let polygons = rings::assemble(&frags, &sides, inside);
+    Polygons {
+        polygons,
+        bound: a.bound.max(b.bound) + 1,
+    }
+}
+
+/// What `rings` cover by `rule`, as simple polygons.
+pub fn simplify(rings: &Rings, rule: FillRule) -> Polygons {
+    boolean(rings, rule, &Rings::default(), FillRule::NonZero, Op::Union)
+}
+
+/// The union of polygon sets.
+pub fn union(a: &Polygons, b: &Polygons) -> Polygons {
+    boolean(
+        &a.rings(),
+        FillRule::NonZero,
+        &b.rings(),
+        FillRule::NonZero,
+        Op::Union,
+    )
+}
+
+/// What `a` and `b` share.
+pub fn intersection(a: &Polygons, b: &Polygons) -> Polygons {
+    boolean(
+        &a.rings(),
+        FillRule::NonZero,
+        &b.rings(),
+        FillRule::NonZero,
+        Op::Intersection,
+    )
+}
+
+/// `a` less `b`.
+pub fn difference(a: &Polygons, b: &Polygons) -> Polygons {
+    boolean(
+        &a.rings(),
+        FillRule::NonZero,
+        &b.rings(),
+        FillRule::NonZero,
+        Op::Difference,
+    )
+}
+
+/// What lies in exactly one of `a` and `b`.
+pub fn xor(a: &Polygons, b: &Polygons) -> Polygons {
+    boolean(
+        &a.rings(),
+        FillRule::NonZero,
+        &b.rings(),
+        FillRule::NonZero,
+        Op::Xor,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +446,183 @@ mod tests {
         assert_eq!(s.contains(p(50, 110)), Verdict::Uncertain);
         assert_eq!(s.contains(p(50, 89)), Verdict::Yes);
         assert_eq!(s.contains(p(50, 90)), Verdict::Uncertain);
+    }
+
+    fn rings(r: Vec<Vec<Point>>) -> Rings {
+        Rings::new(r, 0)
+    }
+
+    fn op(a: Vec<Vec<Point>>, b: Vec<Vec<Point>>, o: Op) -> Polygons {
+        boolean(
+            &rings(a),
+            FillRule::NonZero,
+            &rings(b),
+            FillRule::NonZero,
+            o,
+        )
+    }
+
+    #[test]
+    fn overlapping_squares() {
+        let (a, b) = (sq(0, 0, 10, 10), sq(5, 5, 15, 15));
+        let u = op(vec![a.clone()], vec![b.clone()], Op::Union);
+        assert_eq!(u.polygons.len(), 1);
+        assert_eq!(u.area2(), 2 * 175);
+        assert_eq!(
+            u.polygons[0].outer,
+            vec![
+                p(0, 0),
+                p(10, 0),
+                p(10, 5),
+                p(15, 5),
+                p(15, 15),
+                p(5, 15),
+                p(5, 10),
+                p(0, 10)
+            ]
+        );
+        assert_eq!(u.bound, 1);
+        let i = op(vec![a.clone()], vec![b.clone()], Op::Intersection);
+        assert_eq!(
+            i.polygons,
+            vec![Polygon {
+                outer: sq(5, 5, 10, 10),
+                holes: vec![]
+            }]
+        );
+        let d = op(vec![a.clone()], vec![b.clone()], Op::Difference);
+        assert_eq!(d.area2(), 2 * 75);
+        let x = op(vec![a], vec![b], Op::Xor);
+        assert_eq!((x.polygons.len(), x.area2()), (2, 2 * 150));
+    }
+
+    #[test]
+    fn a_hole_and_its_owner() {
+        let d = op(
+            vec![sq(0, 0, 30, 30)],
+            vec![sq(10, 10, 20, 20)],
+            Op::Difference,
+        );
+        assert_eq!(d.polygons.len(), 1);
+        let poly = &d.polygons[0];
+        assert_eq!(poly.outer, sq(0, 0, 30, 30));
+        // Clockwise, from its least vertex.
+        assert_eq!(
+            poly.holes,
+            vec![vec![p(10, 10), p(10, 20), p(20, 20), p(20, 10)]]
+        );
+        // A ring inside the hole is a polygon of its own.
+        let mut a = vec![sq(0, 0, 30, 30)];
+        a.push(sq(12, 12, 18, 18));
+        let d = op(a, vec![sq(10, 10, 20, 20)], Op::Difference);
+        assert_eq!(d.polygons.len(), 1);
+        // Even-odd makes the inner ring a hole of the first operand, which
+        // the exclusive or turns into an island.
+        let d = boolean(
+            &rings(vec![sq(0, 0, 30, 30), sq(12, 12, 18, 18)]),
+            FillRule::EvenOdd,
+            &rings(vec![sq(10, 10, 20, 20)]),
+            FillRule::NonZero,
+            Op::Xor,
+        );
+        assert_eq!(d.polygons.len(), 2);
+        assert_eq!(d.polygons[1].outer, sq(12, 12, 18, 18));
+        assert_eq!(d.polygons[0].holes.len(), 1);
+    }
+
+    #[test]
+    fn corners_that_touch_stay_apart() {
+        let u = op(vec![sq(0, 0, 10, 10)], vec![sq(10, 10, 20, 20)], Op::Union);
+        assert_eq!(u.polygons.len(), 2);
+        assert_eq!(u.polygons[0].outer, sq(0, 0, 10, 10));
+        // A hole touching its outer ring at a vertex.
+        let d = op(
+            vec![sq(0, 0, 20, 20)],
+            vec![vec![p(0, 10), p(10, 5), p(10, 15)]],
+            Op::Difference,
+        );
+        assert_eq!(d.polygons.len(), 1);
+        assert_eq!(d.area2(), 2 * 400 - 100);
+    }
+
+    #[test]
+    fn many_edges_through_one_point() {
+        // Eight thin triangles meeting at the origin.
+        let mut r = Vec::new();
+        for k in 0..8 {
+            let (s, c) = ryu_math::sin_cos(k as f64 * std::f64::consts::PI / 4.0);
+            let at = |t: f64| {
+                let (s2, c2) = ryu_math::sin_cos(t);
+                p(
+                    ryu_board::geom::round_nm(1000.0 * c2),
+                    ryu_board::geom::round_nm(1000.0 * s2),
+                )
+            };
+            let a0 = ryu_math::atan2(s, c);
+            r.push(vec![p(0, 0), at(a0 - 0.1), at(a0 + 0.1)]);
+        }
+        let u = simplify(&rings(r), FillRule::NonZero);
+        assert_eq!(u.polygons.len(), 8);
+        assert!(
+            u.polygons
+                .iter()
+                .all(|q| q.outer[0] == p(0, 0) || q.outer.contains(&p(0, 0)))
+        );
+    }
+
+    #[test]
+    fn fill_rules() {
+        // Two squares wound the same way, overlapping.
+        let r = rings(vec![sq(0, 0, 10, 10), sq(5, 0, 15, 10)]);
+        assert_eq!(simplify(&r, FillRule::NonZero).area2(), 2 * 150);
+        assert_eq!(simplify(&r, FillRule::EvenOdd).area2(), 2 * 100);
+        // A bowtie: one lobe each way.
+        let bow = rings(vec![vec![p(0, 0), p(10, 10), p(10, 0), p(0, 10)]]);
+        assert_eq!(simplify(&bow, FillRule::NonZero).polygons.len(), 2);
+        assert_eq!(simplify(&bow, FillRule::Positive).polygons.len(), 1);
+    }
+
+    #[test]
+    fn spikes_and_slivers_go() {
+        // A square with a spike out and back along one line.
+        let r = rings(vec![vec![
+            p(0, 0),
+            p(10, 0),
+            p(20, 0),
+            p(10, 0),
+            p(10, 10),
+            p(0, 10),
+        ]]);
+        let s = simplify(&r, FillRule::NonZero);
+        assert_eq!(
+            s.polygons,
+            vec![Polygon {
+                outer: sq(0, 0, 10, 10),
+                holes: vec![]
+            }]
+        );
+        // Two squares sharing a side merge, and the side goes.
+        let u = op(vec![sq(0, 0, 10, 10)], vec![sq(10, 0, 20, 10)], Op::Union);
+        assert_eq!(u.polygons[0].outer, sq(0, 0, 20, 10));
+    }
+
+    #[test]
+    fn crossings_snap_to_the_grid() {
+        // Two thin slanted strips crossing off the grid.
+        let a = vec![p(0, 0), p(1000, 333), p(1000, 334), p(0, 1)];
+        let b = vec![p(0, 333), p(1000, 0), p(1000, 1), p(0, 334)];
+        let u = op(vec![a], vec![b], Op::Union);
+        assert_eq!(u.polygons.len(), 1);
+        for q in &u.polygons {
+            for r in q.rings() {
+                assert!(r.len() >= 3);
+            }
+        }
+        assert_eq!(u.contains(p(500, 166)), Verdict::Uncertain);
+        assert_eq!(u.contains(p(100, 100)), Verdict::No);
+        // A strip a nanometre wide is within the bound of its edges all
+        // across; 1.3 nm below it isn't.
+        assert_eq!(u.contains(p(10, 4)), Verdict::Uncertain);
+        assert_eq!(u.contains(p(10, 2)), Verdict::No);
     }
 }
