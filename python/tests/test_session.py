@@ -104,8 +104,13 @@ class ThroughTheDaemon(unittest.TestCase):
                       "set TMPDIR to a folder outside every repository")
         self.folder = os.path.join(self.scratch, "project")
         os.makedirs(self.folder)
+        # A socket's path must fit sun_path (104 bytes on macOS, 108 on
+        # Linux), or the session runs in process: the daemon's runtime
+        # folder goes in /tmp, not under a TMPDIR that may be long.
+        self.run = (tempfile.mkdtemp(prefix="ryu-", dir="/tmp") if os.name == "posix"
+                    else os.path.join(self.scratch, "run"))
         self.env = dict(os.environ,
-                        RYUCAD_RUNTIME_DIR=os.path.join(self.scratch, "run"),
+                        RYUCAD_RUNTIME_DIR=self.run,
                         RYUCAD_CONFIG_DIR=os.path.join(self.scratch, "config"),
                         RYUCAD_CACHE_DIR=os.path.join(self.scratch, "cache"),
                         RYUCAD_IDLE_TIMEOUT="600")
@@ -118,6 +123,7 @@ class ThroughTheDaemon(unittest.TestCase):
         subprocess.run([EXE, "daemon", "stop"], cwd=self.folder, env=self.env,
                        capture_output=True, timeout=120)
         shutil.rmtree(self.scratch, ignore_errors=True)
+        shutil.rmtree(self.run, ignore_errors=True)
 
     def connect(self, **kwargs):
         return ryucad.connect(self.folder, exe=EXE, env=self.env, no_daemon=self.no_daemon,

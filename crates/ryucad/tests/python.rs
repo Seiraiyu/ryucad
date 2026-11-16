@@ -4,6 +4,7 @@
 
 use ryucad::error::Code;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -70,4 +71,58 @@ fn the_codes_are_ryu_docs() {
         "python/src/ryucad/_codes.py is out of step with ryu_doc::error::Code: \
          run UPDATE_PYTHON=1 cargo test -p ryucad --test python"
     );
+}
+
+/// The interpreter: `python3`, else `python` (Windows), if it is 3.10 or
+/// newer.
+fn python() -> Option<&'static str> {
+    ["python3", "python"].into_iter().find(|p| {
+        Command::new(p)
+            .args([
+                "-c",
+                "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)",
+            ])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
+}
+
+/// The package's unit and integration tests, against the ryucad this
+/// workspace built: in PR CI on Linux x64, in full.yml on every platform
+/// (with `RYUCAD_REQUIRE_PYTHON` set, a missing python3 fails there).
+/// Each project is made in a temporary folder outside the repository.
+#[test]
+fn the_package_passes_its_tests_against_this_build() {
+    let Some(python) = python() else {
+        assert!(
+            std::env::var_os("RYUCAD_REQUIRE_PYTHON").is_none(),
+            "no python3 (3.10 or newer)"
+        );
+        eprintln!("skipped: no python3 (3.10 or newer)");
+        return;
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let root = root();
+    let run = Command::new(python)
+        .args(["-m", "unittest", "discover", "-v", "-s"])
+        .arg(root.join("python/tests"))
+        .current_dir(scratch.path())
+        .env("PYTHONPATH", root.join("python/src"))
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("RYUCAD_EXE", env!("CARGO_BIN_EXE_ryucad"))
+        .env("TMPDIR", scratch.path())
+        .env("TEMP", scratch.path())
+        .env("TMP", scratch.path())
+        .env_remove("RYUCAD_NO_DAEMON")
+        .env_remove("RYUCAD_PARTICIPANT")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "{}\n{err}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    // The integration tests ran: RYUCAD_EXE was set.
+    assert!(!err.contains("RYUCAD_EXE names no ryucad"), "{err}");
 }
