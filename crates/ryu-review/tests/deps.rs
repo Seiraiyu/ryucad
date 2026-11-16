@@ -29,7 +29,15 @@ fn depends_on_no_product() {
     for section in ["[dependencies]", "[dev-dependencies]"] {
         for name in names(MANIFEST, section) {
             assert!(
-                !["ryukei", "ryucad", "ryucad-doc", "ryueda", "ryudfm", "ryupdm"].contains(&name),
+                ![
+                    "ryukei",
+                    "ryucad",
+                    "ryucad-doc",
+                    "ryueda",
+                    "ryudfm",
+                    "ryupdm"
+                ]
+                .contains(&name),
                 "{section} names {name}"
             );
         }
