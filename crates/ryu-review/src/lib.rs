@@ -359,6 +359,225 @@ pub fn where_used(
     Ok(v)
 }
 
+/// What every product's `review` command asks (ryucad adds its own:
+/// audit and packages).
+pub enum Action {
+    Status {
+        pr: Option<u64>,
+    },
+    Threads {
+        pr: Option<u64>,
+        open: bool,
+    },
+    Comment {
+        reference: String,
+        text: String,
+        pr: Option<u64>,
+        commit: Option<String>,
+    },
+    Reply {
+        thread: String,
+        text: String,
+    },
+    Resolve {
+        thread: String,
+    },
+    Reopen {
+        thread: String,
+    },
+    Update {
+        pr: Option<u64>,
+    },
+    Renders {
+        pr: Option<u64>,
+        out: std::path::PathBuf,
+    },
+    Approvals {
+        pr: Option<u64>,
+    },
+}
+
+/// A clone and the service: its repository, its GitHub `owner/name`, and
+/// a client.
+pub struct Session<L: ryu_git::Layout> {
+    repo: ryu_git::repo::Repo<L>,
+    pub slug: String,
+    pub client: Client,
+}
+
+impl<L: ryu_git::Layout> Session<L> {
+    /// The clone holding `here`: `not_a_git_repo` outside one,
+    /// `review_no_remote` when its origin isn't a GitHub repository; the
+    /// token is looked for after that.
+    pub fn open(here: &std::path::Path, product: &Product) -> Result<Session<L>> {
+        let repo = ryu_git::repo::repo::<L>(here)?;
+        let origin = repo.origin_url();
+        let (owner, name) = origin.as_deref().and_then(github_repo).ok_or_else(|| {
+            Error::new(
+                Code::ReviewNoRemote,
+                "the clone's origin remote isn't a GitHub repository",
+            )
+            .with("origin", &origin)
+        })?;
+        Ok(Session {
+            slug: format!("{owner}/{name}"),
+            client: product.client()?,
+            repo,
+        })
+    }
+
+    /// The pull request: `pr`, else the one open with the checked-out
+    /// branch as its head.
+    pub fn pull(&self, pr: Option<u64>) -> Result<u64> {
+        if let Some(n) = pr {
+            return Ok(n);
+        }
+        let branch = self.repo.branch()?.ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                "no branch checked out; name the pull request",
+            )
+        })?;
+        let found = self.client.get(&format!(
+            "/repos/{}/pulls?branch={}",
+            self.slug,
+            escape(&branch)
+        ))?;
+        let numbers: Vec<u64> = found["pulls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p["number"].as_u64())
+            .collect();
+        match numbers[..] {
+            [n] => Ok(n),
+            [] => Err(Error::new(
+                Code::ReviewNotFound,
+                format!("no open pull request has {branch} as its head"),
+            )
+            .with("branch", &branch)),
+            _ => Err(Error::new(
+                Code::InvalidParam,
+                format!("several pull requests have {branch} as their head; name one"),
+            )
+            .with("pulls", &numbers)),
+        }
+    }
+
+    /// `v` saying which repository and pull request it is about.
+    pub fn with(&self, mut v: Value, pr: Option<u64>) -> Value {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("repo".into(), json!(self.slug));
+            if let Some(n) = pr {
+                o.insert("pull".into(), json!(n));
+            }
+        }
+        v
+    }
+
+    /// Runs `action`.
+    pub fn act(&self, action: Action) -> Result<Value> {
+        let (client, slug) = (&self.client, &self.slug);
+        match action {
+            Action::Status { pr } => {
+                let n = self.pull(pr)?;
+                Ok(self.with(client.get(&format!("/repos/{slug}/pulls/{n}"))?, Some(n)))
+            }
+            Action::Threads { pr, open } => {
+                let n = self.pull(pr)?;
+                let q = if open { "?state=open" } else { "" };
+                Ok(self.with(
+                    client.get(&format!("/repos/{slug}/pulls/{n}/threads{q}"))?,
+                    Some(n),
+                ))
+            }
+            Action::Comment {
+                reference,
+                text,
+                pr,
+                commit,
+            } => {
+                let n = self.pull(pr)?;
+                let mut body = json!({"ref": reference, "body": text});
+                if let Some(c) = commit {
+                    body["commit"] = json!(c);
+                }
+                Ok(self.with(
+                    client.post(&format!("/repos/{slug}/pulls/{n}/threads"), &body)?,
+                    Some(n),
+                ))
+            }
+            Action::Reply { thread, text } => Ok(self.with(
+                client.post(
+                    &format!("/threads/{}/comments", escape(&thread)),
+                    &json!({"body": text}),
+                )?,
+                None,
+            )),
+            Action::Resolve { thread } => Ok(self.with(
+                client.post(&format!("/threads/{}/resolve", escape(&thread)), &json!({}))?,
+                None,
+            )),
+            Action::Reopen { thread } => Ok(self.with(
+                client.post(&format!("/threads/{}/reopen", escape(&thread)), &json!({}))?,
+                None,
+            )),
+            Action::Update { pr } => {
+                let n = self.pull(pr)?;
+                Ok(self.with(
+                    client.post(&format!("/repos/{slug}/pulls/{n}/merge-in"), &json!({}))?,
+                    Some(n),
+                ))
+            }
+            Action::Renders { pr, out } => {
+                let n = self.pull(pr)?;
+                let status = client.get(&format!("/repos/{slug}/pulls/{n}"))?;
+                std::fs::create_dir_all(&out).map_err(|e| Error::io(&out, &e))?;
+                let mut files = Vec::new();
+                for r in status["renders"].as_array().into_iter().flatten() {
+                    let (Some(url), Some(side)) = (r["url"].as_str(), r["side"].as_str()) else {
+                        continue;
+                    };
+                    // A part (ryucad's rows), or a block's sheet (ryueda's).
+                    let name = match (r["part"].as_str(), r["block"].as_str(), r["sheet"].as_str())
+                    {
+                        (Some(part), ..) => part.to_owned(),
+                        (None, Some(block), Some(sheet)) => format!("{block}-{sheet}"),
+                        (None, None, Some(sheet)) => sheet.to_owned(),
+                        _ => continue,
+                    };
+                    let project = match r["project"].as_str().unwrap_or("") {
+                        "" | "." => "root".to_owned(),
+                        p => p.replace(['/', '\\'], "_"),
+                    };
+                    let ext = if r["format"] == "svg" { "svg" } else { "png" };
+                    let path = out.join(format!("{project}-{name}-{side}.{ext}"));
+                    let bytes = client.download(url)?;
+                    std::fs::write(&path, bytes).map_err(|e| Error::io(&path, &e))?;
+                    files.push(path);
+                }
+                Ok(json!({"repo": slug, "pull": n, "files": files}))
+            }
+            Action::Approvals { pr } => {
+                let n = self.pull(pr)?;
+                Ok(self.with(
+                    client.get(&format!("/repos/{slug}/pulls/{n}/approvals"))?,
+                    Some(n),
+                ))
+            }
+        }
+    }
+}
+
+/// [`Session::open`] and [`Session::act`].
+pub fn run<L: ryu_git::Layout>(
+    here: &std::path::Path,
+    product: &Product,
+    action: Action,
+) -> Result<Value> {
+    Session::<L>::open(here, product)?.act(action)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
