@@ -5055,6 +5055,7 @@ dependencies = [
  "rayon",
  "roxmltree 0.21.2",
  "ryu-board",
+ "ryu-copper",
  "ryu-doc",
  "ryu-session",
  "ryudfm",
