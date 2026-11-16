@@ -256,6 +256,7 @@ pub fn render(
     scale: Option<f32>,
     fit: bool,
     theme: ryusch::style::Theme,
+    frames: &[&Project],
 ) -> Result<Answer> {
     let b = crate::schemcmd::blocks(now, design, block)?[0];
     let mut laid = schem::lay(now, b, None, &[], ryusch::input::Relayout::None)?;
@@ -285,11 +286,24 @@ pub fn render(
     };
     let none = Marks::default();
     let to_ref = |k: &str| schem::ref_path(&b.id, k);
-    let svg = ryusch::svg::draw_with(
+    let view = if frames.is_empty() {
+        fit.then(|| ryusch::svg::drawn(&laid.built.input, layout, &refs))
+            .flatten()
+    } else {
+        let sid = which.first().ok_or_else(|| {
+            Error::new(Code::InvalidParam, "--frame crops one --sheet").with("param", "frame")
+        })?;
+        crate::schemcmd::framed(
+            &laid,
+            &crate::schemcmd::frame_layouts(frames, &b.id, shown.as_ref()),
+            sid,
+        )
+    };
+    let svg = ryusch::svg::draw_within(
         &laid.built.input,
         layout,
         &refs,
-        fit,
+        view,
         &|sid| looks.get(sid).cloned().unwrap_or_default(),
         &|sid, look| {
             let now = ryusch::paint::sheet_in(&laid.built.input, layout, sid, look);

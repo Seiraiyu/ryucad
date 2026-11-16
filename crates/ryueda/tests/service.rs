@@ -190,3 +190,77 @@ fn diff_lists_the_sheets_a_change_touched() {
         }
     }
 }
+
+/// The four numbers of an SVG's viewBox.
+fn view_box(svg: &str) -> [f64; 4] {
+    let at = svg.find("viewBox=\"").unwrap() + 9;
+    let end = at + svg[at..].find('"').unwrap();
+    let n: Vec<f64> = svg[at..end]
+        .split(' ')
+        .map(|x| x.parse().unwrap())
+        .collect();
+    [n[0], n[1], n[2], n[3]]
+}
+
+/// A fitted before and after framed by each other crop alike, to a box
+/// holding both unframed ones; framed by itself alone, a render is as
+/// unframed.
+#[test]
+fn framed_renders_line_up() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = breakout_in_git(&top, &run);
+        ok(
+            &board,
+            &run,
+            daemon,
+            &["place", "breakout", "--move", "shift J1 right 8"],
+        );
+        let svg = |args: &[&str]| {
+            let mut all = vec![
+                "render", "--block", "breakout", "--sheet", "s1", "--fit", "--out", "x.svg",
+            ];
+            all.extend_from_slice(args);
+            ok(&board, &run, daemon, &all);
+            std::fs::read_to_string(board.join("x.svg")).unwrap()
+        };
+        let (head, base) = (svg(&[]), svg(&["--rev", "HEAD"]));
+        let head_f = svg(&["--frame", "HEAD"]);
+        let base_f = svg(&["--rev", "HEAD", "--frame", "working"]);
+        let (h, b, hf, bf) = (
+            view_box(&head),
+            view_box(&base),
+            view_box(&head_f),
+            view_box(&base_f),
+        );
+        assert_ne!(h, b, "the move changes what is drawn");
+        assert_eq!(hf, bf, "framed together, they crop alike");
+        let right = |v: [f64; 4]| v[0] + v[2];
+        let bottom = |v: [f64; 4]| v[1] + v[3];
+        assert!(
+            hf[0] <= h[0].min(b[0]) && hf[1] <= h[1].min(b[1]),
+            "{hf:?} {h:?} {b:?}"
+        );
+        assert!(right(hf) >= right(h).max(right(b)) && bottom(hf) >= bottom(h).max(bottom(b)));
+        assert_eq!(svg(&["--frame", "working"]), head, "framed by itself alone");
+        // --compare framed by the base: the same view as the plain framed head.
+        let cmp = svg(&["--compare", "HEAD", "--frame", "HEAD"]);
+        assert_eq!(view_box(&cmp), hf);
+        // --frame without --fit is a usage error.
+        let (code, v) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &[
+                "render", "--sheet", "s1", "--frame", "HEAD", "--out", "x.svg",
+            ],
+        );
+        assert_eq!((code, &v["error"]["code"]), (2, &json!("usage")), "{v}");
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}

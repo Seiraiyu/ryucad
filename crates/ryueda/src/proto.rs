@@ -995,6 +995,11 @@ pub enum Request {
         /// parts with a leader, each item keyed by `data-ref` (SVG).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compare: Option<String>,
+        /// Crop a fitted sheet to what it draws here and at each of these
+        /// revisions (`working` for the files on disk), so a before and
+        /// an after line up (design 667). Needs `fit` and `sheet`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frame: Vec<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
         #[serde(default, skip_serializing_if = "Option::is_none")]

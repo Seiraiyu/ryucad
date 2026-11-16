@@ -254,6 +254,21 @@ pub fn answer(
     result
 }
 
+/// The projects `render --frame` names: each revision's (`working`, the
+/// working files', is `None` here and taken from the session by the
+/// caller).
+fn frame_projects(
+    session: &mut Session,
+    revs: &[String],
+) -> Result<Vec<Option<std::sync::Arc<Project>>>> {
+    revs.iter()
+        .map(|r| match r.as_str() {
+            "working" => Ok(None),
+            r => session.at(r).map(|(_, p)| Some(p)),
+        })
+        .collect()
+}
+
 /// A request answered from the working files.
 fn working(
     session: &mut Session,
@@ -273,9 +288,15 @@ fn working(
             fit,
             theme,
             compare: Some(rev),
+            frame,
             ..
         } => {
             let (commit, then) = session.at(&rev)?;
+            let at = frame_projects(session, &frame)?;
+            let frames: Vec<&Project> = at
+                .iter()
+                .map(|p| p.as_deref().unwrap_or(session.project()))
+                .collect();
             crate::compare::render(
                 session.project(),
                 &then,
@@ -289,6 +310,7 @@ fn working(
                 scale,
                 fit,
                 theme.unwrap_or_default(),
+                &frames,
             )
         }
         Request::Render {
@@ -300,18 +322,27 @@ fn working(
             scale,
             fit,
             theme,
+            frame,
             ..
-        } => crate::schemcmd::render(
-            session.project(),
-            design.as_deref(),
-            block.as_deref(),
-            sheet.as_deref(),
-            layer.as_deref(),
-            format.unwrap_or(crate::schemcmd::Format::Svg),
-            scale,
-            fit,
-            theme.unwrap_or_default(),
-        ),
+        } => {
+            let at = frame_projects(session, &frame)?;
+            let frames: Vec<&Project> = at
+                .iter()
+                .map(|p| p.as_deref().unwrap_or(session.project()))
+                .collect();
+            crate::schemcmd::render(
+                session.project(),
+                design.as_deref(),
+                block.as_deref(),
+                sheet.as_deref(),
+                layer.as_deref(),
+                format.unwrap_or(crate::schemcmd::Format::Svg),
+                scale,
+                fit,
+                theme.unwrap_or_default(),
+                &frames,
+            )
+        }
         Request::LayoutPlace {
             block,
             instructions,
@@ -446,18 +477,27 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             scale,
             fit,
             theme,
+            frame,
             ..
-        } => crate::schemcmd::render(
-            p,
-            design.as_deref(),
-            block.as_deref(),
-            sheet.as_deref(),
-            layer.as_deref(),
-            format.unwrap_or(crate::schemcmd::Format::Svg),
-            scale,
-            fit,
-            theme.unwrap_or_default(),
-        ),
+        } => {
+            let at = frame_projects(session, &frame)?;
+            let frames: Vec<&Project> = at
+                .iter()
+                .map(|x| x.as_deref().unwrap_or(session.project()))
+                .collect();
+            crate::schemcmd::render(
+                p,
+                design.as_deref(),
+                block.as_deref(),
+                sheet.as_deref(),
+                layer.as_deref(),
+                format.unwrap_or(crate::schemcmd::Format::Svg),
+                scale,
+                fit,
+                theme.unwrap_or_default(),
+                &frames,
+            )
+        }
         Request::Output { design, layers, .. } => {
             crate::output::output(p, design.as_deref(), layers.unwrap_or_default())
                 .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes))

@@ -423,6 +423,11 @@ enum Command {
         /// moved, gone), each item keyed by its reference path.
         #[arg(long, value_name = "REV")]
         compare: Option<String>,
+        /// With --fit and --sheet: crop to what the sheet draws here and
+        /// at this revision too (repeat for more; `working` is the files
+        /// on disk), so renders of two revisions line up.
+        #[arg(long, value_name = "REV", requires_all = ["fit", "sheet"])]
+        frame: Vec<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         #[command(flatten)]
@@ -3097,12 +3102,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             fit,
             theme,
             compare,
+            frame,
             out,
             rev,
         } => {
             let format = picture_format(format.as_deref(), out)?;
             Request::Render {
                 compare: compare.clone(),
+                frame: frame.clone(),
                 design: design.clone(),
                 block: block.clone(),
                 sheet: sheet.clone(),
