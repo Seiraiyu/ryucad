@@ -1,0 +1,24 @@
+[package]
+name = "ryu-review"
+description = "The hosted review service's client for every ryu product: HTTP, refusals as codes, tokens, the service's URL, and a clone's pull requests"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+ryu-doc = { path = "../ryu-doc" }
+# A clone's origin and branch, for any product's layout.
+ryu-git = { path = "../ryu-git" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# HTTPS on rustls with ring, as ryucad's and ryueda's binaries already
+# build it: static musl binaries need no system OpenSSL (see ryucad's
+# Cargo.toml for why ring).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[features]
+# `testing::Fake`, a stand-in for the service, for products' tests.
+testing = []
+
+[dev-dependencies]
+tempfile = "3"

@@ -4919,6 +4919,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-review"
+version = "0.0.0"
+dependencies = [
+ "ryu-doc",
+ "ryu-git",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "ryu-session"
 version = "0.0.0"
 dependencies = [
