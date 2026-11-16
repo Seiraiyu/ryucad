@@ -56,6 +56,11 @@ pub struct Navigator {
     /// labels' nets.
     drawn: BTreeMap<(String, String), BTreeSet<String>>,
     regions: BTreeMap<(String, String), Vec<String>>,
+    /// A compare's counts by block and sheet, and the sheets only the
+    /// revision has, by block (plan 13.A), from the last compare scene
+    /// of each block; a plain scene of a block clears them.
+    counts: BTreeMap<String, BTreeMap<String, crate::core::scene::Counts>>,
+    removed: BTreeMap<String, Vec<(String, String)>>,
 }
 
 fn s(v: &Value) -> String {
@@ -154,6 +159,20 @@ impl Navigator {
     /// A scene seen: its block's sheets, this sheet's regions and what it
     /// draws.
     pub fn scene(&mut self, sc: &Scene) {
+        // A revision's sheet is a blink, not the working block: it moves
+        // neither the sheets nor what they draw, nor ends a compare.
+        if sc.read_only() {
+            return;
+        }
+        if sc.against.is_some() {
+            self.counts
+                .insert(sc.block.clone(), sc.sheet_counts.clone());
+            self.removed
+                .insert(sc.block.clone(), sc.removed_sheets.clone());
+        } else {
+            self.counts.remove(&sc.block);
+            self.removed.remove(&sc.block);
+        }
         self.sheets.insert(sc.block.clone(), sc.sheets.clone());
         let key = (sc.block.clone(), sc.sheet.clone());
         let mut drawn = BTreeSet::new();
@@ -167,6 +186,27 @@ impl Navigator {
         }
         self.drawn.insert(key.clone(), drawn);
         self.regions.insert(key, regions);
+    }
+
+    /// A sheet's compare counts, when it has changes.
+    pub fn changed(&self, block: &str, sheet: &str) -> Option<crate::core::scene::Counts> {
+        self.counts
+            .get(block)?
+            .get(sheet)
+            .copied()
+            .filter(|c| c.total() > 0)
+    }
+
+    /// Whether any of a block's sheets has changes in its compare.
+    pub fn block_changed(&self, block: &str) -> bool {
+        self.counts
+            .get(block)
+            .is_some_and(|m| m.values().any(|c| c.total() > 0))
+    }
+
+    /// The sheets only the compared revision has, `(id, name)`.
+    pub fn removed(&self, block: &str) -> &[(String, String)] {
+        self.removed.get(block).map_or(&[], Vec::as_slice)
     }
 
     /// The design's hierarchy from its root.
@@ -357,5 +397,30 @@ mod tests {
         // The net on s1 and, through its label, on s2.
         assert_eq!(n.reach("top", "top/sda"), ["s1", "s2"]);
         assert!(n.reach("top", "top/gnd").is_empty());
+    }
+
+    #[test]
+    fn a_compare_marks_sheets_and_blocks_and_lists_removed_sheets() {
+        use crate::core::scene::tests::compared;
+        let mut n = Navigator::default();
+        n.scene(&Scene::from_json(&compared()).unwrap());
+        assert_eq!(n.changed("top", "s2").map(|c| c.changed), Some(2));
+        assert_eq!(n.changed("top", "s1").map(|c| c.total()), Some(3));
+        assert!(n.block_changed("top"));
+        assert_eq!(n.removed("top"), [("s3".to_owned(), "Old".to_owned())]);
+        assert_eq!(
+            n.sheets("top").len(),
+            2,
+            "a removed sheet isn't listed as one"
+        );
+        // A revision's sheet is a blink: the compare stands.
+        let mut v = small();
+        v["commit"] = json!("c0ffee0000000000000000000000000000000000");
+        n.scene(&Scene::from_json(&v).unwrap());
+        assert!(n.block_changed("top"));
+        // A plain scene of the block: the compare is over.
+        n.scene(&Scene::from_json(&small()).unwrap());
+        assert_eq!(n.changed("top", "s2"), None);
+        assert!(!n.block_changed("top") && n.removed("top").is_empty());
     }
 }

@@ -357,7 +357,26 @@ impl Window {
     }
 
     fn blinked(&mut self) {
+        // The working side drawn again leaves a sheet only the revision
+        // has.
+        let block = self.shown.block.clone().unwrap_or_default();
+        if !self.blink.read_only()
+            && self
+                .nav
+                .removed(&block)
+                .iter()
+                .any(|(k, _)| Some(k) == self.shown.sheet.as_ref())
+        {
+            self.shown.sheet = None;
+        }
         self.ask_scene();
+    }
+
+    /// Shows a sheet only the compared revision has, as it drew it.
+    pub fn show_removed(&mut self, block: String, sheet: String) {
+        self.blink.set(Side::Rev);
+        let layer = self.shown.layer.clone();
+        self.show(Some(block), Some(sheet), layer);
     }
 
     /// The window was focused: a compare's revision may have moved.

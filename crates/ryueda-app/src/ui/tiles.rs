@@ -108,7 +108,28 @@ fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
         .show_header(ui, |ui| {
             let here =
                 w.shown.block.as_deref() == Some(n.block.as_str()) && w.shown.layer == n.layer;
-            if ui.selectable_label(here, &n.label).clicked() {
+            let diff = w.scene.as_ref().and_then(|s| s.paper.diff);
+            let label = match diff.filter(|_| w.nav.block_changed(&n.block)) {
+                Some(d) => {
+                    let mut job = egui::text::LayoutJob::default();
+                    let style = ui.style().clone();
+                    egui::RichText::new(&n.label).append_to(
+                        &mut job,
+                        &style,
+                        egui::FontSelection::Default,
+                        egui::Align::Center,
+                    );
+                    egui::RichText::new(" ●").color(d.changed).append_to(
+                        &mut job,
+                        &style,
+                        egui::FontSelection::Default,
+                        egui::Align::Center,
+                    );
+                    egui::WidgetText::from(job)
+                }
+                None => egui::WidgetText::from(n.label.as_str()),
+            };
+            if ui.selectable_label(here, label).clicked() {
                 w.show(Some(n.block.clone()), None, n.layer.clone());
             }
         })
@@ -131,7 +152,36 @@ fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
                 } else {
                     name.clone()
                 };
-                if ui.selectable_label(here, mark).clicked() {
+                let changed = w.nav.changed(&n.block, &sid);
+                let diff = w.scene.as_ref().and_then(|s| s.paper.diff);
+                let text = match (changed, diff) {
+                    (Some(_), Some(d)) => {
+                        let mut job = egui::text::LayoutJob::default();
+                        let style = ui.style().clone();
+                        egui::RichText::new(&mark).append_to(
+                            &mut job,
+                            &style,
+                            egui::FontSelection::Default,
+                            egui::Align::Center,
+                        );
+                        egui::RichText::new(" ●").color(d.changed).append_to(
+                            &mut job,
+                            &style,
+                            egui::FontSelection::Default,
+                            egui::Align::Center,
+                        );
+                        egui::WidgetText::from(job)
+                    }
+                    _ => egui::WidgetText::from(mark),
+                };
+                let mut r = ui.selectable_label(here, text);
+                if let Some(c) = changed {
+                    r = r.on_hover_text(format!(
+                        "{} added, {} changed, {} moved, {} removed",
+                        c.added, c.changed, c.moved, c.removed
+                    ));
+                }
+                if r.clicked() {
                     w.show(Some(n.block.clone()), Some(sid.clone()), n.layer.clone());
                 }
                 for r in w.nav.regions(&n.block, &sid).to_vec() {
@@ -142,6 +192,21 @@ fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
                     if ui.small_button(format!("  {label}")).clicked() {
                         w.go_to(&r);
                     }
+                }
+            }
+            let diff = w.scene.as_ref().and_then(|s| s.paper.diff);
+            for (sid, name) in w.nav.removed(&n.block).to_vec() {
+                let text = egui::RichText::new(&name).strikethrough();
+                let text = match diff {
+                    Some(d) => text.color(d.removed),
+                    None => text,
+                };
+                if ui
+                    .selectable_label(false, text)
+                    .on_hover_text("Only the compared revision has this sheet: shown as it drew it")
+                    .clicked()
+                {
+                    w.show_removed(n.block.clone(), sid.clone());
                 }
             }
             if let Some(r) = &sel_net
