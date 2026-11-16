@@ -3,6 +3,7 @@
 //! selection and view, and what others show. `pump` takes events, `tick`
 //! sends what is due and reconnects.
 
+use crate::core::changes::{Changes, Show};
 use crate::core::compare::{Ask, Blink, Side};
 use crate::core::flash::Flash;
 use crate::core::link::{Daemon, Event, Link, Wake};
@@ -173,6 +174,11 @@ enum Why {
     People,
     /// `compare.get` while comparing: its commit against the drawn one.
     CompareGet,
+    /// `diff --layout` (or `--netlist`) from the compared revision.
+    Changes {
+        rev: String,
+        netlist: bool,
+    },
     Quiet,
 }
 
@@ -241,6 +247,10 @@ pub struct Window {
     compare_polled: Option<Instant>,
     /// A ghost or a revision's pick shown in Properties, never selected.
     pub described: Option<String>,
+    /// The Changes tab: the compare's changes, while comparing.
+    pub changes: Option<Changes>,
+    changes_asked: bool,
+    changes_again: bool,
 }
 
 impl Window {
@@ -296,6 +306,9 @@ impl Window {
             blink: Blink::default(),
             compare_polled: None,
             described: None,
+            changes: None,
+            changes_asked: false,
+            changes_again: false,
         };
         w.ask_all();
         Ok(w)
@@ -394,8 +407,75 @@ impl Window {
         self.ask_changes();
     }
 
-    /// Reads the compare's changes again (the Changes tab).
-    pub fn ask_changes(&mut self) {}
+    /// Reads the compare's changes again: `diff --layout` and `diff
+    /// --netlist` from the compared revision, one read at a time.
+    pub fn ask_changes(&mut self) {
+        let Some(rev) = self.blink.of.clone() else {
+            self.changes = None;
+            return;
+        };
+        if self.changes_asked {
+            self.changes_again = true;
+            return;
+        }
+        self.changes_asked = true;
+        if self.changes.as_ref().is_none_or(|c| c.rev != rev) {
+            self.changes = Some(Changes::new(&rev));
+        }
+        for netlist in [false, true] {
+            let p = if netlist {
+                json!({"from": rev, "netlist": true})
+            } else {
+                json!({"from": rev, "layout": true})
+            };
+            self.send_aside(
+                req("diff", p),
+                Why::Changes {
+                    rev: rev.clone(),
+                    netlist,
+                },
+            );
+        }
+    }
+
+    /// A Changes read came back (or failed): the next read goes once
+    /// both have.
+    fn changes_read(&mut self) {
+        let waiting = self
+            .pending
+            .values()
+            .any(|w| matches!(w, Why::Changes { .. }));
+        if !waiting {
+            self.changes_asked = false;
+            if std::mem::take(&mut self.changes_again) {
+                self.ask_changes();
+            }
+        }
+    }
+
+    /// A Changes row's Show (design 688): a working object selected and
+    /// framed, a removed one's ghost framed on the sheet its layout entry
+    /// names (as the revision drew it, when only the revision has it).
+    pub fn show_change(&mut self, s: &Show) {
+        match s {
+            Show::Working(r) => self.go_to(r),
+            Show::Removed {
+                block,
+                sheet,
+                reference,
+            } => {
+                self.frame_ref = Some(reference.clone());
+                if self.nav.removed(block).iter().any(|(k, _)| k == sheet) {
+                    self.blink.set(Side::Rev);
+                } else {
+                    self.blink.set(Side::Both);
+                }
+                let layer = self.shown.layer.clone();
+                self.show(Some(block.clone()), Some(sheet.clone()), layer);
+            }
+            Show::Nowhere => {}
+        }
+    }
 
     /// Asks the shown sheet's scene.
     pub fn ask_scene(&mut self) {
@@ -689,7 +769,7 @@ impl Window {
     pub fn idle(&self) -> bool {
         self.pending
             .values()
-            .all(|w| matches!(w, Why::OtherSheet | Why::Check))
+            .all(|w| matches!(w, Why::OtherSheet | Why::Check | Why::Changes { .. }))
     }
 
     fn handle(&mut self, e: Event) {
@@ -704,6 +784,8 @@ impl Window {
             Event::Lost if !self.lost => {
                 self.lost = true;
                 self.pending.clear();
+                // What was asked is gone with the link.
+                self.changes_asked = false;
                 self.toasts.lost(Instant::now());
                 self.retry = Some(Retry {
                     at: Instant::now() + RETRY_FIRST,
@@ -725,6 +807,7 @@ impl Window {
                     Why::Write(title) => self.toasts.error(title, &e, 0, now),
                     Why::GoTo(_) => self.toasts.error("Show", &e, 0, now),
                     Why::Check => self.checked = None,
+                    Why::Changes { .. } => self.changes_read(),
                     _ => {}
                 }
                 return;
@@ -747,7 +830,13 @@ impl Window {
                         .owners
                         .iter()
                         .filter(|o| o.reference == r || o.net.as_deref() == Some(r.as_str()))
-                        .filter_map(|o| o.boxed);
+                        .filter_map(|o| o.boxed)
+                        .chain(
+                            sc.ghosts
+                                .iter()
+                                .filter(|g| g.reference == r)
+                                .filter_map(|g| g.boxed),
+                        );
                     self.frame = boxes.reduce(|a, b| {
                         [
                             [a[0][0].min(b[0][0]), a[0][1].min(b[0][1])],
@@ -840,6 +929,16 @@ impl Window {
                     self.ask_props();
                 }
             }
+            Why::Changes { rev, netlist } => {
+                if let Some(c) = self.changes.as_mut().filter(|c| c.rev == rev) {
+                    if netlist {
+                        c.netlist(&v);
+                    } else {
+                        c.layout(&v);
+                    }
+                }
+                self.changes_read();
+            }
             Why::CompareGet => {
                 let commit = v["compare"]["commit"].as_str().map(str::to_owned);
                 let drawn = self.scene.as_ref().and_then(|s| {
@@ -875,6 +974,9 @@ impl Window {
                 }
                 self.send(req("design.list", json!({})), Why::Designs);
                 self.send(req("erc", json!({})), Why::Erc);
+                if self.blink.of.is_some() {
+                    self.ask_changes();
+                }
                 if let Some(b) = self.shown.block.clone() {
                     self.send(
                         req("layout.instructions", json!({"block": b})),
