@@ -4,11 +4,12 @@
 
 mod common;
 
-use common::{breakout, daemon, gpu, one_at_a_time};
+use common::{agent, breakout, breakout_in_git, daemon, gpu, one_at_a_time};
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use ryueda_app::ui::app::App;
+use serde_json::json;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -128,6 +129,8 @@ fn every_control_is_named() {
         "Tools",
         "Run check",
         "Breakout (breakout)",
+        "Changes",
+        "History",
     ] {
         assert!(h.query_by_label(label).is_some(), "nothing named {label}");
     }
@@ -138,4 +141,86 @@ fn every_control_is_named() {
         })
         .count();
     assert_eq!(unnamed, 0, "unnamed buttons");
+}
+
+/// The compare bar's controls are named too (plan 13.A).
+#[test]
+fn every_compare_control_is_named() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let root = breakout_in_git("names-compare");
+    let mut h = loaded(&root, false);
+    agent(&root, "compare.set", json!({"rev": "HEAD"}));
+    let end = Instant::now() + Duration::from_secs(30);
+    while !h
+        .state()
+        .opened()
+        .and_then(|w| w.scene.as_ref())
+        .is_some_and(|s| s.against.is_some())
+    {
+        assert!(Instant::now() < end, "the compare never drew");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    h.step();
+    for label in ["Both", "Working", "HEAD", "Stop"] {
+        assert!(h.query_by_label(label).is_some(), "nothing named {label}");
+    }
+    let unnamed = h
+        .query_all_by(|n| {
+            n.role() == egui::accesskit::Role::Button
+                && n.label().is_none_or(|l| l.trim().is_empty())
+        })
+        .count();
+    assert_eq!(unnamed, 0, "unnamed buttons");
+}
+
+#[test]
+fn a_compare_looks_as_it_did_in_both_themes() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let root = breakout_in_git("snapshot-compare");
+    for (dark, name) in [(false, "compare-light"), (true, "compare-dark")] {
+        let mut h = loaded(&root, dark);
+        agent(&root, "compare.set", json!({"rev": "HEAD"}));
+        let end = Instant::now() + Duration::from_secs(30);
+        while !h
+            .state()
+            .opened()
+            .is_some_and(|w| w.idle() && w.scene.as_ref().is_some_and(|s| s.against.is_some()))
+        {
+            assert!(Instant::now() < end, "the compare never drew");
+            h.step();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        h.state_mut().opened_mut().unwrap().flash.clear();
+        for _ in 0..4 {
+            h.step();
+        }
+        let img = h.render().unwrap();
+        looks_as_it_did(&img, name);
+        agent(&root, "compare.set", json!({"off": true}));
+    }
+}
+
+#[test]
+fn a_halo_reads_on_white_paper() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let root = breakout("snapshot-halo");
+    let mut h = loaded(&root, false);
+    let w = h.state_mut().opened_mut().unwrap();
+    w.flash
+        .start("breakout/r1", Instant::now() + Duration::from_secs(3600));
+    for _ in 0..4 {
+        h.step();
+    }
+    let img = h.render().unwrap();
+    looks_as_it_did(&img, "halo-light");
 }
