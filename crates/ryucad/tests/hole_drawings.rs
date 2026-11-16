@@ -403,3 +403,132 @@ fn a_hole_listed_in_a_table_is_called_out() {
     .unwrap();
     assert_eq!(codes(&g, "dwg_hole_uncalled"), 0, "{}", g["findings"]);
 }
+
+/// Every path item whose model entity is `entity`: (start, its segments).
+fn paths_of(g: &Value, entity: &str) -> Vec<Value> {
+    g["sheets"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["entity"] == entity && i.get("path").is_some())
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_tapped_holes_thread_is_drawn_end_on_side_on_and_in_section() {
+    let (_d, mut s) = plate(&[[10.0, 15.0]]);
+    drill(&mut s, "t", &["p1"], "M6x1.0-6H THRU");
+    let w = wall(&mut s, "p/t/p1");
+    let entity = format!("p/{w}");
+    let full = |s: &mut Session| {
+        must(
+            s,
+            "drawing.get",
+            json!({"part": "p", "drawing": "d", "items": true}),
+        )
+    };
+    let g = full(&mut s);
+    let drawn = paths_of(&g, &entity);
+    // End on in the top view: a three-quarter circle of the major
+    // diameter's radius, 3 mm at 1:1.
+    let arcs: Vec<&Value> = drawn
+        .iter()
+        .flat_map(|i| i["path"]["segments"].as_array().unwrap())
+        .filter_map(|x| x.get("arc"))
+        .filter(|a| (a["sweep"].as_f64().unwrap() - 1.5 * std::f64::consts::PI).abs() < 1e-12)
+        .collect();
+    assert_eq!(arcs.len(), 1, "{drawn:?}");
+    assert!((arcs[0]["radius"].as_f64().unwrap() - 3.0).abs() < 1e-9);
+    // Side on in the front view, hidden: the bore's own silhouettes 5 mm
+    // apart (the tap drill) and the thread's lines 6 mm apart outside
+    // them, all dashed, all the wall's.
+    let straight = |i: &&Value| {
+        i["path"]["segments"].as_array().unwrap().len() == 1
+            && i["path"]["segments"][0].get("line").is_some()
+    };
+    // A solid line's stroke has no dashes (`"dash": []`).
+    let dashed = |i: &&Value| {
+        i["stroke"]["dash"]
+            .as_array()
+            .is_some_and(|d| !d.is_empty())
+    };
+    let mut xs: Vec<f64> = drawn
+        .iter()
+        .filter(straight)
+        .filter(dashed)
+        .map(|i| i["path"]["start"][0].as_f64().unwrap())
+        .collect();
+    xs.sort_by(f64::total_cmp);
+    assert!(xs.len() >= 4, "{drawn:?}");
+    assert!((xs[xs.len() - 1] - xs[0] - 6.0).abs() < 1e-9, "{xs:?}");
+    // Without hidden lines, nothing of the wall in the front view.
+    must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [{"op": "set", "id": "v2", "fields": {"hidden": "off"}}]}),
+    );
+    let g = full(&mut s);
+    assert!(paths_of(&g, &entity).iter().filter(straight).count() == 0);
+    // In a section through the hole: the thread's two thin solid lines,
+    // 6 mm apart, under the section's thick outline (the cut wall's lines
+    // are named by the cut, so the thread's are the wall's alone).
+    must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [{"op": "add", "kind": "view",
+            "value": {"type": "section", "sheet": "s1", "from": "v1", "label": "A",
+                      "cut": {"plane": "zx", "offset": "15 mm"}}}]}),
+    );
+    let g = full(&mut s);
+    let v3 = g["sheets"][0]["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["view"] == "v3")
+        .cloned()
+        .unwrap();
+    let range =
+        v3["items"][0].as_u64().unwrap() as usize..v3["items"][1].as_u64().unwrap() as usize;
+    let items = &g["sheets"][0]["items"].as_array().unwrap()[range];
+    let thick = items
+        .iter()
+        .filter(|i| i.get("path").is_some() && !dashed(i))
+        .filter_map(|i| i["stroke"]["width"].as_f64())
+        .fold(0.0, f64::max);
+    let mut xs: Vec<f64> = items
+        .iter()
+        .filter(|i| i["entity"] == entity.as_str() && i.get("path").is_some())
+        .filter(straight)
+        .filter(|i| !dashed(i) && i["stroke"]["width"].as_f64().unwrap() < thick)
+        .map(|i| i["path"]["start"][0].as_f64().unwrap())
+        .collect();
+    xs.sort_by(f64::total_cmp);
+    assert_eq!(xs.len(), 2, "{xs:?} in {v3}");
+    assert!((xs[1] - xs[0] - 6.0).abs() < 1e-9, "{xs:?}");
+}
+
+#[test]
+fn a_plain_holes_drawing_draws_no_threads() {
+    let (_d, mut s) = plate(&[[10.0, 15.0]]);
+    drill(&mut s, "h", &["p1"], "DIA 5 THRU");
+    let g = must(
+        &mut s,
+        "drawing.get",
+        json!({"part": "p", "drawing": "d", "items": true}),
+    );
+    let quarter = g["sheets"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|i| {
+            i["path"]["segments"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|x| x.get("arc").cloned())
+        .filter(|a| (a["sweep"].as_f64().unwrap() - 1.5 * std::f64::consts::PI).abs() < 1e-12)
+        .count();
+    assert_eq!(quarter, 0);
+}
