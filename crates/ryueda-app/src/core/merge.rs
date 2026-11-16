@@ -459,6 +459,63 @@ pub fn groups(rows: Vec<Row>) -> (Vec<Row>, Vec<Group>) {
     (singles, groups)
 }
 
+/// The revisions `--expect` names, as `project.info` last gave them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Revisions {
+    pub project: Option<String>,
+    pub blocks: std::collections::BTreeMap<String, String>,
+}
+
+impl Revisions {
+    pub fn read(info: &Value) -> Revisions {
+        Revisions {
+            project: info["revision"].as_str().map(str::to_owned),
+            blocks: info["blocks"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                .collect(),
+        }
+    }
+
+    /// A scope's revision: `project`, or a block's.
+    pub fn of(&self, scope: &str) -> Option<&str> {
+        if scope == "project" {
+            self.project.as_deref()
+        } else {
+            self.blocks.get(scope).map(String::as_str)
+        }
+    }
+}
+
+/// The `merge.resolve` a batch sends: guarded by every scope it touches
+/// that the window knows a revision of, or by nothing while `unloaded`.
+pub fn resolution(b: &Batch, revs: &Revisions, unloaded: bool) -> ryueda::proto::Request {
+    let mut expected_revisions = std::collections::BTreeMap::new();
+    if !unloaded {
+        for (id, ..) in &b.items {
+            let scope = ryueda::validate::scope(id);
+            if let Some(r) = revs.of(&scope) {
+                expected_revisions.insert(scope, r.to_owned());
+            }
+        }
+    }
+    ryueda::proto::Request::MergeResolve {
+        resolutions: b
+            .items
+            .iter()
+            .map(|(id, choice, repair)| ryueda::proto::Resolution {
+                conflict: id.clone(),
+                choice: choice.clone(),
+                value: None,
+                repair: repair.clone(),
+            })
+            .collect(),
+        expected_revisions,
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -679,5 +736,55 @@ pub(crate) mod tests {
                 Some("renumber".to_owned())
             )]
         );
+    }
+
+    #[test]
+    fn a_resolve_is_guarded_by_each_scope_it_touches() {
+        let revs = Revisions::read(
+            &json!({"revision": "p1", "blocks": {"breakout": "b1", "sensor": "b2"}}),
+        );
+        assert_eq!(revs.of("project"), Some("p1"));
+        assert_eq!(revs.of("breakout"), Some("b1"));
+        assert_eq!(revs.of("gone"), None);
+        let b = Batch {
+            items: vec![
+                (
+                    "refdes:board/R5".into(),
+                    "repair".into(),
+                    Some("renumber".into()),
+                ),
+                (
+                    "blocks/breakout/components/r1.json#/value".into(),
+                    "theirs".into(),
+                    None,
+                ),
+                ("gone#area:1".into(), "ours".into(), None),
+            ],
+        };
+        let ryueda::proto::Request::MergeResolve {
+            resolutions,
+            expected_revisions,
+        } = resolution(&b, &revs, false)
+        else {
+            panic!("merge.resolve")
+        };
+        assert_eq!(resolutions.len(), 3);
+        assert_eq!(resolutions[0].repair.as_deref(), Some("renumber"));
+        assert_eq!(resolutions[1].choice, "theirs");
+        assert_eq!(
+            expected_revisions.into_iter().collect::<Vec<_>>(),
+            [
+                ("breakout".to_owned(), "b1".to_owned()),
+                ("project".to_owned(), "p1".to_owned())
+            ],
+            "a block it doesn't know isn't guarded"
+        );
+        let ryueda::proto::Request::MergeResolve {
+            expected_revisions, ..
+        } = resolution(&b, &revs, true)
+        else {
+            panic!("merge.resolve")
+        };
+        assert!(expected_revisions.is_empty(), "unloaded: nothing to guard");
     }
 }
