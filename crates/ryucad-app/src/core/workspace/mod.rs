@@ -400,6 +400,7 @@ impl Workspace {
     fn load(&mut self) {
         // What was asked for before a resync may never be answered.
         self.model.loading.clear();
+        self.model.again.clear();
         self.model.asked_at.clear();
         self.send(Request::ProjectInfo {}, Route::Model(model::Asked::Info));
         self.send(Request::PartList {}, Route::Model(model::Asked::Parts));
@@ -1006,7 +1007,7 @@ impl Workspace {
         }
         for id in &s.parts {
             if self.model.listed.contains_key(id) {
-                self.ask_part(id);
+                self.ask_part_again(id);
             }
         }
         if s.diff {

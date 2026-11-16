@@ -523,6 +523,18 @@ impl Workspace {
         };
         self.send(req, Route::Model(model::Asked::Rebuild(id.to_owned(), rev)));
     }
+
+    /// [`Workspace::ask_part`] for a part a notification says changed: a
+    /// report on its way may be older than the change, so the part is
+    /// asked again once it comes, once however many notifications said
+    /// so (#849).
+    pub(super) fn ask_part_again(&mut self, id: &str) {
+        if self.model.loading.contains(id) {
+            self.model.again.insert(id.to_owned());
+        } else {
+            self.ask_part(id);
+        }
+    }
 }
 
 /// What one of this sub-state's requests was for (design 541,
@@ -632,6 +644,7 @@ impl Model {
                         self.loading.remove(&id);
                         fx.then(Then::AskPart(id.clone()));
                     }
+                    self.again.remove(&id);
                     return;
                 }
                 self.loading.remove(&id);
@@ -643,6 +656,9 @@ impl Model {
                     Err(e) => json!({"part": id, "error": e}),
                 };
                 fx.then(Then::PartChanged(report));
+                if self.again.remove(&id) {
+                    fx.then(Then::AskPart(id));
+                }
             }
             // A delete chosen before this one answers too late to matter:
             // its ghosts and its failures alike are dropped.

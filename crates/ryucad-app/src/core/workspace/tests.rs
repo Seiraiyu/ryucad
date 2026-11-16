@@ -298,3 +298,26 @@ fn the_workspace_answers_only_by_routing() {
         );
     }
 }
+
+/// A part a notification named while its report was on its way is
+/// asked again once the report comes, once (#849).
+#[test]
+fn a_part_changed_while_asked_is_asked_again_once() {
+    let mut model = Model::default();
+    model.loading.insert("p".to_owned());
+    model.again.insert("p".to_owned());
+    let mut fx = Effects::default();
+    model.answer(
+        model::Asked::Rebuild("p".to_owned(), None),
+        answered(json!({"parts": [{"part": "p"}]})),
+        Some(None),
+        &mut fx,
+    );
+    assert!(model.again.is_empty());
+    assert!(
+        matches!(fx.recorded(),
+                 [Effect::Then(Then::PartChanged(_)), Effect::Then(Then::AskPart(p))] if p == "p"),
+        "{:?}",
+        fx.recorded()
+    );
+}

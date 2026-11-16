@@ -1025,6 +1025,9 @@ pub struct Model {
     held: std::sync::Mutex<Option<((u64, usize), u64)>>,
     /// Parts whose reports are asked for and not yet answered.
     pub loading: BTreeSet<String>,
+    /// Parts a notification named while their reports were on their
+    /// way: asked again once each comes (#849).
+    pub again: BTreeSet<String>,
     /// The revision each part in `loading` was last asked for at.
     pub(crate) asked_at: BTreeMap<String, Option<String>>,
     /// Parts the tree, as it draws, found it wants loaded (its rows
