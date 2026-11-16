@@ -555,4 +555,106 @@ mod tests {
             fs.same.iter().copied().collect::<BTreeSet<_>>()
         );
     }
+
+    /// A cut arrangement (plan 21.C): pieces, clipped, laminar and old
+    /// edges, the seed sets tried in order, the shortcut's seeds, and
+    /// those of them whose inner point lies inside their old face.
+    struct Cut {
+        arr: Arrangement,
+        tries: Vec<Vec<usize>>,
+        shortcut: BTreeSet<usize>,
+        holds: BTreeSet<usize>,
+    }
+
+    fn read_cut(text: &str) -> Cut {
+        let mut c = Cut {
+            arr: Arrangement::default(),
+            tries: Vec::new(),
+            shortcut: BTreeSet::new(),
+            holds: BTreeSet::new(),
+        };
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            let mut words = line.split_whitespace();
+            let Some(head) = words.next() else {
+                continue;
+            };
+            let nums = |w: std::str::SplitWhitespace| -> Vec<usize> {
+                w.map(|x| x.parse().unwrap()).collect()
+            };
+            match head {
+                "p" => {
+                    let face = words.next().unwrap().parse().unwrap();
+                    let arcs = words
+                        .map(|a| {
+                            let (g, s) = a.split_at(a.len() - 1);
+                            (g.parse().unwrap(), if s == "+" { F } else { R })
+                        })
+                        .collect();
+                    c.arr.pieces.push((face, arcs));
+                }
+                "clipped" => c.arr.clipped.extend(nums(words)),
+                "laminar" => c.arr.laminar.extend(nums(words)),
+                "old" => c.arr.old.extend(nums(words)),
+                "try" => c.tries.push(nums(words)),
+                "shortcut" => c.shortcut.extend(nums(words)),
+                "holds" => c.holds.extend(nums(words)),
+                other => panic!("unknown line {other}"),
+            }
+        }
+        c
+    }
+
+    /// FTC 10 rb's walk at rung 2's narrowed retry (#652, census VI, plan
+    /// 21.C): the kept 1 mm ball `d0eb13c5`'s one piece is its whole
+    /// working sphere, slit by its held seam with carried NURBS
+    /// `a497893e`; the NURBS's quad between the two balls uses the seam
+    /// too.
+    fn ftc_10_slit() -> Cut {
+        read_cut(include_str!("../../../tests/data/nist_ftc_10_slit.arr"))
+    }
+
+    /// The ball's piece and the NURBS's quad in the cut (census VI's
+    /// `conflict edge 917` line).
+    const BALL: usize = 261;
+    const NURBS: usize = 556;
+
+    #[test]
+    fn ftc_10s_slit_fails_every_seed_set() {
+        let c = ftc_10_slit();
+        assert!(!c.tries.is_empty());
+        for t in &c.tries {
+            assert!(
+                matches!(walk(&c.arr, t, &free()), Err(WalkError::Ambiguous { .. })),
+                "{t:?}"
+            );
+        }
+        let bad = conflicts(&c.arr, &c.tries[0]);
+        assert!(!bad.is_empty());
+        // The ball's piece is the slit alone, one edge each way round.
+        let (g, _) = c.arr.pieces[BALL].1[0];
+        assert!(bad.contains(&g));
+        assert_eq!(c.arr.pieces[BALL].1, vec![(g, F), (g, R)]);
+        assert!(c.arr.pieces[NURBS].1.contains(&(g, R)));
+    }
+
+    /// Plan 21.C: FTC 10's conflict has no seed to yield. The ball's seed
+    /// came by the shortcut but holds its old face, and the NURBS's quad
+    /// was seeded by rule 3 proper: the rule doesn't settle FTC 10
+    /// (recorded on #652, moved to ryukei 22).
+    #[test]
+    fn ftc_10s_slit_has_no_seed_to_yield() {
+        let c = ftc_10_slit();
+        assert!(c.shortcut.contains(&BALL) && c.holds.contains(&BALL));
+        assert!(!c.shortcut.contains(&NURBS));
+        let mut holds = |i: usize| c.holds.contains(&i);
+        assert_eq!(yielded(&c.arr, &c.tries[0], &c.shortcut, &mut holds), None);
+        assert!(walk_again(&c.arr, &c.tries, &c.shortcut, &mut holds, &free()).is_none());
+        // Were the ball's seed weaker, it would yield, and the walk still
+        // fails: the seam's third use is the NURBS's own.
+        let mut never = |_: usize| false;
+        let fewer = yielded(&c.arr, &c.tries[0], &c.shortcut, &mut never).unwrap();
+        assert!(!fewer.contains(&BALL));
+        assert!(walk(&c.arr, &fewer, &free()).is_err());
+    }
 }
