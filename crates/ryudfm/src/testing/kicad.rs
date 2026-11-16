@@ -65,27 +65,9 @@ pub fn compare_with_kicad(b: &Board, pos: &str, d356: &str) -> Vec<String> {
     // IPC-D-356 pin records: the net in columns 4-17 (its last 14
     // characters, in capitals, with `?` for some it can't write), the
     // reference designator in 21-26, the pin in 28-31.
-    for line in d356.lines() {
-        if !(line.starts_with("317") || line.starts_with("327")) || line.len() < 31 {
-            continue;
-        }
-        let net = line[3..17].trim();
-        let refdes = line[20..26].trim();
-        let pin = line[27..31].trim();
-        if refdes == "VIA" || refdes.is_empty() {
-            continue;
-        }
-        // A designator cut to six characters names the one component it
-        // begins, if only one does.
-        let found = by_ref.get(refdes).copied().or_else(|| {
-            let mut m = by_ref
-                .iter()
-                .filter(|(r, _)| refdes.len() == 6 && r.starts_with(refdes));
-            match (m.next(), m.next()) {
-                (Some((_, c)), None) => Some(*c),
-                _ => None,
-            }
-        });
+    for (net, refdes, pin) in d356_records(d356) {
+        let (net, refdes, pin) = (net.as_str(), refdes.as_str(), pin.as_str());
+        let found = by_designator(s, refdes).map(|i| &s.components[i]);
         let Some(c) = found else {
             if refdes.len() < 6 {
                 out.push(format!(
@@ -127,6 +109,101 @@ pub fn compare_with_kicad(b: &Board, pos: &str, d356: &str) -> Vec<String> {
         if !agrees {
             out.push(format!("{refdes}.{pin}: net {ours:?}, KiCad says {net}"));
         }
+    }
+    out
+}
+
+/// IPC-D-356 pin records: the net (columns 4-17, cut as KiCad cuts it),
+/// the reference designator (21-26) and the pin (28-31), but vias.
+pub fn d356_records(d356: &str) -> Vec<(String, String, String)> {
+    d356.lines()
+        .filter(|l| (l.starts_with("317") || l.starts_with("327")) && l.len() >= 31)
+        .map(|l| {
+            (
+                l[3..17].trim().to_string(),
+                l[20..26].trim().to_string(),
+                l[27..31].trim().to_string(),
+            )
+        })
+        .filter(|(_, r, _)| r != "VIA" && !r.is_empty())
+        .collect()
+}
+
+/// The component a designator names, cut to six characters as IPC-D-356
+/// cuts it: the one it begins, if only one does.
+fn by_designator(s: &ryu_board::model::Step, refdes: &str) -> Option<usize> {
+    if let Some(i) = s.components.iter().position(|c| c.refdes == refdes) {
+        return Some(i);
+    }
+    let mut m = s
+        .components
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| refdes.len() == 6 && c.refdes.starts_with(refdes));
+    match (m.next(), m.next()) {
+        (Some((i, _)), None) => Some(i),
+        _ => None,
+    }
+}
+
+/// Our islands against KiCad's IPC-D-356 netlist of the board: each of its
+/// pin records is a point of its net at our pin's place (on its
+/// component's side, or through the hole there), and the compare must find
+/// no open, no short and no point off copper. Returns each one found.
+pub fn compare_islands_with_d356(cb: &crate::copper::CopperBoard, d356: &str) -> Vec<String> {
+    use crate::copper::Key;
+    use ryu_copper::layout::{NetPoint, PointSide};
+    let s = &cb.board.steps[cb.built.step];
+    let mut points = Vec::new();
+    for (net, refdes, pin) in d356_records(d356) {
+        if net == "N/C" {
+            continue;
+        }
+        let Some(c) = by_designator(s, &refdes) else {
+            continue;
+        };
+        let Some(p) = s.components[c].pins.iter().position(|p| p.name == pin) else {
+            continue;
+        };
+        points.push(NetPoint {
+            net,
+            at: s.components[c].pins[p].at,
+            side: match s.components[c].side {
+                Side::Top => Some(PointSide::Top),
+                Side::Bottom => Some(PointSide::Bottom),
+                Side::Inner => None,
+            },
+            key: Key::Pin {
+                component: c as u32,
+                pin: p as u32,
+            },
+        });
+    }
+    let r = ryu_copper::netlist::compare(&cb.copper, &points);
+    let mut out = Vec::new();
+    for o in &r.opens {
+        out.push(format!(
+            "open: {} lies on {} islands",
+            o.net,
+            o.islands.len()
+        ));
+    }
+    for x in &r.shorts {
+        let nets: Vec<&str> = x.nets.iter().map(|(n, _)| n.as_str()).collect();
+        out.push(format!(
+            "short: island {} joins {}",
+            cb.island_name(None, &x.island),
+            nets.join(" + ")
+        ));
+    }
+    for o in &r.off_copper {
+        out.push(format!(
+            "off copper: {} of {} at {:?}{}",
+            cb.reference(None, o.key),
+            o.net,
+            o.at,
+            if o.uncertain { " (uncertain)" } else { "" }
+        ));
     }
     out
 }

@@ -39,6 +39,8 @@ fn pinned_boards_read_to_their_manifest() {
         "manifest.txt's pinned boards and pinned.txt's fetched ones differ"
     );
     let mut got = Vec::new();
+    let mut copper = Vec::new();
+    let mut islands = Vec::new();
     for name in fetched {
         let out = dir.join(name);
         assert!(
@@ -56,10 +58,28 @@ fn pinned_boards_read_to_their_manifest() {
         let diff = compare_with_kicad(&a, &pos, &d356);
         assert!(diff.is_empty(), "{name}:\n{}", diff.join("\n"));
         got.push((name.to_string(), summary(&a)));
+        let cb = ryudfm::copper::CopperBoard::new(std::sync::Arc::new(a));
+        let line = ryudfm::testing::copper_summary(&cb);
+        // Printed before any assertion, so the devcontainer job's log has
+        // every line to record.
+        println!("{name}:\n{line}");
+        copper.push((name.to_string(), line));
+        let diff = ryudfm::testing::compare_islands_with_d356(&cb, &d356);
+        islands.extend(diff.into_iter().map(|d| format!("{name}: {d}")));
     }
+    assert!(
+        islands.is_empty(),
+        "islands against KiCad's netlists:\n{}",
+        islands.join("\n")
+    );
     let differing = check_manifest(&here.join("tests/corpus/manifest.txt"), &got);
     assert!(
         differing.is_empty(),
         "counts changed for {differing:?}: UPDATE_MANIFEST=1 and review the diff"
+    );
+    let differing = ryudfm::testing::check_copper(&here.join("tests/corpus/manifest.txt"), &copper);
+    assert!(
+        differing.is_empty(),
+        "copper changed for {differing:?}: copy the lines printed above into manifest.txt"
     );
 }
