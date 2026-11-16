@@ -934,3 +934,24 @@ fn a_tolerant_cone_on_a_torus_whose_faces_overlapped() {
     )));
     assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
 }
+
+/// #905: the `tolerant` target's finds in 30.C's hour-long sessions
+/// (`crash-269db946…` minimised to 38 bytes, and `crash-fa0042c1…`).
+/// Tolerant unions of a block and a sphere of radius 0.75 on one of its
+/// corners: the exact boolean meshes watertight, but the tolerant one's
+/// mesh had a non-manifold edge and two open ones where the sphere's
+/// three arcs meet the block's faces at tolerant vertices. It must refuse
+/// typed or build a sound body that meshes watertight.
+#[test]
+fn tolerant_unions_whose_meshes_opened() {
+    for hex in [
+        "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a282a2a2a2a2a2a2a2a2a2a2a2a282a2a28",
+        "363636363636363636363636363636363636363636363636363636363636363636f6cf79cfc7",
+        // #904: the nightly's crash-903ba247 (run 43672013789), the same
+        // family.
+        "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5afa2c0a",
+    ] {
+        let out = tolerant_run(&bytes(hex));
+        assert!(!matches!(out, TolerantRun::NoCase), "{hex}: {out:?}");
+    }
+}

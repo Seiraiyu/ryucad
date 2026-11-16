@@ -188,8 +188,15 @@ pub(crate) fn discretize_in(
             .collect();
         Sample { t, p, uv, depth }
     };
-    let start = sample(t0, b.vertices[edge.start].point, 0);
-    let end = sample(t1, b.vertices[edge.end].point, 0);
+    // An end within its vertex's tolerance of a seam is on it (#905).
+    let seamed = |mut s: Sample, v| {
+        for (i, &f) in faces.iter().enumerate() {
+            s.uv[i] = geom(f).on_seam(b, v, s.uv[i]);
+        }
+        s
+    };
+    let start = seamed(sample(t0, b.vertices[edge.start].point, 0), edge.start);
+    let end = seamed(sample(t1, b.vertices[edge.end].point, 0), edge.end);
     // The right ends still to reach, nearest last.
     let mut stack = vec![end];
     let mut seeds: Vec<f64> = extra
