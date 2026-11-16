@@ -111,19 +111,55 @@ pub fn handle_job(
     // open: its status and resolutions are read from the files alone.
     let merge =
         matches!(req, Request::MergeStatus {} | Request::MergeResolve { .. }).then(|| req.clone());
-    let r = match (
-        guarded(slot, root, |s| answer(s, live, me, req, job)),
-        merge,
-    ) {
-        (Err(e), Some(req))
-            if e.code == Code::MergeConflict
-                && e.details.get("path").and_then(Value::as_str) == Some(MANIFEST) =>
-        {
+    // A window opening over that record says hello and lists who is
+    // there: both are the live session's, which needs no project (plan
+    // 13.B).
+    let sessionless = matches!(
+        req,
+        Request::SessionHello { .. } | Request::ParticipantList {}
+    )
+    .then(|| req.clone());
+    let mut live = live;
+    let r = guarded(slot, root, |s| answer(s, live.as_deref_mut(), me, req, job));
+    let r = match (r, merge, sessionless) {
+        (Err(e), Some(req), _) if manifest_record(&e) => {
             crate::validate::unloaded(root, req).map(Answer::json)
         }
-        (r, _) => r,
+        (Err(e), _, Some(req)) if manifest_record(&e) && live.is_some() => {
+            live_only(live, req).map(Answer::json)
+        }
+        (r, _, _) => r,
     };
     if schema { r.map(with_schema) } else { r }
+}
+
+/// Whether `e` is a session refused because `ryueda.json` holds a merge's
+/// conflict record.
+fn manifest_record(e: &Error) -> bool {
+    e.code == Code::MergeConflict && e.details.get("path").and_then(Value::as_str) == Some(MANIFEST)
+}
+
+/// `session.hello` and `participant.list`, from the live session alone.
+fn live_only(live: Option<&mut Live<Eda>>, req: Request) -> Result<Value> {
+    match req {
+        Request::SessionHello {
+            kind,
+            name,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("session.hello"))?;
+            let id = live.hello(kind, name.as_deref(), participant.as_deref())?;
+            Ok(json!({"participant": id, "session": live.list()}))
+        }
+        // With no daemon, nobody is attached.
+        Request::ParticipantList {} => {
+            Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        }
+        other => Err(Error::new(
+            Code::Internal,
+            format!("{} needs the project", other.method()),
+        )),
+    }
 }
 
 /// A long request's work, run by the daemon with its lock released: what
@@ -217,7 +253,7 @@ pub fn answer(
     };
     let result = match req.rev().map(str::to_owned) {
         Some(rev) => match session.at(&rev) {
-            Ok((commit, p)) => read_at(session, &p, req)
+            Ok((commit, p)) => read_at(session, &p, &commit, req)
                 .map(|a| with_commit(a, &commit))
                 .map_err(|e| e.with("commit", &commit)),
             Err(e) => Err(e),
@@ -420,6 +456,26 @@ fn working(
             sheet,
             layer,
             theme,
+            compare: Some(rev),
+            ..
+        } => crate::scene::answer_compare(
+            session,
+            &crate::scene::Ask {
+                design,
+                block,
+                sheet,
+                layer,
+                theme: theme.unwrap_or_default(),
+            },
+            &rev,
+        ),
+        Request::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+            ..
         } => crate::scene::answer(
             session,
             &crate::scene::Ask {
@@ -434,8 +490,8 @@ fn working(
     }
 }
 
-/// A read request answered from `p`, a revision's project.
-fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
+/// A read request answered from `p`, a revision's project at `commit`.
+fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Result<Answer> {
     match req {
         Request::Resolve { refs, .. } => crate::anchor::stand_all(p, &refs).map(Answer::json),
         Request::Netlist { design, .. } => {
@@ -464,6 +520,9 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             compare: Some(_), ..
         }
         | Request::Output {
+            compare: Some(_), ..
+        }
+        | Request::Scene {
             compare: Some(_), ..
         } => Err(Error::new(
             Code::InvalidParam,
@@ -522,6 +581,25 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             library.as_deref(),
             symbol.as_deref(),
             &crate::symlint::Listing { summary, codes },
+        ),
+        Request::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+            ..
+        } => crate::scene::answer_at(
+            session,
+            p,
+            commit,
+            &crate::scene::Ask {
+                design,
+                block,
+                sheet,
+                layer,
+                theme: theme.unwrap_or_default(),
+            },
         ),
         other => Err(Error::new(
             Code::InvalidParam,
@@ -1480,18 +1558,9 @@ fn dispatch(
             let who = live.caller(me);
             activity::undo(live, session, &who, entry, true)
         }
-        Request::SessionHello {
-            kind,
-            name,
-            participant,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("session.hello"))?;
-            let id = live.hello(kind, name.as_deref(), participant.as_deref())?;
-            Ok(json!({"participant": id, "session": live.list()}))
-        }
-        // With no daemon, nobody is attached.
-        Request::ParticipantList {} => {
-            Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        req @ (Request::SessionHello { .. } | Request::ParticipantList {}) => live_only(live, req),
+        Request::HistoryLog { limit } => {
+            crate::git::history(session.root(), &session.files(), limit.unwrap_or(50))
         }
         Request::CompareGet { participant } => {
             // Whose compare.set would change: `participant`, else the one

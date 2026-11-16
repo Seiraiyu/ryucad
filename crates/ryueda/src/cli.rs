@@ -61,6 +61,13 @@ struct Rev {
 enum Command {
     /// This build's version.
     Version,
+    /// Open a project (this folder by default) in the desktop app,
+    /// ryueda-app; RYUEDA_APP names another.
+    Open {
+        /// The folder to open: this one (or -C's) by default.
+        #[arg(id = "folder", value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Create a project in this folder, or with --library a library
     /// project, which other projects name with `lib add`.
     Init {
@@ -474,6 +481,12 @@ enum Command {
         /// light (the default) or dark.
         #[arg(long, value_parser = ["light", "dark"])]
         theme: Option<String>,
+        /// Mark what changed since this Git revision: each owner's mark,
+        /// what is gone as ghosts, moved parts' leaders and the counts.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// Whether thread anchors stand: each `<design>:<block>/<object>`
     /// (a component, net, pin, port or instance as scene names it) or
@@ -1986,6 +1999,12 @@ enum GitCmd {
         /// The file's path in the repository, as Git names it.
         path: Option<String>,
     },
+    /// The project's Git commits, newest first, and what is uncommitted.
+    /// Read-only.
+    Log {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2320,6 +2339,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             before: *before,
         },
         Command::Participants => Request::ParticipantList {},
+        Command::Git(GitCmd::Log { limit }) => Request::HistoryLog {
+            limit: Some(*limit),
+        },
         Command::Compare { rev: None, off: false, participant } => Request::CompareGet {
             participant: participant.clone(),
         },
@@ -3221,7 +3243,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             sheet,
             layer,
             theme,
+            compare,
+            rev,
         } => Request::Scene {
+            compare: compare.clone(),
+            rev: rev.rev.clone(),
             design: design.clone(),
             block: block.clone(),
             sheet: sheet.clone(),
@@ -3427,6 +3453,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             repairs: repairs.clone(),
         },
         Command::Version
+        | Command::Open { .. }
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
@@ -3458,6 +3485,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Open { dir } => {
+            let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
+            let dir = ryueda::source::plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
+            client::open(&dir)
+        }
         Command::Init { unit, library } => {
             let root =
                 ryueda::source::plain(here.canonicalize().map_err(|e| Error::io(&here, &e))?);

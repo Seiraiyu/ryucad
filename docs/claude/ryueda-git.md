@@ -47,6 +47,31 @@ The design is document 518 in the Coxswain planning project `ryucad-ryukei`; the
 - **The round.** `scripts/merge-round/` (prepare, a logging wrapper whose `merge` role only reads and settles, two briefs); report 622 holds what the round found (the buck merged by three fresh agents; issues #858-#863).
 - **Testing.** Unit tests in `clash.rs` (each kind and repair on the test design merged in a repository, a refused repair, blame, a designator clash beside a lost net), `tests/merge.rs` (the clashes through Git with the driver and hook, both ways, undo through the daemon, a library component renumbered with its users, one restored, `merge_faults` blocking the commit until fixed), `tests/golden/ryueda.txt`'s `merge.breakout.clashes` and `.files` (each run ends its merge with `git reset --hard`: `merge --abort` refuses once repairs changed staged files).
 
+## The compare scene and the history (decided in ryueda 13.A)
+
+The design is document 688 in the Coxswain planning project `ryucad-ryukei`; these are its phase 1, plan 13.A (document 690).
+
+- **`scene --rev REV`.** `scene` reads a revision as every other read does (`Request::rev`): the sheet as the revision's files draw it, read only, the answer naming its `commit`. Kept in the session's scenes by the ask and the commit (a commit's files never change). `--rev working` is the working sheet.
+- **`scene --compare REV`.** The working sheet marked against a Git revision, decided by `compare::marks` and `ryusch::paint::decide`, which `ryusch::paint::compare` now draws from. So `render --compare`, `output --compare` and the window never disagree, and SVG and PDF keep their bytes. The answer adds:
+  - each owner's `mark` (`added`, `changed`, `moved`). An owner of several keys (a part's units) takes the strongest: added over changed over moved. Unmarked owners carry no field, so a plain scene is the same bytes.
+  - `ghosts`: the revision's ghosted items, each as `items` are, with its owner's `ref`, `kind` and `box`.
+  - `leaders`: `{ref, from, to}` of each moved part.
+  - `counts` (`added`, `changed`, `moved`, `removed`: ghosts no working owner is marked) for the sheet, and in `sheets` each sheet's `counts`, plus the sheets only the revision has (`removed: true`).
+  - `against`: `rev`, `commit`, and `invalid` (the error) when the revision's block doesn't lay out.
+
+  No strip item: the window's bar shows the counts. `--compare working`, and `--compare` with `--rev`, are `invalid_param`.
+- **`paper.diff` in every scene.** Each scene's paper names the look's `diff_added`, `diff_changed` and `diff_removed`, so a style recolours the window as it recolours renders, and the window's changed halo has its colour with no compare. Every `schematic.*.scene.*` golden moved once for it.
+- **Revision lay-outs kept.** The session keeps the last four revisions' laid-out blocks (`session::LAID`, as many as `REVISIONS`), by the revision's key (its tree and aliases), the block and the layer. A compare scene after a working edit lays out only the working block. `compare::lay_then` says why a revision's block doesn't lay out (`laid_then` still swallows it for `render` and `output`). A compare scene is kept in the session's scenes by the ask, the working revisions and the revision's key, so `HEAD` moving is a new key.
+- **Bus entries owned by their net (#878).** `ryusch::paint::bus_items` owns each entry's stub and its net's name by the net's key; the spines, trunk, bundle name and off-sheet connector stay the bus's. So a net drawn only through bus entries (the RP2040's QSPI data lines) has an owner, a box and marks. `compare::marks` marks a changed net on every sheet whose bus entries draw it. SVG and PDF ignore owners; the RP2040's `s1` and `s2` scene goldens moved.
+- **`history.log`** (`ryueda git log [--limit N]`, 50 by default). The commits that changed the project's folder, newest first (`ryu_git::Repo::log`: `id`, `author`, `time`, `subject`, `files`), and `uncommitted`, the working files that differ from `HEAD` (`{path, change}`). `not_a_git_repo` outside a repository. Not `ryueda history`, which is `activity.log` (question 994). The fields are `Repo::log`'s, as ryucad answers (question 995); the window shortens the id itself.
+- **Tests.** The goldens add `schematic.breakout.{compare,rev}.<block>.<sheet>.scene.<theme>` (commit and revisions left out), alike on one thread and eight. The `eda` fuzz target draws a compare against the same files with a component dropped. `tests/git.rs` covers `scene --rev`, `scene --compare` and `git log` both ways.
+
+## A window over a manifest's record (decided in ryueda 13.B)
+
+The design is document 688 in the Coxswain planning project `ryucad-ryukei`; this is its phase 4, plan 13.B (document 692).
+
+- **`session.hello` and `participant.list` without the project.** When the session can't open because `ryueda.json` holds a merge's conflict record (`merge_conflict` with `details.path` `ryueda.json`), `server::handle_job` answers those two from the live session alone (`live_only`), so a window can attach and settle the record. Only then, and only in a daemon: in process (no live session) hello is refused as before. `merge.status` and `merge.resolve` are answered from the files there as they were (`validate::unloaded`), and every other request is still `merge_conflict`. No method, param or answer changed; `answer`'s own arms go through `live_only` too, so there is one copy.
+
 ## The service's hooks (decided in ryupdm phase 8)
 
 The design is document 667 in the Coxswain planning project `ryucad-ryukei`; this is its phase 1, plan 8.A.
@@ -55,4 +80,4 @@ The design is document 667 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Sheets and frames.** `diff --netlist` lists `sheets`, each design's sheets a change touched, counted as `render --compare`'s strip counts them (`compare::counts`); a plain `diff` and `check --against` don't lay them out (Q987). `render --fit --sheet S --frame REV…` crops to the union of what the sheet draws here and at each revision, from the sheet's corner (`ryusch::svg::drawn_on`), so a before and an after line up.
 - **Anchors.** A thread anchor is `<design>:` and a reference path `scene` names, or `<design>:<block>/sheet:<id>`. `ryueda resolve` (`anchor::stand`) answers whether each stands at a revision, with its sheet and its box in `scene`'s frame (`scene::locate`'s box, which is the box `scene` gives the owner: scene shifts only the paper's border, so nothing is shifted), or `removed_in` (design, block) or `gone`.
 - **Attributes.** `ryueda git attributes` answers `drivers::LINES`, so the service needs no copy of them.
-- **Goldens.** Adding `schema` moved 27 keys of `tests/golden/ryueda.txt` (the scenes, the diffs, the merge statuses); `diff.breakout.netlist` also gained `sheets`. Nothing drawn moved. Checked by hashing with the added keys dropped (a scene's own `sheets` kept) against the old file before regenerating.
+- **Goldens.** Adding `schema` moved 27 keys of `tests/golden/ryueda.txt` (the scenes, the diffs, the merge statuses); `diff.breakout.netlist` also gained `sheets`. Merged over 13.A, its eight compare and revision scenes (`schematic.breakout.{compare,rev}.*.scene.*`) moved too, for the same `schema` alone. Nothing drawn moved. Checked by hashing with the added keys dropped (a scene's own `sheets` kept) against the old file before regenerating.
