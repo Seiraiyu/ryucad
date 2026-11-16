@@ -80,10 +80,30 @@ fn sorted<K: Ord + Clone>(keys: &[K]) -> Vec<K> {
     v
 }
 
+/// Where each point lands, in parallel, in the points' order.
+pub fn placements<K: Ord + Hash + Clone + Send + Sync>(
+    copper: &Copper<K>,
+    points: &[NetPoint<K>],
+) -> Vec<Placement<K>> {
+    points
+        .par_iter()
+        .map(|p| copper.place(p.at, p.side))
+        .collect()
+}
+
 /// Compares the copper with a netlist's points, placed in parallel.
 pub fn compare<K: Ord + Hash + Clone + Send + Sync>(
     copper: &Copper<K>,
     points: &[NetPoint<K>],
+) -> Report<K> {
+    compare_placed(copper, points, &placements(copper, points))
+}
+
+/// [`compare`], the points already placed (`placed[i]` is `points[i]`'s).
+pub fn compare_placed<K: Ord + Hash + Clone + Send + Sync>(
+    copper: &Copper<K>,
+    points: &[NetPoint<K>],
+    placed: &[Placement<K>],
 ) -> Report<K> {
     let mut r = Report {
         judged: !points.is_empty(),
@@ -92,13 +112,9 @@ pub fn compare<K: Ord + Hash + Clone + Send + Sync>(
         off_copper: Vec::new(),
         mismatches: Vec::new(),
     };
-    let placed: Vec<Placement<K>> = points
-        .par_iter()
-        .map(|p| copper.place(p.at, p.side))
-        .collect();
     let mut nets: BTreeMap<&str, BTreeMap<IslandId<K>, Vec<K>>> = BTreeMap::new();
     let mut islands: BTreeMap<IslandId<K>, BTreeMap<&str, Vec<K>>> = BTreeMap::new();
-    for (p, at) in points.iter().zip(placed) {
+    for (p, at) in points.iter().zip(placed.iter().cloned()) {
         let uncertain = match at {
             Placement::On(id) => {
                 nets.entry(p.net.as_str())
@@ -211,7 +227,7 @@ fn conflicts<K: Ord + Hash + Clone + Send + Sync>(
 mod tests {
     use super::*;
     use crate::connect::fixtures::*;
-    use crate::layout::PointSide;
+    use crate::layout::{Layout, PointSide};
     use crate::measure::BodyOptions;
 
     fn point(key: &'static str, net: &str, at: Point) -> NetPoint<&'static str> {
@@ -223,8 +239,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn opens_shorts_strays_and_claims() {
+    /// a and b touch end to end, claiming different nets; c and d too,
+    /// apart from them; the points open GND, short it with SIG, and leave
+    /// one off copper.
+    fn shorted_and_open() -> (Layout<&'static str>, Copper<&'static str>) {
         let mut l = board(1);
         // a and b touch end to end, claiming different nets; c and d too,
         // apart from them.
@@ -246,14 +264,21 @@ mod tests {
             "d",
             trace(0, at(1_000_000, y), at(2_000_000, y), 100_000, Some("VCC")),
         );
-        let c = Copper::new(&l, BodyOptions::default());
-        let points = vec![
+        l.points = vec![
             point("p1", "GND", at(0, 0)),
             point("p2", "SIG", at(2_000_000, 0)),
             point("p3", "GND", at(0, y)),
             point("p4", "SIG", at(9_000_000, 9_000_000)),
         ];
-        let r = compare(&c, &points);
+        let c = Copper::new(&l, BodyOptions::default());
+        (l, c)
+    }
+
+    #[test]
+    fn opens_shorts_strays_and_claims() {
+        let (l, c) = shorted_and_open();
+        let at = |x: i64, y: i64| p(x, y);
+        let r = compare(&c, &l.points);
         assert!(r.judged);
         assert_eq!(
             r.opens,
@@ -292,5 +317,16 @@ mod tests {
         let none = compare(&c, &[]);
         assert!(!none.judged);
         assert!(none.opens.is_empty() && none.shorts.is_empty() && none.mismatches.is_empty());
+    }
+
+    #[test]
+    fn placed_apart_the_compare_is_the_same() {
+        let (l, c) = shorted_and_open();
+        let placed = placements(&c, &l.points);
+        assert_eq!(placed.len(), l.points.len());
+        assert_eq!(
+            compare_placed(&c, &l.points, &placed),
+            compare(&c, &l.points)
+        );
     }
 }

@@ -48,6 +48,7 @@ mod resolve;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hash;
+use std::sync::atomic::{self, AtomicU64};
 
 use rayon::prelude::*;
 use ryu_board::geom::{Nm, Point, Rect};
@@ -258,6 +259,9 @@ pub struct Copper<K> {
     hard: Vec<BTreeSet<K>>,
     graph: Graph<Node<K>>,
     uncertain: Doubts<K>,
+    /// Items put through the boolean since this was built, counted for
+    /// tests and benchmarks: what edits cost.
+    resolves: AtomicU64,
 }
 
 impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
@@ -298,6 +302,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
             hard: vec![BTreeSet::new(); n],
             graph: Graph::new(),
             uncertain: BTreeMap::new(),
+            resolves: AtomicU64::new(0),
         };
         let modes: Vec<(usize, Modes<K>)> = (0..n)
             .into_par_iter()
@@ -413,6 +418,12 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
     /// Every contact kept apart, by its nodes.
     pub fn uncertain(&self) -> Vec<UncertainContact<K>> {
         self.uncertain.values().cloned().collect()
+    }
+
+    /// How many times an item's copper has gone through the boolean since
+    /// this was built.
+    pub fn resolves(&self) -> u64 {
+        self.resolves.load(atomic::Ordering::Relaxed)
     }
 
     fn island_from(&self, members: &BTreeSet<Node<K>>) -> Option<Island<K>> {
@@ -630,6 +641,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
     /// negative parts drawn after it (greater keys) that touch it, less
     /// the holes touching it; in groups.
     fn resolve_item(&self, layer: usize, key: &K) -> Vec<Polygons> {
+        self.resolves.fetch_add(1, atomic::Ordering::Relaxed);
         let e = &self.entries[key];
         let fo = FlattenOptions::new(self.opts.bound());
         let mut parts = poly::flatten_shape(&e.item.shape, &fo);

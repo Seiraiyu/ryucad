@@ -10,11 +10,20 @@
 //! nodes and its contacts judged again; and the components the removals
 //! touched are settled. Everything else keeps its pieces, contacts and
 //! modes: none of them depends on what the edit changed.
+//!
+//! Quiet edits skip all that (#930): a new item with no negative part that
+//! touches no hole, and the removal of one that touches no hole and isn't
+//! resolved in two pieces or more, change no other item's copper and no
+//! hole's hardness. An insert finds the fixed point again from the item
+//! alone (it only grows); a removal only takes its pieces out of the
+//! graph.
 
 use std::collections::BTreeSet;
 use std::hash::Hash;
 
 use rayon::prelude::*;
+
+use ryu_board::model::Polarity;
 
 use super::{Copper, Entry, Found, Node, on};
 use crate::layout::{Hole, Item};
@@ -46,6 +55,9 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
     /// Adds an item, or replaces the one of that key. An item on a layer
     /// that isn't copper is left out (and any old one of its key removed).
     pub fn insert_item(&mut self, key: K, item: Item) {
+        if self.insert_quiet(&key, &item) {
+            return;
+        }
         let mut layers: Vec<usize> = self
             .entries
             .get(&key)
@@ -70,8 +82,87 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
     pub fn remove_item(&mut self, key: &K) -> Option<Item> {
         let e = self.entries.get(key)?;
         let (layer, item) = (e.layer, e.item.clone());
-        self.edit(&[layer], Some(key), None, |c| c.unset_item(key));
+        if !self.remove_quiet(key) {
+            self.edit(&[layer], Some(key), None, |c| c.unset_item(key));
+        }
         Some(item)
+    }
+
+    /// #930: a new item with no negative part that touches no hole changes
+    /// no other item's copper and no hole's hardness, and the least fixed
+    /// point only grows with it, so it is found again from the item alone
+    /// on top of what is kept. False, with nothing changed, for any other
+    /// insert.
+    fn insert_quiet(&mut self, key: &K, item: &Item) -> bool {
+        if self.entries.contains_key(key)
+            || !self.is_copper(item.layer)
+            || item
+                .shape
+                .parts
+                .iter()
+                .any(|p| p.polarity == Polarity::Negative)
+        {
+            return false;
+        }
+        let layer = item.layer;
+        self.set_item(key.clone(), item);
+        if !self.holes_touching(layer, key).is_empty() {
+            self.unset_item(key);
+            return false;
+        }
+        let m = self.settle_modes(layer, BTreeSet::from([key.clone()]), BTreeSet::new(), true);
+        // Items it forces to resolve lose their plain pieces.
+        let newly: Vec<Node<K>> = m
+            .resolved
+            .keys()
+            .filter(|k| *k != key)
+            .flat_map(|k| self.nodes_of(k))
+            .collect();
+        let mut seeds = self.forget(&newly);
+        let mut p: BTreeSet<K> = m.resolved.keys().cloned().collect();
+        p.insert(key.clone());
+        self.apply(layer, m);
+        for k in &p {
+            for node in self.nodes_of(k) {
+                self.graph.add_node(node.clone());
+                seeds.push(node);
+            }
+        }
+        let this: &Self = self;
+        let found: Vec<Found<K>> = p
+            .par_iter()
+            .map(|k| this.edges_of(k, &|x: &K| p.contains(x)))
+            .collect();
+        for f in found {
+            self.absorb(f);
+        }
+        self.graph.settle(&seeds);
+        true
+    }
+
+    /// The mirror of [`Self::insert_quiet`]: an item with no negative part
+    /// that touches no hole and isn't resolved in two pieces or more forced
+    /// nothing to resolve (only a negative, a hard hole or an item in two
+    /// resolved pieces does) and held no hole, so the least fixed point
+    /// without it is the same less it: its pieces leave the graph and
+    /// nothing else changes. Plan 1.D took plain items only; an item
+    /// resolved in one piece (a trace touching a split plane) is as quiet.
+    fn remove_quiet(&mut self, key: &K) -> bool {
+        let Some(e) = self.entries.get(key) else {
+            return false;
+        };
+        if e.resolved.as_ref().is_some_and(|g| g.len() >= 2) || !e.negs.is_empty() {
+            return false;
+        }
+        let layer = e.layer;
+        if !self.holes_touching(layer, key).is_empty() {
+            return false;
+        }
+        let gone = self.nodes_of(key);
+        let seeds = self.forget(&gone);
+        self.unset_item(key);
+        self.graph.settle(&seeds);
+        true
     }
 
     /// Adds a hole, or replaces the one of that key.
@@ -469,5 +560,62 @@ mod tests {
         take(&mut l, &mut c, "t");
         undrill(&mut l, &mut c, "v");
         assert!(c.islands().is_empty() && c.uncertain().is_empty());
+    }
+
+    #[test]
+    fn quiet_edits_resolve_nothing_again() {
+        let mut l = board(1);
+        // A plane with a window a later item's negative cuts: the plane
+        // resolves, in one piece. A pad beside it, apart.
+        l.items.insert(
+            "a.plane",
+            block(0, 0, 0, 4_000_000, 4_000_000, Polarity::Positive),
+        );
+        l.items.insert(
+            "b.window",
+            block(
+                0,
+                1_000_000,
+                1_000_000,
+                2_000_000,
+                2_000_000,
+                Polarity::Negative,
+            ),
+        );
+        l.items
+            .insert("c.pad", pad(0, p(6_000_000, 0), 200_000, None));
+        let mut c = Copper::new(&l, BodyOptions::default());
+        assert!(c.is_resolved(&"a.plane"));
+        assert_eq!(c.islands().len(), 2);
+        let before = c.resolves();
+        // A plain trace from the plane to the pad, touching no hole.
+        let t = trace(0, p(3_900_000, 100_000), p(6_000_000, 0), 100_000, None);
+        put(&mut l, &mut c, "d.trace", t);
+        assert_eq!(c.resolves(), before, "a quiet insert resolved again");
+        assert_eq!(c.islands().len(), 1);
+        take(&mut l, &mut c, "d.trace");
+        assert_eq!(c.resolves(), before, "a quiet removal resolved again");
+        assert_eq!(c.islands().len(), 2);
+        // A trace across the window touches a negative: the full edit,
+        // and it still matches a rebuild (`put` checks).
+        let x = trace(
+            0,
+            p(500_000, 1_500_000),
+            p(2_500_000, 1_500_000),
+            100_000,
+            None,
+        );
+        put(&mut l, &mut c, "e.cross", x);
+        assert!(c.is_resolved(&"e.cross"));
+        assert!(c.resolves() > before);
+        // Resolved in one piece, it forced nothing: its removal is quiet.
+        assert_eq!(c.pieces(&"e.cross"), 1);
+        let before = c.resolves();
+        take(&mut l, &mut c, "e.cross");
+        assert_eq!(
+            c.resolves(),
+            before,
+            "a resolved item's removal resolved again"
+        );
     }
 }
