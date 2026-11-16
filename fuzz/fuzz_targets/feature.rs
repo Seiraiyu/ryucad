@@ -691,6 +691,10 @@ fn names_inserted(v: &serde_json::Value) -> bool {
 }
 
 fuzz_target!(|data: &[u8]| {
+    // The import file is built once a process, before any case's deadline
+    // starts: it takes no work, so a cancel can't stop it, and it is the
+    // target's setup, not the case (plan 30.D).
+    seeded();
     ryukei_testkit::fuzz_case(|case| {
         let job = Job::new("fuzz", "fuzz", "feature", case.cancel_flag());
         one(data, case, &job);
