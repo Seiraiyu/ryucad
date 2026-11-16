@@ -152,6 +152,14 @@ impl Workspace {
         self.session.doctor_due.is_some()
     }
 
+    /// How long until a pending doctor's report is due, to repaint then
+    /// (#849): without a frame at that time it would never be asked.
+    pub fn doctor_due(&self, now: Instant) -> Option<Duration> {
+        self.session
+            .doctor_due
+            .map(|due| due.saturating_duration_since(now))
+    }
+
     /// Applies repairs from the last report (`doctor.repair`); the answer
     /// brings the new report.
     pub fn repair(&mut self, repairs: Vec<String>, params: serde_json::Map<String, Value>) {

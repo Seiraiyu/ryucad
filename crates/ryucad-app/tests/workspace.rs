@@ -653,6 +653,33 @@ fn notifications_in_one_poll_ask_the_doctor_once() {
     assert_eq!(doctors(&p) - before, 1);
 }
 
+/// A pending doctor's report has a repaint deadline (#849): the window
+/// keeps frames coming until it is asked, so a burst's last report isn't
+/// left waiting for the mouse.
+#[test]
+fn a_pending_doctor_has_a_deadline() {
+    let p = Project::new();
+    p.ok(&["part", "create", "p"]);
+    let mut ws = open(&p);
+    ws.diagnose();
+    assert!(ws.wait_until(WAIT, |w| w.idle() && w.session.doctor.is_some()));
+    assert!(!ws.doctor_pending());
+    assert_eq!(ws.doctor_due(Instant::now()), None);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+    ]);
+    assert!(ws.wait_until(WAIT, |w| w.doctor_pending()));
+    let d = ws
+        .doctor_due(Instant::now())
+        .expect("a deadline while pending");
+    assert!(
+        d <= ryucad_app::core::workspace::session::DOCTOR_QUIET,
+        "{d:?}"
+    );
+    assert!(ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()));
+    assert_eq!(ws.doctor_due(Instant::now()), None);
+}
+
 /// In a script's burst, a window polled as its frames poll it asks each
 /// reader at most about once per publish (#849): counted by the daemon's
 /// `--timings`, so the bound is the same on any machine.
