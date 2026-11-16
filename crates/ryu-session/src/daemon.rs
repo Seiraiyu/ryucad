@@ -22,6 +22,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+#[cfg_attr(not(test), allow(dead_code))]
+mod fifo;
+
 /// How long a daemon waits for a request before it exits.
 pub const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
 
