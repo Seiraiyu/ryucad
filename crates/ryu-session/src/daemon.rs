@@ -1,7 +1,8 @@
 //! A product's session daemon: one long-running process per project that
 //! keeps the loaded project in memory. It serves newline-delimited
-//! JSON-RPC 2.0 on the project's [`Endpoint`], one request at a time
-//! (but for slow work a request prepares without the lock, [`Serve::prepare`]). The
+//! JSON-RPC 2.0 on the project's [`Endpoint`], one request at a time, in
+//! the order they reached the lock (`fifo`) (but for slow work a request
+//! prepares without the lock, [`Serve::prepare`]). The
 //! requests and the session are the product's ([`Serve`]); the loop, the
 //! subscriptions, idling out and shutting down are the same for every
 //! product.
@@ -22,8 +23,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-#[cfg_attr(not(test), allow(dead_code))]
 mod fifo;
+use fifo::{Fifo, FifoGuard};
 
 /// How long a daemon waits for a request before it exits.
 pub const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
@@ -56,7 +57,7 @@ struct State<P: Serve> {
     idle: Duration,
     started: Instant,
     last: Mutex<Instant>,
-    core: Mutex<Core<P>>,
+    core: Fifo<Core<P>>,
     /// Long requests running now, by participant and token: what
     /// `request.cancel` sets.
     running: Mutex<BTreeMap<(String, String), Running>>,
@@ -74,7 +75,7 @@ impl<P: Serve> State<P> {
             idle,
             started: Instant::now(),
             last: Mutex::new(Instant::now()),
-            core: Mutex::new(Core {
+            core: Fifo::new(Core {
                 session: None,
                 live: Live::with_poll(P::poll_ms()),
             }),
@@ -132,13 +133,13 @@ pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
     let watcher = Arc::clone(&state);
     std::thread::spawn(move || {
         loop {
-            let poll = Duration::from_millis(lock(&watcher.core).live.poll_ms);
+            let poll = Duration::from_millis(watcher.core.lock().live.poll_ms);
             std::thread::sleep(poll.min(watcher.idle));
             if !watcher.root.join(P::MANIFEST).is_file() {
                 stop(&watcher, "the project is gone");
             }
             // Hold the lock so no request is mid-flight.
-            let mut core = lock(&watcher.core);
+            let mut core = watcher.core.lock();
             let before = core.live.snapshot();
             core.live.expire(Instant::now());
             core.live.announce(&before);
@@ -178,7 +179,7 @@ fn accept<P: Serve>(listener: &interprocess::local_socket::Listener, state: &Arc
                         s.close();
                     }
                     if let Some(id) = me {
-                        let mut core = lock(&state.core);
+                        let mut core = state.core.lock();
                         let before = core.live.snapshot();
                         core.live.goodbye(&id);
                         core.live.announce(&before);
@@ -262,11 +263,7 @@ fn status<P: Serve>(state: &State<P>, timings: bool) -> Value {
     });
     // What the session says of itself, unless a request holds it: status
     // never waits.
-    let core = match state.core.try_lock() {
-        Ok(core) => Some(core),
-        Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
-        Err(std::sync::TryLockError::WouldBlock) => None,
-    };
+    let core = state.core.try_lock();
     if let Some(c) = &core {
         v["participants"] = participants(&c.live);
         v["last_activity"] = last_activity(&c.live);
@@ -513,7 +510,7 @@ fn serve<P: Serve>(
             // request a client left behind (an app killed mid-render) kept
             // the daemon past `daemon stop`'s wait (#391).
             cancel_all(state);
-            let _busy = lock(&state.core);
+            let _busy = state.core.lock();
             stop(state, "asked to shut down");
         }
     }
@@ -645,14 +642,14 @@ fn cancel_all<P: Serve>(state: &State<P>) -> usize {
 /// ([`Serve::prepare`]) is done without it, so other connections' requests
 /// don't wait on that work (#91); and how long it waited for the lock.
 fn lock_prepared<'a, P: Serve>(
-    core: &'a Mutex<Core<P>>,
+    core: &'a Fifo<Core<P>>,
     me: Option<&str>,
     req: &P::Request,
     job: &Job,
-) -> (MutexGuard<'a, Core<P>>, Duration) {
+) -> (FifoGuard<'a, Core<P>>, Duration) {
     let asked = Instant::now();
     let (prepared, mut waited) = {
-        let mut c = lock(core);
+        let mut c = core.lock();
         let waited = asked.elapsed();
         let Core { session, live } = &mut *c;
         (P::prepare(session, live, me, req, job), waited)
@@ -660,7 +657,7 @@ fn lock_prepared<'a, P: Serve>(
     let made =
         prepared.and_then(|job| std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).ok());
     let asked = Instant::now();
-    let mut core = lock(core);
+    let mut core = core.lock();
     waited += asked.elapsed();
     if let (Some(put), Some(s)) = (made, core.session.as_mut()) {
         put(s);
@@ -688,7 +685,7 @@ fn subscribe<P: Serve>(
         ));
     }
     let topics = notify::topics::<P::Topic>(names)?;
-    let mut core = lock(&state.core);
+    let mut core = state.core.lock();
     let Core { session, live } = &mut *core;
     // What happened before the subscription isn't news to it.
     P::settle(session, live, &state.root);
@@ -779,7 +776,7 @@ mod tests {
         assert_eq!(e.code, Code::Cancelled);
         // Nothing left running: the lock is free for the shutdown.
         assert_eq!(cancel_all(&state), 0);
-        drop(lock(&state.core));
+        drop(state.core.lock());
     }
 
     /// Connects and says hello as the agent `agent`.
@@ -988,15 +985,47 @@ mod tests {
             .unwrap()
             .unwrap();
         }
-        let core = lock(&state.core);
+        let core = state.core.lock();
         assert_eq!(core.live.timings.get("quick").count, 3);
         // The hello was answered by the product too.
         assert_eq!(core.live.timings.get("session.hello").count, 1);
     }
 
+    /// Requests are answered in the order they reached the lock (#849):
+    /// one queued behind a held lock is served before one that came
+    /// after it.
+    #[test]
+    fn requests_take_the_lock_in_arrival_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (endpoint, state) = serving_state(dir.path());
+        let held = state.core.lock();
+        let mut threads = Vec::new();
+        for n in 0..4u64 {
+            let endpoint = endpoint.clone();
+            threads.push(std::thread::spawn(move || {
+                let mut c = Connection::connect(&endpoint).unwrap();
+                c.call(&Basic {
+                    method: "quick",
+                    params: json!({"order": n}),
+                })
+                .unwrap()
+                .unwrap();
+            }));
+            while state.core.queued() < n + 2 {
+                std::thread::yield_now();
+            }
+        }
+        drop(held);
+        for t in threads {
+            t.join().unwrap();
+        }
+        let answered = state.core.lock().session.clone().unwrap();
+        assert_eq!(answered, ["0", "1", "2", "3"]);
+    }
+
     #[test]
     fn prepared_work_runs_without_the_lock() {
-        let core = Arc::new(Mutex::new(Core::<Test> {
+        let core = Arc::new(Fifo::new(Core::<Test> {
             session: Some(Vec::new()),
             live: Live::with_poll(250),
         }));

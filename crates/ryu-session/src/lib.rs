@@ -260,13 +260,18 @@ pub(crate) mod testing {
         /// cancelled; `write` writes after its first unit, so a cancel
         /// after that is ignored.
         fn handle(
-            _: &mut Option<Vec<String>>,
+            session: &mut Option<Vec<String>>,
             live: &mut crate::live::Live<Test>,
             _: Option<&str>,
             _: &std::path::Path,
             req: Request,
             job: &crate::job::Job,
         ) -> ryu_doc::error::Result<crate::rpc::Answer> {
+            // A request with `order` notes it in the session as it is
+            // answered: the order requests held the lock in (#849).
+            if let Some(n) = req.1.get("order").and_then(Value::as_u64) {
+                session.get_or_insert_with(Vec::new).push(n.to_string());
+            }
             if req.0 == "long" || req.0 == "write" {
                 let stage = job.begin(crate::job::Phase::Rebuild, "units", 2000);
                 for n in 0..2000 {
