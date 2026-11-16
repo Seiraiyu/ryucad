@@ -22,7 +22,8 @@ pub use offset::{close, grow, open, shrink};
 
 use ryu_board::geom::{Nm, Point, Rect, orient};
 
-use crate::measure::Verdict;
+use crate::measure::core::{Core, SegP};
+use crate::measure::{Body, Shell, Solid, Verdict};
 
 /// A simple polygon: its outer ring counterclockwise and its holes
 /// clockwise, each ring starting at its least vertex, with no vertex
@@ -141,6 +142,25 @@ impl Polygons {
 
     pub fn is_empty(&self) -> bool {
         self.polygons.is_empty()
+    }
+
+    /// The polygons as a body to measure, exactly as they stand (bound
+    /// 0): each polygon a region of its rings' edges.
+    pub fn body(&self) -> Body {
+        let solids = self
+            .polygons
+            .iter()
+            .map(|p| {
+                let mut cores = Vec::new();
+                for r in p.rings() {
+                    for k in 0..r.len() {
+                        cores.push(Core::Seg(SegP::new(r[k], r[(k + 1) % r.len()])));
+                    }
+                }
+                Solid::Region(Shell::new(cores, p.outer[0]))
+            })
+            .collect();
+        Body::new(solids, 0)
     }
 
     /// Whether the figure these polygons stand for holds `p`: `Uncertain`
@@ -631,5 +651,35 @@ mod tests {
         // across; 1.3 nm below it isn't.
         assert_eq!(u.contains(p(10, 4)), Verdict::Uncertain);
         assert_eq!(u.contains(p(10, 2)), Verdict::No);
+    }
+}
+
+#[cfg(test)]
+mod body_tests {
+    use super::*;
+    use crate::measure;
+
+    #[test]
+    fn polygons_measure_as_bodies() {
+        let sq = simplify(
+            &Rings::new(
+                vec![vec![
+                    Point::new(0, 0),
+                    Point::new(100, 0),
+                    Point::new(100, 100),
+                    Point::new(0, 100),
+                ]],
+                0,
+            ),
+            FillRule::NonZero,
+        );
+        let b = sq.body();
+        assert_eq!(b.bound, 0);
+        assert!(measure::contains(&b, Point::new(50, 50)).is_yes());
+        assert!(measure::contains(&b, Point::new(100, 50)).is_yes());
+        assert!(!measure::contains(&b, Point::new(101, 50)).is_yes());
+        let far = Body::point(Point::new(130, 50));
+        assert_eq!(measure::distance(&b, &far).unwrap().nm, 30);
+        assert!(Polygons::default().body().is_empty());
     }
 }

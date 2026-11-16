@@ -247,6 +247,54 @@ impl Body {
     pub fn is_empty(&self) -> bool {
         self.solids.is_empty()
     }
+
+    /// The solids in groups that touch one another, each group's solids
+    /// in order and the groups by their first solid: what of the body
+    /// holds together on its own. Exact on the solids.
+    pub fn groups(&self) -> Vec<Vec<u32>> {
+        let n = self.solids.len();
+        let mut root: Vec<usize> = (0..n).collect();
+        fn find(root: &mut [usize], mut i: usize) -> usize {
+            while root[i] != i {
+                root[i] = root[root[i]];
+                i = root[i];
+            }
+            i
+        }
+        for i in 0..n {
+            for j in self.near(&self.boxes[i]) {
+                if j <= i {
+                    continue;
+                }
+                let (a, b) = (find(&mut root, i), find(&mut root, j));
+                if a != b && solid_cmp(&self.solids[i], &self.solids[j], 0) != Ordering::Greater {
+                    root[a.max(b)] = a.min(b);
+                }
+            }
+        }
+        let mut out: Vec<Vec<u32>> = Vec::new();
+        let mut slot: Vec<Option<usize>> = vec![None; n];
+        for i in 0..n {
+            let r = find(&mut root, i);
+            let g = *slot[r].get_or_insert_with(|| {
+                out.push(Vec::new());
+                out.len() - 1
+            });
+            out[g].push(i as u32);
+        }
+        out
+    }
+
+    /// The body of some of its solids, keeping its bound.
+    pub fn subset(&self, solids: &[u32]) -> Body {
+        Body::new(
+            solids
+                .iter()
+                .map(|&k| self.solids[k as usize].clone())
+                .collect(),
+            self.bound,
+        )
+    }
 }
 
 /// An answer the bounds may leave open.
@@ -516,5 +564,21 @@ mod tests {
             compare(&Body::new(vec![], 0), &x, 1 << 40),
             Ordering::Greater
         );
+    }
+
+    #[test]
+    fn groups_hold_what_touches() {
+        // Two thick pieces meeting end to end; a third apart, touched at
+        // its end by a region.
+        let mut solids = Body::stroke(p(0, 0), p(100, 0), 10).solids;
+        solids.extend(Body::stroke(p(100, 0), p(100, 100), 10).solids);
+        solids.extend(Body::stroke(p(500, 0), p(600, 0), 10).solids);
+        solids.extend(square(604, 0, 700, 100).solids);
+        let b = Body::new(solids, 0);
+        assert_eq!(b.groups(), vec![vec![0, 1], vec![2, 3]]);
+        let s = b.subset(&[2, 3]);
+        assert_eq!(s.solids.len(), 2);
+        assert_eq!(s.groups(), vec![vec![0, 1]]);
+        assert!(Body::new(vec![], 0).groups().is_empty());
     }
 }
