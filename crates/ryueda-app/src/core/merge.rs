@@ -361,6 +361,104 @@ pub fn rows(status: &Value) -> Vec<Row> {
         .collect()
 }
 
+/// What an area of a block's layout takes in its group's Apply.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pick {
+    #[default]
+    Relayout,
+    Ours,
+    Theirs,
+}
+
+impl Pick {
+    fn resolution(self) -> (String, Option<String>) {
+        match self {
+            Pick::Relayout => ("repair".to_owned(), Some("relayout".to_owned())),
+            Pick::Ours => ("ours".to_owned(), None),
+            Pick::Theirs => ("theirs".to_owned(), None),
+        }
+    }
+}
+
+/// A block's layout areas, settled together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub block: String,
+    pub areas: Vec<Row>,
+}
+
+/// What one resolve settles: each conflict's ID, choice and repair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Batch {
+    pub items: Vec<(String, String, Option<String>)>,
+}
+
+impl Batch {
+    /// A row's action; a layout area's takes every area of its block.
+    pub fn one(r: &Row, a: &Action) -> Batch {
+        let ids = if r.with.is_empty() {
+            vec![r.id.clone()]
+        } else {
+            r.with.clone()
+        };
+        Batch {
+            items: ids
+                .into_iter()
+                .map(|id| (id, a.choice.clone(), a.repair.clone()))
+                .collect(),
+        }
+    }
+
+    /// Relay out every area of a block.
+    pub fn relayout_all(g: &Group) -> Batch {
+        Batch::areas(g, &std::collections::BTreeMap::new())
+    }
+
+    /// Each area as picked (relaid out unless picked otherwise).
+    pub fn areas(g: &Group, picks: &std::collections::BTreeMap<String, Pick>) -> Batch {
+        Batch {
+            items: g
+                .areas
+                .iter()
+                .map(|r| {
+                    let (choice, repair) =
+                        picks.get(&r.id).copied().unwrap_or_default().resolution();
+                    (r.id.clone(), choice, repair)
+                })
+                .collect(),
+        }
+    }
+
+    pub fn ids(&self) -> Vec<String> {
+        self.items.iter().map(|(id, ..)| id.clone()).collect()
+    }
+}
+
+/// The rows but layout areas, and the areas by block, in the status's
+/// order.
+pub fn groups(rows: Vec<Row>) -> (Vec<Row>, Vec<Group>) {
+    let mut singles = Vec::new();
+    let mut groups: Vec<Group> = Vec::new();
+    for r in rows {
+        if r.kind != "layout_conflict" {
+            singles.push(r);
+            continue;
+        }
+        let block = r
+            .block
+            .clone()
+            .unwrap_or_else(|| r.id.split('#').next().unwrap_or_default().to_owned());
+        match groups.iter_mut().find(|g| g.block == block) {
+            Some(g) => g.areas.push(r),
+            None => groups.push(Group {
+                block,
+                areas: vec![r],
+            }),
+        }
+    }
+    (singles, groups)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -528,5 +626,58 @@ pub(crate) mod tests {
         let long = short(&json!({"a": "x".repeat(80)}));
         assert_eq!(long.0.chars().count(), 40);
         assert!(long.0.ends_with('…') && long.1.len() > 80);
+    }
+
+    #[test]
+    fn a_blocks_areas_are_one_group_and_one_batch() {
+        let (singles, groups) = groups(rows(&status()));
+        assert_eq!(singles.len(), 4);
+        assert_eq!(groups.len(), 1);
+        let g = &groups[0];
+        assert_eq!(g.block, "breakout");
+        assert_eq!(g.areas.len(), 2);
+        let all = Batch::relayout_all(g);
+        assert_eq!(
+            all.items,
+            [
+                (
+                    "breakout#area:1".to_owned(),
+                    "repair".to_owned(),
+                    Some("relayout".to_owned())
+                ),
+                (
+                    "breakout#area:2".to_owned(),
+                    "repair".to_owned(),
+                    Some("relayout".to_owned())
+                ),
+            ]
+        );
+        let mut picks = std::collections::BTreeMap::new();
+        picks.insert("breakout#area:2".to_owned(), Pick::Theirs);
+        let mixed = Batch::areas(g, &picks);
+        assert_eq!(
+            mixed.items[0].2.as_deref(),
+            Some("relayout"),
+            "relay out unless picked"
+        );
+        assert_eq!(
+            (mixed.items[1].1.as_str(), mixed.items[1].2.as_deref()),
+            ("theirs", None)
+        );
+        // One area's action takes its block's every area.
+        let a = &g.areas[0];
+        let ours = Batch::one(a, &a.actions[0]);
+        assert_eq!(ours.ids(), ["breakout#area:1", "breakout#area:2"]);
+        assert!(ours.items.iter().all(|i| i.1 == "ours"));
+        let r = singles.iter().find(|r| r.id == "refdes:board/R5").unwrap();
+        let b = Batch::one(r, &r.actions[0]);
+        assert_eq!(
+            b.items,
+            [(
+                "refdes:board/R5".to_owned(),
+                "repair".to_owned(),
+                Some("renumber".to_owned())
+            )]
+        );
     }
 }
