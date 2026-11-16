@@ -115,6 +115,7 @@ pub fn answer_live(
 ) -> Result<Answer> {
     let external = session.refresh_changes()?;
     let changed = !external.is_empty();
+    let epoch = session.epoch();
     let before = live.as_deref().map(Live::snapshot);
     if let Some(l) = live.as_deref_mut() {
         if changed {
@@ -643,9 +644,22 @@ pub fn answer_live(
             l.prune(|r| r.resolve(session).is_ok());
         }
         l.announce(&before);
-        let t = std::time::Instant::now();
-        publish(l, session);
-        l.timings.publish(&method, t.elapsed());
+        if l.hub.is_watched() {
+            // Subscribers hear of it from the daemon's watcher once the
+            // daemon is quiet, or within `daemon.publish_max_ms` (#849,
+            // design 698): a write never waits on what a window wants
+            // told, and a burst is told in a few notifications. Activity
+            // and participants (above) are still sent on the request.
+            if changed || mutates || switches || session.epoch() != epoch {
+                l.coalesce.mark(std::time::Instant::now());
+            }
+        } else {
+            // Nobody to tell: only noted, so a subscriber hears of what
+            // changes from then on.
+            let t = std::time::Instant::now();
+            publish(l, session);
+            l.timings.publish(&method, t.elapsed());
+        }
         // What the request used may go now that it has answered.
         session.trim();
     }
@@ -1040,6 +1054,16 @@ fn compared(live: &mut Live, session: &mut Session, watched: bool) {
 pub fn tick(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
     if live.hub.is_watched() {
         settle(slot, live, root);
+    }
+}
+
+/// Publishes now what requests marked for the watcher to publish (#849):
+/// what the daemon's watcher does through `settle`, for tests and
+/// callers without one.
+pub fn flush(live: &mut Live, session: &mut Session) {
+    if live.coalesce.pending().is_some() {
+        publish(live, session);
+        live.coalesce.clear();
     }
 }
 

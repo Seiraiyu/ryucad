@@ -187,6 +187,11 @@ pub(crate) fn config_set(
         if key == "daemon.poll_ms" {
             live.poll_ms = v["value"].as_u64().unwrap_or(250);
         }
+        if key == "daemon.publish_quiet_ms" || key == "daemon.publish_max_ms" {
+            let (quiet, max) = <crate::Cad as ryu_session::Serve>::publish_ms();
+            live.coalesce.quiet = std::time::Duration::from_millis(quiet);
+            live.coalesce.max = std::time::Duration::from_millis(max);
+        }
         let note = json!({"key": key, "scope": v["scope"], "value": v["value"],
                           "default": v["default"]});
         live.hub.send(Topic::Project, "config.changed", &note);

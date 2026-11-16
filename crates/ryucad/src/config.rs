@@ -292,6 +292,22 @@ const KEYS: &[Key] = &[
         about: "how often a watched daemon checks the files",
     },
     Key {
+        name: "daemon.publish_quiet_ms",
+        scope: Scope::User,
+        rule: Rule::Int(10, 5000),
+        default: || json!(ryu_session::publish::QUIET_MS),
+        about: "how long a watched daemon waits with no request before telling subscribers \
+                what requests changed",
+    },
+    Key {
+        name: "daemon.publish_max_ms",
+        scope: Scope::User,
+        rule: Rule::Int(100, 60_000),
+        default: || json!(ryu_session::publish::MAX_MS),
+        about: "how long at most a watched daemon waits to tell subscribers of a change, \
+                however busy it is",
+    },
+    Key {
         name: "session.max_memory",
         scope: Scope::User,
         rule: Rule::Int(1 << 29, 1 << 44),

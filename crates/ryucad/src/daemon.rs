@@ -134,6 +134,14 @@ impl ryu_session::Serve for Cad {
             .unwrap_or(250)
     }
 
+    fn publish_ms() -> (u64, u64) {
+        let ms = |k: &str, d: u64| crate::config::user(k).as_u64().unwrap_or(d);
+        (
+            ms("daemon.publish_quiet_ms", ryu_session::publish::QUIET_MS),
+            ms("daemon.publish_max_ms", ryu_session::publish::MAX_MS),
+        )
+    }
+
     /// The project goes first among the recent ones. A preferences file
     /// that can't be written isn't the window's problem.
     fn window_opened(root: &Path) {
