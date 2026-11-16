@@ -58,11 +58,14 @@ impl Shell {
         Shell { cores, probe, tree }
     }
 
-    /// The pieces whose boxes meet `q`, in order.
+    /// The pieces whose boxes meet `q`, in order, each once: a long
+    /// slanted segment has many boxes, and a query along the edge two of
+    /// them share meets both.
     pub fn near(&self, q: &Rect) -> impl Iterator<Item = &Core> {
         let mut found = Vec::new();
         self.tree.query(q, &mut found);
         found.sort_unstable();
+        found.dedup();
         found.into_iter().map(|k| &self.cores[k as usize])
     }
 
@@ -214,11 +217,12 @@ impl Body {
         }
     }
 
-    /// The solids whose boxes meet `q`, in order.
+    /// The solids whose boxes meet `q`, in order, each once.
     pub fn near(&self, q: &Rect) -> Vec<usize> {
         let mut found = Vec::new();
         self.tree.query(q, &mut found);
         found.sort_unstable();
+        found.dedup();
         found.into_iter().map(|k| k as usize).collect()
     }
 
@@ -508,6 +512,35 @@ mod tests {
             edge_cores(e, &mut cores);
         }
         Body::new(vec![Solid::Region(Shell::new(cores, q[0]))], 0)
+    }
+
+    #[test]
+    fn a_ray_along_a_split_box_s_edge_counts_its_piece_once() {
+        // A long slanted edge is indexed as 64 boxes, 100 µm apart in y
+        // here; a ray at a height where two of them meet must count the
+        // edge once. gb-cart256k-a's +1V8 and +3V3 traces "touched" so.
+        let q = [
+            p(0, 0),
+            p(6_400_000, -6_400_000),
+            p(7_400_000, -5_400_000),
+            p(1_000_000, 1_300_000),
+        ];
+        let c = Contour::new((0..4).map(|k| Edge::line(q[k], q[(k + 1) % 4])).collect()).unwrap();
+        let mut cores = Vec::new();
+        for e in c.edges() {
+            edge_cores(e, &mut cores);
+        }
+        let sh = Shell::new(cores, q[0]);
+        for y in (1..64).map(|k| -100_000 * k) {
+            assert!(!sh.contains(p(-50_000 - y, y)), "outside at y {y}");
+            assert!(sh.contains(p(50_000 - y, y)), "inside at y {y}");
+        }
+        let ray = Rect {
+            min: p(-5_000_000, -3_200_000),
+            max: p(MAX_REACH, -3_200_000),
+        };
+        let found: Vec<&Core> = sh.near(&ray).collect();
+        assert_eq!(found.len(), 2, "{found:?}");
     }
 
     #[test]
