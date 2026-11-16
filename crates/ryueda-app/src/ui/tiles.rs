@@ -294,6 +294,16 @@ fn properties(ui: &mut egui::Ui, w: &mut Window, copy: &mut Option<String>) {
             ui.label(t);
         }
     }
+    if let Some(c) = &w.changes {
+        let lines = c.lines_of(&p.reference);
+        if !lines.is_empty() {
+            ui.separator();
+            ui.strong(format!("Changes since {}", c.rev));
+            for l in &lines {
+                ui.label(l);
+            }
+        }
+    }
 }
 
 fn show_button(ui: &mut egui::Ui, w: &mut Window, refs: &[String], label: &str) {

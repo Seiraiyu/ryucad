@@ -39,8 +39,53 @@ pub fn shared() -> &'static Path {
             std::env::set_var("RYUEDA_IDLE_TIMEOUT", "120");
             std::env::set_var("RYUEDA_ID_SEED", "app");
         }
+        // The folder is a repository of its own (#920): `ryueda init`
+        // sets up the repository a project is made in, and this folder is
+        // under the target directory, inside the clone the tests build
+        // from. Without it, every run wrote that clone's shared hooks and
+        // drivers, naming this build's binary.
+        if !dir.join(".git").exists() {
+            git_in(&dir, &dir, &["init", "-q"]);
+        }
         dir
     })
+}
+
+/// `git` in `dir` without anyone's config (`base` holds the empty one), a
+/// fixed identity and dates.
+fn git_in(base: &Path, dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", base.join("no-gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "core.autocrlf=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `git` in `dir` without anyone's config, a fixed identity and dates
+/// (no per-worker setup: the tests make their repositories).
+pub fn git(dir: &Path, args: &[&str]) {
+    git_in(shared(), dir, args);
 }
 
 fn newest(dir: &Path) -> SystemTime {
@@ -144,6 +189,43 @@ pub fn breakout(name: &str) -> PathBuf {
     }
     run(&["layout"]);
     std::fs::canonicalize(board).unwrap()
+}
+
+/// The breakout committed, then edited as `ryueda/tests/git.rs`'s
+/// `edited_breakout` edits it: r1's value, r3 added and connected, c3
+/// deleted, scl renamed, J1 moved.
+pub fn breakout_in_git(name: &str) -> PathBuf {
+    let board = breakout(name);
+    git(&board, &["init", "-q"]);
+    git(&board, &["add", "."]);
+    git(&board, &["commit", "-q", "-m", "laid out"]);
+    for args in [
+        vec!["component", "edit", "breakout/r1", "--value", "10k"],
+        vec![
+            "component",
+            "add",
+            "breakout",
+            "--of",
+            "r_4k7",
+            "--id",
+            "r3",
+        ],
+        vec!["connect", "breakout/r3/1", "SDA"],
+        vec!["connect", "breakout/r3/2", "rail:3V3"],
+        vec!["component", "delete", "breakout/c3"],
+        vec!["net", "rename", "breakout/scl", "I2C_SCL"],
+        vec!["place", "breakout", "--move", "shift J1 right 4"],
+    ] {
+        let out = Command::new(ryueda_exe())
+            .current_dir(&board)
+            .env("RYUEDA_NO_DAEMON", "1")
+            .args(&args)
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["ok"], true, "{args:?}: {v}");
+    }
+    board
 }
 
 /// The agent's request through the project's daemon.
