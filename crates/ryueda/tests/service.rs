@@ -31,3 +31,34 @@ fn version_says_the_schema_of_its_outputs() {
     assert_eq!(v["schema_outputs"], 1, "{v}");
     assert_eq!(v["schema_outputs"], json!(ryueda::OUTPUT_SCHEMA));
 }
+
+/// `check`'s report says its schema whether it passed or failed (the
+/// report in `check_failed`'s details), at the working files, at a
+/// revision and with `--against`.
+#[test]
+fn check_reports_say_their_schema() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = breakout_in_git(&top, &run);
+        for args in [
+            vec!["check", "--offline"],
+            vec!["check", "--offline", "--rev", "HEAD"],
+            vec!["check", "--offline", "--against", "HEAD"],
+        ] {
+            let (code, v) = ryueda(&board, &run, daemon, &args);
+            let report = if code == 0 {
+                &v["result"]
+            } else {
+                assert_eq!(v["error"]["code"], "check_failed", "{args:?}: {v}");
+                &v["error"]["details"]["report"]
+            };
+            assert_eq!(report["schema"], 1, "{args:?}: {v}");
+        }
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
