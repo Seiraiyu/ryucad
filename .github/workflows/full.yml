@@ -356,10 +356,15 @@ jobs:
             export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0
             df -h / && free -m
             sh scripts/fetch-dfm-corpus.sh
-            cargo test -p ryudfm --release --test pinned -- --ignored --nocapture
-            cargo test -p ryudfm --release --test kicad_drc -- --ignored --nocapture
-            RAYON_NUM_THREADS=2 RYUDFM_REQUIRE_CORPUS=1 cargo test -p ryudfm --release --test bar -- --nocapture
+            # Each runs whatever the one before found, so one run's log
+            # holds every board's lines, every DRC disagreement and the
+            # bars; the step fails at the end if any did.
+            failed=0
+            cargo test -p ryudfm --release --test pinned -- --ignored --nocapture || failed=1
+            cargo test -p ryudfm --release --test kicad_drc -- --ignored --nocapture || failed=1
+            RAYON_NUM_THREADS=2 RYUDFM_REQUIRE_CORPUS=1 cargo test -p ryudfm --release --test bar -- --nocapture || failed=1
             df -h / && free -m
+            exit $failed
           push: never
       - name: ryucad's pinned assemblies
         uses: devcontainers/ci@v0.3
