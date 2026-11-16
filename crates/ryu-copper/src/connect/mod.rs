@@ -41,6 +41,7 @@
 mod edit;
 #[cfg(test)]
 pub(crate) mod fixtures;
+mod gap;
 mod graph;
 mod hole;
 mod place;
@@ -60,6 +61,7 @@ use crate::layout::{Hole, Item, Layer, Layout};
 use crate::measure::{self, Body, BodyOptions, Verdict};
 use crate::poly::{self, FlattenOptions, Polygons};
 use crate::tree::grown;
+pub use gap::Gap;
 use graph::Graph;
 pub use place::Placement;
 pub use resolve::{group_touch, groups};
@@ -418,6 +420,33 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
     /// Every contact kept apart, by its nodes.
     pub fn uncertain(&self) -> Vec<UncertainContact<K>> {
         self.uncertain.values().cloned().collect()
+    }
+
+    /// Every item kept, by key, as given.
+    pub fn items(&self) -> impl Iterator<Item = (&K, &Item)> {
+        self.entries.iter().map(|(k, e)| (k, &e.item))
+    }
+
+    /// The index of items' positive bodies, per layer.
+    pub fn bodies(&self) -> &Index<K> {
+        &self.bodies
+    }
+
+    /// An item's pieces' bodies, by piece: a plain item's own solids
+    /// (exact), a resolved item's polygons as bodies (with their bound).
+    pub fn piece_bodies(&self, key: &K) -> Vec<(u32, Body)> {
+        match self.entries.get(key).and_then(|e| e.resolved.as_ref()) {
+            Some(g) => g
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i as u32, p.body()))
+                .collect(),
+            None => self
+                .own(key)
+                .into_iter()
+                .map(|(i, b)| (i, b.clone()))
+                .collect(),
+        }
     }
 
     /// How many times an item's copper has gone through the boolean since

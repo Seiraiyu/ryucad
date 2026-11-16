@@ -397,6 +397,42 @@ impl<K: Ord + Hash + Clone + Send + Sync> Index<K> {
     }
 }
 
+/// The least distance between a body of `a` and a body of `b`, with the
+/// labels of the two it lies between, ties to the lesser pair of labels;
+/// `None` when either has no body that isn't empty. Exact, as
+/// [`measure::distance`]: one pair seeds the best distance, then each body
+/// of `a` asks an index of `b` for what lies within the best distance yet
+/// and the bounds, so far ones cost nothing.
+pub fn nearest_pair<T: Ord + Clone + Send + Sync>(
+    a: &[(T, Body)],
+    b: &[(T, Body)],
+) -> Option<(Distance, T, T)> {
+    let a: Vec<&(T, Body)> = a.iter().filter(|(_, x)| !x.is_empty()).collect();
+    let live: Vec<usize> = (0..b.len()).filter(|&i| !b[i].1.is_empty()).collect();
+    let (first_a, &first_b) = (a.first()?, live.first()?);
+    let idx: Index<usize> = Index::from_bodies(
+        1,
+        live.iter().map(|&i| (i, 0, b[i].1.clone())).collect(),
+        BodyOptions::default(),
+    );
+    let reach_b = live.iter().map(|&i| b[i].1.bound).max().unwrap_or(0);
+    let d0 = measure::distance(&first_a.1, &b[first_b].1)?;
+    let mut best = (d0, first_a.0.clone(), b[first_b].0.clone());
+    for (ta, x) in &a {
+        let reach = best.0.nm + best.0.bound + x.bound + reach_b + 1;
+        for n in idx.near_body(0, x, reach) {
+            let (tb, y) = &b[n.key];
+            let Some(d) = measure::distance(x, y) else {
+                continue;
+            };
+            if (d.nm, ta, tb) < (best.0.nm, &best.1, &best.2) {
+                best = (d, ta.clone(), tb.clone());
+            }
+        }
+    }
+    Some(best)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +586,34 @@ mod tests {
             assert_eq!(ix.in_box(layer, &r), [k]);
             assert!(ix.in_box(1 - layer, &r).is_empty());
         }
+    }
+
+    #[test]
+    fn the_nearest_pair_is_brute_force_s() {
+        let mut g = ryu_board::testing::Lcg::new(0x6e70);
+        let mut set = |n: usize| -> Vec<(u32, Body)> {
+            (0..n as u32)
+                .map(|k| {
+                    let a = Point::new(g.range(0, 5_000_000), g.range(0, 5_000_000));
+                    let b = a.offset(g.range(-300_000, 300_000), g.range(-300_000, 300_000));
+                    (k, Body::stroke(a, b, g.range(0, 200_000)))
+                })
+                .collect()
+        };
+        for _ in 0..20 {
+            let (a, b) = (set(30), set(40));
+            let mut want: Option<(i64, u32, u32)> = None;
+            for (ta, x) in &a {
+                for (tb, y) in &b {
+                    let d = measure::distance(x, y).unwrap().nm;
+                    if want.is_none_or(|w| (d, *ta, *tb) < w) {
+                        want = Some((d, *ta, *tb));
+                    }
+                }
+            }
+            let (d, ta, tb) = nearest_pair(&a, &b).unwrap();
+            assert_eq!(Some((d.nm, ta, tb)), want);
+        }
+        assert!(nearest_pair::<u32>(&[], &set(3)).is_none());
     }
 }
