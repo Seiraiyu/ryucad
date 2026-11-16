@@ -825,6 +825,7 @@ fn every_protocol_method_has_a_command() {
         ("render", &["render"]),
         ("output", &["output"]),
         ("scene", &["scene"]),
+        ("resolve", &["resolve"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),

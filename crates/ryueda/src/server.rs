@@ -83,6 +83,7 @@ fn versioned(req: &Request) -> bool {
             | Request::LibUses { .. }
             | Request::LibUpdate { .. }
             | Request::Render { .. }
+            | Request::Resolve { .. }
     )
 }
 
@@ -436,6 +437,7 @@ fn working(
 /// A read request answered from `p`, a revision's project.
 fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
     match req {
+        Request::Resolve { refs, .. } => crate::anchor::stand_all(p, &refs).map(Answer::json),
         Request::Netlist { design, .. } => {
             crate::netlist::netlist(p, design.as_deref()).map(Answer::json)
         }
@@ -591,6 +593,7 @@ fn dispatch(
     job: &ryu_session::job::Job,
 ) -> Result<Value> {
     match req {
+        Request::Resolve { refs, .. } => crate::anchor::stand_all(session.project(), &refs),
         Request::ProjectInfo {} => Ok(info(session.project())),
         Request::Doctor {} => Ok(crate::doctor::report_with(
             session.root(),

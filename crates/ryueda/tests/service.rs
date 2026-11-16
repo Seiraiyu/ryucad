@@ -290,3 +290,90 @@ fn git_attributes_are_the_lines_init_writes() {
         assert!(written.lines().any(|w| w == *l), "{l} in {written}");
     }
 }
+
+/// `resolve` at the working files and at a revision: what a delete took
+/// away is gone at working and stands at HEAD; a block the design no
+/// longer places, a design that's gone; a malformed anchor refuses.
+#[test]
+fn resolve_says_what_stands() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = breakout_in_git(&top, &run);
+        ok(
+            &board,
+            &run,
+            daemon,
+            &["component", "delete", "breakout/c3"],
+        );
+        let anchors = [
+            "board:breakout/r1",
+            "board:breakout/c3",
+            "board:sensor/u1",
+            "board:breakout/sheet:s1",
+            "board:gone/x",
+            "nodesign:breakout/r1",
+        ];
+        let mut args = vec!["resolve"];
+        args.extend(anchors);
+        let v = ok(&board, &run, daemon, &args);
+        assert_eq!(v["schema"], 1);
+        let r = v["refs"].as_array().unwrap();
+        assert_eq!(r.len(), anchors.len());
+        assert_eq!(
+            (&r[0]["stands"], &r[0]["sheet"]),
+            (&json!(true), &json!("s1")),
+            "{v}"
+        );
+        assert_eq!(r[1]["gone"], true, "{v}");
+        assert_eq!(r[2]["stands"], true, "{v}");
+        assert_eq!(
+            (&r[3]["stands"], &r[3]["kind"]),
+            (&json!(true), &json!("sheet")),
+            "{v}"
+        );
+        assert_eq!(r[4]["removed_in"], "block", "{v}");
+        assert_eq!(r[5]["removed_in"], "design", "{v}");
+        // The box is scene's box for the same owner.
+        let scene = ok(
+            &board,
+            &run,
+            daemon,
+            &["scene", "--block", "breakout", "--sheet", "s1"],
+        );
+        let owner = scene["owners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["ref"] == "breakout/r1")
+            .unwrap();
+        assert_eq!(r[0]["box"], owner["box"]);
+        // At HEAD the deleted component stands.
+        let at = ok(
+            &board,
+            &run,
+            daemon,
+            &["resolve", "board:breakout/c3", "--rev", "HEAD"],
+        );
+        assert_eq!(
+            (
+                &at["refs"][0]["stands"],
+                at["commit"].as_str().map(str::len)
+            ),
+            (&json!(true), Some(40)),
+            "{at}"
+        );
+        // A path with no design: refused.
+        let (code, e) = ryueda(&board, &run, daemon, &["resolve", "breakout/r1"]);
+        assert_eq!(
+            (code, &e["error"]["code"], &e["error"]["details"]["param"]),
+            (1, &json!("invalid_param"), &json!("ref")),
+            "{e}"
+        );
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}

@@ -471,6 +471,16 @@ enum Command {
         #[arg(long, value_parser = ["light", "dark"])]
         theme: Option<String>,
     },
+    /// Whether thread anchors stand: each `<design>:<block>/<object>`
+    /// (a component, net, pin, port or instance as scene names it) or
+    /// `<design>:<block>/sheet:<id>`, with the sheet and box that draw it,
+    /// or what took it away (removed_in: design or block; gone).
+    Resolve {
+        #[arg(required = true, value_name = "REF")]
+        refs: Vec<String>,
+        #[command(flatten)]
+        rev: Rev,
+    },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
     Rail(RailCmd),
@@ -3165,6 +3175,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .as_deref()
                 .map(|t| named("theme", t, "light, dark"))
                 .transpose()?,
+        },
+        Command::Resolve { refs, rev } => Request::Resolve {
+            refs: refs.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Rail(RailCmd::Add {
             name,
