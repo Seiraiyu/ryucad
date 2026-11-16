@@ -32,10 +32,24 @@ from ._errors import (
 )
 from ._find import find
 from ._meta import VERSION as __version__
-from ._session import Answer, Session, connect
+from ._session import (
+    Answer,
+    BatchAnswer,
+    EnsureAnswer,
+    PartStatus,
+    Session,
+    Status,
+    connect,
+    op,
+)
 
 __all__ = [
     "Answer",
+    "BatchAnswer",
+    "EnsureAnswer",
+    "PartStatus",
+    "Status",
+    "op",
     "Session",
     "connect",
     "Code",

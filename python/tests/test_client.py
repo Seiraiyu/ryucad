@@ -153,3 +153,33 @@ class Notifications(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cad.call("progress")
             self.assertEqual(cad.call("after")["method"], "after")
+
+
+class Requests(unittest.TestCase):
+    def test_op_builds_an_op(self):
+        self.assertEqual(ryucad.op("part.ensure", part="p", features=[]),
+                         {"method": "part.ensure", "params": {"part": "p", "features": []}})
+        self.assertEqual(ryucad.op("undo"), {"method": "undo", "params": {}})
+
+    def test_batch_sends_only_the_options_given(self):
+        ops = [ryucad.op("part.ensure", part="p", features=[]), ryucad.op("undo")]
+        with fake() as cad:
+            self.assertEqual(cad.batch(ops), {"method": "batch", "params": {"ops": ops}})
+            got = cad.batch(ops, expect="r1", dry_run=True, rebuild=False, prune=True)
+        self.assertEqual(got["params"], {"ops": ops, "expect": "r1", "dry_run": True,
+                                         "rebuild": False, "prune": True})
+
+    def test_ensure_is_part_ensure(self):
+        features = [{"id": "b", "type": "box"}]
+        with fake() as cad:
+            self.assertEqual(cad.ensure("p", features)["params"],
+                             {"part": "p", "features": features})
+            got = cad.ensure("p", features, kind="part", params={}, props={"name": "P"},
+                             expected_revision="r")
+        self.assertEqual(got, {"method": "part.ensure", "params": {
+            "part": "p", "features": features, "kind": "part", "params": {},
+            "props": {"name": "P"}, "expected_revision": "r"}})
+
+    def test_undo(self):
+        with fake() as cad:
+            self.assertEqual(cad.undo(), {"method": "undo", "params": {}})

@@ -12,7 +12,7 @@ import subprocess
 import threading
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from typing import IO, Any
+from typing import IO, Any, Literal, TypedDict, cast
 
 from ._errors import Error, Incompatible, ProtocolError, SessionClosed, refusal
 from ._find import find
@@ -35,6 +35,47 @@ class Answer(dict[str, Any]):
     def __init__(self, result: Mapping[str, Any], data: bytes | None = None) -> None:
         super().__init__(result)
         self.data = data
+
+
+Status = Literal["created", "updated", "unchanged", "deleted"]
+
+
+class PartStatus(TypedDict):
+    status: Status
+    revision: str | None
+
+
+class BatchAnswer(TypedDict, total=False):
+    """``batch``'s answer (docs/claude/ryucad-scripting.md)."""
+
+    ops: list[dict[str, Any]]
+    parts: dict[str, PartStatus]
+    written: int
+    revision: str
+    dry_run: bool
+    rebuild: dict[str, Any]
+    assemblies: list[Any]
+    warnings: list[Any]
+
+
+class EnsureAnswer(TypedDict, total=False):
+    """``part.ensure``'s answer (docs/claude/ryucad-scripting.md)."""
+
+    part: str
+    kind: str
+    status: Status
+    revision: str | None
+    features: dict[str, Status]
+    params: Any
+    props: Any
+    rebuild: dict[str, Any]
+    assemblies: list[Any]
+    warnings: list[Any]
+
+
+def op(method: str, /, **params: Any) -> dict[str, Any]:
+    """One op of a ``batch``: ``{"method": method, "params": params}``."""
+    return {"method": method, "params": params}
 
 
 class Session:
@@ -70,6 +111,38 @@ class Session:
         param named like a Python keyword, such as ``from``, goes in the
         dict). Its result, or the refusal raised as a :class:`RyucadError`."""
         return self._request(method, {**(params or {}), **kwargs})
+
+    def batch(self, ops: Sequence[Mapping[str, Any]], *, expect: str | None = None,
+              dry_run: bool = False, rebuild: bool | None = None,
+              prune: bool = False) -> BatchAnswer:
+        """``batch``: the ops as one checked, logged, undoable change. Only
+        the options given are sent, so the daemon's defaults stay its own."""
+        params: dict[str, Any] = {"ops": [dict(o) for o in ops]}
+        if expect is not None:
+            params["expect"] = expect
+        if dry_run:
+            params["dry_run"] = True
+        if rebuild is not None:
+            params["rebuild"] = rebuild
+        if prune:
+            params["prune"] = True
+        return cast(BatchAnswer, self._request("batch", params))
+
+    def ensure(self, part: str, features: Sequence[Mapping[str, Any]], *,
+               kind: str | None = None, params: Mapping[str, Any] | None = None,
+               props: Mapping[str, Any] | None = None,
+               expected_revision: str | None = None) -> EnsureAnswer:
+        """``part.ensure`` alone: the part exactly as declared."""
+        sent: dict[str, Any] = {"part": part, "features": [dict(f) for f in features]}
+        for key, value in (("kind", kind), ("params", params), ("props", props),
+                           ("expected_revision", expected_revision)):
+            if value is not None:
+                sent[key] = value
+        return cast(EnsureAnswer, self._request("part.ensure", sent))
+
+    def undo(self) -> Answer:
+        """``undo``: takes back this participant's latest change."""
+        return self._request("undo", {})
 
     def close(self) -> int:
         """Ends the session (EOF on its stdin) and waits for it to exit: its
