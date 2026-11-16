@@ -111,3 +111,82 @@ fn scene_says_its_schema() {
     }
     ryueda(&board, &run, true, &["daemon", "stop"]);
 }
+
+/// `diff --netlist` lists the sheets a change touched, counted as
+/// `render --compare` marks them; an untouched block's sheets aren't
+/// listed.
+#[test]
+fn diff_lists_the_sheets_a_change_touched() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = breakout_in_git(&top, &run);
+        ok(
+            &board,
+            &run,
+            daemon,
+            &["component", "edit", "breakout/r1", "--value", "10k"],
+        );
+        ok(
+            &board,
+            &run,
+            daemon,
+            &["place", "breakout", "--move", "shift J1 right 4"],
+        );
+        let d = ok(
+            &board,
+            &run,
+            daemon,
+            &["diff", "--netlist", "--from", "HEAD"],
+        );
+        let sheets = d["sheets"].as_array().unwrap_or_else(|| panic!("{d}"));
+        assert!(
+            sheets.iter().all(|s| s["block"] != "sensor"),
+            "the sensor didn't change: {d}"
+        );
+        let s = sheets
+            .iter()
+            .find(|s| s["block"] == "breakout")
+            .unwrap_or_else(|| panic!("{d}"));
+        assert_eq!(
+            (&s["design"], &s["status"]),
+            (&json!("board"), &json!("changed")),
+            "{s}"
+        );
+        assert!(
+            s["changed"].as_u64().unwrap() >= 1 && s["moved"].as_u64().unwrap() >= 1,
+            "{s}"
+        );
+        // The same counts as the compare's strip.
+        let sheet = s["sheet"].as_str().unwrap();
+        let r = ok(
+            &board,
+            &run,
+            daemon,
+            &[
+                "render",
+                "--block",
+                "breakout",
+                "--compare",
+                "HEAD",
+                "--out",
+                "c.svg",
+            ],
+        );
+        assert_eq!(
+            r["changed"][sheet],
+            json!(format!(
+                "Against HEAD: {} added, {} changed, {} moved, {} removed",
+                s["added"], s["changed"], s["moved"], s["removed"]
+            )),
+            "{r} {s}"
+        );
+        // Without --netlist: no sheets.
+        assert!(ok(&board, &run, daemon, &["diff"]).get("sheets").is_none());
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}

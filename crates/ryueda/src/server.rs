@@ -1273,6 +1273,7 @@ fn dispatch(
                 layout,
                 library,
                 all,
+                sheets: netlist,
             },
         ),
         Request::Check { against, .. } => {
