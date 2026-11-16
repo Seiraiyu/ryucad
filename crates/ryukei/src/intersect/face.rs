@@ -2186,6 +2186,45 @@ mod tests {
             format!("{:?}", region_outside_boxes(&region, &[cube]))
         );
     }
+
+    /// FTC 07 AP242 #13541's retry pair (#658, census VI, plan 21.B):
+    /// cylinder `79b561f3` and cone `178d3260`, both working, carried over
+    /// their near boxes, sharing no edge or vertex.
+    fn ftc_07_ap242_pair() -> (Body, [FaceId; 2]) {
+        let work = crate::codec::decode_body(include_bytes!(
+            "../../tests/data/nist_ftc_07_ap242_miss_work.body"
+        ))
+        .unwrap();
+        let pair: Vec<FaceId> = work.faces().collect();
+        assert_eq!(pair.len(), 2);
+        let pair = [pair[0], pair[1]];
+        (work, pair)
+    }
+
+    /// Within a rung's cap, as the retry meets it.
+    fn met_in_a_rung(work: &Body, [a, b]: [FaceId; 2], m: &Meter) -> Result<FaceMeet, Failure> {
+        m.capped(crate::work::Scope::Rung, || {
+            face_face_in((work, a), (work, b), m)
+        })
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "slow in a debug build: CI runs it in release"
+    )]
+    fn ftc_07_ap242s_cylinder_and_cone_share_nothing_and_refuse_in_a_first_build() {
+        let (work, pair) = ftc_07_ap242_pair();
+        assert!(!sharing((&work, pair[0]), (&work, pair[1])));
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let met = m.first_build(|| met_in_a_rung(&work, pair, &m));
+        assert_eq!(met, Err(Failure::Uncertain));
+        // Outside a first build, main refuses it too (Task 5 changes this).
+        // unmetered: a unit test.
+        let m = Meter::free();
+        assert_eq!(met_in_a_rung(&work, pair, &m), Err(Failure::Uncertain));
+    }
 }
 
 #[cfg(test)]
