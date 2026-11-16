@@ -82,8 +82,73 @@ pub enum Shape {
 pub struct Item {
     pub owner: Option<usize>,
     pub layer: Option<String>,
+    /// The ghost it draws (an index into [`Scene::ghosts`]): what only
+    /// the compared revision draws, owned by no one.
+    pub ghost: Option<usize>,
     pub shape: Shape,
 }
+
+/// How a compare marks an owner (plan 13.A).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Diff {
+    Added,
+    Changed,
+    Moved,
+}
+
+/// A compare's counts: a sheet's, or the shown sheet's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub added: u64,
+    pub changed: u64,
+    pub moved: u64,
+    pub removed: u64,
+}
+
+impl Counts {
+    pub fn total(&self) -> u64 {
+        self.added + self.changed + self.moved + self.removed
+    }
+
+    fn read(v: &Value) -> Option<Counts> {
+        Some(Counts {
+            added: v["added"].as_u64()?,
+            changed: v["changed"].as_u64()?,
+            moved: v["moved"].as_u64()?,
+            removed: v["removed"].as_u64()?,
+        })
+    }
+}
+
+/// What a compare scene is against.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Against {
+    pub rev: String,
+    pub commit: String,
+    /// The revision's block's error when it doesn't lay out there.
+    pub invalid: Option<Value>,
+}
+
+/// What only the revision draws: its reference, kind and box. Its items
+/// are the scene's with `ghost` naming it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ghost {
+    pub reference: String,
+    pub kind: String,
+    pub boxed: Option<[P; 2]>,
+}
+
+/// The theme's compare colours (`diff_added`, `diff_changed`,
+/// `diff_removed`): a project's style recolours them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiffColours {
+    pub added: Color32,
+    pub changed: Color32,
+    pub removed: Color32,
+}
+
+/// A leader's pen, millimetres: half `ryusch`'s line, as SVG draws it.
+pub const LEADER: f64 = 0.125;
 
 /// An owner: what its items draw, by stable reference.
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +161,8 @@ pub struct Owner {
     pub net: Option<String>,
     pub boxed: Option<[P; 2]>,
     pub hash: String,
+    /// Its compare mark, in a compare scene.
+    pub mark: Option<Diff>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -127,6 +194,9 @@ pub struct Paper {
     pub rect: [P; 2],
     pub colour: Color32,
     pub canvas: Color32,
+    /// The theme's compare colours (`paper.diff`), when the daemon names
+    /// them.
+    pub diff: Option<DiffColours>,
 }
 
 /// One sheet of a block, as drawn.
@@ -154,6 +224,16 @@ pub struct Scene {
     pub items: Vec<Item>,
     pub owners: Vec<Owner>,
     index: BTreeMap<String, usize>,
+    /// The revision's commit, when this is a revision's sheet (`scene
+    /// --rev`): read only.
+    pub commit: Option<String>,
+    pub against: Option<Against>,
+    pub counts: Option<Counts>,
+    pub ghosts: Vec<Ghost>,
+    /// Each sheet's counts in a compare, by sheet ID.
+    pub sheet_counts: BTreeMap<String, Counts>,
+    /// The sheets only the revision has, `(id, name)`.
+    pub removed_sheets: Vec<(String, String)>,
 }
 
 /// `#rrggbb`.
@@ -260,6 +340,7 @@ impl Scene {
                 _ => items.push(Item {
                     owner: it["owner"].as_u64().map(|n| n as usize),
                     layer: layer.clone(),
+                    ghost: None,
                     shape: shape(it)?,
                 }),
             }
@@ -274,10 +355,16 @@ impl Scene {
                     net: text(&o["net"]),
                     boxed: rect(&o["box"]),
                     hash: text(&o["hash"])?,
+                    mark: match o["mark"].as_str() {
+                        Some("added") => Some(Diff::Added),
+                        Some("changed") => Some(Diff::Changed),
+                        Some("moved") => Some(Diff::Moved),
+                        _ => None,
+                    },
                 })
             })
             .collect::<Option<_>>()?;
-        let index = owners
+        let index: BTreeMap<String, usize> = owners
             .iter()
             .enumerate()
             .map(|(i, o)| (o.reference.clone(), i))
@@ -310,6 +397,73 @@ impl Scene {
             })
             .collect();
         let p = &v["paper"];
+        let diff = (|| {
+            let d = &p["diff"];
+            Some(DiffColours {
+                added: colour(d["added"].as_str()?)?,
+                changed: colour(d["changed"].as_str()?)?,
+                removed: colour(d["removed"].as_str()?)?,
+            })
+        })();
+        let listed = v["sheets"].as_array()?;
+        let named = |s: &Value| Some((text(&s["sheet"])?, text(&s["name"]).unwrap_or_default()));
+        let sheets: Vec<(String, String)> = listed
+            .iter()
+            .filter(|s| s["removed"] != true)
+            .filter_map(named)
+            .collect();
+        let removed_sheets = listed
+            .iter()
+            .filter(|s| s["removed"] == true)
+            .filter_map(named)
+            .collect();
+        let sheet_counts = listed
+            .iter()
+            .filter_map(|s| Some((text(&s["sheet"])?, Counts::read(&s["counts"])?)))
+            .collect();
+        // A compare's ghosts are drawn first, owned by no one; its
+        // leaders last, their parts'.
+        let mut ghosts = Vec::new();
+        let mut first = Vec::new();
+        for g in v["ghosts"].as_array().into_iter().flatten() {
+            let (Some(reference), Some(sh)) = (text(&g["ref"]), shape(g)) else {
+                continue;
+            };
+            first.push(Item {
+                owner: None,
+                layer: None,
+                ghost: Some(ghosts.len()),
+                shape: sh,
+            });
+            ghosts.push(Ghost {
+                reference,
+                kind: text(&g["kind"]).unwrap_or_default(),
+                boxed: rect(&g["box"]),
+            });
+        }
+        first.append(&mut items);
+        let mut items = first;
+        if let Some(d) = diff {
+            for l in v["leaders"].as_array().into_iter().flatten() {
+                let (Some(r), Some(from), Some(to)) =
+                    (text(&l["ref"]), point(&l["from"]), point(&l["to"]))
+                else {
+                    continue;
+                };
+                items.push(Item {
+                    owner: index.get(&r).copied(),
+                    layer: None,
+                    ghost: None,
+                    shape: Shape::Polyline {
+                        points: vec![from, to],
+                        stroke: d.changed,
+                        fill: None,
+                        width: LEADER,
+                        dash: true,
+                    },
+                });
+            }
+        }
         Some(Scene {
             block: text(&v["block"])?,
             design: text(&v["design"]),
@@ -322,11 +476,7 @@ impl Scene {
                 .collect(),
             sheet: text(&v["sheet"])?,
             name: text(&v["name"]).unwrap_or_default(),
-            sheets: v["sheets"]
-                .as_array()?
-                .iter()
-                .filter_map(|s| Some((text(&s["sheet"])?, text(&s["name"]).unwrap_or_default())))
-                .collect(),
+            sheets,
             theme: text(&v["theme"]).unwrap_or_default(),
             revision: text(&v["revision"]).unwrap_or_default(),
             revisions: v["revisions"]
@@ -338,6 +488,7 @@ impl Scene {
                 rect: rect(&p["rect"])?,
                 colour: colour(p["colour"].as_str()?)?,
                 canvas: colour(p["canvas"].as_str()?)?,
+                diff,
             },
             score: v["score"].as_u64(),
             stale: v["stale"].as_bool().unwrap_or(false),
@@ -347,7 +498,24 @@ impl Scene {
             items,
             owners,
             index,
+            commit: text(&v["commit"]),
+            against: v.get("against").filter(|a| a.is_object()).and_then(|a| {
+                Some(Against {
+                    rev: text(&a["rev"])?,
+                    commit: text(&a["commit"]).unwrap_or_default(),
+                    invalid: a.get("invalid").cloned().filter(|x| !x.is_null()),
+                })
+            }),
+            counts: Counts::read(&v["counts"]),
+            ghosts,
+            sheet_counts,
+            removed_sheets,
         })
+    }
+
+    /// Whether this is a revision's sheet (`scene --rev`): read only.
+    pub fn read_only(&self) -> bool {
+        self.commit.is_some()
     }
 
     /// The owner with this reference, by index.
@@ -407,6 +575,73 @@ pub(crate) mod tests {
                 {"ref": "top/region:power", "kind": "region", "net": null, "box": [[-20100000, -10100000], [20100000, 13100000]], "hash": "h-reg"}
             ]
         })
+    }
+
+    /// [`small`] as `scene --compare HEAD` answers it: r1 changed, the
+    /// net added, a ghost of a removed capacitor, r1 moved with a leader,
+    /// sheet s2 changed and s3 only at the revision.
+    pub(crate) fn compared() -> Value {
+        let mut v = small();
+        v["owners"][0]["mark"] = json!("moved");
+        v["owners"][1]["mark"] = json!("added");
+        v["against"] = json!({"rev": "HEAD", "commit": "c0ffee0000000000000000000000000000000000"});
+        v["counts"] = json!({"added": 1, "changed": 0, "moved": 1, "removed": 1});
+        v["leaders"] = json!([{"ref": "top/r1", "from": [0, -5080000], "to": [2540000, -1000000]}]);
+        v["sheets"] = json!([
+            {"sheet": "s1", "name": "Power", "counts": {"added": 1, "changed": 0, "moved": 1, "removed": 1}},
+            {"sheet": "s2", "name": "IO", "counts": {"added": 0, "changed": 2, "moved": 0, "removed": 0}},
+            {"sheet": "s3", "name": "Old", "removed": true}
+        ]);
+        v["paper"]["diff"] =
+            json!({"added": "#1a7f37", "changed": "#9a6700", "removed": "#cf222e"});
+        v["ghosts"] = json!([
+            {"ref": "top/c3", "kind": "component", "box": [[30000000, 0], [32540000, 2540000]],
+             "type": "polyline", "points": [[30000000, 0], [32540000, 2540000]], "stroke": "#cf222e", "fill": null, "width": 250000, "dash": true}
+        ]);
+        v
+    }
+
+    #[test]
+    fn a_compare_scene_reads_marks_ghosts_leaders_and_counts() {
+        let s = Scene::from_json(&compared()).unwrap();
+        let a = s.against.as_ref().unwrap();
+        assert_eq!((a.rev.as_str(), a.invalid.is_none()), ("HEAD", true));
+        assert_eq!(s.owners[0].mark, Some(Diff::Moved));
+        assert_eq!(s.owners[1].mark, Some(Diff::Added));
+        assert_eq!(s.owners[2].mark, None);
+        assert_eq!(s.counts.unwrap().total(), 3);
+        assert_eq!(s.sheets.len(), 2, "a removed sheet isn't a working sheet");
+        assert_eq!(s.removed_sheets, [("s3".to_owned(), "Old".to_owned())]);
+        assert_eq!(s.sheet_counts["s2"].changed, 2);
+        let d = s.paper.diff.unwrap();
+        assert_eq!(d.added, Color32::from_rgb(0x1a, 0x7f, 0x37));
+        // The ghost is drawn first, owned by no one; the leader last, r1's.
+        assert_eq!(s.items[0].ghost, Some(0));
+        assert_eq!(s.items[0].owner, None);
+        assert_eq!(s.ghosts[0].reference, "top/c3");
+        let last = s.items.last().unwrap();
+        assert_eq!(last.owner, Some(0));
+        let Shape::Polyline {
+            points,
+            dash,
+            stroke,
+            ..
+        } = &last.shape
+        else {
+            panic!()
+        };
+        assert!(*dash);
+        assert_eq!(*stroke, d.changed);
+        assert_eq!(points[0], [0.0, -5.08]);
+        assert!(!s.read_only());
+        // A plain scene has none of it; a revision's is read only.
+        let plain = Scene::from_json(&small()).unwrap();
+        assert!(
+            plain.against.is_none() && plain.ghosts.is_empty() && plain.removed_sheets.is_empty()
+        );
+        let mut v = small();
+        v["commit"] = json!("c0ffee0000000000000000000000000000000000");
+        assert!(Scene::from_json(&v).unwrap().read_only());
     }
 
     #[test]
