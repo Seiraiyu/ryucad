@@ -9,9 +9,12 @@
 //! polygons, outer rings counterclockwise and holes clockwise, in a
 //! canonical order, with the bound it lies within of the exact result.
 
+mod flatten;
 mod rings;
 mod snap;
 mod sweep;
+
+pub use flatten::{FlattenOptions, disc, flatten_hole, flatten_shape};
 
 use ryu_board::geom::{Nm, Point, Rect, orient};
 
