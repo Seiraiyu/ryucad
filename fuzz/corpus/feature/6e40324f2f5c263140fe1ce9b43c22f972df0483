@@ -1,0 +1,8 @@
+{
+  "form": "feature",
+  "format": 24,
+  "instances": ["i1"],
+  "kind": "ryucad.feature",
+  "on": {"feature": "k", "instance": ["i2"]},
+  "type": "instance_pattern"
+}
