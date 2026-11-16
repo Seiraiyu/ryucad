@@ -84,6 +84,43 @@ fn objects(
     (parts, nets)
 }
 
+/// What a sheet's marks count, as its strip says them: items added,
+/// changed and moved, and those ghosted that nothing marks (removed).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Counts {
+    pub added: usize,
+    pub changed: usize,
+    pub moved: usize,
+    pub removed: usize,
+}
+
+/// [`Counts`] of `m`.
+pub fn counts(m: &Marks) -> Counts {
+    let n = |f: &dyn Fn(&Mark) -> bool| m.marks.values().filter(|x| f(x)).count();
+    let (added, moved) = (
+        n(&|x| *x == Mark::Added),
+        n(&|x| matches!(x, Mark::Moved { .. })),
+    );
+    Counts {
+        added,
+        changed: m.marks.len() - added - moved,
+        moved,
+        removed: m
+            .ghosts
+            .iter()
+            .filter(|g| !m.marks.contains_key(*g))
+            .count(),
+    }
+}
+
+/// The strip a marked sheet carries.
+fn strip(rev: &str, c: Counts) -> String {
+    format!(
+        "Against {rev}: {} added, {} changed, {} moved, {} removed",
+        c.added, c.changed, c.moved, c.removed
+    )
+}
+
 /// Block `block`'s marks by sheet: its working layout `now` against the
 /// revision's `then` (none when the revision hasn't the block), `rev` as
 /// the strip names it.
@@ -176,22 +213,9 @@ pub fn marks(
         }
     }
     for m in out.values_mut() {
-        if m.is_empty() {
-            continue;
+        if !m.is_empty() {
+            m.strip = strip(rev, counts(m));
         }
-        let n = |f: &dyn Fn(&Mark) -> bool| m.marks.values().filter(|x| f(x)).count();
-        let (added, moved) = (
-            n(&|x| *x == Mark::Added),
-            n(&|x| matches!(x, Mark::Moved { .. })),
-        );
-        let changed = m.marks.len() - added - moved;
-        m.strip = format!(
-            "Against {rev}: {added} added, {changed} changed, {moved} moved, {} removed",
-            m.ghosts
-                .iter()
-                .filter(|g| !m.marks.contains_key(*g))
-                .count()
-        );
     }
     out
 }
@@ -315,4 +339,38 @@ pub fn render(
             Answer::bytes(v, "image/png", crate::schemcmd::png(&svg, px)?)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_are_what_the_strip_says() {
+        let mut m = Marks::default();
+        m.marks.insert("a".into(), Mark::Added);
+        m.marks.insert("b".into(), Mark::Changed);
+        m.marks.insert(
+            "c".into(),
+            Mark::Moved {
+                from: [0, 0],
+                to: [1, 0],
+            },
+        );
+        m.ghosts.insert("b".into());
+        m.ghosts.insert("d".into());
+        assert_eq!(
+            counts(&m),
+            Counts {
+                added: 1,
+                changed: 1,
+                moved: 1,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            strip("HEAD", counts(&m)),
+            "Against HEAD: 1 added, 1 changed, 1 moved, 1 removed"
+        );
+    }
 }
