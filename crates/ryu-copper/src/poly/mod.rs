@@ -9,6 +9,8 @@
 //! polygons, outer rings counterclockwise and holes clockwise, in a
 //! canonical order, with the bound it lies within of the exact result.
 
+mod snap;
+
 use ryu_board::geom::{Nm, Point, Rect, orient};
 
 use crate::measure::Verdict;
