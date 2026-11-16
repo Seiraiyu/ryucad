@@ -16,6 +16,7 @@ use ryu_copper::index::Index;
 use ryu_copper::layout::{Item, Layer, Layout};
 use ryu_copper::measure::core::{Core, SegP, edge_cores};
 use ryu_copper::measure::{self, Body, BodyOptions, Distance, Solid};
+use ryu_copper::poly::{self, FillRule, FlattenOptions, Op, Polygons, Rings};
 
 fn point(g: &mut Lcg, reach: i64) -> Point {
     Point::new(g.range(-reach, reach), g.range(-reach, reach))
@@ -86,8 +87,12 @@ fn distance(s: &mut Section, d: Option<Distance>) {
 }
 
 fn layout(seed: u64) -> Layout<u32> {
+    layout_of(seed, 150)
+}
+
+fn layout_of(seed: u64, count: usize) -> Layout<u32> {
     let mut g = Lcg::new(seed);
-    let f = seeded_features(&mut g, 6, 150, 20_000_000);
+    let f = seeded_features(&mut g, 6, count, 20_000_000);
     let lib = Library::default();
     let mut l = Layout {
         layers: vec![
@@ -152,6 +157,112 @@ fn index_sections(golden: &mut Golden, threads: usize) {
     }
 }
 
+fn polygons(s: &mut Section, p: &Polygons) {
+    s.i64(p.bound);
+    for poly in &p.polygons {
+        for r in poly.rings() {
+            s.i64(r.len() as i64);
+            for q in r {
+                s.i64(q.x);
+                s.i64(q.y);
+            }
+        }
+        s.str("|");
+    }
+}
+
+/// A ring round a centre: a star, or points anywhere.
+fn seeded_ring(g: &mut Lcg, reach: i64) -> Vec<Point> {
+    let n = g.range(3, 9) as usize;
+    let c = point(g, reach);
+    (0..n)
+        .map(|_| {
+            if g.coin() {
+                point(g, reach)
+            } else {
+                Point::new(
+                    c.x + g.range(-reach / 8, reach / 8),
+                    c.y + g.range(-reach / 8, reach / 8),
+                )
+            }
+        })
+        .collect()
+}
+
+fn seeded_rings(g: &mut Lcg, reach: i64) -> Rings {
+    let k = g.range(1, 4) as usize;
+    Rings::new((0..k).map(|_| seeded_ring(g, reach)).collect(), 0)
+}
+
+/// Seeded features whose flattening stays small: a concave pen swept
+/// along an arc can flatten to millions of edges, which real boards
+/// hardly draw.
+fn small_layout(seed: u64, count: usize) -> Layout<u32> {
+    let mut l = layout_of(seed, count);
+    let opts = FlattenOptions::default();
+    l.items.retain(|_, it| {
+        poly::flatten_shape(&it.shape, &opts)
+            .iter()
+            .flat_map(|p| &p.1.rings)
+            .map(Vec::len)
+            .sum::<usize>()
+            <= 4_000
+    });
+    l
+}
+
+fn poly_sections(golden: &mut Golden) {
+    let mut g = Lcg::new(0x706f_6c79);
+    let mut s = golden.section("poly.booleans");
+    let mut kept = Vec::new();
+    for case in 0..200 {
+        let reach = if case % 2 == 0 { 50 } else { 3_000_000 };
+        let (a, b) = (seeded_rings(&mut g, reach), seeded_rings(&mut g, reach));
+        for op in [Op::Union, Op::Intersection, Op::Difference, Op::Xor] {
+            let out = poly::boolean(&a, FillRule::NonZero, &b, FillRule::EvenOdd, op);
+            polygons(&mut s, &out);
+        }
+        if case % 2 == 1 {
+            kept.push(poly::simplify(&a, FillRule::NonZero));
+        }
+    }
+    let mut s = golden.section("poly.offsets");
+    let opts = FlattenOptions::default();
+    for (k, p) in kept.iter().enumerate().take(40) {
+        let d = 10_000 + 7_919 * k as i64;
+        polygons(&mut s, &poly::grow(p, d, &opts));
+        polygons(&mut s, &poly::shrink(p, d, &opts));
+    }
+    let l = small_layout(0x666c_6174, 150);
+    let mut s = golden.section("poly.flatten");
+    for it in l.items.values() {
+        for (pol, r) in poly::flatten_shape(&it.shape, &opts) {
+            s.str(&format!("{pol:?}"));
+            s.i64(r.bound);
+            for ring in &r.rings {
+                s.i64(ring.len() as i64);
+                for q in ring {
+                    s.i64(q.x);
+                    s.i64(q.y);
+                }
+            }
+        }
+    }
+}
+
+fn layer_sections(golden: &mut Golden, threads: usize) {
+    let l = small_layout(0x6c61_7972, 400);
+    let merged = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| poly::merge_layers(&l, &FlattenOptions::default()));
+    let mut s = golden.section(&format!("poly.layers.{threads}"));
+    for m in &merged {
+        polygons(&mut s, m);
+    }
+}
+
 #[test]
 fn measurement_is_bit_exact() {
     let mut golden = Golden::new(concat!(
@@ -199,7 +310,14 @@ fn measurement_is_bit_exact() {
     }
     index_sections(&mut golden, 1);
     index_sections(&mut golden, 8);
+    poly_sections(&mut golden);
+    layer_sections(&mut golden, 1);
+    layer_sections(&mut golden, 8);
     let sections = golden.sections_for_test();
+    assert_eq!(
+        sections["poly.layers.1"], sections["poly.layers.8"],
+        "layers differ between one thread and eight"
+    );
     for kind in ["pairs", "nearest"] {
         assert_eq!(
             sections[&format!("index.{kind}.1")],
