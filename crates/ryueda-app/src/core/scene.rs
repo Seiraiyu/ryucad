@@ -236,6 +236,14 @@ pub struct Scene {
     pub removed_sheets: Vec<(String, String)>,
 }
 
+/// An error code as the CLI's envelope writes it (`not_found`).
+pub fn code_word(code: ryu_doc::error::Code) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 /// `#rrggbb`.
 pub fn colour(s: &str) -> Option<Color32> {
     let h = s.strip_prefix('#')?;

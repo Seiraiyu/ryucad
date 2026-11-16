@@ -6,6 +6,7 @@
 use crate::core::changes::{Changes, Show};
 use crate::core::compare::{Ask, Blink, Side};
 use crate::core::flash::Flash;
+use crate::core::history::History;
 use crate::core::link::{Daemon, Event, Link, Wake};
 use crate::core::lists::{self, Entry, Findings, Instruction, Properties, Subject};
 use crate::core::nav::Navigator;
@@ -31,6 +32,8 @@ pub const ACTIVITY: usize = 100;
 /// How often a compare's revision is read again while comparing: a
 /// symbolic revision (`HEAD`) moves with no file changing.
 pub const COMPARE_EVERY: Duration = Duration::from_secs(5);
+/// How many commits the History tab lists.
+pub const HISTORY: usize = 50;
 
 pub type Toasts = ryu_app::toast::Toasts<Eda>;
 
@@ -174,6 +177,8 @@ enum Why {
     People,
     /// `compare.get` while comparing: its commit against the drawn one.
     CompareGet,
+    /// `history.log`, for the History tab.
+    History,
     /// `diff --layout` (or `--netlist`) from the compared revision.
     Changes {
         rev: String,
@@ -251,6 +256,8 @@ pub struct Window {
     pub changes: Option<Changes>,
     changes_asked: bool,
     changes_again: bool,
+    /// The History tab: `history.log`'s commits, or its refusal.
+    pub history: Option<History>,
 }
 
 impl Window {
@@ -309,6 +316,7 @@ impl Window {
             changes: None,
             changes_asked: false,
             changes_again: false,
+            history: None,
         };
         w.ask_all();
         Ok(w)
@@ -339,6 +347,12 @@ impl Window {
             req("activity.log", json!({"limit": ACTIVITY})),
             Why::Activity,
         );
+        self.ask_history();
+    }
+
+    /// Reads the project's Git history again, aside.
+    fn ask_history(&mut self) {
+        self.send_aside(req("history.log", json!({"limit": HISTORY})), Why::History);
     }
 
     fn scene_params(&self, sheet: Option<&str>) -> Value {
@@ -397,6 +411,7 @@ impl Window {
         if self.blink.of.is_some() {
             self.compare_polled = None;
         }
+        self.ask_history();
     }
 
     /// The participant's compare moved (or the window's own did).
@@ -767,9 +782,12 @@ impl Window {
 
     /// Whether nothing is waiting on the daemon.
     pub fn idle(&self) -> bool {
-        self.pending
-            .values()
-            .all(|w| matches!(w, Why::OtherSheet | Why::Check | Why::Changes { .. }))
+        self.pending.values().all(|w| {
+            matches!(
+                w,
+                Why::OtherSheet | Why::Check | Why::Changes { .. } | Why::History
+            )
+        })
     }
 
     fn handle(&mut self, e: Event) {
@@ -808,6 +826,10 @@ impl Window {
                     Why::GoTo(_) => self.toasts.error("Show", &e, 0, now),
                     Why::Check => self.checked = None,
                     Why::Changes { .. } => self.changes_read(),
+                    Why::History => {
+                        self.history =
+                            Some(History::failed(&crate::core::scene::code_word(e.code)));
+                    }
                     _ => {}
                 }
                 return;
@@ -929,6 +951,7 @@ impl Window {
                     self.ask_props();
                 }
             }
+            Why::History => self.history = Some(History::read(&v)),
             Why::Changes { rev, netlist } => {
                 if let Some(c) = self.changes.as_mut().filter(|c| c.rev == rev) {
                     if netlist {
@@ -977,6 +1000,7 @@ impl Window {
                 if self.blink.of.is_some() {
                     self.ask_changes();
                 }
+                self.ask_history();
                 if let Some(b) = self.shown.block.clone() {
                     self.send(
                         req("layout.instructions", json!({"block": b})),

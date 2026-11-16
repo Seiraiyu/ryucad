@@ -6,6 +6,7 @@ pub mod command;
 pub mod compare;
 pub mod flash;
 pub mod geom;
+pub mod history;
 pub mod keys;
 pub mod link;
 pub mod lists;

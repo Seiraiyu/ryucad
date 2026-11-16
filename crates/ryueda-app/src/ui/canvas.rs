@@ -372,13 +372,7 @@ fn text_at(
     p.add(egui::epaint::TextShape::new(pos, galley, colour).with_angle(angle));
 }
 
-/// An error code as the CLI's envelope writes it (`not_found`).
-pub fn code_word(code: ryu_doc::error::Code) -> String {
-    serde_json::to_value(code)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default()
-}
+pub use crate::core::scene::code_word;
 
 /// A body's fill under a mark: a third of the way to the mark's colour,
 /// so the text drawn over it (pin names, values), which takes the mark's
