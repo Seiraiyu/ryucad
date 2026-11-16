@@ -3,8 +3,10 @@
 //! pieces judged exactly; traces cut by holes and planes cut by strips
 //! against the pieces they must fall into; random edits of seeded
 //! layouts with negatives and holes against a rebuild; one thread against
-//! eight. Debug builds run a quarter of the counted cases and skip the
-//! seeded edits and threads, which full.yml runs in release.
+//! eight; clearance against every pair of pieces judged; quiet edits of
+//! positive layouts against a rebuild. Debug builds run a quarter of the
+//! counted cases and skip the seeded edits, threads and clearance, which
+//! full.yml runs in release.
 
 use std::collections::BTreeMap;
 
@@ -424,4 +426,97 @@ fn one_thread_and_eight_agree() {
             })
     };
     assert_eq!(run(1), run(8));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: booleans of seeded shapes take minutes in a debug build"
+)]
+fn clearance_matches_every_pair_judged() {
+    for case in 0..CASES {
+        let mut l = seeded(0x6761_7073 + case, 120, false);
+        add_holes(&mut l, case + 40, 30);
+        let c = Copper::new(&l, BodyOptions::default());
+        // A millimetre: at 0.3 mm the seeds' small islands lie too far from
+        // the large one on some layers to leave any gap to judge.
+        let d = 1_000_000;
+        for layer in 0..2 {
+            let keys: Vec<u32> = l
+                .items
+                .iter()
+                .filter(|(_, it)| it.layer == layer)
+                .map(|(k, _)| *k)
+                .collect();
+            let mut want = Vec::new();
+            for (x, &a) in keys.iter().enumerate() {
+                for &b in &keys[x + 1..] {
+                    for (i, pa) in c.piece_bodies(&a) {
+                        for (j, pb) in c.piece_bodies(&b) {
+                            let ia = c.island_of(&Node::Piece(a, i));
+                            let ib = c.island_of(&Node::Piece(b, j));
+                            if ia == ib || measure::closer(&pa, &pb, d) == Verdict::No {
+                                continue;
+                            }
+                            want.push(((a, i), (b, j), measure::distance(&pa, &pb).unwrap().nm));
+                        }
+                    }
+                }
+            }
+            want.sort_by_key(|x| (x.2, x.0, x.1));
+            let got: Vec<_> = c
+                .clearance(layer, d)
+                .iter()
+                .map(|g| (g.a, g.b, g.distance.nm))
+                .collect();
+            assert_eq!(got, want, "case {case}, layer {layer}");
+            assert!(!got.is_empty(), "case {case}: the seeds must have gaps");
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: booleans of seeded shapes take minutes in a debug build"
+)]
+fn quiet_edits_match_a_rebuild() {
+    for case in 0..CASES {
+        // Positive shapes only, so most inserts and removals are quiet;
+        // the holes make some of them not.
+        let mut full = seeded(0x7175_6965 + case, 100, true);
+        add_holes(&mut full, case + 80, 20);
+        let mut l = Layout {
+            layers: full.layers.clone(),
+            holes: full.holes.clone(),
+            ..Layout::default()
+        };
+        let mut g = Lcg::new(case + 7);
+        for (k, it) in &full.items {
+            if g.coin() {
+                l.items.insert(*k, it.clone());
+            }
+        }
+        let mut c = Copper::new(&l, BodyOptions::default());
+        let items: Vec<u32> = full.items.keys().copied().collect();
+        let mut quiet = 0;
+        for step in 0..40 {
+            let k = items[g.range(0, items.len() as i64 - 1) as usize];
+            let before = c.resolves();
+            if l.items.remove(&k).is_some() {
+                c.remove_item(&k);
+            } else {
+                l.items.insert(k, full.items[&k].clone());
+                c.insert_item(k, full.items[&k].clone());
+            }
+            if c.resolves() == before {
+                quiet += 1;
+            }
+            same(&c, &l, &format!("case {case}, step {step}"));
+        }
+        assert!(
+            quiet >= 10,
+            "case {case}: only {quiet} edits resolved nothing"
+        );
+    }
 }
