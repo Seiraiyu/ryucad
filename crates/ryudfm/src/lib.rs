@@ -19,6 +19,7 @@ pub use ryu_doc::{canonical, error, id, source, units};
 pub mod activity;
 pub mod boards;
 pub mod check;
+pub mod clearance;
 pub mod client;
 pub mod codes;
 pub mod copper;

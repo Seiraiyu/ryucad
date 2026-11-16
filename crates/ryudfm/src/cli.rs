@@ -144,6 +144,31 @@ enum Command {
         #[arg(long)]
         step: Option<String>,
     },
+    /// Every pair of different islands closer than a length on each copper
+    /// layer, closest first: once per pair of islands, or every pair of
+    /// pieces with --all.
+    Clearance {
+        /// A board of the project, or a job's path.
+        board: String,
+        /// A length: bare numbers in the default unit.
+        #[arg(long, allow_hyphen_values = true)]
+        below: String,
+        /// Copper layers (comma separated or repeated); all by default.
+        #[arg(long = "layer", value_delimiter = ',')]
+        layers: Vec<String>,
+        #[arg(long)]
+        net: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+        /// The page after this pair's id.
+        #[arg(long)]
+        after: Option<String>,
+        /// The board step of a job read by path.
+        #[arg(long)]
+        step: Option<String>,
+    },
     /// The exact distance between two features, component pins
     /// (<step>/comp/<refdes>/<pin>), holes or nets, on a copper layer they
     /// share.
@@ -376,6 +401,29 @@ fn render_args(cmd: &Command) -> ryudfm::render::Args {
     }
 }
 
+fn clearance_args(cmd: &Command) -> ryudfm::clearance::Args {
+    let Command::Clearance {
+        below,
+        layers,
+        net,
+        all,
+        limit,
+        after,
+        ..
+    } = cmd
+    else {
+        unreachable!("clearance only")
+    };
+    ryudfm::clearance::Args {
+        below: below.clone(),
+        layers: layers.clone(),
+        net: net.clone(),
+        all: *all,
+        limit: *limit,
+        after: after.clone(),
+    }
+}
+
 fn measure_args(cmd: &Command) -> ryudfm::measure::Args {
     let Command::Measure { a, b, layer, .. } = cmd else {
         unreachable!("measure only")
@@ -480,6 +528,16 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             ),
             Target::Path(_) => return Ok(None),
         },
+        Command::Clearance { board, .. } => match target(here, board)? {
+            Target::Board(root, id) => (
+                root,
+                Request::Clearance {
+                    board: id,
+                    args: clearance_args(cmd),
+                },
+            ),
+            Target::Path(_) => return Ok(None),
+        },
         Command::Measure { board, .. } => match target(here, board)? {
             Target::Board(root, id) => (
                 root,
@@ -574,6 +632,12 @@ fn by_path(cmd: &Command, here: &Path) -> Result<Answer> {
                 unreachable!("a path")
             };
             ryudfm::check::path(&p, step.as_deref()).map(Answer::json)
+        }
+        Command::Clearance { board, step, .. } => {
+            let cb = copper_at(here, board, step, &read)?;
+            let mut v = ryudfm::clearance::clearance(&cb.0, None, &clearance_args(cmd), Unit::Mm)?;
+            at(&mut v, &cb.1);
+            Ok(Answer::json(v))
         }
         Command::Measure { board, step, .. } => {
             let cb = copper_at(here, board, step, &read)?;

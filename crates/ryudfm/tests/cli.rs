@@ -569,6 +569,7 @@ fn every_protocol_method_has_a_command() {
         ("check", &["check"]),
         ("nets", &["nets"]),
         ("measure", &["measure"]),
+        ("clearance", &["clearance"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),

@@ -272,6 +272,7 @@ pub struct CopperBoard {
     contacts: Mutex<BTreeMap<IslandId<Key>, Contacts>>,
     merged: Mutex<BTreeMap<usize, Arc<Polygons>>>,
     gaps: Mutex<BTreeMap<(usize, Nm), Gaps>>,
+    claims: std::sync::OnceLock<BTreeMap<IslandId<Key>, Vec<String>>>,
 }
 
 /// An island's point contacts, as cached.
@@ -315,6 +316,7 @@ impl CopperBoard {
             contacts: Mutex::default(),
             merged: Mutex::default(),
             gaps: Mutex::default(),
+            claims: std::sync::OnceLock::new(),
         }
     }
 
@@ -510,6 +512,17 @@ impl CopperBoard {
         let m = Arc::new(poly::merge_layer(&parts, &holes));
         self.merged.lock().unwrap().insert(layer, Arc::clone(&m));
         m
+    }
+
+    /// The nets each island's items claim, found once.
+    pub fn claims(&self) -> &BTreeMap<IslandId<Key>, Vec<String>> {
+        self.claims.get_or_init(|| {
+            self.copper
+                .islands()
+                .into_iter()
+                .map(|i| (i.id, i.claims))
+                .collect()
+        })
     }
 
     /// The gaps under `below` on a copper layer, found once per distance

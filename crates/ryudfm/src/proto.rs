@@ -106,6 +106,14 @@ pub enum Request {
         #[serde(default, flatten)]
         args: crate::render::Args,
     },
+    /// Every pair of different islands closer than a length on each
+    /// copper layer, closest first.
+    #[serde(rename = "clearance")]
+    Clearance {
+        board: String,
+        #[serde(flatten)]
+        args: crate::clearance::Args,
+    },
     /// The exact distance between two features, pins, holes or nets.
     #[serde(rename = "measure")]
     Measure {
@@ -275,6 +283,14 @@ mod tests {
                     a: "x".into(),
                     b: "y".into(),
                     layer: None,
+                },
+            },
+            Request::Clearance {
+                board: "b".into(),
+                args: crate::clearance::Args {
+                    below: "0.2".into(),
+                    all: true,
+                    ..Default::default()
                 },
             },
             Request::Check { board: None },

@@ -223,6 +223,11 @@ fn dispatch(
             let b = session.board(&board)?;
             crate::render::render(&b, Some(&board), &args, unit)
         }
+        Request::Clearance { board, args } => {
+            let unit = session.project().manifest.default_unit;
+            let cb = session.copper(&board)?;
+            json(crate::clearance::clearance(&cb, Some(&board), &args, unit))
+        }
         Request::Measure { board, args } => {
             let cb = session.copper(&board)?;
             json(crate::measure::measure(&cb, Some(&board), &args))
