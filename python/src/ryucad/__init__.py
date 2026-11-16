@@ -32,8 +32,12 @@ from ._errors import (
 )
 from ._find import find
 from ._meta import VERSION as __version__
+from ._session import Answer, Session, connect
 
 __all__ = [
+    "Answer",
+    "Session",
+    "connect",
     "Code",
     "EXIT",
     "AssemblyOverconstrained",
