@@ -38,6 +38,7 @@
 //!   nanometres; every answer is sorted by key; the graph's labels and
 //!   search order never show.
 
+mod contact;
 mod edit;
 #[cfg(test)]
 pub(crate) mod fixtures;
@@ -61,6 +62,7 @@ use crate::layout::{Hole, Item, Layer, Layout};
 use crate::measure::{self, Body, BodyOptions, Verdict};
 use crate::poly::{self, FlattenOptions, Polygons};
 use crate::tree::grown;
+pub use contact::PointContact;
 pub use gap::Gap;
 use graph::Graph;
 pub use place::Placement;

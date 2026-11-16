@@ -9,6 +9,7 @@
 //! polygons, outer rings counterclockwise and holes clockwise, in a
 //! canonical order, with the bound it lies within of the exact result.
 
+mod clip;
 mod flatten;
 mod layer;
 mod offset;
@@ -16,6 +17,7 @@ mod rings;
 mod snap;
 mod sweep;
 
+pub use clip::clip;
 pub use flatten::{FlattenOptions, disc, flatten_hole, flatten_shape};
 pub use layer::{merge_layer, merge_layers};
 pub use offset::{close, grow, open, shrink};
