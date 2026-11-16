@@ -1463,6 +1463,9 @@ fn dispatch(
         Request::ParticipantList {} => {
             Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
         }
+        Request::HistoryLog { limit } => {
+            crate::git::history(session.root(), &session.files(), limit.unwrap_or(50))
+        }
         Request::CompareGet { participant } => {
             // Whose compare.set would change: `participant`, else the one
             // human, else the caller.

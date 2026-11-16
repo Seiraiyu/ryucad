@@ -751,6 +751,53 @@ fn a_compare_scene_marks_ghosts_and_counts_both_ways() {
     }
 }
 
+/// `history.log` (plan 13.A): the project's commits newest first and what
+/// is uncommitted, both ways; outside a repository, `not_a_git_repo`.
+#[test]
+fn history_lists_commits_and_what_is_uncommitted_both_ways() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(&board, &run, daemon, &["git", "log"]);
+        assert_eq!(code, 0, "{v}");
+        let commits = v["result"]["commits"].as_array().unwrap();
+        let subjects: Vec<&str> = commits
+            .iter()
+            .map(|c| c["subject"].as_str().unwrap())
+            .collect();
+        assert_eq!(subjects[0], "laid out", "newest first: {subjects:?}");
+        for c in commits {
+            assert_eq!(c["id"].as_str().unwrap().len(), 40);
+            assert_eq!(c["author"], "Test");
+            assert!(c["time"].as_i64().is_some());
+        }
+        let uncommitted = v["result"]["uncommitted"].as_array().unwrap();
+        assert!(
+            uncommitted.iter().any(|f| f["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("blocks/breakout/components/r3.json"))
+                && f["change"] == "created"),
+            "{uncommitted:?}"
+        );
+        let (_, one) = ryueda(&board, &run, daemon, &["git", "log", "--limit", "1"]);
+        assert_eq!(one["result"]["commits"].as_array().unwrap().len(), 1);
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let alone = dir.path().join("alone");
+    std::fs::create_dir_all(&alone).unwrap();
+    assert_eq!(ryueda(&alone, &run, false, &["init"]).0, 0);
+    let (code, v) = ryueda(&alone, &run, false, &["git", "log"]);
+    assert_ne!(code, 0);
+    assert_eq!(v["error"]["code"], "not_a_git_repo", "{v}");
+}
+
 #[test]
 fn output_compare_pages_only_changed_sheets() {
     let dir = tempfile::tempdir().unwrap();

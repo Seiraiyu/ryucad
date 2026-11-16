@@ -1182,6 +1182,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// The project's Git commits, newest first (those that changed its
+    /// folder), and the working files that differ from `HEAD` (plan
+    /// 13.A); `not_a_git_repo` outside a repository.
+    #[serde(rename = "history.log")]
+    HistoryLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
     /// A participant's selection by reference path, and what each names:
     /// `participant`, else the one human (an agent asks what the person
     /// points at). Needs the daemon.

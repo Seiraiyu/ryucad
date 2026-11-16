@@ -1970,6 +1970,12 @@ enum GitCmd {
         /// The file's path in the repository, as Git names it.
         path: Option<String>,
     },
+    /// The project's Git commits, newest first, and what is uncommitted.
+    /// Read-only.
+    Log {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2260,6 +2266,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             before: *before,
         },
         Command::Participants => Request::ParticipantList {},
+        Command::Git(GitCmd::Log { limit }) => Request::HistoryLog {
+            limit: Some(*limit),
+        },
         Command::Compare { rev: None, off: false, participant } => Request::CompareGet {
             participant: participant.clone(),
         },
