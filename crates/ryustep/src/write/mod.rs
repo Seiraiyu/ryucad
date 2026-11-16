@@ -27,7 +27,7 @@ use ryukei::name::Name;
 use ryukei::topo::Body;
 use std::collections::BTreeMap;
 
-pub use data::{AttributeData, DataValue, MaterialData, PartData, ProductData};
+pub use data::{AspectData, AttributeData, DataValue, MaterialData, PartData, ProductData};
 pub use style::{BodyPaint, OccurrencePaint, Paint, Paints};
 
 /// A product to write: its identifier, name and description, its
@@ -264,6 +264,12 @@ pub fn write_with(
 pub(crate) struct WrittenBody {
     pub(crate) items: Vec<u64>,
     pub(crate) faces: BTreeMap<Name, u64>,
+    /// The representation its items are in: the product's own for one
+    /// body, the body's for several.
+    pub(crate) rep: u64,
+    /// Every face written, with the body face it was written of, in the
+    /// order written (a face cut along seams is written several times).
+    pub(crate) every: Vec<(Name, u64)>,
 }
 
 /// What the writer wrote of one usage: its
@@ -411,8 +417,8 @@ pub(crate) fn write_inner_styled(
             .zip(&shapes[k])
             .map(|(b, (_, o))| face_names(b, o))
             .collect();
-        let named = |n: usize, faces: BTreeMap<usize, u64>| -> BTreeMap<Name, u64> {
-            faces.into_iter().map(|(i, id)| (names[n][i], id)).collect()
+        let every = |n: usize, faces: &BTreeMap<usize, u64>| -> Vec<(Name, u64)> {
+            faces.iter().map(|(i, id)| (names[n][*i], *id)).collect()
         };
         let mut written = Vec::with_capacity(p.bodies.len());
         let product = out.add(
@@ -459,9 +465,12 @@ pub(crate) fn write_inner_styled(
                 let (got, faces) =
                     body::solid_items(&mut out, &cx, &shapes[k][0].0, p.body_name(0));
                 items.extend(&got);
+                let all = every(0, &faces);
                 written.push(WrittenBody {
                     items: got,
-                    faces: named(0, faces),
+                    faces: all.iter().copied().collect(),
+                    rep,
+                    every: all,
                 });
                 representation(&shapes[k][0].0)
             }
@@ -477,14 +486,17 @@ pub(crate) fn write_inner_styled(
                     let mut body_items = vec![own];
                     let (got, faces) = body::solid_items(&mut out, &cx, sh, p.body_name(n));
                     body_items.extend(&got);
-                    written.push(WrittenBody {
-                        items: got,
-                        faces: named(n, faces),
-                    });
                     let body_rep = out.add(
                         representation(sh),
                         vec![s(p.body_name(n)), refs(body_items), r(cx.geometric)],
                     );
+                    let all = every(n, &faces);
+                    written.push(WrittenBody {
+                        items: got,
+                        faces: all.iter().copied().collect(),
+                        rep: body_rep,
+                        every: all,
+                    });
                     out.add(
                         "SHAPE_REPRESENTATION_RELATIONSHIP",
                         vec![s(""), s(""), r(body_rep), r(rep)],
@@ -567,7 +579,7 @@ pub(crate) fn write_inner_styled(
         }
     }
     style::write(&mut out, &cx, model, &bodies, &usages, paints);
-    data::write(&mut out, &cx, opts.schema, &products, data);
+    data::write(&mut out, &cx, opts.schema, &products, &bodies, data);
     let file = File {
         header: header(opts),
         instances: out.instances,

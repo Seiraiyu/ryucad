@@ -10,6 +10,14 @@
 //! reads them (it reads no `MATERIAL_DESIGNATION`); then one `user defined
 //! attributes` property over its `PRODUCT_DEFINITION`, its items in the
 //! order given. Every property shares one `REPRESENTATION_CONTEXT`.
+//! Then each shape aspect (design 533: a hole's faces, a cosmetic
+//! thread's), by product and body in order, the order given within one:
+//! its `SHAPE_ASPECT` over the product's `PRODUCT_DEFINITION_SHAPE` (not
+//! product-definitional), a `GEOMETRIC_ITEM_SPECIFIC_USAGE` per face
+//! written of it, in the body's representation, and a `user defined
+//! attributes` property over the aspect, as CAx-IF's *User Defined
+//! Attributes* practice gives attributes on a shape aspect. One with no
+//! face written is left out.
 
 use super::{Contexts, Out, e, f, r, refs, s};
 use crate::part21::Param;
@@ -51,17 +59,31 @@ pub struct ProductData {
     pub attributes: Vec<AttributeData>,
 }
 
+/// Faces of body `body` of product `product` (as [`ProductData`] and
+/// styles index them) named `name` as one shape aspect, with attributes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AspectData {
+    pub product: usize,
+    pub body: usize,
+    pub name: String,
+    pub faces: Vec<ryukei::name::Name>,
+    pub attributes: Vec<AttributeData>,
+}
+
 /// Everything written of the products besides their shapes and styles.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PartData {
     pub products: Vec<ProductData>,
+    pub aspects: Vec<AspectData>,
 }
 
 impl PartData {
     pub fn is_empty(&self) -> bool {
-        self.products
-            .iter()
-            .all(|p| p.material.is_none() && p.attributes.is_empty())
+        self.aspects.is_empty()
+            && self
+                .products
+                .iter()
+                .all(|p| p.material.is_none() && p.attributes.is_empty())
     }
 }
 
@@ -174,6 +196,7 @@ pub(crate) fn write(
     cx: &Contexts,
     schema: Schema,
     products: &[(u64, u64)],
+    bodies: &[Vec<super::WrittenBody>],
     data: &PartData,
 ) {
     if data.is_empty() {
@@ -235,6 +258,52 @@ pub(crate) fn write(
                     p.attributes
                         .iter()
                         .map(|a| item(out, cx, schema, a))
+                        .collect()
+                },
+            );
+        }
+    }
+    let mut aspects: Vec<&AspectData> = data.aspects.iter().collect();
+    aspects.sort_by_key(|a| (a.product, a.body));
+    for a in aspects {
+        let (Some(&(_, shape)), Some(w)) = (
+            products.get(a.product),
+            bodies.get(a.product).and_then(|b| b.get(a.body)),
+        ) else {
+            continue;
+        };
+        let mut ids: Vec<u64> = w
+            .every
+            .iter()
+            .filter(|(n, _)| a.faces.contains(n))
+            .map(|x| x.1)
+            .collect();
+        ids.sort_unstable();
+        if ids.is_empty() {
+            continue;
+        }
+        let aspect = out.add(
+            "SHAPE_ASPECT",
+            vec![s(&a.name), s(""), r(shape), super::b(false)],
+        );
+        for id in ids {
+            out.add(
+                "GEOMETRIC_ITEM_SPECIFIC_USAGE",
+                vec![s(""), s(""), r(aspect), r(w.rep), r(id)],
+            );
+        }
+        if !a.attributes.is_empty() {
+            let ctx = shared.context(out);
+            property(
+                out,
+                ctx,
+                ("user defined attributes", ""),
+                aspect,
+                "",
+                |out| {
+                    a.attributes
+                        .iter()
+                        .map(|x| item(out, cx, schema, x))
                         .collect()
                 },
             );
