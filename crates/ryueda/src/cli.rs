@@ -128,6 +128,10 @@ enum Command {
         /// Search no other checkout, the preference's included.
         #[arg(long)]
         no_dependents: bool,
+        /// Ask the review service instead: every repository of the
+        /// organization the token can read (review.url and its token).
+        #[arg(long, conflicts_with_all = ["working", "within", "no_dependents"])]
+        org: bool,
     },
     /// A design's bill of materials (PDM): one line per purchasable
     /// part with designators, maker, part number, alternates and offers;
@@ -2512,6 +2516,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             direct,
             within,
             no_dependents,
+            org: false,
         } => Request::BomWhereUsed {
             part: part.clone(),
             label: label.clone(),
@@ -3427,6 +3432,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         | Command::Daemon(_)
         | Command::Git(_)
         | Command::Review(_)
+        | Command::WhereUsed { org: true, .. }
         | Command::Parts(PartsCmd::Login { .. } | PartsCmd::Logout { .. }) => {
             return Ok(None);
         }
@@ -3463,6 +3469,13 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
+        Command::WhereUsed {
+            part,
+            label,
+            direct,
+            org: true,
+            ..
+        } => ryueda::review::where_used_org(&find_root(&here)?, part, label.as_deref(), *direct),
         Command::Review(cmd) => {
             use ryu_review::Action;
             let action = match cmd {

@@ -39,7 +39,12 @@ fn review_against_a_fake_service() {
     git(&top, &["checkout", "-q", "-b", "feature/r1"]);
     git(
         &top,
-        &["remote", "add", "origin", "https://github.com/acme/boards.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/boards.git",
+        ],
     );
     let fake = Fake::start(vec![
         json(
@@ -130,5 +135,68 @@ fn review_against_a_fake_service() {
     assert_eq!(
         serde_json::from_str::<Value>(&posted.body).unwrap(),
         j!({"ref": "board:breakout/r1", "body": "why 10k?"})
+    );
+}
+
+#[test]
+fn where_used_across_the_organization() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    // In a design project --org is refused: where-used is asked in a
+    // library project.
+    let out = ryueda_cmd(&board, &run, false, &["where-used", "r_4k7", "--org"])
+        .env("RYUEDA_REVIEW_URL", "http://127.0.0.1:9")
+        .env("RYUEDA_REVIEW_TOKEN", "tok")
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_param", "{v}");
+    let (lib, _) = library(&top, &run, false);
+    let manifest = std::fs::read_to_string(lib.join("ryueda.json")).unwrap();
+    let project = serde_json::from_str::<Value>(&manifest).unwrap()["project"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fake = Fake::start(vec![
+        json(
+            "GET",
+            &format!("/api/v1/where-used?project={project}&part=r_4k7&label=A"),
+            200,
+            j!({"schema": 1, "rows": [{"repo": "acme/boards", "design": "board"}]}),
+        ),
+        json(
+            "GET",
+            &format!("/api/v1/where-used?project={project}&part=r_4k7"),
+            200,
+            j!({"schema": 2}),
+        ),
+    ]);
+    let ask = |args: &[&str]| {
+        let mut all = vec!["where-used", "r_4k7", "--org"];
+        all.extend_from_slice(args);
+        let out = ryueda_cmd(&lib, &run, false, &all)
+            .env("RYUEDA_REVIEW_URL", &fake.url)
+            .env("RYUEDA_REVIEW_TOKEN", "tok")
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    let (code, v) = ask(&["--label", "A"]);
+    assert_eq!(
+        (code, &v["result"]["rows"][0]["design"]),
+        (0, &j!("board")),
+        "{v}"
+    );
+    let (code, v) = ask(&[]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (4, &j!("review_failed")),
+        "schema 2 isn't read: {v}"
     );
 }
