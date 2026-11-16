@@ -5,6 +5,11 @@
 
 use super::*;
 
+/// The least time between two doctor reports a change asks for: the
+/// daemon's default `daemon.publish_max_ms`, so a burst asks about once
+/// per publish (#849).
+pub const DOCTOR_EVERY: Duration = Duration::from_millis(1000);
+
 /// This window's session state.
 #[derive(Default)]
 pub struct Session {
@@ -21,6 +26,10 @@ pub struct Session {
     /// meanwhile, so the badges need another.
     pub(super) doctor_waiting: bool,
     pub(super) doctor_again: bool,
+    /// When a report was last asked for, and when one deferred to keep
+    /// to [`DOCTOR_EVERY`] is due (#849).
+    pub(super) doctor_at: Option<Instant>,
+    pub(super) doctor_due: Option<Instant>,
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
@@ -73,6 +82,7 @@ impl Workspace {
     /// Diagnoses the project (`doctor`).
     pub fn diagnose(&mut self) {
         self.session.doctor_waiting = true;
+        self.session.doctor_at = Some(Instant::now());
         self.send(Request::Doctor {}, Route::Session(session::Asked::Doctor));
     }
 
@@ -110,10 +120,37 @@ impl Workspace {
     }
 
     pub(super) fn rediagnose(&mut self) {
+        if self.session.doctor.is_some() {
+            self.diagnose_again();
+        }
+    }
+
+    /// Asks for the doctor's report again after a change: one on its way
+    /// at a time, and at most one per [`DOCTOR_EVERY`], so a script's
+    /// burst costs the daemon a report a second, not one per publish
+    /// (#849). One deferred is asked by [`Workspace::doctor_tick`].
+    pub(super) fn diagnose_again(&mut self) {
         if self.session.doctor_waiting {
             self.session.doctor_again = true;
-        } else if self.session.doctor.is_some() {
-            self.diagnose();
+            return;
+        }
+        let now = Instant::now();
+        match self.session.doctor_at {
+            Some(at) if now.saturating_duration_since(at) < DOCTOR_EVERY => {
+                self.session.doctor_due = Some(at + DOCTOR_EVERY);
+            }
+            _ => {
+                self.session.doctor_due = None;
+                self.diagnose();
+            }
+        }
+    }
+
+    /// Asks a deferred doctor's report once it is due.
+    pub(super) fn doctor_tick(&mut self, now: Instant) {
+        if self.session.doctor_due.is_some_and(|due| now >= due) {
+            self.session.doctor_due = None;
+            self.diagnose_again();
         }
     }
 
@@ -387,5 +424,6 @@ impl Session {
     pub(super) fn on_lost(&mut self) {
         self.doctor_waiting = false;
         self.doctor_again = false;
+        self.doctor_due = None;
     }
 }

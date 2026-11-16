@@ -786,3 +786,21 @@ fn a_burst_over_parts_is_read_in_one_rebuild_per_poll() {
         n("rebuild")
     );
 }
+
+/// A burst asks the doctor at most about once a second
+/// (`DOCTOR_EVERY`, #849), whatever the publishes.
+#[test]
+fn a_burst_asks_the_doctor_about_once_a_second() {
+    let p = Project::new();
+    p.ok(&["part", "create", "p"]);
+    let mut ws = open(&p);
+    ws.diagnose();
+    assert!(ws.wait_until(WAIT, |w| w.idle() && w.session.doctor.is_some()));
+    let before = methods(&p)["doctor"]["count"].as_u64().unwrap_or(0);
+    let (secs, t) = burst(&p, &mut ws, &["p"], 60);
+    let doctors = t["doctor"]["count"].as_u64().unwrap_or(0) - before;
+    // The burst's seconds and the second after it, plus the last.
+    let allowed = secs.ceil() as u64 + 2;
+    assert!(doctors >= 1, "{t}");
+    assert!(doctors <= allowed, "{doctors} doctors in {secs:.1} s: {t}");
+}

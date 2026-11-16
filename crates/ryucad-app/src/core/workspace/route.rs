@@ -157,7 +157,7 @@ impl Workspace {
             Then::AskPreview => self.ask_preview(),
             Then::BomRead => self.bom_read(),
             Then::ChooseAnnotation(id) => self.choose_annotation(Some(&id)),
-            Then::Diagnose => self.diagnose(),
+            Then::Diagnose => self.diagnose_again(),
             Then::ExplodeShown => {
                 self.assembly.explodes.sliding = None;
                 self.follow_explode();

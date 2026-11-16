@@ -816,6 +816,7 @@ impl Workspace {
     /// time. Call it every frame.
     pub fn tick(&mut self, now: Instant) {
         self.toasts.expire(now);
+        self.doctor_tick(now);
         self.take_org();
         if self.lost {
             self.reconnect(now);
@@ -1052,7 +1053,11 @@ impl Workspace {
             if done(self) {
                 return true;
             }
-            let left = timeout.saturating_sub(start.elapsed());
+            let mut left = timeout.saturating_sub(start.elapsed());
+            // A deferred doctor's report is asked when due (#849).
+            if let Some(due) = self.session.doctor_due {
+                left = left.min(due.saturating_duration_since(Instant::now()));
+            }
             match self.link.wait_event(left) {
                 Some(e) => {
                     self.handle(e);
@@ -1061,6 +1066,9 @@ impl Workspace {
                         self.handle(e);
                     }
                     self.flush_stale();
+                }
+                None if self.session.doctor_due.is_some() && start.elapsed() < timeout => {
+                    self.doctor_tick(Instant::now());
                 }
                 None => return done(self),
             }
