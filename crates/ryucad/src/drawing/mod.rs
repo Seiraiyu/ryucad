@@ -22,6 +22,7 @@ pub mod output;
 pub mod request;
 pub mod section;
 pub mod template;
+mod threads;
 
 use crate::doc::assembly::Rev;
 use crate::doc::drawing::{
@@ -164,8 +165,9 @@ pub struct SheetBuilt {
     /// what picking a curve in the app chooses.
     pub sources: BTreeMap<usize, String>,
     /// The hole features its views show, each once: its part, its hole,
-    /// a view showing it and a wall's reference there (for the lint).
-    pub holes: Vec<(Id, Id, Key, String)>,
+    /// a view showing it, a wall's reference there, and whether it is
+    /// tapped (for the lint).
+    pub holes: Vec<(Id, Id, Key, String, bool)>,
 }
 
 /// A drawing built against the model.
@@ -1387,7 +1389,9 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
     for ((plan, src), p) in plans.iter().zip(&projected) {
         match p {
             Ok(p) => {
-                let d = drawn(p, plan, src);
+                let mut d = drawn(p, plan, src);
+                let threads = threads::lines(session, plan, src, &d);
+                d.lines.extend(threads);
                 if !d.uncertain.is_empty() {
                     findings.push(json!({
                         "code": "drawing_view_uncertain", "severity": "warning",

@@ -637,6 +637,167 @@ fn render_compare_paints_what_changed() {
     }
 }
 
+/// `scene --rev` (plan 13.A): the sheet as the revision draws it, read
+/// only, with the commit; the working sheet hasn't what was deleted.
+#[test]
+fn a_scene_reads_a_revision_both_ways() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let refs = |v: &Value| -> Vec<String> {
+            v["result"]["owners"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["ref"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let (code, then) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["scene", "--block", "breakout", "--rev", "HEAD"],
+        );
+        assert_eq!(code, 0, "{then}");
+        assert_eq!(then["result"]["commit"].as_str().unwrap().len(), 40);
+        let (code, now) = ryueda(&board, &run, daemon, &["scene", "--block", "breakout"]);
+        assert_eq!(code, 0, "{now}");
+        assert!(now["result"].get("commit").is_none());
+        assert!(
+            refs(&then).contains(&"breakout/c3".to_owned()),
+            "deleted since HEAD"
+        );
+        assert!(!refs(&now).contains(&"breakout/c3".to_owned()));
+        assert!(
+            refs(&now).contains(&"breakout/r3".to_owned()),
+            "added since HEAD"
+        );
+        assert!(!refs(&then).contains(&"breakout/r3".to_owned()));
+        // `--rev working` is the working sheet.
+        let (_, w) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["scene", "--block", "breakout", "--rev", "working"],
+        );
+        assert_eq!(w["result"]["owners"], now["result"]["owners"]);
+        let (_, bad) = ryueda(&board, &run, daemon, &["scene", "--rev", "nope"]);
+        assert_eq!(bad["error"]["code"], "rev_not_found", "{bad}");
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
+/// `scene --compare` (plan 13.A) over the edited breakout: r1 changed,
+/// r3 added, c3 ghosted, J1 moved with a leader, the counts, both ways.
+#[test]
+fn a_compare_scene_marks_ghosts_and_counts_both_ways() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["scene", "--block", "breakout", "--compare", "HEAD"],
+        );
+        assert_eq!(code, 0, "{v}");
+        let r = &v["result"];
+        let mark = |reference: &str| {
+            r["owners"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["ref"] == reference)
+                .and_then(|o| o["mark"].as_str().map(str::to_owned))
+        };
+        assert_eq!(mark("breakout/r1").as_deref(), Some("changed"));
+        assert_eq!(mark("breakout/r3").as_deref(), Some("added"));
+        assert_eq!(mark("breakout/j1").as_deref(), Some("moved"));
+        let ghosts: Vec<&str> = r["ghosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["ref"].as_str().unwrap())
+            .collect();
+        assert!(ghosts.contains(&"breakout/c3"), "{ghosts:?}");
+        assert!(
+            r["leaders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l["ref"] == "breakout/j1")
+        );
+        assert!(r["counts"]["removed"].as_u64().unwrap() >= 1);
+        assert!(r["sheets"][0]["counts"].is_object());
+        assert_eq!(r["against"]["rev"], "HEAD");
+        for bad in [
+            vec!["scene", "--compare", "HEAD", "--rev", "HEAD"],
+            vec!["scene", "--compare", "working"],
+        ] {
+            let (_, e) = ryueda(&board, &run, daemon, &bad);
+            assert_eq!(e["error"]["code"], "invalid_param", "{bad:?}: {e}");
+        }
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
+/// `history.log` (plan 13.A): the project's commits newest first and what
+/// is uncommitted, both ways; outside a repository, `not_a_git_repo`.
+#[test]
+fn history_lists_commits_and_what_is_uncommitted_both_ways() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(&board, &run, daemon, &["git", "log"]);
+        assert_eq!(code, 0, "{v}");
+        let commits = v["result"]["commits"].as_array().unwrap();
+        let subjects: Vec<&str> = commits
+            .iter()
+            .map(|c| c["subject"].as_str().unwrap())
+            .collect();
+        assert_eq!(subjects[0], "laid out", "newest first: {subjects:?}");
+        for c in commits {
+            assert_eq!(c["id"].as_str().unwrap().len(), 40);
+            assert_eq!(c["author"], "Test");
+            assert!(c["time"].as_i64().is_some());
+        }
+        let uncommitted = v["result"]["uncommitted"].as_array().unwrap();
+        assert!(
+            uncommitted.iter().any(|f| f["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("blocks/breakout/components/r3.json"))
+                && f["change"] == "created"),
+            "{uncommitted:?}"
+        );
+        let (_, one) = ryueda(&board, &run, daemon, &["git", "log", "--limit", "1"]);
+        assert_eq!(one["result"]["commits"].as_array().unwrap().len(), 1);
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let alone = dir.path().join("alone");
+    std::fs::create_dir_all(&alone).unwrap();
+    assert_eq!(ryueda(&alone, &run, false, &["init"]).0, 0);
+    let (code, v) = ryueda(&alone, &run, false, &["git", "log"]);
+    assert_ne!(code, 0);
+    assert_eq!(v["error"]["code"], "not_a_git_repo", "{v}");
+}
+
 #[test]
 fn output_compare_pages_only_changed_sheets() {
     let dir = tempfile::tempdir().unwrap();

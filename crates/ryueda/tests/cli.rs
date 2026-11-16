@@ -165,6 +165,64 @@ impl Drop for Pair {
 }
 
 #[test]
+fn open_starts_the_app_named_by_ryueda_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    // A stand-in app that writes the folder it was given.
+    #[cfg(unix)]
+    let app = {
+        let p = dir.path().join("fake-app");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\necho \"$1\" > '{}'\n",
+                dir.path().join("opened").display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    };
+    #[cfg(windows)]
+    let app = {
+        let p = dir.path().join("fake-app.cmd");
+        std::fs::write(
+            &p,
+            format!("@echo %1> \"{}\"\r\n", dir.path().join("opened").display()),
+        )
+        .unwrap();
+        p
+    };
+    let out = ryueda(&run)
+        .current_dir(dir.path())
+        .env("RYUEDA_APP", &app)
+        .args(["open"])
+        .output()
+        .unwrap();
+    let (code, v) = parse(out, dir.path());
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["opened"], "new");
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !dir.path().join("opened").is_file() {
+        assert!(std::time::Instant::now() < end, "the app never ran");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // No app anywhere: app_not_installed, exit 4.
+    let out = ryueda(&run)
+        .current_dir(dir.path())
+        .env("RYUEDA_APP", dir.path().join("nothing"))
+        .env("PATH", "")
+        .args(["open"])
+        .output()
+        .unwrap();
+    let (code, v) = parse(out, dir.path());
+    assert_eq!(code, 4, "{v}");
+    assert_eq!(v["error"]["code"], "app_not_installed");
+}
+
+#[test]
 fn version_names_ryueda() {
     let out = Command::cargo_bin("ryueda")
         .unwrap()
@@ -825,6 +883,7 @@ fn every_protocol_method_has_a_command() {
         ("render", &["render"]),
         ("output", &["output"]),
         ("scene", &["scene"]),
+        ("resolve", &["resolve"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -832,6 +891,7 @@ fn every_protocol_method_has_a_command() {
         ("participant.list", &["participants"]),
         ("compare.set", &["compare"]),
         ("compare.get", &["compare"]),
+        ("history.log", &["git", "log"]),
         ("selection.get", &["selection"]),
         ("selection.set", &["select"]),
         ("highlight.set", &["highlight"]),
@@ -2995,6 +3055,18 @@ fn schematics_from_the_cli() {
     assert_eq!(list["instructions"][0]["holds"], json!(true), "{list}");
     assert_eq!(list["instructions"][0]["state"], "held", "{list}");
     assert!(list["instructions"][0]["why"].is_null(), "{list}");
+    // Each instruction names what it speaks of by reference path (plan
+    // 3.D: the window's Show frames them).
+    assert_eq!(
+        list["instructions"][0]["refs"],
+        json!(["breakout/j1", "breakout/r1"]),
+        "{list}"
+    );
+    assert_eq!(
+        list["instructions"][1]["refs"],
+        json!(["breakout/sda"]),
+        "{list}"
+    );
     // Every part crowded beside J1 (design 519): left of it they come
     // nearer but not within the reach, so it is pulled and says how far is
     // left; below it nothing comes nearer, so it is laid out without, moves
@@ -4409,4 +4481,37 @@ fn bom_answers_lines_and_writes_csv_to_out() {
         "invalid_param",
         1,
     );
+}
+
+/// `review` needs a Git clone (it asks no service before that), and a
+/// subcommand.
+#[test]
+fn review_needs_a_github_clone() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let p = dir.path().join("p");
+    fs::create_dir_all(&p).unwrap();
+    let (code, v) = {
+        let out = ryueda(&run)
+            .current_dir(&p)
+            .env("RYUEDA_REVIEW_TOKEN", "tok")
+            .args(["review", "status"])
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("not_a_git_repo")),
+        "{v}"
+    );
+    let out = ryueda(&run)
+        .current_dir(&p)
+        .args(["review"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
 }

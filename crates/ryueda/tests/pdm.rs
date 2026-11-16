@@ -19,50 +19,6 @@ fn ok(dir: &Path, run: &Path, daemon: bool, args: &[&str]) -> Value {
     v["result"].clone()
 }
 
-/// A library project `lib` with the breakout's library (its footprints,
-/// symbols and components) in a fresh repository, every component
-/// numbered and ryupdm set up, committed on `main`. Its parts' IDs, as
-/// `release propose --all --dry-run` lists them.
-fn library(top: &Path, run: &Path, daemon: bool) -> (PathBuf, Vec<String>) {
-    git(top, &["init", "-q", "-b", "main"]);
-    let lib = top.join("lib");
-    std::fs::create_dir_all(&lib).unwrap();
-    ok(&lib, run, daemon, &["init", "--library"]);
-    for (path, text) in breakout::footprints() {
-        let at = lib.join(path);
-        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-        std::fs::write(at, text).unwrap();
-    }
-    for args in breakout::library() {
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        ok(&lib, run, daemon, &args);
-    }
-    ok(&lib, run, daemon, &["pdm", "init"]);
-    let dry = ok(
-        &lib,
-        run,
-        daemon,
-        &["release", "propose", "--all", "--dry-run"],
-    );
-    let parts: Vec<String> = dry["parts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p["part"].as_str().unwrap().to_owned())
-        .collect();
-    for (i, p) in parts.iter().enumerate() {
-        ok(
-            &lib,
-            run,
-            daemon,
-            &["props", "set", p, &format!("number=100-{:04}", i + 1)],
-        );
-    }
-    git(top, &["add", "-A"]);
-    git(top, &["commit", "-q", "-m", "start"]);
-    (lib, parts)
-}
-
 /// The kinds `merge status` lists.
 fn kinds(v: &Value) -> Vec<String> {
     v["conflicts"]
@@ -387,6 +343,7 @@ fn components_release_with_all_become_official_tag_and_go_modified() {
         git(&top, &["add", "-A"]);
         git(&top, &["commit", "-q", "-m", "release A"]);
         let v = ok(&lib, &run, daemon, &["release", "list"]);
+        assert_eq!(v["schema"], 1, "{v}");
         assert!(
             v["records"]
                 .as_array()
@@ -651,6 +608,7 @@ fn a_design_places_a_sibling_librarys_components_by_label() {
         assert!(!dry.to_string().contains("component_not_released"), "{dry}");
         release_board(&top, &board, &run, daemon);
         let u = ok(&board, &run, daemon, &["lib", "uses"]);
+        assert_eq!(u["schema"], 1, "{u}");
         let r = &u["released"][0];
         assert_eq!(
             (r["design"].as_str(), r["label"].as_str()),
@@ -883,6 +841,7 @@ fn a_library_in_another_repository_is_fetched_pinned_updated_and_refused_when_re
         let o = ok(&board, &run, daemon, &["lib", "outdated"]);
         assert_eq!(o["outdated"][0]["latest"], "B", "{o}");
         let dry = ok(&board, &run, daemon, &["lib", "update", "--dry-run"]);
+        assert_eq!(dry["schema"], 1, "{dry}");
         assert_eq!(dry["moved"][0]["to"], "B", "{dry}");
         let files =
             || ["ryueda.json", "ryueda.lock"].map(|f| std::fs::read(board.join(f)).unwrap());

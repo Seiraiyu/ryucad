@@ -272,3 +272,133 @@ fn occt_files_import_and_check_clean() {
     );
     exports_import_again(&mut s, &[]);
 }
+
+/// A plate drilled with a tapped pattern, a fitted bore and a plain hole,
+/// exported (design 533, STEP export): one shape aspect per hole, named by
+/// its reference, over its faces, with its intent as attributes; read
+/// back, every one retained; `properties: false` writes none and says so.
+#[test]
+fn a_plates_holes_are_attributes_on_their_faces() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    let mut must = |m: &str, p: Value| call(&mut s, m, p).unwrap_or_else(|e| panic!("{m}: {e}"));
+    must("part.create", json!({"part": "p"}));
+    must(
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 30, "z": 10}}),
+    );
+    must(
+        "feature.add",
+        json!({"part": "p", "type": "sketch", "id": "s", "placement": {"origin": [0, 0, 10]}}),
+    );
+    must(
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [
+            {"op": "add", "type": "point", "at": [8, 8]}, {"op": "add", "type": "fix", "a": "p1"},
+            {"op": "add", "type": "point", "at": [20, 15]}, {"op": "add", "type": "fix", "a": "p2"},
+            {"op": "add", "type": "point", "at": [32, 22]}, {"op": "add", "type": "fix", "a": "p3"}]}),
+    );
+    for (id, point, spec) in [
+        ("t", "p1", "M6x1.0-6H 8 DEEP, DRILL 10 DEEP 118DEG"),
+        ("f", "p2", "DIA 6 H7 THRU"),
+        ("h", "p3", "DIA 4 THRU"),
+    ] {
+        must(
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": id, "sketch": "s", "points": [point], "spec": spec}),
+        );
+    }
+    let out = dir.path().join("p.stp");
+    let v = must(
+        "export",
+        json!({"part": "p", "out": out, "time_stamp": "2026-11-14T00:00:00"}),
+    );
+    let bytes = std::fs::read(&out).unwrap();
+    let f = ryustep::part21::parse(&bytes).unwrap();
+    let named = |n: &str| -> Vec<Vec<ryustep::part21::Param>> {
+        f.instances
+            .iter()
+            .filter_map(|i| match &i.record {
+                ryustep::part21::Record::Simple(p) if &*p.name == n => Some(p.params.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let aspects: Vec<String> = named("SHAPE_ASPECT")
+        .iter()
+        .map(|p| match &p[0] {
+            ryustep::part21::Param::Str(s) => s.to_string(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(aspects, ["p/t/p1", "p/f/p2", "p/h/p3"]);
+    let texts: Vec<(String, String)> = named("DESCRIPTIVE_REPRESENTATION_ITEM")
+        .iter()
+        .map(|p| match (&p[0], &p[1]) {
+            (ryustep::part21::Param::Str(a), ryustep::part21::Param::Str(b)) => {
+                (a.to_string(), b.to_string())
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    for want in [
+        ("hole spec", "M6x1.0-6H 8 DEEP, DRILL 10 DEEP 118DEG"),
+        ("hole type", "tapped"),
+        ("thread designation", "M6x1.0-6H"),
+        ("thread class", "6H"),
+        ("hole spec", "DIA 6 H7 THRU"),
+        ("hole type", "fitted"),
+        ("fit", "H7"),
+        ("hole spec", "DIA 4 THRU"),
+        ("hole type", "plain"),
+    ] {
+        assert!(
+            texts.contains(&(want.0.to_owned(), want.1.to_owned())),
+            "{want:?} in {texts:?}"
+        );
+    }
+    // Two lengths, the tapped hole's pitch and depth.
+    assert_eq!(named("MEASURE_REPRESENTATION_ITEM").len(), 2);
+    assert!(named("GEOMETRIC_ITEM_SPECIFIC_USAGE").len() >= 4);
+    let pmi = v["transfer"]["written"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["category"] == "pmi")
+        .cloned();
+    assert!(pmi.is_some(), "{}", v["transfer"]);
+    // Imported again, into a project of its own: retained, never failed.
+    let other = tempfile::tempdir().unwrap();
+    ryucad::server::init(other.path(), None).unwrap();
+    let mut o = Session::open(other.path()).unwrap();
+    let back = call(&mut o, "import", json!({"path": out, "solid": true})).unwrap();
+    let cat = back["transfer"]["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["category"] == "pmi")
+        .cloned()
+        .unwrap_or_else(|| panic!("{}", back["transfer"]));
+    assert!(cat["retained"]["count"].as_u64().unwrap() > 0, "{cat}");
+    assert_eq!(cat["failed"]["count"], 0, "{cat}");
+    // Without properties: no aspect, and an omitted entry naming the holes.
+    let off = dir.path().join("off.stp");
+    let v = call(
+        &mut s,
+        "export",
+        json!({"part": "p", "out": off, "properties": false, "time_stamp": "2026-11-14T00:00:00"}),
+    )
+    .unwrap();
+    let bytes = std::fs::read(&off).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("SHAPE_ASPECT"));
+    assert!(
+        v["transfer"]["omitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["what"] == "properties" && o["count"] == 3),
+        "{}",
+        v["transfer"]
+    );
+}

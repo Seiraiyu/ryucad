@@ -70,6 +70,33 @@ pub fn handle_safely(
     handle_job(slot, live, me, root, req, &ryu_session::job::Job::default())
 }
 
+/// Whether `req`'s answer is one the hosted review service reads
+/// (design 667): it says its schema, [`crate::OUTPUT_SCHEMA`]. `check`'s
+/// report and `scene`'s head say it where they are built; `bom`, `bom
+/// diff`, `where-used` and `release check` give ryupdm's.
+fn versioned(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::Diff { .. }
+            | Request::MergeStatus {}
+            | Request::ReleaseList { .. }
+            | Request::LibUses { .. }
+            | Request::LibUpdate { .. }
+            | Request::Render { .. }
+            | Request::Resolve { .. }
+    )
+}
+
+/// `a` saying [`crate::OUTPUT_SCHEMA`], when its result is an object.
+fn with_schema(mut a: Answer) -> Answer {
+    if a.raw.is_none()
+        && let Some(o) = a.result.as_object_mut()
+    {
+        o.insert("schema".into(), json!(crate::OUTPUT_SCHEMA));
+    }
+    a
+}
+
 /// [`handle_safely`] with a long request's job.
 pub fn handle_job(
     slot: &mut Option<Session>,
@@ -79,21 +106,59 @@ pub fn handle_job(
     req: Request,
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
+    let schema = versioned(&req);
     // A merge that left a record in the manifest leaves no project to
     // open: its status and resolutions are read from the files alone.
     let merge =
         matches!(req, Request::MergeStatus {} | Request::MergeResolve { .. }).then(|| req.clone());
-    match (
-        guarded(slot, root, |s| answer(s, live, me, req, job)),
-        merge,
-    ) {
-        (Err(e), Some(req))
-            if e.code == Code::MergeConflict
-                && e.details.get("path").and_then(Value::as_str) == Some(MANIFEST) =>
-        {
+    // A window opening over that record says hello and lists who is
+    // there: both are the live session's, which needs no project (plan
+    // 13.B).
+    let sessionless = matches!(
+        req,
+        Request::SessionHello { .. } | Request::ParticipantList {}
+    )
+    .then(|| req.clone());
+    let mut live = live;
+    let r = guarded(slot, root, |s| answer(s, live.as_deref_mut(), me, req, job));
+    let r = match (r, merge, sessionless) {
+        (Err(e), Some(req), _) if manifest_record(&e) => {
             crate::validate::unloaded(root, req).map(Answer::json)
         }
-        (r, _) => r,
+        (Err(e), _, Some(req)) if manifest_record(&e) && live.is_some() => {
+            live_only(live, req).map(Answer::json)
+        }
+        (r, _, _) => r,
+    };
+    if schema { r.map(with_schema) } else { r }
+}
+
+/// Whether `e` is a session refused because `ryueda.json` holds a merge's
+/// conflict record.
+fn manifest_record(e: &Error) -> bool {
+    e.code == Code::MergeConflict && e.details.get("path").and_then(Value::as_str) == Some(MANIFEST)
+}
+
+/// `session.hello` and `participant.list`, from the live session alone.
+fn live_only(live: Option<&mut Live<Eda>>, req: Request) -> Result<Value> {
+    match req {
+        Request::SessionHello {
+            kind,
+            name,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("session.hello"))?;
+            let id = live.hello(kind, name.as_deref(), participant.as_deref())?;
+            Ok(json!({"participant": id, "session": live.list()}))
+        }
+        // With no daemon, nobody is attached.
+        Request::ParticipantList {} => {
+            Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        }
+        other => Err(Error::new(
+            Code::Internal,
+            format!("{} needs the project", other.method()),
+        )),
     }
 }
 
@@ -188,7 +253,7 @@ pub fn answer(
     };
     let result = match req.rev().map(str::to_owned) {
         Some(rev) => match session.at(&rev) {
-            Ok((commit, p)) => read_at(session, &p, req)
+            Ok((commit, p)) => read_at(session, &p, &commit, req)
                 .map(|a| with_commit(a, &commit))
                 .map_err(|e| e.with("commit", &commit)),
             Err(e) => Err(e),
@@ -226,6 +291,21 @@ pub fn answer(
     result
 }
 
+/// The projects `render --frame` names: each revision's (`working`, the
+/// working files', is `None` here and taken from the session by the
+/// caller).
+fn frame_projects(
+    session: &mut Session,
+    revs: &[String],
+) -> Result<Vec<Option<std::sync::Arc<Project>>>> {
+    revs.iter()
+        .map(|r| match r.as_str() {
+            "working" => Ok(None),
+            r => session.at(r).map(|(_, p)| Some(p)),
+        })
+        .collect()
+}
+
 /// A request answered from the working files.
 fn working(
     session: &mut Session,
@@ -245,9 +325,15 @@ fn working(
             fit,
             theme,
             compare: Some(rev),
+            frame,
             ..
         } => {
             let (commit, then) = session.at(&rev)?;
+            let at = frame_projects(session, &frame)?;
+            let frames: Vec<&Project> = at
+                .iter()
+                .map(|p| p.as_deref().unwrap_or(session.project()))
+                .collect();
             crate::compare::render(
                 session.project(),
                 &then,
@@ -261,6 +347,7 @@ fn working(
                 scale,
                 fit,
                 theme.unwrap_or_default(),
+                &frames,
             )
         }
         Request::Render {
@@ -272,18 +359,27 @@ fn working(
             scale,
             fit,
             theme,
+            frame,
             ..
-        } => crate::schemcmd::render(
-            session.project(),
-            design.as_deref(),
-            block.as_deref(),
-            sheet.as_deref(),
-            layer.as_deref(),
-            format.unwrap_or(crate::schemcmd::Format::Svg),
-            scale,
-            fit,
-            theme.unwrap_or_default(),
-        ),
+        } => {
+            let at = frame_projects(session, &frame)?;
+            let frames: Vec<&Project> = at
+                .iter()
+                .map(|p| p.as_deref().unwrap_or(session.project()))
+                .collect();
+            crate::schemcmd::render(
+                session.project(),
+                design.as_deref(),
+                block.as_deref(),
+                sheet.as_deref(),
+                layer.as_deref(),
+                format.unwrap_or(crate::schemcmd::Format::Svg),
+                scale,
+                fit,
+                theme.unwrap_or_default(),
+                &frames,
+            )
+        }
         Request::LayoutPlace {
             block,
             instructions,
@@ -360,6 +456,26 @@ fn working(
             sheet,
             layer,
             theme,
+            compare: Some(rev),
+            ..
+        } => crate::scene::answer_compare(
+            session,
+            &crate::scene::Ask {
+                design,
+                block,
+                sheet,
+                layer,
+                theme: theme.unwrap_or_default(),
+            },
+            &rev,
+        ),
+        Request::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+            ..
         } => crate::scene::answer(
             session,
             &crate::scene::Ask {
@@ -374,9 +490,10 @@ fn working(
     }
 }
 
-/// A read request answered from `p`, a revision's project.
-fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
+/// A read request answered from `p`, a revision's project at `commit`.
+fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Result<Answer> {
     match req {
+        Request::Resolve { refs, .. } => crate::anchor::stand_all(p, &refs).map(Answer::json),
         Request::Netlist { design, .. } => {
             crate::netlist::netlist(p, design.as_deref()).map(Answer::json)
         }
@@ -404,6 +521,9 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
         }
         | Request::Output {
             compare: Some(_), ..
+        }
+        | Request::Scene {
+            compare: Some(_), ..
         } => Err(Error::new(
             Code::InvalidParam,
             "--compare draws the working files against a revision; leave out --rev",
@@ -418,18 +538,27 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             scale,
             fit,
             theme,
+            frame,
             ..
-        } => crate::schemcmd::render(
-            p,
-            design.as_deref(),
-            block.as_deref(),
-            sheet.as_deref(),
-            layer.as_deref(),
-            format.unwrap_or(crate::schemcmd::Format::Svg),
-            scale,
-            fit,
-            theme.unwrap_or_default(),
-        ),
+        } => {
+            let at = frame_projects(session, &frame)?;
+            let frames: Vec<&Project> = at
+                .iter()
+                .map(|x| x.as_deref().unwrap_or(session.project()))
+                .collect();
+            crate::schemcmd::render(
+                p,
+                design.as_deref(),
+                block.as_deref(),
+                sheet.as_deref(),
+                layer.as_deref(),
+                format.unwrap_or(crate::schemcmd::Format::Svg),
+                scale,
+                fit,
+                theme.unwrap_or_default(),
+                &frames,
+            )
+        }
         Request::Output { design, layers, .. } => {
             crate::output::output(p, design.as_deref(), layers.unwrap_or_default())
                 .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes))
@@ -452,6 +581,25 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             library.as_deref(),
             symbol.as_deref(),
             &crate::symlint::Listing { summary, codes },
+        ),
+        Request::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
+            ..
+        } => crate::scene::answer_at(
+            session,
+            p,
+            commit,
+            &crate::scene::Ask {
+                design,
+                block,
+                sheet,
+                layer,
+                theme: theme.unwrap_or_default(),
+            },
         ),
         other => Err(Error::new(
             Code::InvalidParam,
@@ -523,6 +671,7 @@ fn dispatch(
     job: &ryu_session::job::Job,
 ) -> Result<Value> {
     match req {
+        Request::Resolve { refs, .. } => crate::anchor::stand_all(session.project(), &refs),
         Request::ProjectInfo {} => Ok(info(session.project())),
         Request::Doctor {} => Ok(crate::doctor::report_with(
             session.root(),
@@ -1245,6 +1394,7 @@ fn dispatch(
                 layout,
                 library,
                 all,
+                sheets: netlist,
             },
         ),
         Request::Check { against, .. } => {
@@ -1408,18 +1558,9 @@ fn dispatch(
             let who = live.caller(me);
             activity::undo(live, session, &who, entry, true)
         }
-        Request::SessionHello {
-            kind,
-            name,
-            participant,
-        } => {
-            let live = live.ok_or_else(|| live::no_live_session("session.hello"))?;
-            let id = live.hello(kind, name.as_deref(), participant.as_deref())?;
-            Ok(json!({"participant": id, "session": live.list()}))
-        }
-        // With no daemon, nobody is attached.
-        Request::ParticipantList {} => {
-            Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        req @ (Request::SessionHello { .. } | Request::ParticipantList {}) => live_only(live, req),
+        Request::HistoryLog { limit } => {
+            crate::git::history(session.root(), &session.files(), limit.unwrap_or(50))
         }
         Request::CompareGet { participant } => {
             // Whose compare.set would change: `participant`, else the one

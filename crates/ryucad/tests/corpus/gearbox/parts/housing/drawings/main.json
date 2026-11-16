@@ -8,6 +8,24 @@
       "of": "shell/96715f5644b71b744683b045c1c24457",
       "type": "hole_callout",
       "view": "v2"
+    },
+    "d2": {
+      "at": [
+        "58.626 mm",
+        "-27.874 mm"
+      ],
+      "of": "shell/d2e887408d0a60d041ed00b9371666fc",
+      "type": "hole_callout",
+      "view": "v2"
+    },
+    "t1": {
+      "at": [
+        "210 mm",
+        "27.5 mm"
+      ],
+      "origin": "zero",
+      "type": "hole_table",
+      "view": "v2"
     }
   },
   "format": 1,

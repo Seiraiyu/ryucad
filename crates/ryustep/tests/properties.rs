@@ -233,6 +233,7 @@ fn steel(density: Option<f64>) -> PartData {
             }),
             attributes: Vec::new(),
         }],
+        aspects: Vec::new(),
     }
 }
 
@@ -330,6 +331,7 @@ fn every_type() -> PartData {
                 a("draft", DataValue::Angle(0.5)),
             ],
         }],
+        aspects: Vec::new(),
     }
 }
 
@@ -401,4 +403,80 @@ fn occts_material_reads_as_occt_wrote_it() {
         "{:?}",
         o.properties().failed
     );
+}
+
+/// A hole's faces as a shape aspect with its attributes (design 533): its
+/// `SHAPE_ASPECT` over the product's shape, a `GEOMETRIC_ITEM_SPECIFIC_USAGE`
+/// per face in the body's representation, a `user defined attributes`
+/// property over it; after everything else, renumbering nothing; read back
+/// as retained, never as the product's.
+#[test]
+fn a_shape_aspects_attributes_are_written_over_its_faces_and_read_back_retained() {
+    let model = block_model();
+    let body = &model.products[0].bodies[0];
+    let faces: Vec<ryukei::name::Name> = body
+        .faces()
+        .take(2)
+        .map(|f| body.face(f).unwrap().name)
+        .collect();
+    let data = PartData {
+        aspects: vec![ryustep::AspectData {
+            product: 0,
+            body: 0,
+            name: "p/h/p1".into(),
+            faces: faces.clone(),
+            attributes: vec![
+                AttributeData {
+                    name: "hole spec".into(),
+                    value: DataValue::Text("M6x1.0-6H THRU".into()),
+                },
+                AttributeData {
+                    name: "thread pitch".into(),
+                    value: DataValue::Length(0.001),
+                },
+            ],
+        }],
+        ..PartData::default()
+    };
+    for schema in [
+        ryustep::schema::Schema::Ap242,
+        ryustep::schema::Schema::Ap214,
+    ] {
+        let mut o = opts("p.stp");
+        o.schema = schema;
+        let plain = write(&model, &o).unwrap();
+        let with = write_with_data(&model, &[], &Paints::default(), &data, &o)
+            .unwrap()
+            .bytes;
+        let (a, b) = (
+            part21::parse(&plain).unwrap(),
+            part21::parse(&with).unwrap(),
+        );
+        assert_eq!(
+            format!("{:?}", &b.instances[..a.instances.len()]),
+            format!("{:?}", a.instances),
+            "no instance renumbered"
+        );
+        let aspect = record(&with, "SHAPE_ASPECT");
+        assert_eq!(aspect[0], part21::Param::Str("p/h/p1".into()));
+        let named = |n: &str| {
+            b.instances
+                .iter()
+                .filter(|i| matches!(&i.record, Record::Simple(p) if &*p.name == n))
+                .count()
+        };
+        assert_eq!(named("GEOMETRIC_ITEM_SPECIFIC_USAGE"), 2);
+        assert_eq!(named("DESCRIPTIVE_REPRESENTATION_ITEM"), 1);
+        assert_eq!(named("MEASURE_REPRESENTATION_ITEM"), 1);
+        let opened = ryustep::open(&with).unwrap();
+        let p = opened.properties();
+        assert!(p.products.values().all(|x| x.attributes.is_empty()));
+        assert!(p.failed.is_empty(), "{:?}", p.failed);
+        assert!(p.retained.len() >= 5, "{:?}", p.retained);
+        // Nothing to write, nothing written.
+        let none = write_with_data(&model, &[], &Paints::default(), &PartData::default(), &o)
+            .unwrap()
+            .bytes;
+        assert_eq!(none, plain);
+    }
 }

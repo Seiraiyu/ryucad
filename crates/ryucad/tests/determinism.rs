@@ -5911,6 +5911,124 @@ fn hole_places_section(golden: &mut Golden) {
     }
 }
 
+/// Part `hx` (ryucad 28.D): a 60 × 40 × 10 mm plate with a tapped M6
+/// pair, a fitted bore, a counterdrilled hole and a far-sided one,
+/// mirrored into itself, and datum point `o`; drawing `d` of it (a top
+/// view, a front view with hidden lines, a callout of each hole, a hole
+/// table from `o`) as `drawing.get` gives it with every item; and its
+/// STEP export in AP242 mm and AP214 m, on one thread and on four.
+fn hole_exchange_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut g = golden.section("hole_exchange");
+    let (_dir, mut s) = hole_project("hx");
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("hx");
+        hole_call(s, "feature.add", f)
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 60, "y": 40, "z": 10}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "t", "placement": {"origin": [0, 0, 10]}}),
+    );
+    let mut ops = Vec::new();
+    for (i, at) in [[8, 8], [30, 20], [48, 10], [48, 30]].iter().enumerate() {
+        ops.push(json!({"op": "add", "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    hole_call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "hx", "sketch": "t", "ops": ops}),
+    );
+    for (id, point, spec) in [
+        ("m6", "p1", "M6x1.0-6H THRU"),
+        ("dw", "p2", "DIA 6 H7 THRU"),
+        ("cd", "p3", "DIA 5 THRU, CDRILL 9 3 DEEP"),
+        ("fc", "p4", "DIA 4 THRU, FAR CSK 8 90DEG"),
+    ] {
+        add(
+            &mut s,
+            json!({"type": "hole", "id": id, "sketch": "t", "points": [point], "spec": spec}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "row", "features": ["m6"], "direction": "y",
+               "spacing": 24, "count": 2}),
+    );
+    add(
+        &mut s,
+        json!({"type": "mirror", "id": "m", "solid": "b", "plane": "yz"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "point", "id": "o", "by": "coordinates",
+               "coordinates": ["0 mm", "0 mm", "10 mm"]}),
+    );
+    hole_call(
+        &mut s,
+        "drawing.create",
+        json!({"part": "hx", "drawing": "d", "name": "Exchange"}),
+    );
+    let mut ops = vec![
+        json!({"op": "set", "id": "s1", "fields": {"scale": "1:2"}}),
+        json!({"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s1", "orient": "top"}}),
+        json!({"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s1", "orient": "front",
+            "at": ["150 mm", "60 mm"], "hidden": "dashed"}}),
+    ];
+    let holes = hole_call(&mut s, "holes.list", json!({"part": "hx"}));
+    let mut called = std::collections::BTreeSet::new();
+    for h in holes["holes"].as_array().unwrap() {
+        if !called.insert(h["feature"].as_str().unwrap().to_owned()) {
+            continue;
+        }
+        let f = &h["faces"]["wall"];
+        let wall = f.as_str().or(f[0].as_str()).unwrap();
+        ops.push(
+            json!({"op": "add", "kind": "annotation", "value": {"type": "hole_callout",
+            "view": "v1", "of": wall.split_once('/').unwrap().1}}),
+        );
+    }
+    ops.push(json!({"op": "add", "kind": "annotation",
+        "value": {"type": "hole_table", "view": "v1", "origin": "o", "at": ["148 mm", "10 mm"]}}));
+    hole_call(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "hx", "drawing": "d", "ops": ops}),
+    );
+    let got = hole_call(
+        &mut s,
+        "drawing.get",
+        json!({"part": "hx", "drawing": "d", "items": true}),
+    );
+    g.str(&ryucad::doc::canonical::to_string(&got));
+    for (schema, unit) in [("ap242", "mm"), ("ap214", "m")] {
+        let mut files = Vec::new();
+        for threads in [1, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let params = json!({"part": "hx", "schema": schema, "unit": unit,
+                                "time_stamp": "2026-11-14T00:00:00", "file_name": "hx.step"});
+            let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+            let a = pool
+                .install(|| ryucad::server::answer_live(&mut s, None, None, req))
+                .unwrap_or_else(|e| panic!("hx {schema}: {e}"));
+            files.push(a.binary.unwrap());
+        }
+        assert_eq!(files[0], files[1], "hx {schema}: one thread and four");
+        g.str(&format!(
+            "{:x}",
+            md(ryukei_testkit::unversioned(std::str::from_utf8(&files[0]).unwrap()).as_bytes())
+        ));
+    }
+}
+
 /// Part `hc` (ryucad 28.B): one of each hole check's findings in a 60 x
 /// 40 x 12 mm plate; the canonical answer of `holes.check`.
 fn hole_checks_section(golden: &mut Golden) {
@@ -7533,6 +7651,7 @@ sections! {
     hole_geometry => hole_geometry_section(&mut golden),
     hole_checks => hole_checks_section(&mut golden),
     hole_places => hole_places_section(&mut golden),
+    hole_exchange => hole_exchange_section(&mut golden),
     sketch_drawing => sketch_drawing_section(&mut golden),
     diff => diff_section(&mut golden),
     merge => merge_section(&mut golden),

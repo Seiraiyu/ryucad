@@ -476,6 +476,14 @@ fn bus_items(
                     items.push(text_item(name, p, SIZE, anchor, vertical, colour));
                 }
             }
+            // #878: the entry's stub and its name are its net's, so a net
+            // drawn only through a bus has an owner on the sheet.
+            let owner = if block.net(&e.net).is_some() {
+                e.net.as_str()
+            } else {
+                key.as_str()
+            };
+            own(owners, items.len(), owner);
         }
         for pts in columns.values() {
             if let Some([a, b]) = crate::bus::spine(pts)
@@ -572,6 +580,105 @@ impl Marks {
     }
 }
 
+/// A compare's counts on one sheet: owners added, changed and moved, and
+/// owners only the revision draws (ghosts no working owner is marked).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Counts {
+    pub added: usize,
+    pub changed: usize,
+    pub moved: usize,
+    pub removed: usize,
+}
+
+impl Counts {
+    pub fn total(&self) -> usize {
+        self.added + self.changed + self.moved + self.removed
+    }
+}
+
+impl Marks {
+    /// The sheet's counts.
+    pub fn counts(&self) -> Counts {
+        let added = self.marks.values().filter(|m| **m == Mark::Added).count();
+        let moved = self
+            .marks
+            .values()
+            .filter(|m| matches!(m, Mark::Moved { .. }))
+            .count();
+        Counts {
+            added,
+            moved,
+            changed: self.marks.len() - added - moved,
+            removed: self
+                .ghosts
+                .iter()
+                .filter(|g| !self.marks.contains_key(*g))
+                .count(),
+        }
+    }
+}
+
+/// What a compare decides on one sheet, before it is drawn (plan 13.A):
+/// the revision's ghosted items with their owners' keys, in its order;
+/// each marked owner's colour; each moved part's leader; the strip.
+/// [`compare`] draws it for SVG, PNG and PDF; ryueda's `scene --compare`
+/// lists it for a window, so the two never disagree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Decided {
+    pub ghosts: Vec<(Item, String)>,
+    pub colours: BTreeMap<String, Rgb>,
+    pub leaders: Vec<(String, Item)>,
+    pub strip: Option<Item>,
+}
+
+/// What [`compare`] draws for `marks` against the revision's `then`.
+pub fn decide(then: Option<&Painted>, marks: &Marks, look: &Look) -> Decided {
+    let mut d = Decided::default();
+    let removed = look.role(Role::DiffRemoved);
+    if let Some(then) = then {
+        for (it, o) in then.items.iter().zip(&then.owners) {
+            if let Some(k) = o
+                && marks.ghosts.contains(k)
+                && !matches!(it, Item::Begin(_) | Item::End)
+            {
+                d.ghosts.push((ghost(it, removed), k.clone()));
+            }
+        }
+    }
+    for (k, m) in &marks.marks {
+        let c = match m {
+            Mark::Added => look.role(Role::DiffAdded),
+            _ => look.role(Role::DiffChanged),
+        };
+        d.colours.insert(k.clone(), c);
+        if let Mark::Moved { from, to } = m
+            && from != to
+        {
+            d.leaders.push((
+                k.clone(),
+                Item::Polyline {
+                    points: vec![*from, *to],
+                    stroke: look.role(Role::DiffChanged),
+                    fill: None,
+                    width: LINE / 2,
+                    dash: true,
+                },
+            ));
+        }
+    }
+    if !marks.strip.is_empty() {
+        d.strip = Some(text_item(
+            &marks.strip,
+            [0, -2 * GRID],
+            SIZE,
+            Anchor::Start,
+            false,
+            look.role(Role::Text),
+        ));
+    }
+    d
+}
+
 /// `it` in colour `c`: its lines and text; a fill that was its line's
 /// colour (an arrow's) too, a body's fill kept.
 fn recolour(it: &Item, c: Rgb) -> Item {
@@ -621,58 +728,28 @@ fn ghost(it: &Item, c: Rgb) -> Item {
 /// `diff_changed`; a moved part's leader from where it stood; and the
 /// strip under the sheet. Owners carry through, so SVG can key them.
 pub fn compare(now: &Painted, then: Option<&Painted>, marks: &Marks, look: &Look) -> Painted {
+    let d = decide(then, marks, look);
     let mut out = Painted {
         items: Vec::new(),
         owners: Vec::new(),
         ..now.clone()
     };
-    let removed = look.role(Role::DiffRemoved);
-    if let Some(then) = then {
-        for (it, o) in then.items.iter().zip(&then.owners) {
-            if let Some(k) = o
-                && marks.ghosts.contains(k)
-                && !matches!(it, Item::Begin(_) | Item::End)
-            {
-                out.items.push(ghost(it, removed));
-                out.owners.push(Some(k.clone()));
-            }
-        }
+    for (it, k) in d.ghosts {
+        out.items.push(it);
+        out.owners.push(Some(k));
     }
     for (it, o) in now.items.iter().zip(&now.owners) {
-        let colour = o
-            .as_ref()
-            .and_then(|k| marks.marks.get(k))
-            .map(|m| match m {
-                Mark::Added => look.role(Role::DiffAdded),
-                _ => look.role(Role::DiffChanged),
-            });
+        let colour = o.as_ref().and_then(|k| d.colours.get(k)).copied();
         out.items
             .push(colour.map_or_else(|| it.clone(), |c| recolour(it, c)));
         out.owners.push(o.clone());
     }
-    for (k, m) in &marks.marks {
-        if let Mark::Moved { from, to } = m
-            && from != to
-        {
-            out.items.push(Item::Polyline {
-                points: vec![*from, *to],
-                stroke: look.role(Role::DiffChanged),
-                fill: None,
-                width: LINE / 2,
-                dash: true,
-            });
-            out.owners.push(Some(k.clone()));
-        }
+    for (k, it) in d.leaders {
+        out.items.push(it);
+        out.owners.push(Some(k));
     }
-    if !marks.strip.is_empty() {
-        out.items.push(text_item(
-            &marks.strip,
-            [0, -2 * GRID],
-            SIZE,
-            Anchor::Start,
-            false,
-            look.role(Role::Text),
-        ));
+    if let Some(s) = d.strip {
+        out.items.push(s);
         out.owners.push(None);
     }
     out
@@ -1223,6 +1300,86 @@ mod tests {
             assert!(texts.contains(&format!("QSPI_SD{i}").as_str()), "{texts:?}");
         }
         assert!(texts.contains(&"QSPI_SD[0..3]"));
+        // #878: each entry's stub and its net's name are its net's; the
+        // spine, the trunk and the bundle's name stay the bus's.
+        assert_eq!(p.owners.len(), p.items.len(), "one owner per item");
+        for (it, o) in p.items.iter().zip(&p.owners) {
+            match it {
+                Item::Polyline { points, .. } if points.len() == 3 => {
+                    let o = o.as_deref().unwrap();
+                    assert!(o.starts_with('d'), "an entry's stub is its net's: {o}");
+                }
+                Item::Text { text, .. }
+                    if text.starts_with("QSPI_SD") && text != "QSPI_SD[0..3]" =>
+                {
+                    let i = text.trim_start_matches("QSPI_SD");
+                    assert_eq!(o.as_deref(), Some(format!("d{i}").as_str()), "{text}");
+                }
+                Item::Bus { .. } => assert_eq!(o.as_deref(), Some("bus:q")),
+                Item::Text { text, .. } if text == "QSPI_SD[0..3]" => {
+                    assert_eq!(o.as_deref(), Some("bus:q"));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn compare_draws_what_decide_decides() {
+        use crate::style::{Look, Role};
+        let b = seeded(2, 4);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let sid = out.layout.sheets.keys().next().unwrap().clone();
+        let now = sheet(&b, &out.layout, &sid);
+        let then = now.clone();
+        let look = Look::default();
+        let owners: Vec<String> = now.owners.iter().flatten().cloned().collect();
+        let (a, c) = (owners[0].clone(), owners[owners.len() - 1].clone());
+        let mut marks = Marks::default();
+        marks.marks.insert(a.clone(), Mark::Added);
+        marks.marks.insert(
+            c.clone(),
+            Mark::Moved {
+                from: [0, 0],
+                to: [GRID, GRID],
+            },
+        );
+        marks.ghosts.insert(c.clone());
+        marks.strip = "Against HEAD".into();
+        let d = decide(Some(&then), &marks, &look);
+        // Ghosts: every item of a ghosted owner, dashed, in diff_removed.
+        let ghosted = then
+            .owners
+            .iter()
+            .zip(&then.items)
+            .filter(|(o, it)| {
+                o.as_deref() == Some(c.as_str()) && !matches!(it, Item::Begin(_) | Item::End)
+            })
+            .count();
+        assert_eq!(d.ghosts.len(), ghosted);
+        assert!(d.ghosts.iter().all(|(_, k)| *k == c));
+        assert_eq!(d.colours[&a], look.role(Role::DiffAdded));
+        assert_eq!(d.colours[&c], look.role(Role::DiffChanged));
+        assert_eq!(d.leaders.len(), 1);
+        assert_eq!(d.leaders[0].0, c);
+        assert_eq!(
+            marks.counts(),
+            Counts {
+                added: 1,
+                changed: 0,
+                moved: 1,
+                removed: 0
+            },
+            "a ghost of a marked owner isn't removed"
+        );
+        // compare draws exactly that: ghosts, the sheet recoloured, the
+        // leader, the strip.
+        let drawn = compare(&now, Some(&then), &marks, &look);
+        assert_eq!(
+            drawn.items.len(),
+            d.ghosts.len() + now.items.len() + d.leaders.len() + 1
+        );
+        assert_eq!(drawn.items.len(), drawn.owners.len());
     }
 
     #[test]

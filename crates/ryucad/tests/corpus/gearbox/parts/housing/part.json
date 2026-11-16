@@ -8,7 +8,10 @@
     "bore-output",
     "rim",
     "bolt",
-    "bolts"
+    "bolts",
+    "mount",
+    "mounts",
+    "zero"
   ],
   "format": 1,
   "kind": "ryucad.part"

@@ -61,6 +61,13 @@ struct Rev {
 enum Command {
     /// This build's version.
     Version,
+    /// Open a project (this folder by default) in the desktop app,
+    /// ryueda-app; RYUEDA_APP names another.
+    Open {
+        /// The folder to open: this one (or -C's) by default.
+        #[arg(id = "folder", value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Create a project in this folder, or with --library a library
     /// project, which other projects name with `lib add`.
     Init {
@@ -128,6 +135,10 @@ enum Command {
         /// Search no other checkout, the preference's included.
         #[arg(long)]
         no_dependents: bool,
+        /// Ask the review service instead: every repository of the
+        /// organization the token can read (review.url and its token).
+        #[arg(long, conflicts_with_all = ["working", "within", "no_dependents"])]
+        org: bool,
     },
     /// A design's bill of materials (PDM): one line per purchasable
     /// part with designators, maker, part number, alternates and offers;
@@ -423,6 +434,11 @@ enum Command {
         /// moved, gone), each item keyed by its reference path.
         #[arg(long, value_name = "REV")]
         compare: Option<String>,
+        /// With --fit and --sheet: crop to what the sheet draws here and
+        /// at this revision too (repeat for more; `working` is the files
+        /// on disk), so renders of two revisions line up.
+        #[arg(long, value_name = "REV", requires_all = ["fit", "sheet"])]
+        frame: Vec<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         #[command(flatten)]
@@ -465,6 +481,22 @@ enum Command {
         /// light (the default) or dark.
         #[arg(long, value_parser = ["light", "dark"])]
         theme: Option<String>,
+        /// Mark what changed since this Git revision: each owner's mark,
+        /// what is gone as ghosts, moved parts' leaders and the counts.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
+        #[command(flatten)]
+        rev: Rev,
+    },
+    /// Whether thread anchors stand: each `<design>:<block>/<object>`
+    /// (a component, net, pin, port or instance as scene names it) or
+    /// `<design>:<block>/sheet:<id>`, with the sheet and box that draw it,
+    /// or what took it away (removed_in: design or block; gone).
+    Resolve {
+        #[arg(required = true, value_name = "REF")]
+        refs: Vec<String>,
+        #[command(flatten)]
+        rev: Rev,
     },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
@@ -571,6 +603,12 @@ enum Command {
     /// Register ryueda with Git: `git install`.
     #[command(subcommand)]
     Git(GitCmd),
+    /// The hosted review service for this clone's GitHub pull requests:
+    /// checks, sheets before and after, comments pinned to components,
+    /// nets and pins, and merging the base in. Needs a GitHub token
+    /// (RYUEDA_REVIEW_TOKEN, GH_TOKEN or gh).
+    #[command(subcommand)]
+    Review(ReviewCmd),
     /// What a merge in progress leaves to settle, and settling it.
     #[command(subcommand)]
     Merge(MergeCmd),
@@ -1945,6 +1983,10 @@ enum GitCmd {
     /// Print a ryueda file as one line per value, for `git diff` (Git's
     /// textconv): plain text, not JSON.
     Textconv { file: PathBuf },
+    /// The .gitattributes lines ryueda's drivers need, relative to a
+    /// project folder, as JSON: what `init` and `git install` write, for a
+    /// tool that sets up a clone itself (the hosted review service).
+    Attributes,
     /// Merge three versions of a ryueda file value by value, for Git's
     /// merge (`merge.ryueda.driver`): writes the result over OURS and exits
     /// 0, or 1 when conflicts are left in it. Prints nothing.
@@ -1957,6 +1999,56 @@ enum GitCmd {
         /// The file's path in the repository, as Git names it.
         path: Option<String>,
     },
+    /// The project's Git commits, newest first, and what is uncommitted.
+    /// Read-only.
+    Log {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// The pull request's checks, renders and threads (the branch's own
+    /// pull request unless named).
+    Status { pr: Option<u64> },
+    /// Its comment threads; --open for those not resolved.
+    Threads {
+        pr: Option<u64>,
+        #[arg(long)]
+        open: bool,
+    },
+    /// Start a thread pinned to a thread anchor (<design>:<block>/<object>,
+    /// or <design>:<block>/sheet:<id>).
+    Comment {
+        #[arg(value_name = "REF")]
+        reference: String,
+        text: String,
+        #[arg(long)]
+        pr: Option<u64>,
+        /// The commit the anchor was read at (the pull request's head by
+        /// default).
+        #[arg(long)]
+        commit: Option<String>,
+    },
+    /// Reply in a thread.
+    Reply { thread: String, text: String },
+    /// Resolve a thread.
+    Resolve { thread: String },
+    /// Reopen a thread.
+    Reopen { thread: String },
+    /// Merge the base into the pull request's head with ryueda's driver
+    /// (Merge in), when GitHub's line merge conflicts and ryueda's doesn't.
+    Update { pr: Option<u64> },
+    /// Download the sheets before and after into a folder.
+    Renders {
+        pr: Option<u64>,
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
+    /// What the release records the pull request proposes still need,
+    /// and what blocks them.
+    Approvals { pr: Option<u64> },
 }
 
 #[derive(Subcommand)]
@@ -2247,6 +2339,9 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             before: *before,
         },
         Command::Participants => Request::ParticipantList {},
+        Command::Git(GitCmd::Log { limit }) => Request::HistoryLog {
+            limit: Some(*limit),
+        },
         Command::Compare { rev: None, off: false, participant } => Request::CompareGet {
             participant: participant.clone(),
         },
@@ -2443,6 +2538,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             direct,
             within,
             no_dependents,
+            org: false,
         } => Request::BomWhereUsed {
             part: part.clone(),
             label: label.clone(),
@@ -3097,12 +3193,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             fit,
             theme,
             compare,
+            frame,
             out,
             rev,
         } => {
             let format = picture_format(format.as_deref(), out)?;
             Request::Render {
                 compare: compare.clone(),
+                frame: frame.clone(),
                 design: design.clone(),
                 block: block.clone(),
                 sheet: sheet.clone(),
@@ -3145,7 +3243,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             sheet,
             layer,
             theme,
+            compare,
+            rev,
         } => Request::Scene {
+            compare: compare.clone(),
+            rev: rev.rev.clone(),
             design: design.clone(),
             block: block.clone(),
             sheet: sheet.clone(),
@@ -3154,6 +3256,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .as_deref()
                 .map(|t| named("theme", t, "light, dark"))
                 .transpose()?,
+        },
+        Command::Resolve { refs, rev } => Request::Resolve {
+            refs: refs.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Rail(RailCmd::Add {
             name,
@@ -3347,10 +3453,13 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             repairs: repairs.clone(),
         },
         Command::Version
+        | Command::Open { .. }
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
         | Command::Git(_)
+        | Command::Review(_)
+        | Command::WhereUsed { org: true, .. }
         | Command::Parts(PartsCmd::Login { .. } | PartsCmd::Logout { .. }) => {
             return Ok(None);
         }
@@ -3376,6 +3485,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Open { dir } => {
+            let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
+            let dir = ryueda::source::plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
+            client::open(&dir)
+        }
         Command::Init { unit, library } => {
             let root =
                 ryueda::source::plain(here.canonicalize().map_err(|e| Error::io(&here, &e))?);
@@ -3387,6 +3501,55 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
+        Command::WhereUsed {
+            part,
+            label,
+            direct,
+            org: true,
+            ..
+        } => ryueda::review::where_used_org(&find_root(&here)?, part, label.as_deref(), *direct),
+        Command::Review(cmd) => {
+            use ryu_review::Action;
+            let action = match cmd {
+                ReviewCmd::Status { pr } => Action::Status { pr: *pr },
+                ReviewCmd::Threads { pr, open } => Action::Threads {
+                    pr: *pr,
+                    open: *open,
+                },
+                ReviewCmd::Comment {
+                    reference,
+                    text,
+                    pr,
+                    commit,
+                } => Action::Comment {
+                    reference: reference.clone(),
+                    text: text.clone(),
+                    pr: *pr,
+                    commit: commit.clone(),
+                },
+                ReviewCmd::Reply { thread, text } => Action::Reply {
+                    thread: thread.clone(),
+                    text: text.clone(),
+                },
+                ReviewCmd::Resolve { thread } => Action::Resolve {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Reopen { thread } => Action::Reopen {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Update { pr } => Action::Update { pr: *pr },
+                ReviewCmd::Renders { pr, out } => Action::Renders {
+                    pr: *pr,
+                    out: here.join(out),
+                },
+                ReviewCmd::Approvals { pr } => Action::Approvals { pr: *pr },
+            };
+            ryueda::review::run(&here, action)
+        }
+        Command::Git(GitCmd::Attributes) => Ok(json!({
+            "schema": ryueda::OUTPUT_SCHEMA,
+            "lines": ryueda::drivers::LINES,
+        })),
         Command::Git(GitCmd::Textconv { .. }) => unreachable!("answered in main"),
         Command::Git(GitCmd::MergeDriver { .. }) => unreachable!("answered in main"),
         // Keys go straight to the user's config folder: never through a

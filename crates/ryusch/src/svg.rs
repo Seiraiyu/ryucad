@@ -372,6 +372,29 @@ pub fn drawn(block: &Block, layout: &Layout, which: &[&str]) -> Option<Rect> {
         .map(|r| r.grow(4 * GRID))
 }
 
+/// Where sheet `sheet` draws anything, from the sheet's own corner (its
+/// place on the canvas taken off), as [`drawn`] grows it: so revisions
+/// whose canvases place the sheet apart can be framed together. `None`
+/// when the layout has no such sheet or it draws nothing.
+pub fn drawn_on(block: &Block, layout: &Layout, sheet: &str) -> Option<Rect> {
+    let at = layout.sheets.get(sheet)?.at;
+    drawn(block, layout, &[sheet]).map(|r| r.shift([-at[0], -at[1]]))
+}
+
+/// [`draw_with`] with its view given: `Some` a box on the canvas to crop
+/// to (`render --frame`'s union), `None` the whole canvas.
+pub fn draw_within(
+    block: &Block,
+    layout: &Layout,
+    which: &[&str],
+    view: Option<Rect>,
+    look_of: &dyn Fn(&str) -> Look,
+    paint_of: &dyn Fn(&str, &Look) -> crate::paint::Painted,
+    data_ref: Option<&dyn Fn(&str) -> String>,
+) -> String {
+    draw_in(block, layout, which, view, look_of, paint_of, data_ref)
+}
+
 /// [`draw`], its view cropped to what it draws ([`drawn`]).
 pub fn draw_fit(block: &Block, layout: &Layout, which: &[&str]) -> String {
     draw_looks(block, layout, which, true, &|_| Look::default())
@@ -536,5 +559,45 @@ mod tests {
             refs.matches("</g>").count(),
             "balanced"
         );
+    }
+
+    /// Over `testing::seeded(2, 12)` laid out, its last sheet (the
+    /// second or later when the block needs more than one: its corner
+    /// is off the canvas's origin), as `render --frame` takes it.
+    #[test]
+    fn a_sheets_drawn_box_is_from_its_own_corner_and_a_given_view_crops() {
+        let block = crate::testing::seeded(2, 12);
+        let layout = crate::engine::lay_out(&block).unwrap().layout;
+        let sheet = layout.sheets.keys().last().unwrap().clone();
+        let at = layout.sheets[&sheet].at;
+        let on = drawn_on(&block, &layout, &sheet).unwrap();
+        assert_eq!(
+            Some(on.shift(at)),
+            drawn(&block, &layout, &[sheet.as_str()])
+        );
+        // The fitted drawing is the drawing within its drawn box.
+        let look = |_: &str| Look::default();
+        let paint = |sid: &str, l: &Look| crate::paint::sheet_in(&block, &layout, sid, l);
+        assert_eq!(
+            draw_within(
+                &block,
+                &layout,
+                &[sheet.as_str()],
+                Some(on.shift(at)),
+                &look,
+                &paint,
+                None
+            ),
+            draw_with(
+                &block,
+                &layout,
+                &[sheet.as_str()],
+                true,
+                &look,
+                &paint,
+                None
+            )
+        );
+        assert_eq!(drawn_on(&block, &layout, "no such sheet"), None);
     }
 }

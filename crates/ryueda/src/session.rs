@@ -16,6 +16,13 @@ pub const REVISIONS: usize = 4;
 /// first.
 pub const SCENES: usize = 8;
 
+/// How many revisions' laid-out blocks a session keeps (plan 13.A), most
+/// recently used first: as many as [`REVISIONS`].
+pub const LAID: usize = REVISIONS;
+
+/// A revision's block as it lays out ([`crate::compare::lay_then`]).
+pub type LaidThen = std::sync::Arc<Result<Option<crate::schem::Laid>>>;
+
 pub struct Session {
     root: PathBuf,
     project: Project,
@@ -34,6 +41,9 @@ pub struct Session {
     /// The last [`SCENES`] scenes drawn, by their ask and the revisions
     /// they were drawn from, most recently used first.
     pub(crate) scenes: Vec<(String, std::sync::Arc<String>)>,
+    /// The last [`LAID`] revision lay-outs, by the revision's key, the
+    /// block and the layer, most recently used first.
+    pub(crate) laid: Vec<(String, LaidThen)>,
     /// The release branch as last read and the refs it was read at
     /// ([`crate::pdm::history`]): read again only when they move.
     pub(crate) pdm: Option<(String, ryupdm::history::Releases)>,
@@ -132,6 +142,7 @@ impl Session {
             revisions: Vec::new(),
             merge_status: None,
             scenes: Vec::new(),
+            laid: Vec::new(),
             pdm: None,
             pins,
             pins_key,
@@ -139,16 +150,14 @@ impl Session {
         })
     }
 
-    /// The project as `rev` has it, and the commit it names: one of the
-    /// last [`REVISIONS`] read, kept by what they read (the project's tree
-    /// and its aliases'), else read from Git's objects. Never the disk.
-    pub fn at(&mut self, rev: &str) -> Result<(String, std::sync::Arc<Project>)> {
+    /// [`Session::at`], with the key it is kept by.
+    pub fn at_keyed(&mut self, rev: &str) -> Result<(String, String, std::sync::Arc<Project>)> {
         let (commit, key) = crate::git::key(&self.root, rev)?;
         if let Some(i) = self.revisions.iter().position(|(k, _)| *k == key) {
             let hit = self.revisions.remove(i);
             let p = hit.1.clone();
             self.revisions.insert(0, hit);
-            return Ok((commit, p));
+            return Ok((commit, key, p));
         }
         let r = crate::git::revision(&self.root, &commit)?;
         let p = std::sync::Arc::new(Project::load_from(
@@ -157,9 +166,43 @@ impl Session {
             &r.aliases,
             &*self.pins,
         )?);
-        self.revisions.insert(0, (key, p.clone()));
+        self.revisions.insert(0, (key.clone(), p.clone()));
         self.revisions.truncate(REVISIONS);
-        Ok((commit, p))
+        Ok((commit, key, p))
+    }
+
+    /// The project as `rev` has it, and the commit it names: one of the
+    /// last [`REVISIONS`] read, kept by what they read (the project's tree
+    /// and its aliases'), else read from Git's objects. Never the disk.
+    pub fn at(&mut self, rev: &str) -> Result<(String, std::sync::Arc<Project>)> {
+        self.at_keyed(rev).map(|(c, _, p)| (c, p))
+    }
+
+    /// Block `b` of the revision `key` names (`then`, from
+    /// [`Session::at_keyed`]) laid out with `layer`'s designators: kept,
+    /// else laid out and kept, forgetting the least recently used past
+    /// [`LAID`].
+    pub fn laid_at(
+        &mut self,
+        key: &str,
+        then: &Project,
+        b: &crate::id::Id,
+        layer: Option<&crate::schem::Layer>,
+    ) -> LaidThen {
+        let k = format!(
+            "{key}\u{0}{b}\u{0}{}",
+            layer.map_or_else(String::new, |l| format!("{}/{:?}", l.design, l.path))
+        );
+        if let Some(i) = self.laid.iter().position(|(x, _)| *x == k) {
+            let hit = self.laid.remove(i);
+            let l = hit.1.clone();
+            self.laid.insert(0, hit);
+            return l;
+        }
+        let l = std::sync::Arc::new(crate::compare::lay_then(then, b, layer));
+        self.laid.insert(0, (k, l.clone()));
+        self.laid.truncate(LAID);
+        l
     }
 
     /// The files `rev` holds, as a session holds them, and its commit:
@@ -311,6 +354,30 @@ mod tests {
     use super::*;
     use crate::project::ProjectKind;
     use crate::project::tests::{library_in, manifest};
+
+    #[test]
+    fn a_revisions_lay_out_is_kept() {
+        use crate::git::tests::git;
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        git(dir.path(), &["init", "-q"]);
+        manifest(&board, ProjectKind::Design, &[]);
+        crate::project::tests::design_in(&board);
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "c0"]);
+        let mut s = Session::open(&board).unwrap();
+        let (commit, key, then) = s.at_keyed("HEAD").unwrap();
+        assert_eq!(commit.len(), 40);
+        let b = crate::id::Id::parse("top", "block").unwrap();
+        let one = s.laid_at(&key, &then, &b, None);
+        assert!(matches!(&*one, Ok(Some(_))), "top lays out at HEAD");
+        let two = s.laid_at(&key, &then, &b, None);
+        assert!(std::sync::Arc::ptr_eq(&one, &two), "laid out once");
+        assert_eq!(s.laid.len(), 1);
+        // A block the revision hasn't: kept as none.
+        let none = crate::id::Id::parse("nope", "block").unwrap();
+        assert!(matches!(&*s.laid_at(&key, &then, &none, None), Ok(None)));
+    }
 
     #[test]
     fn revisions_are_read_once_and_kept_four_at_a_time() {

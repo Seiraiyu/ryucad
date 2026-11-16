@@ -49,6 +49,9 @@ pub struct Options {
     pub library: bool,
     /// What is the same too.
     pub all: bool,
+    /// Each design's sheets that changed (`--netlist` from the CLI and
+    /// the protocol; `check --against` leaves it off).
+    pub sheets: bool,
 }
 
 /// A file's JSON, or `None` when it is missing or doesn't parse.
@@ -217,6 +220,9 @@ pub fn diff(from: &Side, to: &Side, opts: &Options) -> Result<Value> {
     );
     if opts.netlist {
         out.insert("netlist".into(), json!(netlist(from, to, opts)?));
+    }
+    if opts.sheets {
+        out.insert("sheets".into(), json!(sheets(from, to, opts)?));
     }
     Ok(Value::Object(out))
 }
@@ -636,11 +642,10 @@ fn erc(from: &Side, to: &Side, design: &Id) -> Value {
     })
 }
 
-/// `diff --netlist`: each design (or `opts.design`) flattened on both
-/// sides and compared. A design that doesn't flatten on a side is
-/// `invalid`, with that side's error.
-fn netlist(from: &Side, to: &Side, opts: &Options) -> Result<Vec<Value>> {
-    let designs: BTreeSet<Id> = match &opts.design {
+/// The designs a diff compares: `opts.design` (on either side), else
+/// every design of either side.
+fn designs(from: &Side, to: &Side, opts: &Options) -> Result<BTreeSet<Id>> {
+    Ok(match &opts.design {
         Some(d) => BTreeSet::from([crate::netlist::one_design(to.project, Some(d))
             .or_else(|_| crate::netlist::one_design(from.project, Some(d)))?]),
         None => from
@@ -651,7 +656,79 @@ fn netlist(from: &Side, to: &Side, opts: &Options) -> Result<Vec<Value>> {
             .chain(to.project.conn.designs.keys())
             .cloned()
             .collect(),
-    };
+    })
+}
+
+/// Each design's sheets that changed between the sides (design 667), in
+/// design, block and sheet order: what `render --compare` marks on the
+/// `to` side's sheet against the `from` side, counted
+/// ([`crate::compare::counts`]); a sheet only `to` has is `added`, one
+/// only `from` has `removed` (counted nothing). A block that doesn't lay
+/// out on a side counts as absent there.
+fn sheets(from: &Side, to: &Side, opts: &Options) -> Result<Vec<Value>> {
+    use crate::compare::{Counts, counts};
+    let mut out = Vec::new();
+    for d in designs(from, to, opts)? {
+        let ids = |p: &Project| -> BTreeSet<Id> {
+            crate::schemcmd::blocks(p, Some(d.as_str()), None)
+                .map(|bs| bs.iter().map(|b| b.id.clone()).collect())
+                .unwrap_or_default()
+        };
+        let (was, now) = (ids(from.project), ids(to.project));
+        for b in was.union(&now) {
+            let entry = |sheet: &str, name: &str, status: &str, c: Counts| {
+                json!({"design": d, "block": b, "sheet": sheet, "name": name, "status": status,
+                       "added": c.added, "changed": c.changed, "moved": c.moved, "removed": c.removed})
+            };
+            let laid_then = was
+                .contains(b)
+                .then(|| crate::compare::laid_then(from.project, b, None))
+                .flatten();
+            let laid_now = now
+                .contains(b)
+                .then(|| to.project.conn.blocks.get(b))
+                .flatten()
+                .and_then(|bf| {
+                    crate::schem::lay(to.project, bf, None, &[], ryusch::input::Relayout::None).ok()
+                });
+            let then_sheets = laid_then.as_ref().map(|t| &t.outcome.layout.sheets);
+            if let Some(n) = &laid_now {
+                let marks = crate::compare::marks(
+                    to.project,
+                    n,
+                    from.project,
+                    laid_then.as_ref(),
+                    b,
+                    from.rev,
+                );
+                let empty = ryusch::paint::Marks::default();
+                for (sid, s) in &n.outcome.layout.sheets {
+                    let fresh = then_sheets.is_none_or(|t| !t.contains_key(sid));
+                    let m = marks.get(sid).unwrap_or(&empty);
+                    if fresh || !m.is_empty() {
+                        let status = if fresh { "added" } else { "changed" };
+                        out.push(entry(sid, &s.name, status, counts(m)));
+                    }
+                }
+            }
+            for (sid, s) in then_sheets.into_iter().flatten() {
+                let kept = laid_now
+                    .as_ref()
+                    .is_some_and(|n| n.outcome.layout.sheets.contains_key(sid));
+                if !kept {
+                    out.push(entry(sid, &s.name, "removed", Counts::default()));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `diff --netlist`: each design (or `opts.design`) flattened on both
+/// sides and compared. A design that doesn't flatten on a side is
+/// `invalid`, with that side's error.
+fn netlist(from: &Side, to: &Side, opts: &Options) -> Result<Vec<Value>> {
+    let designs = designs(from, to, opts)?;
     let mut out = Vec::new();
     for d in designs {
         let flat = |s: &Side| {

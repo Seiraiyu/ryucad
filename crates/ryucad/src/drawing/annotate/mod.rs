@@ -7,6 +7,7 @@
 //! doesn't define) likewise.
 
 pub mod feat;
+pub mod hole;
 pub mod text;
 pub mod value;
 
@@ -88,6 +89,11 @@ pub struct Built {
     pub measure: Option<Measure>,
     /// A hole callout's hole feature (and its part), for the lint.
     pub hole: Option<(Id, Id)>,
+    /// Whether a hole callout calls its hole's thread out.
+    pub thread: bool,
+    /// The hole features (and their parts) a hole table lists, for the
+    /// lint: each called out, its thread too.
+    pub listed: Vec<(Id, Id)>,
     /// A balloon's occurrence path.
     pub balloon: Option<String>,
 }
@@ -107,6 +113,10 @@ struct Out {
     boxes: Vec<[P; 2]>,
     measure: Option<Measure>,
     hole: Option<(Id, Id)>,
+    /// Whether its hole callout calls out a thread (a tapped hole's).
+    thread: bool,
+    /// The hole features (and their parts) a hole table lists.
+    listed: Vec<(Id, Id)>,
 }
 
 /// A text's size in the drawing's standard: ISO 3.5 mm, ASME 3 mm (0.12
@@ -284,6 +294,8 @@ pub(super) fn all(
                     hidden,
                     measure: out.measure,
                     hole: out.hole,
+                    thread: out.thread,
+                    listed: out.listed,
                     balloon: match &a.kind {
                         Kind::Balloon { of } => Some(of.clone()),
                         _ => None,
@@ -339,6 +351,8 @@ pub(super) fn all(
                     hidden: Vec::new(),
                     measure: None,
                     hole: None,
+                    thread: false,
+                    listed: Vec::new(),
                     balloon: None,
                 }
             }
@@ -390,20 +404,24 @@ pub(super) fn all(
                 .or(o["feature"].as_str())
                 .and_then(|f| Id::parse(f, "feature").ok());
             let Some(hole) = hole else { continue };
-            let Ok((part, _)) = part_of(session, plan, src, *b) else {
+            let Ok((part, rev)) = part_of(session, plan, src, *b) else {
                 continue;
             };
             if sheets[si]
                 .holes
                 .iter()
-                .any(|(p, h, _, _)| *p == part && *h == hole)
+                .any(|(p, h, _, _, _)| *p == part && *h == hole)
             {
                 continue;
             }
+            let tapped = session.node(&part, &rev).ok().is_some_and(|(p, _, _)| {
+                matches!(p.features.get(&hole),
+                    Some(Ok(crate::doc::files::Feature::Hole(h))) if h.thread.is_some())
+            });
             let label = src[*b].2.split_once('/').map_or("", |x| x.1);
             sheets[si]
                 .holes
-                .push((part, hole, plan.key, format!("{label}/{name}")));
+                .push((part, hole, plan.key, format!("{label}/{name}"), tapped));
         }
     }
     // The general tolerance, above the title block.
@@ -732,7 +750,7 @@ fn build_one(
         }
         Kind::HoleCallout { of } => {
             let r = get("of", of)?;
-            let (lines, hole, report, tip) =
+            let (lines, hole, report, tip, thread) =
                 hole_callout(session, plan, src, &r, &m, units, ctx.standard)?;
             let style = a.style.as_ref().expect("a callout");
             let mut lines = lines;
@@ -750,6 +768,7 @@ fn build_one(
             out.report = report;
             out.report["text"] = json!(out.text);
             out.hole = Some(hole);
+            out.thread = thread;
             Ok(out)
         }
         Kind::CentreMark { of } => {
@@ -851,6 +870,27 @@ fn build_one(
             // Written relative to the view's centre, as notes are.
             let corner = written.map(|w| addp(vb.at, w));
             bom_table(session, ctx, a, &plan.of, Some(&plan.rev), sheet, corner)
+        }
+        Kind::HoleTable { origin, holes } => {
+            // One part's holes: an assembly view is refused before its
+            // origin is looked for.
+            if src
+                .iter()
+                .any(|(_, _, label)| label.split('/').count() != 2)
+            {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "view {} draws an assembly: a hole table lists one part's holes",
+                        vb.key
+                    ),
+                )
+                .with("reason", "assembly_view"));
+            }
+            let r = get("origin", origin)?;
+            hole_table(
+                session, ctx, plan, src, vb, sheet, &m, units, &r, holes, written,
+            )
         }
         Kind::FeatureControlFrame {
             characteristic,
@@ -997,7 +1037,7 @@ fn measure(
     }
 }
 
-fn plain(runs: &[Run]) -> String {
+pub(super) fn plain(runs: &[Run]) -> String {
     text::Shown {
         runs: runs.to_vec(),
         ..text::Shown::default()
@@ -1635,7 +1675,7 @@ fn leader_place(
 
 /// The part (and its revision) whose solid `prefix` (`<solid>`, or
 /// `<instance>/…/<solid>`) names, in `plan`'s view.
-fn part_of(
+pub(in crate::drawing) fn part_of(
     session: &mut Session,
     plan: &Plan,
     src: &Source,
@@ -1759,7 +1799,11 @@ fn chamfer_text(
 }
 
 /// A hole callout: its lines, its hole (part, feature), what it reports,
-/// and where its leader meets the hole (on its circle seen end on).
+/// where its leader meets the hole (on its circle seen end on), and
+/// whether it calls a thread out. The hole is the row of the part's holes
+/// whose faces hold the entity, so a pattern's, a fill's and a mirror's
+/// copies all call out their hole feature, and the count is that
+/// feature's rows in the entity's solid.
 #[allow(clippy::type_complexity)]
 fn hole_callout(
     session: &mut Session,
@@ -1769,98 +1813,34 @@ fn hole_callout(
     m: &Map,
     units: &text::Units,
     standard: Standard,
-) -> Result<(Vec<Vec<Run>>, (Id, Id), Value, Option<P>)> {
-    use crate::doc::hole::{Depth, HoleForm};
+) -> Result<(Vec<Vec<Run>>, (Id, Id), Value, Option<P>, bool)> {
     let not = || {
         Error::new(Code::InvalidParam, format!("{} is no hole's face", r.text))
             .with("reason", "not_a_hole")
     };
-    let o = origin_of(src, r).ok_or_else(not)?;
-    let hid = o["seed"]
-        .as_str()
-        .filter(|_| o.get("instance").is_some())
-        .or(o["feature"].as_str())
-        .and_then(|f| Id::parse(f, "feature").ok())
-        .ok_or_else(not)?;
     let body = r.body.ok_or_else(not)?;
+    let name = r.name.clone().ok_or_else(not)?;
+    let solid = src[body]
+        .2
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
     let (pid, rev) = part_of(session, plan, src, body)?;
+    let holes = crate::holes::at(session, &pid, &rev)?;
+    let row = holes.of_face(&solid, &name).ok_or_else(not)?.0;
+    let hid = row.feature.clone();
     let (part, _, _) = session.node(&pid, &rev)?;
     let Some(Ok(crate::doc::files::Feature::Hole(h))) = part.features.get(&hid) else {
         return Err(not());
     };
-    // Its sizes as rebuild builds them: written, or derived.
-    let sizes =
-        crate::hole::derive::derive(h, part.hole_standards.as_deref()).map_err(|_| not())?;
-    // How many of its bores the solid has: walls by hole, instance, point.
-    let mut bores = std::collections::BTreeSet::new();
-    for (_, origin) in src[body].0.origins.iter() {
-        if origin["segment"] != "wall" {
-            continue;
-        }
-        let of_hole = origin["feature"] == hid.as_str() || origin["seed"] == hid.as_str();
-        if of_hole {
-            bores.insert((
-                origin["feature"].to_string(),
-                origin["instance"].to_string(),
-                origin["point"].to_string(),
-            ));
-        }
-    }
-    let n = bores.len().max(1);
-    let x = if standard == Standard::Asme {
-        "X"
-    } else {
-        "×"
-    };
-    let len = |v: f64| {
-        units.number(
-            v,
-            units.precision.max(text::needs(v / units.unit.factor())),
-            false,
-        )
-    };
-    let mut first = Vec::new();
-    if n > 1 {
-        first.push(Run::Text(format!("{n}{x} ")));
-    }
-    first.push(Run::Symbol(Symbol::Diameter));
-    first.push(Run::Text(len(sizes.drill.si)));
-    let depth = match &h.depth {
-        Depth::ThroughAll => Some("THRU".to_owned()),
-        Depth::Blind(d) | Depth::Tip(d) => Some(len(d.meters())),
-        Depth::UpTo { .. } | Depth::ThroughNext => None,
-    };
-    match &h.depth {
-        Depth::ThroughAll => first.push(Run::Text(" THRU".into())),
-        Depth::Blind(_) | Depth::Tip(_) => {
-            first.push(Run::Text(" ".into()));
-            first.push(Run::Symbol(Symbol::Depth));
-            first.push(Run::Text(depth.clone().unwrap_or_default()));
-        }
-        Depth::UpTo { .. } | Depth::ThroughNext => {}
-    }
-    let mut lines = vec![first];
-    match (&h.form, &sizes.counterbore, &sizes.countersink) {
-        (HoleForm::Counterbore { .. }, Some((diameter, depth)), _) => lines.push(vec![
-            Run::Symbol(Symbol::Counterbore),
-            Run::Text(" ".into()),
-            Run::Symbol(Symbol::Diameter),
-            Run::Text(format!("{} ", len(diameter.si))),
-            Run::Symbol(Symbol::Depth),
-            Run::Text(len(depth.si)),
-        ]),
-        (HoleForm::Countersink { .. }, _, Some((diameter, angle))) => lines.push(vec![
-            Run::Symbol(Symbol::Countersink),
-            Run::Text(" ".into()),
-            Run::Symbol(Symbol::Diameter),
-            Run::Text(format!(
-                "{} {x} {}°",
-                len(diameter.si),
-                text::decimal(angle.si.to_degrees(), 0, false)
-            )),
-        ]),
-        _ => {}
-    }
+    let n = holes
+        .rows
+        .iter()
+        .filter(|x| x.feature == hid && x.solid.as_str() == solid)
+        .count()
+        .max(1);
+    let lines = hole::lines(h, &row.sizes, units, standard, n);
     // The bore's circle seen end on: the leader meets it at 45°.
     let tip = match &r.feat {
         Feat::Round {
@@ -1872,11 +1852,21 @@ fn hole_callout(
         }
         _ => None,
     };
-    let report = json!({
+    let mut report = json!({
         "hole": hid, "part": pid, "count": n, "form": h.form.type_name(),
-        "diameter": sizes.drill.si, "depth": h.depth.type_name(),
+        "diameter": row.sizes.drill.si, "depth": h.depth.type_name(),
     });
-    Ok((lines, (pid, hid), report, tip))
+    if let Some(t) = &row.sizes.thread {
+        report["thread"] = json!(t.designation);
+    }
+    if let Some(f) = &row.sizes.fit {
+        report["fit"] = match &f.class {
+            Some(c) => json!(c),
+            None => json!([f.upper.si, f.lower.si]),
+        };
+    }
+    let thread = row.sizes.thread.is_some();
+    Ok((lines, (pid, hid), report, tip, thread))
 }
 
 /// A note: its lines (fields filled as the title block's) at `at`, the
@@ -2424,6 +2414,265 @@ fn parse_csv(text: &str) -> Vec<Vec<String>> {
         rows.push(row);
     }
     rows
+}
+
+/// Whether a hole table's `name` names row `r`: its reference, or the
+/// hole, pattern or mirror feature that made it.
+fn row_named(r: &crate::holes::Row, name: &str) -> bool {
+    r.reference == name
+        || r.feature.as_str() == name
+        || r.pattern.as_ref().is_some_and(|(p, _)| p.as_str() == name)
+        || r.mirror.as_ref().is_some_and(|m| m.as_str() == name)
+}
+
+/// A hole table's group letters: A … Z, AA, AB, ….
+fn letters(mut i: usize) -> String {
+    let mut s = String::new();
+    loop {
+        s.insert(0, char::from(b'A' + (i % 26) as u8));
+        if i < 26 {
+            return s;
+        }
+        i = i / 26 - 1;
+    }
+}
+
+/// One hole of a hole table.
+struct Listed {
+    spec: String,
+    cells: Vec<Run>,
+    x: f64,
+    y: f64,
+    at: P,
+    r: f64,
+    reference: String,
+    feature: Id,
+}
+
+/// A hole table (design 533, Drawings): the holes of the view's part
+/// (those `names` names, else every one), grouped by canonical spec in
+/// spec order, each group a letter and its holes numbered by X, then Y
+/// (then reference) from `origin` in the view's frame; columns TAG, X, Y
+/// and SPEC (the callout's lines, no count); each hole's tag up and right
+/// of its mouth on the view; blocks side by side where it would run below
+/// the drawing area. Its upper left corner is `written` (from the view's
+/// centre), else 10 mm right of the view's box, level with its top. The
+/// view draws a part (`build_one` refuses an assembly's).
+#[allow(clippy::too_many_arguments)]
+fn hole_table(
+    session: &mut Session,
+    ctx: &Context,
+    plan: &Plan,
+    src: &Source,
+    vb: &ViewBuilt,
+    sheet: &SheetBuilt,
+    m: &Map,
+    units: &text::Units,
+    origin: &Resolved,
+    names: &[String],
+    written: Option<P>,
+) -> Result<Out> {
+    let holes = crate::holes::at(session, &plan.of, &plan.rev)?;
+    let (part, _, _) = session.node(&plan.of, &plan.rev)?;
+    if let Some(n) = names
+        .iter()
+        .find(|n| !holes.rows.iter().any(|r| row_named(r, n)))
+    {
+        return Err(
+            Error::new(Code::NotFound, format!("{} has no hole {n}", plan.of))
+                .with("hole", n.as_str())
+                .with("reason", "no_hole"),
+        );
+    }
+    let o = origin.feat.point();
+    let mut listed: Vec<Listed> = Vec::new();
+    for r in &holes.rows {
+        if !names.is_empty() && !names.iter().any(|n| row_named(r, n)) {
+            continue;
+        }
+        let Some((_, pose, _)) = src
+            .iter()
+            .find(|(_, _, l)| l.rsplit('/').next() == Some(r.solid.as_str()))
+        else {
+            continue;
+        };
+        let Some(Ok(crate::doc::files::Feature::Hole(h))) = part.features.get(&r.feature) else {
+            continue;
+        };
+        let q = pose.apply_point(r.position);
+        let q = [q.x, q.y, q.z];
+        let d = feat::sub(q, o);
+        let mut cells = Vec::new();
+        for (i, l) in hole::lines(h, &r.sizes, units, ctx.standard, 1)
+            .into_iter()
+            .enumerate()
+        {
+            if i > 0 {
+                cells.push(Run::Text(" ".into()));
+            }
+            cells.extend(l);
+        }
+        listed.push(Listed {
+            spec: r.spec.clone(),
+            cells,
+            x: feat::dot(d, plan.frame.x),
+            y: feat::dot(d, plan.frame.y),
+            at: m.sheet(q),
+            r: crate::hole::mouth_radius(&r.sizes),
+            reference: r.reference.clone(),
+            feature: r.feature.clone(),
+        });
+    }
+    listed.sort_by(|a, b| {
+        a.spec
+            .cmp(&b.spec)
+            .then(a.x.total_cmp(&b.x))
+            .then(a.y.total_cmp(&b.y))
+            .then(a.reference.cmp(&b.reference))
+    });
+    let mut tags = Vec::with_capacity(listed.len());
+    let (mut group, mut n) = (0usize, 0usize);
+    for (i, l) in listed.iter().enumerate() {
+        if i > 0 && listed[i - 1].spec != l.spec {
+            group += 1;
+            n = 0;
+        }
+        n += 1;
+        tags.push(format!("{}{n}", letters(group)));
+    }
+    let tsz = 2.5;
+    let pad = 1.5;
+    let rh = 6.0;
+    const HEADER: [&str; 4] = ["TAG", "X", "Y", "SPEC"];
+    let num = |v: f64| units.number(v, units.precision, false);
+    let rows: Vec<[Vec<Run>; 4]> = listed
+        .iter()
+        .zip(&tags)
+        .map(|(l, t)| {
+            [
+                vec![Run::Text(t.clone())],
+                vec![Run::Text(num(l.x))],
+                vec![Run::Text(num(l.y))],
+                l.cells.clone(),
+            ]
+        })
+        .collect();
+    let mut widths = HEADER.map(|h| symbol::width(&[Run::Text(h.into())], tsz) + 2.0 * pad);
+    for r in &rows {
+        for (c, cell) in r.iter().enumerate() {
+            widths[c] = widths[c].max(symbol::width(cell, tsz) + 2.0 * pad);
+        }
+    }
+    let width: f64 = widths.iter().sum();
+    let corner = written
+        .map(|w| addp(vb.at, w))
+        .unwrap_or([vb.bounds[1][0] + 10.0, vb.bounds[1][1]]);
+    let per = (((corner[1] - sheet.area[0][1]) / rh).floor() as usize)
+        .saturating_sub(1)
+        .max(1);
+    let st = ctx.style;
+    let text_stroke = st.stroke(LineKind::Dimension);
+    let mut items = Vec::new();
+    let mut boxes = Vec::new();
+    let chunks: Vec<&[[Vec<Run>; 4]]> = if rows.is_empty() {
+        vec![&[][..]]
+    } else {
+        rows.chunks(per).collect()
+    };
+    for (b, chunk) in chunks.iter().enumerate() {
+        let left = corner[0] + b as f64 * (width + 4.0);
+        let right = left + width;
+        let lines_n = chunk.len() + 1;
+        let lo = [left, corner[1] - rh * lines_n as f64];
+        let hi = [right, corner[1]];
+        items.push(stroke(
+            st,
+            LineKind::Visible,
+            &[lo, [hi[0], lo[1]], hi, [lo[0], hi[1]], lo],
+            Colour::BLACK,
+        ));
+        boxes.push([lo, hi]);
+        for j in 1..lines_n {
+            let y = corner[1] - rh * j as f64;
+            items.push(stroke(
+                st,
+                LineKind::Thin,
+                &[[left, y], [right, y]],
+                Colour::BLACK,
+            ));
+        }
+        let mut x = left;
+        for (c, w) in widths.iter().enumerate() {
+            if c > 0 {
+                items.push(stroke(
+                    st,
+                    LineKind::Thin,
+                    &[[x, lo[1]], [x, hi[1]]],
+                    Colour::BLACK,
+                ));
+            }
+            let cells = std::iter::once(vec![Run::Text(HEADER[c].into())])
+                .chain(chunk.iter().map(|r| r[c].clone()));
+            for (j, cell) in cells.enumerate() {
+                let y = corner[1] - rh * (j + 1) as f64 + (rh - tsz * symbol::CAP) / 2.0;
+                items.extend(symbol::draw(
+                    &cell,
+                    [x + pad, y],
+                    tsz,
+                    0.0,
+                    Anchor::Start,
+                    Colour::BLACK,
+                    &text_stroke,
+                ));
+            }
+            x += w;
+        }
+    }
+    // Each hole's tag up and right of its mouth, clear of its circle.
+    for (l, t) in listed.iter().zip(&tags) {
+        let off = l.r * m.k * std::f64::consts::FRAC_1_SQRT_2 + 1.0;
+        items.push(Item::Text {
+            text: t.clone(),
+            at: [l.at[0] + off, l.at[1] + off],
+            size: tsz,
+            angle: 0.0,
+            anchor: Anchor::Start,
+            colour: Colour::BLACK,
+        });
+    }
+    let mut groups: Vec<Value> = Vec::new();
+    for (l, t) in listed.iter().zip(&tags) {
+        let g = t.trim_end_matches(|c: char| c.is_ascii_digit());
+        match groups.last_mut() {
+            Some(x) if x["tag"] == g => {
+                x["count"] = json!(x["count"].as_u64().unwrap_or(0) + 1);
+            }
+            _ => groups.push(json!({"tag": g, "spec": l.spec, "count": 1})),
+        }
+    }
+    let rows_json: Vec<Value> = listed
+        .iter()
+        .zip(&tags)
+        .map(|(l, t)| json!({"tag": t, "ref": l.reference, "x": l.x, "y": l.y}))
+        .collect();
+    let mut seen: Vec<(Id, Id)> = Vec::new();
+    for l in &listed {
+        let k = (plan.of.clone(), l.feature.clone());
+        if !seen.contains(&k) {
+            seen.push(k);
+        }
+    }
+    Ok(Out {
+        items,
+        report: json!({"of": plan.of, "rows": listed.len(), "groups": groups,
+                       "holes": rows_json, "blocks": chunks.len()}),
+        text: format!("hole table of {}, {} holes", plan.of, listed.len()),
+        at: sub(corner, vb.at),
+        at_placed: written.is_none(),
+        boxes,
+        listed: seen,
+        ..Out::default()
+    })
 }
 
 /// A feature control frame of `rows` (one, or two for a composite frame

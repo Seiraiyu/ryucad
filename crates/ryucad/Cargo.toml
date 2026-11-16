@@ -18,6 +18,8 @@ ctrlc = "3"
 getrandom = "0.3"
 gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
 ryu-git = { path = "../ryu-git" }
+# The hosted review service's client (design 667), shared with ryueda.
+ryu-review = { path = "../ryu-review" }
 interprocess = "2"
 png = "0.18"
 # An 8×8 bitmap font for labels in renders.
@@ -58,6 +60,7 @@ ryukei-testkit = { path = "../ryukei-testkit", optional = true }
 bench = ["dep:ryukei-testkit"]
 
 [dev-dependencies]
+ryu-review = { path = "../ryu-review", features = ["testing"] }
 assert_cmd = "2"
 divan = "0.1"
 num-bigint = "0.4"

@@ -8,6 +8,7 @@ use crate::Cad;
 use crate::doc::files::Manifest;
 use crate::error::{Code, Error, Result};
 use crate::units::Unit;
+use ryu_review::url_ok;
 use ryu_session::prefs::{self, Schema};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -434,31 +435,6 @@ pub const MAX_SCALE: f64 = 2.0;
 pub use ryu_session::chords::{
     MAX_CHORDS, MODIFIERS, NAMED_KEYS, chord_ok, command_id_ok, key_names,
 };
-
-/// An https URL, or an http one to this machine (for tests and a local
-/// service): a host, no user, no spaces or control characters.
-fn url_ok(s: &str) -> bool {
-    let (secure, rest) = match (s.strip_prefix("https://"), s.strip_prefix("http://")) {
-        (Some(r), _) => (true, r),
-        (_, Some(r)) => (false, r),
-        _ => return false,
-    };
-    let authority = &rest[..rest.find('/').unwrap_or(rest.len())];
-    if authority.is_empty()
-        || authority.contains(['@', '?', '#'])
-        || s.contains(' ')
-        || s.chars().any(char::is_control)
-    {
-        return false;
-    }
-    secure
-        || ["localhost", "127.0.0.1", "[::1]"].iter().any(|h| {
-            authority == *h
-                || authority
-                    .strip_prefix(h)
-                    .is_some_and(|p| p.starts_with(':'))
-        })
-}
 
 /// The folder holding the user's preferences.
 pub fn config_dir() -> Result<PathBuf> {

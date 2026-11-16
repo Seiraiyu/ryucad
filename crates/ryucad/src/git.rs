@@ -94,28 +94,9 @@ pub fn release_guard(
     Ok(out)
 }
 
-/// The GitHub owner and repository a remote URL names (https, ssh or
-/// scp-like, with or without `.git`), or `None` for other hosts.
-pub fn github_repo(url: &str) -> Option<(String, String)> {
-    let url = url.trim();
-    let path = [
-        "https://github.com/",
-        "http://github.com/",
-        "ssh://git@github.com/",
-        "git@github.com:",
-    ]
-    .iter()
-    .find_map(|p| url.strip_prefix(p))?;
-    let path = path.trim_end_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let (owner, repo) = path.split_once('/')?;
-    let ok = |s: &str| {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-    };
-    (ok(owner) && ok(repo)).then(|| (owner.to_owned(), repo.to_owned()))
-}
+/// The GitHub owner and repository a remote URL names, from
+/// `ryu-review` (plan 8.A).
+pub use ryu_review::github_repo;
 
 /// `history.log`: the project's commits (or a part's), and what is
 /// uncommitted.

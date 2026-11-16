@@ -84,6 +84,23 @@ fn objects(
     (parts, nets)
 }
 
+/// What a sheet's marks count, as its strip says them: items added,
+/// changed and moved, and those ghosted that nothing marks (removed).
+pub use ryusch::paint::Counts;
+
+/// [`Counts`] of `m` ([`Marks::counts`]).
+pub fn counts(m: &Marks) -> Counts {
+    m.counts()
+}
+
+/// The strip a marked sheet carries.
+fn strip(rev: &str, c: Counts) -> String {
+    format!(
+        "Against {rev}: {} added, {} changed, {} moved, {} removed",
+        c.added, c.changed, c.moved, c.removed
+    )
+}
+
 /// Block `block`'s marks by sheet: its working layout `now` against the
 /// revision's `then` (none when the revision hasn't the block), `rev` as
 /// the strip names it.
@@ -120,10 +137,18 @@ pub fn marks(
             mark(&mut out, &at.sheet, part.key.clone(), *m);
         }
     }
-    // Nets whose file is new or differs: their wires and labels.
+    // Nets whose file is new or differs: their wires, labels and bus
+    // entries (#878: an entry's stub is its net's).
     for (net, m) in &nets {
         for sheet in new.routes.get(net).into_iter().flat_map(|s| s.keys()) {
             mark(&mut out, sheet, net.clone(), *m);
+        }
+        for by_sheet in new.buses.values() {
+            for (sheet, drawn) in by_sheet {
+                if drawn.entries.iter().any(|e| e.net == *net) {
+                    mark(&mut out, sheet, net.clone(), *m);
+                }
+            }
         }
         for l in new.labels.get(net).into_iter().flatten() {
             mark(&mut out, &l.sheet, format!("label:{net}@{}", l.on), *m);
@@ -176,33 +201,22 @@ pub fn marks(
         }
     }
     for m in out.values_mut() {
-        if m.is_empty() {
-            continue;
+        if !m.is_empty() {
+            m.strip = strip(rev, counts(m));
         }
-        let n = |f: &dyn Fn(&Mark) -> bool| m.marks.values().filter(|x| f(x)).count();
-        let (added, moved) = (
-            n(&|x| *x == Mark::Added),
-            n(&|x| matches!(x, Mark::Moved { .. })),
-        );
-        let changed = m.marks.len() - added - moved;
-        m.strip = format!(
-            "Against {rev}: {added} added, {changed} changed, {moved} moved, {} removed",
-            m.ghosts
-                .iter()
-                .filter(|g| !m.marks.contains_key(*g))
-                .count()
-        );
     }
     out
 }
 
-/// Block `b` of the revision's project `then`, laid out, with the
+/// What the revision's block lays out to: `Ok(None)` when the revision
+/// hasn't the block, `Err` when it doesn't lay out there; with the
 /// designators of the layer the working drawing shows (`layer`'s design
-/// and path), or `None` when the revision hasn't the block or it doesn't
-/// lay out there.
-pub fn laid_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Option<Laid> {
-    let tb = then.conn.blocks.get(b)?;
-    let mut l = schem::lay(then, tb, None, &[], ryusch::input::Relayout::None).ok()?;
+/// and path), else the first.
+pub fn lay_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Result<Option<Laid>> {
+    let Some(tb) = then.conn.blocks.get(b) else {
+        return Ok(None);
+    };
+    let mut l = schem::lay(then, tb, None, &[], ryusch::input::Relayout::None)?;
     let all = schem::layers(then, b);
     let same = layer
         .and_then(|x| {
@@ -213,7 +227,13 @@ pub fn laid_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Option
     if let Some(t) = same {
         l.built.designators(&t.refdes);
     }
-    Some(l)
+    Ok(Some(l))
+}
+
+/// [`lay_then`], none when the revision hasn't the block or it doesn't
+/// lay out there.
+pub fn laid_then(then: &Project, b: &Id, layer: Option<&schem::Layer>) -> Option<Laid> {
+    lay_then(then, b, layer).ok().flatten()
 }
 
 /// `render --compare`: block `block`'s canvas (or one sheet) from the
@@ -232,7 +252,9 @@ pub fn render(
     scale: Option<f32>,
     fit: bool,
     theme: ryusch::style::Theme,
+    frames: &[&Project],
 ) -> Result<Answer> {
+    crate::schemcmd::frame_needs_fit(frames, fit)?;
     let b = crate::schemcmd::blocks(now, design, block)?[0];
     let mut laid = schem::lay(now, b, None, &[], ryusch::input::Relayout::None)?;
     let (_, shown) = crate::schemcmd::show_layer(now, b, &mut laid, layer)?;
@@ -261,11 +283,24 @@ pub fn render(
     };
     let none = Marks::default();
     let to_ref = |k: &str| schem::ref_path(&b.id, k);
-    let svg = ryusch::svg::draw_with(
+    let view = if frames.is_empty() {
+        fit.then(|| ryusch::svg::drawn(&laid.built.input, layout, &refs))
+            .flatten()
+    } else {
+        let sid = which.first().ok_or_else(|| {
+            Error::new(Code::InvalidParam, "--frame crops one --sheet").with("param", "frame")
+        })?;
+        crate::schemcmd::framed(
+            &laid,
+            &crate::schemcmd::frame_layouts(frames, &b.id, shown.as_ref()),
+            sid,
+        )
+    };
+    let svg = ryusch::svg::draw_within(
         &laid.built.input,
         layout,
         &refs,
-        fit,
+        view,
         &|sid| looks.get(sid).cloned().unwrap_or_default(),
         &|sid, look| {
             let now = ryusch::paint::sheet_in(&laid.built.input, layout, sid, look);
@@ -315,4 +350,38 @@ pub fn render(
             Answer::bytes(v, "image/png", crate::schemcmd::png(&svg, px)?)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_are_what_the_strip_says() {
+        let mut m = Marks::default();
+        m.marks.insert("a".into(), Mark::Added);
+        m.marks.insert("b".into(), Mark::Changed);
+        m.marks.insert(
+            "c".into(),
+            Mark::Moved {
+                from: [0, 0],
+                to: [1, 0],
+            },
+        );
+        m.ghosts.insert("b".into());
+        m.ghosts.insert("d".into());
+        assert_eq!(
+            counts(&m),
+            Counts {
+                added: 1,
+                changed: 1,
+                moved: 1,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            strip("HEAD", counts(&m)),
+            "Against HEAD: 1 added, 1 changed, 1 moved, 1 removed"
+        );
+    }
 }

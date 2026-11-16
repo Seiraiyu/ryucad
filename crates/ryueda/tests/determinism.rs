@@ -929,6 +929,57 @@ fn compared(golden: &mut Golden, dir: &Path) {
             blake3::hash(&svg).to_hex()[..32].to_owned(),
         );
     }
+    // Each block's sheets as a window draws them against HEAD (plan
+    // 13.A), and as HEAD draws them, light and dark, alike on one thread
+    // and eight. The commit (the manifest's random project ID moves it)
+    // and the revisions are left out.
+    for b in blocks_of(dir) {
+        let first = ryueda(dir, 1, &["scene", "--block", &b, "--compare", "HEAD"]);
+        let sheets: Vec<(String, bool)> = first["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["sheet"].as_str().unwrap().to_owned(),
+                    s["removed"] == true,
+                )
+            })
+            .collect();
+        for (s, removed) in &sheets {
+            for theme in ["light", "dark"] {
+                for (what, flag) in [("compare", "--compare"), ("rev", "--rev")] {
+                    if *removed && what == "compare" {
+                        continue;
+                    }
+                    let args = [
+                        "scene",
+                        "--block",
+                        b.as_str(),
+                        "--sheet",
+                        s.as_str(),
+                        "--theme",
+                        theme,
+                        flag,
+                        "HEAD",
+                    ];
+                    let mut one = ryueda(dir, 1, &args);
+                    assert_eq!(ryueda(dir, 8, &args), one, "{b} {s} {theme} {what}");
+                    let o = one.as_object_mut().unwrap();
+                    o.remove("revision");
+                    o.remove("revisions");
+                    o.remove("commit");
+                    if let Some(a) = o.get_mut("against") {
+                        a["commit"] = Value::Null;
+                    }
+                    golden.json(
+                        &format!("schematic.breakout.{what}.{b}.{s}.scene.{theme}"),
+                        &one,
+                    );
+                }
+            }
+        }
+    }
     ryueda(dir, 1, &["output", "--compare", "HEAD", "--out", "c.pdf"]);
     let pdf = std::fs::read(dir.join("c.pdf")).unwrap();
     golden.got.insert(

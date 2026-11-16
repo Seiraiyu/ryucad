@@ -19,6 +19,10 @@ pub struct VersionInfo {
     pub commit: String,
     pub target: String,
     pub protocol: u32,
+    /// [`crate::OUTPUT_SCHEMA`]: the shape of the answers other tools
+    /// read (0 from a ryueda before it was said).
+    #[serde(default)]
+    pub schema_outputs: u64,
 }
 
 impl VersionInfo {
@@ -29,6 +33,7 @@ impl VersionInfo {
             commit: env!("RYUEDA_COMMIT").to_owned(),
             target: env!("RYUEDA_TARGET").to_owned(),
             protocol: PROTOCOL_VERSION,
+            schema_outputs: crate::OUTPUT_SCHEMA,
         }
     }
 
@@ -990,6 +995,11 @@ pub enum Request {
         /// parts with a leader, each item keyed by `data-ref` (SVG).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compare: Option<String>,
+        /// Crop a fitted sheet to what it draws here and at each of these
+        /// revisions (`working` for the files on disk), so a before and
+        /// an after line up (design 667). Needs `fit` and `sheet`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frame: Vec<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1014,6 +1024,15 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// Whether each thread anchor (`<design>:<block>/<object>`, or a
+    /// sheet `<design>:<block>/sheet:<id>`) stands at a revision: its
+    /// sheet and box, or what took it away (design 667).
+    #[serde(rename = "resolve")]
+    Resolve {
+        refs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// One sheet as a window draws it (design 519): its items with their
     /// owners' reference paths, boxes and hashes, the paper, pins and the
     /// sheet's findings; a design's root block and its first sheet unless
@@ -1030,6 +1049,17 @@ pub enum Request {
         layer: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         theme: Option<ryusch::style::Theme>,
+        /// The working sheet marked against this Git revision (plan
+        /// 13.A): each owner's `mark`, the revision's `ghosts`, moved
+        /// parts' `leaders`, the `counts` and each sheet's, decided as
+        /// `render --compare` decides them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
+        /// The revision to read (`working`, the files on disk, by
+        /// default): any Git revision expression (plan 13.A). The answer
+        /// names its `commit`; a window shows it read only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// A design's designators numbered in canvas order (plan 2.F): the
     /// unannotated ones (`unannotated`, by default) or every unlocked one
@@ -1171,6 +1201,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// The project's Git commits, newest first (those that changed its
+    /// folder), and the working files that differ from `HEAD` (plan
+    /// 13.A); `not_a_git_repo` outside a repository.
+    #[serde(rename = "history.log")]
+    HistoryLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
     /// A participant's selection by reference path, and what each names:
     /// `participant`, else the one human (an agent asks what the person
     /// points at). Needs the daemon.
@@ -1306,13 +1344,15 @@ impl Request {
             | Request::Check { rev, .. }
             | Request::Describe { rev, .. }
             | Request::Render { rev, .. }
+            | Request::Resolve { rev, .. }
             | Request::Output { rev, .. }
             | Request::BlockShow { rev, .. }
             | Request::ComponentShow { rev, .. }
             | Request::NetShow { rev, .. }
             | Request::SymbolShow { rev, .. }
             | Request::LibcompShow { rev, .. }
-            | Request::LibCheck { rev, .. } => rev.as_deref(),
+            | Request::LibCheck { rev, .. }
+            | Request::Scene { rev, .. } => rev.as_deref(),
             _ => None,
         };
         rev.filter(|r| *r != "working")
