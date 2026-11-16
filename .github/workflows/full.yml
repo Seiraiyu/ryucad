@@ -381,6 +381,7 @@ jobs:
             RYUCAD_REQUIRE_CORPUS=1 cargo test -p ryukei-bench --features occt --release --test projection -- --nocapture --test-threads 1
             cargo test -p ryukei-bench --features occt --release --test drafts -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test defeaturing -- --nocapture
+            cargo test -p ryukei-bench --features occt --release --test step occt_reads_ryucads -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
             cargo test -p ryukei-bench --features dxf --release --test dxf -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture

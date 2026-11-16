@@ -1628,3 +1628,124 @@ fn attributed_exports() -> (tempfile::TempDir, Vec<(&'static str, Vec<u8>)>) {
     drop(s);
     (dir, files)
 }
+
+/// A plate with a tapped pattern exported by ryucad (design 533, STEP
+/// export), in AP242 mm and AP214 m: OCCT 7.8's reader takes it to one
+/// solid of ryucad's volume, and its XDE properties are what they are
+/// without holes (OCCT has no attribute reader: 24.C's finding above, so
+/// the aspects are checked by hand): each `SHAPE_ASPECT` over the
+/// product's `PRODUCT_DEFINITION_SHAPE`, its `GEOMETRIC_ITEM_SPECIFIC_USAGE`s
+/// naming `ADVANCED_FACE`s in an `ADVANCED_BREP_SHAPE_REPRESENTATION`, and
+/// a `user defined attributes` property over it.
+#[test]
+fn occt_reads_ryucads_tapped_plate_and_its_aspects_hold_their_forms() {
+    use ryucad::doc::assembly::Rev;
+    use ryustep::part21::Param as P;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+        ryucad::server::handle(s, req).unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(&mut s, "part.create", json!({"part": "plate"}));
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "plate", "type": "box", "id": "slab",
+        "params": {"x": 60, "y": 40, "z": 8}}),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "plate", "type": "sketch", "id": "s",
+        "placement": {"origin": [0, 0, 8]}}),
+    );
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "plate", "sketch": "s", "ops": [
+        {"op": "add", "type": "point", "at": [10, 10]}, {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "plate", "type": "hole", "id": "t",
+        "sketch": "s", "spec": "M6x1.0-6H THRU"}),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "plate", "type": "pattern", "id": "row",
+        "features": ["t"], "direction": "x", "spacing": 20, "count": 3}),
+    );
+    let id = ryucad::doc::id::Id::parse("plate", "part").unwrap();
+    let model = s.model(&id, &Rev::Working).unwrap();
+    let (v, _, bound) = measure(&model.occurrences[0].solids[0].built.body).unwrap();
+    let mut wrong = Vec::new();
+    for (schema, unit) in [("ap242", "mm"), ("ap214", "m")] {
+        let params = json!({"part": "plate", "schema": schema, "unit": unit,
+                            "time_stamp": "2026-11-14T00:00:00"});
+        let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+        let bytes = ryucad::server::answer_live(&mut s, None, None, req)
+            .unwrap()
+            .binary
+            .unwrap();
+        let path = dir.path().join(format!("tapped-{schema}.stp"));
+        std::fs::write(&path, &bytes).unwrap();
+        match occt::Solid::read_step(&path, false).map(|x| x.solids()) {
+            Ok(x) if x.len() == 1 && agree(v, bound, x[0].volume) => {}
+            other => wrong.push(format!("{schema}: {v:.3} mm³, OCCT {other:?}")),
+        }
+        let got = occt::xde_properties(&path).unwrap();
+        if !got.is_empty() {
+            wrong.push(format!(
+                "{schema}: OCCT reads properties from the aspects: {got:?}"
+            ));
+        }
+        let f = ryustep::part21::parse(&bytes).unwrap();
+        let by_id = |id: u64| {
+            f.instances
+                .iter()
+                .find(|i| i.id == id)
+                .map(|i| ryustep::census::joined(i.record.parts()))
+        };
+        let aspects: Vec<_> = instances_named(&f, "SHAPE_ASPECT").collect();
+        if aspects.len() != 3 {
+            wrong.push(format!("{schema}: {} aspects, want 3", aspects.len()));
+        }
+        for (id, params) in &aspects {
+            if !matches!(params.get(2), Some(P::Ref(r)) if by_id(*r).as_deref() == Some("PRODUCT_DEFINITION_SHAPE"))
+            {
+                wrong.push(format!(
+                    "{schema}: aspect #{id} isn't over a PRODUCT_DEFINITION_SHAPE"
+                ));
+            }
+            let usages: Vec<_> = instances_named(&f, "GEOMETRIC_ITEM_SPECIFIC_USAGE")
+                .filter(|(_, p)| matches!(p.get(2), Some(P::Ref(r)) if r == id))
+                .collect();
+            if usages.is_empty() {
+                wrong.push(format!("{schema}: aspect #{id} names no face"));
+            }
+            for (u, p) in usages {
+                let ok = matches!((p.get(3), p.get(4)), (Some(P::Ref(rep)), Some(P::Ref(face)))
+                    if by_id(*rep).as_deref() == Some("ADVANCED_BREP_SHAPE_REPRESENTATION")
+                        && by_id(*face).as_deref() == Some("ADVANCED_FACE"));
+                if !ok {
+                    wrong.push(format!("{schema}: usage #{u} {p:?}"));
+                }
+            }
+            let over = instances_named(&f, "PROPERTY_DEFINITION").any(|(_, p)| {
+                matches!((p.first(), p.get(2)), (Some(P::Str(n)), Some(P::Ref(r)))
+                    if &**n == "user defined attributes" && r == id)
+            });
+            if !over {
+                wrong.push(format!(
+                    "{schema}: aspect #{id} has no user defined attributes"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
