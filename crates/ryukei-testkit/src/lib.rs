@@ -82,9 +82,17 @@ impl FuzzCase {
 }
 
 /// Runs one fuzz case with its watchdog; prints the units it spent when
-/// `RYUKEI_FUZZ_UNITS` is set, for calibrating [`FUZZ_BUDGET`].
+/// `RYUKEI_FUZZ_UNITS` is set, for calibrating [`FUZZ_BUDGET`]. The
+/// deadline is [`FUZZ_DEADLINE`], or `RYUKEI_FUZZ_DEADLINE_S` seconds when
+/// that is set: for measuring how soon a cancel stops a case (plan 30.D),
+/// which it then prints. Only this test crate reads it; never the kernel.
 pub fn fuzz_case<R>(case: impl FnOnce(&FuzzCase) -> R) -> R {
-    fuzz_case_within(FUZZ_DEADLINE, case)
+    let deadline = std::env::var("RYUKEI_FUZZ_DEADLINE_S")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map_or(FUZZ_DEADLINE, std::time::Duration::from_secs_f64);
+    fuzz_case_within(deadline, case)
 }
 
 /// [`fuzz_case`] with another deadline.
@@ -96,14 +104,22 @@ pub fn fuzz_case_within<R>(deadline: std::time::Duration, case: impl FnOnce(&Fuz
         spent: AtomicU64::new(0),
     };
     let (done, wait) = channel::<()>();
+    let fired = std::sync::Mutex::new(None::<std::time::Instant>);
     let out = std::thread::scope(|s| {
         let cancel = &c.cancel;
+        let fired = &fired;
         s.spawn(move || {
             if wait.recv_timeout(deadline) == Err(RecvTimeoutError::Timeout) {
                 cancel.store(true, Ordering::Relaxed);
+                *fired.lock().expect("unpoisoned") = Some(std::time::Instant::now());
             }
         });
         let out = case(&c);
+        if std::env::var_os("RYUKEI_FUZZ_DEADLINE_S").is_some()
+            && let Some(at) = *fired.lock().expect("unpoisoned")
+        {
+            eprintln!("cancel latency {:.3} s", at.elapsed().as_secs_f64());
+        }
         drop(done);
         out
     });
