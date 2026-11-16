@@ -18,6 +18,8 @@ pub struct SheetView {
     /// `(centre_nm, zoom_nm_per_pt)`.
     pub camera: Option<([i64; 2], i64)>,
     pub shown_by: Option<String>,
+    /// The revision the participant compares against (`compare.set`).
+    pub compare: Option<String>,
 }
 
 fn text(v: &Value) -> Option<String> {
@@ -40,6 +42,7 @@ impl ryu_app::people::View for SheetView {
             layer: text(&v["layer"]),
             camera,
             shown_by: text(&v["shown_by"]),
+            compare: text(&v["compare"]),
         }
     }
     /// A participant can be followed once their window shows a sheet.
@@ -62,13 +65,16 @@ mod tests {
         p.reset(&json!([
             {"id": "p-1", "kind": "human", "name": "Dana", "selection": ["top/r1"], "highlights": [],
              "block": "top", "sheet": "s1", "layer": null, "design": "d",
-             "camera": {"centre_nm": [10, 20], "zoom_nm_per_pt": 30000}, "shown_by": "p-2"},
+             "camera": {"centre_nm": [10, 20], "zoom_nm_per_pt": 30000}, "shown_by": "p-2",
+             "compare": "HEAD"},
             {"id": "p-2", "kind": "agent", "name": "agent", "selection": [], "highlights": []},
         ]));
         let dana = p.get("p-1").unwrap();
         assert_eq!(dana.sheet.as_deref(), Some("s1"));
         assert_eq!(dana.camera, Some(([10, 20], 30_000)));
         assert_eq!(dana.shown_by.as_deref(), Some("p-2"));
+        assert_eq!(dana.compare.as_deref(), Some("HEAD"));
+        assert_eq!(p.get("p-2").unwrap().view.compare, None);
         use ryu_app::people::View;
         assert!(dana.view.followable() && !p.get("p-2").unwrap().view.followable());
     }
