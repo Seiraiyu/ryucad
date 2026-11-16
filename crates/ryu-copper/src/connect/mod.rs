@@ -38,6 +38,7 @@
 //!   nanometres; every answer is sorted by key; the graph's labels and
 //!   search order never show.
 
+mod edit;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod graph;
