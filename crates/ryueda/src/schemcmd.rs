@@ -1015,7 +1015,6 @@ pub(crate) fn show_layer(
 /// times (a stack's layers) draws one occurrence's designators: `layer`'s,
 /// else the first's; the answer lists them all.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn render(
     p: &Project,
     design: Option<&str>,

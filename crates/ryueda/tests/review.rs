@@ -4,7 +4,6 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
-#[allow(dead_code)]
 #[path = "support/draw.rs"]
 mod draw;
 #[path = "support/gitrepo.rs"]
