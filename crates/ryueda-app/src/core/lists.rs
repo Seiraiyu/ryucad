@@ -303,6 +303,8 @@ pub fn instructions(v: &Value) -> Vec<Instruction> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub seq: u64,
+    /// The request it logged (`merge.resolve`).
+    pub method: String,
     /// `agent edited`.
     pub text: String,
     pub undo: bool,
@@ -318,6 +320,7 @@ pub fn activity(v: &Value) -> Vec<Entry> {
         .flatten()
         .map(|e| Entry {
             seq: e["seq"].as_u64().unwrap_or(0),
+            method: e["method"].as_str().unwrap_or_default().to_owned(),
             text: format!(
                 "{} {}",
                 e["participant"]["name"].as_str().unwrap_or("outside"),
@@ -436,5 +439,19 @@ mod tests {
         assert!(a[0].redo && !a[0].undo);
         assert!(a[1].undo && !a[1].redo);
         assert_eq!(a[1].text, "agent edited");
+    }
+
+    #[test]
+    fn a_resolve_is_an_entry_with_its_method() {
+        let v = json!({"entries": [
+            {"seq": 4, "method": "merge.resolve", "kind": "change", "undone_by": null,
+             "participant": {"name": "Dana"}},
+            {"seq": 3, "method": "component.edit", "kind": "change", "undone_by": null,
+             "participant": {"name": "agent"}}
+        ]});
+        let list = activity(&v);
+        assert_eq!(list[0].method, "merge.resolve");
+        assert_eq!(list[0].text, "Dana settled");
+        assert!(list[0].undo);
     }
 }

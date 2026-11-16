@@ -800,6 +800,14 @@ impl Window {
         self.send(req("undo", p), Why::Write("Undo"));
     }
 
+    /// The entry Undo would take, when it is a resolve: the panel's Undo.
+    pub fn last_resolve(&self) -> Option<&Entry> {
+        self.activity
+            .iter()
+            .find(|e| e.undo)
+            .filter(|e| e.method == "merge.resolve")
+    }
+
     /// Redoes the newest undo not redone yet.
     pub fn redo(&mut self) {
         let p = self
