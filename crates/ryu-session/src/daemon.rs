@@ -640,7 +640,9 @@ fn cancel_all<P: Serve>(state: &State<P>) -> usize {
 
 /// The lock, for answering `req`, once the slow work it prepares
 /// ([`Serve::prepare`]) is done without it, so other connections' requests
-/// don't wait on that work (#91); and how long it waited for the lock.
+/// don't wait on that work (#91); and how long it waited for the lock. A
+/// request with nothing to prepare keeps the lock it took, so it keeps
+/// its place in the queue (#849).
 fn lock_prepared<'a, P: Serve>(
     core: &'a Fifo<Core<P>>,
     me: Option<&str>,
@@ -648,21 +650,24 @@ fn lock_prepared<'a, P: Serve>(
     job: &Job,
 ) -> (FifoGuard<'a, Core<P>>, Duration) {
     let asked = Instant::now();
-    let (prepared, mut waited) = {
-        let mut c = core.lock();
-        let waited = asked.elapsed();
+    let mut c = core.lock();
+    let mut waited = asked.elapsed();
+    let prepared = {
         let Core { session, live } = &mut *c;
-        (P::prepare(session, live, me, req, job), waited)
+        P::prepare(session, live, me, req, job)
     };
-    let made =
-        prepared.and_then(|job| std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).ok());
+    let Some(prepared) = prepared else {
+        return (c, waited);
+    };
+    drop(c);
+    let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(prepared)).ok();
     let asked = Instant::now();
-    let mut core = core.lock();
+    let mut c = core.lock();
     waited += asked.elapsed();
-    if let (Some(put), Some(s)) = (made, core.session.as_mut()) {
+    if let (Some(put), Some(s)) = (made, c.session.as_mut()) {
         put(s);
     }
-    (core, waited)
+    (c, waited)
 }
 
 /// Opens a subscription for the connection's participant.
