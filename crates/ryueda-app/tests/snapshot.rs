@@ -224,3 +224,53 @@ fn a_halo_reads_on_white_paper() {
     let img = h.render().unwrap();
     looks_as_it_did(&img, "halo-light");
 }
+
+/// The breakout's merge in the window: the Conflicts tile open, light.
+#[test]
+fn the_conflict_panel_looks_as_it_did_and_is_named() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (_top, board) = common::merging("snapshot-conflicts", common::OURS, common::THEIRS);
+    let root = board.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(W, H))
+        .wgpu()
+        .build_eframe(move |cc| App::open(&cc.egui_ctx, &root, daemon()));
+    h.ctx.set_theme(egui::Theme::Light);
+    let end = Instant::now() + Duration::from_secs(60);
+    while !h.state().opened().is_some_and(|w| {
+        w.idle()
+            && w.merge
+                .as_ref()
+                .is_some_and(|m| m.conflicts().iter().any(|c| c["kind"] == "refdes_clash"))
+    }) {
+        assert!(Instant::now() < end, "the merge never showed");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    h.state_mut().opened_mut().unwrap().flash_on = false;
+    h.state_mut().opened_mut().unwrap().flash.clear();
+    for _ in 0..4 {
+        h.step();
+    }
+    let img = h.render().unwrap();
+    looks_as_it_did(&img, "conflicts-light");
+    for label in ["Conflicts", "Renumber (recommended)"] {
+        assert!(h.query_by_label(label).is_some(), "nothing named {label}");
+    }
+    for label in ["Show", "Show ours", "Show theirs", "Copy"] {
+        assert!(
+            h.query_all_by_label(label).next().is_some(),
+            "nothing named {label}"
+        );
+    }
+    let unnamed = h
+        .query_all_by(|n| {
+            n.role() == egui::accesskit::Role::Button
+                && n.label().is_none_or(|l| l.trim().is_empty())
+        })
+        .count();
+    assert_eq!(unnamed, 0, "unnamed buttons");
+}

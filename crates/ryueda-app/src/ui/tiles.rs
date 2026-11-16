@@ -579,7 +579,7 @@ fn conflicts(ui: &mut egui::Ui, w: &mut Window, local: &mut Local, copy: &mut Op
         ui.weak("No merge in progress.");
         return;
     };
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.strong(format!("{} in progress", m.step()));
         ui.label(m.summary());
         if m.resolving {
@@ -634,7 +634,7 @@ fn conflicts(ui: &mut egui::Ui, w: &mut Window, local: &mut Local, copy: &mut Op
                         for a in &g.areas {
                             ui.push_id(&a.id, |ui| {
                                 ui.label(&a.message);
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     let pick = local.areas.entry(a.id.clone()).or_default();
                                     ui.radio_value(pick, Pick::Relayout, "Relay out");
                                     ui.radio_value(pick, Pick::Ours, "Ours");
@@ -719,9 +719,9 @@ fn conflict_row(
             for (side, short, full) in &r.values {
                 ui.label(format!("{side}: {short}")).on_hover_text(full);
             }
-            ui.horizontal(|ui| shows(ui, r, show));
+            ui.horizontal_wrapped(|ui| shows(ui, r, show));
             for a in &r.actions {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let text = if a.recommended {
                         format!("{} (recommended)", a.label)
                     } else {
@@ -739,7 +739,7 @@ fn conflict_row(
                 }
             }
             if let Some(t) = &r.typed {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.weak("A value of your own:");
                     ui.monospace(t);
                     if ui.small_button("Copy").clicked() {
@@ -801,7 +801,7 @@ fn finish(ui: &mut egui::Ui, m: &crate::core::merge::Merge, copy: &mut Option<St
         Some("git commit".to_owned()),
     ];
     for c in cmds.into_iter().flatten() {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.monospace(&c);
             if ui.small_button("Copy").clicked() {
                 *copy = Some(c.clone());
