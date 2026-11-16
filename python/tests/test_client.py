@@ -4,14 +4,17 @@ import concurrent.futures
 import json
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import warnings
 
 import ryucad
 from ryucad._session import check_version
-from support import FAKE, fake
+from support import FAKE, SRC, fake
 
 
 class Framing(unittest.TestCase):
@@ -196,3 +199,44 @@ class Threads(unittest.TestCase):
                 results = list(pool.map(worker, range(4)))
         for t, got in enumerate(results):
             self.assertEqual(got, [t * 1000 + i for i in range(200)])
+
+
+DRIVER = r"""
+import sys
+import time
+import ryucad
+
+cad = ryucad.connect(exe=[sys.executable, sys.argv[1]])
+try:
+    cad.call("slow")
+    print("answered")
+except KeyboardInterrupt:
+    caught = time.time()
+    print("interrupted", cad.close(), repr(caught))
+"""
+
+
+@unittest.skipIf(os.name == "nt", "Ctrl+C reaches a process group on Unix")
+class CtrlC(unittest.TestCase):
+    def test_ctrl_c_waits_for_the_cancelled_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "waiting")
+            answered = os.path.join(tmp, "answered")
+            env = dict(os.environ, FAKE_MARKER=marker, FAKE_ANSWERED=answered,
+                       FAKE_CANCEL_DELAY="1",
+                       PYTHONPATH=os.pathsep.join([SRC, os.environ.get("PYTHONPATH", "")]))
+            driver = subprocess.Popen([sys.executable, "-c", DRIVER, FAKE], env=env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      start_new_session=True)
+            deadline = time.monotonic() + 60
+            while not os.path.exists(marker):
+                self.assertLess(time.monotonic(), deadline, "the fake never started waiting")
+                time.sleep(0.05)
+            os.killpg(driver.pid, signal.SIGINT)
+            out, err = driver.communicate(timeout=60)
+            with open(answered, encoding="utf-8") as f:
+                answered_at = float(f.read())
+        words = out.decode().split()
+        self.assertEqual(words[:2], ["interrupted", "130"], err.decode())
+        # KeyboardInterrupt came only once the cancelled answer was out.
+        self.assertGreaterEqual(float(words[2]), answered_at)

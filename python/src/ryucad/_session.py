@@ -197,18 +197,32 @@ class Session:
         return closed
 
     def _answer(self, rid: int) -> Answer:
+        interrupted = False
         while True:
             try:
                 answer = self._next(rid)
+            except KeyboardInterrupt:
+                # Ctrl+C reached ryucad too (the same process group or
+                # console): it cancels a long request, answers it
+                # `cancelled` and exits 130. Read to there.
+                interrupted = True
+                continue
             except Error:
+                if interrupted:
+                    break
                 self._raised = None
                 raise
             if answer is None:
                 continue
+            if interrupted:
+                break
             raised, self._raised = self._raised, None
             if raised is not None:
                 raise raised
             return answer
+        self._raised = None
+        self._ended()
+        raise KeyboardInterrupt
 
     def _notified(self, message: dict[str, Any]) -> None:
         """A line that isn't an answer: a ``progress`` line goes to
