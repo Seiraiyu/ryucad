@@ -220,8 +220,13 @@ fn dispatch(
         }
         Request::Render { board, args } => {
             let unit = session.project().manifest.default_unit;
-            let b = session.board(&board)?;
-            crate::render::render(&b, Some(&board), &args, unit)
+            if args.wants_copper() {
+                let cb = session.copper(&board)?;
+                crate::render::render_copper(&cb, Some(&board), &args, unit)
+            } else {
+                let b = session.board(&board)?;
+                crate::render::render(&b, Some(&board), &args, unit)
+            }
         }
         Request::Clearance { board, args } => {
             let unit = session.project().manifest.default_unit;

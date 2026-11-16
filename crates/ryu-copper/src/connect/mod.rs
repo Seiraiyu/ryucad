@@ -451,6 +451,11 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
         }
     }
 
+    /// A resolved item's pieces' polygons; `None` for a plain item.
+    pub fn resolved(&self, key: &K) -> Option<&[Polygons]> {
+        self.entries.get(key)?.resolved.as_deref()
+    }
+
     /// How many times an item's copper has gone through the boolean since
     /// this was built.
     pub fn resolves(&self) -> u64 {

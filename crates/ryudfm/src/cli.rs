@@ -143,6 +143,16 @@ enum Command {
         window: Option<String>,
         #[arg(long)]
         step: Option<String>,
+        /// Copper merged, each island in its own colour.
+        #[arg(long)]
+        merged: bool,
+        /// Highlight this net's islands (implies --merged).
+        #[arg(long)]
+        net: Option<String>,
+        /// Draw the merged copper grown by a length, or shrunk when
+        /// negative (implies --merged).
+        #[arg(long, allow_hyphen_values = true)]
+        offset: Option<String>,
     },
     /// Every pair of different islands closer than a length on each copper
     /// layer, closest first: once per pair of islands, or every pair of
@@ -375,6 +385,9 @@ fn render_args(cmd: &Command) -> ryudfm::render::Args {
         size,
         window,
         step,
+        merged,
+        net,
+        offset,
         ..
     } = cmd
     else {
@@ -398,6 +411,9 @@ fn render_args(cmd: &Command) -> ryudfm::render::Args {
         },
         size: size.clone(),
         window: window.clone(),
+        merged: *merged,
+        net: net.clone(),
+        offset: offset.clone(),
     }
 }
 
@@ -620,7 +636,13 @@ fn by_path(cmd: &Command, here: &Path) -> Result<Answer> {
                 unreachable!("a path")
             };
             let b = read(&p, step)?;
-            let mut a = ryudfm::render::render(&b, None, &render_args(cmd), Unit::Mm)?;
+            let args = render_args(cmd);
+            let mut a = if args.wants_copper() {
+                let cb = ryudfm::copper::CopperBoard::new(std::sync::Arc::new(b));
+                ryudfm::render::render_copper(&cb, None, &args, Unit::Mm)?
+            } else {
+                ryudfm::render::render(&b, None, &args, Unit::Mm)?
+            };
             at(&mut a.result, &p);
             Ok(a)
         }
