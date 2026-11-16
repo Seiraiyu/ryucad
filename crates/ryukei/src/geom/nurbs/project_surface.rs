@@ -14,7 +14,7 @@
 use super::KnotVector;
 use super::bezier::BezierCurve;
 use super::eval::Spline;
-use super::project::{Foot, Signs, binom, creases, distinct, in_period, signs};
+use super::project::{Foot, Signs, binom, creases, distinct, in_period, nearest, signs};
 use super::refine::Hom;
 use super::surface::{Direction, NurbsSurface};
 use crate::geom::{SurfaceEval, Vector3};
@@ -1000,7 +1000,31 @@ impl NurbsSurface {
             })
             .collect();
         feet.sort_by(|x, y| x.0.0.total_cmp(&y.0.0).then(x.0.1.total_cmp(&y.0.1)));
-        distinct(feet)
+        // The least foot found, before `distinct` lets an earlier one
+        // within resolution stand for it.
+        let least = feet
+            .iter()
+            .min_by(|x, y| x.2.total_cmp(&y.2))
+            .copied();
+        let mut kept = distinct(feet);
+        // `nearest` takes the first foot within resolution of the least
+        // kept, and a kept foot stands for any within resolution of it, so
+        // the two resolutions could add up: #907's foot at 0 was kept as
+        // one 2.3e-9 away, and one at 1.23e-8 came first. Where the answer
+        // would be more than a resolution from the least found, the least
+        // takes the place of the foot standing for it. Nowhere else does
+        // anything change.
+        if let Some(least) = least
+            && !kept.is_empty()
+            && nearest(&kept).2 > least.2 + LINEAR_RESOLUTION
+            && let Some(k) = kept.iter_mut().find(|k| {
+                let d = least.1 - k.1;
+                d.dot(d) <= LINEAR_RESOLUTION * LINEAR_RESOLUTION
+            })
+        {
+            *k = least;
+        }
+        kept
     }
 }
 

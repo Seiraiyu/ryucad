@@ -16,6 +16,7 @@ use ryukei::offset::{offset_body_with, shell_with};
 use ryukei_testkit::boolean_bytes::boolean_case;
 use ryukei_testkit::crossing::{SelfUnionRun, self_union_run};
 use ryukei_testkit::heal_bytes::heal_case;
+use ryukei_testkit::nurbs_bytes::{self, Case};
 use ryukei_testkit::offset_bytes::{Op, offset_case_past};
 use ryukei_testkit::sweep_bytes::sweep;
 use ryukei_testkit::tolerant_bytes::{TolerantRun, tolerant_run};
@@ -779,6 +780,26 @@ fn a_minimum_on_a_fold_along_the_first_split() {
         [5.0; 6],
     );
     projects_to(&s, Point3::new(6.0, -3.835294117647059, 6.0), (4.2514, 4.0));
+}
+
+/// #907: the `nurbs` target's find of 2026-11-15 (run 43751287168,
+/// `crash-a6856677…`). A grid sample lies at the query point itself, but
+/// the search answered a foot 1.23e-8 away at `(4.99936, 3.00001)`,
+/// beside the domain's corner, where the patch is crushed and Newton's
+/// steps stopped a resolution short.
+#[test]
+fn a_point_on_a_crushed_corner() {
+    let Some(Case::Surface(s, p)) = nurbs_bytes::case(&bytes(concat!(
+        "ffff012000ffffffffff3ddfff26ffffffffff241dffffffffffffffffffffd9d9d9d9d9d9",
+        "57555555a35555550578d9d9d9d9d9d9d9d9d9d9ffffdad1",
+    ))) else {
+        panic!("a surface");
+    };
+    let eps = ryukei::tol::LINEAR_RESOLUTION;
+    let foot = s.project(p);
+    assert_eq!(s.point(foot.param.0, foot.param.1), foot.point);
+    assert!(foot.distance <= sampled(&s, p, 8) + eps, "{foot:?}");
+    assert!(foot.distance <= sampled(&s, p, 400) + eps, "{foot:?}");
 }
 
 /// The `edit` target's find of 2026-11-11 (run 42952227583,
