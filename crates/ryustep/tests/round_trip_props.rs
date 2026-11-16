@@ -374,6 +374,7 @@ fn properties_round_trip() {
                 }),
                 attributes: attributes.clone(),
             }],
+            aspects: Vec::new(),
         };
         let paints = ryustep::Paints {
             bodies: vec![ryustep::BodyPaint {

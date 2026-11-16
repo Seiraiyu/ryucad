@@ -5,9 +5,8 @@
   "depth": {
     "blind": "14 mm"
   },
-  "diameter": "5 mm",
   "form": "simple",
-  "format": 3,
+  "format": 23,
   "kind": "ryucad.feature",
   "points": [
     "p1"
@@ -16,5 +15,10 @@
   "targets": [
     "shell"
   ],
+  "thread": {
+    "depth": "10 mm",
+    "size": "M6",
+    "standard": "iso_metric"
+  },
   "type": "hole"
 }

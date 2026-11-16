@@ -1,6 +1,9 @@
 """A two-stage gearbox: a housing (a block hollowed out, its vertical
-edges rounded, bearing bores through both walls and a bolt pattern round
-its rim), three stepped shafts revolved from sketches, four spur gears
+edges rounded, bearing bores through both walls, a bolt pattern round
+its rim tapped M6, and four mounting holes through its floor for house M8
+cap screws (one dimensioned from the floor's edges, the rest a fill),
+sized from the project's `hole_standards.json` of made-up house values),
+three stepped shafts revolved from sketches, four spur gears
 (a disc with its tooth gaps cut once and patterned round it, and a bore),
 and an assembly holding the housing fixed, each shaft on a revolute in its
 bores and each gear fastened to its shaft. Through ryucad's CLI only;
@@ -28,6 +31,28 @@ GEARS = {
     "wheel-2": ("output", 24, 36, 22, 85),
 }
 LENGTH = 150  # each shaft, along the housing's y
+
+# The project's own fastener table: made-up house values, as a shop's
+# table would hold them. Fasteners are never built into ryucad and no
+# paid table is copied (design 533); these are no standard's numbers.
+HOLE_STANDARDS = {
+    "fasteners": {
+        "house_cap": {
+            "M8": {"clearance": {"close": "8.6 mm", "loose": "10.3 mm", "normal": "9.2 mm"}},
+        },
+    },
+    "format": 1,
+    "kind": "ryucad.hole_standards",
+}
+
+
+def floor_edge(e, axis, at):
+    """Whether `e` is a straight edge of the cavity's floor (z = 6 mm)
+    running across `axis`, `at` metres along it."""
+    c = e["curve"]
+    return (c["type"] == "line" and abs(c["origin"][2] - 0.006) < 1e-9
+            and abs(c["dir"][2]) < 1e-9 and abs(c["dir"][axis]) < 1e-9
+            and abs(c["origin"][axis] - at) < 1e-9)
 
 
 def polygon(points, prefix=""):
@@ -58,10 +83,24 @@ def housing(p):
     rim = p.sketch(h, [{"op": "add", "type": "point", "id": "p1",
                         "at": ["-100 mm", "-52 mm"]}],
                    fid="rim", place=((0, 0, 120), Z, X))
-    p.add(h, "hole", "bolt", sketch=rim, point="p1", diameter="5 mm", depth="14 mm",
-          bottom="118")
+    p.add(h, "hole", "bolt", sketch=rim, point="p1",
+          spec="M6x1.0-6H 10 DEEP, DRILL 14 DEEP 118DEG")
     p.add(h, "pattern", "bolts", seed="bolt", form="linear", direction="x",
           spacing="40 mm", count="6", direction2="y", spacing2="104 mm", count2="2")
+    # Four mounting holes through the floor (6 mm, inside the cavity) for
+    # house M8 cap screws: the first 16 mm and 14 mm in from the floor's
+    # edges, the rest a fill 180 by 70 mm, clipped to the floor.
+    floor = p.faces(h, "shell", lambda f: f["surface"]["type"] == "plane"
+                    and abs(abs(f["surface"]["frame"]["z"][2]) - 1) < 1e-9
+                    and abs(f["surface"]["frame"]["origin"][2] - 0.006) < 1e-9)
+    left = p.edges(h, "shell", lambda e: floor_edge(e, 0, -0.106))
+    front = p.edges(h, "shell", lambda e: floor_edge(e, 1, -0.049))
+    p.add(h, "hole", "mount", spec="CLEAR HOUSE_CAP M8 THRU", face=floor[0],
+          from_edge=[f"{left[0]}=16mm", f"{front[0]}=14mm"])
+    p.add(h, "pattern", "mounts", seed="mount", form="fill", fill_face=floor[0],
+          direction="x", spacing="180mm", spacing2="70mm")
+    # The hole table's datum, at the part's origin.
+    p.add(h, "point", "zero", by="coordinates", coordinates="0,0,0")
 
 
 def shaft(p, name, r):
@@ -132,7 +171,7 @@ def assembly(p):
 
 def drawings(p):
     """The housing's standard views with its holes called out, a section
-    through its bores and a detail of a bolt hole; each gear's standard
+    through its bores, a detail of a bolt hole and a table of its holes; each gear's standard
     views with its bore's diameter; the gearbox in isometric with a
     balloon on every part and its BOM."""
     p.drawing("housing", "main", "Housing", size="ansi_c")
@@ -142,6 +181,12 @@ def drawings(p):
     p.drawing_add("housing", "main", "view", "add", id="v6", **{"from": "v2"},
                   centre="-100mm,-52mm,120mm", radius="12mm", label="B")
     p.run("drawing", "layout", "housing", "main")
+    # Every hole of the housing in a table on its top view, in the sheet's
+    # free band between the detail and the isometric view.
+    p.drawing_ops("housing", "main", [{"op": "add", "kind": "annotation",
+                                       "value": {"type": "hole_table", "view": "v2",
+                                                 "origin": "zero",
+                                                 "at": ["210 mm", "27.5 mm"]}}])
     for name, (on, _teeth, _pitch, _width, _along) in GEARS.items():
         bore = SHAFTS[on][1]
         p.drawing(name, "main", name.capitalize())
@@ -158,6 +203,7 @@ def drawings(p):
 
 def build(p):
     p.run("init", "--unit", "mm")
+    p.write_json("hole_standards.json", HOLE_STANDARDS)
     housing(p)
     for name, (_x, r) in SHAFTS.items():
         shaft(p, name, r)

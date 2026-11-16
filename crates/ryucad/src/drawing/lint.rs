@@ -25,7 +25,7 @@ pub struct Rule {
     pub fix: &'static str,
 }
 
-pub const RULES: [Rule; 11] = [
+pub const RULES: [Rule; 12] = [
     Rule {
         code: "dwg_view_overlap",
         weight: 10,
@@ -102,8 +102,16 @@ pub const RULES: [Rule; 11] = [
         code: "dwg_hole_uncalled",
         weight: 3,
         per: "hole feature",
-        what: "A hole feature the drawing shows has no hole callout and no diameter.",
+        what: "A hole feature the drawing shows has no hole callout, no diameter, and no hole table listing it.",
         why: "Its size, depth and count are nowhere on the drawing.",
+        fix: "Add a hole_callout on one of its faces in a view that shows it.",
+    },
+    Rule {
+        code: "dwg_thread_uncalled",
+        weight: 3,
+        per: "hole feature",
+        what: "A tapped hole the drawing shows is sized (by a diameter) but its thread is called out nowhere: no hole callout, no hole table.",
+        why: "The drill's size doesn't say the hole is tapped, nor to what thread and class.",
         fix: "Add a hole_callout on one of its faces in a view that shows it.",
     },
     Rule {
@@ -272,11 +280,22 @@ pub(crate) fn run(
         }));
     };
     let set = |id: String, fields: Value| json!([{"op": "set", "id": id, "fields": fields}]);
-    let called: std::collections::BTreeSet<(String, String)> = sheets
-        .iter()
-        .flat_map(|s| &s.annotations)
-        .filter(|a| a.error.is_none())
-        .filter_map(|a| a.hole.as_ref().map(|(p, h)| (p.to_string(), h.to_string())))
+    let ok = || {
+        sheets
+            .iter()
+            .flat_map(|s| &s.annotations)
+            .filter(|a| a.error.is_none())
+    };
+    let key = |(p, h): &(crate::doc::id::Id, crate::doc::id::Id)| (p.to_string(), h.to_string());
+    // Called out: by a callout or a diameter of its wall, or a table.
+    let called: std::collections::BTreeSet<(String, String)> = ok()
+        .flat_map(|a| a.hole.iter().chain(&a.listed))
+        .map(key)
+        .collect();
+    // Its thread called out: by a tapped hole's callout, or a table.
+    let threaded: std::collections::BTreeSet<(String, String)> = ok()
+        .flat_map(|a| a.hole.iter().filter(|_| a.thread).chain(&a.listed))
+        .map(key)
         .collect();
     let mut judged: std::collections::BTreeSet<(String, String)> = Default::default();
     for s in sheets {
@@ -544,23 +563,39 @@ pub(crate) fn run(
                 }
             }
         }
-        // Holes uncalled: by a callout or a diameter of its wall anywhere
-        // on the drawing, and each hole judged once, where first shown.
-        for (part, hole, view, face) in &s.holes {
-            let key = (part.to_string(), hole.to_string());
-            if called.contains(&key) || !judged.insert(key) {
+        // Holes uncalled: by a callout, a diameter of its wall or a table
+        // anywhere on the drawing; a tapped one's thread by a callout or
+        // a table. Each hole judged once, where first shown, and a hole
+        // uncalled isn't judged for its thread too.
+        for (part, hole, view, face, tapped) in &s.holes {
+            let k = (part.to_string(), hole.to_string());
+            if !judged.insert(k.clone()) {
                 continue;
             }
-            push(
-                "dwg_hole_uncalled",
-                &sk,
-                format!(
-                    "hole {hole} of {part} is shown in view {view} with no callout or diameter"
-                ),
-                json!({"part": part, "hole": hole, "view": view.to_string()}),
-                vec![json!([{"op": "add", "kind": "annotation",
-                    "value": {"type": "hole_callout", "view": view.to_string(), "of": face}}])],
-            );
+            let fix = vec![json!([{"op": "add", "kind": "annotation",
+                "value": {"type": "hole_callout", "view": view.to_string(), "of": face}}])];
+            let details = json!({"part": part, "hole": hole, "view": view.to_string()});
+            if !called.contains(&k) {
+                push(
+                    "dwg_hole_uncalled",
+                    &sk,
+                    format!(
+                        "hole {hole} of {part} is shown in view {view} with no callout or diameter"
+                    ),
+                    details,
+                    fix,
+                );
+            } else if *tapped && !threaded.contains(&k) {
+                push(
+                    "dwg_thread_uncalled",
+                    &sk,
+                    format!(
+                        "tapped hole {hole} of {part} is shown in view {view} with no thread callout"
+                    ),
+                    details,
+                    fix,
+                );
+            }
         }
     }
     // Datums named but not given.

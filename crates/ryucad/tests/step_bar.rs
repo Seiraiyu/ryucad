@@ -442,6 +442,7 @@ fn attributed_race() -> Vec<u8> {
         .collect();
     let m = model(bodies);
     let data = PartData {
+        aspects: Vec::new(),
         products: (0..m.products.len())
             .map(|k| ProductData {
                 product: k,

@@ -1,0 +1,19 @@
+{
+  "direction": "x",
+  "face": {
+    "feature": "shell",
+    "name": "8fb46a6602056bf05871bc5c75f48a89"
+  },
+  "features": [
+    "mount"
+  ],
+  "form": "fill",
+  "format": 26,
+  "kind": "ryucad.feature",
+  "spacing": "180 mm",
+  "spacing2": "70 mm",
+  "targets": [
+    "shell"
+  ],
+  "type": "pattern"
+}

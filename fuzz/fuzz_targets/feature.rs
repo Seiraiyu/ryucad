@@ -221,6 +221,7 @@ fn seeded() -> &'static ryucad::doc::project::ImportFile {
         // file. The fuzz target builds no project, so no `ryupdm.json`
         // maps them onto properties; that runs in ryucad's tests.
         let data = ryustep::PartData {
+            aspects: Vec::new(),
             products: vec![ryustep::ProductData {
                 product: 0,
                 material: Some(ryustep::MaterialData {

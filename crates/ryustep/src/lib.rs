@@ -24,7 +24,7 @@ pub mod write;
 pub use error::{ImportError, StepError, WriteError};
 pub use read::{Held, Imported, Model, Opened, ReadOptions, Referenced, open, read};
 pub use write::{
-    Approximated, AttributeData, BodyPaint, Child, DataValue, LengthUnit, MaterialData,
+    Approximated, AspectData, AttributeData, BodyPaint, Child, DataValue, LengthUnit, MaterialData,
     OccurrencePaint, Paint, Paints, PartData, Passed, Product, ProductData, WriteModel,
     WriteOptions, Written, write, write_report, write_styled, write_with, write_with_data,
 };
