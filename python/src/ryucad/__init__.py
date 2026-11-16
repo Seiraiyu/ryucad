@@ -30,6 +30,7 @@ from ._errors import (
     SessionClosed,
     UsageError,
 )
+from ._find import find
 from ._meta import VERSION as __version__
 
 __all__ = [
@@ -53,4 +54,5 @@ __all__ = [
     "SessionClosed",
     "UsageError",
     "__version__",
+    "find",
 ]
