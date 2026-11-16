@@ -537,6 +537,32 @@ pub enum Code {
     /// ryudfm: no `misc/info`, or one lacking fields: read as ODB++ 7.0 (a
     /// warning).
     OdbInfoMissing,
+    /// ryudfm finding (an error): a net of the netlist whose points lie on
+    /// two or more islands of copper (each island with its points in the
+    /// details).
+    NetOpen,
+    /// ryudfm finding (an error): an island of copper holding points of two
+    /// or more nets (each net with its points, and the touching items whose
+    /// claimed nets differ, in the details).
+    NetShort,
+    /// ryudfm finding (a warning): a netlist point on no copper, or one the
+    /// bounds can't place (`uncertain`).
+    NetlistPointOffCopper,
+    /// ryudfm finding (a warning): items claiming a net none of their
+    /// island's points carry, while those points agree.
+    NetClaimMismatch,
+    /// ryudfm finding (a warning): the job has no CAD netlist, so its
+    /// components' pins are the netlist compared.
+    NetlistFromPins,
+    /// ryudfm finding (a warning): no CAD netlist and no pins with nets: no
+    /// open or short is judged.
+    NetlistMissing,
+    /// ryudfm finding (a warning): copper or drill features with no shape,
+    /// left out of the copper, so any open or short near them is in doubt.
+    CopperIncomplete,
+    /// ryudfm finding (a warning): two pieces of copper the flattening's
+    /// bounds can't say touch or not, kept apart.
+    CopperContactUncertain,
     /// The remote cache didn't answer, or answered with a server error: a
     /// warning (the local cache serves alone, and the remote is tried again
     /// after a while), or the error of `cache push`.
@@ -1421,6 +1447,19 @@ mod tests {
             json!("odb_font_missing_char")
         );
         assert_eq!(json!(Code::OdbInfoMissing), json!("odb_info_missing"));
+        for (c, name) in [
+            (Code::NetOpen, "net_open"),
+            (Code::NetShort, "net_short"),
+            (Code::NetlistPointOffCopper, "netlist_point_off_copper"),
+            (Code::NetClaimMismatch, "net_claim_mismatch"),
+            (Code::NetlistFromPins, "netlist_from_pins"),
+            (Code::NetlistMissing, "netlist_missing"),
+            (Code::CopperIncomplete, "copper_incomplete"),
+            (Code::CopperContactUncertain, "copper_contact_uncertain"),
+        ] {
+            assert_eq!(json!(c), json!(name));
+            assert_eq!(c.exit_code(), 1);
+        }
         assert_eq!(json!(Code::LayoutStale), json!("layout_stale"));
         assert_eq!(json!(Code::RegionUnresolved), json!("region_unresolved"));
         assert_eq!(json!(Code::SheetResized), json!("sheet_resized"));

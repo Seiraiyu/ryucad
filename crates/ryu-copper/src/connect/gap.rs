@@ -112,7 +112,7 @@ mod tests {
         let c = Copper::new(&l, BodyOptions::default());
         let g = c.clearance(0, 150_000);
         assert_eq!(g.len(), 1, "{g:?}");
-        assert_eq!((g[0].a.clone(), g[0].b.clone()), (("a", 0), ("b", 0)));
+        assert_eq!((g[0].a, g[0].b), (("a", 0), ("b", 0)));
         assert_eq!((g[0].distance.nm, g[0].distance.exact), (100_000, true));
         assert_ne!(g[0].islands.0, g[0].islands.1);
         // Closer than, not at: a gap of exactly 100 µm isn't under 100 µm.
