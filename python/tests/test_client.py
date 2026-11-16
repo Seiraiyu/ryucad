@@ -1,5 +1,6 @@
 """The client against the fake session: framing, errors, versions."""
 
+import concurrent.futures
 import json
 import os
 import shutil
@@ -183,3 +184,15 @@ class Requests(unittest.TestCase):
     def test_undo(self):
         with fake() as cad:
             self.assertEqual(cad.undo(), {"method": "undo", "params": {}})
+
+
+class Threads(unittest.TestCase):
+    def test_threads_sharing_a_session_take_turns(self):
+        with fake() as cad:
+            def worker(t):
+                return [cad.call("echo", n=t * 1000 + i)["params"]["n"] for i in range(200)]
+
+            with concurrent.futures.ThreadPoolExecutor(4) as pool:
+                results = list(pool.map(worker, range(4)))
+        for t, got in enumerate(results):
+            self.assertEqual(got, [t * 1000 + i for i in range(200)])
