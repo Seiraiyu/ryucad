@@ -348,3 +348,43 @@ fn an_appearance_wanted_again_asks_again() {
         fx.recorded()
     );
 }
+
+/// Every part's drawings, and the tile's list, wanted again while a
+/// reading was on its way, are asked once it comes (#849).
+#[test]
+fn drawing_lists_wanted_again_ask_again() {
+    let mut tile = crate::core::drawings::Tile {
+        drawn_waiting: true,
+        drawn_again: true,
+        list_waiting: true,
+        list_again: true,
+        ..Default::default()
+    };
+    let mut fx = Effects::default();
+    tile.answer(
+        drawings::Asked::DrawingsAll,
+        answered(json!({"drawings": []})),
+        &mut fx,
+    );
+    assert!(!tile.drawn_waiting && !tile.drawn_again);
+    assert!(
+        matches!(fx.recorded(), [Effect::Then(Then::ReadDrawn)]),
+        "{:?}",
+        fx.recorded()
+    );
+    let mut fx = Effects::default();
+    tile.answer(
+        drawings::Asked::DrawingList("p".to_owned()),
+        answered(json!({"drawings": []})),
+        &mut fx,
+    );
+    assert!(!tile.list_waiting && !tile.list_again);
+    assert!(
+        matches!(
+            fx.recorded().last(),
+            Some(Effect::Then(Then::ReadDrawingList))
+        ),
+        "{:?}",
+        fx.recorded()
+    );
+}

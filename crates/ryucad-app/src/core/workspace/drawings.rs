@@ -25,8 +25,14 @@ impl Workspace {
         }
     }
 
-    /// Reads every part's drawings again, for the tree's rows.
+    /// Reads every part's drawings again, for the tree's rows: one
+    /// reading on its way at a time (#849).
     pub fn read_drawn(&mut self) {
+        if self.drawings.drawn_waiting {
+            self.drawings.drawn_again = true;
+            return;
+        }
+        self.drawings.drawn_waiting = true;
         self.send(
             Request::DrawingList { part: None },
             Route::Drawings(drawings::Asked::DrawingsAll),
@@ -53,6 +59,11 @@ impl Workspace {
         let Some(part) = self.drawings.part.clone() else {
             return;
         };
+        if self.drawings.list_waiting {
+            self.drawings.list_again = true;
+            return;
+        }
+        self.drawings.list_waiting = true;
         self.send(
             Request::DrawingList {
                 part: Some(part.clone()),
@@ -158,6 +169,34 @@ impl crate::core::drawings::Tile {
     /// Takes the answer to one of this sub-state's requests (design
     /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
     pub(super) fn answer(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
+        let (drawn, list) = (
+            matches!(why, Asked::DrawingsAll),
+            matches!(why, Asked::DrawingList(_)),
+        );
+        self.answer_one(why, answer, fx);
+        if drawn {
+            self.drawn_waiting = false;
+            if std::mem::take(&mut self.drawn_again) {
+                fx.then(Then::ReadDrawn);
+            }
+        }
+        if list {
+            self.list_waiting = false;
+            if std::mem::take(&mut self.list_again) {
+                fx.then(Then::ReadDrawingList);
+            }
+        }
+    }
+
+    /// What was asked for may never be answered (#849).
+    pub(super) fn on_lost(&mut self) {
+        self.drawn_waiting = false;
+        self.drawn_again = false;
+        self.list_waiting = false;
+        self.list_again = false;
+    }
+
+    fn answer_one(&mut self, why: Asked, answer: Result<Answer>, fx: &mut Effects) {
         match (why, answer) {
             (Asked::DrawingList(part), Ok(a)) => {
                 if self.part.as_deref() == Some(&part) {

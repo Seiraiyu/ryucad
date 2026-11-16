@@ -68,6 +68,7 @@ pub(super) enum Then {
     ReadDimension(String, String, String, Option<Box<DimForm>>),
     ReadDrawingList,
     ReadDrawingSheet,
+    ReadDrawn,
     ReadEquations(bool),
     ReadExplodes,
     ReadForm(String, String, Option<Box<Form>>),
@@ -185,6 +186,7 @@ impl Workspace {
             }
             Then::ReadDrawingList => self.read_drawing_list(),
             Then::ReadDrawingSheet => self.read_drawing_sheet(),
+            Then::ReadDrawn => self.read_drawn(),
             Then::ReadEquations(conflicted) => self.read_equations(conflicted),
             Then::ReadExplodes => self.read_explodes(),
             Then::ReadForm(part, id, before) => self.read_form(part, id, before),
