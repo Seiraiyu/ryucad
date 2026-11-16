@@ -9,7 +9,7 @@ use crate::boolean::table::{Boundary, GeId, Member, Table};
 use crate::geom::Point2;
 use crate::intersect::{Place, point_in_face};
 use crate::split::Piece;
-use crate::topo::{Body, FaceId, ShellId};
+use crate::topo::{Body, FaceId, Sense, ShellId};
 use crate::tweak::engine::Changes;
 use crate::work::Meter;
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,6 +53,27 @@ pub(crate) fn arrangement(w: &WorkBody, table: &Table, pieces: &[Piece]) -> Arra
         laminar: BTreeSet::new(),
         old: ges_of(table, &own),
     }
+}
+
+/// The edges seed set `seeds` uses on its own more than twice in all, or
+/// more than once the same way round (design 683, plan 21.C): a set in
+/// conflict, which no closure can keep whole. Each distinct piece counts
+/// once per use; a slit piece uses its edge once each way, which is no
+/// conflict by itself.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn conflicts(arr: &Arrangement, seeds: &[usize]) -> BTreeSet<usize> {
+    let distinct: BTreeSet<usize> = seeds.iter().copied().collect();
+    // Per edge: uses reversed, uses forward.
+    let mut uses: BTreeMap<usize, [usize; 2]> = BTreeMap::new();
+    for &s in &distinct {
+        for &(g, sense) in &arr.pieces[s].1 {
+            uses.entry(g).or_default()[usize::from(sense == Sense::Forward)] += 1;
+        }
+    }
+    uses.into_iter()
+        .filter(|&(_, [r, f])| r + f > 2 || r > 1 || f > 1)
+        .map(|(g, _)| g)
+        .collect()
 }
 
 /// Every piece of an outside face. Never a pinned face's (plan 21.A):
@@ -286,5 +307,42 @@ mod tests {
         assert_eq!(seeds.len(), 1);
         assert_eq!(arr.old.len(), 4);
         assert!(!arr.clipped.is_empty());
+    }
+
+    use super::super::walk::Arrangement;
+    use crate::topo::Sense::{Forward as F, Reversed as R};
+
+    /// A ball's piece B (face 0) slit along edge 0 (both ways round), its
+    /// edge 1 closed by C (face 2); a NURBS piece N (face 1) using edge 0
+    /// forward too, with an edge 2 nothing takes back. Plan 21.C.
+    fn slit() -> Arrangement {
+        Arrangement {
+            pieces: vec![
+                (0, vec![(0, F), (0, R), (1, F)]),
+                (2, vec![(1, R)]),
+                (1, vec![(0, F), (2, F)]),
+            ],
+            ..Arrangement::default()
+        }
+    }
+
+    #[test]
+    fn a_slit_with_a_third_use_is_in_conflict_and_alone_isnt() {
+        let a = slit();
+        assert_eq!(conflicts(&a, &[0, 2]), BTreeSet::from([0]));
+        assert!(conflicts(&a, &[0]).is_empty());
+        assert!(conflicts(&a, &[0, 1]).is_empty());
+        // A seed named twice is one piece.
+        assert!(conflicts(&a, &[0, 0]).is_empty());
+    }
+
+    #[test]
+    fn two_seeds_using_an_edge_the_same_way_are_in_conflict() {
+        let a = Arrangement {
+            pieces: vec![(0, vec![(5, F)]), (1, vec![(5, F)]), (2, vec![(5, R)])],
+            ..Arrangement::default()
+        };
+        assert_eq!(conflicts(&a, &[0, 1]), BTreeSet::from([5]));
+        assert!(conflicts(&a, &[0, 2]).is_empty());
     }
 }
