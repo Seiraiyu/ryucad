@@ -88,6 +88,7 @@ impl ryu_app::toast::Words for Eda {
             "layout" | "layout.place" => "laid out",
             "annotate" => "annotated",
             "style.set" | "style.unset" | "style.rule" => "styled",
+            "merge.resolve" => "settled",
             m => m,
         }
         .to_owned()
@@ -123,6 +124,7 @@ mod tests {
         assert_eq!(Eda::groups(&e).into_iter().collect::<Vec<_>>(), ["top"]);
         assert_eq!(Eda::verb("component.edit", &e["kind"]), "edited");
         assert_eq!(Eda::verb("component.edit", &json!("undo")), "undid");
+        assert_eq!(Eda::verb("merge.resolve", &json!("change")), "settled");
         assert!(Eda::undoable(&e));
     }
 }

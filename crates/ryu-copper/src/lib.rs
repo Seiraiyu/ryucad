@@ -8,6 +8,7 @@
 pub mod index;
 pub mod layout;
 pub mod measure;
+pub mod poly;
 pub mod surd;
 pub mod tree;
 pub mod wide;

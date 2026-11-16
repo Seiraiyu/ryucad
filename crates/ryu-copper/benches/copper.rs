@@ -1,6 +1,6 @@
 //! Exact comparisons and distances between seeded pieces and shapes, and
 //! the index over 1,000 seeded features: built, every pair within
-//! 100 µm, an edit with its queries.
+//! 100 µm, an edit with its queries; booleans, offsets and merged layers.
 
 use ryu_board::geom::{Arc, Dir, Point};
 use ryu_board::model::{Library, Side};
@@ -115,4 +115,91 @@ fn index_edit_and_query(bencher: divan::Bencher) {
         ix.remove(&u32::MAX);
         near
     });
+}
+
+/// 2,000 overlapping pads (60 to 120-gons) on 20 mm.
+fn pads() -> ryu_copper::poly::Rings {
+    let mut g = Lcg::new(3);
+    let rings = (0..2_000)
+        .map(|_| {
+            let c = Point::new(g.range(0, 20_000_000), g.range(0, 20_000_000));
+            let (pen, _) = ryu_copper::poly::disc(g.range(100_000, 600_000), 48.0);
+            pen.iter().map(|p| p.offset(c.x, c.y)).collect()
+        })
+        .collect();
+    ryu_copper::poly::Rings::new(rings, 0)
+}
+
+#[divan::bench(sample_count = 5, sample_size = 1)]
+fn union_of_2000_pads(bencher: divan::Bencher) {
+    use ryu_copper::poly::{self, FillRule};
+    let r = pads();
+    bencher.bench(|| poly::simplify(&r, FillRule::NonZero).polygons.len());
+}
+
+#[divan::bench(sample_count = 5, sample_size = 1)]
+fn pads_grown_by_50_um(bencher: divan::Bencher) {
+    use ryu_copper::poly::{self, FillRule, FlattenOptions};
+    let p = poly::simplify(&pads(), FillRule::NonZero);
+    bencher.bench(|| {
+        poly::grow(&p, 50_000, &FlattenOptions::default())
+            .polygons
+            .len()
+    });
+}
+
+/// A layer of 1,000 traces (round pens 100 to 300 µm wide, up to 3 mm
+/// long) and 1,000 round pads on 20 mm, merged with 100 holes cut.
+#[divan::bench(sample_count = 5, sample_size = 1)]
+fn merge_a_layer_of_2000_traces_and_pads(bencher: divan::Bencher) {
+    use ryu_board::geom::{Pen, Region};
+    use ryu_board::model::Polarity;
+    use ryu_board::shape::{Shape, circle, line_outline};
+    use ryu_copper::layout::{Hole, HoleShape};
+    use ryu_copper::poly::{self, FlattenOptions};
+    let mut g = Lcg::new(4);
+    let mut l: Layout<u32> = Layout::default();
+    l.layers.push(Layer {
+        name: "top".into(),
+        side: Side::Top,
+        copper: true,
+    });
+    for k in 0..2_000u32 {
+        let a = Point::new(g.range(0, 20_000_000), g.range(0, 20_000_000));
+        let region = if k % 2 == 0 {
+            let b = a.offset(
+                g.range(-3_000_000, 3_000_000),
+                g.range(-3_000_000, 3_000_000),
+            );
+            line_outline(a, b, Pen::Round(g.range(100_000, 300_000)))
+        } else {
+            circle(a, g.range(150_000, 600_000)).ok().map(Region::solid)
+        };
+        if let Some(r) = region {
+            l.items.insert(
+                k,
+                Item {
+                    layer: 0,
+                    shape: Shape::regions(Polarity::Positive, [r]),
+                    net: None,
+                },
+            );
+        }
+    }
+    for k in 0..100u32 {
+        l.holes.insert(
+            k,
+            Hole {
+                shape: HoleShape::Round {
+                    at: Point::new(g.range(0, 20_000_000), g.range(0, 20_000_000)),
+                    d: 300_000,
+                },
+                span: (0, 0),
+                plated: true,
+                backdrilled: vec![],
+            },
+        );
+    }
+    let opts = FlattenOptions::default();
+    bencher.bench(|| poly::merge_layers(&l, &opts).len());
 }

@@ -9,7 +9,7 @@ use ryu_app::layout::{Dir, Home, Node, Spec, tabs};
 use ryu_app::shell::Pane;
 use std::time::Instant;
 
-const TILES: [(&str, &str); 8] = [
+const TILES: [(&str, &str); 9] = [
     ("navigator", "Navigator"),
     ("canvas", "Sheet"),
     ("properties", "Properties"),
@@ -18,13 +18,14 @@ const TILES: [(&str, &str); 8] = [
     ("activity", "Activity"),
     ("changes", "Changes"),
     ("history", "History"),
+    ("conflicts", "Conflicts"),
 ];
 
 fn home(id: &str) -> Home {
     match id {
         "navigator" => Home::Left,
         "canvas" => Home::Centre,
-        "properties" => Home::Right,
+        "properties" | "conflicts" => Home::Right,
         _ => Home::Bottom,
     }
 }
@@ -67,6 +68,8 @@ pub struct Local {
     pub kept: Kept,
     pub component_filter: String,
     pub net_filter: String,
+    /// A layout area's pick in its group's Apply.
+    pub areas: std::collections::BTreeMap<String, crate::core::merge::Pick>,
 }
 
 pub struct Behavior<'a> {
@@ -90,6 +93,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
                 "activity" => activity(ui, self.w),
                 "changes" => changes(ui, self.w),
                 "history" => history(ui, self.w, self.copy),
+                "conflicts" => conflicts(ui, self.w, self.local, self.copy),
                 _ => {}
             });
         egui_tiles::UiResponse::None
@@ -139,6 +143,14 @@ fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
             if ui.selectable_label(here, label).clicked() {
                 w.show(Some(n.block.clone()), None, n.layer.clone());
             }
+            if let Some(k) = w
+                .merge
+                .as_ref()
+                .and_then(|m| m.blocks().get(&n.block).copied())
+            {
+                ui.colored_label(ui.visuals().warn_fg_color, format!("● {k}"))
+                    .on_hover_text(format!("{k} to settle"));
+            }
         })
         .body(|ui| {
             let sheets = w.nav.sheets(&n.block).to_vec();
@@ -150,6 +162,11 @@ fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
             let reach = sel_net
                 .as_ref()
                 .map(|r| w.nav.reach(&n.block, r))
+                .unwrap_or_default();
+            let marks = w
+                .merge
+                .as_ref()
+                .map(|m| m.sheets(&n.block, &w.nav))
                 .unwrap_or_default();
             for (sid, name) in sheets {
                 let here = w.shown.block.as_deref() == Some(n.block.as_str())
@@ -181,7 +198,18 @@ fn tree_node(ui: &mut egui::Ui, w: &mut Window, n: &crate::core::nav::Node) {
                     }
                     _ => egui::WidgetText::from(mark),
                 };
-                let mut r = ui.selectable_label(here, text);
+                let mut r = match marks.get(&sid) {
+                    None => ui.selectable_label(here, text),
+                    Some(k) => {
+                        ui.horizontal(|ui| {
+                            let r = ui.selectable_label(here, text);
+                            ui.colored_label(ui.visuals().warn_fg_color, format!("● {k}"))
+                                .on_hover_text(format!("{k} to settle on this sheet"));
+                            r
+                        })
+                        .inner
+                    }
+                };
                 if let Some(c) = changed {
                     r = r.on_hover_text(format!(
                         "{} added, {} changed, {} moved, {} removed",
@@ -543,6 +571,243 @@ fn activity(ui: &mut egui::Ui, w: &mut Window) {
                 ui.label(format!("{}  {}", e.seq, e.text));
             }
         });
+}
+
+fn conflicts(ui: &mut egui::Ui, w: &mut Window, local: &mut Local, copy: &mut Option<String>) {
+    use crate::core::merge::{Batch, Pick, Row, groups, rows};
+    let Some(m) = w.merge.clone() else {
+        ui.weak("No merge in progress.");
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.strong(format!("{} in progress", m.step()));
+        ui.label(m.summary());
+        if w.resolve_busy() {
+            ui.spinner();
+        }
+    });
+    if let Some(e) = &m.error {
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            format!(
+                "Can't tell what is left: {} ({})",
+                e.message,
+                canvas::code_word(e.code)
+            ),
+        );
+    }
+    if w.unloaded {
+        ui.weak("ryueda.json holds this merge's record, so the project doesn't open: settle it here (written, not logged, as the CLI does), and the sheet opens.");
+    }
+    if let Some(e) = w.last_resolve().cloned()
+        && ui
+            .button(format!("Undo: {}", e.text))
+            .on_hover_text("Undo the last resolve, as Activity's Undo does")
+            .clicked()
+    {
+        w.undo();
+    }
+    let busy = w.resolve_busy();
+    let (singles, groups) = groups(rows(&m.status));
+    let mut send: Option<Batch> = None;
+    let mut show: Option<(Row, Option<&'static str>)> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("conflicts")
+        .show(ui, |ui| {
+            for g in &groups {
+                ui.push_id(("areas", &g.block), |ui| {
+                    ui.group(|ui| {
+                        ui.strong(format!(
+                            "layout_conflict in {}: {} areas, settled together",
+                            g.block,
+                            g.areas.len()
+                        ));
+                        if ui
+                            .add_enabled(
+                                !busy,
+                                egui::Button::new("Relay out every area (recommended)"),
+                            )
+                            .clicked()
+                        {
+                            send = Some(Batch::relayout_all(g));
+                        }
+                        for a in &g.areas {
+                            ui.push_id(&a.id, |ui| {
+                                ui.label(&a.message);
+                                ui.horizontal_wrapped(|ui| {
+                                    let pick = local.areas.entry(a.id.clone()).or_default();
+                                    ui.radio_value(pick, Pick::Relayout, "Relay out");
+                                    ui.radio_value(pick, Pick::Ours, "Ours");
+                                    ui.radio_value(pick, Pick::Theirs, "Theirs");
+                                    shows(ui, a, &mut show);
+                                });
+                                if let Some(e) = m.refused_for(&a.id) {
+                                    refused(ui, e);
+                                }
+                            });
+                        }
+                        if ui.add_enabled(!busy, egui::Button::new("Apply")).clicked() {
+                            send = Some(Batch::areas(g, &local.areas));
+                        }
+                    });
+                });
+            }
+            for r in &singles {
+                conflict_row(ui, r, &m, busy, &mut show, &mut send, copy);
+            }
+            finish(ui, &m, copy);
+        });
+    if let Some(b) = send {
+        w.resolve(b);
+    }
+    match show {
+        Some((r, None)) => w.show_conflict(&r),
+        Some((r, Some(side))) => w.show_side(&r, side),
+        None => {}
+    }
+}
+
+fn refused(ui: &mut egui::Ui, e: &ryu_doc::error::Error) {
+    ui.colored_label(
+        ui.visuals().error_fg_color,
+        format!("Refused ({}): {}", canvas::code_word(e.code), e.message),
+    );
+}
+
+/// Show, and Show ours and Show theirs for an item in a block.
+fn shows(
+    ui: &mut egui::Ui,
+    r: &crate::core::merge::Row,
+    show: &mut Option<(crate::core::merge::Row, Option<&'static str>)>,
+) {
+    if ui
+        .add_enabled(r.showable(), egui::Button::new("Show").small())
+        .clicked()
+    {
+        *show = Some((r.clone(), None));
+    }
+    if r.block.is_some() {
+        for (label, side) in [("Show ours", "ours"), ("Show theirs", "theirs")] {
+            if ui
+                .small_button(label)
+                .on_hover_text("The sheet as that side's commit draws it, read only")
+                .clicked()
+            {
+                *show = Some((r.clone(), Some(side)));
+            }
+        }
+    }
+}
+
+fn conflict_row(
+    ui: &mut egui::Ui,
+    r: &crate::core::merge::Row,
+    m: &crate::core::merge::Merge,
+    busy: bool,
+    show: &mut Option<(crate::core::merge::Row, Option<&'static str>)>,
+    send: &mut Option<crate::core::merge::Batch>,
+    copy: &mut Option<String>,
+) {
+    ui.push_id(&r.id, |ui| {
+        ui.group(|ui| {
+            ui.strong(&r.title);
+            ui.label(&r.message);
+            ui.weak(format!("cause: {} · {}", r.cause, r.files.join(", ")));
+            if !r.refs.is_empty() {
+                ui.weak(format!("concerns {}", r.refs.join(", ")));
+            }
+            for (side, short, full) in &r.values {
+                ui.label(format!("{side}: {short}")).on_hover_text(full);
+            }
+            ui.horizontal_wrapped(|ui| shows(ui, r, show));
+            for a in &r.actions {
+                ui.horizontal_wrapped(|ui| {
+                    let text = if a.recommended {
+                        format!("{} (recommended)", a.label)
+                    } else {
+                        a.label.clone()
+                    };
+                    if ui.add_enabled(!busy, egui::Button::new(text)).clicked() {
+                        *send = Some(crate::core::merge::Batch::one(r, a));
+                    }
+                    if let Some(first) = a.plan.first() {
+                        ui.weak(first);
+                    }
+                });
+                for l in a.plan.iter().skip(1) {
+                    ui.weak(format!("    {l}"));
+                }
+            }
+            if let Some(t) = &r.typed {
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak("A value of your own:");
+                    ui.monospace(t);
+                    if ui.small_button("Copy").clicked() {
+                        *copy = Some(t.clone());
+                    }
+                });
+            }
+            if let Some(h) = &r.hint {
+                ui.weak(h);
+            }
+            if let Some(e) = m.refused_for(&r.id) {
+                refused(ui, e);
+            }
+        });
+    });
+}
+
+/// What waits for `git add`, what failed already, the warnings, and the
+/// commands that finish the merge.
+fn finish(ui: &mut egui::Ui, m: &crate::core::merge::Merge, copy: &mut Option<String>) {
+    let line = |v: &serde_json::Value| {
+        v["message"]
+            .as_str()
+            .map_or_else(|| v.to_string(), str::to_owned)
+    };
+    let settled = m.settled();
+    if !settled.is_empty() {
+        ui.separator();
+        ui.strong("Waiting for git add");
+        for f in &settled {
+            ui.monospace(*f);
+        }
+    }
+    let untracked = m.untracked();
+    if !untracked.is_empty() {
+        ui.strong("New files Git doesn't hold");
+        for f in &untracked {
+            ui.monospace(*f);
+        }
+    }
+    for (title, key) in [
+        ("Failing on a side already", "already_failing"),
+        ("Warnings", "warnings"),
+    ] {
+        let list = m.status[key].as_array().cloned().unwrap_or_default();
+        if !list.is_empty() {
+            ui.strong(title);
+            for x in &list {
+                ui.label(line(x));
+            }
+        }
+    }
+    ui.separator();
+    ui.weak("ryueda never stages or commits. Once everything is settled, in the project folder:");
+    let mut add: Vec<&str> = settled;
+    add.extend(untracked);
+    let cmds = [
+        (!add.is_empty()).then(|| format!("git add {}", add.join(" "))),
+        Some("git commit".to_owned()),
+    ];
+    for c in cmds.into_iter().flatten() {
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(&c);
+            if ui.small_button("Copy").clicked() {
+                *copy = Some(c.clone());
+            }
+        });
+    }
 }
 
 #[cfg(test)]

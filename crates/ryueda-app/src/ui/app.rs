@@ -36,6 +36,11 @@ pub struct App {
     /// Whether the window had the focus at the last frame.
     focused: bool,
     recent: Vec<&'static str>,
+    /// Whether a merge was in progress at the last frame (`None` before
+    /// the first).
+    merging: Option<bool>,
+    /// The title last set.
+    titled: Option<String>,
 }
 
 impl App {
@@ -69,6 +74,10 @@ impl App {
             compare_with: None,
             focused: true,
             recent: Vec::new(),
+            // Unknown until the first frame, which opens the Conflicts tile
+            // or closes one a saved layout kept.
+            merging: None,
+            titled: None,
         }
     }
 
@@ -331,6 +340,14 @@ impl App {
                     ui.weak(format!("layer {layer}"));
                 }
             }
+            if let Some(m) = &w.merge {
+                let c = if m.clean() {
+                    ui.visuals().text_color()
+                } else {
+                    ui.visuals().warn_fg_color
+                };
+                ui.colored_label(c, m.summary());
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let version = ryueda::proto::VersionInfo::current().ryueda;
                 ryu_app::status::connection(ui, w.lost, &version);
@@ -389,6 +406,35 @@ impl App {
         }
     }
 
+    /// The window's title: the project's folder, and a merge in progress.
+    pub fn title(&self) -> String {
+        match &self.screen {
+            Screen::Opened(w) => {
+                let name = w.root.file_name().map_or_else(
+                    || w.root.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                match &w.merge {
+                    Some(m) => format!("{name} ({} in progress) — ryueda", m.step()),
+                    None => format!("{name} — ryueda"),
+                }
+            }
+            Screen::Failed(_) => "ryueda".to_owned(),
+        }
+    }
+
+    /// The Conflicts tile opens, as the first tab on the right, when a
+    /// merge starts, and closes itself when it ends (ryucad's rule).
+    fn follow_merge(&mut self) {
+        let merging = self.opened().is_some_and(|w| w.merge.is_some());
+        if merging && self.merging != Some(true) {
+            shell::open_first(&SPEC, &mut self.tree, "conflicts");
+        } else if !merging && self.merging != Some(false) {
+            shell::close(&SPEC, &mut self.tree, "conflicts");
+        }
+        self.merging = Some(merging);
+    }
+
     /// One frame: what eframe's `ui` and the tests' harness call.
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -407,6 +453,12 @@ impl App {
             if let Some(after) = w.tick(now) {
                 ctx.request_repaint_after(after);
             }
+        }
+        self.follow_merge();
+        let title = self.title();
+        if self.titled.as_ref() != Some(&title) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.titled = Some(title);
         }
         self.keys(&ctx);
         egui::Panel::top("menus").show(ui, |ui| {

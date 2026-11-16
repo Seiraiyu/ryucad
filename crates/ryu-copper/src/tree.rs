@@ -57,7 +57,7 @@ pub struct Packed {
 
 impl Packed {
     pub fn new(mut entries: Vec<(Rect, u32)>) -> Packed {
-        entries.sort_by_key(|(r, s)| (hilbert(centre(r)), *s, r.min, r.max));
+        entries.sort_by_cached_key(|(r, s)| (hilbert(centre(r)), *s, r.min, r.max));
         let mut levels = Vec::new();
         let mut below: Vec<Rect> = entries.iter().map(|e| e.0).collect();
         while below.len() > 1 {
@@ -92,6 +92,45 @@ impl Packed {
         match self.levels.len() {
             0 => out.extend(self.entries.iter().filter(|e| meets(&e.0, q)).map(|e| e.1)),
             n => self.descend(n, 0, q, out),
+        }
+    }
+
+    /// Every entry whose box `keep` takes, descending only into nodes
+    /// whose boxes it takes: for a query tighter than a box (a thin slanted
+    /// segment), which a box query would answer with everything its box
+    /// holds. `keep` must take a node's box whenever it takes a box inside
+    /// it.
+    pub fn query_where(&self, keep: &impl Fn(&Rect) -> bool, out: &mut Vec<u32>) {
+        match self.levels.len() {
+            0 => out.extend(self.entries.iter().filter(|e| keep(&e.0)).map(|e| e.1)),
+            n => self.descend_where(n, 0, keep, out),
+        }
+    }
+
+    fn descend_where(
+        &self,
+        level: usize,
+        i: usize,
+        keep: &impl Fn(&Rect) -> bool,
+        out: &mut Vec<u32>,
+    ) {
+        if !keep(&self.levels[level - 1][i]) {
+            return;
+        }
+        let first = i * FANOUT;
+        if level == 1 {
+            let last = (first + FANOUT).min(self.entries.len());
+            out.extend(
+                self.entries[first..last]
+                    .iter()
+                    .filter(|e| keep(&e.0))
+                    .map(|e| e.1),
+            );
+        } else {
+            let last = (first + FANOUT).min(self.levels[level - 2].len());
+            for c in first..last {
+                self.descend_where(level - 1, c, keep, out);
+            }
         }
     }
 
@@ -269,6 +308,31 @@ mod tests {
         assert_eq!(got, want);
         // Six columns by three rows.
         assert_eq!(want.len(), 18);
+    }
+
+    #[test]
+    fn predicate_queries_take_only_what_they_keep() {
+        let entries: Vec<(Rect, u32)> = (0..1000)
+            .map(|k| {
+                let (x, y) = ((k % 40) * 1000, (k / 40) * 1000);
+                (Rect::new(p(x, y), p(x + 500, y + 500)), k as u32)
+            })
+            .collect();
+        let t = Packed::new(entries.clone());
+        // Boxes the diagonal x = y passes: a node holds a kept box only if
+        // its own box straddles the line, so the predicate prunes nodes.
+        let keep = |r: &Rect| r.min.x - r.max.y <= 0 && r.min.y - r.max.x <= 0;
+        let mut got = Vec::new();
+        t.query_where(&keep, &mut got);
+        got.sort();
+        let want: Vec<u32> = entries
+            .iter()
+            .filter(|(r, _)| keep(r))
+            .map(|e| e.1)
+            .collect();
+        assert_eq!(got, want);
+        // One box a row along the diagonal, 25 rows.
+        assert_eq!(want.len(), 25);
     }
 }
 
