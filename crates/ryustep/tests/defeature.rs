@@ -75,8 +75,10 @@ const MAX_SIZE: f64 = 2e-3;
 /// narrowed builds, so FTC 07's ring clip and its torus/plane pair are
 /// never met; it now refuses at rung 2, in half the time, where a carried
 /// NURBS face touching a change (`33b57350`) meets a pinned thin plane
-/// (`f19ffa9e`) `Uncertain`, with no edge between them (#652, recorded for
-/// a later stage). FTC 10's slit is left to ryukei 21.C.
+/// (`f19ffa9e`) `Uncertain`, with no edge between them (#652; moved to
+/// ryukei 22, "Working faces against pins and near-box limits": working
+/// NURBS `33b57350` growing into pin `f19ffa9e`). FTC 10's slit is left to
+/// ryukei 21.C.
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -598,7 +600,7 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 /// builds) and recorded what stops both next; plan 21.A's pins move FTC
 /// 07 on to its next cause (see [`KNOWN_REFUSED`]).
 #[test]
-#[ignore = "#652: FTC 10's kept ball slit by a carried face (ryukei 21.C); FTC 07's carried NURBS meets a pinned plane (recorded in 21.A)"]
+#[ignore = "#652: FTC 10's kept ball slit by a carried face (ryukei 21.C); FTC 07's working NURBS 33b57350 grows into pin f19ffa9e (ryukei 22)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
@@ -672,7 +674,9 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// defeature, bit for bit as on main, and none more (#652, #658). CTC 02
 /// with PMI's pair is never met, and its pinned retry clips a working
 /// plane touching the change at its near box (`1294043e`, `GapNotHealed`
-/// in 11 s); STC 07 now refuses in 64 s; FTC 07 AP242 (21.B), STC 10
+/// in 11 s; moved to ryukei 22, "Working faces against pins and near-box
+/// limits": `1294043e` clipped at its near box in the pinned retry); STC
+/// 07 now refuses in 64 s; FTC 07 AP242 (21.B), STC 10
 /// (21.D) and FTC 10 (21.C) refuse as before; linkrods is still past the
 /// deadline (out of scope, question 984).
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
