@@ -9,7 +9,8 @@
 //! Every configuration must build the same model and log the same
 //! activity. It prints each run's time and the daemon's `--timings`, with
 //! the machine, for `ryucad-session.md`. Release builds only: run it on a
-//! quiet box (load below a quarter of the cores).
+//! quiet box (load below a quarter of the cores). The bar is the median of
+//! three rounds.
 
 mod common;
 
@@ -357,15 +358,86 @@ fn same(how: &str, runs: &[Run; 3]) {
     }
 }
 
+/// The window's run against the unwatched one: 1.25 with
+/// `RYUCAD_BARS=1` on a quiet box (design 698), else 2.0, which still
+/// catches #849's 3x on a noisy box (question 1016).
+fn ratio_bar() -> f64 {
+    if std::env::var_os("RYUCAD_BARS").is_some() {
+        1.25
+    } else {
+        2.0
+    }
+}
+
+/// `daemon.publish_max_ms`, as the run's daemon read it.
+fn publish_max_ms() -> f64 {
+    ryucad::config::user("daemon.publish_max_ms")
+        .as_f64()
+        .unwrap_or(1000.0)
+}
+
+fn publishes(t: &Value) -> u64 {
+    t["methods"]["daemon.publish"]["publishes"]
+        .as_u64()
+        .unwrap_or(0)
+}
+
+/// Rounds of the three configurations: the bar is judged on the median
+/// round, since a single unwatched run varies by a quarter on a shared
+/// box.
+const ROUNDS: usize = 3;
+
+/// The median of `xs`.
+fn median(mut xs: Vec<f64>) -> f64 {
+    xs.sort_by(f64::total_cmp);
+    xs[xs.len() / 2]
+}
+
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a release build's bar")]
 fn a_window_costs_a_script_little() {
     let calls = Script::new(56, 209).singles();
     let slice = &calls[..SLICE.min(calls.len())];
-    let stdio = CONFIGS.map(|c| run(c, &calls, false));
-    report("through one stdio session", calls.len(), &stdio);
-    let each = CONFIGS.map(|c| run(c, slice, true));
-    report("one process a call", slice.len(), &each);
-    same("stdio", &stdio);
-    same("one process a call", &each);
+    let mut ratios: Vec<(&str, Vec<f64>)> =
+        vec![("stdio", Vec::new()), ("one process a call", Vec::new())];
+    let max = publish_max_ms();
+    for round in 1..=ROUNDS {
+        println!("round {round} of {ROUNDS}");
+        let stdio = CONFIGS.map(|c| run(c, &calls, false));
+        report("through one stdio session", calls.len(), &stdio);
+        let each = CONFIGS.map(|c| run(c, slice, true));
+        report("one process a call", slice.len(), &each);
+        same("stdio", &stdio);
+        same("one process a call", &each);
+        ratios[0].1.push(stdio[2].secs / stdio[0].secs);
+        ratios[1].1.push(each[2].secs / each[0].secs);
+        // At most one publish per `publish_max_ms` of the stdio run, plus
+        // one.
+        for (c, r) in CONFIGS.iter().zip(&stdio).skip(1) {
+            let allowed = (r.secs * 1000.0 / max).floor() as u64 + 1;
+            assert!(
+                publishes(&r.timings) <= allowed,
+                "{}: {} publishes in {:.1} s",
+                c.name(),
+                publishes(&r.timings),
+                r.secs
+            );
+        }
+    }
+    let bar = ratio_bar();
+    for (how, rs) in &ratios {
+        let m = median(rs.clone());
+        let all: Vec<String> = rs.iter().map(|r| format!("{r:.2}x")).collect();
+        println!(
+            "#849 {how}: a window's runs took {} the unwatched ones; median {m:.2}x (bar {bar})",
+            all.join(", ")
+        );
+    }
+    for (how, rs) in &ratios {
+        let m = median(rs.clone());
+        assert!(
+            m <= bar,
+            "{how}: a window's median run took {m:.2}x the unwatched one (bar {bar})"
+        );
+    }
 }
