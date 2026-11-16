@@ -308,14 +308,24 @@ pub(crate) fn face_face_over(
             if sharing(a, b) && !ends_together(sa, sb) {
                 return Err(Failure::Uncertain);
             }
-            match super::ss::meet(sa, sb, &region, true, m) {
+            let traced = match super::ss::meet(sa, sb, &region, true, m) {
                 // The trace's cells can fall just wrong for one region's
                 // bits (a tolerant face's box, grown by its rims' tubes,
                 // put a sphere's tangency with a cylinder there): traced
                 // once more in a region grown by a hair.
                 Err(Failure::Uncertain) => {
                     let hair = slack + crate::tol::TOUCH_TOLERANCE;
-                    super::ss::meet(sa, sb, &region.grow(hair), false, m)?
+                    super::ss::meet(sa, sb, &region.grow(hair), false, m)
+                }
+                other => other,
+            };
+            match traced {
+                // Every trace failed. Faces sharing nothing, one of which
+                // keeps off the other's surface, don't meet: a certified
+                // miss (plan 21.B, design 683, #658). Behind the tube
+                // contact's gate, so every first build keeps its answer.
+                Err(Failure::Uncertain) if may_miss(a, b, m) && keeps_off(a, b, sa, sb, m) => {
+                    return Ok(FaceMeet::apart());
                 }
                 other => other?,
             }
@@ -953,6 +963,43 @@ fn fin_on_domain_edge(body: &Body, fin: crate::topo::FinId) -> bool {
                 _ => false,
             })
     })
+}
+
+/// The part limits [`keeps_off`] climbs: the self-intersection check's
+/// and [`along_rims`]'s.
+const MISS_LADDER: [usize; 3] = [1 << 9, 1 << 12, super::BESIDE_CELLS];
+
+/// Whether a pair whose every trace failed may be certified a miss
+/// ([`keeps_off`], plan 21.B): faces sharing no edge and no vertex (a
+/// shared vertex lies on both surfaces, so neither face keeps off the
+/// other's there), outside a re-trim rung's first build, the tube
+/// contact's gate (plan 20.B), so every first build keeps its answer.
+fn may_miss(a: (&Body, FaceId), b: (&Body, FaceId), m: &Meter) -> bool {
+    !m.in_first_build() && !sharing(a, b)
+}
+
+/// Whether one of two faces is certified to keep off the other's
+/// surface ([`super::beside::face_keeps_off`]): one sign in its implicit
+/// form over every part of the face, or every part certified apart from
+/// a surface with none. Then the faces don't meet. Each face's search
+/// under a growing part limit, the other's between: the face that keeps
+/// off usually does in a few parts, while the other runs on to the limit.
+fn keeps_off(
+    a: (&Body, FaceId),
+    b: (&Body, FaceId),
+    sa: &Surface,
+    sb: &Surface,
+    m: &Meter,
+) -> bool {
+    let off = |f: (&Body, FaceId), other: &Surface, cells: usize| {
+        matches!(
+            super::beside::face_keeps_off(f.0, f.1, other, cells, m),
+            Ok(signs) if signs != [true, true]
+        )
+    };
+    MISS_LADDER
+        .into_iter()
+        .any(|cells| off(a, sb, cells) || off(b, sa, cells))
 }
 
 /// Whether two faces of one body share an edge or a vertex.
@@ -2208,22 +2255,83 @@ mod tests {
         })
     }
 
+    /// The pair still refuses outside a first build too: each face is
+    /// certified to cross the other's surface (census VI, plan 21.B: the
+    /// pin grazes the bore's wall, least gaps 3.1e-9 and 3.4e-7 m), so
+    /// neither keeps off the other and no certified miss holds. It needs
+    /// an exact cylinder/cone intersection (ryukei 22).
     #[test]
     #[cfg_attr(
         debug_assertions,
         ignore = "slow in a debug build: CI runs it in release"
     )]
-    fn ftc_07_ap242s_cylinder_and_cone_share_nothing_and_refuse_in_a_first_build() {
+    fn ftc_07_ap242s_cylinder_and_cone_still_refuse() {
         let (work, pair) = ftc_07_ap242_pair();
         assert!(!sharing((&work, pair[0]), (&work, pair[1])));
         // unmetered: a unit test.
         let m = Meter::free();
         let met = m.first_build(|| met_in_a_rung(&work, pair, &m));
         assert_eq!(met, Err(Failure::Uncertain));
-        // Outside a first build, main refuses it too (Task 5 changes this).
         // unmetered: a unit test.
         let m = Meter::free();
         assert_eq!(met_in_a_rung(&work, pair, &m), Err(Failure::Uncertain));
+        // Each crosses the other's surface: certified, not uncertain.
+        let s = |f: FaceId| &work.surfaces[work.faces[f].surface];
+        for (f, g) in [(pair[0], pair[1]), (pair[1], pair[0])] {
+            let signs = super::super::beside::face_keeps_off(&work, f, s(g), 1 << 9, &m);
+            assert_eq!(signs, Ok([true, true]));
+        }
+    }
+
+    /// Plan 21.B: a certified miss is tried only for faces sharing no
+    /// edge or vertex, and never in a re-trim rung's first build.
+    #[test]
+    fn a_miss_is_tried_only_for_faces_sharing_nothing_outside_first_builds() {
+        let (b, _) = primitive::block(OpKey(1), 2.0, 2.0, 2.0, &Rigid::IDENTITY).unwrap();
+        let fs = faces_of(&b);
+        let pairs: Vec<(FaceId, FaceId)> = fs
+            .iter()
+            .flat_map(|&f| fs.iter().map(move |&g| (f, g)))
+            .filter(|&(f, g)| f < g)
+            .collect();
+        let shares_edge =
+            |f: FaceId, g: FaceId| edges((&b, f)).iter().any(|e| edges((&b, g)).contains(e));
+        let opposite = *pairs
+            .iter()
+            .find(|&&(f, g)| !sharing((&b, f), (&b, g)))
+            .unwrap();
+        let adjacent = *pairs.iter().find(|&&(f, g)| shares_edge(f, g)).unwrap();
+        // unmetered: a unit test.
+        let m = Meter::free();
+        assert!(may_miss((&b, opposite.0), (&b, opposite.1), &m));
+        assert!(!may_miss((&b, adjacent.0), (&b, adjacent.1), &m));
+        assert!(!m.first_build(|| may_miss((&b, opposite.0), (&b, opposite.1), &m)));
+        // Faces of two bodies share nothing.
+        let (c, _) = primitive::block(OpKey(2), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let g = faces_of(&c)[0];
+        assert!(may_miss((&b, adjacent.0), (&c, g), &m));
+    }
+
+    /// Plan 21.B: two faces sharing nothing, whose every trace is made to
+    /// fail, are a certified miss where one keeps off the other's surface.
+    #[test]
+    fn a_cone_kept_off_a_cylinder_is_a_certified_miss() {
+        let (a, b) = cylinder_and_cone(0.012);
+        let (fa, fb) = (faces_of(&a)[0], faces_of(&b)[0]);
+        let (sa, sb) = (
+            &a.surfaces[a.faces[fa].surface],
+            &b.surfaces[b.faces[fb].surface],
+        );
+        // unmetered: a unit test.
+        let m = Meter::free();
+        assert!(keeps_off((&a, fa), (&b, fb), sa, sb, &m));
+        let (a, b) = cylinder_and_cone(0.01);
+        let (fa, fb) = (faces_of(&a)[0], faces_of(&b)[0]);
+        let (sa, sb) = (
+            &a.surfaces[a.faces[fa].surface],
+            &b.surfaces[b.faces[fb].surface],
+        );
+        assert!(!keeps_off((&a, fa), (&b, fb), sa, sb, &m));
     }
 
     /// Plan 21.B: a cylinder of radius 10 mm about z, and a cone about an

@@ -194,7 +194,6 @@ pub(crate) fn face_beside(
 /// never meets `other`; `Ok([true, true])` that it crosses it. Fails
 /// with `Uncertain` where a fin has no pcurve or a part can't be signed
 /// within `cells` parts (at most [`CELLS`]).
-#[cfg_attr(not(test), allow(dead_code))] // used by face_face_over from Task 5
 pub(crate) fn face_keeps_off(
     body: &Body,
     face: FaceId,
