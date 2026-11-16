@@ -271,6 +271,8 @@ pub struct Window {
     pub revisions: Revisions,
     /// The project doesn't open: `ryueda.json` holds a merge's record.
     pub unloaded: bool,
+    /// When `merge.status` was last asked while unloaded.
+    merge_polled: Option<Instant>,
     /// A side of the merge shown read only (Show ours, Show theirs).
     pub peek: Option<crate::core::merge::Peek>,
     /// References to frame once the scene now asked for arrives (a
@@ -338,6 +340,7 @@ impl Window {
             merge: None,
             revisions: Revisions::default(),
             unloaded: false,
+            merge_polled: None,
             peek: None,
             frame_refs: Vec::new(),
         };
@@ -928,7 +931,10 @@ impl Window {
             Ok(v) => v,
             Err(e) => {
                 match why {
-                    Why::Scene => self.scene_error = Some(e),
+                    Why::Scene => {
+                        self.unloaded = crate::core::merge::manifest_record(&e);
+                        self.scene_error = Some(e);
+                    }
                     Why::Write(title) => self.toasts.error(title, &e, 0, now),
                     Why::GoTo(_) => self.toasts.error("Show", &e, 0, now),
                     Why::Check => self.checked = None,
@@ -957,6 +963,11 @@ impl Window {
                     return;
                 };
                 self.scene_error = None;
+                if std::mem::take(&mut self.unloaded) {
+                    // The manifest was settled: the project opens.
+                    self.scene = None;
+                    self.ask_all();
+                }
                 let moved = self.scene.as_ref().is_none_or(|o| o.block != sc.block);
                 if self.flash_on {
                     self.flash.arrived(self.scene.as_ref(), &sc, now);
@@ -1246,6 +1257,16 @@ impl Window {
                 Why::CompareGet,
             );
         }
+        if self.unloaded
+            && self
+                .merge_polled
+                .is_none_or(|t| now.saturating_duration_since(t) >= COMPARE_EVERY)
+        {
+            // No session publishes while the project doesn't open.
+            self.merge_polled = Some(now);
+            self.ask_merge();
+            self.ask_scene();
+        }
         if self.select.ready(now) {
             let refs = self.selection.clone();
             self.send(req("selection.set", json!({"refs": refs})), Why::Quiet);
@@ -1271,10 +1292,17 @@ impl Window {
         }
         let flash = self.flash.due().then_some(Duration::from_millis(33));
         let compare = self.blink.of.as_ref().map(|_| COMPARE_EVERY);
-        [self.select.wait(now), self.view.wait(now), flash, compare]
-            .into_iter()
-            .flatten()
-            .min()
+        let unloaded = self.unloaded.then_some(COMPARE_EVERY);
+        [
+            self.select.wait(now),
+            self.view.wait(now),
+            flash,
+            compare,
+            unloaded,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn view_now(&self) -> SheetView {

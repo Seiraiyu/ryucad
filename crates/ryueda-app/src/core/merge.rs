@@ -606,6 +606,13 @@ pub fn peeked(mut p: Value, peek: Option<&Peek>) -> Value {
     p
 }
 
+/// Whether a refusal is the project not opening because `ryueda.json`
+/// holds a merge's conflict record.
+pub fn manifest_record(e: &Error) -> bool {
+    e.code == Code::MergeConflict
+        && e.details.get("path").and_then(Value::as_str) == Some(ryueda::project::MANIFEST)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -955,5 +962,15 @@ pub(crate) mod tests {
             [("s1".to_owned(), 2), ("s2".to_owned(), 1)]
         );
         assert!(m.sheets("other", &nav).is_empty());
+    }
+
+    #[test]
+    fn only_the_manifests_record_unloads_the_window() {
+        let at = |path: &str| Error::new(Code::MergeConflict, "record").with("path", path);
+        assert!(manifest_record(&at("ryueda.json")));
+        assert!(!manifest_record(&at("blocks/breakout/layout.json")));
+        assert!(!manifest_record(
+            &Error::new(Code::NotFound, "x").with("path", "ryueda.json")
+        ));
     }
 }
