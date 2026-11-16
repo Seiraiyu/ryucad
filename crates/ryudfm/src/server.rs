@@ -223,6 +223,10 @@ fn dispatch(
             let b = session.board(&board)?;
             crate::render::render(&b, Some(&board), &args, unit)
         }
+        Request::Nets { board, args } => {
+            let cb = session.copper(&board)?;
+            json(crate::nets::nets(&cb, Some(&board), &args))
+        }
         Request::Check { board } => json(crate::check::project(session, board.as_deref())),
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));

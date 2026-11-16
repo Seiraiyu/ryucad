@@ -106,6 +106,13 @@ pub enum Request {
         #[serde(default, flatten)]
         args: crate::render::Args,
     },
+    /// The copper's islands, a page at a time, or one island.
+    #[serde(rename = "nets")]
+    Nets {
+        board: String,
+        #[serde(default, flatten)]
+        args: crate::nets::Args,
+    },
     /// The project (or one board) loaded from nothing: every load fault
     /// as a finding; `check_failed` on any error.
     #[serde(rename = "check")]
@@ -244,6 +251,14 @@ mod tests {
                 args: crate::render::Args {
                     layers: vec!["top".into(), "drill".into()],
                     side: Some(crate::render::Side::Bottom),
+                    ..Default::default()
+                },
+            },
+            Request::Nets {
+                board: "b".into(),
+                args: crate::nets::Args {
+                    net: Some("GND".into()),
+                    limit: Some(3),
                     ..Default::default()
                 },
             },

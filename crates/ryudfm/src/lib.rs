@@ -27,6 +27,7 @@ pub mod doc;
 pub mod import;
 pub mod input;
 pub mod inspect;
+pub mod nets;
 pub mod notify;
 pub mod odb;
 pub mod project;

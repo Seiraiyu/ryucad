@@ -1,10 +1,10 @@
 //! The agent CLI: arguments in, one JSON document out on stdout, and a
 //! meaningful exit code, as ryucad's and ryueda's are.
 //!
-//! `inspect`, `render` and `check` take a board of the project they run in
-//! or, in path mode, a job's path: a name that isn't one of the project's
-//! boards (or any name outside a project) is read in this process,
-//! read-only, with no daemon.
+//! `inspect`, `render`, `check`, `nets`, `measure` and `clearance` take
+//! a board of the project they run in or, in path mode, a job's path: a
+//! name that isn't one of the project's boards (or any name outside a
+//! project) is read in this process, read-only, with no daemon.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ryudfm::error::{Code, Error, Result};
@@ -141,6 +141,27 @@ enum Command {
         /// X0,Y0,X1,Y1: lengths, bare numbers in the default unit.
         #[arg(long)]
         window: Option<String>,
+        #[arg(long)]
+        step: Option<String>,
+    },
+    /// The copper's islands as the copper connects them, a page at a time;
+    /// a net's islands, a layer's, or one island with its items.
+    Nets {
+        /// A board of the project, or a job's path.
+        board: String,
+        #[arg(long)]
+        net: Option<String>,
+        /// An island's name, as nets gives it.
+        #[arg(long)]
+        island: Option<String>,
+        #[arg(long)]
+        layer: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        /// The page after this island.
+        #[arg(long)]
+        after: Option<String>,
+        /// The board step of a job read by path.
         #[arg(long)]
         step: Option<String>,
     },
@@ -341,6 +362,27 @@ fn render_args(cmd: &Command) -> ryudfm::render::Args {
     }
 }
 
+fn nets_args(cmd: &Command) -> ryudfm::nets::Args {
+    let Command::Nets {
+        net,
+        island,
+        layer,
+        limit,
+        after,
+        ..
+    } = cmd
+    else {
+        unreachable!("nets only")
+    };
+    ryudfm::nets::Args {
+        net: net.clone(),
+        island: island.clone(),
+        layer: layer.clone(),
+        limit: *limit,
+        after: after.clone(),
+    }
+}
+
 /// The request a command sends to the project, for those that are
 /// requests, with the project's root.
 fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
@@ -413,6 +455,16 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             ),
             Target::Path(_) => return Ok(None),
         },
+        Command::Nets { board, .. } => match target(here, board)? {
+            Target::Board(root, id) => (
+                root,
+                Request::Nets {
+                    board: id,
+                    args: nets_args(cmd),
+                },
+            ),
+            Target::Path(_) => return Ok(None),
+        },
         Command::Check { board: None, .. } => (root()?, Request::Check { board: None }),
         Command::Check { board: Some(b), .. } => match target(here, b)? {
             Target::Board(root, id) => (root, Request::Check { board: Some(id) }),
@@ -434,7 +486,22 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
     }))
 }
 
-/// Path mode: `inspect`, `render` and `check` of a job read here.
+/// A job's copper, read in this process, and its path.
+fn copper_at(
+    here: &Path,
+    text: &str,
+    step: &Option<String>,
+    read: &dyn Fn(&Path, &Option<String>) -> Result<ryu_board::model::Board>,
+) -> Result<(ryudfm::copper::CopperBoard, PathBuf)> {
+    let Target::Path(p) = target(here, text)? else {
+        unreachable!("a path")
+    };
+    let b = read(&p, step)?;
+    Ok((ryudfm::copper::CopperBoard::new(std::sync::Arc::new(b)), p))
+}
+
+/// Path mode: `inspect`, `render`, `check`, `nets`, `measure` and
+/// `clearance` of a job read here.
 fn by_path(cmd: &Command, here: &Path) -> Result<Answer> {
     let read = |path: &Path, step: &Option<String>| {
         let options = ryudfm::odb::ReadOptions {
@@ -473,7 +540,13 @@ fn by_path(cmd: &Command, here: &Path) -> Result<Answer> {
             };
             ryudfm::check::path(&p, step.as_deref()).map(Answer::json)
         }
-        _ => unreachable!("only inspect, render and check read paths"),
+        Command::Nets { board, step, .. } => {
+            let cb = copper_at(here, board, step, &read)?;
+            let mut v = ryudfm::nets::nets(&cb.0, None, &nets_args(cmd))?;
+            at(&mut v, &cb.1);
+            Ok(Answer::json(v))
+        }
+        _ => unreachable!("only inspect, render, check, nets, measure and clearance read paths"),
     }
 }
 
