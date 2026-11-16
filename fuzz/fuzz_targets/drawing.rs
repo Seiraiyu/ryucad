@@ -1,7 +1,8 @@
 //! Drawings from bytes (design 417, plan 9.D), over a project made once:
 //! part `p`, a 40 × 30 × 10 mm box `b` drilled through by a ⌀8 cylinder
-//! `h` and its vertical edges filleted (`f`), and drawing `d` of it with
-//! the standard views and a dimension `d1` of its length.
+//! `h`, tapped M3 through at (8, 8) by hole `t`, with datum point `o` at
+//! its top corner, and drawing `d` of it with the standard views and a
+//! dimension `d1` of its length.
 //!
 //! An even first byte reads the rest as a drawing file: one that doesn't
 //! read is a typed error; one that reads writes back canonically and
@@ -72,6 +73,25 @@ fn template() -> &'static Path {
             json!({"part": "p", "type": "cylinder", "id": "h", "operation": "cut", "targets": ["b"],
                    "params": {"radius": 4, "height": 10},
                    "placement": {"origin": [20, 15, 0]}}),
+        );
+        must(
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "placement": {"origin": [0, 0, 10]}}),
+        );
+        must(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "type": "point", "at": [8, 8]}, {"op": "add", "type": "fix", "a": "p1"}]}),
+        );
+        must(
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "t", "sketch": "s", "points": ["p1"],
+                   "spec": "M3x0.5-6H THRU"}),
+        );
+        must(
+            "feature.add",
+            json!({"part": "p", "type": "point", "id": "o", "by": "coordinates",
+                   "coordinates": ["0 mm", "0 mm", "10 mm"]}),
         );
         must(
             "drawing.create",
