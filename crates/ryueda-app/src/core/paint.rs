@@ -61,6 +61,17 @@ pub fn marks(
             });
         }
     }
+    // Compare colours (plan 13.A): over flashes, under everything else.
+    if let Some(d) = scene.paper.diff {
+        for (i, o) in scene.owners.iter().enumerate() {
+            let fill = match o.mark {
+                Some(crate::core::scene::Diff::Added) => d.added,
+                Some(_) => d.changed,
+                None => continue,
+            };
+            m.owners[i] = Some(Mark { fill, edge: None });
+        }
+    }
     let others: Vec<_> = people.others(me).collect();
     for p in &others {
         for h in &p.highlights {
@@ -158,6 +169,30 @@ mod tests {
             now,
         );
         assert_eq!(m.pins, [(1, sel)]);
+    }
+
+    #[test]
+    fn compare_colours_sit_under_highlights_and_selections() {
+        use crate::core::scene::tests::compared;
+        let s = Scene::from_json(&compared()).unwrap();
+        let d = s.paper.diff.unwrap();
+        let mut people = People::default();
+        people.reset(&json!([
+            {"id": "me", "kind": "human", "name": "Dana", "selection": [], "highlights": []},
+        ]));
+        let flash = crate::core::flash::Flash::default();
+        let now = std::time::Instant::now();
+        let m = marks(&s, "me", &[], None, &people, &flash, now);
+        assert_eq!(
+            m.owners[0].map(|x| x.fill),
+            Some(d.changed),
+            "moved: diff_changed"
+        );
+        assert_eq!(m.owners[1].map(|x| x.fill), Some(d.added));
+        assert_eq!(m.owners[2], None, "unmarked");
+        // Mine over the compare colour.
+        let m = marks(&s, "me", &["top/r1".to_owned()], None, &people, &flash, now);
+        assert_eq!(m.owners[0].map(|x| x.fill), Some(color32(SELECTED)));
     }
 
     #[test]
