@@ -2458,6 +2458,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-review"
+version = "0.0.0"
+dependencies = [
+ "ryu-doc",
+ "ryu-git",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "ryu-session"
 version = "0.0.0"
 dependencies = [
@@ -2497,6 +2507,7 @@ dependencies = [
  "ryu-draw",
  "ryu-git",
  "ryu-math",
+ "ryu-review",
  "ryu-session",
  "ryu-standards",
  "ryucad-doc",
@@ -2563,6 +2574,7 @@ dependencies = [
  "ryu-git",
  "ryu-math",
  "ryu-part21",
+ "ryu-review",
  "ryu-session",
  "ryueda-parts",
  "ryupdm",
