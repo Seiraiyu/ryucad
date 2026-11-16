@@ -10,6 +10,7 @@ pub mod connect;
 pub mod index;
 pub mod layout;
 pub mod measure;
+pub mod netlist;
 pub mod poly;
 pub mod surd;
 pub mod tree;
