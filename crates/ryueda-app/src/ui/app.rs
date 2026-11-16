@@ -36,8 +36,9 @@ pub struct App {
     /// Whether the window had the focus at the last frame.
     focused: bool,
     recent: Vec<&'static str>,
-    /// Whether a merge was in progress at the last frame.
-    merging: bool,
+    /// Whether a merge was in progress at the last frame (`None` before
+    /// the first).
+    merging: Option<bool>,
     /// The title last set.
     titled: Option<String>,
 }
@@ -73,8 +74,9 @@ impl App {
             compare_with: None,
             focused: true,
             recent: Vec::new(),
-            // The first frame closes a Conflicts tile a saved layout kept.
-            merging: true,
+            // Unknown until the first frame, which opens the Conflicts tile
+            // or closes one a saved layout kept.
+            merging: None,
             titled: None,
         }
     }
@@ -425,12 +427,12 @@ impl App {
     /// merge starts, and closes itself when it ends (ryucad's rule).
     fn follow_merge(&mut self) {
         let merging = self.opened().is_some_and(|w| w.merge.is_some());
-        if merging && !self.merging {
+        if merging && self.merging != Some(true) {
             shell::open_first(&SPEC, &mut self.tree, "conflicts");
-        } else if !merging && self.merging {
+        } else if !merging && self.merging != Some(false) {
             shell::close(&SPEC, &mut self.tree, "conflicts");
         }
-        self.merging = merging;
+        self.merging = Some(merging);
     }
 
     /// One frame: what eframe's `ui` and the tests' harness call.
