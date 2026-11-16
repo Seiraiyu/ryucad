@@ -10,8 +10,11 @@ Methods, params and answers are the protocol's, as ``ryucad <command>
 --help`` and docs/claude/ryucad-scripting.md name them.
 """
 
+from ._codes import EXIT, Code
 from ._meta import VERSION as __version__
 
 __all__ = [
+    "Code",
+    "EXIT",
     "__version__",
 ]
