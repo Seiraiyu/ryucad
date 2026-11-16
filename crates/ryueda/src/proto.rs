@@ -1030,6 +1030,12 @@ pub enum Request {
         layer: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         theme: Option<ryusch::style::Theme>,
+        /// The working sheet marked against this Git revision (plan
+        /// 13.A): each owner's `mark`, the revision's `ghosts`, moved
+        /// parts' `leaders`, the `counts` and each sheet's, decided as
+        /// `render --compare` decides them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression (plan 13.A). The answer
         /// names its `commit`; a window shows it read only.

@@ -692,6 +692,65 @@ fn a_scene_reads_a_revision_both_ways() {
     }
 }
 
+/// `scene --compare` (plan 13.A) over the edited breakout: r1 changed,
+/// r3 added, c3 ghosted, J1 moved with a leader, the counts, both ways.
+#[test]
+fn a_compare_scene_marks_ghosts_and_counts_both_ways() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["scene", "--block", "breakout", "--compare", "HEAD"],
+        );
+        assert_eq!(code, 0, "{v}");
+        let r = &v["result"];
+        let mark = |reference: &str| {
+            r["owners"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["ref"] == reference)
+                .and_then(|o| o["mark"].as_str().map(str::to_owned))
+        };
+        assert_eq!(mark("breakout/r1").as_deref(), Some("changed"));
+        assert_eq!(mark("breakout/r3").as_deref(), Some("added"));
+        assert_eq!(mark("breakout/j1").as_deref(), Some("moved"));
+        let ghosts: Vec<&str> = r["ghosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["ref"].as_str().unwrap())
+            .collect();
+        assert!(ghosts.contains(&"breakout/c3"), "{ghosts:?}");
+        assert!(
+            r["leaders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l["ref"] == "breakout/j1")
+        );
+        assert!(r["counts"]["removed"].as_u64().unwrap() >= 1);
+        assert!(r["sheets"][0]["counts"].is_object());
+        assert_eq!(r["against"]["rev"], "HEAD");
+        for bad in [
+            vec!["scene", "--compare", "HEAD", "--rev", "HEAD"],
+            vec!["scene", "--compare", "working"],
+        ] {
+            let (_, e) = ryueda(&board, &run, daemon, &bad);
+            assert_eq!(e["error"]["code"], "invalid_param", "{bad:?}: {e}");
+        }
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
 #[test]
 fn output_compare_pages_only_changed_sheets() {
     let dir = tempfile::tempdir().unwrap();

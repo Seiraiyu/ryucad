@@ -472,6 +472,10 @@ enum Command {
         /// light (the default) or dark.
         #[arg(long, value_parser = ["light", "dark"])]
         theme: Option<String>,
+        /// Mark what changed since this Git revision: each owner's mark,
+        /// what is gone as ghosts, moved parts' leaders and the counts.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
         #[command(flatten)]
         rev: Rev,
     },
@@ -3154,8 +3158,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             sheet,
             layer,
             theme,
+            compare,
             rev,
         } => Request::Scene {
+            compare: compare.clone(),
             rev: rev.rev.clone(),
             design: design.clone(),
             block: block.clone(),

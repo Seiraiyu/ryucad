@@ -360,6 +360,25 @@ fn working(
             sheet,
             layer,
             theme,
+            compare: Some(rev),
+            ..
+        } => crate::scene::answer_compare(
+            session,
+            &crate::scene::Ask {
+                design,
+                block,
+                sheet,
+                layer,
+                theme: theme.unwrap_or_default(),
+            },
+            &rev,
+        ),
+        Request::Scene {
+            design,
+            block,
+            sheet,
+            layer,
+            theme,
             ..
         } => crate::scene::answer(
             session,
@@ -404,6 +423,9 @@ fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Re
             compare: Some(_), ..
         }
         | Request::Output {
+            compare: Some(_), ..
+        }
+        | Request::Scene {
             compare: Some(_), ..
         } => Err(Error::new(
             Code::InvalidParam,

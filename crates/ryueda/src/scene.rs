@@ -256,6 +256,31 @@ struct Owner {
     net: Option<String>,
     boxed: Option<Rect>,
     hash: blake3::Hasher,
+    /// Its compare mark (plan 13.A): of its keys' marks, added over
+    /// changed over moved.
+    mark: Option<&'static str>,
+}
+
+fn mark_word(m: &ryusch::paint::Mark) -> &'static str {
+    match m {
+        ryusch::paint::Mark::Added => "added",
+        ryusch::paint::Mark::Changed => "changed",
+        ryusch::paint::Mark::Moved { .. } => "moved",
+    }
+}
+
+/// Of an owner's mark so far and another of its keys', the stronger:
+/// added over changed over moved.
+fn stronger(a: Option<&'static str>, b: &'static str) -> &'static str {
+    let rank = |w: &str| match w {
+        "added" => 0,
+        "changed" => 1,
+        _ => 2,
+    };
+    match a {
+        Some(a) if rank(a) <= rank(b) => a,
+        _ => b,
+    }
 }
 
 /// A sheet's items and owners as JSON text: `items` (an array, each
@@ -272,13 +297,15 @@ pub struct Owned {
 /// one) moved by `shift` into the sheet's frame, then `painted`'s items
 /// with their owners by reference path (`schem::ref_path`). `parts` are
 /// the components' part keys. An owner's hash is BLAKE3 over its items'
-/// JSON without their owner index, so no other owner moves it.
+/// JSON without their owner index, so no other owner moves it. With a
+/// compare's `marks` (by layout key), an owner carries its `mark`.
 pub fn owned(
     block: &Id,
     under: &[Item],
     shift: Point,
     painted: &Painted,
     parts: &BTreeSet<&str>,
+    marks: Option<&BTreeMap<String, ryusch::paint::Mark>>,
 ) -> Owned {
     let mut index: BTreeMap<String, usize> = BTreeMap::new();
     let mut owners: Vec<Owner> = Vec::new();
@@ -314,12 +341,16 @@ pub fn owned(
                             net,
                             boxed: None,
                             hash: blake3::Hasher::new(),
+                            mark: None,
                         });
                         index.insert(r, owners.len() - 1);
                         owners.len() - 1
                     }
                 };
                 let o = &mut owners[i];
+                if let Some(m) = marks.and_then(|m| m.get(key)) {
+                    o.mark = Some(stronger(o.mark, mark_word(m)));
+                }
                 o.hash.update(body.as_bytes());
                 o.hash.update(b"\n");
                 if let Some(b) = item_box(it) {
@@ -335,7 +366,7 @@ pub fn owned(
         .iter()
         .map(|o| {
             format!(
-                r#"{{"ref":{},"kind":"{}","net":{},"box":{},"hash":"{}"}}"#,
+                r#"{{"ref":{},"kind":"{}","net":{},"box":{},"hash":"{}"{}}}"#,
                 serde_json::to_string(&o.reference).expect("a string"),
                 o.kind,
                 o.net.as_ref().map_or_else(
@@ -344,7 +375,9 @@ pub fn owned(
                 ),
                 o.boxed
                     .map_or_else(|| "null".to_owned(), |b| rect_text(b, [0, 0])),
-                &o.hash.finalize().to_hex()[..32]
+                &o.hash.finalize().to_hex()[..32],
+                o.mark
+                    .map_or_else(String::new, |m| format!(r#","mark":"{m}""#))
             )
         })
         .collect();
@@ -581,6 +614,23 @@ struct Head<'a> {
     invalid: Option<&'a Error>,
     findings: Vec<Finding<'a>>,
     pins: Vec<Pin<'a>>,
+    /// With `compare` (plan 13.A): the revision and commit compared with,
+    /// and the revision's block's error when it doesn't lay out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    against: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    counts: Option<ryusch::paint::Counts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leaders: Option<Vec<Value>>,
+}
+
+/// What a compare scene is drawn against (plan 13.A): the revision as
+/// asked, its commit, its project and its block laid out.
+pub struct Against<'a> {
+    pub rev: &'a str,
+    pub commit: &'a str,
+    pub then: &'a Project,
+    pub laid: &'a Result<Option<Laid>>,
 }
 
 /// One sheet of a block as a window draws it (design 519), as JSON text:
@@ -592,6 +642,17 @@ struct Head<'a> {
 /// sheet's frame, `colour`, `canvas`), and the `revisions` it is drawn
 /// from with their `revision`.
 pub fn scene(p: &Project, ask: &Ask) -> Result<String> {
+    scene_with(p, ask, None)
+}
+
+/// [`scene`], and with `against` the compare scene (plan 13.A): each
+/// owner's `mark`, the revision's `ghosts` (each item as `items` are,
+/// with its owner's `ref`, `kind` and `box`), moved parts' `leaders`,
+/// the sheet's `counts`, each sheet's counts in `sheets` and the sheets
+/// only the revision has (`removed`), and `against` (`rev`, `commit`,
+/// `invalid` when the revision's block doesn't lay out), all decided by
+/// `compare::marks` and `ryusch::paint::decide` as `render --compare`.
+pub fn scene_with(p: &Project, ask: &Ask, against: Option<&Against>) -> Result<String> {
     let b = crate::schemcmd::blocks(p, ask.design.as_deref(), ask.block.as_deref())?[0];
     let mut laid = schem::lay(p, b, None, &[], ryusch::input::Relayout::None)?;
     let (layers, shown) = crate::schemcmd::show_layer(p, b, &mut laid, ask.layer.as_deref())?;
@@ -603,6 +664,54 @@ pub fn scene(p: &Project, ask: &Ask) -> Result<String> {
     let looks = crate::schemcmd::looks(p, b, &laid.built, layout, ask.theme);
     let look = looks.get(&sid).cloned().unwrap_or_default();
     let painted = ryusch::paint::sheet_in(&laid.built.input, layout, &sid, &look);
+    // The compare (plan 13.A): decided once, as `render --compare`
+    // decides it.
+    let compared = against.map(|a| {
+        let then_laid = a.laid.as_ref().ok().and_then(Option::as_ref);
+        let all = crate::compare::marks(p, &laid, a.then, then_laid, &b.id, a.rev);
+        let here = all.get(&sid).cloned().unwrap_or_default();
+        let then_block = a.then.conn.blocks.get(&b.id);
+        let was = then_laid
+            .zip(then_block)
+            .filter(|(o, _)| o.outcome.layout.sheets.contains_key(&sid))
+            .map(|(o, tb)| {
+                let looks =
+                    crate::schemcmd::looks(a.then, tb, &o.built, &o.outcome.layout, ask.theme);
+                ryusch::paint::sheet_in(
+                    &o.built.input,
+                    &o.outcome.layout,
+                    &sid,
+                    &looks.get(&sid).cloned().unwrap_or_default(),
+                )
+            });
+        let decided = ryusch::paint::decide(was.as_ref(), &here, &look);
+        let then_parts: BTreeSet<String> = then_laid
+            .map(|o| {
+                o.built
+                    .input
+                    .parts
+                    .iter()
+                    .zip(&o.built.of)
+                    .filter(|(_, of)| matches!(of, schem::Of::Unit { .. }))
+                    .map(|(part, _)| part.key.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let removed: Vec<(String, String)> = then_laid
+            .map(|o| sheets_of(&o.outcome.layout))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| !layout.sheets.contains_key(k))
+            .collect();
+        Compared {
+            against: a,
+            all,
+            here,
+            decided,
+            then_parts,
+            removed,
+        }
+    });
     let parts: BTreeSet<&str> = laid
         .built
         .input
@@ -638,7 +747,14 @@ pub fn scene(p: &Project, ask: &Ask) -> Result<String> {
         format!("{}/{}", place + 1, sheets.len()),
     );
     let under = crate::pdf::paper_items(paper, &title, &look);
-    let owned = owned(&b.id, &under, [-origin[0], -origin[1]], &painted, &parts);
+    let owned = owned(
+        &b.id,
+        &under,
+        [-origin[0], -origin[1]],
+        &painted,
+        &parts,
+        compared.as_ref().map(|c| &c.here.marks),
+    );
     let (found, scores) =
         ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
     let revs = revisions(p, b);
@@ -649,7 +765,24 @@ pub fn scene(p: &Project, ask: &Ask) -> Result<String> {
         layers: layers.iter().map(schem::Layer::to_json).collect(),
         sheet: &sid,
         name,
-        sheets: sheet_list(&sheets),
+        sheets: match &compared {
+            None => sheet_list(&sheets),
+            Some(c) => sheets
+                .iter()
+                .map(|(k, n)| {
+                    json!({
+                        "sheet": k,
+                        "name": n,
+                        "counts": c.all.get(k).map(ryusch::paint::Marks::counts).unwrap_or_default(),
+                    })
+                })
+                .chain(
+                    c.removed
+                        .iter()
+                        .map(|(k, n)| json!({"sheet": k, "name": n, "removed": true})),
+                )
+                .collect(),
+        },
         theme: ask.theme,
         revision: revision(&revs),
         revisions: revs,
@@ -658,6 +791,11 @@ pub fn scene(p: &Project, ask: &Ask) -> Result<String> {
             "rect": [[-origin[0], -origin[1]], [paper[0] - origin[0], paper[1] - origin[1]]],
             "colour": look.role(ryusch::style::Role::Paper).hex(),
             "canvas": look.role(ryusch::style::Role::Canvas).hex(),
+            "diff": {
+                "added": look.role(ryusch::style::Role::DiffAdded).hex(),
+                "changed": look.role(ryusch::style::Role::DiffChanged).hex(),
+                "removed": look.role(ryusch::style::Role::DiffRemoved).hex(),
+            },
         }),
         score: scores.iter().find(|s| s.sheet == sid).map(|s| s.score),
         stale: laid.stale,
@@ -673,16 +811,77 @@ pub fn scene(p: &Project, ask: &Ask) -> Result<String> {
             })
             .collect(),
         pins: pins(&b.id, &laid, &sid, &owned.index),
+        against: compared.as_ref().map(|c| {
+            let mut v = json!({"rev": c.against.rev, "commit": c.against.commit});
+            if let Err(e) = c.against.laid {
+                v["invalid"] = json!(e);
+            }
+            v
+        }),
+        counts: compared.as_ref().map(|c| c.here.counts()),
+        leaders: compared.as_ref().map(|c| {
+            c.decided
+                .leaders
+                .iter()
+                .filter_map(|(k, it)| match it {
+                    Item::Polyline { points, .. } if points.len() == 2 => Some(json!({
+                        "ref": schem::ref_path(&b.id, k),
+                        "from": points[0],
+                        "to": points[1],
+                    })),
+                    _ => None,
+                })
+                .collect()
+        }),
     };
+    // A compare's ghosts: each item as `items` are, with its owner's
+    // reference, kind and box.
+    let ghosts = compared.as_ref().map(|c| {
+        let then_parts: BTreeSet<&str> = c.then_parts.iter().map(String::as_str).collect();
+        let list: Vec<String> = c
+            .decided
+            .ghosts
+            .iter()
+            .map(|(it, k)| {
+                let body = item_body(it, [0, 0]);
+                format!(
+                    r#"{{"ref":{},"kind":"{}","box":{},{}"#,
+                    serde_json::to_string(&schem::ref_path(&b.id, k)).expect("a string"),
+                    kind_of(k, &then_parts),
+                    item_box(it).map_or_else(|| "null".to_owned(), |r| rect_text(r, [0, 0])),
+                    &body[1..]
+                )
+            })
+            .collect();
+        format!("[{}]", list.join(","))
+    });
     let mut text = serde_json::to_string(&head)
         .map_err(|e| Error::new(Code::Internal, format!("a scene's head: {e}")))?;
     text.pop();
     let _ = write!(
         text,
-        r#","items":{},"owners":{}}}"#,
+        r#","items":{},"owners":{}"#,
         owned.items, owned.owners
     );
+    if let Some(g) = ghosts {
+        let _ = write!(text, r#","ghosts":{g}"#);
+    }
+    text.push('}');
     Ok(text)
+}
+
+/// A compare as one scene draws it (plan 13.A).
+struct Compared<'a> {
+    against: &'a Against<'a>,
+    /// Every working sheet's marks.
+    all: BTreeMap<String, ryusch::paint::Marks>,
+    /// This sheet's.
+    here: ryusch::paint::Marks,
+    decided: ryusch::paint::Decided,
+    /// The revision's components' part keys.
+    then_parts: BTreeSet<String>,
+    /// The sheets only the revision has, `(ID, name)`.
+    removed: Vec<(String, String)>,
 }
 
 /// `scene` as the session answers it: a scene drawn before from the same
@@ -724,6 +923,55 @@ pub fn answer_at(
         None => {
             let t = std::sync::Arc::new(scene(p, ask)?);
             session.keep_scene(key, t.clone());
+            t
+        }
+    };
+    Ok(crate::proto::Answer::raw(Raw::Result(
+        text.as_ref().clone(),
+    )))
+}
+
+/// `scene --compare` as the session answers it (plan 13.A): the working
+/// sheet marked against `rev`, the revision's block laid out once
+/// ([`Session::laid_at`](crate::session::Session::laid_at)), kept in the
+/// session's scenes by the ask, the working revisions it is drawn from
+/// and the revision's key, so `HEAD` moving after a commit is a new key.
+pub fn answer_compare(
+    session: &mut crate::session::Session,
+    ask: &Ask,
+    rev: &str,
+) -> Result<crate::proto::Answer> {
+    use ryu_session::rpc::Raw;
+    if rev == "working" {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a compare is against a Git revision: the working files are what it compares",
+        )
+        .with("param", "compare"));
+    }
+    let (commit, key, then) = session.at_keyed(rev)?;
+    let (block, layer, scene_key) = {
+        let p = session.project();
+        let b = crate::schemcmd::blocks(p, ask.design.as_deref(), ask.block.as_deref())?[0];
+        let (_, chosen) = crate::schemcmd::pick_layer(p, b, ask.layer.as_deref())?;
+        let k = format!(
+            "{ask:?}\u{0}{}\u{0}vs {rev}\u{0}{key}",
+            revision(&revisions(p, b))
+        );
+        (b.id.clone(), chosen, k)
+    };
+    let text = match session.scene(&scene_key) {
+        Some(t) => t,
+        None => {
+            let laid = session.laid_at(&key, &then, &block, layer.as_ref());
+            let against = Against {
+                rev,
+                commit: &commit,
+                then: &then,
+                laid: &laid,
+            };
+            let t = std::sync::Arc::new(scene_with(session.project(), ask, Some(&against))?);
+            session.keep_scene(scene_key, t.clone());
             t
         }
     };
@@ -880,6 +1128,81 @@ mod tests {
     use ryusch::paint::Layer;
     use serde_json::{Value, json};
 
+    /// A design committed, then `r1`'s value edited: what `scene
+    /// --compare HEAD` answers, against what `compare::marks` decides.
+    #[test]
+    fn a_compare_scene_lists_what_compare_decides() {
+        use crate::project::ProjectKind;
+        use crate::project::tests::{design_in, manifest};
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        crate::git::tests::git(dir.path(), &["init", "-q"]);
+        manifest(&board, ProjectKind::Design, &[]);
+        design_in(&board);
+        crate::git::tests::git(dir.path(), &["add", "."]);
+        crate::git::tests::git(dir.path(), &["commit", "-q", "-m", "c0"]);
+        let r1 = board.join("blocks/top/components/r1.json");
+        let mut c: Value = serde_json::from_slice(&std::fs::read(&r1).unwrap()).unwrap();
+        c["value"] = json!("22k");
+        std::fs::write(&r1, crate::canonical::to_string(&c)).unwrap();
+        let mut s = crate::session::Session::open(&board).unwrap();
+        let ask = Ask {
+            block: Some("top".into()),
+            ..Ask::default()
+        };
+        let text = |a: crate::proto::Answer| match a.raw {
+            Some(ryu_session::rpc::Raw::Result(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        let v: Value =
+            serde_json::from_str(&text(answer_compare(&mut s, &ask, "HEAD").unwrap())).unwrap();
+        assert_eq!(v["against"]["rev"], "HEAD");
+        assert_eq!(v["against"]["commit"].as_str().unwrap().len(), 40);
+        assert!(v["against"].get("invalid").is_none());
+        let owners = v["owners"].as_array().unwrap();
+        let marked: Vec<(&str, &str)> = owners
+            .iter()
+            .filter_map(|o| Some((o["ref"].as_str()?, o["mark"].as_str()?)))
+            .collect();
+        assert!(marked.contains(&("top/r1", "changed")), "{marked:?}");
+        assert!(
+            owners.iter().any(|o| o.get("mark").is_none()),
+            "unchanged owners carry no mark"
+        );
+        assert_eq!(
+            v["counts"]["changed"],
+            json!(marked.iter().filter(|m| m.1 == "changed").count())
+        );
+        assert!(v["ghosts"].is_array() && v["leaders"].is_array());
+        // The same as compare::marks decides for the sheet.
+        let (_, then) = s.at("HEAD").unwrap();
+        let p = s.project();
+        let b = &p.conn.blocks[&Id::parse("top", "block").unwrap()];
+        let laid = schem::lay(p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+        let old = crate::compare::laid_then(&then, &b.id, None);
+        let m = crate::compare::marks(p, &laid, &then, old.as_ref(), &b.id, "HEAD");
+        let sid = v["sheet"].as_str().unwrap();
+        let want: BTreeSet<String> = m[sid]
+            .marks
+            .keys()
+            .map(|k| schem::ref_path(&b.id, k))
+            .collect();
+        let got: BTreeSet<String> = marked.iter().map(|(r, _)| (*r).to_owned()).collect();
+        assert_eq!(got, want);
+        // Every scene names the diff colours in its paper.
+        assert_eq!(v["paper"]["diff"]["added"], "#1a7f37");
+        let plain: Value = serde_json::from_str(&scene(s.project(), &ask).unwrap()).unwrap();
+        assert_eq!(plain["paper"]["diff"], v["paper"]["diff"]);
+        assert!(plain.get("against").is_none() && plain.get("ghosts").is_none());
+        // Drawn once: the next ask is the kept scene.
+        let n = s.scenes.len();
+        answer_compare(&mut s, &ask, "HEAD").unwrap();
+        assert_eq!(s.scenes.len(), n);
+        // Against the working files: refused.
+        let e = answer_compare(&mut s, &ask, "working").unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+    }
+
     fn line(x: Nm) -> Item {
         Item::Polyline {
             points: vec![[x, 0], [x, 1_000_000]],
@@ -917,7 +1240,7 @@ mod tests {
         let block = Id::parse("top", "block").unwrap();
         let parts: BTreeSet<&str> = ["u1:1", "u1:2"].into();
         let under = [line(-5)];
-        let o = owned(&block, &under, [10, 20], &painted(line(3)), &parts);
+        let o = owned(&block, &under, [10, 20], &painted(line(3)), &parts, None);
         let items: Value = serde_json::from_str(&o.items).unwrap();
         let owners: Value = serde_json::from_str(&o.owners).unwrap();
         let of: Vec<Value> = items
@@ -965,7 +1288,7 @@ mod tests {
         );
         assert_eq!(o.index["top/u1"], 1);
         // Another line for sda moves sda's hash alone.
-        let again = owned(&block, &under, [10, 20], &painted(line(4)), &parts);
+        let again = owned(&block, &under, [10, 20], &painted(line(4)), &parts, None);
         let after: Value = serde_json::from_str(&again.owners).unwrap();
         for i in 0..2 {
             assert_eq!(after[i]["hash"], owners[i]["hash"], "{i}");
@@ -991,7 +1314,7 @@ mod tests {
             owners: vec![Some("label:sda@u1:2/5".into())],
             ..Painted::default()
         };
-        let o = owned(&block, &[], [0, 0], &p, &BTreeSet::new());
+        let o = owned(&block, &[], [0, 0], &p, &BTreeSet::new(), None);
         let owners: Value = serde_json::from_str(&o.owners).unwrap();
         assert_eq!(owners[0]["ref"], "top/label:sda@u1/5");
         assert_eq!(owners[0]["kind"], "label");
