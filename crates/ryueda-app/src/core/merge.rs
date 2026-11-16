@@ -143,6 +143,224 @@ impl Merge {
         }
     }
 }
+/// One thing a row offers: a side taken, or a planned repair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Action {
+    pub label: String,
+    /// `ours`, `theirs` or `repair`, as `merge.resolve` takes it.
+    pub choice: String,
+    pub repair: Option<String>,
+    pub recommended: bool,
+    /// What it will write, from the status's plan: its summary first.
+    pub plan: Vec<String>,
+}
+
+/// One item of `merge.status`, as the panel lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Row {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub message: String,
+    pub cause: String,
+    pub files: Vec<String>,
+    pub refs: Vec<String>,
+    /// The block it concerns, or its references' one block.
+    pub block: Option<String>,
+    /// A layout area's sheets.
+    pub sheets: Vec<String>,
+    /// `(side, shortened, in full)` for base, ours and theirs.
+    pub values: Vec<(&'static str, String, String)>,
+    pub actions: Vec<Action>,
+    /// The CLI's line for a value of one's own, when one is taken.
+    pub typed: Option<String>,
+    /// What a person does when no action here settles it.
+    pub hint: Option<String>,
+    /// A layout area's fellow areas, itself included: settled together.
+    pub with: Vec<String>,
+}
+
+impl Row {
+    /// Whether Show has something to show.
+    pub fn showable(&self) -> bool {
+        !self.refs.is_empty() || self.block.is_some()
+    }
+}
+
+fn owned(v: &Value) -> Vec<String> {
+    strings(v).into_iter().map(str::to_owned).collect()
+}
+
+/// A value as a row shows it: text bare, else its JSON, cut at 40
+/// characters; and in full.
+pub fn short(v: &Value) -> (String, String) {
+    let full = match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let short = if full.chars().count() > 40 {
+        format!("{}…", full.chars().take(39).collect::<String>())
+    } else {
+        full.clone()
+    };
+    (short, full)
+}
+
+/// The block an item concerns: its own, or its references' when they
+/// share one.
+fn block_of(c: &Value) -> Option<String> {
+    if let Some(b) = c["concerns"]["block"].as_str() {
+        return Some(b.to_owned());
+    }
+    let refs = owned(&c["concerns"]["refs"]);
+    let first = refs.first()?.split('/').next()?.to_owned();
+    refs.iter()
+        .all(|r| r.split('/').next() == Some(first.as_str()))
+        .then_some(first)
+}
+
+fn label(repair: &str) -> String {
+    match repair {
+        "relayout" => "Relay out".to_owned(),
+        "merge" => "Merge layouts".to_owned(),
+        other => {
+            let mut c = other.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// What a repair will write, from the status's plan: its summary, then a
+/// line per change it names.
+fn plan(c: &Value, r: &Value) -> Vec<String> {
+    let mut out: Vec<String> = r["summary"]
+        .as_str()
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    let text = |v: &Value| v.as_str().unwrap_or_default().to_owned();
+    match r["id"].as_str().unwrap_or_default() {
+        "renumber" | "annotate" => {
+            for x in r["changes"].as_array().into_iter().flatten() {
+                let (comp, to) = (text(&x["component"]), text(&x["refdes"]));
+                out.push(match c["refdes"].as_str() {
+                    Some(from) => format!("{comp}: {from} → {to}"),
+                    None => format!("{comp} → {to}"),
+                });
+            }
+        }
+        "join" => out.push(format!(
+            "theirs' {} joins ours' {}",
+            text(&r["net"]),
+            text(&r["into"])
+        )),
+        "rename" => {
+            for x in r["renames"].as_array().into_iter().flatten() {
+                out.push(format!("theirs' {} → {}", text(&c["name"]), text(&x["to"])));
+            }
+        }
+        "restore" => {
+            for f in owned(&r["files"]) {
+                out.push(format!("brings back {f}"));
+            }
+        }
+        "relayout" if c["kind"] == "layout_conflict" => {
+            if let Some((b, n)) = c["id"].as_str().and_then(|i| i.split_once("#area:")) {
+                out.push(format!("relays out area {n} of {b}"));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn row(c: &Value) -> Row {
+    let id = c["id"].as_str().unwrap_or_default().to_owned();
+    let kind = c["kind"].as_str().unwrap_or("conflict").to_owned();
+    let files = owned(&c["files"]);
+    let block = block_of(c);
+    let at = block
+        .clone()
+        .or_else(|| files.first().cloned())
+        .unwrap_or_else(|| id.clone());
+    let choices = owned(&c["choices"]);
+    let mut actions = Vec::new();
+    for (side, text) in [("ours", "Take ours"), ("theirs", "Take theirs")] {
+        if choices.iter().any(|x| x == side) {
+            actions.push(Action {
+                label: text.to_owned(),
+                choice: side.to_owned(),
+                repair: None,
+                recommended: false,
+                plan: Vec::new(),
+            });
+        }
+    }
+    for (i, r) in c["repairs"].as_array().into_iter().flatten().enumerate() {
+        let Some(rid) = r["id"].as_str() else {
+            continue;
+        };
+        actions.push(Action {
+            label: label(rid),
+            choice: "repair".to_owned(),
+            repair: Some(rid.to_owned()),
+            recommended: i == 0,
+            plan: plan(c, r),
+        });
+    }
+    let values = ["base", "ours", "theirs"]
+        .into_iter()
+        .filter_map(|k| c.get(k).map(|v| (k, short(v))))
+        .map(|(k, (s, f))| (k, s, f))
+        .collect();
+    let typed = choices
+        .iter()
+        .any(|x| x == "value")
+        .then(|| format!("ryueda merge resolve '{id}' --value '<JSON>'"));
+    let hint = match kind.as_str() {
+        "merge_faults" => Some(
+            "Fixed by editing: Show takes you there, and the status is read again as the files change."
+                .to_owned(),
+        ),
+        "annotate_conflict" => Some(
+            "Unlock all but one of them (`ryueda component edit <component> --unlock`); the status is read again."
+                .to_owned(),
+        ),
+        "pdm_broke" if actions.is_empty() => Some(
+            "Set the property with `ryueda props set`; the status is read again.".to_owned(),
+        ),
+        _ => None,
+    };
+    Row {
+        title: format!("{kind} in {at}"),
+        message: c["message"].as_str().unwrap_or_default().to_owned(),
+        cause: c["cause"].as_str().unwrap_or_default().to_owned(),
+        refs: owned(&c["concerns"]["refs"]),
+        sheets: owned(&c["concerns"]["sheets"]),
+        with: owned(&c["with"]),
+        id,
+        kind,
+        files,
+        block,
+        values,
+        actions,
+        typed,
+        hint,
+    }
+}
+
+/// Every item of a status, in its order.
+pub fn rows(status: &Value) -> Vec<Row> {
+    status["conflicts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(row)
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -245,5 +463,70 @@ pub(crate) mod tests {
         assert_eq!(Merge::noted(Some(&m), &json!({"merging": false})), None);
         let other = Merge::answered(Some(&m), Err(Error::new(Code::Internal, "x"))).unwrap();
         assert!(other.error.is_some() && other.resolving);
+    }
+
+    #[test]
+    fn every_kind_becomes_a_row_with_its_actions_in_order() {
+        let rows = rows(&status());
+        let by = |id: &str| rows.iter().find(|r| r.id == id).unwrap().clone();
+        let v = by("blocks/breakout/components/r1.json#/value");
+        assert_eq!(v.title, "value in breakout");
+        assert_eq!(v.refs, ["breakout/r1"]);
+        assert_eq!(
+            v.values,
+            [
+                ("base", "4k7".to_owned(), "4k7".to_owned()),
+                ("ours", "10k".to_owned(), "10k".to_owned()),
+                ("theirs", "47k".to_owned(), "47k".to_owned()),
+            ]
+        );
+        let labels: Vec<&str> = v.actions.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, ["Take ours", "Take theirs"]);
+        assert!(v.actions.iter().all(|a| !a.recommended));
+        assert_eq!(
+            v.typed.as_deref(),
+            Some(
+                "ryueda merge resolve 'blocks/breakout/components/r1.json#/value' --value '<JSON>'"
+            )
+        );
+        let r = by("refdes:board/R5");
+        assert_eq!(r.title, "refdes_clash in breakout", "refs' one block");
+        let labels: Vec<(&str, bool)> = r
+            .actions
+            .iter()
+            .map(|a| (a.label.as_str(), a.recommended))
+            .collect();
+        assert_eq!(labels, [("Renumber", true), ("Annotate", false)]);
+        assert_eq!(
+            r.actions[0].plan,
+            [
+                "give theirs the next free designators",
+                "breakout/r9: R5 → R6"
+            ]
+        );
+        assert_eq!(
+            (r.actions[0].choice.as_str(), r.actions[0].repair.as_deref()),
+            ("repair", Some("renumber"))
+        );
+        let n = by("name:breakout/AUX");
+        assert_eq!(
+            n.actions[0].plan[1],
+            "theirs' breakout/aux_t joins ours' aux_o"
+        );
+        assert_eq!(n.actions[1].plan[1], "theirs' AUX → AUX_2");
+        let a = by("breakout#area:2");
+        assert_eq!(a.sheets, ["s2"]);
+        assert_eq!(a.with, ["breakout#area:1", "breakout#area:2"]);
+        let labels: Vec<&str> = a.actions.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, ["Take ours", "Take theirs", "Relay out"]);
+        assert_eq!(a.actions[2].plan[1], "relays out area 2 of breakout");
+        let f = by("faults:erc:e1");
+        assert!(f.actions.is_empty() && f.typed.is_none());
+        assert!(f.hint.as_deref().unwrap().starts_with("Fixed by editing"));
+        assert!(f.showable(), "its references");
+        assert_eq!(f.block.as_deref(), Some("breakout"));
+        let long = short(&json!({"a": "x".repeat(80)}));
+        assert_eq!(long.0.chars().count(), 40);
+        assert!(long.0.ends_with('…') && long.1.len() > 80);
     }
 }
