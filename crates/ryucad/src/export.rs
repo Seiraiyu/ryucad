@@ -731,7 +731,8 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 let (data, unwritten) = if properties == Some(false) {
                     (ryustep::PartData::default(), None)
                 } else {
-                    let (d, u) = step_data(sess, &walk);
+                    let (mut d, u) = step_data(sess, &walk);
+                    d.aspects = step_holes(sess, &walk);
                     (d, Some(u))
                 };
                 (paints, unpainted, data, unwritten)
@@ -1953,6 +1954,140 @@ fn step_data(sess: &mut Session, walk: &Walk) -> (ryustep::PartData, Unwritten) 
     (out, u)
 }
 
+/// Each hole's and cosmetic thread's faces as a shape aspect with its
+/// intent as attributes (design 533, STEP export): per product and body,
+/// bodies counted as `step_paints` counts them (references aren't
+/// bodies), the rows in `holes`' order, then the threads. A product's own
+/// solids only: an imported assembly's part flattened into it keeps its
+/// holes in its own product's export. A part whose holes can't be listed
+/// writes none.
+fn step_holes(sess: &mut Session, walk: &Walk) -> Vec<ryustep::AspectData> {
+    let unit = sess.project().manifest.default_unit;
+    let mut out = Vec::new();
+    for (k, p) in walk.scene.products.iter().enumerate() {
+        let holes = match walk.built.get(&(p.part.clone(), p.rev.clone())) {
+            Some((part, result, _)) => crate::holes::of(part, result, unit),
+            None => sess
+                .node(&p.part, &p.rev)
+                .and_then(|(part, result, _)| crate::holes::of(&part, &result, unit)),
+        };
+        let Ok(holes) = holes else { continue };
+        let mut body = 0;
+        for sol in &p.solids {
+            if sol.built.reference {
+                continue;
+            }
+            let j = body;
+            body += 1;
+            if sol.part != p.part {
+                continue;
+            }
+            let founder = sol.founder.as_str();
+            for r in holes.rows.iter().filter(|r| r.solid.as_str() == founder) {
+                out.push(ryustep::AspectData {
+                    product: k,
+                    body: j,
+                    name: r.reference.clone(),
+                    faces: r
+                        .faces
+                        .values()
+                        .flatten()
+                        .filter_map(|n| crate::doc::reference::parse_name(n))
+                        .collect(),
+                    attributes: hole_attributes(r),
+                });
+            }
+            for t in &holes.threads {
+                let faces: Vec<ryukei::name::Name> = t
+                    .faces
+                    .iter()
+                    .filter_map(|f| {
+                        let mut it = f.splitn(3, '/');
+                        let (_, solid, name) = (it.next(), it.next()?, it.next()?);
+                        (solid == founder)
+                            .then(|| crate::doc::reference::parse_name(name))
+                            .flatten()
+                    })
+                    .collect();
+                if faces.is_empty() {
+                    continue;
+                }
+                out.push(ryustep::AspectData {
+                    product: k,
+                    body: j,
+                    name: t.feature.clone().unwrap_or_else(|| t.hole.clone()),
+                    faces,
+                    attributes: thread_attributes(
+                        &t.designation,
+                        t.class.as_deref(),
+                        t.pitch,
+                        Some((t.end - t.mouth).length()),
+                    ),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn text_attribute(name: &str, value: &str) -> ryustep::AttributeData {
+    ryustep::AttributeData {
+        name: name.to_owned(),
+        value: ryustep::DataValue::Text(value.to_owned()),
+    }
+}
+
+/// A thread's items: its designation, class (when it has one), pitch and
+/// depth (when known).
+fn thread_attributes(
+    designation: &str,
+    class: Option<&str>,
+    pitch: f64,
+    depth: Option<f64>,
+) -> Vec<ryustep::AttributeData> {
+    use ryustep::{AttributeData, DataValue};
+    let mut a = vec![text_attribute("thread designation", designation)];
+    if let Some(c) = class {
+        a.push(text_attribute("thread class", c));
+    }
+    a.push(AttributeData {
+        name: "thread pitch".into(),
+        value: DataValue::Length(pitch),
+    });
+    if let Some(d) = depth.filter(|d| d.is_finite()) {
+        a.push(AttributeData {
+            name: "thread depth".into(),
+            value: DataValue::Length(d),
+        });
+    }
+    a
+}
+
+/// A hole's items, in design 533's order: its spec and type; a tapped
+/// hole's thread; a fitted hole's class (or deviations).
+fn hole_attributes(r: &crate::holes::Row) -> Vec<ryustep::AttributeData> {
+    let mut a = vec![
+        text_attribute("hole spec", &r.spec),
+        text_attribute("hole type", r.kind()),
+    ];
+    if let Some(t) = &r.sizes.thread {
+        a.extend(thread_attributes(
+            &t.designation,
+            t.class.as_deref(),
+            t.pitch.si,
+            r.depth.2,
+        ));
+    }
+    if let Some(f) = &r.sizes.fit {
+        let fit = f
+            .class
+            .clone()
+            .unwrap_or_else(|| format!("{} / {}", f.upper.text, f.lower.text));
+        a.push(text_attribute("fit", &fit));
+    }
+    a
+}
+
 /// Solid `sol` of product `k`'s look as its part draws it; `plain` for
 /// none.
 fn look_in<'a>(
@@ -2159,15 +2294,28 @@ fn step_transfer(
     }
     match unwritten {
         // properties: false — every property it would have written.
-        None if !properties.is_empty() => omitted.push(json!({
-            "what": "properties",
-            "count": properties.len(),
-            "summary": format!(
-                "{} part propert(ies) and material(s), not written (properties: false)",
-                properties.len()
-            ),
-        })),
-        None => {}
+        None => {
+            if !properties.is_empty() {
+                omitted.push(json!({
+                    "what": "properties",
+                    "count": properties.len(),
+                    "summary": format!(
+                        "{} part propert(ies) and material(s), not written (properties: false)",
+                        properties.len()
+                    ),
+                }));
+            }
+            let holes = step_holes(s, walk).len();
+            if holes > 0 {
+                omitted.push(json!({
+                    "what": "properties",
+                    "count": holes,
+                    "summary": format!(
+                        "{holes} hole(s)' and thread(s)' attributes, not written (properties: false)"
+                    ),
+                }));
+            }
+        }
         Some(u) => {
             if u.values > 0 {
                 omitted.push(json!({"what": "properties", "count": u.values,
