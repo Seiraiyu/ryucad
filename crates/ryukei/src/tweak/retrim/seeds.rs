@@ -60,7 +60,6 @@ pub(crate) fn arrangement(w: &WorkBody, table: &Table, pieces: &[Piece]) -> Arra
 /// conflict, which no closure can keep whole. Each distinct piece counts
 /// once per use; a slit piece uses its edge once each way, which is no
 /// conflict by itself.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn conflicts(arr: &Arrangement, seeds: &[usize]) -> BTreeSet<usize> {
     let distinct: BTreeSet<usize> = seeds.iter().copied().collect();
     // Per edge: uses reversed, uses forward.
@@ -81,7 +80,6 @@ pub(crate) fn conflicts(arr: &Arrangement, seeds: &[usize]) -> BTreeSet<usize> {
 /// inner point doesn't lie inside their old face (`holds_old`, asked only
 /// of those): the weakest seeds yield (design 683, question 983). `None`
 /// where the set is in no conflict or no seed yields.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn yielded(
     arr: &Arrangement,
     seeds: &[usize],
@@ -119,7 +117,6 @@ pub(crate) fn yielded(
 /// it; `None` otherwise, where the first try's failure stands. A seed
 /// only says where the walk starts: a yielded seed's piece is kept only
 /// if the one closure reaches it.
-#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::type_complexity)]
 pub(crate) fn walk_again(
     arr: &Arrangement,
