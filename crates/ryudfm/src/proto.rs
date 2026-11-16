@@ -106,6 +106,13 @@ pub enum Request {
         #[serde(default, flatten)]
         args: crate::render::Args,
     },
+    /// The exact distance between two features, pins, holes or nets.
+    #[serde(rename = "measure")]
+    Measure {
+        board: String,
+        #[serde(flatten)]
+        args: crate::measure::Args,
+    },
     /// The copper's islands, a page at a time, or one island.
     #[serde(rename = "nets")]
     Nets {
@@ -260,6 +267,14 @@ mod tests {
                     net: Some("GND".into()),
                     limit: Some(3),
                     ..Default::default()
+                },
+            },
+            Request::Measure {
+                board: "b".into(),
+                args: crate::measure::Args {
+                    a: "x".into(),
+                    b: "y".into(),
+                    layer: None,
                 },
             },
             Request::Check { board: None },

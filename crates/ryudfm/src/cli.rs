@@ -144,6 +144,20 @@ enum Command {
         #[arg(long)]
         step: Option<String>,
     },
+    /// The exact distance between two features, component pins
+    /// (<step>/comp/<refdes>/<pin>), holes or nets, on a copper layer they
+    /// share.
+    Measure {
+        /// A board of the project, or a job's path.
+        board: String,
+        a: String,
+        b: String,
+        #[arg(long)]
+        layer: Option<String>,
+        /// The board step of a job read by path.
+        #[arg(long)]
+        step: Option<String>,
+    },
     /// The copper's islands as the copper connects them, a page at a time;
     /// a net's islands, a layer's, or one island with its items.
     Nets {
@@ -362,6 +376,17 @@ fn render_args(cmd: &Command) -> ryudfm::render::Args {
     }
 }
 
+fn measure_args(cmd: &Command) -> ryudfm::measure::Args {
+    let Command::Measure { a, b, layer, .. } = cmd else {
+        unreachable!("measure only")
+    };
+    ryudfm::measure::Args {
+        a: a.clone(),
+        b: b.clone(),
+        layer: layer.clone(),
+    }
+}
+
 fn nets_args(cmd: &Command) -> ryudfm::nets::Args {
     let Command::Nets {
         net,
@@ -455,6 +480,16 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             ),
             Target::Path(_) => return Ok(None),
         },
+        Command::Measure { board, .. } => match target(here, board)? {
+            Target::Board(root, id) => (
+                root,
+                Request::Measure {
+                    board: id,
+                    args: measure_args(cmd),
+                },
+            ),
+            Target::Path(_) => return Ok(None),
+        },
         Command::Nets { board, .. } => match target(here, board)? {
             Target::Board(root, id) => (
                 root,
@@ -539,6 +574,12 @@ fn by_path(cmd: &Command, here: &Path) -> Result<Answer> {
                 unreachable!("a path")
             };
             ryudfm::check::path(&p, step.as_deref()).map(Answer::json)
+        }
+        Command::Measure { board, step, .. } => {
+            let cb = copper_at(here, board, step, &read)?;
+            let mut v = ryudfm::measure::measure(&cb.0, None, &measure_args(cmd))?;
+            at(&mut v, &cb.1);
+            Ok(Answer::json(v))
         }
         Command::Nets { board, step, .. } => {
             let cb = copper_at(here, board, step, &read)?;

@@ -568,6 +568,7 @@ fn every_protocol_method_has_a_command() {
         ("render", &["render"]),
         ("check", &["check"]),
         ("nets", &["nets"]),
+        ("measure", &["measure"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),

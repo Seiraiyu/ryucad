@@ -223,6 +223,10 @@ fn dispatch(
             let b = session.board(&board)?;
             crate::render::render(&b, Some(&board), &args, unit)
         }
+        Request::Measure { board, args } => {
+            let cb = session.copper(&board)?;
+            json(crate::measure::measure(&cb, Some(&board), &args))
+        }
         Request::Nets { board, args } => {
             let cb = session.copper(&board)?;
             json(crate::nets::nets(&cb, Some(&board), &args))
