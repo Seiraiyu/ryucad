@@ -864,10 +864,7 @@ impl Arrangement<'_> {
         // either way, and as an outer boundary it made a piece of its own
         // that merging then grew into the whole face (#909: a torus
         // touched along a circle and a line came out as two tori).
-        let slit = |c: &[usize]| {
-            c.iter()
-                .all(|&d| self.darts[d].twin.is_some_and(|t| c.contains(&t)))
-        };
+        let slit = |c: &[usize]| self.is_slit(c);
         // Outer boundaries: counterclockwise cycles that close.
         let outers: Vec<usize> = (0..lifted.len())
             .filter(|&i| lifted[i].wind == [0, 0] && lifted[i].area > 0.0 && !slit(&cycles[i]))
