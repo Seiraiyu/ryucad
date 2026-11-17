@@ -5177,3 +5177,45 @@ fn a_hand_edited_route_with_a_bad_net_is_a_fault_that_check_reports() {
         "{faults:?}"
     );
 }
+
+#[test]
+fn a_track_edit_takes_negative_points_through_ops() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let pads = p.ok(&["board", "show", "main", "--pads"])["pads"].clone();
+    let net = pads[0]["net"].as_str().unwrap().to_owned();
+    p.ok(&[
+        "board", "track", "add", "main", "--net", &net, "--layer", "top", "--path", "1,1", "2,1",
+        "--id", "t1",
+    ]);
+    let e = p.ok(&[
+        "board",
+        "track",
+        "edit",
+        "main",
+        "t1",
+        "--ops",
+        r#"{"path": [["-1", "2"], ["3", "-4"]], "width": "0.3"}"#,
+    ]);
+    assert_eq!(
+        e["tracks"][0]["track"]["points"],
+        json!([[-1_000_000, 2_000_000], [3_000_000, -4_000_000]])
+    );
+    assert_eq!(e["tracks"][0]["track"]["width_nm"], 300_000);
+    p.fails(
+        &[
+            "board",
+            "track",
+            "edit",
+            "main",
+            "t1",
+            "--ops",
+            r#"{"colour": "red"}"#,
+        ],
+        "invalid_param",
+        1,
+    );
+}

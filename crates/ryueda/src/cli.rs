@@ -1693,6 +1693,10 @@ enum TrackCmd {
         width: Option<String>,
         #[arg(long, num_args = 2.., value_name = "P")]
         path: Vec<String>,
+        /// JSON: {net?, layer?, width?, path?: [["x", "y"] | "R1/1", ...]}, for
+        /// points with a negative coordinate.
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "layer", "width", "path"])]
+        ops: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1770,6 +1774,42 @@ fn point_arg(flag: &str, text: &str) -> Result<serde_json::Value> {
     } else {
         Ok(serde_json::json!(text))
     }
+}
+
+/// What changes from a track edit's `--ops`: its net, layer, width (a
+/// length, as a string) and path (points as `track add --ops` takes them:
+/// strings are lengths, bare integers nanometres).
+type TrackEdit = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<Vec<serde_json::Value>>,
+);
+
+fn track_edit_ops(v: &serde_json::Value) -> Result<TrackEdit> {
+    let bad = |m: &str| Error::new(Code::InvalidParam, format!("--ops {m}")).with("flag", "--ops");
+    let o = v
+        .as_object()
+        .ok_or_else(|| bad("is a JSON object: {net?, layer?, width?, path?}"))?;
+    if let Some(k) = o
+        .keys()
+        .find(|k| !["net", "layer", "width", "path"].contains(&k.as_str()))
+    {
+        return Err(bad(&format!("has no field {k}")));
+    }
+    let text = |k: &str| -> Result<Option<String>> {
+        match o.get(k) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(bad(&format!("{k} is a string"))),
+        }
+    };
+    let path = match o.get("path") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(l)) => Some(l.clone()),
+        Some(_) => return Err(bad("path is a list of points")),
+    };
+    Ok((text("net")?, text("layer")?, text("width")?, path))
 }
 
 fn path_arg(list: &[String]) -> Result<Vec<serde_json::Value>> {
@@ -3799,14 +3839,28 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
             expected_revision: expect.expect.clone(),
         },
-        Command::Board(BoardCmd::Track(TrackCmd::Edit { board, track, net, layer, width, path, expect })) => Request::BoardTrackEdit {
-            board: board.clone(),
-            track: track.clone(),
-            net: net.clone(),
-            layer: layer.clone(),
-            width: width.clone(),
-            path: if path.is_empty() { None } else { Some(path_arg(path)?) },
-            expected_revision: expect.expect.clone(),
+        Command::Board(BoardCmd::Track(TrackCmd::Edit { board, track, net, layer, width, path, ops, expect })) => match ops {
+            Some(o) => {
+                let (net, layer, width, path) = track_edit_ops(&json_arg("--ops", o)?)?;
+                Request::BoardTrackEdit {
+                    board: board.clone(),
+                    track: track.clone(),
+                    net,
+                    layer,
+                    width,
+                    path,
+                    expected_revision: expect.expect.clone(),
+                }
+            }
+            None => Request::BoardTrackEdit {
+                board: board.clone(),
+                track: track.clone(),
+                net: net.clone(),
+                layer: layer.clone(),
+                width: width.clone(),
+                path: if path.is_empty() { None } else { Some(path_arg(path)?) },
+                expected_revision: expect.expect.clone(),
+            },
         },
         Command::Board(BoardCmd::Track(TrackCmd::Delete { board, tracks, expect })) => Request::BoardTrackDelete {
             board: board.clone(),
