@@ -1730,4 +1730,105 @@ mod tests {
         assert_eq!(middle(&[[1.0, 1.0]]), None);
         assert_eq!(middle(&[]), None);
     }
+
+    /// STC 10 #3044's sphere faces (#658, census VI, plan 21.D): its
+    /// working body at the rung that refused (rung 2's narrowed retry),
+    /// met at the pairs the re-trim meets them in, with the held seams it
+    /// meets them along (built from the input body's edges as the re-trim
+    /// builds them). Each face holds a lone vertex (a touch on its
+    /// equator) and a slit: an arc inside it, walked both ways, ending at
+    /// a tolerant vertex within reach of a pole, so the slit lifts as a
+    /// winding cycle. It splits, and each lone vertex lies in exactly one
+    /// piece with a boundary of its own (never alone in the region
+    /// outside every outer boundary).
+    #[test]
+    #[ignore = "plan 21.D: passes once Task 6's slit rule is in"]
+    fn stc_10s_balls_split_with_slits_to_their_poles() {
+        use crate::boolean::table::{Scope, build_seamed};
+        use crate::intersect::{SeamKind, Seams};
+        use crate::topo::{EdgeId, FaceId, Id};
+        use std::collections::BTreeSet;
+        let input = crate::codec::decode_body(include_bytes!(
+            "../../tests/data/nist_stc_10_pole_input.body"
+        ))
+        .unwrap();
+        let work = crate::codec::decode_body(include_bytes!(
+            "../../tests/data/nist_stc_10_pole_work.body"
+        ))
+        .unwrap();
+        let mut spheres = Vec::new();
+        let mut pairs = BTreeSet::new();
+        let mut held = Vec::new();
+        let face = |s: &str| FaceId::from_index(s.parse().unwrap());
+        for line in include_str!("../../tests/data/nist_stc_10_pole_pairs.txt").lines() {
+            let line = line.split('#').next().unwrap().trim();
+            match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+                [] => {}
+                ["sphere", f] => spheres.push(face(f)),
+                ["seam", e, a, b, kind, stopped] => {
+                    let kind = match *kind {
+                        "Frontier" => SeamKind::Frontier,
+                        "Fixed" => SeamKind::Fixed,
+                        "Running" => SeamKind::Running,
+                        _ => panic!("{line}"),
+                    };
+                    let e = EdgeId::from_index(e.parse().unwrap());
+                    held.push((e, face(a), face(b), kind, *stopped == "true"));
+                }
+                [a, b] => {
+                    let (a, b) = (face(a), face(b));
+                    pairs.insert((a.min(b), a.max(b)));
+                }
+                _ => panic!("{line}"),
+            }
+        }
+        assert_eq!(spheres.len(), 2);
+        // The seams as `WorkBody::seams` makes them, at the pairs met.
+        let mut seams = Seams::new();
+        for (e, wa, wb, kind, stopped) in held {
+            let mut seam =
+                crate::tweak::retrim::body::seam_for(&input, e, (&work, wa), (&work, wb), kind)
+                    .unwrap();
+            seam.stopped = stopped;
+            let key = if wa < wb {
+                (wa, wb)
+            } else {
+                seam.pcurves.swap(0, 1);
+                (wb, wa)
+            };
+            if pairs.contains(&key) {
+                seams.entry(key).or_default().push(seam);
+            }
+        }
+        assert!(!seams.is_empty());
+        let ops = [work];
+        // unmetered: a unit test.
+        let m = crate::work::Meter::free();
+        let t = build_seamed(&ops, Scope::Pairs(&pairs), &seams, &m).unwrap();
+        for f in spheres {
+            let f = FaceRef { op: 0, face: f };
+            let w = &t.faces[&f];
+            let mut lone = w.nodes.clone();
+            lone.extend(w.loops.iter().filter_map(|l| match l {
+                Boundary::Lone(g) => Some(*g),
+                Boundary::Arcs(_) => None,
+            }));
+            assert!(!lone.is_empty(), "{f:?} holds no lone vertex");
+            let pieces = split(&ops, &t, f).unwrap_or_else(|e| panic!("{f:?}: {e:?}"));
+            for g in lone {
+                let holding: Vec<&Piece> = pieces
+                    .iter()
+                    .filter(|p| p.loops.contains(&Boundary::Lone(g)))
+                    .collect();
+                assert_eq!(holding.len(), 1, "{f:?}: lone {g} in {holding:?}");
+                assert!(
+                    holding[0]
+                        .loops
+                        .iter()
+                        .any(|l| matches!(l, Boundary::Arcs(_))),
+                    "{f:?}: lone {g} alone in the region outside the face"
+                );
+            }
+        }
+    }
 }
