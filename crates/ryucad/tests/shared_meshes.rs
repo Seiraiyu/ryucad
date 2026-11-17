@@ -147,3 +147,50 @@ fn copies_of_a_seeded_component_share_one_shape() {
     );
     assert_eq!(alone, 0, "copies of one component healed to different shapes");
 }
+
+#[test]
+fn copies_of_one_shape_are_meshed_once_and_moved() {
+    let (_dir, mut s) = common::project();
+    must(
+        &mut s,
+        "import",
+        json!({"path": occt("assembly.stp"), "flatten": true, "part": "board"}),
+    );
+    let board = Id::parse("board", "part").unwrap();
+    let normal = ryucad::mesh::Quality::Normal;
+    let before = s.caches().meshes().made();
+    let meshes = ryucad::scene::meshes(&mut s, &board, None, normal).unwrap();
+    assert_eq!(
+        s.caches().meshes().made() - before,
+        2,
+        "the block's mesh and the pin's, the block's moved to its second copy"
+    );
+    let c = components(&mut s, "board");
+    let (_, blocks) = c.iter().find(|(_, v)| v.len() == 2).expect("the block twice");
+    let mesh_of = |solid: &str| {
+        let id = solid.rsplit('/').next().unwrap();
+        meshes
+            .iter()
+            .find(|(f, _)| f.as_str() == id)
+            .map(|(_, m)| m.as_ref().unwrap().mesh.clone())
+            .unwrap()
+    };
+    let (a, b) = (mesh_of(&blocks[0].0), mesh_of(&blocks[1].0));
+    let (ma, mb) = (a.mesh.as_ref().unwrap(), b.mesh.as_ref().unwrap());
+    assert_eq!(ma.triangles, mb.triangles, "one mesh");
+    assert_eq!(a.params.chord.to_bits(), b.params.chord.to_bits(), "one chord");
+    // Each copy's mesh is the shared one moved by its own pose.
+    let (ra, rb) = (
+        blocks[0].1.moved.as_ref().unwrap(),
+        blocks[1].1.moved.as_ref().unwrap(),
+    );
+    let back = |p: ryukei::geom::Point3, r: &ryukei::geom::Rigid| r.inverse().apply_point(p);
+    for (pa, pb) in ma.positions.iter().zip(&mb.positions) {
+        let (qa, qb) = (back(*pa, &ra.pose), back(*pb, &rb.pose));
+        assert!((qa - qb).length() < 1e-12, "{qa:?} {qb:?}");
+    }
+    // Asked again: nothing is made.
+    let before = s.caches().meshes().made();
+    ryucad::scene::meshes(&mut s, &board, None, normal).unwrap();
+    assert_eq!(s.caches().meshes().made(), before);
+}
