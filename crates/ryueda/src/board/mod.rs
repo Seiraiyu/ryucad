@@ -15,4 +15,7 @@ pub mod render;
 pub mod shapes;
 pub mod text;
 
-pub use file::{BOARD_FILE, BOARD_KIND, BOARDS, FORMAT, PLACEMENT_KIND, PLACEMENTS};
+pub use file::{
+    BOARD_FILE, BOARD_KIND, BOARDS, FORMAT, HOLE_KIND, HOLES, PLACEMENT_KIND, PLACEMENTS,
+    TRACK_KIND, TRACKS, VIA_KIND, VIAS,
+};
