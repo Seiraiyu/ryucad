@@ -640,6 +640,64 @@ fn a_narrowed_ladder_climbs_and_stays_narrowed() {
     ));
 }
 
+fn built_rung() -> super::Rung {
+    super::done(Ok((block(), crate::name::Journal::new())))
+}
+
+fn refused_rung() -> super::Rung {
+    super::done(Err(crate::TweakError::Uncertain {
+        at: Name::from_u128(4),
+    }
+    .into()))
+}
+
+/// An ask for room for the block's +x side.
+fn asks() -> Option<super::near::Adjusts> {
+    let b = block();
+    Some(super::near::Adjusts::from([(
+        face_of(&b, FaceRole::PlusX),
+        super::near::Adjust::Room(1),
+    )]))
+}
+
+/// Design 724's adjusted builds: a narrowed build that asks nothing
+/// answers alone; one that asks is built again with what it asks; the
+/// first adjusted build that builds answers; at most `ADJUSTS` are made;
+/// a stopped meter answers at once; where none builds, the first answer
+/// stands.
+#[test]
+fn adjusted_builds_answer_only_when_they_build() {
+    use super::near::Adjusts;
+    use super::{ADJUSTS, Rung, adjusting};
+    let never = |_: &Adjusts| -> (Rung, Option<Adjusts>) { panic!("built again") };
+    let r = adjusting((walked_rung(), None), &|| false, never);
+    assert!(matches!(r, Rung::Walked(_)));
+    let mut n = 0;
+    let r = adjusting((walked_rung(), asks()), &|| false, |a: &Adjusts| {
+        assert_eq!(Some(a.clone()), asks());
+        n += 1;
+        (built_rung(), None)
+    });
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()) && n == 1);
+    let mut n = 0;
+    let r = adjusting((walked_rung(), asks()), &|| false, |_: &Adjusts| {
+        n += 1;
+        (refused_rung(), asks())
+    });
+    assert!(matches!(r, Rung::Walked(_)), "the first answer stands");
+    assert_eq!(n, ADJUSTS);
+    let mut n = 0;
+    let r = adjusting((walked_rung(), asks()), &|| false, |_: &Adjusts| {
+        n += 1;
+        (walked_rung(), None)
+    });
+    assert!(matches!(r, Rung::Walked(_)) && n == 1);
+    let r = adjusting((walked_rung(), asks()), &|| true, |_: &Adjusts| {
+        (super::done(Err(crate::Error::Cancelled)), asks())
+    });
+    assert!(matches!(&r, Rung::Done(d) if matches!(**d, Err(crate::Error::Cancelled))));
+}
+
 /// FNV-1a of `b`'s `dump_unnamed` (as `ryukei-testkit`'s `fnv`, which the
 /// crate can't depend on).
 fn free_hash(b: &Body) -> u64 {

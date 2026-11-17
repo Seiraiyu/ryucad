@@ -141,6 +141,39 @@ pub(crate) fn climb(
     Err(last.expect("one rung ran"))
 }
 
+/// How many adjusted builds a narrowed rung may make (design 724): a
+/// work bound, not a tolerance. Each costs at most a rung's cap.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const ADJUSTS: usize = 3;
+
+/// A narrowed rung's answer (design 724, plan 22.A). `first` is its first
+/// narrowed build and what that build asks: `Some` adjustments where its
+/// walk failed `Clipped` at a working face with room to give. The rung is
+/// built again by `again` with what each build asks, at most [`ADJUSTS`]
+/// times. The first adjusted build that builds (closes and checks clean)
+/// answers, and so does one after which the meter is stopped (a cancel
+/// or a halt answers at once). Otherwise the first answer stands, so
+/// refusals keep their names and a failed walk climbs as before.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn adjusting(
+    first: (Rung, Option<near::Adjusts>),
+    stopped: &dyn Fn() -> bool,
+    mut again: impl FnMut(&near::Adjusts) -> (Rung, Option<near::Adjusts>),
+) -> Rung {
+    let (first, mut ask) = first;
+    for _ in 0..ADJUSTS {
+        let Some(adjusts) = ask.take() else {
+            break;
+        };
+        let (r, next) = again(&adjusts);
+        if matches!(&r, Rung::Done(d) if d.is_ok()) || stopped() {
+            return r;
+        }
+        ask = next;
+    }
+    first
+}
+
 /// A rung that answers.
 fn done(r: Result<(Body, Journal), Error>) -> Rung {
     Rung::Done(Box::new(r))
