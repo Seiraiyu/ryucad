@@ -1,6 +1,7 @@
 //! A reference's mass properties from its mesh (design 364): a closed
 //! reference is weighed as the polyhedron its display mesh at normal
-//! quality is, bounded by the mesh's distance from the surface. The
+//! quality is (a moved body's: its source's moved, #813),
+//! bounded by the mesh's distance from the surface. The
 //! kernel's `measure::mass` takes only checked solids.
 
 use crate::error::{Code, Error, Result};
@@ -138,15 +139,7 @@ pub fn weigh(b: &Built, density: f64, solid: &str) -> Result<MassProperties> {
         .with("reason", "open")
         .with("laminar", laminar));
     }
-    let diagonal = match crate::inspect::loose_extent(&b.body) {
-        Some((lo, hi)) => {
-            let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-        }
-        None => 1.0,
-    };
-    let params = crate::mesh::Quality::Normal.params(diagonal);
-    let mesh = ryukei::mesh::tessellate(&b.body, &params).map_err(|e| {
+    let (params, mesh) = normal_mesh(b).map_err(|e| {
         Error::new(
             Code::ReferenceNotSolid,
             format!("{solid} is a reference that doesn't mesh: {e}"),
@@ -184,6 +177,29 @@ pub fn weigh(b: &Built, density: f64, solid: &str) -> Result<MassProperties> {
         params.chord,
         largest_tolerance(&b.body),
     ))
+}
+
+/// `b`'s mesh at normal display quality and the parameters it was made
+/// at: a moved body's (a flattened import's, an inserted solid's) is its
+/// source's moved, as its display mesh is (#813), so every copy of one
+/// shape is weighed from one mesh.
+fn normal_mesh(
+    b: &Built,
+) -> std::result::Result<(ryukei::mesh::MeshParams, ryukei::mesh::BodyMesh), ryukei::Error> {
+    if let Some(m) = &b.moved {
+        let (params, mut mesh) = normal_mesh(&m.source)?;
+        crate::mesh::move_mesh(&mut mesh, &m.pose);
+        return Ok((params, mesh));
+    }
+    let diagonal = match crate::inspect::loose_extent(&b.body) {
+        Some((lo, hi)) => {
+            let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+        }
+        None => 1.0,
+    };
+    let params = crate::mesh::Quality::Normal.params(diagonal);
+    Ok((params, ryukei::mesh::tessellate(&b.body, &params)?))
 }
 
 #[cfg(test)]

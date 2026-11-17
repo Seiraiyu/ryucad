@@ -7,7 +7,8 @@
 //! the hash, what it applied, if anything, a feature's report (an
 //! import's, a fill's, a draft's angles), and an unfold's flat, written only when it has one (so every other entry keeps
 //! its bytes), and a hole's other tools, after its places, only when it
-//! has any. A tool's entry is its own
+//! has any; then, only for a placed import, its solids' sources (#813).
+//! A tool's entry is its own
 //! body's `Built`. Integers are little-endian, byte strings length-first.
 //! Anything that doesn't read back exactly is `None`: a miss.
 
@@ -87,6 +88,13 @@ impl<'a> Reader<'a> {
         let n = u32::from_le_bytes(*n) as usize;
         // Every item takes at least eight bytes.
         (n.saturating_mul(8) <= self.0.len()).then_some(n)
+    }
+
+    /// A u32 as it is (an index, not a count of items to follow).
+    fn count_value(&mut self) -> Option<usize> {
+        let (n, rest) = self.0.split_first_chunk::<4>()?;
+        self.0 = rest;
+        Some(u32::from_le_bytes(*n) as usize)
     }
 
     fn name(&mut self) -> Option<Name> {
@@ -194,6 +202,13 @@ pub fn decode_failure(bytes: &[u8]) -> Option<crate::error::Error> {
     serde_json::from_slice(bytes.strip_prefix(FAILURE)?).ok()
 }
 
+/// What starts the sources a placed import's solids are meshed from
+/// (#813), after everything else: eight bytes of 0xff, which no length
+/// is, so a flat (whose first field is its unfold's ID, length first)
+/// can't start so, and an older ryucad reads an entry carrying them as a
+/// miss.
+const SOURCES: &[u8] = b"\xff\xff\xff\xff\xff\xff\xff\xffryucad.sources.1\n";
+
 /// A feature's solids as an entry's payload.
 pub fn encode_made(m: &Made) -> Vec<u8> {
     let mut w = Writer::default();
@@ -237,11 +252,71 @@ pub fn encode_made(m: &Made) -> Vec<u8> {
     if let Some(f) = &m.flat {
         w.flat(f);
     }
+    // The sources of moved solids, only where there are any: every other
+    // entry keeps its bytes. Inserts are never on disk, so only a placed
+    // import's solids have one.
+    let moved: Vec<(usize, &crate::rebuild::Moved)> = m
+        .solids
+        .iter()
+        .enumerate()
+        .filter_map(|(k, (_, b))| Some((k, b.moved.as_deref()?)))
+        .collect();
+    if !moved.is_empty() {
+        w.0.extend_from_slice(SOURCES);
+        w.count(moved.len());
+        for (k, mv) in moved {
+            w.count(k);
+            w.bytes(&ryukei::codec::encode_body(&mv.source.body));
+            w.str(&mv.source.hash);
+            w.bytes(&ryukei::codec::encode_rigid(&mv.pose));
+        }
+    }
     w.0
 }
 
+/// A moved solid's source as an entry holds it: the solid's index, the
+/// unplaced body, its shape hash and the pose.
+type Source = (usize, ryukei::topo::Body, String, ryukei::geom::Rigid);
+
 /// The solids an entry's payload holds, or `None` if it doesn't decode.
+/// Moved solids' sources are read and left (see [`decode_made_for`]).
 pub fn decode_made(bytes: &[u8]) -> Option<Made> {
+    decode(bytes).map(|(m, _)| m)
+}
+
+/// [`decode_made`] for `feature`'s entry, its solids' sources joined
+/// again (#813): a placed import's solids are moved from the file's
+/// bodies, sized by `feature`. A placed import's entry with no sources
+/// (an older ryucad's) is `None`, a miss, so it is healed once again
+/// rather than meshed whole.
+pub fn decode_made_for(bytes: &[u8], feature: &crate::doc::files::Feature) -> Option<Made> {
+    let (mut m, sources) = decode(bytes)?;
+    let placed = feature.import().is_some_and(|i| i.place.is_some());
+    if placed && sources.len() != m.solids.len() {
+        return None;
+    }
+    let shared = Arc::new(feature.clone());
+    for (k, body, hash, pose) in sources {
+        let (_, b) = m.solids.get_mut(k)?;
+        let mut placed_body = (**b).clone();
+        placed_body.moved = Some(Arc::new(crate::rebuild::Moved {
+            source: Arc::new(Built {
+                body,
+                journal: Default::default(),
+                origins: Default::default(),
+                hash,
+                reference: placed_body.reference,
+                moved: None,
+            }),
+            feature: Arc::clone(&shared),
+            pose,
+        }));
+        *b = Arc::new(placed_body);
+    }
+    Some(m)
+}
+
+fn decode(bytes: &[u8]) -> Option<(Made, Vec<Source>)> {
     let mut r = Reader(bytes);
     let n = r.count()?;
     let mut solids = Vec::with_capacity(n);
@@ -288,11 +363,23 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
     } else {
         None
     };
-    let flat = if r.0.is_empty() {
+    let flat = if r.0.is_empty() || r.0.starts_with(SOURCES) {
         None
     } else {
         Some(Arc::new(r.flat()?))
     };
+    let mut sources = Vec::new();
+    if let Some(rest) = r.0.strip_prefix(SOURCES) {
+        r.0 = rest;
+        let n = r.count()?;
+        for _ in 0..n {
+            let k = r.count_value()?;
+            let body = ryukei::codec::decode_body(r.bytes()?).ok()?;
+            let hash = r.str()?.to_owned();
+            let pose = ryukei::codec::decode_rigid(r.bytes()?).ok()?;
+            sources.push((k, body, hash, pose));
+        }
+    }
     r.end()?;
     // A reference's entry says so in its report; nothing else holds one
     // (nothing acts on a reference), so the bytes don't need to.
@@ -309,15 +396,18 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
     } else {
         solids
     };
-    Some(Made {
-        solids,
-        hash,
-        applied,
-        report: import,
-        flat,
-        encoded: Default::default(),
-        inserted: None,
-    })
+    Some((
+        Made {
+            solids,
+            hash,
+            applied,
+            report: import,
+            flat,
+            encoded: Default::default(),
+            inserted: None,
+        },
+        sources,
+    ))
 }
 
 /// A tool's own body as an entry's payload.
@@ -536,6 +626,73 @@ mod tests {
             encode_built(&back.solids[0].1),
             encode_built(&made.solids[0].1)
         );
+    }
+
+    /// A placed import's solid, moved from the file's body: the source
+    /// comes back exactly, with the feature the caller gives; an entry
+    /// with no sources (an older ryucad's) is a miss for a placed import.
+    #[test]
+    fn a_moved_solids_source_comes_back() {
+        let made = made();
+        let mut m = made[0].clone();
+        let (key, b) = m.solids[0].clone();
+        let pose = ryukei::geom::Rigid::translation(ryukei::geom::Vector3::new(0.01, 0.0, 0.0));
+        let feature = crate::doc::files::Feature::Import(crate::doc::import::Import {
+            file: crate::doc::import::FileRef {
+                path: "imports/f.step".into(),
+                blake3: "00".repeat(32),
+            },
+            product: None,
+            body: 0,
+            mode: None,
+            place: Some(crate::doc::import::Place {
+                pose: crate::assembly::rigid_pose(&pose),
+                via: Vec::new(),
+            }),
+        });
+        let source = Built {
+            hash: crate::import::shape_hash(&b.body),
+            moved: None,
+            ..(*b).clone()
+        };
+        let placed = Built {
+            moved: Some(Arc::new(crate::rebuild::Moved {
+                source: Arc::new(source),
+                feature: Arc::new(feature.clone()),
+                pose,
+            })),
+            ..(*b).clone()
+        };
+        m.solids[0] = (key, Arc::new(placed));
+        let bytes = encode_made(&m);
+        // Without the feature, the entry reads as before, the sources left.
+        same(&m, &decode_made(&bytes).unwrap());
+        let back = decode_made_for(&bytes, &feature).unwrap();
+        let (want, got) = (
+            m.solids[0].1.moved.as_ref().unwrap(),
+            back.solids[0].1.moved.as_ref().unwrap(),
+        );
+        assert_eq!(got.source.body.dump(), want.source.body.dump());
+        assert_eq!(got.source.hash, want.source.hash);
+        assert_eq!(got.pose.rotation_matrix(), want.pose.rotation_matrix());
+        assert_eq!(got.pose.translation_part(), want.pose.translation_part());
+        assert_eq!(encode_made(&back), bytes);
+        // An older entry, no sources: a miss for a placed import, read as
+        // ever for anything else.
+        let old = encode_made(&made[0]);
+        assert!(decode_made_for(&old, &feature).is_none());
+        let unplaced = crate::doc::files::Feature::Import(match &feature {
+            crate::doc::files::Feature::Import(i) => crate::doc::import::Import {
+                place: None,
+                ..i.clone()
+            },
+            _ => unreachable!(),
+        });
+        assert!(decode_made_for(&old, &unplaced).is_some());
+        // Cut short anywhere in the sources: a miss.
+        for n in old.len()..bytes.len() {
+            assert!(decode_made_for(&bytes[..n], &feature).is_none(), "{n}");
+        }
     }
 
     #[test]
