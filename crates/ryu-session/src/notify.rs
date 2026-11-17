@@ -169,6 +169,14 @@ impl<T: Topics> Hub<T> {
         }
     }
 
+    /// Whether `participant` is subscribed: a window, not a script.
+    pub fn watches(&mut self, participant: &str) -> bool {
+        self.subscribers.retain(|s| !s.is_closed());
+        self.subscribers
+            .iter()
+            .any(|s| s.participant == participant)
+    }
+
     /// Whether anyone is subscribed.
     pub fn is_watched(&mut self) -> bool {
         self.subscribers.retain(|s| !s.is_closed());
