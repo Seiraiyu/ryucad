@@ -1248,3 +1248,190 @@ fn a_failed_walk_with_nothing_to_yield_fails_as_before() {
     assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)));
     assert!(changes.deleted.is_empty());
 }
+
+/// Where the twin's slot starts (through the block's -x side), how far
+/// before the round it ends, and the rung and build whose walk clips
+/// (plan 22.A: census VII found the plan's slot, starting inside the
+/// block, never clips; this one does).
+const TWIN_START: f64 = -0.01;
+const TWIN_SHORT: f64 = 0.05;
+const TWIN_RUNG: usize = 3;
+const TWIN_BUILD: super::Build = super::Build::Only;
+
+/// Plan 22.A's twin in the crate: `pinned_faces`' block 0.2 × 0.1 × 0.05
+/// with its +x top edge rounded 0.01, and a slot 0.02 wide and deep from
+/// `start` (through the -x side) to `short` before the round
+/// (ryukei-testkit's `near_room` is this body, with the same keys).
+/// Returns it and the slot's far end.
+fn run_out_slot(start: f64, short: f64) -> (Body, FaceId) {
+    use crate::blend::{BlendKind, EdgeBlend, blend};
+    let k = OpKey(0x21a0);
+    let (b, _) = primitive::block(k, 0.2, 0.1, 0.05, &Rigid::IDENTITY).unwrap();
+    let face = |r: FaceRole| match b.by_name(Name::derive(k, Role::Face(r), &[])) {
+        Some(EntityId::Face(f)) => f,
+        _ => panic!("no face {r:?}"),
+    };
+    let (px, pz) = (face(FaceRole::PlusX), face(FaceRole::PlusZ));
+    let edge = b
+        .edges()
+        .find(|&e| {
+            let fs: Vec<FaceId> = b
+                .edge_fins(e)
+                .map(|fin| b.loops[b.fins[fin].loop_].face)
+                .collect();
+            fs.contains(&px) && fs.contains(&pz)
+        })
+        .expect("the +x top edge");
+    let (r, _) = blend(
+        OpKey(0x21a1),
+        &b,
+        &[EdgeBlend {
+            edge: b.edges[edge].name,
+            kind: BlendKind::Fillet { radius: 0.01 },
+        }],
+    )
+    .unwrap();
+    let end = 0.2 - 0.01 - short;
+    let (slot, _) =
+        primitive::block(OpKey(0x22a2), end - start, 0.02, 0.03, &Rigid::IDENTITY).unwrap();
+    let (s, _) = boolean(
+        OpKey(0x22a3),
+        BooleanOp::Subtract,
+        &r,
+        &[Tool {
+            key: ToolKey(1),
+            body: &slot,
+            place: Rigid::translation(Vector3::new(start, 0.04, 0.03)),
+        }],
+    )
+    .unwrap();
+    let far = s
+        .faces()
+        .find(|&f| {
+            let bx = crate::intersect::face_box(&s, f);
+            matches!(
+                s.surfaces[s.faces[f].surface],
+                crate::geom::Surface::Plane(_)
+            ) && (bx.min().x - end).abs() < 1e-9
+                && (bx.max().x - end).abs() < 1e-9
+        })
+        .expect("the slot's far end");
+    (s, far)
+}
+
+/// The twin's run-out volume: the rounded block less the slot's section
+/// from the -x side to the +x side, the round's part included.
+fn run_out_volume() -> f64 {
+    let quarter = core::f64::consts::FRAC_PI_4 * 1e-4;
+    let block = 0.2 * 0.1 * 0.05 - (1e-4 - quarter) * 0.1;
+    let under = (0.2 - 0.01) * 0.02 + 0.01 * (0.02 - 0.01) + quarter;
+    block - 0.02 * under
+}
+
+/// Design 724: the twin's narrowed build clips the top, which touches the
+/// change, and asks room; its first build asks nothing. Given room, the
+/// top and the walls run on but the floor, given none, is dropped: that
+/// build doesn't answer and asks room for the floor (plan 22.A's guard;
+/// unguarded it answered a body of two shells, the slot cut through to
+/// the bottom, volume 0.000798 for 0.000918, checking clean). Given it,
+/// the rung builds the run-out slot, which checks clean.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_clipped_face_given_room_runs_the_slot_out() {
+    use super::near::Adjusts;
+    use super::{Rung, adjusting, attempt_adjusted};
+    use std::collections::BTreeSet;
+    let (b, end) = run_out_slot(TWIN_START, TWIN_SHORT);
+    let changes = Changes {
+        deleted: BTreeSet::from([end]),
+        ..Changes::default()
+    };
+    let mut region = super::region::region(&b, &changes.deleted);
+    for _ in 2..=TWIN_RUNG {
+        region = region.grown(&b);
+    }
+    let mut bx = super::body::region_box(&b, &region, super::reach(&b, &changes));
+    if TWIN_RUNG == 1 {
+        bx = super::body::doubled(&bx);
+    }
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let build = |which: super::Build, adjusts: &Adjusts| {
+        let mut ask = None;
+        let r = attempt_adjusted(
+            K, &b, &changes, &region, &bx, TWIN_RUNG, which, None, adjusts, &mut ask, &m,
+        );
+        (r, ask)
+    };
+    let (_, ask) = build(super::Build::First, &Adjusts::new());
+    assert_eq!(ask, None, "a first build asks nothing");
+    let (first, ask) = build(TWIN_BUILD, &Adjusts::new());
+    assert!(
+        matches!(first, Rung::Walked(_)),
+        "main's narrowed build clips"
+    );
+    let asked = ask.expect("room asked");
+    assert!(
+        asked
+            .keys()
+            .any(|&f| super::near::touched(&b, &region, f).contains(&end)),
+        "room for a face touching the change: {asked:?}"
+    );
+    // The floor: the plane at z = 0.03 under the slot.
+    let floor = b
+        .faces()
+        .find(|&f| {
+            let fb = crate::intersect::face_box(&b, f);
+            (fb.min().z - 0.03).abs() < 1e-9 && (fb.max().z - 0.03).abs() < 1e-9
+        })
+        .expect("the slot's floor");
+    assert!(!asked.contains_key(&floor));
+    // Given that room, the floor is dropped: no answer, room for it.
+    let (r, again) = build(TWIN_BUILD, &asked);
+    let Rung::Walked(crate::Error::InvalidTweak(crate::TweakError::RegionTooSmall { face })) = r
+    else {
+        panic!("a build dropping the floor answered");
+    };
+    assert_eq!(face, b.faces[floor].name);
+    let again = again.expect("room asked for the floor");
+    assert!(again.contains_key(&floor), "{again:?}");
+    let r = adjusting((first, Some(asked)), &|| false, |a: &Adjusts| {
+        build(TWIN_BUILD, a)
+    });
+    let Rung::Done(d) = r else {
+        panic!("no adjusted build built");
+    };
+    let (o, _) = (*d).unwrap();
+    let (v, want) = (volume(&o), run_out_volume());
+    assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
+    assert_eq!(o.counts().faces, 12);
+    assert_eq!(o.counts().shells, b.counts().shells);
+}
+
+/// Plan 22.A's guard, through the whole delete (the regression the
+/// coxswain asked for): the twin's end deleted builds one body of the
+/// input's shells and the run-out volume, never the two shells of the
+/// slot cut through to the bottom (0.000798) that room alone gave.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn room_never_drops_the_slots_floor() {
+    for short in [0.04, TWIN_SHORT, 0.06] {
+        let (b, end) = run_out_slot(TWIN_START, short);
+        let spec = crate::tweak::DeleteSpec {
+            faces: vec![b.faces[end].name],
+            heal: crate::tweak::Heal::Grow,
+        };
+        let (o, _) = crate::tweak::delete_faces(OpKey(0x22a5), &b, &spec)
+            .unwrap_or_else(|e| panic!("{short}: refused: {e:?}"));
+        assert_eq!(crate::check::check_intersections(&o), [], "{short}");
+        assert_eq!(o.counts().shells, b.counts().shells, "{short}");
+        let (v, want) = (volume(&o), run_out_volume());
+        assert!((v - want).abs() <= 2e-3 * want, "{short}: {v} {want}");
+    }
+}

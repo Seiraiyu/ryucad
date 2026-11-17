@@ -143,7 +143,6 @@ pub(crate) fn climb(
 
 /// How many adjusted builds a narrowed rung may make (design 724): a
 /// work bound, not a tolerance. Each costs at most a rung's cap.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const ADJUSTS: usize = 3;
 
 /// A narrowed rung's answer (design 724, plan 22.A). `first` is its first
@@ -154,7 +153,6 @@ pub(crate) const ADJUSTS: usize = 3;
 /// answers, and so does one after which the meter is stopped (a cancel
 /// or a halt answers at once). Otherwise the first answer stands, so
 /// refusals keep their names and a failed walk climbs as before.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn adjusting(
     first: (Rung, Option<near::Adjusts>),
     stopped: &dyn Fn() -> bool,
@@ -198,7 +196,10 @@ pub(crate) fn retrim(
 /// pair of its table, `narrow` says whether it is built again narrowed
 /// (period-aware turns and stops at held seams), under its own
 /// `Scope::Rung` cap; once one is, every later rung is built narrowed
-/// only (design 669).
+/// only (design 669). A narrowed build whose walk fails `Clipped` at a
+/// working face is built again with room for that face, the faces whose
+/// clipped sides it reached, and their working neighbours, at most
+/// `ADJUSTS` times ([`adjusting`], design 724).
 pub(crate) fn retrim_with(
     key: OpKey,
     body: &Body,
@@ -245,14 +246,25 @@ pub(crate) fn retrim_with(
         let bx = at.map(|a| a.1).expect("made above");
         // Each build under its own cap: one that can't settle refuses
         // `Uncertain` in bounded units, as the caps do.
-        Some(m.capped(crate::work::Scope::Rung, || {
-            let build = || attempt(key, body, changes, &region, &bx, rung, which, m);
-            if which.narrowed() {
-                build()
-            } else {
-                m.first_build(build)
-            }
-        }))
+        if !which.narrowed() {
+            return Some(m.capped(crate::work::Scope::Rung, || {
+                m.first_build(|| attempt(key, body, changes, &region, &bx, rung, which, m))
+            }));
+        }
+        // A narrowed build, then its adjusted builds while each asks
+        // (design 724, plan 22.A), each under its own cap: a cap taken
+        // inside another shares it.
+        let once = |adjusts: &near::Adjusts| {
+            m.capped(crate::work::Scope::Rung, || {
+                let mut ask = None;
+                let r = attempt_adjusted(
+                    key, body, changes, &region, &bx, rung, which, None, adjusts, &mut ask, m,
+                );
+                (r, ask)
+            })
+        };
+        let first = once(&near::Adjusts::new());
+        Some(adjusting(first, &|| m.poll().is_err(), once))
     })
 }
 
@@ -691,6 +703,38 @@ fn attempt_adjusted(
             return Rung::Next(TweakError::HealAmbiguous { face: at }.into());
         }
     };
+    // An adjusted build that drops a working face left as it is didn't
+    // cut it: its piece holding its old interior reached its own clipped
+    // side, and the walk closed round it (design 724, plan 22.A: a slot's
+    // floor dropped while its walls, given room, ran down to the bottom).
+    // It doesn't answer; it asks room for those faces too.
+    if !adjusts.is_empty() {
+        let gone: std::collections::BTreeSet<Name> = journal
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                crate::name::Event::Deleted(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let dropped: std::collections::BTreeSet<FaceId> = ws
+            .keys()
+            .copied()
+            .filter(|&f| still(f) && gone.contains(&body.faces[f].name))
+            .collect();
+        if let Some(&f) = dropped.first() {
+            let working: std::collections::BTreeSet<FaceId> = ws.keys().copied().collect();
+            *ask = near::room(body, &working, &dropped, bx, adjusts, &|g| {
+                near::near_box(body, changes, region, g, bx, rung)
+            });
+            return Rung::Walked(
+                TweakError::RegionTooSmall {
+                    face: body.faces[f].name,
+                }
+                .into(),
+            );
+        }
+    }
     let faults = crate::check::check(&out);
     if !faults.is_empty() {
         // Inside out: a face carried past the opposite side (#704); the
