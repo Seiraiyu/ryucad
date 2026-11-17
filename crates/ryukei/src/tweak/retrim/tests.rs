@@ -698,12 +698,14 @@ fn adjusted_builds_answer_only_when_they_build() {
     assert!(matches!(&r, Rung::Done(d) if matches!(**d, Err(crate::Error::Cancelled))));
 }
 
-/// Design 724: only a narrowed build's clip at a working face that isn't
-/// fixed asks room, and it asks it for the face's input face.
+/// Design 724: only a narrowed build's clip asks room, for the input faces
+/// of the face clipped and of the faces whose clipped sides it reached,
+/// those working and not fixed.
 #[test]
 fn only_a_narrowed_clip_at_a_carried_face_asks_room() {
     use super::walk::WalkError;
     use super::{Build, ask_room, near};
+    use std::collections::BTreeSet;
     let b = block();
     let changes = raised(&b, 0.1);
     let changed = changes.motion.keys().copied().collect();
@@ -729,26 +731,48 @@ fn only_a_narrowed_clip_at_a_carried_face_asks_room() {
     let wf = *w.working.iter().next().unwrap();
     let input = w.origin[&wf];
     let clip = WalkError::Clipped { piece: 0 };
-    let give = |i: FaceId| Some(near::Adjusts::from([(i, near::Adjust::Room(1))]));
-    assert_eq!(ask_room(&w, clip, wf, Build::Retry, give), give(input));
-    assert_eq!(ask_room(&w, clip, wf, Build::Only, give), give(input));
-    assert_eq!(ask_room(&w, clip, wf, Build::First, give), None);
+    let give = |c: &BTreeSet<FaceId>| Some(c.iter().map(|&i| (i, near::Adjust::Room(1))).collect());
+    let one = |i: FaceId| Some(near::Adjusts::from([(i, near::Adjust::Room(1))]));
+    let none = BTreeSet::new();
+    assert_eq!(
+        ask_room(&w, clip, wf, &none, Build::Retry, give),
+        one(input)
+    );
+    assert_eq!(ask_room(&w, clip, wf, &none, Build::Only, give), one(input));
+    assert_eq!(ask_room(&w, clip, wf, &none, Build::First, give), None);
     for e in [
         WalkError::Open { piece: 0 },
         WalkError::Ambiguous { piece: 0 },
         WalkError::Halted { piece: 0 },
     ] {
-        assert_eq!(ask_room(&w, e, wf, Build::Only, give), None, "{e:?}");
+        assert_eq!(ask_room(&w, e, wf, &none, Build::Only, give), None, "{e:?}");
     }
     let outside = w
         .body
         .faces()
         .find(|g| !w.working.contains(g))
         .expect("the bottom, outside");
-    assert_eq!(ask_room(&w, clip, outside, Build::Only, give), None);
+    assert_eq!(ask_room(&w, clip, outside, &none, Build::Only, give), None);
+    // A piece of an outside face that reached a working face's clipped
+    // side asks room for that face (NIST STC 10's coplanar planes).
+    let owners = BTreeSet::from([wf]);
+    assert_eq!(
+        ask_room(&w, clip, outside, &owners, Build::Only, give),
+        one(input)
+    );
+    assert_eq!(
+        ask_room(&w, clip, outside, &owners, Build::First, give),
+        None
+    );
+    let other = *w.working.iter().nth(1).unwrap();
+    let both = BTreeSet::from([w.origin[&wf], w.origin[&other]]);
+    assert_eq!(
+        ask_room(&w, clip, other, &owners, Build::Only, give),
+        give(&both)
+    );
     w.fixed.insert(wf);
     assert_eq!(
-        ask_room(&w, clip, wf, Build::Only, give),
+        ask_room(&w, clip, wf, &none, Build::Only, give),
         None,
         "a fixed face gets no room"
     );

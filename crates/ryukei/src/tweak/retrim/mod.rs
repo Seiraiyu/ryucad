@@ -18,7 +18,7 @@ pub(crate) mod walk;
 pub(crate) mod working;
 
 use crate::boolean::build::Kept;
-use crate::boolean::table::Table;
+use crate::boolean::table::{Member, Table};
 use crate::boolean::{Fail, past_cap};
 use crate::check::Fault;
 use crate::name::{Journal, Name, OpKey};
@@ -499,6 +499,9 @@ fn attempt_adjusted(
         Err(e) => return Rung::Next(e),
     };
     let walked: Mutex<Option<(WalkError, FaceId)>> = Mutex::new(None);
+    // The working-body faces whose clipped sides the failing piece
+    // reached (design 724, plan 22.A): an ask's room goes to them too.
+    let clip_owners: Mutex<std::collections::BTreeSet<FaceId>> = Mutex::new(Default::default());
     let select = |_: &[Body], table: &Table, pieces: &[Piece], _: &[usize], m: &Meter| {
         let arr = seeds::arrangement(&w, table, pieces);
         let outside = seeds::outside_seeds(&w, pieces);
@@ -597,6 +600,23 @@ fn attempt_adjusted(
                 | WalkError::Ambiguous { piece }
                 | WalkError::Clipped { piece }
                 | WalkError::Halted { piece }) = e;
+                if let WalkError::Clipped { piece } = e {
+                    *clip_owners.lock().expect("unpoisoned") = arr.pieces[piece]
+                        .1
+                        .iter()
+                        .filter(|(g, _)| arr.clipped.contains(g))
+                        .flat_map(|&(g, _)| &table.edges[g].members)
+                        .filter_map(|mm| match mm {
+                            Member::Edge(e) if w.clipped.contains(&e.edge) => Some(e.edge),
+                            _ => None,
+                        })
+                        .flat_map(|e| {
+                            w.body
+                                .edge_fins(e)
+                                .map(|fin| w.body.loops[w.body.fins[fin].loop_].face)
+                        })
+                        .collect();
+                }
                 let f = pieces[piece].face;
                 *walked.lock().expect("unpoisoned") = Some((e, f.face));
                 // A marker: the walk's own error is read from `walked`.
@@ -624,9 +644,10 @@ fn attempt_adjusted(
         (_, Some((e, f))) => {
             // A narrowed clip at a working face asks room for it and its
             // working neighbours (design 724, plan 22.A).
-            *ask = ask_room(&w, e, f, which, |i| {
+            let owners = clip_owners.lock().expect("unpoisoned").clone();
+            *ask = ask_room(&w, e, f, &owners, which, |clipped| {
                 let working: std::collections::BTreeSet<FaceId> = ws.keys().copied().collect();
-                near::room(body, &working, i, bx, adjusts, &|g| {
+                near::room(body, &working, clipped, bx, adjusts, &|g| {
                     near::near_box(body, changes, region, g, bx, rung)
                 })
             });
@@ -815,25 +836,37 @@ fn walk_error(w: &WorkBody, e: WalkError, face: FaceId) -> Error {
 }
 
 /// What a build whose walk failed with `e` at working-body face `f` asks
-/// (design 724, plan 22.A): `room` for `f`'s input face where `e` is
-/// `Clipped`, the build is narrowed, and `f` is a working face that isn't
-/// `fixed`. A first build, any other failure, or a pinned or outside face
-/// asks nothing.
+/// (design 724, plan 22.A): where `e` is `Clipped` and the build is
+/// narrowed, `room` for the input faces of `f` and of `owners` (the
+/// working-body faces whose clipped sides the failing piece reached) that
+/// are working faces and not `fixed`. A first build, any other failure,
+/// or only pinned, outside or fixed faces ask nothing.
+///
+/// The owners depart from plan 728's Decision 3, which asked room for
+/// `f` alone: in NIST STC 10 (#658, census VII) the clipped side a piece
+/// of plane `a7b86e65` reached was coplanar plane `ccab7076`'s, which
+/// shares no vertex with it (design 724's Decision 2: a sheet ending
+/// short).
 fn ask_room(
     w: &WorkBody,
     e: WalkError,
     f: FaceId,
+    owners: &std::collections::BTreeSet<FaceId>,
     which: Build,
-    room: impl FnOnce(FaceId) -> Option<near::Adjusts>,
+    room: impl FnOnce(&std::collections::BTreeSet<FaceId>) -> Option<near::Adjusts>,
 ) -> Option<near::Adjusts> {
-    if !which.narrowed()
-        || !matches!(e, WalkError::Clipped { .. })
-        || !w.working.contains(&f)
-        || w.fixed.contains(&f)
-    {
+    if !which.narrowed() || !matches!(e, WalkError::Clipped { .. }) {
         return None;
     }
-    room(w.origin[&f])
+    let clipped: std::collections::BTreeSet<FaceId> = std::iter::once(f)
+        .chain(owners.iter().copied())
+        .filter(|g| w.working.contains(g) && !w.fixed.contains(g))
+        .map(|g| w.origin[&g])
+        .collect();
+    if clipped.is_empty() {
+        return None;
+    }
+    room(&clipped)
 }
 
 /// Whether the fixed engine's refusal `e` means the topology must change

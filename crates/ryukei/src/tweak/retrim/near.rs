@@ -151,27 +151,30 @@ pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
     }
 }
 
-/// Room for working face `f`, whose piece a narrowed build's walk found
-/// clipped (design 724, plan 22.A): `adjusts` with `f` and every face of
-/// `working` sharing a vertex with it in the input given one more
+/// Room for the working faces `clipped` (design 724, plan 22.A): those
+/// whose piece a narrowed build's walk found clipped, or whose clipped
+/// side that piece reached. `adjusts` with each of them and every face of
+/// `working` sharing a vertex with one in the input given one more
 /// doubling. `near` gives a face's near box before any adjustment. `None`
 /// where none of their near boxes would grow (each already the rung's
 /// box `x`): that build would repeat the last.
 pub(crate) fn room(
     body: &Body,
     working: &BTreeSet<FaceId>,
-    f: FaceId,
+    clipped: &BTreeSet<FaceId>,
     x: &Box3,
     adjusts: &Adjusts,
     near: &dyn Fn(FaceId) -> Box3,
 ) -> Option<Adjusts> {
-    let mut faces = BTreeSet::from([f]);
-    for v in face_vertices(body, f) {
-        faces.extend(
-            super::region::vertex_faces(body, v)
-                .into_iter()
-                .filter(|g| working.contains(g)),
-        );
+    let mut faces = clipped.clone();
+    for &f in clipped {
+        for v in face_vertices(body, f) {
+            faces.extend(
+                super::region::vertex_faces(body, v)
+                    .into_iter()
+                    .filter(|g| working.contains(g)),
+            );
+        }
     }
     let mut out = adjusts.clone();
     let mut grows = false;
@@ -439,14 +442,22 @@ pub(crate) mod tests {
             .filter(|g| working.contains(g))
             .collect();
         want.insert(f);
-        let once = room(&r, &working, f, &x, &Adjusts::new(), &near).expect("room to give");
+        let once = room(
+            &r,
+            &working,
+            &BTreeSet::from([f]),
+            &x,
+            &Adjusts::new(),
+            &near,
+        )
+        .expect("room to give");
         assert_eq!(once.keys().copied().collect::<BTreeSet<_>>(), want);
         assert!(once.values().all(|&a| a == Adjust::Room(1)));
         assert!(!once.contains_key(&low), "a deleted face gets no room");
         let full = want
             .iter()
             .all(|&g| adjusted(&near(g), &x, once.get(&g).copied()) == x);
-        match room(&r, &working, f, &x, &once, &near) {
+        match room(&r, &working, &BTreeSet::from([f]), &x, &once, &near) {
             Some(twice) => {
                 assert!(!full);
                 for g in &want {
@@ -471,7 +482,17 @@ pub(crate) mod tests {
         let working: BTreeSet<FaceId> =
             region.faces.iter().copied().filter(|&f| f != low).collect();
         let f = *working.iter().next().unwrap();
-        assert_eq!(room(&r, &working, f, &x, &Adjusts::new(), &|_| x), None);
+        assert_eq!(
+            room(
+                &r,
+                &working,
+                &BTreeSet::from([f]),
+                &x,
+                &Adjusts::new(),
+                &|_| x
+            ),
+            None
+        );
     }
 
     /// The rounded block's low ball deleted, its region grown by a ring
