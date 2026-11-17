@@ -34,6 +34,11 @@ pub fn check(_: &mut Session) -> Result<Value> {
 pub fn sync(_: &mut Session) -> Result<Value> {
     Err(Error::new(Code::Usage, "not yet"))
 }
+/// The release branch (nothing official until Task 19).
+pub fn releases_or_none(_: &mut Session) -> ryupdm::history::Releases {
+    Default::default()
+}
+
 pub fn findings(_: &mut Session) -> Result<Vec<Value>> {
     Ok(vec![])
 }
