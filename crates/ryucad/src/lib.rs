@@ -45,6 +45,14 @@ impl ryu_session::Product for Cad {
         into.insert("explode".into(), json!(view.explode));
         into.insert("motion".into(), json!(view.motion));
         into.insert("mode".into(), json!(view.mode));
+        into.insert("following".into(), json!(view.following));
+    }
+
+    /// Whoever leaves, a window following them stops (#812).
+    fn left(view: &mut live::View, gone: &str) {
+        if view.following.as_deref() == Some(gone) {
+            view.following = None;
+        }
     }
 }
 

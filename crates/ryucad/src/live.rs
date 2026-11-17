@@ -78,6 +78,10 @@ pub struct View {
     /// What the participant's window lets its person do: View until they
     /// choose another, every time it connects.
     pub mode: Mode,
+    /// The participant whose camera the window follows (#812): set by
+    /// `view.follow` (an agent's `ryucad follow`, the People strip's
+    /// Follow and Stop), and let go when they leave.
+    pub following: Option<String>,
 }
 
 /// The project and part revisions subscribers were last told about, and
@@ -126,6 +130,9 @@ pub trait CadLive {
     fn set_motion(&mut self, id: &str, motion: Option<crate::playback::Shown>) -> Result<()>;
     /// Sets what participant `id`'s window lets its person do.
     fn set_mode(&mut self, id: &str, mode: Mode) -> Result<()>;
+    /// Sets whom participant `id`'s window follows, or (with `None`) no
+    /// one.
+    fn set_following(&mut self, id: &str, whom: Option<String>) -> Result<()>;
 }
 
 impl CadLive for Live {
@@ -171,6 +178,11 @@ impl CadLive for Live {
         self.get_mut(id)?.view.mode = mode;
         Ok(())
     }
+
+    fn set_following(&mut self, id: &str, whom: Option<String>) -> Result<()> {
+        self.get_mut(id)?.view.following = whom;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +190,22 @@ mod tests {
     use super::*;
     use crate::error::Code;
     use serde_json::json;
+
+    /// #812: whom a window follows is the session's, and goes when they
+    /// leave.
+    #[test]
+    fn a_window_follows_someone_until_they_leave() {
+        let mut live = Live::new();
+        let h = live.hello(Kind::Human, Some("Dana"), None).unwrap();
+        let k = live.hello(Kind::Human, Some("Kai"), None).unwrap();
+        live.set_following(&h, Some(k.clone())).unwrap();
+        assert_eq!(live.get(&h).unwrap().to_json()["following"], json!(k));
+        assert!(live.goodbye(&k));
+        assert_eq!(live.get(&h).unwrap().view.following, None);
+        assert_eq!(live.get(&h).unwrap().to_json()["following"], Value::Null);
+        let e = live.set_following("p-ffffffff", None).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+    }
 
     #[test]
     fn a_participant_reads_as_it_always_has() {
@@ -201,6 +229,7 @@ mod tests {
                 "explode": null,
                 "motion": null,
                 "mode": "view",
+                "following": null,
             })
         );
         live.set_focus(&h, Some(Id::parse("frame", "part").unwrap()))
