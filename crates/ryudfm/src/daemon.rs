@@ -40,7 +40,7 @@ impl ryu_session::Serve for Dfm {
 
     fn control(req: &Request) -> Control {
         match req {
-            Request::DaemonStatus {} => Control::Status,
+            Request::DaemonStatus {} => Control::Status { timings: false },
             Request::DaemonShutdown {} => Control::Shutdown,
             Request::Subscribe { topics } => Control::Subscribe(topics.clone()),
             Request::SessionHello {

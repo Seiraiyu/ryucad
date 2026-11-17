@@ -115,6 +115,7 @@ pub fn answer_live(
 ) -> Result<Answer> {
     let external = session.refresh_changes()?;
     let changed = !external.is_empty();
+    let epoch = session.epoch();
     let before = live.as_deref().map(Live::snapshot);
     if let Some(l) = live.as_deref_mut() {
         if changed {
@@ -643,7 +644,42 @@ pub fn answer_live(
             l.prune(|r| r.resolve(session).is_ok());
         }
         l.announce(&before);
-        publish(l, session);
+        // A window's own write is told before it is answered, as it was
+        // before #849: the window's next write names the revision this
+        // one made, so it must not wait on the watcher's quiet. A window
+        // is a human participant that is subscribed; agents share a name
+        // (`ryucad watch` and a script are both `agent` by default), so
+        // an agent's write is never told on its path.
+        let own = (mutates || switches)
+            && me.is_some_and(|m| {
+                l.get(m).is_ok_and(|p| p.kind == live::Kind::Human) && l.hub.watches(m)
+            });
+        if l.hub.is_watched() && !own {
+            // Subscribers hear of it from the daemon's watcher once the
+            // daemon is quiet, or within `daemon.publish_max_ms` (#849,
+            // design 698): a script's write never waits on what a window
+            // wants told, and a burst is told in a few notifications.
+            // Activity and participants (above) are still sent on the
+            // request.
+            if changed || mutates || switches || session.epoch() != epoch {
+                l.coalesce.mark(std::time::Instant::now());
+            }
+            // A compare with another worktree that just started is read
+            // from here: its files as they are now are what the window's
+            // diff reads next, so a change after it is news (#849: the
+            // watcher's next publish may come after that change).
+            if compared_new(l) {
+                compared(l, session, true);
+            }
+        } else {
+            // Nobody to tell: only noted, so a subscriber hears of what
+            // changes from then on. Or a window's own write, told now,
+            // with whatever the watcher had yet to publish.
+            let t = std::time::Instant::now();
+            publish(l, session);
+            l.coalesce.clear();
+            l.timings.publish(&method, t.elapsed());
+        }
         // What the request used may go now that it has answered.
         session.trim();
     }
@@ -995,6 +1031,14 @@ pub fn publish(live: &mut Live, session: &mut Session) {
     live.seen.parts = revisions;
 }
 
+/// Whether a participant compares with another worktree whose files
+/// [`compared`] hasn't read yet.
+fn compared_new(live: &Live) -> bool {
+    live.participants()
+        .filter_map(|p| p.view.compare.as_ref())
+        .any(|r| crate::session::worktree_path(r).is_some() && !live.seen.compared.contains_key(r))
+}
+
 /// Tells each participant comparing with another worktree when that
 /// worktree's files change (`compare.changed`, to the participant's
 /// connections): its window reads the diff again. Checked only while
@@ -1038,6 +1082,16 @@ fn compared(live: &mut Live, session: &mut Session, watched: bool) {
 pub fn tick(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
     if live.hub.is_watched() {
         settle(slot, live, root);
+    }
+}
+
+/// Publishes now what requests marked for the watcher to publish (#849):
+/// what the daemon's watcher does through `settle`, for tests and
+/// callers without one.
+pub fn flush(live: &mut Live, session: &mut Session) {
+    if live.coalesce.pending().is_some() {
+        publish(live, session);
+        live.coalesce.clear();
     }
 }
 

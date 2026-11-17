@@ -794,6 +794,12 @@ pub struct Tile {
     /// Every part's drawings, for the tree: ID, name, and whether its
     /// file doesn't read (`drawing.list` of the project).
     pub drawing_rows: BTreeMap<String, Vec<(String, String, bool)>>,
+    /// A reading of every part's drawings, and one of this tile's list,
+    /// on its way; and whether another was wanted meanwhile (#849).
+    pub(crate) drawn_waiting: bool,
+    pub(crate) drawn_again: bool,
+    pub(crate) list_waiting: bool,
+    pub(crate) list_again: bool,
 }
 
 impl Tile {

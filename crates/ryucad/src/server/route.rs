@@ -549,7 +549,7 @@ pub(crate) fn dispatch(
                 prune,
             },
         ),
-        Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
+        Request::DaemonStatus { .. } | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),

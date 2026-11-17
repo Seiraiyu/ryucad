@@ -80,7 +80,7 @@ impl ryu_session::Serve for Cad {
 
     fn control(req: &Request) -> Control {
         match req {
-            Request::DaemonStatus {} => Control::Status,
+            Request::DaemonStatus { timings } => Control::Status { timings: *timings },
             Request::DaemonShutdown {} => Control::Shutdown,
             Request::Subscribe { topics } => Control::Subscribe(topics.clone()),
             Request::SessionHello {
@@ -132,6 +132,14 @@ impl ryu_session::Serve for Cad {
         crate::config::user("daemon.poll_ms")
             .as_u64()
             .unwrap_or(250)
+    }
+
+    fn publish_ms() -> (u64, u64) {
+        let ms = |k: &str, d: u64| crate::config::user(k).as_u64().unwrap_or(d);
+        (
+            ms("daemon.publish_quiet_ms", ryu_session::publish::QUIET_MS),
+            ms("daemon.publish_max_ms", ryu_session::publish::MAX_MS),
+        )
     }
 
     /// The project goes first among the recent ones. A preferences file

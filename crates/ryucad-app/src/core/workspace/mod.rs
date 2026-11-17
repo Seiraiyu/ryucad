@@ -28,6 +28,7 @@ use ryucad::live::SelectMode;
 use ryucad::proto::{Answer, Request, Transfer};
 use ryucad::view::{Camera, CameraArg, Projection, ProjectionArg};
 use serde_json::{Value, json};
+use stale::Stale;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,6 +49,7 @@ pub mod parameters;
 pub mod pdm;
 mod route;
 pub mod session;
+mod stale;
 pub mod view;
 
 /// Projects of at most this many parts load whole when the window opens;
@@ -328,6 +330,8 @@ pub struct Workspace {
     /// own that finishes while it hasn't gets a toast.
     pub focused: bool,
     pending: HashMap<u64, Route>,
+    /// What notifications made stale, asked for at the end of the poll.
+    stale: Stale,
     /// The camera to share, and when one was last shared.
     camera_due: Option<Camera>,
     camera_sent: Option<Instant>,
@@ -382,6 +386,7 @@ impl Workspace {
             card: None,
             focused: true,
             pending: HashMap::new(),
+            stale: Stale::default(),
             daemon: daemon.clone(),
             name: name.to_owned(),
             wake,
@@ -395,6 +400,7 @@ impl Workspace {
     fn load(&mut self) {
         // What was asked for before a resync may never be answered.
         self.model.loading.clear();
+        self.model.again.clear();
         self.model.asked_at.clear();
         self.send(Request::ProjectInfo {}, Route::Model(model::Asked::Info));
         self.send(Request::PartList {}, Route::Model(model::Asked::Parts));
@@ -810,6 +816,7 @@ impl Workspace {
     /// time. Call it every frame.
     pub fn tick(&mut self, now: Instant) {
         self.toasts.expire(now);
+        self.doctor_tick(now);
         self.take_org();
         if self.lost {
             self.reconnect(now);
@@ -963,14 +970,75 @@ impl Workspace {
         self.camera_due.is_some()
     }
 
-    /// Handles every event that has arrived. Returns whether there were any.
+    /// Handles every event that has arrived, then asks what they made
+    /// stale, each reader once. Returns whether there were any.
     pub fn pump(&mut self) -> bool {
         let mut any = false;
         while let Some(e) = self.link.try_event() {
             self.handle(e);
             any = true;
         }
+        self.flush_stale();
         any
+    }
+
+    /// Asks what notifications made stale, each reader once (#849): a
+    /// burst's notifications cost the daemon one round of reads per poll,
+    /// not one per notification. In the order `model.changed` asked
+    /// before.
+    fn flush_stale(&mut self) {
+        let s = std::mem::take(&mut self.stale);
+        if self.lost {
+            return; // reconnecting asks for everything
+        }
+        if s.part_list {
+            self.send(Request::PartList {}, Route::Model(model::Asked::Parts));
+        }
+        if s.pdm_config {
+            self.send(Request::PdmConfig {}, Route::Pdm(pdm::Asked::PdmConfig));
+        }
+        if s.bom {
+            self.reload_bom();
+        }
+        if s.where_used {
+            self.read_where_used();
+        }
+        if s.drawing_list {
+            self.read_drawing_list();
+        }
+        let parts: Vec<String> = (s.parts.iter())
+            .filter(|id| self.model.listed.contains_key(*id))
+            .cloned()
+            .collect();
+        self.ask_parts_again(parts);
+        if s.diff {
+            self.ask_diff();
+        }
+        if s.release_check {
+            let req = Request::ReleaseCheck { results: false };
+            self.send(req, Route::Pdm(pdm::Asked::ReleaseCheck));
+        }
+        if s.doctor {
+            self.rediagnose();
+        }
+        if s.history {
+            self.reload_history();
+        }
+        if s.appearance {
+            self.read_appearance();
+        }
+        if s.branches {
+            self.reload_branches();
+        }
+        if s.deps {
+            self.load_deps();
+        }
+        if s.equations {
+            self.reload_equations();
+        }
+        if s.drawn {
+            self.read_drawn();
+        }
     }
 
     /// Handles events until `done` holds or `timeout` passes; returns
@@ -985,9 +1053,23 @@ impl Workspace {
             if done(self) {
                 return true;
             }
-            let left = timeout.saturating_sub(start.elapsed());
+            let mut left = timeout.saturating_sub(start.elapsed());
+            // A deferred doctor's report is asked when due (#849).
+            if let Some(due) = self.session.doctor_due {
+                left = left.min(due.saturating_duration_since(Instant::now()));
+            }
             match self.link.wait_event(left) {
-                Some(e) => self.handle(e),
+                Some(e) => {
+                    self.handle(e);
+                    // Whatever else has arrived, then one round of asks.
+                    while let Some(e) = self.link.try_event() {
+                        self.handle(e);
+                    }
+                    self.flush_stale();
+                }
+                None if self.session.doctor_due.is_some() && start.elapsed() < timeout => {
+                    self.doctor_tick(Instant::now());
+                }
                 None => return done(self),
             }
             if self.lost {
@@ -1029,6 +1111,7 @@ impl Workspace {
             Event::Lost if !self.lost => {
                 self.lost = true;
                 self.pending.clear();
+                self.stale = Stale::default();
                 self.progress.lost();
                 self.toasts.lost(Instant::now());
                 // Saves that went unanswered can be tried again, and what
@@ -1039,6 +1122,8 @@ impl Workspace {
                 self.model.on_lost();
                 self.comparing.on_lost();
                 self.session.on_lost();
+                self.view.on_lost();
+                self.drawings.on_lost();
                 self.activity.on_lost();
                 self.branches.on_lost();
                 self.retry = Some(Retry {
@@ -1065,8 +1150,9 @@ impl Workspace {
     /// handles"), then carries out what it left.
     fn answer(&mut self, why: Route, answer: Result<Answer>) {
         // Only a rebuild's answer is judged by the revision drawn.
-        let drawn =
-            matches!(why, Route::Model(model::Asked::Rebuild(..))).then(|| self.model_rev());
+        let rebuild =
+            |a: &model::Asked| matches!(a, model::Asked::Rebuild(..) | model::Asked::Rebuilds(..));
+        let drawn = matches!(&why, Route::Model(a) if rebuild(a)).then(|| self.model_rev());
         let mut fx = Effects::default();
         match why {
             Route::Proposal(inner, rough) => self.proposed(*inner, rough, answer),
@@ -1184,10 +1270,10 @@ impl Workspace {
                     || params["removed"].as_array().is_some_and(|r| !r.is_empty())
                     || self.pdm.bom.root.is_none()
                 {
-                    self.reload_bom();
+                    self.stale.bom = true;
                 }
                 // Any assembly may now reach the part, or no longer.
-                self.read_where_used();
+                self.stale.where_used = true;
                 // The Drawings tile's part's revision (its drawings') moved.
                 if self.drawings.open
                     && let Some(part) = self.drawings.part.clone()
@@ -1197,7 +1283,7 @@ impl Workspace {
                         r["part"] == part.as_str() && r["revision"].as_str() != read.as_deref()
                     });
                     if moved {
-                        self.read_drawing_list();
+                        self.stale.drawing_list = true;
                     }
                 }
                 for report in params["parts"].as_array().into_iter().flatten() {
@@ -1217,50 +1303,50 @@ impl Workspace {
                     // An assembly's occurrences come only when asked for;
                     // the draft is rebuilt over the files that moved.
                     if report["kind"] == "assembly" && report["occurrences"].is_null() {
-                        self.ask_part(id);
+                        self.stale.parts.insert(id.to_owned());
                     } else if self.model_rev().is_some() {
                         self.model.loading.remove(id);
-                        self.ask_part(id);
+                        self.stale.parts.insert(id.to_owned());
                     } else {
                         self.part_changed(report);
                     }
                 }
                 for id in params["removed"].as_array().into_iter().flatten() {
+                    self.stale.parts.remove(id.as_str().unwrap_or_default());
                     self.model.remove_part(id.as_str().unwrap_or_default());
                 }
                 // What the working files differ by changed with them, and
                 // so may their damage (a conflict record comes and goes
                 // with a file) and the history's uncommitted changes.
-                self.ask_diff();
+                self.stale.diff = true;
                 // A proposal may be stale now.
                 if self.pdm.releases_open {
-                    let req = Request::ReleaseCheck { results: false };
-                    self.send(req, Route::Pdm(pdm::Asked::ReleaseCheck));
+                    self.stale.release_check = true;
                 }
-                self.rediagnose();
-                self.reload_history();
-                self.read_appearance();
-                self.reload_branches();
-                self.load_deps();
-                self.reload_equations();
+                self.stale.doctor = true;
+                self.stale.history = true;
+                self.stale.appearance = true;
+                self.stale.branches = true;
+                self.stale.deps = true;
+                self.stale.equations = true;
                 // A drawing came, went or changed its name.
-                self.read_drawn();
+                self.stale.drawn = true;
             }
             "project.changed" => {
                 // The project's parameters may have changed.
-                self.reload_equations();
+                self.stale.equations = true;
                 // Parts came or went: the list, and what the window shows.
-                self.send(Request::PartList {}, Route::Model(model::Asked::Parts));
+                self.stale.part_list = true;
                 // The manifest may have its ID now, or ryupdm.json changed.
-                self.send(Request::PdmConfig {}, Route::Pdm(pdm::Asked::PdmConfig));
+                self.stale.pdm_config = true;
                 // Parts came or went, or the declared properties changed.
-                self.reload_bom();
-                self.read_where_used();
+                self.stale.bom = true;
+                self.stale.where_used = true;
                 // Parts came or went: damage may have too.
-                self.rediagnose();
-                self.reload_history();
-                self.reload_branches();
-                self.load_deps();
+                self.stale.doctor = true;
+                self.stale.history = true;
+                self.stale.branches = true;
+                self.stale.deps = true;
                 if let Some(u) = params["default_unit"].as_str()
                     && u != self.model.default_unit
                 {

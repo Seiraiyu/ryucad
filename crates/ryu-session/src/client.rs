@@ -47,10 +47,14 @@ impl Call for Basic {
     }
 }
 
-fn daemon_status() -> Basic {
+fn daemon_status(timings: bool) -> Basic {
     Basic {
         method: "daemon.status",
-        params: json!({}),
+        params: if timings {
+            json!({"timings": true})
+        } else {
+            json!({})
+        },
     }
 }
 
@@ -250,7 +254,7 @@ impl Drop for Subscription {
     fn drop(&mut self) {
         self.closing.store(true, Ordering::SeqCst);
         if let Some(mut w) = self.writer.take() {
-            let status = daemon_status();
+            let status = daemon_status(false);
             let line = format!("{}\n", request_line(0, &status.method(), status.params()));
             let _ = w.write_all(line.as_bytes()).and_then(|()| w.flush());
         }
@@ -462,7 +466,7 @@ fn ready<P: Serve>(root: &Path, endpoint: &Endpoint<P>, daemon: &Daemon<P>) -> R
             }
         };
         let status = conn
-            .call(&daemon_status())
+            .call(&daemon_status(false))
             .map_err(unavailable)?
             .map_err(unavailable)?;
         let version = &status["version"];
@@ -624,11 +628,17 @@ pub fn detach(cmd: &mut Command) {
 
 /// The daemon's status, without starting one.
 pub fn status<P: Serve>(root: &Path) -> Result<Value> {
+    status_with::<P>(root, false)
+}
+
+/// [`status`], with what the daemon spent by method when `timings`
+/// (#849).
+pub fn status_with<P: Serve>(root: &Path, timings: bool) -> Result<Value> {
     let endpoint = Endpoint::<P>::for_project(root)?;
     match Connection::connect(&endpoint) {
         Err(_) => Ok(json!({"running": false})),
         Ok(mut conn) => {
-            let mut s = conn.call(&daemon_status()).map_err(unavailable)??;
+            let mut s = conn.call(&daemon_status(timings)).map_err(unavailable)??;
             s["running"] = json!(true);
             Ok(s)
         }
@@ -766,7 +776,7 @@ mod tests {
             v
         };
         assert_eq!(
-            line(&daemon_status()),
+            line(&daemon_status(false)),
             json!({"jsonrpc": "2.0", "id": 0, "method": "daemon.status", "params": {}})
         );
         assert_eq!(line(&daemon_shutdown())["params"], json!({}));

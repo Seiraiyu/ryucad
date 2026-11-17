@@ -987,6 +987,9 @@ pub struct Model {
     pub holes: BTreeMap<String, Arc<crate::core::threads::HoleTable>>,
     /// Holes asked for and not yet answered, by the part revision.
     pub holes_asked: BTreeMap<String, String>,
+    /// Parts whose holes were wanted at a newer revision while an ask was
+    /// on its way: asked again once it comes (#849).
+    pub holes_again: BTreeSet<String>,
     /// The part or assembly the window shows, as its participant's focus
     /// says; `None` for the project's model.
     pub focus: Option<String>,
@@ -1025,6 +1028,9 @@ pub struct Model {
     held: std::sync::Mutex<Option<((u64, usize), u64)>>,
     /// Parts whose reports are asked for and not yet answered.
     pub loading: BTreeSet<String>,
+    /// Parts a notification named while their reports were on their
+    /// way: asked again once each comes (#849).
+    pub again: BTreeSet<String>,
     /// The revision each part in `loading` was last asked for at.
     pub(crate) asked_at: BTreeMap<String, Option<String>>,
     /// Parts the tree, as it draws, found it wants loaded (its rows
@@ -1342,6 +1348,12 @@ impl Model {
         if listed || self.holes_asked.get(part) == Some(&p.revision) {
             return None;
         }
+        // One ask on its way per part: a newer revision is asked once it
+        // comes (#849).
+        if self.holes_asked.contains_key(part) {
+            self.holes_again.insert(part.to_owned());
+            return None;
+        }
         let revision = p.revision.clone();
         self.holes_asked.insert(part.to_owned(), revision.clone());
         Some(revision)
@@ -1378,6 +1390,7 @@ impl Model {
         self.paths_asked.clear();
         self.holes.clear();
         self.holes_asked.clear();
+        self.holes_again.clear();
         self.generation += 1;
         self.parts.keys().cloned().collect()
     }
@@ -1395,6 +1408,7 @@ impl Model {
         self.paths_asked.retain(|(p, _), _| p != id);
         self.holes.remove(id);
         self.holes_asked.remove(id);
+        self.holes_again.remove(id);
         self.generation += 1;
     }
 

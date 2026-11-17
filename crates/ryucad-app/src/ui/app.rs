@@ -467,6 +467,10 @@ impl Opened {
         if let Some(d) = self.ws.error_due(Instant::now()) {
             ctx.request_repaint_after(d);
         }
+        // A change's doctor's report is asked once the project goes quiet.
+        if let Some(d) = self.ws.doctor_due(Instant::now()) {
+            ctx.request_repaint_after(d);
+        }
         if let Some(at) = self.ws.retry_at() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }

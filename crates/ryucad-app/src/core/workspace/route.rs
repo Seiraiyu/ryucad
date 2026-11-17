@@ -50,6 +50,7 @@ pub(super) enum Then {
     /// window follows its explode and motion.
     ExplodeShown,
     FetchGhosts,
+    FetchHoles(String),
     FollowDraft,
     FollowFocus,
     FollowSections,
@@ -68,6 +69,7 @@ pub(super) enum Then {
     ReadDimension(String, String, String, Option<Box<DimForm>>),
     ReadDrawingList,
     ReadDrawingSheet,
+    ReadDrawn,
     ReadEquations(bool),
     ReadExplodes,
     ReadForm(String, String, Option<Box<Form>>),
@@ -151,17 +153,21 @@ impl Workspace {
             Then::AskBomDiff => self.ask_bom_diff(),
             Then::AskDiff => self.ask_diff(),
             Then::AskDrag => self.ask_drag(),
-            Then::AskPart(id) => self.ask_part(&id),
+            // Asked with the poll's other parts, in one rebuild (#849).
+            Then::AskPart(id) => {
+                self.stale.parts.insert(id);
+            }
             Then::AskPreview => self.ask_preview(),
             Then::BomRead => self.bom_read(),
             Then::ChooseAnnotation(id) => self.choose_annotation(Some(&id)),
-            Then::Diagnose => self.diagnose(),
+            Then::Diagnose => self.diagnose_again(),
             Then::ExplodeShown => {
                 self.assembly.explodes.sliding = None;
                 self.follow_explode();
                 self.follow_motion();
             }
             Then::FetchGhosts => self.fetch_ghosts(),
+            Then::FetchHoles(part) => self.fetch_holes(&part),
             Then::FollowDraft => self.follow_draft(),
             Then::FollowFocus => self.follow_focus(),
             Then::FollowSections => self.follow_sections(),
@@ -185,6 +191,7 @@ impl Workspace {
             }
             Then::ReadDrawingList => self.read_drawing_list(),
             Then::ReadDrawingSheet => self.read_drawing_sheet(),
+            Then::ReadDrawn => self.read_drawn(),
             Then::ReadEquations(conflicted) => self.read_equations(conflicted),
             Then::ReadExplodes => self.read_explodes(),
             Then::ReadForm(part, id, before) => self.read_form(part, id, before),

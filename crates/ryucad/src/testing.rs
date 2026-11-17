@@ -147,12 +147,14 @@ pub(crate) fn drain(sub: &crate::notify::Subscriber) -> Vec<(String, Value)> {
 /// What code outside `server/` may name of `crate::server`: the request
 /// lifecycle's entry points. The daemon, the CLI, a worktree's requests
 /// and the requests annotations and redlines replay run through them, and
-/// unit tests start projects with `init` and `handle`. Everything else
+/// unit tests start projects with `init` and `handle`, and publish what
+/// requests marked with `flush` (#849). Everything else
 /// `server` used to lend lives in `part`, `save`, `geometry`, `budget`,
 /// `scene`, `diff` and `testing` (design 541, "The server split").
 const SERVER_ENTRY: &[&str] = &[
     "answer_live",
     "dispatch",
+    "flush",
     "handle",
     "handle_job",
     "handle_job_raw",
