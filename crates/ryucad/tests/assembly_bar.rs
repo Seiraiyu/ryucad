@@ -16,9 +16,9 @@
 mod bar_project;
 
 use assert_cmd::Command;
-use bar_project::{id, jostle, machine, project, project_over_dependency};
+use bar_project::{id, jostle, machine, must, project, project_over_dependency, write};
 use ryucad::session::Session;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Instant;
 
@@ -497,5 +497,75 @@ fn a_batch_solves_the_assembly_once_per_op() {
         "batches of param.set on the 1,000-mate assembly, on {}: {}",
         machine(),
         line.join(", ")
+    );
+}
+
+/// Design 698's #840 bar: one pin of the 1,001 occurrences moved by its
+/// mate since a commit; `interference --changed-since` examines at most a
+/// twentieth of the full check's pairs (one of 1,000 here), skips the
+/// rest, and finds for that pin what the full check finds. A count, so
+/// asserted as it is everywhere.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn one_pin_moved_checks_a_twentieth_of_the_pairs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = project(dir.path());
+    let git = |args: &[&str]| {
+        let out = ryupdm::git_env::isolated()
+            .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "pins"]);
+    // Pin 0's mate puts it 5 mm further along x: the solve moves it.
+    let rel = "parts/asm/features/m0.json";
+    let mut m: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(rel)).unwrap()).unwrap();
+    m["a"]["offset"]["origin"][0] = json!("15 mm");
+    write(dir.path(), rel, &m);
+    s.refresh().unwrap();
+    let full = must(&mut s, "interference", json!({"part": "asm"}));
+    let scoped = must(
+        &mut s,
+        "interference",
+        json!({"part": "asm", "changed_since": "HEAD"}),
+    );
+    assert_eq!(
+        scoped["scope"]["occurrences"],
+        json!(["p0"]),
+        "{}",
+        scoped["scope"]
+    );
+    let (pairs, all) = (
+        scoped["pairs"].as_u64().unwrap(),
+        full["pairs"].as_u64().unwrap(),
+    );
+    assert!(pairs * 20 <= all, "{pairs} of {all} pairs examined");
+    assert_eq!(pairs + scoped["scope"]["skipped"].as_u64().unwrap(), all);
+    let p0 = |v: &Value, k: &str| -> Vec<Value> {
+        v[k].as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["b"].as_str().unwrap().starts_with("asm/p0/"))
+            .cloned()
+            .collect()
+    };
+    for k in ["interferences", "touching", "unchecked"] {
+        assert_eq!(p0(&scoped, k), p0(&full, k), "{k}");
+    }
+    println!(
+        "interference since a commit, one pin of 1,001 occurrences moved, on {}: \
+         {pairs} of {all} pairs examined",
+        machine()
     );
 }
