@@ -834,6 +834,8 @@ fn every_protocol_method_has_a_command() {
         ("board.via.delete", &["board", "via", "delete"]),
         ("board.hole.add", &["board", "hole", "add"]),
         ("board.hole.delete", &["board", "hole", "delete"]),
+        ("board.drc", &["board", "drc"]),
+        ("board.status", &["board", "status"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
         ("block.show", &["block", "show"]),
@@ -4977,4 +4979,39 @@ fn routes_are_added_edited_and_deleted_from_the_cli() {
     ]);
     p.ok(&["board", "delete", "main"]);
     assert!(!p.direct.join("board/boards/main").exists());
+}
+
+#[test]
+fn a_boards_drc_and_status_say_what_is_left() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    // Seven parts unplaced: errors, so drc fails with its report.
+    let e = p.fails(&["board", "drc", "main"], "check_failed", 1);
+    let report = &e["details"]["report"];
+    assert_eq!(report["counts"]["board_unplaced"], 7, "{report}");
+    assert_eq!(report["rules"]["preset"], "jlc-2l");
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["id"].as_str().unwrap().len() == 16)
+    );
+    // Filtered to a code with no finding: clean.
+    let ok = p.ok(&["board", "drc", "main", "--code", "drc_clearance"]);
+    assert_eq!(ok["findings"], json!([]));
+    assert_eq!(ok["errors"], 0);
+    p.fails(
+        &["board", "drc", "main", "--code", "nope"],
+        "invalid_param",
+        1,
+    );
+    let s = p.ok(&["board", "status", "main"]);
+    assert_eq!(s["placed"], 1);
+    assert_eq!(s["unplaced"], 7);
+    assert_eq!(s["findings"]["board_unplaced"], 7);
+    assert!(s["nets"]["total"].as_u64().unwrap() >= s["nets"]["open"].as_u64().unwrap());
 }

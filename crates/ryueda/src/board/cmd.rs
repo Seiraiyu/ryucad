@@ -224,6 +224,93 @@ pub fn delete(session: &mut Session, board: &str, expected: Option<&str>) -> Res
     Ok(json!({"deleted": format!("board/{id}")}))
 }
 
+/// Counts of findings by code.
+fn counts(f: &[super::drc::Finding]) -> Value {
+    let mut by: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for x in f {
+        *by.entry(json!(x.code).as_str().unwrap_or_default().to_owned())
+            .or_default() += 1;
+    }
+    json!(by)
+}
+
+/// `board drc`: the board's findings (those of `codes` when given); fails
+/// with `check_failed`, the answer in its details, when one is an error.
+pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value> {
+    let id = find(session.project(), board)?.id.clone();
+    let wanted: Vec<Code> = codes
+        .iter()
+        .map(|c| {
+            serde_json::from_value::<Code>(json!(c)).map_err(|_| {
+                Error::new(Code::InvalidParam, format!("{c} isn't a finding's code"))
+                    .with("param", "code")
+            })
+        })
+        .collect::<Result<_>>()?;
+    let c = session.board_check(&id)?;
+    let findings: Vec<&super::drc::Finding> = c
+        .findings
+        .iter()
+        .filter(|f| wanted.is_empty() || wanted.contains(&f.code))
+        .collect();
+    let errors = findings.iter().filter(|f| f.is_error()).count();
+    let owned: Vec<super::drc::Finding> = findings.iter().map(|f| (*f).clone()).collect();
+    let v = json!({
+        "board": format!("board/{id}"),
+        "revision": session.project().boards[&id].revision,
+        "rules": c.preset.rules_json(),
+        "findings": owned,
+        "counts": counts(&owned),
+        "errors": errors,
+        "warnings": owned.len() - errors,
+        "incomplete": c.incomplete,
+    });
+    if errors > 0 {
+        return Err(Error::new(
+            Code::CheckFailed,
+            format!("board {id} has {errors} DRC error(s)"),
+        )
+        .with("report", v));
+    }
+    Ok(v)
+}
+
+/// `board status`: placed and unplaced parts, nets routed and open, and
+/// findings by code.
+pub fn status(session: &mut Session, board: &str) -> Result<Value> {
+    let id = find(session.project(), board)?.id.clone();
+    let c = session.board_check(&id)?;
+    let b = &session.project().boards[&id];
+    let mut pads_per_net: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for pt in &c.conn.built.layout.points {
+        *pads_per_net.entry(pt.net.as_str()).or_default() += 1;
+    }
+    let nets: Vec<&str> = pads_per_net
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|(k, _)| k)
+        .collect();
+    let open: std::collections::BTreeSet<&str> =
+        c.conn.report.opens.iter().map(|o| o.net.as_str()).collect();
+    let unplaced = c
+        .findings
+        .iter()
+        .filter(|f| f.code == Code::BoardUnplaced)
+        .count();
+    Ok(json!({
+        "board": format!("board/{id}"),
+        "revision": b.revision,
+        "placed": b.placements.len(),
+        "unplaced": unplaced,
+        "nets": {"total": nets.len(), "open": open.len(), "routed": nets.len() - open.len()},
+        "findings": counts(&c.findings),
+        "errors": c.errors(),
+        "warnings": c.warnings(),
+        "incomplete": c.incomplete,
+    }))
+}
+
 pub fn list(p: &Project) -> Value {
     let boards: Vec<Value> = p
         .boards

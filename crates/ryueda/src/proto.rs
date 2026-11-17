@@ -776,6 +776,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// A board's DRC findings; `check_failed` when one is an error.
+    #[serde(rename = "board.drc")]
+    BoardDrc {
+        board: String,
+        /// Only findings of these codes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        codes: Vec<String>,
+    },
+    /// A board's counts: parts placed, nets routed and open, findings.
+    #[serde(rename = "board.status")]
+    BoardStatus { board: String },
     /// A functional block, its ID random unless given.
     #[serde(rename = "block.create")]
     BlockCreate {

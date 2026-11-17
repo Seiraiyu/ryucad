@@ -1644,6 +1644,15 @@ enum BoardCmd {
     /// Unplated holes: add, delete.
     #[command(subcommand)]
     Hole(HoleCmd),
+    /// The board's DRC findings; exits 1 when any is an error.
+    Drc {
+        board: String,
+        /// Only findings of this code; repeat for more.
+        #[arg(long = "code")]
+        codes: Vec<String>,
+    },
+    /// Parts placed, nets routed and open, findings by code.
+    Status { board: String },
 }
 
 #[derive(Subcommand)]
@@ -3831,6 +3840,13 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             board: board.clone(),
             holes: holes.clone(),
             expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Drc { board, codes }) => Request::BoardDrc {
+            board: board.clone(),
+            codes: codes.clone(),
+        },
+        Command::Board(BoardCmd::Status { board }) => Request::BoardStatus {
+            board: board.clone(),
         },
         Command::Doctor { repairs } if repairs.is_empty() => Request::Doctor {},
         Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},

@@ -1360,6 +1360,8 @@ fn dispatch(
         } => {
             crate::board::route::hole_delete(session, &board, &holes, expected_revision.as_deref())
         }
+        Request::BoardDrc { board, codes } => crate::board::cmd::drc(session, &board, &codes),
+        Request::BoardStatus { board } => crate::board::cmd::status(session, &board),
         Request::BoardList { .. } => Ok(crate::board::cmd::list(session.project())),
         Request::BoardShow { board, pads, .. } => {
             crate::board::cmd::show(session.project(), &board, pads)
