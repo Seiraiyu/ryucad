@@ -897,46 +897,54 @@ impl Arrangement<'_> {
             let b = self.band_of(p, &lifted, &bands, swap)?;
             Some(band_base + b)
         };
+        // Each cycle's piece: an outer boundary's own, a band's, and a
+        // hole's once placed (plan 21.D).
+        let mut owner: Vec<Option<usize>> = vec![None; cycles.len()];
+        for (k, &o) in outers.iter().enumerate() {
+            owner[o] = Some(k);
+        }
+        for (b, cs) in bands.iter().enumerate() {
+            for &c in cs {
+                owner[c] = Some(band_base + b);
+            }
+        }
         for &h in &holes {
             let p = self.sample(&lifted[h])?;
             let k = place(p, &ges(&cycles[h]))?;
+            owner[h] = Some(k);
             pieces[k].loops.push(arcs_of(&cycles[h]));
         }
         for &g in lone {
-            let v = &self.table.vertices[g];
-            let (u, w) = self.surface.project(v.point).param;
+            let node = self.node(g);
+            let (u, w) = self.surface.project(self.table.vertices[g].point).param;
             let mut p = Point2::new(u, w);
-            if let Node::Pole { free, .. } = self.node(g) {
+            if let Node::Pole { free, .. } = node {
                 // A pole or an apex: a point just inside the face's side,
                 // on a line of the free parameter clear of every vertex.
-                let k = 1 - free;
-                let domain = self.surface.domain();
-                let [x0, x1] = domain[k];
-                let (pu, pv) = self.surface.periods();
                 let all: Vec<usize> = (0..lifted.len()).collect();
-                let (f, x) = if free == 0 { (u, w) } else { (w, u) };
+                let f = if free == 0 { u } else { w };
                 let f = match if free == 0 { pu } else { pv } {
                     Some(per) => self.across(&lifted, &all, free == 1, per).unwrap_or(f),
                     None => f,
                 };
-                let step = 1e-6
-                    * if matches!(self.surface, Surface::Sphere(_) | Surface::Cone(_)) {
-                        1.0
-                    } else {
-                        x1 - x0
-                    };
-                let x = if (x - x0).abs() < (x - x1).abs() {
-                    x + step
-                } else {
-                    x - step
-                };
-                p = if free == 0 {
-                    Point2::new(f, x)
-                } else {
-                    Point2::new(x, f)
-                };
+                p = self.just_inside(p, free, f);
             }
-            let k = place(p, &[])?;
+            let k = match place(p, &[]) {
+                // The region outside every outer boundary takes no pole
+                // a cycle of the face passes: that cycle's piece has the
+                // pole on its boundary (plan 21.D, question 1042).
+                Some(k) if whole && k == whole_index => match node {
+                    Node::Pole { row, .. } => match self.passing_pole(cycles, row).as_slice() {
+                        [c] => owner[*c].unwrap_or(k),
+                        _ => k,
+                    },
+                    Node::Point => k,
+                },
+                Some(k) => k,
+                // Poles in the split (design 683, plan 21.D): only where
+                // that point lies in no piece.
+                None => self.pole_piece(g, node, cycles, &lifted, &owner, &|q| place(q, &[]))?,
+            };
             pieces[k].loops.push(Boundary::Lone(g));
         }
         // The region outside every outer boundary may be no region at all.
@@ -944,6 +952,79 @@ impl Arrangement<'_> {
             pieces.remove(whole_index);
         }
         Some(pieces)
+    }
+
+    /// A point just inside the face's side at pole `p` (its parameters),
+    /// on the free parameter's line at `f`: a millionth (of the other
+    /// parameter's range, on a spline or swept surface) off the nearer
+    /// end of the other parameter's domain.
+    fn just_inside(&self, p: Point2, free: usize, f: f64) -> Point2 {
+        let [x0, x1] = self.surface.domain()[1 - free];
+        let x = if free == 0 { p.y } else { p.x };
+        let step = 1e-6
+            * if matches!(self.surface, Surface::Sphere(_) | Surface::Cone(_)) {
+                1.0
+            } else {
+                x1 - x0
+            };
+        let x = if (x - x0).abs() < (x - x1).abs() {
+            x + step
+        } else {
+            x - step
+        };
+        if free == 0 {
+            Point2::new(f, x)
+        } else {
+            Point2::new(x, f)
+        }
+    }
+
+    /// The cycles passing the pole at `row`: those arriving at a vertex
+    /// on it (plan 21.D).
+    fn passing_pole(&self, cycles: &[Vec<usize>], row: [usize; 2]) -> Vec<usize> {
+        let at = |v: GvId| matches!(self.node(v), Node::Pole { row: r, .. } if r == row);
+        passing(cycles, |d| self.darts[d].to, at)
+    }
+
+    /// Where lone vertex `g` at a pole goes when the point `group` places
+    /// it by lies in no piece (design 683, plan 21.D): the piece of the
+    /// one cycle passing that pole, which has the pole on its boundary;
+    /// where none passes, the piece holding a point just inside the
+    /// face's side on the free parameter's line through the middle of the
+    /// span the face's own cycles cover. `None` where two or more cycles
+    /// pass it, or that point can't be placed, as before.
+    fn pole_piece(
+        &self,
+        g: GvId,
+        node: Node,
+        cycles: &[Vec<usize>],
+        lifted: &[Lifted],
+        owner: &[Option<usize>],
+        place: &dyn Fn(Point2) -> Option<usize>,
+    ) -> Option<usize> {
+        let Node::Pole { free, row, .. } = node else {
+            return None;
+        };
+        match self.passing_pole(cycles, row).as_slice() {
+            [c] => return owner[*c],
+            [] => {}
+            _ => return None,
+        }
+        let own: Vec<[f64; 2]> = cycles
+            .iter()
+            .zip(lifted)
+            .filter(|(c, _)| c.iter().any(|&d| self.darts[d].twin.is_none()))
+            .map(|(_, l)| {
+                let (lo, hi) = bounds(&l.chains);
+                if free == 0 {
+                    [lo.x, hi.x]
+                } else {
+                    [lo.y, hi.y]
+                }
+            })
+            .collect();
+        let (u, w) = self.surface.project(self.table.vertices[g].point).param;
+        place(self.just_inside(Point2::new(u, w), free, middle(&own)?))
     }
 
     /// The bands: for each winding cycle with the band on its left above
@@ -1352,7 +1433,6 @@ fn crossings(l: &Lifted, x: f64, swap: bool, period: f64) -> Option<Vec<f64>> {
 /// dart's end vertex): at a pole's row, the cycles running along its
 /// line, since `carry` passes along the line at every vertex there (plan
 /// 21.D).
-#[cfg_attr(not(test), allow(dead_code))]
 fn passing(
     cycles: &[Vec<usize>],
     to: impl Fn(usize) -> GvId,
@@ -1365,7 +1445,6 @@ fn passing(
 
 /// The middle of the smallest span holding all of `spans`; `None` when
 /// there are none or it has no length (plan 21.D).
-#[cfg_attr(not(test), allow(dead_code))]
 fn middle(spans: &[[f64; 2]]) -> Option<f64> {
     let lo = spans.iter().map(|s| s[0]).fold(f64::INFINITY, f64::min);
     let hi = spans.iter().map(|s| s[1]).fold(f64::NEG_INFINITY, f64::max);
