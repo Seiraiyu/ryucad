@@ -16,6 +16,7 @@ ryucad = { path = "../crates/ryucad" }
 ryucad-doc = { path = "../crates/ryucad-doc", features = ["test-support"] }
 ryuformats = { path = "../crates/ryuformats" }
 ryudfm = { path = "../crates/ryudfm", features = ["testing"] }
+ryuplm = { path = "../crates/ryuplm", features = ["testing"] }
 ryueda = { path = "../crates/ryueda" }
 ryueda-parts = { path = "../crates/ryueda-parts", features = ["testing"] }
 ryusch = { path = "../crates/ryusch", features = ["testing"] }
@@ -351,6 +352,13 @@ bench = false
 [[bin]]
 name = "copper"
 path = "fuzz_targets/copper.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plm"
+path = "fuzz_targets/plm.rs"
 test = false
 doc = false
 bench = false
