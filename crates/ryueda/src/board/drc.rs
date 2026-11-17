@@ -83,6 +83,36 @@ pub fn finding(
     }
 }
 
+/// One finding per ID, the IDs' order kept: a later finding with an ID
+/// already seen is folded into the first as `details.also` (its message
+/// and details), so an answer's IDs are unique and nothing is dropped.
+pub fn unique(f: Vec<Finding>) -> Vec<Finding> {
+    let mut out: Vec<Finding> = Vec::with_capacity(f.len());
+    let mut at: BTreeMap<String, usize> = BTreeMap::new();
+    for x in f {
+        match at.get(&x.id) {
+            Some(&i) => {
+                let first = &mut out[i];
+                if !first.details.is_object() {
+                    first.details = json!({});
+                }
+                let also = first.details["also"].take();
+                let mut list = match also {
+                    Value::Array(l) => l,
+                    _ => Vec::new(),
+                };
+                list.push(json!({"message": x.message, "details": x.details}));
+                first.details["also"] = json!(list);
+            }
+            None => {
+                at.insert(x.id.clone(), out.len());
+                out.push(x);
+            }
+        }
+    }
+    out
+}
+
 /// By code, then references.
 pub fn sort(f: &mut [Finding]) {
     f.sort_by(|a, b| {
@@ -257,19 +287,155 @@ pub fn copper(c: &Connectivity, incomplete: bool) -> Vec<Finding> {
             json!({"net": o.net, "at": [o.at.x, o.at.y], "uncertain": o.uncertain}),
         ));
     }
+    // Uncertain contacts, once per pair of references (a pad or via is
+    // one reference on both layers), with the layers it is on.
+    let mut uncertain: BTreeMap<(String, String), (BTreeSet<usize>, i64)> = BTreeMap::new();
     for u in c.copper.uncertain() {
+        let (a, b) = (node_ref(c, &u.a), node_ref(c, &u.b));
+        let key = if a <= b { (a, b) } else { (b, a) };
+        let e = uncertain.entry(key).or_insert((BTreeSet::new(), u.bound));
+        e.0.insert(u.layer);
+        e.1 = e.1.max(u.bound);
+    }
+    for ((a, b), (layers, bound)) in uncertain {
+        let names: Vec<&str> = layers.iter().map(|l| c.built.layer_name(*l)).collect();
         out.push(finding(
             Code::CopperContactUncertain,
             Severity::Warning,
             board,
-            vec![node_ref(c, &u.a), node_ref(c, &u.b)],
+            vec![a.clone(), b.clone()],
+            format!("{a} and {b} lie within {bound} nm of touching: kept apart"),
+            json!({"layer": names[0], "layers": names, "bound_nm": bound}),
+        ));
+    }
+    out.extend(netless(c, incomplete));
+    out.extend(pad_free_shorts(c, incomplete));
+    out
+}
+
+/// The islands the netlist's points landed on.
+fn pointed(c: &Connectivity) -> BTreeSet<IslandId<Key>> {
+    c.placed
+        .iter()
+        .filter_map(|p| match p {
+            Placement::On(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The references of the points on an island, and of the items on it
+/// that claim a net.
+fn carriers(c: &Connectivity, id: &IslandId<Key>) -> Vec<String> {
+    let mut out: BTreeSet<String> = c
+        .built
+        .layout
+        .points
+        .iter()
+        .zip(&c.placed)
+        .filter(|(_, at)| matches!(at, Placement::On(i) if i == id))
+        .map(|(p, _)| c.built.reference(&p.key))
+        .collect();
+    if let Some(island) = c.copper.island(&Node::Piece(id.0.clone(), id.1)) {
+        for k in &island.items {
+            if c.copper.item(k).is_some_and(|it| it.net.is_some()) {
+                out.insert(c.built.reference(k));
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Copper of a pad with no net joined to a net. Such a pad has no netlist
+/// point, so the compare never sees it: every island holding one and
+/// carrying a net (from points or claims) is a short, once per island.
+fn netless(c: &Connectivity, incomplete: bool) -> Vec<Finding> {
+    let board = c.built.board.as_str();
+    let nets = island_nets(c);
+    let mut found: BTreeMap<IslandId<Key>, BTreeSet<String>> = BTreeMap::new();
+    for (k, it) in &c.built.layout.items {
+        if !matches!(k, Key::Pad { .. }) || it.net.is_some() {
+            continue;
+        }
+        for i in 0..c.copper.pieces(k) {
+            if let Some(id) = c.copper.island_of(&Node::Piece(k.clone(), i))
+                && nets.get(&id).is_some_and(|n| !n.is_empty())
+            {
+                found.entry(id).or_default().insert(c.built.reference(k));
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|(id, pads)| {
+            let on: Vec<&String> = nets[&id].iter().collect();
+            let mut refs: Vec<String> = pads.iter().cloned().collect();
+            refs.extend(carriers(c, &id));
+            let pads: Vec<String> = pads.into_iter().collect();
+            finding(
+                Code::NetShort,
+                Severity::Error,
+                board,
+                refs,
+                format!(
+                    "{} {} no net, but copper joins {} to net {}",
+                    pads.join(", "),
+                    if pads.len() == 1 { "has" } else { "have" },
+                    if pads.len() == 1 { "it" } else { "them" },
+                    on.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+                json!({"nets": on, "netless": pads, "incomplete": incomplete}),
+            )
+        })
+        .collect()
+}
+
+/// Islands no netlist point landed on whose items claim two nets or more:
+/// the compare has no pad to judge them by, and clearance sees one
+/// island, so they are shorts here, with the touching pairs of items.
+fn pad_free_shorts(c: &Connectivity, incomplete: bool) -> Vec<Finding> {
+    let board = c.built.board.as_str();
+    let pointed = pointed(c);
+    let net_of = |k: &Key| c.copper.item(k).and_then(|it| it.net.clone());
+    let mut out = Vec::new();
+    for island in c.copper.islands() {
+        let claims: BTreeSet<&String> = island.claims.iter().collect();
+        if pointed.contains(&island.id) || claims.len() < 2 {
+            continue;
+        }
+        let mut contacts: BTreeSet<[String; 2]> = BTreeSet::new();
+        for (k, i) in &island.pieces {
+            let Some(net) = net_of(k) else { continue };
+            for n in c.copper.contacts(&Node::Piece(k.clone(), *i)) {
+                if let Node::Piece(other, _) = &n
+                    && net_of(other).is_some_and(|m| m != net)
+                {
+                    let mut pair = [c.built.reference(k), c.built.reference(other)];
+                    pair.sort();
+                    contacts.insert(pair);
+                }
+            }
+        }
+        let refs = carriers(c, &island.id);
+        let nets: Vec<&String> = claims.into_iter().collect();
+        out.push(finding(
+            Code::NetShort,
+            Severity::Error,
+            board,
+            refs,
             format!(
-                "{} and {} lie within {} nm of touching: kept apart",
-                node_ref(c, &u.a),
-                node_ref(c, &u.b),
-                u.bound
+                "nets {} are joined by copper on no pad",
+                nets.iter()
+                    .map(|n| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            json!({"layer": c.built.layer_name(u.layer), "bound_nm": u.bound}),
+            json!({
+                "nets": nets,
+                "contacts": contacts,
+                "holes": island.holes.iter().map(|k| c.built.reference(k)).collect::<Vec<_>>(),
+                "incomplete": incomplete,
+            }),
         ));
     }
     out
@@ -303,7 +469,10 @@ pub fn clearance(c: &Connectivity, preset: &Preset) -> Vec<Finding> {
         (Some(x), Some(y)) => x.len() == 1 && x == y,
         _ => false,
     };
-    let mut best: BTreeMap<(usize, String, String), Closest> = BTreeMap::new();
+    // One finding per pair of references (a pad or via is one reference
+    // on both layers): the closest gap, with every layer it is under on.
+    let mut best: BTreeMap<(String, String), Closest> = BTreeMap::new();
+    let mut layers: BTreeMap<(String, String), BTreeSet<usize>> = BTreeMap::new();
     for layer in 0..c.built.layout.layers.len() {
         for g in c.copper.clearance(layer, preset.clearance_nm) {
             if one_net(&g.islands.0, &g.islands.1) {
@@ -311,7 +480,8 @@ pub fn clearance(c: &Connectivity, preset: &Preset) -> Vec<Finding> {
             }
             let (ra, rb) = (c.built.reference(&g.a.0), c.built.reference(&g.b.0));
             let (ra, rb) = if ra <= rb { (ra, rb) } else { (rb, ra) };
-            let key = (layer, ra.clone(), rb.clone());
+            let key = (ra.clone(), rb.clone());
+            layers.entry(key.clone()).or_default().insert(layer);
             if best
                 .get(&key)
                 .is_none_or(|(x, ..)| g.distance.nm < x.distance.nm)
@@ -320,8 +490,12 @@ pub fn clearance(c: &Connectivity, preset: &Preset) -> Vec<Finding> {
             }
         }
     }
-    best.into_values()
-        .map(|(g, ra, rb)| {
+    best.into_iter()
+        .map(|(key, (g, ra, rb))| {
+            let on: Vec<&str> = layers[&key]
+                .iter()
+                .map(|l| c.built.layer_name(*l))
+                .collect();
             finding(
                 Code::DrcClearance,
                 Severity::Error,
@@ -335,6 +509,7 @@ pub fn clearance(c: &Connectivity, preset: &Preset) -> Vec<Finding> {
                 ),
                 json!({
                     "layer": c.built.layer_name(g.layer),
+                    "layers": on,
                     "distance_nm": g.distance.nm,
                     "exact": g.distance.exact,
                     "bound_nm": g.distance.bound,
@@ -463,6 +638,9 @@ fn drill_of(h: &HoleShape) -> Nm {
 pub fn drills(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
     let mut out = Vec::new();
     for h in &s.holes {
+        if matches!(h.of, super::shapes::HoleOf::Via(_)) {
+            continue;
+        }
         let d = drill_of(&h.shape);
         // Plated holes (vias' and through pads') and unplated ones have
         // their own least drills.
@@ -482,20 +660,40 @@ pub fn drills(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
             ));
         }
     }
+    // A via's drill and diameter: one finding saying what is wrong.
     for v in &s.vias {
-        if v.diameter_nm < preset.via_diameter_min_nm {
-            out.push(finding(
-                Code::DrcDrill,
-                Severity::Error,
-                board,
-                vec![format!("{board}:via/{}", v.id)],
-                format!(
-                    "via {}'s diameter is {} nm, under the {} nm minimum",
-                    v.id, v.diameter_nm, preset.via_diameter_min_nm
-                ),
-                json!({"diameter_nm": v.diameter_nm, "min_nm": preset.via_diameter_min_nm}),
+        let (min, max) = (preset.drill_min_nm, preset.drill_max_nm);
+        let mut wrong = Vec::new();
+        if v.drill_nm < min || v.drill_nm > max {
+            wrong.push(format!(
+                "its drill is {} nm, outside {min}-{max} nm",
+                v.drill_nm
             ));
         }
+        if v.diameter_nm < preset.via_diameter_min_nm {
+            wrong.push(format!(
+                "its diameter is {} nm, under the {} nm minimum",
+                v.diameter_nm, preset.via_diameter_min_nm
+            ));
+        }
+        if wrong.is_empty() {
+            continue;
+        }
+        out.push(finding(
+            Code::DrcDrill,
+            Severity::Error,
+            board,
+            vec![format!("{board}:via/{}", v.id)],
+            format!("via {}: {}", v.id, wrong.join("; ")),
+            json!({
+                "drill_nm": v.drill_nm,
+                "plated": true,
+                "min_nm": min,
+                "max_nm": max,
+                "diameter_nm": v.diameter_nm,
+                "diameter_min_nm": preset.via_diameter_min_nm,
+            }),
+        ));
     }
     out
 }
@@ -850,6 +1048,7 @@ pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Re
     };
     let mut findings: Vec<Finding> = RULES.par_iter().flat_map_iter(|r| r(&ctx)).collect();
     sort(&mut findings);
+    let findings = unique(findings);
     Ok(BoardCheck {
         shapes: shapes.clone(),
         conn,
@@ -1271,5 +1470,151 @@ mod tests {
         let mut sorted = c.findings.clone();
         sort(&mut sorted);
         assert_eq!(sorted, c.findings);
+    }
+
+    #[test]
+    fn copper_joining_a_net_to_a_pad_with_no_net_is_reported() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("r1", "1", (2 * MM, 5 * MM), (600 * UM, 600 * UM), Some("a"))
+            .smd("u1", "5", (10 * MM, 5 * MM), (600 * UM, 600 * UM), None)
+            .track(
+                "t1",
+                "a",
+                CopperLayer::Top,
+                250 * UM,
+                &[(2 * MM, 5 * MM), (10 * MM, 5 * MM)],
+            );
+        let f = copper(&connect::connect("b", &s), false);
+        assert_eq!(codes(&f), [Code::NetShort], "{f:?}");
+        assert!(f[0].refs.contains(&"b:u1/5".to_owned()), "{f:?}");
+        assert_eq!(f[0].details["netless"], json!(["b:u1/5"]));
+        assert_eq!(f[0].details["nets"], json!(["a"]));
+        // A netless pad alone, or touching only netless copper, is no finding.
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("u1", "5", (10 * MM, 5 * MM), (600 * UM, 600 * UM), None)
+            .smd(
+                "u1",
+                "6",
+                (10 * MM + 500 * UM, 5 * MM),
+                (600 * UM, 600 * UM),
+                None,
+            );
+        assert!(copper(&connect::connect("b", &s), false).is_empty());
+    }
+
+    #[test]
+    fn tracks_of_two_nets_touching_with_no_pad_are_a_short() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.track(
+            "t1",
+            "a",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, 5 * MM), (8 * MM, 5 * MM)],
+        )
+        .track(
+            "t2",
+            "b",
+            CopperLayer::Top,
+            250 * UM,
+            &[(5 * MM, 2 * MM), (5 * MM, 8 * MM)],
+        );
+        let f = copper(&connect::connect("b", &s), false);
+        assert_eq!(codes(&f), [Code::NetShort], "{f:?}");
+        assert_eq!(f[0].refs, ["b:track/t1", "b:track/t2"]);
+        assert_eq!(f[0].details["nets"], json!(["a", "b"]));
+        assert_eq!(
+            f[0].details["contacts"],
+            json!([["b:track/t1", "b:track/t2"]])
+        );
+        // Apart on two layers, they are no finding here.
+        let mut s = board(20 * MM, 10 * MM);
+        s.track(
+            "t1",
+            "a",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, 5 * MM), (8 * MM, 5 * MM)],
+        )
+        .track(
+            "t2",
+            "b",
+            CopperLayer::Bottom,
+            250 * UM,
+            &[(5 * MM, 2 * MM), (5 * MM, 8 * MM)],
+        );
+        assert!(copper(&connect::connect("b", &s), false).is_empty());
+    }
+
+    #[test]
+    fn a_gap_on_both_layers_is_one_finding_with_its_layers() {
+        // A via a micron under the clearance from a through pad: the same
+        // gap on the top and the bottom.
+        let mut s = board(20 * MM, 10 * MM);
+        let x = 5 * MM + 850 * UM + 300 * UM + P.clearance_nm - UM;
+        s.through("j1", "1", (5 * MM, 5 * MM), 1700 * UM, 1000 * UM, Some("a"))
+            .via("v1", "b", (x, 5 * MM), 300 * UM, 600 * UM);
+        let f = clearance(&connect::connect("b", &s), P);
+        assert_eq!(codes(&f), [Code::DrcClearance], "{f:?}");
+        assert_eq!(
+            f[0].details["layers"],
+            json!(["copper.top", "copper.bottom"])
+        );
+        assert_eq!(f[0].details["distance_nm"], json!(P.clearance_nm - UM));
+    }
+
+    #[test]
+    fn a_via_with_a_bad_drill_and_diameter_is_one_finding() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.via(
+            "v1",
+            "a",
+            (10 * MM, 5 * MM),
+            P.drill_min_nm - 1,
+            P.via_diameter_min_nm - 1,
+        );
+        let f = drills(&s, "b", P);
+        assert_eq!(codes(&f), [Code::DrcDrill], "{f:?}");
+        assert_eq!(f[0].details["drill_nm"], json!(P.drill_min_nm - 1));
+        assert_eq!(
+            f[0].details["diameter_nm"],
+            json!(P.via_diameter_min_nm - 1)
+        );
+    }
+
+    #[test]
+    fn findings_sharing_an_id_are_merged() {
+        let a = finding(
+            Code::DrcDrill,
+            Severity::Error,
+            "b",
+            vec!["x".into()],
+            "one".into(),
+            json!({"n": 1}),
+        );
+        let b = finding(
+            Code::DrcDrill,
+            Severity::Error,
+            "b",
+            vec!["x".into()],
+            "two".into(),
+            json!({"n": 2}),
+        );
+        let c = finding(
+            Code::DrcDrill,
+            Severity::Error,
+            "b",
+            vec!["y".into()],
+            "three".into(),
+            Value::Null,
+        );
+        let f = unique(vec![a, b, c]);
+        assert_eq!(f.len(), 2);
+        assert_eq!(
+            f[0].details["also"],
+            json!([{"message": "two", "details": {"n": 2}}])
+        );
+        let ids: BTreeSet<&str> = f.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids.len(), f.len());
     }
 }
