@@ -1,0 +1,427 @@
+//! Connectivity against brute force, against counts and against itself:
+//! islands of seeded features with no cutters against every pair of
+//! pieces judged exactly; traces cut by holes and planes cut by strips
+//! against the pieces they must fall into; random edits of seeded
+//! layouts with negatives and holes against a rebuild; one thread against
+//! eight. Debug builds run a quarter of the counted cases and skip the
+//! seeded edits and threads, which full.yml runs in release.
+
+use std::collections::BTreeMap;
+
+use ryu_board::geom::{Edge, Nm, Pen, Point, Region, Stroke};
+use ryu_board::model::{Library, Polarity, Side};
+use ryu_board::shape::{Part, Piece, Shape, feature_shape, polygon};
+use ryu_board::testing::{Lcg, seeded_features};
+use ryu_copper::connect::{Copper, Node};
+use ryu_copper::layout::{Hole, HoleShape, Item, Layer, Layout};
+use ryu_copper::measure::{self, Body, BodyOptions, Verdict};
+use ryu_copper::poly::{self, FlattenOptions};
+
+/// Debug builds run a quarter of the cases.
+const CASES: u64 = if cfg!(debug_assertions) { 1 } else { 4 };
+
+fn layers(n: usize) -> Vec<Layer> {
+    (0..n)
+        .map(|k| Layer {
+            name: format!("l{k}"),
+            side: if k == 0 { Side::Top } else { Side::Bottom },
+            copper: true,
+        })
+        .collect()
+}
+
+/// Seeded features crowded on two layers (10 mm across, so most touch
+/// some neighbours), keyed by number; those flattening past 4,000
+/// vertices left out, as the determinism test's are; with `positive`,
+/// only shapes with no negative part.
+fn seeded(seed: u64, count: usize, positive: bool) -> Layout<u32> {
+    let mut g = Lcg::new(seed);
+    let f = seeded_features(&mut g, 6, count, 5_000_000);
+    let lib = Library::default();
+    let opts = FlattenOptions::default();
+    let mut l = Layout {
+        layers: layers(2),
+        ..Layout::default()
+    };
+    for k in 0..f.features().len() {
+        let Ok(shape) = feature_shape(&f, k, &lib) else {
+            continue;
+        };
+        if positive && shape.parts.iter().any(|p| p.polarity == Polarity::Negative) {
+            continue;
+        }
+        let size: usize = poly::flatten_shape(shape, &opts)
+            .iter()
+            .flat_map(|p| &p.1.rings)
+            .map(Vec::len)
+            .sum();
+        if size > 4_000 {
+            continue;
+        }
+        l.items.insert(
+            k as u32,
+            Item {
+                layer: k % 2,
+                shape: shape.clone(),
+                net: None,
+            },
+        );
+    }
+    l
+}
+
+/// Round holes and slots at seeded places, half of them on an item's
+/// first solid (vias in pads), through one layer or both, mostly plated,
+/// some back-drilled on the bottom; keyed from 10,000.
+fn add_holes(l: &mut Layout<u32>, seed: u64, count: usize) {
+    let mut g = Lcg::new(seed);
+    let opts = BodyOptions::default();
+    let probes: Vec<Point> = l
+        .items
+        .values()
+        .filter_map(|it| {
+            Body::of_shape(&it.shape, &opts)
+                .solids
+                .first()
+                .map(|s| s.probe())
+        })
+        .collect();
+    for k in 0..count {
+        let at = if g.coin() && !probes.is_empty() {
+            probes[g.range(0, probes.len() as i64 - 1) as usize]
+        } else {
+            Point::new(
+                g.range(-5_000_000, 5_000_000),
+                g.range(-5_000_000, 5_000_000),
+            )
+        };
+        let d = g.range(100_000, 600_000);
+        let shape = if g.range(0, 3) == 0 {
+            let b = at.offset(g.range(-500_000, 500_000), g.range(-500_000, 500_000));
+            HoleShape::Slot { a: at, b, d }
+        } else {
+            HoleShape::Round { at, d }
+        };
+        let span = [(0, 0), (1, 1), (0, 1)][g.range(0, 2) as usize];
+        let backdrilled = if span == (0, 1) && g.range(0, 3) == 0 {
+            vec![(1, 1)]
+        } else {
+            Vec::new()
+        };
+        l.holes.insert(
+            10_000 + k as u32,
+            Hole {
+                shape,
+                span,
+                plated: g.range(0, 2) > 0,
+                backdrilled,
+            },
+        );
+    }
+}
+
+fn stroke(a: Point, b: Point, w: Nm) -> Shape {
+    Shape {
+        parts: vec![Part {
+            polarity: Polarity::Positive,
+            piece: Piece::Stroke(Stroke {
+                path: vec![Edge::line(a, b)],
+                pen: Pen::Round(w),
+            }),
+        }],
+        ..Shape::default()
+    }
+}
+
+fn block(x0: i64, y0: i64, x1: i64, y1: i64, polarity: Polarity) -> Shape {
+    let ring = [
+        Point::new(x0, y0),
+        Point::new(x1, y0),
+        Point::new(x1, y1),
+        Point::new(x0, y1),
+    ];
+    Shape::regions(polarity, [Region::solid(polygon(&ring).unwrap())])
+}
+
+fn find(root: &mut [usize], mut i: usize) -> usize {
+    while root[i] != i {
+        root[i] = root[root[i]];
+        i = root[i];
+    }
+    i
+}
+
+type PieceId = (u32, u32);
+
+#[test]
+fn islands_without_cutters_match_every_pair_judged() {
+    for case in 0..CASES {
+        let l = seeded(0x6e65_7473 + case, 150, true);
+        let c = Copper::new(&l, BodyOptions::default());
+        // Every piece: an item's solids in groups that touch.
+        let opts = BodyOptions::default();
+        let mut pieces: Vec<(PieceId, usize, Body)> = Vec::new();
+        for (&k, it) in &l.items {
+            let b = Body::of_shape(&it.shape, &opts);
+            let groups = b.groups();
+            if groups.len() == 1 {
+                pieces.push(((k, 0), it.layer, b));
+            } else {
+                for (i, g) in groups.iter().enumerate() {
+                    pieces.push(((k, i as u32), it.layer, b.subset(g)));
+                }
+            }
+        }
+        let mut root: Vec<usize> = (0..pieces.len()).collect();
+        let mut doubts: Vec<(PieceId, PieceId)> = Vec::new();
+        for i in 0..pieces.len() {
+            for j in i + 1..pieces.len() {
+                if pieces[i].1 != pieces[j].1 || pieces[i].0.0 == pieces[j].0.0 {
+                    continue;
+                }
+                match measure::touches(&pieces[i].2, &pieces[j].2) {
+                    Verdict::Yes => {
+                        let (a, b) = (find(&mut root, i), find(&mut root, j));
+                        root[a.max(b)] = a.min(b);
+                    }
+                    Verdict::Uncertain => doubts.push((pieces[i].0, pieces[j].0)),
+                    Verdict::No => {}
+                }
+            }
+        }
+        let mut by: BTreeMap<usize, Vec<PieceId>> = BTreeMap::new();
+        for (i, piece) in pieces.iter().enumerate() {
+            let r = find(&mut root, i);
+            by.entry(r).or_default().push(piece.0);
+        }
+        let mut want: Vec<Vec<PieceId>> = by.into_values().collect();
+        want.sort();
+        let mut got: Vec<Vec<PieceId>> = c.islands().into_iter().map(|i| i.pieces).collect();
+        got.sort();
+        assert_eq!(got, want, "case {case}");
+        let got: Vec<(PieceId, PieceId)> = c
+            .uncertain()
+            .into_iter()
+            .map(|u| match (u.a, u.b) {
+                (Node::Piece(a, i), Node::Piece(b, j)) => ((a, i), (b, j)),
+                other => panic!("a wall in doubt: {other:?}"),
+            })
+            .collect();
+        doubts.sort();
+        assert_eq!(got, doubts, "case {case}");
+        // With no cutters nothing resolves.
+        assert!(l.items.keys().all(|k| !c.is_resolved(k)));
+    }
+}
+
+#[test]
+fn traces_cut_by_holes_fall_into_their_count() {
+    let mut g = Lcg::new(0x6375_7473);
+    for case in 0..20 * CASES {
+        let w = g.range(50_000, 300_000);
+        let k = g.range(0, 6) as usize;
+        let len = 2_000_000 * (k as i64 + 1);
+        let mut l = Layout {
+            layers: layers(1),
+            ..Layout::default()
+        };
+        let trace = stroke(Point::new(0, 0), Point::new(len, 0), w);
+        l.items.insert(
+            0,
+            Item {
+                layer: 0,
+                shape: trace,
+                net: None,
+            },
+        );
+        for h in 0..k {
+            // Each hole in its own 2 mm stretch, wider than the trace and
+            // off its axis by less than the excess, a micrometre to spare.
+            let extra = g.range(20_000, 300_000);
+            let x = 2_000_000 * (h as i64 + 1) + g.range(-500_000, 500_000);
+            let y = g.range(-(extra / 2 - 1_000), extra / 2 - 1_000);
+            l.holes.insert(
+                h as u32,
+                Hole {
+                    shape: HoleShape::Round {
+                        at: Point::new(x, y),
+                        d: w + extra,
+                    },
+                    span: (0, 0),
+                    plated: false,
+                    backdrilled: vec![],
+                },
+            );
+        }
+        let c = Copper::new(&l, BodyOptions::default());
+        assert_eq!(c.pieces(&0), k as u32 + 1, "case {case}");
+        assert_eq!(c.islands().len(), k + 1, "case {case}");
+        // Plated, every wall joins the pieces either side of it.
+        for h in l.holes.values_mut() {
+            h.plated = true;
+        }
+        let c = Copper::new(&l, BodyOptions::default());
+        assert_eq!(c.islands().len(), 1, "case {case}");
+        assert!(c.uncertain().is_empty(), "case {case}");
+    }
+}
+
+#[test]
+fn planes_cut_by_strips_fall_into_their_count() {
+    let mut g = Lcg::new(0x7374_7270);
+    for case in 0..20 * CASES {
+        let k = g.range(0, 5) as usize;
+        let plane = block(
+            0,
+            0,
+            2_000_000 * (k as i64 + 1),
+            10_000_000,
+            Polarity::Positive,
+        );
+        let strips: Vec<Shape> = (0..k)
+            .map(|h| {
+                let x = 2_000_000 * (h as i64 + 1) + g.range(-500_000, 500_000);
+                let half = g.range(5_000, 250_000);
+                block(
+                    x - half,
+                    -1_000_000,
+                    x + half,
+                    11_000_000,
+                    Polarity::Negative,
+                )
+            })
+            .collect();
+        // Drawn after the plane the strips cut it; drawn before, nothing.
+        for (after, want) in [(true, k + 1), (false, 1)] {
+            let mut l = Layout {
+                layers: layers(1),
+                ..Layout::default()
+            };
+            let key = if after { 0 } else { 100 };
+            l.items.insert(
+                key,
+                Item {
+                    layer: 0,
+                    shape: plane.clone(),
+                    net: None,
+                },
+            );
+            for (h, s) in strips.iter().enumerate() {
+                let it = Item {
+                    layer: 0,
+                    shape: s.clone(),
+                    net: None,
+                };
+                l.items.insert(1 + h as u32, it);
+            }
+            let c = Copper::new(&l, BodyOptions::default());
+            assert_eq!(c.islands().len(), want, "case {case}, after {after}");
+            assert_eq!(c.pieces(&key), want as u32, "case {case}, after {after}");
+        }
+    }
+}
+
+fn same(c: &Copper<u32>, l: &Layout<u32>, what: &str) {
+    let fresh = Copper::new(l, BodyOptions::default());
+    assert_eq!(c.islands(), fresh.islands(), "{what}");
+    assert_eq!(c.uncertain(), fresh.uncertain(), "{what}");
+    for k in l.items.keys() {
+        assert_eq!(c.is_resolved(k), fresh.is_resolved(k), "{what}: item {k}");
+    }
+    for layer in 0..l.layers.len() {
+        assert_eq!(
+            c.hard_holes(layer),
+            fresh.hard_holes(layer),
+            "{what}: layer {layer}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: booleans of seeded shapes take minutes in a debug build"
+)]
+fn edits_match_a_rebuild() {
+    for case in 0..CASES {
+        let mut full = seeded(0x6564_6974 + case, 120, false);
+        add_holes(&mut full, case, 30);
+        let mut g = Lcg::new(case);
+        // Start from about half the items and holes.
+        let mut l = Layout {
+            layers: full.layers.clone(),
+            ..Layout::default()
+        };
+        for (k, it) in &full.items {
+            if g.coin() {
+                l.items.insert(*k, it.clone());
+            }
+        }
+        for (k, h) in &full.holes {
+            if g.coin() {
+                l.holes.insert(*k, h.clone());
+            }
+        }
+        let mut c = Copper::new(&l, BodyOptions::default());
+        let items: Vec<u32> = full.items.keys().copied().collect();
+        let holes: Vec<u32> = full.holes.keys().copied().collect();
+        for step in 0..40 {
+            if g.range(0, 3) < 2 {
+                let k = items[g.range(0, items.len() as i64 - 1) as usize];
+                if l.items.remove(&k).is_some() {
+                    c.remove_item(&k);
+                } else {
+                    let mut it = full.items[&k].clone();
+                    if g.coin() {
+                        it.layer = 1 - it.layer;
+                    }
+                    l.items.insert(k, it.clone());
+                    c.insert_item(k, it);
+                }
+            } else {
+                let k = holes[g.range(0, holes.len() as i64 - 1) as usize];
+                if l.holes.remove(&k).is_some() {
+                    c.remove_hole(&k);
+                } else {
+                    l.holes.insert(k, full.holes[&k].clone());
+                    c.insert_hole(k, full.holes[&k].clone());
+                }
+            }
+            if step % 8 == 7 {
+                same(&c, &l, &format!("case {case}, step {step}"));
+            }
+        }
+        same(&c, &l, &format!("case {case}, at the end"));
+        // The seeds must exercise what they test.
+        let fresh = Copper::new(&full, BodyOptions::default());
+        assert!(
+            full.items.keys().any(|k| fresh.is_resolved(k)),
+            "case {case}"
+        );
+        assert!(
+            fresh.islands().iter().any(|i| i.layers.len() == 2),
+            "case {case}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: booleans of seeded shapes take minutes in a debug build"
+)]
+fn one_thread_and_eight_agree() {
+    let mut l = seeded(0x7468_7264, 150, false);
+    add_holes(&mut l, 9, 40);
+    let run = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let c = Copper::new(&l, BodyOptions::default());
+                (c.islands(), c.uncertain())
+            })
+    };
+    assert_eq!(run(1), run(8));
+}

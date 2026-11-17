@@ -304,6 +304,23 @@ fn attempt(
     which: Build,
     m: &Meter,
 ) -> Rung {
+    attempt_with(key, body, changes, region, bx, rung, which, None, m)
+}
+
+/// [`attempt`] with the pins forced (`Some`, the tests only) or as
+/// [`near::pins`] gives them (`None`).
+#[allow(clippy::too_many_arguments)]
+fn attempt_with(
+    key: OpKey,
+    body: &Body,
+    changes: &Changes,
+    region: &Region,
+    bx: &crate::geom::Box3,
+    rung: usize,
+    which: Build,
+    forced: Option<&std::collections::BTreeSet<FaceId>>,
+    m: &Meter,
+) -> Rung {
     let narrowed = which.narrowed();
     let mut ws = BTreeMap::new();
     let absorbed = absorbed(body, changes, region);
@@ -320,12 +337,21 @@ fn attempt(
     // The seams kept faces were tangent along, all along or in places,
     // across the frontier too (design 642).
     let held = held::held(body, region, &still);
-    // Whether a narrowed build narrowed anything.
-    let mut narrowing = false;
+    // Faces a narrowed build pins (design 683, plan 21.A): left as they
+    // are and touching no change, built as their input faces with the
+    // faces outside. None in a first build. The working body is built
+    // over the region less them.
+    let pins = match forced {
+        Some(p) => p.clone(),
+        None => near::pins(body, region, &still, &absorbing, which),
+    };
+    let rest = region.without(body, &pins);
+    // Whether a narrowed build narrowed anything; a pin does.
+    let mut narrowing = !pins.is_empty();
     for &f in region
         .faces
         .iter()
-        .filter(|f| !changes.deleted.contains(f) && !absorbed.contains_key(f))
+        .filter(|f| !changes.deleted.contains(f) && !absorbed.contains_key(f) && !pins.contains(f))
     {
         if m.poll().is_err() {
             return done(Err(Error::Cancelled));
@@ -406,8 +432,8 @@ fn attempt(
     if which == Build::Retry && !narrowing {
         return Rung::Unchanged;
     }
-    let w = match work_body(key, body, region, &ws, m) {
-        Ok(w) => w,
+    let w = match work_body(key, body, &rest, &ws, m) {
+        Ok(w) => w.pinning(&pins),
         Err(e) => return Rung::Next(e),
     };
     let walked: Mutex<Option<(WalkError, FaceId)>> = Mutex::new(None);
@@ -421,17 +447,22 @@ fn attempt(
         // faces' alone. A region with no outside face takes the plan's
         // one shell seed instead (below).
         let mut tries: Vec<Vec<usize>> = vec![outside.clone()];
+        // The seeds rule 3's shortcut alone chose (plan 21.C).
+        let mut shortcut = std::collections::BTreeSet::new();
         // A delete whose region is the whole body: every face it keeps
         // seeds by rule 3 too, not one face alone (#692: a drilled plate's
         // side deleted closed from the hole's wall alone, its plug).
         if outside.is_empty() && !changes.deleted.is_empty() && changes.motion.is_empty() {
-            let (same, _) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
-            if same.len() > 1 {
-                tries = vec![same];
+            let fs = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            if fs.same.len() > 1 {
+                tries = vec![fs.same];
+                shortcut = fs.shortcut;
             }
         }
         if !outside.is_empty() {
-            let (same, moved) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            let fs = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            shortcut = fs.shortcut;
+            let (same, moved) = (fs.same, fs.moved);
             if !same.is_empty() || !moved.is_empty() {
                 let mut with_same = outside.clone();
                 with_same.extend(&same);
@@ -446,16 +477,37 @@ fn attempt(
         }
         let mut kept = Err(WalkError::Open { piece: 0 });
         let mut seeds = Vec::new();
-        for (k, t) in tries.into_iter().enumerate() {
-            let r = walk::walk(&arr, &t, m);
+        for (k, t) in tries.iter().enumerate() {
+            let r = walk::walk(&arr, t, m);
             let stop = r.is_ok() || matches!(r, Err(WalkError::Halted { .. }));
             // The first try's failure is the one reported.
             if stop || k == 0 {
                 kept = r;
-                seeds = t;
+                seeds = t.clone();
             }
             if stop {
                 break;
+            }
+        }
+        // Slits and seeds (design 683, plan 21.C, question 983): every
+        // seed set failed. The first set whose seeds alone over-use an
+        // edge walks once more without the shortcut's seeds there that
+        // don't hold their old face; its answer stands only if it closes
+        // (or halts), else the first try's failure is reported.
+        if !shortcut.is_empty()
+            && matches!(
+                kept,
+                Err(WalkError::Open { .. }
+                    | WalkError::Ambiguous { .. }
+                    | WalkError::Clipped { .. })
+            )
+        {
+            let ops = [w.body.clone()];
+            let mut holds =
+                |i: usize| seeds::inside_old(body, changes, &w, &ops, table, &pieces[i]);
+            if let Some((fewer, r)) = seeds::walk_again(&arr, &tries, &shortcut, &mut holds, m) {
+                kept = r;
+                seeds = fewer;
             }
         }
         // Shells no outside face reaches take a seed each, once.

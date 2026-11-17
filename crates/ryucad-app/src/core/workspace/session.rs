@@ -5,6 +5,12 @@
 
 use super::*;
 
+/// How long the project must go without a change before a change's doctor
+/// report is asked (#849): twice the daemon's default
+/// `daemon.publish_max_ms`, since a burst's publishes come about that far
+/// apart, so a script's burst is diagnosed once, when it goes quiet.
+pub const DOCTOR_QUIET: Duration = Duration::from_millis(2000);
+
 /// This window's session state.
 #[derive(Default)]
 pub struct Session {
@@ -21,6 +27,9 @@ pub struct Session {
     /// meanwhile, so the badges need another.
     pub(super) doctor_waiting: bool,
     pub(super) doctor_again: bool,
+    /// When a report a change wants is due: [`DOCTOR_QUIET`] after the
+    /// last change (#849).
+    pub(super) doctor_due: Option<Instant>,
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
@@ -110,11 +119,45 @@ impl Workspace {
     }
 
     pub(super) fn rediagnose(&mut self) {
-        if self.session.doctor_waiting {
-            self.session.doctor_again = true;
-        } else if self.session.doctor.is_some() {
-            self.diagnose();
+        if self.session.doctor.is_some() {
+            self.diagnose_again();
         }
+    }
+
+    /// Asks for the doctor's report again after a change, once the
+    /// project has gone [`DOCTOR_QUIET`] without another (#849): still
+    /// coalesced, never skipped, so every burst is diagnosed at its end,
+    /// and a script's writes don't wait on reports in the middle of it.
+    /// [`Workspace::doctor_tick`] asks it when due.
+    pub(super) fn diagnose_again(&mut self) {
+        self.session.doctor_due = Some(Instant::now() + DOCTOR_QUIET);
+    }
+
+    /// Asks a change's doctor's report once it is due: one on its way at
+    /// a time, another asked when it comes if wanted meanwhile.
+    pub(super) fn doctor_tick(&mut self, now: Instant) {
+        if self.session.doctor_due.is_some_and(|due| now >= due) {
+            self.session.doctor_due = None;
+            if self.session.doctor_waiting {
+                self.session.doctor_again = true;
+            } else {
+                self.diagnose();
+            }
+        }
+    }
+
+    /// Whether a doctor's report a change wants is waiting for the
+    /// project to go quiet (#849).
+    pub fn doctor_pending(&self) -> bool {
+        self.session.doctor_due.is_some()
+    }
+
+    /// How long until a pending doctor's report is due, to repaint then
+    /// (#849): without a frame at that time it would never be asked.
+    pub fn doctor_due(&self, now: Instant) -> Option<Duration> {
+        self.session
+            .doctor_due
+            .map(|due| due.saturating_duration_since(now))
     }
 
     /// Applies repairs from the last report (`doctor.repair`); the answer
@@ -387,5 +430,6 @@ impl Session {
     pub(super) fn on_lost(&mut self) {
         self.doctor_waiting = false;
         self.doctor_again = false;
+        self.doctor_due = None;
     }
 }

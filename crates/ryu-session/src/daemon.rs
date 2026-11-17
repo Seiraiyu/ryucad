@@ -1,7 +1,8 @@
 //! A product's session daemon: one long-running process per project that
 //! keeps the loaded project in memory. It serves newline-delimited
-//! JSON-RPC 2.0 on the project's [`Endpoint`], one request at a time
-//! (but for slow work a request prepares without the lock, [`Serve::prepare`]). The
+//! JSON-RPC 2.0 on the project's [`Endpoint`], one request at a time, in
+//! the order they reached the lock (`fifo`) (but for slow work a request
+//! prepares without the lock, [`Serve::prepare`]). The
 //! requests and the session are the product's ([`Serve`]); the loop, the
 //! subscriptions, idling out and shutting down are the same for every
 //! product.
@@ -22,13 +23,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+mod fifo;
+use fifo::{Fifo, FifoGuard};
+
 /// How long a daemon waits for a request before it exits.
 pub const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
 
 /// What the loop does with a request before the product sees it.
 pub enum Control {
-    /// `daemon.status`: answered by the loop.
-    Status,
+    /// `daemon.status`: answered by the loop. With `timings`, what the
+    /// daemon spent by method too (#849).
+    Status { timings: bool },
     /// `daemon.shutdown`: answered, then the daemon stops.
     Shutdown,
     /// `subscribe` to these topics (all when empty).
@@ -52,7 +57,11 @@ struct State<P: Serve> {
     idle: Duration,
     started: Instant,
     last: Mutex<Instant>,
-    core: Mutex<Core<P>>,
+    /// When a request last started or finished: how long the daemon has
+    /// been quiet, for coalesced publishes (#849). Unlike `last`, the
+    /// watcher never sets it.
+    asked: Mutex<Instant>,
+    core: Fifo<Core<P>>,
     /// Long requests running now, by participant and token: what
     /// `request.cancel` sets.
     running: Mutex<BTreeMap<(String, String), Running>>,
@@ -64,15 +73,19 @@ struct State<P: Serve> {
 
 impl<P: Serve> State<P> {
     fn new(root: &Path, endpoint: Endpoint<P>, idle: Duration) -> Arc<State<P>> {
+        let mut live = Live::with_poll(P::poll_ms());
+        let (quiet, max) = P::publish_ms();
+        live.coalesce = crate::publish::Coalesce::new(quiet, max);
         Arc::new(State {
             root: root.to_path_buf(),
             endpoint,
             idle,
             started: Instant::now(),
             last: Mutex::new(Instant::now()),
-            core: Mutex::new(Core {
+            asked: Mutex::new(Instant::now()),
+            core: Fifo::new(Core {
                 session: None,
-                live: Live::with_poll(P::poll_ms()),
+                live,
             }),
             running: Mutex::new(BTreeMap::new()),
             progress: Mutex::new(Vec::new()),
@@ -125,33 +138,60 @@ pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
         endpoint.address
     ));
     let state = State::<P>::new(root, endpoint, idle);
-    let watcher = Arc::clone(&state);
-    std::thread::spawn(move || {
-        loop {
-            let poll = Duration::from_millis(lock(&watcher.core).live.poll_ms);
-            std::thread::sleep(poll.min(watcher.idle));
-            if !watcher.root.join(P::MANIFEST).is_file() {
-                stop(&watcher, "the project is gone");
-            }
-            // Hold the lock so no request is mid-flight.
-            let mut core = lock(&watcher.core);
-            let before = core.live.snapshot();
-            core.live.expire(Instant::now());
-            core.live.announce(&before);
-            // Someone watching keeps the daemon alive, and sees changes
-            // made behind its back.
-            if core.live.hub.is_watched() {
-                *lock(&watcher.last) = Instant::now();
-                let Core { session, live } = &mut *core;
-                P::settle(session, live, &watcher.root);
-            }
-            if lock(&watcher.last).elapsed() >= watcher.idle {
-                stop(&watcher, "idle");
-            }
-        }
-    });
+    let w = Arc::clone(&state);
+    std::thread::spawn(move || watcher(&w));
     accept(&listener, &state);
     Ok(())
+}
+
+/// The daemon's watcher: expires participants, and while anyone is
+/// subscribed publishes what requests changed once the daemon is quiet or
+/// a change is `publish_max_ms` old (#849), and looks for changes made
+/// behind its back every `poll_ms`. Stops the daemon when its project goes
+/// or it has been idle too long.
+fn watcher<P: Serve>(watcher: &Arc<State<P>>) {
+    let mut settled = Instant::now();
+    loop {
+        let tick = {
+            let c = watcher.core.lock();
+            c.live.coalesce.tick(Duration::from_millis(c.live.poll_ms))
+        };
+        std::thread::sleep(tick.min(watcher.idle));
+        if !watcher.root.join(P::MANIFEST).is_file() {
+            stop(watcher, "the project is gone");
+        }
+        // Hold the lock so no request is mid-flight.
+        let mut core = watcher.core.lock();
+        let before = core.live.snapshot();
+        core.live.expire(Instant::now());
+        core.live.announce(&before);
+        // Someone watching keeps the daemon alive, and sees changes
+        // made behind its back.
+        if core.live.hub.is_watched() {
+            let now = Instant::now();
+            *lock(&watcher.last) = now;
+            let asked = *lock(&watcher.asked);
+            let poll = Duration::from_millis(core.live.poll_ms);
+            if let Some(due) = core.live.coalesce.due(now, asked, settled, poll) {
+                let Core { session, live } = &mut *core;
+                P::settle(session, live, &watcher.root);
+                live.coalesce.clear();
+                let what = match due {
+                    crate::publish::Due::Publish => "daemon.publish",
+                    crate::publish::Due::Poll => "daemon.poll",
+                };
+                live.timings.publish(what, now.elapsed());
+                settled = Instant::now();
+            }
+        } else {
+            // Nobody to tell: a request notes the state itself then.
+            core.live.coalesce.clear();
+        }
+        drop(core);
+        if lock(&watcher.last).elapsed() >= watcher.idle {
+            stop(watcher, "idle");
+        }
+    }
 }
 
 /// Serves every connection `listener` accepts, each on a thread of its
@@ -172,7 +212,7 @@ fn accept<P: Serve>(listener: &interprocess::local_socket::Listener, state: &Arc
                         s.close();
                     }
                     if let Some(id) = me {
-                        let mut core = lock(&state.core);
+                        let mut core = state.core.lock();
                         let before = core.live.snapshot();
                         core.live.goodbye(&id);
                         core.live.announce(&before);
@@ -245,7 +285,7 @@ fn stop<P: Serve>(state: &State<P>, why: &str) -> ! {
     std::process::exit(0)
 }
 
-fn status<P: Serve>(state: &State<P>) -> Value {
+fn status<P: Serve>(state: &State<P>, timings: bool) -> Value {
     let mut v = json!({
         "pid": std::process::id(),
         "root": state.root,
@@ -256,14 +296,13 @@ fn status<P: Serve>(state: &State<P>) -> Value {
     });
     // What the session says of itself, unless a request holds it: status
     // never waits.
-    let core = match state.core.try_lock() {
-        Ok(core) => Some(core),
-        Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
-        Err(std::sync::TryLockError::WouldBlock) => None,
-    };
+    let core = state.core.try_lock();
     if let Some(c) = &core {
         v["participants"] = participants(&c.live);
         v["last_activity"] = last_activity(&c.live);
+        if timings {
+            v["timings"] = c.live.timings.to_json();
+        }
     }
     match core.as_ref().map(|c| c.session.as_ref()) {
         Some(Some(s)) => {
@@ -377,6 +416,7 @@ fn serve<P: Serve>(
             return;
         };
         *lock(&state.last) = Instant::now();
+        *lock(&state.asked) = Instant::now();
         let (id, req) = parse_request_line(line.trim_end());
         // A long method's `progress` and `token` are the loop's.
         let req = req.and_then(|(method, mut params)| {
@@ -389,7 +429,7 @@ fn serve<P: Serve>(
         let mut shutdown = false;
         let mut subscribed = None;
         let result = match req.map(|(m, ask, r)| (P::control(&r), m, ask, r)) {
-            Ok((Control::Status, ..)) => Ok(Answer::json(status(state))),
+            Ok((Control::Status { timings }, ..)) => Ok(Answer::json(status(state, timings))),
             Ok((Control::Shutdown, ..)) => {
                 shutdown = true;
                 Ok(Answer::json(
@@ -427,7 +467,9 @@ fn serve<P: Serve>(
                             }
                             w.running.clone_from(&key);
                         }
-                        let mut core = lock_prepared(&state.core, me.as_deref(), &req, &job);
+                        let (mut core, waited) =
+                            lock_prepared(&state.core, me.as_deref(), &req, &job);
+                        let holding = Instant::now();
                         let Core { session, live } = &mut *core;
                         let r = P::handle(session, live, me.as_deref(), &state.root, req, &job);
                         if window && r.is_ok() {
@@ -447,6 +489,7 @@ fn serve<P: Serve>(
                                 live.announce(&before);
                             }
                         }
+                        live.timings.request(&method, waited, holding.elapsed());
                         drop(core);
                         // A failure written as text is a failure: a cancel
                         // leaves it as it leaves an `Err`.
@@ -457,6 +500,7 @@ fn serve<P: Serve>(
                         lock(&watch).running = None;
                         finished(state, &job, key);
                         *lock(&state.last) = Instant::now();
+                        *lock(&state.asked) = Instant::now();
                         r.map(|mut a| {
                             if job.ignored() && a.result.is_object() {
                                 a.result["cancel_ignored"] = json!(true);
@@ -501,7 +545,7 @@ fn serve<P: Serve>(
             // request a client left behind (an app killed mid-render) kept
             // the daemon past `daemon stop`'s wait (#391).
             cancel_all(state);
-            let _busy = lock(&state.core);
+            let _busy = state.core.lock();
             stop(state, "asked to shut down");
         }
     }
@@ -631,25 +675,34 @@ fn cancel_all<P: Serve>(state: &State<P>) -> usize {
 
 /// The lock, for answering `req`, once the slow work it prepares
 /// ([`Serve::prepare`]) is done without it, so other connections' requests
-/// don't wait on that work (#91).
+/// don't wait on that work (#91); and how long it waited for the lock. A
+/// request with nothing to prepare keeps the lock it took, so it keeps
+/// its place in the queue (#849).
 fn lock_prepared<'a, P: Serve>(
-    core: &'a Mutex<Core<P>>,
+    core: &'a Fifo<Core<P>>,
     me: Option<&str>,
     req: &P::Request,
     job: &Job,
-) -> MutexGuard<'a, Core<P>> {
+) -> (FifoGuard<'a, Core<P>>, Duration) {
+    let asked = Instant::now();
+    let mut c = core.lock();
+    let mut waited = asked.elapsed();
     let prepared = {
-        let mut c = lock(core);
         let Core { session, live } = &mut *c;
         P::prepare(session, live, me, req, job)
     };
-    let made =
-        prepared.and_then(|job| std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).ok());
-    let mut core = lock(core);
-    if let (Some(put), Some(s)) = (made, core.session.as_mut()) {
+    let Some(prepared) = prepared else {
+        return (c, waited);
+    };
+    drop(c);
+    let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(prepared)).ok();
+    let asked = Instant::now();
+    let mut c = core.lock();
+    waited += asked.elapsed();
+    if let (Some(put), Some(s)) = (made, c.session.as_mut()) {
         put(s);
     }
-    core
+    (c, waited)
 }
 
 /// Opens a subscription for the connection's participant.
@@ -672,10 +725,11 @@ fn subscribe<P: Serve>(
         ));
     }
     let topics = notify::topics::<P::Topic>(names)?;
-    let mut core = lock(&state.core);
+    let mut core = state.core.lock();
     let Core { session, live } = &mut *core;
     // What happened before the subscription isn't news to it.
     P::settle(session, live, &state.root);
+    live.coalesce.clear();
     let sub = live.hub.subscribe(me, &topics);
     // Long requests publish their progress outside the hub, while they
     // hold the lock.
@@ -686,6 +740,7 @@ fn subscribe<P: Serve>(
     }
     // Now watched: what is news to it is measured from here.
     P::settle(session, live, &state.root);
+    live.coalesce.clear();
     let shown = if topics.is_empty() {
         P::Topic::ALL.to_vec()
     } else {
@@ -726,6 +781,23 @@ mod tests {
         endpoint
     }
 
+    /// A socket address for a test daemon in `dir`, `tag` keeping two in
+    /// one folder apart.
+    fn test_address(dir: &Path, tag: &str) -> String {
+        #[cfg(unix)]
+        let address = dir
+            .join(format!("{tag}.sock"))
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        let address = format!(
+            "ryutest-daemon-{tag}-{}-{}",
+            std::process::id(),
+            dir.file_name().unwrap().to_string_lossy()
+        );
+        address
+    }
+
     /// As [`serving`], with the daemon's state.
     fn serving_state(dir: &Path) -> (Endpoint<Test>, Arc<State<Test>>) {
         #[cfg(unix)]
@@ -763,7 +835,7 @@ mod tests {
         assert_eq!(e.code, Code::Cancelled);
         // Nothing left running: the lock is free for the shutdown.
         assert_eq!(cancel_all(&state), 0);
-        drop(lock(&state.core));
+        drop(state.core.lock());
     }
 
     /// Connects and says hello as the agent `agent`.
@@ -957,9 +1029,115 @@ mod tests {
         );
     }
 
+    /// Each request's wait for the lock and time holding it are summed
+    /// by method (#849).
+    #[test]
+    fn requests_are_timed_by_method() {
+        let dir = tempfile::tempdir().unwrap();
+        let (endpoint, state) = serving_state(dir.path());
+        let mut c = agent(&endpoint);
+        for _ in 0..3 {
+            c.call(&Basic {
+                method: "quick",
+                params: json!({}),
+            })
+            .unwrap()
+            .unwrap();
+        }
+        let core = state.core.lock();
+        assert_eq!(core.live.timings.get("quick").count, 3);
+        // The hello was answered by the product too.
+        assert_eq!(core.live.timings.get("session.hello").count, 1);
+    }
+
+    /// Requests are answered in the order they reached the lock (#849):
+    /// one queued behind a held lock is served before one that came
+    /// after it.
+    #[test]
+    fn requests_take_the_lock_in_arrival_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (endpoint, state) = serving_state(dir.path());
+        let held = state.core.lock();
+        let mut threads = Vec::new();
+        for n in 0..4u64 {
+            let endpoint = endpoint.clone();
+            threads.push(std::thread::spawn(move || {
+                let mut c = Connection::connect(&endpoint).unwrap();
+                c.call(&Basic {
+                    method: "quick",
+                    params: json!({"order": n}),
+                })
+                .unwrap()
+                .unwrap();
+            }));
+            while state.core.queued() < n + 2 {
+                std::thread::yield_now();
+            }
+        }
+        drop(held);
+        for t in threads {
+            t.join().unwrap();
+        }
+        let answered = state.core.lock().session.clone().unwrap();
+        assert_eq!(answered, ["0", "1", "2", "3"]);
+    }
+
+    /// A burst of changes is published about once per `max`, and the last
+    /// once the daemon is quiet; nothing is left pending (#849).
+    #[test]
+    fn a_burst_is_published_coalesced() {
+        // The watcher outlives the test and stops the process when its
+        // project goes or it idles: the folder is kept, and the idle
+        // timeout is an hour.
+        let dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(dir.join(Test::MANIFEST), "{}").unwrap();
+        let endpoint = Endpoint {
+            address: test_address(&dir, "c"),
+            log: dir.join("c.log"),
+            product: std::marker::PhantomData,
+        };
+        let listener = bind(&endpoint).unwrap();
+        let state = State::<Test>::new(&dir, endpoint.clone(), Duration::from_secs(3600));
+        let serve = Arc::clone(&state);
+        std::thread::spawn(move || accept(&listener, &serve));
+        {
+            let mut c = state.core.lock();
+            c.live.poll_ms = 50;
+            c.live.coalesce = crate::publish::Coalesce::new(100, 400);
+        }
+        let w = Arc::clone(&state);
+        std::thread::spawn(move || watcher(&w));
+        let mut sub = agent(&endpoint);
+        sub.call(&Basic {
+            method: "subscribe",
+            params: json!({}),
+        })
+        .unwrap()
+        .unwrap();
+        let mut c = agent(&endpoint);
+        let published =
+            |s: &State<Test>| s.core.lock().live.timings.get("daemon.publish").publishes;
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(1200) {
+            c.call(&Basic {
+                method: "mark",
+                params: json!({}),
+            })
+            .unwrap()
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let during = published(&state);
+        // At most one per 400 ms of the 1.2 s burst, plus one.
+        assert!((1..=4).contains(&during), "{during}");
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(published(&state), during + 1, "the last, once quiet");
+        assert!(state.core.lock().live.coalesce.pending().is_none());
+    }
+
     #[test]
     fn prepared_work_runs_without_the_lock() {
-        let core = Arc::new(Mutex::new(Core::<Test> {
+        let core = Arc::new(Fifo::new(Core::<Test> {
             session: Some(Vec::new()),
             live: Live::with_poll(250),
         }));
@@ -971,7 +1149,8 @@ mod tests {
                     None,
                     &Request("slow".into(), Value::Null),
                     &Job::default(),
-                );
+                )
+                .0;
                 core.session.clone().unwrap()
             })
         };
@@ -987,7 +1166,8 @@ mod tests {
             None,
             &Request("quick".into(), Value::Null),
             &Job::default(),
-        );
+        )
+        .0;
         assert!(other.session.as_ref().unwrap().is_empty());
         drop(other);
         *g = 2;

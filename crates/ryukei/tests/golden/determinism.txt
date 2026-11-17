@@ -43,6 +43,7 @@ offset_bodies eb19cbbe1a32ed46
 offsets 6ccbb59de7230ff0
 path_check a8332624802745dc
 pcurves 793fa833add523b0
+pinned_faces 854ad241dcf34974
 pipes d0313812b8980bf2
 predicates 582c63309c4c6f67
 primitives d1d75bf1aae07f71

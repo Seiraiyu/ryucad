@@ -2991,6 +2991,7 @@ pub(crate) mod tests {
             json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
         )
         .unwrap();
+        crate::server::flush(&mut live, &mut s);
         live.hub.send(Topic::Model, "marker", &json!({}));
         let got = drain(&sub);
         assert_eq!(got.len(), 1);
@@ -3035,6 +3036,7 @@ pub(crate) mod tests {
             json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
         )
         .unwrap();
+        crate::server::flush(&mut live, &mut s);
         live.hub.send(Topic::Model, "marker", &json!({}));
         let got = drain(&sub);
         let frame = got[0].1["parts"]

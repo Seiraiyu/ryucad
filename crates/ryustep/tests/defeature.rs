@@ -71,7 +71,21 @@ const MAX_SIZE: f64 = 2e-3;
 /// change, and rung 3 refuses at a torus and a plane touching none,
 /// overlapping; FTC 10's walk is `HealAmbiguous` at a kept 1 mm ball slit
 /// by a carried NURBS face's curve ending inside it, as its first builds
-/// at rungs 0 and 1 are.
+/// at rungs 0 and 1 are. Plan 21.A pins those faces touching no change in
+/// narrowed builds, so FTC 07's ring clip and its torus/plane pair are
+/// never met; it now refuses at rung 2, in half the time, where a carried
+/// NURBS face touching a change (`33b57350`) meets a pinned thin plane
+/// (`f19ffa9e`) `Uncertain`, with no edge between them (#652; moved to
+/// ryukei 22, "Working faces against pins and near-box limits": working
+/// NURBS `33b57350` growing into pin `f19ffa9e`). FTC 10's slit is left to
+/// ryukei 21.C. Plan 21.B's certified miss changes neither: FTC 07 refuses
+/// at the same rung-2 pair in the same time as on main, and FTC 10 as
+/// before. Plan 21.C's seed retry doesn't settle FTC 10 either (census VI,
+/// #652): the slit is the ball's held seam with carried NURBS `a497893e`,
+/// the ball's one piece is its whole working sphere (the grown faces meet
+/// it only at points), and no seed yields: the ball's shortcut seed holds
+/// its old face and the NURBS quad's is rule 3's own (moved to ryukei 22,
+/// "a kept ball bounded only by a held seam").
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -379,7 +393,9 @@ fn a_rounded_box_through_step_is_defeatured_to_the_box() {
 
 /// A cancel stops deleting NIST FTC 10's blends at once (plan 13.D: its
 /// re-trim fitted a carried spline's working sheet for 17 minutes past a
-/// cancel, unpolled). Cancelled 5 s in, it answers within 5 s more.
+/// cancel, unpolled). Cancelled 5 s in, it answers within 5 s more. On a
+/// pool of its own (#939): on the global pool it waited for another
+/// test's whole check, on Windows.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -401,6 +417,10 @@ fn a_cancel_stops_deleting_ftc_10s_blends() {
         faces: Vec::new(),
         options: RecogniseOptions::default(),
     };
+    let own = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
     let flag = AtomicBool::new(false);
     let start = Instant::now();
     let (r, stopped) = std::thread::scope(|s| {
@@ -408,12 +428,14 @@ fn a_cancel_stops_deleting_ftc_10s_blends() {
             std::thread::sleep(Duration::from_secs(5));
             flag.store(true, Ordering::Relaxed);
         });
-        let r = delete_blends_with(
-            OpKey(0x13d),
-            &body,
-            &spec,
-            &Work::unlimited().with_cancel(&flag),
-        );
+        let r = own.install(|| {
+            delete_blends_with(
+                OpKey(0x13d),
+                &body,
+                &spec,
+                &Work::unlimited().with_cancel(&flag),
+            )
+        });
         (r, start.elapsed())
     });
     assert!(matches!(r, Err(Error::Cancelled)), "{:?}", r.err());
@@ -590,9 +612,10 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 /// pair census I saw was an artefact of its skipped pairs.
 ///
 /// Plan 20.B parts those pairs (near boxes; the tube contact in narrowed
-/// builds) and recorded what stops both next (see [`KNOWN_REFUSED`]).
+/// builds) and recorded what stops both next; plan 21.A's pins move FTC
+/// 07 on to its next cause (see [`KNOWN_REFUSED`]).
 #[test]
-#[ignore = "#652: walks clipped at ring faces and a kept ball slit by a carried face (recorded in ryukei 20.B)"]
+#[ignore = "#652: FTC 10's kept ball bounded only by a held seam (ryukei 22); FTC 07's working NURBS 33b57350 grows into pin f19ffa9e (ryukei 22)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
@@ -661,6 +684,25 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// refuses at a plane and a NURBS face touching no change, overlapping
 /// (`74fca8b1`/`b150cb1a`); STC 07 still refuses inside the deadline and
 /// linkrods still runs past it (122 s), as on main.
+///
+/// Plan 21.A pins narrowed builds' faces touching no change: the same 18
+/// defeature, bit for bit as on main, and none more (#652, #658). CTC 02
+/// with PMI's pair is never met, and its pinned retry clips a working
+/// plane touching the change at its near box (`1294043e`, `GapNotHealed`
+/// in 11 s; moved to ryukei 22, "Working faces against pins and near-box
+/// limits": `1294043e` clipped at its near box in the pinned retry); STC
+/// 07 now refuses in 64 s; FTC 07 AP242 (21.B), STC 10
+/// (21.D) and FTC 10 (21.C) refuse as before; linkrods is still past the
+/// deadline (out of scope, question 984).
+///
+/// Plan 21.B tries a certified miss after a failed trace at faces sharing
+/// nothing, outside first builds: the same 18 defeature, bit for bit as
+/// on main, and none more. FTC 07 AP242 #13541 still refuses at its retry
+/// pair in 36 s: its cylinder and cone (`79b561f3`/`178d3260`) are each
+/// certified to cross the other's surface, the pin grazing the bore's
+/// wall, so neither keeps off the other; it needs an exact cylinder/cone
+/// intersection (#658; moved to ryukei 22). STC 10 (21.D) and FTC 10
+/// (21.C) refuse as before.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),

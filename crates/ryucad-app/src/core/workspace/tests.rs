@@ -298,3 +298,171 @@ fn the_workspace_answers_only_by_routing() {
         );
     }
 }
+
+/// A part a notification named while its report was on its way is
+/// asked again once the report comes, once (#849).
+#[test]
+fn a_part_changed_while_asked_is_asked_again_once() {
+    let mut model = Model::default();
+    model.loading.insert("p".to_owned());
+    model.again.insert("p".to_owned());
+    let mut fx = Effects::default();
+    model.answer(
+        model::Asked::Rebuild("p".to_owned(), None),
+        answered(json!({"parts": [{"part": "p"}]})),
+        Some(None),
+        &mut fx,
+    );
+    assert!(model.again.is_empty());
+    assert!(
+        matches!(fx.recorded(),
+                 [Effect::Then(Then::PartChanged(_)), Effect::Then(Then::AskPart(p))] if p == "p"),
+        "{:?}",
+        fx.recorded()
+    );
+}
+
+/// Appearance asked for again while a reading was on its way is asked
+/// once that reading comes (#849).
+#[test]
+fn an_appearance_wanted_again_asks_again() {
+    let mut view = view::View {
+        looks_waiting: true,
+        looks_again: true,
+        looks_asked: 1,
+        ..Default::default()
+    };
+    let mut fx = Effects::default();
+    view.answer(
+        view::Asked::Appearance(1),
+        answered(json!({"bodies": []})),
+        &mut fx,
+    );
+    assert!(!view.looks_waiting && !view.looks_again);
+    assert!(
+        matches!(
+            fx.recorded().last(),
+            Some(Effect::Then(Then::ReadAppearance))
+        ),
+        "{:?}",
+        fx.recorded()
+    );
+}
+
+/// Every part's drawings, and the tile's list, wanted again while a
+/// reading was on its way, are asked once it comes (#849).
+#[test]
+fn drawing_lists_wanted_again_ask_again() {
+    let mut tile = crate::core::drawings::Tile {
+        drawn_waiting: true,
+        drawn_again: true,
+        list_waiting: true,
+        list_again: true,
+        ..Default::default()
+    };
+    let mut fx = Effects::default();
+    tile.answer(
+        drawings::Asked::DrawingsAll,
+        answered(json!({"drawings": []})),
+        &mut fx,
+    );
+    assert!(!tile.drawn_waiting && !tile.drawn_again);
+    assert!(
+        matches!(fx.recorded(), [Effect::Then(Then::ReadDrawn)]),
+        "{:?}",
+        fx.recorded()
+    );
+    let mut fx = Effects::default();
+    tile.answer(
+        drawings::Asked::DrawingList("p".to_owned()),
+        answered(json!({"drawings": []})),
+        &mut fx,
+    );
+    assert!(!tile.list_waiting && !tile.list_again);
+    assert!(
+        matches!(
+            fx.recorded().last(),
+            Some(Effect::Then(Then::ReadDrawingList))
+        ),
+        "{:?}",
+        fx.recorded()
+    );
+}
+
+/// A part's holes wanted at a newer revision while an ask was on its way
+/// are asked once it comes, not alongside it (#849).
+#[test]
+fn holes_wanted_again_ask_once_the_answer_comes() {
+    let mut model = Model::default();
+    model.holes_asked.insert("p".to_owned(), "r1".to_owned());
+    model.holes_again.insert("p".to_owned());
+    let mut fx = Effects::default();
+    model.answer(
+        model::Asked::Holes("p".to_owned(), "r1".to_owned()),
+        answered(json!({"holes": []})),
+        Some(None),
+        &mut fx,
+    );
+    assert!(model.holes_asked.is_empty() && model.holes_again.is_empty());
+    assert!(
+        matches!(fx.recorded().last(), Some(Effect::Then(Then::FetchHoles(p))) if p == "p"),
+        "{:?}",
+        fx.recorded()
+    );
+}
+
+/// One rebuild of the project answers each part it was asked for as its
+/// own rebuild would, and asks again a part wanted meanwhile (#849).
+#[test]
+fn one_rebuild_answers_each_part_asked() {
+    let mut model = Model::default();
+    for p in ["a", "b"] {
+        model.loading.insert(p.to_owned());
+    }
+    model.again.insert("b".to_owned());
+    let mut fx = Effects::default();
+    model.answer(
+        model::Asked::Rebuilds(vec!["a".to_owned(), "b".to_owned()], None),
+        answered(json!({"parts": [{"part": "a"}, {"part": "b"}, {"part": "c"}]})),
+        Some(None),
+        &mut fx,
+    );
+    assert!(model.loading.is_empty() && model.again.is_empty());
+    let changed: Vec<&str> = (fx.recorded().iter())
+        .filter_map(|e| match e {
+            Effect::Then(Then::PartChanged(r)) => r["part"].as_str(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(changed, ["a", "b"]);
+    assert!(
+        matches!(fx.recorded().last(), Some(Effect::Then(Then::AskPart(p))) if p == "b"),
+        "{:?}",
+        fx.recorded()
+    );
+}
+
+/// A part list names a part loaded at the revision it lists: it isn't
+/// asked for again; one whose revision moved is (#849: each part list a
+/// burst read asked every part).
+#[test]
+fn a_part_list_asks_only_parts_that_moved() {
+    let mut model = Model::default();
+    model.apply_part(&json!({"part": "p", "revision": "r1", "features": []}));
+    model.apply_part(&json!({"part": "q", "revision": "r1", "features": []}));
+    let mut fx = Effects::default();
+    model.answer(
+        model::Asked::Parts,
+        answered(json!({"parts": [{"part": "p", "revision": "r1"},
+                                  {"part": "q", "revision": "r2"}]})),
+        None,
+        &mut fx,
+    );
+    let asked: Vec<&str> = (fx.recorded().iter())
+        .filter_map(|e| match e {
+            Effect::Then(Then::AskPart(p)) => Some(p.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, ["q"]);
+}

@@ -23,6 +23,10 @@ pub(crate) struct WorkBody {
     pub(crate) origin: BTreeMap<FaceId, FaceId>,
     /// The working faces.
     pub(crate) working: BTreeSet<FaceId>,
+    /// The pinned faces (plan 21.A): region faces left as they are that
+    /// touch no change, copied with the outside faces. Empty unless
+    /// [`WorkBody::pinning`] marked them.
+    pub(crate) pinned: BTreeSet<FaceId>,
     /// Working faces whose surfaces couldn't be carried where needed.
     pub(crate) fixed: BTreeSet<FaceId>,
     /// The working faces' own sides: a kept piece using one reaches past
@@ -155,6 +159,7 @@ pub(crate) fn work_body(
         body: out,
         origin,
         working: working_faces,
+        pinned: BTreeSet::new(),
         fixed,
         clipped,
         frontier,
@@ -182,10 +187,25 @@ pub(crate) fn doubled(b: &Box3) -> Box3 {
 }
 
 impl WorkBody {
+    /// The working body with the input faces `pins` marked pinned (plan
+    /// 21.A). The caller built it over the region less them
+    /// (`Region::without`), so each is a copied face standing for itself.
+    pub(crate) fn pinning(mut self, pins: &BTreeSet<FaceId>) -> WorkBody {
+        self.pinned = self
+            .origin
+            .iter()
+            .filter(|&(w, i)| pins.contains(i) && !self.working.contains(w))
+            .map(|(&w, _)| w)
+            .collect();
+        self
+    }
+
     /// The pairs of faces the table meets, each in face order: every two
     /// working faces whose boxes meet, and each working face with each
     /// outside face it shares a frontier edge with (which imprints that
-    /// edge on it). Outside faces are never met with each other.
+    /// edge on it). Outside faces and pinned faces are never met with
+    /// each other or among themselves; each pinned face is met with each
+    /// working face whose box meets its box (plan 21.A).
     pub(crate) fn pairs(&self) -> BTreeSet<(FaceId, FaceId)> {
         let b = &self.body;
         let boxes: BTreeMap<FaceId, Box3> = b.faces().map(|f| (f, grown_box(b, f))).collect();
@@ -210,6 +230,16 @@ impl WorkBody {
             for &wf in &self.working {
                 if faces.contains(&self.origin[&wf]) {
                     out.insert((wf.min(o), wf.max(o)));
+                }
+            }
+        }
+        // Each pinned face with each working face whose box meets its box
+        // (plan 21.A): a working face that grows may cut it. Never with
+        // another pinned face or an outside face.
+        for &p in &self.pinned {
+            for &a in &self.working {
+                if boxes[&a].intersects(&boxes[&p]) {
+                    out.insert((a.min(p), a.max(p)));
                 }
             }
         }
@@ -465,5 +495,65 @@ mod tests {
             !crate::intersect::face_box(&c, side).intersects(&crate::intersect::face_box(&s, w))
         );
         assert!(grown_box(&c, side).intersects(&grown_box(&s, w)));
+    }
+
+    /// Plan 21.A: the rounded block's low ball deleted over rung 2's
+    /// region. Each pin is its input face copied, with no clipped side;
+    /// no two pins are paired; each pin is paired with every working
+    /// face whose box meets its box.
+    #[test]
+    fn pinned_faces_are_copied_whole_and_met_only_by_working_faces() {
+        let (b, low, _) = super::super::near::tests::rounded();
+        let ring = region(&b, &BTreeSet::from([low])).grown(&b);
+        let still = |f: FaceId| ring.faces.contains(&f) && f != low;
+        let pins = super::super::near::pinned(&b, &ring, &still, &BTreeSet::new());
+        assert!(!pins.is_empty());
+        let rest = ring.without(&b, &pins);
+        let bx = region_box(&b, &ring, 0.1);
+        let ws: BTreeMap<FaceId, Working> = rest
+            .faces
+            .iter()
+            .filter(|&&f| f != low)
+            .map(|&f| {
+                (
+                    f,
+                    working(&b, f, None, b.faces[f].sense, true, &bx).unwrap(),
+                )
+            })
+            .collect();
+        // unmetered: a unit test.
+        let w = work_body(K, &b, &rest, &ws, &crate::work::Meter::free())
+            .unwrap()
+            .pinning(&pins);
+        assert_eq!(w.pinned.len(), pins.len());
+        for &p in &w.pinned {
+            assert!(!w.working.contains(&p));
+            assert!(pins.contains(&w.origin[&p]));
+            assert_eq!(w.body.faces[p].name, b.faces[w.origin[&p]].name);
+            for fin in w.body.face_loops(p).flat_map(|l| w.body.loop_fins(l)) {
+                assert!(!w.clipped.contains(&w.body.fins[fin].edge));
+            }
+        }
+        let pairs = w.pairs();
+        for &(x, y) in &pairs {
+            assert!(
+                !(w.pinned.contains(&x) && w.pinned.contains(&y)),
+                "two pins paired: {x:?} {y:?}"
+            );
+        }
+        let mut met = 0;
+        for &p in &w.pinned {
+            for &a in &w.working {
+                if grown_box(&w.body, p).intersects(&grown_box(&w.body, a)) {
+                    assert!(pairs.contains(&(p.min(a), p.max(a))), "{p:?} {a:?}");
+                    met += 1;
+                }
+            }
+        }
+        assert!(met > 0);
+        // Unpinned, the same working body has no pins.
+        // unmetered: a unit test.
+        let plain = work_body(K, &b, &rest, &ws, &crate::work::Meter::free()).unwrap();
+        assert!(plain.pinned.is_empty());
     }
 }

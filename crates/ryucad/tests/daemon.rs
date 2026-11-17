@@ -107,7 +107,7 @@ fn serves_requests_and_shuts_down() {
     let f = fixture();
     let mut child = f.start(60);
     let conn = f.connect().unwrap();
-    let status = ask(&conn, &Request::DaemonStatus {}).unwrap();
+    let status = ask(&conn, &Request::DaemonStatus { timings: false }).unwrap();
     assert_eq!(status["pid"], child.id());
     assert_eq!(status["version"]["protocol"], 3);
     ask(
@@ -392,7 +392,10 @@ fn a_project_reached_through_a_link_finds_its_daemon() {
         daemon.connect(&link).unwrap()
     });
     assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
-    let status = conn.call(&Request::DaemonStatus {}).unwrap().unwrap();
+    let status = conn
+        .call(&Request::DaemonStatus { timings: false })
+        .unwrap()
+        .unwrap();
     assert_eq!(status["root"], serde_json::json!(f.root));
     // The CLI, run in the canonical folder, finds the same daemon.
     let again = cli(&f, &["daemon", "status"]);
@@ -1209,5 +1212,113 @@ fn a_human_writes_only_in_the_mode_that_allows_it() {
         ask(&conn, &edit).unwrap_err().code,
         ryucad::error::Code::ParticipantMode
     );
+    cli(&f, &["daemon", "stop"]);
+}
+
+/// `daemon status --timings` says what the daemon spent by method
+/// (#849); without the flag the answer has no timings.
+#[test]
+fn daemon_status_reports_timings_when_asked() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let plain = cli(&f, &["daemon", "status"]);
+    assert!(plain["result"].get("timings").is_none(), "{plain}");
+    let v = cli(&f, &["daemon", "status", "--timings"]);
+    let m = &v["result"]["timings"]["methods"];
+    assert_eq!(m["feature.add"]["count"], 1, "{v}");
+    assert!(m["feature.add"]["held_ms"].as_f64().unwrap() > 0.0, "{v}");
+    assert!(m["feature.add"]["wait_ms"].is_number(), "{v}");
+    // Nobody watched: the request noted the state itself.
+    assert_eq!(m["feature.add"]["publishes"], 1, "{v}");
+    cli(&f, &["daemon", "stop"]);
+}
+
+impl Watch {
+    /// Every notification until none comes for `quiet`.
+    fn all(&self, quiet: Duration) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(v) = self.rx.recv_timeout(quiet) {
+            out.push(v);
+        }
+        out
+    }
+}
+
+/// `calls` through one `ryucad session --stdio`; their answers.
+fn stdio(f: &Fixture, calls: &[Value]) -> Vec<Value> {
+    let mut child = Command::new(cargo_bin("ryucad"))
+        .args(["session", "--stdio"])
+        .current_dir(&f.root)
+        .env(RUNTIME_DIR_VAR, &f.run)
+        .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
+        .env("RYUCAD_IDLE_TIMEOUT", "60")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut answers = Vec::new();
+    for (i, c) in calls.iter().enumerate() {
+        let line = serde_json::json!({"jsonrpc": "2.0", "id": i,
+                                      "method": c["method"], "params": c["params"]});
+        writeln!(stdin, "{line}").unwrap();
+        let mut a = String::new();
+        out.read_line(&mut a).unwrap();
+        answers.push(serde_json::from_str(&a).unwrap());
+    }
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    answers
+}
+
+/// A script's burst of writes is told to a watcher in a few
+/// `model.changed`, at most one per `daemon.publish_max_ms` of the burst
+/// plus one, the last naming every feature; each write still has its own
+/// `activity.appended` (#849).
+#[test]
+fn a_burst_of_writes_is_told_in_a_few_notifications() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    let w = Watch::new(&f, &["model", "activity"]);
+    let calls: Vec<Value> = (0..40)
+        .map(|i| {
+            serde_json::json!({"method": "feature.add", "params":
+            {"part": "p", "id": format!("s{i:02}"), "type": "sphere",
+             "params": {"radius": 1 + i % 5},
+             "placement": {"origin": [i * 10, 0, 0]}}})
+        })
+        .collect();
+    let t = Instant::now();
+    let answers = stdio(&f, &calls);
+    let secs = t.elapsed().as_secs_f64();
+    assert!(
+        answers.iter().all(|a| a.get("result").is_some()),
+        "{answers:?}"
+    );
+    let notes = w.all(Duration::from_secs(2));
+    let of = |m: &str| {
+        notes
+            .iter()
+            .filter(|v| v["method"] == m)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(of("activity.appended").len(), 40);
+    let changed = of("model.changed");
+    assert!(!changed.is_empty());
+    assert!(
+        changed.len() <= secs as usize + 2,
+        "{} in {secs:.1} s",
+        changed.len()
+    );
+    let last = &changed.last().unwrap()["params"]["parts"][0];
+    assert_eq!(last["features"].as_array().unwrap().len(), 40, "{last}");
     cli(&f, &["daemon", "stop"]);
 }

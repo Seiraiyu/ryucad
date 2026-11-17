@@ -3751,6 +3751,27 @@ fn near_boxes_section(golden: &mut Golden) {
     }
 }
 
+/// ryukei 21.A's pinned faces (design 683): the rounded, slotted block
+/// (`ryukei_testkit::pinned_faces`), the slot's far end deleted. The slot
+/// runs out through the round and the +x side, which the ladder's rings
+/// bring in touching no change; the narrowed build pins both, and they
+/// are cut and never met. The result's body, created names and mesh, or
+/// the refusal's bytes.
+fn pinned_faces_section(golden: &mut Golden) {
+    use ryukei::tweak::delete_faces;
+    use ryukei_testkit::pinned_faces::{slotted, spec};
+    let mut s = golden.section("pinned_faces");
+    let b = slotted();
+    match delete_faces(OpKey(0x21a5), &b, &spec(&b)) {
+        Ok((o, j)) => hash_body(&mut s, &o, &j),
+        Err(e) => {
+            for byte in format!("{e:?}").bytes() {
+                s.u64(u64::from(byte));
+            }
+        }
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3850,6 +3871,7 @@ sections! {
     known_seams => known_seams_section,
     held_seams => held_seams_section,
     near_boxes => near_boxes_section,
+    pinned_faces => pinned_faces_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline

@@ -1887,7 +1887,12 @@ pub enum Request {
         prune: bool,
     },
     #[serde(rename = "daemon.status")]
-    DaemonStatus {},
+    DaemonStatus {
+        /// What the daemon spent by method (#849): `timings` in the
+        /// answer.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        timings: bool,
+    },
     /// Cancels the caller's running long request `token`: the
     /// connection's participant's, or (on a connection that said no
     /// hello) the agent `as`'s. Answered without waiting for the request.

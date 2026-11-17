@@ -337,6 +337,23 @@ fn the_near_boxes_twin_is_bounded() {
     println!("near boxes' twin: {spent} units");
 }
 
+/// The pinned faces' twin (plan 21.A): bounded, the same units on one
+/// thread and eight, each rung build within its cap.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_pinned_faces_twin_is_bounded() {
+    use ryukei_testkit::pinned_faces::{slotted, spec};
+    let b = slotted();
+    let spec = spec(&b);
+    let spent = bounded("pinned faces' twin", |w| {
+        ryukei::tweak::delete_faces_with(OpKey(0x21a5), &b, &spec, w)
+    });
+    println!("pinned faces' twin: {spent} units");
+}
+
 #[test]
 fn thickening_a_sheet_is_bounded() {
     use ryukei::name::{FaceRole, Name, Role};

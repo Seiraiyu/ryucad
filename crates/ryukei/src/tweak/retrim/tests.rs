@@ -908,3 +908,205 @@ fn ctc_02s_carried_cylinders_are_apart_over_near_boxes() {
         include_bytes!("../../../tests/data/nist_ctc_02_near_work.body"),
     );
 }
+
+/// A committed cut's untouched pair (plan 21.A, census VI): carried over
+/// the rung's box (the work cut) and met, as main's narrowed build meets
+/// them, the pair is `Uncertain` within a rung's cap. Neither face of the
+/// input cut touches a change, and both are left as they are: a narrowed
+/// build pins both, copies them with their input edges, and never meets
+/// them. Where the pair shares an input edge (`shared`), it is kept.
+fn untouched_pair(input: &[u8], work: &[u8], shared: bool) {
+    use crate::codec::decode_body;
+    use std::collections::BTreeSet;
+    let input = decode_body(input).unwrap();
+    let work = decode_body(work).unwrap();
+    let pair: Vec<FaceId> = work.faces().collect();
+    assert_eq!(pair.len(), 2);
+    let inputs: Vec<FaceId> = pair
+        .iter()
+        .map(|&w| match input.by_name(work.faces[w].name) {
+            Some(EntityId::Face(f)) => f,
+            _ => panic!("no input face for {w:?}"),
+        })
+        .collect();
+    // unmetered: a unit test, capped as a rung is.
+    let m = crate::work::Meter::free();
+    let met = m.capped(crate::work::Scope::Rung, || {
+        crate::intersect::face_face_in((&work, pair[0]), (&work, pair[1]), &m)
+    });
+    assert!(met.is_err(), "met over the rung's box: {met:?}");
+    // The input cut is the pair and every face sharing a vertex with
+    // either; census VI found no changed face among them, so none is
+    // changed here. Both faces of the pair are pinned.
+    let region = super::region::Region {
+        changed: BTreeSet::new(),
+        faces: input.faces().collect(),
+        frontier: Default::default(),
+    };
+    let still = |f: FaceId| region.faces.contains(&f);
+    let pins = super::near::pinned(&input, &region, &still, &BTreeSet::new());
+    for &f in &inputs {
+        assert!(pins.contains(&f), "{f:?} not pinned: {pins:?}");
+    }
+    // Built pinned: copied with their own edges, the shared ones too, and
+    // never a pair of the table.
+    let rest = region.without(&input, &pins);
+    let ws = BTreeMap::new();
+    // unmetered: a unit test.
+    let w = super::body::work_body(K, &input, &rest, &ws, &crate::work::Meter::free())
+        .unwrap()
+        .pinning(&pins);
+    let back: BTreeMap<FaceId, FaceId> = w.origin.iter().map(|(&wf, &i)| (i, wf)).collect();
+    let (a, b) = (back[&inputs[0]], back[&inputs[1]]);
+    assert!(w.pinned.contains(&a) && w.pinned.contains(&b));
+    assert!(!w.pairs().contains(&(a.min(b), a.max(b))));
+    let kept = w
+        .body
+        .edges()
+        .filter(|&e| {
+            let fs: Vec<FaceId> = w
+                .body
+                .edge_fins(e)
+                .map(|fin| w.body.loops[w.body.fins[fin].loop_].face)
+                .collect();
+            fs.contains(&a) && fs.contains(&b)
+        })
+        .count();
+    assert_eq!(kept > 0, shared, "the pair's shared input edges: {kept}");
+}
+
+/// FTC 07 rd's rung-3 pair after 20.B (#652, census V and VI): torus
+/// `14131c92` and plane `9d1d527c`, both touching no change, overlapping,
+/// sharing no input edge (census VI), so no shared edge is asserted.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ftc_07s_untouched_pair_is_pinned() {
+    untouched_pair(
+        include_bytes!("../../../tests/data/nist_ftc_07_pinned_input.body"),
+        include_bytes!("../../../tests/data/nist_ftc_07_pinned_work.body"),
+        false,
+    );
+}
+
+/// CTC 02 with PMI's retry pair after 20.B (#658, #295): plane
+/// `74fca8b1`, working, and NURBS `b150cb1a`, outside rung 3's region,
+/// both touching no change, tangent along their shared frontier edge
+/// (census VI).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn ctc_02s_untouched_pair_is_pinned() {
+    untouched_pair(
+        include_bytes!("../../../tests/data/nist_ctc_02_pinned_input.body"),
+        include_bytes!("../../../tests/data/nist_ctc_02_pinned_work.body"),
+        true,
+    );
+}
+
+/// Plan 21.A: the block's top raised 0.2, over the whole body (rung 2's
+/// region). The bottom touches no change: a narrowed build pins it and
+/// builds the taller box, as the first build does.
+#[test]
+fn a_raised_blocks_bottom_is_pinned_and_it_builds_the_taller_box() {
+    use super::{Build, Rung, attempt};
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    assert!(whole.whole(&b));
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let built = |r: Rung| match r {
+        Rung::Done(r) => r.ok().map(|(o, _)| o),
+        _ => None,
+    };
+    let first = built(attempt(K, &b, &changes, &whole, &bx, 2, Build::First, &m))
+        .expect("the first build builds");
+    let pinned = built(attempt(K, &b, &changes, &whole, &bx, 2, Build::Only, &m))
+        .expect("the pinned build builds");
+    assert_eq!(crate::check::check(&pinned), []);
+    assert!((volume(&pinned) - volume(&first)).abs() < 1e-9);
+    assert!((volume(&pinned) - 1.0 * 0.6 * 0.6).abs() < 1e-9);
+    // The bottom, pinned, is its input face: its name and its surface.
+    let bottom = face_of(&b, FaceRole::MinusZ);
+    let Some(EntityId::Face(o)) = pinned.by_name(b.faces[bottom].name) else {
+        panic!("no bottom");
+    };
+    assert_eq!(
+        pinned.surfaces[pinned.faces[o].surface],
+        b.surfaces[b.faces[bottom].surface]
+    );
+}
+
+/// Plan 21.A: a wrong pin gives a refusal, never a wrong body. The same
+/// raised block with its +x side pinned, which has to grow to the new
+/// top: the walk fails and the rung climbs.
+#[test]
+fn a_pin_that_must_grow_fails_its_walk() {
+    use super::{Build, Rung, attempt_with};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let side = BTreeSet::from([face_of(&b, FaceRole::PlusX)]);
+    let r = attempt_with(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        Some(&side),
+        &m,
+    );
+    let what = match &r {
+        Rung::Done(d) => format!("done: {:?}", d.as_ref().as_ref().map(|_| ())),
+        Rung::Next(e) => format!("next: {e:?}"),
+        Rung::Walked(e) => format!("walked: {e:?}"),
+        Rung::Uncertain(e) => format!("uncertain: {e:?}"),
+        Rung::Unchanged => "unchanged".into(),
+    };
+    assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)), "{what}");
+}
+
+/// Plan 21.C: a walk that fails with no seed set in conflict reports its
+/// failure as before; the retry never runs. The raised block with its
+/// +x side wrongly pinned (21.A's test) fails its walk with no shortcut
+/// seed (nothing is deleted).
+#[test]
+fn a_failed_walk_with_nothing_to_yield_fails_as_before() {
+    use super::{Build, Rung, attempt_with};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let side = BTreeSet::from([face_of(&b, FaceRole::PlusX)]);
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let r = attempt_with(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        Some(&side),
+        &m,
+    );
+    assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)));
+    assert!(changes.deleted.is_empty());
+}

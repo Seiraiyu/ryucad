@@ -147,6 +147,11 @@ pub fn status(root: &Path) -> Result<Value> {
     ryu_session::client::status::<Cad>(root)
 }
 
+/// [`status`], with the daemon's timings by method when `timings`.
+pub fn status_with(root: &Path, timings: bool) -> Result<Value> {
+    ryu_session::client::status_with::<Cad>(root, timings)
+}
+
 /// Stops the project's daemon, if one is running.
 pub fn stop(root: &Path) -> Result<Value> {
     ryu_session::client::stop::<Cad>(root)
