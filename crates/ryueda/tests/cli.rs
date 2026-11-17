@@ -819,6 +819,11 @@ fn every_protocol_method_has_a_command() {
         ("design.edit", &["design", "edit"]),
         ("design.delete", &["design", "delete"]),
         ("design.list", &["design", "list"]),
+        ("board.create", &["board", "create"]),
+        ("board.edit", &["board", "edit"]),
+        ("board.delete", &["board", "delete"]),
+        ("board.list", &["board", "list"]),
+        ("board.show", &["board", "show"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
         ("block.show", &["block", "show"]),
@@ -4514,4 +4519,79 @@ fn review_needs_a_github_clone() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn boards_are_created_edited_shown_and_deleted_from_the_cli() {
+    let p = Pair::breakout();
+    let b = p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    assert_eq!(b["reference"], "board/main");
+    assert_eq!(b["path"], "boards/main/board.json");
+    assert_eq!(b["board"]["preset"], "jlc-2l");
+    assert_eq!(
+        b["board"]["outline"]["edges"][1]["to"],
+        json!([30_000_000, 20_000_000])
+    );
+    p.fails(
+        &["board", "create", "Main", "--design", "board", "--rect", "1,1"],
+        "board_exists",
+        1,
+    );
+    p.fails(
+        &["board", "create", "X", "--design", "nope", "--rect", "1,1"],
+        "not_found",
+        1,
+    );
+    p.fails(
+        &["board", "create", "X", "--design", "board"],
+        "invalid_param",
+        1,
+    );
+    let bow = r#"{"start":[0,0],"edges":[{"type":"line","to":[10,10]},{"type":"line","to":[10,0]},{"type":"line","to":[0,10]},{"type":"line","to":[0,0]}]}"#;
+    let e = p.fails(
+        &["board", "edit", "main", "--outline", bow],
+        "board_outline_invalid",
+        1,
+    );
+    assert_eq!(e["details"]["faults"][0]["details"]["pointer"], "/outline");
+    p.fails(
+        &["board", "edit", "main", "--expect", "stale", "--name", "M"],
+        "conflict",
+        1,
+    );
+    let rev = b["revision"].as_str().unwrap().to_owned();
+    let cut = r#"[{"start":["2 mm","2 mm"],"edges":[{"type":"line","to":["4 mm","2 mm"]},{"type":"line","to":["4 mm","4 mm"]},{"type":"line","to":["2 mm","2 mm"]}]}]"#;
+    let e = p.ok(&["board", "edit", "main", "--expect", &rev, "--cutouts", cut]);
+    assert_ne!(e["revision"], b["revision"]);
+    assert_eq!(e["board"]["cutouts"][0]["edges"][0]["to"], json!([4_000_000, 2_000_000]));
+    let list = p.ok(&["board", "list"]);
+    assert_eq!(list["boards"][0]["name"], "Main");
+    assert_eq!(list["boards"][0]["design"], "board");
+    assert_eq!(p.ok(&["board", "show", "Main"])["board"]["name"], "Main");
+    p.fails(&["board", "show", "nope"], "board_not_found", 1);
+    p.ok(&["board", "delete", "main"]);
+    assert_eq!(p.ok(&["board", "list"])["boards"], json!([]));
+}
+
+#[test]
+fn board_writes_are_logged_undone_and_heard() {
+    let p = Pair::breakout();
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    let (code, v) = run(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    let (_, h) = run(&["history"]);
+    let entries = h["result"]["entries"].as_array().unwrap().clone();
+    let last = entries.iter().find(|e| e["method"] == "board.create").unwrap();
+    assert_eq!(last["files"][0]["path"], "boards/main/board.json");
+    let (code, u) = run(&["undo"]);
+    assert_eq!(code, 0, "{u}");
+    assert!(!p.daemon.join("board/boards/main/board.json").exists());
+    assert!(u["result"]["revisions"].get("board/main").is_none(), "{u}");
+    let (code, r) = run(&["redo"]);
+    assert_eq!(code, 0, "{r}");
+    assert!(r["result"]["revisions"]["board/main"].is_string(), "{r}");
 }
