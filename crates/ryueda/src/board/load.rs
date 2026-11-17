@@ -21,6 +21,10 @@ pub struct BoardFiles {
     pub board: Loaded<Board>,
     /// By occurrence (`s1/u1`).
     pub placements: BTreeMap<String, Loaded<Placement>>,
+    /// By ID.
+    pub tracks: BTreeMap<Id, Loaded<Track>>,
+    pub vias: BTreeMap<Id, Loaded<Via>>,
+    pub holes: BTreeMap<Id, Loaded<Hole>>,
 }
 
 fn unknown(path: &str) -> Fault {
@@ -87,6 +91,9 @@ fn load_one(
     h.update(b"ryueda.board.1");
     let mut board = None;
     let mut placements = BTreeMap::new();
+    let mut tracks = BTreeMap::new();
+    let mut vias = BTreeMap::new();
+    let mut holes = BTreeMap::new();
     let mut any = false;
     for (name, kind) in src.list(dir)? {
         let path = join(dir, &name);
@@ -137,6 +144,37 @@ fn load_one(
                     placements.insert(occ, loaded);
                 }
             }
+            (TRACKS, Kind::Dir) => {
+                any |= routes(
+                    src,
+                    &path,
+                    TRACKS,
+                    TRACK_KIND,
+                    "track",
+                    &mut h,
+                    faults,
+                    &mut tracks,
+                    track_faults,
+                )?;
+            }
+            (VIAS, Kind::Dir) => {
+                any |= routes(
+                    src, &path, VIAS, VIA_KIND, "via", &mut h, faults, &mut vias, via_faults,
+                )?;
+            }
+            (HOLES, Kind::Dir) => {
+                any |= routes(
+                    src,
+                    &path,
+                    HOLES,
+                    HOLE_KIND,
+                    "hole",
+                    &mut h,
+                    faults,
+                    &mut holes,
+                    hole_faults,
+                )?;
+            }
             _ => faults.push(unknown(&path)),
         }
     }
@@ -156,7 +194,107 @@ fn load_one(
         revision: h.finalize().to_hex()[..32].to_owned(),
         board,
         placements,
+        tracks,
+        vias,
+        holes,
     }))
+}
+
+/// One route folder's files, each `<id>.json`, hashed into the board's
+/// revision; whether it held any.
+#[allow(clippy::too_many_arguments)]
+fn routes<T: serde::de::DeserializeOwned>(
+    src: &dyn Source,
+    dir: &str,
+    folder: &str,
+    kind: &str,
+    what: &str,
+    h: &mut blake3::Hasher,
+    faults: &mut Vec<Fault>,
+    out: &mut BTreeMap<Id, Loaded<T>>,
+    check: fn(&T) -> Vec<Fault>,
+) -> Result<bool> {
+    let mut any = false;
+    for (file, k) in src.list(dir)? {
+        let at = join(dir, &file);
+        let id = file
+            .strip_suffix(".json")
+            .and_then(|s| Id::parse(s, what).ok());
+        let (Kind::File, Some(id)) = (k, id) else {
+            faults.push(unknown(&at));
+            continue;
+        };
+        any = true;
+        let bytes = read(src, &at)?;
+        piece(h, join(folder, &file).as_bytes());
+        piece(h, &bytes);
+        let loaded = match doc::read::<T>(&bytes, &at, kind, FORMAT) {
+            Ok(x) => Loaded {
+                faults: check(&x).into_iter().map(|f| f.with("path", &at)).collect(),
+                item: Ok(x),
+            },
+            Err(e) => Loaded {
+                item: Err(e),
+                faults: Vec::new(),
+            },
+        };
+        out.insert(id, loaded);
+    }
+    Ok(any)
+}
+
+fn out_of_range(p: &crate::symbol::Point) -> bool {
+    let lim = ryu_board::geom::COORD_LIMIT;
+    p[0].abs() > lim || p[1].abs() > lim
+}
+
+fn invalid(msg: &str, pointer: &str) -> Fault {
+    Fault::error(Code::InvalidDocument, msg).with("pointer", pointer)
+}
+
+fn range(pointer: &str) -> Fault {
+    Fault::error(Code::BoardOutOfRange, "a coordinate past ±2^40 nm").with("pointer", pointer)
+}
+
+fn track_faults(t: &Track) -> Vec<Fault> {
+    let mut out = Vec::new();
+    if t.width_nm <= 0 {
+        out.push(invalid("a track's width is positive", "/width_nm"));
+    }
+    if t.points.iter().any(out_of_range) {
+        out.push(range("/points"));
+    } else if t.points.len() < 2 || t.points.iter().all(|p| *p == t.points[0]) {
+        out.push(invalid(
+            "a track has two or more distinct points",
+            "/points",
+        ));
+    }
+    out
+}
+
+fn via_faults(v: &Via) -> Vec<Fault> {
+    let mut out = Vec::new();
+    if v.drill_nm <= 0 {
+        out.push(invalid("a via's drill is positive", "/drill_nm"));
+    }
+    if v.diameter_nm <= 0 {
+        out.push(invalid("a via's diameter is positive", "/diameter_nm"));
+    }
+    if out_of_range(&v.at) {
+        out.push(range("/at"));
+    }
+    out
+}
+
+fn hole_faults(h: &Hole) -> Vec<Fault> {
+    let mut out = Vec::new();
+    if h.drill_nm <= 0 {
+        out.push(invalid("a hole's drill is positive", "/drill_nm"));
+    }
+    if out_of_range(&h.at) {
+        out.push(range("/at"));
+    }
+    out
 }
 
 fn placement_faults(p: &Placement) -> Vec<Fault> {
@@ -187,6 +325,15 @@ impl BoardFiles {
         one(self.board.item.as_ref().err(), &self.board.faults);
         for p in self.placements.values() {
             one(p.item.as_ref().err(), &p.faults);
+        }
+        for t in self.tracks.values() {
+            one(t.item.as_ref().err(), &t.faults);
+        }
+        for v in self.vias.values() {
+            one(v.item.as_ref().err(), &v.faults);
+        }
+        for h in self.holes.values() {
+            one(h.item.as_ref().err(), &h.faults);
         }
         out
     }
@@ -262,5 +409,82 @@ mod tests {
         let (boards, _) = load(&files(&[("boards/b/board.json", &other)])).unwrap();
         let b = &boards[&Id::parse("b", "board").unwrap()];
         assert_eq!(b.faults()[0].error.details["pointer"], "/preset");
+    }
+
+    const TRACK: &str = r#"{"format":1,"kind":"ryueda.track","layer":"top","net":"sda","points":[[0,0],[10,0]],"width_nm":5}"#;
+    const VIA: &str =
+        r#"{"at":[1,1],"diameter_nm":6,"drill_nm":3,"format":1,"kind":"ryueda.via","net":"sda"}"#;
+    const HOLE: &str = r#"{"at":[2,2],"drill_nm":3,"format":1,"kind":"ryueda.hole"}"#;
+
+    #[test]
+    fn routes_load_with_their_board() {
+        let f = files(&[
+            ("boards/b/board.json", BOARD),
+            ("boards/b/tracks/t1.json", TRACK),
+            ("boards/b/vias/v1.json", VIA),
+            ("boards/b/holes/h1.json", HOLE),
+            ("boards/b/tracks/T-bad.json", TRACK),
+        ]);
+        let (boards, faults) = load(&f).unwrap();
+        let b = &boards[&Id::parse("b", "board").unwrap()];
+        assert_eq!(b.tracks.len(), 1);
+        assert_eq!(b.vias.len(), 1);
+        assert_eq!(b.holes.len(), 1);
+        assert!(b.faults().is_empty(), "{:?}", b.faults());
+        assert_eq!(
+            faults.len(),
+            1,
+            "the badly named track is unknown: {faults:?}"
+        );
+        let without = load(&files(&[("boards/b/board.json", BOARD)])).unwrap().0;
+        assert_ne!(
+            without[&b.id].revision, b.revision,
+            "routes move the revision"
+        );
+    }
+
+    #[test]
+    fn bad_routes_are_faults() {
+        let cases = [
+            (
+                "boards/b/tracks/t1.json",
+                TRACK.replace(r#""width_nm":5"#, r#""width_nm":0"#),
+                "/width_nm",
+            ),
+            (
+                "boards/b/tracks/t1.json",
+                TRACK.replace("[10,0]", "[0,0]"),
+                "/points",
+            ),
+            (
+                "boards/b/tracks/t1.json",
+                TRACK.replace("[10,0]", "[2000000000000,0]"),
+                "/points",
+            ),
+            (
+                "boards/b/vias/v1.json",
+                VIA.replace(r#""drill_nm":3"#, r#""drill_nm":-3"#),
+                "/drill_nm",
+            ),
+            (
+                "boards/b/vias/v1.json",
+                VIA.replace(r#""diameter_nm":6"#, r#""diameter_nm":0"#),
+                "/diameter_nm",
+            ),
+            (
+                "boards/b/holes/h1.json",
+                HOLE.replace(r#""drill_nm":3"#, r#""drill_nm":0"#),
+                "/drill_nm",
+            ),
+        ];
+        for (path, text, pointer) in cases {
+            let (boards, _) =
+                load(&files(&[("boards/b/board.json", BOARD), (path, &text)])).unwrap();
+            let b = &boards[&Id::parse("b", "board").unwrap()];
+            let f = b.faults();
+            assert_eq!(f.len(), 1, "{path}: {f:?}");
+            assert_eq!(f[0].error.details["pointer"], pointer, "{path}");
+            assert_eq!(f[0].error.details["path"], path);
+        }
     }
 }

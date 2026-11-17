@@ -210,6 +210,15 @@ pub fn delete(session: &mut Session, board: &str, expected: Option<&str>) -> Res
     for occ in b.placements.keys() {
         w.delete(placement_path(&id, occ));
     }
+    for t in b.tracks.keys() {
+        w.delete(route_path(&id, TRACKS, t));
+    }
+    for v in b.vias.keys() {
+        w.delete(route_path(&id, VIAS, v));
+    }
+    for h in b.holes.keys() {
+        w.delete(route_path(&id, HOLES, h));
+    }
     w.delete(board_path(&id));
     commit(session, &format!("board {id}"), w)?;
     Ok(json!({"deleted": format!("board/{id}")}))
