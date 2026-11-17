@@ -1348,6 +1348,30 @@ fn crossings(l: &Lifted, x: f64, swap: bool, period: f64) -> Option<Vec<f64>> {
     Some(out)
 }
 
+/// The cycles with a dart arriving at a vertex `at` picks (`to` is each
+/// dart's end vertex): at a pole's row, the cycles running along its
+/// line, since `carry` passes along the line at every vertex there (plan
+/// 21.D).
+#[cfg_attr(not(test), allow(dead_code))]
+fn passing(
+    cycles: &[Vec<usize>],
+    to: impl Fn(usize) -> GvId,
+    at: impl Fn(GvId) -> bool,
+) -> Vec<usize> {
+    (0..cycles.len())
+        .filter(|&i| cycles[i].iter().any(|&d| at(to(d))))
+        .collect()
+}
+
+/// The middle of the smallest span holding all of `spans`; `None` when
+/// there are none or it has no length (plan 21.D).
+#[cfg_attr(not(test), allow(dead_code))]
+fn middle(spans: &[[f64; 2]]) -> Option<f64> {
+    let lo = spans.iter().map(|s| s[0]).fold(f64::INFINITY, f64::min);
+    let hi = spans.iter().map(|s| s[1]).fold(f64::NEG_INFINITY, f64::max);
+    (lo.is_finite() && hi.is_finite() && hi > lo).then_some((lo + hi) / 2.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1681,5 +1705,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Plan 21.D: the cycles passing a pole are those with a dart arriving
+    /// at a vertex on its row.
+    #[test]
+    fn cycles_passing_a_pole_arrive_at_it() {
+        // Darts 0 to 5 arrive at vertices 10, 11, 12, 10, 13 and 14;
+        // vertices 10 and 12 are at the pole.
+        let ends: [GvId; 6] = [10, 11, 12, 10, 13, 14];
+        let at = |g: GvId| g == 10 || g == 12;
+        let cycles = vec![vec![0, 1], vec![4, 5], vec![2], vec![3]];
+        assert_eq!(passing(&cycles, |d| ends[d], at), [0, 2, 3]);
+        assert!(passing(&[vec![1, 4, 5]], |d| ends[d], at).is_empty());
+        assert!(passing(&[], |d| ends[d], at).is_empty());
+    }
+
+    /// Plan 21.D: the middle of the spans' hull; none for no spans or no
+    /// length.
+    #[test]
+    fn the_middle_of_spans_is_their_hulls() {
+        assert_eq!(middle(&[[0.25, 1.0], [0.5, 2.25]]), Some(1.25));
+        assert_eq!(middle(&[[-1.0, 3.0]]), Some(1.0));
+        assert_eq!(middle(&[[1.0, 1.0]]), None);
+        assert_eq!(middle(&[]), None);
     }
 }
