@@ -26,9 +26,14 @@ impl Status {
     }
 
     pub fn parse(s: &str) -> Option<Status> {
-        [Status::Active, Status::Nrnd, Status::Obsolete, Status::Unknown]
-            .into_iter()
-            .find(|x| x.as_str() == s)
+        [
+            Status::Active,
+            Status::Nrnd,
+            Status::Obsolete,
+            Status::Unknown,
+        ]
+        .into_iter()
+        .find(|x| x.as_str() == s)
     }
 
     /// A parts source's lifecycle: not recommended and last time buy are
@@ -78,7 +83,9 @@ impl Entry {
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
                 .map(str::to_owned)
-                .ok_or_else(|| invalid(&format!("{at}/{k}"), &format!("{k} must be non-empty text")))
+                .ok_or_else(|| {
+                    invalid(&format!("{at}/{k}"), &format!("{k} must be non-empty text"))
+                })
         };
         let manufacturer = text("manufacturer")?;
         let mpn = text("mpn")?;
@@ -86,13 +93,25 @@ impl Entry {
             .take("status")?
             .as_str()
             .and_then(Status::parse)
-            .ok_or_else(|| invalid(&format!("{at}/status"), "status is active, nrnd, obsolete or unknown"))?;
+            .ok_or_else(|| {
+                invalid(
+                    &format!("{at}/status"),
+                    "status is active, nrnd, obsolete or unknown",
+                )
+            })?;
         let preferred = match o.take_opt("preferred") {
             None => false,
-            Some(p) => p.as_bool().ok_or_else(|| invalid(&format!("{at}/preferred"), "preferred is true or false"))?,
+            Some(p) => p
+                .as_bool()
+                .ok_or_else(|| invalid(&format!("{at}/preferred"), "preferred is true or false"))?,
         };
         o.finish()?;
-        Ok(Entry { manufacturer, mpn, status, preferred })
+        Ok(Entry {
+            manufacturer,
+            mpn,
+            status,
+            preferred,
+        })
     }
 }
 
@@ -110,13 +129,23 @@ pub fn judge(item: &Id, aml: &[Value]) -> Vec<Error> {
                 let pair = (e.manufacturer.clone(), e.mpn.clone());
                 if seen.contains(&pair) {
                     out.push(
-                        invalid(&at, &format!("{} {} is listed twice", e.manufacturer, e.mpn)).with("item", item),
+                        invalid(
+                            &at,
+                            &format!("{} {} is listed twice", e.manufacturer, e.mpn),
+                        )
+                        .with("item", item),
                     );
                     continue;
                 }
                 seen.push(pair);
                 if e.preferred && preferred {
-                    out.push(invalid(&format!("{at}/preferred"), "only one entry may be preferred").with("item", item));
+                    out.push(
+                        invalid(
+                            &format!("{at}/preferred"),
+                            "only one entry may be preferred",
+                        )
+                        .with("item", item),
+                    );
                 }
                 preferred |= e.preferred;
             }
@@ -137,10 +166,22 @@ mod tests {
     #[test]
     fn statuses_follow_parts_data() {
         use ryueda_parts::record::Lifecycle;
-        assert_eq!(Status::from_lifecycle(Some(Lifecycle::Active)), Status::Active);
-        assert_eq!(Status::from_lifecycle(Some(Lifecycle::NotRecommended)), Status::Nrnd);
-        assert_eq!(Status::from_lifecycle(Some(Lifecycle::LastTimeBuy)), Status::Nrnd);
-        assert_eq!(Status::from_lifecycle(Some(Lifecycle::Obsolete)), Status::Obsolete);
+        assert_eq!(
+            Status::from_lifecycle(Some(Lifecycle::Active)),
+            Status::Active
+        );
+        assert_eq!(
+            Status::from_lifecycle(Some(Lifecycle::NotRecommended)),
+            Status::Nrnd
+        );
+        assert_eq!(
+            Status::from_lifecycle(Some(Lifecycle::LastTimeBuy)),
+            Status::Nrnd
+        );
+        assert_eq!(
+            Status::from_lifecycle(Some(Lifecycle::Obsolete)),
+            Status::Obsolete
+        );
         assert_eq!(Status::from_lifecycle(None), Status::Unknown);
         for s in ["active", "nrnd", "obsolete", "unknown"] {
             assert_eq!(Status::parse(s).unwrap().as_str(), s);
@@ -156,7 +197,10 @@ mod tests {
         }))
         .unwrap();
         let entry = Entry::from_record(&r);
-        assert_eq!(entry.to_json(), json!({"manufacturer": "Acme", "mpn": "BR-42", "status": "unknown"}));
+        assert_eq!(
+            entry.to_json(),
+            json!({"manufacturer": "Acme", "mpn": "BR-42", "status": "unknown"})
+        );
     }
 
     #[test]
@@ -178,6 +222,15 @@ mod tests {
             .iter()
             .map(|e| e.details["pointer"].as_str().unwrap().to_owned())
             .collect();
-        assert_eq!(at, ["/aml/1", "/aml/2/status", "/aml/3/preferred", "/aml/4/manufacturer", "/aml/5/x"]);
+        assert_eq!(
+            at,
+            [
+                "/aml/1",
+                "/aml/2/status",
+                "/aml/3/preferred",
+                "/aml/4/manufacturer",
+                "/aml/5/x"
+            ]
+        );
     }
 }

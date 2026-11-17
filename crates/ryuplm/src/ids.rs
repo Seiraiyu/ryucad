@@ -117,6 +117,9 @@ mod tests {
         assert_eq!(item_of("items/k3v9q2m8x4c1p.json"), None);
         assert_eq!(item_of("items/k3/k3v9q2m8x4c1p.txt"), None);
         assert_eq!(item_of("items/k3/sub/k3v9q2m8x4c1p.json"), None);
-        assert_eq!(shard_of("items/k4/k3v9q2m8x4c1p.json"), Some("k3v9q2m8x4c1p"));
+        assert_eq!(
+            shard_of("items/k4/k3v9q2m8x4c1p.json"),
+            Some("k3v9q2m8x4c1p")
+        );
     }
 }

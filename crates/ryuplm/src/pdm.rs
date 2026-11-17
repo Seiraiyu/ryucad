@@ -25,7 +25,9 @@ impl ryu_git::Layout for Plm {
     fn project_file(rel: &str) -> bool {
         ROOT_FILES.contains(&rel)
             || item_of(rel).is_some()
-            || rel.strip_prefix("releases/").is_some_and(|f| f.matches('/').count() == 1)
+            || rel
+                .strip_prefix("releases/")
+                .is_some_and(|f| f.matches('/').count() == 1)
     }
 }
 
@@ -34,7 +36,11 @@ impl ryu_git::Layout for Plm {
 pub fn properties(item: &Item) -> Properties {
     let mut values = item.properties.clone();
     values.insert("number".into(), Value::from(item.number.clone()));
-    for (k, v) in [("name", &item.name), ("description", &item.description), ("make_buy", &item.make_buy)] {
+    for (k, v) in [
+        ("name", &item.name),
+        ("description", &item.description),
+        ("make_buy", &item.make_buy),
+    ] {
         if let Some(v) = v {
             values.insert(k.into(), Value::from(v.clone()));
         }
@@ -85,7 +91,10 @@ impl Product for Plm {
     }
 
     fn part_files(part: &Id) -> PartFiles {
-        PartFiles { files: vec![item_path(part)], folders: Vec::new() }
+        PartFiles {
+            files: vec![item_path(part)],
+            folders: Vec::new(),
+        }
     }
 
     fn part_of(path: &str) -> Option<Id> {
@@ -108,7 +117,11 @@ impl Product for Plm {
 
     fn identity(manifest: &Value) -> Option<Identity> {
         let m = crate::catalogue::Manifest::from_json(manifest).ok()?;
-        Some(Identity { project: Some(m.project), forked_from: m.forked_from.map(|f| f.project), unit: m.default_unit })
+        Some(Identity {
+            project: Some(m.project),
+            forked_from: m.forked_from.map(|f| f.project),
+            unit: m.default_unit,
+        })
     }
 
     fn properties_from(v: &Value) -> Option<Result<Properties>> {
@@ -131,14 +144,23 @@ pub(crate) mod tests {
 
     fn files() -> BTreeMap<String, Vec<u8>> {
         let mut f = BTreeMap::new();
-        let m = crate::catalogue::Manifest::new(crate::catalogue::tests::pid(1), crate::units::Unit::Mm);
+        let m = crate::catalogue::Manifest::new(
+            crate::catalogue::tests::pid(1),
+            crate::units::Unit::Mm,
+        );
         f.insert("ryuplm.json".to_owned(), m.to_text().into_bytes());
         let mut a = Item::new("A-1");
         a.name = Some("Bracket".into());
         a.unit = Some("kg".into());
         a.properties.insert("finish".into(), json!("anodized"));
-        f.insert("items/k3/k3v9q2m8x4c1p.json".into(), a.to_text().into_bytes());
-        f.insert("items/00/0000000000000.json".into(), Item::new("A-1").to_text().into_bytes());
+        f.insert(
+            "items/k3/k3v9q2m8x4c1p.json".into(),
+            a.to_text().into_bytes(),
+        );
+        f.insert(
+            "items/00/0000000000000.json".into(),
+            Item::new("A-1").to_text().into_bytes(),
+        );
         f
     }
 
@@ -154,15 +176,27 @@ pub(crate) mod tests {
         assert!(!Plm::project_file("notes.txt"));
         assert_eq!(
             <Plm as Product>::parts(&f).unwrap(),
-            [(id("0000000000000"), PartKind::Item), (id("k3v9q2m8x4c1p"), PartKind::Item)]
+            [
+                (id("0000000000000"), PartKind::Item),
+                (id("k3v9q2m8x4c1p"), PartKind::Item)
+            ]
         );
-        assert_eq!(<Plm as Product>::properties_path(&id("k3v9q2m8x4c1p")), "items/k3/k3v9q2m8x4c1p.json");
-        assert_eq!(<Plm as Product>::part_of("items/k3/k3v9q2m8x4c1p.json"), Some(id("k3v9q2m8x4c1p")));
+        assert_eq!(
+            <Plm as Product>::properties_path(&id("k3v9q2m8x4c1p")),
+            "items/k3/k3v9q2m8x4c1p.json"
+        );
+        assert_eq!(
+            <Plm as Product>::part_of("items/k3/k3v9q2m8x4c1p.json"),
+            Some(id("k3v9q2m8x4c1p"))
+        );
         assert_eq!(<Plm as Product>::part_of("ryuplm.json"), None);
         assert!(<Plm as Product>::shared("ryuplm.json"));
         assert_eq!(
             <Plm as Product>::part_files(&id("k3v9q2m8x4c1p")),
-            PartFiles { files: vec!["items/k3/k3v9q2m8x4c1p.json".into()], folders: vec![] }
+            PartFiles {
+                files: vec!["items/k3/k3v9q2m8x4c1p.json".into()],
+                folders: vec![]
+            }
         );
         let p = ryupdm::props::read_for::<Plm>(&f, &id("k3v9q2m8x4c1p")).unwrap();
         assert_eq!(p.number(), Some("A-1"));
@@ -170,8 +204,16 @@ pub(crate) mod tests {
         assert_eq!(p.values["uom"], "kg");
         assert_eq!(p.values["finish"], "anodized");
         // Two live items with one number: ryupdm's own fault.
-        let pdm = ryupdm::props::Pdm::of_for::<Plm>(&f, ryupdm::product::part_ids::<Plm>(&f).unwrap(), crate::units::Unit::Mm);
-        assert!(pdm.faults().iter().any(|e| e.code == crate::error::Code::PartNumberDuplicate));
+        let pdm = ryupdm::props::Pdm::of_for::<Plm>(
+            &f,
+            ryupdm::product::part_ids::<Plm>(&f).unwrap(),
+            crate::units::Unit::Mm,
+        );
+        assert!(
+            pdm.faults()
+                .iter()
+                .any(|e| e.code == crate::error::Code::PartNumberDuplicate)
+        );
         let i = ryupdm::product::identity::<Plm>(&f).unwrap();
         assert_eq!(i.project, Some(crate::catalogue::tests::pid(1)));
     }
@@ -182,14 +224,21 @@ pub(crate) mod tests {
         let at = "items/k3/k3v9q2m8x4c1p.json";
         let before = <Plm as Product>::content(&f, &id("k3v9q2m8x4c1p")).unwrap();
         let mut item = Item::read(&id("k3v9q2m8x4c1p"), &f[at]).unwrap();
-        item.source.insert("erp".into(), json!({"key": "1", "digest": "ff"}));
+        item.source
+            .insert("erp".into(), json!({"key": "1", "digest": "ff"}));
         item.extra.insert("erp".into(), json!({"Col": "x"}));
         item.previous_numbers.push("OLD-1".into());
         f.insert(at.into(), item.to_text().into_bytes());
-        assert_eq!(<Plm as Product>::content(&f, &id("k3v9q2m8x4c1p")).unwrap(), before);
+        assert_eq!(
+            <Plm as Product>::content(&f, &id("k3v9q2m8x4c1p")).unwrap(),
+            before
+        );
         item.description = Some("changed".into());
         f.insert(at.into(), item.to_text().into_bytes());
-        assert_ne!(<Plm as Product>::content(&f, &id("k3v9q2m8x4c1p")).unwrap(), before);
+        assert_ne!(
+            <Plm as Product>::content(&f, &id("k3v9q2m8x4c1p")).unwrap(),
+            before
+        );
         assert_eq!(before.len(), 64);
     }
 }

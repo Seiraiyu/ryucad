@@ -40,7 +40,12 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn new(project: ProjectId, default_unit: Unit) -> Manifest {
-        Manifest { project, forked_from: None, default_unit, classes: BTreeMap::new() }
+        Manifest {
+            project,
+            forked_from: None,
+            default_unit,
+            classes: BTreeMap::new(),
+        }
     }
 
     pub fn to_json(&self) -> Value {
@@ -112,15 +117,24 @@ impl Manifest {
             for (name, body) in map {
                 let at = format!("/classes/{name}");
                 if !ryupdm::config::scheme_name(name) {
-                    return Err(invalid(&at, "a class's name is 1 to 63 of a-z, 0-9, _ and -"));
+                    return Err(invalid(
+                        &at,
+                        "a class's name is 1 to 63 of a-z, 0-9, _ and -",
+                    ));
                 }
                 let mut co = Obj::new(body, &at)?;
                 let properties = match co.take_opt("properties") {
                     None => None,
                     Some(p) => Some(
                         p.as_array()
-                            .and_then(|a| a.iter().map(|x| x.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>())
-                            .ok_or_else(|| invalid(&format!("{at}/properties"), "a list of property names"))?,
+                            .and_then(|a| {
+                                a.iter()
+                                    .map(|x| x.as_str().map(str::to_owned))
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .ok_or_else(|| {
+                                invalid(&format!("{at}/properties"), "a list of property names")
+                            })?,
                     ),
                 };
                 co.finish()?;
@@ -128,7 +142,12 @@ impl Manifest {
             }
         }
         o.finish()?;
-        Ok(Manifest { project, forked_from, default_unit, classes })
+        Ok(Manifest {
+            project,
+            forked_from,
+            default_unit,
+            classes,
+        })
     }
 
     pub fn read(bytes: &[u8]) -> Result<Manifest> {
@@ -151,7 +170,12 @@ pub(crate) mod tests {
     #[test]
     fn a_manifest_reads_and_writes_canonically() {
         let mut m = Manifest::new(pid(1), Unit::Mm);
-        m.classes.insert("fastener".into(), Class { properties: Some(vec!["thread".into()]) });
+        m.classes.insert(
+            "fastener".into(),
+            Class {
+                properties: Some(vec!["thread".into()]),
+            },
+        );
         m.classes.insert("label".into(), Class { properties: None });
         let text = m.to_text();
         assert!(crate::canonical::is_canonical(&text));
@@ -166,13 +190,28 @@ pub(crate) mod tests {
     #[test]
     fn bad_manifests_say_where() {
         for (v, at) in [
-            (json!({"format": 1, "kind": "ryuplm.catalogue", "project": "x", "default_unit": "mm"}), "/project"),
-            (json!({"format": 1, "kind": "ryuplm.catalogue", "project": pid(1), "default_unit": "kg"}), "/default_unit"),
-            (json!({"format": 1, "kind": "ryuplm.catalogue", "project": pid(1), "default_unit": "mm",
-                "classes": {"Bad Name": {}}}), "/classes/Bad Name"),
-            (json!({"format": 1, "kind": "ryuplm.catalogue", "project": pid(1), "default_unit": "mm",
-                "classes": {"a": {"x": 1}}}), "/classes/a/x"),
-            (json!({"format": 1, "kind": "ryuplm.catalogue", "project": pid(1), "default_unit": "mm", "y": 1}), "/y"),
+            (
+                json!({"format": 1, "kind": "ryuplm.catalogue", "project": "x", "default_unit": "mm"}),
+                "/project",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.catalogue", "project": pid(1), "default_unit": "kg"}),
+                "/default_unit",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.catalogue", "project": pid(1), "default_unit": "mm",
+                "classes": {"Bad Name": {}}}),
+                "/classes/Bad Name",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.catalogue", "project": pid(1), "default_unit": "mm",
+                "classes": {"a": {"x": 1}}}),
+                "/classes/a/x",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.catalogue", "project": pid(1), "default_unit": "mm", "y": 1}),
+                "/y",
+            ),
         ] {
             let e = Manifest::read(crate::canonical::to_string(&v).as_bytes()).unwrap_err();
             assert_eq!(e.details["pointer"], at, "{e:?}");

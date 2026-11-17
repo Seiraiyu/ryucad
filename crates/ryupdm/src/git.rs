@@ -49,21 +49,20 @@ pub fn textconv(
             if rest
                 .get("part_number")
                 .is_some_and(|p| p.get("schemes").is_some())
+                && let Some(Value::Object(mut pn)) = rest.remove("part_number")
             {
-                if let Some(Value::Object(mut pn)) = rest.remove("part_number") {
-                    if let Some(Value::Array(schemes)) = pn.remove("schemes") {
-                        for s in &schemes {
-                            let name = s["name"].as_str().unwrap_or("?");
-                            let mut rest = s.clone();
-                            if let Some(o) = rest.as_object_mut() {
-                                o.remove("name");
-                            }
-                            lines.push(format!("part_number.schemes.{name} = {rest}"));
+                if let Some(Value::Array(schemes)) = pn.remove("schemes") {
+                    for s in &schemes {
+                        let name = s["name"].as_str().unwrap_or("?");
+                        let mut rest = s.clone();
+                        if let Some(o) = rest.as_object_mut() {
+                            o.remove("name");
                         }
+                        lines.push(format!("part_number.schemes.{name} = {rest}"));
                     }
-                    for (k, v) in pn {
-                        lines.push(format!("part_number.{k} = {v}"));
-                    }
+                }
+                for (k, v) in pn {
+                    lines.push(format!("part_number.{k} = {v}"));
                 }
             }
             if let Some(Value::Object(decls)) = rest.remove("properties") {

@@ -373,7 +373,9 @@ impl Template {
     /// The sequence `number` was filled with, if this template made it:
     /// the literal parts match and the digits are at least `N` long.
     pub fn read(&self, number: &str) -> Option<u64> {
-        let digits = number.strip_prefix(&self.before)?.strip_suffix(&self.after)?;
+        let digits = number
+            .strip_prefix(&self.before)?
+            .strip_suffix(&self.after)?;
         (digits.len() >= self.width && digits.bytes().all(|c| c.is_ascii_digit()))
             .then(|| digits.parse().ok())
             .flatten()
@@ -408,7 +410,12 @@ impl NumberScheme {
         let name = name
             .as_str()
             .filter(|n| scheme_name(n))
-            .ok_or_else(|| invalid(&format!("{at}/name"), "a scheme's name is 1 to 63 of a-z, 0-9, _ and -"))?
+            .ok_or_else(|| {
+                invalid(
+                    &format!("{at}/name"),
+                    "a scheme's name is 1 to 63 of a-z, 0-9, _ and -",
+                )
+            })?
             .to_owned();
         let class = match o.take_opt("class") {
             None => None,
@@ -434,7 +441,12 @@ impl NumberScheme {
             }
         };
         o.finish()?;
-        Ok(NumberScheme { name, class, pattern, next })
+        Ok(NumberScheme {
+            name,
+            class,
+            pattern,
+            next,
+        })
     }
 }
 
@@ -1045,7 +1057,10 @@ mod tests {
         assert_eq!(c.pattern, None);
         assert_eq!(c.schemes.len(), 2);
         let mech = &c.schemes[0];
-        assert_eq!((mech.name.as_str(), mech.class.as_deref()), ("mech", Some("machined")));
+        assert_eq!(
+            (mech.name.as_str(), mech.class.as_deref()),
+            ("mech", Some("machined"))
+        );
         assert!(mech.pattern.matches("MECH-00042"));
         assert_eq!(mech.next.as_ref().unwrap().fill(42), "MECH-00042");
         assert_eq!(mech.next.as_ref().unwrap().read("MECH-00042"), Some(42));
@@ -1066,13 +1081,34 @@ mod tests {
             "/part_number"
         );
         for (bad, at) in [
-            (json!([{"name": "a", "pattern": "("}]), "/part_number/schemes/0/pattern"),
-            (json!([{"name": "a", "pattern": "x"}, {"name": "a", "pattern": "y"}]), "/part_number/schemes/1/name"),
-            (json!([{"name": "A b", "pattern": "x"}]), "/part_number/schemes/0/name"),
-            (json!([{"name": "a", "pattern": "x", "next": "X-{seq:0}"}]), "/part_number/schemes/0/next"),
-            (json!([{"name": "a", "pattern": "x", "next": "X-{seq:3}{seq:3}"}]), "/part_number/schemes/0/next"),
-            (json!([{"name": "a", "pattern": "x", "next": "X-123"}]), "/part_number/schemes/0/next"),
-            (json!([{"name": "a", "pattern": "x", "z": 1}]), "/part_number/schemes/0/z"),
+            (
+                json!([{"name": "a", "pattern": "("}]),
+                "/part_number/schemes/0/pattern",
+            ),
+            (
+                json!([{"name": "a", "pattern": "x"}, {"name": "a", "pattern": "y"}]),
+                "/part_number/schemes/1/name",
+            ),
+            (
+                json!([{"name": "A b", "pattern": "x"}]),
+                "/part_number/schemes/0/name",
+            ),
+            (
+                json!([{"name": "a", "pattern": "x", "next": "X-{seq:0}"}]),
+                "/part_number/schemes/0/next",
+            ),
+            (
+                json!([{"name": "a", "pattern": "x", "next": "X-{seq:3}{seq:3}"}]),
+                "/part_number/schemes/0/next",
+            ),
+            (
+                json!([{"name": "a", "pattern": "x", "next": "X-123"}]),
+                "/part_number/schemes/0/next",
+            ),
+            (
+                json!([{"name": "a", "pattern": "x", "z": 1}]),
+                "/part_number/schemes/0/z",
+            ),
         ] {
             let v = json!({"format": 5, "kind": "ryupdm.config", "part_number": {"schemes": bad}});
             let e = Config::from_json(&v).unwrap_err();

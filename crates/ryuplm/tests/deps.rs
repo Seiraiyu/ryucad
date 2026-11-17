@@ -26,8 +26,18 @@ fn depends_on_no_kernel_and_no_other_product() {
         for name in names(MANIFEST, section) {
             assert!(
                 ![
-                    "ryukei", "ryukei-testkit", "ryucad", "ryucad-doc", "ryueda", "ryudfm",
-                    "ryu-board", "ryu-copper", "ryustep", "ryu-part21", "ryumate", "ryusketch",
+                    "ryukei",
+                    "ryukei-testkit",
+                    "ryucad",
+                    "ryucad-doc",
+                    "ryueda",
+                    "ryudfm",
+                    "ryu-board",
+                    "ryu-copper",
+                    "ryustep",
+                    "ryu-part21",
+                    "ryumate",
+                    "ryusketch",
                 ]
                 .contains(&name),
                 "{section} names {name}"
@@ -39,7 +49,13 @@ fn depends_on_no_kernel_and_no_other_product() {
 #[test]
 fn takes_ryupdms_core_only() {
     assert!(MANIFEST.contains(r#"ryupdm = { path = "../ryupdm", default-features = false }"#));
-    for name in ["ryu-doc", "ryu-session", "ryu-git", "ryupdm", "ryueda-parts"] {
+    for name in [
+        "ryu-doc",
+        "ryu-session",
+        "ryu-git",
+        "ryupdm",
+        "ryueda-parts",
+    ] {
         assert!(names(MANIFEST, "[dependencies]").contains(&name), "{name}");
     }
 }
