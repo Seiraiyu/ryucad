@@ -80,7 +80,12 @@ const MAX_SIZE: f64 = 2e-3;
 /// NURBS `33b57350` growing into pin `f19ffa9e`). FTC 10's slit is left to
 /// ryukei 21.C. Plan 21.B's certified miss changes neither: FTC 07 refuses
 /// at the same rung-2 pair in the same time as on main, and FTC 10 as
-/// before.
+/// before. Plan 21.C's seed retry doesn't settle FTC 10 either (census VI,
+/// #652): the slit is the ball's held seam with carried NURBS `a497893e`,
+/// the ball's one piece is its whole working sphere (the grown faces meet
+/// it only at points), and no seed yields: the ball's shortcut seed holds
+/// its old face and the NURBS quad's is rule 3's own (moved to ryukei 22,
+/// "a kept ball bounded only by a held seam").
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -388,7 +393,9 @@ fn a_rounded_box_through_step_is_defeatured_to_the_box() {
 
 /// A cancel stops deleting NIST FTC 10's blends at once (plan 13.D: its
 /// re-trim fitted a carried spline's working sheet for 17 minutes past a
-/// cancel, unpolled). Cancelled 5 s in, it answers within 5 s more.
+/// cancel, unpolled). Cancelled 5 s in, it answers within 5 s more. On a
+/// pool of its own (#939): on the global pool it waited for another
+/// test's whole check, on Windows.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -410,6 +417,10 @@ fn a_cancel_stops_deleting_ftc_10s_blends() {
         faces: Vec::new(),
         options: RecogniseOptions::default(),
     };
+    let own = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
     let flag = AtomicBool::new(false);
     let start = Instant::now();
     let (r, stopped) = std::thread::scope(|s| {
@@ -417,12 +428,14 @@ fn a_cancel_stops_deleting_ftc_10s_blends() {
             std::thread::sleep(Duration::from_secs(5));
             flag.store(true, Ordering::Relaxed);
         });
-        let r = delete_blends_with(
-            OpKey(0x13d),
-            &body,
-            &spec,
-            &Work::unlimited().with_cancel(&flag),
-        );
+        let r = own.install(|| {
+            delete_blends_with(
+                OpKey(0x13d),
+                &body,
+                &spec,
+                &Work::unlimited().with_cancel(&flag),
+            )
+        });
         (r, start.elapsed())
     });
     assert!(matches!(r, Err(Error::Cancelled)), "{:?}", r.err());
@@ -602,7 +615,7 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 /// builds) and recorded what stops both next; plan 21.A's pins move FTC
 /// 07 on to its next cause (see [`KNOWN_REFUSED`]).
 #[test]
-#[ignore = "#652: FTC 10's kept ball slit by a carried face (ryukei 21.C); FTC 07's working NURBS 33b57350 grows into pin f19ffa9e (ryukei 22)"]
+#[ignore = "#652: FTC 10's kept ball bounded only by a held seam (ryukei 22); FTC 07's working NURBS 33b57350 grows into pin f19ffa9e (ryukei 22)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)

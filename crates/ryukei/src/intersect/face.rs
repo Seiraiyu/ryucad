@@ -2312,8 +2312,11 @@ mod tests {
         assert!(may_miss((&b, adjacent.0), (&c, g), &m));
     }
 
-    /// Plan 21.B: two faces sharing nothing, whose every trace is made to
-    /// fail, are a certified miss where one keeps off the other's surface.
+    /// Plan 21.B: two faces sharing nothing, one of which keeps off the
+    /// other's surface, are certified to miss (`keeps_off` called
+    /// directly: no synthetic pair makes every trace fail). The arm in
+    /// `face_face_over` is reached end to end only by a real pair (plan
+    /// 21.C, Task 11).
     #[test]
     fn a_cone_kept_off_a_cylinder_is_a_certified_miss() {
         let (a, b) = cylinder_and_cone(0.012);
