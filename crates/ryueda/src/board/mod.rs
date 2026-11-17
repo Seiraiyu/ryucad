@@ -11,5 +11,6 @@ pub mod opening;
 pub mod outline;
 pub mod pad;
 pub mod preset;
+pub mod text;
 
 pub use file::{BOARD_FILE, BOARD_KIND, BOARDS, FORMAT, PLACEMENT_KIND, PLACEMENTS};
