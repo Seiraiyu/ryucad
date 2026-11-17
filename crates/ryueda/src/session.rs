@@ -59,6 +59,9 @@ pub struct Session {
     /// The last [`BOARDS`] boards' shapes built, by the board and the
     /// revisions they were built from, most recently used first.
     pub(crate) boards: Vec<(String, std::sync::Arc<crate::board::shapes::BoardShapes>)>,
+    /// The last [`BOARDS`] boards' checks, by the same keys as their
+    /// shapes, most recently used first.
+    pub(crate) checks: Vec<(String, std::sync::Arc<crate::board::drc::BoardCheck>)>,
 }
 
 /// How many boards' shapes a session keeps.
@@ -154,15 +157,13 @@ impl Session {
             pins_key,
             fetched: None,
             boards: Vec::new(),
+            checks: Vec::new(),
         })
     }
 
-    /// The board's shapes, built once per the board's, the project's, its
-    /// libraries' and its blocks' revisions.
-    pub fn board_shapes(
-        &mut self,
-        board: &crate::id::Id,
-    ) -> Result<std::sync::Arc<crate::board::shapes::BoardShapes>> {
+    /// What a board's shapes and check are kept by: the board's, the
+    /// project's, its libraries' and its blocks' revisions.
+    fn board_key(&self, board: &crate::id::Id) -> Result<String> {
         let p = &self.project;
         let b = p.boards.get(board).ok_or_else(|| {
             Error::new(Code::BoardNotFound, format!("there is no board {board}"))
@@ -178,7 +179,42 @@ impl Session {
                 crate::design::piece(&mut h, v.to_string().as_bytes());
             }
         }
-        let key = h.finalize().to_hex().to_string();
+        Ok(h.finalize().to_hex().to_string())
+    }
+
+    /// The board's check, built once per the same revisions as its shapes.
+    pub fn board_check(
+        &mut self,
+        board: &crate::id::Id,
+    ) -> Result<std::sync::Arc<crate::board::drc::BoardCheck>> {
+        let key = self.board_key(board)?;
+        if let Some(i) = self.checks.iter().position(|(k, _)| *k == key) {
+            let hit = self.checks.remove(i);
+            let c = hit.1.clone();
+            self.checks.insert(0, hit);
+            return Ok(c);
+        }
+        let shapes = self.board_shapes(board)?;
+        let p = &self.project;
+        let built = std::sync::Arc::new(crate::board::drc::check_shapes(
+            p,
+            &p.boards[board],
+            shapes,
+        )?);
+        self.checks.insert(0, (key, built.clone()));
+        self.checks.truncate(BOARDS);
+        Ok(built)
+    }
+
+    /// The board's shapes, built once per the board's, the project's, its
+    /// libraries' and its blocks' revisions.
+    pub fn board_shapes(
+        &mut self,
+        board: &crate::id::Id,
+    ) -> Result<std::sync::Arc<crate::board::shapes::BoardShapes>> {
+        let key = self.board_key(board)?;
+        let p = &self.project;
+        let b = &p.boards[board];
         if let Some(i) = self.boards.iter().position(|(k, _)| *k == key) {
             let hit = self.boards.remove(i);
             let shapes = hit.1.clone();
@@ -371,6 +407,34 @@ pub fn current(root: &Path) -> Result<Files> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_boards_check_is_kept_until_a_revision_moves() {
+        let (dir, p) = crate::netlist::tests::project(&[]);
+        let design = crate::netlist::one_design(&p, None).unwrap().to_string();
+        let root = dir.path().join("board");
+        let mut s = Session::open(&root).unwrap();
+        crate::board::cmd::create(
+            &mut s,
+            "B",
+            &design,
+            Some(&["30".into(), "20".into()]),
+            None,
+            Some("b"),
+            None,
+        )
+        .unwrap();
+        let id = crate::id::Id::parse("b", "board").unwrap();
+        let a = s.board_check(&id).unwrap();
+        let b = s.board_check(&id).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &b), "kept");
+        crate::board::cmd::edit(&mut s, "b", Some("C"), None, None, None).unwrap();
+        let c = s.board_check(&id).unwrap();
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &c),
+            "built again after the board moved"
+        );
+    }
 
     #[test]
     fn a_session_resolves_pins_and_sees_a_new_official_label() {

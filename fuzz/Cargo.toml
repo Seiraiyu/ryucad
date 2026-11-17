@@ -265,6 +265,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "board"
+path = "fuzz_targets/board.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "kicad"
 path = "fuzz_targets/kicad.rs"
 test = false

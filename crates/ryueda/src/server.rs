@@ -1268,6 +1268,100 @@ fn dispatch(
             r#ref,
             expected_revision,
         } => crate::board::cmd::unplace(session, &board, &r#ref, expected_revision.as_deref()),
+        Request::BoardTrackAdd {
+            board,
+            net,
+            layer,
+            width,
+            path,
+            id,
+            ops,
+            expected_revision,
+        } => {
+            let one = json!({"net": net, "layer": layer, "width": width, "path": path, "id": id});
+            crate::board::route::track_add(
+                session,
+                &board,
+                crate::board::route::asks(ops, one)?,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::BoardTrackEdit {
+            board,
+            track,
+            net,
+            layer,
+            width,
+            path,
+            expected_revision,
+        } => crate::board::route::track_edit(
+            session,
+            &board,
+            &track,
+            net.as_deref(),
+            layer.as_deref(),
+            width.as_deref(),
+            path.as_deref(),
+            expected_revision.as_deref(),
+        ),
+        Request::BoardTrackDelete {
+            board,
+            tracks,
+            expected_revision,
+        } => crate::board::route::track_delete(
+            session,
+            &board,
+            &tracks,
+            expected_revision.as_deref(),
+        ),
+        Request::BoardViaAdd {
+            board,
+            net,
+            at,
+            drill,
+            diameter,
+            id,
+            ops,
+            expected_revision,
+        } => {
+            let one = json!({"net": net, "at": at, "drill": drill, "diameter": diameter, "id": id});
+            crate::board::route::via_add(
+                session,
+                &board,
+                crate::board::route::asks(ops, one)?,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::BoardViaDelete {
+            board,
+            vias,
+            expected_revision,
+        } => crate::board::route::via_delete(session, &board, &vias, expected_revision.as_deref()),
+        Request::BoardHoleAdd {
+            board,
+            at,
+            drill,
+            id,
+            ops,
+            expected_revision,
+        } => {
+            let one = json!({"at": at, "drill": drill, "id": id});
+            crate::board::route::hole_add(
+                session,
+                &board,
+                crate::board::route::asks(ops, one)?,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::BoardHoleDelete {
+            board,
+            holes,
+            expected_revision,
+        } => {
+            crate::board::route::hole_delete(session, &board, &holes, expected_revision.as_deref())
+        }
+        Request::BoardDrc { board, codes } => crate::board::cmd::drc(session, &board, &codes),
+        Request::BoardStatus { board } => crate::board::cmd::status(session, &board),
         Request::BoardList { .. } => Ok(crate::board::cmd::list(session.project())),
         Request::BoardShow { board, pads, .. } => {
             crate::board::cmd::show(session.project(), &board, pads)

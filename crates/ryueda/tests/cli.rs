@@ -827,6 +827,15 @@ fn every_protocol_method_has_a_command() {
         ("board.place", &["board", "place"]),
         ("board.unplace", &["board", "unplace"]),
         ("board.render", &["board", "render"]),
+        ("board.track.add", &["board", "track", "add"]),
+        ("board.track.edit", &["board", "track", "edit"]),
+        ("board.track.delete", &["board", "track", "delete"]),
+        ("board.via.add", &["board", "via", "add"]),
+        ("board.via.delete", &["board", "via", "delete"]),
+        ("board.hole.add", &["board", "hole", "add"]),
+        ("board.hole.delete", &["board", "hole", "delete"]),
+        ("board.drc", &["board", "drc"]),
+        ("board.status", &["board", "status"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
         ("block.show", &["block", "show"]),
@@ -4828,6 +4837,384 @@ fn boards_render_to_png_and_svg() {
     );
     p.fails(
         &["board", "render", "main", "--out", "x.png", "--size", "0"],
+        "invalid_param",
+        1,
+    );
+}
+
+#[test]
+fn routes_are_added_edited_and_deleted_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    p.ok(&["board", "place", "main", "R2", "--at", "14,10"]);
+    let pads = p.ok(&["board", "show", "main", "--pads"])["pads"].clone();
+    let net_of = |r: &str| {
+        pads.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["reference"] == r)
+            .unwrap()["net"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // R1/2 and R2/2 are both on the 3V3 rail.
+    let v33 = net_of("main:R1/2");
+    assert_eq!(v33, net_of("main:R2/2"));
+    let t = p.ok(&[
+        "board",
+        "track",
+        "add",
+        "main",
+        "--net",
+        &v33,
+        "--layer",
+        "top",
+        "--path",
+        "R1/2",
+        "12,10.48",
+        "main:R2/2",
+        "--id",
+        "t1",
+    ]);
+    assert_eq!(t["tracks"][0]["reference"], "main:track/t1");
+    let pts = &t["tracks"][0]["track"]["points"];
+    assert_eq!(pts[0], json!([10_480_000, 10_000_000]));
+    assert_eq!(pts[1], json!([12_000_000, 10_480_000]));
+    assert_eq!(pts[2], json!([14_480_000, 10_000_000]));
+    assert_eq!(t["tracks"][0]["track"]["width_nm"], 250_000);
+    assert!(p.direct.join("board/boards/main/tracks/t1.json").is_file());
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", "nope", "--layer", "top", "--path", "1,1",
+            "2,2",
+        ],
+        "board_net_not_found",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", &v33, "--layer", "inner", "--path", "1,1",
+            "2,2",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--path", "Q9/1",
+            "2,2",
+        ],
+        "not_found",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--path", "1,1",
+            "1,1",
+        ],
+        "invalid_document",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--width", "0",
+            "--path", "1,1", "2,2",
+        ],
+        "invalid_param",
+        1,
+    );
+    let e = p.ok(&[
+        "board", "track", "edit", "main", "t1", "--layer", "bottom", "--width", "0.3",
+    ]);
+    assert_eq!(e["tracks"][0]["track"]["layer"], "bottom");
+    assert_eq!(e["tracks"][0]["track"]["width_nm"], 300_000);
+    // Several, all or nothing.
+    let ops = format!(
+        r#"[{{"net":"{v33}","layer":"top","path":[["1","1"],["2","1"]],"id":"t2"}},{{"net":"nope","layer":"top","path":[["1","2"],["2","2"]]}}]"#
+    );
+    p.fails(
+        &["board", "track", "add", "main", "--ops", &ops],
+        "board_net_not_found",
+        1,
+    );
+    assert!(!p.direct.join("board/boards/main/tracks/t2.json").exists());
+    let v = p.ok(&[
+        "board", "via", "add", "main", "--net", &v33, "--at", "12,12", "--id", "v1",
+    ]);
+    assert_eq!(v["vias"][0]["via"]["drill_nm"], 300_000);
+    assert_eq!(v["vias"][0]["via"]["diameter_nm"], 600_000);
+    p.ok(&[
+        "board", "track", "add", "main", "--net", &v33, "--layer", "bottom", "--path", "via/v1",
+        "12,15", "--id", "t3",
+    ]);
+    let h = p.ok(&[
+        "board", "hole", "add", "main", "--at", "27,17", "--drill", "3.2", "--id", "h1",
+    ]);
+    assert_eq!(h["holes"][0]["hole"]["drill_nm"], 3_200_000);
+    p.fails(
+        &[
+            "board", "hole", "add", "main", "--at", "27,17", "--drill", "3.2", "--id", "h1",
+        ],
+        "duplicate_id",
+        1,
+    );
+    p.ok(&["board", "track", "delete", "main", "t1", "t3"]);
+    p.fails(&["board", "track", "delete", "main", "t1"], "not_found", 1);
+    p.ok(&["board", "via", "delete", "main", "v1"]);
+    p.ok(&["board", "hole", "delete", "main", "h1"]);
+    assert!(
+        !p.direct.join("board/boards/main/vias").exists()
+            || fs::read_dir(p.direct.join("board/boards/main/vias"))
+                .unwrap()
+                .next()
+                .is_none()
+    );
+    // Deleting the board deletes its routes.
+    p.ok(&[
+        "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--path", "1,1", "2,1",
+    ]);
+    p.ok(&["board", "delete", "main"]);
+    assert!(!p.direct.join("board/boards/main").exists());
+}
+
+#[test]
+fn a_boards_drc_and_status_say_what_is_left() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    // Seven parts unplaced: errors, so drc fails with its report.
+    let e = p.fails(&["board", "drc", "main"], "check_failed", 1);
+    let report = &e["details"]["report"];
+    assert_eq!(report["counts"]["board_unplaced"], 7, "{report}");
+    assert_eq!(report["rules"]["preset"], "jlc-2l");
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["id"].as_str().unwrap().len() == 16)
+    );
+    // Filtered to a code with no finding: clean.
+    let ok = p.ok(&["board", "drc", "main", "--code", "drc_clearance"]);
+    assert_eq!(ok["findings"], json!([]));
+    assert_eq!(ok["errors"], 0);
+    p.fails(
+        &["board", "drc", "main", "--code", "nope"],
+        "invalid_param",
+        1,
+    );
+    let s = p.ok(&["board", "status", "main"]);
+    assert_eq!(s["placed"], 1);
+    assert_eq!(s["unplaced"], 7);
+    assert_eq!(s["findings"]["board_unplaced"], 7);
+    assert!(s["nets"]["total"].as_u64().unwrap() >= s["nets"]["open"].as_u64().unwrap());
+}
+
+#[test]
+fn every_board_write_answers_what_it_did_to_drc() {
+    let p = Pair::breakout();
+    let c = p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    assert_eq!(
+        c["drc"]["added"].as_array().unwrap().len(),
+        8,
+        "eight unplaced: {}",
+        c["drc"]
+    );
+    assert_eq!(c["drc"]["removed"], json!([]));
+    let r = p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    assert_eq!(
+        r["drc"]["removed"].as_array().unwrap().len(),
+        1,
+        "R1 placed: {}",
+        r["drc"]
+    );
+    p.ok(&["board", "place", "main", "R2", "--at", "14,10"]);
+    let pads = p.ok(&["board", "show", "main", "--pads"])["pads"].clone();
+    let net = |r: &str| {
+        pads.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["reference"] == r)
+            .unwrap()["net"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // Drawn straight across R2's other pad: a short, said at once.
+    let t = p.ok(&[
+        "board",
+        "track",
+        "add",
+        "main",
+        "--net",
+        &net("main:R1/2"),
+        "--layer",
+        "top",
+        "--path",
+        "R1/2",
+        "main:R2/1",
+        "main:R2/2",
+        "--id",
+        "t1",
+    ]);
+    let added: Vec<&str> = t["drc"]["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(added.contains(&"net_short"), "{}", t["drc"]);
+    assert!(t["drc"]["errors"].as_u64().unwrap() > 0);
+    let d = p.ok(&["board", "track", "delete", "main", "t1"]);
+    let removed = d["drc"]["removed"].as_array().unwrap();
+    assert!(!removed.is_empty(), "{}", d["drc"]);
+    assert!(
+        removed.iter().all(|x| x.is_string()),
+        "removed findings are IDs"
+    );
+}
+
+#[test]
+fn check_has_a_boards_section_only_with_boards() {
+    let p = Pair::breakout();
+    let report = |v: (i32, Value)| -> Value {
+        if v.1["ok"] == true {
+            v.1["result"].clone()
+        } else {
+            v.1["error"]["details"]["report"].clone()
+        }
+    };
+    let before = report(p.both_in("board", &["check"]));
+    assert!(before.get("boards").is_none(), "{before}");
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    let (code, v) = p.both_in("board", &["check"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("check_failed")),
+        "{v}"
+    );
+    let r = report((code, v));
+    let main = &r["boards"][0];
+    assert_eq!(main["board"], "board/main");
+    assert_eq!(main["errors"], 8, "eight unplaced: {main}");
+    assert!(r["errors"].as_u64().unwrap() >= 8);
+}
+
+#[test]
+fn route_writes_are_logged_undone_and_guarded() {
+    let p = Pair::breakout();
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    assert_eq!(
+        run(&[
+            "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main"
+        ])
+        .0,
+        0
+    );
+    assert_eq!(run(&["board", "place", "main", "R1", "--at", "10,10"]).0, 0);
+    let (_, pads) = run(&["board", "show", "main", "--pads"]);
+    let net = pads["result"]["pads"][0]["net"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, s) = run(&["board", "show", "main"]);
+    let rev = s["result"]["revision"].as_str().unwrap().to_owned();
+    let (code, v) = run(&[
+        "board", "track", "add", "main", "--expect", "stale", "--net", &net, "--layer", "top",
+        "--path", "1,1", "2,1",
+    ]);
+    assert_eq!((code, &v["error"]["code"]), (1, &json!("conflict")), "{v}");
+    let (code, v) = run(&[
+        "board", "track", "add", "main", "--expect", &rev, "--net", &net, "--layer", "top",
+        "--path", "R1/1", "5,10", "--id", "t1",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    let (_, h) = run(&["history"]);
+    let last = h["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["method"] == "board.track.add")
+        .unwrap()
+        .clone();
+    assert_eq!(last["files"][0]["path"], "boards/main/tracks/t1.json");
+    let (code, _) = run(&["undo"]);
+    assert_eq!(code, 0);
+    assert!(!p.daemon.join("board/boards/main/tracks/t1.json").exists());
+    let (code, _) = run(&["redo"]);
+    assert_eq!(code, 0);
+    assert!(p.daemon.join("board/boards/main/tracks/t1.json").is_file());
+}
+
+#[test]
+fn a_hand_edited_route_with_a_bad_net_is_a_fault_that_check_reports() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.write(
+        "board/boards/main/tracks/t9.json",
+        r#"{"format":1,"kind":"ryueda.track","layer":"top","net":"gone","points":[[0,0],[1000000,0]],"width_nm":250000}"#,
+    );
+    let (code, v) = p.both_in("board", &["check"]);
+    assert_eq!(code, 1, "{v}");
+    let faults = v["error"]["details"]["report"]["faults"]
+        .as_array()
+        .unwrap();
+    assert!(
+        faults.iter().any(|f| f["code"] == "board_net_not_found"
+            && f["details"]["path"] == "boards/main/tracks/t9.json"),
+        "{faults:?}"
+    );
+}
+
+#[test]
+fn a_track_edit_takes_negative_points_through_ops() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let pads = p.ok(&["board", "show", "main", "--pads"])["pads"].clone();
+    let net = pads[0]["net"].as_str().unwrap().to_owned();
+    p.ok(&[
+        "board", "track", "add", "main", "--net", &net, "--layer", "top", "--path", "1,1", "2,1",
+        "--id", "t1",
+    ]);
+    let e = p.ok(&[
+        "board",
+        "track",
+        "edit",
+        "main",
+        "t1",
+        "--ops",
+        r#"{"path": [["-1", "2"], ["3", "-4"]], "width": "0.3"}"#,
+    ]);
+    assert_eq!(
+        e["tracks"][0]["track"]["points"],
+        json!([[-1_000_000, 2_000_000], [3_000_000, -4_000_000]])
+    );
+    assert_eq!(e["tracks"][0]["track"]["width_nm"], 300_000);
+    p.fails(
+        &[
+            "board",
+            "track",
+            "edit",
+            "main",
+            "t1",
+            "--ops",
+            r#"{"colour": "red"}"#,
+        ],
         "invalid_param",
         1,
     );

@@ -1635,6 +1635,185 @@ enum BoardCmd {
         #[command(flatten)]
         rev: Rev,
     },
+    /// Tracks: add, edit, delete.
+    #[command(subcommand)]
+    Track(TrackCmd),
+    /// Vias: add, delete.
+    #[command(subcommand)]
+    Via(ViaCmd),
+    /// Unplated holes: add, delete.
+    #[command(subcommand)]
+    Hole(HoleCmd),
+    /// The board's DRC findings; exits 1 when any is an error.
+    Drc {
+        board: String,
+        /// Only findings of this code; repeat for more.
+        #[arg(long = "code")]
+        codes: Vec<String>,
+    },
+    /// Parts placed, nets routed and open, findings by code.
+    Status { board: String },
+}
+
+#[derive(Subcommand)]
+enum TrackCmd {
+    /// A track: --net, --layer and --path, or --ops for several (all or nothing).
+    Add {
+        board: String,
+        /// The net: sda, s1/<net>, rail:gnd (`board show --pads` gives each pad's).
+        #[arg(long)]
+        net: Option<String>,
+        /// top or bottom.
+        #[arg(long)]
+        layer: Option<String>,
+        /// A length; the preset's default when left out.
+        #[arg(long)]
+        width: Option<String>,
+        /// Two or more points: X,Y (lengths), or a pad (R1/1) or via (via/<id>) for its centre.
+        /// A point with a negative coordinate goes through --ops.
+        #[arg(long, num_args = 2.., value_name = "P")]
+        path: Vec<String>,
+        #[arg(long)]
+        id: Option<String>,
+        /// JSON: [{net, layer, width?, path: [[x, y] | "R1/1", ...], id?}].
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "layer", "width", "path", "id"])]
+        ops: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Change a track's net, layer, width or path.
+    Edit {
+        board: String,
+        track: String,
+        #[arg(long)]
+        net: Option<String>,
+        #[arg(long)]
+        layer: Option<String>,
+        #[arg(long)]
+        width: Option<String>,
+        #[arg(long, num_args = 2.., value_name = "P")]
+        path: Vec<String>,
+        /// JSON: {net?, layer?, width?, path?: [["x", "y"] | "R1/1", ...]}, for
+        /// points with a negative coordinate.
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "layer", "width", "path"])]
+        ops: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete tracks by ID.
+    Delete {
+        board: String,
+        #[arg(required = true)]
+        tracks: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum ViaCmd {
+    /// A through via: --net and --at, or --ops for several (all or nothing).
+    Add {
+        board: String,
+        #[arg(long)]
+        net: Option<String>,
+        /// X,Y (lengths), or a pad's reference for its centre.
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: Option<String>,
+        #[arg(long)]
+        drill: Option<String>,
+        #[arg(long)]
+        diameter: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        /// JSON: [{net, at, drill?, diameter?, id?}].
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "at", "drill", "diameter", "id"])]
+        ops: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        board: String,
+        #[arg(required = true)]
+        vias: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum HoleCmd {
+    /// An unplated hole: --at and --drill, or --ops for several (all or nothing).
+    Add {
+        board: String,
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: Option<String>,
+        #[arg(long)]
+        drill: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        /// JSON: [{at, drill, id?}].
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["at", "drill", "id"])]
+        ops: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        board: String,
+        #[arg(required = true)]
+        holes: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// A point on the command line: `X,Y` as two lengths, else a reference.
+fn point_arg(flag: &str, text: &str) -> Result<serde_json::Value> {
+    if text.contains(',') {
+        Ok(serde_json::json!(pair_arg(flag, text)?))
+    } else {
+        Ok(serde_json::json!(text))
+    }
+}
+
+/// What changes from a track edit's `--ops`: its net, layer, width (a
+/// length, as a string) and path (points as `track add --ops` takes them:
+/// strings are lengths, bare integers nanometres).
+type TrackEdit = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<Vec<serde_json::Value>>,
+);
+
+fn track_edit_ops(v: &serde_json::Value) -> Result<TrackEdit> {
+    let bad = |m: &str| Error::new(Code::InvalidParam, format!("--ops {m}")).with("flag", "--ops");
+    let o = v
+        .as_object()
+        .ok_or_else(|| bad("is a JSON object: {net?, layer?, width?, path?}"))?;
+    if let Some(k) = o
+        .keys()
+        .find(|k| !["net", "layer", "width", "path"].contains(&k.as_str()))
+    {
+        return Err(bad(&format!("has no field {k}")));
+    }
+    let text = |k: &str| -> Result<Option<String>> {
+        match o.get(k) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(bad(&format!("{k} is a string"))),
+        }
+    };
+    let path = match o.get("path") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(l)) => Some(l.clone()),
+        Some(_) => return Err(bad("path is a list of points")),
+    };
+    Ok((text("net")?, text("layer")?, text("width")?, path))
+}
+
+fn path_arg(list: &[String]) -> Result<Vec<serde_json::Value>> {
+    list.iter().map(|p| point_arg("--path", p)).collect()
 }
 
 /// JSON given on the command line, or `invalid_param` naming the flag.
@@ -3649,6 +3828,79 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             board: board.clone(),
             pads: *pads,
             rev: rev.rev.clone(),
+        },
+        Command::Board(BoardCmd::Track(TrackCmd::Add { board, net, layer, width, path, id, ops, expect })) => Request::BoardTrackAdd {
+            board: board.clone(),
+            net: net.clone(),
+            layer: layer.clone(),
+            width: width.clone(),
+            path: path_arg(path)?,
+            id: id.clone(),
+            ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Track(TrackCmd::Edit { board, track, net, layer, width, path, ops, expect })) => match ops {
+            Some(o) => {
+                let (net, layer, width, path) = track_edit_ops(&json_arg("--ops", o)?)?;
+                Request::BoardTrackEdit {
+                    board: board.clone(),
+                    track: track.clone(),
+                    net,
+                    layer,
+                    width,
+                    path,
+                    expected_revision: expect.expect.clone(),
+                }
+            }
+            None => Request::BoardTrackEdit {
+                board: board.clone(),
+                track: track.clone(),
+                net: net.clone(),
+                layer: layer.clone(),
+                width: width.clone(),
+                path: if path.is_empty() { None } else { Some(path_arg(path)?) },
+                expected_revision: expect.expect.clone(),
+            },
+        },
+        Command::Board(BoardCmd::Track(TrackCmd::Delete { board, tracks, expect })) => Request::BoardTrackDelete {
+            board: board.clone(),
+            tracks: tracks.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Via(ViaCmd::Add { board, net, at, drill, diameter, id, ops, expect })) => Request::BoardViaAdd {
+            board: board.clone(),
+            net: net.clone(),
+            at: at.as_deref().map(|a| point_arg("--at", a)).transpose()?,
+            drill: drill.clone(),
+            diameter: diameter.clone(),
+            id: id.clone(),
+            ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Via(ViaCmd::Delete { board, vias, expect })) => Request::BoardViaDelete {
+            board: board.clone(),
+            vias: vias.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Hole(HoleCmd::Add { board, at, drill, id, ops, expect })) => Request::BoardHoleAdd {
+            board: board.clone(),
+            at: at.as_deref().map(|a| point_arg("--at", a)).transpose()?,
+            drill: drill.clone(),
+            id: id.clone(),
+            ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Hole(HoleCmd::Delete { board, holes, expect })) => Request::BoardHoleDelete {
+            board: board.clone(),
+            holes: holes.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Drc { board, codes }) => Request::BoardDrc {
+            board: board.clone(),
+            codes: codes.clone(),
+        },
+        Command::Board(BoardCmd::Status { board }) => Request::BoardStatus {
+            board: board.clone(),
         },
         Command::Doctor { repairs } if repairs.is_empty() => Request::Doctor {},
         Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},

@@ -42,7 +42,8 @@ pub type Repo = ryu_git::Repo<crate::Eda>;
 /// (`blocks/<b>/<f>`, `blocks/<b>/<dir>/<f>`), and the library's
 /// (`library/<f>`, `library/<dir>/<f>`), and PDM's (`properties/<f>`,
 /// `releases/<part>/<f>`; `ryupdm.json` is a root file), and boards'
-/// (`boards/<b>/board.json`, `boards/<b>/placements/<o>.json`).
+/// (`boards/<b>/board.json`, `boards/<b>/placements/<o>.json`,
+/// `tracks/<id>.json`, `vias/<id>.json`, `holes/<id>.json`).
 pub fn project_file(rel: &str) -> bool {
     if ROOT_FILES.contains(&rel) {
         return true;
@@ -58,7 +59,13 @@ pub fn project_file(rel: &str) -> bool {
         ]
         .contains(d),
         [d, _, f] if *d == crate::board::BOARDS => *f == crate::board::BOARD_FILE,
-        [d, _, p, _] if *d == crate::board::BOARDS => *p == crate::board::PLACEMENTS,
+        [d, _, p, _] if *d == crate::board::BOARDS => [
+            crate::board::PLACEMENTS,
+            crate::board::TRACKS,
+            crate::board::VIAS,
+            crate::board::HOLES,
+        ]
+        .contains(p),
         [d, _, _] => *d == crate::conn::BLOCKS || *d == library::DIR || *d == crate::pdm::RELEASES,
         [d, _, _, _] => *d == crate::conn::BLOCKS,
         _ => false,
@@ -230,6 +237,19 @@ pub fn history(root: &Path, files: &Files, limit: usize) -> Result<serde_json::V
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn route_files_are_project_files() {
+        for f in [
+            "boards/b/tracks/t1.json",
+            "boards/b/vias/v1.json",
+            "boards/b/holes/h1.json",
+            "boards/b/placements/r1.json",
+        ] {
+            assert!(super::project_file(f), "{f}");
+        }
+        assert!(!super::project_file("boards/b/notes/x.json"));
+    }
+
     use super::*;
     use crate::project::tests::{library_in, manifest};
     use crate::project::{Project, ProjectKind};

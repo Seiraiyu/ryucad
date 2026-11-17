@@ -1108,6 +1108,40 @@ pub enum Code {
     BoardFootprintUnsupported,
     /// A character the board's stroke font doesn't draw, left as a gap.
     BoardTextMissingGlyph,
+    /// A board's track or via names a net its design doesn't have.
+    BoardNetNotFound,
+    /// ryueda DRC finding (an error): an occurrence with a footprint and
+    /// no placement on the board.
+    BoardUnplaced,
+    /// ryueda DRC finding (an error): a placement whose occurrence the
+    /// design no longer has.
+    BoardPlacementOrphan,
+    /// ryueda DRC finding (an error): copper of two islands closer than
+    /// the preset's clearance on a layer.
+    DrcClearance,
+    /// ryueda DRC finding (an error): a track closer to another island's
+    /// solder mask opening than the preset allows.
+    DrcMaskClearance,
+    /// ryueda DRC finding (an error): a track narrower than the preset's
+    /// minimum.
+    DrcTrackWidth,
+    /// ryueda DRC finding (an error): a drill outside the preset's range,
+    /// or a via's diameter under its minimum.
+    DrcDrill,
+    /// ryueda DRC finding (an error): a via's or through pad's copper
+    /// round its hole under the preset's minimum ring.
+    DrcAnnularRing,
+    /// ryueda DRC finding (an error): two holes' walls closer than the
+    /// preset's minimum.
+    DrcHoleSpacing,
+    /// ryueda DRC finding (an error): copper or a hole closer to the
+    /// outline or a cutout than the preset's minimum, or outside the board.
+    DrcEdgeClearance,
+    /// ryueda DRC finding (an error): two placements' courtyards touching.
+    DrcCourtyardOverlap,
+    /// ryueda DRC finding (a warning): a courtyard whose graphics don't
+    /// close, judged by its box.
+    DrcCourtyardOpen,
 }
 
 impl Code {
@@ -1484,6 +1518,18 @@ impl Code {
         Code::BoardRefAmbiguous,
         Code::BoardFootprintUnsupported,
         Code::BoardTextMissingGlyph,
+        Code::BoardNetNotFound,
+        Code::BoardUnplaced,
+        Code::BoardPlacementOrphan,
+        Code::DrcClearance,
+        Code::DrcMaskClearance,
+        Code::DrcTrackWidth,
+        Code::DrcDrill,
+        Code::DrcAnnularRing,
+        Code::DrcHoleSpacing,
+        Code::DrcEdgeClearance,
+        Code::DrcCourtyardOverlap,
+        Code::DrcCourtyardOpen,
     ];
 
     /// The CLI's exit code: 1 the agent can fix it, 2 usage, 3 not a
@@ -1573,6 +1619,28 @@ mod tests {
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);
+        }
+    }
+
+    #[test]
+    fn route_and_drc_codes() {
+        for (c, s) in [
+            (Code::BoardNetNotFound, "board_net_not_found"),
+            (Code::BoardUnplaced, "board_unplaced"),
+            (Code::BoardPlacementOrphan, "board_placement_orphan"),
+            (Code::DrcClearance, "drc_clearance"),
+            (Code::DrcMaskClearance, "drc_mask_clearance"),
+            (Code::DrcTrackWidth, "drc_track_width"),
+            (Code::DrcDrill, "drc_drill"),
+            (Code::DrcAnnularRing, "drc_annular_ring"),
+            (Code::DrcHoleSpacing, "drc_hole_spacing"),
+            (Code::DrcEdgeClearance, "drc_edge_clearance"),
+            (Code::DrcCourtyardOverlap, "drc_courtyard_overlap"),
+            (Code::DrcCourtyardOpen, "drc_courtyard_open"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
         }
     }
 

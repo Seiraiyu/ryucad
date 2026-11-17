@@ -7,18 +7,24 @@
 //! times. Design 629's bars too: a 10,000-occurrence BOM through a warm
 //! daemon in 50 ms, `release propose --all` of 10,000 library components
 //! in 10 s, `release list` over them in 1 s, and where-used over 10
-//! checkouts in 1 s.
+//! checkouts in 1 s. Design 732's bars: a generated board of 1,000 parts
+//! and 2,000 tracks checked from nothing in 1 s, and a track write with
+//! its DRC delta through a warm daemon in 250 ms (50 ms on the breakout).
 
+#[path = "support/board_gen.rs"]
+mod board_gen;
+#[path = "support/breakout.rs"]
+mod breakout;
 #[path = "support/draw.rs"]
 mod draw;
-#[path = "support/generated.rs"]
-mod generated;
 #[path = "support/parts.rs"]
 mod parts;
 #[path = "support/rp2040.rs"]
 mod rp2040;
 
 use assert_cmd::Command;
+// `board_gen` includes the generated design; one copy of it serves both.
+use board_gen::generated;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -716,4 +722,140 @@ fn boms_releases_and_where_used_are_within_their_bars() {
             .args(["daemon", "stop"])
             .output();
     }
+}
+
+/// Design 732's bars: the generated board (1,000 parts, 2,000 pads,
+/// 2,000 tracks) loaded, shaped, connected and checked from nothing in
+/// 1 s; a track write answering its DRC delta through a warm daemon in
+/// 250 ms. The times include the CLI's start for the write.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test bar"
+)]
+fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board");
+    std::fs::create_dir_all(&board).unwrap();
+    board_gen::write(&board, &board_gen::Spec::bar());
+    git(&board, &["init", "-q"]);
+    let id = ryueda::id::Id::parse("main", "board").unwrap();
+    let t = Instant::now();
+    let p = ryueda::project::Project::load(&board).unwrap();
+    let c = ryueda::board::drc::check(&p, &p.boards[&id]).unwrap();
+    let cold = t.elapsed();
+    println!(
+        "generated board: {} pads, {} tracks: loaded, shaped, connected and checked in {cold:?}",
+        c.shapes.pads.len(),
+        c.shapes.tracks.len()
+    );
+    assert!(
+        c.findings.is_empty(),
+        "{:?}",
+        &c.findings[..c.findings.len().min(5)]
+    );
+    assert!(cold < bar(Duration::from_secs(1)), "{cold:?}");
+    let run = dir.path().join("run");
+    let ryueda = warm(&board, &run, dir.path());
+    ryueda(&["board", "drc", "main"]);
+    let net = ryueda(&["board", "show", "main", "--pads"])["pads"][0]["net"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut worst = Duration::ZERO;
+    for i in 0..5 {
+        let y = format!("{}", 1 + i);
+        let t = Instant::now();
+        let v = ryueda(&[
+            "board",
+            "track",
+            "add",
+            "main",
+            "--net",
+            &net,
+            "--layer",
+            "bottom",
+            "--path",
+            &format!("1,{y}"),
+            &format!("2,{y}"),
+            "--id",
+            &format!("x{i}"),
+        ]);
+        let took = t.elapsed();
+        assert_eq!(v["drc"]["errors"], 0, "{v}");
+        worst = worst.max(took);
+    }
+    println!("a track write with its delta through a warm daemon: worst {worst:?}");
+    assert!(worst < bar(Duration::from_millis(250)), "{worst:?}");
+    ryueda(&["daemon", "stop"]);
+}
+
+/// Design 732's bar: a track write on the placed breakout through a warm
+/// daemon, with its DRC delta, in 50 ms.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test bar"
+)]
+fn a_breakout_track_write_answers_its_delta_within_its_bar() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board");
+    std::fs::create_dir_all(&board).unwrap();
+    git(&board, &["init", "-q"]);
+    let run = dir.path().join("run");
+    let ryueda = warm(&board, &run, dir.path());
+    ryueda(&["init"]);
+    for (path, text) in breakout::footprints() {
+        let at = board.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+    for args in breakout::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        ryueda(&args);
+    }
+    ryueda(&[
+        "board", "create", "Main", "--design", "board", "--rect", "26,20", "--id", "main",
+    ]);
+    for (r, xy, rot) in [
+        ("U1", "8,10", "0"),
+        ("C1", "8,14", "90"),
+        ("U2", "18,10", "0"),
+        ("C2", "15,6", "0"),
+        ("C3", "21,6", "0"),
+        ("R1", "12,15", "90"),
+        ("R2", "14,15", "90"),
+        ("J1", "3,10", "0"),
+    ] {
+        ryueda(&["board", "place", "main", r, "--at", xy, "--rotation", rot]);
+    }
+    let net = ryueda(&["board", "show", "main", "--pads"])["pads"][0]["net"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut worst = Duration::ZERO;
+    for i in 0..5 {
+        let y = format!("{}", 1 + i);
+        let t = Instant::now();
+        let v = ryueda(&[
+            "board",
+            "track",
+            "add",
+            "main",
+            "--net",
+            &net,
+            "--layer",
+            "bottom",
+            "--path",
+            &format!("22,{y}"),
+            &format!("24,{y}"),
+            "--id",
+            &format!("x{i}"),
+        ]);
+        worst = worst.max(t.elapsed());
+        assert!(v["drc"].get("added").is_some(), "{v}");
+    }
+    println!("a breakout track write with its delta through a warm daemon: worst {worst:?}");
+    assert!(worst < bar(Duration::from_millis(50)), "{worst:?}");
+    ryueda(&["daemon", "stop"]);
 }

@@ -330,6 +330,14 @@ mod tests {
             t.contains("design = d\n") && t.contains("preset = jlc-2l\n"),
             "{t}"
         );
+        let t = conv(
+            r#"{"format":1,"kind":"ryueda.track","layer":"top","net":"sda","points":[[0,0],[10,0]],"width_nm":250000}"#,
+        );
+        assert!(t.starts_with("ryueda.track format 1\n"), "{t}");
+        assert!(
+            t.contains("net = sda\n") && t.contains("width_nm = 250000\n"),
+            "{t}"
+        );
     }
 
     #[test]

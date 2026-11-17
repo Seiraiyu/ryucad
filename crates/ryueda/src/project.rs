@@ -883,6 +883,44 @@ impl Project {
                     .with("pointer", "/design"),
                 );
             }
+            // Route nets against the design's flattened nets: only for
+            // boards with routes, and only when the design flattens (its
+            // own faults say why when it doesn't).
+            if let Ok(board) = &b.board.item
+                && p.conn.designs.contains_key(&board.design)
+                && (!b.tracks.is_empty() || !b.vias.is_empty())
+                && let Ok(n) = crate::netlist::flatten(&p, &board.design)
+            {
+                let nets: std::collections::BTreeSet<String> = n
+                    .nets
+                    .iter()
+                    .map(|x| crate::board::occ::local(&board.design, &x.id))
+                    .collect();
+                let routes = b
+                    .tracks
+                    .iter()
+                    .filter_map(|(i, t)| {
+                        Some((crate::board::TRACKS, i, &t.item.as_ref().ok()?.net))
+                    })
+                    .chain(b.vias.iter().filter_map(|(i, v)| {
+                        Some((crate::board::VIAS, i, &v.item.as_ref().ok()?.net))
+                    }));
+                for (folder, rid, net) in routes {
+                    if !nets.contains(net) {
+                        board_faults.push(
+                            Fault::error(
+                                Code::BoardNetNotFound,
+                                format!(
+                                    "board {id}'s {folder} {rid} names net {net}, which design {} doesn't have; `ryueda netlist` lists its nets",
+                                    board.design
+                                ),
+                            )
+                            .with("path", crate::board::file::route_path(id, folder, rid))
+                            .with("pointer", "/net"),
+                        );
+                    }
+                }
+            }
         }
         p.board_faults = board_faults;
         Ok(p)
@@ -2021,6 +2059,49 @@ pub(crate) mod tests {
             p.revision, before,
             "boards aren't in the project's revision"
         );
+    }
+
+    #[test]
+    fn a_route_naming_no_net_of_its_design_is_a_fault() {
+        let (dir, p) = crate::netlist::tests::project(&[]);
+        let design = crate::netlist::one_design(&p, None).unwrap();
+        let net = crate::board::occ::occurrences(&p, &design)
+            .unwrap()
+            .1
+            .iter()
+            .flat_map(|o| o.nets.values().cloned())
+            .next()
+            .unwrap();
+        let root = &dir.path().join("board");
+        let board = format!(
+            r#"{{"design":"{design}","format":1,"kind":"ryueda.board","name":"B","outline":{{"edges":[{{"to":[10,0],"type":"line"}},{{"to":[10,10],"type":"line"}},{{"to":[0,10],"type":"line"}},{{"to":[0,0],"type":"line"}}],"start":[0,0]}},"preset":"jlc-2l"}}"#
+        );
+        std::fs::create_dir_all(root.join("boards/b/tracks")).unwrap();
+        std::fs::write(root.join("boards/b/board.json"), board).unwrap();
+        let track = |n: &str| {
+            format!(
+                r#"{{"format":1,"kind":"ryueda.track","layer":"top","net":"{n}","points":[[0,0],[10,0]],"width_nm":5}}"#
+            )
+        };
+        std::fs::write(root.join("boards/b/tracks/t1.json"), track(&net)).unwrap();
+        let p = Project::load(root).unwrap();
+        assert!(
+            p.faults()
+                .iter()
+                .all(|f| f.error.code != Code::BoardNetNotFound),
+            "{:?}",
+            p.faults()
+        );
+        std::fs::write(root.join("boards/b/tracks/t1.json"), track("nope")).unwrap();
+        let p = Project::load(root).unwrap();
+        let f: Vec<_> = p
+            .faults()
+            .into_iter()
+            .filter(|f| f.error.code == Code::BoardNetNotFound)
+            .collect();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].error.details["path"], "boards/b/tracks/t1.json");
+        assert_eq!(f[0].error.details["pointer"], "/net");
     }
 
     #[test]

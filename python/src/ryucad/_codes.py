@@ -379,6 +379,18 @@ class Code(str, Enum):
     BOARD_REF_AMBIGUOUS = "board_ref_ambiguous"
     BOARD_FOOTPRINT_UNSUPPORTED = "board_footprint_unsupported"
     BOARD_TEXT_MISSING_GLYPH = "board_text_missing_glyph"
+    BOARD_NET_NOT_FOUND = "board_net_not_found"
+    BOARD_UNPLACED = "board_unplaced"
+    BOARD_PLACEMENT_ORPHAN = "board_placement_orphan"
+    DRC_CLEARANCE = "drc_clearance"
+    DRC_MASK_CLEARANCE = "drc_mask_clearance"
+    DRC_TRACK_WIDTH = "drc_track_width"
+    DRC_DRILL = "drc_drill"
+    DRC_ANNULAR_RING = "drc_annular_ring"
+    DRC_HOLE_SPACING = "drc_hole_spacing"
+    DRC_EDGE_CLEARANCE = "drc_edge_clearance"
+    DRC_COURTYARD_OVERLAP = "drc_courtyard_overlap"
+    DRC_COURTYARD_OPEN = "drc_courtyard_open"
 
 
 #: Each code's exit class.
@@ -751,4 +763,16 @@ EXIT: dict[Code, int] = {
     Code.BOARD_REF_AMBIGUOUS: 1,
     Code.BOARD_FOOTPRINT_UNSUPPORTED: 1,
     Code.BOARD_TEXT_MISSING_GLYPH: 1,
+    Code.BOARD_NET_NOT_FOUND: 1,
+    Code.BOARD_UNPLACED: 1,
+    Code.BOARD_PLACEMENT_ORPHAN: 1,
+    Code.DRC_CLEARANCE: 1,
+    Code.DRC_MASK_CLEARANCE: 1,
+    Code.DRC_TRACK_WIDTH: 1,
+    Code.DRC_DRILL: 1,
+    Code.DRC_ANNULAR_RING: 1,
+    Code.DRC_HOLE_SPACING: 1,
+    Code.DRC_EDGE_CLEARANCE: 1,
+    Code.DRC_COURTYARD_OVERLAP: 1,
+    Code.DRC_COURTYARD_OPEN: 1,
 }

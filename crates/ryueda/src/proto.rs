@@ -684,6 +684,109 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// Tracks (design 732): one (`net`, `layer`, `width`, `path`, `id`) or,
+    /// with `ops`, several, all or nothing. A path point is `[x, y]`
+    /// (lengths) or a pad's or via's reference.
+    #[serde(rename = "board.track.add")]
+    BoardTrackAdd {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        path: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ops: Option<Value>,
+        /// The board's revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.track.edit")]
+    BoardTrackEdit {
+        board: String,
+        track: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<Vec<Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.track.delete")]
+    BoardTrackDelete {
+        board: String,
+        tracks: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Vias: one (`net`, `at`, `drill`, `diameter`, `id`) or `ops`.
+    #[serde(rename = "board.via.add")]
+    BoardViaAdd {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drill: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diameter: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ops: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.via.delete")]
+    BoardViaDelete {
+        board: String,
+        vias: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Unplated holes: one (`at`, `drill`, `id`) or `ops`.
+    #[serde(rename = "board.hole.add")]
+    BoardHoleAdd {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drill: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ops: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.hole.delete")]
+    BoardHoleDelete {
+        board: String,
+        holes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A board's DRC findings; `check_failed` when one is an error.
+    #[serde(rename = "board.drc")]
+    BoardDrc {
+        board: String,
+        /// Only findings of these codes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        codes: Vec<String>,
+    },
+    /// A board's counts: parts placed, nets routed and open, findings.
+    #[serde(rename = "board.status")]
+    BoardStatus { board: String },
     /// A functional block, its ID random unless given.
     #[serde(rename = "block.create")]
     BlockCreate {
@@ -1502,6 +1605,13 @@ impl Request {
                 | Request::BoardDelete { .. }
                 | Request::BoardPlace { .. }
                 | Request::BoardUnplace { .. }
+                | Request::BoardTrackAdd { .. }
+                | Request::BoardTrackEdit { .. }
+                | Request::BoardTrackDelete { .. }
+                | Request::BoardViaAdd { .. }
+                | Request::BoardViaDelete { .. }
+                | Request::BoardHoleAdd { .. }
+                | Request::BoardHoleDelete { .. }
                 | Request::BlockCreate { .. }
                 | Request::BlockEdit { .. }
                 | Request::BlockDelete { .. }
@@ -1610,6 +1720,16 @@ mod tests {
                 board: "main".into(),
                 pads: true,
                 rev: None,
+            },
+            Request::BoardTrackAdd {
+                board: "main".into(),
+                net: Some("sda".into()),
+                layer: Some("top".into()),
+                width: None,
+                path: vec![json!(["1", "2"]), json!("R1/1")],
+                id: None,
+                ops: None,
+                expected_revision: None,
             },
             Request::LibAdd {
                 alias: "passives".into(),
