@@ -2,6 +2,7 @@
 //! loaded with the project, their shapes built through `ryu-board`, and
 //! the `board.*` commands.
 
+pub mod assembly;
 pub mod cmd;
 pub mod connect;
 pub mod courtyard;
