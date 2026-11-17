@@ -260,8 +260,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
       - run: ruff check python/src
       - run: mypy --strict python/src
-      # Hatchling can't name files above python/, so the licences are
-      # copied in (plan 32.B's scripts/python-dist.sh takes this over).
-      - run: cp LICENSE NOTICE python/
-      - run: python -m build python
+      # The wheel and sdist as a release builds them (the licences copied
+      # in and checked in the wheel), then checked as PyPI renders them.
+      - run: sh scripts/python-dist.sh
+        env:
+          PYTHON: python
       - run: twine check --strict python/dist/*
