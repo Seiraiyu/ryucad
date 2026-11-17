@@ -571,8 +571,7 @@ fn spawn<P: Serve>(root: &Path, endpoint: &Endpoint<P>, exe: &Path) -> Result<()
         cmd.args(["--idle-timeout", &secs]);
     }
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
-    detach(&mut cmd);
-    cmd.spawn().map_err(unavailable)?;
+    spawn_detached(&mut cmd).map_err(unavailable)?;
     Ok(())
 }
 
@@ -594,26 +593,58 @@ pub fn command(exe: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
-/// Out of the terminal's process group, so Ctrl-C on the CLI spares it:
-/// how daemons (and the app, from `open`) are started.
+/// Starts `cmd` detached ([`detach`]): how daemons and the apps, from
+/// `open`, are started. On Windows it breaks away from its starter's job,
+/// so a shell whose job is killed on close (Windows Terminal's tabs, some
+/// agents' shells) takes neither with it (#799); a job that refuses
+/// breakaway fails `CreateProcess` with access denied, and the process is
+/// then started inside it, as before.
+pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    detach(cmd);
+    match cmd.spawn() {
+        Err(e) if cfg!(windows) && e.raw_os_error() == Some(5) => {
+            detach_without_breakaway(cmd);
+            cmd.spawn()
+        }
+        other => other,
+    }
+}
+
+/// Out of the terminal's process group, so Ctrl-C on the CLI spares it.
 #[cfg(unix)]
 pub fn detach(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
 
+/// [`detach`]: there is no job to break away from.
+#[cfg(unix)]
+pub fn detach_without_breakaway(cmd: &mut Command) {
+    detach(cmd);
+}
+
+/// [`detach_without_breakaway`], and out of its starter's job (#799).
+#[cfg(windows)]
+pub fn detach(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    detach_without_breakaway(cmd);
+    cmd.creation_flags(DETACHED | CREATE_BREAKAWAY_FROM_JOB);
+}
+
+#[cfg(windows)]
+const DETACHED: u32 = 0x0000_0008 | 0x0000_0200; // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+
 /// No console, its own process group, and none of this process's handles:
 /// an inherited stdout pipe would keep whoever reads the CLI's output
 /// waiting until the daemon exits.
 #[cfg(windows)]
-pub fn detach(cmd: &mut Command) {
+pub fn detach_without_breakaway(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
         // SAFETY: plain Win32 calls on this process's own standard handles.
         unsafe {
@@ -623,7 +654,7 @@ pub fn detach(cmd: &mut Command) {
             }
         }
     }
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    cmd.creation_flags(DETACHED);
 }
 
 /// The daemon's status, without starting one.
