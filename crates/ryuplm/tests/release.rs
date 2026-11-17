@@ -178,3 +178,83 @@ fn an_item_missing_a_required_property_is_not_ready() {
     assert_eq!(e.code, ryuplm::error::Code::ReleaseNotReady);
     assert!(e.message.contains("finish"), "{}", e.message);
 }
+#[test]
+fn diff_names_items_added_removed_and_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    ryuplm::server::init(&root, None).unwrap();
+    let a = ask(
+        &root,
+        Request::ItemCreate {
+            fields: Default::default(),
+            number: Some("A-1".into()),
+            next: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let b = ask(
+        &root,
+        Request::ItemCreate {
+            fields: Default::default(),
+            number: Some("B-1".into()),
+            next: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let (a, b) = (
+        a["item"]["id"].as_str().unwrap().to_owned(),
+        b["item"]["id"].as_str().unwrap().to_owned(),
+    );
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "two"]);
+    ask(
+        &root,
+        Request::ItemDelete {
+            item: b.clone(),
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    ask(
+        &root,
+        Request::ItemRenumber {
+            item: a.clone(),
+            number: Some("A-2".into()),
+            next: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let c = ask(
+        &root,
+        Request::ItemCreate {
+            fields: Default::default(),
+            number: Some("C-1".into()),
+            next: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let d = ask(
+        &root,
+        Request::Diff {
+            from: None,
+            to: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        d["added"],
+        json!([{"id": c["item"]["id"], "number": "C-1"}])
+    );
+    assert_eq!(d["removed"], json!([{"id": b, "number": "B-1"}]));
+    assert_eq!(d["changed"][0]["id"], json!(a));
+    assert_eq!(d["changed"][0]["removed"], json!(["number = A-1"]));
+    assert_eq!(
+        d["changed"][0]["added"],
+        json!(["number = A-2", "previous_numbers = A-1"])
+    );
+}
