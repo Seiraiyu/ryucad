@@ -12,6 +12,7 @@ pub mod catalogue;
 pub mod fault;
 pub mod ids;
 pub mod item;
+pub mod judge;
 pub mod load;
 pub mod pdm;
 
