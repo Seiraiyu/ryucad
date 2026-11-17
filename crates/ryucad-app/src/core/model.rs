@@ -1063,6 +1063,9 @@ pub struct Model {
     /// How many `mesh.get`s the workspace's `fetch` sent: a part's bodies
     /// go by the batch, as an assembly's do (#801).
     pub mesh_requests: u64,
+    /// How many requests [`crate::core::workspace::Workspace::fetch_levels`]
+    /// has sent: a part's bodies at one level go by the batch (#876).
+    pub level_requests: u64,
     /// How many bytes answers brought after their lines: meshes, mostly.
     pub received: u64,
     /// What the model was last read at: its revision and the draft's
