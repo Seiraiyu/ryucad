@@ -298,3 +298,31 @@ fn every_protocol_method_has_a_command() {
         assert!(out.status.success(), "ryuplm {args:?} --help");
     }
 }
+
+#[test]
+fn git_install_registers_the_driver_locally() {
+    let p = Pair::project();
+    let root = p.direct.join("p");
+    std::process::Command::new("git")
+        .current_dir(&root)
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    let (code, v) = p.run_in(&p.direct, &["git", "install"]);
+    assert_eq!(code, 0, "{v}");
+    let cfg = &v["result"]["config"];
+    assert!(
+        cfg["merge.ryuplm.driver"]
+            .as_str()
+            .unwrap()
+            .ends_with("git merge-driver %O %A %B %P"),
+        "{cfg}"
+    );
+    assert!(
+        cfg["diff.ryuplm.textconv"]
+            .as_str()
+            .unwrap()
+            .ends_with("git textconv"),
+        "{cfg}"
+    );
+}

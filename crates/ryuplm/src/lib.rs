@@ -21,6 +21,7 @@ pub mod item;
 pub mod items;
 pub mod judge;
 pub mod load;
+pub mod merge;
 pub mod notify;
 pub mod numbers;
 pub mod pdm;
@@ -29,6 +30,7 @@ pub mod release;
 pub mod server;
 pub mod session;
 pub mod settings;
+pub mod textconv;
 pub mod write;
 
 /// ryuplm, as ryupdm, ryu-git and ryu-session know it.

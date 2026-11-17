@@ -534,8 +534,15 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
         Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),
-        Command::Git(_) | Command::Merge(_) => {
-            Err(Error::new(Code::Usage, "git and merge come with Task 21"))
+        Command::Git(GitCmd::Install { global }) => ryuplm::drivers::install(&here, !global),
+        Command::Git(GitCmd::Textconv { .. } | GitCmd::MergeDriver { .. })
+        | Command::Merge(MergeCmd::Status { hook: true }) => unreachable!("answered in main"),
+        Command::Merge(MergeCmd::Status { hook: false }) => {
+            let roots = ryu_git::merging_projects::<ryuplm::Plm>(&here)?;
+            Ok(json!({"merging": roots
+                .iter()
+                .map(|r| json!({"root": r, "unresolved": ryuplm::merge::unresolved(r)}))
+                .collect::<Vec<_>>()}))
         }
         Command::Watch {
             topics,
@@ -607,9 +614,121 @@ pub fn main() -> ExitCode {
             return finish(Err(err), Vec::new(), args.iter().any(|a| a == "--pretty"));
         }
     };
+    // Git reads a textconv's output as the file's text, not JSON.
+    if let Command::Git(GitCmd::Textconv { path }) = &cli.command {
+        return match std::fs::read(path) {
+            Ok(bytes) => {
+                use std::io::Write;
+                let text = ryuplm::textconv::textconv(&bytes);
+                match std::io::stdout().lock().write_all(&text) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::from(Code::Io.exit_code()),
+                }
+            }
+            Err(e) => finish(Err(Error::io(path, &e)), Vec::new(), cli.pretty),
+        };
+    }
+    // Git calls the merge driver: its answer is the file and the exit code.
+    if let Command::Git(GitCmd::MergeDriver {
+        base,
+        ours,
+        theirs,
+        path,
+    }) = &cli.command
+    {
+        return merge_driver(base, ours, theirs, path.as_deref());
+    }
+    // Git's hooks read the exit code; people read what it prints.
+    if let Command::Merge(MergeCmd::Status { hook: true }) = &cli.command {
+        let here = match &cli.dir {
+            Some(d) => d.clone(),
+            None => std::env::current_dir().unwrap_or_default(),
+        };
+        return hook_check(&here);
+    }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);
     finish(outcome, warnings, cli.pretty)
+}
+
+/// `ryuplm git merge-driver`: merges, writes over `ours`, and exits 0 when
+/// nothing is left to resolve, 1 when conflicts are (in the file's record,
+/// or as Git's markers when it fell back to merging lines), 4 when a file
+/// can't be read or written. Failures go to stderr: Git shows them.
+fn merge_driver(base: &Path, ours: &Path, theirs: &Path, path: Option<&str>) -> ExitCode {
+    let read = |p: &Path| std::fs::read(p).map_err(|e| Error::io(p, &e));
+    let merged = (|| -> Result<ryuplm::merge::Outcome> {
+        let (out, outcome) = ryuplm::merge::bytes(&read(base)?, &read(ours)?, &read(theirs)?);
+        std::fs::write(ours, out).map_err(|e| Error::io(ours, &e))?;
+        Ok(outcome)
+    })();
+    match merged {
+        Ok(ryuplm::merge::Outcome::Clean) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!(
+                "ryuplm: merging {}: {}",
+                path.unwrap_or(&ours.to_string_lossy()),
+                e.message
+            );
+            ExitCode::from(Code::Io.exit_code())
+        }
+    }
+}
+
+/// `ryuplm merge status --hook`: the commit guard, then every catalogue a
+/// merge in progress concerns checked for files the merge left
+/// unresolved. Exits 0 when nothing is, 1 otherwise, saying what to
+/// settle on stderr.
+fn hook_check(here: &Path) -> ExitCode {
+    let catalogues = match ryu_git::merging_projects::<ryuplm::Plm>(here) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ryuplm: checking the merge: {}", e.message);
+            return ExitCode::from(1);
+        }
+    };
+    let mut failed = false;
+    // The commit guard (design 629): a commit that would leave a proposal
+    // stale or change an official record, merge or not.
+    match ryupdm::release::guard_for::<ryuplm::Plm>(here) {
+        Ok(found) => {
+            for (root, list) in found {
+                failed = true;
+                eprintln!(
+                    "ryuplm: this commit would leave {} release problem(s) in {}:",
+                    list.len(),
+                    root.display()
+                );
+                for f in &list {
+                    eprintln!("  {}: {}", f.code, f.message);
+                }
+            }
+        }
+        Err(e) => {
+            failed = true;
+            eprintln!("ryuplm: checking the release records staged: {}", e.message);
+        }
+    }
+    for root in catalogues {
+        let left = ryuplm::merge::unresolved(&root);
+        if !left.is_empty() {
+            failed = true;
+            eprintln!(
+                "ryuplm: the merge leaves {} file(s) unresolved in {}:",
+                left.len(),
+                root.display()
+            );
+            for p in &left {
+                eprintln!("  {p}");
+            }
+        }
+    }
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCode {
