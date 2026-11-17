@@ -8,6 +8,7 @@ pub mod graphic;
 pub mod load;
 pub mod occ;
 pub mod outline;
+pub mod pad;
 pub mod preset;
 
 pub use file::{BOARD_FILE, BOARD_KIND, BOARDS, FORMAT, PLACEMENT_KIND, PLACEMENTS};
