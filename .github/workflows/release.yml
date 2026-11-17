@@ -5,6 +5,9 @@ name: Release
 # (full.yml: every test on every platform, which pull requests don't run)
 # pass on the tagged commit. Run by hand (workflow_dispatch) for a dry run
 # that builds and tests every target but publishes nothing.
+# The same tag publishes the Python client (python/, design 697) to
+# TestPyPI, verifies it on Linux, macOS and Windows against the release's
+# binaries, then publishes it to PyPI, by trusted publishing (no tokens).
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
@@ -404,3 +407,29 @@ jobs:
             echo "::error::the integration tests were skipped"
             exit 1
           fi
+
+  pypi:
+    # Design 697: the verified files to PyPI by trusted publishing (OIDC;
+    # the owner registers the pending publisher once: project ryucad,
+    # workflow release.yml, environment pypi). Nothing reaches PyPI unless
+    # the GitHub release, the installers and the TestPyPI verification on
+    # three platforms passed. Pre-releases publish as rcN, which
+    # `pip install ryucad` never picks. The action's PEP 740 attestations
+    # are kept. skip-existing: a re-run finishes a release that failed later.
+    name: publish to PyPI
+    if: always() && github.ref_type == 'tag' && needs.python-verify.result == 'success'
+    needs: [python-verify]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ryucad
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

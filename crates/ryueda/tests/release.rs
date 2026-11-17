@@ -470,6 +470,47 @@ fn ryucads_release_verifies_the_package_on_three_platforms() {
     assert!(!verify.contains("id-token"), "python-verify publishes nothing");
 }
 
+/// Design 697: PyPI only after the GitHub release, the installers and the
+/// TestPyPI verification, by trusted publishing; no release workflow
+/// reads a secret, only these two jobs may mint an OIDC token, and
+/// ryueda's and ryudfm's releases never publish the Python package.
+#[test]
+fn ryucads_release_publishes_to_pypi_by_trusted_publishing() {
+    let release = workflow("release.yml");
+    let pypi = job(&release, "pypi");
+    for want in [
+        "github.ref_type == 'tag'",
+        "needs.python-verify.result == 'success'",
+        "needs: [python-verify]",
+        "name: pypi",
+        "url: https://pypi.org/p/ryucad",
+        "id-token: write",
+        "name: python-dist",
+        "uses: pypa/gh-action-pypi-publish@release/v1",
+        "skip-existing: true",
+    ] {
+        assert!(pypi.contains(want), "release.yml's pypi job lacks {want}");
+    }
+    assert!(
+        !pypi.contains("repository-url"),
+        "the pypi job uploads to PyPI itself"
+    );
+    assert_eq!(
+        release.matches("id-token: write").count(),
+        2,
+        "only testpypi and pypi may mint an OIDC token"
+    );
+    for file in ["release.yml", "ryueda-release.yml", "ryudfm-release.yml"] {
+        let text = workflow(file);
+        for word in ["secrets.", "password:", "api-token"] {
+            assert!(!text.contains(word), "{file} reads a secret ({word})");
+        }
+        if file != "release.yml" {
+            assert!(!text.contains("pypi"), "{file} publishes the Python package");
+        }
+    }
+}
+
 /// The devcontainer's .debs are cached from main, whose caches every tag's
 /// run can restore, under the path and key full.yml restores: a tag's own
 /// save serves only that tag (#677).
