@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The folders a project is made of, below its root.
-pub const FOLDERS: [&str; 7] = [
+pub const FOLDERS: [&str; 8] = [
     crate::conn::DESIGNS,
     crate::conn::RAILS,
     crate::conn::CLASSES,
@@ -20,6 +20,7 @@ pub const FOLDERS: [&str; 7] = [
     library::DIR,
     crate::pdm::PROPERTIES,
     crate::pdm::RELEASES,
+    crate::board::BOARDS,
 ];
 
 impl ryu_git::Layout for crate::Eda {
@@ -40,7 +41,8 @@ pub type Repo = ryu_git::Repo<crate::Eda>;
 /// `designs/`, `rails/` or `classes/`, a block's files and its parts'
 /// (`blocks/<b>/<f>`, `blocks/<b>/<dir>/<f>`), and the library's
 /// (`library/<f>`, `library/<dir>/<f>`), and PDM's (`properties/<f>`,
-/// `releases/<part>/<f>`; `ryupdm.json` is a root file).
+/// `releases/<part>/<f>`; `ryupdm.json` is a root file), and boards'
+/// (`boards/<b>/board.json`, `boards/<b>/placements/<o>.json`).
 pub fn project_file(rel: &str) -> bool {
     if ROOT_FILES.contains(&rel) {
         return true;
@@ -55,6 +57,8 @@ pub fn project_file(rel: &str) -> bool {
             crate::pdm::PROPERTIES,
         ]
         .contains(d),
+        [d, _, f] if *d == crate::board::BOARDS => *f == crate::board::BOARD_FILE,
+        [d, _, p, _] if *d == crate::board::BOARDS => *p == crate::board::PLACEMENTS,
         [d, _, _] => *d == crate::conn::BLOCKS || *d == library::DIR || *d == crate::pdm::RELEASES,
         [d, _, _, _] => *d == crate::conn::BLOCKS,
         _ => false,
@@ -355,6 +359,8 @@ pub(crate) mod tests {
             "library/standards.json",
             "library/symbols/r.json",
             "library/models/r.step",
+            "boards/b/board.json",
+            "boards/b/placements/s1.u1.json",
         ] {
             assert!(project_file(f), "{f}");
         }
@@ -363,6 +369,10 @@ pub(crate) mod tests {
             "designs/x/d.json",
             "blocks/b/components/x/c.json",
             "library/a/b/c.json",
+            "boards/b.json",
+            "boards/b/other/x.json",
+            "boards/b/notes.json",
+            "boards/b/placements/x/o.json",
         ] {
             assert!(!project_file(f), "{f}");
         }

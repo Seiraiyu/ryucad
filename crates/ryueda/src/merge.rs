@@ -349,6 +349,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         ryupdm::record::RELEASE_KIND => ryupdm::record::PRODUCT_FORMAT,
         ryupdm::record::OBSOLETE_KIND => ryupdm::record::FORMAT,
         crate::project::LOCK_KIND => ryu_doc::lock::FORMAT,
+        crate::board::BOARD_KIND | crate::board::PLACEMENT_KIND => crate::board::FORMAT,
         _ => return None,
     })
 }
@@ -482,6 +483,12 @@ pub fn settle(v: &Value, pointer: &str, kind: Kind, x: Option<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_newer_board_merges_as_text() {
+        assert_eq!(newest(crate::board::BOARD_KIND), Some(crate::board::FORMAT));
+        assert_eq!(newest(crate::board::PLACEMENT_KIND), Some(crate::board::FORMAT));
+    }
 
     #[test]
     fn a_lock_merges_per_label() {
