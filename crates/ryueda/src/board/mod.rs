@@ -5,6 +5,7 @@
 pub mod cmd;
 pub mod file;
 pub mod graphic;
+pub mod layout;
 pub mod load;
 pub mod occ;
 pub mod opening;
