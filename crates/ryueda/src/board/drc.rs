@@ -6,11 +6,12 @@
 use super::connect::{self, Connectivity};
 use super::layout::Key;
 use super::load::BoardFiles;
-use super::occ::Occ;
-use super::preset::Preset;
+use super::occ::{self, Occ};
+use super::preset::{self, Preset};
 use super::shapes::BoardShapes;
-use crate::error::Code;
+use crate::error::{Code, Result};
 use crate::fault::Severity;
+use crate::project::Project;
 use rayon::prelude::*;
 use ryu_board::geom::{Edge, Nm, Pen, Stroke};
 use ryu_board::model::Polarity;
@@ -22,6 +23,7 @@ use ryu_copper::poly::{self, FlattenOptions};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// One finding on a board.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -779,6 +781,89 @@ pub fn courtyards(s: &BoardShapes, board: &str) -> Vec<Finding> {
     out
 }
 
+/// A board checked: its shapes, its copper connected and compared, its
+/// findings sorted, and whether a placement's pads were left out.
+pub struct BoardCheck {
+    pub shapes: Arc<BoardShapes>,
+    pub conn: Connectivity,
+    pub preset: &'static Preset,
+    pub findings: Vec<Finding>,
+    pub incomplete: bool,
+}
+
+impl BoardCheck {
+    pub fn errors(&self) -> usize {
+        self.findings.iter().filter(|f| f.is_error()).count()
+    }
+
+    pub fn warnings(&self) -> usize {
+        self.findings.len() - self.errors()
+    }
+}
+
+/// What every rule reads.
+struct Ctx<'a> {
+    board: &'a str,
+    files: &'a BoardFiles,
+    occs: &'a [Occ<'a>],
+    shapes: &'a BoardShapes,
+    conn: &'a Connectivity,
+    preset: &'a Preset,
+    incomplete: bool,
+}
+
+type Rule = fn(&Ctx) -> Vec<Finding>;
+
+const RULES: [Rule; 10] = [
+    |c| placements(c.board, c.files, c.occs, c.shapes),
+    |c| copper(c.conn, c.incomplete),
+    |c| clearance(c.conn, c.preset),
+    |c| mask_clearance(c.conn, c.shapes, c.preset),
+    |c| widths(c.shapes, c.board, c.preset),
+    |c| drills(c.shapes, c.board, c.preset),
+    |c| rings(c.conn, c.shapes, c.preset),
+    |c| hole_spacing(c.shapes, c.board, c.preset),
+    |c| edges(c.conn, c.shapes, c.preset),
+    |c| courtyards(c.shapes, c.board),
+];
+
+/// A board checked from shapes already built. A design that doesn't
+/// flatten refuses with its faults.
+pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Result<BoardCheck> {
+    let file = b.board.item.as_ref().map_err(Clone::clone)?;
+    let preset = preset::by_name(&file.preset).unwrap_or(preset::DEFAULT);
+    let (_, occs) = occ::occurrences(p, &file.design)?;
+    let board = b.id.to_string();
+    let conn = connect::connect(&board, &shapes);
+    let incomplete = shapes
+        .notices
+        .iter()
+        .any(|n| n.error.code == Code::BoardFootprintUnsupported);
+    let ctx = Ctx {
+        board: &board,
+        files: b,
+        occs: &occs,
+        shapes: &shapes,
+        conn: &conn,
+        preset,
+        incomplete,
+    };
+    let mut findings: Vec<Finding> = RULES.par_iter().flat_map_iter(|r| r(&ctx)).collect();
+    sort(&mut findings);
+    Ok(BoardCheck {
+        shapes: shapes.clone(),
+        conn,
+        preset,
+        findings,
+        incomplete,
+    })
+}
+
+/// A board checked from its files.
+pub fn check(p: &Project, b: &BoardFiles) -> Result<BoardCheck> {
+    check_shapes(p, b, Arc::new(super::shapes::build(p, b)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,5 +1197,29 @@ mod tests {
         let f = courtyards(&s, "b");
         assert_eq!(codes(&f), [Code::DrcCourtyardOpen]);
         assert_eq!(f[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn a_placed_board_checks_the_same_on_one_thread_and_eight() {
+        let (_d, p, id) = crate::board::shapes::tests::placed();
+        let run = |n| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let c = check(&p, &p.boards[&id]).unwrap();
+                    serde_json::to_string(&c.findings).unwrap()
+                })
+        };
+        let one = run(1);
+        assert_eq!(one, run(8));
+        let c = check(&p, &p.boards[&id]).unwrap();
+        // Nothing is routed: every net with two pads or more is open.
+        assert!(c.findings.iter().any(|f| f.code == Code::NetOpen), "{one}");
+        assert!(c.findings.iter().all(|f| f.code != Code::BoardUnplaced));
+        let mut sorted = c.findings.clone();
+        sort(&mut sorted);
+        assert_eq!(sorted, c.findings);
     }
 }
