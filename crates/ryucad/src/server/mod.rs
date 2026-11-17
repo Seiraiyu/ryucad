@@ -646,8 +646,14 @@ pub fn answer_live(
         l.announce(&before);
         // A window's own write is told before it is answered, as it was
         // before #849: the window's next write names the revision this
-        // one made, so it must not wait on the watcher's quiet.
-        let own = (mutates || switches) && me.is_some_and(|m| l.hub.watches(m));
+        // one made, so it must not wait on the watcher's quiet. A window
+        // is a human participant that is subscribed; agents share a name
+        // (`ryucad watch` and a script are both `agent` by default), so
+        // an agent's write is never told on its path.
+        let own = (mutates || switches)
+            && me.is_some_and(|m| {
+                l.get(m).is_ok_and(|p| p.kind == live::Kind::Human) && l.hub.watches(m)
+            });
         if l.hub.is_watched() && !own {
             // Subscribers hear of it from the daemon's watcher once the
             // daemon is quiet, or within `daemon.publish_max_ms` (#849,

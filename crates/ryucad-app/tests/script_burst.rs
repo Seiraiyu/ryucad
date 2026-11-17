@@ -376,10 +376,17 @@ fn publish_max_ms() -> f64 {
         .unwrap_or(1000.0)
 }
 
+/// Every publish but the watcher's polls: the watcher's coalesced ones
+/// and any a request made on its path, timed under its method (a script
+/// sharing a watch's name must not publish on its path, #849). Less the
+/// run's first `part list`, which starts the daemon before anyone
+/// subscribes and so notes the state on its path.
 fn publishes(t: &Value) -> u64 {
-    t["methods"]["daemon.publish"]["publishes"]
-        .as_u64()
-        .unwrap_or(0)
+    let methods = t["methods"].as_object().into_iter().flatten();
+    methods
+        .filter(|(m, _)| !matches!(m.as_str(), "daemon.poll" | "part.list"))
+        .map(|(_, v)| v["publishes"].as_u64().unwrap_or(0))
+        .sum()
 }
 
 /// Rounds of the three configurations: the bar is judged on the median

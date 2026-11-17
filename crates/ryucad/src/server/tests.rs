@@ -4994,3 +4994,53 @@ fn a_watched_write_is_published_by_the_watcher_not_the_request() {
     call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
     assert!(live.coalesce.pending().is_none());
 }
+
+/// A window's own write is told before it is answered; an agent's, even
+/// one subscribed under the same name (`ryucad watch` and a script are
+/// both `agent`), waits for the watcher (#849).
+#[test]
+fn only_a_windows_own_write_is_told_on_its_path() {
+    let (_dir, mut s) = fresh();
+    call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+    let mut live = Live::new();
+    let a = live.hello(live::Kind::Agent, Some("agent"), None).unwrap();
+    let watch = live.hub.subscribe(&a, &[Topic::Model]);
+    crate::server::publish(&mut live, &mut s);
+    drained(&watch);
+    let add =
+        |id: &str| json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": "5 mm"}});
+    call_live(&mut s, &mut live, Some(&a), "feature.add", add("s1")).unwrap();
+    assert!(live.coalesce.pending().is_some(), "an agent's write waits");
+    assert!(
+        drained(&watch)
+            .iter()
+            .all(|v| v["method"] != "model.changed")
+    );
+    crate::server::flush(&mut live, &mut s);
+    assert!(
+        drained(&watch)
+            .iter()
+            .any(|v| v["method"] == "model.changed")
+    );
+    // A window: a human, subscribed, editing.
+    let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+    let window = live.hub.subscribe(&h, &[Topic::Model]);
+    call_live(
+        &mut s,
+        &mut live,
+        Some(&h),
+        "participant.mode",
+        json!({"mode": "edit"}),
+    )
+    .unwrap();
+    call_live(&mut s, &mut live, Some(&h), "feature.add", add("s2")).unwrap();
+    assert!(
+        live.coalesce.pending().is_none(),
+        "a window's write is told"
+    );
+    assert!(
+        drained(&window)
+            .iter()
+            .any(|v| v["method"] == "model.changed")
+    );
+}
