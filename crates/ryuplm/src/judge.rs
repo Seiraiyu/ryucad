@@ -9,7 +9,6 @@ use crate::id::Id;
 use crate::load::Catalogue;
 use crate::source::Source;
 use ryupdm::config::Config;
-use serde_json::Value;
 use std::path::PathBuf;
 
 /// What judging reads besides the catalogue's files: other catalogues to
@@ -18,6 +17,9 @@ use std::path::PathBuf;
 pub struct Context {
     /// Folders searched for other catalogues (`--in`, `pdm.dependents`).
     pub elsewhere: Vec<PathBuf>,
+    /// The catalogue's folder on disk, `None` for files in memory: other
+    /// catalogues in its work tree are compared too.
+    pub here: Option<PathBuf>,
 }
 
 fn err(e: Error) -> Fault {
@@ -58,10 +60,13 @@ pub fn all(src: &dyn Source, cat: &Catalogue, cx: &Context) -> Vec<Fault> {
 fn class(cat: &Catalogue, id: &Id) -> Option<Error> {
     let c = cat.items[id].class.as_ref()?;
     (!cat.manifest.classes.contains_key(c)).then(|| {
-        Error::new(Code::ItemClassUnknown, format!("item {id}: class {c:?} isn't declared in ryuplm.json"))
-            .with("item", id)
-            .with("pointer", "/class")
-            .with("class", c)
+        Error::new(
+            Code::ItemClassUnknown,
+            format!("item {id}: class {c:?} isn't declared in ryuplm.json"),
+        )
+        .with("item", id)
+        .with("pointer", "/class")
+        .with("class", c)
     })
 }
 
@@ -94,7 +99,10 @@ fn properties(src: &dyn Source, cat: &Catalogue, config: &Config) -> Vec<Error> 
                     out.push(
                         Error::new(
                             Code::PropertyUnknown,
-                            format!("item {id}: class {} doesn't take {name}", item.class.as_deref().unwrap_or("")),
+                            format!(
+                                "item {id}: class {} doesn't take {name}",
+                                item.class.as_deref().unwrap_or("")
+                            ),
                         )
                         .with("item", id)
                         .with("property", name)
@@ -110,8 +118,28 @@ fn properties(src: &dyn Source, cat: &Catalogue, config: &Config) -> Vec<Error> 
 
 /// Numbers: duplicates, schemes and other catalogues.
 fn numbers(src: &dyn Source, cat: &Catalogue, config: &Config, cx: &Context) -> Vec<Fault> {
-    let _ = (src, cx);
-    crate::numbers::unschemed(cat, config).into_iter().map(warn).collect()
+    let mut out: Vec<Fault> = crate::numbers::duplicates(src, cat)
+        .into_iter()
+        .map(err)
+        .collect();
+    out.extend(crate::numbers::unschemed(cat, config).into_iter().map(warn));
+    let others = match &cx.here {
+        Some(h) => crate::numbers::others(h, &cx.elsewhere),
+        None => cx
+            .elsewhere
+            .iter()
+            .flat_map(|f| {
+                ryupdm::dependents::projects_under(f, crate::catalogue::MANIFEST)
+                    .unwrap_or_default()
+            })
+            .collect(),
+    };
+    out.extend(
+        crate::numbers::elsewhere(cat, &others)
+            .into_iter()
+            .map(warn),
+    );
+    out
 }
 
 /// The declared properties a release of `id` needs that it lacks: those
@@ -132,9 +160,6 @@ pub fn missing(cat: &Catalogue, config: &Config, id: &Id) -> Vec<String> {
         .collect()
 }
 
-#[allow(dead_code)]
-fn _value(_: &Value) {}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -145,15 +170,30 @@ pub(crate) mod tests {
 
     /// A catalogue's files: `classes` in its manifest, `config` as its
     /// `ryupdm.json` (when given), and `items`.
-    pub(crate) fn files(classes: &[(&str, Option<&[&str]>)], config: Option<Value>, items: &[(&str, Item)]) -> BTreeMap<String, Vec<u8>> {
-        let mut m = crate::catalogue::Manifest::new(crate::catalogue::tests::pid(1), crate::units::Unit::Mm);
+    pub(crate) fn files(
+        classes: &[(&str, Option<&[&str]>)],
+        config: Option<serde_json::Value>,
+        items: &[(&str, Item)],
+    ) -> BTreeMap<String, Vec<u8>> {
+        let mut m = crate::catalogue::Manifest::new(
+            crate::catalogue::tests::pid(1),
+            crate::units::Unit::Mm,
+        );
         for (n, p) in classes {
-            m.classes.insert((*n).into(), Class { properties: p.map(|l| l.iter().map(|s| (*s).to_owned()).collect()) });
+            m.classes.insert(
+                (*n).into(),
+                Class {
+                    properties: p.map(|l| l.iter().map(|s| (*s).to_owned()).collect()),
+                },
+            );
         }
         let mut f = BTreeMap::new();
         f.insert(MANIFEST.to_owned(), m.to_text().into_bytes());
         if let Some(c) = config {
-            f.insert("ryupdm.json".to_owned(), crate::canonical::to_string(&c).into_bytes());
+            f.insert(
+                "ryupdm.json".to_owned(),
+                crate::canonical::to_string(&c).into_bytes(),
+            );
         }
         for (id, item) in items {
             let id = Id::parse(id, "item").unwrap();
@@ -168,7 +208,11 @@ pub(crate) mod tests {
             .iter()
             .map(|x| {
                 (
-                    serde_json::to_value(x.error.code).unwrap().as_str().unwrap().to_owned(),
+                    serde_json::to_value(x.error.code)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
                     if x.is_error() { "error" } else { "warning" },
                     x.error.details["item"].as_str().unwrap_or("").to_owned(),
                 )
@@ -194,7 +238,12 @@ pub(crate) mod tests {
         let f = files(
             &[("fastener", Some(&["thread"])), ("label", None)],
             Some(config),
-            &[("0000000000001", a), ("0000000000002", b), ("0000000000003", c), ("0000000000004", d)],
+            &[
+                ("0000000000001", a),
+                ("0000000000002", b),
+                ("0000000000003", c),
+                ("0000000000004", d),
+            ],
         );
         assert_eq!(
             codes(&f),
