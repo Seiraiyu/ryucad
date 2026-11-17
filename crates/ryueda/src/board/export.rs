@@ -9,8 +9,8 @@
 //! committed.
 
 use super::cmd;
-use super::{assembly, fab, occ, preset};
 use super::shapes::BoardShapes;
+use super::{assembly, fab, occ, preset};
 use crate::error::{Code, Error, Result};
 use crate::pdm::bom::COLUMNS;
 use crate::session::Session;
@@ -25,10 +25,16 @@ pub const MANIFEST: &str = "manifest.json";
 /// The vendor in `.GenerationSoftware`.
 pub const VENDOR: &str = "Seiraiyu";
 
-/// How slots are written, settled by plan 5.C's Task 23 against gerbv and
-/// JLC's stated format (`docs/claude/ryueda-board.md`): JLC's KiCad guide
-/// asks for "alternate drill mode for oval holes", the drilled slot (G85).
-// PROVISIONAL until Task 23 sees gerbv read it cleanly.
+/// How slots are written, settled against gerbv and JLC's stated format
+/// (`docs/claude/ryueda-board.md`).
+// Settled in plan 5.C (2026-11-17): gerbv 2.10.0 reads drilled slots
+// (G85) without a warning and its raster matches, and refuses routed ones
+// ("Unsupported G00 (rout mode)", M15, G01, M16). JLC's "How to generate
+// Gerber and drill files in KiCad 9"
+// (https://jlcpcb.com/help/article/how-to-generate-gerber-and-drill-files-in-kicad-9,
+// read by the coxswain on 2026-11-17) says "Use alternate drill mode for
+// oval holes": "Tick to generate accurate slots and oval holes", KiCad's
+// G85 form; no JLC page mentions M15/M16.
 pub const SLOTS: SlotForm = SlotForm::G85;
 
 /// The manifest's name for [`SLOTS`].
@@ -167,9 +173,7 @@ pub fn package(
             text: assembly::pos_form(&rows, form),
         });
     }
-    let listed = |f: &File| {
-        json!({"name": f.name, "function": f.function, "blake3": hash(&f.text), "bytes": f.text.len()})
-    };
+    let listed = |f: &File| json!({"name": f.name, "function": f.function, "blake3": hash(&f.text), "bytes": f.text.len()});
     let manifest = json!({
         "schema": 1,
         "board": format!("board/{id}"),
@@ -218,26 +222,48 @@ mod tests {
         let s = crate::board::shapes::build(&p, &p.boards[&id]).unwrap();
         let files = fabrication("b", &s, "9.9.9").unwrap();
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(&names[..9], [
-            "b-copper-top.gtl", "b-copper-bottom.gbl", "b-mask-top.gts", "b-mask-bottom.gbs",
-            "b-paste-top.gtp", "b-paste-bottom.gbp", "b-silk-top.gto", "b-silk-bottom.gbo",
-            "b-profile.gm1",
-        ]);
+        assert_eq!(
+            &names[..9],
+            [
+                "b-copper-top.gtl",
+                "b-copper-bottom.gbl",
+                "b-mask-top.gts",
+                "b-mask-bottom.gbs",
+                "b-paste-top.gtp",
+                "b-paste-bottom.gbp",
+                "b-silk-top.gto",
+                "b-silk-bottom.gbo",
+                "b-profile.gm1",
+            ]
+        );
         for f in &files[..9] {
-            let img = ryu_gerber::read::gerber(&f.text).unwrap_or_else(|e| panic!("{}: {e}", f.name));
+            let img =
+                ryu_gerber::read::gerber(&f.text).unwrap_or_else(|e| panic!("{}: {e}", f.name));
             assert_eq!(img.attrs[".GenerationSoftware"], "Seiraiyu,ryueda,9.9.9");
         }
         let top = ryu_gerber::read::gerber(&files[0].text).unwrap();
-        let pads = top.objects.iter().filter(|o| o.attrs.contains_key(".P")).count();
+        let pads = top
+            .objects
+            .iter()
+            .filter(|o| o.attrs.contains_key(".P"))
+            .count();
         assert_eq!(pads, s.pads.iter().filter(|p| p.top).count());
         for f in files.iter().filter(|f| f.name.ends_with(".drl")) {
             ryu_gerber::read::excellon(&f.text).unwrap_or_else(|e| panic!("{}: {e}", f.name));
         }
         // The same board, the same bytes, on one thread and eight.
         let run = |n| {
-            rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap().install(|| {
-                fabrication("b", &s, "9.9.9").unwrap().into_iter().map(|f| f.text).collect::<Vec<_>>()
-            })
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| {
+                    fabrication("b", &s, "9.9.9")
+                        .unwrap()
+                        .into_iter()
+                        .map(|f| f.text)
+                        .collect::<Vec<_>>()
+                })
         };
         assert_eq!(run(1), run(8));
     }
@@ -249,6 +275,9 @@ mod tests {
             "b-copper-top.gtl",
         );
         assert_eq!(e.code, Code::BoardOutOfRange);
-        assert_eq!(gerber_error(ryu_gerber::Error::Holes, "x").code, Code::Internal);
+        assert_eq!(
+            gerber_error(ryu_gerber::Error::Holes, "x").code,
+            Code::Internal
+        );
     }
 }
