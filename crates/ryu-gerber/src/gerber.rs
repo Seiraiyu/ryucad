@@ -219,6 +219,12 @@ pub fn write(layer: &Layer, sw: &Software) -> Result<String, Error> {
             }
         }
     }
+    // A layer that flashes and draws nothing (regions only, or empty)
+    // still defines one aperture, never used: readers such as gerbv take
+    // a file with no `%AD` for RS-274D and warn.
+    if apertures.is_empty() {
+        apertures.push((Aperture::Circle(10_000), None));
+    }
     let number = |t: Aperture, f: Option<&str>| -> usize {
         10 + apertures
             .iter()
@@ -471,6 +477,32 @@ mod tests {
             write(&one(no_width), &sw()),
             Err(Error::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn a_layer_of_regions_or_nothing_still_defines_an_aperture() {
+        // Readers (gerbv among them) take a file with no %AD for RS-274D;
+        // one unused aperture says it is RS-274X.
+        let rounded = symbol_shape(&ryu_board::symbol::pad::roundrect(
+            1_000_000, 600_000, 250_000,
+        ))
+        .unwrap();
+        for items in [
+            vec![],
+            vec![Item {
+                shape: rounded,
+                ..Item::default()
+            }],
+        ] {
+            let layer = Layer {
+                function: "Paste,Top".into(),
+                negative: false,
+                items,
+            };
+            let text = write(&layer, &sw()).unwrap();
+            assert!(text.contains("%ADD10C,0.010000*%\n"), "{text}");
+            assert_eq!(text.matches("%ADD").count(), 1, "{text}");
+        }
     }
 
     #[test]
