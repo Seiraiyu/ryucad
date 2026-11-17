@@ -326,6 +326,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.nav_cube", "Navigation cube", View).toggle(),
     cmd("view.triad", "Axis triad", View).toggle(),
     cmd("view.origin", "Origin", View).toggle(),
+    // #812: keep what agents change in frame (`view.follow_work`).
+    cmd("view.follow_work", "Follow agents' work", View).toggle(),
     cmd("view.show", "Show", View).choices(),
     // Every row of the tree opened or closed by hand (#540): in the Edit
     // menu beside Find in tree, listed here for the rows' menus' order.
@@ -627,6 +629,8 @@ pub struct State {
     pub nav_cube: bool,
     pub triad: bool,
     pub origin: bool,
+    /// View > Follow agents' work is on (`view.follow_work`).
+    pub follow_work: bool,
     pub measuring: bool,
     /// The view selector, or Select other's list, is open.
     pub selector: bool,
@@ -869,6 +873,7 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
         "view.nav_cube" => s.nav_cube,
         "view.triad" => s.triad,
         "view.origin" => s.origin,
+        "view.follow_work" => s.follow_work,
         "measure.tool" => s.measuring,
         "select.faces" => s.filter.faces,
         "select.edges" => s.filter.edges,
@@ -1283,6 +1288,13 @@ mod tests {
         }
         assert_eq!(checked("view.edges", &s), Some(true));
         assert_eq!(checked("view.origin", &s), Some(false));
+        // #812: off until the person turns it on.
+        assert_eq!(checked("view.follow_work", &s), Some(false));
+        let on = State {
+            follow_work: true,
+            ..State::default()
+        };
+        assert_eq!(checked("view.follow_work", &on), Some(true));
     }
 
     #[test]

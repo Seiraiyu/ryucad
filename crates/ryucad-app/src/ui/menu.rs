@@ -165,7 +165,7 @@ fn group_of(id: &str) -> u8 {
         "edit.preferences" => 1,
         "view.fit" | "view.fit_selection" | "view.quality" | "view.edges" | "view.sketches"
         | "view.datums" | "view.threads" | "view.nav_cube" | "view.triad" | "view.origin"
-        | "view.show" | "view.show_all" => 1,
+        | "view.follow_work" | "view.show" | "view.show_all" => 1,
         "view.compare_head" | "view.compare_with" | "view.compare_stop" => 2,
         "view.panels" | "view.reset_layout" => 3,
         "measure.clearance" | "tools.interference" => 1,

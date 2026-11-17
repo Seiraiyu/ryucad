@@ -36,9 +36,19 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
             followable: p.camera.is_some(),
         })
         .collect();
-    if let Some(f) = ryu_app::people::strip(ui, &lines, ws.session.following.as_deref()) {
-        ws.session.following = f;
-    }
+    ui.horizontal(|ui| {
+        if let Some(f) = ryu_app::people::strip(ui, &lines, ws.session.following.as_deref()) {
+            ws.follow(f);
+        }
+        // View > Follow agents' work, where the people are (#812).
+        let on = ws.follows_work();
+        let r = ui
+            .selectable_label(on, "Follow work")
+            .on_hover_text("Keep what agents change in frame (View > Follow agents' work)");
+        if r.clicked() {
+            ws.set_config("view.follow_work", serde_json::json!(!on));
+        }
+    });
 }
 
 /// A compare: the revision, what differs and the colours that say so,
