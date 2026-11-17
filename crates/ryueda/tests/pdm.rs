@@ -776,11 +776,16 @@ fn boms_diffs_and_where_used_at_labels_and_in_checkouts() {
             daemon,
             &["where-used", &comp, "--in", other.to_str().unwrap()],
         );
+        // The folder comes back canonical: /private/var for /var on
+        // macOS, without \\?\ on Windows (#956).
+        let canonical =
+            |p: &std::path::Path| std::fs::canonicalize(p).ok().map(ryu_doc::source::plain);
+        let other_c = canonical(&other).unwrap();
         assert!(
-            w["working"].as_array().unwrap().iter().any(|r| r["folder"]
-                .as_str()
-                .unwrap()
-                .starts_with(other.to_str().unwrap())),
+            w["working"].as_array().unwrap().iter().any(|r| {
+                canonical(std::path::Path::new(r["folder"].as_str().unwrap()))
+                    .is_some_and(|f| f.starts_with(&other_c))
+            }),
             "{w}"
         );
         assert_eq!(w["dependents"].as_array().unwrap().len(), 1, "{w}");

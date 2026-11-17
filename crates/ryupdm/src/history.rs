@@ -117,6 +117,9 @@ pub struct Releases {
     pub tip_approvals: Option<Approvals>,
     /// The walk reached the end of a shallow clone's history.
     pub shallow: bool,
+    /// Every `ryupdm/` tag in the repository, every project's, by its
+    /// name without `refs/tags/`: what a new tag can't clash with (#844).
+    pub all_tags: std::collections::BTreeSet<String>,
 }
 
 /// How a release's tag stands.
@@ -487,12 +490,26 @@ pub fn tag_refs(repo: &gix::Repository) -> Result<TagRefs> {
     Ok(out)
 }
 
-/// Every `ryupdm/` tag, by `<part>/<label>`, with the commit it points at.
-pub fn tags(repo: &gix::Repository) -> Result<BTreeMap<String, Option<String>>> {
-    Ok(tag_refs(repo)?
-        .into_iter()
-        .map(|(k, (c, _))| (k, c))
-        .collect())
+/// The tag among `tags` (names without `refs/tags/`) that `name` can't sit
+/// beside in Git's ref store: one of `name`'s leading paths, or a tag
+/// below `name` as a folder (#844). `None` when `name` itself is there.
+pub fn tag_clash(tags: &std::collections::BTreeSet<String>, name: &str) -> Option<String> {
+    if tags.contains(name) {
+        return None;
+    }
+    let mut up = 0;
+    while let Some(i) = name[up..].find('/') {
+        up += i;
+        if tags.contains(&name[..up]) {
+            return Some(name[..up].to_owned());
+        }
+        up += 1;
+    }
+    let below = format!("{name}/");
+    tags.range(below.clone()..)
+        .next()
+        .filter(|t| t.starts_with(&below))
+        .cloned()
 }
 
 /// `ryupdm.json` at the commit `commit` (hex), for the project at
@@ -746,6 +763,8 @@ impl Releases {
     /// moved tag.
     pub fn read(repo: &gix::Repository, prefix: &str, config: &Config) -> Result<Releases> {
         let all = tag_refs(repo)?;
+        let all_tags: std::collections::BTreeSet<String> =
+            all.keys().map(|k| format!("{TAG_PREFIX}{k}")).collect();
         let mut refs: TagRefs = all
             .iter()
             .filter_map(|(k, v)| Some((scoped(prefix, k)?.to_owned(), v.clone())))
@@ -767,6 +786,7 @@ impl Releases {
                 prefix: prefix.to_owned(),
                 tags,
                 objects,
+                all_tags,
                 ..Releases::default()
             });
         };
@@ -891,6 +911,7 @@ impl Releases {
             approvals,
             tip_approvals,
             shallow,
+            all_tags,
         })
     }
 
