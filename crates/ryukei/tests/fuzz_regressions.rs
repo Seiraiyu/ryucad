@@ -16,6 +16,7 @@ use ryukei::offset::{offset_body_with, shell_with};
 use ryukei_testkit::boolean_bytes::boolean_case;
 use ryukei_testkit::crossing::{SelfUnionRun, self_union_run};
 use ryukei_testkit::heal_bytes::heal_case;
+use ryukei_testkit::nurbs_bytes::{self, Case};
 use ryukei_testkit::offset_bytes::{Op, offset_case_past};
 use ryukei_testkit::sweep_bytes::sweep;
 use ryukei_testkit::tolerant_bytes::{TolerantRun, tolerant_run};
@@ -781,6 +782,26 @@ fn a_minimum_on_a_fold_along_the_first_split() {
     projects_to(&s, Point3::new(6.0, -3.835294117647059, 6.0), (4.2514, 4.0));
 }
 
+/// #907: the `nurbs` target's find of 2026-11-15 (run 43751287168,
+/// `crash-a6856677…`). A grid sample lies at the query point itself, but
+/// the search answered a foot 1.23e-8 away at `(4.99936, 3.00001)`,
+/// beside the domain's corner, where the patch is crushed and Newton's
+/// steps stopped a resolution short.
+#[test]
+fn a_point_on_a_crushed_corner() {
+    let Some(Case::Surface(s, p)) = nurbs_bytes::case(&bytes(concat!(
+        "ffff012000ffffffffff3ddfff26ffffffffff241dffffffffffffffffffffd9d9d9d9d9d9",
+        "57555555a35555550578d9d9d9d9d9d9d9d9d9d9ffffdad1",
+    ))) else {
+        panic!("a surface");
+    };
+    let eps = ryukei::tol::LINEAR_RESOLUTION;
+    let foot = s.project(p);
+    assert_eq!(s.point(foot.param.0, foot.param.1), foot.point);
+    assert!(foot.distance <= sampled(&s, p, 8) + eps, "{foot:?}");
+    assert!(foot.distance <= sampled(&s, p, 400) + eps, "{foot:?}");
+}
+
 /// The `edit` target's find of 2026-11-11 (run 42952227583,
 /// `crash-7c8b16c0…`): a delete on a blended body whose re-trim resolved
 /// to a body with an inward region, which `repair::resolve`'s debug
@@ -887,6 +908,28 @@ fn the_tolerant_boolean_that_ran_out_of_memory_ends_typed() {
     assert!(s < RUNAWAY, "{s} s");
 }
 
+/// The `tolerant` target's out-of-memory unit in 30.D's third branch
+/// dispatch (run 44041318442, `oom-cc5efaca…`, 4,106 MB against its
+/// 4,096 MB limit under ASan): a tolerant boolean (first byte `0xfe`,
+/// even). In release it builds in 0.1 s at 10 MB: the session's RSS was
+/// ASan's (`kernel-work.md`, Fuzzing memory). It must refuse typed or
+/// build a sound body, in bounded time.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_tolerant_boolean_of_the_third_dispatch_ends() {
+    let _timed = timed();
+    let hex = concat!(
+        "fefefe0a17171717171717171717171717171717171717171717171717171717",
+        "171717171717171717c6171717171717171717171717171717",
+    );
+    let t = std::time::Instant::now();
+    let out = tolerant_run(&bytes(hex));
+    let s = t.elapsed().as_secs_f64();
+    eprintln!("{}…: {out:?} in {s:.1} s", &hex[..8]);
+    assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+    assert!(s < RUNAWAY, "{s} s");
+}
+
 /// #890: the `tolerant` target's find of 2026-11-14 (run 43551143856,
 /// `crash-d32c30b9…`): a tolerant boolean (first byte `0x1a`, even)
 /// whose result had face 0's domain bad (`BadDomain`). It must refuse
@@ -898,4 +941,55 @@ fn a_tolerant_boolean_whose_face_lost_its_domain() {
         "ebebebebebebebebebebebebebebebff05ebebebebebebebebebebebebeb",
     )));
     assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+}
+
+/// #909: the `tolerant` target's find of 2026-11-15 (run 43751287168,
+/// `crash-a723a281…`), a mutation of #890's input: the same
+/// torus and cone, with other tolerant directions. The result's faces 0
+/// and 1 overlapped (`check_intersections`: `FacesOverlap`). It must
+/// refuse typed or build a sound body.
+#[test]
+fn a_tolerant_cone_on_a_torus_whose_faces_overlapped() {
+    let out = tolerant_run(&bytes(concat!(
+        "1a4949ebebebebebebebebebebebebebebebebebebebebebebebebebebebebebeb",
+        "ebebebebebebebebebebebebebebebebebffffffffffdfffffffebebebebebeb",
+    )));
+    assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+}
+
+/// The `tolerant` target's find in 30.D's second branch dispatch (run
+/// 43941742240, `crash-78d2ac85…`): a block less a sphere on its corner,
+/// tolerant by 1e-7. A meridian edge of the sphere runs into a vertex
+/// 1.03e-7 off its pole, within the vertex's 1.55e-7 tolerance; the
+/// sphere face asked for boundary samples ever nearer the pole, round
+/// after round, and ended `BoundaryNotResolved`. A face still asking after
+/// the last round now takes the mesher's second try (the vertex on the
+/// pole), with a few rounds more.
+#[test]
+fn a_tolerant_vertex_beside_a_pole_meshes() {
+    let out = tolerant_run(&bytes(
+        "f8f8f8d8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f825f8f8f8f8f8f8f8f8f8f8f8f8f8f8f80a303d",
+    ));
+    assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+}
+
+/// #905: the `tolerant` target's finds in 30.C's hour-long sessions
+/// (`crash-269db946…` minimised to 38 bytes, and `crash-fa0042c1…`).
+/// Tolerant unions of a block and a sphere of radius 0.75 on one of its
+/// corners: the exact boolean meshes watertight, but the tolerant one's
+/// mesh had a non-manifold edge and two open ones where the sphere's
+/// three arcs meet the block's faces at tolerant vertices. It must refuse
+/// typed or build a sound body that meshes watertight.
+#[test]
+fn tolerant_unions_whose_meshes_opened() {
+    for hex in [
+        "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a282a2a2a2a2a2a2a2a2a2a2a2a282a2a28",
+        "363636363636363636363636363636363636363636363636363636363636363636f6cf79cfc7",
+        // #904: the nightly's crash-903ba247 (run 43672013789), the same
+        // family.
+        "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5afa2c0a",
+    ] {
+        let out = tolerant_run(&bytes(hex));
+        assert!(!matches!(out, TolerantRun::NoCase), "{hex}: {out:?}");
+    }
 }

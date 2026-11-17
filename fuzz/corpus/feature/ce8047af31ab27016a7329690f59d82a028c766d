@@ -1,0 +1,1 @@
+{"format": 2, "kind": "ryucad.feature", "type": "box", "params": {"x": "wall * 2", "y": "gap", "z": "wall + gap"}, "placement": {"origin": ["0 mm", "gap", "0 mm"], "x": [1, 0, 0], "z": [0, 0, 1]}, "operation": "join", "targets": ["b"]}

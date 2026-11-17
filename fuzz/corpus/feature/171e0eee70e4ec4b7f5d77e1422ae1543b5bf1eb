@@ -1,0 +1,20 @@
+{
+  "angle": "360 deg",
+  "axis": {
+    "at": "origin",
+    "instance": [
+      "i2"
+    ]
+  },
+  "count": "4",
+  "form": "circular",
+  "format": 4,
+  "instances": [
+    "i1"
+  ],
+  "kind": "ryucad.feature",
+  "skip": [
+    2
+  ],
+  "type": "instance_pattern"
+}

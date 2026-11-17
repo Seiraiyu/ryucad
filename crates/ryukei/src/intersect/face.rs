@@ -601,9 +601,13 @@ fn along_rims(
         return Ok(None);
     }
     let mut rims: Vec<(EdgeId, EdgeId, f64)> = Vec::new();
+    // A cancel stops the pairing, which charges nothing (plan 30.D: a
+    // loft's edge pairs ran minutes past a fuzz case's deadline).
+    let stop = || m.poll().is_err();
     for ea in edges(a) {
         for eb in edges(b) {
-            if let Some(gap) = edges_together((a.0, ea), (b.0, eb)) {
+            m.poll()?;
+            if let Some(gap) = edges_together((a.0, ea), (b.0, eb), &stop) {
                 let x = &a.0.edges[ea];
                 let p = a.0.curves[x.curve].point(0.5 * (x.interval[0] + x.interval[1]));
                 let normal = |s: &Surface| {
@@ -767,7 +771,11 @@ fn either_side(
 /// their tolerances, and every point of each certified within a reach of
 /// the other ([`within_reach`]), the least of a ladder from their
 /// tolerances' sum up to that touch reach. `None` otherwise.
-fn edges_together((ba, ea): (&Body, EdgeId), (bb, eb): (&Body, EdgeId)) -> Option<f64> {
+fn edges_together(
+    (ba, ea): (&Body, EdgeId),
+    (bb, eb): (&Body, EdgeId),
+    stop: &dyn Fn() -> bool,
+) -> Option<f64> {
     let (x, y) = (&ba.edges[ea], &bb.edges[eb]);
     let (ca, cb) = (&ba.curves[x.curve], &bb.curves[y.curve]);
     let (ta, tb) = (x.tolerance.get(), y.tolerance.get());
@@ -795,12 +803,12 @@ fn edges_together((ba, ea): (&Body, EdgeId), (bb, eb): (&Body, EdgeId)) -> Optio
     let mut r = (ta + tb).max(LINEAR_RESOLUTION);
     loop {
         let r_now = r.min(most);
-        if within_reach((ca, x.interval), (cb, y.interval), r_now)
-            && within_reach((cb, y.interval), (ca, x.interval), r_now)
+        if within_reach((ca, x.interval), (cb, y.interval), r_now, stop)
+            && within_reach((cb, y.interval), (ca, x.interval), r_now, stop)
         {
             return Some(r_now);
         }
-        if r_now >= most {
+        if r_now >= most || stop() {
             return None;
         }
         r *= 4.0;
@@ -828,8 +836,8 @@ fn beside_edge(
         let ends = (p0.distance(a) <= reach && p1.distance(b) <= reach)
             || (p0.distance(b) <= reach && p1.distance(a) <= reach);
         let ec = &body.curves[edge.curve];
-        ends && within_reach((curve, range), (ec, edge.interval), reach)
-            && within_reach((ec, edge.interval), (curve, range), reach)
+        ends && within_reach((curve, range), (ec, edge.interval), reach, &|| false)
+            && within_reach((ec, edge.interval), (curve, range), reach, &|| false)
     })
 }
 
@@ -840,11 +848,13 @@ fn beside_edge(
 /// by the interval enclosure of the derivative over the stretch (the sum
 /// of its components' magnitudes), is within `reach`: every point of the
 /// stretch is then that close. A stretch that doesn't pass is halved, down
-/// to `1 / 2^12` of the range; one that still doesn't is no proof.
+/// to `1 / 2^12` of the range; one that still doesn't is no proof. Nor is
+/// a search `stop` ends (a cancel).
 fn within_reach(
     (c, [c0, c1]): (&Curve, [f64; 2]),
     (other, range): (&Curve, [f64; 2]),
     reach: f64,
+    stop: &dyn Fn() -> bool,
 ) -> bool {
     const DEPTH: u32 = 12;
     let mut stack: Vec<([f64; 2], u32)> = (0..16)
@@ -854,6 +864,9 @@ fn within_reach(
         })
         .collect();
     while let Some(([s, t], depth)) = stack.pop() {
+        if stop() {
+            return false;
+        }
         let m = 0.5 * (s + t);
         let d = super::inface::edge_distance(other, range, c.point(m));
         let speed: f64 = c.jet_box([s.min(t), s.max(t)])[1]

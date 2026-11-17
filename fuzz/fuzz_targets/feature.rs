@@ -64,6 +64,11 @@
 //! a part `src` holding the base (design 521): it must build or give a
 //! structured error, never an internal one, and every body it leaves
 //! must pass the checks as any does.
+//! Each case runs under `ryukei_testkit::fuzz_case` (plan 30.D, #769): its
+//! rebuilds, interference and sweeps carry a job on the case's cancel
+//! flag, so they stop at its deadline, and its own checks and meshes share
+//! the case's budget too. A case stopped so ends there, as a typed stop
+//! (`cancelled`, `Cancelled` or `BudgetExceeded`), never a find.
 //! Any panic is a bug.
 
 #![no_main]
@@ -75,15 +80,30 @@ use ryucad::doc::id::Id;
 use ryucad::doc::project::Part;
 use ryucad::doc::sketch::Geometry;
 use ryucad::expr::Env;
-use ryucad::rebuild::{Output, rebuild_part};
+use ryucad::motion::Job;
+use ryucad::rebuild::{Output, Run, rebuild_part_in};
 use ryucad::units::Unit;
-use ryukei::check::{Fault, check, check_intersections};
-use ryukei::mesh::{MeshParams, check_mesh, tessellate};
+use ryukei::check::{Fault, check, check_intersections_with};
+use ryukei::mesh::{MeshParams, check_mesh, tessellate_with};
+use ryukei_testkit::FuzzCase;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 fn id(s: &str) -> Id {
     Id::parse(s, "feature").unwrap()
+}
+
+/// A kernel call stopped by the fuzz case: its deadline or budget.
+fn stopped(e: &ryukei::Error) -> bool {
+    matches!(
+        e,
+        ryukei::Error::Cancelled | ryukei::Error::BudgetExceeded { .. }
+    )
+}
+
+/// A ryucad request stopped by the fuzz case's deadline.
+fn cancelled(e: &ryucad::error::Error) -> bool {
+    e.code == ryucad::error::Code::Cancelled
 }
 
 /// The project's parameters every fuzzed feature may read.
@@ -323,7 +343,7 @@ fn part(f: Feature, reference: bool, placed: bool) -> Part {
 /// `asm` of a project with part `fz` (the base) and an assembly `sub`
 /// placing `asm`; a mate or a pattern follows instances `i1` (free, 20 mm
 /// up) and `i2` (fixed) of `fz`.
-fn assemble(written: &str, after_instances: bool) {
+fn assemble(written: &str, after_instances: bool, job: &Job) {
     use ryucad::assembly::{Rebuild, Store};
     use ryucad::error::{Code, Error};
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -383,11 +403,13 @@ fn assemble(written: &str, after_instances: bool) {
         ))
     });
     let mut r = Rebuild::new(&project, &pins, Store::default());
+    r.job = job.clone();
     for asm in ["asm", "sub"] {
-        let result = r
-            .result(&Id::parse(asm, "part").unwrap())
-            .expect("assemblies rebuild")
-            .clone();
+        let result = match r.result(&Id::parse(asm, "part").unwrap()) {
+            Ok(result) => result.clone(),
+            Err(e) if cancelled(&e) => return,
+            Err(e) => panic!("assemblies rebuild: {e:?}"),
+        };
         let sound = |p: &ryucad::assembly::Placed| {
             for o in &p.model.occurrences {
                 let pose = ryucad::assembly::rigid_pose(&o.pose);
@@ -446,16 +468,30 @@ fn assemble(written: &str, after_instances: bool) {
             }
         }
         let part = Id::parse(asm, "part").unwrap();
-        let model = r
-            .model(&part, &ryucad::doc::assembly::Rev::Working)
-            .expect("its model");
+        let model = match r.model(&part, &ryucad::doc::assembly::Rev::Working) {
+            Ok(model) => model,
+            Err(e) if cancelled(&e) => return,
+            Err(e) => panic!("its model: {e:?}"),
+        };
         let found = |cache: &mut ryucad::interference::Cache| {
-            ryucad::interference::find(&part, &model, &[], cache).expect("interference")
+            ryucad::interference::find_for(&part, &model, &[], cache, job)
         };
         let mut cache = ryucad::interference::Cache::default();
-        let v = found(&mut cache);
-        assert_eq!(found(&mut cache), v, "from what it cached");
-        assert_eq!(found(&mut Default::default()), v, "from nothing");
+        let v = match found(&mut cache) {
+            Ok(v) => v,
+            Err(e) if cancelled(&e) => return,
+            Err(e) => panic!("interference: {e:?}"),
+        };
+        for (again, how) in [
+            (found(&mut cache), "from what it cached"),
+            (found(&mut Default::default()), "from nothing"),
+        ] {
+            match again {
+                Ok(w) => assert_eq!(w, v, "{how}"),
+                Err(e) if cancelled(&e) => return,
+                Err(e) => panic!("interference {how}: {e:?}"),
+            }
+        }
         // Clearances likewise, each a finite distance with its bound, and
         // a pair interference finds sharing a volume at 0 when measured.
         let unit = ryucad::units::Unit::Mm;
@@ -531,22 +567,25 @@ fn assemble(written: &str, after_instances: bool) {
                             interference: i,
                             clearance: c,
                         },
-                        &ryucad::motion::Job::default(),
+                        job,
                     )
                 };
                 let (mut i, mut c) = (Default::default(), Default::default());
                 match run(&mut i, &mut c) {
                     Ok(v) => {
-                        assert_eq!(
-                            run(&mut i, &mut c).ok(),
-                            Some(v.clone()),
-                            "from what it cached"
-                        );
-                        assert_eq!(
-                            run(&mut Default::default(), &mut Default::default()).ok(),
-                            Some(v),
-                            "from nothing"
-                        );
+                        for (again, how) in [
+                            (run(&mut i, &mut c), "from what it cached"),
+                            (
+                                run(&mut Default::default(), &mut Default::default()),
+                                "from nothing",
+                            ),
+                        ] {
+                            match again {
+                                Ok(w) => assert_eq!(w, v, "{how}"),
+                                Err(e) if cancelled(&e) => return,
+                                Err(e) => panic!("the sweep {how}: {e:?}"),
+                            }
+                        }
                     }
                     Err(e) => assert_ne!(e.code, Code::Internal, "{e:?}"),
                 }
@@ -558,7 +597,7 @@ fn assemble(written: &str, after_instances: bool) {
 /// Builds `written` (an insert, a delete of bodies, or a feature naming
 /// `i/…`) as feature `f` of part `fz`, after an insert `i` of part `src`,
 /// the base, at working.
-fn inserted(written: &str) {
+fn inserted(written: &str, case: &FuzzCase, job: &Job) {
     use ryucad::assembly::{Rebuild, Store};
     use ryucad::error::{Code, Error};
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -600,6 +639,7 @@ fn inserted(written: &str) {
         ))
     });
     let mut r = Rebuild::new(&project, &pins, Store::default());
+    r.job = job.clone();
     let Ok(result) = r.result(&Id::parse("fz", "part").unwrap()) else {
         return;
     };
@@ -616,10 +656,16 @@ fn inserted(written: &str) {
                     if *fid == id("i") {
                         continue;
                     }
-                    for fault in check_intersections(&b.body) {
+                    let faults = match case.run(|w| check_intersections_with(&b.body, w)) {
+                        Ok(faults) => faults,
+                        Err(e) if stopped(&e) => return,
+                        Err(e) => panic!("unexpected {e:?}"),
+                    };
+                    for fault in faults {
                         assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
                     }
-                    match tessellate(&b.body, &params) {
+                    match case.run(|w| tessellate_with(&b.body, &params, w)) {
+                        Err(e) if stopped(&e) => return,
                         Ok(mesh) => assert_eq!(mesh.faults, []),
                         Err(ryukei::Error::MeshTooLarge { .. }) => {}
                         Err(e) => panic!("unexpected {e:?}"),
@@ -646,6 +692,18 @@ fn names_inserted(v: &serde_json::Value) -> bool {
 }
 
 fuzz_target!(|data: &[u8]| {
+    // The import file is built once a process, before any case's deadline
+    // starts: it takes no work, so a cancel can't stop it, and it is the
+    // target's setup, not the case (plan 30.D).
+    seeded();
+    ryukei_testkit::fuzz_case(|case| {
+        let job = Job::new("fuzz", "fuzz", "feature", case.cancel_flag());
+        one(data, case, &job);
+    });
+});
+
+/// One case: `data` read as a feature file and built.
+fn one(data: &[u8], case: &FuzzCase, job: &Job) {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
@@ -663,15 +721,15 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(back, f);
     assert_eq!(canonical::to_string(&back.to_json()), written);
     if let Feature::Instance(_) = &f {
-        assemble(&written, false);
+        assemble(&written, false, job);
         return;
     }
     if f.inserts() || !f.deletes().is_empty() || names_inserted(&f.to_json()) {
-        inserted(&written);
+        inserted(&written, case, job);
         return;
     }
     if matches!(f, Feature::Mate(_) | Feature::InstancePattern(_)) {
-        assemble(&written, true);
+        assemble(&written, true, job);
         return;
     }
     // Inputs of odd length make the import `m` a reference: nothing may
@@ -686,7 +744,17 @@ fuzz_target!(|data: &[u8]| {
         .iter()
         .any(|r| r.changes && r.body.as_str() == "m");
     let part = part(f, reference, placed);
-    let r = rebuild_part(&part);
+    let r = match rebuild_part_in(
+        &part,
+        &ryucad::rebuild::Cache::new(),
+        &ryucad::assembly::Children::new(),
+        None,
+        &Run::with_job(job),
+    ) {
+        Ok((r, _)) => r,
+        // Stopped at the case's deadline.
+        Err(_) => return,
+    };
     // The file layer reads wherever an import is (plan 24.B).
     let layer = ryucad::file_styles::of_part(&part, &r);
     for k in layer.faces.keys() {
@@ -716,10 +784,16 @@ fuzz_target!(|data: &[u8]| {
             };
             for (_, b) in m.solids.iter().filter(|(_, b)| !b.reference) {
                 assert_eq!(check(&b.body), []);
-                for fault in check_intersections(&b.body) {
+                let faults = match case.run(|w| check_intersections_with(&b.body, w)) {
+                    Ok(faults) => faults,
+                    Err(e) if stopped(&e) => return,
+                    Err(e) => panic!("unexpected {e:?}"),
+                };
+                for fault in faults {
                     assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
                 }
-                match tessellate(&b.body, &params) {
+                match case.run(|w| tessellate_with(&b.body, &params, w)) {
+                    Err(e) if stopped(&e) => return,
                     Ok(mesh) => {
                         assert_eq!(mesh.faults, []);
                         assert_eq!(check_mesh(&b.body, &mesh), Ok(()));
@@ -782,4 +856,4 @@ fuzz_target!(|data: &[u8]| {
         }
         None => {}
     }
-});
+}

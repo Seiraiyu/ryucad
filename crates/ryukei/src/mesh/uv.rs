@@ -451,6 +451,45 @@ impl<'a> FaceGeom<'a> {
         uv
     }
 
+    /// `uv`, the parameters of vertex `v` at an end of one of its edges,
+    /// put exactly on a seam that comes within the vertex's tolerance of
+    /// it (#905). A tolerant vertex beside a seam is otherwise on one side
+    /// of it at the end of one edge and on the other at the start of the
+    /// next (their curves are healed past each other within it), and the
+    /// face's boundary crosses the seam twice inside the vertex's ball,
+    /// with a seam sample a few microns from the vertex: the face folds
+    /// there. On the seam, both edges agree where the vertex is, and
+    /// neither needs a sample at the seam beside it. A move of more than
+    /// a thousandth of a period is never taken (near a pole every
+    /// parameter comes close).
+    pub(crate) fn on_seam(&self, b: &Body, v: crate::topo::VertexId, uv: Point2) -> Point2 {
+        if self.pole(uv).is_some() {
+            return uv;
+        }
+        let vertex = &b.vertices[v];
+        let reach = vertex.tolerance.get() + LINEAR_RESOLUTION;
+        let mut x = [uv.x, uv.y];
+        for k in 0..2 {
+            let (Some(period), Some(seam)) = (self.periods[k], self.seam(k)) else {
+                continue;
+            };
+            if x[k] == seam {
+                continue;
+            }
+            let gap = x[k] - seam;
+            let gap = (gap - (gap / period).round() * period).abs();
+            if gap > 1e-3 * period {
+                continue;
+            }
+            let mut y = x;
+            y[k] = seam;
+            if self.surface.point(y[0], y[1]).distance(vertex.point) <= reach {
+                x = y;
+            }
+        }
+        Point2::new(x[0], x[1])
+    }
+
     /// The seam of a periodic direction: the start of its domain.
     pub(crate) fn seam(&self, k: usize) -> Option<f64> {
         self.periods[k].map(|_| self.domain[k][0])
