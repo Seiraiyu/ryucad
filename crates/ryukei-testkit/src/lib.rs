@@ -166,6 +166,7 @@ pub mod held_seams;
 mod lcg;
 pub mod mesh;
 pub mod near_boxes;
+pub mod near_room;
 pub mod nurbs;
 pub mod nurbs_race;
 pub mod offset_bytes;
