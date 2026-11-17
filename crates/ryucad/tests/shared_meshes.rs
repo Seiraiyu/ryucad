@@ -227,3 +227,44 @@ fn a_flattened_parts_export_meshes_each_shape_once() {
     );
     assert!(std::fs::metadata(&out).unwrap().len() > 84);
 }
+
+/// Design 698: a flattened reference is weighed from its moved mesh. The
+/// block's two copies weigh alike within their bounds; the printed
+/// values, before the change and after, are what the PR states.
+#[test]
+fn a_flattened_references_mass_reads_its_moved_mesh() {
+    let (_dir, mut s) = common::project();
+    must(
+        &mut s,
+        "materials.set",
+        json!({"name": "steel", "density": "7850 kg/m^3", "default": true}),
+    );
+    must(
+        &mut s,
+        "import",
+        json!({"path": occt("assembly.stp"), "flatten": true, "part": "board"}),
+    );
+    let c = components(&mut s, "board");
+    let mut seen = Vec::new();
+    for (component, copies) in &c {
+        for (solid, _) in copies {
+            let v = must(&mut s, "mass", json!({"of": solid}));
+            let (vol, bound) = (
+                v["volume"]["m3"].as_f64().unwrap(),
+                v["volume"]["bound_m3"].as_f64().unwrap_or(0.0),
+            );
+            println!("{component} {solid}: volume {vol:e} m3 ± {bound:e}");
+            seen.push((component.clone(), vol, bound));
+        }
+    }
+    for w in seen.windows(2) {
+        if w[0].0 == w[1].0 {
+            assert!(
+                (w[0].1 - w[1].1).abs() <= w[0].2 + w[1].2,
+                "two copies of {} weigh apart: {:?}",
+                w[0].0,
+                w
+            );
+        }
+    }
+}
