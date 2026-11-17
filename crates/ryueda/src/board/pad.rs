@@ -68,15 +68,17 @@ pub fn symbol(shape: &PadShape, w: Nm, h: Nm) -> Option<StandardSymbol> {
 /// likewise. A custom pad isn't grown here (`None` when `grow` isn't 0):
 /// [`super::shapes`] offsets it through `ryu_copper::poly`.
 pub fn own_shape(p: &Pad, grow: Nm) -> Result<Option<Shape>, ShapeError> {
+    // A custom pad is changed through its primitives' union, which may
+    // outlast its anchor: never judged by the anchor's size here.
+    if grow != 0 && matches!(p.shape, PadShape::Custom { .. }) {
+        return Ok(None);
+    }
     let (w, h) = (p.size[0] + 2 * grow, p.size[1] + 2 * grow);
     if w <= 0 || h <= 0 {
         return Ok(Some(Shape::default()));
     }
     match &p.shape {
         PadShape::Custom { anchor, primitives } => {
-            if grow != 0 {
-                return Ok(None);
-            }
             let anchor = match anchor {
                 Anchor::Circle => StandardSymbol::Round { d: w.min(h) },
                 Anchor::Rect => StandardSymbol::Rect {

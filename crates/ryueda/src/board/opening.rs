@@ -141,4 +141,27 @@ mod tests {
         );
         assert_eq!(s.approximate, Some(BOUND_NM));
     }
+
+    #[test]
+    fn a_custom_pad_shrunk_past_its_anchor_keeps_its_primitives() {
+        use crate::footprint::{Anchor, PadShape, Shape as Drawn};
+        let f = r0402();
+        let mut p = f.pads.values().next().unwrap().clone();
+        p.at = [0, 0];
+        p.size = [200_000, 200_000];
+        let square: Drawn = serde_json::from_value(serde_json::json!({
+            "type": "polygon",
+            "points": [[-500_000, -500_000], [500_000, -500_000], [500_000, 500_000], [-500_000, 500_000]],
+            "width_nm": 0,
+        }))
+        .unwrap();
+        p.shape = PadShape::Custom {
+            anchor: Anchor::Rect,
+            primitives: vec![square],
+        };
+        // 150 µm a side is more than half the anchor, not of the pad.
+        let s = changed(&p, -150_000).unwrap();
+        let b = s.bounds().expect("an opening, smaller than the pad");
+        assert!((b.max.x - b.min.x - 700_000).abs() <= 2 * BOUND_NM, "{b:?}");
+    }
 }
