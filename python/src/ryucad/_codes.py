@@ -391,6 +391,7 @@ class Code(str, Enum):
     DRC_EDGE_CLEARANCE = "drc_edge_clearance"
     DRC_COURTYARD_OVERLAP = "drc_courtyard_overlap"
     DRC_COURTYARD_OPEN = "drc_courtyard_open"
+    DRC_FAILED = "drc_failed"
 
 
 #: Each code's exit class.
@@ -775,4 +776,5 @@ EXIT: dict[Code, int] = {
     Code.DRC_EDGE_CLEARANCE: 1,
     Code.DRC_COURTYARD_OVERLAP: 1,
     Code.DRC_COURTYARD_OPEN: 1,
+    Code.DRC_FAILED: 1,
 }

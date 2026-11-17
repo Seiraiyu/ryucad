@@ -1142,6 +1142,10 @@ pub enum Code {
     /// ryueda DRC finding (a warning): a courtyard whose graphics don't
     /// close, judged by its box.
     DrcCourtyardOpen,
+    /// `board export` refused: the board has DRC errors (its report in
+    /// `details.report`); fix them, or export with `--allow-errors`,
+    /// which the manifest records.
+    DrcFailed,
 }
 
 impl Code {
@@ -1530,6 +1534,7 @@ impl Code {
         Code::DrcEdgeClearance,
         Code::DrcCourtyardOverlap,
         Code::DrcCourtyardOpen,
+        Code::DrcFailed,
     ];
 
     /// The CLI's exit code: 1 the agent can fix it, 2 usage, 3 not a
@@ -1642,6 +1647,13 @@ mod tests {
             assert_eq!(c.exit_code(), 1);
             assert!(Code::ALL.contains(&c), "{c:?} in ALL");
         }
+    }
+
+    #[test]
+    fn export_codes() {
+        assert_eq!(json!(Code::DrcFailed), json!("drc_failed"));
+        assert_eq!(Code::DrcFailed.exit_code(), 1);
+        assert!(Code::ALL.contains(&Code::DrcFailed));
     }
 
     #[test]
