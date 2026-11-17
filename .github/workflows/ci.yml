@@ -228,3 +228,40 @@ jobs:
           # Pull requests read main's cache; only main saves it.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --manifest-path fuzz/Cargo.toml --bins
+
+  python:
+    # The Python client (python/, ryucad plan 32.A) without ryucad: its
+    # unit tests on the oldest and the newest Python it supports (pinned
+    # by number, moved forward by hand), its wheel and sdist built and
+    # checked, ruff and mypy --strict. Its tests against a real ryucad
+    # run in Linux x64's partitions (crates/ryucad/tests/python.rs) and
+    # on every platform in full.yml. About a minute beside the Rust jobs;
+    # no path filter, so the check always reports.
+    name: python ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.15"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # CI tools, never the package's dependencies (it has none).
+      # ruff and mypy pinned, so a new release can't fail a pull request
+      # that changed nothing; moved forward by hand.
+      - run: python -m pip install "build>=1.2" "twine>=6.1" "ruff==0.17.5" "mypy==2.4.1"
+      - name: unit tests (no ryucad)
+        run: python -m unittest discover -v -s python/tests
+        env:
+          PYTHONPATH: python/src
+          PYTHONDONTWRITEBYTECODE: "1"
+      - run: ruff check python/src
+      - run: mypy --strict python/src
+      # Hatchling can't name files above python/, so the licences are
+      # copied in (plan 32.B's scripts/python-dist.sh takes this over).
+      - run: cp LICENSE NOTICE python/
+      - run: python -m build python
+      - run: twine check --strict python/dist/*

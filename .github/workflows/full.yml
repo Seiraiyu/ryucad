@@ -57,6 +57,10 @@ jobs:
           # through a 450-part burst: Windows has a desktop, so it must run
           # there; on Linux it runs in the next step, under Xvfb.
           RYUCAD_REQUIRE_DISPLAY: ${{ runner.os == 'Windows' && '1' || '' }}
+          # tests/python.rs runs the Python client's tests against a real
+          # daemon on every platform (ryucad plan 32.A): without python3
+          # it must fail here, not skip.
+          RYUCAD_REQUIRE_PYTHON: "1"
       - if: matrix.os == 'ubuntu-latest'
         name: the window through a burst of parts, under Xvfb (#799)
         run: xvfb-run -a cargo test -p ryucad-app --test burst -- --nocapture
