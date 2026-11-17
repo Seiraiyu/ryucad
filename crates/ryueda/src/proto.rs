@@ -620,6 +620,34 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Place parts: one (`ref`, `at`, `rotation`) or, with `ops`,
+    /// several, all or nothing.
+    #[serde(rename = "board.place")]
+    BoardPlace {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        r#ref: Option<String>,
+        /// `[x, y]`, lengths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<[String; 2]>,
+        /// Degrees counterclockwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation: Option<String>,
+        /// `[{ref, at: [x, y], rotation?}]`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ops: Option<Value>,
+        /// The board's revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.unplace")]
+    BoardUnplace {
+        board: String,
+        r#ref: String,
+        /// The board's revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "board.list")]
     BoardList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1449,6 +1477,8 @@ impl Request {
                 | Request::BoardCreate { .. }
                 | Request::BoardEdit { .. }
                 | Request::BoardDelete { .. }
+                | Request::BoardPlace { .. }
+                | Request::BoardUnplace { .. }
                 | Request::BlockCreate { .. }
                 | Request::BlockEdit { .. }
                 | Request::BlockDelete { .. }

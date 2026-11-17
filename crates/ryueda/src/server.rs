@@ -1228,6 +1228,28 @@ fn dispatch(
             board,
             expected_revision,
         } => crate::board::cmd::delete(session, &board, expected_revision.as_deref()),
+        Request::BoardPlace {
+            board,
+            r#ref,
+            at,
+            rotation,
+            ops,
+            expected_revision,
+        } => crate::board::cmd::place(
+            session,
+            &board,
+            match (&r#ref, &at) {
+                (Some(r), Some(a)) => Some((r.as_str(), a, rotation.as_deref())),
+                _ => None,
+            },
+            ops.as_ref(),
+            expected_revision.as_deref(),
+        ),
+        Request::BoardUnplace {
+            board,
+            r#ref,
+            expected_revision,
+        } => crate::board::cmd::unplace(session, &board, &r#ref, expected_revision.as_deref()),
         Request::BoardList { .. } => Ok(crate::board::cmd::list(session.project())),
         Request::BoardShow { board, pads, .. } => {
             crate::board::cmd::show(session.project(), &board, pads)

@@ -824,6 +824,8 @@ fn every_protocol_method_has_a_command() {
         ("board.delete", &["board", "delete"]),
         ("board.list", &["board", "list"]),
         ("board.show", &["board", "show"]),
+        ("board.place", &["board", "place"]),
+        ("board.unplace", &["board", "unplace"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
         ("block.show", &["block", "show"]),
@@ -4594,4 +4596,91 @@ fn board_writes_are_logged_undone_and_heard() {
     let (code, r) = run(&["redo"]);
     assert_eq!(code, 0, "{r}");
     assert!(r["result"]["revisions"]["board/main"].is_string(), "{r}");
+}
+
+#[test]
+fn parts_are_placed_moved_and_unplaced() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    let s = p.ok(&["board", "show", "main"]);
+    assert_eq!(s["unplaced"], 8, "{s}");
+    let r = p.ok(&[
+        "board", "place", "main", "U1", "--at", "10,10", "--rotation", "90",
+    ]);
+    assert_eq!(
+        r["placed"][0],
+        json!({"occurrence": "s1/u1", "refdes": "U1", "at": [10_000_000, 10_000_000], "rotation_mdeg": 90_000})
+    );
+    p.ok(&["board", "place", "main", "s1/c1", "--at", "12.5,10"]);
+    p.ok(&[
+        "board", "place", "main", "board:j1", "--at", "2,10", "--rotation", "-90",
+    ]);
+    let s = p.ok(&["board", "show", "main"]);
+    assert_eq!(s["unplaced"], 5);
+    let j1 = s["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["reference"] == "j1")
+        .unwrap();
+    assert_eq!(j1["placement"]["rotation_mdeg"], 270_000);
+    p.fails(&["board", "place", "main", "Q9", "--at", "0,0"], "not_found", 1);
+    // All or nothing: one bad op writes none.
+    let ops = r#"[{"ref":"R1","at":["5","5"]},{"ref":"Q9","at":["6","6"]}]"#;
+    p.fails(&["board", "place", "main", "--ops", ops], "not_found", 1);
+    assert_eq!(p.ok(&["board", "show", "main"])["unplaced"], 5);
+    let ops = r#"[{"ref":"R1","at":["5","5"]},{"ref":"R2","at":["6 mm","5 mm"],"rotation":"180"}]"#;
+    assert_eq!(
+        p.ok(&["board", "place", "main", "--ops", ops])["placed"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    p.ok(&["board", "unplace", "main", "R2"]);
+    assert_eq!(p.ok(&["board", "show", "main"])["unplaced"], 4);
+    p.fails(&["board", "unplace", "main", "R2"], "not_found", 1);
+}
+
+#[test]
+fn a_placement_whose_occurrence_is_gone_still_reads() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R2", "--at", "5,5"]);
+    p.ok(&["component", "delete", "breakout/r2"]);
+    let s = p.ok(&["board", "show", "main"]);
+    assert_eq!(s["orphans"], json!(["r2"]));
+    p.ok(&["board", "unplace", "main", "r2"]);
+    assert_eq!(p.ok(&["board", "show", "main"])["orphans"], json!([]));
+}
+
+#[test]
+fn a_designator_two_occurrences_share_is_ambiguous() {
+    let p = Pair::breakout();
+    // A second sensor: its parts' designators repeat until annotated.
+    p.ok(&["instance", "add", "breakout", "--of", "sensor", "--id", "s2"]);
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    let s = p.ok(&["board", "show", "main"]);
+    let refdes: Vec<&Value> = s["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["reference"].as_str().unwrap().ends_with("/u1"))
+        .map(|o| &o["refdes"])
+        .collect();
+    assert_eq!(refdes.len(), 2, "{s}");
+    assert_eq!(refdes[0], refdes[1], "{s}");
+    let r = refdes[0].as_str().unwrap().to_owned();
+    p.fails(
+        &["board", "place", "main", &r, "--at", "1,1"],
+        "board_ref_ambiguous",
+        1,
+    );
+    p.ok(&["board", "place", "main", "s2/u1", "--at", "1,1"]);
 }

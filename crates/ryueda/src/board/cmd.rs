@@ -2,6 +2,7 @@
 
 use super::file::*;
 use super::load::BoardFiles;
+use super::occ;
 use crate::coord;
 use crate::error::{Code, Error, Result};
 use crate::fault;
@@ -237,9 +238,165 @@ pub fn list(p: &Project) -> Value {
     json!({"boards": boards})
 }
 
-/// `board show`: the board's file and, per occurrence of its design, its
-/// placement or none.
-pub fn show(p: &Project, board: &str, _pads: bool) -> Result<Value> {
+/// A rotation in millidegrees, within a turn: degrees as text (`"90"`),
+/// whole millidegrees as a JSON integer (as `coord` reads angles), none
+/// for 0.
+fn rotation(v: Option<&Value>) -> Result<i64> {
+    match v {
+        None | Some(Value::Null) => Ok(0),
+        Some(v) => Ok(coord::mdeg(v)?.rem_euclid(360_000)),
+    }
+}
+
+/// `board place`: one part, or several all or nothing.
+pub fn place(
+    session: &mut Session,
+    board: &str,
+    one: Option<(&str, &[String; 2], Option<&str>)>,
+    ops: Option<&Value>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let unit = p.manifest.default_unit;
     let b = find(p, board)?;
-    Ok(answer(p, &b.id))
+    check_revision(&format!("board {}", b.id), &b.revision, expected)?;
+    let id = b.id.clone();
+    let design = board_of(b)?.design.clone();
+    let asks: Vec<Value> = match (one, ops) {
+        (Some((r, at, rot)), None) => vec![json!({"ref": r, "at": at, "rotation": rot})],
+        (None, Some(Value::Array(list))) if !list.is_empty() => list.clone(),
+        _ => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "give REF --at X,Y, or --ops with a list of {ref, at: [x, y], rotation?}",
+            ));
+        }
+    };
+    let (_, occs) = occ::occurrences(p, &design)?;
+    let mut w = Writes::default();
+    let mut placed = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (i, a) in asks.iter().enumerate() {
+        let r = a.get("ref").and_then(Value::as_str).ok_or_else(|| {
+            Error::new(Code::InvalidParam, format!("op {i} needs a ref")).with("op", i)
+        })?;
+        let o = occ::resolve(&occs, &design, r)?;
+        if o.footprint_ref.is_none() {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{} has no footprint to place; choose one in the design",
+                    o.reference
+                ),
+            )
+            .with("ref", r));
+        }
+        if !seen.insert(o.reference.clone()) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{} is placed twice in one request", o.reference),
+            )
+            .with("ref", r));
+        }
+        let at = a
+            .get("at")
+            .ok_or_else(|| Error::new(Code::InvalidParam, format!("op {i} needs at")).with("op", i))?;
+        let placement = Placement {
+            at: coord::point(at, unit)?,
+            rotation_mdeg: rotation(a.get("rotation"))?,
+        };
+        w.put(placement_path(&id, &o.reference), &placement, PLACEMENT_KIND);
+        placed.push(json!({
+            "occurrence": o.reference,
+            "refdes": o.refdes,
+            "at": placement.at,
+            "rotation_mdeg": placement.rotation_mdeg,
+        }));
+    }
+    commit(session, &format!("board {id} place"), w)?;
+    let b = &session.project().boards[&id];
+    Ok(json!({"board": format!("board/{id}"), "revision": b.revision, "placed": placed}))
+}
+
+/// `board unplace`: a placement's file removed. A placement whose
+/// occurrence is gone is named by its occurrence reference.
+pub fn unplace(
+    session: &mut Session,
+    board: &str,
+    r: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let b = find(p, board)?;
+    check_revision(&format!("board {}", b.id), &b.revision, expected)?;
+    let id = b.id.clone();
+    let design = board_of(b)?.design.clone();
+    let occurrence = match occ::occurrences(p, &design) {
+        Ok((_, occs)) => match occ::resolve(&occs, &design, r) {
+            Ok(o) => o.reference.clone(),
+            Err(e) if e.code == Code::BoardRefAmbiguous => return Err(e),
+            Err(_) => occ::local(&design, r),
+        },
+        Err(_) => occ::local(&design, r),
+    };
+    if !b.placements.contains_key(&occurrence) {
+        return Err(
+            Error::new(Code::NotFound, format!("{r} isn't placed on board {id}")).with("ref", r),
+        );
+    }
+    let mut w = Writes::default();
+    w.delete(placement_path(&id, &occurrence));
+    commit(session, &format!("board {id} unplace"), w)?;
+    let b = &session.project().boards[&id];
+    Ok(json!({"board": format!("board/{id}"), "revision": b.revision, "unplaced": occurrence}))
+}
+
+/// `board show`: the board's file and, per occurrence of its design with a
+/// footprint, its placement or none; how many are unplaced, and the
+/// placements whose occurrence is gone.
+pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
+    let b = find(p, board)?;
+    let mut v = answer(p, &b.id);
+    let Ok(file) = board_of(b) else {
+        return Ok(v);
+    };
+    match occ::occurrences(p, &file.design) {
+        Err(e) => v["design_error"] = json!(e),
+        Ok((_, occs)) => {
+            let mut unplaced = 0;
+            let list: Vec<Value> = occs
+                .iter()
+                .filter(|o| o.footprint_ref.is_some())
+                .map(|o| {
+                    let placement = b
+                        .placements
+                        .get(&o.reference)
+                        .and_then(|l| l.item.as_ref().ok());
+                    if placement.is_none() {
+                        unplaced += 1;
+                    }
+                    json!({
+                        "reference": o.reference,
+                        "refdes": o.refdes,
+                        "value": o.value,
+                        "footprint": o.footprint_ref,
+                        "dnp": o.dnp,
+                        "placement": placement.map(|pl| json!({"at": pl.at, "rotation_mdeg": pl.rotation_mdeg})),
+                    })
+                })
+                .collect();
+            let orphans: Vec<&String> = b
+                .placements
+                .keys()
+                .filter(|k| !occs.iter().any(|o| &o.reference == *k))
+                .collect();
+            v["occurrences"] = json!(list);
+            v["unplaced"] = json!(unplaced);
+            v["orphans"] = json!(orphans);
+            if pads {
+                v["pads"] = json!([]);
+            }
+        }
+    }
+    Ok(v)
 }

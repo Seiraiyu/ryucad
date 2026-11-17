@@ -507,7 +507,7 @@ enum Command {
     /// Create, edit, delete or list designs: a name and a root block.
     #[command(subcommand)]
     Design(DesignCmd),
-    /// Boards: create, edit, list, show and delete.
+    /// Boards: create, edit, list, show and delete; place parts.
     #[command(subcommand)]
     Board(BoardCmd),
     /// Import libraries from other tools: KiCad's for now.
@@ -1562,6 +1562,33 @@ enum BoardCmd {
     /// Delete a board and its placements.
     Delete {
         board: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Place parts: REF --at X,Y [--rotation A], or --ops for several (all or nothing).
+    Place {
+        board: String,
+        /// An occurrence reference (s1/u1) or a designator.
+        #[arg(value_name = "REF", required_unless_present = "ops")]
+        r#ref: Option<String>,
+        /// X,Y (lengths; bare numbers in the project's unit).
+        #[arg(long, value_name = "X,Y", required_unless_present = "ops", allow_hyphen_values = true)]
+        at: Option<String>,
+        /// Degrees counterclockwise.
+        #[arg(long, allow_hyphen_values = true)]
+        rotation: Option<String>,
+        /// JSON: [{ref, at: [x, y], rotation?}].
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation"])]
+        ops: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Remove a part's placement.
+    Unplace {
+        board: String,
+        /// An occurrence reference (s1/u1) or a designator.
+        #[arg(value_name = "REF")]
+        r#ref: String,
         #[command(flatten)]
         expect: Expect,
     },
@@ -3528,6 +3555,30 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         },
         Command::Board(BoardCmd::Delete { board, expect }) => Request::BoardDelete {
             board: board.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Place {
+            board,
+            r#ref,
+            at,
+            rotation,
+            ops,
+            expect,
+        }) => Request::BoardPlace {
+            board: board.clone(),
+            r#ref: r#ref.clone(),
+            at: at.as_deref().map(|a| pair_arg("--at", a)).transpose()?,
+            rotation: rotation.clone(),
+            ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Unplace {
+            board,
+            r#ref,
+            expect,
+        }) => Request::BoardUnplace {
+            board: board.clone(),
+            r#ref: r#ref.clone(),
             expected_revision: expect.expect.clone(),
         },
         Command::Board(BoardCmd::List { rev }) => Request::BoardList {

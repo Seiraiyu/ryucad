@@ -979,7 +979,6 @@ fn the_merge_driver_writes_over_ours_and_exits_by_outcome() {
 }
 
 #[test]
-#[ignore = "needs board place (task 11)"]
 fn board_files_merge_by_value_and_two_moves_of_one_part_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let run = dir.path().join("run");
@@ -993,6 +992,7 @@ fn board_files_merge_by_value_and_two_moves_of_one_part_conflict() {
     ok(&[
         "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
     ]);
+    ok(&["board", "place", "main", "J1", "--at", "1,10"]);
     git(&top, &["add", "-A"]);
     git(&top, &["commit", "-qm", "board"]);
     git(&top, &["branch", "theirs"]);
@@ -1016,5 +1016,6 @@ fn board_files_merge_by_value_and_two_moves_of_one_part_conflict() {
     let j1: Value =
         serde_json::from_str(&std::fs::read_to_string(placements.join("j1.json")).unwrap())
             .unwrap();
-    assert!(j1["conflicts"]["/at"].is_object(), "{j1}");
+    assert_eq!(j1["conflicts"]["/at"]["kind"], "value", "{j1}");
+    assert_eq!(j1["at"], json!([2_000_000, 10_000_000]), "ours' in place");
 }
