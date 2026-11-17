@@ -11,9 +11,10 @@ fn root() -> PathBuf {
 }
 
 /// Runs `scripts/stamp-version.sh ARG` on a copy of the workspace's
-/// manifests: its exit code, what it printed, and the root manifest after.
+/// manifests and the Python client's `pyproject.toml`: its exit code, what
+/// it printed, and the root manifest and `python/pyproject.toml` after.
 #[cfg(unix)]
-fn stamp(arg: &str) -> (i32, String, String) {
+fn stamp(arg: &str) -> (i32, String, String, String) {
     let tmp = tempfile::tempdir().unwrap();
     let root = root();
     std::fs::copy(root.join("Cargo.toml"), tmp.path().join("Cargo.toml")).unwrap();
@@ -30,6 +31,12 @@ fn stamp(arg: &str) -> (i32, String, String) {
             std::fs::copy(&manifest, to.join("Cargo.toml")).unwrap();
         }
     }
+    std::fs::create_dir_all(tmp.path().join("python")).unwrap();
+    std::fs::copy(
+        root.join("python/pyproject.toml"),
+        tmp.path().join("python/pyproject.toml"),
+    )
+    .unwrap();
     let out = std::process::Command::new("sh")
         .arg(root.join("scripts/stamp-version.sh"))
         .arg(arg)
@@ -37,10 +44,12 @@ fn stamp(arg: &str) -> (i32, String, String) {
         .output()
         .unwrap();
     let manifest = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    let pyproject = std::fs::read_to_string(tmp.path().join("python/pyproject.toml")).unwrap();
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr),
         manifest,
+        pyproject,
     )
 }
 
@@ -55,7 +64,7 @@ fn stamp_version_reads_every_lines_tags() {
         ("ryudfm-v1.2.3", "1.2.3"),
         ("ryudfm-v0.1.0-pre.2", "0.1.0-pre.2"),
     ] {
-        let (code, printed, manifest) = stamp(arg);
+        let (code, printed, manifest, _) = stamp(arg);
         assert_eq!(code, 0, "{arg}: {printed}");
         assert!(
             printed.contains(&format!("stamped {version}")),
@@ -68,9 +77,59 @@ fn stamp_version_reads_every_lines_tags() {
     }
     // Another product's tag is no version.
     for arg in ["ryucad-v1.2.3", "ryueda-1.2.3", "ryudfm-1.2.3", "vx"] {
-        let (code, printed, _) = stamp(arg);
+        let (code, printed, _, _) = stamp(arg);
         assert_eq!(code, 2, "{arg}: {printed}");
         assert!(printed.contains("not a version"), "{arg}: {printed}");
+    }
+}
+
+/// The version line of a `pyproject.toml`: its first `version = "…"`.
+#[cfg(unix)]
+fn python_version(pyproject: &str) -> &str {
+    pyproject
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("a version line")
+}
+
+/// Design 697: ryucad's tags stamp the Python client in PEP 440's form;
+/// a bare version (every release workflow's build jobs, full.yml's
+/// 9.9.9-ci) and the other lines' tags leave it at 0.0.0.
+#[cfg(unix)]
+#[test]
+fn ryucads_tags_stamp_the_python_client_in_pep_440() {
+    for (arg, python) in [
+        ("v1.2.3", "1.2.3"),
+        ("v0.11.0-pre.4", "0.11.0rc4"),
+        ("v0.11.0-pre.0", "0.11.0rc0"),
+        ("v0.0.0-dev", "0.0.0.dev0"),
+        ("1.2.3", "0.0.0"),
+        ("0.11.0-pre.4", "0.0.0"),
+        ("9.9.9-ci", "0.0.0"),
+        ("ryueda-v1.2.3", "0.0.0"),
+        ("ryudfm-v0.1.0-pre.2", "0.0.0"),
+    ] {
+        let (code, printed, _, pyproject) = stamp(arg);
+        assert_eq!(code, 0, "{arg}: {printed}");
+        assert_eq!(python_version(&pyproject), python, "{arg}: {printed}");
+        assert_eq!(
+            printed.contains(&format!("stamped python {python}")),
+            python != "0.0.0",
+            "{arg}: {printed}"
+        );
+    }
+    // Any other suffix has no PEP 440 form here: refused before anything
+    // is written, Cargo's files included.
+    for arg in ["v12.34.56-rc.1", "v1.2.3-pre.01", "v1.2.3-pre", "v1.2.3-dev.1"] {
+        let (code, printed, manifest, pyproject) = stamp(arg);
+        assert_eq!(code, 2, "{arg}: {printed}");
+        assert!(printed.contains("no PEP 440 form"), "{arg}: {printed}");
+        assert!(
+            manifest.contains("\nversion = \"0.0.0\""),
+            "{arg}: the workspace was stamped"
+        );
+        assert_eq!(python_version(&pyproject), "0.0.0", "{arg}");
     }
 }
 
