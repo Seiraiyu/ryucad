@@ -357,6 +357,44 @@ fn ryucads_release_asks_whether_a_tag_is_latest() {
     assert!(w.contains("--latest=\"$latest\""));
 }
 
+/// One job of a workflow: its `  <name>:` line and every line up to the
+/// next job's (the next line indented exactly two spaces that isn't a
+/// comment).
+fn job(workflow: &str, name: &str) -> String {
+    let head = format!("  {name}:");
+    let mut lines = workflow.lines().skip_while(|l| *l != head);
+    let first = lines
+        .next()
+        .unwrap_or_else(|| panic!("the workflow has no job {name}"));
+    let mut out = vec![first];
+    out.extend(lines.take_while(|l| {
+        !(l.starts_with("  ") && !l.starts_with("   ") && !l.trim_start().starts_with('#'))
+    }));
+    out.join("\n")
+}
+
+/// The Python client's wheel and sdist are built by one script (design
+/// 697), which PR CI runs and full.yml shellchecks.
+#[test]
+fn the_python_package_is_built_by_python_dist() {
+    assert!(root().join("scripts/python-dist.sh").is_file());
+    let ci = job(&workflow("ci.yml"), "python");
+    assert!(
+        ci.contains("sh scripts/python-dist.sh"),
+        "ci.yml's python job doesn't build with scripts/python-dist.sh"
+    );
+    assert!(
+        !ci.contains("cp LICENSE NOTICE python/"),
+        "ci.yml's python job still copies the licences itself"
+    );
+    assert!(
+        workflow("full.yml")
+            .lines()
+            .any(|l| l.contains("shellcheck") && l.contains("scripts/python-dist.sh")),
+        "full.yml doesn't shellcheck scripts/python-dist.sh"
+    );
+}
+
 /// The devcontainer's .debs are cached from main, whose caches every tag's
 /// run can restore, under the path and key full.yml restores: a tag's own
 /// save serves only that tag (#677).
