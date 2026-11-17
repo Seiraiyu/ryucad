@@ -26,6 +26,9 @@ pub struct PadInfo {
     pub reference: String,
     pub occurrence: String,
     pub number: Option<String>,
+    /// Its name in the footprint, as its reference ends (`1`, `1@p3`,
+    /// `@p3`).
+    pub pad: String,
     pub at: Point,
     pub rotation_mdeg: i64,
     pub size: [i64; 2],
@@ -33,6 +36,8 @@ pub struct PadInfo {
     pub bottom: bool,
     pub net: Option<String>,
     pub copper: Shape,
+    /// Its solder mask openings on the top and bottom, placed.
+    pub mask: [Option<Shape>; 2],
 }
 
 /// A drilled hole and what owns it.
@@ -41,6 +46,64 @@ pub struct HoleInfo {
     pub owner: String,
     pub shape: HoleShape,
     pub plated: bool,
+    pub of: HoleOf,
+}
+
+/// What a drill belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HoleOf {
+    Pad { occ: String, pad: String },
+    Via(crate::id::Id),
+    Hole(crate::id::Id),
+}
+
+/// A track as drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackInfo {
+    pub id: crate::id::Id,
+    pub net: String,
+    pub layer: super::file::CopperLayer,
+    pub width_nm: i64,
+    pub shape: Shape,
+}
+
+/// A via as drawn: a disc on both copper layers and a plated drill.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViaInfo {
+    pub id: crate::id::Id,
+    pub net: String,
+    pub at: Point,
+    pub drill_nm: i64,
+    pub diameter_nm: i64,
+    pub shape: Shape,
+}
+
+/// A track's copper: its polyline, repeated points skipped, drawn with a
+/// round pen of its width.
+pub fn track_shape(t: &super::file::Track) -> Shape {
+    let pts: Vec<Point> = t.points.iter().map(|p| Point::new(p[0], p[1])).collect();
+    let path: Vec<ryu_board::geom::Edge> = pts
+        .windows(2)
+        .filter(|w| w[0] != w[1])
+        .map(|w| ryu_board::geom::Edge::line(w[0], w[1]))
+        .collect();
+    Shape {
+        parts: vec![Part {
+            polarity: Polarity::Positive,
+            piece: Piece::Stroke(ryu_board::geom::Stroke {
+                path,
+                pen: ryu_board::geom::Pen::Round(t.width_nm),
+            }),
+        }],
+        ..Shape::default()
+    }
+}
+
+/// A disc of diameter `d` at `at`; empty when `d` isn't positive.
+pub fn disc(at: Point, d: i64) -> Shape {
+    ryu_board::shape::circle(at, ryu_board::geom::half(d))
+        .map(|c| Shape::regions(Polarity::Positive, [Region::solid(c)]))
+        .unwrap_or_default()
 }
 
 /// Everything a board draws.
@@ -52,6 +115,8 @@ pub struct BoardShapes {
     pub layers: BTreeMap<String, Vec<(String, Shape)>>,
     pub holes: Vec<HoleInfo>,
     pub pads: Vec<PadInfo>,
+    pub tracks: Vec<TrackInfo>,
+    pub vias: Vec<ViaInfo>,
     /// The outline less its cutouts.
     pub outline: Shape,
     /// The outline's and cutouts' boundaries, zero width.
@@ -170,10 +235,12 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
         if bottom {
             put(&mut out, "copper.bottom", copper.clone());
         }
-        for side in ["top", "bottom"] {
+        let mut mask: [Option<Shape>; 2] = [None, None];
+        for (i, side) in ["top", "bottom"].into_iter().enumerate() {
             if p.layers.iter().any(|l| l == &format!("mask.{side}"))
                 && let Ok(m) = opening::mask(f, p, preset)
             {
+                mask[i] = Some(m.placed(&place, Polarity::Positive));
                 put(&mut out, &format!("mask.{side}"), m);
             }
             if p.layers.iter().any(|l| l == &format!("paste.{side}"))
@@ -198,6 +265,10 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
                 owner: format!("{owner}/{}", names[&id.to_string()]),
                 shape,
                 plated,
+                of: HoleOf::Pad {
+                    occ: o.reference.clone(),
+                    pad: names[&id.to_string()].clone(),
+                },
             });
         }
         let at = place.point(Point::new(p.at[0], p.at[1]));
@@ -205,6 +276,7 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
             reference: format!("{owner}/{}", names[&id.to_string()]),
             occurrence: o.reference.clone(),
             number: p.number.clone(),
+            pad: names[&id.to_string()].clone(),
             at,
             rotation_mdeg: i64::from(Mdeg::new(p.rotation_mdeg + i64::from(place.rot.get())).get()),
             size: p.size,
@@ -212,6 +284,7 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
             bottom,
             net: p.number.as_ref().and_then(|n| o.nets.get(n)).cloned(),
             copper: copper.placed(&place, Polarity::Positive),
+            mask,
         });
     }
     let refdes = o.label().to_owned();
@@ -332,6 +405,70 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         out.pads.extend(one.pads);
         notices.extend(one.notices);
     }
+    // The routes; files with an error fault are left out (`check`
+    // reports them).
+    let fine = |faults: &[Fault]| faults.iter().all(|f| !f.is_error());
+    for (tid, t) in &b.tracks {
+        let (Ok(track), true) = (&t.item, fine(&t.faults)) else {
+            continue;
+        };
+        let shape = track_shape(track);
+        out.layers
+            .entry(track.layer.name().to_owned())
+            .or_default()
+            .push((format!("{board}:track/{tid}"), shape.clone()));
+        out.tracks.push(TrackInfo {
+            id: tid.clone(),
+            net: track.net.clone(),
+            layer: track.layer,
+            width_nm: track.width_nm,
+            shape,
+        });
+    }
+    for (vid, v) in &b.vias {
+        let (Ok(via), true) = (&v.item, fine(&v.faults)) else {
+            continue;
+        };
+        let at = Point::new(via.at[0], via.at[1]);
+        let shape = disc(at, via.diameter_nm);
+        for layer in ["copper.top", "copper.bottom"] {
+            out.layers
+                .entry(layer.to_owned())
+                .or_default()
+                .push((format!("{board}:via/{vid}"), shape.clone()));
+        }
+        out.holes.push(HoleInfo {
+            owner: format!("{board}:via/{vid}"),
+            shape: HoleShape::Round {
+                at,
+                d: via.drill_nm,
+            },
+            plated: true,
+            of: HoleOf::Via(vid.clone()),
+        });
+        out.vias.push(ViaInfo {
+            id: vid.clone(),
+            net: via.net.clone(),
+            at,
+            drill_nm: via.drill_nm,
+            diameter_nm: via.diameter_nm,
+            shape,
+        });
+    }
+    for (hid, h) in &b.holes {
+        let (Ok(hole), true) = (&h.item, fine(&h.faults)) else {
+            continue;
+        };
+        out.holes.push(HoleInfo {
+            owner: format!("{board}:hole/{hid}"),
+            shape: HoleShape::Round {
+                at: Point::new(hole.at[0], hole.at[1]),
+                d: hole.drill_nm,
+            },
+            plated: false,
+            of: HoleOf::Hole(hid.clone()),
+        });
+    }
     let (region, edges) = outline(file);
     out.outline = region;
     out.edges = edges;
@@ -369,12 +506,19 @@ pub fn pads_json(s: &BoardShapes) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The netlist fixture with a board placing every occurrence on a
     /// 5 mm grid.
-    fn placed() -> (tempfile::TempDir, Project, crate::id::Id) {
+    pub(crate) fn placed() -> (tempfile::TempDir, Project, crate::id::Id) {
+        placed_with(&[])
+    }
+
+    /// [`placed`] with `extra` files (path, text) beside it.
+    pub(crate) fn placed_with(
+        extra: &[(String, String)],
+    ) -> (tempfile::TempDir, Project, crate::id::Id) {
         let (dir, p) = crate::netlist::tests::project(&[]);
         let design = crate::netlist::one_design(&p, None).unwrap();
         let (_, occs) = occ::occurrences(&p, &design).unwrap();
@@ -403,10 +547,80 @@ mod tests {
                 crate::doc::to_string(&pl, super::super::PLACEMENT_KIND, 1).into_bytes(),
             );
         }
+        for (path, text) in extra {
+            files.insert(path.clone(), text.clone().into_bytes());
+        }
         let (boards, _) = super::super::load::load(&files).unwrap();
         let mut p = p;
         p.boards = boards;
         (dir, p, crate::id::Id::parse("b", "board").unwrap())
+    }
+
+    /// The first net any pad of the fixture's occurrences carries.
+    pub(crate) fn a_net(p: &Project) -> String {
+        let design = crate::netlist::one_design(p, None).unwrap();
+        occ::occurrences(p, &design)
+            .unwrap()
+            .1
+            .iter()
+            .flat_map(|o| o.nets.values().cloned())
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn routes_are_drawn_on_their_layers_with_their_drills() {
+        let (_d, p0, _) = placed();
+        let net = a_net(&p0);
+        let extra = vec![
+            (
+                "boards/b/tracks/t1.json".to_owned(),
+                format!(
+                    r#"{{"format":1,"kind":"ryueda.track","layer":"bottom","net":"{net}","points":[[1000000,1000000],[1000000,1000000],[9000000,1000000]],"width_nm":250000}}"#
+                ),
+            ),
+            (
+                "boards/b/vias/v1.json".to_owned(),
+                format!(
+                    r#"{{"at":[9000000,1000000],"diameter_nm":600000,"drill_nm":300000,"format":1,"kind":"ryueda.via","net":"{net}"}}"#
+                ),
+            ),
+            (
+                "boards/b/holes/h1.json".to_owned(),
+                r#"{"at":[40000000,40000000],"drill_nm":3200000,"format":1,"kind":"ryueda.hole"}"#
+                    .to_owned(),
+            ),
+        ];
+        let (_dir, p, id) = placed_with(&extra);
+        let s = build(&p, &p.boards[&id]).unwrap();
+        assert_eq!(s.tracks.len(), 1);
+        assert_eq!(s.tracks[0].layer, super::super::file::CopperLayer::Bottom);
+        let on = |layer: &str, owner: &str| {
+            s.layers
+                .get(layer)
+                .is_some_and(|l| l.iter().any(|(o, _)| o == owner))
+        };
+        assert!(on("copper.bottom", "b:track/t1"));
+        assert!(!on("copper.top", "b:track/t1"));
+        assert!(on("copper.top", "b:via/v1") && on("copper.bottom", "b:via/v1"));
+        let via = s.holes.iter().find(|h| h.owner == "b:via/v1").unwrap();
+        assert!(via.plated);
+        assert_eq!(
+            via.of,
+            HoleOf::Via(crate::id::Id::parse("v1", "via").unwrap())
+        );
+        let hole = s.holes.iter().find(|h| h.owner == "b:hole/h1").unwrap();
+        assert!(!hole.plated);
+        // The repeated point is skipped: one segment.
+        match &s.tracks[0].shape.parts[0].piece {
+            Piece::Stroke(st) => assert_eq!(st.path.len(), 1),
+            other => panic!("{other:?}"),
+        }
+        // Each pad knows its name and its mask openings.
+        for pd in &s.pads {
+            assert!(pd.reference.ends_with(&format!("/{}", pd.pad)), "{pd:?}");
+            assert_eq!(pd.mask[0].is_some(), pd.top, "{pd:?}");
+        }
     }
 
     #[test]

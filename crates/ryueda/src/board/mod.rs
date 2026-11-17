@@ -13,6 +13,8 @@ pub mod pad;
 pub mod preset;
 pub mod render;
 pub mod shapes;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod text;
 
 pub use file::{
