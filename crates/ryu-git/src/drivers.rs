@@ -139,10 +139,27 @@ fn exe_path(product: &str) -> Result<PathBuf> {
     Ok(canonical(&exe))
 }
 
-/// `p` canonical, without Windows' `\\?\` prefix, or as given when it
-/// can't be.
+/// `p` canonical, without Windows' `\\?\` prefix: its nearest folder that
+/// exists made canonical, and the rest joined on, so a path not made yet
+/// compares with one that is (`/private/var` for macOS's `/var`, a
+/// Windows long name for an 8.3 one).
 fn canonical(p: &Path) -> PathBuf {
-    ryu_doc::source::plain(p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+    let mut rest = Vec::new();
+    let mut at = p;
+    loop {
+        if let Ok(c) = at.canonicalize() {
+            let mut out = ryu_doc::source::plain(c);
+            out.extend(rest.iter().rev());
+            return out;
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(up), Some(name)) => {
+                rest.push(name.to_owned());
+                at = up;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
 }
 
 /// `exe` quoted for the shell Git runs commands in, with forward slashes
