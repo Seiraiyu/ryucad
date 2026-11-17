@@ -292,6 +292,7 @@ impl<P: Product> Live<P> {
         p.last_seen = Instant::now();
         if p.kind == Kind::Human && p.connections == 0 {
             self.participants.remove(id);
+            self.forget(id);
             return true;
         }
         false
@@ -319,8 +320,17 @@ impl<P: Product> Live<P> {
             .collect();
         for id in &gone {
             self.participants.remove(id);
+            self.forget(id);
         }
         gone
+    }
+
+    /// Every remaining view lets participant `gone` go
+    /// ([`Product::left`]).
+    fn forget(&mut self, gone: &str) {
+        for p in self.participants.values_mut() {
+            P::left(&mut p.view, gone);
+        }
     }
 
     /// Participant `id`, or the one named `id` (`--of agent`, `--of "dana
@@ -652,6 +662,27 @@ mod tests {
         assert!(live.expire(now).is_empty());
         assert_eq!(live.expire(now + AGENT_EXPIRY), vec![a.clone()]);
         assert!(live.get(&a).is_err());
+    }
+
+    /// #812: whoever leaves, a window that follows them lets them go;
+    /// the test product's view is whom it follows.
+    #[test]
+    fn a_view_lets_go_of_whoever_leaves() {
+        let mut live = Live::new();
+        let h = live.hello(Kind::Human, Some("Dana"), None).unwrap();
+        let k = live.hello(Kind::Human, Some("Kai"), None).unwrap();
+        let a = live.hello(Kind::Agent, None, None).unwrap();
+        live.get_mut(&h).unwrap().view = Some(k.clone());
+        live.get_mut(&a).unwrap().view = Some(k.clone());
+        // Kai's window closes.
+        assert!(live.goodbye(&k));
+        assert_eq!(live.get(&h).unwrap().view, None);
+        assert_eq!(live.get(&a).unwrap().view, None);
+        // An agent that expires is let go too.
+        live.get_mut(&h).unwrap().view = Some(a.clone());
+        assert!(!live.goodbye(&a));
+        assert_eq!(live.expire(Instant::now() + AGENT_EXPIRY), vec![a.clone()]);
+        assert_eq!(live.get(&h).unwrap().view, None);
     }
 
     fn r(name: char) -> String {
