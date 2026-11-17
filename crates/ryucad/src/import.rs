@@ -394,21 +394,17 @@ pub fn build(
     if i.mode() == crate::doc::import::Mode::Reference {
         return build_reference(part, id, i, &opened, k, run);
     }
-    let work = crate::work::work(run.job).with_budget(run.heal_budget);
-    let read = opened.body_with(
-        k,
-        &ReadOptions {
-            key: op_key(&part.id, id),
-            heal: heal_options(),
-        },
-        &work,
-    );
-    let (body, journal, healed) = read.result.map_err(|e| match e {
-        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
-        e => failed(id, i, &e, &read.instances, &read.solids),
-    })?;
+    let key = op_key(&part.id, id);
+    let heal = |key| heal_solid(id, i, &opened, k, run, key);
+    let h = match &i.place {
+        // Healed once per shape, then given this feature's names (#813).
+        Some(_) => once(&file.blake3, k, false, shape_key(i), heal)?.renamed(key),
+        None => heal(key)?,
+    };
+    let healed = h.solid.expect("a solid's heal reports");
+    let (body, journal, instances) = (h.body, h.journal, h.instances);
     let (body, unplaced) = placed(id, i, body)?;
-    let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
+    let step = |n: &Name| instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
         .map(|n| {
@@ -437,21 +433,18 @@ fn build_reference(
     k: usize,
     run: &crate::rebuild::Run,
 ) -> Result<(Built, Value)> {
-    let work = crate::work::work(run.job).with_budget(run.heal_budget);
-    let read = opened.reference_with(
-        k,
-        &ReadOptions {
-            key: op_key(&part.id, id),
-            heal: heal_options(),
-        },
-        &work,
-    );
-    let (body, report) = read.result.map_err(|e| match e {
-        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
-        e => failed(id, i, &e, &read.instances, &read.solids),
-    })?;
+    let key = op_key(&part.id, id);
+    let blake3 = &part.imports[&i.file.path].blake3;
+    let heal = |key| heal_reference(id, i, opened, k, run, key);
+    let h = match &i.place {
+        // Healed once per shape, then given this feature's names (#813).
+        Some(_) => once(blake3, k, true, shape_key(i), heal)?.renamed(key),
+        None => heal(key)?,
+    };
+    let report = h.reference.expect("a reference's layout reports");
+    let (body, instances) = (h.body, h.instances);
     let (body, unplaced) = placed(id, i, body)?;
-    let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
+    let step = |n: &Name| instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
         .map(|n| {
@@ -462,13 +455,198 @@ fn build_reference(
             (n.to_string(), o)
         })
         .collect();
-    let v = reference_report(i, &report, &read.instances);
+    let v = reference_report(i, &report, &instances);
     // A reference changes nothing the file had: its journal is empty, as
     // a mirror's is.
     let journal = ryukei::name::Journal::new();
     let mut built = crate::rebuild::finish_reference(id, (body, journal), origins)?;
     built.moved = unplaced.map(|(b, pose)| moved_from(i, b, pose, true));
     Ok((built, v))
+}
+
+/// A file body as healing or a reference's layout left it, by its import
+/// names: the body, its journal, the report, and the STEP instance each
+/// name came from.
+#[derive(Clone)]
+struct Healed {
+    body: ryukei::topo::Body,
+    journal: ryukei::name::Journal,
+    solid: Option<HealReport>,
+    reference: Option<ryukei::heal::ReferenceReport>,
+    instances: BTreeMap<Name, u64>,
+}
+
+impl Healed {
+    /// These names moved to `key`'s (#813): each name `n` becomes
+    /// `Name::derive(key, Import(Repair), [n])`, in the body, its journal,
+    /// the reference report's faces and the instance map, and nothing
+    /// else changes ([`ryukei::topo::Body::renamed`]). A body healed under
+    /// a shape key so takes each feature's own names.
+    fn renamed(&self, key: ryukei::name::OpKey) -> Healed {
+        let f = |n: Name| rekey(key, n);
+        let reference = self.reference.clone().map(|mut r| {
+            for list in [
+                &mut r.seams,
+                &mut r.poles,
+                &mut r.joined,
+                &mut r.split,
+                &mut r.reversed,
+                &mut r.turned,
+                &mut r.unoriented,
+                &mut r.split_faces,
+                &mut r.dropped_faces,
+                &mut r.laminar,
+            ] {
+                for n in list.iter_mut() {
+                    *n = f(*n);
+                }
+                list.sort();
+            }
+            for (n, _) in &mut r.tolerances {
+                *n = f(*n);
+            }
+            r
+        });
+        Healed {
+            body: self
+                .body
+                .renamed(f)
+                .expect("a keyed hash of distinct names is distinct"),
+            journal: self.journal.renamed(f),
+            solid: self.solid.clone(),
+            reference,
+            instances: self.instances.iter().map(|(n, k)| (f(*n), *k)).collect(),
+        }
+    }
+}
+
+/// `n`, a name made under a flattened import's shape key, as feature
+/// `key` names it (#813).
+fn rekey(key: ryukei::name::OpKey, n: Name) -> Name {
+    use ryukei::name::{ImportRole, Role};
+    Name::derive(key, Role::Import(ImportRole::Repair), &[n])
+}
+
+/// The key a flattened import's file body is healed under (#813): from
+/// the file's path, the product and the body, never the feature, so
+/// every copy of one component heals alike (ryukei's healer breaks ties
+/// by names, which follow the key) and once. Like a feature's key, it
+/// doesn't follow the file's bytes: a new version of the file keeps the
+/// names of what didn't change.
+fn shape_key(i: &Import) -> ryukei::name::OpKey {
+    let (pid, pname, ordinal) = match &i.product {
+        Some(p) => (p.id.as_str(), p.name.as_str(), p.ordinal),
+        None => ("", "", 0),
+    };
+    let text = format!(
+        "ryucad.import.shape.1\0{}\0{pid}\0{pname}\0{ordinal}\0{}",
+        i.file.path, i.body
+    );
+    ryukei::name::OpKey::from_bytes(text.as_bytes())
+}
+
+/// How many healed file bodies are kept by shape (#813).
+const HEALED_BODIES: usize = 1024;
+
+/// Healed file bodies by file, body, mode and shape key, most recently
+/// used last.
+type HealedKey = (String, usize, bool, u128);
+static HEALED: Mutex<Vec<(HealedKey, Arc<Healed>)>> = Mutex::new(Vec::new());
+
+/// `heal(key)`, kept by `file`'s hash, its body `k`, the mode and `key`,
+/// so copies of one component are healed once (#813). The lock is never
+/// held while healing (see [`opened`]: a rayon worker waiting on it could
+/// wait on itself): two copies healed side by side both heal, alike, and
+/// the first is kept. A heal that fails isn't kept.
+fn once(
+    file: &str,
+    k: usize,
+    reference: bool,
+    key: ryukei::name::OpKey,
+    heal: impl FnOnce(ryukei::name::OpKey) -> Result<Healed>,
+) -> Result<Arc<Healed>> {
+    let at: HealedKey = (file.to_owned(), k, reference, key.0);
+    {
+        let mut kept = HEALED.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(n) = kept.iter().position(|(x, _)| *x == at) {
+            let e = kept.remove(n);
+            let h = Arc::clone(&e.1);
+            kept.push(e);
+            return Ok(h);
+        }
+    }
+    let h = Arc::new(heal(key)?);
+    let mut kept = HEALED.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((_, first)) = kept.iter().find(|(x, _)| *x == at) {
+        return Ok(Arc::clone(first));
+    }
+    kept.push((at, Arc::clone(&h)));
+    while kept.len() > HEALED_BODIES {
+        kept.remove(0);
+    }
+    Ok(h)
+}
+
+/// Body `k` of `opened` healed under `key`, within `run`'s budget.
+fn heal_solid(
+    id: &Id,
+    i: &Import,
+    opened: &Opened,
+    k: usize,
+    run: &crate::rebuild::Run,
+    key: ryukei::name::OpKey,
+) -> Result<Healed> {
+    let work = crate::work::work(run.job).with_budget(run.heal_budget);
+    let read = opened.body_with(
+        k,
+        &ReadOptions {
+            key,
+            heal: heal_options(),
+        },
+        &work,
+    );
+    let (body, journal, healed) = read.result.map_err(|e| match e {
+        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
+        e => failed(id, i, &e, &read.instances, &read.solids),
+    })?;
+    Ok(Healed {
+        body,
+        journal,
+        solid: Some(healed),
+        reference: None,
+        instances: read.instances,
+    })
+}
+
+/// Body `k` of `opened` laid out as a reference under `key`.
+fn heal_reference(
+    id: &Id,
+    i: &Import,
+    opened: &Opened,
+    k: usize,
+    run: &crate::rebuild::Run,
+    key: ryukei::name::OpKey,
+) -> Result<Healed> {
+    let work = crate::work::work(run.job).with_budget(run.heal_budget);
+    let read = opened.reference_with(
+        k,
+        &ReadOptions {
+            key,
+            heal: heal_options(),
+        },
+        &work,
+    );
+    let (body, report) = read.result.map_err(|e| match e {
+        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
+        e => failed(id, i, &e, &read.instances, &read.solids),
+    })?;
+    Ok(Healed {
+        body,
+        journal: ryukei::name::Journal::new(),
+        solid: None,
+        reference: Some(report),
+        instances: read.instances,
+    })
 }
 
 /// A flattened import's file body, unplaced, and the pose that places it.
@@ -2405,8 +2583,32 @@ pub(crate) mod tests {
             s.reload().unwrap();
             let placed = solid(&mut s);
             let m = placed.moved.as_ref().expect("a placed import is moved");
-            assert_eq!(m.source.hash, shape_hash(&plain.body), "{mode:?}");
-            assert_eq!(m.source.body.dump(), plain.body.dump(), "the file's body as healed");
+            // The file's body healed once under its shape key, then given
+            // this feature's names (#813).
+            let Feature::Import(i) = i else { unreachable!() };
+            let opened = opened(&f).unwrap();
+            let k = select(&id("i"), &i, &opened).unwrap();
+            let heal = |key| match mode {
+                None => heal_solid(&id("i"), &i, &opened, k, &crate::rebuild::Run::none(), key),
+                Some(_) => {
+                    heal_reference(&id("i"), &i, &opened, k, &crate::rebuild::Run::none(), key)
+                }
+            };
+            let want = heal(shape_key(&i)).unwrap().renamed(op_key(&p, &id("i")));
+            assert_eq!(m.source.body.dump(), want.body.dump(), "{mode:?}");
+            assert_eq!(m.source.hash, shape_hash(&want.body), "{mode:?}");
+            // The before and after (#813): healed under the feature's own
+            // key and renamed, it is today's body, every entity where it
+            // was and named by the map; so the placed body differs from
+            // today's only by the key healing broke its ties with.
+            let own = heal(op_key(&p, &id("i"))).unwrap();
+            let ours = own.renamed(op_key(&p, &id("i")));
+            assert_eq!(own.body.dump(), plain.body.dump(), "today's body");
+            assert_eq!(ours.body.dump_unnamed(), plain.body.dump_unnamed());
+            for f in plain.body.faces() {
+                let n = plain.body.face(f).unwrap().name;
+                assert_eq!(ours.body.face(f).unwrap().name, rekey(op_key(&p, &id("i")), n));
+            }
             assert_eq!(
                 m.source.body.transformed(&m.pose).unwrap().dump(),
                 placed.body.dump(),
