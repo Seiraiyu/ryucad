@@ -24,7 +24,6 @@ fn err(e: Error) -> Fault {
     Fault::of(Severity::Error, e)
 }
 
-#[allow(dead_code)]
 fn warn(e: Error) -> Fault {
     Fault::of(Severity::Warning, e)
 }
@@ -109,10 +108,10 @@ fn properties(src: &dyn Source, cat: &Catalogue, config: &Config) -> Vec<Error> 
     out
 }
 
-/// Numbers (Tasks 13 and 14).
+/// Numbers: duplicates, schemes and other catalogues.
 fn numbers(src: &dyn Source, cat: &Catalogue, config: &Config, cx: &Context) -> Vec<Fault> {
-    let _ = (src, cat, config, cx);
-    Vec::new()
+    let _ = (src, cx);
+    crate::numbers::unschemed(cat, config).into_iter().map(warn).collect()
 }
 
 /// The declared properties a release of `id` needs that it lacks: those
