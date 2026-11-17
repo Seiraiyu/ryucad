@@ -71,7 +71,30 @@ fn pinned_boards_read_to_their_manifest() {
         // every line to record.
         println!("{name}:\n{line}");
         copper.push((name.to_string(), line));
-        let diff = ryudfm::testing::compare_islands_with_d356(&cb, &d356);
+        let mut diff = ryudfm::testing::compare_islands_with_d356(&cb, &d356);
+        // A net KiCad's own DRC reports unconnected is open for us too:
+        // printed, not a disagreement. (IPC-D-356 cuts long names to their
+        // last 14 characters, so a name matches the end of KiCad's.)
+        let unconnected = std::fs::read_to_string(out.join("drc.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .map(|v| ryudfm::testing::drc_unconnected(&v))
+            .unwrap_or_default();
+        diff.retain(|d| {
+            let net = d
+                .strip_prefix("open: ")
+                .and_then(|r| r.split_once(" lies on "))
+                .map(|(n, _)| n.to_ascii_uppercase());
+            let excused = net.as_ref().is_some_and(|n| {
+                unconnected
+                    .iter()
+                    .any(|u| u.to_ascii_uppercase().ends_with(n.as_str()))
+            });
+            if excused {
+                println!("{name}: {d}, as KiCad's DRC reports it unconnected");
+            }
+            !excused
+        });
         if let Some((_, issue)) = KNOWN_PIN_CASES.iter().find(|(n, _)| *n == name) {
             // Recorded, not asserted: the pin positions are the reader's
             // to fix (the copper agrees with the board's CAD netlist).

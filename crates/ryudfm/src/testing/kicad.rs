@@ -213,18 +213,48 @@ pub fn compare_islands_with_d356(cb: &crate::copper::CopperBoard, d356: &str) ->
 /// reports' precision.
 pub const TOLERANCE: ryu_board::geom::Nm = 6_000;
 
+/// KiCad 9's DRC reports about this many violations of a type at most
+/// (500 and 501 seen on boards with thousands): a report this long is
+/// cut, so only its gaps are checked against ours, not ours against it.
+pub const KICAD_REPORT_CAP: usize = 500;
+
+/// A net's name as ODB++ writes it: KiCad's export puts `_` for spaces.
+fn odb_net(n: &str) -> String {
+    n.replace(' ', "_")
+}
+
 /// The net in a KiCad DRC item's description: `Track [GND] on F.Cu, ...`.
 fn drc_net(d: &str) -> String {
     d.split_once('[')
         .and_then(|(_, r)| r.split_once(']'))
-        .map(|(n, _)| n.to_string())
+        .map(|(n, _)| odb_net(n))
         .unwrap_or_else(|| "<no net>".into())
 }
 
-/// The layer in a description, upper case as ODB++ names it: `... on F.Cu`.
+/// The layer in a description, upper case as ODB++ names it: `... on F.Cu`;
+/// `None` for one on a span (`Via [GND] on F.Cu - B.Cu`).
 fn drc_layer(d: &str) -> Option<String> {
     let (_, r) = d.rsplit_once(" on ")?;
+    if r.contains(" - ") {
+        return None;
+    }
     Some(r.split([',', ' ']).next()?.to_ascii_uppercase())
+}
+
+/// The nets KiCad's DRC report says are unconnected, as ODB++ names them.
+pub fn drc_unconnected(drc: &serde_json::Value) -> BTreeSet<String> {
+    drc["unconnected_items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|v| {
+            v["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|i| i["description"].as_str().map(drc_net))
+        })
+        .collect()
 }
 
 /// The distance a violation's description gives: `... actual 0.1500 mm)`.
@@ -243,6 +273,12 @@ fn sorted_pair(a: String, b: String) -> (String, String) {
 /// of nets shorted, and pairs of nets closer than the clearance on a
 /// layer. Gaps only one of us reports are tolerated within [`TOLERANCE`]
 /// of the clearance, and printed. Returns every other disagreement.
+///
+/// Two rules: when the board's CAD netlist places no point on copper
+/// (#933), our compare judged nothing, so opens and shorts are printed,
+/// not compared; and when KiCad's clearance violations reach
+/// [`KICAD_REPORT_CAP`], its report is cut, so each of its gaps must be
+/// ours but ours needn't be its (their count is printed).
 pub fn compare_with_drc(
     cb: &crate::copper::CopperBoard,
     drc: &serde_json::Value,
@@ -261,19 +297,22 @@ pub fn compare_with_drc(
     let violations: Vec<serde_json::Value> =
         drc["violations"].as_array().cloned().unwrap_or_default();
     let mut out = Vec::new();
+    let points = cb.built.layout.points.len();
+    let unjudged = points > 0 && cb.report.off_copper.len() == points;
     // Opens.
-    let theirs: BTreeSet<String> = drc["unconnected_items"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|v| items(v).into_iter().map(|d| drc_net(&d)))
-        .collect();
-    let ours: BTreeSet<String> = cb.report.opens.iter().map(|o| o.net.clone()).collect();
-    for n in theirs.difference(&ours) {
-        out.push(format!("net {n} open for KiCad, not for ryudfm"));
-    }
-    for n in ours.difference(&theirs) {
-        out.push(format!("net {n} open for ryudfm, not for KiCad"));
+    let theirs = drc_unconnected(drc);
+    let ours: BTreeSet<String> = cb.report.opens.iter().map(|o| odb_net(&o.net)).collect();
+    if unjudged {
+        println!(
+            "no CAD point lies on copper (#933): KiCad's unconnected nets {theirs:?} aren't compared"
+        );
+    } else {
+        for n in theirs.difference(&ours) {
+            out.push(format!("net {n} open for KiCad, not for ryudfm"));
+        }
+        for n in ours.difference(&theirs) {
+            out.push(format!("net {n} open for ryudfm, not for KiCad"));
+        }
     }
     // Shorts.
     let theirs: BTreeSet<(String, String)> = violations
@@ -288,11 +327,15 @@ pub fn compare_with_drc(
     for s in &cb.report.shorts {
         for (i, (a, _)) in s.nets.iter().enumerate() {
             for (b, _) in &s.nets[i + 1..] {
-                ours.insert(sorted_pair(a.clone(), b.clone()));
+                ours.insert(sorted_pair(odb_net(a), odb_net(b)));
             }
         }
     }
     for p in theirs.symmetric_difference(&ours) {
+        if unjudged {
+            println!("not compared (#933): {} and {} shorted", p.0, p.1);
+            continue;
+        }
         let who = if ours.contains(p) { "ryudfm" } else { "KiCad" };
         out.push(format!("{} and {} shorted for {who} alone", p.0, p.1));
     }
@@ -304,18 +347,24 @@ pub fn compare_with_drc(
         .filter_map(|v| {
             let d = items(v);
             let (a, b) = sorted_pair(drc_net(d.first()?), drc_net(d.get(1)?));
-            let layer = drc_layer(d.first()?)?;
+            let layer = d.iter().find_map(|x| drc_layer(x))?;
             Some((
                 (layer, a, b),
                 drc_actual(v["description"].as_str().unwrap_or("")),
             ))
         })
         .collect();
+    let capped = violations
+        .iter()
+        .filter(|v| v["type"] == "clearance")
+        .count()
+        >= KICAD_REPORT_CAP;
     let net = |id: &ryu_copper::connect::IslandId<crate::copper::Key>| {
         cb.nets
             .get(id)
             .and_then(|s| s.iter().next().cloned())
             .or_else(|| cb.claims().get(id).and_then(|c| c.first().cloned()))
+            .map(|n| odb_net(&n))
             .unwrap_or_else(|| "<no net>".into())
     };
     let mut ours: Gaps<ryu_board::geom::Nm> = BTreeMap::new();
@@ -331,8 +380,15 @@ pub fn compare_with_drc(
             *e = (*e).min(g.distance.nm);
         }
     }
+    if capped {
+        let only = ours.keys().filter(|k| !theirs.contains_key(*k)).count();
+        println!(
+            "KiCad's report is cut at {KICAD_REPORT_CAP} clearance violations: {only} of our {} pairs aren't in it, as expected",
+            ours.len()
+        );
+    }
     for (k, d) in &ours {
-        if !theirs.contains_key(k) {
+        if !capped && !theirs.contains_key(k) {
             if *d >= clearance - TOLERANCE {
                 println!(
                     "tolerated: ryudfm's gap {k:?} of {d} nm, within {TOLERANCE} nm of {clearance}"
