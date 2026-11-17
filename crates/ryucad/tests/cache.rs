@@ -993,7 +993,11 @@ fn a_flattened_imports_sources_come_back_from_the_cache() {
             .flat_map(|(_, o)| o.as_ref().unwrap().solids().to_vec())
             .map(|(_, b)| {
                 let m = b.moved.as_ref().expect("a flattened body is moved");
-                (b.hash.clone(), m.source.hash.clone(), format!("{:?}", m.pose))
+                (
+                    b.hash.clone(),
+                    m.source.hash.clone(),
+                    format!("{:?}", m.pose),
+                )
             })
             .collect()
     };

@@ -437,7 +437,10 @@ pub(crate) mod tests {
             assert_eq!(r.name_of(entity), Some(f(old)));
             assert_eq!(r.by_name(old), None);
         }
-        assert!(b.renamed(|_| Name::derive(OpKey(1), Role::Merged, &[])).is_none());
+        assert!(
+            b.renamed(|_| Name::derive(OpKey(1), Role::Merged, &[]))
+                .is_none()
+        );
     }
 
     #[test]

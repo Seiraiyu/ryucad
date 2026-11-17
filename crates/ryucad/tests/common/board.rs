@@ -14,8 +14,11 @@ pub fn place(k: usize) -> Rigid {
     let turn = |axis: UnitVector3, step: usize, n: usize| {
         Rigid::rotation(axis, 0.3 + 0.7 * ((k * step) % n) as f64)
     };
-    let r = turn(UnitVector3::Z, 1, 7)
-        .then_after(&turn(UnitVector3::Y, 3, 5).then_after(&turn(UnitVector3::X, 5, 11)));
+    let r = turn(UnitVector3::Z, 1, 7).then_after(&turn(UnitVector3::Y, 3, 5).then_after(&turn(
+        UnitVector3::X,
+        5,
+        11,
+    )));
     let t = Rigid::translation(Vector3::new(
         10.0 * (k % 40) as f64 - 200.0,
         10.0 * (k / 40) as f64 - 125.0,
@@ -83,7 +86,11 @@ pub fn board(distinct: usize, copies: usize) -> Vec<u8> {
         i += 1;
         !refused.contains(&format!("c{}", i - 1))
     });
-    assert!(bodies.len() >= distinct, "{} of the race write", bodies.len());
+    assert!(
+        bodies.len() >= distinct,
+        "{} of the race write",
+        bodies.len()
+    );
     bodies.truncate(distinct);
     ryustep::write(&model(&bodies, copies), &options()).unwrap()
 }

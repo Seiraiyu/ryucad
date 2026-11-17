@@ -33,7 +33,11 @@ fn components(s: &mut Session, part: &str) -> BTreeMap<String, Vec<(String, Arc<
         .features
         .iter()
         .map(|(id, f)| {
-            let i = f.as_ref().unwrap().import().expect("a flattened part imports");
+            let i = f
+                .as_ref()
+                .unwrap()
+                .import()
+                .expect("a flattened part imports");
             assert!(i.place.is_some(), "{id} is placed");
             (id.clone(), i.clone())
         })
@@ -146,7 +150,10 @@ fn copies_of_a_seeded_component_share_one_shape() {
         "seeded board: {copies} copies of {} components, {alone} meshed alone",
         c.len()
     );
-    assert_eq!(alone, 0, "copies of one component healed to different shapes");
+    assert_eq!(
+        alone, 0,
+        "copies of one component healed to different shapes"
+    );
 }
 
 #[test]
@@ -167,7 +174,10 @@ fn copies_of_one_shape_are_meshed_once_and_moved() {
         "the block's mesh and the pin's, the block's moved to its second copy"
     );
     let c = components(&mut s, "board");
-    let (_, blocks) = c.iter().find(|(_, v)| v.len() == 2).expect("the block twice");
+    let (_, blocks) = c
+        .iter()
+        .find(|(_, v)| v.len() == 2)
+        .expect("the block twice");
     let mesh_of = |solid: &str| {
         let id = solid.rsplit('/').next().unwrap();
         meshes
@@ -179,7 +189,11 @@ fn copies_of_one_shape_are_meshed_once_and_moved() {
     let (a, b) = (mesh_of(&blocks[0].0), mesh_of(&blocks[1].0));
     let (ma, mb) = (a.mesh.as_ref().unwrap(), b.mesh.as_ref().unwrap());
     assert_eq!(ma.triangles, mb.triangles, "one mesh");
-    assert_eq!(a.params.chord.to_bits(), b.params.chord.to_bits(), "one chord");
+    assert_eq!(
+        a.params.chord.to_bits(),
+        b.params.chord.to_bits(),
+        "one chord"
+    );
     // Each copy's mesh is the shared one moved by its own pose.
     let (ra, rb) = (
         blocks[0].1.moved.as_ref().unwrap(),
@@ -348,7 +362,11 @@ fn a_board_of_forty_components_placed_a_thousand_times_meshes_forty() {
         .iter()
         .map(|b| b.moved.as_ref().unwrap().source.hash.as_str())
         .collect();
-    assert_eq!(shapes.len(), DISTINCT, "one shape per component (the proof)");
+    assert_eq!(
+        shapes.len(),
+        DISTINCT,
+        "one shape per component (the proof)"
+    );
     let whole = Id::parse("whole", "part").unwrap();
     let model = s
         .model(&whole, &ryucad::doc::assembly::Rev::Working)

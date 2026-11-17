@@ -431,7 +431,10 @@ impl Cache {
         // parameters are the export's.
         let missing = self.roots(items.iter().map(|b| ((), *b)), key, |(), b| export_root(b));
         let disk = self.disk.as_deref();
-        prefetch(disk, missing.iter().map(|(_, b)| (b.hash.as_str(), *params)));
+        prefetch(
+            disk,
+            missing.iter().map(|(_, b)| (b.hash.as_str(), *params)),
+        );
         self.made += missing.len() as u64;
         let stage = job.begin(Phase::Mesh, "bodies", missing.len());
         let made: Vec<Result<(String, Arc<DisplayMesh>)>> = missing
@@ -565,7 +568,9 @@ impl Pending {
         let params = |f: &Feature, b: &Built| quality.params(diagonal(f, &b.body));
         prefetch(
             disk,
-            self.items.iter().map(|(f, b)| (b.hash.as_str(), params(f, b))),
+            self.items
+                .iter()
+                .map(|(f, b)| (b.hash.as_str(), params(f, b))),
         );
         let stage = job.begin(Phase::Mesh, "bodies", self.items.len());
         let meshes = self
@@ -1338,7 +1343,10 @@ pub(crate) mod tests {
         assert_eq!(cache.made(), 2, "each source once");
         for (b, m) in bodies.iter().zip(&meshes) {
             let source = &b.moved.as_ref().unwrap().source;
-            assert!(cache.has(&source.hash, Quality::Normal), "the source is kept");
+            assert!(
+                cache.has(&source.hash, Quality::Normal),
+                "the source is kept"
+            );
             assert!(cache.has(&b.hash, Quality::Normal));
             assert!(m.mesh.is_ok());
         }
@@ -1346,7 +1354,10 @@ pub(crate) mod tests {
         let mut cache = Cache::with_disk(None);
         let pending = cache.pending(&items, Quality::Normal).unwrap();
         cache.put(pending.make(), usize::MAX);
-        assert!(cache.pending(&items, Quality::Normal).is_none(), "the roots are held");
+        assert!(
+            cache.pending(&items, Quality::Normal).is_none(),
+            "the roots are held"
+        );
         let before = cache.made();
         cache.get_all(&items, Quality::Normal, usize::MAX);
         assert_eq!(cache.made(), before, "only moved");
@@ -1372,7 +1383,10 @@ pub(crate) mod tests {
         let mut cache = Cache::with_disk(None);
         let made = cache.export_all(&[&m.source, &b], &params, usize::MAX);
         assert_eq!(cache.made(), 1, "the source once");
-        let (a, z) = (made[0].mesh.as_ref().unwrap(), made[1].mesh.as_ref().unwrap());
+        let (a, z) = (
+            made[0].mesh.as_ref().unwrap(),
+            made[1].mesh.as_ref().unwrap(),
+        );
         assert_eq!(a.triangles, z.triangles);
         assert_eq!(z.positions[0], m.pose.apply_point(a.positions[0]));
         assert_eq!(made[1].params.chord.to_bits(), params.chord.to_bits());

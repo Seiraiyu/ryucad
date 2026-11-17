@@ -2557,7 +2557,10 @@ pub(crate) mod tests {
                 Arc::clone(&s.rebuilt(&p).unwrap().output(&id("i")).unwrap().solids()[0].1)
             };
             let plain = solid(&mut s);
-            assert!(plain.moved.is_none(), "{mode:?}: an unplaced import moves nothing");
+            assert!(
+                plain.moved.is_none(),
+                "{mode:?}: an unplaced import moves nothing"
+            );
             let f = ImportFile::new(bytes.clone());
             let i = Feature::Import(Import {
                 mode,
@@ -2585,7 +2588,9 @@ pub(crate) mod tests {
             let m = placed.moved.as_ref().expect("a placed import is moved");
             // The file's body healed once under its shape key, then given
             // this feature's names (#813).
-            let Feature::Import(i) = i else { unreachable!() };
+            let Feature::Import(i) = i else {
+                unreachable!()
+            };
             let opened = opened(&f).unwrap();
             let k = select(&id("i"), &i, &opened).unwrap();
             let heal = |key| match mode {
@@ -2607,7 +2612,10 @@ pub(crate) mod tests {
             assert_eq!(ours.body.dump_unnamed(), plain.body.dump_unnamed());
             for f in plain.body.faces() {
                 let n = plain.body.face(f).unwrap().name;
-                assert_eq!(ours.body.face(f).unwrap().name, rekey(op_key(&p, &id("i")), n));
+                assert_eq!(
+                    ours.body.face(f).unwrap().name,
+                    rekey(op_key(&p, &id("i")), n)
+                );
             }
             assert_eq!(
                 m.source.body.transformed(&m.pose).unwrap().dump(),
