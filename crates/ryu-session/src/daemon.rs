@@ -1082,13 +1082,63 @@ mod tests {
         assert_eq!(answered, ["0", "1", "2", "3"]);
     }
 
-    /// A burst of changes is published at most once per `max`, and the
-    /// last once the daemon is quiet; nothing is left pending (#849).
+    /// A lone change is published at the watcher's next look, not after
+    /// the quiet window (#960): with `quiet` and `max` both an hour, only
+    /// the leading edge can publish it.
+    #[test]
+    fn a_lone_change_is_published_at_once() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(dir.join(Test::MANIFEST), "{}").unwrap();
+        let endpoint = Endpoint {
+            address: test_address(&dir, "l"),
+            log: dir.join("l.log"),
+            product: std::marker::PhantomData,
+        };
+        let listener = bind(&endpoint).unwrap();
+        let state = State::<Test>::new(&dir, endpoint.clone(), Duration::from_secs(3600));
+        let serve = Arc::clone(&state);
+        std::thread::spawn(move || accept(&listener, &serve));
+        {
+            let mut c = state.core.lock();
+            c.live.poll_ms = 50;
+            c.live.coalesce = crate::publish::Coalesce::new(3_600_000, 3_600_000);
+        }
+        let w = Arc::clone(&state);
+        std::thread::spawn(move || watcher(&w));
+        let mut sub = agent(&endpoint);
+        sub.call(&Basic {
+            method: "subscribe",
+            params: json!({}),
+        })
+        .unwrap()
+        .unwrap();
+        let published =
+            |s: &State<Test>| s.core.lock().live.timings.get("daemon.publish").publishes;
+        agent(&endpoint)
+            .call(&Basic {
+                method: "mark",
+                params: json!({}),
+            })
+            .unwrap()
+            .unwrap();
+        let t = Instant::now();
+        while published(&state) == 0 {
+            assert!(t.elapsed() < Duration::from_secs(60), "held for quiet");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(published(&state), 1);
+        assert!(state.core.lock().live.coalesce.pending().is_none());
+    }
+
+    /// A burst of changes is published at most once per `max` after its
+    /// first, lone, change, and the last once the daemon is quiet; nothing
+    /// is left pending (#849, #960).
     ///
     /// Each half sets only the rule it tests, so a slow runner's stalls
     /// can't change the count (#950): with `quiet` an hour no stall in the
-    /// burst is quiet enough to publish, and every publish then needs a
-    /// change at least `max` old, so `n` publishes take at least `n × max`.
+    /// burst is quiet enough to publish or to make a change lone, and every
+    /// publish after the first then needs a change at least `max` old, so
+    /// `n` publishes take at least `(n - 1) × max`.
     #[test]
     fn a_burst_is_published_coalesced() {
         // The watcher outlives the test and stops the process when its
@@ -1141,7 +1191,7 @@ mod tests {
         let elapsed = t.elapsed();
         let bound = u64::try_from(elapsed.as_nanos() / max.as_nanos()).unwrap();
         assert!(
-            (1..=bound).contains(&during),
+            (1..=bound + 1).contains(&during),
             "{during} publishes of {marks} changes in {elapsed:?}"
         );
         // The last: with `max` an hour, only quiet publishes, once.

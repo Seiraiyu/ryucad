@@ -1,9 +1,12 @@
 //! When a watched daemon tells its subscribers what changed (#849, design
 //! 698): a request that changed something marks it pending and answers.
-//! The daemon's watcher publishes once the daemon has been quiet for
-//! `quiet` (no request started or finished), or at the latest `max` after
-//! the first unpublished change, so a long burst still updates a window
-//! about once a second. A publish covers every change since the last.
+//! A lone change, one marked at least `quiet` after the change before it,
+//! is published at the watcher's next look (#960: holding it for the quiet
+//! window put a lone edit over design 192's 300 ms bar). Only a burst
+//! coalesces: a change marked within `quiet` of another is published once
+//! the daemon has been quiet for `quiet` (no request started or finished),
+//! or at the latest `max` after the first unpublished change, so a long
+//! burst still updates a window about once a second. A publish covers every change since the last.
 //! While nothing is pending, the watcher checks for changes made behind
 //! the daemon's back every `poll_ms`, as before.
 
@@ -20,6 +23,11 @@ pub struct Coalesce {
     pub max: Duration,
     /// The first change not yet published.
     since: Option<Instant>,
+    /// Whether that change came alone, `quiet` or more after the change
+    /// before it: published without waiting (#960).
+    lone: bool,
+    /// When the last change was marked, published or not.
+    last: Option<Instant>,
 }
 
 /// Why the watcher settles now.
@@ -43,12 +51,20 @@ impl Coalesce {
             quiet: Duration::from_millis(quiet_ms),
             max: Duration::from_millis(max_ms),
             since: None,
+            lone: false,
+            last: None,
         }
     }
 
     /// A request changed something subscribers will hear of.
     pub fn mark(&mut self, now: Instant) {
-        self.since.get_or_insert(now);
+        if self.since.is_none() {
+            self.since = Some(now);
+            self.lone = self
+                .last
+                .is_none_or(|l| now.saturating_duration_since(l) >= self.quiet);
+        }
+        self.last = Some(now);
     }
 
     /// When the first unpublished change was marked.
@@ -61,7 +77,8 @@ impl Coalesce {
         self.since = None;
     }
 
-    /// Whether the watcher settles now, and why. `last_request` is when a
+    /// Whether the watcher settles now, and why: a lone change at once, a
+    /// burst once quiet or once its first change is `max` old. `last_request` is when a
     /// request last started or finished, `last_settle` when the watcher
     /// last settled.
     pub fn due(
@@ -73,8 +90,10 @@ impl Coalesce {
     ) -> Option<Due> {
         let since = |t: Instant| now.saturating_duration_since(t);
         match self.since {
-            Some(first) => (since(last_request) >= self.quiet || since(first) >= self.max)
-                .then_some(Due::Publish),
+            Some(first) => {
+                (self.lone || since(last_request) >= self.quiet || since(first) >= self.max)
+                    .then_some(Due::Publish)
+            }
             None => (since(last_settle) >= poll).then_some(Due::Poll),
         }
     }
@@ -102,6 +121,15 @@ mod tests {
         c.mark(c0);
         c.mark(c0 + ms(50)); // the first mark stands
         assert_eq!(c.pending(), Some(c0));
+        // The first change came alone: published at once (#960).
+        assert_eq!(
+            c.due(c0 + ms(50), c0 + ms(50), c0, poll),
+            Some(Due::Publish)
+        );
+        c.clear();
+        // The burst goes on: within `quiet` of the change before it.
+        c.mark(c0 + ms(100));
+        assert_eq!(c.pending(), Some(c0 + ms(100)));
         // Requests keep coming: not quiet, not yet a second.
         assert_eq!(c.due(c0 + ms(500), c0 + ms(450), c0, poll), None);
         // Quiet for 150 ms.
@@ -110,12 +138,20 @@ mod tests {
             Some(Due::Publish)
         );
         // Never quiet, but a second since the first change.
+        c.mark(c0 + ms(1090));
         assert_eq!(
-            c.due(c0 + ms(1000), c0 + ms(990), c0, poll),
+            c.due(c0 + ms(1100), c0 + ms(1090), c0, poll),
             Some(Due::Publish)
         );
         c.clear();
         assert_eq!(c.pending(), None);
+        // Quiet since the burst's last change: the next comes alone.
+        c.mark(c0 + ms(1090) + ms(150));
+        assert_eq!(
+            c.due(c0 + ms(1240), c0 + ms(1240), c0, poll),
+            Some(Due::Publish)
+        );
+        c.clear();
         assert_eq!(c.tick(poll), ms(150));
         assert_eq!(Coalesce::new(5, 1000).tick(poll), ms(10));
     }
