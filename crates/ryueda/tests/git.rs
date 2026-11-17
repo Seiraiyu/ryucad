@@ -1019,3 +1019,57 @@ fn board_files_merge_by_value_and_two_moves_of_one_part_conflict() {
     assert_eq!(j1["conflicts"]["/at"]["kind"], "value", "{j1}");
     assert_eq!(j1["at"], json!([2_000_000, 10_000_000]), "ours' in place");
 }
+
+#[test]
+fn two_branches_adding_tracks_merge_and_one_track_edited_both_ways_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    let ok = |args: &[&str]| -> Value {
+        let (c, v) = ryueda(&board, &run, false, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+        v
+    };
+    ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let pads = ok(&["board", "show", "main", "--pads"])["result"]["pads"].clone();
+    let net = pads[0]["net"].as_str().unwrap().to_owned();
+    ok(&[
+        "board", "track", "add", "main", "--net", &net, "--layer", "top", "--path", "1,1", "2,1",
+        "--id", "t0",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "board"]);
+    git(&top, &["branch", "theirs"]);
+    ok(&[
+        "board", "track", "add", "main", "--net", &net, "--layer", "top", "--path", "1,3", "2,3",
+        "--id", "t1",
+    ]);
+    ok(&["board", "track", "edit", "main", "t0", "--width", "0.3"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&[
+        "board", "track", "add", "main", "--net", &net, "--layer", "bottom", "--path", "1,5",
+        "2,5", "--id", "t2",
+    ]);
+    ok(&[
+        "board", "via", "add", "main", "--net", &net, "--at", "5,5", "--id", "v1",
+    ]);
+    ok(&["board", "track", "edit", "main", "t0", "--width", "0.4"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, _) = git_try(&top, &[], &["merge", "-q", "theirs"]);
+    assert!(!merged, "t0's width edited both ways conflicts");
+    let tracks = board.join("boards/main/tracks");
+    assert!(tracks.join("t1.json").is_file() && tracks.join("t2.json").is_file());
+    assert!(board.join("boards/main/vias/v1.json").is_file());
+    let t0: Value =
+        serde_json::from_str(&std::fs::read_to_string(tracks.join("t0.json")).unwrap()).unwrap();
+    assert_eq!(t0["conflicts"]["/width_nm"]["kind"], "value", "{t0}");
+}
