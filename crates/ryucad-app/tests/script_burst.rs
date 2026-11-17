@@ -376,17 +376,27 @@ fn publish_max_ms() -> f64 {
         .unwrap_or(1000.0)
 }
 
-/// Every publish but the watcher's polls: the watcher's coalesced ones
-/// and any a request made on its path, timed under its method (a script
-/// sharing a watch's name must not publish on its path, #849). Less the
-/// run's first `part list`, which starts the daemon before anyone
-/// subscribes and so notes the state on its path.
+/// The watcher's coalesced publishes.
 fn publishes(t: &Value) -> u64 {
+    t["methods"]["daemon.publish"]["publishes"]
+        .as_u64()
+        .unwrap_or(0)
+}
+
+/// Publishes requests made on their own path while someone watched, by
+/// method: none may (#849), not even a script's that shares the watch's
+/// name (`agent`). A request with nobody subscribed notes the state on
+/// its path, so the hellos and the setup's `part list` made before the
+/// watch or the window subscribed don't count.
+fn on_path(t: &Value) -> Vec<(String, u64)> {
     let methods = t["methods"].as_object().into_iter().flatten();
     methods
-        .filter(|(m, _)| !matches!(m.as_str(), "daemon.poll" | "part.list"))
-        .map(|(_, v)| v["publishes"].as_u64().unwrap_or(0))
-        .sum()
+        .filter(|(m, _)| {
+            !m.starts_with("daemon.") && !matches!(m.as_str(), "session.hello" | "part.list")
+        })
+        .map(|(m, v)| (m.clone(), v["publishes"].as_u64().unwrap_or(0)))
+        .filter(|(_, n)| *n > 0)
+        .collect()
 }
 
 /// Rounds of the three configurations: the bar is judged on the median
@@ -418,6 +428,17 @@ fn a_window_costs_a_script_little() {
         same("one process a call", &each);
         ratios[0].1.push(stdio[2].secs / stdio[0].secs);
         ratios[1].1.push(each[2].secs / each[0].secs);
+        // Nothing a request made while someone watched was told on its path.
+        for runs in [&stdio, &each] {
+            for (c, r) in CONFIGS.iter().zip(runs).skip(1) {
+                let on = on_path(&r.timings);
+                assert!(
+                    on.is_empty(),
+                    "{}: published on their path: {on:?}",
+                    c.name()
+                );
+            }
+        }
         // At most one publish per `publish_max_ms` of the stdio run, plus
         // one.
         for (c, r) in CONFIGS.iter().zip(&stdio).skip(1) {
