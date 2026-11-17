@@ -179,4 +179,21 @@ impl BoardShapes {
         });
         self
     }
+
+    /// A rectangular courtyard `size` centred on `at`.
+    pub fn courtyard(
+        &mut self,
+        occ: &str,
+        at: (i64, i64),
+        size: (i64, i64),
+        open: bool,
+    ) -> &mut Self {
+        self.courtyards.push(super::shapes::CourtyardInfo {
+            owner: format!("b:{occ}"),
+            occurrence: occ.into(),
+            shape: rect(Point::new(at.0, at.1), size.0, size.1),
+            open,
+        });
+        self
+    }
 }

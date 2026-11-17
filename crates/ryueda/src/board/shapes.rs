@@ -57,6 +57,17 @@ pub enum HoleOf {
     Hole(crate::id::Id),
 }
 
+/// A placement's courtyard, placed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CourtyardInfo {
+    /// `<board>:<refdes>`.
+    pub owner: String,
+    pub occurrence: String,
+    pub shape: Shape,
+    /// Its graphics didn't close: this is their box.
+    pub open: bool,
+}
+
 /// A track as drawn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackInfo {
@@ -117,6 +128,7 @@ pub struct BoardShapes {
     pub pads: Vec<PadInfo>,
     pub tracks: Vec<TrackInfo>,
     pub vias: Vec<ViaInfo>,
+    pub courtyards: Vec<CourtyardInfo>,
     /// The outline less its cutouts.
     pub outline: Shape,
     /// The outline's and cutouts' boundaries, zero width.
@@ -187,6 +199,7 @@ struct One {
     layers: Vec<(String, String, Shape)>,
     holes: Vec<HoleInfo>,
     pads: Vec<PadInfo>,
+    courtyards: Vec<CourtyardInfo>,
     notices: Vec<Fault>,
 }
 
@@ -331,6 +344,19 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
             put(&mut out, &layer_of(&fl.layer), s);
         }
     }
+    let court: Vec<&crate::footprint::Graphic> = f
+        .graphics
+        .values()
+        .filter(|g| g.layer == "courtyard.top")
+        .collect();
+    if let Some((shape, open)) = super::courtyard::of_graphics(&court) {
+        out.courtyards.push(CourtyardInfo {
+            owner: owner.clone(),
+            occurrence: o.reference.clone(),
+            shape: shape.placed(&place, Polarity::Positive),
+            open,
+        });
+    }
     out
 }
 
@@ -403,6 +429,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         }
         out.holes.extend(one.holes);
         out.pads.extend(one.pads);
+        out.courtyards.extend(one.courtyards);
         notices.extend(one.notices);
     }
     // The routes; files with an error fault are left out (`check`

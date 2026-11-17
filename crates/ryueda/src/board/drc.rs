@@ -724,6 +724,61 @@ pub fn edges(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding>
         .collect()
 }
 
+/// Courtyards touching, and courtyards judged by their box.
+pub fn courtyards(s: &BoardShapes, board: &str) -> Vec<Finding> {
+    let opts = BodyOptions::default();
+    let mut out: Vec<Finding> = s
+        .courtyards
+        .iter()
+        .filter(|c| c.open)
+        .map(|c| {
+            finding(
+                Code::DrcCourtyardOpen,
+                Severity::Warning,
+                board,
+                vec![c.owner.clone()],
+                format!("{}'s courtyard doesn't close; judged by its box", c.owner),
+                Value::Null,
+            )
+        })
+        .collect();
+    let bodies: Vec<Body> = s
+        .courtyards
+        .iter()
+        .map(|c| Body::of_shape(&c.shape, &opts))
+        .collect();
+    let index = ryu_copper::index::Index::from_bodies(
+        1,
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (i, 0, b.clone()))
+            .collect(),
+        opts,
+    );
+    let found: Vec<Finding> = index
+        .pairs(0, 0)
+        .into_par_iter()
+        .filter_map(|p| {
+            let v = measure::touches(&bodies[p.a], &bodies[p.b]);
+            if v == Verdict::No {
+                return None;
+            }
+            let (a, b) = (&s.courtyards[p.a], &s.courtyards[p.b]);
+            Some(finding(
+                Code::DrcCourtyardOverlap,
+                Severity::Error,
+                board,
+                vec![a.owner.clone(), b.owner.clone()],
+                format!("{} and {}'s courtyards touch", a.owner, b.owner),
+                json!({"uncertain": v == Verdict::Uncertain}),
+            ))
+        })
+        .collect();
+    out.extend(found);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,5 +1093,24 @@ mod tests {
         let f = edges(&connect::connect("b", &s), &s, P);
         assert_eq!(codes(&f), [Code::DrcEdgeClearance]);
         assert_eq!(f[0].refs, ["b:hole/h1#hole"]);
+    }
+
+    #[test]
+    fn courtyards_touching_overlap_and_open_ones_warn() {
+        let two = |gap| {
+            let mut s = board(20 * MM, 10 * MM);
+            s.courtyard("r1", (5 * MM, 5 * MM), (2 * MM, MM), false)
+                .courtyard("r2", (7 * MM + gap, 5 * MM), (2 * MM, MM), false);
+            courtyards(&s, "b")
+        };
+        assert!(two(1).is_empty());
+        let f = two(0);
+        assert_eq!(codes(&f), [Code::DrcCourtyardOverlap]);
+        assert_eq!(f[0].refs, ["b:r1", "b:r2"]);
+        let mut s = board(20 * MM, 10 * MM);
+        s.courtyard("r1", (5 * MM, 5 * MM), (2 * MM, MM), true);
+        let f = courtyards(&s, "b");
+        assert_eq!(codes(&f), [Code::DrcCourtyardOpen]);
+        assert_eq!(f[0].severity, Severity::Warning);
     }
 }
