@@ -5109,3 +5109,71 @@ fn check_has_a_boards_section_only_with_boards() {
     assert_eq!(main["errors"], 8, "eight unplaced: {main}");
     assert!(r["errors"].as_u64().unwrap() >= 8);
 }
+
+#[test]
+fn route_writes_are_logged_undone_and_guarded() {
+    let p = Pair::breakout();
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    assert_eq!(
+        run(&[
+            "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main"
+        ])
+        .0,
+        0
+    );
+    assert_eq!(run(&["board", "place", "main", "R1", "--at", "10,10"]).0, 0);
+    let (_, pads) = run(&["board", "show", "main", "--pads"]);
+    let net = pads["result"]["pads"][0]["net"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, s) = run(&["board", "show", "main"]);
+    let rev = s["result"]["revision"].as_str().unwrap().to_owned();
+    let (code, v) = run(&[
+        "board", "track", "add", "main", "--expect", "stale", "--net", &net, "--layer", "top",
+        "--path", "1,1", "2,1",
+    ]);
+    assert_eq!((code, &v["error"]["code"]), (1, &json!("conflict")), "{v}");
+    let (code, v) = run(&[
+        "board", "track", "add", "main", "--expect", &rev, "--net", &net, "--layer", "top",
+        "--path", "R1/1", "5,10", "--id", "t1",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    let (_, h) = run(&["history"]);
+    let last = h["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["method"] == "board.track.add")
+        .unwrap()
+        .clone();
+    assert_eq!(last["files"][0]["path"], "boards/main/tracks/t1.json");
+    let (code, _) = run(&["undo"]);
+    assert_eq!(code, 0);
+    assert!(!p.daemon.join("board/boards/main/tracks/t1.json").exists());
+    let (code, _) = run(&["redo"]);
+    assert_eq!(code, 0);
+    assert!(p.daemon.join("board/boards/main/tracks/t1.json").is_file());
+}
+
+#[test]
+fn a_hand_edited_route_with_a_bad_net_is_a_fault_that_check_reports() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.write(
+        "board/boards/main/tracks/t9.json",
+        r#"{"format":1,"kind":"ryueda.track","layer":"top","net":"gone","points":[[0,0],[1000000,0]],"width_nm":250000}"#,
+    );
+    let (code, v) = p.both_in("board", &["check"]);
+    assert_eq!(code, 1, "{v}");
+    let faults = v["error"]["details"]["report"]["faults"]
+        .as_array()
+        .unwrap();
+    assert!(
+        faults.iter().any(|f| f["code"] == "board_net_not_found"
+            && f["details"]["path"] == "boards/main/tracks/t9.json"),
+        "{faults:?}"
+    );
+}
