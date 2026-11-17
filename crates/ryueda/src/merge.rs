@@ -349,7 +349,11 @@ pub fn newest(kind: &str) -> Option<u64> {
         ryupdm::record::RELEASE_KIND => ryupdm::record::PRODUCT_FORMAT,
         ryupdm::record::OBSOLETE_KIND => ryupdm::record::FORMAT,
         crate::project::LOCK_KIND => ryu_doc::lock::FORMAT,
-        crate::board::BOARD_KIND | crate::board::PLACEMENT_KIND => crate::board::FORMAT,
+        crate::board::BOARD_KIND
+        | crate::board::PLACEMENT_KIND
+        | crate::board::TRACK_KIND
+        | crate::board::VIA_KIND
+        | crate::board::HOLE_KIND => crate::board::FORMAT,
         _ => return None,
     })
 }
@@ -491,6 +495,13 @@ mod tests {
             newest(crate::board::PLACEMENT_KIND),
             Some(crate::board::FORMAT)
         );
+        for k in [
+            crate::board::TRACK_KIND,
+            crate::board::VIA_KIND,
+            crate::board::HOLE_KIND,
+        ] {
+            assert_eq!(newest(k), Some(crate::board::FORMAT), "{k}");
+        }
     }
 
     #[test]
