@@ -181,6 +181,43 @@ pub(crate) fn face_beside(
     )
 }
 
+/// Which signs a face of a body takes in `other`'s implicit form, with
+/// no strip left out: [`face_beside`] with no rails and no vertices, for
+/// faces that share nothing (plan 21.B's certified miss, design 683).
+/// Every part of the face's parameter box is signed but those certified
+/// outside the face ([`outside`]), so the parts a plane stop or a near
+/// box left outside a working face's loops have no say. The search stops
+/// once both signs are seen.
+///
+/// `Ok` with one sign, or with none (`other` has no implicit form and
+/// every part is certified apart from it), certifies that the face
+/// never meets `other`; `Ok([true, true])` that it crosses it. Fails
+/// with `Uncertain` where a fin has no pcurve or a part can't be signed
+/// within `cells` parts (at most [`CELLS`]).
+pub(crate) fn face_keeps_off(
+    body: &Body,
+    face: FaceId,
+    other: &Surface,
+    cells: usize,
+    m: &Meter,
+) -> Result<[bool; 2], Failure> {
+    let surface = &body.surfaces[body.faces[face].surface];
+    let boundary = boundary_of(body, face).ok_or(Failure::Uncertain)?;
+    let periods = surface.periods();
+    let keep = |c: Cell| !outside(body, face, &boundary, periods, c);
+    run(
+        surface,
+        other,
+        parameter_box(body, face),
+        (&[], &[]),
+        0.0,
+        &keep,
+        true,
+        cells.min(CELLS),
+        m,
+    )
+}
+
 /// [`face_beside`] for a face touching `other` along `rails`, pcurves on
 /// its own surface over their parameter ranges that need not be edges of
 /// it: a re-trim's known seam runs across its working face (design 551,

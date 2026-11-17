@@ -332,6 +332,25 @@ impl Workspace {
         self.send(req, Route::Model(model::Asked::Made(key, revision)));
     }
 
+    /// Asks for `part`'s holes, if they are older than the part and not
+    /// already on their way.
+    pub(super) fn fetch_holes(&mut self, part: &str) {
+        if let Some(revision) = self.model.ask_holes(part) {
+            let req = Request::HolesList {
+                part: part.to_owned(),
+                solid: None,
+                csv: false,
+                group: false,
+                reference: None,
+                rev: self.model_rev(),
+            };
+            self.send(
+                req,
+                Route::Model(model::Asked::Holes(part.to_owned(), revision)),
+            );
+        }
+    }
+
     /// Fetches the drawings of `part`'s sketches, paths and helices that
     /// are missing or older than the part, one per request.
     pub(super) fn fetch_sketches(&mut self, part: &str) {
@@ -353,20 +372,7 @@ impl Workspace {
             };
             self.send(req, Route::Model(model::Asked::Path(key, revision)));
         }
-        if let Some(revision) = self.model.ask_holes(part) {
-            let req = Request::HolesList {
-                part: part.to_owned(),
-                solid: None,
-                csv: false,
-                group: false,
-                reference: None,
-                rev: self.model_rev(),
-            };
-            self.send(
-                req,
-                Route::Model(model::Asked::Holes(part.to_owned(), revision)),
-            );
-        }
+        self.fetch_holes(part);
     }
 
     /// Fetches display meshes by the batch (`MESH_BATCH` to a request, a
@@ -523,6 +529,42 @@ impl Workspace {
         };
         self.send(req, Route::Model(model::Asked::Rebuild(id.to_owned(), rev)));
     }
+
+    /// [`Workspace::ask_part`] for parts a notification says changed. One
+    /// whose report is on its way may be older than the change, so it is
+    /// asked again once that comes, once however many notifications said
+    /// so. The rest are asked in one rebuild of the project when there are
+    /// several and the project is one the window loads whole ([`LOAD_WHOLE`]):
+    /// one request, and one turn at the daemon's lock, per poll, however
+    /// many parts a burst's publish named (#849).
+    pub(super) fn ask_parts_again(&mut self, ids: Vec<String>) {
+        let mut ask = Vec::new();
+        for id in ids {
+            if self.model.loading.contains(&id) {
+                self.model.again.insert(id);
+            } else {
+                ask.push(id);
+            }
+        }
+        // A project the window loads whole is rebuilt whole; a larger one
+        // part by part, so nothing it doesn't hold is rebuilt for it.
+        if ask.len() < 2 || self.model.listed.len() > LOAD_WHOLE {
+            for id in &ask {
+                self.ask_part(id);
+            }
+            return;
+        }
+        let rev = self.model_rev();
+        for id in &ask {
+            self.model.loading.insert(id.clone());
+            self.model.asked_at.insert(id.clone(), rev.clone());
+        }
+        let req = Request::Rebuild {
+            part: None,
+            rev: rev.clone(),
+        };
+        self.send(req, Route::Model(model::Asked::Rebuilds(ask, rev)));
+    }
 }
 
 /// What one of this sub-state's requests was for (design 541,
@@ -534,6 +576,9 @@ pub(crate) enum Asked {
     /// A part's report, asked for at this revision (the draft, or the
     /// working files).
     Rebuild(String, Option<String>),
+    /// These parts' reports, from one rebuild of the project at this
+    /// revision (#849).
+    Rebuilds(Vec<String>, Option<String>),
     /// A body's mesh, asked for at this hash.
     Mesh(BodyKey, String),
     /// Several bodies of one assembly's occurrences, each at its hash.
@@ -611,6 +656,9 @@ impl Model {
                                 &json!({"part": id, "revision": l.revision, "error": e}),
                             );
                         }
+                        // One loaded at the listed revision is current
+                        // (#849: a burst's part lists asked every part).
+                        None if self.parts.get(id).is_some_and(|p| p.revision == l.revision) => {}
                         None if whole || shown.contains(id) || self.parts.contains_key(id) => {
                             fx.then(Then::AskPart(id.clone()));
                         }
@@ -619,6 +667,35 @@ impl Model {
                 }
                 self.listed = listed;
                 self.generation += 1;
+            }
+            // One rebuild of the project for several parts: each part's
+            // report taken as its own rebuild's would be.
+            (Asked::Rebuilds(ids, rev), r) => {
+                let all = match &r {
+                    Ok(a) => Some(a.result["parts"].clone()),
+                    Err(e) if e.code == Code::RebuildFailed => Some(e.details["parts"].clone()),
+                    Err(_) => None,
+                };
+                for id in ids {
+                    let one = match (&all, &r) {
+                        (Some(parts), _) => {
+                            let found = (parts.as_array().into_iter().flatten())
+                                .find(|p| p["part"] == id.as_str());
+                            let Some(report) = found else {
+                                // Gone from the project: `model.changed`
+                                // says so.
+                                self.loading.remove(&id);
+                                self.asked_at.remove(&id);
+                                self.again.remove(&id);
+                                continue;
+                            };
+                            Ok(Answer::json(json!({"parts": [report]})))
+                        }
+                        (None, Err(e)) => Err(e.clone()),
+                        (None, Ok(_)) => unreachable!("an answer has its parts"),
+                    };
+                    self.answer(Asked::Rebuild(id, rev.clone()), one, drawn.clone(), fx);
+                }
             }
             (Asked::Rebuild(id, rev), r) => {
                 // Asked at a revision the window no longer draws: its
@@ -632,6 +709,7 @@ impl Model {
                         self.loading.remove(&id);
                         fx.then(Then::AskPart(id.clone()));
                     }
+                    self.again.remove(&id);
                     return;
                 }
                 self.loading.remove(&id);
@@ -643,6 +721,9 @@ impl Model {
                     Err(e) => json!({"part": id, "error": e}),
                 };
                 fx.then(Then::PartChanged(report));
+                if self.again.remove(&id) {
+                    fx.then(Then::AskPart(id));
+                }
             }
             // A delete chosen before this one answers too late to matter:
             // its ghosts and its failures alike are dropped.
@@ -689,6 +770,9 @@ impl Model {
                 };
                 t.revision = revision;
                 self.take_holes(&part, t);
+                if self.holes_again.remove(&part) {
+                    fx.then(Then::FetchHoles(part));
+                }
             }
             (Asked::Sweep(key, _), a) => {
                 if self.made_for.as_ref() == Some(&key) {
@@ -856,5 +940,7 @@ impl Model {
     pub(super) fn on_lost(&mut self) {
         self.asked.clear();
         self.sketches_asked.clear();
+        self.holes_asked.clear();
+        self.holes_again.clear();
     }
 }

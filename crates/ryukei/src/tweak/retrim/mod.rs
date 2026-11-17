@@ -447,17 +447,22 @@ fn attempt_with(
         // faces' alone. A region with no outside face takes the plan's
         // one shell seed instead (below).
         let mut tries: Vec<Vec<usize>> = vec![outside.clone()];
+        // The seeds rule 3's shortcut alone chose (plan 21.C).
+        let mut shortcut = std::collections::BTreeSet::new();
         // A delete whose region is the whole body: every face it keeps
         // seeds by rule 3 too, not one face alone (#692: a drilled plate's
         // side deleted closed from the hole's wall alone, its plug).
         if outside.is_empty() && !changes.deleted.is_empty() && changes.motion.is_empty() {
-            let (same, _) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
-            if same.len() > 1 {
-                tries = vec![same];
+            let fs = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            if fs.same.len() > 1 {
+                tries = vec![fs.same];
+                shortcut = fs.shortcut;
             }
         }
         if !outside.is_empty() {
-            let (same, moved) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            let fs = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            shortcut = fs.shortcut;
+            let (same, moved) = (fs.same, fs.moved);
             if !same.is_empty() || !moved.is_empty() {
                 let mut with_same = outside.clone();
                 with_same.extend(&same);
@@ -472,16 +477,37 @@ fn attempt_with(
         }
         let mut kept = Err(WalkError::Open { piece: 0 });
         let mut seeds = Vec::new();
-        for (k, t) in tries.into_iter().enumerate() {
-            let r = walk::walk(&arr, &t, m);
+        for (k, t) in tries.iter().enumerate() {
+            let r = walk::walk(&arr, t, m);
             let stop = r.is_ok() || matches!(r, Err(WalkError::Halted { .. }));
             // The first try's failure is the one reported.
             if stop || k == 0 {
                 kept = r;
-                seeds = t;
+                seeds = t.clone();
             }
             if stop {
                 break;
+            }
+        }
+        // Slits and seeds (design 683, plan 21.C, question 983): every
+        // seed set failed. The first set whose seeds alone over-use an
+        // edge walks once more without the shortcut's seeds there that
+        // don't hold their old face; its answer stands only if it closes
+        // (or halts), else the first try's failure is reported.
+        if !shortcut.is_empty()
+            && matches!(
+                kept,
+                Err(WalkError::Open { .. }
+                    | WalkError::Ambiguous { .. }
+                    | WalkError::Clipped { .. })
+            )
+        {
+            let ops = [w.body.clone()];
+            let mut holds =
+                |i: usize| seeds::inside_old(body, changes, &w, &ops, table, &pieces[i]);
+            if let Some((fewer, r)) = seeds::walk_again(&arr, &tries, &shortcut, &mut holds, m) {
+                kept = r;
+                seeds = fewer;
             }
         }
         // Shells no outside face reaches take a seed each, once.

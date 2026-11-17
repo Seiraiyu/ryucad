@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ryucad"
+# The version comes from ryucad's release tag, never from this file: the
+# repository holds 0.0.0, as the workspace does, and the release stamps it
+# (scripts/stamp-version.sh, ryucad plan 32.B).
+version = "0.0.0"
+description = "The official Python client for ryucad, CAD built for AI agents to drive"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = []
+classifiers = [
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/Seiraiyu/ryucad"
+Issues = "https://github.com/Seiraiyu/ryucad/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ryucad"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/ryucad", "tests", "README.md", "LICENSE", "NOTICE"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# Named, not ruff's default set, which grows between releases.
+select = ["E", "F", "W", "B", "UP", "I"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true

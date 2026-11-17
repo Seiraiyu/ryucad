@@ -1,0 +1,6 @@
+# Copied in from the repository's root to build (plan 32.B's
+# scripts/python-dist.sh); never committed twice.
+/LICENSE
+/NOTICE
+/dist/
+/build/

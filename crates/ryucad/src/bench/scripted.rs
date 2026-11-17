@@ -1,9 +1,10 @@
 //! #810's project, as a build script declares it (design 603, plan
-//! 31.C): `parts` leaves of primitives, sketches and revolves, and one
-//! assembly tree placing them `instances` times, with materials and
-//! properties. [`Script::batch`] is the script's one `batch` of
-//! `part.ensure`s; [`Script::singles`] the same project request by
-//! request.
+//! 31.C), and #849's workload (design 698, plan 33.A): `parts` leaves of
+//! primitives, sketches and revolves, and one assembly tree placing them
+//! `instances` times, with materials and properties. [`Script::batch`] is
+//! the script's one `batch` of `part.ensure`s; [`Script::singles`] the
+//! same project request by request. ryucad's own tests include this file
+//! by path (they build without the `bench` feature).
 
 use serde_json::{Map, Value, json};
 

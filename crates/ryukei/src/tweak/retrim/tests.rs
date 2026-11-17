@@ -1079,3 +1079,34 @@ fn a_pin_that_must_grow_fails_its_walk() {
     };
     assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)), "{what}");
 }
+
+/// Plan 21.C: a walk that fails with no seed set in conflict reports its
+/// failure as before; the retry never runs. The raised block with its
+/// +x side wrongly pinned (21.A's test) fails its walk with no shortcut
+/// seed (nothing is deleted).
+#[test]
+fn a_failed_walk_with_nothing_to_yield_fails_as_before() {
+    use super::{Build, Rung, attempt_with};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let side = BTreeSet::from([face_of(&b, FaceRole::PlusX)]);
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let r = attempt_with(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        Some(&side),
+        &m,
+    );
+    assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)));
+    assert!(changes.deleted.is_empty());
+}

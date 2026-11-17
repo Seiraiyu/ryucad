@@ -3152,6 +3152,7 @@ fn annotations_are_announced_with_their_derived_states() {
     )
     .unwrap()["annotation"]["id"]
         .clone();
+    crate::server::flush(&mut live, &mut s);
     let notes = drained(&sub);
     let n = notes
         .iter()
@@ -3168,6 +3169,7 @@ fn annotations_are_announced_with_their_derived_states() {
         json!({"part": "plate", "id": "slab"}),
     )
     .unwrap();
+    crate::server::flush(&mut live, &mut s);
     let notes = drained(&sub);
     let n = notes
         .iter()
@@ -3182,6 +3184,7 @@ fn annotations_are_announced_with_their_derived_states() {
         json!({"id": id}),
     )
     .unwrap();
+    crate::server::flush(&mut live, &mut s);
     let notes = drained(&sub);
     let n = notes
         .iter()
@@ -4606,6 +4609,7 @@ fn subscribers_hear_of_project_parameters_nothing_reads() {
         json!({"scope": "project", "parameters": {"spare": "2 mm"}}),
     )
     .unwrap();
+    crate::server::flush(&mut live, &mut s);
     mark(&mut live);
     let got = drain(&sub);
     assert_eq!(got.len(), 1, "{got:?}");
@@ -4631,6 +4635,7 @@ fn subscribers_hear_of_model_changes_once() {
         json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}}),
     )
     .unwrap();
+    crate::server::flush(&mut live, &mut s);
     mark(&mut live);
     let got = drain(&sub);
     assert_eq!(got.len(), 1);
@@ -4640,6 +4645,7 @@ fn subscribers_hear_of_model_changes_once() {
     assert_eq!(part["features"][0]["ok"], true);
     // Nothing changed: nothing is sent.
     call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+    crate::server::flush(&mut live, &mut s);
     let mut slot = Some(s);
     tick(&mut slot, &mut live, dir.path());
     mark(&mut live);
@@ -4942,4 +4948,99 @@ fn feature_adds_build_is_what_it_writes() {
             .to_json();
         assert_eq!(f.to_json(), written, "{ty}");
     }
+}
+
+/// A watched request marks what it changed and answers; the daemon's
+/// watcher (here `flush`) tells subscribers, once for many writes
+/// (#849). With nobody watching, nothing is marked.
+#[test]
+fn a_watched_write_is_published_by_the_watcher_not_the_request() {
+    let (dir, s) = with_part();
+    let mut live = Live::new();
+    let mut slot = Some(s);
+    settle(&mut slot, &mut live, dir.path());
+    let mut s = slot.take().unwrap();
+    call_live(
+        &mut s,
+        &mut live,
+        None,
+        "param.set",
+        json!({"part": "p", "parameters": {"width": "21 mm"}}),
+    )
+    .unwrap();
+    assert!(live.coalesce.pending().is_none(), "nobody watches");
+    let sub = live.hub.subscribe("p-x", &[Topic::Model]);
+    let mark = |live: &mut Live| live.hub.send(Topic::Model, "marker", &json!({}));
+    for w in ["22 mm", "23 mm", "24 mm"] {
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "param.set",
+            json!({"part": "p", "parameters": {"width": w}}),
+        )
+        .unwrap();
+    }
+    mark(&mut live);
+    assert!(drain(&sub).is_empty(), "the requests published nothing");
+    assert!(live.coalesce.pending().is_some());
+    crate::server::flush(&mut live, &mut s);
+    mark(&mut live);
+    let got = drain(&sub);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "model.changed");
+    assert!(live.coalesce.pending().is_none());
+    // A read marks nothing.
+    call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+    assert!(live.coalesce.pending().is_none());
+}
+
+/// A window's own write is told before it is answered; an agent's, even
+/// one subscribed under the same name (`ryucad watch` and a script are
+/// both `agent`), waits for the watcher (#849).
+#[test]
+fn only_a_windows_own_write_is_told_on_its_path() {
+    let (_dir, mut s) = fresh();
+    call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+    let mut live = Live::new();
+    let a = live.hello(live::Kind::Agent, Some("agent"), None).unwrap();
+    let watch = live.hub.subscribe(&a, &[Topic::Model]);
+    crate::server::publish(&mut live, &mut s);
+    drained(&watch);
+    let add =
+        |id: &str| json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": "5 mm"}});
+    call_live(&mut s, &mut live, Some(&a), "feature.add", add("s1")).unwrap();
+    assert!(live.coalesce.pending().is_some(), "an agent's write waits");
+    assert!(
+        drained(&watch)
+            .iter()
+            .all(|v| v["method"] != "model.changed")
+    );
+    crate::server::flush(&mut live, &mut s);
+    assert!(
+        drained(&watch)
+            .iter()
+            .any(|v| v["method"] == "model.changed")
+    );
+    // A window: a human, subscribed, editing.
+    let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+    let window = live.hub.subscribe(&h, &[Topic::Model]);
+    call_live(
+        &mut s,
+        &mut live,
+        Some(&h),
+        "participant.mode",
+        json!({"mode": "edit"}),
+    )
+    .unwrap();
+    call_live(&mut s, &mut live, Some(&h), "feature.add", add("s2")).unwrap();
+    assert!(
+        live.coalesce.pending().is_none(),
+        "a window's write is told"
+    );
+    assert!(
+        drained(&window)
+            .iter()
+            .any(|v| v["method"] == "model.changed")
+    );
 }
