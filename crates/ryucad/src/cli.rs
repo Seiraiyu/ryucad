@@ -353,13 +353,21 @@ enum Command {
     },
     /// Which instances of an assembly overlap: each pair of solids that
     /// share a volume, with its box, its volume (estimated from a mesh)
-    /// and the faces it touches. Faces that only touch are clear.
+    /// and the faces it touches. Faces that only touch are clear. With
+    /// --changed-since, only the pairs an edit since that revision could
+    /// have changed.
     Interference {
         part: String,
         /// Only pairs with a side under this instance path (s1/b2,
         /// holes:2/bolt); repeat for more.
         #[arg(long = "instance", value_name = "PATH")]
         instances: Vec<String>,
+        /// Only pairs with a side at an instance added, moved or changed
+        /// since this revision (a Git revision, working, worktree:<path>);
+        /// with --instance, those of them under its paths. The answer's
+        /// scope lists them and how many pairs were skipped.
+        #[arg(long = "changed-since", value_name = "REV")]
+        changed_since: Option<String>,
     },
     /// Measure one entity (its point, length or area and shape; a solid's or occurrence's
     /// volume and area) or two (their distance and nearest points, and their angle where
@@ -5842,9 +5850,14 @@ fn request(cmd: &Command) -> Option<Request> {
             entities: entities.clone(),
             rev: rev.rev.clone(),
         },
-        Command::Interference { part, instances } => Request::Interference {
+        Command::Interference {
+            part,
+            instances,
+            changed_since,
+        } => Request::Interference {
             part: part.clone(),
             instances: instances.clone(),
+            changed_since: changed_since.clone(),
         },
         Command::Check {
             part,
