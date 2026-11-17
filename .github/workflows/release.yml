@@ -298,3 +298,31 @@ jobs:
           $out = powershell -NoProfile -Command "`$env:Path = '$userPath;' + `$env:Path; ryucad version"
           $out
           if ($out -notmatch "`"ryucad`":`"$env:WANT`"") { throw 'wrong version on PATH' }
+
+  testpypi:
+    # Design 697: the package to TestPyPI by trusted publishing (OIDC; no
+    # token or secret anywhere), once the binaries it finds are released.
+    # The owner registers the pending publisher once (project ryucad,
+    # workflow release.yml, environment testpypi); until then this job
+    # fails and a re-run finishes it. skip-existing: a re-run after a later
+    # failure doesn't fail on the upload already made.
+    name: publish to TestPyPI
+    if: >-
+      always() && github.ref_type == 'tag'
+      && needs.publish.result == 'success' && needs.python.result == 'success'
+    needs: [publish, python]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/ryucad
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true

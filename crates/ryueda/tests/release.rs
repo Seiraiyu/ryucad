@@ -420,6 +420,28 @@ fn ryucads_release_builds_the_python_package() {
     );
 }
 
+/// Design 697: a tag uploads the package to TestPyPI by trusted publishing
+/// (OIDC, no token), after the GitHub release, and a re-run doesn't fail
+/// on the upload already made.
+#[test]
+fn ryucads_release_uploads_to_testpypi_by_trusted_publishing() {
+    let testpypi = job(&workflow("release.yml"), "testpypi");
+    for want in [
+        "github.ref_type == 'tag'",
+        "needs.publish.result == 'success'",
+        "needs.python.result == 'success'",
+        "needs: [publish, python]",
+        "name: testpypi",
+        "id-token: write",
+        "name: python-dist",
+        "uses: pypa/gh-action-pypi-publish@release/v1",
+        "repository-url: https://test.pypi.org/legacy/",
+        "skip-existing: true",
+    ] {
+        assert!(testpypi.contains(want), "release.yml's testpypi job lacks {want}");
+    }
+}
+
 /// The devcontainer's .debs are cached from main, whose caches every tag's
 /// run can restore, under the path and key full.yml restores: a tag's own
 /// save serves only that tag (#677).
