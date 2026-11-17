@@ -3,6 +3,8 @@
 //! preset's rules. Every topology decision is `ryu-copper`'s exact
 //! predicate; a rule a bound can't decide is reported, never dropped.
 
+use super::connect::{self, Connectivity};
+use super::layout::Key;
 use super::load::BoardFiles;
 use super::occ::Occ;
 use super::shapes::BoardShapes;
@@ -126,9 +128,165 @@ pub fn placements(board: &str, b: &BoardFiles, occs: &[Occ], s: &BoardShapes) ->
     out
 }
 
+/// A point's reference.
+fn point_refs(c: &Connectivity, keys: &[Key]) -> Vec<String> {
+    keys.iter().map(|k| c.built.reference(k)).collect()
+}
+
+fn node_ref(c: &Connectivity, n: &ryu_copper::connect::Node<Key>) -> String {
+    match n {
+        ryu_copper::connect::Node::Piece(k, _) | ryu_copper::connect::Node::Hole(k) => {
+            c.built.reference(k)
+        }
+    }
+}
+
+/// The compare's findings: opens (with the connections that would close
+/// them), shorts, items claiming another net than their island's pads,
+/// pads on no copper, and contacts the bounds leave open. `incomplete`
+/// when a placement's pads were left out.
+pub fn copper(c: &Connectivity, incomplete: bool) -> Vec<Finding> {
+    let board = c.built.board.as_str();
+    let mut out = Vec::new();
+    for o in &c.report.opens {
+        let refs: Vec<String> = o
+            .islands
+            .iter()
+            .flat_map(|(_, ks)| point_refs(c, ks))
+            .collect();
+        let next: Vec<Value> = connect::connections(c, o)
+            .iter()
+            .map(|x| {
+                json!({
+                    "a": c.built.reference(&x.a.0),
+                    "a_layer": c.built.layer_name(c.layer_of(&x.a.0)),
+                    "a_at": [x.distance.a.x, x.distance.a.y],
+                    "b": c.built.reference(&x.b.0),
+                    "b_layer": c.built.layer_name(c.layer_of(&x.b.0)),
+                    "b_at": [x.distance.b.x, x.distance.b.y],
+                    "distance_nm": x.distance.nm,
+                })
+            })
+            .collect();
+        out.push(finding(
+            Code::NetOpen,
+            Severity::Error,
+            board,
+            refs,
+            format!("net {} is open: its pads lie on {} islands", o.net, o.islands.len()),
+            json!({
+                "net": o.net,
+                "islands": o.islands.iter().map(|(_, ks)| json!({"pads": point_refs(c, ks)})).collect::<Vec<_>>(),
+                "connections": next,
+                "incomplete": incomplete,
+            }),
+        ));
+    }
+    for s in &c.report.shorts {
+        let refs: Vec<String> = s
+            .nets
+            .iter()
+            .flat_map(|(_, ks)| point_refs(c, ks))
+            .collect();
+        let contacts: Vec<[String; 2]> = s
+            .contacts
+            .iter()
+            .map(|(a, b)| {
+                let mut p = [c.built.reference(a), c.built.reference(b)];
+                p.sort();
+                p
+            })
+            .collect();
+        out.push(finding(
+            Code::NetShort,
+            Severity::Error,
+            board,
+            refs,
+            format!(
+                "nets {} are joined",
+                s.nets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            json!({
+                "nets": s.nets.iter().map(|(n, ks)| json!({"net": n, "pads": point_refs(c, ks)})).collect::<Vec<_>>(),
+                "contacts": contacts,
+                "holes": point_refs(c, &s.holes),
+                "incomplete": incomplete,
+            }),
+        ));
+    }
+    for m in &c.report.mismatches {
+        let refs: Vec<String> = m.items.iter().map(|(k, _)| c.built.reference(k)).collect();
+        out.push(finding(
+            Code::NetClaimMismatch,
+            Severity::Error,
+            board,
+            refs,
+            format!("copper on net {}'s pads claims another net; change its --net", m.net),
+            json!({
+                "net": m.net,
+                "items": m.items.iter().map(|(k, n)| json!({"item": c.built.reference(k), "claims": n})).collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    for o in &c.report.off_copper {
+        out.push(finding(
+            Code::NetlistPointOffCopper,
+            Severity::Warning,
+            board,
+            vec![c.built.reference(&o.key)],
+            format!(
+                "a pad of net {} lies on {}",
+                o.net,
+                if o.uncertain {
+                    "copper the bounds can't place"
+                } else {
+                    "no copper"
+                }
+            ),
+            json!({"net": o.net, "at": [o.at.x, o.at.y], "uncertain": o.uncertain}),
+        ));
+    }
+    for u in c.copper.uncertain() {
+        out.push(finding(
+            Code::CopperContactUncertain,
+            Severity::Warning,
+            board,
+            vec![node_ref(c, &u.a), node_ref(c, &u.b)],
+            format!(
+                "{} and {} lie within {} nm of touching: kept apart",
+                node_ref(c, &u.a),
+                node_ref(c, &u.b),
+                u.bound
+            ),
+            json!({"layer": c.built.layer_name(u.layer), "bound_nm": u.bound}),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::file::CopperLayer;
+    use crate::board::testing::{MM, UM, board};
+
+    fn two_and_one() -> BoardShapes {
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("r1", "1", (2 * MM, 5 * MM), (600 * UM, 600 * UM), Some("a"))
+            .smd(
+                "r2",
+                "1",
+                (10 * MM, 5 * MM),
+                (600 * UM, 600 * UM),
+                Some("a"),
+            )
+            .smd("r3", "1", (6 * MM, 8 * MM), (600 * UM, 600 * UM), Some("b"));
+        s
+    }
+
+    fn codes(f: &[Finding]) -> Vec<Code> {
+        f.iter().map(|x| x.code).collect()
+    }
 
     #[test]
     fn ids_ignore_reference_order_but_not_code_or_board() {
@@ -175,5 +333,57 @@ mod tests {
         );
         assert_eq!(f[1].refs, ["b:zz9"]);
         assert!(f.iter().all(|x| x.severity == Severity::Error));
+    }
+
+    #[test]
+    fn opens_shorts_and_mismatches_are_findings() {
+        let s = two_and_one();
+        let f = copper(&connect::connect("b", &s), false);
+        assert_eq!(codes(&f), [Code::NetOpen]);
+        assert_eq!(f[0].refs, ["b:r1/1", "b:r2/1"]);
+        let next = &f[0].details["connections"][0];
+        assert_eq!(next["distance_nm"], json!(8 * MM - 600 * UM));
+        assert_eq!(next["a"], "b:r1/1");
+        assert_eq!(next["a_layer"], "copper.top");
+
+        let mut s = two_and_one();
+        s.track(
+            "t1",
+            "a",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, 5 * MM), (10 * MM, 5 * MM)],
+        )
+        .track(
+            "t2",
+            "a",
+            CopperLayer::Top,
+            250 * UM,
+            &[(6 * MM, 5 * MM), (6 * MM, 8 * MM)],
+        );
+        let f = copper(&connect::connect("b", &s), true);
+        assert_eq!(codes(&f), [Code::NetShort]);
+        assert_eq!(f[0].details["incomplete"], true);
+        assert!(
+            f[0].details["contacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == &json!(["b:r3/1", "b:track/t2"])),
+            "{f:?}"
+        );
+
+        let mut s = two_and_one();
+        s.track(
+            "t1",
+            "b",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, 5 * MM), (10 * MM, 5 * MM)],
+        );
+        let f = copper(&connect::connect("b", &s), false);
+        assert_eq!(codes(&f), [Code::NetClaimMismatch]);
+        assert_eq!(f[0].severity, Severity::Error);
+        assert_eq!(f[0].refs, ["b:track/t1"]);
     }
 }
