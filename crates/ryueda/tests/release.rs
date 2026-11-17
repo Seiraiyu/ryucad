@@ -121,7 +121,12 @@ fn ryucads_tags_stamp_the_python_client_in_pep_440() {
     }
     // Any other suffix has no PEP 440 form here: refused before anything
     // is written, Cargo's files included.
-    for arg in ["v12.34.56-rc.1", "v1.2.3-pre.01", "v1.2.3-pre", "v1.2.3-dev.1"] {
+    for arg in [
+        "v12.34.56-rc.1",
+        "v1.2.3-pre.01",
+        "v1.2.3-pre",
+        "v1.2.3-dev.1",
+    ] {
         let (code, printed, manifest, pyproject) = stamp(arg);
         assert_eq!(code, 2, "{arg}: {printed}");
         assert!(printed.contains("no PEP 440 form"), "{arg}: {printed}");
@@ -411,9 +416,15 @@ fn ryucads_release_builds_the_python_package() {
         "python -m unittest discover -v -s python/tests",
         "name: python-dist",
     ] {
-        assert!(python.contains(want), "release.yml's python job lacks {want}");
+        assert!(
+            python.contains(want),
+            "release.yml's python job lacks {want}"
+        );
     }
-    assert!(!python.contains("id-token"), "the python job publishes nothing");
+    assert!(
+        !python.contains("id-token"),
+        "the python job publishes nothing"
+    );
     assert!(
         !job(&workflow("release.yml"), "publish").contains("python"),
         "the GitHub release mustn't wait on the Python package"
@@ -438,7 +449,10 @@ fn ryucads_release_uploads_to_testpypi_by_trusted_publishing() {
         "repository-url: https://test.pypi.org/legacy/",
         "skip-existing: true",
     ] {
-        assert!(testpypi.contains(want), "release.yml's testpypi job lacks {want}");
+        assert!(
+            testpypi.contains(want),
+            "release.yml's testpypi job lacks {want}"
+        );
     }
 }
 
@@ -465,9 +479,15 @@ fn ryucads_release_verifies_the_package_on_three_platforms() {
         "-p test_session.py",
         "RYUCAD_EXE names no ryucad",
     ] {
-        assert!(verify.contains(want), "release.yml's python-verify job lacks {want}");
+        assert!(
+            verify.contains(want),
+            "release.yml's python-verify job lacks {want}"
+        );
     }
-    assert!(!verify.contains("id-token"), "python-verify publishes nothing");
+    assert!(
+        !verify.contains("id-token"),
+        "python-verify publishes nothing"
+    );
 }
 
 /// Design 697: PyPI only after the GitHub release, the installers and the
@@ -506,7 +526,10 @@ fn ryucads_release_publishes_to_pypi_by_trusted_publishing() {
             assert!(!text.contains(word), "{file} reads a secret ({word})");
         }
         if file != "release.yml" {
-            assert!(!text.contains("pypi"), "{file} publishes the Python package");
+            assert!(
+                !text.contains("pypi"),
+                "{file} publishes the Python package"
+            );
         }
     }
 }
