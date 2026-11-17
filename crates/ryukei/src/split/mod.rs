@@ -107,7 +107,8 @@ pub(crate) fn split(ops: &[Body], table: &Table, f: FaceRef) -> Result<Vec<Piece
         size: (corners.max() - corners.min()).length(),
         far: false,
     };
-    if let Some(pieces) = arr.walk().and_then(|c| arr.group(f, &c, &lone)) {
+    let near = arr.walk();
+    if let Some(pieces) = near.as_ref().and_then(|c| arr.group(f, c, &lone, false)) {
         return Ok(pieces);
     }
     // A stretch tangent to a boundary arc at their vertex, starting a
@@ -117,7 +118,18 @@ pub(crate) fn split(ops: &[Body], table: &Table, f: FaceRef) -> Result<Vec<Piece
     // every face the near order walks keeps its pieces.
     let far = Arrangement { far: true, ..arr };
     let cycles = far.walk().ok_or_else(uncertain)?;
-    far.group(f, &cycles, &lone).ok_or_else(uncertain)
+    if let Some(pieces) = far.group(f, &cycles, &lone, false) {
+        return Ok(pieces);
+    }
+    // Slits (plan 21.D, #658): a cycle holding both darts of every arc it
+    // runs along bounds nothing on the surface, but one that turns back
+    // at a pole lifts round the pole's whole line, as a winding cycle
+    // (STC 10's balls: a slit ending at a tolerant vertex within reach of
+    // a pole). Grouped again, near order first, with such cycles as the
+    // slits they are; only where both orders refused.
+    near.and_then(|c| arr.group(f, &c, &lone, true))
+        .or_else(|| far.group(f, &cycles, &lone, true))
+        .ok_or_else(uncertain)
 }
 
 /// One way along an arc: a global edge, the sense it is run, its end
@@ -792,16 +804,34 @@ impl Arrangement<'_> {
     }
 
     /// Groups the cycles into pieces, and places the lone vertices.
-    fn group(&self, f: FaceRef, cycles: &[Vec<usize>], lone: &[GvId]) -> Option<Vec<Piece>> {
+    fn group(
+        &self,
+        f: FaceRef,
+        cycles: &[Vec<usize>],
+        lone: &[GvId],
+        slits: bool,
+    ) -> Option<Vec<Piece>> {
         let (pu, pv) = self.surface.periods();
         let mut lifted = Vec::new();
         for c in cycles {
             let (chains, gaps, shift) = self.lift(c);
-            let wind = [
-                pu.map_or(0, |p| (shift.x / p).round() as i64),
-                pv.map_or(0, |p| (shift.y / p).round() as i64),
-            ];
-            let area = signed_area(&chains) * self.sigma;
+            // With `slits`, a cycle running both ways along every arc it
+            // uses is a slit: it winds nowhere and bounds no area, so it
+            // is placed as a hole is (plan 21.D).
+            let slit = slits && self.is_slit(c);
+            let wind = if slit {
+                [0, 0]
+            } else {
+                [
+                    pu.map_or(0, |p| (shift.x / p).round() as i64),
+                    pv.map_or(0, |p| (shift.y / p).round() as i64),
+                ]
+            };
+            let area = if slit {
+                0.0
+            } else {
+                signed_area(&chains) * self.sigma
+            };
             lifted.push(Lifted {
                 chains,
                 gaps,
@@ -977,6 +1007,13 @@ impl Arrangement<'_> {
         } else {
             Point2::new(x, f)
         }
+    }
+
+    /// Whether every dart of cycle `c` has its twin in `c`: an arc inside
+    /// the face walked both ways, or a tree of them (plan 21.D).
+    fn is_slit(&self, c: &[usize]) -> bool {
+        c.iter()
+            .all(|&d| self.darts[d].twin.is_some_and(|t| c.contains(&t)))
     }
 
     /// The cycles passing the pole at `row`: those arriving at a vertex
@@ -1821,7 +1858,10 @@ mod tests {
     /// piece with a boundary of its own (never alone in the region
     /// outside every outer boundary).
     #[test]
-    #[ignore = "plan 21.D: passes once Task 6's slit rule is in"]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "slow in a debug build: CI runs it in release"
+    )]
     fn stc_10s_balls_split_with_slits_to_their_poles() {
         use crate::boolean::table::{Scope, build_seamed};
         use crate::intersect::{SeamKind, Seams};
