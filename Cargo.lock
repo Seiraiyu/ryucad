@@ -5221,6 +5221,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryuplm"
+version = "0.0.0"
+dependencies = [
+ "assert_cmd",
+ "blake3",
+ "clap",
+ "getrandom 0.3.4",
+ "gix",
+ "mimalloc",
+ "ryu-doc",
+ "ryu-git",
+ "ryu-session",
+ "ryueda-parts",
+ "ryupdm",
+ "ryuplm",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ryusch"
 version = "0.0.0"
 dependencies = [
