@@ -11,6 +11,7 @@ pub mod opening;
 pub mod outline;
 pub mod pad;
 pub mod preset;
+pub mod render;
 pub mod shapes;
 pub mod text;
 

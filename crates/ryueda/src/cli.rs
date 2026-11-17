@@ -507,7 +507,7 @@ enum Command {
     /// Create, edit, delete or list designs: a name and a root block.
     #[command(subcommand)]
     Design(DesignCmd),
-    /// Boards: create, edit, list, show and delete; place parts.
+    /// Boards: create, edit, list, show and delete; place parts; render.
     #[command(subcommand)]
     Board(BoardCmd),
     /// Import libraries from other tools: KiCad's for now.
@@ -1582,6 +1582,31 @@ enum BoardCmd {
         ops: Option<String>,
         #[command(flatten)]
         expect: Expect,
+    },
+    /// The board as PNG or SVG (by --out's extension, or --format).
+    Render {
+        board: String,
+        #[arg(long)]
+        out: PathBuf,
+        /// Layers bottom first: copper.top, mask.top, paste.top, silk.top, fab.top,
+        /// courtyard.top, their .bottom, drill, outline.
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        /// top (the default) or bottom, seen from below.
+        #[arg(long)]
+        side: Option<String>,
+        /// A net to highlight (sda, rail:gnd).
+        #[arg(long)]
+        net: Option<String>,
+        /// X0,Y0,X1,Y1 (lengths; bare numbers in the project's unit).
+        #[arg(long, allow_hyphen_values = true)]
+        window: Option<String>,
+        /// The long side in pixels (1600 by default).
+        #[arg(long)]
+        size: Option<u32>,
+        /// svg or png.
+        #[arg(long)]
+        format: Option<String>,
     },
     /// Remove a part's placement.
     Unplace {
@@ -3572,6 +3597,37 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
             expected_revision: expect.expect.clone(),
         },
+        Command::Board(BoardCmd::Render {
+            board,
+            out,
+            layers,
+            side,
+            net,
+            window,
+            size,
+            format,
+        }) => Request::BoardRender {
+            board: board.clone(),
+            layers: layers.clone(),
+            side: side.clone(),
+            net: net.clone(),
+            window: window
+                .as_deref()
+                .map(|w| {
+                    let v: Vec<String> = w.split(',').map(|s| s.trim().to_owned()).collect();
+                    <[String; 4]>::try_from(v).map_err(|_| {
+                        Error::new(Code::InvalidParam, "--window is X0,Y0,X1,Y1")
+                            .with("param", "window")
+                    })
+                })
+                .transpose()?,
+            size: *size,
+            format: match picture_format(format.as_deref(), out)? {
+                ryueda::schemcmd::Format::Png => "png",
+                ryueda::schemcmd::Format::Svg => "svg",
+            }
+            .to_owned(),
+        },
         Command::Board(BoardCmd::Unplace {
             board,
             r#ref,
@@ -3896,6 +3952,7 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
         return Ok(a.result);
     };
     let (Command::Render { out, .. }
+    | Command::Board(BoardCmd::Render { out, .. })
     | Command::Output { out, .. }
     | Command::Place {
         render: Some(out), ..

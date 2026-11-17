@@ -407,3 +407,75 @@ pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
     }
     Ok(v)
 }
+
+/// `board render`: the board's shapes (kept by the session) drawn.
+#[allow(clippy::too_many_arguments)]
+pub fn render(
+    session: &mut Session,
+    board: &str,
+    layers: &[String],
+    side: Option<&str>,
+    net: Option<&str>,
+    window: Option<&[String; 4]>,
+    size: Option<u32>,
+    format: &str,
+) -> Result<ryu_session::rpc::Answer> {
+    let p = session.project();
+    let unit = p.manifest.default_unit;
+    let id = find(p, board)?.id.clone();
+    let bottom = match side {
+        None | Some("top") => false,
+        Some("bottom") => true,
+        Some(o) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("--side is top or bottom, not {o}"),
+            )
+            .with("param", "side"));
+        }
+    };
+    let svg = match format {
+        "png" => false,
+        "svg" => true,
+        o => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{o} isn't a format: png or svg"),
+            )
+            .with("param", "format"));
+        }
+    };
+    let window = match window {
+        None => None,
+        Some(w) => {
+            let v: Vec<i64> = w
+                .iter()
+                .map(|x| coord::nm(&json!(x), unit))
+                .collect::<Result<_>>()?;
+            if v[2] <= v[0] || v[3] <= v[1] {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "--window is X0,Y0,X1,Y1 with X1 > X0 and Y1 > Y0",
+                )
+                .with("param", "window"));
+            }
+            Some(ryu_board::geom::Rect::new(
+                ryu_board::geom::Point::new(v[0], v[1]),
+                ryu_board::geom::Point::new(v[2], v[3]),
+            ))
+        }
+    };
+    let shapes = session.board_shapes(&id)?;
+    let ask = super::render::Ask {
+        layers,
+        bottom,
+        net,
+        window,
+        size: size.unwrap_or(super::render::DEFAULT_SIZE),
+        svg,
+    };
+    let (mut v, mime, bytes) = super::render::render(id.as_str(), &shapes, &ask)?;
+    v["notices"] = fault::list(&shapes.notices);
+    v["revision"] = json!(session.project().boards[&id].revision);
+    Ok(ryu_session::rpc::Answer::bytes(v, mime, bytes))
+}

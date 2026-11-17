@@ -648,6 +648,29 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// A board's layers as PNG or SVG.
+    #[serde(rename = "board.render")]
+    BoardRender {
+        board: String,
+        /// Layers bottom first; the side's copper, mask, silk, then drill
+        /// and outline by default.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layers: Vec<String>,
+        /// `top` (the default) or `bottom`, seen from below.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        side: Option<String>,
+        /// A net to highlight (`sda`, `rail:gnd`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net: Option<String>,
+        /// `[x0, y0, x1, y1]`, lengths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<[String; 4]>,
+        /// The long side in pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<u32>,
+        /// `png` or `svg`.
+        format: String,
+    },
     #[serde(rename = "board.list")]
     BoardList {
         #[serde(default, skip_serializing_if = "Option::is_none")]

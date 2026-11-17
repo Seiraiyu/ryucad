@@ -315,6 +315,24 @@ fn working(
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
     match req {
+        Request::BoardRender {
+            board,
+            layers,
+            side,
+            net,
+            window,
+            size,
+            format,
+        } => crate::board::cmd::render(
+            session,
+            &board,
+            &layers,
+            side.as_deref(),
+            net.as_deref(),
+            window.as_ref(),
+            size,
+            &format,
+        ),
         Request::Render {
             design,
             block,
@@ -1601,6 +1619,7 @@ fn dispatch(
             sheet.as_deref(),
         ),
         Request::Render { .. }
+        | Request::BoardRender { .. }
         | Request::Output { .. }
         | Request::Scene { .. }
         | Request::LibCheck { .. }

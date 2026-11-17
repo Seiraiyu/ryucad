@@ -826,6 +826,7 @@ fn every_protocol_method_has_a_command() {
         ("board.show", &["board", "show"]),
         ("board.place", &["board", "place"]),
         ("board.unplace", &["board", "unplace"]),
+        ("board.render", &["board", "render"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
         ("block.show", &["block", "show"]),
@@ -4706,4 +4707,64 @@ fn a_boards_pads_are_listed_with_their_nets() {
     let s = p.ok(&["board", "show", "main"]);
     assert!(s.get("pads").is_none());
     assert_eq!(s["notices"], json!([]));
+}
+
+#[test]
+fn boards_render_to_png_and_svg() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "U1", "--at", "10,10"]);
+    p.ok(&[
+        "board", "place", "main", "J1", "--at", "3,10", "--rotation", "90",
+    ]);
+    let r = p.ok(&[
+        "board", "render", "main", "--out", "top.png", "--size", "800",
+    ]);
+    assert_eq!(r["binary"]["encoding"], "image/png");
+    assert_eq!(r["width"], 800);
+    assert_eq!(
+        r["layers"],
+        json!(["copper.top", "mask.top", "silk.top", "drill", "outline"])
+    );
+    for top in [&p.direct, &p.daemon] {
+        let png = fs::read(top.join("board/top.png")).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+    }
+    let r = p.ok(&[
+        "board", "render", "main", "--out", "bottom.svg", "--side", "bottom",
+    ]);
+    assert_eq!(r["binary"]["encoding"], "image/svg+xml");
+    assert_eq!(r["side"], "bottom");
+    assert_eq!(
+        r["layers"],
+        json!(["copper.bottom", "mask.bottom", "silk.bottom", "drill", "outline"])
+    );
+    let svg = fs::read_to_string(p.direct.join("board/bottom.svg")).unwrap();
+    assert!(svg.starts_with("<svg") || svg.starts_with("<?xml"), "{svg}");
+    let r = p.ok(&[
+        "board", "render", "main", "--out", "n.png", "--net", "rail:gnd", "--layer",
+        "copper.top", "--layer", "outline",
+    ]);
+    assert_eq!(r["net"], "rail:gnd");
+    let r = p.ok(&[
+        "board", "render", "main", "--out", "w.png", "--window", "0,0,15,15",
+    ]);
+    assert_eq!(r["window"], json!([0, 0, 15_000_000, 15_000_000]));
+    p.fails(
+        &["board", "render", "main", "--out", "x.png", "--layer", "nope"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["board", "render", "main", "--out", "x.png", "--net", "nope"],
+        "not_found",
+        1,
+    );
+    p.fails(
+        &["board", "render", "main", "--out", "x.png", "--size", "0"],
+        "invalid_param",
+        1,
+    );
 }
