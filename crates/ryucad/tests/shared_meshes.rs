@@ -13,6 +13,7 @@ use ryucad::session::Session;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 fn occt(name: &str) -> String {
     format!(
@@ -57,11 +58,11 @@ fn components(s: &mut Session, part: &str) -> BTreeMap<String, Vec<(String, Arc<
 /// How many copies have a shape other than their component's first
 /// copy's (each meshed alone).
 ///
-/// Measured 2026-11-17 (plan 33.C, Task 4): on `assembly.stp` the block's
-/// second copy is alone (its unplaced body heals with flipped face senses:
-/// ryukei's healer breaks ties by names, which follow each feature's key),
-/// and on the seeded board 4 of 12 copies are alone. Held for a decision,
-/// not weakened. Copies that share it share entity ids:
+/// Healed under each feature's own key, copies came out alone (the
+/// block's second copy in `assembly.stp` with flipped face senses, 4 of
+/// 12 on the seeded board): ryukei's healer breaks ties by names, which
+/// follow the key. A placed import is healed under its shape key and
+/// renamed, so none is. Copies that share it share entity ids:
 /// every face of one mesh of the first is a live face of each.
 fn alone(components: &BTreeMap<String, Vec<(String, Arc<Built>)>>) -> usize {
     let params = ryukei::mesh::MeshParams::new(1e-3, 0.5);
@@ -306,4 +307,98 @@ fn mesh_get_says_each_bodys_shape_and_pose() {
     let v = must(&mut s, "mesh.get", json!({"part": "p"}));
     assert!(v["bodies"][0].get("shape").is_none());
     assert!(v["bodies"][0].get("pose").is_none());
+}
+
+/// The bar itself with `RYUCAD_BARS`, else ten times looser.
+fn slack() -> f64 {
+    if std::env::var_os("RYUCAD_BARS").is_some() {
+        1.0
+    } else {
+        10.0
+    }
+}
+
+/// Design 698's bar (#813): a seeded board of 40 components placed 1,000
+/// times, turned about all three axes. Flattened, it is meshed exactly
+/// once per shape, every copy's display mesh has its shape's triangles
+/// and chord, and meshing it takes at most twice what meshing the same
+/// file imported per product (40 parts, 1,000 instances) takes. Release
+/// builds only.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a thousand placed bodies in a debug build")]
+fn a_board_of_forty_components_placed_a_thousand_times_meshes_forty() {
+    use ryucad::mesh::Quality;
+    const DISTINCT: usize = 40;
+    const COPIES: usize = 1000;
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("board.step");
+    std::fs::write(&file, common::board::board(DISTINCT, COPIES)).unwrap();
+    let (_dir, mut s) = common::project();
+    must(
+        &mut s,
+        "import",
+        json!({"path": file, "flatten": true, "part": "board"}),
+    );
+    must(&mut s, "import", json!({"path": file, "part": "whole"}));
+    // Built first: the bar times meshing, not reading the file.
+    let c = components(&mut s, "board");
+    let bodies: Vec<&Arc<Built>> = c.values().flatten().map(|(_, b)| b).collect();
+    assert_eq!(bodies.len(), COPIES);
+    let shapes: std::collections::BTreeSet<&str> = bodies
+        .iter()
+        .map(|b| b.moved.as_ref().unwrap().source.hash.as_str())
+        .collect();
+    assert_eq!(shapes.len(), DISTINCT, "one shape per component (the proof)");
+    let whole = Id::parse("whole", "part").unwrap();
+    let model = s
+        .model(&whole, &ryucad::doc::assembly::Rev::Working)
+        .unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    let solids: Vec<ryucad::assembly::Solid> = model
+        .occurrences
+        .iter()
+        .flat_map(|o| o.solids.iter().cloned())
+        .filter(|sd| seen.insert(sd.built.hash.clone()))
+        .collect();
+    let placed: usize = model.occurrences.iter().map(|o| o.solids.len()).sum();
+    assert_eq!((solids.len(), placed), (DISTINCT, COPIES));
+    // Flattened: 40 meshes made, 1,000 moved.
+    let board = Id::parse("board", "part").unwrap();
+    let before = s.caches().meshes().made();
+    let t = Instant::now();
+    let flat = ryucad::scene::meshes(&mut s, &board, None, Quality::Normal).unwrap();
+    let flat_s = t.elapsed().as_secs_f64();
+    let flat_made = s.caches().meshes().made() - before;
+    // Per product: 40 meshes, placed by the assembly.
+    let refs: Vec<&ryucad::assembly::Solid> = solids.iter().collect();
+    let before = s.caches().meshes().made();
+    let t = Instant::now();
+    ryucad::scene::occurrence_meshes(&mut s, &refs, Quality::Normal).unwrap();
+    let whole_s = t.elapsed().as_secs_f64();
+    let whole_made = s.caches().meshes().made() - before;
+    let mut by_shape: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+    let mut triangles = 0;
+    for (solid, m) in &flat {
+        let m = m.as_ref().unwrap_or_else(|e| panic!("{solid}: {e}"));
+        let (shape, _) = m.shape.as_ref().expect("moved");
+        let n = m.mesh.mesh.as_ref().map_or(0, |x| x.triangles.len());
+        triangles += n;
+        let got = (n, m.mesh.params.chord.to_bits());
+        let want = *by_shape.entry(shape.clone()).or_insert(got);
+        assert_eq!(got, want, "{solid}: its shape's triangles and chord");
+    }
+    println!(
+        "shared-mesh bar on {}: {COPIES} placements of {DISTINCT} components, {triangles} \
+         triangles; flattened {flat_s:.3} s ({flat_made} meshes made), per product \
+         {whole_s:.3} s ({whole_made} made), {:.2} times",
+        bar_project::machine(),
+        flat_s / whole_s,
+    );
+    // Every number is printed before any bar is judged.
+    assert_eq!(flat_made as usize, DISTINCT, "one mesh per shape");
+    assert_eq!(whole_made as usize, DISTINCT);
+    assert!(
+        flat_s <= 2.0 * whole_s * slack(),
+        "flattened {flat_s:.3} s, per product {whole_s:.3} s"
+    );
 }
