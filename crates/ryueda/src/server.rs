@@ -568,6 +568,10 @@ fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Re
             partcmd::component_show(p, &component).map(Answer::json)
         }
         Request::NetShow { net, .. } => partcmd::net_show(p, &net).map(Answer::json),
+        Request::BoardList { .. } => Ok(Answer::json(crate::board::cmd::list(p))),
+        Request::BoardShow { board, pads, .. } => {
+            crate::board::cmd::show(p, &board, pads).map(Answer::json)
+        }
         Request::SymbolShow { symbol, .. } => libcmd::symbol_show(p, &symbol).map(Answer::json),
         Request::LibcompShow { libcomp, .. } => libcmd::libcomp_show(p, &libcomp).map(Answer::json),
         Request::LibCheck {
@@ -1190,6 +1194,44 @@ fn dispatch(
             expected_revision,
         } => topcmd::design_delete(session, &design, expected_revision.as_deref()),
         Request::DesignList {} => Ok(topcmd::design_list(session.project())),
+        Request::BoardCreate {
+            name,
+            design,
+            rect,
+            outline,
+            id,
+            expected_revision,
+        } => crate::board::cmd::create(
+            session,
+            &name,
+            &design,
+            rect.as_ref(),
+            outline.as_ref(),
+            id.as_deref(),
+            expected_revision.as_deref(),
+        ),
+        Request::BoardEdit {
+            board,
+            name,
+            outline,
+            cutouts,
+            expected_revision,
+        } => crate::board::cmd::edit(
+            session,
+            &board,
+            name.as_deref(),
+            outline.as_ref(),
+            cutouts.as_ref(),
+            expected_revision.as_deref(),
+        ),
+        Request::BoardDelete {
+            board,
+            expected_revision,
+        } => crate::board::cmd::delete(session, &board, expected_revision.as_deref()),
+        Request::BoardList { .. } => Ok(crate::board::cmd::list(session.project())),
+        Request::BoardShow { board, pads, .. } => {
+            crate::board::cmd::show(session.project(), &board, pads)
+        }
         Request::BlockCreate {
             name,
             id,

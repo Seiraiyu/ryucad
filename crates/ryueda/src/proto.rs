@@ -581,6 +581,58 @@ pub enum Request {
     },
     #[serde(rename = "design.list")]
     DesignList {},
+    /// A board for a design (design 732), with the `jlc-2l` preset.
+    #[serde(rename = "board.create")]
+    BoardCreate {
+        name: String,
+        /// The design, by ID or name.
+        design: String,
+        /// A rectangle `[w, h]` at the origin, lengths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rect: Option<[String; 2]>,
+        /// An outline as `board::file::Contour`, its coordinates lengths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outline: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// The project's revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.edit")]
+    BoardEdit {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outline: Option<Value>,
+        /// A list of contours; `[]` clears them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cutouts: Option<Value>,
+        /// The board's revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.delete")]
+    BoardDelete {
+        board: String,
+        /// The board's revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.list")]
+    BoardList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    #[serde(rename = "board.show")]
+    BoardShow {
+        board: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pads: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// A functional block, its ID random unless given.
     #[serde(rename = "block.create")]
     BlockCreate {
@@ -1349,6 +1401,8 @@ impl Request {
             | Request::BlockShow { rev, .. }
             | Request::ComponentShow { rev, .. }
             | Request::NetShow { rev, .. }
+            | Request::BoardList { rev }
+            | Request::BoardShow { rev, .. }
             | Request::SymbolShow { rev, .. }
             | Request::LibcompShow { rev, .. }
             | Request::LibCheck { rev, .. }
@@ -1392,6 +1446,9 @@ impl Request {
                 | Request::DesignCreate { .. }
                 | Request::DesignEdit { .. }
                 | Request::DesignDelete { .. }
+                | Request::BoardCreate { .. }
+                | Request::BoardEdit { .. }
+                | Request::BoardDelete { .. }
                 | Request::BlockCreate { .. }
                 | Request::BlockEdit { .. }
                 | Request::BlockDelete { .. }
@@ -1488,6 +1545,19 @@ mod tests {
     fn requests_round_trip_through_rpc() {
         let reqs = [
             Request::ProjectInfo {},
+            Request::BoardCreate {
+                name: "Main".into(),
+                design: "board".into(),
+                rect: Some(["30 mm".into(), "20 mm".into()]),
+                outline: None,
+                id: Some("main".into()),
+                expected_revision: None,
+            },
+            Request::BoardShow {
+                board: "main".into(),
+                pads: true,
+                rev: None,
+            },
             Request::LibAdd {
                 alias: "passives".into(),
                 path: "../passives".into(),
