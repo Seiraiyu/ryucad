@@ -22,7 +22,9 @@ class RyucadError(Error):
 
     def __init__(self, code: Code | str, message: str,
                  details: Mapping[str, Any] | None = None) -> None:
-        super().__init__(message)
+        # Every argument goes to the base, so pickle (which calls
+        # cls(*args)) rebuilds it: a process pool's worker sends it back.
+        super().__init__(code, message, details)
         self.code: Code | str = code
         self.message = message
         self.details: dict[str, Any] = dict(details or {})

@@ -1,5 +1,6 @@
 """Refusals become exceptions by their stable codes."""
 
+import pickle
 import unittest
 
 import ryucad
@@ -94,3 +95,23 @@ class Errors(unittest.TestCase):
             self.assertTrue(issubclass(cls, ryucad.Error))
             self.assertFalse(issubclass(cls, ryucad.RyucadError))
         self.assertEqual(ryucad.SessionClosed("gone", 3).returncode, 3)
+
+    def test_refusals_survive_pickle(self):
+        # A ProcessPoolExecutor's worker sends its exception back pickled:
+        # the parent must get the same class, code, message and details.
+        for e in (refusal(error("conflict", {"path": "parts/p/part.json"}, message="stale")),
+                  refusal(error("invalid_param", {"op": 2, "method": "part.ensure"})),
+                  refusal(error("from_a_newer_ryucad", {"x": [1]}))):
+            back = pickle.loads(pickle.dumps(e))
+            self.assertIs(type(back), type(e))
+            self.assertEqual(back.code, e.code)
+            self.assertEqual(back.message, e.message)
+            self.assertEqual(back.details, e.details)
+            self.assertEqual(str(back), str(e))
+        self.assertIs(type(refusal(error("conflict"))), ryucad.Conflict)
+        self.assertIs(type(refusal(error("invalid_param"))), ryucad.FixableError)
+
+    def test_session_closed_survives_pickle(self):
+        back = pickle.loads(pickle.dumps(ryucad.SessionClosed("gone", 3)))
+        self.assertIs(type(back), ryucad.SessionClosed)
+        self.assertEqual((str(back), back.returncode), ("gone", 3))
