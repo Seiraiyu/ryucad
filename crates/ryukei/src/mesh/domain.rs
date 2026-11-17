@@ -164,7 +164,36 @@ fn gather_with(
         }
         out.rings.push(ring);
     }
+    in_order(&mut out);
     (out, moved)
+}
+
+/// A face's rings and lone vertices in an order of their parameters
+/// alone, never their entities' IDs. The domain's triangulation and its
+/// refinement take loops in this order, and a healed body's loop order
+/// follows its import names, which follow the caller's key: the race's
+/// p484 (blend seed 267) meshed under one key and refused another with
+/// `BadDomain` (#917). Rings go by their lowest point (least `v`, then
+/// `u`), then their points from there on; lone vertices by their
+/// parameters. Each ring keeps its own start.
+fn in_order(loops: &mut Loops) {
+    fn cmp(a: Point2, b: Point2) -> core::cmp::Ordering {
+        a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x))
+    }
+    fn from_lowest(r: &[LoopPoint]) -> impl Iterator<Item = Point2> + '_ {
+        let low = (0..r.len())
+            .min_by(|&i, &j| cmp(r[i].uv, r[j].uv).then(i.cmp(&j)))
+            .unwrap_or(0);
+        (0..r.len()).map(move |i| r[(low + i) % r.len()].uv)
+    }
+    loops.rings.sort_by(|a, b| {
+        from_lowest(a)
+            .zip(from_lowest(b))
+            .map(|(p, q)| cmp(p, q))
+            .find(|o| o.is_ne())
+            .unwrap_or(a.len().cmp(&b.len()))
+    });
+    loops.lone.sort_by(|a, b| cmp(a.1, b.1));
 }
 
 /// A tolerant edge ending at a vertex on a collapsed row (a sewn sphere
