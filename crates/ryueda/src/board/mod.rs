@@ -4,6 +4,7 @@
 
 pub mod cmd;
 pub mod file;
+pub mod graphic;
 pub mod load;
 pub mod occ;
 pub mod outline;
