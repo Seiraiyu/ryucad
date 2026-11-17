@@ -371,6 +371,14 @@ class Code(str, Enum):
     COMPONENT_OUTDATED = "component_outdated"
     LIBRARY_FOREIGN_WORKING = "library_foreign_working"
     BOM_UNIDENTIFIED = "bom_unidentified"
+    BOARD_NOT_FOUND = "board_not_found"
+    BOARD_EXISTS = "board_exists"
+    BOARD_DESIGN_NOT_FOUND = "board_design_not_found"
+    BOARD_OUTLINE_INVALID = "board_outline_invalid"
+    BOARD_OUT_OF_RANGE = "board_out_of_range"
+    BOARD_REF_AMBIGUOUS = "board_ref_ambiguous"
+    BOARD_FOOTPRINT_UNSUPPORTED = "board_footprint_unsupported"
+    BOARD_TEXT_MISSING_GLYPH = "board_text_missing_glyph"
 
 
 #: Each code's exit class.
@@ -735,4 +743,12 @@ EXIT: dict[Code, int] = {
     Code.COMPONENT_OUTDATED: 1,
     Code.LIBRARY_FOREIGN_WORKING: 1,
     Code.BOM_UNIDENTIFIED: 1,
+    Code.BOARD_NOT_FOUND: 1,
+    Code.BOARD_EXISTS: 1,
+    Code.BOARD_DESIGN_NOT_FOUND: 1,
+    Code.BOARD_OUTLINE_INVALID: 1,
+    Code.BOARD_OUT_OF_RANGE: 1,
+    Code.BOARD_REF_AMBIGUOUS: 1,
+    Code.BOARD_FOOTPRINT_UNSUPPORTED: 1,
+    Code.BOARD_TEXT_MISSING_GLYPH: 1,
 }
