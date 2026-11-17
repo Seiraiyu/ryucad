@@ -165,3 +165,9 @@ Issue #533: `ryucad rebuild` with no part named answers every part's report (89 
   | Full checks at the end | 9 (file events overflowed), none narrowed | 1 (the watch started), 8 narrowed |
 
 - **Testing.** `fresh`'s `listing_and_reading_every_folder_raises_no_event` (20,000 folders listed and read on rayon: overflowed under notify, debug and release) and `a_folder_moved_inside_the_project_is_watched_where_it_went`, Linux only; ryucad's `a_watched_daemon_s_requests_check_only_what_events_name`; `scale_bar`'s guard.
+
+## Meshes shared across placements (decided in ryucad phase 33, #813)
+
+- **The bar.** `tests/shared_meshes.rs`' `a_board_of_forty_components_placed_a_thousand_times_meshes_forty` (release only): `common::board`'s seeded board, 40 race components placed 1,000 times, each turned about x, y and z, written by ryustep. Flattened, its meshing makes exactly 40 meshes (`Cache::made`), every copy has its shape's triangle count and chord, and it takes at most 2× the same file imported per product (40 parts, 1,000 instances); ratio and count are asserted, ten times looser without `RYUCAD_BARS`.
+- **Measured** (three runs, `RYUCAD_BARS=1`, linux x86_64, Intel Core Ultra 5 250K Plus, 18 cores, load 3 to 4 from other sessions): 1,000 placements of 40 components, 4,809,800 triangles; flattened 0.254 s, 0.242 s and 0.243 s (40 meshes made), per product 0.143 s, 0.145 s and 0.148 s (40 made): 1.77, 1.67 and 1.64 times. What the flattened run spends beyond the per-product one is moving 1,000 meshes' positions and normals.
+- **The real board.** #801's NUCLEO-H563ZI (158 distinct bodies of 1,023) isn't in the pinned corpus, so only the seeded board is measured.
