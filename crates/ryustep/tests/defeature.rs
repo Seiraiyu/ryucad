@@ -393,7 +393,9 @@ fn a_rounded_box_through_step_is_defeatured_to_the_box() {
 
 /// A cancel stops deleting NIST FTC 10's blends at once (plan 13.D: its
 /// re-trim fitted a carried spline's working sheet for 17 minutes past a
-/// cancel, unpolled). Cancelled 5 s in, it answers within 5 s more.
+/// cancel, unpolled). Cancelled 5 s in, it answers within 5 s more. On a
+/// pool of its own (#939): on the global pool it waited for another
+/// test's whole check, on Windows.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -415,6 +417,10 @@ fn a_cancel_stops_deleting_ftc_10s_blends() {
         faces: Vec::new(),
         options: RecogniseOptions::default(),
     };
+    let own = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
     let flag = AtomicBool::new(false);
     let start = Instant::now();
     let (r, stopped) = std::thread::scope(|s| {
@@ -422,12 +428,14 @@ fn a_cancel_stops_deleting_ftc_10s_blends() {
             std::thread::sleep(Duration::from_secs(5));
             flag.store(true, Ordering::Relaxed);
         });
-        let r = delete_blends_with(
-            OpKey(0x13d),
-            &body,
-            &spec,
-            &Work::unlimited().with_cancel(&flag),
-        );
+        let r = own.install(|| {
+            delete_blends_with(
+                OpKey(0x13d),
+                &body,
+                &spec,
+                &Work::unlimited().with_cancel(&flag),
+            )
+        });
         (r, start.elapsed())
     });
     assert!(matches!(r, Err(Error::Cancelled)), "{:?}", r.err());
