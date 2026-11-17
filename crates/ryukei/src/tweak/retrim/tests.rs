@@ -1521,11 +1521,37 @@ fn clipped_at_its_near_box(bytes: &[u8], text: &str) -> (ClipCut, super::region:
     (c, region, changes)
 }
 
+/// A cut's clipped face given room (design 724, plan 22.A): room asked
+/// for it holds every clip point strictly inside its adjusted near box,
+/// and goes to its working neighbours too.
+fn given_room_holds_its_clip(bytes: &[u8], text: &str) {
+    let (c, region, changes) = clipped_at_its_near_box(bytes, text);
+    let near = |g: FaceId| super::near::near_box(&c.body, &changes, &region, g, &c.x, c.rung);
+    let adjusts = super::near::room(
+        &c.body,
+        &c.working,
+        &std::collections::BTreeSet::from([c.clipped]),
+        &c.x,
+        &super::near::Adjusts::new(),
+        &near,
+    )
+    .expect("room to give");
+    let roomy = super::near::adjusted(&c.near, &c.x, adjusts.get(&c.clipped).copied());
+    for &p in &c.points {
+        assert!(strictly_inside(&roomy, p), "{p:?} outside {roomy:?}");
+    }
+    assert!(
+        adjusts.len() > 1,
+        "no working neighbour given room: {adjusts:?}"
+    );
+}
+
 /// CTC 02 with PMI #295 (#658, census VII): working plane `1294043e`
-/// clipped at its near box in rung 3's narrowed retry.
+/// clipped at its near box in rung 3's narrowed retry; given room, its
+/// near box holds the clip.
 #[test]
-fn ctc_02s_plane_is_clipped_at_its_near_box() {
-    clipped_at_its_near_box(
+fn ctc_02s_plane_is_given_room() {
+    given_room_holds_its_clip(
         include_bytes!("../../../tests/data/nist_ctc_02_room.body"),
         include_str!("../../../tests/data/nist_ctc_02_room.txt"),
     );
@@ -1533,10 +1559,11 @@ fn ctc_02s_plane_is_clipped_at_its_near_box() {
 
 /// STC 10 #3044 (#658, census VII): working plane `ccab7076` (z = 75 mm),
 /// whose clipped side a piece of coplanar plane `a7b86e65` reached in rung
-/// 2's narrowed retry, clipped at its near box.
+/// 2's narrowed retry, clipped at its near box; given room, its near box
+/// holds the clip.
 #[test]
-fn stc_10s_coplanar_plane_is_clipped_at_its_near_box() {
-    clipped_at_its_near_box(
+fn stc_10s_coplanar_plane_is_given_room() {
+    given_room_holds_its_clip(
         include_bytes!("../../../tests/data/nist_stc_10_room.body"),
         include_str!("../../../tests/data/nist_stc_10_room.txt"),
     );
