@@ -7,6 +7,7 @@ pub mod cmd;
 pub mod connect;
 pub mod courtyard;
 pub mod drc;
+pub mod export;
 pub mod fab;
 pub mod file;
 pub mod graphic;

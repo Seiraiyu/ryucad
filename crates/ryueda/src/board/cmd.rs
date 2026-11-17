@@ -230,7 +230,7 @@ pub fn delete(session: &mut Session, board: &str, expected: Option<&str>) -> Res
 }
 
 /// Counts of findings by code.
-fn counts(f: &[super::drc::Finding]) -> Value {
+pub(crate) fn counts(f: &[super::drc::Finding]) -> Value {
     let mut by: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     for x in f {
         *by.entry(json!(x.code).as_str().unwrap_or_default().to_owned())
