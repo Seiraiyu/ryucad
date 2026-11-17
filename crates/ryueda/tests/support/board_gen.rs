@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 #[path = "generated.rs"]
-mod generated;
+pub mod generated;
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -97,7 +97,7 @@ impl Spec {
 
     /// Whether connection `n` (part n to part n + 1) goes by the bottom.
     pub fn by_vias(&self, n: usize) -> bool {
-        self.via_every > 0 && self.same_row(n) && n % self.via_every == 0
+        self.via_every > 0 && self.same_row(n) && n.is_multiple_of(self.via_every)
     }
 
     /// The board's size.

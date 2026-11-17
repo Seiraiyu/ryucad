@@ -17,14 +17,14 @@ mod board_gen;
 mod breakout;
 #[path = "support/draw.rs"]
 mod draw;
-#[path = "support/generated.rs"]
-mod generated;
 #[path = "support/parts.rs"]
 mod parts;
 #[path = "support/rp2040.rs"]
 mod rp2040;
 
 use assert_cmd::Command;
+// `board_gen` includes the generated design; one copy of it serves both.
+use board_gen::generated;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
