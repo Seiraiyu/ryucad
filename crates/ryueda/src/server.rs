@@ -1839,6 +1839,10 @@ pub fn revisions(p: &Project) -> BTreeMap<String, Value> {
             out.insert(format!("layout/{id}"), rev);
         }
     }
+    // Boards (design 732): each its own revision.
+    for (id, b) in &p.boards {
+        out.insert(format!("board/{id}"), json!(b.revision));
+    }
     // The standards that judge this project's own symbols: a viewer
     // redraws the lint when they change.
     let standards = p.standards_for(SELF).map_or(Value::Null, |(s, _)| {
