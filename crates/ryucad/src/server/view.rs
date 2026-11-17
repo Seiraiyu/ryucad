@@ -333,6 +333,7 @@ fn assembly_meshes(
                 hash: s.built.hash.clone(),
                 mesh,
                 warning,
+                shape: mesh::shape_of(&s.built),
             };
             (label, Ok(m))
         })
@@ -443,6 +444,7 @@ fn mesh_before_json(
     let mut body = mesh::to_json(&m.body, &m.mesh);
     body["feature"] = json!(solid);
     body["hash"] = json!(m.hash);
+    m.shape_into(&mut body);
     let mut v = json!({"part": pid, "quality": quality.as_str(), "bodies": [body]});
     with_warnings(&mut v, m.warning.into_iter().collect());
     Ok(v)
@@ -485,6 +487,7 @@ pub(crate) fn mesh_get(
                 let mut v = mesh::to_json(&m.body, &m.mesh);
                 v["feature"] = json!(label);
                 v["hash"] = json!(m.hash);
+                m.shape_into(&mut v);
                 Some(v)
             })
             .collect();
@@ -504,6 +507,7 @@ pub(crate) fn mesh_get(
                 let mut v = mesh::to_json(&m.body, &m.mesh);
                 v["feature"] = json!(id);
                 v["hash"] = json!(m.hash);
+                m.shape_into(&mut v);
                 v
             }
             Err(e) => json!({"feature": id, "ok": false, "error": e}),

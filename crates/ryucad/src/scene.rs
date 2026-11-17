@@ -92,11 +92,13 @@ pub fn meshes_of(
             let r = b.map(|(_, b)| {
                 let mesh = made.next().expect("one mesh per built body");
                 let warning = mesh::unmeshed_warning(part, &id, &b, &mesh);
+                let shape = mesh::shape_of(&b);
                 mesh::Meshed {
                     body: b.body,
                     hash: b.hash,
                     mesh,
                     warning,
+                    shape,
                 }
             });
             (id, r)
@@ -144,11 +146,13 @@ pub fn mesh_before(
         .pop()
         .expect("one mesh for one body");
     let warning = mesh::unmeshed_warning(part, solid, &b, &mesh);
+    let shape = mesh::shape_of(&b);
     Ok(mesh::Meshed {
         body: b.body,
         hash: b.hash,
         mesh,
         warning,
+        shape,
     })
 }
 
@@ -548,6 +552,7 @@ fn occurrences_at(session: &mut Session, rev: &str, part: &Id) -> Result<Occurre
                 hash: sol.built.hash.clone(),
                 mesh: m,
                 warning: None,
+                shape: mesh::shape_of(&sol.built),
             };
             out.insert((path.clone(), sol.founder.clone()), (o.pose, m));
         }
@@ -890,6 +895,7 @@ pub(crate) fn render_scene(
                         hash: s.built.hash.clone(),
                         mesh: m,
                         warning: None,
+                        shape: mesh::shape_of(&s.built),
                     };
                     let key = (path.clone(), s.founder.clone());
                     let (whole, faces) = match theirs_occurrences.get(part) {
@@ -1272,6 +1278,7 @@ pub(crate) fn flat_meshed(f: &crate::sheet_metal::flat::FlatOf) -> mesh::Meshed 
         hash: f.body.hash.clone(),
         mesh,
         warning: None,
+        shape: None,
     }
 }
 

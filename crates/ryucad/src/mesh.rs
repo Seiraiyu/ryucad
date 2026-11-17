@@ -113,6 +113,29 @@ pub struct Meshed {
     pub mesh: Arc<DisplayMesh>,
     /// A reference's faces its mesh left out ([`unmeshed_warning`]).
     pub warning: Option<Value>,
+    /// For a moved body (an inserted solid, a flattened import's copy):
+    /// the hash of the mesh its mesh is moved from and the pose that
+    /// moves it (#813). `mesh.get` says them as `shape` and `pose`.
+    pub shape: Option<(String, ryukei::geom::Rigid)>,
+}
+
+/// What [`Meshed::shape`] says of `b`: its source's hash and its pose,
+/// when it is moved.
+pub fn shape_of(b: &Built) -> Option<(String, ryukei::geom::Rigid)> {
+    b.moved.as_ref().map(|m| (m.source.hash.clone(), m.pose))
+}
+
+impl Meshed {
+    /// Adds `shape` and `pose` to `v`, a body of `mesh.get`'s JSON, when
+    /// this body is moved: bodies with one `shape` share one mesh, moved
+    /// by each one's `pose`. Additive JSON only: the binary encodings
+    /// (`ryucad.mesh.1` and `.2`) leave them out and don't change.
+    pub fn shape_into(&self, v: &mut Value) {
+        if let Some((shape, pose)) = &self.shape {
+            v["shape"] = json!(shape);
+            v["pose"] = crate::assembly::rigid_pose(pose).to_json();
+        }
+    }
 }
 
 /// `reference_faces_unmeshed` for a reference body `b` (solid `solid` of
@@ -1493,6 +1516,7 @@ pub(crate) mod tests {
             hash: b.hash.clone(),
             mesh: cache.get(&f, &b, Quality::Coarse, usize::MAX),
             warning: None,
+            shape: None,
         };
         let id = |s: &str| Id::parse(s, "feature").unwrap();
         let failed = Err(Error::new(Code::RebuildFailed, "no"));
@@ -1582,6 +1606,7 @@ pub(crate) mod tests {
             hash: b.hash.clone(),
             mesh: Cache::default().get(&f, &b, Quality::Normal, usize::MAX),
             warning: None,
+            shape: None,
         };
         let (one, w1, two, w2) = both_ways(&m);
         alike(&w1, &w2);
@@ -1611,6 +1636,7 @@ pub(crate) mod tests {
                 mesh: Ok(Arc::new(mesh)),
             }),
             warning: None,
+            shape: None,
         };
         let (_, w1, _, w2) = both_ways(&m);
         alike(&w1, &w2);

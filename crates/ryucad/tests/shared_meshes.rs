@@ -268,3 +268,42 @@ fn a_flattened_references_mass_reads_its_moved_mesh() {
         }
     }
 }
+
+/// `mesh.get` says, for each moved body, the hash of the mesh it is moved
+/// from and the pose that moves it: the block's copies name one `shape`;
+/// a body nothing moves says neither. The binary encodings don't change.
+#[test]
+fn mesh_get_says_each_bodys_shape_and_pose() {
+    let (_dir, mut s) = common::project();
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b",
+               "params": {"x": "1 mm", "y": "1 mm", "z": "1 mm"}}),
+    );
+    must(
+        &mut s,
+        "import",
+        json!({"path": occt("assembly.stp"), "flatten": true, "part": "board"}),
+    );
+    let v = must(&mut s, "mesh.get", json!({"part": "board"}));
+    let bodies = v["bodies"].as_array().unwrap();
+    assert_eq!(bodies.len(), 3);
+    let mut shapes = std::collections::BTreeMap::<String, usize>::new();
+    for b in bodies {
+        let shape = b["shape"]
+            .as_str()
+            .expect("a flattened body says its shape");
+        assert_eq!(shape.len(), 32);
+        assert!(b["pose"]["origin_m"].is_array() && b["pose"]["z"].is_array());
+        assert_ne!(b["shape"], b["hash"]);
+        *shapes.entry(shape.to_owned()).or_default() += 1;
+    }
+    assert_eq!(
+        shapes.values().copied().collect::<Vec<_>>().iter().max(),
+        Some(&2)
+    );
+    let v = must(&mut s, "mesh.get", json!({"part": "p"}));
+    assert!(v["bodies"][0].get("shape").is_none());
+    assert!(v["bodies"][0].get("pose").is_none());
+}
