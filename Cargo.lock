@@ -4892,6 +4892,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-gerber"
+version = "0.0.0"
+dependencies = [
+ "ryu-board",
+ "ryu-gerber",
+]
+
+[[package]]
 name = "ryu-git"
 version = "0.0.0"
 dependencies = [

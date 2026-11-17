@@ -1,0 +1,19 @@
+[package]
+name = "ryu-gerber"
+description = "Gerber X2 and Excellon written from ryu-board's shapes: product-neutral (design 732)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+ryu-board = { path = "../ryu-board" }
+
+[features]
+# A reader of exactly what this crate writes, for its tests, ryueda's and
+# the fuzz targets. Not a general reader: ryudfm's stage 6 brings that.
+testing = []
+
+[dev-dependencies]
+ryu-gerber = { path = ".", features = ["testing"] }
+ryu-board = { path = "../ryu-board", features = ["testing"] }
