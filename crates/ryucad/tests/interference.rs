@@ -93,6 +93,77 @@ fn near(got: f64, want: f64, rel: f64) {
     assert!((got - want).abs() <= rel * want, "{got} against {want}");
 }
 
+/// Runs git in `dir` with a fixed identity, isolated from the user's
+/// config, and fails the test on an error.
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = ryupdm::git_env::isolated()
+        .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Commits everything in `dir`.
+fn commit(dir: &std::path::Path, message: &str) {
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "--allow-empty", "-m", message]);
+}
+
+/// Whether solid `s` (`<asm>/<path>/<solid>`) lies at one of `paths`.
+fn at(s: &str, asm: &str, paths: &[String]) -> bool {
+    paths.iter().any(|p| s.starts_with(&format!("{asm}/{p}/")))
+}
+
+/// `v`'s pair lists (interferences, touching, unchecked) keeping the
+/// pairs `keep` takes, by their two solids.
+fn kept(v: &Value, keep: impl Fn(&str, &str) -> bool) -> Value {
+    let list = |k: &str| -> Vec<Value> {
+        v[k].as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| keep(i["a"].as_str().unwrap(), i["b"].as_str().unwrap()))
+            .cloned()
+            .collect()
+    };
+    json!({"interferences": list("interferences"), "touching": list("touching"),
+           "unchecked": list("unchecked")})
+}
+
+/// The occurrences an answer's scope lists.
+fn scoped_paths(v: &Value) -> Vec<String> {
+    v["scope"]["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Five balls: `a`, `b` and `c` in a row, each overlapping the next, and
+/// `d` and `e` overlapping far off; committed.
+fn row() -> (tempfile::TempDir, Session) {
+    let (dir, mut s) = project(3.0);
+    for (id, x) in [
+        ("a", 0.0),
+        ("b", 15.0),
+        ("c", 30.0),
+        ("d", 200.0),
+        ("e", 215.0),
+    ] {
+        place(&mut s, "asm", id, "ball", [x, 0.0, 0.0], Z, X);
+    }
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    commit(dir.path(), "start");
+    (dir, s)
+}
+
 #[test]
 fn two_balls_share_a_lens() {
     let (_dir, mut s) = project(3.0);
@@ -697,4 +768,124 @@ fn the_pcbas_undecided_kinds_are_decided_on_meshes() {
     // recorded departure). Every pose of all three is still asserted
     // decided above.
     assert!(kinds[0] > 0, "{kinds:?}");
+}
+
+#[test]
+fn a_scoped_answer_is_the_full_answer_kept_to_what_changed() {
+    let (_dir, mut s) = row();
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "asm", "id": "e", "placement": {"origin": [212, 0, 0], "z": Z, "x": X}}),
+    );
+    let full = must(&mut s, "interference", json!({"part": "asm"}));
+    let scoped = must(
+        &mut s,
+        "interference",
+        json!({"part": "asm", "changed_since": "HEAD"}),
+    );
+    assert_eq!(scoped_paths(&scoped), ["e"], "{scoped}");
+    assert_eq!(scoped["scope"]["since"], "HEAD");
+    assert!(scoped["scope"]["commit"].is_string(), "{scoped}");
+    assert_eq!(scoped["pairs"], 1, "{scoped}");
+    let paths = scoped_paths(&scoped);
+    assert_eq!(
+        kept(&scoped, |_, _| true),
+        kept(&full, |a, b| at(a, "asm", &paths) || at(b, "asm", &paths))
+    );
+    assert_eq!(
+        scoped["pairs"].as_u64().unwrap() + scoped["scope"]["skipped"].as_u64().unwrap(),
+        full["pairs"].as_u64().unwrap(),
+        "{full}"
+    );
+    // The full answer has no scope.
+    assert!(full.get("scope").is_none(), "{full}");
+}
+
+#[test]
+fn nothing_changed_checks_nothing() {
+    let (_dir, mut s) = row();
+    let full = must(&mut s, "interference", json!({"part": "asm"}));
+    for rev in ["HEAD", "working"] {
+        let v = must(
+            &mut s,
+            "interference",
+            json!({"part": "asm", "changed_since": rev}),
+        );
+        assert_eq!(
+            (&v["pairs"], &v["interferences"], &v["scope"]["occurrences"]),
+            (&json!(0), &json!([]), &json!([])),
+            "{rev}: {v}"
+        );
+        assert_eq!(v["scope"]["skipped"], full["pairs"], "{rev}");
+    }
+}
+
+#[test]
+fn an_assembly_new_since_the_revision_is_checked_whole() {
+    let (_dir, mut s) = row();
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "fresh", "kind": "assembly"}),
+    );
+    place(&mut s, "fresh", "l", "ball", [0.0; 3], Z, X);
+    place(&mut s, "fresh", "r", "ball", [15.0, 0.0, 0.0], Z, X);
+    let full = must(&mut s, "interference", json!({"part": "fresh"}));
+    let v = must(
+        &mut s,
+        "interference",
+        json!({"part": "fresh", "changed_since": "HEAD"}),
+    );
+    assert_eq!(scoped_paths(&v), ["l", "r"]);
+    assert_eq!(v["scope"]["skipped"], 0);
+    assert_eq!(kept(&v, |_, _| true), kept(&full, |_, _| true));
+    assert_eq!(v["pairs"], full["pairs"]);
+}
+
+#[test]
+fn instances_narrow_the_scope() {
+    let (_dir, mut s) = row();
+    for (id, x) in [("a", -2.0), ("e", 212.0)] {
+        must(
+            &mut s,
+            "feature.edit",
+            json!({"part": "asm", "id": id, "placement": {"origin": [x, 0, 0], "z": Z, "x": X}}),
+        );
+    }
+    let full = must(&mut s, "interference", json!({"part": "asm"}));
+    // Of a and b, only a changed: a's pair with b, not e's with d.
+    let v = must(
+        &mut s,
+        "interference",
+        json!({"part": "asm", "changed_since": "HEAD", "instances": ["a", "b"]}),
+    );
+    assert_eq!(scoped_paths(&v), ["a"], "{v}");
+    let a = ["a".to_owned()];
+    assert_eq!(
+        kept(&v, |_, _| true),
+        kept(&full, |x, y| at(x, "asm", &a) || at(y, "asm", &a))
+    );
+    // Of c, nothing changed: nothing checked.
+    let v = must(
+        &mut s,
+        "interference",
+        json!({"part": "asm", "changed_since": "HEAD", "instances": ["c"]}),
+    );
+    assert_eq!((&v["pairs"], scoped_paths(&v).len()), (&json!(0), 0), "{v}");
+    // A path that places nothing is still not_found.
+    let e = common::call(
+        &mut s,
+        "interference",
+        json!({"part": "asm", "changed_since": "HEAD", "instances": ["z"]}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ryucad::error::Code::NotFound, "{e}");
+    let e = common::call(
+        &mut s,
+        "interference",
+        json!({"part": "asm", "changed_since": "nowhere"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ryucad::error::Code::RevNotFound, "{e}");
 }
