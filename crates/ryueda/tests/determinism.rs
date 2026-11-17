@@ -298,7 +298,15 @@ fn boards(golden: &mut Golden, at: &Path) {
         ("R2", "14,15", "90"),
         ("J1", "3,10", "0"),
     ];
-    type Got = (Value, String, String, Value, Value, Value, BTreeMap<String, String>);
+    type Got = (
+        Value,
+        String,
+        String,
+        Value,
+        Value,
+        Value,
+        BTreeMap<String, String>,
+    );
     let mut first: Option<Got> = None;
     for threads in [1, 8] {
         let board = at.join(format!("t{threads}")).join("board");
@@ -387,7 +395,10 @@ fn boards(golden: &mut Golden, at: &Path) {
         let mut exported = BTreeMap::new();
         for e in std::fs::read_dir(board.join("fab")).unwrap().flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            exported.insert(name.clone(), export_hash(&name, &std::fs::read(e.path()).unwrap()));
+            exported.insert(
+                name.clone(),
+                export_hash(&name, &std::fs::read(e.path()).unwrap()),
+            );
         }
         assert!(exported.len() >= 14, "{exported:?}");
         let p = ryueda::project::Project::load(&board).unwrap();
@@ -431,7 +442,9 @@ fn boards(golden: &mut Golden, at: &Path) {
     golden.json("board.breakout.layout", &layout);
     golden.json("board.breakout.islands", &islands);
     for (name, hash) in exported {
-        golden.got.insert(format!("board.breakout.export.{name}"), hash);
+        golden
+            .got
+            .insert(format!("board.breakout.export.{name}"), hash);
     }
 }
 

@@ -1365,12 +1365,9 @@ fn dispatch(
         Request::BoardExport {
             board,
             allow_errors,
-        } => crate::board::export::package(
-            session,
-            &board,
-            allow_errors,
-            env!("CARGO_PKG_VERSION"),
-        ),
+        } => {
+            crate::board::export::package(session, &board, allow_errors, env!("CARGO_PKG_VERSION"))
+        }
         Request::BoardList { .. } => Ok(crate::board::cmd::list(session.project())),
         Request::BoardShow { board, pads, .. } => {
             crate::board::cmd::show(session.project(), &board, pads)

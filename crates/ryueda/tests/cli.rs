@@ -5134,8 +5134,15 @@ fn a_board_exports_its_fabrication_package() {
     }
     // Unrouted: DRC errors, so the export is refused with them, and
     // nothing is written.
-    let e = p.fails(&["board", "export", "main", "--out", "fab"], "drc_failed", 1);
-    assert!(e["details"]["report"]["drc"]["errors"].as_u64().unwrap() > 0, "{e}");
+    let e = p.fails(
+        &["board", "export", "main", "--out", "fab"],
+        "drc_failed",
+        1,
+    );
+    assert!(
+        e["details"]["report"]["drc"]["errors"].as_u64().unwrap() > 0,
+        "{e}"
+    );
     for top in [&p.direct, &p.daemon] {
         assert!(!top.join("board/fab").exists());
     }
@@ -5195,14 +5202,25 @@ fn a_board_exports_its_fabrication_package() {
         fs::write(top.join("board/other/keep.txt"), "x").unwrap();
     }
     p.fails(
-        &["board", "export", "main", "--out", "other", "--allow-errors"],
+        &[
+            "board",
+            "export",
+            "main",
+            "--out",
+            "other",
+            "--allow-errors",
+        ],
         "invalid_param",
         1,
     );
     for top in [&p.direct, &p.daemon] {
         assert!(top.join("board/other/keep.txt").exists());
     }
-    p.fails(&["board", "export", "nope", "--out", "x"], "board_not_found", 1);
+    p.fails(
+        &["board", "export", "nope", "--out", "x"],
+        "board_not_found",
+        1,
+    );
 }
 
 #[test]

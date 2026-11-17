@@ -61,7 +61,11 @@ pub fn rows(occs: &[Occ], b: &BoardFiles) -> (Vec<Row>, Vec<Value>) {
             leave(o, "exclude_from_pos");
             continue;
         }
-        match b.placements.get(&o.reference).and_then(|p| p.item.as_ref().ok()) {
+        match b
+            .placements
+            .get(&o.reference)
+            .and_then(|p| p.item.as_ref().ok())
+        {
             None => leave(o, "unplaced"),
             Some(p) => rows.push(Row {
                 designator: o.label().to_owned(),
@@ -216,7 +220,11 @@ mod tests {
         let head = f.pos.join(",");
         assert!(text.starts_with(&format!("{head}\n")), "{text}");
         assert!(
-            text.contains(&format!("R2,1.5{s},-2.5{s},{t},90\n", s = f.length_suffix, t = f.top)),
+            text.contains(&format!(
+                "R2,1.5{s},-2.5{s},{t},90\n",
+                s = f.length_suffix,
+                t = f.top
+            )),
             "{text}"
         );
     }
@@ -228,7 +236,10 @@ mod tests {
         cols.insert("value".to_owned(), "10k".to_owned());
         cols.insert("refdes".to_owned(), "R1,R2".to_owned());
         cols.insert("footprint".to_owned(), "R_0402".to_owned());
-        cols.insert("offers".to_owned(), format!("Mouser=m1; {} =C25744", f.supplier.to_lowercase()));
+        cols.insert(
+            "offers".to_owned(),
+            format!("Mouser=m1; {} =C25744", f.supplier.to_lowercase()),
+        );
         let line = ryupdm::lines::Line {
             key: "k".into(),
             part: "self/r".into(),

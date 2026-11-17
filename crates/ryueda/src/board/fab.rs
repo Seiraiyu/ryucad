@@ -27,7 +27,13 @@ pub struct LayerFile {
 /// board's layer, X2's `.FileFunction`, negative).
 pub const LAYERS: [(&str, &str, &str, &str, bool); 9] = [
     ("copper-top", "gtl", "copper.top", "Copper,L1,Top", false),
-    ("copper-bottom", "gbl", "copper.bottom", "Copper,L2,Bot", false),
+    (
+        "copper-bottom",
+        "gbl",
+        "copper.bottom",
+        "Copper,L2,Bot",
+        false,
+    ),
     ("mask-top", "gts", "mask.top", "Soldermask,Top", true),
     ("mask-bottom", "gbs", "mask.bottom", "Soldermask,Bot", true),
     ("paste-top", "gtp", "paste.top", "Paste,Top", false),
@@ -51,7 +57,14 @@ fn copper(board: &str, s: &BoardShapes, top: bool) -> Vec<Item> {
         let through = pd.top && pd.bottom;
         out.push(Item {
             shape: pd.copper.clone(),
-            function: Some(if through { "ComponentPad" } else { "SMDPad,CuDef" }.to_owned()),
+            function: Some(
+                if through {
+                    "ComponentPad"
+                } else {
+                    "SMDPad,CuDef"
+                }
+                .to_owned(),
+            ),
             net: pd.net.clone(),
             pad: Some((
                 refdes.clone(),
@@ -60,7 +73,11 @@ fn copper(board: &str, s: &BoardShapes, top: bool) -> Vec<Item> {
             component: Some(refdes),
         });
     }
-    let side = if top { CopperLayer::Top } else { CopperLayer::Bottom };
+    let side = if top {
+        CopperLayer::Top
+    } else {
+        CopperLayer::Bottom
+    };
     for t in s.tracks.iter().filter(|t| t.layer == side) {
         out.push(Item {
             shape: t.shape.clone(),
@@ -221,7 +238,11 @@ pub fn drills(s: &BoardShapes) -> [Drills; 2] {
     for h in &s.holes {
         let drill = match &h.shape {
             HoleShape::Round { at, d } => Drill::Round { at: *at, d: *d },
-            HoleShape::Slot { a, b, d } => Drill::Slot { a: *a, b: *b, d: *d },
+            HoleShape::Slot { a, b, d } => Drill::Slot {
+                a: *a,
+                b: *b,
+                d: *d,
+            },
         };
         let function = match (&h.of, h.plated) {
             (HoleOf::Via(_), _) => "Plated,PTH,ViaDrill",
@@ -245,7 +266,7 @@ pub fn drills(s: &BoardShapes) -> [Drills; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::shapes::{build, tests::placed_with, tests::a_net};
+    use crate::board::shapes::{build, tests::a_net, tests::placed_with};
 
     fn routed() -> BoardShapes {
         let (_d, p0, _) = crate::board::shapes::tests::placed();
@@ -265,7 +286,8 @@ mod tests {
             ),
             (
                 "boards/b/holes/h1.json".to_owned(),
-                r#"{"at":[40000000,40000000],"drill_nm":3200000,"format":1,"kind":"ryueda.hole"}"#.to_owned(),
+                r#"{"at":[40000000,40000000],"drill_nm":3200000,"format":1,"kind":"ryueda.hole"}"#
+                    .to_owned(),
             ),
         ];
         let (_dir, p, id) = placed_with(&extra);
@@ -280,24 +302,51 @@ mod tests {
         assert_eq!(
             names,
             [
-                "copper-top", "copper-bottom", "mask-top", "mask-bottom", "paste-top",
-                "paste-bottom", "silk-top", "silk-bottom", "profile"
+                "copper-top",
+                "copper-bottom",
+                "mask-top",
+                "mask-bottom",
+                "paste-top",
+                "paste-bottom",
+                "silk-top",
+                "silk-bottom",
+                "profile"
             ]
         );
         let top = &files[0].layer;
         assert_eq!(top.function, "Copper,L1,Top");
         let pads_on_top = s.pads.iter().filter(|p| p.top).count();
         assert_eq!(top.items.len(), pads_on_top + s.vias.len());
-        assert!(top.items.iter().take(pads_on_top).all(|i| i.pad.is_some() && i.component.is_some()));
+        assert!(
+            top.items
+                .iter()
+                .take(pads_on_top)
+                .all(|i| i.pad.is_some() && i.component.is_some())
+        );
         let bottom = &files[1].layer;
-        assert!(bottom.items.iter().any(|i| i.function.as_deref() == Some("Conductor")));
-        assert!(bottom.items.iter().any(|i| i.function.as_deref() == Some("ViaPad")));
+        assert!(
+            bottom
+                .items
+                .iter()
+                .any(|i| i.function.as_deref() == Some("Conductor"))
+        );
+        assert!(
+            bottom
+                .items
+                .iter()
+                .any(|i| i.function.as_deref() == Some("ViaPad"))
+        );
         assert!(files[2].layer.negative && !files[0].layer.negative);
         assert_eq!(files[8].layer.items[0].function.as_deref(), Some("Profile"));
         // Every layer writes.
-        let sw = ryu_gerber::Software { vendor: "v".into(), application: "a".into(), version: "0".into() };
+        let sw = ryu_gerber::Software {
+            vendor: "v".into(),
+            application: "a".into(),
+            version: "0".into(),
+        };
         for f in &files {
-            ryu_gerber::gerber::write(&f.layer, &sw).unwrap_or_else(|e| panic!("{}: {e}", f.function));
+            ryu_gerber::gerber::write(&f.layer, &sw)
+                .unwrap_or_else(|e| panic!("{}: {e}", f.function));
         }
     }
 
@@ -307,9 +356,18 @@ mod tests {
         let [plated, unplated] = drills(&s);
         assert_eq!(plated.function, "Plated,1,2,PTH");
         assert_eq!(unplated.function, "NonPlated,1,2,NPTH");
-        assert!(plated.holes.iter().any(|h| h.function.as_deref() == Some("Plated,PTH,ViaDrill")));
+        assert!(
+            plated
+                .holes
+                .iter()
+                .any(|h| h.function.as_deref() == Some("Plated,PTH,ViaDrill"))
+        );
         assert_eq!(
-            unplated.holes.iter().filter(|h| h.function.as_deref() == Some("NonPlated,NPTH,MechanicalDrill")).count(),
+            unplated
+                .holes
+                .iter()
+                .filter(|h| h.function.as_deref() == Some("NonPlated,NPTH,MechanicalDrill"))
+                .count(),
             1
         );
         assert_eq!(plated.holes.len() + unplated.holes.len(), s.holes.len());
@@ -326,11 +384,17 @@ mod tests {
             ])
             .unwrap()
         };
-        let r = Region { outer: sq(0, 0, 1000, 1000), holes: vec![sq(300, 300, 700, 700).reversed()] };
+        let r = Region {
+            outer: sq(0, 0, 1000, 1000),
+            holes: vec![sq(300, 300, 700, 700).reversed()],
+        };
         let pieces = fracture(&r).unwrap();
         assert!(pieces.len() >= 2);
         assert!(pieces.iter().all(|p| p.holes.is_empty()));
-        let area: i128 = pieces.iter().map(|p| p.outer.polygon_area2().unwrap().abs()).sum();
+        let area: i128 = pieces
+            .iter()
+            .map(|p| p.outer.polygon_area2().unwrap().abs())
+            .sum();
         assert_eq!(area, 2 * (1000 * 1000 - 400 * 400));
         // Arcs aren't cut.
         let ring = Region::ring(
