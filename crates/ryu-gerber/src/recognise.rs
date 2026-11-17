@@ -55,7 +55,15 @@ fn from_least(c: &Contour) -> Vec<Edge> {
 }
 
 /// Whether two contours have the same edges in the same cyclic order.
+/// A full circle is one closed curve whichever point it starts from, so
+/// two are the same when their centres, radii and turns are.
 pub fn same_contour(a: &Contour, b: &Contour) -> bool {
+    if let ([Edge::Arc(x)], [Edge::Arc(y)]) = (a.edges(), b.edges())
+        && x.is_full()
+        && y.is_full()
+    {
+        return x.centre == y.centre && x.radius2() == y.radius2() && x.dir == y.dir;
+    }
     from_least(a) == from_least(b)
 }
 
