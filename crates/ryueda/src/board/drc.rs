@@ -12,8 +12,13 @@ use super::shapes::BoardShapes;
 use crate::error::Code;
 use crate::fault::Severity;
 use rayon::prelude::*;
+use ryu_board::geom::{Edge, Nm, Pen, Stroke};
+use ryu_board::model::Polarity;
+use ryu_board::shape::{Part, Piece, Shape};
 use ryu_copper::connect::{IslandId, Node, Placement};
+use ryu_copper::layout::HoleShape;
 use ryu_copper::measure::{self, Body, BodyOptions, Verdict};
+use ryu_copper::poly::{self, FlattenOptions};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -422,6 +427,250 @@ pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
     out
 }
 
+/// The bound a pad's outline is flattened at when it isn't all regions.
+const FLAT: Nm = 10;
+
+/// Tracks narrower than the rule.
+pub fn widths(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
+    s.tracks
+        .iter()
+        .filter(|t| t.width_nm < preset.track_width_min_nm)
+        .map(|t| {
+            finding(
+                Code::DrcTrackWidth,
+                Severity::Error,
+                board,
+                vec![format!("{board}:track/{}", t.id)],
+                format!(
+                    "track {} is {} nm wide, under the {} nm minimum",
+                    t.id, t.width_nm, preset.track_width_min_nm
+                ),
+                json!({"width_nm": t.width_nm, "rule_nm": preset.track_width_min_nm}),
+            )
+        })
+        .collect()
+}
+
+fn drill_of(h: &HoleShape) -> Nm {
+    match *h {
+        HoleShape::Round { d, .. } | HoleShape::Slot { d, .. } => d,
+    }
+}
+
+/// Drills outside the range, and vias under the least diameter.
+pub fn drills(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for h in &s.holes {
+        let d = drill_of(&h.shape);
+        // Plated holes (vias' and through pads') and unplated ones have
+        // their own least drills.
+        let min = if h.plated {
+            preset.drill_min_nm
+        } else {
+            preset.npth_drill_min_nm
+        };
+        if d < min || d > preset.drill_max_nm {
+            out.push(finding(
+                Code::DrcDrill,
+                Severity::Error,
+                board,
+                vec![h.owner.clone()],
+                format!("{}'s drill is {d} nm, outside {min}-{} nm", h.owner, preset.drill_max_nm),
+                json!({"drill_nm": d, "plated": h.plated, "min_nm": min, "max_nm": preset.drill_max_nm}),
+            ));
+        }
+    }
+    for v in &s.vias {
+        if v.diameter_nm < preset.via_diameter_min_nm {
+            out.push(finding(
+                Code::DrcDrill,
+                Severity::Error,
+                board,
+                vec![format!("{board}:via/{}", v.id)],
+                format!(
+                    "via {}'s diameter is {} nm, under the {} nm minimum",
+                    v.id, v.diameter_nm, preset.via_diameter_min_nm
+                ),
+                json!({"diameter_nm": v.diameter_nm, "min_nm": preset.via_diameter_min_nm}),
+            ));
+        }
+    }
+    out
+}
+
+/// A shape's outline as zero-width strokes, and the bound it carries:
+/// exact when every part is a positive region, else its copper merged and
+/// flattened at [`FLAT`].
+fn outline_of(s: &Shape) -> (Shape, Nm) {
+    let zero = |path: Vec<Edge>| Part {
+        polarity: Polarity::Positive,
+        piece: Piece::Stroke(Stroke {
+            path,
+            pen: Pen::Round(0),
+        }),
+    };
+    let mut out = Shape::default();
+    if s.parts
+        .iter()
+        .all(|p| p.polarity == Polarity::Positive && matches!(p.piece, Piece::Region(_)))
+    {
+        for p in &s.parts {
+            if let Piece::Region(r) = &p.piece {
+                for c in std::iter::once(&r.outer).chain(&r.holes) {
+                    out.parts.push(zero(c.edges().to_vec()));
+                }
+            }
+        }
+        return (out, 0);
+    }
+    let merged = poly::merge_layer(&poly::flatten_shape(s, &FlattenOptions::new(FLAT)), &[]);
+    for ring in &merged.rings().rings {
+        let n = ring.len();
+        let edges: Vec<Edge> = (0..n)
+            .map(|i| Edge::line(ring[i], ring[(i + 1) % n]))
+            .filter(|e| e.start() != e.end())
+            .collect();
+        if !edges.is_empty() {
+            out.parts.push(zero(edges));
+        }
+    }
+    (out, FLAT)
+}
+
+fn ring_finding(
+    board: &str,
+    owner: String,
+    ring: Option<Nm>,
+    inside: bool,
+    uncertain: bool,
+    min: Nm,
+) -> Finding {
+    finding(
+        Code::DrcAnnularRing,
+        Severity::Error,
+        board,
+        vec![owner.clone()],
+        if inside {
+            format!("{owner}'s ring is under the {min} nm minimum")
+        } else {
+            format!("{owner}'s hole isn't inside its copper")
+        },
+        json!({"ring_nm": ring, "inside": inside, "uncertain": uncertain, "rule_nm": min}),
+    )
+}
+
+/// Vias' rings, exactly from their numbers, against the via rule;
+/// through pads' from the hole to the pad's outline, against the PTH rule.
+pub fn rings(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding> {
+    let board = c.built.board.as_str();
+    let min = preset.annular_ring_min_nm;
+    let via_min = preset.via_annular_ring_min_nm;
+    let opts = BodyOptions::default();
+    let mut out = Vec::new();
+    for v in &s.vias {
+        // (diameter - drill) / 2 < min, without halving.
+        if v.diameter_nm - v.drill_nm < 2 * via_min {
+            out.push(ring_finding(
+                board,
+                format!("{board}:via/{}", v.id),
+                Some((v.diameter_nm - v.drill_nm).div_euclid(2)),
+                v.diameter_nm > v.drill_nm,
+                false,
+                via_min,
+            ));
+        }
+    }
+    let pads: BTreeMap<(&str, &str), &super::shapes::PadInfo> = s
+        .pads
+        .iter()
+        .map(|p| ((p.occurrence.as_str(), p.pad.as_str()), p))
+        .collect();
+    let found: Vec<Finding> = s
+        .holes
+        .par_iter()
+        .filter(|h| h.plated)
+        .filter_map(|h| {
+            let super::shapes::HoleOf::Pad { occ, pad } = &h.of else {
+                return None;
+            };
+            let pd = pads.get(&(occ.as_str(), pad.as_str()))?;
+            let hole = h.shape.body();
+            let copper = Body::of_shape(&pd.copper, &opts);
+            let (outline, flat) = outline_of(&pd.copper);
+            let edge = Body::of_shape(&outline, &opts);
+            let probe = match h.shape {
+                HoleShape::Round { at, .. } => at,
+                HoleShape::Slot { a, .. } => a,
+            };
+            let inside = measure::contains(&copper, probe).is_yes()
+                && measure::closer(&hole, &edge, 1) == Verdict::No;
+            let v = measure::closer(&hole, &edge, min + flat);
+            if inside && v == Verdict::No {
+                return None;
+            }
+            let ring = inside
+                .then(|| measure::distance(&hole, &edge).map(|d| d.nm))
+                .flatten();
+            Some(ring_finding(
+                board,
+                pd.reference.clone(),
+                ring,
+                inside,
+                v == Verdict::Uncertain || flat > 0,
+                min,
+            ))
+        })
+        .collect();
+    out.extend(found);
+    out
+}
+
+/// Two holes' walls closer than the rule: the via rule when both are
+/// vias', the general one otherwise.
+pub fn hole_spacing(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
+    let wide = preset.hole_spacing_nm.max(preset.via_hole_spacing_nm);
+    let is_via = |h: &super::shapes::HoleInfo| matches!(h.of, super::shapes::HoleOf::Via(_));
+    let opts = BodyOptions::default();
+    let index = ryu_copper::index::Index::from_bodies(
+        1,
+        s.holes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (i, 0, h.shape.body()))
+            .collect(),
+        opts,
+    );
+    index
+        .pairs(0, wide)
+        .into_par_iter()
+        .filter_map(|p| {
+            let (a, b) = (&s.holes[p.a], &s.holes[p.b]);
+            let rule = if is_via(a) && is_via(b) {
+                preset.via_hole_spacing_nm
+            } else {
+                preset.hole_spacing_nm
+            };
+            let (ba, bb) = (a.shape.body(), b.shape.body());
+            let v = measure::closer(&ba, &bb, rule);
+            if v == Verdict::No {
+                return None;
+            }
+            let d = measure::distance(&ba, &bb).map(|d| d.nm);
+            Some(finding(
+                Code::DrcHoleSpacing,
+                Severity::Error,
+                board,
+                vec![a.owner.clone(), b.owner.clone()],
+                format!(
+                    "{} and {}'s holes are under {rule} nm apart",
+                    a.owner, b.owner
+                ),
+                json!({"distance_nm": d, "uncertain": v == Verdict::Uncertain, "rule_nm": rule}),
+            ))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,5 +860,105 @@ mod tests {
                 &[(5 * MM, 5 * MM), (8 * MM, 5 * MM)],
             );
         assert!(mask_clearance(&connect::connect("b", &s), &s, P).is_empty());
+    }
+
+    #[test]
+    fn widths_drills_rings_and_hole_spacing_fire_at_their_edges() {
+        let w = |width| {
+            let mut s = board(20 * MM, 10 * MM);
+            s.track(
+                "t1",
+                "a",
+                CopperLayer::Top,
+                width,
+                &[(2 * MM, 5 * MM), (8 * MM, 5 * MM)],
+            );
+            widths(&s, "b", P)
+        };
+        assert!(w(P.track_width_min_nm).is_empty());
+        assert_eq!(codes(&w(P.track_width_min_nm - 1)), [Code::DrcTrackWidth]);
+
+        let via = |drill, dia| {
+            let mut s = board(20 * MM, 10 * MM);
+            s.via("v1", "a", (10 * MM, 5 * MM), drill, dia);
+            let c = connect::connect("b", &s);
+            let mut f = drills(&s, "b", P);
+            f.extend(rings(&c, &s, P));
+            f
+        };
+        // A via's ring is judged by the via rule; a drill one over keeps
+        // the diameter a nanometre short of the ring at or above its own
+        // minimum.
+        let ring = P.via_annular_ring_min_nm;
+        let d = P.drill_min_nm.max(P.via_diameter_min_nm - 2 * ring + 1);
+        assert!(
+            via(d, d + 2 * ring).is_empty(),
+            "{:?}",
+            via(d, d + 2 * ring)
+        );
+        assert_eq!(codes(&via(d, d + 2 * ring - 1)), [Code::DrcAnnularRing]);
+        // ryueda's default via and the page's smallest one pass.
+        assert!(via(P.default_via_drill_nm, P.default_via_diameter_nm).is_empty());
+        assert!(via(P.drill_min_nm, P.via_diameter_min_nm).is_empty());
+        assert_eq!(
+            codes(&via(
+                P.drill_min_nm - 1,
+                P.drill_min_nm - 1 + 4 * ring + P.via_diameter_min_nm
+            )),
+            [Code::DrcDrill]
+        );
+        let small = via(d, P.via_diameter_min_nm - 1);
+        assert!(
+            small.iter().any(|f| f.code == Code::DrcDrill
+                && f.details["diameter_nm"] == json!(P.via_diameter_min_nm - 1)),
+            "{small:?}"
+        );
+
+        // A square through pad: the ring is half the side less half the drill, exactly.
+        let pad = |side| {
+            let mut s = board(20 * MM, 10 * MM);
+            s.through("j1", "1", (10 * MM, 5 * MM), side, 1000 * UM, None);
+            rings(&connect::connect("b", &s), &s, P)
+        };
+        assert!(pad(1000 * UM + 2 * P.annular_ring_min_nm).is_empty());
+        let f = pad(1000 * UM + 2 * P.annular_ring_min_nm - 2);
+        assert_eq!(codes(&f), [Code::DrcAnnularRing]);
+        assert_eq!(f[0].refs, ["b:j1/1"]);
+
+        // An unplated hole's least drill is its own.
+        let npth = |drill| {
+            let mut s = board(20 * MM, 10 * MM);
+            s.hole("h1", (10 * MM, 5 * MM), drill);
+            drills(&s, "b", P)
+        };
+        assert!(npth(P.npth_drill_min_nm).is_empty());
+        assert_eq!(codes(&npth(P.npth_drill_min_nm - 1)), [Code::DrcDrill]);
+
+        let holes = |sep| {
+            let mut s = board(20 * MM, 10 * MM);
+            s.hole("h1", (5 * MM, 5 * MM), 1000 * UM)
+                .hole("h2", (5 * MM + sep, 5 * MM), 1000 * UM);
+            hole_spacing(&s, "b", P)
+        };
+        assert!(holes(1000 * UM + P.hole_spacing_nm).is_empty());
+        let f = holes(1000 * UM + P.hole_spacing_nm - 1);
+        assert_eq!(codes(&f), [Code::DrcHoleSpacing]);
+        assert_eq!(f[0].details["distance_nm"], json!(P.hole_spacing_nm - 1));
+        // Two vias' holes take the via rule.
+        let vias = |sep| {
+            let mut s = board(20 * MM, 10 * MM);
+            s.via("v1", "a", (5 * MM, 5 * MM), 300 * UM, 600 * UM).via(
+                "v2",
+                "a",
+                (5 * MM + sep, 5 * MM),
+                300 * UM,
+                600 * UM,
+            );
+            hole_spacing(&s, "b", P)
+        };
+        assert!(vias(300 * UM + P.via_hole_spacing_nm).is_empty());
+        let f = vias(300 * UM + P.via_hole_spacing_nm - 1);
+        assert_eq!(codes(&f), [Code::DrcHoleSpacing]);
+        assert_eq!(f[0].details["rule_nm"], json!(P.via_hole_spacing_nm));
     }
 }
