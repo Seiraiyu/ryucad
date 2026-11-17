@@ -20,6 +20,7 @@ pub const OUTPUT_SCHEMA: u64 = 1;
 pub mod activity;
 pub mod anchor;
 pub mod annotate;
+pub mod board;
 pub mod cascade;
 pub mod clash;
 pub mod client;

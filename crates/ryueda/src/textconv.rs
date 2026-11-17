@@ -315,6 +315,24 @@ mod tests {
     }
 
     #[test]
+    fn boards_and_placements_flatten_by_key() {
+        let t = conv(
+            r#"{"at":[1000000,2000000],"format":1,"kind":"ryueda.placement","rotation_mdeg":90000}"#,
+        );
+        assert_eq!(
+            t,
+            "ryueda.placement format 1\nat = 1000000, 2000000\nrotation_mdeg = 90000\n"
+        );
+        let t = conv(
+            r#"{"design":"d","format":1,"kind":"ryueda.board","name":"B","outline":{"edges":[],"start":[0,0]},"preset":"jlc-2l"}"#,
+        );
+        assert!(
+            t.contains("design = d\n") && t.contains("preset = jlc-2l\n"),
+            "{t}"
+        );
+    }
+
+    #[test]
     fn a_component_reads_by_pin() {
         let t = conv(
             r#"{"format": 2, "kind": "ryueda.component", "of": {"id": "r_0402"},

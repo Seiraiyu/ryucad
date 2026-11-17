@@ -1,4 +1,7 @@
 # ryueda's golden hashes: UPDATE_GOLDEN=1 cargo test -p ryueda --test determinism
+board.breakout.bottom.svg 72c1067b9270d02fdf99d5a4f4538fce
+board.breakout.show f44489a70dac3b507b133230e96a3433
+board.breakout.top.png 04d99bb31445a92787314dfbb48916df
 breakout.erc f84678494c89aa19a5910ab3c7a8330e
 breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
 diff.breakout c7f4564101cf7ec93b6e49d7814def43
@@ -8,7 +11,7 @@ generated.erc 78239ee711bef7fca90a828cc74caab3
 generated.netlist 5320f73be71d1afe60130384cd00fcea
 kicad.library 9acdf4c928678cfba0ea7435e1848d06
 merge.breakout.clashes 62c1ecb50166ce5cebf422481a3c91b0
-merge.breakout.clashes.files 178329dd8b71d504abc655eb767312f2
+merge.breakout.clashes.files cf236cbebd2cfff54c09479e1334c265
 merge.breakout.layout 94d5d004668c8dfc7b12ddf155f51d1c
 merge.breakout.status 2b6bfce2104dc00226e8f277381bf0f9
 parts.digikey.records 22ee956abb9ece594e25dd55164199c9

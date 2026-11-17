@@ -5082,6 +5082,8 @@ dependencies = [
  "proptest",
  "rayon",
  "resvg",
+ "ryu-board",
+ "ryu-copper",
  "ryu-doc",
  "ryu-draw",
  "ryu-git",

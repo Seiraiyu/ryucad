@@ -1090,6 +1090,24 @@ pub enum Code {
     /// once per line. A warning in `check`'s `bom` section; a problem of
     /// `release_not_ready`.
     BomUnidentified,
+    /// No board of that ID or name (ryueda 5).
+    BoardNotFound,
+    /// A board of that ID or name already exists.
+    BoardExists,
+    /// A board names a design the project doesn't have.
+    BoardDesignNotFound,
+    /// A board's outline or a cutout isn't one closed, simple contour, or
+    /// a cutout isn't inside the outline or meets another.
+    BoardOutlineInvalid,
+    /// A board coordinate past ±2^40 nm.
+    BoardOutOfRange,
+    /// A designator two occurrences of the board's design share.
+    BoardRefAmbiguous,
+    /// A placed footprint the board can't build yet (an `edge` graphic, a
+    /// pad on `copper.inner`).
+    BoardFootprintUnsupported,
+    /// A character the board's stroke font doesn't draw, left as a gap.
+    BoardTextMissingGlyph,
 }
 
 impl Code {
@@ -1458,6 +1476,14 @@ impl Code {
         Code::ComponentOutdated,
         Code::LibraryForeignWorking,
         Code::BomUnidentified,
+        Code::BoardNotFound,
+        Code::BoardExists,
+        Code::BoardDesignNotFound,
+        Code::BoardOutlineInvalid,
+        Code::BoardOutOfRange,
+        Code::BoardRefAmbiguous,
+        Code::BoardFootprintUnsupported,
+        Code::BoardTextMissingGlyph,
     ];
 
     /// The CLI's exit code: 1 the agent can fix it, 2 usage, 3 not a
@@ -1529,6 +1555,26 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn board_codes() {
+        for (c, s) in [
+            (Code::BoardNotFound, "board_not_found"),
+            (Code::BoardExists, "board_exists"),
+            (Code::BoardDesignNotFound, "board_design_not_found"),
+            (Code::BoardOutlineInvalid, "board_outline_invalid"),
+            (Code::BoardOutOfRange, "board_out_of_range"),
+            (Code::BoardRefAmbiguous, "board_ref_ambiguous"),
+            (
+                Code::BoardFootprintUnsupported,
+                "board_footprint_unsupported",
+            ),
+            (Code::BoardTextMissingGlyph, "board_text_missing_glyph"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+        }
+    }
 
     #[test]
     fn external_reference_codes() {

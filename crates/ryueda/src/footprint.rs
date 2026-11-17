@@ -418,7 +418,7 @@ pub fn layer_known(layer: &str) -> bool {
 }
 
 /// Whether segments `a b` and `c d` cross or touch, exactly.
-fn segments_meet(a: Point, b: Point, c: Point, d: Point) -> bool {
+pub(crate) fn segments_meet(a: Point, b: Point, c: Point, d: Point) -> bool {
     let (d1, d2) = (cross(c, d, a).signum(), cross(c, d, b).signum());
     let (d3, d4) = (cross(a, b, c).signum(), cross(a, b, d).signum());
     if d1 * d2 < 0 && d3 * d4 < 0 {

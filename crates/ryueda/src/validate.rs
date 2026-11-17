@@ -484,6 +484,10 @@ fn pending(working: &Files) -> Vec<Id> {
 /// manifest's sheet) but ERC's, lint's and sourcing's settings and the
 /// attributes.
 pub(crate) fn affects(path: &str, block: &str) -> bool {
+    // Boards never change a schematic (design 732).
+    if path.starts_with("boards/") {
+        return false;
+    }
     match path.strip_prefix("blocks/") {
         Some(rest) => {
             rest.strip_prefix(block).is_some_and(|r| r.starts_with('/'))
@@ -1497,6 +1501,11 @@ pub(crate) mod tests {
         assert!(!affects("blocks/bb/layout.json", "b"));
         assert!(affects("rails/gnd.json", "b") && affects("../lib/library/symbols/r.json", "b"));
         assert!(!affects("erc.json", "b") && affects("style.json", "b"));
+        assert!(
+            !affects("boards/b/board.json", "b"),
+            "boards never move a sheet"
+        );
+        assert!(!affects("boards/b/placements/r1.json", "b"));
         let f = |pairs: &[(&str, &str)]| -> Files {
             pairs
                 .iter()

@@ -552,6 +552,12 @@ pub struct Project {
     pub style: Loaded<crate::style::Style>,
     /// The organisation's style, when the manifest names one.
     pub org_style: Option<OrgStyle>,
+    /// Boards (design 732), by ID. Not in [`Project::revision`]: each
+    /// board has its own.
+    pub boards: BTreeMap<Id, crate::board::load::BoardFiles>,
+    /// The faults of files under `boards/` that aren't a board's, and of
+    /// boards naming a design the project doesn't have.
+    pub board_faults: Vec<Fault>,
 }
 
 /// The organisation's style: the library project `schematic.style_from`
@@ -622,6 +628,7 @@ impl Project {
         let parts = src.read(PARTS)?;
         let style = src.read(STYLE)?;
         let mut conn = design::load(src)?;
+        let (boards, mut board_faults) = crate::board::load::load(src)?;
         let mut h = blake3::Hasher::new();
         h.update(b"ryueda.project.1");
         design::piece(&mut h, &bytes);
@@ -801,6 +808,8 @@ impl Project {
             parts,
             style,
             org_style,
+            boards,
+            board_faults: Vec::new(),
         };
         let builtin = crate::style::builtin();
         let org_palette: Vec<String> = p
@@ -843,6 +852,7 @@ impl Project {
                 (crate::conn::DESIGNS, conn.designs.is_empty()),
                 (crate::conn::BLOCKS, conn.blocks.is_empty()),
                 (crate::conn::RAILS, conn.rails.is_empty()),
+                (crate::board::BOARDS, p.boards.is_empty()),
             ];
             for (folder, empty) in held {
                 if !empty {
@@ -857,6 +867,24 @@ impl Project {
             }
         }
         p.conn = conn;
+        for (id, b) in &p.boards {
+            if let Ok(board) = &b.board.item
+                && !p.conn.designs.contains_key(&board.design)
+            {
+                board_faults.push(
+                    Fault::error(
+                        Code::BoardDesignNotFound,
+                        format!(
+                            "board {id} names design {}, which the project doesn't have",
+                            board.design
+                        ),
+                    )
+                    .with("path", crate::board::file::board_path(id))
+                    .with("pointer", "/design"),
+                );
+            }
+        }
+        p.board_faults = board_faults;
         Ok(p)
     }
 
@@ -1181,6 +1209,10 @@ impl Project {
             );
         }
         out.extend(self.conn.faults());
+        for b in self.boards.values() {
+            out.extend(b.faults());
+        }
+        out.extend(self.board_faults.iter().cloned());
         out
     }
 
@@ -1216,6 +1248,22 @@ impl Project {
         }
         for (block, meta) in listed(root, crate::conn::BLOCKS) {
             let dir = join(crate::conn::BLOCKS, &block);
+            if !meta.is_dir() {
+                out.push((dir, meta));
+                continue;
+            }
+            for (name, meta) in listed(root, &dir) {
+                let at = join(&dir, &name);
+                if meta.is_dir() {
+                    out.extend(files_of(root, &at));
+                } else {
+                    out.push((at, meta));
+                }
+            }
+        }
+        // Boards (design 732): each board's file and its placements.
+        for (board, meta) in listed(root, crate::board::BOARDS) {
+            let dir = join(crate::board::BOARDS, &board);
             if !meta.is_dir() {
                 out.push((dir, meta));
                 continue;
@@ -1931,6 +1979,48 @@ pub(crate) mod tests {
         for (p, b) in crate::design::tests::files() {
             write_atomic(&dir.join(p), b).unwrap();
         }
+    }
+
+    #[test]
+    fn boards_are_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("board");
+        manifest(&top, ProjectKind::Design, &[]);
+        let b = top.join("boards/b/placements");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(top.join("boards/b/board.json"), "{}").unwrap();
+        std::fs::write(b.join("r1.json"), "{}").unwrap();
+        let t: Vec<String> = Project::tracked(&top).into_iter().map(|(p, _)| p).collect();
+        assert!(t.contains(&"boards/b/board.json".to_owned()), "{t:?}");
+        assert!(
+            t.contains(&"boards/b/placements/r1.json".to_owned()),
+            "{t:?}"
+        );
+    }
+
+    #[test]
+    fn a_board_naming_no_design_is_a_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("board");
+        manifest(&top, ProjectKind::Design, &[]);
+        library_in(&top);
+        design_in(&top);
+        let before = Project::load(&top).unwrap().revision;
+        let b = top.join("boards").join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(
+            b.join("board.json"),
+            r#"{"design":"nope","format":1,"kind":"ryueda.board","name":"B","outline":{"edges":[{"to":[10,0],"type":"line"},{"to":[10,10],"type":"line"},{"to":[0,10],"type":"line"},{"to":[0,0],"type":"line"}],"start":[0,0]},"preset":"jlc-2l"}"#,
+        )
+        .unwrap();
+        let p = Project::load(&top).unwrap();
+        let faults = p.faults();
+        assert_eq!(faults.len(), 1, "{faults:?}");
+        assert_eq!(faults[0].error.code, Code::BoardDesignNotFound);
+        assert_eq!(
+            p.revision, before,
+            "boards aren't in the project's revision"
+        );
     }
 
     #[test]

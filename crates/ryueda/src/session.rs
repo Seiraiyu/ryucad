@@ -56,7 +56,13 @@ pub struct Session {
     /// What a long request's lock-free fetches got
     /// ([`crate::libdeps::prepare`]), taken by its answer.
     pub(crate) fetched: Option<crate::libdeps::Prefetched>,
+    /// The last [`BOARDS`] boards' shapes built, by the board and the
+    /// revisions they were built from, most recently used first.
+    pub(crate) boards: Vec<(String, std::sync::Arc<crate::board::shapes::BoardShapes>)>,
 }
+
+/// How many boards' shapes a session keeps.
+const BOARDS: usize = 4;
 
 /// The refs every same-repository pinned library's release branch is
 /// read at, joined: when they move, a label may have become official or
@@ -147,7 +153,42 @@ impl Session {
             pins,
             pins_key,
             fetched: None,
+            boards: Vec::new(),
         })
+    }
+
+    /// The board's shapes, built once per the board's, the project's, its
+    /// libraries' and its blocks' revisions.
+    pub fn board_shapes(
+        &mut self,
+        board: &crate::id::Id,
+    ) -> Result<std::sync::Arc<crate::board::shapes::BoardShapes>> {
+        let p = &self.project;
+        let b = p.boards.get(board).ok_or_else(|| {
+            Error::new(Code::BoardNotFound, format!("there is no board {board}"))
+                .with("board", board)
+        })?;
+        let mut h = blake3::Hasher::new();
+        h.update(b"ryueda.board-shapes.1");
+        crate::design::piece(&mut h, board.as_str().as_bytes());
+        crate::design::piece(&mut h, b.revision.as_bytes());
+        for (k, v) in crate::server::revisions(p) {
+            if k == "project" || k.starts_with("lib/") || k.starts_with("block/") {
+                crate::design::piece(&mut h, k.as_bytes());
+                crate::design::piece(&mut h, v.to_string().as_bytes());
+            }
+        }
+        let key = h.finalize().to_hex().to_string();
+        if let Some(i) = self.boards.iter().position(|(k, _)| *k == key) {
+            let hit = self.boards.remove(i);
+            let shapes = hit.1.clone();
+            self.boards.insert(0, hit);
+            return Ok(shapes);
+        }
+        let built = std::sync::Arc::new(crate::board::shapes::build(p, b)?);
+        self.boards.insert(0, (key, built.clone()));
+        self.boards.truncate(BOARDS);
+        Ok(built)
     }
 
     /// [`Session::at`], with the key it is kept by.

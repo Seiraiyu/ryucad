@@ -507,6 +507,9 @@ enum Command {
     /// Create, edit, delete or list designs: a name and a root block.
     #[command(subcommand)]
     Design(DesignCmd),
+    /// Boards: create, edit, list, show and delete; place parts; render.
+    #[command(subcommand)]
+    Board(BoardCmd),
     /// Import libraries from other tools: KiCad's for now.
     #[command(subcommand)]
     Import(ImportCmd),
@@ -1519,6 +1522,134 @@ enum DesignCmd {
         expect: Expect,
     },
     List,
+}
+
+#[derive(Subcommand)]
+enum BoardCmd {
+    /// A board for a design, with the JLC 2-layer preset and an outline.
+    Create {
+        name: String,
+        /// The design, by ID or name.
+        #[arg(long)]
+        design: String,
+        /// A rectangle W,H at the origin (lengths; bare numbers in the project's unit).
+        #[arg(long, value_name = "W,H", conflicts_with = "outline")]
+        rect: Option<String>,
+        /// The outline as JSON: {start: [x, y], edges: [{type: line, to: [x, y]} |
+        /// {type: arc, mid: [x, y], to: [x, y]}]}; integers are nanometres, strings
+        /// lengths ("10 mm", or "10" in the project's unit).
+        #[arg(long, value_name = "OPS")]
+        outline: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Change a board's name, outline or cutouts.
+    Edit {
+        board: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// The outline as JSON, as `board create --outline` takes it.
+        #[arg(long, value_name = "OPS")]
+        outline: Option<String>,
+        /// A JSON list of contours; [] clears them.
+        #[arg(long, value_name = "OPS")]
+        cutouts: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a board and its placements.
+    Delete {
+        board: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Place parts: REF --at X,Y [--rotation A], or --ops for several (all or nothing).
+    Place {
+        board: String,
+        /// An occurrence reference (s1/u1) or a designator.
+        #[arg(value_name = "REF", required_unless_present = "ops")]
+        r#ref: Option<String>,
+        /// X,Y (lengths; bare numbers in the project's unit).
+        #[arg(
+            long,
+            value_name = "X,Y",
+            required_unless_present = "ops",
+            allow_hyphen_values = true
+        )]
+        at: Option<String>,
+        /// Degrees counterclockwise.
+        #[arg(long, allow_hyphen_values = true)]
+        rotation: Option<String>,
+        /// JSON: [{ref, at: [x, y], rotation?}].
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation"])]
+        ops: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The board as PNG or SVG (by --out's extension, or --format).
+    Render {
+        board: String,
+        #[arg(long)]
+        out: PathBuf,
+        /// Layers bottom first: copper.top, mask.top, paste.top, silk.top, fab.top,
+        /// courtyard.top, their .bottom, drill, outline.
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        /// top (the default) or bottom, seen from below.
+        #[arg(long)]
+        side: Option<String>,
+        /// A net to highlight (sda, rail:gnd).
+        #[arg(long)]
+        net: Option<String>,
+        /// X0,Y0,X1,Y1 (lengths; bare numbers in the project's unit).
+        #[arg(long, allow_hyphen_values = true)]
+        window: Option<String>,
+        /// The long side in pixels (1600 by default).
+        #[arg(long)]
+        size: Option<u32>,
+        /// svg or png.
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// Remove a part's placement.
+    Unplace {
+        board: String,
+        /// An occurrence reference (s1/u1) or a designator.
+        #[arg(value_name = "REF")]
+        r#ref: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The project's boards.
+    List {
+        #[command(flatten)]
+        rev: Rev,
+    },
+    /// A board: its file, each occurrence's placement, with --pads every pad.
+    Show {
+        board: String,
+        #[arg(long)]
+        pads: bool,
+        #[command(flatten)]
+        rev: Rev,
+    },
+}
+
+/// JSON given on the command line, or `invalid_param` naming the flag.
+fn json_arg(flag: &str, text: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(text).map_err(|e| {
+        Error::new(Code::InvalidParam, format!("{flag} isn't JSON: {e}")).with("flag", flag)
+    })
+}
+
+/// `A,B` split once at the comma.
+fn pair_arg(flag: &str, text: &str) -> Result<[String; 2]> {
+    let (a, b) = text.split_once(',').ok_or_else(|| {
+        Error::new(Code::InvalidParam, format!("{flag} is two values, A,B")).with("flag", flag)
+    })?;
+    Ok([a.trim().to_owned(), b.trim().to_owned()])
 }
 
 #[derive(Subcommand)]
@@ -3415,6 +3546,110 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Design(DesignCmd::List) => Request::DesignList {},
+        Command::Board(BoardCmd::Create {
+            name,
+            design,
+            rect,
+            outline,
+            id,
+            expect,
+        }) => Request::BoardCreate {
+            name: name.clone(),
+            design: design.clone(),
+            rect: rect.as_deref().map(|r| pair_arg("--rect", r)).transpose()?,
+            outline: outline
+                .as_deref()
+                .map(|o| json_arg("--outline", o))
+                .transpose()?,
+            id: id.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Edit {
+            board,
+            name,
+            outline,
+            cutouts,
+            expect,
+        }) => Request::BoardEdit {
+            board: board.clone(),
+            name: name.clone(),
+            outline: outline
+                .as_deref()
+                .map(|o| json_arg("--outline", o))
+                .transpose()?,
+            cutouts: cutouts
+                .as_deref()
+                .map(|c| json_arg("--cutouts", c))
+                .transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Delete { board, expect }) => Request::BoardDelete {
+            board: board.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Place {
+            board,
+            r#ref,
+            at,
+            rotation,
+            ops,
+            expect,
+        }) => Request::BoardPlace {
+            board: board.clone(),
+            r#ref: r#ref.clone(),
+            at: at.as_deref().map(|a| pair_arg("--at", a)).transpose()?,
+            rotation: rotation.clone(),
+            ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Render {
+            board,
+            out,
+            layers,
+            side,
+            net,
+            window,
+            size,
+            format,
+        }) => Request::BoardRender {
+            board: board.clone(),
+            layers: layers.clone(),
+            side: side.clone(),
+            net: net.clone(),
+            window: window
+                .as_deref()
+                .map(|w| {
+                    let v: Vec<String> = w.split(',').map(|s| s.trim().to_owned()).collect();
+                    <[String; 4]>::try_from(v).map_err(|_| {
+                        Error::new(Code::InvalidParam, "--window is X0,Y0,X1,Y1")
+                            .with("param", "window")
+                    })
+                })
+                .transpose()?,
+            size: *size,
+            format: match picture_format(format.as_deref(), out)? {
+                ryueda::schemcmd::Format::Png => "png",
+                ryueda::schemcmd::Format::Svg => "svg",
+            }
+            .to_owned(),
+        },
+        Command::Board(BoardCmd::Unplace {
+            board,
+            r#ref,
+            expect,
+        }) => Request::BoardUnplace {
+            board: board.clone(),
+            r#ref: r#ref.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::List { rev }) => Request::BoardList {
+            rev: rev.rev.clone(),
+        },
+        Command::Board(BoardCmd::Show { board, pads, rev }) => Request::BoardShow {
+            board: board.clone(),
+            pads: *pads,
+            rev: rev.rev.clone(),
+        },
         Command::Doctor { repairs } if repairs.is_empty() => Request::Doctor {},
         Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
         Command::Merge(MergeCmd::Resolve {
@@ -3722,6 +3957,7 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
         return Ok(a.result);
     };
     let (Command::Render { out, .. }
+    | Command::Board(BoardCmd::Render { out, .. })
     | Command::Output { out, .. }
     | Command::Place {
         render: Some(out), ..

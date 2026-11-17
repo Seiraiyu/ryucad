@@ -819,6 +819,14 @@ fn every_protocol_method_has_a_command() {
         ("design.edit", &["design", "edit"]),
         ("design.delete", &["design", "delete"]),
         ("design.list", &["design", "list"]),
+        ("board.create", &["board", "create"]),
+        ("board.edit", &["board", "edit"]),
+        ("board.delete", &["board", "delete"]),
+        ("board.list", &["board", "list"]),
+        ("board.show", &["board", "show"]),
+        ("board.place", &["board", "place"]),
+        ("board.unplace", &["board", "unplace"]),
+        ("board.render", &["board", "render"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
         ("block.show", &["block", "show"]),
@@ -4514,4 +4522,313 @@ fn review_needs_a_github_clone() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn boards_are_created_edited_shown_and_deleted_from_the_cli() {
+    let p = Pair::breakout();
+    let b = p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    assert_eq!(b["reference"], "board/main");
+    assert_eq!(b["path"], "boards/main/board.json");
+    assert_eq!(b["board"]["preset"], "jlc-2l");
+    assert_eq!(
+        b["board"]["outline"]["edges"][1]["to"],
+        json!([30_000_000, 20_000_000])
+    );
+    p.fails(
+        &[
+            "board", "create", "Main", "--design", "board", "--rect", "1,1",
+        ],
+        "board_exists",
+        1,
+    );
+    p.fails(
+        &["board", "create", "X", "--design", "nope", "--rect", "1,1"],
+        "not_found",
+        1,
+    );
+    p.fails(
+        &["board", "create", "X", "--design", "board"],
+        "invalid_param",
+        1,
+    );
+    let bow = r#"{"start":[0,0],"edges":[{"type":"line","to":[10,10]},{"type":"line","to":[10,0]},{"type":"line","to":[0,10]},{"type":"line","to":[0,0]}]}"#;
+    let e = p.fails(
+        &["board", "edit", "main", "--outline", bow],
+        "board_outline_invalid",
+        1,
+    );
+    assert_eq!(e["details"]["faults"][0]["details"]["pointer"], "/outline");
+    p.fails(
+        &["board", "edit", "main", "--expect", "stale", "--name", "M"],
+        "conflict",
+        1,
+    );
+    let rev = b["revision"].as_str().unwrap().to_owned();
+    let cut = r#"[{"start":["2 mm","2 mm"],"edges":[{"type":"line","to":["4 mm","2 mm"]},{"type":"line","to":["4 mm","4 mm"]},{"type":"line","to":["2 mm","2 mm"]}]}]"#;
+    let e = p.ok(&["board", "edit", "main", "--expect", &rev, "--cutouts", cut]);
+    assert_ne!(e["revision"], b["revision"]);
+    assert_eq!(
+        e["board"]["cutouts"][0]["edges"][0]["to"],
+        json!([4_000_000, 2_000_000])
+    );
+    let list = p.ok(&["board", "list"]);
+    assert_eq!(list["boards"][0]["name"], "Main");
+    assert_eq!(list["boards"][0]["design"], "board");
+    assert_eq!(p.ok(&["board", "show", "Main"])["board"]["name"], "Main");
+    p.fails(&["board", "show", "nope"], "board_not_found", 1);
+    p.ok(&["board", "delete", "main"]);
+    assert_eq!(p.ok(&["board", "list"])["boards"], json!([]));
+}
+
+#[test]
+fn board_writes_are_logged_undone_and_heard() {
+    let p = Pair::breakout();
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    let (code, v) = run(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    let (_, h) = run(&["history"]);
+    let entries = h["result"]["entries"].as_array().unwrap().clone();
+    let last = entries
+        .iter()
+        .find(|e| e["method"] == "board.create")
+        .unwrap();
+    assert_eq!(last["files"][0]["path"], "boards/main/board.json");
+    let (code, u) = run(&["undo"]);
+    assert_eq!(code, 0, "{u}");
+    assert!(!p.daemon.join("board/boards/main/board.json").exists());
+    assert!(u["result"]["revisions"].get("board/main").is_none(), "{u}");
+    let (code, r) = run(&["redo"]);
+    assert_eq!(code, 0, "{r}");
+    assert!(r["result"]["revisions"]["board/main"].is_string(), "{r}");
+}
+
+#[test]
+fn parts_are_placed_moved_and_unplaced() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    let s = p.ok(&["board", "show", "main"]);
+    assert_eq!(s["unplaced"], 8, "{s}");
+    let r = p.ok(&[
+        "board",
+        "place",
+        "main",
+        "U1",
+        "--at",
+        "10,10",
+        "--rotation",
+        "90",
+    ]);
+    assert_eq!(
+        r["placed"][0],
+        json!({"occurrence": "s1/u1", "refdes": "U1", "at": [10_000_000, 10_000_000], "rotation_mdeg": 90_000})
+    );
+    p.ok(&["board", "place", "main", "s1/c1", "--at", "12.5,10"]);
+    p.ok(&[
+        "board",
+        "place",
+        "main",
+        "board:j1",
+        "--at",
+        "2,10",
+        "--rotation",
+        "-90",
+    ]);
+    let s = p.ok(&["board", "show", "main"]);
+    assert_eq!(s["unplaced"], 5);
+    let j1 = s["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["reference"] == "j1")
+        .unwrap();
+    assert_eq!(j1["placement"]["rotation_mdeg"], 270_000);
+    p.fails(
+        &["board", "place", "main", "Q9", "--at", "0,0"],
+        "not_found",
+        1,
+    );
+    // All or nothing: one bad op writes none.
+    let ops = r#"[{"ref":"R1","at":["5","5"]},{"ref":"Q9","at":["6","6"]}]"#;
+    p.fails(&["board", "place", "main", "--ops", ops], "not_found", 1);
+    assert_eq!(p.ok(&["board", "show", "main"])["unplaced"], 5);
+    let ops = r#"[{"ref":"R1","at":["5","5"]},{"ref":"R2","at":["6 mm","5 mm"],"rotation":"180"}]"#;
+    assert_eq!(
+        p.ok(&["board", "place", "main", "--ops", ops])["placed"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    p.ok(&["board", "unplace", "main", "R2"]);
+    assert_eq!(p.ok(&["board", "show", "main"])["unplaced"], 4);
+    p.fails(&["board", "unplace", "main", "R2"], "not_found", 1);
+}
+
+#[test]
+fn a_placement_whose_occurrence_is_gone_still_reads() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R2", "--at", "5,5"]);
+    p.ok(&["component", "delete", "breakout/r2"]);
+    let s = p.ok(&["board", "show", "main"]);
+    assert_eq!(s["orphans"], json!(["r2"]));
+    p.ok(&["board", "unplace", "main", "r2"]);
+    assert_eq!(p.ok(&["board", "show", "main"])["orphans"], json!([]));
+}
+
+#[test]
+fn a_designator_two_occurrences_share_is_ambiguous() {
+    let p = Pair::breakout();
+    // A second sensor: its parts' designators repeat until annotated.
+    p.ok(&[
+        "instance", "add", "breakout", "--of", "sensor", "--id", "s2",
+    ]);
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    let s = p.ok(&["board", "show", "main"]);
+    let refdes: Vec<&Value> = s["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["reference"].as_str().unwrap().ends_with("/u1"))
+        .map(|o| &o["refdes"])
+        .collect();
+    assert_eq!(refdes.len(), 2, "{s}");
+    assert_eq!(refdes[0], refdes[1], "{s}");
+    let r = refdes[0].as_str().unwrap().to_owned();
+    p.fails(
+        &["board", "place", "main", &r, "--at", "1,1"],
+        "board_ref_ambiguous",
+        1,
+    );
+    p.ok(&["board", "place", "main", "s2/u1", "--at", "1,1"]);
+}
+
+#[test]
+fn a_boards_pads_are_listed_with_their_nets() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let s = p.ok(&["board", "show", "main", "--pads"]);
+    let pads = s["pads"].as_array().unwrap();
+    assert_eq!(pads.len(), 2, "{s}");
+    assert_eq!(pads[0]["reference"], "main:R1/1");
+    assert_eq!(pads[0]["layers"], json!(["copper.top"]));
+    // The breakout's 0402 pads sit at ±480 µm.
+    assert_eq!(pads[0]["at"], json!([10_000_000 - 480_000, 10_000_000]));
+    assert_eq!(pads[0]["size"], json!([560_000, 620_000]));
+    assert!(pads.iter().all(|p| p["net"].is_string()), "{pads:?}");
+    assert_eq!(s["notices"], json!([]));
+    // Without --pads, no pads, but still the notices.
+    let s = p.ok(&["board", "show", "main"]);
+    assert!(s.get("pads").is_none());
+    assert_eq!(s["notices"], json!([]));
+}
+
+#[test]
+fn boards_render_to_png_and_svg() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "U1", "--at", "10,10"]);
+    p.ok(&[
+        "board",
+        "place",
+        "main",
+        "J1",
+        "--at",
+        "3,10",
+        "--rotation",
+        "90",
+    ]);
+    let r = p.ok(&[
+        "board", "render", "main", "--out", "top.png", "--size", "800",
+    ]);
+    assert_eq!(r["binary"]["encoding"], "image/png");
+    assert_eq!(r["width"], 800);
+    assert_eq!(
+        r["layers"],
+        json!(["copper.top", "mask.top", "silk.top", "drill", "outline"])
+    );
+    for top in [&p.direct, &p.daemon] {
+        let png = fs::read(top.join("board/top.png")).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+    }
+    let r = p.ok(&[
+        "board",
+        "render",
+        "main",
+        "--out",
+        "bottom.svg",
+        "--side",
+        "bottom",
+    ]);
+    assert_eq!(r["binary"]["encoding"], "image/svg+xml");
+    assert_eq!(r["side"], "bottom");
+    assert_eq!(
+        r["layers"],
+        json!([
+            "copper.bottom",
+            "mask.bottom",
+            "silk.bottom",
+            "drill",
+            "outline"
+        ])
+    );
+    let svg = fs::read_to_string(p.direct.join("board/bottom.svg")).unwrap();
+    assert!(svg.starts_with("<svg") || svg.starts_with("<?xml"), "{svg}");
+    let r = p.ok(&[
+        "board",
+        "render",
+        "main",
+        "--out",
+        "n.png",
+        "--net",
+        "rail:gnd",
+        "--layer",
+        "copper.top",
+        "--layer",
+        "outline",
+    ]);
+    assert_eq!(r["net"], "rail:gnd");
+    let r = p.ok(&[
+        "board",
+        "render",
+        "main",
+        "--out",
+        "w.png",
+        "--window",
+        "0,0,15,15",
+    ]);
+    assert_eq!(r["window"], json!([0, 0, 15_000_000, 15_000_000]));
+    p.fails(
+        &[
+            "board", "render", "main", "--out", "x.png", "--layer", "nope",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["board", "render", "main", "--out", "x.png", "--net", "nope"],
+        "not_found",
+        1,
+    );
+    p.fails(
+        &["board", "render", "main", "--out", "x.png", "--size", "0"],
+        "invalid_param",
+        1,
+    );
 }

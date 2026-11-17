@@ -267,6 +267,80 @@ fn breakout_at(board: &Path) {
     }
 }
 
+/// Boards (5.A): the breakout placed on a fixed grid, its pads and
+/// renders, alike on one thread and eight.
+fn boards(golden: &mut Golden, at: &Path) {
+    let placed = [
+        ("U1", "8,10", "0"),
+        ("C1", "8,14", "90"),
+        ("U2", "18,10", "0"),
+        ("C2", "15,6", "0"),
+        ("C3", "21,6", "0"),
+        ("R1", "12,15", "90"),
+        ("R2", "14,15", "90"),
+        ("J1", "3,10", "0"),
+    ];
+    let mut first: Option<(Value, String, String)> = None;
+    for threads in [1, 8] {
+        let board = at.join(format!("t{threads}")).join("board");
+        std::fs::create_dir_all(&board).unwrap();
+        ryueda(&board, 1, &["init"]);
+        breakout_at(&board);
+        ryueda(
+            &board,
+            threads,
+            &[
+                "board", "create", "Main", "--design", "board", "--rect", "26,20", "--id", "main",
+            ],
+        );
+        for (r, xy, rot) in placed {
+            ryueda(
+                &board,
+                threads,
+                &["board", "place", "main", r, "--at", xy, "--rotation", rot],
+            );
+        }
+        let mut show = ryueda(&board, threads, &["board", "show", "main", "--pads"]);
+        assert_eq!(show["unplaced"], 0, "{show}");
+        assert_eq!(show["notices"], serde_json::json!([]), "{show}");
+        // The golden is of what is drawn: revisions hash file bytes.
+        if let Some(o) = show.as_object_mut() {
+            o.remove("revision");
+            o.remove("schema");
+        }
+        ryueda(
+            &board,
+            threads,
+            &["board", "render", "main", "--out", "top.png"],
+        );
+        ryueda(
+            &board,
+            threads,
+            &[
+                "board",
+                "render",
+                "main",
+                "--out",
+                "bottom.svg",
+                "--side",
+                "bottom",
+            ],
+        );
+        let hash = |name: &str| {
+            blake3::hash(&std::fs::read(board.join(name)).unwrap()).to_hex()[..32].to_owned()
+        };
+        let got = (show, hash("top.png"), hash("bottom.svg"));
+        match &first {
+            None => first = Some(got),
+            Some(one) => assert_eq!(&got, one, "one thread and eight"),
+        }
+    }
+    let (show, png, svg) = first.unwrap();
+    golden.json("board.breakout.show", &show);
+    golden.got.insert("board.breakout.top.png".into(), png);
+    golden.got.insert("board.breakout.bottom.svg".into(), svg);
+}
+
 #[test]
 fn netlists_and_erc_are_bit_exact() {
     let mut golden = Golden::new(concat!(
@@ -541,6 +615,7 @@ fn netlists_and_erc_are_bit_exact() {
     let one = kicad_lint(1);
     assert_eq!(kicad_lint(8), one);
     golden.json("symbols.lint", &one);
+    boards(&mut golden, &dir.path().join("boards"));
     golden.finish();
 }
 

@@ -977,3 +977,45 @@ fn the_merge_driver_writes_over_ours_and_exits_by_outcome() {
     let v: Value = serde_json::from_slice(&std::fs::read(&o).unwrap()).unwrap();
     assert_eq!(v["conflicts"]["/value"]["theirs"], "2k");
 }
+
+#[test]
+fn board_files_merge_by_value_and_two_moves_of_one_part_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    let ok = |args: &[&str]| {
+        let (c, v) = ryueda(&board, &run, false, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+    };
+    ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    ok(&["board", "place", "main", "J1", "--at", "1,10"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "board"]);
+    git(&top, &["branch", "theirs"]);
+    // Ours places U1 and moves J1; theirs places C1 and moves J1 elsewhere.
+    ok(&["board", "place", "main", "U1", "--at", "10,10"]);
+    ok(&["board", "place", "main", "J1", "--at", "2,10"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&["board", "place", "main", "C1", "--at", "12,10"]);
+    ok(&["board", "place", "main", "J1", "--at", "3,10"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, _) = git_try(&top, &[], &["merge", "-q", "theirs"]);
+    assert!(!merged, "J1 moved both ways conflicts");
+    // U1 and C1 merged with no conflict; J1's file holds the record.
+    let placements = board.join("boards/main/placements");
+    assert!(placements.join("s1.u1.json").is_file());
+    assert!(placements.join("s1.c1.json").is_file());
+    let j1: Value =
+        serde_json::from_str(&std::fs::read_to_string(placements.join("j1.json")).unwrap())
+            .unwrap();
+    assert_eq!(j1["conflicts"]["/at"]["kind"], "value", "{j1}");
+    assert_eq!(j1["at"], json!([2_000_000, 10_000_000]), "ours' in place");
+}

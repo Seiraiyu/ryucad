@@ -21,11 +21,16 @@ impl ryu_session::activity::Project for Undone<'_> {
     }
 
     /// Library files go back before the manifest that names their
-    /// libraries, and a block's files before its `block.json`.
+    /// libraries, a block's files before its `block.json`, and a board's
+    /// `board.json` before its placements.
     fn is_index(&self, p: &str) -> bool {
         p == project::MANIFEST
             || p.ends_with(&format!("/{}", project::MANIFEST))
             || (p.starts_with("blocks/") && p.ends_with(&format!("/{}", crate::conn::BLOCK_FILE)))
+            || matches!(
+                p.split('/').collect::<Vec<_>>().as_slice(),
+                [crate::board::BOARDS, _, crate::board::BOARD_FILE]
+            )
     }
 
     fn remove(&self, path: &Path) -> Result<()> {
