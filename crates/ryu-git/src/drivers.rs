@@ -132,33 +132,78 @@ pub fn setup(root: &Path, d: &Drivers, isolated: bool) -> Option<Setup> {
     Some(Setup { missing, hooks })
 }
 
-/// This binary, quoted for the shell Git runs commands in, with forward
-/// slashes even on Windows.
-pub fn exe(product: &str) -> Result<String> {
+/// This binary's path, canonical where it can be.
+fn exe_path(product: &str) -> Result<PathBuf> {
     let exe = std::env::current_exe()
         .map_err(|e| Error::new(Code::Io, format!("finding the {product} binary: {e}")))?;
-    let exe = ryu_doc::source::plain(exe.canonicalize().unwrap_or(exe));
+    Ok(canonical(&exe))
+}
+
+/// `p` canonical, without Windows' `\\?\` prefix, or as given when it
+/// can't be.
+fn canonical(p: &Path) -> PathBuf {
+    ryu_doc::source::plain(p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+}
+
+/// `exe` quoted for the shell Git runs commands in, with forward slashes
+/// even on Windows.
+fn quoted(exe: &Path) -> String {
     let path = exe
         .to_string_lossy()
         .replace('\\', "/")
         .replace('\'', r"'\''");
-    Ok(format!("'{path}'"))
+    format!("'{path}'")
+}
+
+/// This binary, quoted for the shell Git runs commands in, with forward
+/// slashes even on Windows.
+pub fn exe(product: &str) -> Result<String> {
+    Ok(quoted(&exe_path(product)?))
 }
 
 /// The command Git runs for the diff driver.
 pub fn textconv_command(product: &str) -> Result<String> {
-    Ok(format!("{} git textconv", exe(product)?))
+    Ok(textconv_with(&exe(product)?))
+}
+
+fn textconv_with(exe: &str) -> String {
+    format!("{exe} git textconv")
 }
 
 /// The command Git runs for the merge driver: base, ours, theirs and the
 /// path.
 pub fn merge_command(product: &str) -> Result<String> {
-    Ok(format!("{} git merge-driver %O %A %B %P", exe(product)?))
+    Ok(merge_with(&exe(product)?))
+}
+
+fn merge_with(exe: &str) -> String {
+    format!("{exe} git merge-driver %O %A %B %P")
 }
 
 /// The line that runs this binary's check from someone's own hook.
 pub fn hook_line(product: &str) -> Result<String> {
-    Ok(format!("{} {HOOK_CHECK} || exit 1", exe(product)?))
+    Ok(hook_line_with(&exe(product)?))
+}
+
+fn hook_line_with(exe: &str) -> String {
+    format!("{exe} {HOOK_CHECK} || exit 1")
+}
+
+/// Whether `exe` is inside a checkout of `repo`: its own work tree, the
+/// main one, or any linked worktree (#920).
+fn in_checkout(repo: &gix::Repository, exe: &Path) -> bool {
+    let mut trees: Vec<PathBuf> = repo.workdir().map(Path::to_path_buf).into_iter().collect();
+    if let Ok(main) = repo.main_repo() {
+        trees.extend(main.workdir().map(Path::to_path_buf));
+    }
+    if let Ok(linked) = repo.worktrees() {
+        trees.extend(linked.iter().filter_map(|w| w.base().ok()));
+    }
+    let exes = [exe.to_path_buf(), canonical(exe)];
+    trees
+        .iter()
+        .flat_map(|t| [t.clone(), canonical(t)])
+        .any(|t| exes.iter().any(|e| e.starts_with(&t)))
 }
 
 /// Runs `git config` with `args` in `dir` (any folder for `--global`).
@@ -195,10 +240,26 @@ fn git_config(dir: Option<&Path>, args: &[&str]) -> Result<()> {
 /// [`RENAMES`] off and, for a product with a hook line, the clone's
 /// hooks (someone else's is left alone and reported with the line to add).
 pub fn install(here: &Path, local: bool, d: &Drivers, isolated: bool) -> Result<Value> {
-    let mut entries = vec![(d.textconv, textconv_command(d.product)?)];
+    install_with(here, local, d, isolated, &exe_path(d.product)?)
+}
+
+/// [`install`] for the binary at `exe`. With `local`, a binary inside a
+/// checkout of the repository writes nothing: its path would be in the
+/// config and hooks every worktree of the clone shares, and goes when that
+/// checkout's build does (#920). It says so as `skipped:
+/// binary_in_checkout`, with a warning.
+pub fn install_with(
+    here: &Path,
+    local: bool,
+    d: &Drivers,
+    isolated: bool,
+    exe: &Path,
+) -> Result<Value> {
+    let q = quoted(&canonical(exe));
+    let mut entries = vec![(d.textconv, textconv_with(&q))];
     if let Some((name, driver)) = d.merge {
         entries.push((name, d.product.to_owned()));
-        entries.push((driver, merge_command(d.product)?));
+        entries.push((driver, merge_with(&q)));
     }
     let mut config = Map::new();
     if !local {
@@ -215,6 +276,17 @@ pub fn install(here: &Path, local: bool, d: &Drivers, isolated: bool) -> Result<
         )
         .with("path", here)
     })?;
+    if in_checkout(&repo, exe) {
+        return Ok(json!({
+            "scope": "local",
+            "skipped": "binary_in_checkout",
+            "warning": format!(
+                "{} is inside a checkout of this repository, so its drivers and hooks, which every worktree of the clone shares, would point at a build that goes away (#920); nothing was written. Run git install from an installed {}.",
+                exe.display(),
+                d.product
+            ),
+        }));
+    }
     let dir = repo.workdir().unwrap_or(repo.git_dir()).to_path_buf();
     // Only what differs is written: a clone already set up takes no lock,
     // so projects made side by side in one repository don't collide.
@@ -230,7 +302,7 @@ pub fn install(here: &Path, local: bool, d: &Drivers, isolated: bool) -> Result<
     }
     config.insert(RENAMES.to_owned(), json!("false"));
     let hooks = if d.hook {
-        install_hooks(&repo, d.product)?
+        install_hooks(&repo, d.product, &q)?
     } else {
         Map::new()
     };
@@ -386,7 +458,7 @@ fn write_hook(path: &Path, text: &str) -> Result<()> {
 /// Puts `product`'s line in each of the clone's [`HOOKS`]: the shared hook
 /// written or brought up to date (another product's lines kept, ryucad's
 /// old hook taken in), someone else's left alone with the line to add.
-fn install_hooks(repo: &gix::Repository, product: &str) -> Result<Map<String, Value>> {
+fn install_hooks(repo: &gix::Repository, product: &str, exe: &str) -> Result<Map<String, Value>> {
     let mut hooks = Map::new();
     for name in HOOKS {
         let v = match hook(repo, name, product) {
@@ -399,7 +471,7 @@ fn install_hooks(repo: &gix::Repository, product: &str) -> Result<Map<String, Va
                     Some(t) => managed(t),
                 };
                 if let Some(mut lines) = ours {
-                    lines.insert(product.to_owned(), exe(product)?);
+                    lines.insert(product.to_owned(), exe.to_owned());
                     let new = script(&lines);
                     if text.as_deref() != Some(new.as_str()) {
                         write_hook(&p, &new)?;
@@ -408,10 +480,10 @@ fn install_hooks(repo: &gix::Repository, product: &str) -> Result<Map<String, Va
                 json!({"path": p, "status": "installed"})
             }
             Hook::Foreign(p) => {
-                json!({"path": p, "status": "foreign", "line": hook_line(product)?})
+                json!({"path": p, "status": "foreign", "line": hook_line_with(exe)})
             }
             Hook::HooksPath(p) => {
-                json!({"path": p, "status": "hooks_path", "line": hook_line(product)?})
+                json!({"path": p, "status": "hooks_path", "line": hook_line_with(exe)})
             }
         };
         hooks.insert(name.to_owned(), v);
@@ -459,6 +531,38 @@ mod tests {
             format!("*.png binary\n{}\n{}\n", ATTRS.header, LINES.join("\n"))
         );
         assert_eq!(ATTRS.missing(&ours, Some("x/** binary")), ["x/** binary"]);
+    }
+
+    /// #920: `install` run by a binary inside a linked worktree (a
+    /// `target/` under it) writes no driver entries into the shared config
+    /// and no hook into the shared hooks, and says why; nor does one in the
+    /// main checkout's own tree. A binary elsewhere installs as before.
+    #[test]
+    fn a_binary_inside_a_checkout_installs_nothing_shared() {
+        let d = tempfile::tempdir().unwrap();
+        let main = d.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        let wt = d.path().join("wt");
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        for (at, exe) in [
+            (&wt, wt.join("target/debug/toy")),
+            (&wt, main.join("target/debug/toy")),
+            (&main, wt.join("target/debug/toy")),
+        ] {
+            let v = install_with(at, true, &FULL, true, &exe).unwrap();
+            assert_eq!(v["skipped"], "binary_in_checkout", "{v}");
+            assert!(v["warning"].as_str().unwrap().contains("#920"), "{v}");
+            let config = std::fs::read_to_string(main.join(".git/config")).unwrap();
+            assert!(!config.contains("toy"), "{config}");
+            assert!(!main.join(".git/hooks/pre-commit").exists());
+        }
+        let outside = d.path().join("bin/toy");
+        let v = install_with(&wt, true, &FULL, true, &outside).unwrap();
+        assert_eq!(v["scope"], "local", "{v}");
+        let config = std::fs::read_to_string(main.join(".git/config")).unwrap();
+        assert!(config.contains("bin/toy"), "{config}");
     }
 
     #[test]
