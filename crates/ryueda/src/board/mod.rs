@@ -7,6 +7,7 @@ pub mod file;
 pub mod graphic;
 pub mod load;
 pub mod occ;
+pub mod opening;
 pub mod outline;
 pub mod pad;
 pub mod preset;
