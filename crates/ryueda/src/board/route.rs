@@ -108,18 +108,26 @@ fn point(
     .with("point", text))
 }
 
-/// The board a write names, checked against `expected`.
-fn start(session: &Session, board: &str, expected: Option<&str>) -> Result<Id> {
+/// The findings before a write, if the board checks.
+type Before = Option<Vec<super::drc::Finding>>;
+
+/// The board a write names, checked against `expected`, and its findings
+/// before the write.
+fn start(session: &mut Session, board: &str, expected: Option<&str>) -> Result<(Id, Before)> {
     let b = find(session.project(), board)?;
     check_revision(&format!("board {}", b.id), &b.revision, expected)?;
-    Ok(b.id.clone())
+    let id = b.id.clone();
+    let before = super::drc::now(session, &id);
+    Ok((id, before))
 }
 
-/// A write's answer: the board, its revision and what the write made.
-fn answer(session: &mut Session, id: &Id, made: Value) -> Value {
+/// A write's answer: the board, its revision, what the write made and
+/// what it did to the board's findings.
+fn answer(session: &mut Session, id: &Id, made: Value, before: Before) -> Value {
     let mut v = made;
     v["board"] = json!(format!("board/{id}"));
     v["revision"] = json!(session.project().boards.get(id).map(|b| b.revision.clone()));
+    v["drc"] = super::drc::delta(session, id, before);
     v
 }
 
@@ -130,7 +138,7 @@ pub fn track_add(
     asks: Vec<Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
-    let id = start(session, board, expected)?;
+    let (id, before) = start(session, board, expected)?;
     if asks.is_empty() {
         return Err(invalid("give --net, --layer and --path, or --ops", "ops"));
     }
@@ -182,7 +190,7 @@ pub fn track_add(
         made.push(json!({"id": tid, "reference": format!("{id}:track/{tid}"), "track": crate::doc::to_value(&t, TRACK_KIND, FORMAT)}));
     }
     commit(session, &format!("board {id} track"), w)?;
-    Ok(answer(session, &id, json!({"tracks": made})))
+    Ok(answer(session, &id, json!({"tracks": made}), before))
 }
 
 /// `board track edit`: the fields given replaced.
@@ -197,7 +205,7 @@ pub fn track_edit(
     path: Option<&[Value]>,
     expected: Option<&str>,
 ) -> Result<Value> {
-    let id = start(session, board, expected)?;
+    let (id, before) = start(session, board, expected)?;
     let refs = path.is_some_and(|l| l.iter().any(Value::is_string));
     let shapes = if refs {
         Some(session.board_shapes(&id)?)
@@ -237,7 +245,7 @@ pub fn track_edit(
     w.put(route_path(&id, TRACKS, &tid), &t, TRACK_KIND);
     commit(session, &format!("board {id} track {tid}"), w)?;
     let made = json!({"tracks": [{"id": tid, "reference": format!("{id}:track/{tid}"), "track": crate::doc::to_value(&t, TRACK_KIND, FORMAT)}]});
-    Ok(answer(session, &id, made))
+    Ok(answer(session, &id, made, before))
 }
 
 /// Deletes routes of one folder by ID, all or nothing.
@@ -249,7 +257,7 @@ fn delete(
     ids: &[String],
     expected: Option<&str>,
 ) -> Result<Value> {
-    let id = start(session, board, expected)?;
+    let (id, before) = start(session, board, expected)?;
     if ids.is_empty() {
         return Err(invalid(format!("name the {what}s to delete"), what));
     }
@@ -275,6 +283,7 @@ fn delete(
         session,
         &id,
         json!({"deleted": ids.iter().map(|r| format!("{id}:{what}/{r}")).collect::<Vec<_>>()}),
+        before,
     ))
 }
 
@@ -312,7 +321,7 @@ pub fn via_add(
     asks: Vec<Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
-    let id = start(session, board, expected)?;
+    let (id, before) = start(session, board, expected)?;
     if asks.is_empty() {
         return Err(invalid("give --net and --at, or --ops", "ops"));
     }
@@ -364,7 +373,7 @@ pub fn via_add(
         made.push(json!({"id": vid, "reference": format!("{id}:via/{vid}"), "via": crate::doc::to_value(&v, VIA_KIND, FORMAT)}));
     }
     commit(session, &format!("board {id} via"), w)?;
-    Ok(answer(session, &id, json!({"vias": made})))
+    Ok(answer(session, &id, json!({"vias": made}), before))
 }
 
 /// `board hole add`: one hole or several (all or nothing).
@@ -374,7 +383,7 @@ pub fn hole_add(
     asks: Vec<Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
-    let id = start(session, board, expected)?;
+    let (id, before) = start(session, board, expected)?;
     if asks.is_empty() {
         return Err(invalid("give --at and --drill, or --ops", "ops"));
     }
@@ -406,7 +415,7 @@ pub fn hole_add(
         made.push(json!({"id": hid, "reference": format!("{id}:hole/{hid}"), "hole": crate::doc::to_value(&h, HOLE_KIND, FORMAT)}));
     }
     commit(session, &format!("board {id} hole"), w)?;
-    Ok(answer(session, &id, json!({"holes": made})))
+    Ok(answer(session, &id, json!({"holes": made}), before))
 }
 
 /// The asks a request carries: `ops`' list, else the one its fields make.

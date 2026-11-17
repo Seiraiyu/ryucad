@@ -864,6 +864,38 @@ pub fn check(p: &Project, b: &BoardFiles) -> Result<BoardCheck> {
     check_shapes(p, b, Arc::new(super::shapes::build(p, b)?))
 }
 
+/// The board's findings now, if it checks (its design flattens).
+pub fn now(session: &mut crate::session::Session, id: &crate::id::Id) -> Option<Vec<Finding>> {
+    session.board_check(id).ok().map(|c| c.findings.clone())
+}
+
+/// What a write did to the board's findings: those it added, the IDs it
+/// removed, and the counts left; `{error}` when the board doesn't check.
+pub fn delta(
+    session: &mut crate::session::Session,
+    id: &crate::id::Id,
+    before: Option<Vec<Finding>>,
+) -> Value {
+    let after = match session.board_check(id) {
+        Ok(c) => c,
+        Err(e) => return json!({"error": e}),
+    };
+    let was: BTreeSet<String> = before.iter().flatten().map(|f| f.id.clone()).collect();
+    let is: BTreeSet<&str> = after.findings.iter().map(|f| f.id.as_str()).collect();
+    let added: Vec<&Finding> = after
+        .findings
+        .iter()
+        .filter(|f| !was.contains(&f.id))
+        .collect();
+    let removed: Vec<&String> = was.iter().filter(|i| !is.contains(i.as_str())).collect();
+    json!({
+        "added": added,
+        "removed": removed,
+        "errors": after.errors(),
+        "warnings": after.warnings(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -157,7 +157,9 @@ pub fn create(
     let mut w = Writes::default();
     w.put(board_path(&id), &board, BOARD_KIND);
     commit(session, &format!("board {name}"), w)?;
-    Ok(answer(session.project(), &id))
+    let mut v = answer(session.project(), &id);
+    v["drc"] = super::drc::delta(session, &id, Some(Vec::new()));
+    Ok(v)
 }
 
 pub fn edit(
@@ -197,8 +199,11 @@ pub fn edit(
     }
     let mut w = Writes::default();
     w.put(board_path(&id), &file, BOARD_KIND);
+    let before = super::drc::now(session, &id);
     commit(session, &format!("board {id}"), w)?;
-    Ok(answer(session.project(), &id))
+    let mut v = answer(session.project(), &id);
+    v["drc"] = super::drc::delta(session, &id, before);
+    Ok(v)
 }
 
 pub fn delete(session: &mut Session, board: &str, expected: Option<&str>) -> Result<Value> {
@@ -414,9 +419,12 @@ pub fn place(
             "rotation_mdeg": placement.rotation_mdeg,
         }));
     }
+    let before = super::drc::now(session, &id);
     commit(session, &format!("board {id} place"), w)?;
     let b = &session.project().boards[&id];
-    Ok(json!({"board": format!("board/{id}"), "revision": b.revision, "placed": placed}))
+    let mut v = json!({"board": format!("board/{id}"), "revision": b.revision, "placed": placed});
+    v["drc"] = super::drc::delta(session, &id, before);
+    Ok(v)
 }
 
 /// `board unplace`: a placement's file removed. A placement whose
@@ -447,9 +455,13 @@ pub fn unplace(
     }
     let mut w = Writes::default();
     w.delete(placement_path(&id, &occurrence));
+    let before = super::drc::now(session, &id);
     commit(session, &format!("board {id} unplace"), w)?;
     let b = &session.project().boards[&id];
-    Ok(json!({"board": format!("board/{id}"), "revision": b.revision, "unplaced": occurrence}))
+    let mut v =
+        json!({"board": format!("board/{id}"), "revision": b.revision, "unplaced": occurrence});
+    v["drc"] = super::drc::delta(session, &id, before);
+    Ok(v)
 }
 
 /// `board show`: the board's file and, per occurrence of its design with a

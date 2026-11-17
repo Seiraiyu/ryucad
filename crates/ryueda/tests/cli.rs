@@ -5015,3 +5015,69 @@ fn a_boards_drc_and_status_say_what_is_left() {
     assert_eq!(s["findings"]["board_unplaced"], 7);
     assert!(s["nets"]["total"].as_u64().unwrap() >= s["nets"]["open"].as_u64().unwrap());
 }
+
+#[test]
+fn every_board_write_answers_what_it_did_to_drc() {
+    let p = Pair::breakout();
+    let c = p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    assert_eq!(
+        c["drc"]["added"].as_array().unwrap().len(),
+        8,
+        "eight unplaced: {}",
+        c["drc"]
+    );
+    assert_eq!(c["drc"]["removed"], json!([]));
+    let r = p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    assert_eq!(
+        r["drc"]["removed"].as_array().unwrap().len(),
+        1,
+        "R1 placed: {}",
+        r["drc"]
+    );
+    p.ok(&["board", "place", "main", "R2", "--at", "14,10"]);
+    let pads = p.ok(&["board", "show", "main", "--pads"])["pads"].clone();
+    let net = |r: &str| {
+        pads.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["reference"] == r)
+            .unwrap()["net"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // Drawn straight across R2's other pad: a short, said at once.
+    let t = p.ok(&[
+        "board",
+        "track",
+        "add",
+        "main",
+        "--net",
+        &net("main:R1/2"),
+        "--layer",
+        "top",
+        "--path",
+        "R1/2",
+        "main:R2/1",
+        "main:R2/2",
+        "--id",
+        "t1",
+    ]);
+    let added: Vec<&str> = t["drc"]["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(added.contains(&"net_short"), "{}", t["drc"]);
+    assert!(t["drc"]["errors"].as_u64().unwrap() > 0);
+    let d = p.ok(&["board", "track", "delete", "main", "t1"]);
+    let removed = d["drc"]["removed"].as_array().unwrap();
+    assert!(!removed.is_empty(), "{}", d["drc"]);
+    assert!(
+        removed.iter().all(|x| x.is_string()),
+        "removed findings are IDs"
+    );
+}
