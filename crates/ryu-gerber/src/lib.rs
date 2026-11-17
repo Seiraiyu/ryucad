@@ -9,10 +9,12 @@
 pub mod excellon;
 mod fmt;
 pub mod gerber;
+#[cfg(feature = "testing")]
+pub mod read;
 mod recognise;
 
 pub use fmt::{LIMIT, mm};
-// pub use recognise::{Aperture, Flash, flash_of, same_contour};
+pub use recognise::{Aperture, Flash, flash_of, same_contour};
 
 /// Who wrote a file: `.GenerationSoftware`'s vendor, application and
 /// version.
