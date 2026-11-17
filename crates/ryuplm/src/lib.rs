@@ -9,6 +9,7 @@ pub use ryu_doc::{canonical, error, id, source, units};
 
 pub mod catalogue;
 pub mod ids;
+pub mod item;
 
 /// ryuplm, as ryupdm, ryu-git and ryu-session know it.
 pub struct Plm;
