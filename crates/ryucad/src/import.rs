@@ -2903,6 +2903,55 @@ pub(crate) mod tests {
         assert!(!h.derived.names.is_empty());
     }
 
+    /// #955's review: names a shape heal derives inside its own parallel
+    /// tasks are all recorded, however a pool of eight threads would have
+    /// spread them: the heal runs on its own one-thread pool. The heal
+    /// here is a box's, plus 64 names derived in a `par_iter` whose tasks
+    /// sleep so they spread, carried as the heal's (its instance map).
+    #[test]
+    fn names_a_shape_heal_derives_in_parallel_tasks_are_all_recorded() {
+        use rayon::prelude::*;
+        let f = ImportFile::new(occt("box_ap214.stp"));
+        let i = import(&f, Some(("part 2", "part 2")), 0);
+        let opened = opened(&f).unwrap();
+        let k = select(&id("i"), &i, &opened).unwrap();
+        let run = crate::rebuild::Run::none();
+        let heal = |key: ryukei::name::OpKey| {
+            let mut h = heal_solid(&id("i"), &i, &opened, k, &run, key)?;
+            let names: Vec<Name> = (0..64u128)
+                .into_par_iter()
+                .map(|n| {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    Name::derive(key, ryukei::name::Role::NewFace, &[Name::from_u128(n)])
+                })
+                .collect();
+            for (n, name) in names.into_iter().enumerate() {
+                h.instances.insert(name, n as u64);
+            }
+            Ok(h)
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        for _ in 0..3 {
+            let (h, complete) = pool.install(|| shape_heal(heal, shape_key(&i))).unwrap();
+            assert!(
+                complete,
+                "a name derived in a parallel task wasn't recorded"
+            );
+            for n in 0..64u128 {
+                let name = Name::derive(
+                    shape_key(&i),
+                    ryukei::name::Role::NewFace,
+                    &[Name::from_u128(n)],
+                );
+                assert!(h.derived.has(name), "{n}");
+                assert!(h.instances.contains_key(&name));
+            }
+        }
+    }
+
     /// #955's review: a reference of two face groups (healed by a task
     /// each, `Meter::par_map`), flattened twice, rebuilds cold to the same
     /// bodies on 1 thread and 8, its two copies sharing one shape on each.
