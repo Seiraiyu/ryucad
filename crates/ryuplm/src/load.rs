@@ -35,7 +35,11 @@ fn walk(src: &dyn Source, dir: &str, out: &mut Vec<String>) -> Result<()> {
 impl Catalogue {
     pub fn load(src: &dyn Source) -> Result<Catalogue> {
         let bytes = src.read(MANIFEST)?.ok_or_else(|| {
-            Error::new(Code::ProjectNotFound, format!("no {MANIFEST}; run `ryuplm init`")).with("path", MANIFEST)
+            Error::new(
+                Code::ProjectNotFound,
+                format!("no {MANIFEST}; run `ryuplm init`"),
+            )
+            .with("path", MANIFEST)
         })?;
         let manifest = Manifest::read(&bytes)?;
         let mut paths = Vec::new();
@@ -45,8 +49,11 @@ impl Catalogue {
         let mut faults = Vec::new();
         for path in paths {
             let Some(id) = item_of(&path) else {
-                let mut e = ryu_doc::files::invalid("", "not an item file: items/<first two characters of the ID>/<ID>.json")
-                    .with("path", &path);
+                let mut e = ryu_doc::files::invalid(
+                    "",
+                    "not an item file: items/<first two characters of the ID>/<ID>.json",
+                )
+                .with("path", &path);
                 if let Some(name) = shard_of(&path).and_then(|n| Id::parse(n, "item").ok()) {
                     e = e.with("expected", item_path(&name));
                 }
@@ -61,13 +68,21 @@ impl Catalogue {
                 None => {}
             }
         }
-        Ok(Catalogue { manifest, items, faults })
+        Ok(Catalogue {
+            manifest,
+            items,
+            faults,
+        })
     }
 
     /// The items whose number, or else whose previous number, is `n`:
     /// current matches first, each list in ID order.
     pub fn by_number(&self, n: &str) -> Vec<Id> {
-        let now = self.items.iter().filter(|(_, i)| i.number == n).map(|(id, _)| id.clone());
+        let now = self
+            .items
+            .iter()
+            .filter(|(_, i)| i.number == n)
+            .map(|(id, _)| id.clone());
         let before = self
             .items
             .iter()
@@ -85,7 +100,11 @@ impl Catalogue {
             return Ok(id);
         }
         self.by_number(s).into_iter().next().ok_or_else(|| {
-            Error::new(Code::ItemNotFound, format!("no item with ID or number {s:?}")).with("item", s)
+            Error::new(
+                Code::ItemNotFound,
+                format!("no item with ID or number {s:?}"),
+            )
+            .with("item", s)
         })
     }
 }
@@ -98,11 +117,20 @@ pub(crate) mod tests {
 
     pub(crate) fn files(items: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
         let mut f = BTreeMap::new();
-        let m = crate::catalogue::Manifest::new(crate::catalogue::tests::pid(1), crate::units::Unit::Mm);
-        f.insert(crate::catalogue::MANIFEST.to_owned(), m.to_text().into_bytes());
+        let m = crate::catalogue::Manifest::new(
+            crate::catalogue::tests::pid(1),
+            crate::units::Unit::Mm,
+        );
+        f.insert(
+            crate::catalogue::MANIFEST.to_owned(),
+            m.to_text().into_bytes(),
+        );
         for (id, number) in items {
             let id = Id::parse(id, "item").unwrap();
-            f.insert(crate::ids::item_path(&id), Item::new(number).to_text().into_bytes());
+            f.insert(
+                crate::ids::item_path(&id),
+                Item::new(number).to_text().into_bytes(),
+            );
         }
         f
     }
@@ -111,7 +139,10 @@ pub(crate) mod tests {
     fn every_item_is_read_and_each_bad_file_is_a_fault() {
         let mut f = files(&[("k3v9q2m8x4c1p", "A-1"), ("0000000000000", "A-2")]);
         f.insert("items/zz/zzzzzzzzzzzzf.json".into(), b"{".to_vec());
-        f.insert("items/k4/k3aaaaaaaaaaa.json".into(), Item::new("A-3").to_text().into_bytes());
+        f.insert(
+            "items/k4/k3aaaaaaaaaaa.json".into(),
+            Item::new("A-3").to_text().into_bytes(),
+        );
         f.insert("items/README.md".into(), b"hi".to_vec());
         let c = Catalogue::load(&f).unwrap();
         assert_eq!(
@@ -127,17 +158,46 @@ pub(crate) mod tests {
             faults,
             [
                 (Code::InvalidDocument, "items/README.md".to_owned()),
-                (Code::InvalidDocument, "items/k4/k3aaaaaaaaaaa.json".to_owned()),
+                (
+                    Code::InvalidDocument,
+                    "items/k4/k3aaaaaaaaaaa.json".to_owned()
+                ),
                 (Code::InvalidJson, "items/zz/zzzzzzzzzzzzf.json".to_owned()),
             ]
         );
-        assert_eq!(c.faults[1].details["expected"], "items/k3/k3aaaaaaaaaaa.json");
-        assert_eq!(c.by_number("A-2"), vec![Id::parse("0000000000000", "item").unwrap()]);
+        assert_eq!(
+            c.faults[1].details["expected"],
+            "items/k3/k3aaaaaaaaaaa.json"
+        );
+        assert_eq!(
+            c.by_number("A-2"),
+            vec![Id::parse("0000000000000", "item").unwrap()]
+        );
     }
 
     #[test]
     fn no_manifest_is_no_catalogue() {
         let f: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         assert_eq!(Catalogue::load(&f).unwrap_err().code, Code::ProjectNotFound);
+    }
+    #[test]
+    fn old_numbers_still_find_their_items() {
+        let mut f = files(&[("0000000000001", "B-1"), ("0000000000002", "A-1")]);
+        let id = Id::parse("0000000000001", "item").unwrap();
+        let mut i = Item::new("B-1");
+        i.previous_numbers.push("A-1".into());
+        f.insert(crate::ids::item_path(&id), i.to_text().into_bytes());
+        let c = Catalogue::load(&f).unwrap();
+        // The current holder of A-1 first, then the item that had it.
+        assert_eq!(
+            c.by_number("A-1")
+                .iter()
+                .map(Id::as_str)
+                .collect::<Vec<_>>(),
+            ["0000000000002", "0000000000001"]
+        );
+        assert_eq!(c.find("0000000000001").unwrap(), id);
+        assert_eq!(c.find("B-1").unwrap(), id);
+        assert_eq!(c.find("Z-9").unwrap_err().code, Code::ItemNotFound);
     }
 }

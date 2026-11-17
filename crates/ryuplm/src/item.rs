@@ -35,7 +35,10 @@ impl ItemRef {
                 catalogue: Some(ProjectId::parse(p).ok()?),
                 item: Id::parse(i, "item").ok()?,
             }),
-            None => Some(ItemRef { catalogue: None, item: Id::parse(s, "item").ok()? }),
+            None => Some(ItemRef {
+                catalogue: None,
+                item: Id::parse(s, "item").ok()?,
+            }),
         }
     }
 
@@ -86,19 +89,44 @@ pub struct Item {
 /// control characters, no space at either end. Anything else, any case
 /// and punctuation, is kept exactly as written.
 pub fn number_ok(n: &str) -> bool {
-    !n.is_empty()
-        && n.chars().count() <= 200
-        && n.trim() == n
-        && !n.chars().any(char::is_control)
+    !n.is_empty() && n.chars().count() <= 200 && n.trim() == n && !n.chars().any(char::is_control)
 }
 
 fn text_at(v: Value, at: &str) -> Result<String> {
-    v.as_str().map(str::to_owned).ok_or_else(|| invalid(at, "expected a string"))
+    v.as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| invalid(at, "expected a string"))
 }
 
 impl Item {
     pub fn new(number: &str) -> Item {
-        Item { number: number.to_owned(), ..Item::default() }
+        Item {
+            number: number.to_owned(),
+            ..Item::default()
+        }
+    }
+
+    /// Gives the item `number`, keeping the one it had first in
+    /// `previous_numbers` (design 734): links, lines and documents name
+    /// the ID, so nothing else changes.
+    pub fn renumber(&mut self, number: &str) -> Result<()> {
+        if !number_ok(number) {
+            return Err(
+                Error::new(Code::InvalidParam, format!("bad part number {number:?}"))
+                    .with("number", number),
+            );
+        }
+        if number == self.number {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("the item is already {number:?}"),
+            )
+            .with("number", number));
+        }
+        let old = std::mem::replace(&mut self.number, number.to_owned());
+        self.previous_numbers.retain(|p| p != number && *p != old);
+        self.previous_numbers.insert(0, old);
+        Ok(())
     }
 
     /// The unit of measure, `each` unless set.
@@ -159,7 +187,10 @@ impl Item {
             );
         }
         if !self.documents.is_empty() {
-            put("documents", self.documents.iter().map(|d| json!(d.as_str())).collect());
+            put(
+                "documents",
+                self.documents.iter().map(|d| json!(d.as_str())).collect(),
+            );
         }
         if !self.source.is_empty() {
             put("source", Value::Object(self.source.clone()));
@@ -178,14 +209,22 @@ impl Item {
         let mut o = header_in(v, KIND, FORMAT, crate::catalogue::NAME)?;
         let number = text_at(o.take("number")?, "/number")?;
         if !number_ok(&number) {
-            return Err(invalid("/number", "a part number is 1 to 200 characters, no control characters, no space at either end"));
+            return Err(invalid(
+                "/number",
+                "a part number is 1 to 200 characters, no control characters, no space at either end",
+            ));
         }
         let mut item = Item::new(&number);
         if let Some(p) = o.take_opt("previous_numbers") {
-            let list = p.as_array().ok_or_else(|| invalid("/previous_numbers", "a list of numbers"))?;
+            let list = p
+                .as_array()
+                .ok_or_else(|| invalid("/previous_numbers", "a list of numbers"))?;
             for (i, n) in list.iter().enumerate() {
                 let at = format!("/previous_numbers/{i}");
-                let n = n.as_str().filter(|n| number_ok(n)).ok_or_else(|| invalid(&at, "a part number"))?;
+                let n = n
+                    .as_str()
+                    .filter(|n| number_ok(n))
+                    .ok_or_else(|| invalid(&at, "a part number"))?;
                 item.previous_numbers.push(n.to_owned());
             }
         }
@@ -213,46 +252,74 @@ impl Item {
             item.make_buy = Some(m);
         }
         if let Some(p) = o.take_opt("properties") {
-            let map = p.as_object().ok_or_else(|| invalid("/properties", "properties must be an object"))?;
+            let map = p
+                .as_object()
+                .ok_or_else(|| invalid("/properties", "properties must be an object"))?;
             item.properties = map.iter().map(|(k, x)| (k.clone(), x.clone())).collect();
         }
         if let Some(a) = o.take_opt("aml") {
-            item.aml = a.as_array().cloned().ok_or_else(|| invalid("/aml", "aml must be a list"))?;
+            item.aml = a
+                .as_array()
+                .cloned()
+                .ok_or_else(|| invalid("/aml", "aml must be a list"))?;
         }
         if let Some(l) = o.take_opt("links") {
-            let list = l.as_array().ok_or_else(|| invalid("/links", "links must be a list"))?;
+            let list = l
+                .as_array()
+                .ok_or_else(|| invalid("/links", "links must be a list"))?;
             for (i, x) in list.iter().enumerate() {
                 let at = format!("/links/{i}");
                 let mut lo = Obj::new(x, &at)?;
                 let product = text_at(lo.take("product")?, &format!("{at}/product"))?;
                 if product != "ryucad" && product != "ryueda" {
-                    return Err(invalid(&format!("{at}/product"), "product is ryucad or ryueda"));
+                    return Err(invalid(
+                        &format!("{at}/product"),
+                        "product is ryucad or ryueda",
+                    ));
                 }
-                let project = ProjectId::parse(&text_at(lo.take("project")?, &format!("{at}/project"))?)
-                    .map_err(|e| invalid(&format!("{at}/project"), &e.message))?;
+                let project =
+                    ProjectId::parse(&text_at(lo.take("project")?, &format!("{at}/project"))?)
+                        .map_err(|e| invalid(&format!("{at}/project"), &e.message))?;
                 let part = Id::parse(&text_at(lo.take("part")?, &format!("{at}/part"))?, "part")
                     .map_err(|e| invalid(&format!("{at}/part"), &e.message))?;
                 lo.finish()?;
-                item.links.push(Link { product, project, part });
+                item.links.push(Link {
+                    product,
+                    project,
+                    part,
+                });
             }
         }
         if let Some(b) = o.take_opt("bom") {
-            let list = b.as_array().ok_or_else(|| invalid("/bom", "bom must be a list"))?;
+            let list = b
+                .as_array()
+                .ok_or_else(|| invalid("/bom", "bom must be a list"))?;
             for (i, x) in list.iter().enumerate() {
                 let at = format!("/bom/{i}");
                 let mut lo = Obj::new(x, &at)?;
                 let line = text_at(lo.take("line")?, &format!("{at}/line"))?;
-                if !crate::ids::generated(&line) || item.bom.iter().any(|l| l.line.as_str() == line) {
-                    return Err(invalid(&format!("{at}/line"), "a line's ID is 13 base32 characters, once per item"));
+                if !crate::ids::generated(&line) || item.bom.iter().any(|l| l.line.as_str() == line)
+                {
+                    return Err(invalid(
+                        &format!("{at}/line"),
+                        "a line's ID is 13 base32 characters, once per item",
+                    ));
                 }
                 let child = text_at(lo.take("item")?, &format!("{at}/item"))?;
-                let child = ItemRef::parse(&child)
-                    .ok_or_else(|| invalid(&format!("{at}/item"), "an item ID, or <catalogue project ID>:<item ID>"))?;
+                let child = ItemRef::parse(&child).ok_or_else(|| {
+                    invalid(
+                        &format!("{at}/item"),
+                        "an item ID, or <catalogue project ID>:<item ID>",
+                    )
+                })?;
                 let quantity = text_at(lo.take("quantity")?, &format!("{at}/quantity"))?;
                 let mut opt = |k: &str| -> Result<Option<String>> {
-                    lo.take_opt(k).map(|x| text_at(x, &format!("{at}/{k}"))).transpose()
+                    lo.take_opt(k)
+                        .map(|x| text_at(x, &format!("{at}/{k}")))
+                        .transpose()
                 };
-                let (unit, find, refdes, notes) = (opt("unit")?, opt("find")?, opt("refdes")?, opt("notes")?);
+                let (unit, find, refdes, notes) =
+                    (opt("unit")?, opt("find")?, opt("refdes")?, opt("notes")?);
                 lo.finish()?;
                 item.bom.push(Line {
                     line: Id::parse(&line, "line").expect("checked"),
@@ -266,17 +333,24 @@ impl Item {
             }
         }
         if let Some(d) = o.take_opt("documents") {
-            let list = d.as_array().ok_or_else(|| invalid("/documents", "documents must be a list"))?;
+            let list = d
+                .as_array()
+                .ok_or_else(|| invalid("/documents", "documents must be a list"))?;
             for (i, x) in list.iter().enumerate() {
                 let at = format!("/documents/{i}");
-                let id = x.as_str().and_then(|s| Id::parse(s, "document").ok())
+                let id = x
+                    .as_str()
+                    .and_then(|s| Id::parse(s, "document").ok())
                     .ok_or_else(|| invalid(&at, "a document ID"))?;
                 item.documents.push(id);
             }
         }
         for (k, slot) in [("source", &mut item.source), ("extra", &mut item.extra)] {
             if let Some(x) = o.take_opt(k) {
-                *slot = x.as_object().cloned().ok_or_else(|| invalid(&format!("/{k}"), "an object keyed by import name"))?;
+                *slot = x
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| invalid(&format!("/{k}"), "an object keyed by import name"))?;
             }
         }
         o.finish()?;
@@ -287,8 +361,12 @@ impl Item {
     pub fn read(id: &Id, bytes: &[u8]) -> Result<Item> {
         let path = crate::ids::item_path(id);
         let at = |e: Error| e.with("item", id).with("path", &path);
-        let text = std::str::from_utf8(bytes)
-            .map_err(|_| at(Error::new(Code::InvalidJson, format!("{path} is not UTF-8"))))?;
+        let text = std::str::from_utf8(bytes).map_err(|_| {
+            at(Error::new(
+                Code::InvalidJson,
+                format!("{path} is not UTF-8"),
+            ))
+        })?;
         let v = crate::canonical::parse(text).map_err(at)?;
         if let Some(e) = ryu_doc::files::conflicted_in(&v, &path, crate::catalogue::NAME) {
             return Err(at(e));
@@ -330,7 +408,10 @@ pub(crate) mod tests {
         assert!(crate::canonical::is_canonical(&text));
         assert_eq!(Item::read(&id, text.as_bytes()).unwrap(), item);
         let bare = Item::new("100-1");
-        assert_eq!(bare.to_json(), json!({"format": 1, "kind": "ryuplm.item", "number": "100-1"}));
+        assert_eq!(
+            bare.to_json(),
+            json!({"format": 1, "kind": "ryuplm.item", "number": "100-1"})
+        );
     }
 
     #[test]
@@ -338,26 +419,79 @@ pub(crate) mod tests {
         let id = Id::parse("k3v9q2m8x4c1p", "item").unwrap();
         let cases: Vec<(Value, &str)> = vec![
             (json!({"format": 1, "kind": "ryuplm.item"}), "/number"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": ""}), "/number"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": " x"}), "/number"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": "x", "unit": "pcs"}), "/unit"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": "x", "make_buy": "both"}), "/make_buy"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": "x", "properties": []}), "/properties"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": "x", "status": "released"}), "/status"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": "x",
-                "links": [{"product": "ryudfm", "project": "0123456789abcdef0123456789abcdef", "part": "p"}]}), "/links/0/product"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": "x",
-                "bom": [{"line": "L", "item": "k3v9q2m8x4c1p", "quantity": "1"}]}), "/bom/0/line"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": "x",
-                "bom": [{"line": "0000000000000", "item": "k3v9q2m8x4c1p", "quantity": 1}]}), "/bom/0/quantity"),
-            (json!({"format": 1, "kind": "ryuplm.item", "number": "x",
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": ""}),
+                "/number",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": " x"}),
+                "/number",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": "x", "unit": "pcs"}),
+                "/unit",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": "x", "make_buy": "both"}),
+                "/make_buy",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": "x", "properties": []}),
+                "/properties",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": "x", "status": "released"}),
+                "/status",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": "x",
+                "links": [{"product": "ryudfm", "project": "0123456789abcdef0123456789abcdef", "part": "p"}]}),
+                "/links/0/product",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": "x",
+                "bom": [{"line": "L", "item": "k3v9q2m8x4c1p", "quantity": "1"}]}),
+                "/bom/0/line",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": "x",
+                "bom": [{"line": "0000000000000", "item": "k3v9q2m8x4c1p", "quantity": 1}]}),
+                "/bom/0/quantity",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.item", "number": "x",
                 "bom": [{"line": "0000000000000", "item": "0123456789abcdef0123456789abcdef:k3v9q2m8x4c1p", "quantity": "1"},
-                        {"line": "0000000000000", "item": "k3v9q2m8x4c1p", "quantity": "1"}]}), "/bom/1/line"),
+                        {"line": "0000000000000", "item": "k3v9q2m8x4c1p", "quantity": "1"}]}),
+                "/bom/1/line",
+            ),
         ];
         for (v, at) in cases {
             let e = Item::read(&id, crate::canonical::to_string(&v).as_bytes()).unwrap_err();
-            assert_eq!((e.code, e.details["pointer"].clone()), (Code::InvalidDocument, json!(at)), "{v}");
+            assert_eq!(
+                (e.code, e.details["pointer"].clone()),
+                (Code::InvalidDocument, json!(at)),
+                "{v}"
+            );
             assert_eq!(e.details["item"], "k3v9q2m8x4c1p");
         }
+    }
+    #[test]
+    fn renumbering_keeps_the_old_number() {
+        let mut i = Item::new("A-1");
+        i.renumber("B-1").unwrap();
+        assert_eq!(
+            (i.number.as_str(), i.previous_numbers.clone()),
+            ("B-1", vec!["A-1".to_owned()])
+        );
+        i.renumber("C-1").unwrap();
+        assert_eq!(i.previous_numbers, ["B-1", "A-1"]);
+        // Back to an old number: it leaves the list, the current one joins.
+        i.renumber("A-1").unwrap();
+        assert_eq!(
+            (i.number.as_str(), i.previous_numbers.clone()),
+            ("A-1", vec!["C-1".to_owned(), "B-1".to_owned()])
+        );
+        assert_eq!(i.renumber("A-1").unwrap_err().code, Code::InvalidParam);
+        assert_eq!(i.renumber(" bad").unwrap_err().code, Code::InvalidParam);
     }
 }
