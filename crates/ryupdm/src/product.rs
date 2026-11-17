@@ -34,9 +34,9 @@ pub struct PartFiles {
 }
 
 /// What a part is, as its product says (design 629): ryucad's parts and
-/// assemblies, ryueda's designs and library components. ryuplm's `item`
-/// joins the same way. Written by name (`part`, `assembly`, `design`,
-/// `component`).
+/// assemblies, ryueda's designs and library components, and ryuplm's
+/// `item` (design 734). Written by name (`part`, `assembly`, `design`,
+/// `component`, `item`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartKind {
@@ -44,6 +44,8 @@ pub enum PartKind {
     Assembly,
     Design,
     Component,
+    /// ryuplm's: an item of a catalogue (design 734).
+    Item,
 }
 
 impl PartKind {
@@ -53,6 +55,7 @@ impl PartKind {
             PartKind::Assembly => "assembly",
             PartKind::Design => "design",
             PartKind::Component => "component",
+            PartKind::Item => "item",
         }
     }
 
@@ -63,6 +66,7 @@ impl PartKind {
             PartKind::Assembly,
             PartKind::Design,
             PartKind::Component,
+            PartKind::Item,
         ]
         .into_iter()
         .find(|k| k.as_str() == s)
@@ -140,11 +144,12 @@ mod tests {
             (PartKind::Assembly, "assembly"),
             (PartKind::Design, "design"),
             (PartKind::Component, "component"),
+            (PartKind::Item, "item"),
         ] {
             assert_eq!(k.as_str(), s);
             assert_eq!(PartKind::parse(s), Some(k));
             assert_eq!(serde_json::to_value(k).unwrap(), s);
         }
-        assert_eq!(PartKind::parse("item"), None);
+        assert_eq!(PartKind::parse("document"), None);
     }
 }
