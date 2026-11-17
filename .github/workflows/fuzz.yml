@@ -98,9 +98,10 @@ jobs:
           src=fuzz/corpus/$TARGET; dst=$RUNNER_TEMP/sample/$TARGET
           mkdir -p "$dst"
           find "$src" -maxdepth 1 -type f -printf '%s %f\n' | LC_ALL=C sort -k1,1n -k2,2 > "$RUNNER_TEMP/by_size"
-          sed -n "1,${SMALL}p" "$RUNNER_TEMP/by_size" | cut -d' ' -f2 > "$RUNNER_TEMP/small"
-          sed -n "$((SMALL + 1)),\$p" "$RUNNER_TEMP/by_size" | cut -d' ' -f2 | LC_ALL=C sort > "$RUNNER_TEMP/rest"
-          sed -n "1,${MORE}p" "$RUNNER_TEMP/rest" > "$RUNNER_TEMP/more"
+          cut -d' ' -f2 "$RUNNER_TEMP/by_size" > "$RUNNER_TEMP/names"
+          head -n "$SMALL" "$RUNNER_TEMP/names" > "$RUNNER_TEMP/small"
+          tail -n +"$((SMALL + 1))" "$RUNNER_TEMP/names" | LC_ALL=C sort > "$RUNNER_TEMP/rest"
+          head -n "$MORE" "$RUNNER_TEMP/rest" > "$RUNNER_TEMP/more"
           { grep "^$TARGET/" fuzz/pinned.txt | cut -d/ -f2- || true; } > "$RUNNER_TEMP/pinned"
           cat "$RUNNER_TEMP/small" "$RUNNER_TEMP/more" "$RUNNER_TEMP/pinned" | LC_ALL=C sort -u |
             while read -r f; do if [ -f "$src/$f" ]; then cp "$src/$f" "$dst/"; fi; done
