@@ -2771,6 +2771,87 @@ pub fn model(
     }
 }
 
+/// Which leaf occurrences of an assembly differ between two builds of
+/// it, by path as [`crate::assembly::path_text`] writes it, each list in
+/// path order: `added` and `removed` by path; `moved` where both have the
+/// path and its pose's bits differ; `changed` where its solids (founder
+/// and body hash, in order) or its `rev` differ. A path may be both
+/// `moved` and `changed`. What `diff --model` reports per assembly, and
+/// what `interference --changed-since` scopes to (#840).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Changed {
+    pub added: Vec<String>,
+    pub moved: Vec<String>,
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl Changed {
+    /// Nothing differs.
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty()
+            && self.moved.is_empty()
+            && self.changed.is_empty()
+            && self.removed.is_empty()
+    }
+
+    /// The paths whose pairs may have a new verdict: added, moved or
+    /// changed, each once. A removed path places nothing any more.
+    pub fn touched(&self) -> BTreeSet<&str> {
+        self.added
+            .iter()
+            .chain(&self.moved)
+            .chain(&self.changed)
+            .map(String::as_str)
+            .collect()
+    }
+}
+
+/// [`Changed`] from assembly model `then` to `now`.
+pub fn changed_occurrences(then: &crate::assembly::Model, now: &crate::assembly::Model) -> Changed {
+    changed_between(&then.occurrences, &now.occurrences)
+}
+
+/// Occurrences by their path's text.
+fn by_path(side: &[crate::assembly::Occurrence]) -> BTreeMap<String, &crate::assembly::Occurrence> {
+    side.iter()
+        .map(|o| (crate::assembly::path_text(&o.path), o))
+        .collect()
+}
+
+/// [`Changed`] from occurrences `a` to `b`.
+fn changed_between(
+    a: &[crate::assembly::Occurrence],
+    b: &[crate::assembly::Occurrence],
+) -> Changed {
+    use crate::assembly::Occurrence;
+    let (x, y) = (by_path(a), by_path(b));
+    let hashes = |o: &Occurrence| -> Vec<String> {
+        o.solids
+            .iter()
+            .map(|s| format!("{} {}", s.founder, s.built.hash))
+            .collect()
+    };
+    let (mut moved, mut changed) = (Vec::new(), Vec::new());
+    for (k, p) in &x {
+        let Some(q) = y.get(k) else {
+            continue;
+        };
+        if p.pose != q.pose {
+            moved.push(k.clone());
+        }
+        if hashes(p) != hashes(q) || p.rev != q.rev {
+            changed.push(k.clone());
+        }
+    }
+    Changed {
+        added: y.keys().filter(|k| !x.contains_key(*k)).cloned().collect(),
+        moved,
+        changed,
+        removed: x.keys().filter(|k| !y.contains_key(*k)).cloned().collect(),
+    }
+}
+
 /// An assembly's occurrences on each side, by path: `added`, `removed`,
 /// `moved` (its pose differs) and `changed` (its part's solids differ);
 /// each of those with both its `sides` as [`crate::assembly::Occurrence`]
@@ -2780,54 +2861,26 @@ pub fn model(
 /// paints and ghosts (issue #109). `None` when nothing differs, unless
 /// `all`.
 fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
-    use crate::assembly::{Occurrence, path_text};
+    use crate::assembly::Occurrence;
     if a.occurrences.is_empty() && b.occurrences.is_empty() {
         return None;
     }
-    let by_path = |side: &'_ Built| -> BTreeMap<String, Occurrence> {
-        side.occurrences
-            .iter()
-            .map(|o| (path_text(&o.path), o.clone()))
-            .collect()
-    };
-    let (x, y) = (by_path(a), by_path(b));
-    let added: Vec<&String> = y.keys().filter(|k| !x.contains_key(*k)).collect();
-    let removed: Vec<&String> = x.keys().filter(|k| !y.contains_key(*k)).collect();
-    let both: Vec<(&String, &Occurrence, &Occurrence)> = x
-        .iter()
-        .filter_map(|(k, o)| Some((k, o, y.get(k)?)))
-        .collect();
-    let moved: Vec<&String> = both
-        .iter()
-        .filter(|(_, p, q)| p.pose != q.pose)
-        .map(|(k, _, _)| *k)
-        .collect();
-    let hashes = |o: &Occurrence| -> Vec<String> {
-        o.solids
-            .iter()
-            .map(|s| format!("{} {}", s.founder, s.built.hash))
-            .collect()
-    };
-    let changed: Vec<&String> = both
-        .iter()
-        .filter(|(_, p, q)| hashes(p) != hashes(q) || p.rev != q.rev)
-        .map(|(k, _, _)| *k)
-        .collect();
-    let same = added.is_empty() && removed.is_empty() && moved.is_empty() && changed.is_empty();
-    if same && !all {
+    let c = changed_between(&a.occurrences, &b.occurrences);
+    if c.is_empty() && !all {
         return None;
     }
+    let (x, y) = (by_path(&a.occurrences), by_path(&b.occurrences));
     let mut sides = serde_json::Map::new();
     let mut differ = serde_json::Map::new();
-    let listed: BTreeSet<&String> = added
+    let listed: BTreeSet<&String> = c
+        .added
         .iter()
-        .chain(&removed)
-        .chain(&moved)
-        .chain(&changed)
-        .copied()
+        .chain(&c.removed)
+        .chain(&c.moved)
+        .chain(&c.changed)
         .collect();
     for path in listed {
-        let (p, q) = (x.get(path), y.get(path));
+        let (p, q) = (x.get(path).copied(), y.get(path).copied());
         let side = |o: Option<&Occurrence>| o.map_or(Value::Null, Occurrence::to_json);
         sides.insert(path.clone(), json!({"from": side(p), "to": side(q)}));
         let (Some(p), Some(q)) = (p, q) else {
@@ -2845,8 +2898,8 @@ fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
         }
     }
     Some(
-        json!({"added": added, "removed": removed, "moved": moved, "changed": changed,
-                "sides": sides, "bodies": differ}),
+        json!({"added": c.added, "removed": c.removed, "moved": c.moved,
+                "changed": c.changed, "sides": sides, "bodies": differ}),
     )
 }
 
@@ -5660,3 +5713,4 @@ mod tests {
         assert!(!t.contains("thread.size"), "{t}");
     }
 }
+
