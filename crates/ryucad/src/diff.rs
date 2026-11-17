@@ -5714,3 +5714,199 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod changed_occurrences_tests {
+    //! [`super::changed_occurrences`] on the edits a script makes: an
+    //! instance added or removed, one moved by its mate, a subassembly
+    //! moved, a part edited under three instances, a parameter, an
+    //! insert.
+    use super::{Changed, changed_occurrences};
+    use crate::assembly::Model;
+    use crate::assembly::tests::{id, project};
+    use crate::doc::assembly::Rev;
+    use crate::session::Session;
+    use crate::testing::call;
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+
+    fn ok(s: &mut Session, method: &str, params: Value) {
+        call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"));
+    }
+
+    fn model(s: &mut Session, asm: &str) -> Arc<Model> {
+        s.model(&id(asm), &Rev::Working).unwrap()
+    }
+
+    /// Places `of` in `asm` as `inst` at `origin` (mm).
+    fn place(s: &mut Session, asm: &str, inst: &str, of: &str, origin: [f64; 3]) {
+        ok(
+            s,
+            "feature.add",
+            json!({"part": asm, "type": "instance", "id": inst, "of": of,
+                   "placement": {"origin": origin}}),
+        );
+    }
+
+    fn paths(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// `project()`'s `frame` with the plate as `p1` and the bolt as `b1`,
+    /// `b2` and `b3`.
+    fn frame() -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = project();
+        place(&mut s, "frame", "p1", "plate", [0.0; 3]);
+        for (inst, x) in [("b1", 10.0), ("b2", 30.0), ("b3", 50.0)] {
+            place(&mut s, "frame", inst, "bolt", [x, 10.0, 5.0]);
+        }
+        (dir, s)
+    }
+
+    #[test]
+    fn the_same_build_changes_nothing() {
+        let (_dir, mut s) = frame();
+        let (a, b) = (model(&mut s, "frame"), model(&mut s, "frame"));
+        let c = changed_occurrences(&a, &b);
+        assert!(c.is_empty(), "{c:?}");
+        assert_eq!(c, Changed::default());
+        assert!(c.touched().is_empty());
+    }
+
+    #[test]
+    fn an_added_instance_is_added() {
+        let (_dir, mut s) = frame();
+        let then = model(&mut s, "frame");
+        place(&mut s, "frame", "b4", "bolt", [70.0, 10.0, 5.0]);
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(
+            c,
+            Changed {
+                added: paths(&["b4"]),
+                ..Changed::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_removed_instance_is_removed_and_touches_nothing() {
+        let (_dir, mut s) = frame();
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b2"}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(c.removed, paths(&["b2"]), "{c:?}");
+        assert!(c.touched().is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn a_part_edited_under_three_instances_changes_all_three() {
+        let (_dir, mut s) = frame();
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(
+            c,
+            Changed {
+                changed: paths(&["b1", "b2", "b3"]),
+                ..Changed::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_parameter_changes_the_instances_of_what_reads_it() {
+        let (_dir, mut s) = frame();
+        ok(
+            &mut s,
+            "param.set",
+            json!({"part": "bolt", "parameters": {"r": "3 mm"}}),
+        );
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": "r"}}),
+        );
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "param.set",
+            json!({"part": "bolt", "parameters": {"r": "4 mm"}}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(c.changed, paths(&["b1", "b2", "b3"]), "{c:?}");
+        assert!(c.moved.is_empty() && c.added.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn an_insert_changes_with_what_it_inserts() {
+        let (_dir, mut s) = frame();
+        ok(&mut s, "part.create", json!({"part": "kit"}));
+        ok(
+            &mut s,
+            "feature.add",
+            json!({"part": "kit", "type": "insert", "id": "i", "of": "bolt", "rev": "working"}),
+        );
+        place(&mut s, "frame", "k1", "kit", [80.0, 10.0, 5.0]);
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(c.changed, paths(&["b1", "b2", "b3", "k1"]), "{c:?}");
+    }
+
+    #[test]
+    fn a_moved_subassembly_moves_every_leaf_under_it() {
+        let (_dir, mut s) = frame();
+        ok(
+            &mut s,
+            "part.create",
+            json!({"part": "pair", "kind": "assembly"}),
+        );
+        place(&mut s, "pair", "l", "bolt", [0.0; 3]);
+        place(&mut s, "pair", "r", "bolt", [10.0, 0.0, 0.0]);
+        place(&mut s, "frame", "s1", "pair", [0.0, 40.0, 5.0]);
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "s1", "placement": {"origin": [0, 45, 5]}}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(
+            c,
+            Changed {
+                moved: paths(&["s1/l", "s1/r"]),
+                ..Changed::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_mate_driven_elsewhere_moves_its_instance() {
+        let (_dir, mut s) = crate::mate::tests::hinged();
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": "30 deg"}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(
+            c,
+            Changed {
+                moved: paths(&["pin"]),
+                ..Changed::default()
+            }
+        );
+    }
+}
