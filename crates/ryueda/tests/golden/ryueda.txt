@@ -1,4 +1,7 @@
 # ryueda's golden hashes: UPDATE_GOLDEN=1 cargo test -p ryueda --test determinism
+board.breakout.bottom.svg 72c1067b9270d02fdf99d5a4f4538fce
+board.breakout.show f44489a70dac3b507b133230e96a3433
+board.breakout.top.png 04d99bb31445a92787314dfbb48916df
 breakout.erc f84678494c89aa19a5910ab3c7a8330e
 breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
 diff.breakout c7f4564101cf7ec93b6e49d7814def43
