@@ -76,8 +76,8 @@ pub fn rows(occs: &[Occ], b: &BoardFiles) -> (Vec<Row>, Vec<Value>) {
             }),
         }
     }
-    rows.sort_by(|a, b| designator_key(&a.designator).cmp(&designator_key(&b.designator)));
-    left.sort_by(|a, b| designator_key(&a.0).cmp(&designator_key(&b.0)));
+    rows.sort_by_key(|r| designator_key(&r.designator));
+    left.sort_by_key(|l| designator_key(&l.0));
     (rows, left.into_iter().map(|(_, v)| v).collect())
 }
 
@@ -270,7 +270,7 @@ mod tests {
         let with_footprint = occs.iter().filter(|o| o.footprint.is_some()).count();
         assert_eq!(rows.len() + left.len(), with_footprint, "{left:?}");
         let mut sorted = rows.clone();
-        sorted.sort_by(|a, b| designator_key(&a.designator).cmp(&designator_key(&b.designator)));
+        sorted.sort_by_key(|r| designator_key(&r.designator));
         assert_eq!(rows, sorted);
     }
 }
