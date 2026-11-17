@@ -88,7 +88,9 @@ jobs:
         # at least libFuzzer's 2,048 and at most 6,144: an hour on
         # cox-worker-4 under these options for feature (3,038 MB), sweep
         # (2,718 MB), self_union (2,577) and offset (1,839, #746); for
-        # tolerant the nightlies' 2,027 (its hour stops at #905's crashes);
+        # tolerant the nightlies' 2,027 (its hour stops at #905's crashes)
+        # until 30.D's third dispatch passed 4,096 under ASan alone (its
+        # corpus stays near 80 MB in release), so 6,144;
         # and the largest `rss:` of the last 15 runs' green jobs for the
         # rest (boolean 2,215, sheet 1,819, drawing 1,423). The peaks are
         # in docs/claude/kernel-work.md (Fuzzing memory). -malloc_limit_mb
@@ -100,7 +102,7 @@ jobs:
         # rest keep libFuzzer's 1,200 s.
         env:
           ASAN_OPTIONS: quarantine_size_mb=64:allocator_release_to_os_interval_ms=1000
-          RSS_LIMIT_MB: ${{ fromJSON('{"feature":6144,"sweep":4096,"boolean":4096,"offset":4096,"tolerant":4096,"self_union":4096,"sheet":4096,"drawing":4096}')[matrix.target] || 2048 }}
+          RSS_LIMIT_MB: ${{ fromJSON('{"feature":6144,"sweep":4096,"boolean":4096,"offset":4096,"tolerant":6144,"self_union":4096,"sheet":4096,"drawing":4096}')[matrix.target] || 2048 }}
           TIMEOUT_S: ${{ fromJSON('{"feature":600,"sweep":600,"offset":600,"tweak":600,"edit":600,"projection":600,"self_union":600,"tolerant":600}')[matrix.target] || 1200 }}
         run: >-
           cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600

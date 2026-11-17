@@ -908,6 +908,28 @@ fn the_tolerant_boolean_that_ran_out_of_memory_ends_typed() {
     assert!(s < RUNAWAY, "{s} s");
 }
 
+/// The `tolerant` target's out-of-memory unit in 30.D's third branch
+/// dispatch (run 44041318442, `oom-cc5efaca…`, 4,106 MB against its
+/// 4,096 MB limit under ASan): a tolerant boolean (first byte `0xfe`,
+/// even). In release it builds in 0.1 s at 10 MB: the session's RSS was
+/// ASan's (`kernel-work.md`, Fuzzing memory). It must refuse typed or
+/// build a sound body, in bounded time.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_tolerant_boolean_of_the_third_dispatch_ends() {
+    let _timed = timed();
+    let hex = concat!(
+        "fefefe0a17171717171717171717171717171717171717171717171717171717",
+        "171717171717171717c6171717171717171717171717171717",
+    );
+    let t = std::time::Instant::now();
+    let out = tolerant_run(&bytes(hex));
+    let s = t.elapsed().as_secs_f64();
+    eprintln!("{}…: {out:?} in {s:.1} s", &hex[..8]);
+    assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+    assert!(s < RUNAWAY, "{s} s");
+}
+
 /// #890: the `tolerant` target's find of 2026-11-14 (run 43551143856,
 /// `crash-d32c30b9…`): a tolerant boolean (first byte `0x1a`, even)
 /// whose result had face 0's domain bad (`BadDomain`). It must refuse
