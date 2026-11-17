@@ -287,7 +287,6 @@ pub fn bodies(model: &Model, t: &Target) -> Vec<BodyKey> {
 
 /// The occurrences of `part` in the assemblies the window shows, each
 /// with its assembly.
-
 fn placed<'a>(model: &'a Model, part: &str) -> Vec<(&'a str, &'a Occurrence)> {
     let mut out = Vec::new();
     for a in model.shown() {
@@ -305,7 +304,6 @@ fn placed<'a>(model: &'a Model, part: &str) -> Vec<(&'a str, &'a Occurrence)> {
 }
 
 /// A target's box: its bodies' and sketches', and its entities' own.
-
 fn boxed(model: &Model, picker: &Picker, t: &Target) -> Option<Bounds> {
     let mut b = union_all(
         bodies(model, t)
