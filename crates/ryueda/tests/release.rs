@@ -11,9 +11,10 @@ fn root() -> PathBuf {
 }
 
 /// Runs `scripts/stamp-version.sh ARG` on a copy of the workspace's
-/// manifests: its exit code, what it printed, and the root manifest after.
+/// manifests and the Python client's `pyproject.toml`: its exit code, what
+/// it printed, and the root manifest and `python/pyproject.toml` after.
 #[cfg(unix)]
-fn stamp(arg: &str) -> (i32, String, String) {
+fn stamp(arg: &str) -> (i32, String, String, String) {
     let tmp = tempfile::tempdir().unwrap();
     let root = root();
     std::fs::copy(root.join("Cargo.toml"), tmp.path().join("Cargo.toml")).unwrap();
@@ -30,6 +31,12 @@ fn stamp(arg: &str) -> (i32, String, String) {
             std::fs::copy(&manifest, to.join("Cargo.toml")).unwrap();
         }
     }
+    std::fs::create_dir_all(tmp.path().join("python")).unwrap();
+    std::fs::copy(
+        root.join("python/pyproject.toml"),
+        tmp.path().join("python/pyproject.toml"),
+    )
+    .unwrap();
     let out = std::process::Command::new("sh")
         .arg(root.join("scripts/stamp-version.sh"))
         .arg(arg)
@@ -37,10 +44,12 @@ fn stamp(arg: &str) -> (i32, String, String) {
         .output()
         .unwrap();
     let manifest = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    let pyproject = std::fs::read_to_string(tmp.path().join("python/pyproject.toml")).unwrap();
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr),
         manifest,
+        pyproject,
     )
 }
 
@@ -55,7 +64,7 @@ fn stamp_version_reads_every_lines_tags() {
         ("ryudfm-v1.2.3", "1.2.3"),
         ("ryudfm-v0.1.0-pre.2", "0.1.0-pre.2"),
     ] {
-        let (code, printed, manifest) = stamp(arg);
+        let (code, printed, manifest, _) = stamp(arg);
         assert_eq!(code, 0, "{arg}: {printed}");
         assert!(
             printed.contains(&format!("stamped {version}")),
@@ -68,9 +77,64 @@ fn stamp_version_reads_every_lines_tags() {
     }
     // Another product's tag is no version.
     for arg in ["ryucad-v1.2.3", "ryueda-1.2.3", "ryudfm-1.2.3", "vx"] {
-        let (code, printed, _) = stamp(arg);
+        let (code, printed, _, _) = stamp(arg);
         assert_eq!(code, 2, "{arg}: {printed}");
         assert!(printed.contains("not a version"), "{arg}: {printed}");
+    }
+}
+
+/// The version line of a `pyproject.toml`: its first `version = "…"`.
+#[cfg(unix)]
+fn python_version(pyproject: &str) -> &str {
+    pyproject
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("a version line")
+}
+
+/// Design 697: ryucad's tags stamp the Python client in PEP 440's form;
+/// a bare version (every release workflow's build jobs, full.yml's
+/// 9.9.9-ci) and the other lines' tags leave it at 0.0.0.
+#[cfg(unix)]
+#[test]
+fn ryucads_tags_stamp_the_python_client_in_pep_440() {
+    for (arg, python) in [
+        ("v1.2.3", "1.2.3"),
+        ("v0.11.0-pre.4", "0.11.0rc4"),
+        ("v0.11.0-pre.0", "0.11.0rc0"),
+        ("v0.0.0-dev", "0.0.0.dev0"),
+        ("1.2.3", "0.0.0"),
+        ("0.11.0-pre.4", "0.0.0"),
+        ("9.9.9-ci", "0.0.0"),
+        ("ryueda-v1.2.3", "0.0.0"),
+        ("ryudfm-v0.1.0-pre.2", "0.0.0"),
+    ] {
+        let (code, printed, _, pyproject) = stamp(arg);
+        assert_eq!(code, 0, "{arg}: {printed}");
+        assert_eq!(python_version(&pyproject), python, "{arg}: {printed}");
+        assert_eq!(
+            printed.contains(&format!("stamped python {python}")),
+            python != "0.0.0",
+            "{arg}: {printed}"
+        );
+    }
+    // Any other suffix has no PEP 440 form here: refused before anything
+    // is written, Cargo's files included.
+    for arg in [
+        "v12.34.56-rc.1",
+        "v1.2.3-pre.01",
+        "v1.2.3-pre",
+        "v1.2.3-dev.1",
+    ] {
+        let (code, printed, manifest, pyproject) = stamp(arg);
+        assert_eq!(code, 2, "{arg}: {printed}");
+        assert!(printed.contains("no PEP 440 form"), "{arg}: {printed}");
+        assert!(
+            manifest.contains("\nversion = \"0.0.0\""),
+            "{arg}: the workspace was stamped"
+        );
+        assert_eq!(python_version(&pyproject), "0.0.0", "{arg}");
     }
 }
 
@@ -296,6 +360,178 @@ fn ryucads_release_asks_whether_a_tag_is_latest() {
     let w = workflow("release.yml");
     assert!(w.contains("sh scripts/latest-release.sh \"$GITHUB_REF_NAME\""));
     assert!(w.contains("--latest=\"$latest\""));
+}
+
+/// One job of a workflow: its `  <name>:` line and every line up to the
+/// next job's (the next line indented exactly two spaces that isn't a
+/// comment).
+fn job(workflow: &str, name: &str) -> String {
+    let head = format!("  {name}:");
+    let mut lines = workflow.lines().skip_while(|l| *l != head);
+    let first = lines
+        .next()
+        .unwrap_or_else(|| panic!("the workflow has no job {name}"));
+    let mut out = vec![first];
+    out.extend(lines.take_while(|l| {
+        !(l.starts_with("  ") && !l.starts_with("   ") && !l.trim_start().starts_with('#'))
+    }));
+    out.join("\n")
+}
+
+/// The Python client's wheel and sdist are built by one script (design
+/// 697), which PR CI runs and full.yml shellchecks.
+#[test]
+fn the_python_package_is_built_by_python_dist() {
+    assert!(root().join("scripts/python-dist.sh").is_file());
+    let ci = job(&workflow("ci.yml"), "python");
+    assert!(
+        ci.contains("sh scripts/python-dist.sh"),
+        "ci.yml's python job doesn't build with scripts/python-dist.sh"
+    );
+    assert!(
+        !ci.contains("cp LICENSE NOTICE python/"),
+        "ci.yml's python job still copies the licences itself"
+    );
+    assert!(
+        workflow("full.yml")
+            .lines()
+            .any(|l| l.contains("shellcheck") && l.contains("scripts/python-dist.sh")),
+        "full.yml doesn't shellcheck scripts/python-dist.sh"
+    );
+}
+
+/// Design 697: every ryucad release, dry runs included, stamps the tag's
+/// PEP 440 version into the Python client, builds it and runs its unit
+/// tests against the installed wheel, beside `build`; it publishes nothing.
+#[test]
+fn ryucads_release_builds_the_python_package() {
+    let python = job(&workflow("release.yml"), "python");
+    for want in [
+        "needs: version",
+        "sh scripts/stamp-version.sh \"v${{ needs.version.outputs.version }}\"",
+        "version: ${{ steps.v.outputs.version }}",
+        "sh scripts/python-dist.sh",
+        "twine check --strict python/dist/*",
+        "rm -rf python/src",
+        "python -m unittest discover -v -s python/tests",
+        "name: python-dist",
+    ] {
+        assert!(
+            python.contains(want),
+            "release.yml's python job lacks {want}"
+        );
+    }
+    assert!(
+        !python.contains("id-token"),
+        "the python job publishes nothing"
+    );
+    assert!(
+        !job(&workflow("release.yml"), "publish").contains("python"),
+        "the GitHub release mustn't wait on the Python package"
+    );
+}
+
+/// Design 697: a tag uploads the package to TestPyPI by trusted publishing
+/// (OIDC, no token), after the GitHub release, and a re-run doesn't fail
+/// on the upload already made.
+#[test]
+fn ryucads_release_uploads_to_testpypi_by_trusted_publishing() {
+    let testpypi = job(&workflow("release.yml"), "testpypi");
+    for want in [
+        "github.ref_type == 'tag'",
+        "needs.publish.result == 'success'",
+        "needs.python.result == 'success'",
+        "needs: [publish, python]",
+        "name: testpypi",
+        "id-token: write",
+        "name: python-dist",
+        "uses: pypa/gh-action-pypi-publish@release/v1",
+        "repository-url: https://test.pypi.org/legacy/",
+        "skip-existing: true",
+    ] {
+        assert!(
+            testpypi.contains(want),
+            "release.yml's testpypi job lacks {want}"
+        );
+    }
+}
+
+/// Design 697: the wheel TestPyPI serves, with python/src removed, passes
+/// the integration tests against the release's own installed binary on
+/// Linux, macOS and Windows; it publishes nothing.
+#[test]
+fn ryucads_release_verifies_the_package_on_three_platforms() {
+    let verify = job(&workflow("release.yml"), "python-verify");
+    for want in [
+        "needs: [version, python, testpypi, installers]",
+        "needs.testpypi.result == 'success'",
+        "needs.installers.result == 'success'",
+        "{ os: ubuntu-latest, python: \"3.10\" }",
+        "os: macos-latest",
+        "os: windows-latest",
+        "-p install.sh -O - | sh",
+        "Get-Content -Raw install.ps1 | Invoke-Expression",
+        "--no-deps",
+        "--index-url https://test.pypi.org/simple/",
+        "\"ryucad==$PEP440\"",
+        "rm -rf python/src",
+        "ryucad.find()",
+        "-p test_session.py",
+        "RYUCAD_EXE names no ryucad",
+    ] {
+        assert!(
+            verify.contains(want),
+            "release.yml's python-verify job lacks {want}"
+        );
+    }
+    assert!(
+        !verify.contains("id-token"),
+        "python-verify publishes nothing"
+    );
+}
+
+/// Design 697: PyPI only after the GitHub release, the installers and the
+/// TestPyPI verification, by trusted publishing; no release workflow
+/// reads a secret, only these two jobs may mint an OIDC token, and
+/// ryueda's and ryudfm's releases never publish the Python package.
+#[test]
+fn ryucads_release_publishes_to_pypi_by_trusted_publishing() {
+    let release = workflow("release.yml");
+    let pypi = job(&release, "pypi");
+    for want in [
+        "github.ref_type == 'tag'",
+        "needs.python-verify.result == 'success'",
+        "needs: [python-verify]",
+        "name: pypi",
+        "url: https://pypi.org/p/ryucad",
+        "id-token: write",
+        "name: python-dist",
+        "uses: pypa/gh-action-pypi-publish@release/v1",
+        "skip-existing: true",
+    ] {
+        assert!(pypi.contains(want), "release.yml's pypi job lacks {want}");
+    }
+    assert!(
+        !pypi.contains("repository-url"),
+        "the pypi job uploads to PyPI itself"
+    );
+    assert_eq!(
+        release.matches("id-token: write").count(),
+        2,
+        "only testpypi and pypi may mint an OIDC token"
+    );
+    for file in ["release.yml", "ryueda-release.yml", "ryudfm-release.yml"] {
+        let text = workflow(file);
+        for word in ["secrets.", "password:", "api-token"] {
+            assert!(!text.contains(word), "{file} reads a secret ({word})");
+        }
+        if file != "release.yml" {
+            assert!(
+                !text.contains("pypi"),
+                "{file} publishes the Python package"
+            );
+        }
+    }
 }
 
 /// The devcontainer's .debs are cached from main, whose caches every tag's

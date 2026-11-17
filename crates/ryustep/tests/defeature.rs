@@ -85,7 +85,8 @@ const MAX_SIZE: f64 = 2e-3;
 /// the ball's one piece is its whole working sphere (the grown faces meet
 /// it only at points), and no seed yields: the ball's shortcut seed holds
 /// its old face and the NURBS quad's is rule 3's own (moved to ryukei 22,
-/// "a kept ball bounded only by a held seam").
+/// "a kept ball bounded only by a held seam"). Plan 21.D changes neither
+/// (FTC 07 and FTC 10 stop where 21.C left them).
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -703,6 +704,16 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// wall, so neither keeps off the other; it needs an exact cylinder/cone
 /// intersection (#658; moved to ryukei 22). STC 10 (21.D) and FTC 10
 /// (21.C) refuse as before.
+///
+/// Plan 21.D places lone pole vertices by the cycles passing them, and
+/// groups slits to a pole as slits: the same 18 defeature, bit for bit as
+/// on main, and none more. STC 10 #3044's balls were never lone poles
+/// (census VI): each holds a touch on its equator and a slit ending at a
+/// tolerant vertex within reach of its pole, which lifted as a winding
+/// cycle. They split now, and STC 10 now stops at its re-trim's walk,
+/// clipped at working plane `a7b86e65` in the narrowed retry and at rung
+/// 3 (`GapNotHealed` in 20 s; #658; moved to ryukei 22, "STC 10: working
+/// plane clipped in the narrowed retry").
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),

@@ -107,7 +107,8 @@ pub(crate) fn split(ops: &[Body], table: &Table, f: FaceRef) -> Result<Vec<Piece
         size: (corners.max() - corners.min()).length(),
         far: false,
     };
-    if let Some(pieces) = arr.walk().and_then(|c| arr.group(f, &c, &lone)) {
+    let near = arr.walk();
+    if let Some(pieces) = near.as_ref().and_then(|c| arr.group(f, c, &lone, false)) {
         return Ok(pieces);
     }
     // A stretch tangent to a boundary arc at their vertex, starting a
@@ -117,7 +118,18 @@ pub(crate) fn split(ops: &[Body], table: &Table, f: FaceRef) -> Result<Vec<Piece
     // every face the near order walks keeps its pieces.
     let far = Arrangement { far: true, ..arr };
     let cycles = far.walk().ok_or_else(uncertain)?;
-    far.group(f, &cycles, &lone).ok_or_else(uncertain)
+    if let Some(pieces) = far.group(f, &cycles, &lone, false) {
+        return Ok(pieces);
+    }
+    // Slits (plan 21.D, #658): a cycle holding both darts of every arc it
+    // runs along bounds nothing on the surface, but one that turns back
+    // at a pole lifts round the pole's whole line, as a winding cycle
+    // (STC 10's balls: a slit ending at a tolerant vertex within reach of
+    // a pole). Grouped again, near order first, with such cycles as the
+    // slits they are; only where both orders refused.
+    near.and_then(|c| arr.group(f, &c, &lone, true))
+        .or_else(|| far.group(f, &cycles, &lone, true))
+        .ok_or_else(uncertain)
 }
 
 /// One way along an arc: a global edge, the sense it is run, its end
@@ -226,6 +238,10 @@ enum Node {
     Pole {
         sign: f64,
         free: usize,
+        /// The collapsed row of the domain it is, `[k, e]`: end `e` of
+        /// parameter `k` (a cone's one apex is `[1, 0]`). Vertices at one
+        /// row are at one pole (plan 21.D).
+        row: [usize; 2],
     },
 }
 
@@ -240,10 +256,12 @@ impl Arrangement<'_> {
                 for sign in [1.0, -1.0] {
                     let pole = f.origin() + f.z().get() * (s.radius() * sign);
                     if pole.distance(v.point) <= reach {
-                        // The outward normal at the pole is along `sign z`.
+                        // The outward normal at the pole is along `sign z`;
+                        // `+z` is the top of `v`.
                         return Node::Pole {
                             sign: -sign * self.sigma,
                             free: 0,
+                            row: [1, usize::from(sign > 0.0)],
                         };
                     }
                 }
@@ -257,6 +275,7 @@ impl Arrangement<'_> {
                     Node::Pole {
                         sign: self.sigma,
                         free: 0,
+                        row: [1, 0],
                     }
                 } else {
                     Node::Point
@@ -314,6 +333,7 @@ impl Arrangement<'_> {
                 return Node::Pole {
                     sign: if c > 0.0 { -1.0 } else { 1.0 },
                     free,
+                    row: [k, e],
                 };
             }
         }
@@ -709,7 +729,7 @@ impl Arrangement<'_> {
         };
         match self.node(prev.to) {
             Node::Point => Vector2::new(snap(end.x - start.x, pu), snap(end.y - start.y, pv)),
-            Node::Pole { sign, free }
+            Node::Pole { sign, free, .. }
                 if !matches!(self.surface, Surface::Sphere(_) | Surface::Cone(_)) =>
             {
                 // Along the pole's line by the free parameter: the way
@@ -784,16 +804,34 @@ impl Arrangement<'_> {
     }
 
     /// Groups the cycles into pieces, and places the lone vertices.
-    fn group(&self, f: FaceRef, cycles: &[Vec<usize>], lone: &[GvId]) -> Option<Vec<Piece>> {
+    fn group(
+        &self,
+        f: FaceRef,
+        cycles: &[Vec<usize>],
+        lone: &[GvId],
+        slits: bool,
+    ) -> Option<Vec<Piece>> {
         let (pu, pv) = self.surface.periods();
         let mut lifted = Vec::new();
         for c in cycles {
             let (chains, gaps, shift) = self.lift(c);
-            let wind = [
-                pu.map_or(0, |p| (shift.x / p).round() as i64),
-                pv.map_or(0, |p| (shift.y / p).round() as i64),
-            ];
-            let area = signed_area(&chains) * self.sigma;
+            // With `slits`, a cycle running both ways along every arc it
+            // uses is a slit: it winds nowhere and bounds no area, so it
+            // is placed as a hole is (plan 21.D).
+            let slit = slits && self.is_slit(c);
+            let wind = if slit {
+                [0, 0]
+            } else {
+                [
+                    pu.map_or(0, |p| (shift.x / p).round() as i64),
+                    pv.map_or(0, |p| (shift.y / p).round() as i64),
+                ]
+            };
+            let area = if slit {
+                0.0
+            } else {
+                signed_area(&chains) * self.sigma
+            };
             lifted.push(Lifted {
                 chains,
                 gaps,
@@ -900,46 +938,54 @@ impl Arrangement<'_> {
             let b = self.band_of(p, &lifted, &bands, swap)?;
             Some(band_base + b)
         };
+        // Each cycle's piece: an outer boundary's own, a band's, and a
+        // hole's once placed (plan 21.D).
+        let mut owner: Vec<Option<usize>> = vec![None; cycles.len()];
+        for (k, &o) in outers.iter().enumerate() {
+            owner[o] = Some(k);
+        }
+        for (b, cs) in bands.iter().enumerate() {
+            for &c in cs {
+                owner[c] = Some(band_base + b);
+            }
+        }
         for &h in &holes {
             let p = self.sample(&lifted[h])?;
             let k = place(p, &ges(&cycles[h]))?;
+            owner[h] = Some(k);
             pieces[k].loops.push(arcs_of(&cycles[h]));
         }
         for &g in lone {
-            let v = &self.table.vertices[g];
-            let (u, w) = self.surface.project(v.point).param;
+            let node = self.node(g);
+            let (u, w) = self.surface.project(self.table.vertices[g].point).param;
             let mut p = Point2::new(u, w);
-            if let Node::Pole { free, .. } = self.node(g) {
+            if let Node::Pole { free, .. } = node {
                 // A pole or an apex: a point just inside the face's side,
                 // on a line of the free parameter clear of every vertex.
-                let k = 1 - free;
-                let domain = self.surface.domain();
-                let [x0, x1] = domain[k];
-                let (pu, pv) = self.surface.periods();
                 let all: Vec<usize> = (0..lifted.len()).collect();
-                let (f, x) = if free == 0 { (u, w) } else { (w, u) };
+                let f = if free == 0 { u } else { w };
                 let f = match if free == 0 { pu } else { pv } {
                     Some(per) => self.across(&lifted, &all, free == 1, per).unwrap_or(f),
                     None => f,
                 };
-                let step = 1e-6
-                    * if matches!(self.surface, Surface::Sphere(_) | Surface::Cone(_)) {
-                        1.0
-                    } else {
-                        x1 - x0
-                    };
-                let x = if (x - x0).abs() < (x - x1).abs() {
-                    x + step
-                } else {
-                    x - step
-                };
-                p = if free == 0 {
-                    Point2::new(f, x)
-                } else {
-                    Point2::new(x, f)
-                };
+                p = self.just_inside(p, free, f);
             }
-            let k = place(p, &[])?;
+            let k = match place(p, &[]) {
+                // The region outside every outer boundary takes no pole
+                // a cycle of the face passes: that cycle's piece has the
+                // pole on its boundary (plan 21.D, question 1042).
+                Some(k) if whole && k == whole_index => match node {
+                    Node::Pole { row, .. } => match self.passing_pole(cycles, row).as_slice() {
+                        [c] => owner[*c].unwrap_or(k),
+                        _ => k,
+                    },
+                    Node::Point => k,
+                },
+                Some(k) => k,
+                // Poles in the split (design 683, plan 21.D): only where
+                // that point lies in no piece.
+                None => self.pole_piece(g, node, cycles, &lifted, &owner, &|q| place(q, &[]))?,
+            };
             pieces[k].loops.push(Boundary::Lone(g));
         }
         // The region outside every outer boundary may be no region at all.
@@ -947,6 +993,86 @@ impl Arrangement<'_> {
             pieces.remove(whole_index);
         }
         Some(pieces)
+    }
+
+    /// A point just inside the face's side at pole `p` (its parameters),
+    /// on the free parameter's line at `f`: a millionth (of the other
+    /// parameter's range, on a spline or swept surface) off the nearer
+    /// end of the other parameter's domain.
+    fn just_inside(&self, p: Point2, free: usize, f: f64) -> Point2 {
+        let [x0, x1] = self.surface.domain()[1 - free];
+        let x = if free == 0 { p.y } else { p.x };
+        let step = 1e-6
+            * if matches!(self.surface, Surface::Sphere(_) | Surface::Cone(_)) {
+                1.0
+            } else {
+                x1 - x0
+            };
+        let x = if (x - x0).abs() < (x - x1).abs() {
+            x + step
+        } else {
+            x - step
+        };
+        if free == 0 {
+            Point2::new(f, x)
+        } else {
+            Point2::new(x, f)
+        }
+    }
+
+    /// Whether every dart of cycle `c` has its twin in `c`: an arc inside
+    /// the face walked both ways, or a tree of them (plan 21.D).
+    fn is_slit(&self, c: &[usize]) -> bool {
+        c.iter()
+            .all(|&d| self.darts[d].twin.is_some_and(|t| c.contains(&t)))
+    }
+
+    /// The cycles passing the pole at `row`: those arriving at a vertex
+    /// on it (plan 21.D).
+    fn passing_pole(&self, cycles: &[Vec<usize>], row: [usize; 2]) -> Vec<usize> {
+        let at = |v: GvId| matches!(self.node(v), Node::Pole { row: r, .. } if r == row);
+        passing(cycles, |d| self.darts[d].to, at)
+    }
+
+    /// Where lone vertex `g` at a pole goes when the point `group` places
+    /// it by lies in no piece (design 683, plan 21.D): the piece of the
+    /// one cycle passing that pole, which has the pole on its boundary;
+    /// where none passes, the piece holding a point just inside the
+    /// face's side on the free parameter's line through the middle of the
+    /// span the face's own cycles cover. `None` where two or more cycles
+    /// pass it, or that point can't be placed, as before.
+    fn pole_piece(
+        &self,
+        g: GvId,
+        node: Node,
+        cycles: &[Vec<usize>],
+        lifted: &[Lifted],
+        owner: &[Option<usize>],
+        place: &dyn Fn(Point2) -> Option<usize>,
+    ) -> Option<usize> {
+        let Node::Pole { free, row, .. } = node else {
+            return None;
+        };
+        match self.passing_pole(cycles, row).as_slice() {
+            [c] => return owner[*c],
+            [] => {}
+            _ => return None,
+        }
+        let own: Vec<[f64; 2]> = cycles
+            .iter()
+            .zip(lifted)
+            .filter(|(c, _)| c.iter().any(|&d| self.darts[d].twin.is_none()))
+            .map(|(_, l)| {
+                let (lo, hi) = bounds(&l.chains);
+                if free == 0 {
+                    [lo.x, hi.x]
+                } else {
+                    [lo.y, hi.y]
+                }
+            })
+            .collect();
+        let (u, w) = self.surface.project(self.table.vertices[g].point).param;
+        place(self.just_inside(Point2::new(u, w), free, middle(&own)?))
     }
 
     /// The bands: for each winding cycle with the band on its left above
@@ -1351,6 +1477,28 @@ fn crossings(l: &Lifted, x: f64, swap: bool, period: f64) -> Option<Vec<f64>> {
     Some(out)
 }
 
+/// The cycles with a dart arriving at a vertex `at` picks (`to` is each
+/// dart's end vertex): at a pole's row, the cycles running along its
+/// line, since `carry` passes along the line at every vertex there (plan
+/// 21.D).
+fn passing(
+    cycles: &[Vec<usize>],
+    to: impl Fn(usize) -> GvId,
+    at: impl Fn(GvId) -> bool,
+) -> Vec<usize> {
+    (0..cycles.len())
+        .filter(|&i| cycles[i].iter().any(|&d| at(to(d))))
+        .collect()
+}
+
+/// The middle of the smallest span holding all of `spans`; `None` when
+/// there are none or it has no length (plan 21.D).
+fn middle(spans: &[[f64; 2]]) -> Option<f64> {
+    let lo = spans.iter().map(|s| s[0]).fold(f64::INFINITY, f64::min);
+    let hi = spans.iter().map(|s| s[1]).fold(f64::NEG_INFINITY, f64::max);
+    (lo.is_finite() && hi.is_finite() && hi > lo).then_some((lo + hi) / 2.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1606,5 +1754,211 @@ mod tests {
             pieces_of(&ops, 1, plane_at(Point3::new(0.0, 0.0, s), up)),
             [1, 1]
         );
+    }
+
+    /// Plan 21.D: a pole knows its row of the domain. A sphere's north
+    /// and south poles are the two ends of `v`; a vertex within its reach
+    /// of a pole is that pole; a point off them is none; a cone's apex is
+    /// its one row.
+    #[test]
+    fn poles_know_their_rows() {
+        use crate::boolean::table::Gv;
+        use crate::geom::{Cone, Frame, Sphere};
+        use std::collections::BTreeSet;
+        let gv = |p: Point3| Gv {
+            point: p,
+            tolerance: LINEAR_RESOLUTION,
+            originals: Vec::new(),
+            faces: BTreeSet::new(),
+        };
+        let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+        let table = Table {
+            vertices: vec![
+                gv(Point3::new(0.0, 0.0, 1.0)),
+                gv(Point3::new(0.0, 0.0, -1.0)),
+                gv(Point3::new(1.0, 0.0, 0.0)),
+                gv(Point3::new(0.0, 0.0, 1.0 + 1e-9)),
+            ],
+            ..Table::default()
+        };
+        let arr = Arrangement {
+            table: &table,
+            surface: &ball,
+            sigma: 1.0,
+            darts: &[],
+            size: 2.0,
+            far: false,
+        };
+        assert!(matches!(
+            arr.node(0),
+            Node::Pole {
+                free: 0,
+                row: [1, 1],
+                ..
+            }
+        ));
+        assert!(matches!(
+            arr.node(1),
+            Node::Pole {
+                free: 0,
+                row: [1, 0],
+                ..
+            }
+        ));
+        assert_eq!(arr.node(2), Node::Point);
+        assert!(matches!(arr.node(3), Node::Pole { row: [1, 1], .. }));
+        // A cone's apex.
+        let cone = Surface::Cone(Cone::new(Frame::WORLD, 0.5, 0.4).unwrap());
+        let Surface::Cone(c) = &cone else {
+            unreachable!()
+        };
+        let table = Table {
+            vertices: vec![gv(Point3::new(0.0, 0.0, c.apex_v()))],
+            ..Table::default()
+        };
+        let arr = Arrangement {
+            table: &table,
+            surface: &cone,
+            sigma: 1.0,
+            darts: &[],
+            size: 2.0,
+            far: false,
+        };
+        assert!(matches!(
+            arr.node(0),
+            Node::Pole {
+                free: 0,
+                row: [1, 0],
+                ..
+            }
+        ));
+    }
+
+    /// Plan 21.D: the cycles passing a pole are those with a dart arriving
+    /// at a vertex on its row.
+    #[test]
+    fn cycles_passing_a_pole_arrive_at_it() {
+        // Darts 0 to 5 arrive at vertices 10, 11, 12, 10, 13 and 14;
+        // vertices 10 and 12 are at the pole.
+        let ends: [GvId; 6] = [10, 11, 12, 10, 13, 14];
+        let at = |g: GvId| g == 10 || g == 12;
+        let cycles = vec![vec![0, 1], vec![4, 5], vec![2], vec![3]];
+        assert_eq!(passing(&cycles, |d| ends[d], at), [0, 2, 3]);
+        assert!(passing(&[vec![1, 4, 5]], |d| ends[d], at).is_empty());
+        assert!(passing(&[], |d| ends[d], at).is_empty());
+    }
+
+    /// Plan 21.D: the middle of the spans' hull; none for no spans or no
+    /// length.
+    #[test]
+    fn the_middle_of_spans_is_their_hulls() {
+        assert_eq!(middle(&[[0.25, 1.0], [0.5, 2.25]]), Some(1.25));
+        assert_eq!(middle(&[[-1.0, 3.0]]), Some(1.0));
+        assert_eq!(middle(&[[1.0, 1.0]]), None);
+        assert_eq!(middle(&[]), None);
+    }
+
+    /// STC 10 #3044's sphere faces (#658, census VI, plan 21.D): its
+    /// working body at the rung that refused (rung 2's narrowed retry),
+    /// met at the pairs the re-trim meets them in, with the held seams it
+    /// meets them along (built from the input body's edges as the re-trim
+    /// builds them). Each face holds a lone vertex (a touch on its
+    /// equator) and a slit: an arc inside it, walked both ways, ending at
+    /// a tolerant vertex within reach of a pole, so the slit lifts as a
+    /// winding cycle. It splits, and each lone vertex lies in exactly one
+    /// piece with a boundary of its own (never alone in the region
+    /// outside every outer boundary).
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "slow in a debug build: CI runs it in release"
+    )]
+    fn stc_10s_balls_split_with_slits_to_their_poles() {
+        use crate::boolean::table::{Scope, build_seamed};
+        use crate::intersect::{SeamKind, Seams};
+        use crate::topo::{EdgeId, FaceId, Id};
+        use std::collections::BTreeSet;
+        let input = crate::codec::decode_body(include_bytes!(
+            "../../tests/data/nist_stc_10_pole_input.body"
+        ))
+        .unwrap();
+        let work = crate::codec::decode_body(include_bytes!(
+            "../../tests/data/nist_stc_10_pole_work.body"
+        ))
+        .unwrap();
+        let mut spheres = Vec::new();
+        let mut pairs = BTreeSet::new();
+        let mut held = Vec::new();
+        let face = |s: &str| FaceId::from_index(s.parse().unwrap());
+        for line in include_str!("../../tests/data/nist_stc_10_pole_pairs.txt").lines() {
+            let line = line.split('#').next().unwrap().trim();
+            match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+                [] => {}
+                ["sphere", f] => spheres.push(face(f)),
+                ["seam", e, a, b, kind, stopped] => {
+                    let kind = match *kind {
+                        "Frontier" => SeamKind::Frontier,
+                        "Fixed" => SeamKind::Fixed,
+                        "Running" => SeamKind::Running,
+                        _ => panic!("{line}"),
+                    };
+                    let e = EdgeId::from_index(e.parse().unwrap());
+                    held.push((e, face(a), face(b), kind, *stopped == "true"));
+                }
+                [a, b] => {
+                    let (a, b) = (face(a), face(b));
+                    pairs.insert((a.min(b), a.max(b)));
+                }
+                _ => panic!("{line}"),
+            }
+        }
+        assert_eq!(spheres.len(), 2);
+        // The seams as `WorkBody::seams` makes them, at the pairs met.
+        let mut seams = Seams::new();
+        for (e, wa, wb, kind, stopped) in held {
+            let mut seam =
+                crate::tweak::retrim::body::seam_for(&input, e, (&work, wa), (&work, wb), kind)
+                    .unwrap();
+            seam.stopped = stopped;
+            let key = if wa < wb {
+                (wa, wb)
+            } else {
+                seam.pcurves.swap(0, 1);
+                (wb, wa)
+            };
+            if pairs.contains(&key) {
+                seams.entry(key).or_default().push(seam);
+            }
+        }
+        assert!(!seams.is_empty());
+        let ops = [work];
+        // unmetered: a unit test.
+        let m = crate::work::Meter::free();
+        let t = build_seamed(&ops, Scope::Pairs(&pairs), &seams, &m).unwrap();
+        for f in spheres {
+            let f = FaceRef { op: 0, face: f };
+            let w = &t.faces[&f];
+            let mut lone = w.nodes.clone();
+            lone.extend(w.loops.iter().filter_map(|l| match l {
+                Boundary::Lone(g) => Some(*g),
+                Boundary::Arcs(_) => None,
+            }));
+            assert!(!lone.is_empty(), "{f:?} holds no lone vertex");
+            let pieces = split(&ops, &t, f).unwrap_or_else(|e| panic!("{f:?}: {e:?}"));
+            for g in lone {
+                let holding: Vec<&Piece> = pieces
+                    .iter()
+                    .filter(|p| p.loops.contains(&Boundary::Lone(g)))
+                    .collect();
+                assert_eq!(holding.len(), 1, "{f:?}: lone {g} in {holding:?}");
+                assert!(
+                    holding[0]
+                        .loops
+                        .iter()
+                        .any(|l| matches!(l, Boundary::Arcs(_))),
+                    "{f:?}: lone {g} alone in the region outside the face"
+                );
+            }
+        }
     }
 }
