@@ -11,6 +11,7 @@ pub mod catalogue;
 pub mod ids;
 pub mod item;
 pub mod load;
+pub mod pdm;
 
 /// ryuplm, as ryupdm, ryu-git and ryu-session know it.
 pub struct Plm;
