@@ -1140,6 +1140,40 @@ pub(crate) fn view_focus(
     Ok(json!({"participant": id, "focus": focus, "shows": shows}))
 }
 
+/// `view.follow` (#812): whom participant `participant` (else the one
+/// human, else the caller) follows: `follow`, else the caller; `off`
+/// stops it. A window can't follow itself.
+pub(crate) fn view_follow(
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    follow: Option<String>,
+    off: bool,
+    participant: Option<String>,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("view.follow"))?;
+    if off && follow.is_some() {
+        return Err(Error::new(
+            Code::Usage,
+            "give a participant to follow, or off, not both",
+        ));
+    }
+    let id = live.compare_target(participant.as_deref(), me)?;
+    let whom = match (off, follow) {
+        (true, _) => None,
+        (false, Some(f)) => Some(live.get(&f)?.id.clone()),
+        (false, None) => Some(live.caller(me)),
+    };
+    if whom.as_deref() == Some(id.as_str()) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("participant {id} can't follow itself"),
+        )
+        .with("participant", &id));
+    }
+    live.set_following(&id, whom)?;
+    Ok(json!({"participant": id, "following": live.get(&id)?.view.following}))
+}
+
 /// `visibility.set`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn visibility_set(
