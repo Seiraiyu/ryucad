@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-pub use ryu_session::client::{Call, Connection, Subscription, command, detach, find_program};
+pub use ryu_session::client::{
+    Call, Connection, Subscription, command, detach, find_program, spawn_detached,
+};
 
 /// The `ryucad` binary that daemons are started from, and its version.
 pub type Daemon = ryu_session::client::Daemon<Cad>;
@@ -72,9 +74,7 @@ pub fn open_app(dir: &Path, root: Option<&Path>, app: Option<&Path>) -> Result<V
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    detach(&mut cmd);
-    let child = cmd
-        .spawn()
+    let child = spawn_detached(&mut cmd)
         .map_err(|e| missing().with("path", &app).with("why", e.to_string()))?;
     Ok(json!({"opened": "new", "app": app, "pid": child.id(), "dir": dir}))
 }
