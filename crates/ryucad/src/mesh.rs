@@ -376,7 +376,8 @@ impl Cache {
     }
 
     /// The meshes of several bodies for an export at `params`, in order:
-    /// each body (by hash) meshed once, those not cached in parallel.
+    /// each root (by hash) meshed once, and every body moved from it, those
+    /// not cached in parallel.
     pub fn export_all(
         &mut self,
         items: &[&Built],
@@ -389,8 +390,10 @@ impl Cache {
         }
     }
 
-    /// [`Cache::export_all`] for a request's `job`: each body it meshes
-    /// is a boundary, and what it made is kept when cancelled.
+    /// [`Cache::export_all`] for a request's `job`: each root (by hash)
+    /// meshed once, and every body moved from it, those not cached in
+    /// parallel; each body it meshes is a boundary, and what it made is
+    /// kept when cancelled.
     pub fn export_all_for(
         &mut self,
         items: &[&Built],
@@ -400,21 +403,17 @@ impl Cache {
     ) -> Result<Vec<Arc<DisplayMesh>>> {
         use rayon::prelude::*;
         let key = Key::export(params);
-        let mut missing: BTreeMap<&str, &Built> = BTreeMap::new();
-        for b in items {
-            if !self.entries.contains_key(&(b.hash.clone(), key)) {
-                missing.entry(&b.hash).or_insert(b);
-            }
-        }
+        // Each root once at the export's parameters, every body moved from
+        // it: what display does (design 521, #813). No feature: the
+        // parameters are the export's.
+        let missing = self.roots(items.iter().map(|b| ((), *b)), key, |(), b| export_root(b));
         let disk = self.disk.as_deref();
-        prefetch(disk, missing.values().map(|b| (b.hash.as_str(), *params)));
+        prefetch(disk, missing.iter().map(|(_, b)| (b.hash.as_str(), *params)));
         self.made += missing.len() as u64;
         let stage = job.begin(Phase::Mesh, "bodies", missing.len());
         let made: Vec<Result<(String, Arc<DisplayMesh>)>> = missing
-            .into_values()
-            .collect::<Vec<_>>()
             .par_iter()
-            .map(|b| {
+            .map(|(_, b)| {
                 stage.step(|| b.hash.clone())?;
                 let m = make_with(disk, b, *params, job);
                 cut_short(&m)?;
@@ -437,15 +436,7 @@ impl Cache {
         }
         let out = items
             .iter()
-            .map(|b| {
-                self.clock += 1;
-                let (used, m) = self
-                    .entries
-                    .get_mut(&(b.hash.clone(), key))
-                    .expect("made above");
-                *used = self.clock;
-                Arc::clone(m)
-            })
+            .map(|b| self.moved_in(b, key).expect("its root is held"))
             .collect();
         // What it made stays until the budget pushes it out, the meshes the
         // export uses last.
@@ -1336,6 +1327,32 @@ pub(crate) mod tests {
         let before = cache.made();
         cache.get_all(&items, Quality::Normal, usize::MAX);
         assert_eq!(cache.made(), before, "only moved");
+    }
+
+    /// Design 698: an inserted solid's export mesh is its source's moved,
+    /// as its display mesh is, made once.
+    #[test]
+    fn an_inserted_solids_export_mesh_is_its_sources_moved() {
+        let (_dir, mut s) = crate::insert::tests::boarded();
+        crate::testing::call(
+            &mut s,
+            "feature.edit",
+            serde_json::json!({"part": "enclosure",
+            "id": "pcb", "placement": {"origin": ["0 mm", "0 mm", "5 mm"]}}),
+        )
+        .unwrap();
+        let id = crate::assembly::tests::id;
+        let r = s.rebuilt(&id("enclosure")).unwrap().clone();
+        let b = Arc::clone(&r.output(&id("pcb")).unwrap().solids()[0].1);
+        let m = b.moved.as_ref().unwrap();
+        let params = MeshParams::new(5e-5, 0.35);
+        let mut cache = Cache::with_disk(None);
+        let made = cache.export_all(&[&m.source, &b], &params, usize::MAX);
+        assert_eq!(cache.made(), 1, "the source once");
+        let (a, z) = (made[0].mesh.as_ref().unwrap(), made[1].mesh.as_ref().unwrap());
+        assert_eq!(a.triangles, z.triangles);
+        assert_eq!(z.positions[0], m.pose.apply_point(a.positions[0]));
+        assert_eq!(made[1].params.chord.to_bits(), params.chord.to_bits());
     }
 
     #[test]

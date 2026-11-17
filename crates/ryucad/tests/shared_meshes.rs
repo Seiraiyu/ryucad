@@ -194,3 +194,36 @@ fn copies_of_one_shape_are_meshed_once_and_moved() {
     ryucad::scene::meshes(&mut s, &board, None, normal).unwrap();
     assert_eq!(s.caches().meshes().made(), before);
 }
+
+/// A flattened part's STL: the block's two copies come from one mesh, so
+/// the file holds the same number of triangles for each.
+#[test]
+fn a_flattened_parts_export_meshes_each_shape_once() {
+    let (dir, mut s) = common::project();
+    must(
+        &mut s,
+        "import",
+        json!({"path": occt("assembly.stp"), "flatten": true, "part": "board"}),
+    );
+    let c = components(&mut s, "board");
+    let bodies: Vec<Arc<Built>> = c.values().flatten().map(|(_, b)| Arc::clone(b)).collect();
+    let refs: Vec<&Built> = bodies.iter().map(Arc::as_ref).collect();
+    let params = ryukei::mesh::MeshParams::new(5e-5, 0.35);
+    let mut cache = ryucad::mesh::Cache::with_disk(None);
+    let made = cache.export_all(&refs, &params, usize::MAX);
+    assert_eq!(cache.made(), 2, "the block and the pin");
+    let (_, blocks) = c.iter().find(|(_, v)| v.len() == 2).unwrap();
+    let count = |b: &Arc<Built>| {
+        let k = bodies.iter().position(|x| Arc::ptr_eq(x, b)).unwrap();
+        made[k].mesh.as_ref().unwrap().triangles.len()
+    };
+    assert_eq!(count(&blocks[0].1), count(&blocks[1].1));
+    // And the export itself writes.
+    let out = dir.path().join("board.stl");
+    must(
+        &mut s,
+        "export",
+        json!({"part": "board", "out": out.display().to_string(), "chord": "0.05 mm"}),
+    );
+    assert!(std::fs::metadata(&out).unwrap().len() > 84);
+}
