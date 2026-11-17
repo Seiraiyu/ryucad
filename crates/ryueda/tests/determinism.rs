@@ -280,7 +280,8 @@ fn boards(golden: &mut Golden, at: &Path) {
         ("R2", "14,15", "90"),
         ("J1", "3,10", "0"),
     ];
-    let mut first: Option<(Value, String, String)> = None;
+    type Got = (Value, String, String, Value, Value, Value);
+    let mut first: Option<Got> = None;
     for threads in [1, 8] {
         let board = at.join(format!("t{threads}")).join("board");
         std::fs::create_dir_all(&board).unwrap();
@@ -329,16 +330,76 @@ fn boards(golden: &mut Golden, at: &Path) {
         let hash = |name: &str| {
             blake3::hash(&std::fs::read(board.join(name)).unwrap()).to_hex()[..32].to_owned()
         };
-        let got = (show, hash("top.png"), hash("bottom.svg"));
+        let pads = show["pads"].as_array().unwrap().clone();
+        let net = |r: &str| {
+            pads.iter().find(|x| x["reference"] == r).unwrap()["net"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let v33 = net("main:R1/2");
+        for args in [
+            vec![
+                "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--path", "R1/2",
+                "R2/2", "--id", "t1",
+            ],
+            vec![
+                "board", "via", "add", "main", "--net", &v33, "--at", "13,17", "--id", "v1",
+            ],
+            vec![
+                "board", "track", "add", "main", "--net", &v33, "--layer", "bottom", "--path",
+                "via/v1", "13,18.5", "--id", "t2",
+            ],
+            vec![
+                "board", "hole", "add", "main", "--at", "23,17", "--drill", "3.2", "--id", "h1",
+            ],
+        ] {
+            ryueda(&board, threads, &args);
+        }
+        let mut drc = ryueda_out(&board, threads, &["board", "drc", "main"], &[]);
+        let mut drc = drc["error"]["details"]["report"].take();
+        if let Some(o) = drc.as_object_mut() {
+            o.remove("revision");
+        }
+        let p = ryueda::project::Project::load(&board).unwrap();
+        let id = ryueda::id::Id::parse("main", "board").unwrap();
+        let c = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| ryueda::board::drc::check(&p, &p.boards[&id]).unwrap());
+        let layout = serde_json::json!({
+            "items": c.conn.built.layout.items.iter().map(|(k, it)| serde_json::json!([c.conn.built.reference(k), it.layer, it.net])).collect::<Vec<_>>(),
+            "holes": c.conn.built.layout.holes.iter().map(|(k, h)| serde_json::json!([c.conn.built.reference(k), h.plated])).collect::<Vec<_>>(),
+            "points": c.conn.built.layout.points.iter().map(|pt| serde_json::json!([c.conn.built.reference(&pt.key), pt.net, [pt.at.x, pt.at.y]])).collect::<Vec<_>>(),
+        });
+        let islands: Vec<Vec<String>> = c
+            .conn
+            .copper
+            .islands()
+            .iter()
+            .map(|i| i.items.iter().map(|k| c.conn.built.reference(k)).collect())
+            .collect();
+        let got = (
+            show,
+            hash("top.png"),
+            hash("bottom.svg"),
+            drc,
+            layout,
+            serde_json::json!(islands),
+        );
         match &first {
             None => first = Some(got),
             Some(one) => assert_eq!(&got, one, "one thread and eight"),
         }
     }
-    let (show, png, svg) = first.unwrap();
+    let (show, png, svg, drc, layout, islands) = first.unwrap();
     golden.json("board.breakout.show", &show);
     golden.got.insert("board.breakout.top.png".into(), png);
     golden.got.insert("board.breakout.bottom.svg".into(), svg);
+    golden.json("board.breakout.drc", &drc);
+    golden.json("board.breakout.layout", &layout);
+    golden.json("board.breakout.islands", &islands);
 }
 
 #[test]
