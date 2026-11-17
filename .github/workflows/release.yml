@@ -326,3 +326,81 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
+
+  python-verify:
+    # Design 697: what ships, tested as a user gets it. ryucad installed by
+    # the release's own installer, the package from TestPyPI (--no-deps:
+    # anyone can upload to TestPyPI, and it has none), python/src removed
+    # so the installed wheel is what's imported, and the integration tests
+    # run against the installed binary, which the package's own find()
+    # locates in ~/.ryucad/bin (a step after the installer has no new PATH).
+    name: python on ${{ matrix.os }}
+    if: >-
+      always() && github.ref_type == 'tag'
+      && needs.testpypi.result == 'success' && needs.installers.result == 'success'
+    needs: [version, python, testpypi, installers]
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Python the package supports on Linux, the newest
+        # stable elsewhere (pinned by number, as ci.yml's, moved by hand).
+        include:
+          - { os: ubuntu-latest, python: "3.10" }
+          - { os: macos-latest, python: "3.15" }
+          - { os: windows-latest, python: "3.15" }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RYUCAD_VERSION: ${{ github.ref_name }}
+      WANT: ${{ needs.version.outputs.version }}
+      PEP440: ${{ needs.python.outputs.version }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - if: runner.os != 'Windows'
+        name: install ryucad
+        run: gh release download "$RYUCAD_VERSION" -R "$GITHUB_REPOSITORY" -p install.sh -O - | sh
+      - if: runner.os == 'Windows'
+        name: install ryucad
+        shell: pwsh
+        run: |
+          gh release download $env:RYUCAD_VERSION -R $env:GITHUB_REPOSITORY -p install.ps1 -O install.ps1
+          Get-Content -Raw install.ps1 | Invoke-Expression
+      - name: the package from TestPyPI
+        shell: bash
+        run: |
+          # TestPyPI's index lags its uploads: retried for two minutes.
+          for i in $(seq 1 24); do
+            if python -m pip install --no-deps --no-cache-dir \
+                --index-url https://test.pypi.org/simple/ "ryucad==$PEP440"; then
+              break
+            fi
+            if [ "$i" = 24 ]; then
+              echo "::error::ryucad==$PEP440 isn't on TestPyPI after two minutes"
+              exit 1
+            fi
+            sleep 5
+          done
+      - name: the integration tests against the installed package and ryucad
+        shell: bash
+        run: |
+          rm -rf python/src
+          got=$(python -c "import ryucad; print(ryucad.__version__)")
+          if [ "$got" != "$PEP440" ]; then
+            echo "::error::the package says $got, the tag $PEP440"
+            exit 1
+          fi
+          RYUCAD_EXE=$(python -c "import ryucad; print(ryucad.find()[0])")
+          export RYUCAD_EXE
+          "$RYUCAD_EXE" version | tee version.json
+          grep -q "\"ryucad\":\"$WANT\"" version.json
+          cd "$RUNNER_TEMP"
+          python -m unittest discover -v -s "$GITHUB_WORKSPACE/python/tests" -p test_session.py 2>&1 | tee unittest.log
+          if grep -q "RYUCAD_EXE names no ryucad" unittest.log; then
+            echo "::error::the integration tests were skipped"
+            exit 1
+          fi

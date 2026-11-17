@@ -442,6 +442,34 @@ fn ryucads_release_uploads_to_testpypi_by_trusted_publishing() {
     }
 }
 
+/// Design 697: the wheel TestPyPI serves, with python/src removed, passes
+/// the integration tests against the release's own installed binary on
+/// Linux, macOS and Windows; it publishes nothing.
+#[test]
+fn ryucads_release_verifies_the_package_on_three_platforms() {
+    let verify = job(&workflow("release.yml"), "python-verify");
+    for want in [
+        "needs: [version, python, testpypi, installers]",
+        "needs.testpypi.result == 'success'",
+        "needs.installers.result == 'success'",
+        "{ os: ubuntu-latest, python: \"3.10\" }",
+        "os: macos-latest",
+        "os: windows-latest",
+        "-p install.sh -O - | sh",
+        "Get-Content -Raw install.ps1 | Invoke-Expression",
+        "--no-deps",
+        "--index-url https://test.pypi.org/simple/",
+        "\"ryucad==$PEP440\"",
+        "rm -rf python/src",
+        "ryucad.find()",
+        "-p test_session.py",
+        "RYUCAD_EXE names no ryucad",
+    ] {
+        assert!(verify.contains(want), "release.yml's python-verify job lacks {want}");
+    }
+    assert!(!verify.contains("id-token"), "python-verify publishes nothing");
+}
+
 /// The devcontainer's .debs are cached from main, whose caches every tag's
 /// run can restore, under the path and key full.yml restores: a tag's own
 /// save serves only that tag (#677).
