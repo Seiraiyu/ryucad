@@ -3772,6 +3772,27 @@ fn pinned_faces_section(golden: &mut Golden) {
     }
 }
 
+/// ryukei 22.A's room for clipped faces (design 724): the near_room twin
+/// (`ryukei_testkit::near_room`), the slot's far end deleted. In rung 3's
+/// narrowed build the walk is clipped at the top; given room for the top
+/// and walls, then for the floor, the slot runs out through the pinned
+/// round and side. The result's body, created names and mesh, or the
+/// refusal's bytes.
+fn near_room_section(golden: &mut Golden) {
+    use ryukei::tweak::delete_faces;
+    use ryukei_testkit::near_room::{slotted, spec};
+    let mut s = golden.section("near_room");
+    let b = slotted();
+    match delete_faces(OpKey(0x22a5), &b, &spec(&b)) {
+        Ok((o, j)) => hash_body(&mut s, &o, &j),
+        Err(e) => {
+            for byte in format!("{e:?}").bytes() {
+                s.u64(u64::from(byte));
+            }
+        }
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3872,6 +3893,7 @@ sections! {
     held_seams => held_seams_section,
     near_boxes => near_boxes_section,
     pinned_faces => pinned_faces_section,
+    near_room => near_room_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline
