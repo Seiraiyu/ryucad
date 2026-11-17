@@ -4295,6 +4295,10 @@ fn write_package(dir: &std::path::Path, result: &mut Value) -> Result<()> {
         }
     }
     std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
+    // Every file renamed into place first and synced together after, so
+    // the package waits on the file system's journal once, not once a
+    // file (#270); all are synced before the answer is printed.
+    ryueda::source::defer_syncs();
     for f in result["files"].as_array_mut().into_iter().flatten() {
         let name = f["name"].as_str().unwrap_or_default().to_owned();
         let text = f
@@ -4304,6 +4308,7 @@ fn write_package(dir: &std::path::Path, result: &mut Value) -> Result<()> {
             .unwrap_or_default();
         ryueda::source::write_atomic(&dir.join(&name), text.as_bytes())?;
     }
+    ryueda::source::flush_syncs();
     Ok(())
 }
 

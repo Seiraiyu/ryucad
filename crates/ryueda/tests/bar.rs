@@ -727,7 +727,9 @@ fn boms_releases_and_where_used_are_within_their_bars() {
 /// Design 732's bars: the generated board (1,000 parts, 2,000 pads,
 /// 2,000 tracks) loaded, shaped, connected and checked from nothing in
 /// 1 s; a track write answering its DRC delta through a warm daemon in
-/// 250 ms. The times include the CLI's start for the write.
+/// 250 ms; the package exported in 1 s, in process and through a warm
+/// daemon with its files written. The times include the CLI's start for
+/// the write and the export.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -755,9 +757,25 @@ fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
         &c.findings[..c.findings.len().min(5)]
     );
     assert!(cold < bar(Duration::from_secs(1)), "{cold:?}");
+    // Design 732: the export in 1 s.
+    let t = Instant::now();
+    let files = ryueda::board::export::fabrication("main", &c.shapes, "bar").unwrap();
+    let made = t.elapsed();
+    println!(
+        "generated board: {} fabrication files, {} bytes, made in {made:?}",
+        files.len(),
+        files.iter().map(|f| f.text.len()).sum::<usize>()
+    );
+    assert!(made < bar(Duration::from_secs(1)), "{made:?}");
     let run = dir.path().join("run");
     let ryueda = warm(&board, &run, dir.path());
     ryueda(&["board", "drc", "main"]);
+    let t = Instant::now();
+    let v = ryueda(&["board", "export", "main", "--out", "fab"]);
+    let took = t.elapsed();
+    assert!(v["files"].as_array().unwrap().len() >= 14, "{v}");
+    println!("the package through a warm daemon, written: {took:?}");
+    assert!(took < bar(Duration::from_secs(1)), "{took:?}");
     let net = ryueda(&["board", "show", "main", "--pads"])["pads"][0]["net"]
         .as_str()
         .unwrap()
