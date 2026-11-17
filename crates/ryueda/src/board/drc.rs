@@ -7,12 +7,16 @@ use super::connect::{self, Connectivity};
 use super::layout::Key;
 use super::load::BoardFiles;
 use super::occ::Occ;
+use super::preset::Preset;
 use super::shapes::BoardShapes;
 use crate::error::Code;
 use crate::fault::Severity;
+use rayon::prelude::*;
+use ryu_copper::connect::{IslandId, Node, Placement};
+use ryu_copper::measure::{self, Body, BodyOptions, Verdict};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One finding on a board.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -264,10 +268,165 @@ pub fn copper(c: &Connectivity, incomplete: bool) -> Vec<Finding> {
     out
 }
 
+/// Each island's nets: its pads' and what its items claim.
+fn island_nets(c: &Connectivity) -> BTreeMap<IslandId<Key>, BTreeSet<String>> {
+    let mut out: BTreeMap<IslandId<Key>, BTreeSet<String>> = BTreeMap::new();
+    for (p, at) in c.built.layout.points.iter().zip(&c.placed) {
+        if let Placement::On(id) = at {
+            out.entry(id.clone()).or_default().insert(p.net.clone());
+        }
+    }
+    for i in c.copper.islands() {
+        out.entry(i.id.clone())
+            .or_default()
+            .extend(i.claims.iter().cloned());
+    }
+    out
+}
+
+/// The closest gap between two items on a layer, and their references.
+type Closest = (ryu_copper::connect::Gap<Key>, String, String);
+
+/// Copper of two islands closer than the rule on a layer, once per pair
+/// of items (their closest pieces); not two islands of one net alone.
+pub fn clearance(c: &Connectivity, preset: &Preset) -> Vec<Finding> {
+    let board = c.built.board.as_str();
+    let nets = island_nets(c);
+    let one_net = |a: &IslandId<Key>, b: &IslandId<Key>| match (nets.get(a), nets.get(b)) {
+        (Some(x), Some(y)) => x.len() == 1 && x == y,
+        _ => false,
+    };
+    let mut best: BTreeMap<(usize, String, String), Closest> = BTreeMap::new();
+    for layer in 0..c.built.layout.layers.len() {
+        for g in c.copper.clearance(layer, preset.clearance_nm) {
+            if one_net(&g.islands.0, &g.islands.1) {
+                continue;
+            }
+            let (ra, rb) = (c.built.reference(&g.a.0), c.built.reference(&g.b.0));
+            let (ra, rb) = if ra <= rb { (ra, rb) } else { (rb, ra) };
+            let key = (layer, ra.clone(), rb.clone());
+            if best
+                .get(&key)
+                .is_none_or(|(x, ..)| g.distance.nm < x.distance.nm)
+            {
+                best.insert(key, (g, ra, rb));
+            }
+        }
+    }
+    best.into_values()
+        .map(|(g, ra, rb)| {
+            finding(
+                Code::DrcClearance,
+                Severity::Error,
+                board,
+                vec![ra.clone(), rb.clone()],
+                format!(
+                    "{ra} and {rb} are {} nm apart on {}, under the {} nm clearance",
+                    g.distance.nm,
+                    c.built.layer_name(g.layer),
+                    preset.clearance_nm
+                ),
+                json!({
+                    "layer": c.built.layer_name(g.layer),
+                    "distance_nm": g.distance.nm,
+                    "exact": g.distance.exact,
+                    "bound_nm": g.distance.bound,
+                    "uncertain": g.verdict == Verdict::Uncertain,
+                    "a_at": [g.distance.a.x, g.distance.a.y],
+                    "b_at": [g.distance.b.x, g.distance.b.y],
+                    "rule_nm": preset.clearance_nm,
+                }),
+            )
+        })
+        .collect()
+}
+
+/// Whether a track's copper and a pad's copper share an island.
+fn same_island(c: &Connectivity, a: &Key, b: &Key) -> bool {
+    let ids = |k: &Key| -> BTreeSet<IslandId<Key>> {
+        (0..c.copper.pieces(k).max(1))
+            .filter_map(|i| c.copper.island_of(&Node::Piece(k.clone(), i)))
+            .collect()
+    };
+    !ids(a).is_disjoint(&ids(b))
+}
+
+/// Tracks closer than the preset's mask rule to a mask opening on their
+/// side whose pad is on another island.
+pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding> {
+    let board = c.built.board.as_str();
+    let rule = preset.mask_trace_clearance_nm;
+    let opts = BodyOptions::default();
+    let mut out = Vec::new();
+    for side in 0..2usize {
+        let masks: Vec<(usize, Body)> = s
+            .pads
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| Some((i, Body::of_shape(p.mask[side].as_ref()?, &opts))))
+            .collect();
+        if masks.is_empty() {
+            continue;
+        }
+        let index = ryu_copper::index::Index::from_bodies(
+            1,
+            masks.iter().map(|(i, b)| (*i, 0, b.clone())).collect(),
+            opts,
+        );
+        let found: Vec<Finding> = s
+            .tracks
+            .par_iter()
+            .filter(|t| t.layer.index() == side)
+            .flat_map_iter(|t| {
+                let body = Body::of_shape(&t.shape, &opts);
+                let tk = Key::Track(t.id.to_string());
+                let mut f = Vec::new();
+                for n in index.near_body(0, &body, rule) {
+                    let pd = &s.pads[n.key];
+                    let pk = Key::Pad {
+                        occ: pd.occurrence.clone(),
+                        pad: pd.pad.clone(),
+                        layer: side as u8,
+                    };
+                    if same_island(c, &tk, &pk) {
+                        continue;
+                    }
+                    let mbody = &masks.iter().find(|(i, _)| *i == n.key).unwrap().1;
+                    let v = measure::closer(&body, mbody, rule);
+                    if v == Verdict::No {
+                        continue;
+                    }
+                    let d = measure::distance(&body, mbody);
+                    f.push(finding(
+                        Code::DrcMaskClearance,
+                        Severity::Error,
+                        board,
+                        vec![c.built.reference(&tk), pd.reference.clone()],
+                        format!(
+                            "track {} is under {rule} nm from {}'s mask opening",
+                            t.id, pd.reference
+                        ),
+                        json!({
+                            "layer": c.built.layer_name(side),
+                            "distance_nm": d.map(|d| d.nm),
+                            "uncertain": v == Verdict::Uncertain,
+                            "rule_nm": rule,
+                        }),
+                    ));
+                }
+                f
+            })
+            .collect();
+        out.extend(found);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::board::file::CopperLayer;
+    use crate::board::preset;
     use crate::board::testing::{MM, UM, board};
 
     fn two_and_one() -> BoardShapes {
@@ -385,5 +544,72 @@ mod tests {
         assert_eq!(codes(&f), [Code::NetClaimMismatch]);
         assert_eq!(f[0].severity, Severity::Error);
         assert_eq!(f[0].refs, ["b:track/t1"]);
+    }
+
+    const P: &Preset = &preset::JLC_2L;
+
+    /// Pads of nets a and b `gap` apart, edge to edge.
+    fn apart(gap: i64, b_net: &str) -> BoardShapes {
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (600 * UM, 600 * UM), Some("a"))
+            .smd(
+                "r2",
+                "1",
+                (5 * MM + 600 * UM + gap, 5 * MM),
+                (600 * UM, 600 * UM),
+                Some(b_net),
+            );
+        s
+    }
+
+    #[test]
+    fn clearance_fires_a_nanometre_under_the_rule() {
+        let at = |gap, net: &str| clearance(&connect::connect("b", &apart(gap, net)), P);
+        assert!(at(P.clearance_nm, "b").is_empty());
+        let f = at(P.clearance_nm - 1, "b");
+        assert_eq!(codes(&f), [Code::DrcClearance]);
+        assert_eq!(f[0].refs, ["b:r1/1", "b:r2/1"]);
+        assert_eq!(f[0].details["distance_nm"], json!(P.clearance_nm - 1));
+        assert_eq!(f[0].details["layer"], "copper.top");
+        // Two islands of one net are its open, not a clearance finding.
+        assert!(at(P.clearance_nm - 1, "a").is_empty());
+    }
+
+    #[test]
+    fn mask_clearance_fires_a_nanometre_under_its_rule() {
+        let g = P.clearance_nm + MM;
+        let y = 5 * MM + 300 * UM + g + 125 * UM;
+        let with_mask = |margin: i64| {
+            let mut s = board(20 * MM, 20 * MM);
+            s.smd("r1", "1", (5 * MM, 5 * MM), (600 * UM, 600 * UM), Some("a"))
+                .track(
+                    "t1",
+                    "b",
+                    CopperLayer::Top,
+                    250 * UM,
+                    &[(2 * MM, y), (8 * MM, y)],
+                );
+            s.pads[0].mask[0] = Some(crate::board::testing::rect(
+                ryu_board::geom::Point::new(5 * MM, 5 * MM),
+                600 * UM + 2 * margin,
+                600 * UM + 2 * margin,
+            ));
+            mask_clearance(&connect::connect("b", &s), &s, P)
+        };
+        assert!(with_mask(g - P.mask_trace_clearance_nm).is_empty());
+        let f = with_mask(g - P.mask_trace_clearance_nm + 1);
+        assert_eq!(codes(&f), [Code::DrcMaskClearance]);
+        assert_eq!(f[0].refs, ["b:r1/1", "b:track/t1"]);
+        // A track on the pad's own island crosses its opening freely.
+        let mut s = board(20 * MM, 20 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (600 * UM, 600 * UM), Some("a"))
+            .track(
+                "t1",
+                "a",
+                CopperLayer::Top,
+                250 * UM,
+                &[(5 * MM, 5 * MM), (8 * MM, 5 * MM)],
+            );
+        assert!(mask_clearance(&connect::connect("b", &s), &s, P).is_empty());
     }
 }
