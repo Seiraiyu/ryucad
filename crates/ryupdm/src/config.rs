@@ -18,7 +18,8 @@
 //! ```
 //!
 //! The file is written at the lowest format holding its keys: 1, or 2
-//! with `approvals` (design 261). A key a newer format added is refused in
+//! with `approvals` (design 261), 5 with numbering schemes
+//! (`part_number.schemes`, design 734). A key a newer format added is refused in
 //! a file that declares an older one.
 
 use crate::PDM_CONFIG;
@@ -33,8 +34,8 @@ use std::collections::BTreeMap;
 pub const KIND: &str = "ryupdm.config";
 /// The newest format this build reads: 2 added `approvals` (and
 /// `dependencies`), 3 teams in its rules and revoked keys, 4 `packages`
-/// (design 436).
-pub const FORMAT: u64 = 4;
+/// (design 436), 5 `part_number.schemes` (design 734).
+pub const FORMAT: u64 = 5;
 
 /// How a part's revisions are labelled. Labels are always derived from the
 /// scheme, never typed.
@@ -323,6 +324,130 @@ impl Pattern {
     }
 }
 
+/// `next`: a number with one `{seq:N}`, the sequence zero-padded to `N`
+/// digits (more when it outgrows them), the rest literal (design 734).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Template {
+    text: String,
+    before: String,
+    width: usize,
+    after: String,
+}
+
+impl Template {
+    pub fn new(text: &str) -> std::result::Result<Template, String> {
+        let open = "{seq:";
+        let Some(start) = text.find(open) else {
+            return Err("next needs one {seq:N}, such as MECH-{seq:5}".into());
+        };
+        let rest = &text[start + open.len()..];
+        let Some(close) = rest.find('}') else {
+            return Err("{seq:N} is not closed".into());
+        };
+        let width: usize = rest[..close]
+            .parse()
+            .ok()
+            .filter(|w| (1..=12).contains(w))
+            .ok_or("N in {seq:N} must be 1 to 12")?;
+        let after = &rest[close + 1..];
+        if after.contains(open) {
+            return Err("next takes one {seq:N}".into());
+        }
+        Ok(Template {
+            text: text.to_owned(),
+            before: text[..start].to_owned(),
+            width,
+            after: after.to_owned(),
+        })
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The number with sequence `n`.
+    pub fn fill(&self, n: u64) -> String {
+        format!("{}{:0w$}{}", self.before, n, self.after, w = self.width)
+    }
+
+    /// The sequence `number` was filled with, if this template made it:
+    /// the literal parts match and the digits are at least `N` long.
+    pub fn read(&self, number: &str) -> Option<u64> {
+        let digits = number.strip_prefix(&self.before)?.strip_suffix(&self.after)?;
+        (digits.len() >= self.width && digits.bytes().all(|c| c.is_ascii_digit()))
+            .then(|| digits.parse().ok())
+            .flatten()
+    }
+}
+
+/// A named numbering scheme (format 5): the numbers of items of `class`
+/// (every class when `None`) that match `pattern`, `next` making new ones.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NumberScheme {
+    pub name: String,
+    pub class: Option<String>,
+    pub pattern: Pattern,
+    pub next: Option<Template>,
+}
+
+impl NumberScheme {
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({"name": self.name, "pattern": self.pattern.text()});
+        if let Some(c) = &self.class {
+            v["class"] = json!(c);
+        }
+        if let Some(n) = &self.next {
+            v["next"] = json!(n.text());
+        }
+        v
+    }
+
+    fn from_json(v: &Value, at: &str) -> Result<NumberScheme> {
+        let mut o = Obj::new(v, at)?;
+        let name = o.take("name")?;
+        let name = name
+            .as_str()
+            .filter(|n| scheme_name(n))
+            .ok_or_else(|| invalid(&format!("{at}/name"), "a scheme's name is 1 to 63 of a-z, 0-9, _ and -"))?
+            .to_owned();
+        let class = match o.take_opt("class") {
+            None => None,
+            Some(c) => Some(
+                c.as_str()
+                    .filter(|c| scheme_name(c))
+                    .ok_or_else(|| invalid(&format!("{at}/class"), "class must be a class's name"))?
+                    .to_owned(),
+            ),
+        };
+        let p = o.take("pattern")?;
+        let p = p
+            .as_str()
+            .ok_or_else(|| invalid(&format!("{at}/pattern"), "pattern must be a string"))?;
+        let pattern = Pattern::new(p).map_err(|e| invalid(&format!("{at}/pattern"), &e.message))?;
+        let next = match o.take_opt("next") {
+            None => None,
+            Some(n) => {
+                let text = n
+                    .as_str()
+                    .ok_or_else(|| invalid(&format!("{at}/next"), "next must be a string"))?;
+                Some(Template::new(text).map_err(|why| invalid(&format!("{at}/next"), &why))?)
+            }
+        };
+        o.finish()?;
+        Ok(NumberScheme { name, class, pattern, next })
+    }
+}
+
+/// A scheme's or class's name: `[a-z0-9][a-z0-9_-]{0,62}`.
+pub fn scheme_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 63
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-')
+}
+
 /// `ryupdm.json`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -330,6 +455,9 @@ pub struct Config {
     /// The branch whose history makes release records official.
     pub release_branch: String,
     pub pattern: Option<Pattern>,
+    /// The numbering schemes (format 5), exclusive with `pattern`; judged
+    /// by the product (ryuplm), never by [`crate::props::check`].
+    pub schemes: Vec<NumberScheme>,
     /// The custom properties, by name.
     pub properties: BTreeMap<String, Decl>,
     /// Who must approve releases, and the keys trusted to say they did
@@ -350,6 +478,7 @@ impl Default for Config {
             revisions: Scheme::Letters,
             release_branch: "main".to_owned(),
             pattern: None,
+            schemes: Vec::new(),
             properties: BTreeMap::new(),
             approvals: None,
             bump: Bump::None,
@@ -375,7 +504,9 @@ impl Config {
 
     /// The lowest format that holds these settings.
     pub fn format(&self) -> u64 {
-        if self.packages.is_some() {
+        if !self.schemes.is_empty() {
+            5
+        } else if self.packages.is_some() {
             4
         } else if self
             .approvals
@@ -399,6 +530,11 @@ impl Config {
         });
         if let Some(p) = &self.pattern {
             v["part_number"] = json!({"pattern": p.text()});
+        }
+        if !self.schemes.is_empty() {
+            v["part_number"] = json!({
+                "schemes": self.schemes.iter().map(NumberScheme::to_json).collect::<Vec<_>>()
+            });
         }
         if !self.properties.is_empty() {
             let props: Map<String, Value> = self
@@ -454,12 +590,44 @@ impl Config {
         }
         if let Some(p) = o.take_opt("part_number") {
             let mut po = Obj::new(&p, "/part_number")?;
-            let text = po.take("pattern")?;
-            let text = text
-                .as_str()
-                .ok_or_else(|| invalid("/part_number/pattern", "pattern must be a string"))?;
-            c.pattern =
-                Some(Pattern::new(text).map_err(|e| invalid("/part_number/pattern", &e.message))?);
+            if po.has("pattern") && po.has("schemes") {
+                return Err(invalid(
+                    "/part_number",
+                    "part_number takes a pattern or schemes, not both",
+                ));
+            }
+            if !po.has("schemes") {
+                // Format 1's `{pattern}`: the pattern is required.
+                let text = po.take("pattern")?;
+                let text = text
+                    .as_str()
+                    .ok_or_else(|| invalid("/part_number/pattern", "pattern must be a string"))?;
+                c.pattern = Some(
+                    Pattern::new(text).map_err(|e| invalid("/part_number/pattern", &e.message))?,
+                );
+            }
+            if let Some(list) = po.take_opt("schemes") {
+                if declared < 5 {
+                    return Err(invalid(
+                        "/part_number/schemes",
+                        "schemes need format 5: write the file at format 5",
+                    ));
+                }
+                let items = list
+                    .as_array()
+                    .ok_or_else(|| invalid("/part_number/schemes", "schemes must be a list"))?;
+                for (i, s) in items.iter().enumerate() {
+                    let at = format!("/part_number/schemes/{i}");
+                    let s = NumberScheme::from_json(s, &at)?;
+                    if c.schemes.iter().any(|o| o.name == s.name) {
+                        return Err(invalid(
+                            &format!("{at}/name"),
+                            &format!("scheme {:?} is declared twice", s.name),
+                        ));
+                    }
+                    c.schemes.push(s);
+                }
+            }
             po.finish()?;
         }
         if let Some(props) = o.take_opt("properties") {
@@ -863,5 +1031,61 @@ mod tests {
         let plain = json!({"approvals": {"rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]},
                            "format": 3, "kind": "ryupdm.config"});
         assert_eq!(Config::from_json(&plain).unwrap().to_json()["format"], 2);
+    }
+    #[test]
+    fn schemes_need_format_5_and_write_it() {
+        let v = json!({
+            "format": 5, "kind": "ryupdm.config",
+            "part_number": {"schemes": [
+                {"name": "mech", "class": "machined", "pattern": "MECH-\\d{5}", "next": "MECH-{seq:5}"},
+                {"name": "legacy", "pattern": "[0-9]{3}-[0-9]{4}"}
+            ]}
+        });
+        let c = Config::from_json(&v).unwrap();
+        assert_eq!(c.pattern, None);
+        assert_eq!(c.schemes.len(), 2);
+        let mech = &c.schemes[0];
+        assert_eq!((mech.name.as_str(), mech.class.as_deref()), ("mech", Some("machined")));
+        assert!(mech.pattern.matches("MECH-00042"));
+        assert_eq!(mech.next.as_ref().unwrap().fill(42), "MECH-00042");
+        assert_eq!(mech.next.as_ref().unwrap().read("MECH-00042"), Some(42));
+        assert_eq!(mech.next.as_ref().unwrap().read("MECH-0042"), None);
+        assert_eq!(c.format(), 5);
+        assert_eq!(Config::from_json(&c.to_json()).unwrap(), c);
+        // Older formats refuse them; a pattern and schemes together are refused.
+        let mut old = v.clone();
+        old["format"] = json!(4);
+        assert_eq!(
+            Config::from_json(&old).unwrap_err().details["pointer"],
+            "/part_number/schemes"
+        );
+        let both = json!({"format": 5, "kind": "ryupdm.config",
+            "part_number": {"pattern": "x", "schemes": []}});
+        assert_eq!(
+            Config::from_json(&both).unwrap_err().details["pointer"],
+            "/part_number"
+        );
+        for (bad, at) in [
+            (json!([{"name": "a", "pattern": "("}]), "/part_number/schemes/0/pattern"),
+            (json!([{"name": "a", "pattern": "x"}, {"name": "a", "pattern": "y"}]), "/part_number/schemes/1/name"),
+            (json!([{"name": "A b", "pattern": "x"}]), "/part_number/schemes/0/name"),
+            (json!([{"name": "a", "pattern": "x", "next": "X-{seq:0}"}]), "/part_number/schemes/0/next"),
+            (json!([{"name": "a", "pattern": "x", "next": "X-{seq:3}{seq:3}"}]), "/part_number/schemes/0/next"),
+            (json!([{"name": "a", "pattern": "x", "next": "X-123"}]), "/part_number/schemes/0/next"),
+            (json!([{"name": "a", "pattern": "x", "z": 1}]), "/part_number/schemes/0/z"),
+        ] {
+            let v = json!({"format": 5, "kind": "ryupdm.config", "part_number": {"schemes": bad}});
+            let e = Config::from_json(&v).unwrap_err();
+            assert_eq!(e.details["pointer"], at, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn a_config_without_schemes_writes_as_before() {
+        let v = json!({"format": 1, "kind": "ryupdm.config", "part_number": {"pattern": "\\d+"},
+            "release_branch": "main", "revisions": "letters"});
+        let c = Config::from_json(&v).unwrap();
+        assert!(c.schemes.is_empty());
+        assert_eq!(c.to_json(), v);
     }
 }
