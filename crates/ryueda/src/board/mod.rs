@@ -3,6 +3,7 @@
 //! the `board.*` commands.
 
 pub mod cmd;
+pub mod connect;
 pub mod file;
 pub mod graphic;
 pub mod layout;
