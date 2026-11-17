@@ -86,7 +86,9 @@ const MAX_SIZE: f64 = 2e-3;
 /// it only at points), and no seed yields: the ball's shortcut seed holds
 /// its old face and the NURBS quad's is rule 3's own (moved to ryukei 22,
 /// "a kept ball bounded only by a held seam"). Plan 21.D changes neither
-/// (FTC 07 and FTC 10 stop where 21.C left them).
+/// (FTC 07 and FTC 10 stop where 21.C left them). Plan 22.A leaves FTC
+/// 07 rd (22.B) and FTC 10 rb (22.C) where they were; FTC 07 spends its
+/// adjusted builds first (31 s to 56 s, inside the deadline).
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -714,6 +716,18 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// clipped at working plane `a7b86e65` in the narrowed retry and at rung
 /// 3 (`GapNotHealed` in 20 s; #658; moved to ryukei 22, "STC 10: working
 /// plane clipped in the narrowed retry").
+///
+/// Plan 22.A gives room to a working face clipped in a narrowed build
+/// (and to the faces whose clipped sides its piece reached): the same 18
+/// defeature and none more. Room holds each clip, and the next cause is
+/// behind it (#658; moved to ryukei 23). CTC 02 with PMI #295: with room
+/// twice, `1294043e` runs past pinned cylinder `e153cd0e`, which should
+/// cut it (a wrong pin; `GapNotHealed` in 12 s). STC 10 #3044: the clip
+/// was coplanar plane `ccab7076`'s side; given room, the walk is
+/// ambiguous at outside cylinder `e098ee50`, as rungs 0 and 1 are
+/// (`GapNotHealed` in 28 s). Refusals spend their adjusted builds first:
+/// FTC 07 rd 31 s to 55 s, FTC 09 e1 3 s to 10 s, FTC 10 e2 27 s to 37 s,
+/// all inside the deadline.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
