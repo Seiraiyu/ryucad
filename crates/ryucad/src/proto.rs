@@ -1344,12 +1344,18 @@ pub enum Request {
     },
     /// Which solids of an assembly's occurrences overlap: every pair whose
     /// boxes do, or those with a side under `instances` (instance paths
-    /// under the assembly, as `s1/b2` or `holes:2/bolt`).
+    /// under the assembly, as `s1/b2` or `holes:2/bolt`). With
+    /// `changed_since` (a revision, as `rev` takes one elsewhere), only
+    /// the pairs with a side at an occurrence added, moved or changed
+    /// since then, of those under `instances` when given; the answer's
+    /// `scope` says what that was (#840).
     #[serde(rename = "interference")]
     Interference {
         part: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         instances: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        changed_since: Option<String>,
     },
     /// Measures one entity (its properties: a point, a length, an area
     /// and its shape; a solid's or an occurrence's volume and area) or two
@@ -2870,6 +2876,27 @@ pub fn parse_rpc_request(line: &str) -> (Value, Result<Request>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interference_takes_changed_since_and_leaves_it_out_unasked() {
+        let r = Request::from_rpc(
+            "interference",
+            Some(json!({"part": "asm", "changed_since": "HEAD~1"})),
+        )
+        .unwrap();
+        assert!(
+            matches!(&r, Request::Interference { changed_since: Some(c), .. } if c == "HEAD~1"),
+            "{r:?}"
+        );
+        let bare = Request::from_rpc("interference", Some(json!({"part": "asm"}))).unwrap();
+        assert!(matches!(
+            bare,
+            Request::Interference {
+                changed_since: None,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn batch_is_one_request_of_ops() {
