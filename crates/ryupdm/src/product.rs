@@ -116,6 +116,16 @@ pub trait Product: ryu_git::Layout {
         let _ = path;
         false
     }
+
+    /// The part's properties read from the file at
+    /// [`Product::properties_path`] when that file is the product's own
+    /// and not a `ryupdm.properties` file (ryuplm's items hold theirs in
+    /// the item file, design 734). `None`, the default, reads it as
+    /// `ryupdm.properties`.
+    fn properties_from(v: &Value) -> Option<Result<crate::props::Properties>> {
+        let _ = v;
+        None
+    }
 }
 
 /// The project's parts' IDs alone ([`Product::parts`]).
