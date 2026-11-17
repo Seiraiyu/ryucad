@@ -562,9 +562,11 @@ fn a_bar_in_a_cubes_side_by_a_rounding_is_decided() {
 /// tilted 1.75e-7 rad and sunk 6.7e-10 m, and a part flush on a drilled
 /// plate sunk 4.8e-11 m. Every pose is decided by `solid_verdict`, the
 /// block and the part clear or touching (a sink under the resolution
-/// leaves the exact intersection empty, which is clear). For the bar some
-/// pose is still `Uncertain` in the exact boolean, so the mesh answer is
-/// what decided it. The block and the part are also turned as the board's
+/// leaves the exact intersection empty, which is clear). The bar's poses
+/// were `Uncertain` in the exact boolean (a box face paired with itself in
+/// the split), so the mesh answer decided them; plan 21.D's slits, grouped
+/// as slits where the split refused, let the exact boolean decide every
+/// one, clear as its untilted poses always were. The block and the part are also turned as the board's
 /// parts are (a quarter or half turn about z rounded to f32) and tilted
 /// about diagonal axes and by f32's π/4 and 3π/4; the exact boolean
 /// decides every one of their poses (see the end).
@@ -690,11 +692,14 @@ fn the_pcbas_undecided_kinds_are_decided_on_meshes() {
         }
     }
     println!("poses the exact boolean leaves Uncertain, by kind: {kinds:?}");
-    // Only the bar reproduces `Uncertain` in small: no pose of the block
-    // or the part does, even widened (f32's π/4 and 3π/4, diagonal axes,
-    // quarter and half turns), so the exact boolean decides those, and
-    // the board's own pairs of those kinds are Task 13's (plan 18.B's
-    // recorded departure). Every pose of all three is still asserted
-    // decided above.
-    assert!(kinds[0] > 0, "{kinds:?}");
+    // No pose of the block or the part reproduces `Uncertain` in small,
+    // even widened (f32's π/4 and 3π/4, diagonal axes, quarter and half
+    // turns), so the exact boolean decides those, and the board's own
+    // pairs of those kinds are Task 13's (plan 18.B's recorded
+    // departure). The bar's did until plan 21.D: five of its twelve
+    // poses left a slit on a box face (an arc walked both ways) whose
+    // area rounds to about 5e-27, which the split refused as an outer
+    // boundary with no area; grouped as a slit, each is decided exactly.
+    // Every pose of all three is still asserted decided above.
+    assert_eq!(kinds, [0, 0, 0]);
 }
