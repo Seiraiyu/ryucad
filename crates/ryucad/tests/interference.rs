@@ -889,3 +889,95 @@ fn instances_narrow_the_scope() {
     .unwrap_err();
     assert_eq!(e.code, ryucad::error::Code::RevNotFound, "{e}");
 }
+
+/// Seeded edits (a ball moved, the ball part's radius, a ball added or
+/// removed), each round committed: the scoped answer is the full one
+/// kept to the scope, and the pairs outside it are as they were at the
+/// commit, so scoped plus unchanged is the full check.
+#[test]
+fn seeded_edits_scope_to_the_full_answer() {
+    let (dir, mut s) = project(3.0);
+    let mut g = ryukei_testkit::Lcg::new(840);
+    let mut live: Vec<String> = Vec::new();
+    for k in 0..6 {
+        let id = format!("k{k}");
+        place(
+            &mut s,
+            "asm",
+            &id,
+            "ball",
+            [15.0 * k as f64, 0.0, 0.0],
+            Z,
+            X,
+        );
+        live.push(id);
+    }
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    commit(dir.path(), "start");
+    let mut was = must(&mut s, "interference", json!({"part": "asm"}));
+    let mut next = 6;
+    for round in 0..10 {
+        let pick = |g: &mut ryukei_testkit::Lcg, n: usize| (g.next_u64() % n as u64) as usize;
+        match g.next_u64() % 4 {
+            0 => {
+                let i = pick(&mut g, live.len());
+                let at = [g.next_f64(0.0, 90.0), g.next_f64(-10.0, 10.0), 0.0];
+                must(
+                    &mut s,
+                    "feature.edit",
+                    json!({"part": "asm", "id": live[i],
+                           "placement": {"origin": at, "z": Z, "x": X}}),
+                );
+            }
+            1 => {
+                let r = g.next_f64(8.0, 12.0);
+                must(
+                    &mut s,
+                    "feature.edit",
+                    json!({"part": "ball", "id": "b", "params": {"radius": r}}),
+                );
+            }
+            2 => {
+                let id = format!("k{next}");
+                next += 1;
+                let at = [g.next_f64(0.0, 90.0), g.next_f64(-10.0, 10.0), 0.0];
+                place(&mut s, "asm", &id, "ball", at, Z, X);
+                live.push(id);
+            }
+            _ if live.len() > 2 => {
+                let id = live.remove(pick(&mut g, live.len()));
+                must(&mut s, "feature.delete", json!({"part": "asm", "id": id}));
+            }
+            _ => {}
+        }
+        let full = must(&mut s, "interference", json!({"part": "asm"}));
+        let scoped = must(
+            &mut s,
+            "interference",
+            json!({"part": "asm", "changed_since": "HEAD"}),
+        );
+        let paths = scoped_paths(&scoped);
+        let inside = |a: &str, b: &str| at(a, "asm", &paths) || at(b, "asm", &paths);
+        assert_eq!(
+            kept(&scoped, |_, _| true),
+            kept(&full, inside),
+            "round {round}"
+        );
+        assert_eq!(
+            scoped["pairs"].as_u64().unwrap() + scoped["scope"]["skipped"].as_u64().unwrap(),
+            full["pairs"].as_u64().unwrap(),
+            "round {round}"
+        );
+        // Outside the scope, as at the commit (pairs of a removed ball
+        // aside).
+        assert_eq!(
+            kept(&full, |a, b| !inside(a, b)),
+            kept(&was, |a, b| !inside(a, b)
+                && at(a, "asm", &live)
+                && at(b, "asm", &live)),
+            "round {round}"
+        );
+        commit(dir.path(), &format!("round {round}"));
+        was = full;
+    }
+}
