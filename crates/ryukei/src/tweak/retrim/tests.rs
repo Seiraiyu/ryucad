@@ -1435,3 +1435,109 @@ fn room_never_drops_the_slots_floor() {
         assert!((v - want).abs() <= 2e-3 * want, "{short}: {v} {want}");
     }
 }
+
+struct ClipCut {
+    body: Body,
+    rung: usize,
+    x: crate::geom::Box3,
+    near: crate::geom::Box3,
+    clipped: FaceId,
+    changed: std::collections::BTreeSet<FaceId>,
+    working: std::collections::BTreeSet<FaceId>,
+    points: Vec<crate::geom::Point3>,
+}
+
+fn clip_cut(bytes: &[u8], text: &str) -> ClipCut {
+    use crate::geom::{Box3, Point3};
+    use std::collections::BTreeSet;
+    let body = crate::codec::decode_body(bytes).unwrap();
+    let face =
+        |hex: &str| match body.by_name(Name::from_u128(u128::from_str_radix(hex, 16).unwrap())) {
+            Some(EntityId::Face(f)) => f,
+            _ => panic!("no face {hex}"),
+        };
+    let float = |hex: &str| f64::from_bits(u64::from_str_radix(hex, 16).unwrap());
+    let boxed =
+        |v: Vec<f64>| Box3::new(Point3::new(v[0], v[1], v[2]), Point3::new(v[3], v[4], v[5]));
+    let (mut rung, mut x, mut near, mut clipped) = (None, None, None, None);
+    let (mut changed, mut working, mut points) = (BTreeSet::new(), BTreeSet::new(), Vec::new());
+    for line in text.lines() {
+        let mut w = line.split_whitespace();
+        match w.next() {
+            Some("rung") => rung = Some(w.next().unwrap().parse().unwrap()),
+            Some("box") => x = Some(boxed(w.map(float).collect())),
+            Some("near") => near = Some(boxed(w.map(float).collect())),
+            Some("clipped") => clipped = Some(face(w.next().unwrap())),
+            Some("changed") => changed.extend(w.map(face)),
+            Some("working") => working.extend(w.map(face)),
+            Some("point") => {
+                let v: Vec<f64> = w.map(float).collect();
+                points.push(Point3::new(v[0], v[1], v[2]));
+            }
+            _ => {}
+        }
+    }
+    let clipped = clipped.expect("a clipped face");
+    ClipCut {
+        body,
+        rung: rung.expect("a rung"),
+        x: x.expect("the rung's box"),
+        near: near.expect("its near box"),
+        clipped,
+        changed,
+        working,
+        points,
+    }
+}
+
+/// Whether `p` lies strictly inside `b`.
+fn strictly_inside(b: &crate::geom::Box3, p: crate::geom::Point3) -> bool {
+    let (l, h) = (b.min(), b.max());
+    l.x < p.x && p.x < h.x && l.y < p.y && p.y < h.y && l.z < p.z && p.z < h.z
+}
+
+/// A cut's clipped face under main's rule: it touches the change, the cut
+/// gives the near box the census read, and the walk reached its clipped
+/// side at points the near box doesn't hold strictly inside. Returns the
+/// cut, its region and changes, for Task 7's room.
+fn clipped_at_its_near_box(bytes: &[u8], text: &str) -> (ClipCut, super::region::Region, Changes) {
+    let c = clip_cut(bytes, text);
+    let region = super::region::Region {
+        changed: c.changed.clone(),
+        faces: c.body.faces().collect(),
+        frontier: Default::default(),
+    };
+    let changes = Changes {
+        deleted: c.changed.clone(),
+        ..Changes::default()
+    };
+    assert!(!super::near::touched(&c.body, &region, c.clipped).is_empty());
+    let n = super::near::near_box(&c.body, &changes, &region, c.clipped, &c.x, c.rung);
+    assert_eq!(n, c.near, "the cut misses a face the near box needs");
+    assert!(!c.points.is_empty());
+    for &p in &c.points {
+        assert!(!strictly_inside(&n, p), "{p:?} inside {n:?}");
+    }
+    (c, region, changes)
+}
+
+/// CTC 02 with PMI #295 (#658, census VII): working plane `1294043e`
+/// clipped at its near box in rung 3's narrowed retry.
+#[test]
+fn ctc_02s_plane_is_clipped_at_its_near_box() {
+    clipped_at_its_near_box(
+        include_bytes!("../../../tests/data/nist_ctc_02_room.body"),
+        include_str!("../../../tests/data/nist_ctc_02_room.txt"),
+    );
+}
+
+/// STC 10 #3044 (#658, census VII): working plane `ccab7076` (z = 75 mm),
+/// whose clipped side a piece of coplanar plane `a7b86e65` reached in rung
+/// 2's narrowed retry, clipped at its near box.
+#[test]
+fn stc_10s_coplanar_plane_is_clipped_at_its_near_box() {
+    clipped_at_its_near_box(
+        include_bytes!("../../../tests/data/nist_stc_10_room.body"),
+        include_str!("../../../tests/data/nist_stc_10_room.txt"),
+    );
+}
