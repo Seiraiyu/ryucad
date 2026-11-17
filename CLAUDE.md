@@ -70,6 +70,9 @@ cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --nocap
 cargo test -p ryucad --release --test bar -- --nocapture    # a 1,000-hole pattern against ryukei's own boolean, one thread (ignored in debug builds)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test assembly_bar -- --nocapture   # design 72's bars: 1,000 mates held and jostled, a cold daemon over a warm cache (without RYUCAD_BARS, ten times looser)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test script_bar -- --nocapture   # design 603's bars: #810's scripted project (56 parts, 209 instances) through one stdio session, from scratch, again, one constant and the review round (ten times looser without RYUCAD_BARS)
+PYTHONPATH=python/src python3 -m unittest discover -s python/tests   # the Python client's tests (its integration tests too with RYUCAD_EXE=<a ryucad>)
+UPDATE_PYTHON=1 cargo test -p ryucad --test python          # after adding an error code: the Python client's _codes.py written again
+sh scripts/python-dist.sh                                    # the Python client's wheel and sdist into python/dist (needs `pip install build`)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test hole_bar -- --nocapture   # design 533's bars: the 1,000-hole plate tapped M6 against plain ⌀5, a 10,000-place fill clipped, holes warm (ten times looser without RYUCAD_BARS)
 cargo test -p ryucad --release --test corpus                # ryucad's corpus: the committed projects against their manifest, their scripts, and the pinned assemblies once fetched
 UPDATE_MANIFEST=1 cargo test -p ryucad --release --test corpus the_committed   # after a deliberate change to what the corpus builds (review it)
