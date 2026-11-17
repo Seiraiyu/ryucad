@@ -161,6 +161,34 @@ impl Body {
         self.names.insert(name, entity);
     }
 
+    /// This body with every live face, edge and vertex renamed by `f`:
+    /// its geometry, topology and entity ids exactly as they are, and a
+    /// name's recipe, if recorded, kept under its new name. `None` when
+    /// `f` gives two entities one name. What a caller uses to move a body
+    /// made under one key to another's names (ryucad's flattened imports,
+    /// healed once per shape, #813); nothing in the kernel calls it.
+    pub fn renamed(&self, f: impl Fn(Name) -> Name) -> Option<Body> {
+        let mut out = self.clone();
+        let mut names = std::collections::BTreeMap::new();
+        for (&old, &entity) in &self.names {
+            let new = f(old);
+            match entity {
+                EntityId::Face(x) => out.faces[x].name = new,
+                EntityId::Edge(x) => out.edges[x].name = new,
+                EntityId::Vertex(x) => out.vertices[x].name = new,
+                _ => unreachable!("only faces, edges and vertices have names"),
+            }
+            if names.insert(new, entity).is_some() {
+                return None;
+            }
+        }
+        out.names = names;
+        if let Some(r) = &self.recipes {
+            out.recipes = Some(r.iter().map(|(n, x)| (f(*n), x.clone())).collect());
+        }
+        Some(out)
+    }
+
     /// Drops a name from the index and its recipe.
     pub(crate) fn retire_name(&mut self, name: Name) {
         self.names.remove(&name);
@@ -391,6 +419,25 @@ pub(crate) mod tests {
     pub(crate) fn line(b: &mut Body, p: Point3, q: Point3) -> (CurveId, [f64; 2]) {
         let c = b.add_curve(Curve::Line(Line::through(p, q).unwrap()));
         (c, [0.0, p.distance(q)])
+    }
+
+    /// `renamed` changes the names and nothing else: the unnamed dump is
+    /// the same bit for bit, every entity keeps its id under its new
+    /// name, and a map giving two entities one name is refused.
+    #[test]
+    fn renamed_keeps_everything_but_the_names() {
+        let b = crate::topo::fixture::tetrahedron();
+        let f = |n: Name| Name::derive(OpKey(77), Role::Merged, &[n]);
+        let r = b.renamed(f).unwrap();
+        assert_eq!(r.dump_unnamed(), b.dump_unnamed());
+        assert_ne!(r.dump(), b.dump());
+        assert_eq!(r.names.len(), b.names.len());
+        for (&old, &entity) in &b.names {
+            assert_eq!(r.by_name(f(old)), Some(entity));
+            assert_eq!(r.name_of(entity), Some(f(old)));
+            assert_eq!(r.by_name(old), None);
+        }
+        assert!(b.renamed(|_| Name::derive(OpKey(1), Role::Merged, &[])).is_none());
     }
 
     #[test]
