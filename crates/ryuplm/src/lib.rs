@@ -7,6 +7,7 @@
 
 pub use ryu_doc::{canonical, error, id, source, units};
 
+pub mod catalogue;
 pub mod ids;
 
 /// ryuplm, as ryupdm, ryu-git and ryu-session know it.
