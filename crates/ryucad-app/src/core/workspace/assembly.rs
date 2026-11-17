@@ -56,6 +56,7 @@ impl Workspace {
         let req = Request::Interference {
             part: part.clone(),
             instances: Vec::new(),
+            changed_since: None,
         };
         self.send(req, Route::Assembly(assembly::Asked::Interference(part)));
     }

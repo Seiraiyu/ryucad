@@ -4451,7 +4451,7 @@ fn interference_section(golden: &mut Golden) {
             .build()
             .unwrap();
         let mut fresh = ryucad::session::Session::open(session.root()).unwrap();
-        let v = pool.install(|| ryucad::interference::run(&mut fresh, "frame", &[]).unwrap());
+        let v = pool.install(|| ryucad::interference::run(&mut fresh, "frame", &[], None).unwrap());
         reports.push(v);
     }
     assert_eq!(reports[0], reports[1], "one thread and four");

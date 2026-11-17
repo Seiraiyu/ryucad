@@ -2771,6 +2771,87 @@ pub fn model(
     }
 }
 
+/// Which leaf occurrences of an assembly differ between two builds of
+/// it, by path as [`crate::assembly::path_text`] writes it, each list in
+/// path order: `added` and `removed` by path; `moved` where both have the
+/// path and its pose's bits differ; `changed` where its solids (founder
+/// and body hash, in order) or its `rev` differ. A path may be both
+/// `moved` and `changed`. What `diff --model` reports per assembly, and
+/// what `interference --changed-since` scopes to (#840).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Changed {
+    pub added: Vec<String>,
+    pub moved: Vec<String>,
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl Changed {
+    /// Nothing differs.
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty()
+            && self.moved.is_empty()
+            && self.changed.is_empty()
+            && self.removed.is_empty()
+    }
+
+    /// The paths whose pairs may have a new verdict: added, moved or
+    /// changed, each once. A removed path places nothing any more.
+    pub fn touched(&self) -> BTreeSet<&str> {
+        self.added
+            .iter()
+            .chain(&self.moved)
+            .chain(&self.changed)
+            .map(String::as_str)
+            .collect()
+    }
+}
+
+/// [`Changed`] from assembly model `then` to `now`.
+pub fn changed_occurrences(then: &crate::assembly::Model, now: &crate::assembly::Model) -> Changed {
+    changed_between(&then.occurrences, &now.occurrences)
+}
+
+/// Occurrences by their path's text.
+fn by_path(side: &[crate::assembly::Occurrence]) -> BTreeMap<String, &crate::assembly::Occurrence> {
+    side.iter()
+        .map(|o| (crate::assembly::path_text(&o.path), o))
+        .collect()
+}
+
+/// [`Changed`] from occurrences `a` to `b`.
+fn changed_between(
+    a: &[crate::assembly::Occurrence],
+    b: &[crate::assembly::Occurrence],
+) -> Changed {
+    use crate::assembly::Occurrence;
+    let (x, y) = (by_path(a), by_path(b));
+    let hashes = |o: &Occurrence| -> Vec<String> {
+        o.solids
+            .iter()
+            .map(|s| format!("{} {}", s.founder, s.built.hash))
+            .collect()
+    };
+    let (mut moved, mut changed) = (Vec::new(), Vec::new());
+    for (k, p) in &x {
+        let Some(q) = y.get(k) else {
+            continue;
+        };
+        if p.pose != q.pose {
+            moved.push(k.clone());
+        }
+        if hashes(p) != hashes(q) || p.rev != q.rev {
+            changed.push(k.clone());
+        }
+    }
+    Changed {
+        added: y.keys().filter(|k| !x.contains_key(*k)).cloned().collect(),
+        moved,
+        changed,
+        removed: x.keys().filter(|k| !y.contains_key(*k)).cloned().collect(),
+    }
+}
+
 /// An assembly's occurrences on each side, by path: `added`, `removed`,
 /// `moved` (its pose differs) and `changed` (its part's solids differ);
 /// each of those with both its `sides` as [`crate::assembly::Occurrence`]
@@ -2780,54 +2861,26 @@ pub fn model(
 /// paints and ghosts (issue #109). `None` when nothing differs, unless
 /// `all`.
 fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
-    use crate::assembly::{Occurrence, path_text};
+    use crate::assembly::Occurrence;
     if a.occurrences.is_empty() && b.occurrences.is_empty() {
         return None;
     }
-    let by_path = |side: &'_ Built| -> BTreeMap<String, Occurrence> {
-        side.occurrences
-            .iter()
-            .map(|o| (path_text(&o.path), o.clone()))
-            .collect()
-    };
-    let (x, y) = (by_path(a), by_path(b));
-    let added: Vec<&String> = y.keys().filter(|k| !x.contains_key(*k)).collect();
-    let removed: Vec<&String> = x.keys().filter(|k| !y.contains_key(*k)).collect();
-    let both: Vec<(&String, &Occurrence, &Occurrence)> = x
-        .iter()
-        .filter_map(|(k, o)| Some((k, o, y.get(k)?)))
-        .collect();
-    let moved: Vec<&String> = both
-        .iter()
-        .filter(|(_, p, q)| p.pose != q.pose)
-        .map(|(k, _, _)| *k)
-        .collect();
-    let hashes = |o: &Occurrence| -> Vec<String> {
-        o.solids
-            .iter()
-            .map(|s| format!("{} {}", s.founder, s.built.hash))
-            .collect()
-    };
-    let changed: Vec<&String> = both
-        .iter()
-        .filter(|(_, p, q)| hashes(p) != hashes(q) || p.rev != q.rev)
-        .map(|(k, _, _)| *k)
-        .collect();
-    let same = added.is_empty() && removed.is_empty() && moved.is_empty() && changed.is_empty();
-    if same && !all {
+    let c = changed_between(&a.occurrences, &b.occurrences);
+    if c.is_empty() && !all {
         return None;
     }
+    let (x, y) = (by_path(&a.occurrences), by_path(&b.occurrences));
     let mut sides = serde_json::Map::new();
     let mut differ = serde_json::Map::new();
-    let listed: BTreeSet<&String> = added
+    let listed: BTreeSet<&String> = c
+        .added
         .iter()
-        .chain(&removed)
-        .chain(&moved)
-        .chain(&changed)
-        .copied()
+        .chain(&c.removed)
+        .chain(&c.moved)
+        .chain(&c.changed)
         .collect();
     for path in listed {
-        let (p, q) = (x.get(path), y.get(path));
+        let (p, q) = (x.get(path).copied(), y.get(path).copied());
         let side = |o: Option<&Occurrence>| o.map_or(Value::Null, Occurrence::to_json);
         sides.insert(path.clone(), json!({"from": side(p), "to": side(q)}));
         let (Some(p), Some(q)) = (p, q) else {
@@ -2845,8 +2898,8 @@ fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
         }
     }
     Some(
-        json!({"added": added, "removed": removed, "moved": moved, "changed": changed,
-                "sides": sides, "bodies": differ}),
+        json!({"added": c.added, "removed": c.removed, "moved": c.moved,
+                "changed": c.changed, "sides": sides, "bodies": differ}),
     )
 }
 
@@ -5658,5 +5711,202 @@ mod tests {
         assert!(t.contains("\nthread = M10x1.5-6g, full\n"), "{t}");
         assert!(t.contains("\ndepth = 12 mm\n"), "{t}");
         assert!(!t.contains("thread.size"), "{t}");
+    }
+}
+
+#[cfg(test)]
+mod changed_occurrences_tests {
+    //! [`super::changed_occurrences`] on the edits a script makes: an
+    //! instance added or removed, one moved by its mate, a subassembly
+    //! moved, a part edited under three instances, a parameter, an
+    //! insert.
+    use super::{Changed, changed_occurrences};
+    use crate::assembly::Model;
+    use crate::assembly::tests::{id, project};
+    use crate::doc::assembly::Rev;
+    use crate::session::Session;
+    use crate::testing::call;
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+
+    fn ok(s: &mut Session, method: &str, params: Value) {
+        call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"));
+    }
+
+    fn model(s: &mut Session, asm: &str) -> Arc<Model> {
+        s.model(&id(asm), &Rev::Working).unwrap()
+    }
+
+    /// Places `of` in `asm` as `inst` at `origin` (mm).
+    fn place(s: &mut Session, asm: &str, inst: &str, of: &str, origin: [f64; 3]) {
+        ok(
+            s,
+            "feature.add",
+            json!({"part": asm, "type": "instance", "id": inst, "of": of,
+                   "placement": {"origin": origin}}),
+        );
+    }
+
+    fn paths(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// `project()`'s `frame` with the plate as `p1` and the bolt as `b1`,
+    /// `b2` and `b3`.
+    fn frame() -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = project();
+        place(&mut s, "frame", "p1", "plate", [0.0; 3]);
+        for (inst, x) in [("b1", 10.0), ("b2", 30.0), ("b3", 50.0)] {
+            place(&mut s, "frame", inst, "bolt", [x, 10.0, 5.0]);
+        }
+        (dir, s)
+    }
+
+    #[test]
+    fn the_same_build_changes_nothing() {
+        let (_dir, mut s) = frame();
+        let (a, b) = (model(&mut s, "frame"), model(&mut s, "frame"));
+        let c = changed_occurrences(&a, &b);
+        assert!(c.is_empty(), "{c:?}");
+        assert_eq!(c, Changed::default());
+        assert!(c.touched().is_empty());
+    }
+
+    #[test]
+    fn an_added_instance_is_added() {
+        let (_dir, mut s) = frame();
+        let then = model(&mut s, "frame");
+        place(&mut s, "frame", "b4", "bolt", [70.0, 10.0, 5.0]);
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(
+            c,
+            Changed {
+                added: paths(&["b4"]),
+                ..Changed::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_removed_instance_is_removed_and_touches_nothing() {
+        let (_dir, mut s) = frame();
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b2"}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(c.removed, paths(&["b2"]), "{c:?}");
+        assert!(c.touched().is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn a_part_edited_under_three_instances_changes_all_three() {
+        let (_dir, mut s) = frame();
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(
+            c,
+            Changed {
+                changed: paths(&["b1", "b2", "b3"]),
+                ..Changed::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_parameter_changes_the_instances_of_what_reads_it() {
+        let (_dir, mut s) = frame();
+        ok(
+            &mut s,
+            "param.set",
+            json!({"part": "bolt", "parameters": {"r": "3 mm"}}),
+        );
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": "r"}}),
+        );
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "param.set",
+            json!({"part": "bolt", "parameters": {"r": "4 mm"}}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(c.changed, paths(&["b1", "b2", "b3"]), "{c:?}");
+        assert!(c.moved.is_empty() && c.added.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn an_insert_changes_with_what_it_inserts() {
+        let (_dir, mut s) = frame();
+        ok(&mut s, "part.create", json!({"part": "kit"}));
+        ok(
+            &mut s,
+            "feature.add",
+            json!({"part": "kit", "type": "insert", "id": "i", "of": "bolt", "rev": "working"}),
+        );
+        place(&mut s, "frame", "k1", "kit", [80.0, 10.0, 5.0]);
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(c.changed, paths(&["b1", "b2", "b3", "k1"]), "{c:?}");
+    }
+
+    #[test]
+    fn a_moved_subassembly_moves_every_leaf_under_it() {
+        let (_dir, mut s) = frame();
+        ok(
+            &mut s,
+            "part.create",
+            json!({"part": "pair", "kind": "assembly"}),
+        );
+        place(&mut s, "pair", "l", "bolt", [0.0; 3]);
+        place(&mut s, "pair", "r", "bolt", [10.0, 0.0, 0.0]);
+        place(&mut s, "frame", "s1", "pair", [0.0, 40.0, 5.0]);
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "s1", "placement": {"origin": [0, 45, 5]}}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(
+            c,
+            Changed {
+                moved: paths(&["s1/l", "s1/r"]),
+                ..Changed::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_mate_driven_elsewhere_moves_its_instance() {
+        let (_dir, mut s) = crate::mate::tests::hinged();
+        let then = model(&mut s, "frame");
+        ok(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": "30 deg"}),
+        );
+        let c = changed_occurrences(&then, &model(&mut s, "frame"));
+        assert_eq!(
+            c,
+            Changed {
+                moved: paths(&["pin"]),
+                ..Changed::default()
+            }
+        );
     }
 }

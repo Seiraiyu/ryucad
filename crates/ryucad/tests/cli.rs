@@ -7515,6 +7515,91 @@ fn interference_from_the_cli() {
     p.fails(&["clearance", "bolt"], "wrong_part_kind", 1);
 }
 
+/// #840: `interference --changed-since`, both ways: nothing since the
+/// commit checks nothing; a bolt moved into the plate checks its pair
+/// only; narrowed to an unchanged bolt, nothing; a revision that isn't
+/// one is refused.
+#[test]
+fn interference_since_a_revision_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "slab", "--param", "x=100", "--param", "y=50",
+        "--param", "z=5",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "p1", "--of", "plate",
+    ]);
+    // Through the plate, and standing on it.
+    for (id, at) in [("b1", "10,10,0"), ("b2", "30,10,5")] {
+        p.ok(&[
+            "feature", "add", "frame", "instance", "--id", id, "--of", "bolt", "--origin", at,
+        ]);
+    }
+    p.git(&["init", "-q", "-b", "main"]);
+    p.ok(&["git", "install"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    let head = git(&p.direct, &["rev-parse", "HEAD"]).trim().to_owned();
+    let none = p.ok(&["interference", "frame", "--changed-since", "HEAD"]);
+    assert_eq!(
+        (&none["pairs"], &none["scope"]),
+        (
+            &json!(0),
+            &json!({"since": "HEAD", "commit": head, "occurrences": [], "skipped": 2})
+        ),
+        "{none}"
+    );
+    // b2 down into the plate: only its pair, now an interference.
+    p.ok(&["feature", "edit", "frame", "b2", "--origin", "30,10,0"]);
+    let one = p.ok(&["interference", "frame", "--changed-since", "HEAD"]);
+    assert_eq!(
+        (
+            &one["pairs"],
+            &one["scope"]["occurrences"],
+            &one["scope"]["skipped"]
+        ),
+        (&json!(1), &json!(["b2"]), &json!(1)),
+        "{one}"
+    );
+    assert_eq!(one["interferences"][0]["b"], "frame/b2/shank");
+    let all = p.ok(&["interference", "frame"]);
+    assert_eq!(all["interferences"][1], one["interferences"][0], "{all}");
+    // Of b1, nothing changed.
+    let b1 = p.ok(&[
+        "interference",
+        "frame",
+        "--changed-since",
+        "HEAD",
+        "--instance",
+        "b1",
+    ]);
+    assert_eq!(
+        (&b1["pairs"], &b1["scope"]["occurrences"]),
+        (&json!(0), &json!([]))
+    );
+    p.fails(
+        &["interference", "frame", "--changed-since", "nowhere"],
+        "rev_not_found",
+        1,
+    );
+}
+
 /// A plate `base` (100 × 50 × 5 mm, fixed) and a bolt `pin` (radius 3,
 /// height 20) placed 50 mm along x in assembly `frame`; the plate's top
 /// and the bolt's foot as entity references.

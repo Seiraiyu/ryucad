@@ -473,6 +473,23 @@ pub fn find_for(
     cache: &mut Cache,
     job: &Job,
 ) -> Result<Value> {
+    find_scoped(asm, model, only, None, cache, job).map(|(v, _)| v)
+}
+
+/// [`find_for`] scoped to what changed (#840): with `changed` (leaf
+/// occurrence paths), only the candidate pairs (boxes overlapping, of
+/// different occurrences, a side under `only`) with a side at one of
+/// them, none when it is empty; and how many candidates that left out.
+/// A pair with neither side changed has the same two bodies at the same
+/// relative pose, so its verdict can't have changed.
+pub fn find_scoped(
+    asm: &Id,
+    model: &Model,
+    only: &[Vec<Id>],
+    changed: Option<&BTreeSet<Vec<Id>>>,
+    cache: &mut Cache,
+    job: &Job,
+) -> Result<(Value, usize)> {
     for p in only {
         if !model.occurrences.iter().any(|o| o.path.starts_with(p)) {
             return Err(Error::new(
@@ -513,13 +530,25 @@ pub fn find_for(
     // along x is quadratic when occurrences line up across x, as 100,000
     // in subassemblies laid out alike do).
     let boxes: Vec<Box3> = pieces.iter().map(|(_, p)| p.world).collect();
-    let mut pairs: Vec<(usize, usize)> = overlapping(&boxes)
+    let candidates: Vec<(usize, usize)> = overlapping(&boxes)
         .into_iter()
         .filter(|&(a, b)| {
             let ((oa, x), (ob, y)) = (&pieces[a], &pieces[b]);
             oa != ob && (under(x.occurrence, only) || under(y.occurrence, only))
         })
         .collect();
+    let considered = candidates.len();
+    let mut pairs: Vec<(usize, usize)> = match changed {
+        None => candidates,
+        Some(set) => candidates
+            .into_iter()
+            .filter(|&(a, b)| {
+                set.contains(&pieces[a].1.occurrence.path)
+                    || set.contains(&pieces[b].1.occurrence.path)
+            })
+            .collect(),
+    };
+    let skipped = considered - pairs.len();
     pairs.sort_unstable();
     let keyed: Vec<(usize, usize, Rigid, String)> = pairs
         .into_iter()
@@ -713,16 +742,19 @@ pub fn find_for(
             }
         }
     }
-    Ok(json!({
-        "part": asm,
-        "occurrences": model.occurrences.len(),
-        "pairs": keyed.len(),
-        "clear": clear,
-        "interferences": interferences,
-        "touching": touching,
-        "unchecked": unchecked,
-        "volume": "estimated from each intersection's mesh at normal quality; null where judged on meshes (approximate: a reference import's side)",
-    }))
+    Ok((
+        json!({
+            "part": asm,
+            "occurrences": model.occurrences.len(),
+            "pairs": keyed.len(),
+            "clear": clear,
+            "interferences": interferences,
+            "touching": touching,
+            "unchecked": unchecked,
+            "volume": "estimated from each intersection's mesh at normal quality; null where judged on meshes (approximate: a reference import's side)",
+        }),
+        skipped,
+    ))
 }
 
 /// Instance paths under assembly `pid` (`s1/b2`, `pattern:2/bolt`), as
@@ -744,13 +776,60 @@ pub(crate) fn instance_paths(pid: &Id, instances: &[String]) -> Result<Vec<Vec<I
         .collect()
 }
 
+/// Assembly `pid` as revision `rev` builds it (as `--rev` takes one: a
+/// Git revision, `working`, `worktree:<path>`, `annotation:<id>`,
+/// `draft:<name>`), from a revision session that starts from this one's
+/// caches, and the commit `rev` names; `None` for the model when `pid`
+/// isn't an assembly there.
+fn model_at(
+    session: &mut crate::session::Session,
+    pid: &Id,
+    rev: &str,
+) -> Result<(Option<String>, Option<Arc<Model>>)> {
+    let (commit, s) = session.at(Some(rev))?;
+    let assembly = s
+        .project()
+        .parts
+        .get(pid)
+        .is_some_and(|p| crate::part::part_kind(p) == crate::doc::files::PartKind::Assembly);
+    if !assembly {
+        return Ok((commit, None));
+    }
+    let model = s.model(pid, &crate::doc::assembly::Rev::Working)?;
+    Ok((commit, Some(model)))
+}
+
+/// The leaf occurrences of `now` added, moved or changed since `then`
+/// (every one when `then` is `None`: no such assembly then), narrowed to
+/// those under `only` when it names any, in `now`'s order.
+fn scope_paths(then: Option<&Model>, now: &Model, only: &[Vec<Id>]) -> Vec<Vec<Id>> {
+    let changed = then.map(|t| crate::diff::changed_occurrences(t, now));
+    let touched = changed.as_ref().map(crate::diff::Changed::touched);
+    now.occurrences
+        .iter()
+        .filter(|o| {
+            touched
+                .as_ref()
+                .is_none_or(|t| t.contains(path_text(&o.path).as_str()))
+        })
+        .filter(|o| under(o, only))
+        .map(|o| o.path.clone())
+        .collect()
+}
+
 /// `interference`: which solids of assembly `part`'s occurrences overlap,
 /// or with `instances` (paths under the assembly, as `s1/b2` or
 /// `pattern:2/bolt`), those of a pair with a side under one of them.
+/// With `changed_since` (a revision), only the pairs with a side at an
+/// occurrence added, moved or changed since then, of those under
+/// `instances` when it names any (#840): the answer's `scope` gives the
+/// revision, its commit, those occurrences and how many candidate pairs
+/// were `skipped` as unchanged. Nothing changed checks nothing.
 pub fn run(
     session: &mut crate::session::Session,
     part: &str,
     instances: &[String],
+    changed_since: Option<&str>,
 ) -> Result<Value> {
     let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
@@ -762,16 +841,27 @@ pub fn run(
         .with("part", &pid));
     }
     let only = instance_paths(&pid, instances)?;
+    // The assembly then, first: a revision session borrows this one.
+    let then = match changed_since {
+        Some(rev) => Some((rev, model_at(session, &pid, rev)?)),
+        None => None,
+    };
     let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
     let revision = session.project().part(&pid)?.revision.clone();
     let job = session.job().clone();
-    let mut v = find_for(
-        &pid,
-        &model,
-        &only,
-        session.caches_mut().interference_mut(),
-        &job,
-    )?;
+    let cache = session.caches_mut().interference_mut();
+    let mut v = match &then {
+        None => find_for(&pid, &model, &only, cache, &job)?,
+        Some((rev, (commit, then))) => {
+            let paths = scope_paths(then.as_deref(), &model, &only);
+            let set: BTreeSet<Vec<Id>> = paths.iter().cloned().collect();
+            let (mut v, skipped) = find_scoped(&pid, &model, &only, Some(&set), cache, &job)?;
+            let occurrences: Vec<String> = paths.iter().map(|p| path_text(p)).collect();
+            v["scope"] = json!({"since": rev, "commit": commit,
+                                "occurrences": occurrences, "skipped": skipped});
+            v
+        }
+    };
     v["revision"] = json!(revision);
     // Poses a failed mate left where a solve without it put them make
     // clashes that aren't the design's (issue #155).
@@ -792,7 +882,7 @@ pub fn run(
 mod tests {
 
     use super::*;
-    use crate::assembly::tests::{place_in, project};
+    use crate::assembly::tests::{id, place_in, project};
     use crate::doc::project::write_json;
     use serde_json::json;
 
@@ -833,10 +923,88 @@ mod tests {
 
     /// [`run`] after reading the files again, as every request does,
     /// with how many pairs it intersected (`computed`).
+    #[test]
+    fn a_scope_keeps_the_pairs_at_it_and_counts_the_rest() {
+        let (dir, mut s) = project();
+        for (inst, part, at) in [
+            ("p1", "plate", [0.0; 3]),
+            ("b1", "bolt", [0.01, 0.01, 0.0]),
+            ("b2", "bolt", [0.03, 0.01, 0.0]),
+        ] {
+            place_in(dir.path(), "frame", inst, part, json!("working"), at);
+        }
+        s.refresh().unwrap();
+        let model = s
+            .model(&id("frame"), &crate::doc::assembly::Rev::Working)
+            .unwrap();
+        let (asm, job) = (id("frame"), Job::default());
+        let mut cache = Cache::default();
+        let (all, skipped) = find_scoped(&asm, &model, &[], None, &mut cache, &job).unwrap();
+        assert_eq!((all["pairs"].as_u64(), skipped), (Some(2), 0), "{all}");
+        // Only b2's pair with the plate.
+        let b2: BTreeSet<Vec<Id>> = [vec![id("b2")]].into_iter().collect();
+        let (one, skipped) = find_scoped(&asm, &model, &[], Some(&b2), &mut cache, &job).unwrap();
+        assert_eq!((one["pairs"].as_u64(), skipped), (Some(1), 1), "{one}");
+        assert_eq!(one["interferences"][0]["b"], "frame/b2/shank");
+        assert_eq!(one["interferences"][0], all["interferences"][1]);
+        // An empty scope checks nothing, never everything.
+        let none = BTreeSet::new();
+        let (empty, skipped) =
+            find_scoped(&asm, &model, &[], Some(&none), &mut cache, &job).unwrap();
+        assert_eq!((empty["pairs"].as_u64(), skipped), (Some(0), 2), "{empty}");
+        assert_eq!(empty["interferences"], json!([]));
+        // find_for is find_scoped without a scope.
+        assert_eq!(find_for(&asm, &model, &[], &mut cache, &job).unwrap(), all);
+    }
+
+    #[test]
+    fn the_scope_is_what_changed_under_the_instances_in_model_order() {
+        let (dir, mut s) = project();
+        for (inst, part, at) in [
+            ("p1", "plate", [0.0; 3]),
+            ("b1", "bolt", [0.01, 0.01, 0.0]),
+            ("b2", "bolt", [0.03, 0.01, 0.0]),
+            ("b3", "bolt", [0.05, 0.01, 0.0]),
+        ] {
+            place_in(dir.path(), "frame", inst, part, json!("working"), at);
+        }
+        s.refresh().unwrap();
+        let rev = crate::doc::assembly::Rev::Working;
+        let then = s.model(&id("frame"), &rev).unwrap();
+        // b3 moved (its file rewritten, the list as it was), b4 added.
+        let b3 = json!({"format": 4, "kind": "ryucad.feature", "type": "instance",
+                        "part": "bolt", "rev": "working",
+                        "pose": {"origin_m": [0.05, 0.02, 0.0], "z": [0, 0, 1], "x": [1, 0, 0]}});
+        let file = crate::doc::project::feature_path(dir.path(), &id("frame"), &id("b3"));
+        write_json(&file, &b3).unwrap();
+        place_in(
+            dir.path(),
+            "frame",
+            "b4",
+            "bolt",
+            json!("working"),
+            [0.07, 0.01, 0.0],
+        );
+        s.refresh().unwrap();
+        let now = s.model(&id("frame"), &rev).unwrap();
+        let text = |v: Vec<Vec<Id>>| -> Vec<String> { v.iter().map(|p| path_text(p)).collect() };
+        assert_eq!(text(scope_paths(Some(&then), &now, &[])), ["b3", "b4"]);
+        assert_eq!(
+            text(scope_paths(Some(&then), &now, &[vec![id("b4")]])),
+            ["b4"]
+        );
+        assert!(scope_paths(Some(&then), &now, &[vec![id("b1")]]).is_empty());
+        // No assembly then: everything, in model order.
+        assert_eq!(
+            text(scope_paths(None, &now, &[])),
+            ["p1", "b1", "b2", "b3", "b4"]
+        );
+    }
+
     fn find_in(s: &mut crate::session::Session, part: &str, only: &[String]) -> Result<Value> {
         s.refresh()?;
         let before = s.caches().interference().len();
-        let mut v = run(s, part, only)?;
+        let mut v = run(s, part, only, None)?;
         v["computed"] = json!(s.caches().interference().len() - before);
         Ok(v)
     }
