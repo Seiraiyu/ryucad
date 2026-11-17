@@ -827,6 +827,13 @@ fn every_protocol_method_has_a_command() {
         ("board.place", &["board", "place"]),
         ("board.unplace", &["board", "unplace"]),
         ("board.render", &["board", "render"]),
+        ("board.track.add", &["board", "track", "add"]),
+        ("board.track.edit", &["board", "track", "edit"]),
+        ("board.track.delete", &["board", "track", "delete"]),
+        ("board.via.add", &["board", "via", "add"]),
+        ("board.via.delete", &["board", "via", "delete"]),
+        ("board.hole.add", &["board", "hole", "add"]),
+        ("board.hole.delete", &["board", "hole", "delete"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
         ("block.show", &["block", "show"]),
@@ -4831,4 +4838,143 @@ fn boards_render_to_png_and_svg() {
         "invalid_param",
         1,
     );
+}
+
+#[test]
+fn routes_are_added_edited_and_deleted_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    p.ok(&["board", "place", "main", "R2", "--at", "14,10"]);
+    let pads = p.ok(&["board", "show", "main", "--pads"])["pads"].clone();
+    let net_of = |r: &str| {
+        pads.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["reference"] == r)
+            .unwrap()["net"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // R1/2 and R2/2 are both on the 3V3 rail.
+    let v33 = net_of("main:R1/2");
+    assert_eq!(v33, net_of("main:R2/2"));
+    let t = p.ok(&[
+        "board",
+        "track",
+        "add",
+        "main",
+        "--net",
+        &v33,
+        "--layer",
+        "top",
+        "--path",
+        "R1/2",
+        "12,10.48",
+        "main:R2/2",
+        "--id",
+        "t1",
+    ]);
+    assert_eq!(t["tracks"][0]["reference"], "main:track/t1");
+    let pts = &t["tracks"][0]["track"]["points"];
+    assert_eq!(pts[0], json!([10_480_000, 10_000_000]));
+    assert_eq!(pts[1], json!([12_000_000, 10_480_000]));
+    assert_eq!(pts[2], json!([14_480_000, 10_000_000]));
+    assert_eq!(t["tracks"][0]["track"]["width_nm"], 250_000);
+    assert!(p.direct.join("board/boards/main/tracks/t1.json").is_file());
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", "nope", "--layer", "top", "--path", "1,1",
+            "2,2",
+        ],
+        "board_net_not_found",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", &v33, "--layer", "inner", "--path", "1,1",
+            "2,2",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--path", "Q9/1",
+            "2,2",
+        ],
+        "not_found",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--path", "1,1",
+            "1,1",
+        ],
+        "invalid_document",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--width", "0",
+            "--path", "1,1", "2,2",
+        ],
+        "invalid_param",
+        1,
+    );
+    let e = p.ok(&[
+        "board", "track", "edit", "main", "t1", "--layer", "bottom", "--width", "0.3",
+    ]);
+    assert_eq!(e["tracks"][0]["track"]["layer"], "bottom");
+    assert_eq!(e["tracks"][0]["track"]["width_nm"], 300_000);
+    // Several, all or nothing.
+    let ops = format!(
+        r#"[{{"net":"{v33}","layer":"top","path":[["1","1"],["2","1"]],"id":"t2"}},{{"net":"nope","layer":"top","path":[["1","2"],["2","2"]]}}]"#
+    );
+    p.fails(
+        &["board", "track", "add", "main", "--ops", &ops],
+        "board_net_not_found",
+        1,
+    );
+    assert!(!p.direct.join("board/boards/main/tracks/t2.json").exists());
+    let v = p.ok(&[
+        "board", "via", "add", "main", "--net", &v33, "--at", "12,12", "--id", "v1",
+    ]);
+    assert_eq!(v["vias"][0]["via"]["drill_nm"], 300_000);
+    assert_eq!(v["vias"][0]["via"]["diameter_nm"], 600_000);
+    p.ok(&[
+        "board", "track", "add", "main", "--net", &v33, "--layer", "bottom", "--path", "via/v1",
+        "12,15", "--id", "t3",
+    ]);
+    let h = p.ok(&[
+        "board", "hole", "add", "main", "--at", "27,17", "--drill", "3.2", "--id", "h1",
+    ]);
+    assert_eq!(h["holes"][0]["hole"]["drill_nm"], 3_200_000);
+    p.fails(
+        &[
+            "board", "hole", "add", "main", "--at", "27,17", "--drill", "3.2", "--id", "h1",
+        ],
+        "duplicate_id",
+        1,
+    );
+    p.ok(&["board", "track", "delete", "main", "t1", "t3"]);
+    p.fails(&["board", "track", "delete", "main", "t1"], "not_found", 1);
+    p.ok(&["board", "via", "delete", "main", "v1"]);
+    p.ok(&["board", "hole", "delete", "main", "h1"]);
+    assert!(
+        !p.direct.join("board/boards/main/vias").exists()
+            || fs::read_dir(p.direct.join("board/boards/main/vias"))
+                .unwrap()
+                .next()
+                .is_none()
+    );
+    // Deleting the board deletes its routes.
+    p.ok(&[
+        "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--path", "1,1", "2,1",
+    ]);
+    p.ok(&["board", "delete", "main"]);
+    assert!(!p.direct.join("board/boards/main").exists());
 }

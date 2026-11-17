@@ -66,6 +66,9 @@ impl Connectivity {
     }
 }
 
+/// The nearest pair of pieces between two islands, and their distance.
+type Nearest = (Distance, (Key, u32), (Key, u32));
+
 /// The connections that would close an open net: a spanning tree over
 /// its islands (Prim's, from the least island), each edge the nearest
 /// pair of pieces between an island in the tree and one not yet in it,
@@ -77,7 +80,7 @@ pub fn connections(c: &Connectivity, open: &Open<Key>) -> Vec<Connection> {
         .map(|(id, _)| c.island_bodies(id))
         .collect();
     let n = islands.len();
-    let mut near: BTreeMap<(usize, usize), (Distance, (Key, u32), (Key, u32))> = BTreeMap::new();
+    let mut near: BTreeMap<(usize, usize), Nearest> = BTreeMap::new();
     for i in 0..n {
         for j in i + 1..n {
             if let Some(found) = ryu_copper::index::nearest_pair(&islands[i], &islands[j]) {

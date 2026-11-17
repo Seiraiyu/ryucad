@@ -16,6 +16,11 @@ pub struct Preset {
     /// Paste openings change by this on every side (negative shrinks),
     /// where neither the pad nor its footprint says otherwise.
     pub paste_margin_nm: i64,
+    /// The width a track takes when its command gives none.
+    pub default_track_width_nm: i64,
+    /// The drill and diameter a via takes when its command gives none.
+    pub default_via_drill_nm: i64,
+    pub default_via_diameter_nm: i64,
 }
 
 /// Read from https://jlcpcb.com/capabilities/pcb-capabilities on
@@ -28,6 +33,9 @@ pub const JLC_2L: Preset = Preset {
     name: "jlc-2l",
     mask_expansion_nm: 0,
     paste_margin_nm: 0,
+    default_track_width_nm: 250_000,
+    default_via_drill_nm: 300_000,
+    default_via_diameter_nm: 600_000,
 };
 
 /// The preset a new board takes.

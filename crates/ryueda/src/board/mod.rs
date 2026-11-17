@@ -14,6 +14,7 @@ pub mod outline;
 pub mod pad;
 pub mod preset;
 pub mod render;
+pub mod route;
 pub mod shapes;
 #[cfg(test)]
 pub(crate) mod testing;
