@@ -86,3 +86,31 @@ fn a_name_unknown_in_mils_goes_round() {
         "00554e4954533d494e43480d0a234c617965725f506879736963616c5f4f726465723d300d0a234c617965725f436f6c6f723d3235350d0a230d0a23466561747572652073796d627839312e353531320d0a243220726563743130322e333632327834372e323434310d0a243320726563743130362e32393932783435393236373731370d0a726563743132392e",
     );
 }
+
+/// #857: `$363953 ;0=0` in a 29-byte millimetre features file built a
+/// table of 363,954 symbols, which took the fuzzer 20 s to read and write.
+/// Symbols are numbered densely from 0, a line each, so no index can be
+/// past the file's length: such a file is refused.
+#[test]
+fn a_symbol_index_past_the_file_is_refused() {
+    for hex in [
+        "800a3533351d000000000000002e300a24333633393533203b303d300a",
+        "800a3533353139274120313635303330302e300a24333531393635203b303d300a",
+        "80787d3330302e300a35333531393635303330302e300a24333531393635203b303d300a",
+    ] {
+        let data = bytes(hex);
+        let text = decode(&data[1..]);
+        let decls = Decls::default();
+        let user = BTreeSet::from(["user_pad".to_string()]);
+        let cx = Context {
+            path: "f",
+            units: Units::Mm,
+            decls: &decls,
+            user: &user,
+        };
+        match features(&text, &cx) {
+            Err(bad) => assert!(bad.message.contains("past the file"), "{}", bad.message),
+            Ok(p) => panic!("{hex}: read, with {} symbols", p.symbols.len()),
+        }
+    }
+}

@@ -241,6 +241,15 @@ pub fn features(text: &str, cx: &Context) -> Result<Parsed, Bad> {
         }
         if let Some(rest) = line.strip_prefix('$') {
             let (i, s) = symbol(&mut r, rest)?;
+            // Symbols are numbered densely from 0, a line each, so an
+            // index past the file's length can't be one; it would build a
+            // table that long (#857).
+            if i > text.len() {
+                return Err(r.bad(
+                    2,
+                    format!("symbol index {i} is past the file ({} bytes)", text.len()),
+                ));
+            }
             if symbols.len() <= i {
                 symbols.resize(i + 1, None);
             }

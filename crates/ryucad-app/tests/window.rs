@@ -7726,6 +7726,71 @@ fn on_sheet(h: &Harness<'static, App>, at: [f64; 2]) -> egui::Pos2 {
     rect.left_top() + egui::vec2(q[0] as f32, q[1] as f32)
 }
 
+/// Whether `id`'s tile is drawn: open and its group's active tab.
+fn tile_in_front(h: &Harness<'static, App>, id: &str) -> bool {
+    let tiles = &h.state().opened().tiles;
+    let Some(t) = ryucad_app::ui::shell::find(tiles, id) else {
+        return false;
+    };
+    tiles.active_tiles().contains(&t)
+}
+
+/// #867: Show in model in the Drawings tile selects the entity and brings
+/// the viewport forward (Drawings opens in its tab group), so something
+/// visibly happens.
+#[test]
+fn show_in_model_brings_the_viewport_forward() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_drawing();
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    shown(&mut h, "d (drawing: Block)");
+    h.get_by_label("d (drawing: Block)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .drawings
+            .sheet
+            .as_ref()
+            .is_some_and(|s| !s.entities.is_empty())
+    });
+    h.run_steps(2);
+    assert!(tile_in_front(&h, "drawings"));
+    assert!(
+        !tile_in_front(&h, "viewport"),
+        "the viewport is in front already"
+    );
+    // A curve of the view, chosen as the tile's own click would.
+    let entity = {
+        let sheet = h.state().opened().ws.drawings.sheet.clone().unwrap();
+        sheet.entities.values().next().unwrap().clone()
+    };
+    h.state_mut().opened_mut().ws.drawings.selected =
+        Some(ryucad_app::core::drawings::Pick::Entity {
+            entity: entity.clone(),
+            view: "v1".into(),
+        });
+    h.run_steps(2);
+    h.get_by_label("Show in model").click();
+    h.run_steps(2);
+    assert!(
+        tile_in_front(&h, "viewport"),
+        "the viewport is behind another tab"
+    );
+    assert!(
+        h.state()
+            .opened()
+            .ws
+            .myself()
+            .unwrap()
+            .selection
+            .contains(&entity)
+    );
+}
+
 #[test]
 fn a_drawing_opens_from_its_row_its_dimension_is_edited_and_a_view_dragged() {
     let _one = one_at_a_time();

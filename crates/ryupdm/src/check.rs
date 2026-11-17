@@ -14,6 +14,7 @@
 //! | `release_part_deleted` | error | A part folder is gone while its latest official release isn't obsolete |
 //! | `release_result_changed` | warning | This build rebuilds an official release's content to other body hashes |
 //! | `release_tag_missing` | warning | An official release has no tag |
+//! | `release_tag_clash` | warning | An official release with no tag can't be tagged: another project's tag is a leading path of its name, or below it (#844) |
 //! | `release_tag_moved` | warning | A tag points away from its release's official commit |
 //! | `release_tag_orphaned` | warning | A `ryupdm/` tag names no official release |
 //! | `release_unapproved` | error | An official record under approval rules whose service attestation says it became official without them |
@@ -41,7 +42,7 @@ use std::collections::BTreeMap;
 pub const SCHEMA: u64 = 1;
 
 /// Every code a release check reports, with its severity.
-pub const CODES: [(&str, &str); 16] = [
+pub const CODES: [(&str, &str); 17] = [
     ("release_hash_mismatch", "error"),
     ("release_stale", "error"),
     ("release_modified", "error"),
@@ -50,6 +51,7 @@ pub const CODES: [(&str, &str); 16] = [
     ("release_part_deleted", "error"),
     ("release_result_changed", "warning"),
     ("release_tag_missing", "warning"),
+    ("release_tag_clash", "warning"),
     ("release_tag_moved", "warning"),
     ("release_tag_orphaned", "warning"),
     ("release_unapproved", "error"),
@@ -352,7 +354,25 @@ pub fn run_for<P: Product>(
             } else {
                 match releases.tag(&part, &e.label, &o.commit) {
                     Tag::Ok => {}
-                    Tag::Missing => out.push(
+                    Tag::Missing => {
+                        let name = releases.name_of(&part, &e.label, Kind::Release);
+                        if let Some(other) = crate::history::tag_clash(&releases.all_tags, &name) {
+                            out.push(
+                                Finding::new(
+                                    "release_tag_clash",
+                                    &part,
+                                    Some(&e.label),
+                                    format!(
+                                        "{part} {} can't be tagged {name}: Git already holds {other}, and one tag can't be a folder of another (#844)",
+                                        e.label
+                                    ),
+                                )
+                                .with("tag", &name)
+                                .with("clashes", &other)
+                                .with("official", &o.commit),
+                            );
+                        } else {
+                        out.push(
                         Finding::new(
                             "release_tag_missing",
                             &part,
@@ -366,7 +386,9 @@ pub fn run_for<P: Product>(
                         )
                         .with("tag", releases.name_of(&part, &e.label, Kind::Release))
                         .with("official", &o.commit),
-                    ),
+                    );
+                        }
+                    }
                     Tag::Moved(to) => out.push(
                         Finding::new(
                             "release_tag_moved",
@@ -1003,6 +1025,12 @@ mod tests {
         write(d, &f);
         let official = commit(d, "release A");
         assert_eq!(codes(&checked(d)), [("release_tag_missing", "A".into())]);
+        // #844: another project's tag where this one's would be a folder.
+        git(d, &["tag", "ryupdm/p", &official]);
+        let found = checked(d);
+        assert_eq!(codes(&found), [("release_tag_clash", "A".into())]);
+        assert_eq!(found[0].details["clashes"], "ryupdm/p");
+        git(d, &["tag", "-d", "ryupdm/p"]);
         git(d, &["tag", "ryupdm/p/A", &official]);
         assert!(checked(d).is_empty());
         // Moved, and one no release accounts for.
