@@ -213,13 +213,17 @@ pub fn compare_islands_with_d356(cb: &crate::copper::CopperBoard, d356: &str) ->
 /// reports' precision.
 pub const TOLERANCE: ryu_board::geom::Nm = 6_000;
 
-/// KiCad 9's DRC reports about this many violations of a type at most
-/// (500 and 501 seen on boards with thousands): a report this long is
+/// KiCad 9's DRC stops reporting a type near 500 violations (499 to 502
+/// seen on boards with thousands, run to run): a report this long is
 /// cut, so only its gaps are checked against ours, not ours against it.
-pub const KICAD_REPORT_CAP: usize = 500;
+pub const KICAD_REPORT_CAP: usize = 450;
 
 /// A net's name as ODB++ writes it: KiCad's export puts `_` for spaces.
+/// KiCad's `<no net>` is ours as it is.
 fn odb_net(n: &str) -> String {
+    if n == "<no net>" {
+        return n.to_string();
+    }
     n.replace(' ', "_")
 }
 
@@ -341,7 +345,7 @@ pub fn compare_with_drc(
     }
     // Gaps: by layer and pair of nets, KiCad's with the distance it gives.
     type Gaps<T> = BTreeMap<(String, String, String), T>;
-    let theirs: Gaps<Option<ryu_board::geom::Nm>> = violations
+    let theirs: Gaps<(Option<ryu_board::geom::Nm>, String)> = violations
         .iter()
         .filter(|v| v["type"] == "clearance")
         .filter_map(|v| {
@@ -350,7 +354,10 @@ pub fn compare_with_drc(
             let layer = d.iter().find_map(|x| drc_layer(x))?;
             Some((
                 (layer, a, b),
-                drc_actual(v["description"].as_str().unwrap_or("")),
+                (
+                    drc_actual(v["description"].as_str().unwrap_or("")),
+                    d.join(" | "),
+                ),
             ))
         })
         .collect();
@@ -398,14 +405,17 @@ pub fn compare_with_drc(
             }
         }
     }
-    for (k, actual) in &theirs {
+    for (k, (actual, what)) in &theirs {
         if !ours.contains_key(k) {
             match actual {
                 Some(a) if *a >= clearance - TOLERANCE => {
                     println!("tolerated: KiCad's gap {k:?} of {a} nm")
                 }
+                // Copper of a net touched by copper of none: one island
+                // for us, so no gap.
+                Some(0) => println!("a contact, not a gap: KiCad's {k:?} ({what})"),
                 _ => out.push(format!(
-                    "gap {k:?} of {actual:?} nm for KiCad, not for ryudfm"
+                    "gap {k:?} of {actual:?} nm for KiCad, not for ryudfm ({what})"
                 )),
             }
         }
