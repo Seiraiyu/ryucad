@@ -671,6 +671,59 @@ pub fn hole_spacing(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Findin
         .collect()
 }
 
+/// Copper and holes closer to the outline or a cutout than the rule, or
+/// outside the board: once per item (pads and vias on both layers once).
+pub fn edges(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding> {
+    let board = c.built.board.as_str();
+    let rule = preset.edge_clearance_nm;
+    let opts = BodyOptions::default();
+    let edge = Body::of_shape(&s.edges, &opts);
+    let inside = Body::of_shape(&s.outline, &opts);
+    if edge.is_empty() {
+        return Vec::new();
+    }
+    let mut things: BTreeMap<String, Body> = BTreeMap::new();
+    for (k, _) in c.copper.items() {
+        if let Some(b) = c.copper.bodies().body(k) {
+            things
+                .entry(c.built.reference(k))
+                .or_insert_with(|| b.clone());
+        }
+    }
+    for h in &s.holes {
+        // A through pad's drill shares its pad's reference: `#hole` keeps
+        // the two findings' IDs apart.
+        things
+            .entry(format!("{}#hole", h.owner))
+            .or_insert_with(|| h.shape.body());
+    }
+    things
+        .par_iter()
+        .filter_map(|(r, b)| {
+            let v = measure::closer(b, &edge, rule);
+            let outside = v == Verdict::No
+                && !b.solids.first().is_some_and(|x| measure::contains(&inside, x.probe()).is_yes());
+            if v == Verdict::No && !outside {
+                return None;
+            }
+            let reference = r.clone();
+            let d = measure::distance(b, &edge).map(|d| d.nm);
+            Some(finding(
+                Code::DrcEdgeClearance,
+                Severity::Error,
+                board,
+                vec![reference.clone()],
+                if outside {
+                    format!("{reference} is outside the board")
+                } else {
+                    format!("{reference} is under {rule} nm from the board's edge")
+                },
+                json!({"distance_nm": d, "outside": outside, "hole": r.ends_with("#hole"), "uncertain": v == Verdict::Uncertain, "rule_nm": rule}),
+            ))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,5 +1013,30 @@ mod tests {
         let f = vias(300 * UM + P.via_hole_spacing_nm - 1);
         assert_eq!(codes(&f), [Code::DrcHoleSpacing]);
         assert_eq!(f[0].details["rule_nm"], json!(P.via_hole_spacing_nm));
+    }
+
+    #[test]
+    fn edge_clearance_and_copper_outside_the_board_fire() {
+        let at = |x| {
+            let mut s = board(20 * MM, 10 * MM);
+            s.smd("r1", "1", (x, 5 * MM), (600 * UM, 600 * UM), None);
+            edges(&connect::connect("b", &s), &s, P)
+        };
+        assert!(at(300 * UM + P.edge_clearance_nm).is_empty());
+        let f = at(300 * UM + P.edge_clearance_nm - 1);
+        assert_eq!(codes(&f), [Code::DrcEdgeClearance]);
+        assert_eq!(f[0].details["distance_nm"], json!(P.edge_clearance_nm - 1));
+        let out = at(-5 * MM);
+        assert_eq!(codes(&out), [Code::DrcEdgeClearance]);
+        assert_eq!(out[0].details["outside"], true);
+        let mut s = board(20 * MM, 10 * MM);
+        s.hole(
+            "h1",
+            (500 * UM + P.edge_clearance_nm - 1, 5 * MM),
+            1000 * UM,
+        );
+        let f = edges(&connect::connect("b", &s), &s, P);
+        assert_eq!(codes(&f), [Code::DrcEdgeClearance]);
+        assert_eq!(f[0].refs, ["b:hole/h1#hole"]);
     }
 }
