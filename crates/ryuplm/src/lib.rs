@@ -7,7 +7,9 @@
 
 pub use ryu_doc::{canonical, error, id, source, units};
 
+pub mod aml;
 pub mod catalogue;
+pub mod fault;
 pub mod ids;
 pub mod item;
 pub mod load;
