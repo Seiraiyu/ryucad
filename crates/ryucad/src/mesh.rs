@@ -1267,7 +1267,7 @@ fn decode_mesh(r: &mut Reader, compact: bool) -> Result<WireMesh> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::doc::files::{Placement, Primitive, PrimitiveType};
     use crate::doc::id::Id;
@@ -1282,6 +1282,19 @@ mod tests {
             combine: crate::doc::solid::Combine::NEW,
         });
         let id = Id::parse("s", "feature").unwrap();
+        let b = build_feature(&id, &id, &f).unwrap();
+        (f, b)
+    }
+
+    /// A sphere of radius `r` built as feature `id`: its names follow `id`.
+    pub(crate) fn sphere_built(r: &str, id: &str) -> (Feature, Built) {
+        let f = Feature::Primitive(Primitive {
+            ty: PrimitiveType::Sphere,
+            params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
+            placement: Placement::identity(Unit::Mm),
+            combine: crate::doc::solid::Combine::NEW,
+        });
+        let id = Id::parse(id, "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
         (f, b)
     }

@@ -41,8 +41,10 @@ pub struct Built {
     /// [`target`] refuses it to every feature that would.
     pub reference: bool,
     /// For an inserted solid nothing has acted on, its source's body and
-    /// where the insert moved it: its mesh is the source's moved, never
-    /// made again (design 521). `None` for every other body.
+    /// where the insert moved it (design 521); for a flattened import's,
+    /// the file's body under its shape hash and where its place moved it
+    /// (#813). Its mesh is the source's moved, never made again. `None`
+    /// for every other body.
     pub moved: Option<Arc<Moved>>,
 }
 

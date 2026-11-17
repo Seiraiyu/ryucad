@@ -13,7 +13,7 @@ use crate::doc::id::Id;
 use crate::doc::import::{Import, ProductRef};
 use crate::doc::project::{ImportFile, Part};
 use crate::error::{Code, Error, Result};
-use crate::rebuild::{Built, finish, op_key};
+use crate::rebuild::{Built, Moved, finish, op_key};
 use ryukei::HealError;
 use ryukei::heal::HealReport;
 use ryukei::name::Name;
@@ -407,7 +407,7 @@ pub fn build(
         ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
         e => failed(id, i, &e, &read.instances, &read.solids),
     })?;
-    let body = placed(id, i, body)?;
+    let (body, unplaced) = placed(id, i, body)?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
@@ -420,7 +420,9 @@ pub fn build(
         })
         .collect();
     let report = report(i, &healed);
-    Ok((finish(id, "import", (body, journal), origins)?, report))
+    let mut built = finish(id, "import", (body, journal), origins)?;
+    built.moved = unplaced.map(|(b, pose)| moved_from(i, b, pose, false));
+    Ok((built, report))
 }
 
 /// A reference import's body (design 364): the file's topology as a
@@ -448,7 +450,7 @@ fn build_reference(
         ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
         e => failed(id, i, &e, &read.instances, &read.solids),
     })?;
-    let body = placed(id, i, body)?;
+    let (body, unplaced) = placed(id, i, body)?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
@@ -464,27 +466,63 @@ fn build_reference(
     // A reference changes nothing the file had: its journal is empty, as
     // a mirror's is.
     let journal = ryukei::name::Journal::new();
-    Ok((
-        crate::rebuild::finish_reference(id, (body, journal), origins)?,
-        v,
-    ))
+    let mut built = crate::rebuild::finish_reference(id, (body, journal), origins)?;
+    built.moved = unplaced.map(|(b, pose)| moved_from(i, b, pose, true));
+    Ok((built, v))
 }
 
-/// `body` moved where a flattened import's `place` puts it; as it is
-/// with none. Names don't depend on where the body stands, so a placed
-/// import's names are its file's.
-fn placed(id: &Id, i: &Import, body: ryukei::topo::Body) -> Result<ryukei::topo::Body> {
+/// A flattened import's file body, unplaced, and the pose that places it.
+type Unplaced = Option<(ryukei::topo::Body, ryukei::geom::Rigid)>;
+
+/// `body` moved where a flattened import's `place` puts it, with the
+/// file's body and the pose (what its mesh is moved from, #813); as it is,
+/// and nothing, with no place. Names don't depend on where the body
+/// stands, so a placed import's names are its file's.
+fn placed(id: &Id, i: &Import, body: ryukei::topo::Body) -> Result<(ryukei::topo::Body, Unplaced)> {
     let Some(p) = &i.place else {
-        return Ok(body);
+        return Ok((body, None));
     };
     let r = crate::assembly::pose_rigid(&p.pose).map_err(|e| e.with("feature", id))?;
-    body.transformed(&r).map_err(|e| {
+    let at = body.transformed(&r).map_err(|e| {
         Error::new(
             Code::ImportFailed,
             format!("import {id}: its place puts it where it can't stand: {e:?}"),
         )
         .with("feature", id)
         .with("reason", "place")
+    })?;
+    Ok((at, Some((body, r))))
+}
+
+/// BLAKE3 of `body`'s dump without names (its geometry and topology bit
+/// for bit, entity ids included), as [`Built::hash`] is of the named dump:
+/// two copies of one component, whatever features name them, have one
+/// shape hash, so one mesh (#813).
+pub fn shape_hash(body: &ryukei::topo::Body) -> String {
+    blake3::hash(body.dump_unnamed().as_bytes()).to_hex()[..32].to_owned()
+}
+
+/// What a flattened import's mesh is moved from (#813): the file's body
+/// unplaced, under its [`shape_hash`], and the pose that places it, as an
+/// inserted solid's is moved from its source's (design 521).
+fn moved_from(
+    i: &Import,
+    unplaced: ryukei::topo::Body,
+    pose: ryukei::geom::Rigid,
+    reference: bool,
+) -> Arc<Moved> {
+    let source = Built {
+        hash: shape_hash(&unplaced),
+        body: unplaced,
+        journal: Default::default(),
+        origins: Default::default(),
+        reference,
+        moved: None,
+    };
+    Arc::new(Moved {
+        source: Arc::new(source),
+        feature: Arc::new(crate::doc::files::Feature::Import(i.clone())),
+        pose,
     })
 }
 
@@ -2322,6 +2360,77 @@ pub(crate) mod tests {
             assert!((after[1] - before[1]).abs() < 1e-12);
             assert!((after[2] - before[2]).abs() < 1e-12);
         }
+    }
+
+    /// #813: a placed import's body carries the file's body unplaced,
+    /// hashed by its shape, and the pose that places it, as an inserted
+    /// solid carries its source; an unplaced one carries nothing. Its
+    /// own body and hash are as before.
+    #[test]
+    fn a_placed_import_keeps_its_file_body_under_its_shape() {
+        use crate::doc::files::Feature;
+        use crate::doc::import::{Mode, Place, Via};
+        use crate::doc::project::{feature_path, write_json};
+        let bytes = occt("box_ap214.stp");
+        for mode in [None, Some(Mode::Reference)] {
+            let (dir, mut s) = with_import_as(&bytes, Some(("part 2", "part 2")), mode);
+            let p = Id::parse("p", "part").unwrap();
+            let solid = |s: &mut crate::session::Session| {
+                Arc::clone(&s.rebuilt(&p).unwrap().output(&id("i")).unwrap().solids()[0].1)
+            };
+            let plain = solid(&mut s);
+            assert!(plain.moved.is_none(), "{mode:?}: an unplaced import moves nothing");
+            let f = ImportFile::new(bytes.clone());
+            let i = Feature::Import(Import {
+                mode,
+                place: Some(Place {
+                    pose: crate::doc::assembly::Pose {
+                        origin_m: [0.1, 0.02, -0.03],
+                        z: [0.0, 1.0, 0.0],
+                        x: [1.0, 0.0, 0.0],
+                    },
+                    via: vec![Via {
+                        usage: "u1".into(),
+                        product: crate::doc::import::ProductRef {
+                            id: "part 2".into(),
+                            name: "part 2".into(),
+                            ordinal: 0,
+                        },
+                        ordinal: 0,
+                    }],
+                }),
+                ..import(&f, Some(("part 2", "part 2")), 0)
+            });
+            write_json(&feature_path(dir.path(), &p, &id("i")), &i.to_json()).unwrap();
+            s.reload().unwrap();
+            let placed = solid(&mut s);
+            let m = placed.moved.as_ref().expect("a placed import is moved");
+            assert_eq!(m.source.hash, shape_hash(&plain.body), "{mode:?}");
+            assert_eq!(m.source.body.dump(), plain.body.dump(), "the file's body as healed");
+            assert_eq!(
+                m.source.body.transformed(&m.pose).unwrap().dump(),
+                placed.body.dump(),
+                "moved by its pose, it is the placed body bit for bit"
+            );
+            assert_eq!(
+                placed.hash,
+                blake3::hash(placed.body.dump().as_bytes()).to_hex()[..32].to_owned(),
+                "its own hash is its placed body's, as before"
+            );
+            assert_eq!(m.source.reference, placed.reference);
+            assert!(m.source.moved.is_none());
+            assert!(matches!(&*m.feature, Feature::Import(_)));
+        }
+    }
+
+    #[test]
+    fn a_shape_hash_ignores_names() {
+        let (_, a) = crate::mesh::tests::sphere_built("10 mm", "s");
+        let (_, b) = crate::mesh::tests::sphere_built("10 mm", "t");
+        assert_ne!(a.hash, b.hash, "named by their features");
+        assert_eq!(shape_hash(&a.body), shape_hash(&b.body));
+        let (_, c) = crate::mesh::tests::sphere_built("11 mm", "s");
+        assert_ne!(shape_hash(&a.body), shape_hash(&c.body));
     }
 
     /// #800: a flattened import whose file starts a line 499.8 m away
