@@ -93,10 +93,12 @@ board osm-l-bmc-som
   stackup 19
   capabilities geometry,nets,components,drill
   faults odb_symbol_unknown=3
+  copper layers=10 items=18034 left_out=1 holes=1763 islands=1063 resolved=339 uncertain=5 source=cad points=4191 opens=0 shorts=0 off=0 mismatches=0 contacts=26 gaps_0.2mm=15790
 
 board lpddr4-test-board
   source Antmicro's LPDDR4 test board: 8 copper layers, DDR routing to a SO-DIMM socket, blind vias.
   source pinned.txt says where from.
+  source Its CAD netlist lies offset from its copper too (#933): its copper line's off=3208.
   licence Apache-2.0
   pinned
   version 8.1 KiCad EDA 9.0.8+1
@@ -109,3 +111,4 @@ board lpddr4-test-board
   stackup 15
   capabilities geometry,nets,components,drill
   faults -
+  copper layers=8 items=20919 left_out=11 holes=1267 islands=784 resolved=216 uncertain=78 source=cad points=3208 opens=0 shorts=0 off=3208 mismatches=0 contacts=25 gaps_0.2mm=9570
