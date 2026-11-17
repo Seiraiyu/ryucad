@@ -127,7 +127,6 @@ pub(crate) fn near_box(
 
 /// A working face's near box changed after a narrowed build failed
 /// (design 724). Plan 22.B adds keeping a face off a pin.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Adjust {
     /// Room (plan 22.A): the near box doubled about its middle this many
@@ -137,14 +136,12 @@ pub(crate) enum Adjust {
 
 /// Each working face's adjustment in an adjusted build; empty in a
 /// rung's first narrowed build, which is today's, bit for bit.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) type Adjusts = BTreeMap<FaceId, Adjust>;
 
 /// Near box `n`, inside the rung's box `x`, as `adjust` leaves it: as it
 /// is with none; with `Room(k)`, doubled about its middle and kept inside
 /// `x`, `k` times (`body::doubled`, then [`within`], as rung 1 does for
 /// every face).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
     match adjust {
         None => *n,
@@ -160,7 +157,6 @@ pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
 /// doubling. `near` gives a face's near box before any adjustment. `None`
 /// where none of their near boxes would grow (each already the rung's
 /// box `x`): that build would repeat the last.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn room(
     body: &Body,
     working: &BTreeSet<FaceId>,

@@ -354,6 +354,29 @@ fn attempt_with(
     forced: Option<&std::collections::BTreeSet<FaceId>>,
     m: &Meter,
 ) -> Rung {
+    let none = near::Adjusts::new();
+    attempt_adjusted(
+        key, body, changes, region, bx, rung, which, forced, &none, &mut None, m,
+    )
+}
+
+/// [`attempt_with`] with each working face's near box adjusted by
+/// `adjusts` (design 724, plan 22.A); `ask` is set to what a failed walk
+/// asks for an adjusted build ([`ask_room`]), and left `None` otherwise.
+#[allow(clippy::too_many_arguments)]
+fn attempt_adjusted(
+    key: OpKey,
+    body: &Body,
+    changes: &Changes,
+    region: &Region,
+    bx: &crate::geom::Box3,
+    rung: usize,
+    which: Build,
+    forced: Option<&std::collections::BTreeSet<FaceId>>,
+    adjusts: &near::Adjusts,
+    ask: &mut Option<near::Adjusts>,
+    m: &Meter,
+) -> Rung {
     let narrowed = which.narrowed();
     let mut ws = BTreeMap::new();
     let absorbed = absorbed(body, changes, region);
@@ -435,7 +458,13 @@ fn attempt_with(
             // ends can't move (design 642), iso stops first and plane
             // stops where none applied.
             let before = w.surface.clone();
-            let near = near::near_box(body, changes, region, f, bx, rung);
+            // Adjusted after a narrowed build failed (design 724): as
+            // before where `adjusts` names nothing.
+            let near = near::adjusted(
+                &near::near_box(body, changes, region, f, bx, rung),
+                bx,
+                adjusts.get(&f).copied(),
+            );
             if near != *bx {
                 w = match over(&near) {
                     Ok(w) => w,
@@ -592,7 +621,17 @@ fn attempt_with(
         (_, Some((e @ WalkError::Halted { .. }, f))) => {
             return done(Err(walk_error(&w, e, f)));
         }
-        (_, Some((e, f))) => return Rung::Walked(walk_error(&w, e, f)),
+        (_, Some((e, f))) => {
+            // A narrowed clip at a working face asks room for it and its
+            // working neighbours (design 724, plan 22.A).
+            *ask = ask_room(&w, e, f, which, |i| {
+                let working: std::collections::BTreeSet<FaceId> = ws.keys().copied().collect();
+                near::room(body, &working, i, bx, adjusts, &|g| {
+                    near::near_box(body, changes, region, g, bx, rung)
+                })
+            });
+            return Rung::Walked(walk_error(&w, e, f));
+        }
         (Ok(Some(r)), None) => r,
         (Ok(None), None) => {
             let least = region.changed.iter().map(|&f| body.faces[f].name).min();
@@ -773,6 +812,28 @@ fn walk_error(w: &WorkBody, e: WalkError, face: FaceId) -> Error {
         WalkError::Halted { .. } => TweakError::Uncertain { at: name },
     }
     .into()
+}
+
+/// What a build whose walk failed with `e` at working-body face `f` asks
+/// (design 724, plan 22.A): `room` for `f`'s input face where `e` is
+/// `Clipped`, the build is narrowed, and `f` is a working face that isn't
+/// `fixed`. A first build, any other failure, or a pinned or outside face
+/// asks nothing.
+fn ask_room(
+    w: &WorkBody,
+    e: WalkError,
+    f: FaceId,
+    which: Build,
+    room: impl FnOnce(FaceId) -> Option<near::Adjusts>,
+) -> Option<near::Adjusts> {
+    if !which.narrowed()
+        || !matches!(e, WalkError::Clipped { .. })
+        || !w.working.contains(&f)
+        || w.fixed.contains(&f)
+    {
+        return None;
+    }
+    room(w.origin[&f])
 }
 
 /// Whether the fixed engine's refusal `e` means the topology must change

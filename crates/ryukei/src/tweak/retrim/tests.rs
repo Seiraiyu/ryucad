@@ -698,6 +698,62 @@ fn adjusted_builds_answer_only_when_they_build() {
     assert!(matches!(&r, Rung::Done(d) if matches!(**d, Err(crate::Error::Cancelled))));
 }
 
+/// Design 724: only a narrowed build's clip at a working face that isn't
+/// fixed asks room, and it asks it for the face's input face.
+#[test]
+fn only_a_narrowed_clip_at_a_carried_face_asks_room() {
+    use super::walk::WalkError;
+    use super::{Build, ask_room, near};
+    let b = block();
+    let changes = raised(&b, 0.1);
+    let changed = changes.motion.keys().copied().collect();
+    let region = super::region::region(&b, &changed);
+    let bx = super::body::region_box(&b, &region, super::reach(&b, &changes));
+    let ws: BTreeMap<FaceId, super::working::Working> = region
+        .faces
+        .iter()
+        .map(|&f| {
+            let w = super::working::working(
+                &b,
+                f,
+                changes.surface.get(&f),
+                b.faces[f].sense,
+                true,
+                &bx,
+            );
+            (f, w.unwrap())
+        })
+        .collect();
+    // unmetered: a unit test.
+    let mut w = super::body::work_body(K, &b, &region, &ws, &crate::work::Meter::free()).unwrap();
+    let wf = *w.working.iter().next().unwrap();
+    let input = w.origin[&wf];
+    let clip = WalkError::Clipped { piece: 0 };
+    let give = |i: FaceId| Some(near::Adjusts::from([(i, near::Adjust::Room(1))]));
+    assert_eq!(ask_room(&w, clip, wf, Build::Retry, give), give(input));
+    assert_eq!(ask_room(&w, clip, wf, Build::Only, give), give(input));
+    assert_eq!(ask_room(&w, clip, wf, Build::First, give), None);
+    for e in [
+        WalkError::Open { piece: 0 },
+        WalkError::Ambiguous { piece: 0 },
+        WalkError::Halted { piece: 0 },
+    ] {
+        assert_eq!(ask_room(&w, e, wf, Build::Only, give), None, "{e:?}");
+    }
+    let outside = w
+        .body
+        .faces()
+        .find(|g| !w.working.contains(g))
+        .expect("the bottom, outside");
+    assert_eq!(ask_room(&w, clip, outside, Build::Only, give), None);
+    w.fixed.insert(wf);
+    assert_eq!(
+        ask_room(&w, clip, wf, Build::Only, give),
+        None,
+        "a fixed face gets no room"
+    );
+}
+
 /// FNV-1a of `b`'s `dump_unnamed` (as `ryukei-testkit`'s `fnv`, which the
 /// crate can't depend on).
 fn free_hash(b: &Body) -> u64 {
