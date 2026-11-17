@@ -639,47 +639,111 @@ const HEALED_BODIES: usize = 1024;
 /// (a budget other than the default may refuse a body the default heals,
 /// as the rebuild's key says), most recently used last.
 type HealedKey = (String, usize, bool, u128, u64);
-static HEALED: Mutex<Vec<(HealedKey, Option<Arc<Healed>>)>> = Mutex::new(Vec::new());
+
+/// A shape's heal being made or made: `Some(None)` when its names weren't
+/// all recorded (not shared), `None` when it failed (the slot is dropped,
+/// and whoever waited heals again).
+type HealedSlot = Arc<OnceLock<Option<Option<Arc<Healed>>>>>;
+static HEALED: Mutex<Vec<(HealedKey, HealedSlot)>> = Mutex::new(Vec::new());
 
 /// `heal(key)` recorded ([`ryukei::name::record::recording`]), kept by
 /// `file`'s hash, its body `k`, the mode, `key` and the heal `budget`, so
-/// copies of one component are healed once (#813). `None` (kept too) when
-/// the heal's names weren't all recorded on this thread, so can't be
-/// derived again under a feature's key: each copy then heals under its
-/// own, as before shape keys. The lock is never held while healing (see
-/// [`opened`]: a rayon worker waiting on it could wait on itself): two
-/// copies healed side by side both heal, alike, and the first is kept. A
-/// heal that fails isn't kept.
+/// copies of one component are healed once (#813). `None` when the heal's
+/// names weren't all recorded, so can't be derived again under a
+/// feature's key: each copy then heals under its own, as before shape
+/// keys.
+///
+/// Copies rebuilt side by side wait for the first to heal their shape
+/// rather than heal it again. Waiting can't deadlock as waiting on
+/// [`opened`] could: the heal runs on its own pool ([`shape_heal`]), so it
+/// never needs a worker that waits on it, and the thread that heals waits
+/// for that pool in a join, never running another copy meanwhile. A heal that fails isn't kept:
+/// its slot is dropped, so a later request heals again, and a copy that
+/// waited on it heals itself (and fails alike, or is cancelled alike).
 fn once(
     file: &str,
     k: usize,
     reference: bool,
     key: ryukei::name::OpKey,
     budget: u64,
-    heal: impl FnOnce(ryukei::name::OpKey) -> Result<Healed>,
+    heal: impl Fn(ryukei::name::OpKey) -> Result<Healed> + Send + Sync,
 ) -> Result<Option<Arc<Healed>>> {
     let at: HealedKey = (file.to_owned(), k, reference, key.0, budget);
-    {
+    loop {
+        let slot: HealedSlot = {
+            let mut kept = HEALED.lock().unwrap_or_else(|p| p.into_inner());
+            let slot = match kept.iter().position(|(x, _)| *x == at) {
+                Some(n) => kept.remove(n).1,
+                None => HealedSlot::default(),
+            };
+            kept.push((at.clone(), Arc::clone(&slot)));
+            while kept.len() > HEALED_BODIES {
+                kept.remove(0);
+            }
+            slot
+        };
+        let mut failed = None;
+        let done = slot.get_or_init(|| match shape_heal(&heal, key) {
+            Ok((h, complete)) => Some(complete.then(|| Arc::new(h))),
+            Err(e) => {
+                failed = Some(e);
+                None
+            }
+        });
+        if let Some(h) = done {
+            return Ok(h.clone());
+        }
         let mut kept = HEALED.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(n) = kept.iter().position(|(x, _)| *x == at) {
-            let e = kept.remove(n);
-            let h = e.1.clone();
-            kept.push(e);
-            return Ok(h);
+        kept.retain(|(x, s)| !(*x == at && Arc::ptr_eq(s, &slot)));
+        drop(kept);
+        if let Some(e) = failed {
+            return Err(e);
         }
     }
-    let (h, derived) = ryukei::name::record::recording(|| heal(key));
+}
+
+/// `heal(key)` recorded, its derivations kept as far as its names reach,
+/// and whether every name it left was recorded ([`Healed::keep`]).
+///
+/// The heal runs in a pool of one thread of its own (#955's review): a
+/// recording is its thread's, and a heal's parallel tasks
+/// (`Meter::par_map` over face groups and sewn pieces) would otherwise run
+/// on whichever worker took them, out of the recording's sight, while the
+/// waiting thread could run another heal's. On its own one thread every
+/// task of this heal runs there and nothing else does, so every name is
+/// recorded on every machine and thread count, and the heal gives what it
+/// gives on any (ryukei's parallel work is deterministic). What it gives
+/// up is parallelism inside one heal, once per shape. A pool that can't
+/// be made (the system refused a thread) heals unrecorded: not shared.
+fn shape_heal(
+    heal: impl Fn(ryukei::name::OpKey) -> Result<Healed> + Send + Sync,
+    key: ryukei::name::OpKey,
+) -> Result<(Healed, bool)> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .thread_name(|_| "ryucad-shape-heal".into())
+        .build();
+    let Ok(pool) = pool else {
+        return Ok((heal(key)?, false));
+    };
+    // Waited on from a thread of its own, joined: a rayon worker waiting in
+    // `install` on another pool runs its own pool's tasks meanwhile, and
+    // one of them could be another copy waiting on this very heal ([`once`]).
+    // A join blocks without running anything.
+    let (h, derived) = std::thread::scope(|sc| {
+        sc.spawn(|| pool.install(|| ryukei::name::record::recording(|| heal(key))))
+            .join()
+            .unwrap_or_else(|p| std::panic::resume_unwind(p))
+    });
     let mut h = h?;
-    let h = h.keep(derived).then(|| Arc::new(h));
-    let mut kept = HEALED.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some((_, first)) = kept.iter().find(|(x, _)| *x == at) {
-        return Ok(first.clone());
-    }
-    kept.push((at, h.clone()));
-    while kept.len() > HEALED_BODIES {
-        kept.remove(0);
-    }
-    Ok(h)
+    let complete = h.keep(derived);
+    Ok((h, complete))
+}
+
+/// Forgets every shape heal kept: a test's cold start.
+#[cfg(test)]
+pub(crate) fn forget_healed() {
+    HEALED.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
 /// Body `k` of `opened` healed under `key`, within `run`'s budget.
@@ -2837,6 +2901,141 @@ pub(crate) mod tests {
         assert!(!other.clone().keep(none));
         assert!(h.keep(d));
         assert!(!h.derived.names.is_empty());
+    }
+
+    /// #955's review: a reference of two face groups (healed by a task
+    /// each, `Meter::par_map`), flattened twice, rebuilds cold to the same
+    /// bodies on 1 thread and 8, its two copies sharing one shape on each.
+    #[test]
+    fn a_shape_heal_of_many_tasks_is_alike_on_any_thread_count() {
+        use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+        use ryukei::geom::{Rigid, Vector3};
+        // Eight spheres and cylinders apart, one body: eight face groups,
+        // each with seams and poles its task names again (unseam).
+        let block = |n: u32| {
+            let at = Rigid::translation(Vector3::new(0.05 * f64::from(n), 0.0, 0.0));
+            let key = ryukei::name::OpKey(3 + u128::from(n));
+            let r = 0.01 + 0.001 * f64::from(n);
+            if n % 2 == 0 {
+                ryukei::primitive::sphere(key, r, &at).unwrap().0
+            } else {
+                ryukei::primitive::cylinder(key, r, 0.02, &at).unwrap().0
+            }
+        };
+        let first = block(0);
+        let rest: Vec<ryukei::topo::Body> = (1..8).map(block).collect();
+        let tools: Vec<Tool> = rest
+            .iter()
+            .enumerate()
+            .map(|(n, body)| Tool {
+                key: ToolKey(n as u128 + 1),
+                body,
+                place: Rigid::IDENTITY,
+            })
+            .collect();
+        let two = boolean(ryukei::name::OpKey(99), BooleanOp::Unite, &first, &tools)
+            .unwrap()
+            .0;
+        let products = vec![
+            ryustep::Product {
+                id: "two".into(),
+                name: "two".into(),
+                bodies: vec![two],
+                ..Default::default()
+            },
+            ryustep::Product {
+                id: "root".into(),
+                name: "root".into(),
+                children: (0..2)
+                    .map(|n| ryustep::Child {
+                        product: 0,
+                        place: Rigid::translation(Vector3::new(0.0, 0.1 * n as f64, 0.0)),
+                        id: String::new(),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        ];
+        let bytes = ryustep::write(
+            &ryustep::WriteModel { products },
+            &ryustep::WriteOptions {
+                time_stamp: "2026-11-17T00:00:00".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("two.step");
+        std::fs::write(&file, &bytes).unwrap();
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                forget_healed();
+                let (_dir, mut s) = crate::testing::fresh();
+                crate::testing::call(
+                    &mut s,
+                    "import",
+                    json!({"path": file, "flatten": true, "part": "board"}),
+                )
+                .unwrap();
+                let board = Id::parse("board", "part").unwrap();
+                let r = s.rebuilt(&board).unwrap().clone();
+                assert_eq!(r.failed(), 0);
+                r.features
+                    .iter()
+                    .flat_map(|(_, o)| o.as_ref().unwrap().solids().to_vec())
+                    .map(|(_, b)| {
+                        let m = b.moved.as_ref().expect("moved");
+                        (b.hash.clone(), m.source.hash.clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Every name a shape heal makes is recorded, wherever its tasks
+        // ran: twenty heals on eight threads.
+        let f = ImportFile::new(bytes.clone());
+        let opened = opened(&f).unwrap();
+        let i = Import {
+            file: FileRef {
+                path: "imports/f.step".into(),
+                blake3: f.blake3.clone(),
+            },
+            product: Some(ProductRef {
+                id: "two".into(),
+                name: "two".into(),
+                ordinal: 0,
+            }),
+            body: 0,
+            mode: None,
+            place: None,
+        };
+        let kk = select(&id("i"), &i, &opened).unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        for _ in 0..20 {
+            let none = crate::rebuild::Run::none();
+            let (h, complete) = pool
+                .install(|| {
+                    shape_heal(
+                        |key| heal_reference(&id("i"), &i, &opened, kk, &none, key),
+                        shape_key(&i),
+                    )
+                })
+                .unwrap();
+            assert!(h.body.faces().count() >= 8, "eight pieces");
+            assert!(complete, "a name derived out of the recording's sight");
+        }
+        let one = run(1);
+        assert_eq!(one.len(), 2);
+        assert_eq!(one[0].1, one[1].1, "one shape, 1 thread");
+        for _ in 0..4 {
+            assert_eq!(run(8), one, "8 threads");
+        }
     }
 
     #[test]
