@@ -1,8 +1,9 @@
 //! When a watched daemon tells its subscribers what changed (#849, design
 //! 698): a request that changed something marks it pending and answers.
 //! A lone change, one marked at least `quiet` after the change before it,
-//! is published at the watcher's next look (#960: holding it for the quiet
-//! window put a lone edit over design 192's 300 ms bar). Only a burst
+//! wakes the watcher and is published as soon as the request lets go of
+//! the session (#960: holding it for the quiet window put a lone edit
+//! over design 192's 300 ms bar). Only a burst
 //! coalesces: a change marked within `quiet` of another is published once
 //! the daemon has been quiet for `quiet` (no request started or finished),
 //! or at the latest `max` after the first unpublished change, so a long
@@ -10,6 +11,7 @@
 //! While nothing is pending, the watcher checks for changes made behind
 //! the daemon's back every `poll_ms`, as before.
 
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// `daemon.publish_quiet_ms`'s default (question 1009).
@@ -28,6 +30,33 @@ pub struct Coalesce {
     lone: bool,
     /// When the last change was marked, published or not.
     last: Option<Instant>,
+    /// Wakes the watcher when a lone change is marked, so it publishes
+    /// as soon as the request lets go of the session, not a tick later.
+    wake: Wake,
+}
+
+/// What the daemon's watcher sleeps on between looks: woken early by a
+/// lone change (#960).
+#[derive(Clone, Debug, Default)]
+pub struct Wake(Arc<(Mutex<bool>, Condvar)>);
+
+impl Wake {
+    /// Sleeps for `tick`, or until a lone change is marked.
+    pub fn sleep(&self, tick: Duration) {
+        let (lock, cv) = &*self.0;
+        let woken = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut woken = cv
+            .wait_timeout_while(woken, tick, |w| !*w)
+            .unwrap_or_else(|p| p.into_inner())
+            .0;
+        *woken = false;
+    }
+
+    fn nudge(&self) {
+        let (lock, cv) = &*self.0;
+        *lock.lock().unwrap_or_else(|p| p.into_inner()) = true;
+        cv.notify_all();
+    }
 }
 
 /// Why the watcher settles now.
@@ -53,6 +82,7 @@ impl Coalesce {
             since: None,
             lone: false,
             last: None,
+            wake: Wake::default(),
         }
     }
 
@@ -63,8 +93,16 @@ impl Coalesce {
             self.lone = self
                 .last
                 .is_none_or(|l| now.saturating_duration_since(l) >= self.quiet);
+            if self.lone {
+                self.wake.nudge();
+            }
         }
         self.last = Some(now);
+    }
+
+    /// What the watcher sleeps on.
+    pub fn wake(&self) -> Wake {
+        self.wake.clone()
     }
 
     /// When the first unpublished change was marked.
@@ -154,5 +192,25 @@ mod tests {
         c.clear();
         assert_eq!(c.tick(poll), ms(150));
         assert_eq!(Coalesce::new(5, 1000).tick(poll), ms(10));
+    }
+
+    /// A lone change wakes the watcher's sleep; a burst's later ones
+    /// leave it to its tick (#960).
+    #[test]
+    fn a_lone_change_wakes_the_watcher() {
+        let mut c = Coalesce::new(3_600_000, 3_600_000);
+        let wake = c.wake();
+        let t = Instant::now();
+        let sleeper = std::thread::spawn(move || wake.sleep(Duration::from_secs(3600)));
+        std::thread::sleep(Duration::from_millis(20));
+        c.mark(Instant::now());
+        sleeper.join().unwrap();
+        assert!(t.elapsed() < Duration::from_secs(60));
+        c.clear();
+        // Within `quiet` of the last: no nudge, the sleep runs its tick.
+        c.mark(Instant::now());
+        let t = Instant::now();
+        c.wake().sleep(Duration::from_millis(50));
+        assert!(t.elapsed() >= Duration::from_millis(50));
     }
 }

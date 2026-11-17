@@ -152,11 +152,16 @@ pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
 fn watcher<P: Serve>(watcher: &Arc<State<P>>) {
     let mut settled = Instant::now();
     loop {
-        let tick = {
+        let (tick, wake) = {
             let c = watcher.core.lock();
-            c.live.coalesce.tick(Duration::from_millis(c.live.poll_ms))
+            let coalesce = &c.live.coalesce;
+            (
+                coalesce.tick(Duration::from_millis(c.live.poll_ms)),
+                coalesce.wake(),
+            )
         };
-        std::thread::sleep(tick.min(watcher.idle));
+        // A lone change wakes it at once (#960).
+        wake.sleep(tick.min(watcher.idle));
         if !watcher.root.join(P::MANIFEST).is_file() {
             stop(watcher, "the project is gone");
         }
