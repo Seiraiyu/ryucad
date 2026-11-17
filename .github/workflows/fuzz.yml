@@ -80,7 +80,10 @@ jobs:
       # feature's 1,024 smallest in 30 s, its next 1,024 in 350 s). The
       # sample is the SMALL smallest (by size, then name), MORE of the
       # rest by name, and every seed fuzz/pinned.txt keeps: the same every
-      # night. A find goes to the sample's folder and its artifacts, as a
+      # night. feature's 120 pinned seeds are its slow ones (about 1.4 s
+      # each), so it takes no more; the first sampled dispatch (run
+      # 44174480847) replayed sweep 237 + 30 in 176 s and feature 1,024 +
+      # 40 + its pinned in 203 s. A find goes to the sample's folder and its artifacts, as a
       # find in the full corpus did. Other targets replay their whole
       # corpus.
       - name: Corpus sample
@@ -89,7 +92,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           SMALL: ${{ fromJSON('{"sweep":237,"feature":1024}')[matrix.target] }}
-          MORE: ${{ fromJSON('{"sweep":30,"feature":40}')[matrix.target] }}
+          MORE: ${{ fromJSON('{"sweep":20,"feature":0}')[matrix.target] }}
         run: |
           set -euo pipefail
           src=fuzz/corpus/$TARGET; dst=$RUNNER_TEMP/sample/$TARGET
