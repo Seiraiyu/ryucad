@@ -226,6 +226,10 @@ enum Node {
     Pole {
         sign: f64,
         free: usize,
+        /// The collapsed row of the domain it is, `[k, e]`: end `e` of
+        /// parameter `k` (a cone's one apex is `[1, 0]`). Vertices at one
+        /// row are at one pole (plan 21.D).
+        row: [usize; 2],
     },
 }
 
@@ -240,10 +244,12 @@ impl Arrangement<'_> {
                 for sign in [1.0, -1.0] {
                     let pole = f.origin() + f.z().get() * (s.radius() * sign);
                     if pole.distance(v.point) <= reach {
-                        // The outward normal at the pole is along `sign z`.
+                        // The outward normal at the pole is along `sign z`;
+                        // `+z` is the top of `v`.
                         return Node::Pole {
                             sign: -sign * self.sigma,
                             free: 0,
+                            row: [1, usize::from(sign > 0.0)],
                         };
                     }
                 }
@@ -257,6 +263,7 @@ impl Arrangement<'_> {
                     Node::Pole {
                         sign: self.sigma,
                         free: 0,
+                        row: [1, 0],
                     }
                 } else {
                     Node::Point
@@ -314,6 +321,7 @@ impl Arrangement<'_> {
                 return Node::Pole {
                     sign: if c > 0.0 { -1.0 } else { 1.0 },
                     free,
+                    row: [k, e],
                 };
             }
         }
@@ -709,7 +717,7 @@ impl Arrangement<'_> {
         };
         match self.node(prev.to) {
             Node::Point => Vector2::new(snap(end.x - start.x, pu), snap(end.y - start.y, pv)),
-            Node::Pole { sign, free }
+            Node::Pole { sign, free, .. }
                 if !matches!(self.surface, Surface::Sphere(_) | Surface::Cone(_)) =>
             {
                 // Along the pole's line by the free parameter: the way
@@ -1595,5 +1603,83 @@ mod tests {
             pieces_of(&ops, 1, plane_at(Point3::new(0.0, 0.0, s), up)),
             [1, 1]
         );
+    }
+
+    /// Plan 21.D: a pole knows its row of the domain. A sphere's north
+    /// and south poles are the two ends of `v`; a vertex within its reach
+    /// of a pole is that pole; a point off them is none; a cone's apex is
+    /// its one row.
+    #[test]
+    fn poles_know_their_rows() {
+        use crate::boolean::table::Gv;
+        use crate::geom::{Cone, Frame, Sphere};
+        use std::collections::BTreeSet;
+        let gv = |p: Point3| Gv {
+            point: p,
+            tolerance: LINEAR_RESOLUTION,
+            originals: Vec::new(),
+            faces: BTreeSet::new(),
+        };
+        let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+        let table = Table {
+            vertices: vec![
+                gv(Point3::new(0.0, 0.0, 1.0)),
+                gv(Point3::new(0.0, 0.0, -1.0)),
+                gv(Point3::new(1.0, 0.0, 0.0)),
+                gv(Point3::new(0.0, 0.0, 1.0 + 1e-9)),
+            ],
+            ..Table::default()
+        };
+        let arr = Arrangement {
+            table: &table,
+            surface: &ball,
+            sigma: 1.0,
+            darts: &[],
+            size: 2.0,
+            far: false,
+        };
+        assert!(matches!(
+            arr.node(0),
+            Node::Pole {
+                free: 0,
+                row: [1, 1],
+                ..
+            }
+        ));
+        assert!(matches!(
+            arr.node(1),
+            Node::Pole {
+                free: 0,
+                row: [1, 0],
+                ..
+            }
+        ));
+        assert_eq!(arr.node(2), Node::Point);
+        assert!(matches!(arr.node(3), Node::Pole { row: [1, 1], .. }));
+        // A cone's apex.
+        let cone = Surface::Cone(Cone::new(Frame::WORLD, 0.5, 0.4).unwrap());
+        let Surface::Cone(c) = &cone else {
+            unreachable!()
+        };
+        let table = Table {
+            vertices: vec![gv(Point3::new(0.0, 0.0, c.apex_v()))],
+            ..Table::default()
+        };
+        let arr = Arrangement {
+            table: &table,
+            surface: &cone,
+            sigma: 1.0,
+            darts: &[],
+            size: 2.0,
+            far: false,
+        };
+        assert!(matches!(
+            arr.node(0),
+            Node::Pole {
+                free: 0,
+                row: [1, 0],
+                ..
+            }
+        ));
     }
 }
