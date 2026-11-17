@@ -2916,7 +2916,7 @@ pub(crate) mod tests {
             let at = Rigid::translation(Vector3::new(0.05 * f64::from(n), 0.0, 0.0));
             let key = ryukei::name::OpKey(3 + u128::from(n));
             let r = 0.01 + 0.001 * f64::from(n);
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 ryukei::primitive::sphere(key, r, &at).unwrap().0
             } else {
                 ryukei::primitive::cylinder(key, r, 0.02, &at).unwrap().0
