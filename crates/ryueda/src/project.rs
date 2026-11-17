@@ -1992,7 +1992,10 @@ pub(crate) mod tests {
         std::fs::write(b.join("r1.json"), "{}").unwrap();
         let t: Vec<String> = Project::tracked(&top).into_iter().map(|(p, _)| p).collect();
         assert!(t.contains(&"boards/b/board.json".to_owned()), "{t:?}");
-        assert!(t.contains(&"boards/b/placements/r1.json".to_owned()), "{t:?}");
+        assert!(
+            t.contains(&"boards/b/placements/r1.json".to_owned()),
+            "{t:?}"
+        );
     }
 
     #[test]
@@ -2014,7 +2017,10 @@ pub(crate) mod tests {
         let faults = p.faults();
         assert_eq!(faults.len(), 1, "{faults:?}");
         assert_eq!(faults[0].error.code, Code::BoardDesignNotFound);
-        assert_eq!(p.revision, before, "boards aren't in the project's revision");
+        assert_eq!(
+            p.revision, before,
+            "boards aren't in the project's revision"
+        );
     }
 
     #[test]

@@ -81,9 +81,9 @@ pub fn contour_from(v: &Value, unit: Unit) -> Result<Contour> {
 }
 
 fn named_elsewhere(p: &Project, name: &str, except: Option<&Id>) -> bool {
-    p.boards.values().any(|b| {
-        Some(&b.id) != except && b.board.item.as_ref().is_ok_and(|x| x.name == name)
-    })
+    p.boards
+        .values()
+        .any(|b| Some(&b.id) != except && b.board.item.as_ref().is_ok_and(|x| x.name == name))
 }
 
 /// The board's answer: its reference, file, revision and faults.
@@ -116,10 +116,11 @@ pub fn create(
     let unit = p.manifest.default_unit;
     let design = crate::netlist::one_design(p, Some(design))?;
     if named_elsewhere(p, name, None) {
-        return Err(
-            Error::new(Code::BoardExists, format!("a board is already named {name}"))
-                .with("name", name),
-        );
+        return Err(Error::new(
+            Code::BoardExists,
+            format!("a board is already named {name}"),
+        )
+        .with("name", name));
     }
     if let Some(asked) = id
         && let Ok(i) = Id::parse(asked, "board")
@@ -186,9 +187,9 @@ pub fn edit(
         file.outline = contour_from(o, unit)?;
     }
     if let Some(c) = cutouts {
-        let list = c.as_array().ok_or_else(|| {
-            Error::new(Code::InvalidParam, "cutouts are a list of contours")
-        })?;
+        let list = c
+            .as_array()
+            .ok_or_else(|| Error::new(Code::InvalidParam, "cutouts are a list of contours"))?;
         file.cutouts = list
             .iter()
             .map(|v| contour_from(v, unit))
@@ -298,14 +299,18 @@ pub fn place(
             )
             .with("ref", r));
         }
-        let at = a
-            .get("at")
-            .ok_or_else(|| Error::new(Code::InvalidParam, format!("op {i} needs at")).with("op", i))?;
+        let at = a.get("at").ok_or_else(|| {
+            Error::new(Code::InvalidParam, format!("op {i} needs at")).with("op", i)
+        })?;
         let placement = Placement {
             at: coord::point(at, unit)?,
             rotation_mdeg: rotation(a.get("rotation"))?,
         };
-        w.put(placement_path(&id, &o.reference), &placement, PLACEMENT_KIND);
+        w.put(
+            placement_path(&id, &o.reference),
+            &placement,
+            PLACEMENT_KIND,
+        );
         placed.push(json!({
             "occurrence": o.reference,
             "refdes": o.refdes,

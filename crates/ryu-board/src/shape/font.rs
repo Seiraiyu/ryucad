@@ -17,6 +17,7 @@ pub const BUILTIN_FONT: &str = "ryu-stroke";
 const UNIT: i64 = 1_000;
 
 /// Each glyph as polylines separated by `;`, points `x,y` by spaces.
+#[rustfmt::skip]
 const GLYPHS: &[(char, &str)] = &[
     ('!', "4,12 4,4; 4,1 4,0"),
     ('"', "2,12 2,9; 6,12 6,9"),
@@ -127,7 +128,11 @@ fn strokes(spec: &str) -> Vec<FontStroke> {
     for line in spec.split(';') {
         let pts: Vec<Point> = line.split_whitespace().map(point).collect();
         for w in pts.windows(2) {
-            out.push(FontStroke { a: w[0], b: w[1], pen: Pen::Round(1) });
+            out.push(FontStroke {
+                a: w[0],
+                b: w[1],
+                pen: Pen::Round(1),
+            });
         }
     }
     out
@@ -172,7 +177,10 @@ mod tests {
         for (c, s) in &f.chars {
             for st in s {
                 for p in [st.a, st.b] {
-                    assert!((0..=f.width).contains(&p.x) && (0..=f.height).contains(&p.y), "{c:?} {p:?}");
+                    assert!(
+                        (0..=f.width).contains(&p.x) && (0..=f.height).contains(&p.y),
+                        "{c:?} {p:?}"
+                    );
                 }
                 assert_ne!(st.a, st.b, "{c:?} has a stroke of no length");
             }
@@ -200,11 +208,11 @@ mod tests {
         let b = s.bounds().unwrap();
         // Half the line width beyond the box, and a nanometre of the pen
         // outline's rounding.
-        assert!(
-            b.max.y <= 1_000_000 + 75_001 && b.min.y >= -75_001,
-            "{b:?}"
-        );
-        let t = Text { string: "Ω".into(), ..t };
+        assert!(b.max.y <= 1_000_000 + 75_001 && b.min.y >= -75_001, "{b:?}");
+        let t = Text {
+            string: "Ω".into(),
+            ..t
+        };
         assert_eq!(text_shape(&t, builtin_font()).unwrap().missing, vec!['Ω']);
     }
 }

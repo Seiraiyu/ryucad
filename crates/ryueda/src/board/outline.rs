@@ -31,8 +31,7 @@ pub enum Bad {
 
 /// The file's contour as `ryu-board` edges, or why it can't be one.
 pub fn contour(c: &FileContour) -> Result<Contour, Bad> {
-    if c
-        .points()
+    if c.points()
         .iter()
         .any(|p| p[0].abs() > COORD_LIMIT || p[1].abs() > COORD_LIMIT)
     {
@@ -110,11 +109,9 @@ pub fn judge(b: &Board) -> Vec<Fault> {
     );
     for (ptr, c) in all {
         match contour(c) {
-            Err(Bad::OutOfRange) => out.push(fault(
-                Code::BoardOutOfRange,
-                &ptr,
-                "a point past ±2^40 nm",
-            )),
+            Err(Bad::OutOfRange) => {
+                out.push(fault(Code::BoardOutOfRange, &ptr, "a point past ±2^40 nm"))
+            }
             Err(Bad::Invalid(why)) => out.push(fault(Code::BoardOutlineInvalid, &ptr, why)),
             Ok(k) => {
                 let r = ring(&k);
@@ -170,12 +167,7 @@ fn touches(a: &[Point], b: &[Point]) -> bool {
     let p = |q: Point| [q.x, q.y];
     (0..n).any(|i| {
         (0..m).any(|j| {
-            crate::footprint::segments_meet(
-                p(a[i]),
-                p(a[(i + 1) % n]),
-                p(b[j]),
-                p(b[(j + 1) % m]),
-            )
+            crate::footprint::segments_meet(p(a[i]), p(a[(i + 1) % n]), p(b[j]), p(b[(j + 1) % m]))
         })
     })
 }
@@ -303,7 +295,13 @@ mod tests {
         assert!(judge(&board(o, vec![])).is_empty());
         let collinear = FileContour {
             start: [0, 0],
-            edges: vec![Op::Arc { mid: [5, 0], to: [10, 0] }, Op::Line { to: [0, 0] }],
+            edges: vec![
+                Op::Arc {
+                    mid: [5, 0],
+                    to: [10, 0],
+                },
+                Op::Line { to: [0, 0] },
+            ],
         };
         assert_eq!(
             codes(&board(collinear, vec![])),

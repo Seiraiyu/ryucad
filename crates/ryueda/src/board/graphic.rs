@@ -12,22 +12,37 @@ fn pt(p: [i64; 2]) -> Point {
 }
 
 fn stroke(path: Vec<Edge>, w: i64) -> Part {
-    Part { polarity: Polarity::Positive, piece: Piece::Stroke(Stroke { path, pen: Pen::Round(w) }) }
+    Part {
+        polarity: Polarity::Positive,
+        piece: Piece::Stroke(Stroke {
+            path,
+            pen: Pen::Round(w),
+        }),
+    }
 }
 
 fn region(r: Region) -> Part {
-    Part { polarity: Polarity::Positive, piece: Piece::Region(r) }
+    Part {
+        polarity: Polarity::Positive,
+        piece: Piece::Region(r),
+    }
 }
 
 /// A closed polygon through `points`, counterclockwise.
 fn ccw_polygon(points: &[Point]) -> Option<Contour> {
     let c = polygon(points).ok()?;
-    Some(if c.polygon_area2().unwrap_or(0) < 0 { c.reversed() } else { c })
+    Some(if c.polygon_area2().unwrap_or(0) < 0 {
+        c.reversed()
+    } else {
+        c
+    })
 }
 
 fn closed_path(points: &[Point]) -> Vec<Edge> {
     let n = points.len();
-    (0..n).map(|i| Edge::line(points[i], points[(i + 1) % n])).collect()
+    (0..n)
+        .map(|i| Edge::line(points[i], points[(i + 1) % n]))
+        .collect()
 }
 
 /// A cubic Bézier as 16 straight segments, by exact integer
@@ -41,7 +56,10 @@ fn bezier(p: [Point; 4]) -> Vec<Edge> {
         Point::new(div_round(x, 4096) as i64, div_round(y, 4096) as i64)
     };
     let pts: Vec<Point> = (0..=16).map(at).collect();
-    pts.windows(2).filter(|w| w[0] != w[1]).map(|w| Edge::line(w[0], w[1])).collect()
+    pts.windows(2)
+        .filter(|w| w[0] != w[1])
+        .map(|w| Edge::line(w[0], w[1]))
+        .collect()
 }
 
 /// A drawn shape as parts in the footprint's frame; empty when it draws
@@ -50,31 +68,48 @@ pub fn drawn(s: &Drawn) -> Shape {
     let mut shape = Shape::default();
     let parts = &mut shape.parts;
     match s {
-        Drawn::Line { start, end, width_nm } => {
+        Drawn::Line {
+            start,
+            end,
+            width_nm,
+        } => {
             if *width_nm > 0 && start != end {
                 parts.push(stroke(vec![Edge::line(pt(*start), pt(*end))], *width_nm));
             }
         }
-        Drawn::Rect { start, end, width_nm, fill } => {
+        Drawn::Rect {
+            start,
+            end,
+            width_nm,
+            fill,
+        } => {
             let (a, b) = (pt(*start), pt(*end));
             let corners = [a, Point::new(b.x, a.y), b, Point::new(a.x, b.y)];
-            if *fill
-                && let Some(c) = ccw_polygon(&corners)
-            {
+            if *fill && let Some(c) = ccw_polygon(&corners) {
                 parts.push(region(Region::solid(c)));
             }
             if *width_nm > 0 {
                 parts.push(stroke(closed_path(&corners), *width_nm));
             }
         }
-        Drawn::Arc { start, mid, end, width_nm } => {
+        Drawn::Arc {
+            start,
+            mid,
+            end,
+            width_nm,
+        } => {
             if *width_nm > 0
                 && let Some(a) = Arc::through(pt(*start), pt(*mid), pt(*end))
             {
                 parts.push(stroke(vec![Edge::Arc(a)], *width_nm));
             }
         }
-        Drawn::Circle { center, radius_nm, width_nm, fill } => {
+        Drawn::Circle {
+            center,
+            radius_nm,
+            width_nm,
+            fill,
+        } => {
             let c = pt(*center);
             let (r, w) = (*radius_nm, *width_nm);
             let outer = r + half(w);
@@ -91,11 +126,13 @@ pub fn drawn(s: &Drawn) -> Shape {
                 }
             }
         }
-        Drawn::Polygon { points, width_nm, fill } => {
+        Drawn::Polygon {
+            points,
+            width_nm,
+            fill,
+        } => {
             let pts: Vec<Point> = points.iter().copied().map(pt).collect();
-            if *fill
-                && let Some(c) = ccw_polygon(&pts)
-            {
+            if *fill && let Some(c) = ccw_polygon(&pts) {
                 parts.push(region(Region::solid(c)));
             }
             if *width_nm > 0 && pts.len() > 1 {
@@ -127,28 +164,52 @@ mod tests {
 
     #[test]
     fn lines_rects_and_circles_have_their_written_sizes() {
-        let l = drawn(&d(json!({"type": "line", "start": [0, 0], "end": [1000, 0], "width_nm": 100})));
+        let l = drawn(&d(
+            json!({"type": "line", "start": [0, 0], "end": [1000, 0], "width_nm": 100}),
+        ));
         let b = l.bounds().unwrap();
         assert_eq!((b.min, b.max), (Point::new(-50, -50), Point::new(1050, 50)));
-        let r = drawn(&d(json!({"type": "rect", "start": [0, 1000], "end": [2000, 0], "width_nm": 0, "fill": true})));
-        let Piece::Region(reg) = &r.parts[0].piece else { panic!() };
+        let r = drawn(&d(
+            json!({"type": "rect", "start": [0, 1000], "end": [2000, 0], "width_nm": 0, "fill": true}),
+        ));
+        let Piece::Region(reg) = &r.parts[0].piece else {
+            panic!()
+        };
         assert_eq!(reg.outer.polygon_area2(), Some(2 * 2000 * 1000));
-        let c = drawn(&d(json!({"type": "circle", "center": [0, 0], "radius_nm": 1000, "width_nm": 200})));
-        let Piece::Region(ring) = &c.parts[0].piece else { panic!() };
+        let c = drawn(&d(
+            json!({"type": "circle", "center": [0, 0], "radius_nm": 1000, "width_nm": 200}),
+        ));
+        let Piece::Region(ring) = &c.parts[0].piece else {
+            panic!()
+        };
         assert_eq!(ring.holes.len(), 1);
         assert_eq!(c.bounds().unwrap().max, Point::new(1100, 1100));
     }
 
     #[test]
     fn polygons_turn_counterclockwise_and_beziers_are_marked() {
-        let p = drawn(&d(json!({"type": "polygon", "points": [[0, 0], [0, 10], [10, 10], [10, 0]], "width_nm": 0, "fill": true})));
-        let Piece::Region(reg) = &p.parts[0].piece else { panic!() };
+        let p = drawn(&d(
+            json!({"type": "polygon", "points": [[0, 0], [0, 10], [10, 10], [10, 0]], "width_nm": 0, "fill": true}),
+        ));
+        let Piece::Region(reg) = &p.parts[0].piece else {
+            panic!()
+        };
         assert!(reg.outer.polygon_area2().unwrap() > 0);
-        let b = drawn(&d(json!({"type": "bezier", "points": [[0, 0], [0, 100], [100, 100], [100, 0]], "width_nm": 10})));
+        let b = drawn(&d(
+            json!({"type": "bezier", "points": [[0, 0], [0, 100], [100, 100], [100, 0]], "width_nm": 10}),
+        ));
         assert_eq!(b.approximate, Some(1));
-        let Piece::Stroke(s) = &b.parts[0].piece else { panic!() };
+        let Piece::Stroke(s) = &b.parts[0].piece else {
+            panic!()
+        };
         assert_eq!(s.path.first().unwrap().start(), Point::new(0, 0));
         assert_eq!(s.path.last().unwrap().end(), Point::new(100, 0));
-        assert!(drawn(&d(json!({"type": "line", "start": [0, 0], "end": [5, 0], "width_nm": 0}))).parts.is_empty());
+        assert!(
+            drawn(&d(
+                json!({"type": "line", "start": [0, 0], "end": [5, 0], "width_nm": 0})
+            ))
+            .parts
+            .is_empty()
+        );
     }
 }

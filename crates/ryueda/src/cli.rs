@@ -1572,7 +1572,12 @@ enum BoardCmd {
         #[arg(value_name = "REF", required_unless_present = "ops")]
         r#ref: Option<String>,
         /// X,Y (lengths; bare numbers in the project's unit).
-        #[arg(long, value_name = "X,Y", required_unless_present = "ops", allow_hyphen_values = true)]
+        #[arg(
+            long,
+            value_name = "X,Y",
+            required_unless_present = "ops",
+            allow_hyphen_values = true
+        )]
         at: Option<String>,
         /// Degrees counterclockwise.
         #[arg(long, allow_hyphen_values = true)]

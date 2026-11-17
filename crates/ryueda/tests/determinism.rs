@@ -308,12 +308,22 @@ fn boards(golden: &mut Golden, at: &Path) {
             o.remove("revision");
             o.remove("schema");
         }
-        ryueda(&board, threads, &["board", "render", "main", "--out", "top.png"]);
+        ryueda(
+            &board,
+            threads,
+            &["board", "render", "main", "--out", "top.png"],
+        );
         ryueda(
             &board,
             threads,
             &[
-                "board", "render", "main", "--out", "bottom.svg", "--side", "bottom",
+                "board",
+                "render",
+                "main",
+                "--out",
+                "bottom.svg",
+                "--side",
+                "bottom",
             ],
         );
         let hash = |name: &str| {

@@ -17,14 +17,25 @@ use ryu_copper::poly::{self, FillRule, FlattenOptions, Rings, flatten_shape};
 pub const BOUND_NM: Nm = 10;
 
 pub fn mask_margin(f: &Footprint, p: &Pad, preset: &Preset) -> Nm {
-    p.margins.mask_margin_nm.or(f.margins.mask_margin_nm).unwrap_or(preset.mask_expansion_nm)
+    p.margins
+        .mask_margin_nm
+        .or(f.margins.mask_margin_nm)
+        .unwrap_or(preset.mask_expansion_nm)
 }
 
 /// The paste opening's change on each side: the margin plus the ratio
 /// of the pad's smaller side, rounded to the nanometre.
 pub fn paste_margin(f: &Footprint, p: &Pad, preset: &Preset) -> Nm {
-    let margin = p.margins.paste_margin_nm.or(f.margins.paste_margin_nm).unwrap_or(preset.paste_margin_nm);
-    let ratio = p.margins.paste_ratio_ppm.or(f.margins.paste_ratio_ppm).unwrap_or(0);
+    let margin = p
+        .margins
+        .paste_margin_nm
+        .or(f.margins.paste_margin_nm)
+        .unwrap_or(preset.paste_margin_nm);
+    let ratio = p
+        .margins
+        .paste_ratio_ppm
+        .or(f.margins.paste_ratio_ppm)
+        .unwrap_or(0);
     let side = p.size[0].min(p.size[1]);
     margin + div_round(i128::from(side) * i128::from(ratio), 1_000_000) as Nm
 }
@@ -42,7 +53,11 @@ pub fn changed(p: &Pad, by: Nm) -> Result<Shape, ShapeError> {
         rings.extend(r.rings);
     }
     let merged = poly::simplify(&Rings::new(rings, opts.bound()), FillRule::NonZero);
-    let moved = if by >= 0 { poly::grow(&merged, by, &opts) } else { poly::shrink(&merged, -by, &opts) };
+    let moved = if by >= 0 {
+        poly::grow(&merged, by, &opts)
+    } else {
+        poly::shrink(&merged, -by, &opts)
+    };
     let mut out = Shape::default();
     for pg in &moved.polygons {
         let outer = polygon(&pg.outer)?;
@@ -72,9 +87,9 @@ pub fn paste(f: &Footprint, p: &Pad, preset: &Preset) -> Result<Shape, ShapeErro
 
 #[cfg(test)]
 mod tests {
+    use super::super::preset::JLC_2L;
     use super::*;
     use crate::footprint::tests::r0402;
-    use super::super::preset::JLC_2L;
 
     #[test]
     fn masks_grow_by_the_preset_unless_the_pad_says() {
@@ -113,11 +128,17 @@ mod tests {
         let f = r0402();
         let mut p = f.pads.values().next().unwrap().clone();
         p.at = [0, 0];
-        p.shape = PadShape::Custom { anchor: Anchor::Rect, primitives: vec![] };
+        p.shape = PadShape::Custom {
+            anchor: Anchor::Rect,
+            primitives: vec![],
+        };
         let s = changed(&p, 50_000).unwrap();
         let b = s.bounds().unwrap();
         // Round joins at the corners stay within the box grown by 50 µm.
-        assert!((b.max.x - b.min.x - (540_000 + 100_000)).abs() <= 2 * BOUND_NM, "{b:?}");
+        assert!(
+            (b.max.x - b.min.x - (540_000 + 100_000)).abs() <= 2 * BOUND_NM,
+            "{b:?}"
+        );
         assert_eq!(s.approximate, Some(BOUND_NM));
     }
 }

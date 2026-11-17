@@ -39,9 +39,14 @@ pub struct Contour {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Op {
-    Line { to: Point },
+    Line {
+        to: Point,
+    },
     /// Through `mid`, from the last point to `to`.
-    Arc { mid: Point, to: Point },
+    Arc {
+        mid: Point,
+        to: Point,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,7 +160,10 @@ mod tests {
         assert_eq!(occurrence_of("S1.u1"), None);
         assert_eq!(occurrence_of("s1..u1"), None);
         let b = Id::parse("b", "board").unwrap();
-        assert_eq!(placement_path(&b, "s1/u1"), "boards/b/placements/s1.u1.json");
+        assert_eq!(
+            placement_path(&b, "s1/u1"),
+            "boards/b/placements/s1.u1.json"
+        );
         assert_eq!(board_path(&b), "boards/b/board.json");
     }
 }

@@ -161,11 +161,23 @@ mod tests {
         let design = crate::netlist::one_design(&p, None).unwrap();
         let (_, occs) = occurrences(&p, &design).unwrap();
         let o = &occs[0];
-        assert_eq!(resolve(&occs, &design, &o.reference).unwrap().reference, o.reference);
+        assert_eq!(
+            resolve(&occs, &design, &o.reference).unwrap().reference,
+            o.reference
+        );
         let prefixed = format!("{design}:{}", o.reference);
-        assert_eq!(resolve(&occs, &design, &prefixed).unwrap().reference, o.reference);
-        assert_eq!(resolve(&occs, &design, "U1_B").unwrap().reference, "ch_b/u1");
-        assert_eq!(resolve(&occs, &design, "NOPE9").unwrap_err().code, Code::NotFound);
+        assert_eq!(
+            resolve(&occs, &design, &prefixed).unwrap().reference,
+            o.reference
+        );
+        assert_eq!(
+            resolve(&occs, &design, "U1_B").unwrap().reference,
+            "ch_b/u1"
+        );
+        assert_eq!(
+            resolve(&occs, &design, "NOPE9").unwrap_err().code,
+            Code::NotFound
+        );
         let mut twins = occs.clone();
         twins[1].refdes = twins[0].refdes.clone();
         let label = twins[0].refdes.clone().unwrap();

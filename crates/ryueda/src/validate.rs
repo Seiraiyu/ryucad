@@ -1501,7 +1501,10 @@ pub(crate) mod tests {
         assert!(!affects("blocks/bb/layout.json", "b"));
         assert!(affects("rails/gnd.json", "b") && affects("../lib/library/symbols/r.json", "b"));
         assert!(!affects("erc.json", "b") && affects("style.json", "b"));
-        assert!(!affects("boards/b/board.json", "b"), "boards never move a sheet");
+        assert!(
+            !affects("boards/b/board.json", "b"),
+            "boards never move a sheet"
+        );
         assert!(!affects("boards/b/placements/r1.json", "b"));
         let f = |pairs: &[(&str, &str)]| -> Files {
             pairs

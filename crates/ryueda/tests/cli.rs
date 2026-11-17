@@ -4538,7 +4538,9 @@ fn boards_are_created_edited_shown_and_deleted_from_the_cli() {
         json!([30_000_000, 20_000_000])
     );
     p.fails(
-        &["board", "create", "Main", "--design", "board", "--rect", "1,1"],
+        &[
+            "board", "create", "Main", "--design", "board", "--rect", "1,1",
+        ],
         "board_exists",
         1,
     );
@@ -4568,7 +4570,10 @@ fn boards_are_created_edited_shown_and_deleted_from_the_cli() {
     let cut = r#"[{"start":["2 mm","2 mm"],"edges":[{"type":"line","to":["4 mm","2 mm"]},{"type":"line","to":["4 mm","4 mm"]},{"type":"line","to":["2 mm","2 mm"]}]}]"#;
     let e = p.ok(&["board", "edit", "main", "--expect", &rev, "--cutouts", cut]);
     assert_ne!(e["revision"], b["revision"]);
-    assert_eq!(e["board"]["cutouts"][0]["edges"][0]["to"], json!([4_000_000, 2_000_000]));
+    assert_eq!(
+        e["board"]["cutouts"][0]["edges"][0]["to"],
+        json!([4_000_000, 2_000_000])
+    );
     let list = p.ok(&["board", "list"]);
     assert_eq!(list["boards"][0]["name"], "Main");
     assert_eq!(list["boards"][0]["design"], "board");
@@ -4588,7 +4593,10 @@ fn board_writes_are_logged_undone_and_heard() {
     assert_eq!(code, 0, "{v}");
     let (_, h) = run(&["history"]);
     let entries = h["result"]["entries"].as_array().unwrap().clone();
-    let last = entries.iter().find(|e| e["method"] == "board.create").unwrap();
+    let last = entries
+        .iter()
+        .find(|e| e["method"] == "board.create")
+        .unwrap();
     assert_eq!(last["files"][0]["path"], "boards/main/board.json");
     let (code, u) = run(&["undo"]);
     assert_eq!(code, 0, "{u}");
@@ -4608,7 +4616,14 @@ fn parts_are_placed_moved_and_unplaced() {
     let s = p.ok(&["board", "show", "main"]);
     assert_eq!(s["unplaced"], 8, "{s}");
     let r = p.ok(&[
-        "board", "place", "main", "U1", "--at", "10,10", "--rotation", "90",
+        "board",
+        "place",
+        "main",
+        "U1",
+        "--at",
+        "10,10",
+        "--rotation",
+        "90",
     ]);
     assert_eq!(
         r["placed"][0],
@@ -4616,7 +4631,14 @@ fn parts_are_placed_moved_and_unplaced() {
     );
     p.ok(&["board", "place", "main", "s1/c1", "--at", "12.5,10"]);
     p.ok(&[
-        "board", "place", "main", "board:j1", "--at", "2,10", "--rotation", "-90",
+        "board",
+        "place",
+        "main",
+        "board:j1",
+        "--at",
+        "2,10",
+        "--rotation",
+        "-90",
     ]);
     let s = p.ok(&["board", "show", "main"]);
     assert_eq!(s["unplaced"], 5);
@@ -4627,7 +4649,11 @@ fn parts_are_placed_moved_and_unplaced() {
         .find(|o| o["reference"] == "j1")
         .unwrap();
     assert_eq!(j1["placement"]["rotation_mdeg"], 270_000);
-    p.fails(&["board", "place", "main", "Q9", "--at", "0,0"], "not_found", 1);
+    p.fails(
+        &["board", "place", "main", "Q9", "--at", "0,0"],
+        "not_found",
+        1,
+    );
     // All or nothing: one bad op writes none.
     let ops = r#"[{"ref":"R1","at":["5","5"]},{"ref":"Q9","at":["6","6"]}]"#;
     p.fails(&["board", "place", "main", "--ops", ops], "not_found", 1);
@@ -4663,7 +4689,9 @@ fn a_placement_whose_occurrence_is_gone_still_reads() {
 fn a_designator_two_occurrences_share_is_ambiguous() {
     let p = Pair::breakout();
     // A second sensor: its parts' designators repeat until annotated.
-    p.ok(&["instance", "add", "breakout", "--of", "sensor", "--id", "s2"]);
+    p.ok(&[
+        "instance", "add", "breakout", "--of", "sensor", "--id", "s2",
+    ]);
     p.ok(&[
         "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
     ]);
@@ -4717,7 +4745,14 @@ fn boards_render_to_png_and_svg() {
     ]);
     p.ok(&["board", "place", "main", "U1", "--at", "10,10"]);
     p.ok(&[
-        "board", "place", "main", "J1", "--at", "3,10", "--rotation", "90",
+        "board",
+        "place",
+        "main",
+        "J1",
+        "--at",
+        "3,10",
+        "--rotation",
+        "90",
     ]);
     let r = p.ok(&[
         "board", "render", "main", "--out", "top.png", "--size", "800",
@@ -4733,27 +4768,56 @@ fn boards_render_to_png_and_svg() {
         assert_eq!(&png[1..4], b"PNG");
     }
     let r = p.ok(&[
-        "board", "render", "main", "--out", "bottom.svg", "--side", "bottom",
+        "board",
+        "render",
+        "main",
+        "--out",
+        "bottom.svg",
+        "--side",
+        "bottom",
     ]);
     assert_eq!(r["binary"]["encoding"], "image/svg+xml");
     assert_eq!(r["side"], "bottom");
     assert_eq!(
         r["layers"],
-        json!(["copper.bottom", "mask.bottom", "silk.bottom", "drill", "outline"])
+        json!([
+            "copper.bottom",
+            "mask.bottom",
+            "silk.bottom",
+            "drill",
+            "outline"
+        ])
     );
     let svg = fs::read_to_string(p.direct.join("board/bottom.svg")).unwrap();
     assert!(svg.starts_with("<svg") || svg.starts_with("<?xml"), "{svg}");
     let r = p.ok(&[
-        "board", "render", "main", "--out", "n.png", "--net", "rail:gnd", "--layer",
-        "copper.top", "--layer", "outline",
+        "board",
+        "render",
+        "main",
+        "--out",
+        "n.png",
+        "--net",
+        "rail:gnd",
+        "--layer",
+        "copper.top",
+        "--layer",
+        "outline",
     ]);
     assert_eq!(r["net"], "rail:gnd");
     let r = p.ok(&[
-        "board", "render", "main", "--out", "w.png", "--window", "0,0,15,15",
+        "board",
+        "render",
+        "main",
+        "--out",
+        "w.png",
+        "--window",
+        "0,0,15,15",
     ]);
     assert_eq!(r["window"], json!([0, 0, 15_000_000, 15_000_000]));
     p.fails(
-        &["board", "render", "main", "--out", "x.png", "--layer", "nope"],
+        &[
+            "board", "render", "main", "--out", "x.png", "--layer", "nope",
+        ],
         "invalid_param",
         1,
     );

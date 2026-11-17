@@ -487,7 +487,10 @@ mod tests {
     #[test]
     fn a_newer_board_merges_as_text() {
         assert_eq!(newest(crate::board::BOARD_KIND), Some(crate::board::FORMAT));
-        assert_eq!(newest(crate::board::PLACEMENT_KIND), Some(crate::board::FORMAT));
+        assert_eq!(
+            newest(crate::board::PLACEMENT_KIND),
+            Some(crate::board::FORMAT)
+        );
     }
 
     #[test]

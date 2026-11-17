@@ -26,7 +26,12 @@ pub fn centred(
     // no offset after it.
     let advance = i128::from(f.width + f.offset) * i128::from(w) / i128::from(f.width);
     let drawn = advance * (n - 1) + i128::from(w);
-    let turn = Place { at: Point::new(at[0], at[1]), rot: Mdeg::new(rotation_mdeg), mirror: false, scale: None };
+    let turn = Place {
+        at: Point::new(at[0], at[1]),
+        rot: Mdeg::new(rotation_mdeg),
+        mirror: false,
+        scale: None,
+    };
     let origin = turn.point(Point::new(-(drawn / 2) as i64, -h / 2));
     let text = Text {
         font: BUILTIN_FONT.into(),
@@ -41,7 +46,8 @@ pub fn centred(
 
 /// `${REFERENCE}` and `${VALUE}` in a footprint's text, filled in.
 pub fn substitute(text: &str, refdes: &str, value: &str) -> String {
-    text.replace("${REFERENCE}", refdes).replace("${VALUE}", value)
+    text.replace("${REFERENCE}", refdes)
+        .replace("${VALUE}", value)
 }
 
 #[cfg(test)]
@@ -52,7 +58,14 @@ mod tests {
     fn text_is_centred_on_its_place() {
         // Centred by the characters' boxes, as KiCad does: `H` fills its
         // box, so its ink is centred too.
-        let s = centred("HH", [1_000_000, 2_000_000], 0, [1_000_000, 1_000_000], 150_000).unwrap();
+        let s = centred(
+            "HH",
+            [1_000_000, 2_000_000],
+            0,
+            [1_000_000, 1_000_000],
+            150_000,
+        )
+        .unwrap();
         let b = s.bounds().unwrap();
         let cx = (b.min.x + b.max.x) / 2;
         let cy = (b.min.y + b.max.y) / 2;
@@ -60,7 +73,10 @@ mod tests {
         assert!((cy - 2_000_000).abs() <= 1, "{b:?}");
         let turned = centred("R1", [0, 0], 90_000, [1_000_000, 1_000_000], 150_000).unwrap();
         let t = turned.bounds().unwrap();
-        assert!(t.max.y - t.min.y > t.max.x - t.min.x, "turned text runs up: {t:?}");
+        assert!(
+            t.max.y - t.min.y > t.max.x - t.min.x,
+            "turned text runs up: {t:?}"
+        );
     }
 
     #[test]

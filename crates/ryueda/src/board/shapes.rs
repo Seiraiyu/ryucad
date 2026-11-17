@@ -76,10 +76,16 @@ fn outline(b: &Board) -> (Shape, Shape) {
     for c in std::iter::once(&outer).chain(&cuts) {
         edges.parts.push(Part {
             polarity: Polarity::Positive,
-            piece: Piece::Stroke(ryu_board::geom::Stroke { path: c.edges().to_vec(), pen: ryu_board::geom::Pen::Round(0) }),
+            piece: Piece::Stroke(ryu_board::geom::Stroke {
+                path: c.edges().to_vec(),
+                pen: ryu_board::geom::Pen::Round(0),
+            }),
         });
     }
-    let region = Region { outer, holes: cuts.into_iter().map(|c| c.reversed()).collect() };
+    let region = Region {
+        outer,
+        holes: cuts.into_iter().map(|c| c.reversed()).collect(),
+    };
     (Shape::regions(Polarity::Positive, [region]), edges)
 }
 
@@ -120,8 +126,11 @@ struct One {
 }
 
 fn unsupported(o: &Occ, why: &str) -> Fault {
-    Fault::error(Code::BoardFootprintUnsupported, format!("{}'s footprint {why}; stage 5 can't build it", o.label()))
-        .with("occurrence", &o.reference)
+    Fault::error(
+        Code::BoardFootprintUnsupported,
+        format!("{}'s footprint {why}; stage 5 can't build it", o.label()),
+    )
+    .with("occurrence", &o.reference)
 }
 
 fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Preset) -> One {
@@ -131,19 +140,27 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
         return out;
     }
     if f.pads.values().any(|p| pad::copper_sides(p).2) {
-        out.notices.push(unsupported(o, "has a pad on copper.inner"));
+        out.notices
+            .push(unsupported(o, "has a pad on copper.inner"));
         return out;
     }
     let owner = format!("{board}:{}", o.label());
     let names = pad_names(f);
     let put = |out: &mut One, layer: &str, s: Shape| {
         if !s.parts.is_empty() {
-            out.layers.push((layer.to_owned(), owner.clone(), s.placed(&place, Polarity::Positive)));
+            out.layers.push((
+                layer.to_owned(),
+                owner.clone(),
+                s.placed(&place, Polarity::Positive),
+            ));
         }
     };
     for (id, p) in &f.pads {
         let Ok(copper) = pad::copper(p) else {
-            out.notices.push(unsupported(o, &format!("has a pad ({id}) whose shape can't be built")));
+            out.notices.push(unsupported(
+                o,
+                &format!("has a pad ({id}) whose shape can't be built"),
+            ));
             continue;
         };
         let (top, bottom, _) = pad::copper_sides(p);
@@ -154,23 +171,34 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
             put(&mut out, "copper.bottom", copper.clone());
         }
         for side in ["top", "bottom"] {
-            if p.layers.iter().any(|l| l == &format!("mask.{side}")) {
-                if let Ok(m) = opening::mask(f, p, preset) {
-                    put(&mut out, &format!("mask.{side}"), m);
-                }
+            if p.layers.iter().any(|l| l == &format!("mask.{side}"))
+                && let Ok(m) = opening::mask(f, p, preset)
+            {
+                put(&mut out, &format!("mask.{side}"), m);
             }
-            if p.layers.iter().any(|l| l == &format!("paste.{side}")) {
-                if let Ok(m) = opening::paste(f, p, preset) {
-                    put(&mut out, &format!("paste.{side}"), m);
-                }
+            if p.layers.iter().any(|l| l == &format!("paste.{side}"))
+                && let Ok(m) = opening::paste(f, p, preset)
+            {
+                put(&mut out, &format!("paste.{side}"), m);
             }
         }
         if let Some((h, plated)) = pad::hole(p) {
             let shape = match h {
-                HoleShape::Round { at, d } => HoleShape::Round { at: place.point(at), d },
-                HoleShape::Slot { a, b, d } => HoleShape::Slot { a: place.point(a), b: place.point(b), d },
+                HoleShape::Round { at, d } => HoleShape::Round {
+                    at: place.point(at),
+                    d,
+                },
+                HoleShape::Slot { a, b, d } => HoleShape::Slot {
+                    a: place.point(a),
+                    b: place.point(b),
+                    d,
+                },
             };
-            out.holes.push(HoleInfo { owner: format!("{owner}/{}", names[&id.to_string()]), shape, plated });
+            out.holes.push(HoleInfo {
+                owner: format!("{owner}/{}", names[&id.to_string()]),
+                shape,
+                plated,
+            });
         }
         let at = place.point(Point::new(p.at[0], p.at[1]));
         out.pads.push(PadInfo {
@@ -190,11 +218,24 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
     let value = o.value.clone().unwrap_or_default();
     for g in f.graphics.values() {
         let s = match &g.shape {
-            Drawn::Text { text: t, at, rotation_mdeg, size_nm, thickness_nm, hidden } => {
+            Drawn::Text {
+                text: t,
+                at,
+                rotation_mdeg,
+                size_nm,
+                thickness_nm,
+                hidden,
+            } => {
                 if *hidden {
                     continue;
                 }
-                match text::centred(&text::substitute(t, &refdes, &value), *at, *rotation_mdeg, *size_nm, *thickness_nm) {
+                match text::centred(
+                    &text::substitute(t, &refdes, &value),
+                    *at,
+                    *rotation_mdeg,
+                    *size_nm,
+                    *thickness_nm,
+                ) {
                     Ok(s) => s,
                     Err(_) => continue,
                 }
@@ -204,7 +245,10 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
         note_missing(&mut out.notices, o, &s);
         put(&mut out, &layer_of(&g.layer), s);
     }
-    for (field, string) in [(&f.fields.reference, refdes.as_str()), (&f.fields.value, value.as_str())] {
+    for (field, string) in [
+        (&f.fields.reference, refdes.as_str()),
+        (&f.fields.value, value.as_str()),
+    ] {
         let Some(fl) = field else { continue };
         if fl.hidden || string.is_empty() {
             continue;
@@ -220,8 +264,15 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
 fn note_missing(notices: &mut Vec<Fault>, o: &Occ, s: &Shape) {
     if !s.missing.is_empty() {
         notices.push(
-            Fault::warning(Code::BoardTextMissingGlyph, format!("{}'s text has characters the stroke font lacks: {}", o.label(), s.missing.iter().collect::<String>()))
-                .with("occurrence", &o.reference),
+            Fault::warning(
+                Code::BoardTextMissingGlyph,
+                format!(
+                    "{}'s text has characters the stroke font lacks: {}",
+                    o.label(),
+                    s.missing.iter().collect::<String>()
+                ),
+            )
+            .with("occurrence", &o.reference),
         );
     }
 }
@@ -231,7 +282,10 @@ fn note_missing(notices: &mut Vec<Fault>, o: &Occ, s: &Shape) {
 pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
     let file = b.board.item.as_ref().map_err(Clone::clone)?;
     let preset = preset::by_name(&file.preset).ok_or_else(|| {
-        Error::new(Code::InvalidDocument, format!("preset {} isn't known", file.preset))
+        Error::new(
+            Code::InvalidDocument,
+            format!("preset {} isn't known", file.preset),
+        )
     })?;
     let (_, occs) = occ::occurrences(p, &file.design)?;
     let board = b.id.to_string();
@@ -239,7 +293,15 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         .iter()
         .filter_map(|o| {
             let pl = b.placements.get(&o.reference)?.item.as_ref().ok()?;
-            Some((o, Place { at: Point::new(pl.at[0], pl.at[1]), rot: Mdeg::new(pl.rotation_mdeg), mirror: false, scale: None }))
+            Some((
+                o,
+                Place {
+                    at: Point::new(pl.at[0], pl.at[1]),
+                    rot: Mdeg::new(pl.rotation_mdeg),
+                    mirror: false,
+                    scale: None,
+                },
+            ))
         })
         .collect();
     let mut notices = Vec::new();
@@ -248,7 +310,15 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         .map(|(o, place)| match (&o.footprint, &o.footprint_error) {
             (Some(f), _) => one(&board, o, f, *place, preset),
             (None, e) => One {
-                notices: vec![unsupported(o, &format!("can't be read ({})", e.as_ref().map(|e| e.message.as_str()).unwrap_or("none chosen")))],
+                notices: vec![unsupported(
+                    o,
+                    &format!(
+                        "can't be read ({})",
+                        e.as_ref()
+                            .map(|e| e.message.as_str())
+                            .unwrap_or("none chosen")
+                    ),
+                )],
                 ..One::default()
             },
         })
@@ -316,11 +386,20 @@ mod tests {
             outline: super::super::file::Contour::rect(50_000_000, 50_000_000),
             cutouts: vec![],
         };
-        files.insert("boards/b/board.json".into(), crate::doc::to_string(&board, super::super::BOARD_KIND, 1).into_bytes());
+        files.insert(
+            "boards/b/board.json".into(),
+            crate::doc::to_string(&board, super::super::BOARD_KIND, 1).into_bytes(),
+        );
         for (i, o) in occs.iter().filter(|o| o.footprint.is_some()).enumerate() {
-            let pl = super::super::file::Placement { at: [5_000_000 * (i as i64 + 1), 10_000_000], rotation_mdeg: 90_000 * i as i64 };
+            let pl = super::super::file::Placement {
+                at: [5_000_000 * (i as i64 + 1), 10_000_000],
+                rotation_mdeg: 90_000 * i as i64,
+            };
             files.insert(
-                format!("boards/b/placements/{}.json", super::super::file::placement_name(&o.reference)),
+                format!(
+                    "boards/b/placements/{}.json",
+                    super::super::file::placement_name(&o.reference)
+                ),
                 crate::doc::to_string(&pl, super::super::PLACEMENT_KIND, 1).into_bytes(),
             );
         }
@@ -337,8 +416,17 @@ mod tests {
         assert!(!s.pads.is_empty());
         assert!(s.layers["copper.top"].len() >= s.pads.len());
         assert!(s.layers.contains_key("mask.top"));
-        assert!(s.layers.get("silk.top").is_some_and(|l| !l.is_empty()), "designators on silk");
-        assert!(s.notices.iter().all(|n| n.error.code != Code::BoardFootprintUnsupported), "{:?}", s.notices);
+        assert!(
+            s.layers.get("silk.top").is_some_and(|l| !l.is_empty()),
+            "designators on silk"
+        );
+        assert!(
+            s.notices
+                .iter()
+                .all(|n| n.error.code != Code::BoardFootprintUnsupported),
+            "{:?}",
+            s.notices
+        );
         let b = s.outline.bounds().unwrap();
         assert_eq!((b.max.x, b.max.y), (50_000_000, 50_000_000));
         assert!(s.pads.iter().any(|p| p.net.is_some()));
@@ -348,10 +436,14 @@ mod tests {
     fn shapes_are_the_same_on_one_thread_and_eight() {
         let (_dir, p, id) = placed();
         let run = |n| {
-            rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap().install(|| {
-                let s = build(&p, &p.boards[&id]).unwrap();
-                format!("{:?}{:?}{:?}", s.layers, s.holes, s.pads)
-            })
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let s = build(&p, &p.boards[&id]).unwrap();
+                    format!("{:?}{:?}{:?}", s.layers, s.holes, s.pads)
+                })
         };
         assert_eq!(run(1), run(8));
     }
@@ -376,6 +468,10 @@ mod tests {
             }
         }
         let s = build(&p, &p.boards[&id]).unwrap();
-        assert!(s.notices.iter().any(|n| n.error.code == Code::BoardFootprintUnsupported));
+        assert!(
+            s.notices
+                .iter()
+                .any(|n| n.error.code == Code::BoardFootprintUnsupported)
+        );
     }
 }

@@ -96,16 +96,18 @@ fn load_one(
                 let bytes = read(src, &path)?;
                 piece(&mut h, name.as_bytes());
                 piece(&mut h, &bytes);
-                board = Some(match doc::read::<Board>(&bytes, &path, BOARD_KIND, FORMAT) {
-                    Ok(b) => Loaded {
-                        faults: board_faults(&b, &path),
-                        item: Ok(b),
+                board = Some(
+                    match doc::read::<Board>(&bytes, &path, BOARD_KIND, FORMAT) {
+                        Ok(b) => Loaded {
+                            faults: board_faults(&b, &path),
+                            item: Ok(b),
+                        },
+                        Err(e) => Loaded {
+                            item: Err(e),
+                            faults: Vec::new(),
+                        },
                     },
-                    Err(e) => Loaded {
-                        item: Err(e),
-                        faults: Vec::new(),
-                    },
-                });
+                );
             }
             (PLACEMENTS, Kind::Dir) => {
                 for (file, kind) in src.list(&path)? {
@@ -119,20 +121,19 @@ fn load_one(
                     let bytes = read(src, &at)?;
                     piece(&mut h, join(PLACEMENTS, &file).as_bytes());
                     piece(&mut h, &bytes);
-                    let loaded =
-                        match doc::read::<Placement>(&bytes, &at, PLACEMENT_KIND, FORMAT) {
-                            Ok(p) => Loaded {
-                                faults: placement_faults(&p)
-                                    .into_iter()
-                                    .map(|f| f.with("path", &at))
-                                    .collect(),
-                                item: Ok(p),
-                            },
-                            Err(e) => Loaded {
-                                item: Err(e),
-                                faults: Vec::new(),
-                            },
-                        };
+                    let loaded = match doc::read::<Placement>(&bytes, &at, PLACEMENT_KIND, FORMAT) {
+                        Ok(p) => Loaded {
+                            faults: placement_faults(&p)
+                                .into_iter()
+                                .map(|f| f.with("path", &at))
+                                .collect(),
+                            item: Ok(p),
+                        },
+                        Err(e) => Loaded {
+                            item: Err(e),
+                            faults: Vec::new(),
+                        },
+                    };
                     placements.insert(occ, loaded);
                 }
             }
@@ -162,8 +163,7 @@ fn placement_faults(p: &Placement) -> Vec<Fault> {
     let lim = ryu_board::geom::COORD_LIMIT;
     if p.at[0].abs() > lim || p.at[1].abs() > lim {
         vec![
-            Fault::error(Code::BoardOutOfRange, "a placement past ±2^40 nm")
-                .with("pointer", "/at"),
+            Fault::error(Code::BoardOutOfRange, "a placement past ±2^40 nm").with("pointer", "/at"),
         ]
     } else {
         Vec::new()

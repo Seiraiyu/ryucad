@@ -36,13 +36,27 @@ fn corner_number(c: Corner) -> u8 {
 pub fn symbol(shape: &PadShape, w: Nm, h: Nm) -> Option<StandardSymbol> {
     Some(match shape {
         PadShape::Circle => StandardSymbol::Round { d: w.min(h) },
-        PadShape::Rect => StandardSymbol::Rect { w, h, corners: Corners::SHARP },
+        PadShape::Rect => StandardSymbol::Rect {
+            w,
+            h,
+            corners: Corners::SHARP,
+        },
         PadShape::Oval => StandardSymbol::Oval { w, h },
         PadShape::Trapezoid { delta } => pads::trapezoid(w, h, delta[0], delta[1]),
         PadShape::Roundrect { ratio_ppm } => pads::roundrect(w, h, *ratio_ppm),
-        PadShape::Chamfered { ratio_ppm, corners, round_ratio_ppm } => {
+        PadShape::Chamfered {
+            ratio_ppm,
+            corners,
+            round_ratio_ppm,
+        } => {
             let nums: Vec<u8> = corners.iter().copied().map(corner_number).collect();
-            pads::chamfered(w, h, *ratio_ppm, CornerSet::of(&nums).expect("1 to 4"), *round_ratio_ppm)
+            pads::chamfered(
+                w,
+                h,
+                *ratio_ppm,
+                CornerSet::of(&nums).expect("1 to 4"),
+                *round_ratio_ppm,
+            )
         }
         PadShape::Custom { .. } => return None,
     })
@@ -65,7 +79,11 @@ pub fn own_shape(p: &Pad, grow: Nm) -> Result<Option<Shape>, ShapeError> {
             }
             let anchor = match anchor {
                 Anchor::Circle => StandardSymbol::Round { d: w.min(h) },
-                Anchor::Rect => StandardSymbol::Rect { w, h, corners: Corners::SHARP },
+                Anchor::Rect => StandardSymbol::Rect {
+                    w,
+                    h,
+                    corners: Corners::SHARP,
+                },
             };
             let mut s = symbol_shape(&anchor)?;
             for prim in primitives {
@@ -116,8 +134,14 @@ pub fn hole(p: &Pad) -> Option<(HoleShape, bool)> {
     let place = pad_place(p);
     let plated = matches!(p.kind, PadKind::Through);
     Some(match d {
-        Drill::Round { diameter_nm, offset } => (
-            HoleShape::Round { at: place.point(Point::new(offset[0], offset[1])), d: *diameter_nm },
+        Drill::Round {
+            diameter_nm,
+            offset,
+        } => (
+            HoleShape::Round {
+                at: place.point(Point::new(offset[0], offset[1])),
+                d: *diameter_nm,
+            },
             plated,
         ),
         Drill::Slot { size, offset } => {
@@ -157,7 +181,11 @@ mod tests {
     #[test]
     fn pads_take_their_footprints_sizes_and_places() {
         let f = r0402();
-        let p1 = f.pads.values().find(|p| p.number.as_deref() == Some("1")).unwrap();
+        let p1 = f
+            .pads
+            .values()
+            .find(|p| p.number.as_deref() == Some("1"))
+            .unwrap();
         let c = copper(p1).unwrap();
         let b = c.bounds().unwrap();
         assert_eq!(b.min, Point::new(-510_000 - 270_000, -320_000));
@@ -180,10 +208,20 @@ mod tests {
         let b = copper(&p).unwrap().bounds().unwrap();
         assert_eq!((b.max.x - b.min.x, b.max.y - b.min.y), (640_000, 540_000));
         p.kind = PadKind::Through;
-        p.drill = Some(Drill::Slot { size: [300_000, 100_000], offset: [0, 0] });
+        p.drill = Some(Drill::Slot {
+            size: [300_000, 100_000],
+            offset: [0, 0],
+        });
         let (h, plated) = hole(&p).unwrap();
         assert!(plated);
-        assert_eq!(h, HoleShape::Slot { a: Point::new(0, -100_000), b: Point::new(0, 100_000), d: 100_000 });
+        assert_eq!(
+            h,
+            HoleShape::Slot {
+                a: Point::new(0, -100_000),
+                b: Point::new(0, 100_000),
+                d: 100_000
+            }
+        );
         assert_eq!(copper_sides(&p), (true, true, false));
     }
 
@@ -212,7 +250,10 @@ mod tests {
         let b = s.bounds().unwrap();
         assert_eq!(b.max.x - b.min.x, 540_000 + 100_000);
         assert!(own_shape(&p, -400_000).unwrap().unwrap().parts.is_empty());
-        p.shape = PadShape::Custom { anchor: Anchor::Rect, primitives: vec![] };
+        p.shape = PadShape::Custom {
+            anchor: Anchor::Rect,
+            primitives: vec![],
+        };
         assert!(own_shape(&p, 10).unwrap().is_none());
     }
 }

@@ -7,9 +7,9 @@
 use super::shapes::BoardShapes;
 use crate::error::{Code, Error, Result};
 use ryu_board::geom::Rect;
+use ryu_board::model::Polarity;
 use ryu_board::render::{self, Ink, Layer, MAX_SIDE, Scene, View};
 use ryu_board::shape::{Part, Piece, Shape};
-use ryu_board::model::Polarity;
 use serde_json::{Value, json};
 
 pub const DEFAULT_SIZE: u32 = 1600;
@@ -18,9 +18,20 @@ const MARGIN_NM: i64 = 1_000_000;
 
 /// Every layer `board render` knows.
 pub const LAYERS: [&str; 14] = [
-    "copper.top", "copper.bottom", "mask.top", "mask.bottom", "paste.top", "paste.bottom",
-    "silk.top", "silk.bottom", "fab.top", "fab.bottom", "courtyard.top", "courtyard.bottom",
-    "drill", "outline",
+    "copper.top",
+    "copper.bottom",
+    "mask.top",
+    "mask.bottom",
+    "paste.top",
+    "paste.bottom",
+    "silk.top",
+    "silk.bottom",
+    "fab.top",
+    "fab.bottom",
+    "courtyard.top",
+    "courtyard.bottom",
+    "drill",
+    "outline",
 ];
 
 pub fn ink(layer: &str) -> Ink {
@@ -39,19 +50,35 @@ pub fn ink(layer: &str) -> Ink {
     }
 }
 
-const DIM: Ink = Ink::Paint { colour: [80, 80, 80], alpha: 200 };
-const HIGHLIGHT: Ink = Ink::Paint { colour: [255, 230, 40], alpha: 255 };
+const DIM: Ink = Ink::Paint {
+    colour: [80, 80, 80],
+    alpha: 200,
+};
+const HIGHLIGHT: Ink = Ink::Paint {
+    colour: [255, 230, 40],
+    alpha: 255,
+};
 
 pub fn default_layers(bottom: bool) -> Vec<String> {
     let s = if bottom { "bottom" } else { "top" };
-    vec![format!("copper.{s}"), format!("mask.{s}"), format!("silk.{s}"), "drill".into(), "outline".into()]
+    vec![
+        format!("copper.{s}"),
+        format!("mask.{s}"),
+        format!("silk.{s}"),
+        "drill".into(),
+        "outline".into(),
+    ]
 }
 
 fn hole_shape(h: &ryu_copper::layout::HoleShape) -> Shape {
     use ryu_copper::layout::HoleShape as H;
     let region = match h {
-        H::Round { at, d } => ryu_board::shape::circle(*at, ryu_board::geom::half(*d)).ok().map(ryu_board::geom::Region::solid),
-        H::Slot { a, b, d } => ryu_board::shape::line_outline(*a, *b, ryu_board::geom::Pen::Round(*d)),
+        H::Round { at, d } => ryu_board::shape::circle(*at, ryu_board::geom::half(*d))
+            .ok()
+            .map(ryu_board::geom::Region::solid),
+        H::Slot { a, b, d } => {
+            ryu_board::shape::line_outline(*a, *b, ryu_board::geom::Pen::Round(*d))
+        }
     };
     Shape::regions(Polarity::Positive, region)
 }
@@ -66,9 +93,15 @@ fn outline_drawn(s: &BoardShapes) -> Shape {
             .map(|p| match &p.piece {
                 Piece::Stroke(st) => Part {
                     polarity: Polarity::Positive,
-                    piece: Piece::Stroke(ryu_board::geom::Stroke { path: st.path.clone(), pen: ryu_board::geom::Pen::Round(100_000) }),
+                    piece: Piece::Stroke(ryu_board::geom::Stroke {
+                        path: st.path.clone(),
+                        pen: ryu_board::geom::Pen::Round(100_000),
+                    }),
                 },
-                other => Part { polarity: p.polarity, piece: other.clone() },
+                other => Part {
+                    polarity: p.polarity,
+                    piece: other.clone(),
+                },
             })
             .collect(),
         ..Shape::default()
@@ -88,16 +121,29 @@ pub struct Ask<'a> {
 /// The picture's bytes and the answer's fields.
 pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'static str, Vec<u8>)> {
     if ask.size == 0 || ask.size > MAX_SIDE {
-        return Err(Error::new(Code::InvalidParam, format!("--size is 1 to {MAX_SIDE} pixels")));
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("--size is 1 to {MAX_SIDE} pixels"),
+        ));
     }
-    let layers: Vec<String> = if ask.layers.is_empty() { default_layers(ask.bottom) } else { ask.layers.to_vec() };
+    let layers: Vec<String> = if ask.layers.is_empty() {
+        default_layers(ask.bottom)
+    } else {
+        ask.layers.to_vec()
+    };
     if let Some(bad) = layers.iter().find(|l| !LAYERS.contains(&l.as_str())) {
-        return Err(Error::new(Code::InvalidParam, format!("there is no layer {bad}; layers are {}", LAYERS.join(", "))).with("layer", bad));
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("there is no layer {bad}; layers are {}", LAYERS.join(", ")),
+        )
+        .with("layer", bad));
     }
     if let Some(n) = ask.net
         && !s.pads.iter().any(|p| p.net.as_deref() == Some(n))
     {
-        return Err(Error::new(Code::NotFound, format!("no placed pad is on net {n}")).with("net", n));
+        return Err(
+            Error::new(Code::NotFound, format!("no placed pad is on net {n}")).with("net", n),
+        );
     }
     let holes: Vec<Shape> = s.holes.iter().map(|h| hole_shape(&h.shape)).collect();
     let outline = outline_drawn(s);
@@ -115,22 +161,51 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
         let shapes: Vec<&Shape> = match l.as_str() {
             "drill" => holes.iter().collect(),
             "outline" => vec![&outline],
-            other => s.layers.get(other).map(|v| v.iter().map(|(_, sh)| sh).collect()).unwrap_or_default(),
+            other => s
+                .layers
+                .get(other)
+                .map(|v| v.iter().map(|(_, sh)| sh).collect())
+                .unwrap_or_default(),
         };
         let copper = l.starts_with("copper.");
-        let ink = if ask.net.is_some() && copper { DIM } else { ink(l) };
-        scene_layers.push(Layer { name: l.clone(), ink, shapes });
+        let ink = if ask.net.is_some() && copper {
+            DIM
+        } else {
+            ink(l)
+        };
+        scene_layers.push(Layer {
+            name: l.clone(),
+            ink,
+            shapes,
+        });
         if ask.net.is_some() && copper {
-            scene_layers.push(Layer { name: format!("{l}:net"), ink: HIGHLIGHT, shapes: net_copper(l == "copper.top") });
+            scene_layers.push(Layer {
+                name: format!("{l}:net"),
+                ink: HIGHLIGHT,
+                shapes: net_copper(l == "copper.top"),
+            });
         }
     }
     let window = ask.window.unwrap_or_else(|| {
-        let b = s.outline.bounds().or_else(|| render::bounds(s.layers.values().flatten().map(|(_, sh)| sh)));
-        let b = b.unwrap_or(Rect::new(ryu_board::geom::Point::ORIGIN, ryu_board::geom::Point::new(1_000_000, 1_000_000)));
-        Rect { min: b.min.offset(-MARGIN_NM, -MARGIN_NM), max: b.max.offset(MARGIN_NM, MARGIN_NM) }
+        let b = s
+            .outline
+            .bounds()
+            .or_else(|| render::bounds(s.layers.values().flatten().map(|(_, sh)| sh)));
+        let b = b.unwrap_or(Rect::new(
+            ryu_board::geom::Point::ORIGIN,
+            ryu_board::geom::Point::new(1_000_000, 1_000_000),
+        ));
+        Rect {
+            min: b.min.offset(-MARGIN_NM, -MARGIN_NM),
+            max: b.max.offset(MARGIN_NM, MARGIN_NM),
+        }
     });
     let view = View::fitting(window, ask.size, ask.bottom);
-    let scene = Scene { view, background: BACKGROUND, layers: scene_layers };
+    let scene = Scene {
+        view,
+        background: BACKGROUND,
+        layers: scene_layers,
+    };
     let (mime, bytes) = if ask.svg {
         ("image/svg+xml", render::svg(&scene).into_bytes())
     } else {
@@ -155,11 +230,36 @@ mod tests {
     #[test]
     fn renders_are_the_same_bytes_on_any_thread_count() {
         let s = BoardShapes {
-            outline: Shape::regions(Polarity::Positive, [ryu_board::geom::Region::solid(ryu_board::shape::rect(0, 0, 10_000_000, 5_000_000, &ryu_board::symbol::Corners::SHARP).unwrap())]),
+            outline: Shape::regions(
+                Polarity::Positive,
+                [ryu_board::geom::Region::solid(
+                    ryu_board::shape::rect(
+                        0,
+                        0,
+                        10_000_000,
+                        5_000_000,
+                        &ryu_board::symbol::Corners::SHARP,
+                    )
+                    .unwrap(),
+                )],
+            ),
             ..BoardShapes::default()
         };
-        let ask = Ask { layers: &[], bottom: false, net: None, window: None, size: 200, svg: false };
-        let run = |n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap().install(|| render("b", &s, &ask).unwrap().2);
+        let ask = Ask {
+            layers: &[],
+            bottom: false,
+            net: None,
+            window: None,
+            size: 200,
+            svg: false,
+        };
+        let run = |n| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| render("b", &s, &ask).unwrap().2)
+        };
         assert_eq!(run(1), run(8));
         let ask = Ask { size: 0, ..ask };
         assert_eq!(render("b", &s, &ask).unwrap_err().code, Code::InvalidParam);

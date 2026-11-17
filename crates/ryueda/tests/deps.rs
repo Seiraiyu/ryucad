@@ -25,7 +25,10 @@ fn boards_build_on_ryu_board_and_ryu_copper_and_never_on_a_kernel_or_product() {
     let toml = include_str!("../Cargo.toml");
     let deps = names(toml, "[dependencies]");
     for want in ["ryu-board", "ryu-copper"] {
-        assert!(deps.iter().any(|d| d == want), "ryueda needs {want}: {deps:?}");
+        assert!(
+            deps.iter().any(|d| d == want),
+            "ryueda needs {want}: {deps:?}"
+        );
     }
     for never in [
         "ryukei",

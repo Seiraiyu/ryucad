@@ -1565,7 +1565,10 @@ mod tests {
             (Code::BoardOutlineInvalid, "board_outline_invalid"),
             (Code::BoardOutOfRange, "board_out_of_range"),
             (Code::BoardRefAmbiguous, "board_ref_ambiguous"),
-            (Code::BoardFootprintUnsupported, "board_footprint_unsupported"),
+            (
+                Code::BoardFootprintUnsupported,
+                "board_footprint_unsupported",
+            ),
             (Code::BoardTextMissingGlyph, "board_text_missing_glyph"),
         ] {
             assert_eq!(json!(c), json!(s));
