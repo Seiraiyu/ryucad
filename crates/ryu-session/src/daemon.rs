@@ -1082,8 +1082,13 @@ mod tests {
         assert_eq!(answered, ["0", "1", "2", "3"]);
     }
 
-    /// A burst of changes is published about once per `max`, and the last
-    /// once the daemon is quiet; nothing is left pending (#849).
+    /// A burst of changes is published at most once per `max`, and the
+    /// last once the daemon is quiet; nothing is left pending (#849).
+    ///
+    /// Each half sets only the rule it tests, so a slow runner's stalls
+    /// can't change the count (#950): with `quiet` an hour no stall in the
+    /// burst is quiet enough to publish, and every publish then needs a
+    /// change at least `max` old, so `n` publishes take at least `n × max`.
     #[test]
     fn a_burst_is_published_coalesced() {
         // The watcher outlives the test and stops the process when its
@@ -1100,10 +1105,11 @@ mod tests {
         let state = State::<Test>::new(&dir, endpoint.clone(), Duration::from_secs(3600));
         let serve = Arc::clone(&state);
         std::thread::spawn(move || accept(&listener, &serve));
+        let max = Duration::from_millis(200);
         {
             let mut c = state.core.lock();
             c.live.poll_ms = 50;
-            c.live.coalesce = crate::publish::Coalesce::new(100, 400);
+            c.live.coalesce = crate::publish::Coalesce::new(3_600_000, 200);
         }
         let w = Arc::clone(&state);
         std::thread::spawn(move || watcher(&w));
@@ -1117,22 +1123,47 @@ mod tests {
         let mut c = agent(&endpoint);
         let published =
             |s: &State<Test>| s.core.lock().live.timings.get("daemon.publish").publishes;
-        let t = Instant::now();
-        while t.elapsed() < Duration::from_millis(1200) {
+        // The burst: a change every 20 ms for at least 1.2 s, and until
+        // `max` has published at least once.
+        let (t, mut marks) = (Instant::now(), 0u64);
+        while t.elapsed() < Duration::from_millis(1200) || published(&state) == 0 {
+            assert!(t.elapsed() < Duration::from_secs(60), "never published");
             c.call(&Basic {
                 method: "mark",
                 params: json!({}),
             })
             .unwrap()
             .unwrap();
+            marks += 1;
             std::thread::sleep(Duration::from_millis(20));
         }
         let during = published(&state);
-        // At most one per 400 ms of the 1.2 s burst, plus one.
-        assert!((1..=4).contains(&during), "{during}");
-        std::thread::sleep(Duration::from_millis(500));
-        assert_eq!(published(&state), during + 1, "the last, once quiet");
-        assert!(state.core.lock().live.coalesce.pending().is_none());
+        let elapsed = t.elapsed();
+        let bound = u64::try_from(elapsed.as_nanos() / max.as_nanos()).unwrap();
+        assert!(
+            (1..=bound).contains(&during),
+            "{during} publishes of {marks} changes in {elapsed:?}"
+        );
+        // The last: with `max` an hour, only quiet publishes, once.
+        let before = {
+            let mut c = state.core.lock();
+            c.live.coalesce.quiet = Duration::from_millis(100);
+            c.live.coalesce.max = Duration::from_secs(3600);
+            c.live.coalesce.mark(Instant::now());
+            c.live.timings.get("daemon.publish").publishes
+        };
+        let t = Instant::now();
+        while published(&state) == before {
+            assert!(t.elapsed() < Duration::from_secs(60), "never quiet");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let c = state.core.lock();
+        assert_eq!(
+            c.live.timings.get("daemon.publish").publishes,
+            before + 1,
+            "the last, once quiet"
+        );
+        assert!(c.live.coalesce.pending().is_none());
     }
 
     #[test]
