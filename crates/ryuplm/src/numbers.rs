@@ -94,9 +94,11 @@ pub fn scheme<'a>(
 }
 
 /// The next number of the scheme chosen as [`scheme`] chooses: one more
-/// than the highest sequence any item's number or previous number reads
-/// back through its template.
+/// than the highest sequence in use read back through its template: any
+/// item's number or previous number, and any number a release record in
+/// `src` holds (an item released, then deleted, keeps its number taken).
 pub fn next(
+    src: &dyn Source,
     cat: &Catalogue,
     config: &Config,
     name: Option<&str>,
@@ -114,6 +116,7 @@ pub fn next(
         .items
         .values()
         .flat_map(|i| std::iter::once(&i.number).chain(&i.previous_numbers))
+        .chain(held(src).keys())
         .filter_map(|n| t.read(n))
         .max()
         .unwrap_or(0);
@@ -315,15 +318,21 @@ mod tests {
         );
         let cat = crate::load::Catalogue::load(&f).unwrap();
         let c = ryupdm::config::Config::read_in(&f, "ryuplm").unwrap();
-        assert_eq!(next(&cat, &c, Some("mech"), None).unwrap(), "MECH-00042");
         assert_eq!(
-            next(&cat, &c, None, Some("machined")).unwrap(),
+            next(&f, &cat, &c, Some("mech"), None).unwrap(),
             "MECH-00042"
         );
-        assert_eq!(next(&cat, &c, Some("elec"), None).unwrap(), "E0003");
-        assert_eq!(next(&cat, &c, None, None).unwrap_err().code, Code::Usage);
         assert_eq!(
-            next(&cat, &c, Some("none"), None).unwrap_err().code,
+            next(&f, &cat, &c, None, Some("machined")).unwrap(),
+            "MECH-00042"
+        );
+        assert_eq!(next(&f, &cat, &c, Some("elec"), None).unwrap(), "E0003");
+        assert_eq!(
+            next(&f, &cat, &c, None, None).unwrap_err().code,
+            Code::Usage
+        );
+        assert_eq!(
+            next(&f, &cat, &c, Some("none"), None).unwrap_err().code,
             Code::InvalidParam
         );
         let empty = files(
@@ -334,10 +343,47 @@ mod tests {
         let cat = crate::load::Catalogue::load(&empty).unwrap();
         let c = ryupdm::config::Config::read_in(&empty, "ryuplm").unwrap();
         assert_eq!(
-            next(&cat, &c, None, None).unwrap_err().code,
+            next(&empty, &cat, &c, None, None).unwrap_err().code,
             Code::InvalidParam
         );
     }
+    #[test]
+    fn the_next_number_skips_numbers_records_hold() {
+        use ryupdm::record::{BuiltWith, Record, Release, ReleasedBy};
+        let mut f = files(
+            &[("machined", None)],
+            Some(config()),
+            &[("0000000000001", item("MECH-00007", Some("machined")))],
+        );
+        // MECH-00050's item was released, then deleted.
+        let r = Record::Release(Release {
+            project: crate::catalogue::tests::pid(1),
+            part: Id::parse("0000000000009", "item").unwrap(),
+            label: "A".into(),
+            content: "0".repeat(64),
+            properties: [("number".to_owned(), json!("MECH-00050"))].into(),
+            results: Default::default(),
+            built_with: BuiltWith::of_product("ryuplm", "0.0.0", "c"),
+            released_by: ReleasedBy {
+                name: None,
+                email: None,
+                participant: "agent".into(),
+            },
+            supersedes: None,
+            note: None,
+        });
+        f.insert(
+            r.path(),
+            crate::canonical::to_string(&r.to_json()).into_bytes(),
+        );
+        let cat = crate::load::Catalogue::load(&f).unwrap();
+        let c = ryupdm::config::Config::read_in(&f, "ryuplm").unwrap();
+        assert_eq!(
+            next(&f, &cat, &c, Some("mech"), None).unwrap(),
+            "MECH-00051"
+        );
+    }
+
     #[test]
     fn numbers_are_unique_live_and_released() {
         use ryupdm::record::{BuiltWith, Record, Release, ReleasedBy};

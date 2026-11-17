@@ -97,7 +97,13 @@ fn number_for(
             let config =
                 ryupdm::config::Config::read_in(&session.snapshot(), crate::catalogue::NAME)?;
             let name = (!scheme.is_empty()).then_some(scheme.as_str());
-            crate::numbers::next(session.catalogue(), &config, name, class)
+            crate::numbers::next(
+                &session.snapshot(),
+                session.catalogue(),
+                &config,
+                name,
+                class,
+            )
         }
         _ => Err(Error::new(
             Code::Usage,

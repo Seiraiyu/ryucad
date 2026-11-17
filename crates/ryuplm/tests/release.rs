@@ -258,3 +258,66 @@ fn diff_names_items_added_removed_and_changed() {
         json!(["number = A-2", "previous_numbers = A-1"])
     );
 }
+
+#[test]
+fn next_skips_a_number_a_record_holds_after_its_item_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    ryuplm::server::init(&root, None).unwrap();
+    ask(
+        &root,
+        Request::SettingsEdit {
+            change: serde_json::from_value(json!({
+                "scheme": "mech", "pattern": "MECH-\\d{5}", "next_template": "MECH-{seq:5}"}))
+            .unwrap(),
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let next = |root: &Path| {
+        ask(
+            root,
+            Request::ItemCreate {
+                fields: Default::default(),
+                number: None,
+                next: Some(String::new()),
+                expected_revision: None,
+            },
+        )
+        .unwrap()["item"]["number"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(next(&root), "MECH-00001");
+    assert_eq!(next(&root), "MECH-00002");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "two items"]);
+    // The highest is released, then deleted: its record still holds it.
+    git(&root, &["checkout", "-q", "-b", "rel"]);
+    ask(
+        &root,
+        Request::ReleasePropose {
+            items: vec!["MECH-00002".into()],
+            all: false,
+            dry_run: false,
+            note: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "release MECH-00002 A"]);
+    git(&root, &["checkout", "-q", "main"]);
+    git(&root, &["merge", "-q", "--no-ff", "rel", "-m", "merge"]);
+    ask(
+        &root,
+        Request::ItemDelete {
+            item: "MECH-00002".into(),
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(next(&root), "MECH-00003");
+}

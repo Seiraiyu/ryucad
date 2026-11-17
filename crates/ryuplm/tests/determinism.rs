@@ -21,7 +21,7 @@ fn catalogues_answer_the_same_everywhere() {
     let config = ryupdm::config::Config::read_in(&files, "ryuplm").unwrap();
     for s in ["mech", "fast"] {
         g.section("next")
-            .str(&ryuplm::numbers::next(&cat, &config, Some(s), None).unwrap());
+            .str(&ryuplm::numbers::next(&files, &cat, &config, Some(s), None).unwrap());
     }
     for (id, item) in &cat.items {
         g.section("content")
