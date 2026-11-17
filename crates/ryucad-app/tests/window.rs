@@ -820,6 +820,100 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
 }
 
 #[test]
+fn the_window_follows_agents_work_and_an_agent_s_ask() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.run_steps(2);
+    assert!(!h.state().opened().ws.follows_work(), "off by default");
+    menu(&mut h, "View", "Follow agents' work");
+    frames(&mut h, |a| a.opened().ws.follows_work());
+    // The agent builds far from the view: the view takes it in.
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "far", "--param", "x=5", "--param", "y=5", "--param",
+        "z=5", "--origin", "400,0,0",
+    ]);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        let r = o.view.rect;
+        let aspect = f64::from(r.width().max(1.0) / r.height().max(1.0));
+        ryucad_app::core::pick::Picker::new(&o.ws.model)
+            .bounds()
+            .is_some_and(|(lo, hi)| {
+                hi[0] >= 0.4
+                    && !o.view.nav.moving()
+                    && ryucad_app::core::work::in_view(&o.view.nav.camera, aspect, lo, hi, 1.0)
+            })
+    });
+    // The strip shows the same state, and turns it off.
+    h.get_by_label("Follow work").click();
+    frames(&mut h, |a| !a.opened().ws.follows_work());
+    // An agent asks the window to follow it.
+    p.ok(&["camera", "--view", "front"]);
+    p.ok(&["follow"]);
+    frames(&mut h, |a| a.opened().ws.session.following.is_some());
+    h.step();
+    // A drag in the viewport takes the camera back, and says so.
+    let c = h.state().opened().view.rect.center();
+    h.event(egui::Event::PointerMoved(c));
+    h.event(egui::Event::PointerButton {
+        pos: c,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    for i in 1..6 {
+        h.event(egui::Event::PointerMoved(
+            c + egui::vec2(10.0 * i as f32, 0.0),
+        ));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton {
+        pos: c + egui::vec2(50.0, 0.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    assert_eq!(h.state().opened().ws.session.following, None);
+    assert!(
+        h.state()
+            .opened()
+            .ws
+            .toasts
+            .shown()
+            .iter()
+            .any(|t| t.text == "Following agent: your move stopped it")
+    );
+    // The session hears it ended.
+    let me = h.state().opened().ws.me().to_owned();
+    let t = Instant::now();
+    loop {
+        let list = p.ok(&["participants"]);
+        let mine = list["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == me.as_str())
+            .unwrap()["following"]
+            .clone();
+        if mine.is_null() {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "the session still follows"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn a_parameter_is_edited_in_the_property_panel() {
     let _one = one_at_a_time();
     if !gpu() {
