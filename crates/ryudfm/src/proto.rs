@@ -106,6 +106,28 @@ pub enum Request {
         #[serde(default, flatten)]
         args: crate::render::Args,
     },
+    /// Every pair of different islands closer than a length on each
+    /// copper layer, closest first.
+    #[serde(rename = "clearance")]
+    Clearance {
+        board: String,
+        #[serde(flatten)]
+        args: crate::clearance::Args,
+    },
+    /// The exact distance between two features, pins, holes or nets.
+    #[serde(rename = "measure")]
+    Measure {
+        board: String,
+        #[serde(flatten)]
+        args: crate::measure::Args,
+    },
+    /// The copper's islands, a page at a time, or one island.
+    #[serde(rename = "nets")]
+    Nets {
+        board: String,
+        #[serde(default, flatten)]
+        args: crate::nets::Args,
+    },
     /// The project (or one board) loaded from nothing: every load fault
     /// as a finding; `check_failed` on any error.
     #[serde(rename = "check")]
@@ -244,6 +266,30 @@ mod tests {
                 args: crate::render::Args {
                     layers: vec!["top".into(), "drill".into()],
                     side: Some(crate::render::Side::Bottom),
+                    ..Default::default()
+                },
+            },
+            Request::Nets {
+                board: "b".into(),
+                args: crate::nets::Args {
+                    net: Some("GND".into()),
+                    limit: Some(3),
+                    ..Default::default()
+                },
+            },
+            Request::Measure {
+                board: "b".into(),
+                args: crate::measure::Args {
+                    a: "x".into(),
+                    b: "y".into(),
+                    layer: None,
+                },
+            },
+            Request::Clearance {
+                board: "b".into(),
+                args: crate::clearance::Args {
+                    below: "0.2".into(),
+                    all: true,
                     ..Default::default()
                 },
             },

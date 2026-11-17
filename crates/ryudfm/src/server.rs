@@ -220,8 +220,26 @@ fn dispatch(
         }
         Request::Render { board, args } => {
             let unit = session.project().manifest.default_unit;
-            let b = session.board(&board)?;
-            crate::render::render(&b, Some(&board), &args, unit)
+            if args.wants_copper() {
+                let cb = session.copper(&board)?;
+                crate::render::render_copper(&cb, Some(&board), &args, unit)
+            } else {
+                let b = session.board(&board)?;
+                crate::render::render(&b, Some(&board), &args, unit)
+            }
+        }
+        Request::Clearance { board, args } => {
+            let unit = session.project().manifest.default_unit;
+            let cb = session.copper(&board)?;
+            json(crate::clearance::clearance(&cb, Some(&board), &args, unit))
+        }
+        Request::Measure { board, args } => {
+            let cb = session.copper(&board)?;
+            json(crate::measure::measure(&cb, Some(&board), &args))
+        }
+        Request::Nets { board, args } => {
+            let cb = session.copper(&board)?;
+            json(crate::nets::nets(&cb, Some(&board), &args))
         }
         Request::Check { board } => json(crate::check::project(session, board.as_deref())),
         Request::ActivityLog { limit, before } => {

@@ -7,7 +7,8 @@
 //!
 //! Boards read are kept by their input's hash and step, the eight most
 //! recently used, so `inspect` and `render` after the first read cost
-//! milliseconds, and so do the shapes they build.
+//! milliseconds, and so do the shapes they build; and so is each board's
+//! copper (`copper`), built on first use.
 
 use crate::codes;
 use crate::error::{Code, Error, Result};
@@ -27,6 +28,7 @@ pub struct Session {
     stamps: Stamps,
     /// Boards read, most recently used first, by input hash and step.
     boards: Vec<(String, Arc<Board>)>,
+    coppers: Vec<(String, Arc<crate::copper::CopperBoard>)>,
 }
 
 /// `rel` (relative to the project, with `/`) as a path under `root`.
@@ -64,6 +66,7 @@ impl Session {
             project,
             stamps,
             boards: Vec::new(),
+            coppers: Vec::new(),
         })
     }
 
@@ -119,6 +122,28 @@ impl Session {
     /// How many boards the session keeps read.
     pub fn boards_kept(&self) -> usize {
         self.boards.len()
+    }
+
+    /// Board `id`'s copper, built on first use and kept as its board is:
+    /// by input hash and step, the eight most recently used.
+    pub fn copper(&mut self, id: &str) -> Result<Arc<crate::copper::CopperBoard>> {
+        let key = {
+            let entry = self.project.board(id)?;
+            let (file, _) = entry.ready()?;
+            format!("{}\0{}", entry.hash.as_deref().expect("ready"), file.step)
+        };
+        if let Some(c) = recall(&mut self.coppers, &key) {
+            return Ok(c);
+        }
+        let board = self.board(id)?;
+        let c = Arc::new(crate::copper::CopperBoard::new(board));
+        remember(&mut self.coppers, key, Arc::clone(&c));
+        Ok(c)
+    }
+
+    /// How many boards' copper the session keeps.
+    pub fn coppers_kept(&self) -> usize {
+        self.coppers.len()
     }
 }
 
@@ -251,6 +276,11 @@ mod tests {
         // The same input and step: one board read.
         assert!(Arc::ptr_eq(&a, &s.board("b").unwrap()));
         assert_eq!(s.boards_kept(), 1);
+        let c = s.copper("a").unwrap();
+        assert!(Arc::ptr_eq(&c, &s.copper("b").unwrap()));
+        assert!(Arc::ptr_eq(&c.board, &a));
+        assert_eq!(s.coppers_kept(), 1);
+        assert_eq!(s.copper("c").map(|_| ()).unwrap_err().code, Code::NotFound);
         assert_eq!(s.board("c").unwrap_err().code, Code::NotFound);
     }
 }

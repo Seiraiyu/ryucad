@@ -12,6 +12,8 @@
 #   pinned                   fetched and exported by
 #                            scripts/fetch-dfm-corpus.sh from pinned.txt,
 #                            never committed
+#   copper <counts>          the board's copper (tests/copper_corpus.rs's,
+#                            tests/pinned.rs's)
 #
 # The counts after them are tests/corpus.rs's (committed boards) and
 # tests/pinned.rs's (pinned ones): `UPDATE_MANIFEST=1` writes them as read.
@@ -34,6 +36,7 @@ board minimal-clean
   stackup 3
   capabilities geometry,nets,components,stackup,drill
   faults -
+  copper layers=2 items=54 left_out=0 holes=4 islands=11 resolved=7 uncertain=0 source=cad points=13 opens=0 shorts=0 off=0 mismatches=0 contacts=0 gaps_0.2mm=0
 
 board gb-cart256k-a
   source GB-CART256K-A, a Game Boy cartridge board by Joonas Javanainen (Gekkio),
@@ -53,11 +56,13 @@ board gb-cart256k-a
   stackup 3
   capabilities geometry,nets,components,drill
   faults -
+  copper layers=2 items=1017 left_out=0 holes=130 islands=62 resolved=121 uncertain=531 source=cad points=267 opens=0 shorts=0 off=0 mismatches=0 contacts=0 gaps_0.2mm=0
 
 board vna-se-probe
   source A four-layer single-ended VNA probe board by Antmicro,
   source https://github.com/antmicro/vna-se-probe at 96d6af354c2ff3c1c5f82fabbc4676161fc8804b,
   source vna-se-probe.kicad_pcb, exported and referenced as gb-cart256k-a is.
+  source Its CAD netlist lies offset from its copper (#933): its copper line's off=31.
   licence Apache-2.0
   archive vna-se-probe.zip 43be19cb33b5cdc45e028dda3469244cb0f8935b24c34aaea0365442d6d975cc
   folder vna-se-probe
@@ -71,6 +76,7 @@ board vna-se-probe
   stackup 7
   capabilities geometry,nets,components,drill
   faults -
+  copper layers=4 items=118 left_out=0 holes=27 islands=2 resolved=0 uncertain=0 source=cad points=31 opens=0 shorts=0 off=31 mismatches=0 contacts=0 gaps_0.2mm=0
 
 board osm-l-bmc-som
   source Antmicro's OSM-L BMC system on module: 10 copper layers, an LPDDR4X chip, microvias and
@@ -87,10 +93,12 @@ board osm-l-bmc-som
   stackup 19
   capabilities geometry,nets,components,drill
   faults odb_symbol_unknown=3
+  copper layers=10 items=18034 left_out=1 holes=1763 islands=1063 resolved=339 uncertain=5 source=cad points=4191 opens=0 shorts=0 off=0 mismatches=0 contacts=26 gaps_0.2mm=15790
 
 board lpddr4-test-board
   source Antmicro's LPDDR4 test board: 8 copper layers, DDR routing to a SO-DIMM socket, blind vias.
   source pinned.txt says where from.
+  source Its CAD netlist lies offset from its copper too (#933): its copper line's off=3208.
   licence Apache-2.0
   pinned
   version 8.1 KiCad EDA 9.0.8+1
@@ -103,3 +111,4 @@ board lpddr4-test-board
   stackup 15
   capabilities geometry,nets,components,drill
   faults -
+  copper layers=8 items=20919 left_out=11 holes=1267 islands=784 resolved=216 uncertain=78 source=cad points=3208 opens=0 shorts=0 off=3208 mismatches=0 contacts=25 gaps_0.2mm=9570

@@ -382,6 +382,61 @@ fn boards_from_the_cli() {
 }
 
 #[test]
+fn copper_from_the_cli() {
+    let p = Pair::project();
+    let job = corpus("minimal-clean.tgz");
+    p.ok(&["import", job.to_str().unwrap(), "--board", "mc"]);
+    let v = p.ok(&["nets", "mc", "--limit", "2"]);
+    assert_eq!(v["islands"].as_array().unwrap().len(), 2);
+    let first = v["islands"][0]["island"].as_str().unwrap().to_owned();
+    assert!(first.starts_with("mc/pcb/"), "{first}");
+    let next = v["next"].as_str().unwrap().to_owned();
+    let w = p.ok(&["nets", "mc", "--after", &next, "--limit", "1"]);
+    assert_ne!(w["islands"][0]["island"], v["islands"][0]["island"]);
+    let one = p.ok(&["nets", "mc", "--island", &first]);
+    assert_eq!(one["island"]["island"], json!(first));
+    assert!(
+        p.ok(&["nets", "mc", "--net", "GND"])["total"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    let m = p.ok(&["measure", "mc", "mc/pcb/net/GND", "mc/pcb/net/+5"]);
+    assert!(m["distance_nm"].as_i64().unwrap() > 0);
+    assert_eq!(m["touching"], json!(false));
+    let c = p.ok(&["clearance", "mc", "--below", "50"]);
+    let pairs = c["pairs"].as_array().unwrap();
+    assert!(!pairs.is_empty());
+    assert!(
+        pairs
+            .windows(2)
+            .all(|x| x[0]["distance_nm"].as_i64() <= x[1]["distance_nm"].as_i64())
+    );
+    p.fails(&["clearance", "mc", "--below", "-1"], "invalid_param", 1);
+    p.fails(
+        &["measure", "mc", "mc/pcb/top/999999", "mc/pcb/net/GND"],
+        "not_found",
+        1,
+    );
+    p.fails(
+        &["nets", "mc", "--layer", "top_overlay"],
+        "invalid_param",
+        1,
+    );
+    let r = p.ok(&[
+        "render", "mc", "--merged", "--out", "m.png", "--size", "300",
+    ]);
+    assert_eq!(r["merged"], json!(true));
+    p.ok(&[
+        "render", "mc", "--net", "GND", "--out", "n.svg", "--size", "300",
+    ]);
+    p.ok(&[
+        "render", "mc", "--offset", "-0.05", "--out", "o.png", "--size", "300",
+    ]);
+    assert_eq!(p.ok(&["check"])["errors"], json!(0));
+}
+
+#[test]
 fn path_mode_reads_a_job_anywhere() {
     let dir = tempfile::tempdir().unwrap();
     let run = dir.path().join("run");
@@ -408,6 +463,24 @@ fn path_mode_reads_a_job_anywhere() {
     assert!(here.join("v.svg").is_file());
     let (code, v) = go(&["check", job]);
     assert_eq!((code, v["result"]["errors"].clone()), (0, json!(0)), "{v}");
+    let (code, v) = go(&["nets", job, "--limit", "1"]);
+    assert_eq!(
+        (code, v["result"]["board"].clone()),
+        (0, Value::Null),
+        "{v}"
+    );
+    let (code, v) = go(&["clearance", job, "--below", "0.2"]);
+    assert_eq!(code, 0, "{v}");
+    // vna-se-probe's CAD netlist lies off its copper (KiCad wrote it
+    // offset by (133.5, -92.34) mm), so no net is placed: a feature.
+    let (code, v) = go(&["measure", job, "pcb/f.cu/0", "pcb/f.cu/0"]);
+    assert_eq!(
+        (code, v["result"]["distance_nm"].clone()),
+        (0, json!(0)),
+        "{v}"
+    );
+    let (code, v) = go(&["render", job, "--merged", "--out", "m.png", "--size", "200"]);
+    assert_eq!(code, 0, "{v}");
     // Outside a project, nothing but paths.
     let (code, v) = go(&["inspect", "nothing-here"]);
     assert_eq!((code, &v["error"]["code"]), (1, &json!("not_found")));
@@ -567,6 +640,9 @@ fn every_protocol_method_has_a_command() {
         ("inspect", &["inspect"]),
         ("render", &["render"]),
         ("check", &["check"]),
+        ("nets", &["nets"]),
+        ("measure", &["measure"]),
+        ("clearance", &["clearance"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),

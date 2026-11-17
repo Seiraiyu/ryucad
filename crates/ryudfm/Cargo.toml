@@ -12,6 +12,7 @@ blake3 = { version = "1", features = ["pure"] }
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.3"
 ryu-board = { path = "../ryu-board" }
+ryu-copper = { path = "../ryu-copper" }
 ryu-doc = { path = "../ryu-doc" }
 ryu-session = { path = "../ryu-session" }
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +41,10 @@ tempfile = "3"
 
 [[bench]]
 name = "read"
+harness = false
+
+[[bench]]
+name = "copper"
 harness = false
 
 # musl's allocator is slow under multithreaded allocation; ryucad's and

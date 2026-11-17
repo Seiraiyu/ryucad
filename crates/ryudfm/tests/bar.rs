@@ -2,7 +2,10 @@
 //! densest pinned board (`lpddr4-test-board`, about 340,000 features) read
 //! from its archive and every layer's shapes built, from nothing, on all
 //! cores, in under 2 s; and through a warm daemon, `inspect` in under
-//! 100 ms and a 1600-pixel render in under 500 ms, each one CLI call.
+//! 100 ms and a 1600-pixel render in under 500 ms, each one CLI call;
+//! and design 245's copper bars on the same board: connectivity and the
+//! netlist compare under 1 s, every gap under 0.2 mm under 2 s, and a
+//! trace's edit with its queries under 1 ms (only on the pinned board).
 //!
 //! The pinned board is `scripts/fetch-dfm-corpus.sh`'s export, in
 //! `target/dfm-corpus` (or `$RYUDFM_CORPUS`), which only the devcontainer
@@ -159,4 +162,128 @@ fn the_densest_board_reads_and_draws_within_the_bars() {
         .output();
     assert!(inspect < bar(Duration::from_millis(100)), "{inspect:?}");
     assert!(render < bar(Duration::from_millis(500)), "{render:?}");
+}
+
+/// The CPU this runs on, for the record.
+fn machine() -> String {
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_string())
+        })
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string());
+    format!(
+        "{cpu}, {} threads available, {} used",
+        std::thread::available_parallelism().map_or(0, |n| n.get()),
+        rayon::current_num_threads()
+    )
+}
+
+/// Design 245's bars, on lpddr4-test-board only: a seeded stand-in has no
+/// board's copper (its features overlap at random), so without the
+/// pinned board this says so and passes, unless RYUDFM_REQUIRE_CORPUS=1.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryudfm --release --test bar"
+)]
+fn the_densest_board_s_copper_within_the_bars() {
+    use rayon::prelude::*;
+    use ryu_copper::connect::Node;
+    use ryudfm::copper::CopperBoard;
+    use std::sync::Arc;
+    let Some(job) = pinned() else {
+        assert!(
+            std::env::var("RYUDFM_REQUIRE_CORPUS").as_deref() != Ok("1"),
+            "no lpddr4-test-board: run scripts/fetch-dfm-corpus.sh"
+        );
+        println!("the pinned corpus isn't fetched: the copper bars need lpddr4-test-board itself");
+        return;
+    };
+    println!("{}", machine());
+    let b = read_path(&job, &ReadOptions::default()).unwrap();
+    let all: Vec<usize> = (0..b.layers.len()).collect();
+    b.build_shapes(b.board_step, &all);
+    let b = Arc::new(b);
+
+    let start = Instant::now();
+    let mut cb = CopperBoard::new(Arc::clone(&b));
+    let connect = start.elapsed();
+
+    let start = Instant::now();
+    let gaps: usize = (0..cb.built.copper.len())
+        .into_par_iter()
+        .map(|l| cb.copper.clearance(l, 200_000).len())
+        .sum();
+    let clearance = start.elapsed();
+
+    let islands = cb.copper.islands();
+    let largest = islands
+        .iter()
+        .max_by(|x, y| x.pieces.len().cmp(&y.pieces.len()).then(y.id.cmp(&x.id)))
+        .unwrap();
+    let ground = *largest
+        .items
+        .iter()
+        .find(|k| cb.is_trace(k))
+        .expect("a trace on the largest island");
+    let signal = islands
+        .iter()
+        .filter(|i| i.pieces.len() <= 10)
+        .flat_map(|i| i.items.iter())
+        .copied()
+        .find(|k| cb.is_trace(k))
+        .expect("a signal trace");
+    let mut edits = Vec::new();
+    for (what, k) in [("signal", signal), ("ground", ground)] {
+        let (mut out, mut back) = (Duration::ZERO, Duration::ZERO);
+        let resolves = cb.copper.resolves();
+        for _ in 0..5 {
+            let touching = cb.copper.contacts(&Node::Piece(k, 0));
+            let start = Instant::now();
+            let it = cb.copper.remove_item(&k).unwrap();
+            // What it touched: are its neighbours still joined?
+            let _: Vec<_> = touching.iter().map(|n| cb.copper.island_of(n)).collect();
+            out = out.max(start.elapsed());
+            let start = Instant::now();
+            cb.copper.insert_item(k, it);
+            // Its clearance: every item within 0.2 mm, with the exact
+            // distance; and its island.
+            let body = cb.copper.bodies().body(&k).unwrap().clone();
+            let _: Vec<_> = cb
+                .copper
+                .bodies()
+                .near(&k, 200_000)
+                .iter()
+                .filter_map(|n| {
+                    ryu_copper::measure::distance(&body, cb.copper.bodies().body(&n.key)?)
+                })
+                .collect();
+            let _ = cb.copper.island_of(&Node::Piece(k, 0));
+            back = back.max(start.elapsed());
+        }
+        println!(
+            "a {what} trace: out with its queries {out:?}, back with its queries {back:?} (the worst of five; {} booleans)",
+            cb.copper.resolves() - resolves
+        );
+        edits.push((what, out.max(back)));
+    }
+    println!(
+        "{}: {} items on {} copper layers, {} islands; connectivity and the compare {connect:?}; {gaps} gaps under 0.2 mm in {clearance:?}",
+        job.file_name().unwrap().to_string_lossy(),
+        cb.copper.items().count(),
+        cb.built.copper.len(),
+        islands.len(),
+    );
+    assert!(connect < bar(Duration::from_secs(1)), "{connect:?}");
+    assert!(clearance < bar(Duration::from_secs(2)), "{clearance:?}");
+    for (what, t) in edits {
+        assert!(
+            t < bar(Duration::from_millis(1)),
+            "a {what} trace's edit: {t:?}"
+        );
+    }
 }

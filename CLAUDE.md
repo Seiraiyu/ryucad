@@ -100,9 +100,11 @@ cargo run -p ryudfm -- <command>                          # the ryudfm CLI (`ryu
 UPDATE_GOLDEN=1 cargo test -p ryu-board --test determinism   # after a deliberate change to board shapes or renders
 UPDATE_GOLDEN=1 cargo test -p ryudfm --test determinism   # after a deliberate change to what ryudfm reads or renders of the committed boards
 UPDATE_MANIFEST=1 cargo test -p ryudfm --test corpus      # record the committed boards' counts after a change that reads more (review them)
-sh scripts/fetch-dfm-corpus.sh                            # the pinned KiCad boards exported to ODB++ into target/dfm-corpus; devcontainer only (its KiCad)
+sh scripts/fetch-dfm-corpus.sh                            # the pinned KiCad boards exported to ODB++, and every corpus board's KiCad DRC, into target/dfm-corpus; devcontainer only (its KiCad)
 cargo test -p ryudfm --release --test pinned -- --ignored   # the pinned boards to their counts and KiCad's own results, after the fetch
-RYUDFM_BARS=1 cargo test -p ryudfm --release --test bar -- --nocapture   # design 213's bars: a dense board read and shaped, a warm daemon's inspect and render (ten times looser without RYUDFM_BARS)
+RYUDFM_BARS=1 cargo test -p ryudfm --release --test bar -- --nocapture   # design 213's and 245's bars: a dense board read and shaped, a warm daemon's inspect and render, its copper connected, cleared and edited (ten times looser without RYUDFM_BARS)
+cargo test -p ryudfm --release --test copper_corpus        # the committed boards' copper to their manifest lines and their IPC-D-356 netlists (ignored in debug builds)
+cargo test -p ryudfm --release --test kicad_drc -- --ignored --nocapture   # opens, shorts and gaps against KiCad's DRC at 0.2 mm, after the fetch; devcontainer only
 sh scripts/test-install-ryudfm.sh target/release/ryudfm   # install-ryudfm.sh against a fake release
 sh scripts/smoke-ryudfm.sh target/release/ryudfm          # an agent session: minimal-clean imported, inspected, rendered, checked, updated and undone
 ```

@@ -1,10 +1,11 @@
 //! ODB++ from bytes: the first byte picks what the rest is read as (a
 //! features file, `eda/data`, a matrix, a components file, a netlist, a
 //! tools file, a step header, a font, attribute declarations and a list,
-//! a stackup, `misc/info`, or an archive of a whole job, which is read
-//! and every layer's shapes built). Every reader gives a value or a typed
-//! fault, never a panic, and a features file that reads writes and reads
-//! back to itself.
+//! a stackup, `misc/info`, or an archive of a whole job, which is read,
+//! every layer's shapes built, and (when small) its copper built,
+//! compared, listed, cleared and merged). Every reader gives a value or a
+//! typed fault, never a panic, and a features file that reads writes and
+//! reads back to itself.
 
 #![no_main]
 
@@ -88,6 +89,19 @@ fuzz_target!(|data: &[u8]| {
             let all: Vec<usize> = (0..b.layers.len()).collect();
             for s in 0..b.steps.len() {
                 b.build_shapes(s, &all);
+            }
+            // The board step's copper, when it is small enough to stay
+            // quick: never a panic.
+            let features: usize = b.steps[b.board_step].layers.iter().map(|f| f.features().len()).sum();
+            if features <= 2_000 {
+                let cb = ryudfm::copper::CopperBoard::new(std::sync::Arc::new(b));
+                let _ = ryudfm::copper::findings(&cb, None);
+                let _ = ryudfm::nets::nets(&cb, None, &Default::default());
+                let below = ryudfm::clearance::Args { below: "0.1".into(), ..Default::default() };
+                let _ = ryudfm::clearance::clearance(&cb, None, &below, ryudfm::units::Unit::Mm);
+                for l in 0..cb.built.copper.len() {
+                    let _ = cb.merged(l);
+                }
             }
         }
     }

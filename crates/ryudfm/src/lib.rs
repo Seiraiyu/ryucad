@@ -7,10 +7,11 @@
 //! project's daemon answer the same requests over `ryu-session`'s
 //! plumbing, as ryucad's and ryueda's do (`proto`, `server`). `inspect`,
 //! `render` and `check` read a board of a project or, in path mode, a job
-//! anywhere.
+//! anywhere. `copper` builds a board's copper with `ryu-copper` and
+//! compares it with its netlist.
 //!
 //! It depends on no kernel and no other product: the board model is
-//! `ryu-board`'s, the file vocabulary `ryu-doc`'s, the daemon's plumbing
+//! `ryu-board`'s, its copper `ryu-copper`'s, the file vocabulary `ryu-doc`'s, the daemon's plumbing
 //! `ryu-session`'s.
 
 pub use ryu_doc::{canonical, error, id, source, units};
@@ -18,13 +19,17 @@ pub use ryu_doc::{canonical, error, id, source, units};
 pub mod activity;
 pub mod boards;
 pub mod check;
+pub mod clearance;
 pub mod client;
 pub mod codes;
+pub mod copper;
 pub mod daemon;
 pub mod doc;
 pub mod import;
 pub mod input;
 pub mod inspect;
+pub mod measure;
+pub mod nets;
 pub mod notify;
 pub mod odb;
 pub mod project;

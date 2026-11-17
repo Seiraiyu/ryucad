@@ -9,8 +9,13 @@
 #
 # Each board lands in <dir>/<name>/: odb/ (the uncompressed export),
 # <name>.zip (the same, zipped), pos.csv (KiCad's component positions, both
-# sides, mm), netlist.d356 (its IPC-D-356 netlist of the board) and SOURCE,
-# as the committed boards' tests/corpus/reference/<name>/ hold them. Sources
+# sides, mm), netlist.d356 (its IPC-D-356 netlist of the board), drc.json
+# (KiCad's DRC of it at a fixed clearance of 0.2 mm, beside a copy of the
+# board and a rules file of that one rule; zones as filled, never refilled)
+# and SOURCE, as the committed boards' tests/corpus/reference/<name>/ hold
+# them. Every board of the list gets its drc.json, the committed ones too
+# (their exports are committed, their DRC reports aren't); --all exports
+# those too. Sources
 # are kept in <dir>/.src; a board already exported from the same line by the
 # same KiCad is kept. Needs curl, tar, sha256sum (or shasum) and kicad-cli at
 # the pinned version (the devcontainer has it). The boards are third
@@ -43,6 +48,7 @@ mkdir -p "$HOME"
 
 want=$(sed -n 's/^kicad //p' "$list")
 options=$(sed -n 's/^options //p' "$list")
+clearance=0.2mm
 command -v kicad-cli >/dev/null 2>&1 || {
     echo "kicad-cli not found: the corpus is exported with KiCad $want" >&2
     exit 1
@@ -54,7 +60,7 @@ if [ "$have" != "$want" ]; then
 fi
 
 grep -E '^(fetch|commit) ' "$list" | while read -r kind name repo commit board licence hash; do
-    case " $kinds " in *" $kind "*) ;; *) continue ;; esac
+    case " $kinds " in *" $kind "*) wanted=1 ;; *) wanted=0 ;; esac
     src=$dir/.src/$name
     pcb=$src/$board
     if [ ! -f "$pcb" ] || [ "$(sha "$pcb")" != "$hash" ]; then
@@ -77,22 +83,39 @@ grep -E '^(fetch|commit) ' "$list" | while read -r kind name repo commit board l
 
     out=$dir/$name
     stamp="$kind $name $repo $commit $board $licence $hash kicad $have $options"
-    if [ -f "$out/SOURCE" ] && [ "$(head -n 1 "$out/SOURCE")" = "$stamp" ]; then
-        continue
+    if [ "$wanted" = 1 ] && ! { [ -f "$out/SOURCE" ] && [ "$(head -n 1 "$out/SOURCE")" = "$stamp" ]; }; then
+        echo "exporting $name"
+        rm -rf "$out"
+        mkdir -p "$out"
+        # shellcheck disable=SC2086 # options are words
+        kicad-cli pcb export odb $options --compression none -o "$out/odb" "$pcb"
+        # shellcheck disable=SC2086
+        kicad-cli pcb export odb $options --compression zip -o "$out/$name.zip" "$pcb"
+        kicad-cli pcb export pos --format csv --units mm --side both -o "$out/pos.csv" "$pcb"
+        kicad-cli pcb export ipcd356 -o "$out/netlist.d356" "$pcb"
+        {
+            echo "$stamp"
+            echo "https://github.com/$repo/tree/$commit"
+            echo "licence $licence"
+        } >"$out/SOURCE"
     fi
-    echo "exporting $name"
-    rm -rf "$out"
-    mkdir -p "$out"
-    # shellcheck disable=SC2086 # options are words
-    kicad-cli pcb export odb $options --compression none -o "$out/odb" "$pcb"
-    # shellcheck disable=SC2086
-    kicad-cli pcb export odb $options --compression zip -o "$out/$name.zip" "$pcb"
-    kicad-cli pcb export pos --format csv --units mm --side both -o "$out/pos.csv" "$pcb"
-    kicad-cli pcb export ipcd356 -o "$out/netlist.d356" "$pcb"
-    {
-        echo "$stamp"
-        echo "https://github.com/$repo/tree/$commit"
-        echo "licence $licence"
-    } >"$out/SOURCE"
+
+    # KiCad's DRC at one clearance (design 245): a copy of the board beside
+    # a rules file holding that one rule.
+    check="drc $stamp clearance $clearance"
+    if [ ! -f "$out/DRC" ] || [ "$(cat "$out/DRC")" != "$check" ]; then
+        echo "checking $name with KiCad's DRC"
+        mkdir -p "$out"
+        base=$(basename "$board" .kicad_pcb)
+        rm -rf "$out/drc"
+        mkdir -p "$out/drc"
+        cp "$pcb" "$out/drc/$base.kicad_pcb"
+        if [ -f "${pcb%.kicad_pcb}.kicad_pro" ]; then
+            cp "${pcb%.kicad_pcb}.kicad_pro" "$out/drc/$base.kicad_pro"
+        fi
+        printf '(version 1)\n(rule "ryudfm clearance"\n  (constraint clearance (min %s)))\n' "$clearance" >"$out/drc/$base.kicad_dru"
+        kicad-cli pcb drc --format json --severity-all --units mm -o "$out/drc.json" "$out/drc/$base.kicad_pcb"
+        echo "$check" >"$out/DRC"
+    fi
 done
 echo "dfm corpus in $dir"

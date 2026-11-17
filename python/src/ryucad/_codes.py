@@ -205,6 +205,14 @@ class Code(str, Enum):
     ODB_TEXT_DYNAMIC = "odb_text_dynamic"
     ODB_BARCODE_SKIPPED = "odb_barcode_skipped"
     ODB_INFO_MISSING = "odb_info_missing"
+    NET_OPEN = "net_open"
+    NET_SHORT = "net_short"
+    NETLIST_POINT_OFF_COPPER = "netlist_point_off_copper"
+    NET_CLAIM_MISMATCH = "net_claim_mismatch"
+    NETLIST_FROM_PINS = "netlist_from_pins"
+    NETLIST_MISSING = "netlist_missing"
+    COPPER_INCOMPLETE = "copper_incomplete"
+    COPPER_CONTACT_UNCERTAIN = "copper_contact_uncertain"
     CACHE_REMOTE_UNREACHABLE = "cache_remote_unreachable"
     CACHE_REMOTE_REFUSED = "cache_remote_refused"
     CACHE_ENTRY_BAD = "cache_entry_bad"
@@ -561,6 +569,14 @@ EXIT: dict[Code, int] = {
     Code.ODB_TEXT_DYNAMIC: 1,
     Code.ODB_BARCODE_SKIPPED: 1,
     Code.ODB_INFO_MISSING: 1,
+    Code.NET_OPEN: 1,
+    Code.NET_SHORT: 1,
+    Code.NETLIST_POINT_OFF_COPPER: 1,
+    Code.NET_CLAIM_MISMATCH: 1,
+    Code.NETLIST_FROM_PINS: 1,
+    Code.NETLIST_MISSING: 1,
+    Code.COPPER_INCOMPLETE: 1,
+    Code.COPPER_CONTACT_UNCERTAIN: 1,
     Code.CACHE_REMOTE_UNREACHABLE: 4,
     Code.CACHE_REMOTE_REFUSED: 1,
     Code.CACHE_ENTRY_BAD: 1,

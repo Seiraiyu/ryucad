@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 use ryudfm::odb::{ReadOptions, read_path};
 use ryudfm::testing::{check_manifest, compare_with_kicad, manifest, summary};
 
+/// Pinned boards whose islands against KiCad's IPC-D-356 netlist are
+/// printed rather than asserted, each with the issue that holds them:
+/// the d356 compare places points at our components' pin positions, and
+/// these boards' are wrong for some parts while their copper agrees with
+/// their own CAD netlists.
+const KNOWN_PIN_CASES: &[(&str, &str)] = &[("osm-l-bmc-som", "#937")];
+
 #[test]
 #[ignore = "needs scripts/fetch-dfm-corpus.sh's exports: run in the devcontainer"]
 fn pinned_boards_read_to_their_manifest() {
@@ -39,6 +46,8 @@ fn pinned_boards_read_to_their_manifest() {
         "manifest.txt's pinned boards and pinned.txt's fetched ones differ"
     );
     let mut got = Vec::new();
+    let mut copper = Vec::new();
+    let mut islands = Vec::new();
     for name in fetched {
         let out = dir.join(name);
         assert!(
@@ -56,10 +65,63 @@ fn pinned_boards_read_to_their_manifest() {
         let diff = compare_with_kicad(&a, &pos, &d356);
         assert!(diff.is_empty(), "{name}:\n{}", diff.join("\n"));
         got.push((name.to_string(), summary(&a)));
+        let cb = ryudfm::copper::CopperBoard::new(std::sync::Arc::new(a));
+        let line = ryudfm::testing::copper_summary(&cb);
+        // Printed before any assertion, so the devcontainer job's log has
+        // every line to record.
+        println!("{name}:\n{line}");
+        copper.push((name.to_string(), line));
+        let mut diff = ryudfm::testing::compare_islands_with_d356(&cb, &d356);
+        // A net KiCad's own DRC reports unconnected is open for us too:
+        // printed, not a disagreement. (IPC-D-356 cuts long names to their
+        // last 14 characters, so a name matches the end of KiCad's.)
+        let unconnected = std::fs::read_to_string(out.join("drc.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .map(|v| ryudfm::testing::drc_unconnected(&v))
+            .unwrap_or_default();
+        diff.retain(|d| {
+            let net = d
+                .strip_prefix("open: ")
+                .and_then(|r| r.split_once(" lies on "))
+                .map(|(n, _)| n.to_ascii_uppercase());
+            let excused = net.as_ref().is_some_and(|n| {
+                unconnected
+                    .iter()
+                    .any(|u| u.to_ascii_uppercase().ends_with(n.as_str()))
+            });
+            if excused {
+                println!("{name}: {d}, as KiCad's DRC reports it unconnected");
+            }
+            !excused
+        });
+        if let Some((_, issue)) = KNOWN_PIN_CASES.iter().find(|(n, _)| *n == name) {
+            // Recorded, not asserted: the pin positions are the reader's
+            // to fix (the copper agrees with the board's CAD netlist).
+            println!(
+                "{name}: {} disagreement(s) with KiCad's netlist, recorded under {issue}",
+                diff.len()
+            );
+            for d in &diff {
+                println!("  {d}");
+            }
+        } else {
+            islands.extend(diff.into_iter().map(|d| format!("{name}: {d}")));
+        }
     }
+    assert!(
+        islands.is_empty(),
+        "islands against KiCad's netlists:\n{}",
+        islands.join("\n")
+    );
     let differing = check_manifest(&here.join("tests/corpus/manifest.txt"), &got);
     assert!(
         differing.is_empty(),
         "counts changed for {differing:?}: UPDATE_MANIFEST=1 and review the diff"
+    );
+    let differing = ryudfm::testing::check_copper(&here.join("tests/corpus/manifest.txt"), &copper);
+    assert!(
+        differing.is_empty(),
+        "copper changed for {differing:?}: copy the lines printed above into manifest.txt"
     );
 }

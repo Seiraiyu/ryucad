@@ -99,6 +99,9 @@ pub struct Declared {
     pub pinned: bool,
     /// The count lines recorded.
     pub counts: String,
+    /// The `copper` line recorded (with its newline), apart from the
+    /// counts.
+    pub copper: Option<String>,
 }
 
 const KEYS: [&str; 6] = ["source", "licence", "archive", "folder", "step", "pinned"];
@@ -129,6 +132,7 @@ pub fn manifest(text: &str) -> Vec<Declared> {
             "folder" => d.folder = Some(rest.to_string()),
             "step" => d.step = Some(rest.to_string()),
             "pinned" => d.pinned = true,
+            "copper" => d.copper = Some(format!("{line}\n")),
             _ if !t.is_empty() => {
                 d.counts.push_str(line);
                 d.counts.push('\n');
@@ -156,25 +160,31 @@ pub fn check_manifest(path: &std::path::Path, got: &[(String, String)]) -> Vec<S
     if std::env::var_os("UPDATE_MANIFEST").is_none() {
         return differing;
     }
-    // Rewrite each block: its declaration lines as written, then counts.
+    rewrite(path, got, false);
+    Vec::new()
+}
+
+/// Rewrites `manifest.txt` at `path`: each block's declaration lines as
+/// written, then its counts and its copper line: the part `copper` names
+/// from `got` where `got` has the board, the other as recorded.
+fn rewrite(path: &std::path::Path, got: &[(String, String)], copper: bool) {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let declared = manifest(&text);
     let mut out = String::new();
     let mut block: Option<String> = None;
     let flush = |out: &mut String, block: &Option<String>| {
-        if let Some(name) = block {
-            let counts = got
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, c)| c.clone())
-                .or_else(|| {
-                    declared
-                        .iter()
-                        .find(|d| d.name == *name)
-                        .map(|d| d.counts.clone())
-                })
-                .unwrap_or_default();
-            out.push_str(&counts);
-            out.push('\n');
+        let Some(name) = block else { return };
+        let d = declared.iter().find(|d| d.name == *name);
+        let now = got.iter().find(|(n, _)| n == name).map(|(_, c)| c.clone());
+        let counts = (if copper { None } else { now.clone() })
+            .or_else(|| d.map(|d| d.counts.clone()))
+            .unwrap_or_default();
+        let line = (if copper { now } else { None }).or_else(|| d.and_then(|d| d.copper.clone()));
+        out.push_str(&counts);
+        if let Some(l) = line {
+            out.push_str(&l);
         }
+        out.push('\n');
     };
     for line in text.lines() {
         if let Some(name) = line.strip_prefix("board ") {
@@ -193,5 +203,62 @@ pub fn check_manifest(path: &std::path::Path, got: &[(String, String)]) -> Vec<S
     }
     flush(&mut out, &block);
     std::fs::write(path, out.trim_end().to_string() + "\n").unwrap();
-    Vec::new()
+}
+
+/// [`check_manifest`] for the `copper` lines: `got` holds each board's
+/// [`copper_summary`].
+pub fn check_copper(path: &std::path::Path, got: &[(String, String)]) -> Vec<String> {
+    let declared = manifest(&std::fs::read_to_string(path).unwrap_or_default());
+    let differing: Vec<String> = got
+        .iter()
+        .filter(|(name, line)| {
+            declared
+                .iter()
+                .find(|d| d.name == *name)
+                .and_then(|d| d.copper.as_ref())
+                != Some(line)
+        })
+        .map(|(n, _)| n.clone())
+        .collect();
+    if std::env::var_os("UPDATE_MANIFEST").is_some() {
+        rewrite(path, got, true);
+        return Vec::new();
+    }
+    differing
+}
+
+/// A board's copper as `manifest.txt` records it, one line: layers, items
+/// and those left out, holes, islands, resolved items, uncertain contacts,
+/// the netlist's source and points, the compare's counts, point contacts
+/// and the pairs of pieces of different islands under 0.2 mm.
+pub fn copper_summary(cb: &crate::copper::CopperBoard) -> String {
+    let islands = cb.copper.islands();
+    let resolved = cb
+        .copper
+        .items()
+        .filter(|(k, _)| cb.copper.is_resolved(k))
+        .count();
+    let contacts: usize = islands.iter().map(|i| cb.point_contacts(i).len()).sum();
+    let gaps: usize = (0..cb.built.copper.len())
+        .map(|l| cb.gaps(l, 200_000).len())
+        .sum();
+    let r = &cb.report;
+    format!(
+        "  copper layers={} items={} left_out={} holes={} islands={} resolved={} uncertain={} source={} points={} opens={} shorts={} off={} mismatches={} contacts={} gaps_0.2mm={}\n",
+        cb.built.copper.len(),
+        cb.copper.items().count(),
+        cb.built.left_out.len(),
+        cb.built.layout.holes.len(),
+        islands.len(),
+        resolved,
+        cb.copper.uncertain().len(),
+        crate::nets::source_name(cb.built.source),
+        cb.built.layout.points.len(),
+        r.opens.len(),
+        r.shorts.len(),
+        r.off_copper.len(),
+        r.mismatches.len(),
+        contacts,
+        gaps,
+    )
 }
