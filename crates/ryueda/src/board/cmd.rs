@@ -393,8 +393,15 @@ pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
             v["occurrences"] = json!(list);
             v["unplaced"] = json!(unplaced);
             v["orphans"] = json!(orphans);
-            if pads {
-                v["pads"] = json!([]);
+            // What can't be built, always; the pads when asked.
+            match super::shapes::build(p, b) {
+                Ok(s) => {
+                    v["notices"] = fault::list(&s.notices);
+                    if pads {
+                        v["pads"] = super::shapes::pads_json(&s);
+                    }
+                }
+                Err(e) => v["shapes_error"] = json!(e),
             }
         }
     }

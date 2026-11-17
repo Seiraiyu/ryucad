@@ -4684,3 +4684,26 @@ fn a_designator_two_occurrences_share_is_ambiguous() {
     );
     p.ok(&["board", "place", "main", "s2/u1", "--at", "1,1"]);
 }
+
+#[test]
+fn a_boards_pads_are_listed_with_their_nets() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let s = p.ok(&["board", "show", "main", "--pads"]);
+    let pads = s["pads"].as_array().unwrap();
+    assert_eq!(pads.len(), 2, "{s}");
+    assert_eq!(pads[0]["reference"], "main:R1/1");
+    assert_eq!(pads[0]["layers"], json!(["copper.top"]));
+    // The breakout's 0402 pads sit at ±480 µm.
+    assert_eq!(pads[0]["at"], json!([10_000_000 - 480_000, 10_000_000]));
+    assert_eq!(pads[0]["size"], json!([560_000, 620_000]));
+    assert!(pads.iter().all(|p| p["net"].is_string()), "{pads:?}");
+    assert_eq!(s["notices"], json!([]));
+    // Without --pads, no pads, but still the notices.
+    let s = p.ok(&["board", "show", "main"]);
+    assert!(s.get("pads").is_none());
+    assert_eq!(s["notices"], json!([]));
+}
