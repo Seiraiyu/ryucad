@@ -328,7 +328,7 @@ pub(crate) fn dispatch(
             crate::hole::derive::request(session, spec.as_deref(), fields.as_ref(), part.as_deref())
         }
         Request::Interference { part, instances } => {
-            crate::interference::run(session, &part, &instances)
+            crate::interference::run(session, &part, &instances, None)
         }
         Request::Measure { entities, rev } => {
             crate::measure::run(session, &entities, rev.as_deref())
