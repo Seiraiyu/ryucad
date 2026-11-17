@@ -3,12 +3,16 @@
 //! (ryucad's flattened imports, healed once per shape and named per
 //! feature, #813). Recording changes no result: [`super::Name::derive`]
 //! and [`super::OpKey::from_bytes`] return what they always do, and only
-//! note how while a recording runs.
+//! note how while a recording runs on their thread.
+//!
+//! A recording is the calling thread's alone: a thread-local stack, so
+//! nothing locks and other threads pay one thread-local read a derive.
+//! Work the recorded call hands to other threads (rayon) isn't seen; a
+//! caller checks that what it needs was recorded ([`Derivations::has`]).
 
 use super::{Name, OpKey, Role};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// How a name was made: [`Name::derive`]'s arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,56 +30,67 @@ pub struct Derivations {
     pub keys: BTreeMap<OpKey, Vec<u8>>,
 }
 
-/// How many recordings run; the table is shared by all of them.
-static RUNNING: AtomicUsize = AtomicUsize::new(0);
-static TABLE: Mutex<Option<Derivations>> = Mutex::new(None);
-
-fn table() -> std::sync::MutexGuard<'static, Option<Derivations>> {
-    TABLE.lock().unwrap_or_else(|p| p.into_inner())
+thread_local! {
+    /// This thread's recordings, innermost last: a derive goes to the
+    /// innermost only.
+    static RECORDING: RefCell<Vec<Derivations>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn name(name: Name, key: OpKey, role: Role, parents: &[Name]) {
-    if RUNNING.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    if let Some(t) = table().as_mut() {
-        t.names.entry(name).or_insert_with(|| Derived {
-            key,
-            role,
-            parents: parents.to_vec(),
+    RECORDING.with(|r| {
+        if let Ok(mut r) = r.try_borrow_mut()
+            && let Some(t) = r.last_mut()
+        {
+            t.names.entry(name).or_insert_with(|| Derived {
+                key,
+                role,
+                parents: parents.to_vec(),
+            });
+        }
+    });
+}
+
+pub(super) fn key(key: OpKey, bytes: &[u8]) {
+    RECORDING.with(|r| {
+        if let Ok(mut r) = r.try_borrow_mut()
+            && let Some(t) = r.last_mut()
+        {
+            t.keys.entry(key).or_insert_with(|| bytes.to_vec());
+        }
+    });
+}
+
+/// Takes the innermost recording off this thread's stack even if `f`
+/// unwinds.
+struct Pop;
+
+impl Drop for Pop {
+    fn drop(&mut self) {
+        RECORDING.with(|r| {
+            r.borrow_mut().pop();
         });
     }
 }
 
-pub(super) fn key(key: OpKey, bytes: &[u8]) {
-    if RUNNING.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    if let Some(t) = table().as_mut() {
-        t.keys.entry(key).or_insert_with(|| bytes.to_vec());
-    }
-}
-
-/// `f`'s result and every derivation made while it ran, on any thread:
-/// at least `f`'s own, and possibly others' made at the same time, which
-/// a caller that looks names up by value never confuses with its own.
+/// `f`'s result and every derivation made on this thread while it ran
+/// (and perhaps others' a rayon worker ran here meanwhile, harmless to a
+/// caller that looks names up by value). Derivations on other threads
+/// aren't seen.
 pub fn recording<T>(f: impl FnOnce() -> T) -> (T, Derivations) {
-    {
-        let mut t = table();
-        if RUNNING.fetch_add(1, Ordering::AcqRel) == 0 || t.is_none() {
-            *t = Some(Derivations::default());
-        }
-    }
+    RECORDING.with(|r| r.borrow_mut().push(Derivations::default()));
+    let pop = Pop;
     let out = f();
-    let mut t = table();
-    let seen = t.clone().unwrap_or_default();
-    if RUNNING.fetch_sub(1, Ordering::AcqRel) == 1 {
-        *t = None;
-    }
-    (out, seen)
+    let seen = RECORDING.with(|r| r.borrow_mut().last_mut().map(std::mem::take));
+    drop(pop);
+    (out, seen.unwrap_or_default())
 }
 
 impl Derivations {
+    /// Whether `n` was recorded.
+    pub fn has(&self, n: Name) -> bool {
+        self.names.contains_key(&n)
+    }
+
     /// `n` as it would have been derived had every key `from` led to been
     /// `to`'s: each recorded name derived again from its parents so
     /// derived, under its key so mapped; a key `from` is `to`, a key that
@@ -149,7 +164,7 @@ mod tests {
     #[test]
     fn a_chain_derived_again_is_the_chain_under_the_other_key() {
         let leaf = Name::from_u128(5);
-        let chain = |k: OpKey| {
+        let chain = move |k: OpKey| {
             let a = Name::derive(k, Role::NewFace, &[leaf]);
             let sub = OpKey(Name::derive(k, Role::Merged, &[]).to_u128());
             let b = Name::derive(sub, Role::NewEdge, &[a, leaf]);
@@ -165,8 +180,19 @@ mod tests {
             assert_eq!(d.rekey(from, to, *g, &mut memo), *w);
         }
         assert_eq!(d.rekey(from, to, leaf, &mut memo), leaf);
-        // Nothing records outside a recording.
+        // Nothing records outside a recording, nor on another thread.
         let (_, empty) = recording(|| ());
-        assert!(empty.names.is_empty() || !empty.names.contains_key(&want[0]));
+        assert!(empty.names.is_empty());
+        let (_, apart) = recording(|| std::thread::spawn(move || chain(from)).join().unwrap());
+        assert!(apart.names.is_empty() && apart.keys.is_empty());
+        // Nested: the inner sees its own, the outer the rest.
+        let (inner, outer) = recording(|| {
+            let a = Name::derive(from, Role::NewFace, &[]);
+            let (_, inner) = recording(|| Name::derive(from, Role::NewEdge, &[]));
+            assert!(!inner.has(a));
+            inner
+        });
+        assert_eq!(inner.names.len(), 1);
+        assert_eq!(outer.names.len(), 1);
     }
 }

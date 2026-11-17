@@ -398,8 +398,12 @@ pub fn build(
     let heal = |key| heal_solid(id, i, &opened, k, run, key);
     let h = match &i.place {
         // Healed once per shape, then given this feature's names (#813).
-        Some(_) => once(&file.blake3, k, false, shape_key(i), run.heal_budget, heal)?
-            .renamed(shape_key(i), key),
+        // Healed once per shape, then given this feature's names (#813);
+        // as before where the shape's derivations weren't all seen.
+        Some(_) => match once(&file.blake3, k, false, shape_key(i), run.heal_budget, heal)? {
+            Some(h) => h.renamed(shape_key(i), key),
+            None => heal(key)?,
+        },
         None => heal(key)?,
     };
     let healed = h.solid.expect("a solid's heal reports");
@@ -439,9 +443,10 @@ fn build_reference(
     let heal = |key| heal_reference(id, i, opened, k, run, key);
     let h = match &i.place {
         // Healed once per shape, then given this feature's names (#813).
-        Some(_) => {
-            once(blake3, k, true, shape_key(i), run.heal_budget, heal)?.renamed(shape_key(i), key)
-        }
+        Some(_) => match once(blake3, k, true, shape_key(i), run.heal_budget, heal)? {
+            Some(h) => h.renamed(shape_key(i), key),
+            None => heal(key)?,
+        },
         None => heal(key)?,
     };
     let report = h.reference.expect("a reference's layout reports");
@@ -534,11 +539,17 @@ impl Healed {
     }
 
     /// `d` kept only as far as these names reach (their parents, the
-    /// names their keys are, the bytes keys were made from).
-    fn keep(&mut self, d: ryukei::name::record::Derivations) {
+    /// names their keys are, the bytes keys were made from); `false`, and
+    /// nothing kept, when a name these hold wasn't recorded (derived on
+    /// another thread): then it can't be derived again.
+    fn keep(&mut self, d: ryukei::name::record::Derivations) -> bool {
         use ryukei::name::record::Derivations;
+        let roots = self.names();
+        if !roots.iter().all(|n| d.has(*n)) {
+            return false;
+        }
         let mut kept = Derivations::default();
-        let mut todo = self.names();
+        let mut todo = roots;
         while let Some(n) = todo.pop() {
             if kept.names.contains_key(&n) {
                 continue;
@@ -552,6 +563,7 @@ impl Healed {
             kept.names.insert(n, x.clone());
         }
         self.derived = Arc::new(kept);
+        true
     }
 
     /// These names derived again under `to` where they were made under
@@ -627,14 +639,17 @@ const HEALED_BODIES: usize = 1024;
 /// (a budget other than the default may refuse a body the default heals,
 /// as the rebuild's key says), most recently used last.
 type HealedKey = (String, usize, bool, u128, u64);
-static HEALED: Mutex<Vec<(HealedKey, Arc<Healed>)>> = Mutex::new(Vec::new());
+static HEALED: Mutex<Vec<(HealedKey, Option<Arc<Healed>>)>> = Mutex::new(Vec::new());
 
 /// `heal(key)` recorded ([`ryukei::name::record::recording`]), kept by
 /// `file`'s hash, its body `k`, the mode, `key` and the heal `budget`, so
-/// copies of one component are healed once (#813). The lock is never
-/// held while healing (see [`opened`]: a rayon worker waiting on it could
-/// wait on itself): two copies healed side by side both heal, alike, and
-/// the first is kept. A heal that fails isn't kept.
+/// copies of one component are healed once (#813). `None` (kept too) when
+/// the heal's names weren't all recorded on this thread, so can't be
+/// derived again under a feature's key: each copy then heals under its
+/// own, as before shape keys. The lock is never held while healing (see
+/// [`opened`]: a rayon worker waiting on it could wait on itself): two
+/// copies healed side by side both heal, alike, and the first is kept. A
+/// heal that fails isn't kept.
 fn once(
     file: &str,
     k: usize,
@@ -642,26 +657,25 @@ fn once(
     key: ryukei::name::OpKey,
     budget: u64,
     heal: impl FnOnce(ryukei::name::OpKey) -> Result<Healed>,
-) -> Result<Arc<Healed>> {
+) -> Result<Option<Arc<Healed>>> {
     let at: HealedKey = (file.to_owned(), k, reference, key.0, budget);
     {
         let mut kept = HEALED.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(n) = kept.iter().position(|(x, _)| *x == at) {
             let e = kept.remove(n);
-            let h = Arc::clone(&e.1);
+            let h = e.1.clone();
             kept.push(e);
             return Ok(h);
         }
     }
     let (h, derived) = ryukei::name::record::recording(|| heal(key));
     let mut h = h?;
-    h.keep(derived);
-    let h = Arc::new(h);
+    let h = h.keep(derived).then(|| Arc::new(h));
     let mut kept = HEALED.lock().unwrap_or_else(|p| p.into_inner());
     if let Some((_, first)) = kept.iter().find(|(x, _)| *x == at) {
-        return Ok(Arc::clone(first));
+        return Ok(first.clone());
     }
-    kept.push((at, Arc::clone(&h)));
+    kept.push((at, h.clone()));
     while kept.len() > HEALED_BODIES {
         kept.remove(0);
     }
@@ -2684,7 +2698,7 @@ pub(crate) mod tests {
             };
             let (h, d) = ryukei::name::record::recording(|| heal(shape_key(&i)));
             let mut h = h.unwrap();
-            h.keep(d);
+            assert!(h.keep(d), "every name recorded");
             let want = h.renamed(shape_key(&i), op_key(&p, &id("i")));
             assert_eq!(m.source.body.dump(), want.body.dump(), "{mode:?}");
             assert_eq!(m.source.hash, shape_hash(&want.body), "{mode:?}");
@@ -2797,6 +2811,32 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(checked, 6 + 6 + 3, "the block's faces twice, the pin's");
+    }
+
+    /// #955's review: a heal whose names weren't all recorded (derived on
+    /// another thread) can't be derived again, so isn't shared: `keep`
+    /// says so and keeps nothing.
+    #[test]
+    fn a_heal_not_all_recorded_is_not_shared() {
+        let bytes = occt("box_ap214.stp");
+        let f = ImportFile::new(bytes);
+        let i = import(&f, Some(("part 2", "part 2")), 0);
+        let opened = opened(&f).unwrap();
+        let k = select(&id("i"), &i, &opened).unwrap();
+        let run = crate::rebuild::Run::none();
+        let heal = || heal_solid(&id("i"), &i, &opened, k, &run, shape_key(&i)).unwrap();
+        let (mut h, d) = ryukei::name::record::recording(heal);
+        let mut partial = d.clone();
+        let first = h.body.faces().next().unwrap();
+        partial.names.remove(&h.body.face(first).unwrap().name);
+        assert!(!h.clone().keep(partial));
+        // Healed on another thread, nothing is recorded here.
+        let (other, none) = ryukei::name::record::recording(|| {
+            std::thread::scope(|sc| sc.spawn(heal).join().unwrap())
+        });
+        assert!(!other.clone().keep(none));
+        assert!(h.keep(d));
+        assert!(!h.derived.names.is_empty());
     }
 
     #[test]
