@@ -29,6 +29,8 @@ pub struct CadView {
     /// The mode their window is in (design 374): an agent's is shown,
     /// never enforced.
     pub mode: ryucad::live::Mode,
+    /// Whom their window follows (#812), as the session holds it.
+    pub following: Option<String>,
 }
 
 impl ryu_app::people::View for CadView {
@@ -42,6 +44,7 @@ impl ryu_app::people::View for CadView {
             mode: serde_json::from_value(v["mode"].clone()).unwrap_or_default(),
             explode: crate::core::explode::Shown::from_json(&v["explode"]),
             motion: crate::core::motion::Shown::from_json(&v["motion"]),
+            following: v["following"].as_str().map(str::to_owned),
         }
     }
     fn followable(&self) -> bool {
@@ -63,6 +66,7 @@ mod tests {
     #[test]
     fn a_person_shows_a_motion() {
         let v = serde_json::json!({"id": "p-1", "kind": "human", "name": "Dana",
+            "following": "p-2",
             "motion": {"part": "asm", "motion": "lift", "fraction": 0.25, "playing": true}});
         let p = Person::from_json(&v).unwrap();
         assert_eq!(
@@ -75,6 +79,7 @@ mod tests {
             })
         );
         assert_eq!(p.explode, None);
+        assert_eq!(p.following.as_deref(), Some("p-2"));
     }
 
     #[test]

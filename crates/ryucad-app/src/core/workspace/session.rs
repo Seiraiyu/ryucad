@@ -20,6 +20,14 @@ pub struct Session {
     pub people: People,
     /// The participant whose camera this window follows.
     pub following: Option<String>,
+    /// Whom the session last said this window follows: its `following`
+    /// is taken only when this changes, so a click not yet echoed isn't
+    /// undone by an older notification (#812).
+    pub(super) following_seen: Option<String>,
+    /// This window's own `view.follow` requests not yet answered: while
+    /// any is, the session's notifications don't move `following`, since
+    /// an echo of an older request would undo a newer click (#812).
+    pub(super) following_asked: u32,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
@@ -296,6 +304,34 @@ impl Workspace {
             .as_ref()
     }
 
+    /// Follows the camera of participant `who`, or (with `None`) no one,
+    /// through `view.follow` (#812): at once here, and held by the
+    /// session, so an agent's `ryucad follow` and this window agree.
+    pub fn follow(&mut self, who: Option<String>) {
+        self.session.following.clone_from(&who);
+        let req = Request::ViewFollow {
+            off: who.is_none(),
+            follow: who,
+            participant: Some(self.link.participant.clone()),
+        };
+        self.session.following_asked += 1;
+        self.send(req, Route::Session(session::Asked::Following));
+    }
+
+    /// Follows whom the session says this window follows, when that
+    /// changed: an agent's `ryucad follow`, or this window's own request.
+    /// Not while one of its own is on its way: its answer says.
+    pub(super) fn follow_following(&mut self) {
+        if self.session.following_asked > 0 {
+            return;
+        }
+        let said = self.myself().and_then(|m| m.following.clone());
+        if said != self.session.following_seen {
+            self.session.following_seen.clone_from(&said);
+            self.session.following = said;
+        }
+    }
+
     /// The user's display quality, as the settings say.
     pub(super) fn display_quality(&self) -> ryucad::mesh::Quality {
         self.session.display_quality()
@@ -324,6 +360,8 @@ pub(crate) enum Asked {
     ExplodeShown,
     /// This window's own `motion.show`.
     MotionShown,
+    /// This window's own `view.follow` (#812).
+    Following,
 }
 
 impl Session {
@@ -343,10 +381,24 @@ impl Session {
                 self.mode = was;
                 fx.fail(e);
             }
+            // Whom this window follows, as its own request left it: later
+            // notifications are measured against this.
+            (Asked::Following, a) => {
+                self.following_asked = self.following_asked.saturating_sub(1);
+                match a {
+                    Ok(a) => {
+                        if self.following_asked == 0 {
+                            self.following_seen = a.result["following"].as_str().map(str::to_owned);
+                        }
+                    }
+                    Err(e) => fx.fail(e),
+                }
+            }
             (Asked::People, Ok(a)) => {
                 self.people.reset(&a.result["participants"]);
                 fx.then(Then::FollowDraft);
                 fx.then(Then::FollowFocus);
+                fx.then(Then::FollowFollowing);
             }
             // Drawn as its own request answers, not only when the
             // notification comes (#143).
