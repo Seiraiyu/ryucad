@@ -896,6 +896,24 @@ pub fn delta(
     })
 }
 
+/// `check`'s `boards` section: each board's findings and counts, or why
+/// it doesn't check (its design's faults are counted where they are).
+pub fn section(p: &Project) -> Vec<Value> {
+    p.boards
+        .iter()
+        .map(|(id, b)| match check(p, b) {
+            Ok(c) => json!({
+                "board": format!("board/{id}"),
+                "revision": b.revision,
+                "findings": c.findings,
+                "errors": c.errors(),
+                "warnings": c.warnings(),
+            }),
+            Err(e) => json!({"board": format!("board/{id}"), "error": e}),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

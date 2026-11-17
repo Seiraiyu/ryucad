@@ -5081,3 +5081,31 @@ fn every_board_write_answers_what_it_did_to_drc() {
         "removed findings are IDs"
     );
 }
+
+#[test]
+fn check_has_a_boards_section_only_with_boards() {
+    let p = Pair::breakout();
+    let report = |v: (i32, Value)| -> Value {
+        if v.1["ok"] == true {
+            v.1["result"].clone()
+        } else {
+            v.1["error"]["details"]["report"].clone()
+        }
+    };
+    let before = report(p.both_in("board", &["check"]));
+    assert!(before.get("boards").is_none(), "{before}");
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    let (code, v) = p.both_in("board", &["check"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("check_failed")),
+        "{v}"
+    );
+    let r = report((code, v));
+    let main = &r["boards"][0];
+    assert_eq!(main["board"], "board/main");
+    assert_eq!(main["errors"], 8, "eight unplaced: {main}");
+    assert!(r["errors"].as_u64().unwrap() >= 8);
+}

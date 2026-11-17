@@ -1133,6 +1133,15 @@ pub fn check_project(
     let release_errors = release.iter().filter(|f| f["severity"] == "error").count() as u64;
     let deps_errors = deps.iter().filter(|f| f["severity"] == "error").count() as u64;
     let bom_errors = bom.iter().filter(|f| f["severity"] == "error").count() as u64;
+    let boards = crate::board::drc::section(p);
+    let board_errors: u64 = boards
+        .iter()
+        .map(|b| b["errors"].as_u64().unwrap_or(0))
+        .sum();
+    let board_warnings: u64 = boards
+        .iter()
+        .map(|b| b["warnings"].as_u64().unwrap_or(0))
+        .sum();
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| f.is_error()).count() as u64
@@ -1142,7 +1151,8 @@ pub fn check_project(
         + supply_errors
         + release_errors
         + deps_errors
-        + bom_errors;
+        + bom_errors
+        + board_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
         + schematic.iter().filter(|f| !f.is_error()).count() as u64
@@ -1152,7 +1162,8 @@ pub fn check_project(
         + (supply.len() as u64 - supply_errors)
         + (release.len() as u64 - release_errors)
         + (deps.len() as u64 - deps_errors)
-        + (bom.len() as u64 - bom_errors);
+        + (bom.len() as u64 - bom_errors)
+        + board_warnings;
     let mut report = json!({
         "schema": crate::OUTPUT_SCHEMA,
         "faults": fault::list(&faults),
@@ -1173,6 +1184,9 @@ pub fn check_project(
     }
     if !bom.is_empty() {
         report["bom"] = json!(bom);
+    }
+    if !p.boards.is_empty() {
+        report["boards"] = json!(boards);
     }
     if errors > 0 {
         return Err(crate::error::Error::new(
