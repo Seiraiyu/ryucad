@@ -179,6 +179,13 @@ const KEYS: &[Key] = &[
         about: "the app's colours: its look's own, or one high-contrast palette per theme",
     },
     Key {
+        name: "view.follow_work",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(false),
+        about: "whether the app keeps what agents change in frame (View > Follow agents' work)",
+    },
+    Key {
         name: "display.quality",
         scope: Scope::User,
         rule: Rule::OneOf(&["coarse", "normal", "fine"]),
@@ -770,6 +777,19 @@ pub(crate) mod tests {
             assert!(k.check(&json!(ok)).is_ok(), "{ok}");
         }
         for bad in [json!("fast"), json!(true), json!("")] {
+            assert!(k.check(&bad).is_err(), "{bad}");
+        }
+    }
+
+    /// #812: following the agents' work is a person's choice, off until
+    /// they choose it, the same in every window.
+    #[test]
+    fn following_the_agents_work_is_off_by_default() {
+        let k = key("view.follow_work").unwrap();
+        assert_eq!((k.default)(), json!(false));
+        assert_eq!(k.scope, Scope::User);
+        assert!(k.check(&json!(true)).is_ok());
+        for bad in [json!("on"), json!(1), json!(null)] {
             assert!(k.check(&bad).is_err(), "{bad}");
         }
     }
