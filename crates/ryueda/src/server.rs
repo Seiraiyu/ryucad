@@ -1362,6 +1362,15 @@ fn dispatch(
         }
         Request::BoardDrc { board, codes } => crate::board::cmd::drc(session, &board, &codes),
         Request::BoardStatus { board } => crate::board::cmd::status(session, &board),
+        Request::BoardExport {
+            board,
+            allow_errors,
+        } => crate::board::export::package(
+            session,
+            &board,
+            allow_errors,
+            env!("CARGO_PKG_VERSION"),
+        ),
         Request::BoardList { .. } => Ok(crate::board::cmd::list(session.project())),
         Request::BoardShow { board, pads, .. } => {
             crate::board::cmd::show(session.project(), &board, pads)

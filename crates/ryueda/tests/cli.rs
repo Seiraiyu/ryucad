@@ -836,6 +836,7 @@ fn every_protocol_method_has_a_command() {
         ("board.hole.delete", &["board", "hole", "delete"]),
         ("board.drc", &["board", "drc"]),
         ("board.status", &["board", "status"]),
+        ("board.export", &["board", "export"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
         ("block.show", &["block", "show"]),

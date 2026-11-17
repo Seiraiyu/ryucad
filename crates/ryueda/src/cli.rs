@@ -1653,6 +1653,19 @@ enum BoardCmd {
     },
     /// Parts placed, nets routed and open, findings by code.
     Status { board: String },
+    /// The fabrication package into --out: Gerber X2 per layer, Excellon
+    /// drills, the BOM and pick and place, and manifest.json. Refused
+    /// (drc_failed) while the board has a DRC error, unless
+    /// --allow-errors, which the manifest records.
+    Export {
+        board: String,
+        /// A new or empty folder, or one an earlier export wrote (its
+        /// files are replaced).
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        allow_errors: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3902,6 +3915,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Board(BoardCmd::Status { board }) => Request::BoardStatus {
             board: board.clone(),
         },
+        Command::Board(BoardCmd::Export {
+            board,
+            allow_errors,
+            ..
+        }) => Request::BoardExport {
+            board: board.clone(),
+            allow_errors: *allow_errors,
+        },
         Command::Doctor { repairs } if repairs.is_empty() => Request::Doctor {},
         Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
         Command::Merge(MergeCmd::Resolve {
@@ -4184,6 +4205,12 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     // A report written as text (lib check's, #711) is read back here, in
     // a process that ends once it prints it.
     let a = a.into_json()?;
+    if let Command::Board(BoardCmd::Export { out, .. }) = cmd {
+        let mut result = a.result;
+        write_package(&here.join(out), &mut result)?;
+        result["out"] = json!(out);
+        return Ok(result);
+    }
     if let Command::Bom {
         cmd: None,
         show: BomShow { out: Some(out), .. },
@@ -4227,6 +4254,57 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     let mut result = a.result;
     result["out"] = json!(out);
     Ok(result)
+}
+
+/// Writes an export's files into `dir` (made when missing), each
+/// atomically, and drops their `text` from the printed answer. A folder
+/// holding files but no manifest is refused; one an earlier export wrote
+/// has that export's files (its manifest's) removed first, so nothing
+/// stale stays beside the new package.
+fn write_package(dir: &std::path::Path, result: &mut Value) -> Result<()> {
+    let manifest = dir.join(ryueda::board::export::MANIFEST);
+    if dir.exists() {
+        let any = std::fs::read_dir(dir)
+            .map_err(|e| Error::io(dir, &e))?
+            .next()
+            .is_some();
+        if any {
+            let old: Value = std::fs::read_to_string(&manifest)
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .ok_or_else(|| {
+                    Error::new(
+                        Code::InvalidParam,
+                        format!(
+                            "{} holds files and no {}: give a new or empty folder",
+                            dir.display(),
+                            ryueda::board::export::MANIFEST
+                        ),
+                    )
+                    .with("param", "out")
+                })?;
+            for f in old["files"].as_array().into_iter().flatten() {
+                if let Some(n) = f["name"].as_str()
+                    && !n.contains(['/', '\\'])
+                    && !n.starts_with('.')
+                {
+                    let _ = std::fs::remove_file(dir.join(n));
+                }
+            }
+            let _ = std::fs::remove_file(&manifest);
+        }
+    }
+    std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
+    for f in result["files"].as_array_mut().into_iter().flatten() {
+        let name = f["name"].as_str().unwrap_or_default().to_owned();
+        let text = f
+            .as_object_mut()
+            .and_then(|o| o.remove("text"))
+            .and_then(|t| t.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        ryueda::source::write_atomic(&dir.join(&name), text.as_bytes())?;
+    }
+    Ok(())
 }
 
 /// Whether the arguments ask only for the version the way most tools take
