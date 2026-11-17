@@ -115,6 +115,24 @@ fn ryueda_out(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+/// An exported file's hash with ryueda's version (which releases stamp
+/// in) written as `VERSION`; the manifest's without its revisions and
+/// version.
+fn export_hash(name: &str, bytes: &[u8]) -> String {
+    let v = env!("CARGO_PKG_VERSION");
+    let text = String::from_utf8_lossy(bytes).replace(&format!("ryueda,{v}"), "ryueda,VERSION");
+    let text = if name == "manifest.json" {
+        let mut m: Value = serde_json::from_str(&text).unwrap();
+        for k in ["board_revision", "project_revision", "ryueda"] {
+            m.as_object_mut().unwrap().remove(k);
+        }
+        ryueda::canonical::to_string(&m)
+    } else {
+        text
+    };
+    blake3::hash(text.as_bytes()).to_hex()[..32].to_owned()
+}
+
 /// ryueda's PDM over the breakout (design 629), in a folder of its own
 /// so no other key's files change: the design's content hash (which
 /// covers the `self` components placed) and defaults through ryupdm's
@@ -280,7 +298,7 @@ fn boards(golden: &mut Golden, at: &Path) {
         ("R2", "14,15", "90"),
         ("J1", "3,10", "0"),
     ];
-    type Got = (Value, String, String, Value, Value, Value);
+    type Got = (Value, String, String, Value, Value, Value, BTreeMap<String, String>);
     let mut first: Option<Got> = None;
     for threads in [1, 8] {
         let board = at.join(format!("t{threads}")).join("board");
@@ -361,6 +379,17 @@ fn boards(golden: &mut Golden, at: &Path) {
         if let Some(o) = drc.as_object_mut() {
             o.remove("revision");
         }
+        ryueda(
+            &board,
+            threads,
+            &["board", "export", "main", "--out", "fab", "--allow-errors"],
+        );
+        let mut exported = BTreeMap::new();
+        for e in std::fs::read_dir(board.join("fab")).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            exported.insert(name.clone(), export_hash(&name, &std::fs::read(e.path()).unwrap()));
+        }
+        assert!(exported.len() >= 14, "{exported:?}");
         let p = ryueda::project::Project::load(&board).unwrap();
         let id = ryueda::id::Id::parse("main", "board").unwrap();
         let c = rayon::ThreadPoolBuilder::new()
@@ -387,19 +416,23 @@ fn boards(golden: &mut Golden, at: &Path) {
             drc,
             layout,
             serde_json::json!(islands),
+            exported,
         );
         match &first {
             None => first = Some(got),
             Some(one) => assert_eq!(&got, one, "one thread and eight"),
         }
     }
-    let (show, png, svg, drc, layout, islands) = first.unwrap();
+    let (show, png, svg, drc, layout, islands, exported) = first.unwrap();
     golden.json("board.breakout.show", &show);
     golden.got.insert("board.breakout.top.png".into(), png);
     golden.got.insert("board.breakout.bottom.svg".into(), svg);
     golden.json("board.breakout.drc", &drc);
     golden.json("board.breakout.layout", &layout);
     golden.json("board.breakout.islands", &islands);
+    for (name, hash) in exported {
+        golden.got.insert(format!("board.breakout.export.{name}"), hash);
+    }
 }
 
 #[test]
