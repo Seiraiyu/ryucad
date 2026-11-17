@@ -174,6 +174,57 @@ jobs:
           path: dist/${{ env.NAME }}.*
           if-no-files-found: error
 
+  python:
+    # The Python client (python/, design 697): the tag's version stamped in
+    # its PEP 440 form (vX.Y.Z-pre.N publishes X.Y.ZrcN; a dry run builds
+    # 0.0.0.dev0), the wheel and sdist built and checked, and the unit
+    # tests run against the installed wheel, python/src removed. Beside
+    # `build`, so it adds nothing to the critical path, and `publish`
+    # doesn't wait on it. A dry run stops here.
+    name: python package
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      # CI tools, never the package's dependencies (it has none).
+      - run: python -m pip install "build>=1.2" "twine>=6.1"
+      - name: stamp the version
+        run: sh scripts/stamp-version.sh "v${{ needs.version.outputs.version }}"
+      - id: v
+        name: the package's version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' python/pyproject.toml | head -n 1)
+          echo "the package is ryucad $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: sh scripts/python-dist.sh
+        env:
+          PYTHON: python
+      - run: twine check --strict python/dist/*
+      - name: unit tests against the installed wheel
+        env:
+          WANT: ${{ steps.v.outputs.version }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python -m pip install --no-deps python/dist/*.whl
+          rm -rf python/src
+          got=$(python -c "import ryucad; print(ryucad.__version__)")
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::the wheel says $got, the stamp $WANT"
+            exit 1
+          fi
+          python -m unittest discover -v -s python/tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: python/dist/*
+          if-no-files-found: error
+
   publish:
     name: publish
     # The full tests passed, or the gate found a pre-release's that did.

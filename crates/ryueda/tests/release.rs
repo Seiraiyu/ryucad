@@ -395,6 +395,31 @@ fn the_python_package_is_built_by_python_dist() {
     );
 }
 
+/// Design 697: every ryucad release, dry runs included, stamps the tag's
+/// PEP 440 version into the Python client, builds it and runs its unit
+/// tests against the installed wheel, beside `build`; it publishes nothing.
+#[test]
+fn ryucads_release_builds_the_python_package() {
+    let python = job(&workflow("release.yml"), "python");
+    for want in [
+        "needs: version",
+        "sh scripts/stamp-version.sh \"v${{ needs.version.outputs.version }}\"",
+        "version: ${{ steps.v.outputs.version }}",
+        "sh scripts/python-dist.sh",
+        "twine check --strict python/dist/*",
+        "rm -rf python/src",
+        "python -m unittest discover -v -s python/tests",
+        "name: python-dist",
+    ] {
+        assert!(python.contains(want), "release.yml's python job lacks {want}");
+    }
+    assert!(!python.contains("id-token"), "the python job publishes nothing");
+    assert!(
+        !job(&workflow("release.yml"), "publish").contains("python"),
+        "the GitHub release mustn't wait on the Python package"
+    );
+}
+
 /// The devcontainer's .debs are cached from main, whose caches every tag's
 /// run can restore, under the path and key full.yml restores: a tag's own
 /// save serves only that tag (#677).
