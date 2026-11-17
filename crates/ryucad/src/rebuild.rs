@@ -2133,13 +2133,19 @@ fn disk_input(h: &blake3::Hash, part: &Id, id: &Id) -> Vec<u8> {
 /// A body-making feature's result from the disk cache, by the hash of
 /// its inputs: its solids, or a kernel's refusal (#503). An entry that
 /// doesn't decode is removed.
-fn from_disk(disk: &Disk, h: &blake3::Hash, part: &Id, id: &Id) -> Option<Result<Output>> {
+fn from_disk(
+    disk: &Disk,
+    h: &blake3::Hash,
+    part: &Id,
+    id: &Id,
+    f: &Feature,
+) -> Option<Result<Output>> {
     let input = disk_input(h, part, id);
     let bytes = disk.get(Kind::Feature, &input)?;
     if let Some(e) = crate::cache::results::decode_failure(&bytes) {
         return Some(Err(e));
     }
-    match crate::cache::results::decode_made(&bytes) {
+    match crate::cache::results::decode_made_for(&bytes, f) {
         Some(m) => {
             let _ = m.encoded.set(bytes.len() as u64);
             Some(Ok(Output::Solids(Arc::new(m))))
@@ -2439,7 +2445,7 @@ pub fn rebuild_part_in(
                         Feature::Datum(_) | Feature::Path(_) | Feature::DeleteBody(_)
                     );
                 let on_disk = || match (disk, f) {
-                    (Some(d), _) if !kept_in_memory => from_disk(d, &h, &part.id, &id),
+                    (Some(d), _) if !kept_in_memory => from_disk(d, &h, &part.id, &id, f),
                     _ => None,
                 };
                 let memory = cache.features.get(&id).filter(|(c, _)| *c == h);

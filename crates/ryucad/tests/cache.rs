@@ -972,3 +972,41 @@ fn a_drafts_angles_come_back_from_a_warm_cache() {
     let r = second.rebuilt(&id("p")).unwrap();
     assert_eq!(names(&r.disk), ["b", "d"]);
 }
+
+/// #813: a flattened import's bodies come back from a warm cache still
+/// moved from the file's bodies, by the same shapes and poses, so a
+/// daemon started over the cache meshes each shape once as a cold one
+/// does.
+#[test]
+fn a_flattened_imports_sources_come_back_from_the_cache() {
+    let (dir, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    init(dir.path(), None).unwrap();
+    let step = format!(
+        "{}/../ryustep/tests/data/occt/assembly.stp",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let shapes = |s: &mut Session| -> Vec<(String, String, String)> {
+        let r = s.rebuilt(&id("board")).unwrap().clone();
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        r.features
+            .iter()
+            .flat_map(|(_, o)| o.as_ref().unwrap().solids().to_vec())
+            .map(|(_, b)| {
+                let m = b.moved.as_ref().expect("a flattened body is moved");
+                (b.hash.clone(), m.source.hash.clone(), format!("{:?}", m.pose))
+            })
+            .collect()
+    };
+    let mut first = open(dir.path(), cache.path());
+    must(
+        &mut first,
+        "import",
+        json!({"path": step, "flatten": true, "part": "board"}),
+    );
+    let want = shapes(&mut first);
+    assert_eq!(want.len(), 3, "the block twice and the pin");
+    let mut second = open(dir.path(), cache.path());
+    assert_eq!(shapes(&mut second), want);
+    let r = second.rebuilt(&id("board")).unwrap();
+    assert_eq!(r.disk.len(), 3, "every import read from the cache");
+}
