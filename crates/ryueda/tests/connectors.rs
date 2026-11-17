@@ -35,6 +35,9 @@ fn no_file_outside_a_connector_names_it() {
         "distributor.rs",
         "ryueda-parts/src/lib.rs",
         "kicad/import.rs",
+        // A fabricator's process (design 732's board preset), not a
+        // parts connector.
+        "board/preset.rs",
     ];
     for f in files.iter().filter(|f| {
         !allowed

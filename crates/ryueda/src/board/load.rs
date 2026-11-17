@@ -59,18 +59,17 @@ pub fn load(src: &dyn Source) -> Result<(BTreeMap<Id, BoardFiles>, Vec<Fault>)> 
 }
 
 fn board_faults(b: &Board, path: &str) -> Vec<Fault> {
-    let preset = super::preset_known(&b.preset).then_some(()).map_or_else(
-        || {
-            vec![
-                Fault::error(
-                    Code::InvalidDocument,
-                    format!("preset {} isn't known; stage 5 has jlc-2l", b.preset),
-                )
-                .with("pointer", "/preset"),
-            ]
-        },
-        |_| Vec::new(),
-    );
+    let preset = super::preset::by_name(&b.preset).is_none().then(|| {
+        Fault::error(
+            Code::InvalidDocument,
+            format!(
+                "preset {} isn't known; presets are {}",
+                b.preset,
+                super::preset::names()
+            ),
+        )
+        .with("pointer", "/preset")
+    });
     super::outline::judge(b)
         .into_iter()
         .chain(preset)

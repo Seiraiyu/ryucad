@@ -15,9 +15,6 @@ pub const BOARD_KIND: &str = "ryueda.board";
 pub const PLACEMENT_KIND: &str = "ryueda.placement";
 pub const FORMAT: u64 = 1;
 
-/// The one preset stage 5 knows.
-pub const JLC_2L: &str = "jlc-2l";
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Board {

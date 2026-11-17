@@ -148,7 +148,7 @@ pub fn create(
     let board = Board {
         name: name.to_owned(),
         design,
-        preset: JLC_2L.into(),
+        preset: super::preset::DEFAULT.name.into(),
         outline,
         cutouts: Vec::new(),
     };

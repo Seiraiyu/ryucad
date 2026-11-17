@@ -5,11 +5,8 @@
 pub mod cmd;
 pub mod file;
 pub mod load;
+pub mod occ;
 pub mod outline;
+pub mod preset;
 
 pub use file::{BOARD_FILE, BOARD_KIND, BOARDS, FORMAT, PLACEMENT_KIND, PLACEMENTS};
-
-/// Whether a board's `preset` is one this ryueda knows.
-pub fn preset_known(name: &str) -> bool {
-    name == file::JLC_2L
-}
