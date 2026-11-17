@@ -67,6 +67,36 @@ fn the_window_loads_the_model_and_its_meshes() {
     assert_eq!(ws.model.mesh_requests, 1);
 }
 
+/// #876: a part's bodies refined to another level go by the batch, one
+/// request for both of this part's, meshed side by side, not one a body.
+#[test]
+fn level_refinements_go_by_the_batch() {
+    use ryucad::mesh::Quality;
+    let p = Project::new().with_part();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && meshed(ws)));
+    let level = if ws.model.base == Quality::Fine {
+        Quality::Coarse
+    } else {
+        Quality::Fine
+    };
+    let keys: Vec<_> = ["base", "boss"]
+        .map(|f| ("p".to_owned(), f.to_owned()))
+        .into();
+    ws.fetch_levels(keys.iter().map(|k| (k.clone(), level)).collect());
+    assert_eq!(ws.model.level_requests, 1);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && keys.iter().all(|k| {
+                let hash = ws.model.meshes[k].hash.clone();
+                ws.model.levels.contains_key(&(hash, level))
+            })
+    }));
+    // Each body and level once.
+    ws.fetch_levels(keys.iter().map(|k| (k.clone(), level)).collect());
+    assert_eq!(ws.model.level_requests, 1);
+}
+
 #[test]
 fn an_edit_refetches_one_body() {
     let p = Project::new().with_part();
