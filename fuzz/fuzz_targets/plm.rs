@@ -5,7 +5,8 @@
 //! of what reads is judged without panicking; ryueda's bom answer read
 //! and a joined BOM judged; an import mapping that reads writes
 //! canonically and reads back; the CSV and XLSX readers on any bytes never
-//! panic, nor does a small source planned through the seeded import.
+//! panic, nor does a small source planned through the seeded import, nor
+//! the JSON and XML readers and their surveys.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -14,7 +15,7 @@ use std::collections::BTreeMap;
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else { return };
     let id = ryuplm::id::Id::parse("k3v9q2m8x4c1p", "item").unwrap();
-    match mode % 10 {
+    match mode % 12 {
         0 => {
             if let Ok(item) = ryuplm::item::Item::read(&id, rest) {
                 let text = item.to_text();
@@ -89,7 +90,7 @@ fuzz_target!(|data: &[u8]| {
             let _ = ryuplm::import::xlsx::read(rest, None);
             let _ = ryuplm::import::xlsx::sheets(rest);
         }
-        _ => {
+        9 => {
             // A small source through the golden's mapping, planned against
             // its catalogue: never a panic.
             let (files, m, _, _) = ryuplm::testing::import_source("fuzz", 12);
@@ -102,6 +103,29 @@ fuzz_target!(|data: &[u8]| {
             {
                 let _ = ryuplm::import::run::plan(&files, &cat, &config, &m, &rows, None, 10);
             }
+        }
+        10 => {
+            // The JSON reader on any bytes, as records, with children and as
+            // JSON Lines, and its survey: never a panic.
+            use ryuplm::import::json::{self, Shape};
+            for shape in [
+                Shape { records: "/items", children: Some("/c"), lines: false },
+                Shape { records: "", children: None, lines: false },
+                Shape { records: "", children: Some("/c"), lines: true },
+            ] {
+                if let Ok(r) = json::read(rest, shape) {
+                    let _ = ryuplm::import::rows::Table::from_records(r);
+                }
+            }
+            let _ = json::survey(rest, false, None);
+            let _ = json::survey(rest, true, None);
+        }
+        _ => {
+            // The XML reader on any bytes, with children, and its survey.
+            if let Ok(r) = ryuplm::import::xml::read(rest, "/a/b", Some("c/d")) {
+                let _ = ryuplm::import::rows::Table::from_records(r);
+            }
+            let _ = ryuplm::import::xml::survey(rest, None);
         }
     }
 });
