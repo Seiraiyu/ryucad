@@ -6,6 +6,7 @@
 
 use crate::error::Result;
 use crate::id::Id;
+use crate::item::Item;
 use crate::source::Source;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,4 +95,87 @@ pub fn merged(stored: &[Value], new: &[Value]) -> Vec<Value> {
         before = Some(l);
     }
     out
+}
+
+/// The item's legacy revisions as `item.show` and `release.list` answer
+/// them: each stored revision with its import's name and whether it is
+/// the carried one.
+pub fn legacy(item: &Item) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (name, p) in &item.source {
+        let carried = p.get("carried").and_then(Value::as_str);
+        for r in p
+            .get("revisions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let mut v = r.clone();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("import".into(), json!(name));
+                o.insert(
+                    "carried".into(),
+                    json!(carried.is_some() && r["label"].as_str() == carried),
+                );
+            }
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// The carried label of the history import `item` holds, if any.
+pub fn carried(item: &Item) -> Option<&str> {
+    item.source.values().find_map(|p| {
+        p.get("revisions")?;
+        p.get("carried")?.as_str()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::Request;
+    use crate::server::tests::{ask, catalogue};
+
+    #[test]
+    fn item_show_and_release_list_answer_legacy_revisions() {
+        let (_d, root) = catalogue();
+        let made = ask(
+            &root,
+            Request::ItemCreate {
+                fields: Default::default(),
+                number: Some("A-1".into()),
+                next: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let id = Id::parse(made["item"]["id"].as_str().unwrap(), "item").unwrap();
+        let path = root.join(crate::ids::item_path(&id));
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        v["source"] = json!({"hist": {"key": "A-1", "digest": "ff", "values": {}, "carried": "B",
+            "revisions": [{"label": "A", "values": {}}, {"label": "B", "date": "2020-11-02", "values": {}}]}});
+        std::fs::write(&path, crate::canonical::to_string(&v)).unwrap();
+        let shown = ask(&root, Request::ItemShow { item: "A-1".into() }).unwrap();
+        assert_eq!(
+            shown["legacy"],
+            json!([
+                {"label": "A", "values": {}, "import": "hist", "carried": false},
+                {"label": "B", "date": "2020-11-02", "values": {}, "import": "hist", "carried": true}
+            ])
+        );
+        let listed = ask(
+            &root,
+            Request::ReleaseList {
+                item: Some("A-1".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(listed["legacy"], shown["legacy"]);
+        let all = ask(&root, Request::ReleaseList { item: None }).unwrap();
+        assert!(all.get("legacy").is_none());
+        let item = crate::item::Item::read(&id, &std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(carried(&item), Some("B"));
+    }
 }

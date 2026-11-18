@@ -162,6 +162,10 @@ pub fn show(session: &mut Session, item: &str) -> Result<Value> {
     .map(|f| f.to_json())
     .collect();
     v["faults"] = json!(faults);
+    let legacy = crate::import::history::legacy(&session.catalogue().items[&id]);
+    if !legacy.is_empty() {
+        v["legacy"] = json!(legacy);
+    }
     Ok(v)
 }
 
