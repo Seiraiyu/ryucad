@@ -178,6 +178,19 @@ impl FieldArgs {
 
 #[derive(Subcommand)]
 enum BomCmd {
+    /// The item's BOM: own lines, then its representations' lines, each
+    /// child resolved to an item; --depth follows child items deeper.
+    Show {
+        item: String,
+        /// A Git revision of the catalogue: the working files by default.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        #[arg(long)]
+        depth: Option<usize>,
+        /// Also look for representations under this folder.
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+    },
     /// A new own line: CHILD (an ID, a number, or <catalogue>:<ID>) and
     /// its QUANTITY in the child's unit.
     Add {
@@ -396,6 +409,16 @@ enum DaemonCmd {
     },
 }
 
+/// Folders an agent named, absolute: the daemon runs elsewhere.
+fn absolute(here: &Path, dirs: &[String]) -> Vec<String> {
+    dirs.iter()
+        .map(|d| {
+            let p = here.join(d);
+            p.canonicalize().unwrap_or(p).display().to_string()
+        })
+        .collect()
+}
+
 fn unit(s: &str) -> core::result::Result<Unit, String> {
     Unit::parse(s).ok_or_else(|| format!("unknown unit {s:?}: m, cm, mm, um, in or ft"))
 }
@@ -501,6 +524,20 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 item: item.clone(),
                 product: product.clone(),
                 expected_revision: exp(expect),
+            },
+        ),
+        Command::Bom(BomCmd::Show {
+            item,
+            rev,
+            depth,
+            within,
+        }) => (
+            root()?,
+            Request::BomGet {
+                item: item.clone(),
+                rev: rev.clone(),
+                depth: *depth,
+                within: absolute(here, within),
             },
         ),
         Command::Bom(BomCmd::Add {

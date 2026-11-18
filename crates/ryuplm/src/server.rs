@@ -219,6 +219,12 @@ fn dispatch(
             line,
             expected_revision,
         } => crate::bom::remove(session, &item, &line, expected_revision.as_deref())?,
+        Request::BomGet {
+            item,
+            rev,
+            depth,
+            within,
+        } => crate::bom::show(session, &item, rev.as_deref(), depth, &within)?,
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,

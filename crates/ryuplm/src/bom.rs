@@ -548,6 +548,100 @@ pub fn line_json(cat: &Catalogue, j: &Joined) -> Value {
     v
 }
 
+/// The catalogue at `rev` (`None` for the working files) and what its
+/// representations are read at.
+pub fn at_rev(session: &mut Session, rev: Option<&str>) -> Result<(Catalogue, At)> {
+    match rev {
+        None => Ok((session.catalogue().clone(), At::Working)),
+        Some(r) => {
+            let (repo, _) = crate::release::history(session)?;
+            let commit = crate::reps::commit_hex(repo.gix(), r)?;
+            let files =
+                ryupdm::history::files_for::<crate::Plm>(repo.gix(), &commit, repo.prefix())?;
+            Ok((Catalogue::load(&files)?, At::Commit(commit)))
+        }
+    }
+}
+
+/// The disk reader for the session's catalogue, searching its work tree,
+/// `within` and the `pdm.dependents` preference.
+pub fn disk(session: &Session, within: &[String]) -> crate::reps::Disk {
+    let folders = crate::check::elsewhere(within);
+    let tops = crate::reps::tops(session.root(), &folders);
+    crate::reps::Disk::new(crate::reps::Index::scan(&tops), session.root())
+}
+
+/// Item `id`'s lines as answers give them, each line's child of this
+/// catalogue followed `depth - 1` levels deeper (`children`), never
+/// round a loop (`path` holds the items above).
+#[allow(clippy::too_many_arguments)]
+fn tree(
+    cat: &Catalogue,
+    linked: &BTreeMap<crate::links::Key, Id>,
+    id: &Id,
+    reps: &mut dyn Reps,
+    at: &At,
+    depth: usize,
+    path: &mut Vec<Id>,
+    faults: &mut Vec<Fault>,
+) -> Vec<Value> {
+    let (lines, f) = of(cat, linked, id, reps, at);
+    faults.extend(f);
+    let mut out = Vec::new();
+    for j in &lines {
+        let mut v = line_json(cat, j);
+        let deeper = j
+            .item
+            .as_ref()
+            .and_then(|r| local(&cat.manifest.project, r))
+            .filter(|c| cat.items.contains_key(*c) && !path.contains(c))
+            .cloned();
+        if depth > 1
+            && let Some(c) = deeper
+        {
+            path.push(c.clone());
+            v["children"] = json!(tree(cat, linked, &c, reps, at, depth - 1, path, faults));
+            path.pop();
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// `bom.get`: `{schema, item, number, rev, lines, findings}`, the item's
+/// BOM at `rev` (working by default) to `depth` levels (1 by default).
+pub fn show(
+    session: &mut Session,
+    item: &str,
+    rev: Option<&str>,
+    depth: Option<usize>,
+    within: &[String],
+) -> Result<Value> {
+    let (cat, at) = at_rev(session, rev)?;
+    let id = cat.find(item)?;
+    let mut reps = disk(session, within);
+    let linked = crate::links::linked(&cat);
+    let mut faults = Vec::new();
+    let lines = tree(
+        &cat,
+        &linked,
+        &id,
+        &mut reps,
+        &at,
+        depth.unwrap_or(1).max(1),
+        &mut vec![id.clone()],
+        &mut faults,
+    );
+    Ok(json!({
+        "schema": SCHEMA,
+        "item": id,
+        "number": cat.items[&id].number,
+        "rev": rev.unwrap_or("working"),
+        "lines": lines,
+        "findings": crate::fault::list(&faults),
+    }))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -840,5 +934,57 @@ pub(crate) mod tests {
         assert_eq!(faults[0].error.details["unlinked"].as_array().unwrap().len(), 2);
         assert_eq!(faults[1].error.details["pointer"], "/bom/1");
         assert!(faults.iter().all(|f| !f.is_error()));
+    }
+
+    #[cfg(feature = "cad")]
+    #[test]
+    fn bom_show_reads_the_linked_assembly_and_goes_deeper_on_asking() {
+        use crate::proto::Request;
+        use crate::server::tests::{ask, catalogue};
+        let (_d, root) = catalogue();
+        crate::reps::tests::cad_project(
+            &root.join("mech"),
+            &pid(3),
+            &["screw"],
+            &[("box", &[("screw", 4)])],
+        );
+        let mk = |n: &str| {
+            ask(
+                &root,
+                Request::ItemCreate { fields: Default::default(), number: Some(n.into()), next: None, expected_revision: None },
+            )
+            .unwrap()
+        };
+        mk("BOX-1");
+        mk("SCREW-1");
+        mk("THREADLOCK-1");
+        for (item, part) in [("BOX-1", "box"), ("SCREW-1", "screw")] {
+            ask(
+                &root,
+                Request::ItemLink { item: item.into(), product: "ryucad".into(), project: pid(3).to_string(), part: part.into(), expected_revision: None },
+            )
+            .unwrap();
+        }
+        ask(
+            &root,
+            Request::BomAdd {
+                item: "SCREW-1".into(),
+                fields: serde_json::from_value(serde_json::json!({"child": "THREADLOCK-1", "quantity": "0.01", "unit": "l"})).unwrap(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let show = |depth: Option<usize>| {
+            ask(&root, Request::BomGet { item: "BOX-1".into(), rev: None, depth, within: vec![] }).unwrap()
+        };
+        let one = show(None);
+        assert_eq!(one["schema"], 1);
+        assert_eq!(one["lines"].as_array().unwrap().len(), 1, "{one}");
+        assert_eq!(one["lines"][0]["number"], "SCREW-1");
+        assert_eq!(one["lines"][0]["quantity"], "4");
+        assert_eq!(one["findings"], serde_json::json!([]));
+        assert!(one["lines"][0].get("children").is_none());
+        let two = show(Some(2));
+        assert_eq!(two["lines"][0]["children"][0]["number"], "THREADLOCK-1");
     }
 }

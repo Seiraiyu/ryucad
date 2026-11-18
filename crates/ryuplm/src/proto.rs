@@ -144,6 +144,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    #[serde(rename = "bom.get")]
+    BomGet {
+        item: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<usize>,
+        /// Folders searched for representations besides the work tree
+        /// and `pdm.dependents`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]
