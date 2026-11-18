@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fmt;
 
+pub mod details;
+
 /// A stable error code. Agents branch on these, so a code is never renamed
 /// or reused; new failures get new codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
