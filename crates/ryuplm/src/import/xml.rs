@@ -4,6 +4,8 @@
 //! name, so a namespaced export reads without declaring its namespaces,
 //! as XLSX's do; roxmltree refuses DTDs, so no entity expands.
 
+use super::rows::{Leaves, Refusal};
+
 /// Whether `p` is an element path: `/A/B` when absolute, `A/B` when not,
 /// each step a local name (no `@`, `[`, `]`, `:` or space).
 pub fn path_ok(p: &str, absolute: bool) -> bool {
@@ -19,4 +21,9 @@ pub fn path_ok(p: &str, absolute: bool) -> bool {
         && rest
             .split('/')
             .all(|s| !s.is_empty() && !s.contains(['@', '[', ']', ':', ' ']))
+}
+
+/// The records `bytes` hold (Task 7 of plan 8.A writes the reader).
+pub fn read(_bytes: &[u8], records: &str, _children: Option<&str>) -> Result<Vec<Leaves>, Refusal> {
+    Err(Refusal::file(format!("no records at {records}")))
 }

@@ -73,8 +73,22 @@ pub fn read_table(
             csv::parse(&s, d)?
         }
         mapping::ReaderKind::Xlsx => xlsx::read(bytes, reader.sheet.as_deref())?,
-        mapping::ReaderKind::Json | mapping::ReaderKind::Xml => {
-            return Err(rows::Refusal::file("tree readers come in plan 8.A's Task 5"));
+        mapping::ReaderKind::Json => {
+            return rows::Table::from_records(json::read(
+                bytes,
+                json::Shape {
+                    records: reader.records.as_deref().unwrap_or(""),
+                    children: reader.children.as_deref(),
+                    lines: reader.lines,
+                },
+            )?);
+        }
+        mapping::ReaderKind::Xml => {
+            return rows::Table::from_records(xml::read(
+                bytes,
+                reader.records.as_deref().unwrap_or("/"),
+                reader.children.as_deref(),
+            )?);
         }
     };
     rows::Table::from_raw(raw, reader.header_row)
@@ -172,12 +186,13 @@ pub fn prepare(session: &crate::session::Session, name: &str, file: &Path) -> Re
     }
     let bytes = read_file(file)?;
     let table = read_table(&bytes, &mapping.reader).map_err(|r| refused(name, file, vec![r]))?;
-    let (rows, refusals) = records::map(
+    let (rows, mut refusals) = records::map(
         &table,
         &mapping,
         &config,
         session.catalogue().manifest.default_unit,
     )?;
+    table.place(&mut refusals);
     Ok(Prepared {
         mapping,
         config,
@@ -287,5 +302,47 @@ mod tests {
         let (_d, root) = catalogue();
         let v = ask(&root, Request::ImportList {}).unwrap();
         assert_eq!(v, json!({"imports": []}));
+    }
+
+    #[test]
+    fn a_json_refusal_says_where_its_record_is() {
+        let (_d, root) = catalogue();
+        std::fs::create_dir_all(root.join("imports")).unwrap();
+        std::fs::write(
+            root.join("imports/items.json"),
+            crate::canonical::to_string(&json!({"format": 2, "kind": "ryuplm.import",
+                "reader": {"type": "json", "records": "/items"},
+                "key": "/id", "fields": {"number": {"from": "/pn"}}, "numbers": "keep"})),
+        )
+        .unwrap();
+        let src = root.join("export.json");
+        std::fs::write(
+            &src,
+            r#"{"items": [{"id": "1", "pn": "P-1"}, {"id": "2", "pn": ""}]}"#,
+        )
+        .unwrap();
+        let check = || {
+            ask(
+                &root,
+                Request::ImportCheck {
+                    name: "items".into(),
+                    file: src.display().to_string(),
+                    limit: None,
+                },
+            )
+            .unwrap_err()
+        };
+        let e = check();
+        let r = &e.details["report"]["refusals"][0];
+        assert_eq!(
+            (r["row"].clone(), r["column"].clone(), r["place"].clone()),
+            (json!(2), json!("/pn"), json!("/items/1")),
+            "{e:?}"
+        );
+        // A record that doesn't parse is refused at the record.
+        std::fs::write(&src, r#"{"items": [{"id": "1",}]}"#).unwrap();
+        let e = check();
+        assert_eq!(e.code, crate::error::Code::InvalidDocument, "{e:?}");
+        assert_eq!(e.details["refusals"][0]["place"], "/items/0");
     }
 }
