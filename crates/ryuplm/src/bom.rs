@@ -16,6 +16,7 @@ use crate::id::{Id, ProjectId};
 use crate::item::ItemRef;
 use crate::load::Catalogue;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 /// The version of the shape `bom show`, `bom diff` and `where-used`
 /// answer with. Adding a field is not a change.
@@ -642,6 +643,102 @@ pub fn show(
     }))
 }
 
+/// Every linked item's joined findings ([`of`]), then each cycle that
+/// representation lines close and own lines alone don't (`bom_cycle`, an
+/// error: own-line cycles are [`judge`]'s).
+pub fn joined(cat: &Catalogue, reps: &mut dyn Reps, at: &At) -> Vec<Fault> {
+    let linked = crate::links::linked(cat);
+    let own_cycles: BTreeSet<Vec<Id>> = cycles(&own_edges(cat)).into_iter().collect();
+    let mut edges = own_edges(cat);
+    let mut out = Vec::new();
+    for (id, item) in &cat.items {
+        if item.links.is_empty() {
+            continue;
+        }
+        let (lines, faults) = of(cat, &linked, id, reps, at);
+        out.extend(faults);
+        let kids = edges.entry(id.clone()).or_default();
+        for j in &lines {
+            if let (Origin::Rep { .. }, Some(r)) = (&j.origin, &j.item)
+                && let Some(c) = local(&cat.manifest.project, r)
+            {
+                kids.push(c.clone());
+            }
+        }
+    }
+    for c in cycles(&edges) {
+        if !own_cycles.contains(&c) {
+            out.push(Fault::of(Severity::Error, cycle_error(&c)));
+        }
+    }
+    out
+}
+
+/// `bom_item_missing`, a warning, for each own line naming another
+/// catalogue's item that no catalogue in `others` holds.
+pub fn foreign_children(cat: &Catalogue, others: &[PathBuf]) -> Vec<Fault> {
+    let mut held: BTreeMap<ProjectId, BTreeSet<Id>> = BTreeMap::new();
+    for p in others {
+        if let Ok(c) = Catalogue::load(&crate::source::Folder(p)) {
+            held.entry(c.manifest.project.clone())
+                .or_insert_with(|| c.items.keys().cloned().collect());
+        }
+    }
+    let own = &cat.manifest.project;
+    let mut out = Vec::new();
+    for (id, item) in &cat.items {
+        for (i, l) in item.bom.iter().enumerate() {
+            let Some(p) = l.item.catalogue.as_ref().filter(|p| *p != own) else {
+                continue;
+            };
+            let why = match held.get(p) {
+                None => format!("catalogue {p} isn't in any folder searched"),
+                Some(ids) if !ids.contains(&l.item.item) => {
+                    format!("catalogue {p} has no item {}", l.item.item)
+                }
+                Some(_) => continue,
+            };
+            out.push(Fault::of(
+                Severity::Warning,
+                Error::new(
+                    Code::BomItemMissing,
+                    format!("item {id}: line {} names {}: {why}", l.line, l.item.text()),
+                )
+                .with("item", id)
+                .with("line", &l.line)
+                .with("child", l.item.text())
+                .with("pointer", format!("/bom/{i}/item")),
+            ));
+        }
+    }
+    out
+}
+
+/// What `check` adds for structure: links followed on disk
+/// ([`crate::links::resolve`]), the joined findings ([`joined`]; a link
+/// `resolve` already found unresolved isn't reported twice), and other
+/// catalogues' missing children ([`foreign_children`]).
+pub fn findings(
+    cat: &Catalogue,
+    index: &crate::reps::Index,
+    reps: &mut dyn Reps,
+    others: &[PathBuf],
+) -> Vec<Fault> {
+    let detail = |f: &Fault, k: &str| f.error.details[k].as_str().unwrap_or("").to_owned();
+    let mut out = crate::links::resolve(cat, index);
+    let told: BTreeSet<(String, String)> = out
+        .iter()
+        .filter(|f| f.error.code == Code::ItemLinkUnresolved)
+        .map(|f| (detail(f, "item"), detail(f, "product")))
+        .collect();
+    out.extend(joined(cat, reps, &At::Working).into_iter().filter(|f| {
+        f.error.code != Code::ItemLinkUnresolved
+            || !told.contains(&(detail(f, "item"), detail(f, "product")))
+    }));
+    out.extend(foreign_children(cat, others));
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -986,5 +1083,45 @@ pub(crate) mod tests {
         assert!(one["lines"][0].get("children").is_none());
         let two = show(Some(2));
         assert_eq!(two["lines"][0]["children"][0]["number"], "THREADLOCK-1");
+    }
+
+    #[test]
+    fn check_finds_what_only_representations_show() {
+        let (mut f, mut reps) = pcba();
+        // MCU-1's design places PCBA-1: a loop only representation lines close.
+        reps.0.insert(
+            ("ryueda".into(), pid(5), Id::parse("mcu", "part").unwrap()),
+            vec![rep(Some(4), "main", 1)],
+        );
+        // An own line naming another catalogue's item no folder holds.
+        let mut glue: Item = crate::item::Item::read(
+            &id("0000000000004"),
+            &f[&crate::ids::item_path(&id("0000000000004"))],
+        )
+        .unwrap();
+        glue.bom = vec![line(1, "0123456789abcdef0123456789abcdef:0000000000009", "1")];
+        f.insert(crate::ids::item_path(&id("0000000000004")), glue.to_text().into_bytes());
+        let cat = crate::load::Catalogue::load(&f).unwrap();
+        let mut got: Vec<(String, bool, String)> = joined(&cat, &mut reps, &At::Working)
+            .into_iter()
+            .chain(foreign_children(&cat, &[]))
+            .map(|x| {
+                (
+                    serde_json::to_value(x.error.code).unwrap().as_str().unwrap().to_owned(),
+                    x.is_error(),
+                    x.error.details["item"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("bom_cycle".into(), true, "0000000000001".into()),
+                ("bom_item_missing".into(), false, "0000000000004".into()),
+                ("bom_line_twice".into(), false, "0000000000001".into()),
+                ("bom_unlinked".into(), false, "0000000000001".into()),
+            ]
+        );
     }
 }
