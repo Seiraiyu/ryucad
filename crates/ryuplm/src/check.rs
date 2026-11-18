@@ -4,7 +4,7 @@
 use crate::error::{Code, Error, Result};
 use crate::judge::Context;
 use crate::session::Session;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 
 pub const SCHEMA: u64 = 1;
@@ -40,15 +40,16 @@ pub fn report(session: &mut Session, within: &[String]) -> Result<Value> {
     let errors = faults.iter().filter(|f| f.is_error()).count()
         + release.iter().filter(|f| f["severity"] == "error").count();
     let warnings = faults.len() + release.len() - errors;
-    let mut r = json!({
-        "schema": SCHEMA,
-        "faults": crate::fault::list(&faults),
-        "errors": errors,
-        "warnings": warnings,
-    });
+    // Built by moving: `json!` would copy every fault again.
+    let mut r = Map::new();
+    r.insert("errors".into(), json!(errors));
+    r.insert("faults".into(), crate::fault::into_list(faults));
+    r.insert("schema".into(), json!(SCHEMA));
+    r.insert("warnings".into(), json!(warnings));
+    let mut r = Value::Object(r);
     // Only when there are release findings, as ryueda's.
     if !release.is_empty() {
-        r["release"] = json!(release);
+        r["release"] = Value::Array(release);
     }
     Ok(r)
 }
@@ -60,11 +61,15 @@ pub fn check(session: &mut Session, within: &[String]) -> Result<Value> {
         r["warnings"].as_u64().unwrap_or(0),
     );
     if e > 0 {
-        return Err(Error::new(
+        // The report moved in, not copied by `with`.
+        let mut err = Error::new(
             Code::CheckFailed,
             format!("check found {e} error(s) and {w} warning(s)"),
-        )
-        .with("report", r));
+        );
+        let mut details = Map::new();
+        details.insert("report".into(), r);
+        err.details = Value::Object(details);
+        return Err(err);
     }
     Ok(r)
 }
