@@ -776,11 +776,15 @@ fn boms_diffs_and_where_used_at_labels_and_in_checkouts() {
             daemon,
             &["where-used", &comp, "--in", other.to_str().unwrap()],
         );
+        // The answer names the clone by its real path: macOS's temporary
+        // folder is /private/var behind /var, and Windows' is under the
+        // long name behind RUNNER~1 (the dry runs of ryueda 5.D).
+        let real = ryueda::source::plain(other.canonicalize().unwrap());
         assert!(
             w["working"].as_array().unwrap().iter().any(|r| r["folder"]
                 .as_str()
                 .unwrap()
-                .starts_with(other.to_str().unwrap())),
+                .starts_with(real.to_str().unwrap())),
             "{w}"
         );
         assert_eq!(w["dependents"].as_array().unwrap().len(), 1, "{w}");
