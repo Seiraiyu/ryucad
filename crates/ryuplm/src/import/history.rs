@@ -4,10 +4,12 @@
 //! said. They aren't releases: nothing derives a state or a content hash
 //! from them.
 
-use crate::error::Result;
+use crate::error::{Code, Error, Result};
 use crate::id::Id;
 use crate::item::Item;
+use crate::load::Catalogue;
 use crate::source::Source;
+use ryupdm::config::Config;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -132,6 +134,33 @@ pub fn carried(item: &Item) -> Option<&str> {
     })
 }
 
+/// `item_history_label_foreign` for each item with no release yet whose
+/// carried legacy label isn't one of the revision scheme's (design 935).
+pub fn foreign(src: &dyn Source, cat: &Catalogue, config: &Config) -> Vec<Error> {
+    let released = released(src).unwrap_or_default();
+    let scheme = config.revisions;
+    cat.items
+        .iter()
+        .filter(|(id, _)| !released.contains(*id))
+        .filter_map(|(id, item)| {
+            let c = carried(item)?;
+            ryupdm::label::index(scheme, c).is_none().then(|| {
+                Error::new(
+                    Code::ItemHistoryLabelForeign,
+                    format!(
+                        "item {id}: its legacy label {c:?} isn't a {} label; its first release takes {}",
+                        scheme.as_str(),
+                        ryupdm::label::first(scheme)
+                    ),
+                )
+                .with("item", id)
+                .with("label", c)
+                .with("scheme", scheme.as_str())
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +206,57 @@ mod tests {
         assert!(all.get("legacy").is_none());
         let item = crate::item::Item::read(&id, &std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(carried(&item), Some("B"));
+    }
+
+    #[test]
+    fn a_carried_label_is_continued_or_warned_of() {
+        use ryupdm::config::Scheme;
+        use ryupdm::product::Product;
+        let item = |number: &str, carried: &str| {
+            let mut i = Item::new(number);
+            i.source.insert(
+                "hist".into(),
+                json!({"key": number, "digest": "ff", "values": {}, "carried": carried,
+                       "revisions": [{"label": carried, "values": {}}]}),
+            );
+            i
+        };
+        let (a, b) = ("k3v9q2m8x4c1p", "k3v9q2m8x4c1q");
+        let mut f =
+            crate::judge::tests::files(&[], None, &[(a, item("A-1", "C")), (b, item("B-1", "X3"))]);
+        let (ia, ib) = (Id::parse(a, "item").unwrap(), Id::parse(b, "item").unwrap());
+        assert_eq!(
+            <crate::Plm as Product>::first_label(&f, &ia, Scheme::Letters),
+            "D"
+        );
+        assert_eq!(
+            <crate::Plm as Product>::first_label(&f, &ib, Scheme::Letters),
+            "A"
+        );
+        assert_eq!(
+            <crate::Plm as Product>::first_label(&f, &ia, Scheme::Numeric),
+            "1"
+        );
+        let warned = |f: &BTreeMap<String, Vec<u8>>| -> Vec<Value> {
+            let cat = crate::load::Catalogue::load(f).unwrap();
+            foreign(f, &cat, &ryupdm::config::Config::default())
+                .into_iter()
+                .map(|e| e.details["label"].clone())
+                .collect()
+        };
+        assert_eq!(warned(&f), [json!("X3")]);
+        assert!(
+            crate::judge::tests::codes(&f)
+                .iter()
+                .any(|(code, _, _)| code == "item_history_label_foreign"),
+            "{:?}",
+            crate::judge::tests::codes(&f)
+        );
+        f.insert(format!("releases/{b}/A.json"), b"{}".to_vec());
+        assert_eq!(
+            warned(&f),
+            Vec::<Value>::new(),
+            "released: it no longer matters"
+        );
     }
 }

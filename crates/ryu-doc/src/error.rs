@@ -1192,6 +1192,10 @@ pub enum Code {
     /// a column the source hasn't, or a property, class or scheme the
     /// catalogue doesn't declare (an error).
     ImportMappingInvalid,
+    /// ryuplm check finding (a warning): the label an item's legacy
+    /// history carried isn't one of the catalogue's revision scheme, so its
+    /// first release takes the scheme's first label (design 935).
+    ItemHistoryLabelForeign,
 }
 
 impl Code {
@@ -1594,6 +1598,7 @@ impl Code {
         Code::ImportConflict,
         Code::ImportMissing,
         Code::ImportMappingInvalid,
+        Code::ItemHistoryLabelForeign,
     ];
 
     /// The CLI's exit code: 1 the agent can fix it, 2 usage, 3 not a
@@ -1705,6 +1710,7 @@ mod tests {
             (Code::ImportConflict, "import_conflict"),
             (Code::ImportMissing, "import_missing"),
             (Code::ImportMappingInvalid, "import_mapping_invalid"),
+            (Code::ItemHistoryLabelForeign, "item_history_label_foreign"),
             (Code::BomItemMissing, "bom_item_missing"),
         ] {
             assert_eq!(json!(c), json!(s));
