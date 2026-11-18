@@ -92,10 +92,11 @@ sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent
 cargo run -p ryueda -- <command>                          # the ryueda CLI (`ryueda --help`); run in a ryueda project folder, or with -C <dir>
 UPDATE_GOLDEN=1 cargo test -p ryueda --test determinism   # after a deliberate change to ryueda's netlists, ERC or imports
 RYUEDA_BARS=1 cargo test -p ryueda --release --test bar -- --nocapture   # design 157's bars: 10,000 occurrences loaded, flattened and checked, and a warm daemon's write (ten times looser without RYUEDA_BARS)
+RYUEDA_REQUIRE_GERBV=1 cargo test -p ryueda --release --test gerbv -- --ignored --nocapture   # ryueda's fabrication packages read by gerbv, its rasters against ryu-board's; devcontainer only
 sh scripts/fetch-kicad.sh                                 # KiCad 9.0.9's symbol, footprint and 3D model libraries into target/kicad, checked by SHA-256
 RYUEDA_REQUIRE_KICAD=1 cargo test -p ryueda --release --test kicad_corpus -- --nocapture   # every item of those libraries imports or is a typed refusal
 sh scripts/test-install-ryueda.sh target/release/ryueda   # install-ryueda.sh against a fake release
-sh scripts/smoke-ryueda.sh target/release/ryueda          # an agent session: a KiCad library imported, a small design, its netlist, ERC and check
+sh scripts/smoke-ryueda.sh target/release/ryueda          # an agent session: a KiCad library imported, a small design, its netlist, ERC and check, and a board routed, checked and exported
 cargo run -p ryudfm -- <command>                          # the ryudfm CLI (`ryudfm --help`); run in a ryudfm project folder, or with -C <dir>, or on a job's path
 UPDATE_GOLDEN=1 cargo test -p ryu-board --test determinism   # after a deliberate change to board shapes or renders
 UPDATE_GOLDEN=1 cargo test -p ryudfm --test determinism   # after a deliberate change to what ryudfm reads or renders of the committed boards
@@ -134,8 +135,9 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryustep`: STEP files (library): Part 21 exchange structures, the AP203/AP214/AP242 entities, units and the product tree, and bodies read and written. `tests/data/occt` holds files OCCT wrote, with the `gen.cpp` that made them; `tests/corpus` holds public domain NIST test models, byte for byte, with `manifest.txt` and the pinned corpus's `pinned.txt`.
 - `crates/ryuformats`: the formats ryucad writes besides STEP (library): STL and 3MF from ryukei's meshes, a deterministic zip writer, and USD (a layer model, usda, omniSolid BrepArrays from ryukei's bodies), pure Rust over `ryukei`, `miniz_oxide` and `rayon`. It never depends on ryucad or `ryustep`, and ryukei never depends on it.
 - `crates/ryucad`: the application layer and binary.
-- `crates/ryueda`: electronics CAD (library and binary): projects and library projects of canonical JSON, symbols, footprints, models and library components, connectivity, the flattened netlist, ERC, `check` and KiCad library import, behind a CLI and a daemon. It depends on `ryu-doc`, `ryu-session` and `ryu-part21`, never on the kernel, `ryustep` or `ryucad`. `tests/data/kicad` holds KiCad-format files written for its tests, and `tests/kicad/pinned.txt` the pinned KiCad libraries.
+- `crates/ryueda`: electronics CAD (library and binary): projects and library projects of canonical JSON, symbols, footprints, models and library components, connectivity, the flattened netlist, ERC, `check` and KiCad library import, boards (placement, routes, DRC through `ryu-copper`, fabrication packages through `ryu-gerber`), behind a CLI and a daemon. It depends on `ryu-doc`, `ryu-session`, `ryu-part21`, `ryu-board`, `ryu-copper` and `ryu-gerber` (and the schematic, parts, PDM and review crates), never on the kernel, `ryustep`, `ryucad` or `ryudfm`. `tests/data/kicad` holds KiCad-format files written for its tests, and `tests/kicad/pinned.txt` the pinned KiCad libraries.
 - `crates/ryu-board`: the board model every ryu product's boards are read into (library): integer nanometre geometry, exact decimals, placements, ODB++'s standard and user symbols, exact shapes of features and stroke text, layers, steps, components, nets, drills and the stackup with capabilities and notices, and the PNG and SVG renderer. It depends on `ryu-math`, `rayon` and `png` only; its `testing` feature holds seeded symbols and features and the golden hashes.
+- `crates/ryu-gerber`: Gerber X2 and Excellon written from `ryu-board` shapes (library), and a test-only reader; product-neutral, it depends on `ryu-board` only.
 - `crates/ryudfm`: design for manufacturing of boards (library and binary): the ODB++ reader (`odb`: folders and archives into `ryu-board`'s model, faults and warnings), projects of canonical JSON holding boards as committed inputs, import and update, `inspect`, renders and `check`, behind a CLI and a daemon. It depends on `ryu-board`, `ryu-doc` and `ryu-session`, never on the kernel or another product. `tests/corpus` holds the committed ODB++ boards with `manifest.txt` and the pinned boards' `pinned.txt`.
 - `crates/ryucad-app`: the desktop app, a client of the daemon (`core`: link, model, people, navigation, picking, forms; `ui`: the egui window and the wgpu scene).
 - `packaging/`: what the installers register: the Linux desktop entry and project MIME type, and the macOS launcher's AppleScript.
@@ -219,7 +221,7 @@ What each phase decided is recorded per area under `docs/claude/`. Read the guid
 - `docs/claude/ryueda-git.md` — ryueda in Git: revisions, attributes and install, textconv, doctor
 - `docs/claude/ryueda-pdm.md` — ryueda PDM: parts, properties, content hashes, releases, the guard and Git
 - `docs/claude/ryueda-app.md` — the ryueda window: the scene drawn, picking, marks, follow, the lists, `ryueda open`, shipping the app
-- `docs/claude/ryueda-board.md` — ryueda boards: board files, placements, shapes, the stroke font, renders
+- `docs/claude/ryueda-board.md` — ryueda boards: board files, placements, shapes, the stroke font, renders, routes and DRC, fabrication outputs, the breakout
 
 When a plan records what it decided, it edits or adds only its area's file under `docs/claude/`. It doesn't touch CLAUDE.md, except to add one import line here for a new area, and it never writes project status anywhere in the repo.
 
