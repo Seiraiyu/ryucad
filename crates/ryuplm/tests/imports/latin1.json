@@ -1,0 +1,24 @@
+{
+  "class": "machined",
+  "fields": {
+    "name": {
+      "from": "Benennung"
+    },
+    "number": {
+      "from": "Teilenummer"
+    },
+    "properties.size": {
+      "from": "Größe"
+    }
+  },
+  "format": 1,
+  "key": "Teilenummer",
+  "kind": "ryuplm.import",
+  "numbers": "keep",
+  "reader": {
+    "delimiter": ";",
+    "encoding": "latin1",
+    "file": "latin1*.csv",
+    "type": "csv"
+  }
+}

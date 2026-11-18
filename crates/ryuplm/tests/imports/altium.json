@@ -1,0 +1,34 @@
+{
+  "bom": {
+    "quantity": "Quantity",
+    "refdes": "Designator",
+    "root": "PCBA-100"
+  },
+  "class": "electronic",
+  "fields": {
+    "aml.0.manufacturer": {
+      "from": "Manufacturer 1"
+    },
+    "aml.0.mpn": {
+      "from": "Manufacturer Part Number 1"
+    },
+    "description": {
+      "from": "Description",
+      "trim": true
+    },
+    "name": {
+      "from": "Comment",
+      "trim": true
+    }
+  },
+  "format": 1,
+  "key": "Manufacturer Part Number 1",
+  "kind": "ryuplm.import",
+  "numbers": "assign",
+  "reader": {
+    "delimiter": ",",
+    "file": "altium*.csv",
+    "type": "csv"
+  },
+  "scheme": "elec"
+}

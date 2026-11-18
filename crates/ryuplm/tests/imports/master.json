@@ -1,0 +1,36 @@
+{
+  "bom": {
+    "parent": "Parent",
+    "quantity": "Qty"
+  },
+  "class": "machined",
+  "fields": {
+    "description": {
+      "from": "Description",
+      "trim": true
+    },
+    "make_buy": {
+      "from": "Make/Buy",
+      "values": {
+        "B": "buy",
+        "M": "make"
+      }
+    },
+    "number": {
+      "from": "Part Number",
+      "trim": true
+    },
+    "properties.weight": {
+      "from": "Weight (kg)"
+    }
+  },
+  "format": 1,
+  "key": "Item ID",
+  "kind": "ryuplm.import",
+  "numbers": "keep",
+  "reader": {
+    "file": "item-master*.xlsx",
+    "sheet": "Items",
+    "type": "xlsx"
+  }
+}
