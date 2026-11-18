@@ -4885,7 +4885,7 @@ fn place_labels(
             // when they were renamed, so the labels it joins stand first
             // (#859: R9's wire to R8's renamed label was lost).
             None if wired_before => {
-                if prev_labels(n).iter().all(|l| says_still(l)) {
+                if prev_labels(n).iter().all(says_still) {
                     0
                 } else {
                     1
