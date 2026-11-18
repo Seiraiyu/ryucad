@@ -3,7 +3,13 @@
 //! This file judges own lines; the joined BOM, `bom show`, the findings
 //! and the diff build on it.
 
-use crate::error::{Code, Error};
+use crate::error::{Code, Error, Result};
+use crate::ids::item_path;
+use crate::item::Line;
+use crate::session::Session;
+use crate::write::{Writes, commit};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use crate::id::{Id, ProjectId};
 use crate::item::ItemRef;
 use crate::load::Catalogue;
@@ -180,6 +186,160 @@ pub fn judge(cat: &Catalogue) -> Vec<Error> {
     out
 }
 
+/// What `bom add` and `bom edit` set on a line.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineFields {
+    /// The child item: its ID or number, or `<catalogue project ID>:<item ID>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub find: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refdes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// The fields `bom edit --unset` may clear.
+const UNSETTABLE: [&str; 4] = ["unit", "find", "refdes", "notes"];
+
+/// The child `s` names: another catalogue's by `<project>:<id>`, else
+/// this one's by ID or number.
+fn child_of(cat: &Catalogue, s: &str) -> Result<ItemRef> {
+    if s.contains(':') {
+        return ItemRef::parse(s).ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                format!("{s:?} isn't <catalogue project ID>:<item ID>"),
+            )
+            .with("param", "child")
+        });
+    }
+    Ok(ItemRef {
+        catalogue: None,
+        item: cat.find(s)?,
+    })
+}
+
+fn write_item(session: &mut Session, id: &Id, it: &crate::item::Item, what: &str) -> Result<Value> {
+    let text = crate::items::text_of(id, it)?;
+    commit(session, what, Writes(vec![(item_path(id), Some(text))]))?;
+    Ok(crate::items::shown(session, id))
+}
+
+/// `bom.add`: a new own line on `item`, with a fresh line ID.
+pub fn add(
+    session: &mut Session,
+    item: &str,
+    fields: LineFields,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let (id, mut it) = crate::items::current(session, item, expected)?;
+    let child = fields
+        .child
+        .as_deref()
+        .ok_or_else(|| Error::new(Code::Usage, "a line needs its child item"))?;
+    let child = child_of(session.catalogue(), child)?;
+    let quantity = fields
+        .quantity
+        .clone()
+        .ok_or_else(|| Error::new(Code::Usage, "a line needs its quantity"))?;
+    let line = crate::ids::random(|s| it.bom.iter().any(|l| l.line.as_str() == s))?;
+    it.bom.push(Line {
+        line: line.clone(),
+        item: child,
+        quantity,
+        unit: fields.unit,
+        find: fields.find,
+        refdes: fields.refdes,
+        notes: fields.notes,
+    });
+    let mut v = write_item(session, &id, &it, &format!("adding line {line} to item {id}"))?;
+    v["line"] = json!(line);
+    Ok(v)
+}
+
+fn line_index(id: &Id, it: &crate::item::Item, line: &str) -> Result<usize> {
+    it.bom
+        .iter()
+        .position(|l| l.line.as_str() == line)
+        .ok_or_else(|| {
+            Error::new(Code::NotFound, format!("item {id} has no line {line}"))
+                .with("line", line)
+        })
+}
+
+/// `bom.edit`: the fields given set on the line, those in `unset` cleared.
+pub fn edit(
+    session: &mut Session,
+    item: &str,
+    line: &str,
+    fields: LineFields,
+    unset: Vec<String>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let (id, mut it) = crate::items::current(session, item, expected)?;
+    let i = line_index(&id, &it, line)?;
+    let child = fields
+        .child
+        .as_deref()
+        .map(|c| child_of(session.catalogue(), c))
+        .transpose()?;
+    let l = &mut it.bom[i];
+    if let Some(c) = child {
+        l.item = c;
+    }
+    if let Some(q) = fields.quantity {
+        l.quantity = q;
+    }
+    for (slot, v) in [
+        (&mut l.unit, fields.unit),
+        (&mut l.find, fields.find),
+        (&mut l.refdes, fields.refdes),
+        (&mut l.notes, fields.notes),
+    ] {
+        if v.is_some() {
+            *slot = v;
+        }
+    }
+    for u in &unset {
+        match u.as_str() {
+            "unit" => l.unit = None,
+            "find" => l.find = None,
+            "refdes" => l.refdes = None,
+            "notes" => l.notes = None,
+            other => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("can't unset {other:?}: {}", UNSETTABLE.join(", ")),
+                )
+                .with("field", other));
+            }
+        }
+    }
+    write_item(session, &id, &it, &format!("editing line {line} of item {id}"))
+}
+
+/// `bom.remove`: the line taken off the item.
+pub fn remove(
+    session: &mut Session,
+    item: &str,
+    line: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let (id, mut it) = crate::items::current(session, item, expected)?;
+    let i = line_index(&id, &it, line)?;
+    it.bom.remove(i);
+    let mut v = write_item(session, &id, &it, &format!("removing line {line} from item {id}"))?;
+    v["removed"] = json!(line);
+    Ok(v)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -272,5 +432,103 @@ pub(crate) mod tests {
                 ("bom_cycle".into(), "error", "0000000000004".into()),
             ]
         );
+    }
+
+    #[test]
+    fn own_lines_from_add_to_remove() {
+        use crate::proto::Request;
+        use crate::server::tests::{ask, catalogue};
+        let (_d, root) = catalogue();
+        for n in ["KIT-1", "SCREW-1", "LABEL-1"] {
+            ask(
+                &root,
+                Request::ItemCreate {
+                    fields: Default::default(),
+                    number: Some(n.into()),
+                    next: None,
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+        }
+        let fields = |v: serde_json::Value| -> LineFields { serde_json::from_value(v).unwrap() };
+        let added = ask(
+            &root,
+            Request::BomAdd {
+                item: "KIT-1".into(),
+                fields: fields(serde_json::json!({"child": "SCREW-1", "quantity": "4", "find": "10"})),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let line = added["line"].as_str().unwrap().to_owned();
+        assert_eq!(added["item"]["bom"][0]["quantity"], "4");
+        assert_eq!(added["item"]["bom"][0]["find"], "10");
+        // A bad quantity is refused by the judge, at its pointer.
+        let bad = ask(
+            &root,
+            Request::BomAdd {
+                item: "KIT-1".into(),
+                fields: fields(serde_json::json!({"child": "LABEL-1", "quantity": "lots"})),
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(bad.code, Code::InvalidQuantity);
+        // A loop is refused.
+        let lp = ask(
+            &root,
+            Request::BomAdd {
+                item: "SCREW-1".into(),
+                fields: fields(serde_json::json!({"child": "KIT-1", "quantity": "1"})),
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(lp.code, Code::BomCycle);
+        // The child can't be deleted while a line names it.
+        let del = ask(
+            &root,
+            Request::ItemDelete {
+                item: "SCREW-1".into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(del.code, Code::BomItemMissing);
+        let edited = ask(
+            &root,
+            Request::BomEdit {
+                item: "KIT-1".into(),
+                line: line.clone(),
+                fields: fields(serde_json::json!({"quantity": "6", "notes": "M3x8"})),
+                unset: vec!["find".into()],
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let l = &edited["item"]["bom"][0];
+        assert_eq!((l["quantity"].clone(), l["notes"].clone()), (serde_json::json!("6"), serde_json::json!("M3x8")));
+        assert!(l.get("find").is_none(), "{l}");
+        let removed = ask(
+            &root,
+            Request::BomRemove {
+                item: "KIT-1".into(),
+                line: line.clone(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert!(removed["item"].get("bom").is_none(), "{removed}");
+        let gone = ask(
+            &root,
+            Request::BomRemove {
+                item: "KIT-1".into(),
+                line,
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(gone.code, Code::NotFound);
     }
 }

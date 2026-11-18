@@ -118,6 +118,32 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    #[serde(rename = "bom.add")]
+    BomAdd {
+        item: String,
+        #[serde(default, flatten)]
+        fields: crate::bom::LineFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "bom.edit")]
+    BomEdit {
+        item: String,
+        line: String,
+        #[serde(default, flatten)]
+        fields: crate::bom::LineFields,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unset: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "bom.remove")]
+    BomRemove {
+        item: String,
+        line: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]
@@ -248,6 +274,9 @@ impl Request {
                 | Request::ItemDelete { .. }
                 | Request::ItemLink { .. }
                 | Request::ItemUnlink { .. }
+                | Request::BomAdd { .. }
+                | Request::BomEdit { .. }
+                | Request::BomRemove { .. }
                 | Request::SettingsEdit { .. }
                 | Request::ReleasePropose { .. }
                 | Request::ReleaseObsolete { .. }
@@ -321,6 +350,13 @@ mod tests {
                 product: "ryucad".into(),
                 project: "p".into(),
                 part: "x".into(),
+                expected_revision: None,
+            },
+            Request::BomEdit {
+                item: "A-1".into(),
+                line: "0000000000001".into(),
+                fields: Default::default(),
+                unset: vec!["find".into()],
                 expected_revision: None,
             },
             Request::Undo { entry: None },

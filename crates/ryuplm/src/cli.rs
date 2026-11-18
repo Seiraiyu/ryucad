@@ -84,6 +84,10 @@ enum Command {
     },
     #[command(subcommand)]
     Release(ReleaseCmd),
+    /// An item's BOM: its own lines plus its representations' (show),
+    /// its own lines edited (add, edit, remove), and what changed (diff).
+    #[command(subcommand)]
+    Bom(BomCmd),
     /// Items added, removed and changed between two revisions.
     Diff {
         from: Option<String>,
@@ -170,6 +174,56 @@ impl FieldArgs {
             aml,
         })
     }
+}
+
+#[derive(Subcommand)]
+enum BomCmd {
+    /// A new own line: CHILD (an ID, a number, or <catalogue>:<ID>) and
+    /// its QUANTITY in the child's unit.
+    Add {
+        item: String,
+        child: String,
+        quantity: String,
+        #[arg(long)]
+        unit: Option<String>,
+        /// The find number a balloon cites.
+        #[arg(long)]
+        find: Option<String>,
+        #[arg(long)]
+        refdes: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Change an own line; --unset clears unit, find, refdes or notes.
+    Edit {
+        item: String,
+        line: String,
+        #[arg(long)]
+        child: Option<String>,
+        #[arg(long)]
+        quantity: Option<String>,
+        #[arg(long)]
+        unit: Option<String>,
+        #[arg(long)]
+        find: Option<String>,
+        #[arg(long)]
+        refdes: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        unset: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Take an own line off the item.
+    Remove {
+        item: String,
+        line: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 #[derive(Subcommand)]
@@ -446,6 +500,66 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             Request::ItemUnlink {
                 item: item.clone(),
                 product: product.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Bom(BomCmd::Add {
+            item,
+            child,
+            quantity,
+            unit,
+            find,
+            refdes,
+            notes,
+            expect,
+        }) => (
+            root()?,
+            Request::BomAdd {
+                item: item.clone(),
+                fields: ryuplm::bom::LineFields {
+                    child: Some(child.clone()),
+                    quantity: Some(quantity.clone()),
+                    unit: unit.clone(),
+                    find: find.clone(),
+                    refdes: refdes.clone(),
+                    notes: notes.clone(),
+                },
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Bom(BomCmd::Edit {
+            item,
+            line,
+            child,
+            quantity,
+            unit,
+            find,
+            refdes,
+            notes,
+            unset,
+            expect,
+        }) => (
+            root()?,
+            Request::BomEdit {
+                item: item.clone(),
+                line: line.clone(),
+                fields: ryuplm::bom::LineFields {
+                    child: child.clone(),
+                    quantity: quantity.clone(),
+                    unit: unit.clone(),
+                    find: find.clone(),
+                    refdes: refdes.clone(),
+                    notes: notes.clone(),
+                },
+                unset: unset.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Bom(BomCmd::Remove { item, line, expect }) => (
+            root()?,
+            Request::BomRemove {
+                item: item.clone(),
+                line: line.clone(),
                 expected_revision: exp(expect),
             },
         ),

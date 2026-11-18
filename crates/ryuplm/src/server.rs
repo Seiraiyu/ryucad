@@ -195,6 +195,30 @@ fn dispatch(
             product,
             expected_revision,
         } => crate::links::unlink(session, &item, &product, expected_revision.as_deref())?,
+        Request::BomAdd {
+            item,
+            fields,
+            expected_revision,
+        } => crate::bom::add(session, &item, fields, expected_revision.as_deref())?,
+        Request::BomEdit {
+            item,
+            line,
+            fields,
+            unset,
+            expected_revision,
+        } => crate::bom::edit(
+            session,
+            &item,
+            &line,
+            fields,
+            unset,
+            expected_revision.as_deref(),
+        )?,
+        Request::BomRemove {
+            item,
+            line,
+            expected_revision,
+        } => crate::bom::remove(session, &item, &line, expected_revision.as_deref())?,
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,
