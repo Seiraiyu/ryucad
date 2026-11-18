@@ -371,6 +371,24 @@ fn the_near_room_twin_is_bounded() {
     println!("near_room twin: {spent} units");
 }
 
+/// The slit_seeds twin (plan 22.C): bounded, the same units on one
+/// thread and eight, each rung build within its cap and the seed retry's
+/// walk charged.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_slit_seeds_twin_is_bounded() {
+    use ryukei_testkit::slit_seeds::{rounded, spec};
+    let b = rounded();
+    let spec = spec(&b);
+    let spent = bounded("slit_seeds twin", |w| {
+        ryukei::tweak::delete_faces_with(OpKey(0x22c5), &b, &spec, w)
+    });
+    println!("slit_seeds twin: {spent} units");
+}
+
 #[test]
 fn thickening_a_sheet_is_bounded() {
     use ryukei::name::{FaceRole, Name, Role};

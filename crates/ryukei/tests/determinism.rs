@@ -3793,6 +3793,27 @@ fn near_room_section(golden: &mut Golden) {
     }
 }
 
+/// ryukei 22.C's slit seeds (design 724): the slit_seeds twin
+/// (`ryukei_testkit::slit_seeds`), two of its corner's three fillets
+/// deleted. The ball's one piece is its working sphere slit by its held
+/// seam with the kept fillet; its shortcut seed yields in the seed retry,
+/// the fillet runs out to the corner and the ball is deleted. The
+/// result's body, created names and mesh, or the refusal's bytes.
+fn slit_seeds_section(golden: &mut Golden) {
+    use ryukei::tweak::delete_faces;
+    use ryukei_testkit::slit_seeds::{rounded, spec};
+    let mut s = golden.section("slit_seeds");
+    let b = rounded();
+    match delete_faces(OpKey(0x22c5), &b, &spec(&b)) {
+        Ok((o, j)) => hash_body(&mut s, &o, &j),
+        Err(e) => {
+            for byte in format!("{e:?}").bytes() {
+                s.u64(u64::from(byte));
+            }
+        }
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3894,6 +3915,7 @@ sections! {
     near_boxes => near_boxes_section,
     pinned_faces => pinned_faces_section,
     near_room => near_room_section,
+    slit_seeds => slit_seeds_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline
