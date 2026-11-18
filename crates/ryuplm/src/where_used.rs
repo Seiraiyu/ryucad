@@ -65,9 +65,9 @@ pub fn rows<'a>(
                 Ok(read) => {
                     for rl in &read.lines {
                         let names_t = rl.project.as_ref().is_some_and(|p| {
-                            t.links
-                                .iter()
-                                .any(|(pr, pj, pt)| *pr == link.product && pj == p && *pt == rl.part)
+                            t.links.iter().any(|(pr, pj, pt)| {
+                                *pr == link.product && pj == p && *pt == rl.part
+                            })
                         });
                         if names_t {
                             out.push(json!({"item": id, "number": item.number, "via": link.product,
@@ -89,7 +89,14 @@ pub fn rows_in(
     at: &At,
     problems: &mut Vec<Value>,
 ) -> Vec<Value> {
-    rows(&cat.manifest.project, cat.items.iter(), t, reps, at, problems)
+    rows(
+        &cat.manifest.project,
+        cat.items.iter(),
+        t,
+        reps,
+        at,
+        problems,
+    )
 }
 
 /// The rows of each official release of `s`'s items naming `t`, read at
@@ -106,15 +113,16 @@ fn released_rows(
     let Ok((repo, releases)) = crate::release::history(s) else {
         return Vec::new();
     };
-    let config = ryupdm::config::Config::read_in(&s.snapshot(), crate::catalogue::NAME)
-        .unwrap_or_default();
+    let config =
+        ryupdm::config::Config::read_in(&s.snapshot(), crate::catalogue::NAME).unwrap_or_default();
     let mut at_commit: BTreeMap<String, Option<Catalogue>> = BTreeMap::new();
     let mut out = Vec::new();
     for (part, labels) in ryupdm::deps::parts::released(&releases, config.revisions) {
         for r in labels {
             if !at_commit.contains_key(&r.commit) {
-                let read = ryupdm::history::files_for::<crate::Plm>(repo.gix(), &r.commit, repo.prefix())
-                    .and_then(|f| Catalogue::load(&f));
+                let read =
+                    ryupdm::history::files_for::<crate::Plm>(repo.gix(), &r.commit, repo.prefix())
+                        .and_then(|f| Catalogue::load(&f));
                 let c = match read {
                     Ok(c) => Some(c),
                     Err(e) => {
@@ -276,7 +284,10 @@ mod tests {
         assert_eq!(problems, Vec::<Value>::new());
         // The glue has no links: only own lines are searched.
         let glue = target(&cat, &id("0000000000004"));
-        assert_eq!(rows_in(&cat, &glue, &mut reps, &At::Working, &mut problems).len(), 1);
+        assert_eq!(
+            rows_in(&cat, &glue, &mut reps, &At::Working, &mut problems).len(),
+            1
+        );
         // Another catalogue names this one's items by project and ID.
         let mut other = cat.clone();
         other.manifest.project = crate::id::ProjectId::from_bytes([8; 16]);

@@ -5,16 +5,16 @@
 
 use crate::error::{Code, Error, Result};
 use crate::fault::{Fault, Severity};
-use crate::reps::{At, Reps};
+use crate::id::{Id, ProjectId};
 use crate::ids::item_path;
+use crate::item::ItemRef;
 use crate::item::Line;
+use crate::load::Catalogue;
+use crate::reps::{At, Reps};
 use crate::session::Session;
 use crate::write::{Writes, commit};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use crate::id::{Id, ProjectId};
-use crate::item::ItemRef;
-use crate::load::Catalogue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -262,7 +262,12 @@ pub fn add(
         refdes: fields.refdes,
         notes: fields.notes,
     });
-    let mut v = write_item(session, &id, &it, &format!("adding line {line} to item {id}"))?;
+    let mut v = write_item(
+        session,
+        &id,
+        &it,
+        &format!("adding line {line} to item {id}"),
+    )?;
     v["line"] = json!(line);
     Ok(v)
 }
@@ -272,8 +277,7 @@ fn line_index(id: &Id, it: &crate::item::Item, line: &str) -> Result<usize> {
         .iter()
         .position(|l| l.line.as_str() == line)
         .ok_or_else(|| {
-            Error::new(Code::NotFound, format!("item {id} has no line {line}"))
-                .with("line", line)
+            Error::new(Code::NotFound, format!("item {id} has no line {line}")).with("line", line)
         })
 }
 
@@ -325,7 +329,12 @@ pub fn edit(
             }
         }
     }
-    write_item(session, &id, &it, &format!("editing line {line} of item {id}"))
+    write_item(
+        session,
+        &id,
+        &it,
+        &format!("editing line {line} of item {id}"),
+    )
 }
 
 /// `bom.remove`: the line taken off the item.
@@ -338,7 +347,12 @@ pub fn remove(
     let (id, mut it) = crate::items::current(session, item, expected)?;
     let i = line_index(&id, &it, line)?;
     it.bom.remove(i);
-    let mut v = write_item(session, &id, &it, &format!("removing line {line} from item {id}"))?;
+    let mut v = write_item(
+        session,
+        &id,
+        &it,
+        &format!("removing line {line} from item {id}"),
+    )?;
     v["removed"] = json!(line);
     Ok(v)
 }
@@ -413,7 +427,9 @@ pub fn of(
         .bom
         .iter()
         .map(|l| Joined {
-            origin: Origin::Own { line: l.line.clone() },
+            origin: Origin::Own {
+                line: l.line.clone(),
+            },
             item: Some(l.item.clone()),
             child: None,
             quantity: l.quantity.clone(),
@@ -518,7 +534,9 @@ pub fn line_json(cat: &Catalogue, j: &Joined) -> Value {
             v["from"] = json!("own");
             v["line"] = json!(line);
         }
-        Origin::Rep { product, key, rev, .. } => {
+        Origin::Rep {
+            product, key, rev, ..
+        } => {
             v["from"] = json!(product);
             v["key"] = json!(key);
             v["rev"] = json!(rev);
@@ -783,7 +801,11 @@ pub(crate) mod tests {
         a.bom[0].unit = Some("pcs".into()); // bad unit
         let mut b = Item::new("A-2");
         // Another catalogue's item: check's business, not a write's.
-        b.bom = vec![line(1, "0123456789abcdef0123456789abcdef:0000000000009", "1")];
+        b.bom = vec![line(
+            1,
+            "0123456789abcdef0123456789abcdef:0000000000009",
+            "1",
+        )];
         let f = files(&[], None, &[("0000000000001", a), ("0000000000002", b)]);
         assert_eq!(
             codes(&f),
@@ -820,7 +842,11 @@ pub(crate) mod tests {
         assert_eq!(
             found,
             [
-                vec![id("0000000000001"), id("0000000000002"), id("0000000000003")],
+                vec![
+                    id("0000000000001"),
+                    id("0000000000002"),
+                    id("0000000000003")
+                ],
                 vec![id("0000000000004")],
             ]
         );
@@ -855,7 +881,9 @@ pub(crate) mod tests {
             &root,
             Request::BomAdd {
                 item: "KIT-1".into(),
-                fields: fields(serde_json::json!({"child": "SCREW-1", "quantity": "4", "find": "10"})),
+                fields: fields(
+                    serde_json::json!({"child": "SCREW-1", "quantity": "4", "find": "10"}),
+                ),
                 expected_revision: None,
             },
         )
@@ -907,7 +935,10 @@ pub(crate) mod tests {
         )
         .unwrap();
         let l = &edited["item"]["bom"][0];
-        assert_eq!((l["quantity"].clone(), l["notes"].clone()), (serde_json::json!("6"), serde_json::json!("M3x8")));
+        assert_eq!(
+            (l["quantity"].clone(), l["notes"].clone()),
+            (serde_json::json!("6"), serde_json::json!("M3x8"))
+        );
         assert!(l.get("find").is_none(), "{l}");
         let removed = ask(
             &root,
@@ -960,7 +991,10 @@ pub(crate) mod tests {
     pub(crate) fn pcba() -> (std::collections::BTreeMap<String, Vec<u8>>, Fixed) {
         let mut a = Item::new("PCBA-1");
         a.links = vec![link("ryucad", 3, "box"), link("ryueda", 4, "main")];
-        a.bom = vec![line(1, "0000000000004", "0.5"), line(2, "0000000000002", "4")];
+        a.bom = vec![
+            line(1, "0000000000004", "0.5"),
+            line(2, "0000000000002", "4"),
+        ];
         a.bom[0].unit = Some("kg".into());
         let mut screw = Item::new("SCREW-1");
         screw.links = vec![link("ryucad", 3, "screw")];
@@ -987,7 +1021,8 @@ pub(crate) mod tests {
         );
         for (p, n) in [("ryucad", 3), ("ryueda", 5)] {
             let part = if p == "ryucad" { "screw" } else { "mcu" };
-            reps.0.insert((p.into(), pid(n), Id::parse(part, "part").unwrap()), vec![]);
+            reps.0
+                .insert((p.into(), pid(n), Id::parse(part, "part").unwrap()), vec![]);
         }
         (f, reps)
     }
@@ -1025,10 +1060,22 @@ pub(crate) mod tests {
         assert_eq!(shown[3]["representation"]["part"], "lid");
         let codes: Vec<String> = faults
             .iter()
-            .map(|f| serde_json::to_value(f.error.code).unwrap().as_str().unwrap().to_owned())
+            .map(|f| {
+                serde_json::to_value(f.error.code)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
             .collect();
         assert_eq!(codes, ["bom_unlinked", "bom_line_twice"]);
-        assert_eq!(faults[0].error.details["unlinked"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            faults[0].error.details["unlinked"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(faults[1].error.details["pointer"], "/bom/1");
         assert!(faults.iter().all(|f| !f.is_error()));
     }
@@ -1048,7 +1095,12 @@ pub(crate) mod tests {
         let mk = |n: &str| {
             ask(
                 &root,
-                Request::ItemCreate { fields: Default::default(), number: Some(n.into()), next: None, expected_revision: None },
+                Request::ItemCreate {
+                    fields: Default::default(),
+                    number: Some(n.into()),
+                    next: None,
+                    expected_revision: None,
+                },
             )
             .unwrap()
         };
@@ -1058,7 +1110,13 @@ pub(crate) mod tests {
         for (item, part) in [("BOX-1", "box"), ("SCREW-1", "screw")] {
             ask(
                 &root,
-                Request::ItemLink { item: item.into(), product: "ryucad".into(), project: pid(3).to_string(), part: part.into(), expected_revision: None },
+                Request::ItemLink {
+                    item: item.into(),
+                    product: "ryucad".into(),
+                    project: pid(3).to_string(),
+                    part: part.into(),
+                    expected_revision: None,
+                },
             )
             .unwrap();
         }
@@ -1066,13 +1124,25 @@ pub(crate) mod tests {
             &root,
             Request::BomAdd {
                 item: "SCREW-1".into(),
-                fields: serde_json::from_value(serde_json::json!({"child": "THREADLOCK-1", "quantity": "0.01", "unit": "l"})).unwrap(),
+                fields: serde_json::from_value(
+                    serde_json::json!({"child": "THREADLOCK-1", "quantity": "0.01", "unit": "l"}),
+                )
+                .unwrap(),
                 expected_revision: None,
             },
         )
         .unwrap();
         let show = |depth: Option<usize>| {
-            ask(&root, Request::BomGet { item: "BOX-1".into(), rev: None, depth, within: vec![] }).unwrap()
+            ask(
+                &root,
+                Request::BomGet {
+                    item: "BOX-1".into(),
+                    rev: None,
+                    depth,
+                    within: vec![],
+                },
+            )
+            .unwrap()
         };
         let one = show(None);
         assert_eq!(one["schema"], 1);
@@ -1099,15 +1169,26 @@ pub(crate) mod tests {
             &f[&crate::ids::item_path(&id("0000000000004"))],
         )
         .unwrap();
-        glue.bom = vec![line(1, "0123456789abcdef0123456789abcdef:0000000000009", "1")];
-        f.insert(crate::ids::item_path(&id("0000000000004")), glue.to_text().into_bytes());
+        glue.bom = vec![line(
+            1,
+            "0123456789abcdef0123456789abcdef:0000000000009",
+            "1",
+        )];
+        f.insert(
+            crate::ids::item_path(&id("0000000000004")),
+            glue.to_text().into_bytes(),
+        );
         let cat = crate::load::Catalogue::load(&f).unwrap();
         let mut got: Vec<(String, bool, String)> = joined(&cat, &mut reps, &At::Working)
             .into_iter()
             .chain(foreign_children(&cat, &[]))
             .map(|x| {
                 (
-                    serde_json::to_value(x.error.code).unwrap().as_str().unwrap().to_owned(),
+                    serde_json::to_value(x.error.code)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
                     x.is_error(),
                     x.error.details["item"].as_str().unwrap().to_owned(),
                 )

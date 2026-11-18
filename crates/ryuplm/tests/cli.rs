@@ -401,7 +401,11 @@ fn links_boms_and_where_used_from_the_cli() {
     assert_eq!(bom["findings"][0]["code"], "bom_line_twice");
     let check = p.ok(&["check"]);
     assert!(
-        check["faults"].as_array().unwrap().iter().any(|f| f["code"] == "bom_line_twice"),
+        check["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "bom_line_twice"),
         "{check}"
     );
     // A loop, and a delete that would leave a line naming nothing, are refused.
@@ -411,10 +415,21 @@ fn links_boms_and_where_used_from_the_cli() {
     p.ok(&["bom", "remove", "BOX-1", &line]);
     assert_eq!(p.ok(&["bom", "show", "BOX-1"])["findings"], json!([]));
     // A link no folder holds is a warning, never a failure.
-    p.ok(&["item", "link", "GLUE-1", "ryueda", "44444444444444444444444444444444", "main"]);
+    p.ok(&[
+        "item",
+        "link",
+        "GLUE-1",
+        "ryueda",
+        "44444444444444444444444444444444",
+        "main",
+    ]);
     let check = p.ok(&["check"]);
     assert!(
-        check["faults"].as_array().unwrap().iter().any(|f| f["code"] == "item_link_unresolved"),
+        check["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "item_link_unresolved"),
         "{check}"
     );
     let used = p.ok(&["where-used", "SCREW-1", "--working", "--no-dependents"]);

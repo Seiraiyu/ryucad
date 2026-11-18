@@ -24,7 +24,15 @@ fn ask(root: &Path, req: Request) -> Value {
 }
 
 fn create(root: &Path, n: &str) -> String {
-    let v = ask(root, Request::ItemCreate { fields: Default::default(), number: Some(n.into()), next: None, expected_revision: None });
+    let v = ask(
+        root,
+        Request::ItemCreate {
+            fields: Default::default(),
+            number: Some(n.into()),
+            next: None,
+            expected_revision: None,
+        },
+    );
     v["item"]["id"].as_str().unwrap().to_owned()
 }
 
@@ -41,33 +49,70 @@ fn where_used_reads_other_checkouts_and_their_releases() {
     }
     git(&top, &["init", "-q", "-b", "main"]);
     let screw = create(&parts, "SCREW-1");
-    let parts_id = ask(&parts, Request::ProjectInfo {})["project"].as_str().unwrap().to_owned();
+    let parts_id = ask(&parts, Request::ProjectInfo {})["project"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let kit = create(&kits, "KIT-1");
-    ask(&kits, Request::BomAdd {
-        item: "KIT-1".into(),
-        fields: serde_json::from_value(json!({"child": format!("{parts_id}:{screw}"), "quantity": "8"})).unwrap(),
-        expected_revision: None,
-    });
+    ask(
+        &kits,
+        Request::BomAdd {
+            item: "KIT-1".into(),
+            fields: serde_json::from_value(
+                json!({"child": format!("{parts_id}:{screw}"), "quantity": "8"}),
+            )
+            .unwrap(),
+            expected_revision: None,
+        },
+    );
     git(&top, &["add", "-A"]);
     git(&top, &["commit", "-q", "-m", "catalogues"]);
     // KIT-1 released on a branch and merged: official, as tests/release.rs does it.
     git(&top, &["checkout", "-q", "-b", "rel"]);
-    ask(&kits, Request::ReleasePropose { items: vec![kit.clone()], all: false, dry_run: false, note: None, expected_revision: None });
+    ask(
+        &kits,
+        Request::ReleasePropose {
+            items: vec![kit.clone()],
+            all: false,
+            dry_run: false,
+            note: None,
+            expected_revision: None,
+        },
+    );
     git(&top, &["add", "-A"]);
     git(&top, &["commit", "-q", "-m", "release KIT-1 A"]);
     git(&top, &["checkout", "-q", "main"]);
     git(&top, &["merge", "-q", "--no-ff", "rel", "-m", "merge"]);
-    let v = ask(&parts, Request::BomWhereUsed { item: "SCREW-1".into(), within: vec![], no_dependents: true, working: false });
+    let v = ask(
+        &parts,
+        Request::BomWhereUsed {
+            item: "SCREW-1".into(),
+            within: vec![],
+            no_dependents: true,
+            working: false,
+        },
+    );
     assert_eq!(v["schema"], 1);
     let working = v["working"].as_array().unwrap();
     assert_eq!(working.len(), 1, "{v}");
     assert_eq!(working[0]["number"], "KIT-1");
-    assert_eq!(working[0]["catalogue"], ask(&kits, Request::ProjectInfo {})["project"]);
+    assert_eq!(
+        working[0]["catalogue"],
+        ask(&kits, Request::ProjectInfo {})["project"]
+    );
     assert_eq!(working[0]["quantity"], "8");
     let released = v["released"].as_array().unwrap();
     assert_eq!(released.len(), 1, "{v}");
     assert_eq!(released[0]["release"], "A");
     assert_eq!(released[0]["state"], "released");
-    let only = ask(&parts, Request::BomWhereUsed { item: "SCREW-1".into(), within: vec![], no_dependents: true, working: true });
+    let only = ask(
+        &parts,
+        Request::BomWhereUsed {
+            item: "SCREW-1".into(),
+            within: vec![],
+            no_dependents: true,
+            working: true,
+        },
+    );
     assert_eq!(only["released"], json!([]));
 }

@@ -52,8 +52,10 @@ fn structure_answers_the_same_everywhere() {
     let linked = ryuplm::links::linked(&cat);
     for id in cat.items.keys() {
         let (lines, _) = ryuplm::bom::of(&cat, &linked, id, &mut reps, &at);
-        let shown: Vec<serde_json::Value> =
-            lines.iter().map(|j| ryuplm::bom::line_json(&cat, j)).collect();
+        let shown: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|j| ryuplm::bom::line_json(&cat, j))
+            .collect();
         g.section("bom")
             .str(id.as_str())
             .str(&serde_json::to_string(&shown).unwrap());
@@ -72,7 +74,8 @@ fn structure_answers_the_same_everywhere() {
         }
     }
     let d = ryuplm::bom_diff::between(&cat, &at, &b, &at, None, &mut reps);
-    g.section("bom_diff").str(&serde_json::to_string(&d).unwrap());
+    g.section("bom_diff")
+        .str(&serde_json::to_string(&d).unwrap());
     for id in cat.items.keys().take(40) {
         let t = ryuplm::where_used::target(&cat, id);
         let mut problems = Vec::new();

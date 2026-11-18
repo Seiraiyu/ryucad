@@ -69,9 +69,11 @@ fn reads_ryucad_only_through_the_cad_feature() {
     assert!(MANIFEST.contains(r#"cad = ["ryupdm/cad", "dep:ryucad-doc"]"#));
     // The tests' own copy of the crate takes no default feature, so
     // `--no-default-features` really tests without `cad`.
-    assert!(MANIFEST.contains(
-        r#"ryuplm = { path = ".", default-features = false, features = ["testing"] }"#
-    ));
+    assert!(
+        MANIFEST.contains(
+            r#"ryuplm = { path = ".", default-features = false, features = ["testing"] }"#
+        )
+    );
     // ryueda is read through its executable, never its crate.
     assert!(!names(MANIFEST, "[dependencies]").contains(&"ryueda"));
 }

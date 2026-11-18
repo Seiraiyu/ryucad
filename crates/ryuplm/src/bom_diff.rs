@@ -7,9 +7,9 @@ use crate::bom::{Joined, SCHEMA, line_json, of};
 use crate::error::Result;
 use crate::id::Id;
 use crate::load::Catalogue;
-use crate::reps::{At, Reps};
 #[cfg(test)]
 use crate::reps::Fixed;
+use crate::reps::{At, Reps};
 use crate::session::Session;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -109,7 +109,11 @@ pub fn between(
         na += added.len();
         nr += removed.len();
         nc += changed.len();
-        let number = b.items.get(id).or_else(|| a.items.get(id)).map(|i| i.number.clone());
+        let number = b
+            .items
+            .get(id)
+            .or_else(|| a.items.get(id))
+            .map(|i| i.number.clone());
         items.push(json!({
             "item": id, "number": number,
             "added": added, "removed": removed, "changed": changed,
@@ -161,13 +165,21 @@ mod tests {
         }
         let mut after = reps.clone();
         after.0.insert(
-            ("ryucad".into(), pid(3), crate::id::Id::parse("box", "part").unwrap()),
+            (
+                "ryucad".into(),
+                pid(3),
+                crate::id::Id::parse("box", "part").unwrap(),
+            ),
             vec![rep(Some(3), "screw", 6), rep(Some(3), "lid", 1)],
         );
         // One reader serving both sides: the "to" side's lines differ.
         struct Two(Fixed, Fixed);
         impl Reps for Two {
-            fn lines(&mut self, l: &crate::item::Link, at: &At) -> crate::error::Result<crate::reps::Read> {
+            fn lines(
+                &mut self,
+                l: &crate::item::Link,
+                at: &At,
+            ) -> crate::error::Result<crate::reps::Read> {
                 match at {
                     At::Working => self.1.lines(l, at),
                     At::Commit(_) => self.0.lines(l, at),
@@ -175,18 +187,41 @@ mod tests {
             }
         }
         let mut two = Two(reps.clone(), after);
-        let d = between(&a, &At::Commit("c0".into()), &b, &At::Working, None, &mut two);
-        assert_eq!(d["summary"], serde_json::json!({"added": 1, "removed": 1, "changed": 2}));
+        let d = between(
+            &a,
+            &At::Commit("c0".into()),
+            &b,
+            &At::Working,
+            None,
+            &mut two,
+        );
+        assert_eq!(
+            d["summary"],
+            serde_json::json!({"added": 1, "removed": 1, "changed": 2})
+        );
         let it = &d["items"][0];
         assert_eq!(it["item"], "0000000000001");
         assert_eq!(it["number"], "PCBA-1");
-        assert_eq!(it["changed"][0]["quantity"], serde_json::json!({"from": "0.5", "to": "0.75"}));
+        assert_eq!(
+            it["changed"][0]["quantity"],
+            serde_json::json!({"from": "0.5", "to": "0.75"})
+        );
         assert_eq!(it["changed"][1]["from"], "ryucad");
-        assert_eq!(it["changed"][1]["quantity"], serde_json::json!({"from": "4", "to": "6"}));
+        assert_eq!(
+            it["changed"][1]["quantity"],
+            serde_json::json!({"from": "4", "to": "6"})
+        );
         assert_eq!(it["removed"][0]["number"], "SCREW-1");
         assert_eq!(it["added"][0]["number"], "MCU-1");
         // Asked about one item, only it; an unchanged catalogue, nothing.
-        let one = between(&a, &At::Working, &a, &At::Working, Some(&id("0000000000002")), &mut reps);
+        let one = between(
+            &a,
+            &At::Working,
+            &a,
+            &At::Working,
+            Some(&id("0000000000002")),
+            &mut reps,
+        );
         assert_eq!(one["items"], serde_json::json!([]));
     }
 }

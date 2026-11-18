@@ -80,7 +80,10 @@ pub fn structure(seed: &str, n: usize) -> (BTreeMap<String, Vec<u8>>, crate::rep
     let cat = crate::load::Catalogue::load(&f).expect("the seeded catalogue reads");
     let ids: Vec<Id> = cat.items.keys().cloned().collect();
     let mut items: Vec<Item> = ids.iter().map(|id| cat.items[id].clone()).collect();
-    let (cad, eda) = (ProjectId::from_bytes([3; 16]), ProjectId::from_bytes([4; 16]));
+    let (cad, eda) = (
+        ProjectId::from_bytes([3; 16]),
+        ProjectId::from_bytes([4; 16]),
+    );
     let part = |s: String| Id::parse(&s, "part").expect("a part ID");
     let mut reps = crate::reps::Fixed::default();
     let mut made = 0u64;
@@ -158,8 +161,10 @@ pub fn structure(seed: &str, n: usize) -> (BTreeMap<String, Vec<u8>>, crate::rep
                     project: eda.clone(),
                     part: part(format!("c{k}")),
                 });
-                reps.0
-                    .insert(("ryueda".into(), eda.clone(), part(format!("c{k}"))), Vec::new());
+                reps.0.insert(
+                    ("ryueda".into(), eda.clone(), part(format!("c{k}"))),
+                    Vec::new(),
+                );
             }
         }
     }

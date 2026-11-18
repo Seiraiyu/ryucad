@@ -106,7 +106,10 @@ impl Index {
 /// (its own folder outside one), then `folders`.
 pub fn tops(here: &Path, folders: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    match gix::discover(here).ok().and_then(|r| r.workdir().map(Path::to_path_buf)) {
+    match gix::discover(here)
+        .ok()
+        .and_then(|r| r.workdir().map(Path::to_path_buf))
+    {
         Some(w) => out.push(w.canonicalize().unwrap_or(w)),
         None => out.push(here.to_path_buf()),
     }
@@ -188,7 +191,11 @@ pub struct Fixed(pub BTreeMap<(String, ProjectId, Id), Vec<RepLine>>);
 
 impl Reps for Fixed {
     fn lines(&mut self, link: &crate::item::Link, at: &At) -> Result<Read> {
-        let k = (link.product.clone(), link.project.clone(), link.part.clone());
+        let k = (
+            link.product.clone(),
+            link.project.clone(),
+            link.part.clone(),
+        );
         let lines = self
             .0
             .get(&k)
@@ -210,10 +217,13 @@ pub const RYUEDA_EXE: &str = "RYUEDA_EXE";
 /// project. A line whose every occurrence is DNP (quantity 0) buys
 /// nothing and is left out. Anything else is `item_link_unresolved`.
 pub fn eda_answer(stdout: &[u8], own: &ProjectId) -> Result<Vec<RepLine>> {
-    let bad =
-        |why: String| Error::new(Code::ItemLinkUnresolved, format!("ryueda's bom answer {why}"));
-    let v: Value =
-        serde_json::from_slice(stdout).map_err(|e| bad(format!("isn't JSON: {e}")))?;
+    let bad = |why: String| {
+        Error::new(
+            Code::ItemLinkUnresolved,
+            format!("ryueda's bom answer {why}"),
+        )
+    };
+    let v: Value = serde_json::from_slice(stdout).map_err(|e| bad(format!("isn't JSON: {e}")))?;
     if v.get("ok") != Some(&Value::Bool(true)) {
         let msg = v
             .pointer("/error/message")
@@ -246,7 +256,8 @@ pub fn eda_answer(stdout: &[u8], own: &ProjectId) -> Result<Vec<RepLine>> {
         let (project, id) = if let Some(id) = part_text.strip_prefix("self/") {
             (Some(own.clone()), id)
         } else if let Some((p, id)) = part_text.split_once(':') {
-            let p = ProjectId::parse(p).map_err(|_| bad(format!("line {i} names project {p:?}")))?;
+            let p =
+                ProjectId::parse(p).map_err(|_| bad(format!("line {i} names project {p:?}")))?;
             (Some(p), id)
         } else if let Some((_, id)) = part_text.split_once('/') {
             (None, id)
@@ -314,7 +325,12 @@ pub fn eda_lines_with(
 /// part, project (`own` for the project's own parts), instance count and
 /// item number. A plain part has none.
 #[cfg(feature = "cad")]
-pub fn cad_lines(src: &dyn Source, root: &Path, own: &ProjectId, part: &Id) -> Result<Vec<RepLine>> {
+pub fn cad_lines(
+    src: &dyn Source,
+    root: &Path,
+    own: &ProjectId,
+    part: &Id,
+) -> Result<Vec<RepLine>> {
     use ryucad_doc::doc::assembly::Rev;
     let project = ryucad_doc::doc::project::Project::load_from(root, src)?;
     let mut cache = ryupdm::structure::Cache::new();
@@ -415,11 +431,22 @@ impl Disk {
                 if crate::source::Folder(&dir).read(&design)?.is_none() {
                     Vec::new()
                 } else {
-                    eda_lines_with(&ryueda_exe(), &dir, &link.project, &link.part, commit.as_deref())?
+                    eda_lines_with(
+                        &ryueda_exe(),
+                        &dir,
+                        &link.project,
+                        &link.part,
+                        commit.as_deref(),
+                    )?
                 }
             }
             "ryucad" => self.cad(&dir, link, commit.as_deref())?,
-            other => return Err(unresolved(link, &format!("{other} isn't a product links read"))),
+            other => {
+                return Err(unresolved(
+                    link,
+                    &format!("{other} isn't a product links read"),
+                ));
+            }
         };
         Ok(Read {
             lines,
@@ -428,7 +455,12 @@ impl Disk {
     }
 
     #[cfg(feature = "cad")]
-    fn cad(&self, dir: &Path, link: &crate::item::Link, commit: Option<&str>) -> Result<Vec<RepLine>> {
+    fn cad(
+        &self,
+        dir: &Path,
+        link: &crate::item::Link,
+        commit: Option<&str>,
+    ) -> Result<Vec<RepLine>> {
         match (commit, &self.repo) {
             (Some(c), Some(repo)) => {
                 let prefix = self.prefix(dir).unwrap_or_default();
@@ -440,7 +472,12 @@ impl Disk {
     }
 
     #[cfg(not(feature = "cad"))]
-    fn cad(&self, _dir: &Path, link: &crate::item::Link, _commit: Option<&str>) -> Result<Vec<RepLine>> {
+    fn cad(
+        &self,
+        _dir: &Path,
+        link: &crate::item::Link,
+        _commit: Option<&str>,
+    ) -> Result<Vec<RepLine>> {
         Err(unresolved(
             link,
             "this ryuplm was built without ryucad's reader (feature cad)",
@@ -542,19 +579,22 @@ pub(crate) mod tests {
             r#"{"format":1,"kind":"ryupdm.properties","number":"PCB-1"}"#,
         )
         .unwrap();
-        let ix = Index::scan(&[top.clone()]);
+        let ix = Index::scan(std::slice::from_ref(&top));
         // The first folder in sorted order wins: copy before mech.
         assert_eq!(ix.dir("ryucad", &pid(3)), Some(top.join("copy").as_path()));
         assert_eq!(ix.dir("ryueda", &pid(4)), Some(top.join("eda").as_path()));
         assert_eq!(ix.dir("ryueda", &pid(3)), None);
-        assert_eq!(ix.searched, [top.clone()]);
+        assert_eq!(ix.searched, std::slice::from_ref(&top));
         let id = |s: &str| Id::parse(s, "part").unwrap();
         let mech = crate::source::Folder(&top.join("mech"));
         assert!(part_exists(&mech, "ryucad", &id("bolt")));
         assert!(!part_exists(&mech, "ryucad", &id("nut")));
         let eda = crate::source::Folder(&top.join("eda"));
         assert!(part_exists(&eda, "ryueda", &id("main")));
-        assert_eq!(number_of(&eda, "ryueda", &id("main")).as_deref(), Some("PCB-1"));
+        assert_eq!(
+            number_of(&eda, "ryueda", &id("main")).as_deref(),
+            Some("PCB-1")
+        );
         assert_eq!(number_of(&mech, "ryucad", &id("bolt")), None);
         assert_eq!(manifest_of("ryudfm"), None);
     }
@@ -564,17 +604,17 @@ pub(crate) mod tests {
     /// project, and one whose every occurrence is DNP.
     pub(crate) fn eda_stdout(lib: &ProjectId) -> String {
         serde_json::json!({"ok": true, "warnings": [], "result": {
-            "schema": 1, "design": "main", "rev": "working", "columns": [], "findings": [],
-            "lines": [
-                {"part": "self/r10k", "revision": "working", "quantity": 3, "value": "10k",
-                 "footprint": "R0603", "refdes": "R1,R2,R3"},
-                {"part": format!("{lib}:mcu"), "revision": "A", "quantity": 1, "value": "RP2040",
-                 "footprint": "QFN56", "refdes": "U1"},
-                {"part": "passives/c100n", "revision": "working", "quantity": 2, "value": "100n",
-                 "footprint": "C0402", "refdes": "C1,C2"},
-                {"part": "self/tp", "revision": "working", "quantity": 0, "value": "",
-                 "footprint": "TP", "refdes": ""}
-            ]}})
+        "schema": 1, "design": "main", "rev": "working", "columns": [], "findings": [],
+        "lines": [
+            {"part": "self/r10k", "revision": "working", "quantity": 3, "value": "10k",
+             "footprint": "R0603", "refdes": "R1,R2,R3"},
+            {"part": format!("{lib}:mcu"), "revision": "A", "quantity": 1, "value": "RP2040",
+             "footprint": "QFN56", "refdes": "U1"},
+            {"part": "passives/c100n", "revision": "working", "quantity": 2, "value": "100n",
+             "footprint": "C0402", "refdes": "C1,C2"},
+            {"part": "self/tp", "revision": "working", "quantity": 0, "value": "",
+             "footprint": "TP", "refdes": ""}
+        ]}})
         .to_string()
     }
 
@@ -670,22 +710,48 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             got,
-            [("bolt".into(), Some(pid(3)), 4), ("plate".into(), Some(pid(3)), 1)]
+            [
+                ("bolt".into(), Some(pid(3)), 4),
+                ("plate".into(), Some(pid(3)), 1)
+            ]
         );
         // A plain part has no lines.
-        assert!(cad_lines(&src, &top.join("mech"), &pid(3), &id("bolt")).unwrap().is_empty());
+        assert!(
+            cad_lines(&src, &top.join("mech"), &pid(3), &id("bolt"))
+                .unwrap()
+                .is_empty()
+        );
         // Through the disk reader, found by the index, read once.
-        let mut disk = Disk::new(Index::scan(&[top.clone()]), &top);
-        let link = crate::item::Link { product: "ryucad".into(), project: pid(3), part: id("frame") };
+        let mut disk = Disk::new(Index::scan(std::slice::from_ref(&top)), &top);
+        let link = crate::item::Link {
+            product: "ryucad".into(),
+            project: pid(3),
+            part: id("frame"),
+        };
         let r = disk.lines(&link, &At::Working).unwrap();
         assert_eq!((r.lines.len(), r.rev.as_str()), (2, "working"));
-        let gone = crate::item::Link { product: "ryucad".into(), project: pid(9), part: id("frame") };
-        assert_eq!(disk.lines(&gone, &At::Working).unwrap_err().code, Code::ItemLinkUnresolved);
+        let gone = crate::item::Link {
+            product: "ryucad".into(),
+            project: pid(9),
+            part: id("frame"),
+        };
+        assert_eq!(
+            disk.lines(&gone, &At::Working).unwrap_err().code,
+            Code::ItemLinkUnresolved
+        );
         // A ryueda component (no designs/<id>.json) is a leaf: no executable run.
         std::fs::create_dir_all(top.join("lib")).unwrap();
-        std::fs::write(top.join("lib/ryueda.json"), format!(r#"{{"project":"{}"}}"#, pid(6))).unwrap();
-        let mut disk = Disk::new(Index::scan(&[top.clone()]), &top);
-        let comp = crate::item::Link { product: "ryueda".into(), project: pid(6), part: id("r10k") };
+        std::fs::write(
+            top.join("lib/ryueda.json"),
+            format!(r#"{{"project":"{}"}}"#, pid(6)),
+        )
+        .unwrap();
+        let mut disk = Disk::new(Index::scan(std::slice::from_ref(&top)), &top);
+        let comp = crate::item::Link {
+            product: "ryueda".into(),
+            project: pid(6),
+            part: id("r10k"),
+        };
         assert!(disk.lines(&comp, &At::Working).unwrap().lines.is_empty());
     }
 
@@ -694,8 +760,13 @@ pub(crate) mod tests {
     fn without_cad_ryucad_links_are_unresolved() {
         let d = tempfile::tempdir().unwrap();
         let top = d.path().canonicalize().unwrap();
-        cad_project(&top.join("mech"), &pid(3), &["bolt"], &[("frame", &[("bolt", 1)])]);
-        let mut disk = Disk::new(Index::scan(&[top.clone()]), &top);
+        cad_project(
+            &top.join("mech"),
+            &pid(3),
+            &["bolt"],
+            &[("frame", &[("bolt", 1)])],
+        );
+        let mut disk = Disk::new(Index::scan(std::slice::from_ref(&top)), &top);
         let link = crate::item::Link {
             product: "ryucad".into(),
             project: pid(3),

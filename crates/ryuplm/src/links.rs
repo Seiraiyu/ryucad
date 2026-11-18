@@ -6,17 +6,17 @@
 //! ([`resolve`]) is `check`'s.
 
 use crate::error::{Code, Error, Result};
+use crate::fault::{Fault, Severity};
+use crate::id::{Id, ProjectId};
 use crate::ids::item_path;
 use crate::item::Link;
+use crate::load::Catalogue;
+use crate::reps::{self, Index};
 use crate::session::Session;
 use crate::write::{Writes, commit};
 use serde_json::Value;
-use std::path::Path;
-use crate::fault::{Fault, Severity};
-use crate::reps::{self, Index};
-use crate::id::{Id, ProjectId};
-use crate::load::Catalogue;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 /// What a link names: product, project and part.
 pub type Key = (String, ProjectId, Id);
@@ -262,13 +262,25 @@ mod tests {
         let f = files(
             &[],
             None,
-            &[("0000000000001", a), ("0000000000002", b), ("0000000000003", c)],
+            &[
+                ("0000000000001", a),
+                ("0000000000002", b),
+                ("0000000000003", c),
+            ],
         );
         assert_eq!(
             codes(&f),
             [
-                ("item_link_duplicate".into(), "error", "0000000000002".into()),
-                ("item_link_duplicate".into(), "error", "0000000000003".into()),
+                (
+                    "item_link_duplicate".into(),
+                    "error",
+                    "0000000000002".into()
+                ),
+                (
+                    "item_link_duplicate".into(),
+                    "error",
+                    "0000000000003".into()
+                ),
             ]
         );
     }
@@ -303,12 +315,16 @@ mod tests {
             ],
         );
         let cat = crate::load::Catalogue::load(&f).unwrap();
-        let ix = crate::reps::Index::scan(&[top.clone()]);
+        let ix = crate::reps::Index::scan(std::slice::from_ref(&top));
         let got: Vec<(String, bool, String)> = super::resolve(&cat, &ix)
             .iter()
             .map(|x| {
                 (
-                    serde_json::to_value(x.error.code).unwrap().as_str().unwrap().to_owned(),
+                    serde_json::to_value(x.error.code)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
                     x.is_error(),
                     x.error.details["item"].as_str().unwrap().to_owned(),
                 )
