@@ -65,6 +65,13 @@ pub fn find_root(start: &Path) -> Result<PathBuf> {
 enum Command {
     /// This build's version, commit, target and protocol.
     Version,
+    /// Every error code with its exit code, title and the detail keys it
+    /// declares, or one code's: answered by this build, with no catalogue
+    /// or daemon.
+    Errors {
+        /// One code, such as item_not_found.
+        code: Option<String>,
+    },
     /// Make this folder a catalogue.
     Init {
         #[arg(long, value_parser = unit)]
@@ -495,6 +502,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Redo { entry } => (root()?, Request::Redo { entry: *entry }),
         // Version, Init, Watch, Daemon, Git and Merge are not requests.
         Command::Version
+        | Command::Errors { .. }
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
@@ -522,6 +530,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Errors { code } => ryuplm::error::details::listing(code.as_deref()),
         Command::Init { unit } => {
             let root =
                 ryuplm::source::plain(here.canonicalize().map_err(|e| Error::io(&here, &e))?);
@@ -738,6 +747,7 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
             0,
         ),
         Err(e) => {
+            ryuplm::error::details::check(&e);
             let code = e.code.exit_code();
             (json!({"ok": false, "error": e, "warnings": warnings}), code)
         }
