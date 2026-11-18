@@ -116,3 +116,39 @@ fn imports_answer_the_same_everywhere() {
     g.section("mapping").str(&m2.to_text());
     g.finish();
 }
+
+#[test]
+fn tree_imports_answer_the_same_everywhere() {
+    use ryuplm::import::{mapping::ReaderKind, records, run};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut g = Golden::new(dir.join("tests/golden/trees.txt"));
+    // SAFETY: the goldens read one seed.
+    unsafe { std::env::set_var(ryuplm::ids::SEED_VAR, "golden") };
+    let (files, m, csv, _) = ryuplm::testing::import_source("golden", 400);
+    let config = ryupdm::config::Config::read_in(&files, "ryuplm").unwrap();
+    let cat = Catalogue::load(&files).unwrap();
+    let (json_text, xml_text) = ryuplm::testing::csv_as_trees(&csv);
+    for (kind, name, text) in [
+        (ReaderKind::Json, "json", json_text),
+        (ReaderKind::Xml, "xml", xml_text),
+    ] {
+        let tm = ryuplm::testing::tree_mapping(&m, kind);
+        let table = ryuplm::import::read_table(text.as_bytes(), &tm.reader).unwrap();
+        g.section(&format!("{name}_columns"))
+            .str(&table.columns.join("\n"));
+        let (rows, refusals) =
+            records::map(&table, &tm, &config, cat.manifest.default_unit).unwrap();
+        g.section(&format!("{name}_refusals"))
+            .str(&serde_json::to_string(&refusals).unwrap());
+        let out = run::plan(&files, &cat, &config, &tm, &rows, None, 50).unwrap();
+        g.section(&format!("{name}_report"))
+            .str(&serde_json::to_string(&out.report).unwrap());
+        for (id, it) in &out.items {
+            g.section(&format!("{name}_items"))
+                .str(id.as_str())
+                .str(&it.to_text());
+        }
+        g.section(&format!("{name}_mapping")).str(&tm.to_text());
+    }
+    g.finish();
+}
