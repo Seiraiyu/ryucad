@@ -663,6 +663,57 @@ fn record(file: &std::path::Path, code: Code, found: &[Problem]) {
     let _ = f.write_all(text.as_bytes());
 }
 
+fn key_json(code: Option<Code>, k: &Key) -> Value {
+    let kind = code.map_or(k.kind, |c| kind(c, k));
+    let mut v = serde_json::json!({"name": k.name, "kind": kind.name(), "about": about(k)});
+    if let Some(of) = k.alias_of {
+        v["alias_of"] = serde_json::json!(of);
+    }
+    v
+}
+
+/// One code as `errors` lists it.
+fn code_json(code: Code) -> Value {
+    let keys: Vec<Value> = keys(code)
+        .unwrap_or_default()
+        .iter()
+        .map(|k| key_json(Some(code), k))
+        .collect();
+    serde_json::json!({
+        "code": name(code),
+        "exit": code.exit_code(),
+        "title": title(code),
+        "declared": code.keys().is_some(),
+        "keys": keys,
+    })
+}
+
+/// What `ryucad errors`, `ryueda errors` and `ryudfm errors` answer:
+/// `{codes: [{code, exit, title, declared, keys}], common: [key]}`, every
+/// code in `Code::ALL`'s order or just `code`. In process, from this
+/// table: no project, daemon or protocol.
+pub fn listing(code: Option<&str>) -> super::Result<Value> {
+    let codes: Vec<Code> = match code {
+        None => Code::ALL.to_vec(),
+        Some(text) => {
+            let c = serde_json::from_value(serde_json::json!(text)).map_err(|_| {
+                super::Error::new(
+                    Code::InvalidParam,
+                    format!("no error code {text:?}: `errors` alone lists them"),
+                )
+                .with("param", "code")
+                .with("value", text)
+            })?;
+            vec![c]
+        }
+    };
+    let common: Vec<Value> = COMMON.iter().map(|k| key_json(None, k)).collect();
+    Ok(serde_json::json!({
+        "codes": codes.into_iter().map(code_json).collect::<Vec<_>>(),
+        "common": common,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,5 +899,54 @@ mod tests {
         assert_eq!(title(Code::BomItemDuplicate), "BOM item duplicate");
         assert_eq!(title(Code::Cancelled), "Cancelled");
         assert_eq!(title(Code::BlendFailed), "Fillet or chamfer failed");
+    }
+
+    #[test]
+    fn listing_names_every_code_or_one() {
+        let all = listing(None).unwrap();
+        assert_eq!(all["codes"].as_array().unwrap().len(), Code::ALL.len());
+        assert_eq!(all["common"].as_array().unwrap().len(), COMMON.len());
+        assert_eq!(
+            all["common"][0],
+            json!({"name": "hint", "kind": "str",
+            "about": "What to do about it: a command to run or a sentence."})
+        );
+        let one = &listing(Some("label_not_found")).unwrap()["codes"];
+        assert_eq!(one.as_array().unwrap().len(), 1);
+        assert_eq!(
+            (
+                &one[0]["code"],
+                &one[0]["exit"],
+                &one[0]["title"],
+                &one[0]["declared"]
+            ),
+            (
+                &json!("label_not_found"),
+                &json!(1),
+                &json!("Label not found"),
+                &json!(true)
+            )
+        );
+        let usage = &listing(Some("usage")).unwrap()["codes"][0];
+        assert_eq!(
+            (&usage["exit"], &usage["declared"], &usage["keys"]),
+            (&json!(2), &json!(false), &json!([]))
+        );
+        let keys = listing(Some("invalid_param")).unwrap()["codes"][0]["keys"].clone();
+        let field = keys
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["name"] == "field")
+            .unwrap();
+        assert_eq!(
+            (&field["kind"], &field["alias_of"]),
+            (&json!("str"), &json!("param"))
+        );
+        let e = listing(Some("no_such_code")).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::InvalidParam, &json!("code"))
+        );
     }
 }
