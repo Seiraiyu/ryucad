@@ -389,6 +389,28 @@ fn the_slit_seeds_twin_is_bounded() {
     println!("slit_seeds twin: {spent} units");
 }
 
+/// The ruled_pin twin (plan 22.D): bounded, the same units on one thread
+/// and eight, the closed form's charts, roots and spans charged.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_ruled_pin_twin_is_bounded() {
+    use ryukei::boolean::boolean_with;
+    use ryukei_testkit::ruled_pin::{BITE, bored, pin};
+    let (b, p) = (bored(BITE), pin());
+    let spent = bounded("ruled_pin twin", |w| {
+        let tools = [Tool {
+            key: ToolKey(2),
+            body: &p,
+            place: Rigid::IDENTITY,
+        }];
+        boolean_with(OpKey(0x22d4), BooleanOp::Subtract, &b, &tools, w)
+    });
+    println!("ruled_pin twin: {spent} units");
+}
+
 #[test]
 fn thickening_a_sheet_is_bounded() {
     use ryukei::name::{FaceRole, Name, Role};
