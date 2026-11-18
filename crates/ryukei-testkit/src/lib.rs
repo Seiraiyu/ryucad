@@ -215,6 +215,7 @@ pub mod offset_bytes;
 pub mod pinned_faces;
 pub mod projection;
 pub mod race;
+pub mod released_pin;
 pub mod rings;
 pub mod ruled_pin;
 pub mod sheet_bytes;

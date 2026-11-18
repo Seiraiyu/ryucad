@@ -698,3 +698,15 @@ fn the_slit_seeds_twins_ball_is_deleted() {
     let want = run_out_volume();
     assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
 }
+
+/// ryukei 23.A's twin (design 919): `pinned_faces`' block with its blind
+/// slot ending farther before the round; twelve faces, the slot's start
+/// plane apart from its far end.
+#[test]
+fn the_released_pin_twin_is_rounded_and_slotted() {
+    use ryukei_testkit::released_pin::{far_end, slotted, start_end};
+    let s = slotted();
+    assert_eq!(s.counts().faces, 12);
+    assert_eq!(check(&s), []);
+    assert_ne!(far_end(&s), start_end(&s));
+}
