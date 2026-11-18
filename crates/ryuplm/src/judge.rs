@@ -48,6 +48,8 @@ pub fn all(src: &dyn Source, cat: &Catalogue, cx: &Context) -> Vec<Fault> {
         out.extend(crate::aml::judge(id, &item.aml).into_iter().map(err));
         out.extend(class(cat, id).into_iter().map(err));
     }
+    out.extend(crate::links::judge(cat).into_iter().map(err));
+    out.extend(crate::bom::judge(cat).into_iter().map(err));
     if let Some(c) = &config {
         out.extend(properties(src, cat, c).into_iter().map(err));
         out.extend(numbers(src, cat, c, cx));

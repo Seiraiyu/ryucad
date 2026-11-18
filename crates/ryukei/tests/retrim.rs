@@ -648,3 +648,53 @@ fn the_near_room_twins_slot_runs_out() {
     let want = run_out_volume();
     assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
 }
+
+/// ryukei 22.C's twin (design 724): a block whose three edges at one
+/// corner are filleted and meet in a ball; ten faces.
+#[test]
+fn the_slit_seeds_twin_is_a_rounded_corner() {
+    use ryukei_testkit::slit_seeds::{ball, fillet, rounded};
+    let b = rounded();
+    assert_eq!(b.counts().faces, 10);
+    assert_eq!(check(&b), []);
+    assert_eq!(check_intersections(&b), []);
+    let fillets = [fillet(&b, 0), fillet(&b, 1), fillet(&b, 2)];
+    assert!(fillets[0] != fillets[1] && fillets[1] != fillets[2] && fillets[0] != fillets[2]);
+    assert!(!fillets.contains(&ball(&b)));
+}
+
+/// The twin's slit ball (#652, #941; design 724, plan 22.C): two of the
+/// corner's fillets deleted. The ball's one piece is its working sphere,
+/// slit by its held seam with the kept fillet, which the fillet's piece
+/// uses a third time; every seed set fails, and the ball's slit seed
+/// yields in `attempt_with`'s seed retry (main refuses `HealAmbiguous`
+/// at the ball, nothing yielding). The kept fillet runs out to the
+/// corner along its whole edge and the ball is deleted: seven faces, one
+/// shell, checking clean, with the run-out volume.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_slit_seeds_twins_ball_is_deleted() {
+    use ryukei_testkit::slit_seeds::{ball, rounded, run_out_volume, spec};
+    let b = rounded();
+    let gone = b.face(ball(&b)).unwrap().name;
+    let r = ryukei::tweak::delete_faces(OpKey(0x22c5), &b, &spec(&b));
+    let (o, j) = r.unwrap_or_else(|e| panic!("refused: {e:?}"));
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    assert_eq!(o.counts().faces, 7);
+    assert_eq!(o.counts().shells, b.counts().shells);
+    assert!(
+        j.events().contains(&Event::Deleted(gone)),
+        "{:?}",
+        j.events()
+    );
+    let m = tessellate(&o, &MeshParams::new(2e-5, 0.3)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    check_mesh(&o, &m).unwrap();
+    let (v, _) = ryukei_testkit::mesh::volume_and_area(&m);
+    let want = run_out_volume();
+    assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
+}

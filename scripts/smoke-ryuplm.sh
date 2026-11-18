@@ -3,8 +3,9 @@
 # a numbering scheme and a class, items created (one by its scheme's next
 # number, one with a legacy number and an AML), edited, renumbered, shown
 # and listed, checked (the legacy number a warning), a duplicate refused,
-# a change undone and redone through the daemon, the activity log, the
-# daemon's status and stop, and a check in process.
+# a change undone and redone through the daemon, a kit's own line, its
+# BOM, a loop refused, where-used, the BOM diff and an unresolved link,
+# the activity log, the daemon's status and stop, and a check in process.
 #
 #   scripts/smoke-ryuplm.sh path/to/ryuplm
 set -eu
@@ -89,6 +90,21 @@ run redo
 fails item_not_found item show 100-0042
 run history
 run diff
+# Structure: a kit naming the bracket by an own line, its BOM, a loop
+# refused, where-used, the BOM diff, and a link no folder holds (a
+# warning, never a failure).
+run item create KIT-1 --name Kit
+run bom add KIT-1 MECH-00100 2 --find 10
+run bom show KIT-1
+has '"MECH-00100"' "the kit's own line names the bracket"
+fails bom_cycle bom add MECH-00100 KIT-1 1
+run where-used MECH-00100 --working --no-dependents
+has '"KIT-1"' "where-used finds the kit"
+run bom diff
+has '"KIT-1"' "the BOM diff shows the kit's new line"
+run item link KIT-1 ryucad 0123456789abcdef0123456789abcdef kit
+run check
+has '"item_link_unresolved"' "a link no folder holds is a warning"
 run daemon status
 has '"running":true' "a daemon is running"
 run daemon stop

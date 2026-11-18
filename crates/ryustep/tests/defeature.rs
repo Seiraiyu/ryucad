@@ -88,7 +88,31 @@ const MAX_SIZE: f64 = 2e-3;
 /// "a kept ball bounded only by a held seam"). Plan 21.D changes neither
 /// (FTC 07 and FTC 10 stop where 21.C left them). Plan 22.A leaves FTC
 /// 07 rd (22.B) and FTC 10 rb (22.C) where they were; FTC 07 spends its
-/// adjusted builds first (31 s to 56 s, inside the deadline).
+/// adjusted builds first (31 s to 56 s, inside the deadline). Plan 22.B
+/// keeps a working face off a pin it shares nothing with, but working
+/// NURBS `33b57350` and pin `f19ffa9e` share a vertex (census VII), and
+/// the pin's box meets the NURBS' own box on every axis (they touch at
+/// that vertex), so no one-sided cut keeps the own box and clears the
+/// pin (census VII's INSIDE): FTC 07 rd still stops at that pair in 56 s
+/// (#652; moved to ryukei 23, "a pin touching the working face at a
+/// vertex, its box meeting the face's own box"). Plan 22.C lets FTC 10's
+/// slit balls' seeds yield at every rung, and the walk without them still
+/// finds no closure (census VII): the two halves of plane y = 23 mm,
+/// `51c4bf10` and `3a1d8efe`, either side of the blends deleted between
+/// the balls, grow over the same gap and their working faces' pieces
+/// coincide arc for arc, and working face `006f1f95` runs both ways along
+/// the arcs that cut pins `4e6572af` and `1144cdb9` in two. Merging the
+/// two halves alone still fails at every rung. FTC 10 rb stops at
+/// `HealAmbiguous` on ball `d0eb13c5` (#652; moved to ryukei 23,
+/// "coincident working faces across a deleted gap").
+///
+/// Phase 22 ends here (plan 22.D, owner 2026-11-18: "go for SW parity and
+/// call it good"). Plan 22.D's ruled closed form leaves both where they
+/// were (FTC 07 rd at pin `f19ffa9e` in 56 s, FTC 10 rb at ball
+/// `d0eb13c5` in 27 s). FTC 07 rd and FTC 10 rb stay refused, as
+/// SolidWorks 2026 also refuses them as one Delete and Patch; their work
+/// continues in ryukei 23, "SolidWorks parity on blend deletes"
+/// (per-feature partial deletes, fast refusals).
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -618,7 +642,7 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 /// builds) and recorded what stops both next; plan 21.A's pins move FTC
 /// 07 on to its next cause (see [`KNOWN_REFUSED`]).
 #[test]
-#[ignore = "#652: FTC 10's kept ball bounded only by a held seam (ryukei 22); FTC 07's working NURBS 33b57350 grows into pin f19ffa9e (ryukei 22)"]
+#[ignore = "#652: FTC 10's two halves of one plane grown over the same gap, their working faces coinciding, and a working face along the arcs that cut its pins (ryukei 23); FTC 07's working NURBS 33b57350 meets pin f19ffa9e, which touches it at a vertex, its box meeting the NURBS' own box (ryukei 23)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
@@ -728,6 +752,25 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// (`GapNotHealed` in 28 s). Refusals spend their adjusted builds first:
 /// FTC 07 rd 31 s to 55 s, FTC 09 e1 3 s to 10 s, FTC 10 e2 27 s to 37 s,
 /// all inside the deadline.
+///
+/// Plan 22.B keeps a working face off a pin it shares nothing with (its
+/// near box cut back short of the pin): the same 18 defeature and none
+/// more, every answer and time as on main. No narrowed build in the
+/// corpus refuses at such a pair (census VII); FTC 07 rd's pair shares a
+/// vertex (#652; moved to ryukei 23).
+///
+/// Plan 22.D meets a cylinder against a cone or cylinder in closed form
+/// through its rulings (`ss_exact::ruled`) once a trace's fit has failed,
+/// outside first builds: the same 18 defeature, bit for bit, and none
+/// more, every answer and time as on main and before phase 22. FTC 07
+/// AP242 #13541's cylinder and cone (`79b561f3`/`178d3260`) now meet in
+/// two curves round the pin, and it stops at the pattern's three other
+/// pins instead: each grazes its bore along one ruling (a pinch, which the
+/// form refuses by design, question 1153), so the delete refuses
+/// `Uncertain` at `784aeb19` in 37 s (#658; moved to ryukei 23).
+/// STC 10 and CTC 02 with PMI stay out as 22.A left them (moved to
+/// ryukei 23). SolidWorks 2026 deletes CTC 02 with PMI in one operation,
+/// and refuses STC 10 and FTC 07 AP242.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),

@@ -202,6 +202,24 @@ jobs:
       - run: "! cargo tree -p ryupdm --no-default-features -e normal | grep -E 'ryucad-doc|ryukei'"
       - run: cargo test --profile ci -p ryupdm --no-default-features --lib
 
+  ryuplm-core:
+    # ryuplm built and tested without its `cad` feature: the proof that a
+    # catalogue reaches neither ryucad's file format nor the kernel, nor
+    # any other product (design 734, plan 0.B).
+    name: ryuplm without cad
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          add-rust-environment-hash-key: false
+          shared-key: ryuplm-core
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: "! cargo tree -p ryuplm --no-default-features -e normal | grep -E 'ryucad-doc|ryukei|ryusketch|ryueda |ryudfm'"
+      - run: cargo test --profile ci -p ryuplm --no-default-features --lib
+
   fuzz-check:
     # Every fuzz target type-checked on every pull request, so a change to
     # a type the targets build (a field added to `Part`, a renamed path)

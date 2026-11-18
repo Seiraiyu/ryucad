@@ -9,6 +9,8 @@ pub use ryu_doc::{canonical, error, id, source, units};
 
 pub mod activity;
 pub mod aml;
+pub mod bom;
+pub mod bom_diff;
 pub mod catalogue;
 pub mod check;
 pub mod client;
@@ -20,6 +22,7 @@ pub mod ids;
 pub mod item;
 pub mod items;
 pub mod judge;
+pub mod links;
 pub mod load;
 pub mod merge;
 pub mod notify;
@@ -27,12 +30,14 @@ pub mod numbers;
 pub mod pdm;
 pub mod proto;
 pub mod release;
+pub mod reps;
 pub mod server;
 pub mod session;
 pub mod settings;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod textconv;
+pub mod where_used;
 pub mod write;
 
 /// ryuplm, as ryupdm, ryu-git and ryu-session know it.

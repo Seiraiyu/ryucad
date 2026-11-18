@@ -1855,6 +1855,294 @@ mod tests {
         assert_eq!(middle(&[]), None);
     }
 
+    use core::f64::consts::{FRAC_PI_2, FRAC_PI_6, PI};
+
+    /// Where the sectors' apex and pole are: on +y, a unit up.
+    const APEX: Point3 = Point3::new(0.0, 1.0, 0.0);
+
+    /// A line segment of a profile from `a` to `b`.
+    fn line(key: u128, a: (f64, f64), b: (f64, f64)) -> crate::sweep::Segment {
+        use crate::geom::{Line2, Point2};
+        let (a, b) = (Point2::new(a.0, a.1), Point2::new(b.0, b.1));
+        crate::sweep::Segment {
+            key: crate::sweep::SegmentKey(key),
+            curve: Curve2::Line2(Line2::through(a, b).unwrap()),
+            t0: 0.0,
+            t1: a.distance(b),
+        }
+    }
+
+    /// A closed polygon of lines through `pts` (x the radius, y the
+    /// height).
+    fn polygon(pts: &[(f64, f64)]) -> Vec<crate::sweep::Segment> {
+        let n = pts.len();
+        (0..n)
+            .map(|i| line(10 + i as u128, pts[i], pts[(i + 1) % n]))
+            .collect()
+    }
+
+    /// The profile `segments` in the world's xy plane, turned about +y
+    /// from 0 to `turn` (plan 22.C).
+    fn turned(segments: Vec<crate::sweep::Segment>, turn: f64) -> Body {
+        use crate::geom::{Axis, Frame};
+        use crate::sweep::{Loop, LoopKey, Profile, ValidProfile, revolve};
+        let profile = ValidProfile::new(Profile {
+            frame: Frame::WORLD,
+            loops: vec![Loop {
+                key: LoopKey(1),
+                segments,
+            }],
+        })
+        .unwrap();
+        let axis = Axis::new(Point3::ORIGIN, Vector3::new(0.0, 1.0, 0.0)).unwrap();
+        revolve(OpKey(0x22c0), &profile, axis, 0.0, turn).unwrap().0
+    }
+
+    /// A unit ball's octant: the quarter disc from (0, 0) along x, round
+    /// the unit circle to (0, 1) and down the axis, turned a quarter.
+    fn ball_octant() -> Body {
+        use crate::geom::{Circle2, Frame2};
+        let f = Frame2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0), true).unwrap();
+        let arc = crate::sweep::Segment {
+            key: crate::sweep::SegmentKey(11),
+            curve: Curve2::Circle2(Circle2::new(f, 1.0).unwrap()),
+            t0: 0.0,
+            t1: FRAC_PI_2,
+        };
+        turned(
+            vec![
+                line(10, (0.0, 0.0), (1.0, 0.0)),
+                arc,
+                line(12, (0.0, 1.0), (0.0, 0.0)),
+            ],
+            FRAC_PI_2,
+        )
+    }
+
+    /// The one face of `b` whose surface passes `test`.
+    fn face_on(b: &Body, test: impl Fn(&Surface) -> bool) -> crate::topo::FaceId {
+        let found: Vec<_> = b
+            .faces()
+            .filter(|&f| test(&b.surfaces[b.faces[f].surface]))
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        found[0]
+    }
+
+    /// Whether a vertex of face `f`'s loops lies at `p`.
+    fn check_face_reaches(b: &Body, f: crate::topo::FaceId, p: Point3) -> bool {
+        b.face_loops(f).any(|l| {
+            b.loop_fins(l).any(|fin| {
+                let e = b.fins[fin].edge;
+                [b.edges[e].start, b.edges[e].end]
+                    .into_iter()
+                    .any(|v| b.vertices[v].point.distance(p) < 1e-12)
+            })
+        })
+    }
+
+    /// Face `f` of `b` split, met with a block far off (so the table has
+    /// two operands, as every real one does), with a lone vertex added to
+    /// its table at each of `points`, as a touch there would leave one
+    /// (plan 22.C): a vertex of its own, at a pole or apex when the point
+    /// is one. The pieces, and the lone vertices' ids.
+    fn split_lone(
+        b: &Body,
+        f: crate::topo::FaceId,
+        points: &[Point3],
+    ) -> (Result<Vec<Piece>, Fail>, Vec<GvId>) {
+        split_lone_with(b, None, f, points)
+    }
+
+    /// [`split_lone`] with `tool` in place of the far block.
+    fn split_lone_with(
+        b: &Body,
+        tool: Option<Body>,
+        f: crate::topo::FaceId,
+        points: &[Point3],
+    ) -> (Result<Vec<Piece>, Fail>, Vec<GvId>) {
+        use crate::boolean::table::Gv;
+        use std::collections::BTreeSet;
+        let far = tool.unwrap_or_else(|| {
+            primitive::block(OpKey(9), 0.1, 0.1, 0.1, &at(5.0, 5.0, 5.0))
+                .unwrap()
+                .0
+        });
+        let ops = [b.clone(), far];
+        // unmetered: a test
+        let mut t = build(&ops, &crate::work::Meter::free()).unwrap();
+        let face = FaceRef { op: 0, face: f };
+        let mut lone = Vec::new();
+        for &p in points {
+            t.vertices.push(Gv {
+                point: p,
+                tolerance: LINEAR_RESOLUTION,
+                originals: Vec::new(),
+                faces: BTreeSet::from([face]),
+            });
+            let g = t.vertices.len() - 1;
+            t.faces
+                .get_mut(&face)
+                .expect("the face's work")
+                .nodes
+                .push(g);
+            lone.push(g);
+        }
+        (split(&ops, &t, face), lone)
+    }
+
+    /// Plan 22.C's sectors: a cone's quarter, turned from a triangle on
+    /// its axis, has one face on the cone whose loop runs through the
+    /// apex; a unit ball's octant has one on the sphere through its pole;
+    /// neither face winds round its surface.
+    #[test]
+    fn turned_sectors_reach_their_apex_and_pole() {
+        let cone = turned(polygon(&[(0.0, 0.0), (0.5, 0.0), (0.0, 1.0)]), FRAC_PI_2);
+        let f = face_on(&cone, |s| matches!(s, Surface::Cone(_)));
+        assert!(check_face_reaches(&cone, f, APEX));
+        let ball = ball_octant();
+        let g = face_on(&ball, |s| matches!(s, Surface::Sphere(_)));
+        assert!(check_face_reaches(&ball, g, APEX));
+        let (pieces, lone) = split_lone(&cone, f, &[]);
+        assert!(lone.is_empty());
+        assert_eq!(pieces.unwrap().len(), 1);
+    }
+
+    /// Plan 22.C (#948): a cone's quarter with a lone vertex at its apex.
+    /// The cone has no closed genus and its face winds nowhere, so the
+    /// point just inside the apex that `group` places a pole by (on the
+    /// line `across` finds, in the widest gap, outside the quarter) lies
+    /// in no piece, and `pole_piece` runs. The face's own loop passes the
+    /// apex, so the vertex goes to that cycle's piece.
+    #[test]
+    fn a_lone_apex_goes_to_the_one_cycle_passing_it() {
+        let s = turned(polygon(&[(0.0, 0.0), (0.5, 0.0), (0.0, 1.0)]), FRAC_PI_2);
+        let f = face_on(&s, |x| matches!(x, Surface::Cone(_)));
+        let (pieces, lone) = split_lone(&s, f, &[APEX]);
+        let pieces = pieces.expect("split");
+        assert_eq!(pieces.len(), 1);
+        assert!(pieces[0].loops.contains(&Boundary::Lone(lone[0])));
+        assert!(
+            pieces[0]
+                .loops
+                .iter()
+                .any(|l| matches!(l, Boundary::Arcs(_)))
+        );
+    }
+
+    /// Plan 22.C (#948): a cone's quarter stopping 5e-7 below its apex
+    /// (its top corners 5.6e-7 from it, beyond a pole's reach of 4e-8),
+    /// with a lone vertex at the apex. No cycle passes the apex, so
+    /// `pole_piece` takes the point 1e-6 inside the apex on the line
+    /// through the middle of the span the face's own cycles cover (a
+    /// quarter turn, so an eighth), which lies in the face.
+    #[test]
+    fn a_lone_apex_no_cycle_passes_goes_to_the_middle_of_their_span() {
+        let top = 1.0 - 5e-7;
+        let s = turned(
+            polygon(&[(0.0, 0.0), (0.5, 0.0), (0.5 * (1.0 - top), top), (0.0, top)]),
+            FRAC_PI_2,
+        );
+        let f = face_on(&s, |x| matches!(x, Surface::Cone(_)));
+        assert!(!check_face_reaches(&s, f, APEX));
+        let (pieces, lone) = split_lone(&s, f, &[APEX]);
+        let pieces = pieces.expect("split");
+        assert_eq!(pieces.len(), 1);
+        assert!(pieces[0].loops.contains(&Boundary::Lone(lone[0])));
+    }
+
+    /// A half turn about +y of a profile whose top side is a quadratic
+    /// NURBS from (0.5, 0) to the axis at [`APEX`]: one face on a surface
+    /// of revolution, with no closed genus, whose loop runs through the
+    /// pole the profile makes there.
+    fn turned_bow() -> Body {
+        use crate::geom::{KnotVector, NurbsCurve2};
+        let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        let bow = Curve2::Nurbs2(std::sync::Arc::new(
+            NurbsCurve2::new(
+                k,
+                vec![
+                    Point2::new(0.5, 0.0),
+                    Point2::new(0.4, 0.7),
+                    Point2::new(0.0, 1.0),
+                ],
+                None,
+            )
+            .unwrap(),
+        ));
+        let top = crate::sweep::Segment {
+            key: crate::sweep::SegmentKey(11),
+            curve: bow,
+            t0: 0.0,
+            t1: 1.0,
+        };
+        turned(
+            vec![
+                line(10, (0.0, 0.0), (0.5, 0.0)),
+                top,
+                line(12, (0.0, 1.0), (0.0, 0.0)),
+            ],
+            PI,
+        )
+    }
+
+    /// Plan 22.C (#948): [`turned_bow`]'s face cut along one meridian, a
+    /// third of the way round, by a block's side through the axis. Its
+    /// two pieces both pass the pole, so a lone vertex there belongs to
+    /// neither: the point `group` places it by lies in no piece (no closed
+    /// genus, no winding cycle), and `pole_piece` answers `None`, so the
+    /// face doesn't split. Without the vertex it splits in two.
+    ///
+    /// Plan 22.C asked for a cone's half here. A cone's apex can't be
+    /// split with an arc ending at it: the darts' directions there all run
+    /// along v in the parameter plane, so `slots` can't order the face's
+    /// two boundary rulings and refuses before any grouping. A surface of
+    /// revolution's pole is ordered along the pole's line instead.
+    #[test]
+    fn two_cycles_passing_a_lone_apex_place_it_nowhere() {
+        let s = turned_bow();
+        let f = face_on(&s, |x| matches!(x, Surface::Revolution(_)));
+        assert!(check_face_reaches(&s, f, APEX));
+        let y = Vector3::new(0.0, 1.0, 0.0).normalize().unwrap();
+        let block = || {
+            primitive::block(
+                OpKey(9),
+                2.0,
+                3.0,
+                4.0,
+                &Rigid::rotation(y, -FRAC_PI_6).then_after(&at(-2.0, -1.0, -2.0)),
+            )
+            .unwrap()
+            .0
+        };
+        let (pieces, _) = split_lone_with(&s, Some(block()), f, &[]);
+        assert_eq!(pieces.expect("split").len(), 2);
+        let (pieces, _) = split_lone_with(&s, Some(block()), f, &[APEX]);
+        assert!(pieces.is_err(), "{pieces:?}");
+    }
+
+    /// Plan 22.C (#948), Step 3b: a unit ball's octant with a lone vertex
+    /// at its pole. A sphere has closed genus 0 and the face winds
+    /// nowhere, so the point `group` places the pole by (outside the
+    /// octant) lies in the region outside every outer boundary. One cycle
+    /// passes the pole, so the vertex goes to its piece, and the region
+    /// outside, left empty, is no piece.
+    #[test]
+    fn a_lone_pole_the_rest_would_take_goes_to_the_cycle_passing_it() {
+        let s = ball_octant();
+        let f = face_on(&s, |x| matches!(x, Surface::Sphere(_)));
+        let (pieces, lone) = split_lone(&s, f, &[APEX]);
+        let pieces = pieces.expect("split");
+        assert_eq!(pieces.len(), 1, "{pieces:?}");
+        assert!(pieces[0].loops.contains(&Boundary::Lone(lone[0])));
+        assert!(
+            pieces[0]
+                .loops
+                .iter()
+                .any(|l| matches!(l, Boundary::Arcs(_)))
+        );
+    }
+
     /// STC 10 #3044's sphere faces (#658, census VI, plan 21.D): its
     /// working body at the rung that refused (rung 2's narrowed retry),
     /// met at the pairs the re-trim meets them in, with the held seams it

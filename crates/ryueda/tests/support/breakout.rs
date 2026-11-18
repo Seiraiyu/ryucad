@@ -9,7 +9,8 @@
 use serde_json::json;
 
 /// A footprint's file: `pads` as `(number, x, y, w, h)` in micrometres,
-/// SMD unless `drill` (micrometres) is given, with a courtyard round them.
+/// SMD unless `drill` (micrometres) is given, with a courtyard round them
+/// and the reference designator on the silk above it.
 fn footprint(name: &str, pads: &[(&str, i64, i64, i64, i64)], drill: Option<i64>) -> String {
     let um = 1_000;
     let mut list = serde_json::Map::new();
@@ -41,6 +42,10 @@ fn footprint(name: &str, pads: &[(&str, i64, i64, i64, i64)], drill: Option<i64>
         "pads": list,
         "graphics": {"g1": {"layer": "courtyard.top", "type": "rect",
             "start": [-x * um, y * um], "end": [x * um, -y * um], "width_nm": 50_000}},
+        // The designator on the silk above the courtyard, 1 mm high, as
+        // KiCad's footprints place it.
+        "fields": {"reference": {"layer": "silk.top", "at": [0, (y + 700) * um],
+            "size_nm": [1_000_000, 1_000_000], "thickness_nm": 150_000}},
     });
     ryueda::canonical::to_string(&v)
 }

@@ -264,6 +264,14 @@ fn every_protocol_method_has_a_command() {
         ("item.edit", &["item", "edit"]),
         ("item.renumber", &["item", "renumber"]),
         ("item.delete", &["item", "delete"]),
+        ("item.link", &["item", "link"]),
+        ("item.unlink", &["item", "unlink"]),
+        ("bom.add", &["bom", "add"]),
+        ("bom.edit", &["bom", "edit"]),
+        ("bom.remove", &["bom", "remove"]),
+        ("bom.get", &["bom", "show"]),
+        ("bom.diff", &["bom", "diff"]),
+        ("bom.where_used", &["where-used"]),
         ("settings.show", &["settings", "show"]),
         ("settings.edit", &["settings", "edit"]),
         ("check", &["check"]),
@@ -354,4 +362,112 @@ fn errors_lists_every_code_and_its_keys() {
     );
     let (code, bad) = run(false, &["errors", "nope"]);
     assert_eq!((code, &bad["error"]["code"]), (1, &json!("invalid_param")));
+}
+
+/// A ryucad project at `p/mech` in both catalogues of the pair: an
+/// assembly `box` placing four `screw`s. Its project ID.
+fn mech(p: &Pair) -> &'static str {
+    const PID: &str = "33333333333333333333333333333333";
+    for top in [&p.direct, &p.daemon] {
+        let dir = top.join("p/mech");
+        let put = |rel: &str, v: Value| {
+            let f = dir.join(rel);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(f, ryuplm::canonical::to_string(&v)).unwrap();
+        };
+        put(
+            "ryucad.json",
+            json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project", "project": PID}),
+        );
+        put(
+            "parts/screw/part.json",
+            json!({"features": ["b"], "format": 1, "kind": "ryucad.part"}),
+        );
+        put(
+            "parts/screw/features/b.json",
+            json!({"format": 1, "kind": "ryucad.feature", "type": "box", "x": "1", "y": "1", "z": "1"}),
+        );
+        let ids: Vec<String> = (0..4).map(|k| format!("s{k}")).collect();
+        put(
+            "parts/box/part.json",
+            json!({"features": ids, "format": 2, "kind": "ryucad.part", "part_kind": "assembly"}),
+        );
+        for id in &ids {
+            put(
+                &format!("parts/box/features/{id}.json"),
+                json!({"format": 4, "kind": "ryucad.feature", "type": "instance", "part": "screw",
+                       "rev": "working", "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}}),
+            );
+        }
+    }
+    PID
+}
+
+#[test]
+fn links_boms_and_where_used_from_the_cli() {
+    let p = Pair::project();
+    let pid = mech(&p);
+    for n in ["BOX-1", "SCREW-1", "GLUE-1"] {
+        p.ok(&["item", "create", n]);
+    }
+    // By the project's folder, then by ID.
+    let linked = p.ok(&["item", "link", "BOX-1", "ryucad", "mech", "box"]);
+    assert_eq!(linked["item"]["links"][0]["project"], pid);
+    p.ok(&["item", "link", "SCREW-1", "ryucad", pid, "screw"]);
+    p.ok(&["bom", "add", "BOX-1", "GLUE-1", "0.5", "--unit", "kg"]);
+    let twice = p.ok(&["bom", "add", "BOX-1", "SCREW-1", "4", "--find", "10"]);
+    let line = twice["line"].as_str().unwrap().to_owned();
+    let bom = p.ok(&["bom", "show", "BOX-1"]);
+    let from: Vec<&str> = bom["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["from"].as_str().unwrap())
+        .collect();
+    assert_eq!(from, ["own", "own", "ryucad"], "{bom}");
+    assert_eq!(bom["lines"][2]["number"], "SCREW-1");
+    assert_eq!(bom["lines"][2]["quantity"], "4");
+    assert_eq!(bom["findings"][0]["code"], "bom_line_twice");
+    let check = p.ok(&["check"]);
+    assert!(
+        check["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "bom_line_twice"),
+        "{check}"
+    );
+    // A loop, and a delete that would leave a line naming nothing, are refused.
+    p.fails(&["bom", "add", "SCREW-1", "BOX-1", "1"], "bom_cycle", 1);
+    p.fails(&["item", "delete", "GLUE-1"], "bom_item_missing", 1);
+    // The line the CAD now models comes off, and the warning with it.
+    p.ok(&["bom", "remove", "BOX-1", &line]);
+    assert_eq!(p.ok(&["bom", "show", "BOX-1"])["findings"], json!([]));
+    // A link no folder holds is a warning, never a failure.
+    p.ok(&[
+        "item",
+        "link",
+        "GLUE-1",
+        "ryueda",
+        "44444444444444444444444444444444",
+        "main",
+    ]);
+    let check = p.ok(&["check"]);
+    assert!(
+        check["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "item_link_unresolved"),
+        "{check}"
+    );
+    let used = p.ok(&["where-used", "SCREW-1", "--working", "--no-dependents"]);
+    let via: Vec<&str> = used["working"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["via"].as_str().unwrap())
+        .collect();
+    assert_eq!(via, ["ryucad"], "{used}");
+    p.ok(&["item", "unlink", "GLUE-1", "ryueda"]);
 }

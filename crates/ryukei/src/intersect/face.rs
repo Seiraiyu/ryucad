@@ -2268,27 +2268,45 @@ mod tests {
         })
     }
 
-    /// The pair still refuses outside a first build too: each face is
-    /// certified to cross the other's surface (census VI, plan 21.B: the
-    /// pin grazes the bore's wall, least gaps 3.1e-9 and 3.4e-7 m), so
-    /// neither keeps off the other and no certified miss holds. It needs
-    /// an exact cylinder/cone intersection (ryukei 22).
+    /// FTC 07 AP242's cylinder and cone (plan 22.D, census VII on
+    /// cox-worker-2, 2026-11-18): each certified to cross the other's
+    /// surface, the pin through the bore's wall (least gap 3.1e-9 m
+    /// between the faces). The trace certifies three chains, but no fit
+    /// of them does. Outside a first build the cylinder's rulings settle
+    /// it in closed form: `Δ` is certified positive all round (no root),
+    /// so every ruling of the pin crosses the cone, in two curves round
+    /// the pin of 78 Hermite spans each. In a first build it still
+    /// refuses, and the closed form is never tried there.
     #[test]
     #[cfg_attr(
         debug_assertions,
         ignore = "slow in a debug build: CI runs it in release"
     )]
-    fn ftc_07_ap242s_cylinder_and_cone_still_refuse() {
+    fn ftc_07_ap242s_cylinder_and_cone_meet_in_closed_form() {
+        use super::super::ss_exact::RULED_TRIED;
         let (work, pair) = ftc_07_ap242_pair();
         assert!(!sharing((&work, pair[0]), (&work, pair[1])));
+        RULED_TRIED.with(|n| n.set(0));
         // unmetered: a unit test.
         let m = Meter::free();
         let met = m.first_build(|| met_in_a_rung(&work, pair, &m));
         assert_eq!(met, Err(Failure::Uncertain));
+        assert_eq!(RULED_TRIED.with(|n| n.get()), 0, "never in a first build");
         // unmetered: a unit test.
         let m = Meter::free();
-        assert_eq!(met_in_a_rung(&work, pair, &m), Err(Failure::Uncertain));
-        // Each crosses the other's surface: certified, not uncertain.
+        let met = met_in_a_rung(&work, pair, &m).expect("the rulings' closed form");
+        assert!(RULED_TRIED.with(|n| n.get()) > 0);
+        let FaceMeet::Meet {
+            stretches,
+            contacts,
+        } = met
+        else {
+            panic!("coincident")
+        };
+        // Census VII: two stretches (the pin's two curves, cut to the
+        // faces) and no contact.
+        assert_eq!((stretches.len(), contacts.len()), (2, 0));
+        // Each face still crosses the other's surface.
         let s = |f: FaceId| &work.surfaces[work.faces[f].surface];
         for (f, g) in [(pair[0], pair[1]), (pair[1], pair[0])] {
             let signs = super::super::beside::face_keeps_off(&work, f, s(g), 1 << 9, &m);
@@ -2423,9 +2441,9 @@ mod tests {
         }
     }
 
-    /// FTC 07 AP242's pair met the other way round: the same answer (it
-    /// still refuses, census VI), inside a rung's cap: the certificate's
-    /// search is bounded (plan 21.B).
+    /// FTC 07 AP242's pair met the other way round: the same answer (the
+    /// rulings' closed form since plan 22.D, census VII: two stretches),
+    /// inside a rung's cap: the search is bounded (plan 21.B).
     #[test]
     #[cfg_attr(
         debug_assertions,
@@ -2441,7 +2459,14 @@ mod tests {
         let m = Meter::free();
         let ba = met_in_a_rung(&work, [b, a], &m);
         assert_eq!(ab, ba.map(FaceMeet::swapped));
-        assert_eq!(ab, Err(Failure::Uncertain));
+        let Ok(FaceMeet::Meet {
+            stretches,
+            contacts,
+        }) = &ab
+        else {
+            panic!("{ab:?}")
+        };
+        assert_eq!((stretches.len(), contacts.len()), (2, 0));
         assert!(spent < crate::work::Scope::Rung.limit(), "{spent} units");
         eprintln!("FTC 07 AP242's pair: {spent} units");
     }

@@ -15,6 +15,8 @@
 mod board_gen;
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/breakout_board.rs"]
+mod breakout_board;
 #[path = "support/draw.rs"]
 mod draw;
 #[path = "support/parts.rs"]
@@ -808,8 +810,8 @@ fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
     ryueda(&["daemon", "stop"]);
 }
 
-/// Design 732's bar: a track write on the placed breakout through a warm
-/// daemon, with its DRC delta, in 50 ms.
+/// Design 732's bar: a track write on the breakout as agent round 5.D
+/// routed it, through a warm daemon, with its DRC delta, in 50 ms.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -832,22 +834,12 @@ fn a_breakout_track_write_answers_its_delta_within_its_bar() {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         ryueda(&args);
     }
-    ryueda(&[
-        "board", "create", "Main", "--design", "board", "--rect", "26,20", "--id", "main",
-    ]);
-    for (r, xy, rot) in [
-        ("U1", "8,10", "0"),
-        ("C1", "8,14", "90"),
-        ("U2", "18,10", "0"),
-        ("C2", "15,6", "0"),
-        ("C3", "21,6", "0"),
-        ("R1", "12,15", "90"),
-        ("R2", "14,15", "90"),
-        ("J1", "3,10", "0"),
-    ] {
-        ryueda(&["board", "place", "main", r, "--at", xy, "--rotation", rot]);
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        ryueda(&args);
     }
-    let net = ryueda(&["board", "show", "main", "--pads"])["pads"][0]["net"]
+    let id = breakout_board::BOARD;
+    let net = ryueda(&["board", "show", id, "--pads"])["pads"][0]["net"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -859,7 +851,7 @@ fn a_breakout_track_write_answers_its_delta_within_its_bar() {
             "board",
             "track",
             "add",
-            "main",
+            id,
             "--net",
             &net,
             "--layer",

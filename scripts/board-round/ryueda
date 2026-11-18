@@ -1,0 +1,55 @@
+#!/usr/bin/env -S python3 -I
+"""The board round's ryueda: runs the real one (ROUND_RYUEDA) and logs
+every call to ROUND_LOG as a JSON line (its arguments, exit, error code,
+time, and the envelope it printed), so fixture.py can pin the IDs a write
+was answered with."""
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+
+def envelope(out):
+    """The JSON envelope `out` holds (pretty or not), or None."""
+    for text in (out, out.split(b"\n", 1)[0]):
+        try:
+            v = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(v, dict):
+            return v
+    return None
+
+
+def main():
+    real = os.environ["ROUND_RYUEDA"]
+    log = os.environ["ROUND_LOG"]
+    args = sys.argv[1:]
+    start = time.time()
+    p = subprocess.run([real] + args, capture_output=True)
+    sys.stdout.buffer.write(p.stdout)
+    sys.stderr.buffer.write(p.stderr)
+    env = envelope(p.stdout)
+    code = None
+    if env is not None and not env.get("ok", True):
+        code = (env.get("error") or {}).get("code")
+    entry = {
+        "t": round(start, 3),
+        "ms": round((time.time() - start) * 1000),
+        "args": args,
+        "exit": p.returncode,
+        "code": code,
+        "bytes": len(p.stdout),
+        # Renders' and exports' answers are small (their bytes go to
+        # --out); a huge answer isn't kept.
+        "answer": env if len(p.stdout) <= 1_000_000 else None,
+    }
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+    sys.exit(p.returncode)
+
+
+if __name__ == "__main__":
+    main()
