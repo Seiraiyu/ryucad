@@ -7,6 +7,7 @@
 
 pub mod csv;
 pub mod guess;
+pub mod history;
 pub mod json;
 pub mod mapping;
 pub mod preview;
