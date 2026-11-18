@@ -123,6 +123,33 @@ fn role(column: &str, config: &Config, exact: bool) -> Option<(String, usize)> {
     None
 }
 
+/// A tree reader's column as guess reads it (design 935): its last name,
+/// and the AML group its nearest index gives (`/alts/1/mpn` is `mpn` in
+/// group 1, `Alt[2]/MPN` is `MPN` in group 1).
+fn leaf(column: &str, kind: ReaderKind) -> (String, Option<usize>) {
+    let mut name = column.to_owned();
+    let mut group = None;
+    for step in column.split('/').filter(|s| !s.is_empty()) {
+        match kind {
+            ReaderKind::Json => match step.parse::<usize>() {
+                Ok(i) => group = Some(i),
+                Err(_) => name = step.replace("~1", "/").replace("~0", "~"),
+            },
+            _ => {
+                let s = step.trim_start_matches('@');
+                match s.strip_suffix(']').and_then(|x| x.split_once('[')) {
+                    Some((n, i)) => {
+                        name = n.to_owned();
+                        group = i.parse::<usize>().ok().and_then(|i| i.checked_sub(1));
+                    }
+                    None => name = s.to_owned(),
+                }
+            }
+        }
+    }
+    (name, group)
+}
+
 /// The mapping proposed for `table`, and each column's verdict.
 pub fn propose(
     name: &str,
@@ -130,6 +157,7 @@ pub fn propose(
     reader: Reader,
     config: &Config,
 ) -> (Mapping, Vec<Value>) {
+    let kind = reader.kind;
     let mut given: BTreeMap<String, String> = BTreeMap::new();
     let mut verdicts: Vec<Value> = table.columns.iter().map(|c| json!({"column": c})).collect();
     for exact in [true, false] {
@@ -137,7 +165,20 @@ pub fn propose(
             if verdicts[i].get("target").is_some() {
                 continue;
             }
-            let Some((r, g)) = role(c, config, exact) else {
+            let found = if kind.tree() {
+                let (n, g) = leaf(c, kind);
+                role(&n, config, exact).map(|(r, g0)| {
+                    let g = if r.starts_with("aml.") {
+                        g.unwrap_or(g0)
+                    } else {
+                        0
+                    };
+                    (r, g)
+                })
+            } else {
+                role(c, config, exact)
+            };
+            let Some((r, g)) = found.filter(|(_, g)| *g < 10) else {
                 continue;
             };
             let t = match r.strip_prefix("aml.") {
@@ -410,5 +451,59 @@ mod tests {
         );
         assert_eq!(m.numbers, Numbers::Assign(None));
         assert_eq!(m.key, "Manufacturer Part Number 1");
+    }
+
+    #[test]
+    fn tree_columns_are_named_by_their_last_step() {
+        assert_eq!(
+            leaf("/alts/1/mpn", ReaderKind::Json),
+            ("mpn".to_owned(), Some(1))
+        );
+        assert_eq!(leaf("/a~1b", ReaderKind::Json), ("a/b".to_owned(), None));
+        assert_eq!(
+            leaf("Alt[2]/MPN", ReaderKind::Xml),
+            ("MPN".to_owned(), Some(1))
+        );
+        assert_eq!(leaf("@id", ReaderKind::Xml), ("id".to_owned(), None));
+        assert_eq!(
+            leaf("#level", ReaderKind::Json),
+            ("#level".to_owned(), None)
+        );
+        let config =
+            Config::from_json_in(&json!({"format": 5, "kind": "ryupdm.config"}), "ryuplm").unwrap();
+        let t = Table::from_records(vec![crate::import::rows::Leaves {
+            place: "/items/0".into(),
+            cells: vec![
+                ("#level".into(), "0".into()),
+                ("/id".into(), "1".into()),
+                ("/pn".into(), "A".into()),
+                ("/qty".into(), "1".into()),
+                ("/sources/0/mpn".into(), "M".into()),
+                ("/sources/1/manufacturer".into(), "Acme".into()),
+                ("/sources/12/mpn".into(), "Z".into()),
+            ],
+        }])
+        .unwrap();
+        let mut r = csv();
+        r.kind = ReaderKind::Json;
+        r.delimiter = None;
+        r.records = Some("/items".into());
+        r.children = Some("/parts".into());
+        let (m, cols) = propose("t", &t, r, &config);
+        let targets: Vec<Option<&str>> = cols.iter().map(|c| c["target"].as_str()).collect();
+        assert_eq!(
+            targets,
+            [
+                Some("bom.level"),
+                Some("key"),
+                Some("number"),
+                Some("bom.quantity"),
+                Some("aml.0.mpn"),
+                Some("aml.1.manufacturer"),
+                None
+            ]
+        );
+        assert_eq!(m.bom.clone().unwrap().level.as_deref(), Some("#level"));
+        Mapping::read("t", m.to_text().as_bytes()).unwrap();
     }
 }
