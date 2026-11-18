@@ -167,6 +167,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         within: Vec<String>,
     },
+    #[serde(rename = "bom.where_used")]
+    BomWhereUsed {
+        item: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_dependents: bool,
+        /// Working files only, no releases.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        working: bool,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]

@@ -88,6 +88,20 @@ enum Command {
     /// its own lines edited (add, edit, remove), and what changed (diff).
     #[command(subcommand)]
     Bom(BomCmd),
+    /// Every item whose own lines or representations' lines use ITEM:
+    /// here, in other catalogues' checkouts, and in their releases.
+    WhereUsed {
+        item: String,
+        /// Search the catalogues under this folder (else pdm.dependents).
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+        /// Don't search the pdm.dependents folders.
+        #[arg(long)]
+        no_dependents: bool,
+        /// Working files only: no releases.
+        #[arg(long)]
+        working: bool,
+    },
     /// Items added, removed and changed between two revisions.
     Diff {
         from: Option<String>,
@@ -535,6 +549,20 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 item: item.clone(),
                 product: product.clone(),
                 expected_revision: exp(expect),
+            },
+        ),
+        Command::WhereUsed {
+            item,
+            within,
+            no_dependents,
+            working,
+        } => (
+            root()?,
+            Request::BomWhereUsed {
+                item: item.clone(),
+                within: absolute(here, within),
+                no_dependents: *no_dependents,
+                working: *working,
             },
         ),
         Command::Bom(BomCmd::Show {

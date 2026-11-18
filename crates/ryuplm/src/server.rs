@@ -237,6 +237,20 @@ fn dispatch(
             to.as_deref(),
             &within,
         )?,
+        Request::BomWhereUsed {
+            item,
+            within,
+            no_dependents,
+            working,
+        } => crate::where_used::answer(
+            session,
+            &crate::where_used::Ask {
+                item: &item,
+                within: &within,
+                no_dependents,
+                working,
+            },
+        )?,
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,
