@@ -2,8 +2,9 @@
 //!
 //! A coincident pair is reported as such; a pair with a closed form
 //! ([`super::ss_exact`]) gets exact curves; a cylinder against a cone or
-//! cylinder whose trace fails gets the closed form through its rulings
-//! ([`super::ss_exact::ruled`], plan 22.D); any other analytic pair is
+//! cylinder whose trace or its fit fails gets the closed form through
+//! its rulings ([`super::ss_exact::ruled`], plan 22.D); any other
+//! analytic pair is
 //! traced ([`super::ss_trace`]) and fitted ([`super::fit`]), and any other
 //! surface (a pipe, a NURBS, a swept surface) and an analytic one are
 //! traced in the first's parameter plane ([`super::sheet_trace`]), and
@@ -169,7 +170,21 @@ pub(crate) fn meet(
         }
     }
     let mut points = topo.points;
-    let branches = fitted(&chains, order, swapped, &mut points, m)?;
+    let branches = match fitted(&chains, order, swapped, &mut points, m) {
+        Ok(branches) => branches,
+        // A cylinder against a cone or cylinder can trace and still fail
+        // its fit: FTC 07 AP242's pin through its bore's wall (#658, plan
+        // 22.D, census VII) traces in three chains no fit certifies. Its
+        // rulings settle it, behind the same gate: only once the fit has
+        // failed, and never in a re-trim rung's first build.
+        Err(Failure::Uncertain) if !m.in_first_build() => {
+            return match ss_exact::ruled(a, b, region, m)? {
+                Some((raws, points)) => exact_hit(raws, points, [a, b], m),
+                None => Err(Failure::Uncertain),
+            };
+        }
+        Err(e) => return Err(e),
+    };
     Ok(SurfaceHit::Meet { branches, points })
 }
 
