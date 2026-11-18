@@ -34,6 +34,8 @@ pub struct PadInfo {
     pub size: [i64; 2],
     pub top: bool,
     pub bottom: bool,
+    /// On every inner layer.
+    pub inner: bool,
     pub net: Option<String>,
     pub copper: Shape,
     /// Its solder mask openings on the top and bottom, placed.
@@ -47,6 +49,9 @@ pub struct HoleInfo {
     pub shape: HoleShape,
     pub plated: bool,
     pub of: HoleOf,
+    /// The copper layers it passes through, by index: the whole board
+    /// but for a blind or buried via's.
+    pub span: (usize, usize),
 }
 
 /// What a drill belongs to.
@@ -78,10 +83,14 @@ pub struct TrackInfo {
     pub shape: Shape,
 }
 
-/// A via as drawn: a disc on both copper layers and a plated drill.
+/// A via as drawn: a disc on every copper layer of its span and a plated
+/// drill.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViaInfo {
     pub id: crate::id::Id,
+    /// Its span's first and last copper layers, by index.
+    pub from: usize,
+    pub to: usize,
     pub net: String,
     pub at: Point,
     pub drill_nm: i64,
@@ -135,6 +144,29 @@ pub struct BoardShapes {
     pub edges: Shape,
     /// What couldn't be built, and characters the font lacks.
     pub notices: Vec<Fault>,
+    /// How many copper layers the board has; 0 in shapes made by hand,
+    /// read through [`BoardShapes::n`].
+    pub copper_layers: usize,
+}
+
+impl BoardShapes {
+    /// The board's copper layer count (two when unset).
+    pub fn n(&self) -> usize {
+        self.copper_layers.max(2)
+    }
+}
+
+impl PadInfo {
+    /// Whether the pad has copper on layer `l` of `n`.
+    pub fn on(&self, l: usize, n: usize) -> bool {
+        if l == 0 {
+            self.top
+        } else if l + 1 >= n {
+            self.bottom
+        } else {
+            self.inner
+        }
+    }
 }
 
 /// The outline region (cutouts as holes) and its boundary.
@@ -206,20 +238,22 @@ struct One {
 fn unsupported(o: &Occ, why: &str) -> Fault {
     Fault::error(
         Code::BoardFootprintUnsupported,
-        format!("{}'s footprint {why}; stage 5 can't build it", o.label()),
+        format!("{}'s footprint {why}; ryueda can't build it yet", o.label()),
     )
     .with("occurrence", &o.reference)
 }
 
-fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Preset) -> One {
+fn one(
+    board: &str,
+    o: &Occ,
+    f: &Footprint,
+    place: Place,
+    preset: &preset::Preset,
+    n: usize,
+) -> One {
     let mut out = One::default();
     if f.graphics.values().any(|g| g.layer == "edge") {
         out.notices.push(unsupported(o, "draws on the edge layer"));
-        return out;
-    }
-    if f.pads.values().any(|p| pad::copper_sides(p).2) {
-        out.notices
-            .push(unsupported(o, "has a pad on copper.inner"));
         return out;
     }
     let owner = format!("{board}:{}", o.label());
@@ -241,12 +275,18 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
             ));
             continue;
         };
-        let (top, bottom, _) = pad::copper_sides(p);
-        if top {
-            put(&mut out, "copper.top", copper.clone());
-        }
-        if bottom {
-            put(&mut out, "copper.bottom", copper.clone());
+        let (top, bottom, inner) = pad::copper_sides(p);
+        for (l, name) in super::stackup::names(n).iter().enumerate() {
+            let on = if l == 0 {
+                top
+            } else if l + 1 == n {
+                bottom
+            } else {
+                inner
+            };
+            if on {
+                put(&mut out, name, copper.clone());
+            }
         }
         let mut mask: [Option<Shape>; 2] = [None, None];
         for (i, side) in ["top", "bottom"].into_iter().enumerate() {
@@ -282,6 +322,7 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
                     occ: o.reference.clone(),
                     pad: names[&id.to_string()].clone(),
                 },
+                span: (0, n - 1),
             });
         }
         let at = place.point(Point::new(p.at[0], p.at[1]));
@@ -295,6 +336,7 @@ fn one(board: &str, o: &Occ, f: &Footprint, place: Place, preset: &preset::Prese
             size: p.size,
             top,
             bottom,
+            inner,
             net: p.number.as_ref().and_then(|n| o.nets.get(n)).cloned(),
             copper: copper.placed(&place, Polarity::Positive),
             mask,
@@ -388,6 +430,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
     })?;
     let (_, occs) = occ::occurrences(p, &file.design)?;
     let board = b.id.to_string();
+    let n = super::stackup::copper_count(file);
     let placed: Vec<(&Occ, Place)> = occs
         .iter()
         .filter_map(|o| {
@@ -407,7 +450,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
     let parts: Vec<One> = placed
         .par_iter()
         .map(|(o, place)| match (&o.footprint, &o.footprint_error) {
-            (Some(f), _) => one(&board, o, f, *place, preset),
+            (Some(f), _) => one(&board, o, f, *place, preset, n),
             (None, e) => One {
                 notices: vec![unsupported(
                     o,
@@ -422,7 +465,10 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             },
         })
         .collect();
-    let mut out = BoardShapes::default();
+    let mut out = BoardShapes {
+        copper_layers: n,
+        ..BoardShapes::default()
+    };
     for one in parts {
         for (layer, owner, s) in one.layers {
             out.layers.entry(layer).or_default().push((owner, s));
@@ -439,6 +485,9 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         let (Ok(track), true) = (&t.item, fine(&t.faults)) else {
             continue;
         };
+        if track.layer.index(n).is_none() {
+            continue;
+        }
         let shape = track_shape(track);
         out.layers
             .entry(track.layer.name())
@@ -456,11 +505,14 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         let (Ok(via), true) = (&v.item, fine(&v.faults)) else {
             continue;
         };
+        let Some((from, to)) = via.span(n) else {
+            continue;
+        };
         let at = Point::new(via.at[0], via.at[1]);
         let shape = disc(at, via.diameter_nm);
-        for layer in ["copper.top", "copper.bottom"] {
+        for layer in &super::stackup::names(n)[from..=to] {
             out.layers
-                .entry(layer.to_owned())
+                .entry(layer.clone())
                 .or_default()
                 .push((format!("{board}:via/{vid}"), shape.clone()));
         }
@@ -472,9 +524,12 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             },
             plated: true,
             of: HoleOf::Via(vid.clone()),
+            span: (from, to),
         });
         out.vias.push(ViaInfo {
             id: vid.clone(),
+            from,
+            to,
             net: via.net.clone(),
             at,
             drill_nm: via.drill_nm,
@@ -494,6 +549,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             },
             plated: false,
             of: HoleOf::Hole(hid.clone()),
+            span: (0, n - 1),
         });
     }
     let (region, edges) = outline(file);
@@ -510,13 +566,13 @@ pub fn pads_json(s: &BoardShapes) -> Value {
         .pads
         .iter()
         .map(|pd| {
-            let layers: Vec<&str> = [
-                pd.top.then_some("copper.top"),
-                pd.bottom.then_some("copper.bottom"),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            let n = s.n();
+            let layers: Vec<String> = super::stackup::names(n)
+                .into_iter()
+                .enumerate()
+                .filter(|(l, _)| pd.on(*l, n))
+                .map(|(_, name)| name)
+                .collect();
             json!({
                 "reference": pd.reference,
                 "occurrence": pd.occurrence,
@@ -546,6 +602,15 @@ pub(crate) mod tests {
     pub(crate) fn placed_with(
         extra: &[(String, String)],
     ) -> (tempfile::TempDir, Project, crate::id::Id) {
+        placed_on(2, extra)
+    }
+
+    /// [`placed_with`] on a board of `layers` copper layers (an even
+    /// stackup when more than two).
+    pub(crate) fn placed_on(
+        layers: usize,
+        extra: &[(String, String)],
+    ) -> (tempfile::TempDir, Project, crate::id::Id) {
         let (dir, p) = crate::netlist::tests::project(&[]);
         let design = crate::netlist::one_design(&p, None).unwrap();
         let (_, occs) = occ::occurrences(&p, &design).unwrap();
@@ -556,11 +621,14 @@ pub(crate) mod tests {
             preset: "jlc-2l".into(),
             outline: super::super::file::Contour::rect(50_000_000, 50_000_000),
             cutouts: vec![],
-            stackup: None,
+            stackup: (layers > 2).then(|| {
+                super::super::stackup::even(&super::super::preset::JLC_2L, layers).unwrap()
+            }),
         };
+        let format = if layers > 2 { 2 } else { 1 };
         files.insert(
             "boards/b/board.json".into(),
-            crate::doc::to_string(&board, super::super::BOARD_KIND, 1).into_bytes(),
+            crate::doc::to_string(&board, super::super::BOARD_KIND, format).into_bytes(),
         );
         for (i, o) in occs.iter().filter(|o| o.footprint.is_some()).enumerate() {
             let pl = super::super::file::Placement {
@@ -594,6 +662,66 @@ pub(crate) mod tests {
             .flat_map(|o| o.nets.values().cloned())
             .next()
             .unwrap()
+    }
+
+    #[test]
+    fn four_layers_carry_tracks_vias_and_through_pads() {
+        let (_d, p0, _) = placed();
+        let net = a_net(&p0);
+        let extra = vec![
+            (
+                "boards/b/tracks/t1.json".to_owned(),
+                format!(
+                    r#"{{"format":2,"kind":"ryueda.track","layer":"in2","net":"{net}","points":[[1000000,1000000],[9000000,1000000]],"width_nm":250000}}"#
+                ),
+            ),
+            (
+                "boards/b/vias/v1.json".to_owned(),
+                format!(
+                    r#"{{"at":[9000000,1000000],"diameter_nm":600000,"drill_nm":300000,"format":2,"kind":"ryueda.via","net":"{net}","to":"in2"}}"#
+                ),
+            ),
+            (
+                "boards/b/vias/v2.json".to_owned(),
+                format!(
+                    r#"{{"at":[20000000,1000000],"diameter_nm":600000,"drill_nm":300000,"format":1,"kind":"ryueda.via","net":"{net}"}}"#
+                ),
+            ),
+        ];
+        let (_dir, p, id) = placed_on(4, &extra);
+        let s = build(&p, &p.boards[&id]).unwrap();
+        assert_eq!(s.n(), 4);
+        let on = |l: &str, owner: &str| {
+            s.layers
+                .get(l)
+                .is_some_and(|v| v.iter().any(|(o, _)| o == owner))
+        };
+        assert!(on("copper.in2", "b:track/t1") && !on("copper.top", "b:track/t1"));
+        for (l, blind, through) in [
+            ("copper.top", true, true),
+            ("copper.in1", true, true),
+            ("copper.in2", true, true),
+            ("copper.bottom", false, true),
+        ] {
+            assert_eq!(on(l, "b:via/v1"), blind, "{l}");
+            assert_eq!(on(l, "b:via/v2"), through, "{l}");
+        }
+        let v1 = s.vias.iter().find(|v| v.id.as_str() == "v1").unwrap();
+        assert_eq!((v1.from, v1.to), (0, 2));
+        let h1 = s.holes.iter().find(|h| h.owner == "b:via/v1").unwrap();
+        assert_eq!(h1.span, (0, 2));
+        // Surface pads stay on their side; nothing is unsupported.
+        assert!(
+            s.pads
+                .iter()
+                .all(|pd| pd.top && !pd.inner && !pd.bottom || pd.top && pd.inner && pd.bottom)
+        );
+        assert!(s.notices.is_empty(), "{:?}", s.notices);
+        // On two layers the same board has only its two copper layers.
+        let (_d2, p2, id2) = placed();
+        let s2 = build(&p2, &p2.boards[&id2]).unwrap();
+        assert_eq!(s2.n(), 2);
+        assert!(s2.layers.keys().all(|k| !k.starts_with("copper.in")));
     }
 
     #[test]

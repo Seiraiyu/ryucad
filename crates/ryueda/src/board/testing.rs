@@ -41,6 +41,7 @@ pub fn board(w: i64, h: i64) -> BoardShapes {
     BoardShapes {
         outline,
         edges,
+        copper_layers: 2,
         ..BoardShapes::default()
     }
 }
@@ -70,6 +71,7 @@ impl BoardShapes {
             size: [size.0, size.1],
             top: true,
             bottom: false,
+            inner: false,
             net: net.map(Into::into),
             mask: [Some(copper.clone()), None],
             copper,
@@ -98,6 +100,7 @@ impl BoardShapes {
             size: [side, side],
             top: true,
             bottom: true,
+            inner: true,
             net: net.map(Into::into),
             mask: [Some(copper.clone()), Some(copper.clone())],
             copper,
@@ -113,6 +116,7 @@ impl BoardShapes {
                 occ: occ.into(),
                 pad: pad.into(),
             },
+            span: (0, self.n() - 1),
         });
         self
     }
@@ -152,6 +156,8 @@ impl BoardShapes {
         let p = Point::new(at.0, at.1);
         self.vias.push(ViaInfo {
             id: id(vid, "via"),
+            from: 0,
+            to: self.n() - 1,
             net: net.into(),
             at: p,
             drill_nm: drill,
@@ -163,6 +169,7 @@ impl BoardShapes {
             shape: HoleShape::Round { at: p, d: drill },
             plated: true,
             of: HoleOf::Via(id(vid, "via")),
+            span: (0, self.n() - 1),
         });
         self
     }
@@ -176,7 +183,40 @@ impl BoardShapes {
             },
             plated: false,
             of: HoleOf::Hole(id(hid, "hole")),
+            span: (0, self.n() - 1),
         });
+        self
+    }
+
+    /// The same board on `n` copper layers: through pads', holes' and
+    /// vias' spans made whole again (call it before adding blind vias).
+    pub fn layers(&mut self, n: usize) -> &mut Self {
+        self.copper_layers = n;
+        for h in &mut self.holes {
+            h.span = (0, n - 1);
+        }
+        for v in &mut self.vias {
+            v.from = 0;
+            v.to = n - 1;
+        }
+        self
+    }
+
+    /// A via over layers `span.0..=span.1`.
+    pub fn blind(
+        &mut self,
+        vid: &str,
+        net: &str,
+        at: (i64, i64),
+        drill: i64,
+        diameter: i64,
+        span: (usize, usize),
+    ) -> &mut Self {
+        self.via(vid, net, at, drill, diameter);
+        let v = self.vias.last_mut().unwrap();
+        v.from = span.0;
+        v.to = span.1;
+        self.holes.last_mut().unwrap().span = span;
         self
     }
 
