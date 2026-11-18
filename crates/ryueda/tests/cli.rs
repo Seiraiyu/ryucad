@@ -4475,6 +4475,46 @@ fn place_help_lists_every_form() {
     }
 }
 
+/// A board command's help, its words joined by single spaces.
+fn board_help(args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ryueda(&dir.path().join("run"))
+        .arg("board")
+        .args(args)
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "board {args:?} --help");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Every board `--ops` says how its numbers read: integers nanometres
+/// (and millidegrees), strings lengths (and degrees). Round 5.D placed
+/// with `"rotation": 180` and got 0.18 degrees.
+#[test]
+fn board_ops_help_says_how_numbers_read() {
+    for args in [
+        &["place"][..],
+        &["track", "add"],
+        &["track", "edit"],
+        &["via", "add"],
+        &["hole", "add"],
+        &["create"],
+    ] {
+        let help = board_help(args);
+        assert!(
+            help.contains("integers are nanometres"),
+            "board {args:?}: {help}"
+        );
+    }
+    let help = board_help(&["place"]);
+    assert!(help.contains("millidegrees"), "{help}");
+}
+
 #[test]
 fn bom_answers_lines_and_writes_csv_to_out() {
     let p = Pair::breakout();

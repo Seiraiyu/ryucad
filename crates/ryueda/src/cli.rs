@@ -1590,7 +1590,8 @@ enum BoardCmd {
         /// Degrees counterclockwise.
         #[arg(long, allow_hyphen_values = true)]
         rotation: Option<String>,
-        /// JSON: [{ref, at: [x, y], rotation?}].
+        /// JSON: [{ref, at: [x, y], rotation?}]; integers are nanometres (a
+        /// rotation millidegrees), strings lengths (a rotation degrees): "90", not 90.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation"])]
         ops: Option<String>,
         #[command(flatten)]
@@ -1696,7 +1697,8 @@ enum TrackCmd {
         path: Vec<String>,
         #[arg(long)]
         id: Option<String>,
-        /// JSON: [{net, layer, width?, path: [[x, y] | "R1/1", ...], id?}].
+        /// JSON: [{net, layer, width?, path: [[x, y] | "R1/1", ...], id?}]; integers
+        /// are nanometres, strings lengths.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "layer", "width", "path", "id"])]
         ops: Option<String>,
         #[command(flatten)]
@@ -1715,7 +1717,8 @@ enum TrackCmd {
         #[arg(long, num_args = 2.., value_name = "P")]
         path: Vec<String>,
         /// JSON: {net?, layer?, width?, path?: [["x", "y"] | "R1/1", ...]}, for
-        /// points with a negative coordinate.
+        /// points with a negative coordinate; integers are nanometres, strings
+        /// lengths.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "layer", "width", "path"])]
         ops: Option<String>,
         #[command(flatten)]
@@ -1747,7 +1750,8 @@ enum ViaCmd {
         diameter: Option<String>,
         #[arg(long)]
         id: Option<String>,
-        /// JSON: [{net, at, drill?, diameter?, id?}].
+        /// JSON: [{net, at, drill?, diameter?, id?}]; integers are nanometres,
+        /// strings lengths.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "at", "drill", "diameter", "id"])]
         ops: Option<String>,
         #[command(flatten)]
@@ -1774,7 +1778,7 @@ enum HoleCmd {
         drill: Option<String>,
         #[arg(long)]
         id: Option<String>,
-        /// JSON: [{at, drill, id?}].
+        /// JSON: [{at, drill, id?}]; integers are nanometres, strings lengths.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["at", "drill", "id"])]
         ops: Option<String>,
         #[command(flatten)]
