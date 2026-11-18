@@ -59,3 +59,43 @@ fn nested_boms_read_as_indented_ones() {
         );
     }
 }
+
+type Seen = (String, String, Vec<String>, Option<String>, Option<String>);
+
+/// What a mapped row says, apart from its row number and the columns'
+/// names (a CSV's `Note` is a JSON reader's `/Note`).
+fn seen(rows: &[records::Mapped]) -> Vec<Seen> {
+    rows.iter()
+        .map(|r| {
+            (
+                r.record.key.clone(),
+                serde_json::to_string(&r.values).unwrap(),
+                r.extra.values().cloned().collect(),
+                r.record.parent.clone(),
+                r.record.quantity.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn csv_json_and_xml_saying_the_same_read_the_same() {
+    use ryuplm::import::{mapping::ReaderKind, rows::Table};
+    let (files, m, csv, _) = ryuplm::testing::import_source("trees", 120);
+    let config = ryupdm::config::Config::read_in(&files, "ryuplm").unwrap();
+    let unit = ryuplm::load::Catalogue::load(&files)
+        .unwrap()
+        .manifest
+        .default_unit;
+    let t = Table::from_raw(import::csv::parse(&csv, ',').unwrap(), 1).unwrap();
+    let (want, want_refused) = records::map(&t, &m, &config, unit).unwrap();
+    let (json_text, xml_text) = ryuplm::testing::csv_as_trees(&csv);
+    for (kind, text) in [(ReaderKind::Json, json_text), (ReaderKind::Xml, xml_text)] {
+        let tm = ryuplm::testing::tree_mapping(&m, kind);
+        let table = import::read_table(text.as_bytes(), &tm.reader).unwrap();
+        assert_eq!(table.rows.len(), t.rows.len(), "{kind:?}");
+        let (got, refused) = records::map(&table, &tm, &config, unit).unwrap();
+        assert_eq!(seen(&got), seen(&want), "{kind:?}");
+        assert_eq!(refused.len(), want_refused.len(), "{kind:?}");
+    }
+}
