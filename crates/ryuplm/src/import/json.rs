@@ -7,7 +7,7 @@
 //! among them. It reads as it goes and builds no tree.
 
 use super::rows::{Leaves, Refusal};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The deepest nesting read: deeper is refused, which bounds the
 /// recursion too.
@@ -68,6 +68,81 @@ fn utf8(bytes: &[u8]) -> Result<&str, Refusal> {
         let line = 1 + b[..e.valid_up_to()].iter().filter(|c| **c == b'\n').count();
         Refusal::file(format!("line {line} isn't UTF-8; JSON is UTF-8"))
     })
+}
+
+/// What a survey knows of the arrays with one pattern (indices as `*`):
+/// how many objects they hold, up to 1,024 of their keys, and when the
+/// pattern was first seen.
+#[derive(Default)]
+struct Stat {
+    objects: usize,
+    keys: BTreeSet<String>,
+    order: usize,
+}
+
+/// `import guess`'s proposal for a JSON file (design 935): the concrete
+/// array holding the most objects (the first seen on a tie) as records,
+/// unless `records` names them, and as children the array of objects one
+/// key below a record that shares at least two keys with the records and
+/// at least half of its own. JSON Lines' records are `""`.
+pub fn survey(
+    bytes: &[u8],
+    lines: bool,
+    records: Option<&str>,
+) -> Result<(String, Option<String>), Refusal> {
+    let text = utf8(bytes)?;
+    let mut stats: BTreeMap<String, Stat> = BTreeMap::new();
+    if lines {
+        for (i, line) in text.split('\n').enumerate() {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut p = Parser::new(line, i as u64 + 1, None);
+            p.ws();
+            p.survey_value(&mut "/*".to_owned(), Some(""), &mut stats)?;
+            p.end()?;
+        }
+    } else {
+        let mut p = Parser::new(text, 1, None);
+        p.ws();
+        p.survey_value(&mut String::new(), None, &mut stats)?;
+        p.end()?;
+    }
+    let records = match records {
+        Some(r) => tokens(r)
+            .ok_or_else(|| Refusal::file(format!("records {r:?} isn't a JSON Pointer")))?
+            .iter()
+            .map(|x| format!("/{}", escape(x)))
+            .collect::<String>(),
+        None if lines => String::new(),
+        None => stats
+            .iter()
+            .filter(|(k, s)| s.objects > 0 && !k.split('/').any(|t| t == "*"))
+            .max_by_key(|(_, s)| (s.objects, std::cmp::Reverse(s.order)))
+            .map(|(k, _)| k.clone())
+            .ok_or_else(|| {
+                Refusal::file("no array of objects to read as records; name one with --records")
+            })?,
+    };
+    let Some(rs) = stats.get(&records) else {
+        return Ok((records, None));
+    };
+    let prefix = format!("{records}/*/");
+    let children = stats
+        .iter()
+        .filter(|(k, s)| {
+            s.objects > 0
+                && k.strip_prefix(&prefix)
+                    .is_some_and(|rest| !rest.contains('/'))
+        })
+        .filter(|(_, s)| {
+            let common = s.keys.intersection(&rs.keys).count();
+            common >= 2 && common * 2 >= s.keys.len()
+        })
+        .min_by_key(|(_, s)| s.order)
+        .map(|(k, _)| format!("/{}", &k[prefix.len()..]));
+    Ok((records, children))
 }
 
 struct Parser<'a> {
@@ -515,6 +590,55 @@ impl<'a> Parser<'a> {
             _ => Err(self.err(format!("the children at {ptr} aren't an array"))),
         }
     }
+
+    /// The value here at `pattern`, into `stats`: an object directly in
+    /// an array counts under the array's pattern (`owner`), with its keys.
+    fn survey_value(
+        &mut self,
+        pattern: &mut String,
+        owner: Option<&str>,
+        stats: &mut BTreeMap<String, Stat>,
+    ) -> Result<(), Refusal> {
+        match self.peek() {
+            Some(b'{') => {
+                if let Some(a) = owner {
+                    let n = stats.len();
+                    stats
+                        .entry(a.to_owned())
+                        .or_insert_with(|| Stat {
+                            order: n,
+                            ..Stat::default()
+                        })
+                        .objects += 1;
+                }
+                let len = pattern.len();
+                self.object(&mut |p, k| {
+                    if let Some(a) = owner
+                        && let Some(s) = stats.get_mut(a)
+                        && s.keys.len() < 1024
+                    {
+                        s.keys.insert(k.clone());
+                    }
+                    pattern.push('/');
+                    pattern.push_str(&escape(&k));
+                    let r = p.survey_value(pattern, None, stats);
+                    pattern.truncate(len);
+                    r
+                })
+            }
+            Some(b'[') => {
+                let here = pattern.clone();
+                let len = pattern.len();
+                self.array(&mut |p, _| {
+                    pattern.push_str("/*");
+                    let r = p.survey_value(pattern, Some(here.as_str()), stats);
+                    pattern.truncate(len);
+                    r
+                })
+            }
+            _ => self.scalar().map(|_| ()),
+        }
+    }
 }
 
 /// A JSON Pointer's reference tokens, unescaped: `""` has none, and a
@@ -781,5 +905,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.message.contains("UTF-8"));
+    }
+
+    #[test]
+    fn a_survey_proposes_the_records_and_their_children() {
+        let doc = br#"{"meta": {"tags": [{"k": 1}]}, "items": [
+            {"id": 1, "pn": "A", "qty": 1, "mfrs": [{"name": "M"}], "parts": [{"id": 2, "pn": "B", "qty": 2}]},
+            {"id": 3, "pn": "C", "qty": 1}]}"#;
+        assert_eq!(
+            survey(doc, false, None).unwrap(),
+            ("/items".to_owned(), Some("/parts".to_owned()))
+        );
+        assert_eq!(
+            survey(doc, false, Some("/meta/tags")).unwrap(),
+            ("/meta/tags".to_owned(), None)
+        );
+        let lines = b"{\"id\": 1, \"pn\": \"A\"}\n{\"id\": 2, \"pn\": \"B\", \"parts\": [{\"id\": 3, \"pn\": \"C\"}]}\n";
+        assert_eq!(
+            survey(lines, true, None).unwrap(),
+            (String::new(), Some("/parts".to_owned()))
+        );
+        assert!(survey(br#"{"a": 1}"#, false, None).is_err());
     }
 }

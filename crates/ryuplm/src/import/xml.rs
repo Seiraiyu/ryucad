@@ -7,7 +7,7 @@
 use super::rows::{Leaves, Refusal};
 use super::text::{self, Encoding};
 use roxmltree::{Document, Node};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The deepest element nesting read: deeper is refused, which bounds the
 /// recursion too.
@@ -233,6 +233,95 @@ fn flatten(
     Ok(())
 }
 
+/// An element's names, as a record's columns would start them: its
+/// attributes (`@a`) and its child elements' names.
+fn names(n: Node<'_, '_>) -> BTreeSet<String> {
+    n.attributes()
+        .map(|a| format!("@{}", a.name()))
+        .chain(
+            n.children()
+                .filter(|c| c.is_element())
+                .map(|c| c.tag_name().name().to_owned()),
+        )
+        .collect()
+}
+
+/// `import guess`'s proposal for an XML file (design 935): as records, the
+/// element path whose name repeats most under one parent (counting only
+/// names that repeat; the first seen on a tie), unless `records` names
+/// them; as children, the first element one or two steps below a record
+/// named as the record is, or sharing at least two names with the records
+/// and at least half of its own.
+pub fn survey(bytes: &[u8], records: Option<&str>) -> Result<(String, Option<String>), Refusal> {
+    let text = decode(bytes)?;
+    let doc = parse(&text)?;
+    let records = match records {
+        Some(r) => r.to_owned(),
+        None => {
+            let path_of = |n: Node<'_, '_>| {
+                let mut names: Vec<&str> = n
+                    .ancestors()
+                    .filter(|a| a.is_element())
+                    .map(|a| a.tag_name().name())
+                    .collect();
+                names.reverse();
+                format!("/{}", names.join("/"))
+            };
+            let mut counts: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+            for e in doc.descendants().filter(|n| n.is_element()) {
+                let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+                for c in e.children().filter(|c| c.is_element()) {
+                    *by.entry(c.tag_name().name()).or_default() += 1;
+                }
+                for (name, k) in by {
+                    if k < 2 {
+                        continue;
+                    }
+                    let n = counts.len();
+                    counts
+                        .entry(format!("{}/{name}", path_of(e)))
+                        .or_insert((0, n))
+                        .0 += k;
+                }
+            }
+            counts
+                .into_iter()
+                .max_by_key(|(_, (k, o))| (*k, std::cmp::Reverse(*o)))
+                .map(|(p, _)| p)
+                .ok_or_else(|| {
+                    Refusal::file(
+                        "no element repeats under one parent to read as records; name them with --records",
+                    )
+                })?
+        }
+    };
+    let recs = records_at(&doc, &records)?;
+    let rname = records.rsplit('/').next().unwrap_or("");
+    let mut rk: BTreeSet<String> = BTreeSet::new();
+    for r in recs.iter().take(100) {
+        rk.extend(names(*r));
+    }
+    for r in &recs {
+        for a in r.children().filter(|c| c.is_element()) {
+            let an = a.tag_name().name();
+            let mut cands = vec![(an.to_owned(), a)];
+            cands.extend(
+                a.children()
+                    .filter(|c| c.is_element())
+                    .map(|b| (format!("{an}/{}", b.tag_name().name()), b)),
+            );
+            for (path, c) in cands {
+                let cn = names(c);
+                let common = cn.intersection(&rk).count();
+                if c.tag_name().name() == rname || (common >= 2 && common * 2 >= cn.len()) {
+                    return Ok((records, Some(path)));
+                }
+            }
+        }
+    }
+    Ok((records, None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +453,21 @@ mod tests {
         let e = read(deep.as_bytes(), "/A/B", None).unwrap_err();
         assert_eq!((e.row, e.place.as_deref()), (1, Some("line 1, column 4")));
         assert!(e.message.contains("128"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_survey_proposes_the_records_and_their_children() {
+        let x = br#"<Export><Meta><Tag/></Meta><Items>
+<Item number="A"><Name>a</Name><Qty>1</Qty><Uses><Use number="B"><Name>b</Name><Qty>2</Qty></Use></Uses></Item>
+<Item number="C"><Name>c</Name><Qty>1</Qty></Item></Items></Export>"#;
+        assert_eq!(
+            survey(x, None).unwrap(),
+            ("/Export/Items/Item".to_owned(), Some("Uses/Use".to_owned()))
+        );
+        assert_eq!(
+            survey(x, Some("/Export/Meta/Tag")).unwrap(),
+            ("/Export/Meta/Tag".to_owned(), None)
+        );
+        assert!(survey(b"<A><B/></A>", None).is_err());
     }
 }
