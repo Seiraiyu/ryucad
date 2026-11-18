@@ -1621,7 +1621,8 @@ enum BoardCmd {
         #[arg(long)]
         out: PathBuf,
         /// Layers bottom first: copper.top, mask.top, paste.top, silk.top, fab.top,
-        /// courtyard.top, their .bottom, drill, outline.
+        /// courtyard.top, their .bottom, drill, outline; and copper.in1 … on a
+        /// board with inner layers.
         #[arg(long = "layer")]
         layers: Vec<String>,
         /// top (the default) or bottom, seen from below.

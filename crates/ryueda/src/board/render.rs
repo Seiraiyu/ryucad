@@ -34,6 +34,24 @@ pub const LAYERS: [&str; 14] = [
     "outline",
 ];
 
+/// Every layer `board render` knows on a board of `n` copper layers:
+/// [`LAYERS`] with the inner copper layers after `copper.top`.
+pub fn layers(n: usize) -> Vec<String> {
+    let mut out: Vec<String> = LAYERS.iter().map(|s| (*s).to_owned()).collect();
+    let names = super::stackup::names(n.max(2));
+    let inner = &names[1..names.len() - 1];
+    out.splice(1..1, inner.iter().cloned());
+    out
+}
+
+/// The colours of inner copper layers, by layer number.
+const INNER: [[u8; 3]; 4] = [
+    [90, 180, 90],
+    [190, 90, 190],
+    [90, 190, 190],
+    [200, 190, 80],
+];
+
 pub fn ink(layer: &str) -> Ink {
     let paint = |colour, alpha| Ink::Paint { colour, alpha };
     match layer {
@@ -46,6 +64,10 @@ pub fn ink(layer: &str) -> Ink {
         "courtyard.top" | "courtyard.bottom" => paint([230, 90, 200], 160),
         "drill" => Ink::Cut,
         "outline" => paint([240, 200, 40], 255),
+        l if l.starts_with("copper.in") => {
+            let k: usize = l["copper.in".len()..].parse().unwrap_or(1);
+            paint(INNER[(k + 3) % 4], 230)
+        }
         _ => paint([170, 110, 210], 160),
     }
 }
@@ -131,10 +153,11 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
     } else {
         ask.layers.to_vec()
     };
-    if let Some(bad) = layers.iter().find(|l| !LAYERS.contains(&l.as_str())) {
+    let known = self::layers(s.n());
+    if let Some(bad) = layers.iter().find(|l| !known.contains(l)) {
         return Err(Error::new(
             Code::InvalidParam,
-            format!("there is no layer {bad}; layers are {}", LAYERS.join(", ")),
+            format!("there is no layer {bad}; layers are {}", known.join(", ")),
         )
         .with("layer", bad));
     }
@@ -147,12 +170,14 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
     }
     let holes: Vec<Shape> = s.holes.iter().map(|h| hole_shape(&h.shape)).collect();
     let outline = outline_drawn(s);
-    // The net's pads' copper, per side.
-    let net_copper = |top: bool| -> Vec<&Shape> {
+    // The net's pads' copper, per copper layer.
+    let n = s.n();
+    let names = super::stackup::names(n);
+    let net_copper = |index: Option<usize>| -> Vec<&Shape> {
         s.pads
             .iter()
             .filter(|p| ask.net.is_some() && p.net.as_deref() == ask.net)
-            .filter(|p| if top { p.top } else { p.bottom })
+            .filter(|p| index.is_some_and(|i| p.on(i, n)))
             .map(|p| &p.copper)
             .collect()
     };
@@ -182,7 +207,7 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
             scene_layers.push(Layer {
                 name: format!("{l}:net"),
                 ink: HIGHLIGHT,
-                shapes: net_copper(l == "copper.top"),
+                shapes: net_copper(names.iter().position(|x| x == l)),
             });
         }
     }
@@ -226,6 +251,48 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inner_layers_render_and_unknown_ones_are_refused() {
+        use crate::board::testing::{MM, UM, board};
+        let mut s = board(10 * MM, 5 * MM);
+        s.layers(4).track(
+            "t1",
+            "a",
+            crate::board::file::CopperLayer::Inner(1),
+            250 * UM,
+            &[(1 * MM, 1 * MM), (9 * MM, 1 * MM)],
+        );
+        s.layers
+            .entry("copper.in1".into())
+            .or_default()
+            .push(("b:track/t1".into(), s.tracks[0].shape.clone()));
+        let ask = |l: &str| {
+            let layers = vec![l.to_owned()];
+            render(
+                "b",
+                &s,
+                &Ask {
+                    layers: &layers,
+                    bottom: false,
+                    net: None,
+                    window: None,
+                    size: 200,
+                    svg: true,
+                },
+            )
+        };
+        let (v, _, svg) = ask("copper.in1").unwrap();
+        assert_eq!(v["layers"], serde_json::json!(["copper.in1"]));
+        assert!(
+            String::from_utf8(svg).unwrap().contains("<path"),
+            "the track is drawn"
+        );
+        let e = ask("copper.in3").unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert!(e.message.contains("copper.in2"), "{}", e.message);
+        assert_eq!(layers(2), LAYERS.map(str::to_owned).to_vec());
+    }
 
     #[test]
     fn renders_are_the_same_bytes_on_any_thread_count() {
