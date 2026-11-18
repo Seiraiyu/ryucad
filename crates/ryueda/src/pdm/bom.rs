@@ -161,8 +161,8 @@ pub fn lines_of(p: &Project, occs: &[&Occurrence], build: u64) -> Vec<Line> {
     }
     by.into_values()
         .map(|mut a| {
-            a.refdes.sort_by_key(|d| designator_key(d));
-            a.dnp.sort_by_key(|d| designator_key(d));
+            a.refdes.sort_by_cached_key(|d| designator_key(d));
+            a.dnp.sort_by_cached_key(|d| designator_key(d));
             a.line
                 .columns
                 .insert("refdes".to_owned(), a.refdes.join(","));
@@ -569,9 +569,9 @@ mod tests {
 
     #[test]
     fn designators_sort_by_letters_then_number() {
-        let mut v = vec!["R10", "C1", "R2", "R1", "U1A"];
-        v.sort_by_key(|a| designator_key(a));
-        assert_eq!(v, ["C1", "R1", "R2", "R10", "U1A"]);
+        let mut v = vec!["R10", "C1", "R2", "R1", "U1A", "R", "U1"];
+        v.sort_by_cached_key(|a| designator_key(a));
+        assert_eq!(v, ["C1", "R1", "R2", "R10", "R", "U1", "U1A"]);
     }
 
     #[test]
