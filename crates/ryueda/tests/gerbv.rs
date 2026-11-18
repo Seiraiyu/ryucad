@@ -15,6 +15,8 @@
 mod board_gen;
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/breakout_board.rs"]
+mod breakout_board;
 #[path = "support/draw.rs"]
 mod draw;
 
@@ -364,9 +366,12 @@ fn ryueda(dir: &Path, args: &[&str]) -> serde_json::Value {
     v["result"].clone()
 }
 
+/// The breakout placed by hand, one net routed, a via and an unplated
+/// hole, exported with `--allow-errors`: `npth.drl` and the via's paths,
+/// whatever the round drew.
 #[test]
 #[ignore = "needs gerbv: the devcontainer, full.yml"]
-fn gerbv_reads_the_breakouts_package() {
+fn gerbv_reads_a_partly_routed_breakouts_package() {
     if !have_gerbv() {
         return;
     }
@@ -517,4 +522,33 @@ fn gerbv_reads_slots_in_the_chosen_form() {
             );
         }
     }
+}
+
+/// The breakout as agent round 5.D laid it out: clean, so exported
+/// without `--allow-errors`, every file read by gerbv.
+#[test]
+#[ignore = "needs gerbv: the devcontainer, full.yml"]
+fn gerbv_reads_the_breakouts_package() {
+    if !have_gerbv() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("board");
+    std::fs::create_dir_all(&root).unwrap();
+    ryueda(&root, &["init"]);
+    for (path, text) in breakout::footprints() {
+        let at = root.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+    for args in breakout::script()
+        .into_iter()
+        .chain(breakout_board::script())
+    {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        ryueda(&root, &args);
+    }
+    let id = breakout_board::BOARD;
+    ryueda(&root, &["board", "export", id, "--out", "fab"]);
+    check_package(&root, id, &root.join("fab"));
 }
