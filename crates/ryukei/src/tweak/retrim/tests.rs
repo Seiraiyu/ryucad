@@ -838,6 +838,66 @@ fn only_a_narrowed_uncertain_at_a_pin_it_shares_nothing_with_asks_a_cut() {
     assert_eq!(ask_off_pin(&b, &w, wt, wside, Build::Only, mark), None);
 }
 
+/// A rung's outcome, for messages.
+fn what(r: &super::Rung) -> String {
+    match r {
+        super::Rung::Done(d) => format!("done: {:?}", d.as_ref().as_ref().map(|_| ())),
+        super::Rung::Next(e) => format!("next: {e:?}"),
+        super::Rung::Walked(e) => format!("walked: {e:?}"),
+        super::Rung::Uncertain(e) => format!("uncertain: {e:?}"),
+        super::Rung::Unchanged => "unchanged".into(),
+    }
+}
+
+/// Design 724: a face kept off a pin has less sheet, and where the
+/// result needs the part cut away, the walk fails: a wrong cut gives a
+/// refusal, never a wrong body. The block's top raised 0.2 over the whole
+/// body (rung 2, the bottom pinned): its +x side, cut off at z = 0.3,
+/// can't reach the new top. Uncut, the same build builds the taller box.
+/// No adjusted build would give that side room: it is kept off.
+#[test]
+fn a_cut_that_takes_what_the_result_needs_fails_its_walk() {
+    use super::near::{Adjust, Adjusts};
+    use super::{Build, Rung, attempt_adjusted};
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let side = face_of(&b, FaceRole::PlusX);
+    let n = super::near::near_box(&b, &changes, &whole, side, &bx, 2);
+    let (l, h) = (n.min(), n.max());
+    let cut = crate::geom::Box3::new(l, crate::geom::Point3::new(h.x, h.y, 0.3));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let build = |adjusts: &Adjusts| {
+        let mut ask = None;
+        let r = attempt_adjusted(
+            K,
+            &b,
+            &changes,
+            &whole,
+            &bx,
+            2,
+            Build::Only,
+            None,
+            adjusts,
+            &mut ask,
+            &m,
+        );
+        (r, ask)
+    };
+    let (r, ask) = build(&Adjusts::from([(side, Adjust::off(&cut))]));
+    assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)), "{}", what(&r));
+    assert!(
+        ask.as_ref()
+            .is_none_or(|a| !matches!(a.get(&side), Some(Adjust::Room(_)))),
+        "room for a face kept off: {ask:?}"
+    );
+    let (r, _) = build(&Adjusts::new());
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()), "{}", what(&r));
+}
+
 /// FNV-1a of `b`'s `dump_unnamed` (as `ryukei-testkit`'s `fnv`, which the
 /// crate can't depend on).
 fn free_hash(b: &Body) -> u64 {
