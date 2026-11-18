@@ -2438,3 +2438,51 @@ fn an_edge_along_spline_domain_edges_is_tolerated_untraced() {
     // Judging it (gaps, normals, feet) and the rest of healing only.
     assert!(work.spent() < 600, "{}", work.spent());
 }
+
+/// #813: a heal recorded under one key, its names derived again under
+/// another ([`crate::name::record`]), names a body exactly as healing
+/// under that other key does wherever the two make the same choices
+/// (seamed primitives: merges, unseams, poles; plain ones), and where
+/// ties broke otherwise still gives every one of its names.
+#[test]
+fn names_derived_again_under_another_key_are_that_keys() {
+    use crate::name::record::recording;
+    let t = tilted();
+    let k = OpKey(1);
+    let (from, to) = (OpKey(41), OpKey(42));
+    let mut same = 0;
+    for b in [
+        primitive::block(k, 1.0, 2.0, 3.0, &t).unwrap().0,
+        primitive::cylinder(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::cone(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::sphere(k, 1.0, &t).unwrap().0,
+        primitive::torus(k, 2.0, 0.5, &t).unwrap().0,
+    ] {
+        for s in [plain(&b), seamed(&b, 1e-7).unwrap()] {
+            let (a, d) = recording(|| heal(from, &s, &HealOptions::default()).unwrap());
+            let want = heal(to, &s, &HealOptions::default()).unwrap();
+            let memo = std::cell::RefCell::new(BTreeMap::new());
+            let map = |n| d.rekey(from, to, n, &mut memo.borrow_mut());
+            if a.0.dump_unnamed() != want.0.dump_unnamed() {
+                // Other choices (4 of 10 here, 6 apart).
+                let named = |x: &Body| -> std::collections::BTreeSet<Name> {
+                    x.faces()
+                        .map(|f| x.face(f).unwrap().name)
+                        .chain(x.edges().map(|e| x.edge(e).unwrap().name))
+                        .chain(x.vertices().map(|v| x.vertex(v).unwrap().name))
+                        .collect()
+                };
+                // Ties broken otherwise order and turn the same entities:
+                // every name is still the other key's.
+                assert_eq!(named(&a.0.renamed(map).unwrap()), named(&want.0));
+                continue;
+            }
+            same += 1;
+            let got = a.0.renamed(map).unwrap();
+            assert_eq!(got.dump(), want.0.dump(), "{}", b.dump());
+            let journal = a.1.renamed(map);
+            assert_eq!(journal, want.1);
+        }
+    }
+    assert!(same >= 4, "{same} of 10 healed alike");
+}

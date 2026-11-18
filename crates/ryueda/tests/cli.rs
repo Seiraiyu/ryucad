@@ -836,6 +836,7 @@ fn every_protocol_method_has_a_command() {
         ("board.hole.delete", &["board", "hole", "delete"]),
         ("board.drc", &["board", "drc"]),
         ("board.status", &["board", "status"]),
+        ("board.export", &["board", "export"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
         ("block.show", &["block", "show"]),
@@ -5108,6 +5109,118 @@ fn check_has_a_boards_section_only_with_boards() {
     assert_eq!(main["board"], "board/main");
     assert_eq!(main["errors"], 8, "eight unplaced: {main}");
     assert!(r["errors"].as_u64().unwrap() >= 8);
+}
+
+/// The breakout's parts as the determinism golden places them.
+const BREAKOUT_PLACES: [(&str, &str, &str); 8] = [
+    ("U1", "8,10", "0"),
+    ("C1", "8,14", "90"),
+    ("U2", "18,10", "0"),
+    ("C2", "15,6", "0"),
+    ("C3", "21,6", "0"),
+    ("R1", "12,15", "90"),
+    ("R2", "14,15", "90"),
+    ("J1", "3,10", "0"),
+];
+
+#[test]
+fn a_board_exports_its_fabrication_package() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "26,20", "--id", "main",
+    ]);
+    for (r, xy, rot) in BREAKOUT_PLACES {
+        p.ok(&["board", "place", "main", r, "--at", xy, "--rotation", rot]);
+    }
+    // Unrouted: DRC errors, so the export is refused with them, and
+    // nothing is written.
+    let e = p.fails(
+        &["board", "export", "main", "--out", "fab"],
+        "drc_failed",
+        1,
+    );
+    assert!(
+        e["details"]["report"]["drc"]["errors"].as_u64().unwrap() > 0,
+        "{e}"
+    );
+    for top in [&p.direct, &p.daemon] {
+        assert!(!top.join("board/fab").exists());
+    }
+    let r = p.ok(&["board", "export", "main", "--out", "fab", "--allow-errors"]);
+    assert_eq!(r["out"], "fab");
+    assert_eq!(r["allow_errors"], true);
+    let files = r["files"].as_array().unwrap();
+    assert!(files.iter().all(|f| f.get("text").is_none()), "{r}");
+    let names: Vec<&str> = files.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    let form = ryueda::board::preset::JLC_2L.assembly.unwrap().name;
+    for want in [
+        "main-copper-top.gtl".to_owned(),
+        "main-copper-bottom.gbl".into(),
+        "main-mask-top.gts".into(),
+        "main-paste-top.gtp".into(),
+        "main-silk-top.gto".into(),
+        "main-profile.gm1".into(),
+        "main-pth.drl".into(),
+        "main-bom.csv".into(),
+        "main-pos.csv".into(),
+        format!("main-bom-{form}.csv"),
+        format!("main-pos-{form}.csv"),
+        "manifest.json".into(),
+    ] {
+        assert!(names.contains(&want.as_str()), "{want} in {names:?}");
+    }
+    for top in [&p.direct, &p.daemon] {
+        let dir = top.join("board/fab");
+        let m: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(m["allow_errors"], true);
+        assert_eq!(m["board"], "board/main");
+        assert_eq!(m["slots"], ryueda::board::export::slots_name());
+        for f in m["files"].as_array().unwrap() {
+            let bytes = fs::read(dir.join(f["name"].as_str().unwrap())).unwrap();
+            assert_eq!(
+                &blake3::hash(&bytes).to_hex()[..32],
+                f["blake3"].as_str().unwrap(),
+                "{f}"
+            );
+        }
+        let gtl = fs::read_to_string(dir.join("main-copper-top.gtl")).unwrap();
+        assert!(gtl.contains("%TF.FileFunction,Copper,L1,Top*%"));
+        assert!(gtl.contains("%TO.P,R1,1*%"), "{gtl}");
+        assert!(!gtl.contains("CreationDate"));
+        let pos = fs::read_to_string(dir.join("main-pos.csv")).unwrap();
+        assert!(pos.starts_with("Designator,Value,Footprint,X,Y,Rotation,Side\n"));
+        let left = m["left_out"].as_array().unwrap().len();
+        assert_eq!(pos.lines().count() - 1 + left, 8, "{pos}");
+        assert!(pos.contains("\nR1,"), "{pos}");
+    }
+    // Again into the same folder: the earlier files are replaced.
+    p.ok(&["board", "export", "main", "--out", "fab", "--allow-errors"]);
+    // A folder of other files is refused, and kept.
+    for top in [&p.direct, &p.daemon] {
+        fs::create_dir_all(top.join("board/other")).unwrap();
+        fs::write(top.join("board/other/keep.txt"), "x").unwrap();
+    }
+    p.fails(
+        &[
+            "board",
+            "export",
+            "main",
+            "--out",
+            "other",
+            "--allow-errors",
+        ],
+        "invalid_param",
+        1,
+    );
+    for top in [&p.direct, &p.daemon] {
+        assert!(top.join("board/other/keep.txt").exists());
+    }
+    p.fails(
+        &["board", "export", "nope", "--out", "x"],
+        "board_not_found",
+        1,
+    );
 }
 
 #[test]

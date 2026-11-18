@@ -102,6 +102,20 @@ RUN apt-get update \
     && /opt/usd/bin/python -c "import usd_brep, pxr, brep_validator, ezdxf" \
     && chmod -R a+rX /opt/uv /opt/usd
 
+# gerbv (GPL-2.0, C), only for ryueda's tests/gerbv.rs (design 732): a
+# third-party Gerber and Excellon reader that reads every file `board
+# export` writes and rasterizes it, standing in for a fabricator in CI.
+# Verification only, never a product dependency. Its PNG export runs with
+# no display; the image's build proves it on a one-flash file.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gerbv \
+    && rm -rf /var/lib/apt/lists/* \
+    && gerbv --version \
+    && printf '%%FSLAX46Y46*%%\n%%MOMM*%%\n%%ADD10C,1.000000*%%\nD10*\nX0Y0D03*\nM02*\n' > /tmp/smoke.gbr \
+    && gerbv -x png -o /tmp/smoke.png --dpi=100 /tmp/smoke.gbr \
+    && test -s /tmp/smoke.png \
+    && rm -f /tmp/smoke.gbr /tmp/smoke.png
+
 RUN useradd -m -s /bin/bash ${USERNAME} \
     && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
 

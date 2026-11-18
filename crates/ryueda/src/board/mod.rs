@@ -2,10 +2,13 @@
 //! loaded with the project, their shapes built through `ryu-board`, and
 //! the `board.*` commands.
 
+pub mod assembly;
 pub mod cmd;
 pub mod connect;
 pub mod courtyard;
 pub mod drc;
+pub mod export;
+pub mod fab;
 pub mod file;
 pub mod graphic;
 pub mod layout;

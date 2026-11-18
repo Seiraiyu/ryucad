@@ -15,13 +15,18 @@
 //! Pinned faces (design 683, plan 21.A): in a narrowed build, a region
 //! face left as it is that touches no change is built as its input face,
 //! never carried (`pinned`).
+//!
+//! Adjusted near boxes (design 724, plan 22.A): after a narrowed build's
+//! walk fails `Clipped` at a working face, the rung may be built again
+//! with that face's near box and its working neighbours' doubled
+//! (`room`, `adjusted`). First builds are never adjusted.
 
 use super::region::{Region, face_vertices};
 use crate::geom::Box3;
 use crate::intersect::face_box;
 use crate::topo::{Body, FaceId};
 use crate::tweak::engine::Changes;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The changed faces of `region` that working face `f` touches: `f`
 /// itself, and those sharing a vertex with it.
@@ -118,6 +123,72 @@ pub(crate) fn near_box(
         n = super::body::doubled(&n);
     }
     within(&n, x).unwrap_or(*x)
+}
+
+/// A working face's near box changed after a narrowed build failed
+/// (design 724). Plan 22.B adds keeping a face off a pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Adjust {
+    /// Room (plan 22.A): the near box doubled about its middle this many
+    /// times, each inside the rung's box.
+    Room(u32),
+}
+
+/// Each working face's adjustment in an adjusted build; empty in a
+/// rung's first narrowed build, which is today's, bit for bit.
+pub(crate) type Adjusts = BTreeMap<FaceId, Adjust>;
+
+/// Near box `n`, inside the rung's box `x`, as `adjust` leaves it: as it
+/// is with none; with `Room(k)`, doubled about its middle and kept inside
+/// `x`, `k` times (`body::doubled`, then [`within`], as rung 1 does for
+/// every face).
+pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
+    match adjust {
+        None => *n,
+        Some(Adjust::Room(k)) => (0..k).fold(*n, |b, _| {
+            within(&super::body::doubled(&b), x).unwrap_or(*x)
+        }),
+    }
+}
+
+/// Room for the working faces `clipped` (design 724, plan 22.A): those
+/// whose piece a narrowed build's walk found clipped, or whose clipped
+/// side that piece reached. `adjusts` with each of them and every face of
+/// `working` sharing a vertex with one in the input given one more
+/// doubling. `near` gives a face's near box before any adjustment. `None`
+/// where none of their near boxes would grow (each already the rung's
+/// box `x`): that build would repeat the last.
+pub(crate) fn room(
+    body: &Body,
+    working: &BTreeSet<FaceId>,
+    clipped: &BTreeSet<FaceId>,
+    x: &Box3,
+    adjusts: &Adjusts,
+    near: &dyn Fn(FaceId) -> Box3,
+) -> Option<Adjusts> {
+    let mut faces = clipped.clone();
+    for &f in clipped {
+        for v in face_vertices(body, f) {
+            faces.extend(
+                super::region::vertex_faces(body, v)
+                    .into_iter()
+                    .filter(|g| working.contains(g)),
+            );
+        }
+    }
+    let mut out = adjusts.clone();
+    let mut grows = false;
+    for g in faces {
+        let k = match adjusts.get(&g) {
+            Some(Adjust::Room(k)) => *k,
+            None => 0,
+        };
+        let n = near(g);
+        let now = adjusted(&n, x, adjusts.get(&g).copied());
+        grows |= adjusted(&n, x, Some(Adjust::Room(k + 1))) != now;
+        out.insert(g, Adjust::Room(k + 1));
+    }
+    grows.then_some(out)
 }
 
 /// Where boxes `a` and `x` overlap, or `None`.
@@ -315,6 +386,113 @@ pub(crate) mod tests {
         );
         assert!(holds(&n1, &n0));
         assert!(holds(&x, &n1));
+    }
+
+    /// Plan 22.A: room doubles a near box about its middle, inside the
+    /// rung's box, once per step; no adjustment leaves it.
+    #[test]
+    fn room_doubles_a_near_box_inside_the_rungs_box() {
+        let (r, low, high) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low, high]),
+            ..Default::default()
+        };
+        let region = region(&r, &BTreeSet::from([low, high]));
+        let x = rung_box(&r, &changes, &region);
+        let n = region
+            .faces
+            .iter()
+            .filter(|f| !changes.deleted.contains(f))
+            .map(|&f| near_box(&r, &changes, &region, f, &x, 0))
+            .find(|n| *n != x)
+            .expect("a near box short of the rung's box");
+        assert_eq!(adjusted(&n, &x, None), n);
+        assert_eq!(adjusted(&n, &x, Some(Adjust::Room(0))), n);
+        let one = adjusted(&n, &x, Some(Adjust::Room(1)));
+        assert_eq!(one, within(&super::super::body::doubled(&n), &x).unwrap());
+        assert!(
+            one != n && holds(&one, &n) && holds(&x, &one),
+            "{n:?} {one:?}"
+        );
+        let two = adjusted(&n, &x, Some(Adjust::Room(2)));
+        assert!(holds(&two, &one) && holds(&x, &two));
+        // At the rung's box, room ends.
+        assert_eq!(adjusted(&x, &x, Some(Adjust::Room(3))), x);
+    }
+
+    /// Plan 22.A: room for a clipped face goes to it and to every working
+    /// face sharing a vertex with it, one more doubling each; never to a
+    /// deleted face.
+    #[test]
+    fn room_goes_to_the_clipped_face_and_its_working_neighbours() {
+        let (r, low, _) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low]),
+            ..Default::default()
+        };
+        let region = region(&r, &BTreeSet::from([low]));
+        let x = rung_box(&r, &changes, &region);
+        let working: BTreeSet<FaceId> =
+            region.faces.iter().copied().filter(|&f| f != low).collect();
+        let near = |g: FaceId| near_box(&r, &changes, &region, g, &x, 0);
+        let f = *working.iter().next().unwrap();
+        let mut want: BTreeSet<FaceId> = face_vertices(&r, f)
+            .into_iter()
+            .flat_map(|v| super::super::region::vertex_faces(&r, v))
+            .filter(|g| working.contains(g))
+            .collect();
+        want.insert(f);
+        let once = room(
+            &r,
+            &working,
+            &BTreeSet::from([f]),
+            &x,
+            &Adjusts::new(),
+            &near,
+        )
+        .expect("room to give");
+        assert_eq!(once.keys().copied().collect::<BTreeSet<_>>(), want);
+        assert!(once.values().all(|&a| a == Adjust::Room(1)));
+        assert!(!once.contains_key(&low), "a deleted face gets no room");
+        let full = want
+            .iter()
+            .all(|&g| adjusted(&near(g), &x, once.get(&g).copied()) == x);
+        match room(&r, &working, &BTreeSet::from([f]), &x, &once, &near) {
+            Some(twice) => {
+                assert!(!full);
+                for g in &want {
+                    assert_eq!(twice[g], Adjust::Room(2));
+                }
+            }
+            None => assert!(full),
+        }
+    }
+
+    /// Plan 22.A: where every near box named is already the rung's box,
+    /// room would repeat the build: none is given.
+    #[test]
+    fn no_room_where_every_near_box_is_the_rungs_box() {
+        let (r, low, _) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low]),
+            ..Default::default()
+        };
+        let region = region(&r, &BTreeSet::from([low]));
+        let x = rung_box(&r, &changes, &region);
+        let working: BTreeSet<FaceId> =
+            region.faces.iter().copied().filter(|&f| f != low).collect();
+        let f = *working.iter().next().unwrap();
+        assert_eq!(
+            room(
+                &r,
+                &working,
+                &BTreeSet::from([f]),
+                &x,
+                &Adjusts::new(),
+                &|_| x
+            ),
+            None
+        );
     }
 
     /// The rounded block's low ball deleted, its region grown by a ring

@@ -84,7 +84,7 @@ fn hole_shape(h: &ryu_copper::layout::HoleShape) -> Shape {
 }
 
 /// The outline's boundary drawn a tenth of a millimetre wide.
-fn outline_drawn(s: &BoardShapes) -> Shape {
+pub(crate) fn outline_drawn(s: &BoardShapes) -> Shape {
     Shape {
         parts: s
             .edges

@@ -8,6 +8,7 @@
 
 mod hash;
 mod journal;
+pub mod record;
 
 pub use journal::{Event, Journal};
 
@@ -35,7 +36,9 @@ impl OpKey {
     /// them under an all-zero key. ryucad derives a feature's key this way
     /// from its part and feature IDs, so the key never depends on order.
     pub fn from_bytes(bytes: &[u8]) -> OpKey {
-        OpKey(siphash128(&[0; 16], bytes))
+        let k = OpKey(siphash128(&[0; 16], bytes));
+        record::key(k, bytes);
+        k
     }
 }
 
@@ -479,7 +482,9 @@ impl Name {
         for p in parents {
             bytes.extend_from_slice(&p.0.to_le_bytes());
         }
-        Self(siphash128(&NAME_KEY, &bytes))
+        let name = Self(siphash128(&NAME_KEY, &bytes));
+        record::name(name, key, role, parents);
+        name
     }
 
     pub fn to_u128(self) -> u128 {

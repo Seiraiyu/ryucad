@@ -137,7 +137,23 @@ fuzz_target!(|data: &[u8]| {
     for board in p.boards.values() {
         let run = |pool: &rayon::ThreadPool| {
             pool.install(|| match ryueda::board::drc::check(&p, board) {
-                Ok(c) => Ok(serde_json::to_string(&c.findings).unwrap()),
+                Ok(c) => {
+                    // The package's fabrication files: a result or a
+                    // typed refusal, never ryueda's own bug.
+                    let fab = match ryueda::board::export::fabrication(board.id.as_str(), &c.shapes, "fuzz") {
+                        Ok(files) => files.into_iter().map(|f| f.name + &f.text).collect::<String>(),
+                        Err(e) => {
+                            assert_ne!(e.code, ryueda::error::Code::Internal, "{e:?}");
+                            format!("{:?}", e.code)
+                        }
+                    };
+                    let rows = board.board.item.as_ref().ok().and_then(|b| {
+                        ryueda::board::occ::occurrences(&p, &b.design)
+                            .ok()
+                            .map(|(_, occs)| format!("{:?}", ryueda::board::assembly::rows(&occs, board)))
+                    });
+                    Ok((serde_json::to_string(&c.findings).unwrap(), fab, rows))
+                }
                 Err(e) => Err(e.code),
             })
         };

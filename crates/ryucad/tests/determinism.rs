@@ -4862,7 +4862,13 @@ fn reference_interference_section(golden: &mut Golden) {
 
 /// OCCT's nested assembly flattened as references: the part's features
 /// (IDs, products, places), each body's hash and counts, and its STEP and
-/// STL exports' bytes, one thread and four alike.
+/// STL exports' bytes, one thread and four alike. Each body is its file
+/// body healed once under its shape key, its names derived again under
+/// its feature's key (the names ryucad 0.9 gave), and its STL is that
+/// body's mesh moved where its place puts it, the block's two copies from
+/// one mesh (#813, plan 33.C): the body hashes (entities ordered and
+/// sensed as the shape key's ties set) and the STL bytes moved then, the
+/// names, STEP bytes and counts didn't.
 fn flatten_section(golden: &mut Golden) {
     use serde_json::json;
     let mut s = golden.section("flatten");
@@ -7217,7 +7223,11 @@ fn transfer_section(golden: &mut Golden) {
 /// External-reference assemblies (design 448, plan 24.D): the committed
 /// set imported as references (an agent's default) and flattened; each
 /// answer's parts, instances and `external` lines without the machine's
-/// paths, and every body's hash. One thread and four.
+/// paths, and every body's hash. One thread and four. The flattened
+/// bodies are healed under their shape keys, their names derived again
+/// under their features' (#813, plan 33.C): the box's hash and dump moved
+/// then (its entities ordered and sensed as the shape key's ties set, the
+/// same names), the pins' didn't.
 fn external_imports_section(golden: &mut Golden) {
     let mut s = golden.section("external_imports");
     let set = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

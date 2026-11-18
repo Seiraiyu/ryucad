@@ -6,6 +6,27 @@
 //! A fabricator's process, not a parts connector: this is the one file
 //! outside them that names it (`tests/connectors.rs`).
 
+/// How a fabricator's assembly service reads a BOM and a pick and place
+/// file. `board export` writes both in this form beside its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssemblyForm {
+    /// The files' suffix: `<board>-bom-<name>.csv`, `<board>-pos-<name>.csv`.
+    pub name: &'static str,
+    /// The supplier whose part numbers its BOM carries (an offer's
+    /// supplier, compared ignoring case and spaces).
+    pub supplier: &'static str,
+    /// The BOM's columns: the value, the designators, the footprint, the
+    /// supplier's part number.
+    pub bom: [&'static str; 4],
+    /// The pick and place file's columns: the designator, x, y, the side,
+    /// the rotation.
+    pub pos: [&'static str; 5],
+    /// What follows a length in the pick and place file (`mm`), and the
+    /// top side's name there.
+    pub length_suffix: &'static str,
+    pub top: &'static str,
+}
+
 /// A preset's numbers, in nanometres.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preset {
@@ -47,6 +68,8 @@ pub struct Preset {
     pub edge_clearance_nm: i64,
     /// The least distance from a track to another island's mask opening.
     pub mask_trace_clearance_nm: i64,
+    /// The assembly service's file form, if the fabricator has one.
+    pub assembly: Option<AssemblyForm>,
 }
 
 impl Preset {
@@ -75,6 +98,27 @@ impl Preset {
         })
     }
 }
+
+/// JLCPCB's assembly files, read by the coxswain from JLC's help pages
+/// on 2026-11-17:
+///
+/// - BOM, https://jlcpcb.com/help/article/bill-of-materials-for-pcb-assembly:
+///   the required columns "Comment", "Designator", "Footprint", and the
+///   part number as JLC's own toolkit writes it, "LCSC Part #" (its KiCad
+///   guide spells it "JLCPCB Part #"; both appear). Several designators
+///   share a row comma-separated ("R5,R6"), never as ranges.
+/// - CPL, https://jlcpcb.com/help/article/pick-place-file-for-pcb-assembly:
+///   "Designator", "Mid X", "Mid Y" ("Required units: Metric(mm)", written
+///   `12.5mm` as JLC's sample does), "Layer" ("Top / Bottom") and
+///   "Rotation" ("Positive values are counter clockwise").
+pub const JLC_ASSEMBLY: AssemblyForm = AssemblyForm {
+    name: "jlc",
+    supplier: "LCSC",
+    bom: ["Comment", "Designator", "Footprint", "LCSC Part #"],
+    pos: ["Designator", "Mid X", "Mid Y", "Layer", "Rotation"],
+    length_suffix: "mm",
+    top: "Top",
+};
 
 /// Read from https://jlcpcb.com/capabilities/pcb-capabilities on
 /// 2026-11-17. Its "Soldermask Expansion" row says "1:1": "LDI equipment
@@ -133,6 +177,7 @@ pub const JLC_2L: Preset = Preset {
     via_hole_spacing_nm: 200_000,
     edge_clearance_nm: 200_000,
     mask_trace_clearance_nm: 90_000,
+    assembly: Some(JLC_ASSEMBLY),
 };
 
 /// The preset a new board takes.
@@ -196,5 +241,15 @@ mod tests {
         let v = p.rules_json();
         assert_eq!(v["clearance_nm"], serde_json::json!(p.clearance_nm));
         assert_eq!(v["preset"], "jlc-2l");
+    }
+
+    #[test]
+    fn the_preset_has_an_assembly_form() {
+        let f = JLC_2L.assembly.expect("jlc-2l has an assembly form");
+        assert!(!f.name.is_empty() && f.name.chars().all(|c| c.is_ascii_lowercase()));
+        assert!(f.bom.iter().all(|c| !c.is_empty() && !c.contains(',')));
+        assert!(f.pos.iter().all(|c| !c.is_empty() && !c.contains(',')));
+        assert!(!f.supplier.is_empty());
+        assert!(!f.top.is_empty());
     }
 }

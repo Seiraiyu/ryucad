@@ -608,3 +608,43 @@ fn the_pinned_twins_slot_runs_out() {
     let want = run_out_volume();
     assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
 }
+
+/// ryukei 22.A's twin (design 724): `pinned_faces`' block with its slot
+/// open through the -x side and ending farther before the round; eleven
+/// faces (the slot's start end is gone, the top is one U).
+#[test]
+fn the_near_room_twin_is_rounded_and_slotted() {
+    use ryukei_testkit::near_room::{far_end, slotted};
+    let s = slotted();
+    assert_eq!(s.counts().faces, 11);
+    assert_eq!(check(&s), []);
+    let _ = far_end(&s);
+}
+
+/// The twin's clipped face (#658): the slot's far end deleted. In rung 3's
+/// narrowed build the near boxes round the end stop short of the round,
+/// and the walk is clipped at the top (main refuses). Given room, the
+/// top, the walls and then the floor reach the pinned round and side: the
+/// delete builds one shell, checks clean, and has the volume of the
+/// run-out slot. Twelve faces: the round and the +x side are notched, the
+/// top split in two, the end gone.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_near_room_twins_slot_runs_out() {
+    use ryukei_testkit::near_room::{run_out_volume, slotted, spec};
+    let s = slotted();
+    let r = ryukei::tweak::delete_faces(OpKey(0x22a5), &s, &spec(&s));
+    let (o, _) = r.unwrap_or_else(|e| panic!("refused: {e:?}"));
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    assert_eq!(o.counts().faces, 12);
+    assert_eq!(o.counts().shells, s.counts().shells);
+    let m = tessellate(&o, &MeshParams::new(2e-5, 0.3)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    let (v, _) = ryukei_testkit::mesh::volume_and_area(&m);
+    let want = run_out_volume();
+    assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
+}

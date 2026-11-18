@@ -1142,6 +1142,10 @@ pub enum Code {
     /// ryueda DRC finding (a warning): a courtyard whose graphics don't
     /// close, judged by its box.
     DrcCourtyardOpen,
+    /// `board export` refused: the board has DRC errors (its report in
+    /// `details.report`); fix them, or export with `--allow-errors`,
+    /// which the manifest records.
+    DrcFailed,
     /// No item of that ID or part number in the catalogue (ryuplm 0).
     ItemNotFound,
     /// An item's `class` isn't one `ryuplm.json` declares (an error).
@@ -1541,6 +1545,7 @@ impl Code {
         Code::DrcEdgeClearance,
         Code::DrcCourtyardOverlap,
         Code::DrcCourtyardOpen,
+        Code::DrcFailed,
         Code::ItemNotFound,
         Code::ItemClassUnknown,
         Code::PartNumberUnschemed,
@@ -1674,6 +1679,13 @@ mod tests {
             assert_eq!(c.exit_code(), 1);
             assert!(Code::ALL.contains(&c), "{c:?} in ALL");
         }
+    }
+
+    #[test]
+    fn export_codes() {
+        assert_eq!(json!(Code::DrcFailed), json!("drc_failed"));
+        assert_eq!(Code::DrcFailed.exit_code(), 1);
+        assert!(Code::ALL.contains(&Code::DrcFailed));
     }
 
     #[test]

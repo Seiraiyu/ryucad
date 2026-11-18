@@ -344,6 +344,7 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
                         &["ryucad", "solidworks", "onshape"],
                     );
                     choice(ui, ws, "ui.motion", "Camera motion", &["animate", "reduce"]);
+                    toggle(ui, ws, "view.follow_work", "Follow agents' work");
                     choice(
                         ui,
                         ws,

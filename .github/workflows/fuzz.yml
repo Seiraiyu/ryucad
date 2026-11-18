@@ -72,6 +72,41 @@ jobs:
           s=$!
           trap 'kill $s' EXIT
           cargo +nightly fuzz build ${{ matrix.target }}
+      # A fixed sample of a slow corpus (#934). sweep's 670 seeds took
+      # 1,995 s to replay and feature's 2,730 took 410 s (run 44153707736),
+      # so sweep never mutated within its 600 s. libFuzzer replays smallest
+      # first, and there the small seeds cost milliseconds and the rest
+      # seconds each (sweep's 256 smallest in 7 s, its next 256 in 921 s;
+      # feature's 1,024 smallest in 30 s, its next 1,024 in 350 s). The
+      # sample is the SMALL smallest (by size, then name), MORE of the
+      # rest by name, and every seed fuzz/pinned.txt keeps: the same every
+      # night. feature's 120 pinned seeds are its slow ones (about 1.4 s
+      # each), so it takes no more; the first sampled dispatch (run
+      # 44174480847) replayed sweep 237 + 30 in 176 s and feature 1,024 +
+      # 40 + its pinned in 203 s. A find goes to the sample's folder and its artifacts, as a
+      # find in the full corpus did. Other targets replay their whole
+      # corpus.
+      - name: Corpus sample
+        if: matrix.target == 'sweep' || matrix.target == 'feature'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          SMALL: ${{ fromJSON('{"sweep":237,"feature":1024}')[matrix.target] }}
+          MORE: ${{ fromJSON('{"sweep":20,"feature":0}')[matrix.target] }}
+        run: |
+          set -euo pipefail
+          src=fuzz/corpus/$TARGET; dst=$RUNNER_TEMP/sample/$TARGET
+          mkdir -p "$dst"
+          find "$src" -maxdepth 1 -type f -printf '%s %f\n' | LC_ALL=C sort -k1,1n -k2,2 > "$RUNNER_TEMP/by_size"
+          cut -d' ' -f2 "$RUNNER_TEMP/by_size" > "$RUNNER_TEMP/names"
+          head -n "$SMALL" "$RUNNER_TEMP/names" > "$RUNNER_TEMP/small"
+          tail -n +"$((SMALL + 1))" "$RUNNER_TEMP/names" | LC_ALL=C sort > "$RUNNER_TEMP/rest"
+          head -n "$MORE" "$RUNNER_TEMP/rest" > "$RUNNER_TEMP/more"
+          { grep "^$TARGET/" fuzz/pinned.txt | cut -d/ -f2- || true; } > "$RUNNER_TEMP/pinned"
+          cat "$RUNNER_TEMP/small" "$RUNNER_TEMP/more" "$RUNNER_TEMP/pinned" | LC_ALL=C sort -u |
+            while read -r f; do if [ -f "$src/$f" ]; then cp "$src/$f" "$dst/"; fi; done
+          echo "sample: $(ls "$dst" | wc -l) of $(ls "$src" | wc -l) seeds ($(wc -l < "$RUNNER_TEMP/pinned") pinned)"
+          echo "CORPUS=$dst" >> "$GITHUB_ENV"
       - name: Fuzz for 10 minutes
         id: fuzz
         working-directory: fuzz
@@ -105,7 +140,7 @@ jobs:
           RSS_LIMIT_MB: ${{ fromJSON('{"feature":6144,"sweep":4096,"boolean":4096,"offset":4096,"tolerant":6144,"self_union":4096,"sheet":4096,"drawing":4096}')[matrix.target] || 2048 }}
           TIMEOUT_S: ${{ fromJSON('{"feature":600,"sweep":600,"offset":600,"tweak":600,"edit":600,"projection":600,"self_union":600,"tolerant":600}')[matrix.target] || 1200 }}
         run: >-
-          cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
+          cargo +nightly fuzz run ${{ matrix.target }} ${CORPUS:-} -- -max_total_time=600
           -rss_limit_mb=$RSS_LIMIT_MB -malloc_limit_mb=2048 -timeout=$TIMEOUT_S
           2>&1 | tee "$RUNNER_TEMP/fuzz.log"
       - name: Upload crashes

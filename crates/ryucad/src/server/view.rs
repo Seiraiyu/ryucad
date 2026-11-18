@@ -333,6 +333,7 @@ fn assembly_meshes(
                 hash: s.built.hash.clone(),
                 mesh,
                 warning,
+                shape: mesh::shape_of(&s.built),
             };
             (label, Ok(m))
         })
@@ -443,6 +444,7 @@ fn mesh_before_json(
     let mut body = mesh::to_json(&m.body, &m.mesh);
     body["feature"] = json!(solid);
     body["hash"] = json!(m.hash);
+    m.shape_into(&mut body);
     let mut v = json!({"part": pid, "quality": quality.as_str(), "bodies": [body]});
     with_warnings(&mut v, m.warning.into_iter().collect());
     Ok(v)
@@ -485,6 +487,7 @@ pub(crate) fn mesh_get(
                 let mut v = mesh::to_json(&m.body, &m.mesh);
                 v["feature"] = json!(label);
                 v["hash"] = json!(m.hash);
+                m.shape_into(&mut v);
                 Some(v)
             })
             .collect();
@@ -504,6 +507,7 @@ pub(crate) fn mesh_get(
                 let mut v = mesh::to_json(&m.body, &m.mesh);
                 v["feature"] = json!(id);
                 v["hash"] = json!(m.hash);
+                m.shape_into(&mut v);
                 v
             }
             Err(e) => json!({"feature": id, "ok": false, "error": e}),
@@ -1134,6 +1138,40 @@ pub(crate) fn view_focus(
         None => crate::assembly::shown_parts(session.project()),
     };
     Ok(json!({"participant": id, "focus": focus, "shows": shows}))
+}
+
+/// `view.follow` (#812): whom participant `participant` (else the one
+/// human, else the caller) follows: `follow`, else the caller; `off`
+/// stops it. A window can't follow itself.
+pub(crate) fn view_follow(
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    follow: Option<String>,
+    off: bool,
+    participant: Option<String>,
+) -> Result<Value> {
+    let live = live.ok_or_else(|| live::no_live_session("view.follow"))?;
+    if off && follow.is_some() {
+        return Err(Error::new(
+            Code::Usage,
+            "give a participant to follow, or off, not both",
+        ));
+    }
+    let id = live.compare_target(participant.as_deref(), me)?;
+    let whom = match (off, follow) {
+        (true, _) => None,
+        (false, Some(f)) => Some(live.get(&f)?.id.clone()),
+        (false, None) => Some(live.caller(me)),
+    };
+    if whom.as_deref() == Some(id.as_str()) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("participant {id} can't follow itself"),
+        )
+        .with("participant", &id));
+    }
+    live.set_following(&id, whom)?;
+    Ok(json!({"participant": id, "following": live.get(&id)?.view.following}))
 }
 
 /// `visibility.set`.

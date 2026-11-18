@@ -13,7 +13,7 @@ use crate::doc::id::Id;
 use crate::doc::import::{Import, ProductRef};
 use crate::doc::project::{ImportFile, Part};
 use crate::error::{Code, Error, Result};
-use crate::rebuild::{Built, finish, op_key};
+use crate::rebuild::{Built, Moved, finish, op_key};
 use ryukei::HealError;
 use ryukei::heal::HealReport;
 use ryukei::name::Name;
@@ -394,21 +394,22 @@ pub fn build(
     if i.mode() == crate::doc::import::Mode::Reference {
         return build_reference(part, id, i, &opened, k, run);
     }
-    let work = crate::work::work(run.job).with_budget(run.heal_budget);
-    let read = opened.body_with(
-        k,
-        &ReadOptions {
-            key: op_key(&part.id, id),
-            heal: heal_options(),
+    let key = op_key(&part.id, id);
+    let heal = |key| heal_solid(id, i, &opened, k, run, key);
+    let h = match &i.place {
+        // Healed once per shape, then given this feature's names (#813).
+        // Healed once per shape, then given this feature's names (#813);
+        // as before where the shape's derivations weren't all seen.
+        Some(_) => match once(&file.blake3, k, false, shape_key(i), run.heal_budget, heal)? {
+            Some(h) => h.renamed(shape_key(i), key),
+            None => heal(key)?,
         },
-        &work,
-    );
-    let (body, journal, healed) = read.result.map_err(|e| match e {
-        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
-        e => failed(id, i, &e, &read.instances, &read.solids),
-    })?;
-    let body = placed(id, i, body)?;
-    let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
+        None => heal(key)?,
+    };
+    let healed = h.solid.expect("a solid's heal reports");
+    let (body, journal, instances) = (h.body, h.journal, h.instances);
+    let (body, unplaced) = placed(id, i, body)?;
+    let step = |n: &Name| instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
         .map(|n| {
@@ -420,7 +421,9 @@ pub fn build(
         })
         .collect();
     let report = report(i, &healed);
-    Ok((finish(id, "import", (body, journal), origins)?, report))
+    let mut built = finish(id, "import", (body, journal), origins)?;
+    built.moved = unplaced.map(|(b, pose)| moved_from(i, b, pose, false));
+    Ok((built, report))
 }
 
 /// A reference import's body (design 364): the file's topology as a
@@ -435,21 +438,21 @@ fn build_reference(
     k: usize,
     run: &crate::rebuild::Run,
 ) -> Result<(Built, Value)> {
-    let work = crate::work::work(run.job).with_budget(run.heal_budget);
-    let read = opened.reference_with(
-        k,
-        &ReadOptions {
-            key: op_key(&part.id, id),
-            heal: heal_options(),
+    let key = op_key(&part.id, id);
+    let blake3 = &part.imports[&i.file.path].blake3;
+    let heal = |key| heal_reference(id, i, opened, k, run, key);
+    let h = match &i.place {
+        // Healed once per shape, then given this feature's names (#813).
+        Some(_) => match once(blake3, k, true, shape_key(i), run.heal_budget, heal)? {
+            Some(h) => h.renamed(shape_key(i), key),
+            None => heal(key)?,
         },
-        &work,
-    );
-    let (body, report) = read.result.map_err(|e| match e {
-        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
-        e => failed(id, i, &e, &read.instances, &read.solids),
-    })?;
-    let body = placed(id, i, body)?;
-    let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
+        None => heal(key)?,
+    };
+    let report = h.reference.expect("a reference's layout reports");
+    let (body, instances) = (h.body, h.instances);
+    let (body, unplaced) = placed(id, i, body)?;
+    let step = |n: &Name| instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
         .map(|n| {
@@ -460,31 +463,405 @@ fn build_reference(
             (n.to_string(), o)
         })
         .collect();
-    let v = reference_report(i, &report, &read.instances);
+    let v = reference_report(i, &report, &instances);
     // A reference changes nothing the file had: its journal is empty, as
     // a mirror's is.
     let journal = ryukei::name::Journal::new();
-    Ok((
-        crate::rebuild::finish_reference(id, (body, journal), origins)?,
-        v,
-    ))
+    let mut built = crate::rebuild::finish_reference(id, (body, journal), origins)?;
+    built.moved = unplaced.map(|(b, pose)| moved_from(i, b, pose, true));
+    Ok((built, v))
 }
 
-/// `body` moved where a flattened import's `place` puts it; as it is
-/// with none. Names don't depend on where the body stands, so a placed
-/// import's names are its file's.
-fn placed(id: &Id, i: &Import, body: ryukei::topo::Body) -> Result<ryukei::topo::Body> {
+/// A file body as healing or a reference's layout left it, by its import
+/// names: the body, its journal, the report, the STEP instance each name
+/// came from, and, for one healed under a shape key, how its names were
+/// derived ([`ryukei::name::record`]), to derive them again under a
+/// feature's key.
+#[derive(Clone)]
+struct Healed {
+    body: ryukei::topo::Body,
+    journal: ryukei::name::Journal,
+    solid: Option<HealReport>,
+    reference: Option<ryukei::heal::ReferenceReport>,
+    instances: BTreeMap<Name, u64>,
+    derived: Arc<ryukei::name::record::Derivations>,
+}
+
+impl Healed {
+    /// Every name these hold: the body's, the journal's, the instance
+    /// map's and the report's.
+    fn names(&self) -> Vec<Name> {
+        use ryukei::name::Event;
+        let b = &self.body;
+        let mut out: Vec<Name> = b
+            .faces()
+            .filter_map(|f| Some(b.face(f)?.name))
+            .chain(b.edges().filter_map(|e| Some(b.edge(e)?.name)))
+            .chain(b.vertices().filter_map(|v| Some(b.vertex(v)?.name)))
+            .chain(self.instances.keys().copied())
+            .collect();
+        for e in self.journal.events() {
+            match e {
+                Event::Created(n) | Event::Deleted(n) | Event::Modified(n) => out.push(*n),
+                Event::Split { parent, children } => {
+                    out.push(*parent);
+                    out.extend(children);
+                }
+                Event::Merged { parents, child } => {
+                    out.extend(parents);
+                    out.push(*child);
+                }
+                Event::Placed { from, to, .. } => out.extend([*from, *to]),
+                Event::Replaced { old, new } => {
+                    out.push(*old);
+                    out.extend(new);
+                }
+            }
+        }
+        if let Some(r) = &self.reference {
+            for list in [
+                &r.seams,
+                &r.poles,
+                &r.joined,
+                &r.split,
+                &r.reversed,
+                &r.turned,
+                &r.unoriented,
+                &r.split_faces,
+                &r.dropped_faces,
+                &r.laminar,
+            ] {
+                out.extend(list);
+            }
+            out.extend(r.tolerances.iter().map(|(n, _)| *n));
+        }
+        out
+    }
+
+    /// `d` kept only as far as these names reach (their parents, the
+    /// names their keys are, the bytes keys were made from); `false`, and
+    /// nothing kept, when a name these hold wasn't recorded (derived on
+    /// another thread): then it can't be derived again.
+    fn keep(&mut self, d: ryukei::name::record::Derivations) -> bool {
+        use ryukei::name::record::Derivations;
+        let roots = self.names();
+        if !roots.iter().all(|n| d.has(*n)) {
+            return false;
+        }
+        let mut kept = Derivations::default();
+        let mut todo = roots;
+        while let Some(n) = todo.pop() {
+            if kept.names.contains_key(&n) {
+                continue;
+            }
+            let Some(x) = d.names.get(&n) else { continue };
+            todo.extend(&x.parents);
+            todo.push(Name::from_u128(x.key.0));
+            if let Some(b) = d.keys.get(&x.key) {
+                kept.keys.insert(x.key, b.clone());
+            }
+            kept.names.insert(n, x.clone());
+        }
+        self.derived = Arc::new(kept);
+        true
+    }
+
+    /// These names derived again under `to` where they were made under
+    /// `from` (#813, [`ryukei::name::record::Derivations::rekey`]): in
+    /// the body, its journal, the reference report and the instance map;
+    /// nothing else changes ([`ryukei::topo::Body::renamed`]). A body
+    /// healed under its shape key so takes the names healing under the
+    /// feature's key gives: exactly them where the two heals break their
+    /// ties alike, and the same names however they broke them on every
+    /// body ryukei's tests and ours have tried.
+    fn renamed(&self, from: ryukei::name::OpKey, to: ryukei::name::OpKey) -> Healed {
+        let memo = std::cell::RefCell::new(BTreeMap::new());
+        let f = |n: Name| self.derived.rekey(from, to, n, &mut memo.borrow_mut());
+        let reference = self.reference.clone().map(|mut r| {
+            for list in [
+                &mut r.seams,
+                &mut r.poles,
+                &mut r.joined,
+                &mut r.split,
+                &mut r.reversed,
+                &mut r.turned,
+                &mut r.unoriented,
+                &mut r.split_faces,
+                &mut r.dropped_faces,
+                &mut r.laminar,
+            ] {
+                for n in list.iter_mut() {
+                    *n = f(*n);
+                }
+                list.sort();
+            }
+            for (n, _) in &mut r.tolerances {
+                *n = f(*n);
+            }
+            r
+        });
+        Healed {
+            body: self
+                .body
+                .renamed(f)
+                .expect("names derived alike from distinct ones are distinct"),
+            journal: self.journal.renamed(f),
+            solid: self.solid.clone(),
+            reference,
+            instances: self.instances.iter().map(|(n, k)| (f(*n), *k)).collect(),
+            derived: Arc::default(),
+        }
+    }
+}
+
+/// The key a flattened import's file body is healed under (#813): from
+/// the file's path, the product and the body, never the feature, so
+/// every copy of one component heals alike (ryukei's healer breaks ties
+/// by names, which follow the key) and once. Like a feature's key, it
+/// doesn't follow the file's bytes: a new version of the file keeps the
+/// names of what didn't change.
+fn shape_key(i: &Import) -> ryukei::name::OpKey {
+    let (pid, pname, ordinal) = match &i.product {
+        Some(p) => (p.id.as_str(), p.name.as_str(), p.ordinal),
+        None => ("", "", 0),
+    };
+    let text = format!(
+        "ryucad.import.shape.1\0{}\0{pid}\0{pname}\0{ordinal}\0{}",
+        i.file.path, i.body
+    );
+    ryukei::name::OpKey::from_bytes(text.as_bytes())
+}
+
+/// How many healed file bodies are kept by shape (#813).
+const HEALED_BODIES: usize = 1024;
+
+/// Healed file bodies by file, body, mode, shape key and heal budget
+/// (a budget other than the default may refuse a body the default heals,
+/// as the rebuild's key says), most recently used last.
+type HealedKey = (String, usize, bool, u128, u64);
+
+/// A shape's heal being made or made: `Some(None)` when its names weren't
+/// all recorded (not shared), `None` when it failed (the slot is dropped,
+/// and whoever waited heals again).
+type HealedSlot = Arc<OnceLock<Option<Option<Arc<Healed>>>>>;
+static HEALED: Mutex<Vec<(HealedKey, HealedSlot)>> = Mutex::new(Vec::new());
+
+/// `heal(key)` recorded ([`ryukei::name::record::recording`]), kept by
+/// `file`'s hash, its body `k`, the mode, `key` and the heal `budget`, so
+/// copies of one component are healed once (#813). `None` when the heal's
+/// names weren't all recorded, so can't be derived again under a
+/// feature's key: each copy then heals under its own, as before shape
+/// keys.
+///
+/// Copies rebuilt side by side wait for the first to heal their shape
+/// rather than heal it again. Waiting can't deadlock as waiting on
+/// [`opened`] could: the heal runs on its own pool ([`shape_heal`]), so it
+/// never needs a worker that waits on it, and the thread that heals waits
+/// for that pool in a join, never running another copy meanwhile. A heal that fails isn't kept:
+/// its slot is dropped, so a later request heals again, and a copy that
+/// waited on it heals itself (and fails alike, or is cancelled alike).
+fn once(
+    file: &str,
+    k: usize,
+    reference: bool,
+    key: ryukei::name::OpKey,
+    budget: u64,
+    heal: impl Fn(ryukei::name::OpKey) -> Result<Healed> + Send + Sync,
+) -> Result<Option<Arc<Healed>>> {
+    let at: HealedKey = (file.to_owned(), k, reference, key.0, budget);
+    loop {
+        let slot: HealedSlot = {
+            let mut kept = HEALED.lock().unwrap_or_else(|p| p.into_inner());
+            let slot = match kept.iter().position(|(x, _)| *x == at) {
+                Some(n) => kept.remove(n).1,
+                None => HealedSlot::default(),
+            };
+            kept.push((at.clone(), Arc::clone(&slot)));
+            while kept.len() > HEALED_BODIES {
+                kept.remove(0);
+            }
+            slot
+        };
+        let mut failed = None;
+        let done = slot.get_or_init(|| match shape_heal(&heal, key) {
+            Ok((h, complete)) => Some(complete.then(|| Arc::new(h))),
+            Err(e) => {
+                failed = Some(e);
+                None
+            }
+        });
+        if let Some(h) = done {
+            return Ok(h.clone());
+        }
+        let mut kept = HEALED.lock().unwrap_or_else(|p| p.into_inner());
+        kept.retain(|(x, s)| !(*x == at && Arc::ptr_eq(s, &slot)));
+        drop(kept);
+        if let Some(e) = failed {
+            return Err(e);
+        }
+    }
+}
+
+/// `heal(key)` recorded, its derivations kept as far as its names reach,
+/// and whether every name it left was recorded ([`Healed::keep`]).
+///
+/// The heal runs in a pool of one thread of its own (#955's review): a
+/// recording is its thread's, and a heal's parallel tasks
+/// (`Meter::par_map` over face groups and sewn pieces) would otherwise run
+/// on whichever worker took them, out of the recording's sight, while the
+/// waiting thread could run another heal's. On its own one thread every
+/// task of this heal runs there and nothing else does, so every name is
+/// recorded on every machine and thread count, and the heal gives what it
+/// gives on any (ryukei's parallel work is deterministic). What it gives
+/// up is parallelism inside one heal, once per shape. A pool that can't
+/// be made (the system refused a thread) heals unrecorded: not shared.
+fn shape_heal(
+    heal: impl Fn(ryukei::name::OpKey) -> Result<Healed> + Send + Sync,
+    key: ryukei::name::OpKey,
+) -> Result<(Healed, bool)> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .thread_name(|_| "ryucad-shape-heal".into())
+        .build();
+    let Ok(pool) = pool else {
+        return Ok((heal(key)?, false));
+    };
+    // Waited on from a thread of its own, joined: a rayon worker waiting in
+    // `install` on another pool runs its own pool's tasks meanwhile, and
+    // one of them could be another copy waiting on this very heal ([`once`]).
+    // A join blocks without running anything.
+    let (h, derived) = std::thread::scope(|sc| {
+        sc.spawn(|| pool.install(|| ryukei::name::record::recording(|| heal(key))))
+            .join()
+            .unwrap_or_else(|p| std::panic::resume_unwind(p))
+    });
+    let mut h = h?;
+    let complete = h.keep(derived);
+    Ok((h, complete))
+}
+
+/// Forgets every shape heal kept: a test's cold start.
+#[cfg(test)]
+pub(crate) fn forget_healed() {
+    HEALED.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
+/// Body `k` of `opened` healed under `key`, within `run`'s budget.
+fn heal_solid(
+    id: &Id,
+    i: &Import,
+    opened: &Opened,
+    k: usize,
+    run: &crate::rebuild::Run,
+    key: ryukei::name::OpKey,
+) -> Result<Healed> {
+    let work = crate::work::work(run.job).with_budget(run.heal_budget);
+    let read = opened.body_with(
+        k,
+        &ReadOptions {
+            key,
+            heal: heal_options(),
+        },
+        &work,
+    );
+    let (body, journal, healed) = read.result.map_err(|e| match e {
+        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
+        e => failed(id, i, &e, &read.instances, &read.solids),
+    })?;
+    Ok(Healed {
+        body,
+        journal,
+        solid: Some(healed),
+        reference: None,
+        instances: read.instances,
+        derived: Arc::default(),
+    })
+}
+
+/// Body `k` of `opened` laid out as a reference under `key`.
+fn heal_reference(
+    id: &Id,
+    i: &Import,
+    opened: &Opened,
+    k: usize,
+    run: &crate::rebuild::Run,
+    key: ryukei::name::OpKey,
+) -> Result<Healed> {
+    let work = crate::work::work(run.job).with_budget(run.heal_budget);
+    let read = opened.reference_with(
+        k,
+        &ReadOptions {
+            key,
+            heal: heal_options(),
+        },
+        &work,
+    );
+    let (body, report) = read.result.map_err(|e| match e {
+        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
+        e => failed(id, i, &e, &read.instances, &read.solids),
+    })?;
+    Ok(Healed {
+        body,
+        journal: ryukei::name::Journal::new(),
+        solid: None,
+        reference: Some(report),
+        instances: read.instances,
+        derived: Arc::default(),
+    })
+}
+
+/// A flattened import's file body, unplaced, and the pose that places it.
+type Unplaced = Option<(ryukei::topo::Body, ryukei::geom::Rigid)>;
+
+/// `body` moved where a flattened import's `place` puts it, with the
+/// file's body and the pose (what its mesh is moved from, #813); as it is,
+/// and nothing, with no place. Names don't depend on where the body
+/// stands, so a placed import's names are its file's.
+fn placed(id: &Id, i: &Import, body: ryukei::topo::Body) -> Result<(ryukei::topo::Body, Unplaced)> {
     let Some(p) = &i.place else {
-        return Ok(body);
+        return Ok((body, None));
     };
     let r = crate::assembly::pose_rigid(&p.pose).map_err(|e| e.with("feature", id))?;
-    body.transformed(&r).map_err(|e| {
+    let at = body.transformed(&r).map_err(|e| {
         Error::new(
             Code::ImportFailed,
             format!("import {id}: its place puts it where it can't stand: {e:?}"),
         )
         .with("feature", id)
         .with("reason", "place")
+    })?;
+    Ok((at, Some((body, r))))
+}
+
+/// BLAKE3 of `body`'s dump without names (its geometry and topology bit
+/// for bit, entity ids included), as [`Built::hash`] is of the named dump:
+/// two copies of one component, whatever features name them, have one
+/// shape hash, so one mesh (#813).
+pub fn shape_hash(body: &ryukei::topo::Body) -> String {
+    blake3::hash(body.dump_unnamed().as_bytes()).to_hex()[..32].to_owned()
+}
+
+/// What a flattened import's mesh is moved from (#813): the file's body
+/// unplaced, under its [`shape_hash`], and the pose that places it, as an
+/// inserted solid's is moved from its source's (design 521).
+fn moved_from(
+    i: &Import,
+    unplaced: ryukei::topo::Body,
+    pose: ryukei::geom::Rigid,
+    reference: bool,
+) -> Arc<Moved> {
+    let source = Built {
+        hash: shape_hash(&unplaced),
+        body: unplaced,
+        journal: Default::default(),
+        origins: Default::default(),
+        reference,
+        moved: None,
+    };
+    Arc::new(Moved {
+        source: Arc::new(source),
+        feature: Arc::new(crate::doc::files::Feature::Import(i.clone())),
+        pose,
     })
 }
 
@@ -2324,6 +2701,402 @@ pub(crate) mod tests {
         }
     }
 
+    /// #813: a placed import's body carries the file's body unplaced,
+    /// hashed by its shape, and the pose that places it, as an inserted
+    /// solid carries its source; an unplaced one carries nothing. Its
+    /// own body and hash are as before.
+    #[test]
+    fn a_placed_import_keeps_its_file_body_under_its_shape() {
+        use crate::doc::files::Feature;
+        use crate::doc::import::{Mode, Place, Via};
+        use crate::doc::project::{feature_path, write_json};
+        let bytes = occt("box_ap214.stp");
+        for mode in [None, Some(Mode::Reference)] {
+            let (dir, mut s) = with_import_as(&bytes, Some(("part 2", "part 2")), mode);
+            let p = Id::parse("p", "part").unwrap();
+            let solid = |s: &mut crate::session::Session| {
+                Arc::clone(&s.rebuilt(&p).unwrap().output(&id("i")).unwrap().solids()[0].1)
+            };
+            let plain = solid(&mut s);
+            assert!(
+                plain.moved.is_none(),
+                "{mode:?}: an unplaced import moves nothing"
+            );
+            let f = ImportFile::new(bytes.clone());
+            let i = Feature::Import(Import {
+                mode,
+                place: Some(Place {
+                    pose: crate::doc::assembly::Pose {
+                        origin_m: [0.1, 0.02, -0.03],
+                        z: [0.0, 1.0, 0.0],
+                        x: [1.0, 0.0, 0.0],
+                    },
+                    via: vec![Via {
+                        usage: "u1".into(),
+                        product: crate::doc::import::ProductRef {
+                            id: "part 2".into(),
+                            name: "part 2".into(),
+                            ordinal: 0,
+                        },
+                        ordinal: 0,
+                    }],
+                }),
+                ..import(&f, Some(("part 2", "part 2")), 0)
+            });
+            write_json(&feature_path(dir.path(), &p, &id("i")), &i.to_json()).unwrap();
+            s.reload().unwrap();
+            let placed = solid(&mut s);
+            let m = placed.moved.as_ref().expect("a placed import is moved");
+            // The file's body healed once under its shape key, then given
+            // this feature's names (#813).
+            let Feature::Import(i) = i else {
+                unreachable!()
+            };
+            let opened = opened(&f).unwrap();
+            let k = select(&id("i"), &i, &opened).unwrap();
+            let heal = |key| match mode {
+                None => heal_solid(&id("i"), &i, &opened, k, &crate::rebuild::Run::none(), key),
+                Some(_) => {
+                    heal_reference(&id("i"), &i, &opened, k, &crate::rebuild::Run::none(), key)
+                }
+            };
+            let (h, d) = ryukei::name::record::recording(|| heal(shape_key(&i)));
+            let mut h = h.unwrap();
+            assert!(h.keep(d), "every name recorded");
+            let want = h.renamed(shape_key(&i), op_key(&p, &id("i")));
+            assert_eq!(m.source.body.dump(), want.body.dump(), "{mode:?}");
+            assert_eq!(m.source.hash, shape_hash(&want.body), "{mode:?}");
+            // Stable names (#813's review): every name is the one today's
+            // heal under the feature's own key gives, and where both heals
+            // break their ties alike the body is today's bit for bit.
+            let names = |b: &ryukei::topo::Body| -> std::collections::BTreeSet<Name> {
+                b.faces()
+                    .map(|f| b.face(f).unwrap().name)
+                    .chain(b.edges().map(|e| b.edge(e).unwrap().name))
+                    .chain(b.vertices().map(|v| b.vertex(v).unwrap().name))
+                    .collect()
+            };
+            assert_eq!(names(&m.source.body), names(&plain.body), "{mode:?}");
+            if m.source.body.dump_unnamed() == plain.body.dump_unnamed() {
+                assert_eq!(m.source.body.dump(), plain.body.dump(), "{mode:?}");
+            }
+            assert_eq!(
+                m.source.body.transformed(&m.pose).unwrap().dump(),
+                placed.body.dump(),
+                "moved by its pose, it is the placed body bit for bit"
+            );
+            assert_eq!(
+                placed.hash,
+                blake3::hash(placed.body.dump().as_bytes()).to_hex()[..32].to_owned(),
+                "its own hash is its placed body's, as before"
+            );
+            assert_eq!(m.source.reference, placed.reference);
+            assert!(m.source.moved.is_none());
+            assert!(matches!(&*m.feature, Feature::Import(_)));
+        }
+    }
+
+    /// #813's review: a reference saved before shape keys, into a
+    /// flattened body (each face as healing under its feature's own key
+    /// named it, as ryucad 0.9 did), still resolves: every copy of the
+    /// block and the pin keeps those names, whichever way the shape key's
+    /// heal broke its ties.
+    #[test]
+    fn a_reference_into_a_flattened_body_from_before_shape_keys_still_resolves() {
+        let (_dir, mut s) = crate::testing::fresh();
+        crate::testing::call(
+            &mut s,
+            "import",
+            json!({"path": occt_path("assembly.stp"), "flatten": true, "part": "board"}),
+        )
+        .unwrap();
+        let board = Id::parse("board", "part").unwrap();
+        let part = s.project().part(&board).unwrap().clone();
+        let r = s.rebuilt(&board).unwrap().clone();
+        let mut checked = 0;
+        for (fid, f) in &part.features {
+            let crate::doc::files::Feature::Import(i) = f.as_ref().unwrap() else {
+                unreachable!()
+            };
+            assert!(i.place.is_some());
+            // What 0.9 healed: under the feature's own key.
+            let opened = opened(&part.imports[&i.file.path]).unwrap();
+            let k = select(fid, i, &opened).unwrap();
+            let old = heal_reference(
+                fid,
+                i,
+                &opened,
+                k,
+                &crate::rebuild::Run::none(),
+                op_key(&board, fid),
+            )
+            .unwrap();
+            let (solid, now) = &r.output(fid).unwrap().solids()[0];
+            // Each name is the same face turned the same way: the sums of
+            // its mesh's corner normals, old and new, agree (healing's ties
+            // may order the entities and senses otherwise, never a face's
+            // outward side).
+            let params = ryukei::mesh::MeshParams::new(1e-3, 0.5);
+            let normals = |b: &ryukei::topo::Body| {
+                let m = ryukei::mesh::tessellate(b, &params).unwrap();
+                let mut out = BTreeMap::new();
+                for f in &m.faces {
+                    let sum = m.corners[f.corners.start as usize..f.corners.end as usize]
+                        .iter()
+                        .fold(ryukei::geom::Vector3::new(0.0, 0.0, 0.0), |a, c| {
+                            a + c.normal.get()
+                        });
+                    out.insert(b.face(f.face).unwrap().name, sum.normalize().unwrap());
+                }
+                out
+            };
+            let src = &now.moved.as_ref().unwrap().source.body;
+            let (was, is) = (normals(&old.body), normals(src));
+            for (n, a) in &was {
+                assert!(a.dot(is[n]) > 0.99, "{fid}: face {n} turned");
+            }
+            for face in old.body.faces() {
+                let n = old.body.face(face).unwrap().name;
+                assert!(now.body.by_name(n).is_some(), "{fid}: face {n} lost");
+                let v = crate::testing::call(
+                    &mut s,
+                    "measure",
+                    json!({"entities": [format!("board/{solid}/{n}")]}),
+                )
+                .unwrap_or_else(|e| panic!("board/{solid}/{n}: {e}"));
+                assert!(v.is_object());
+                checked += 1;
+            }
+            for e in old.body.edges() {
+                assert!(now.body.by_name(old.body.edge(e).unwrap().name).is_some());
+            }
+            for v in old.body.vertices() {
+                assert!(now.body.by_name(old.body.vertex(v).unwrap().name).is_some());
+            }
+        }
+        assert_eq!(checked, 6 + 6 + 3, "the block's faces twice, the pin's");
+    }
+
+    /// #955's review: a heal whose names weren't all recorded (derived on
+    /// another thread) can't be derived again, so isn't shared: `keep`
+    /// says so and keeps nothing.
+    #[test]
+    fn a_heal_not_all_recorded_is_not_shared() {
+        let bytes = occt("box_ap214.stp");
+        let f = ImportFile::new(bytes);
+        let i = import(&f, Some(("part 2", "part 2")), 0);
+        let opened = opened(&f).unwrap();
+        let k = select(&id("i"), &i, &opened).unwrap();
+        let run = crate::rebuild::Run::none();
+        let heal = || heal_solid(&id("i"), &i, &opened, k, &run, shape_key(&i)).unwrap();
+        let (mut h, d) = ryukei::name::record::recording(heal);
+        let mut partial = d.clone();
+        let first = h.body.faces().next().unwrap();
+        partial.names.remove(&h.body.face(first).unwrap().name);
+        assert!(!h.clone().keep(partial));
+        // Healed on another thread, nothing is recorded here.
+        let (other, none) = ryukei::name::record::recording(|| {
+            std::thread::scope(|sc| sc.spawn(heal).join().unwrap())
+        });
+        assert!(!other.clone().keep(none));
+        assert!(h.keep(d));
+        assert!(!h.derived.names.is_empty());
+    }
+
+    /// #955's review: names a shape heal derives inside its own parallel
+    /// tasks are all recorded, however a pool of eight threads would have
+    /// spread them: the heal runs on its own one-thread pool. The heal
+    /// here is a box's, plus 64 names derived in a `par_iter` whose tasks
+    /// sleep so they spread, carried as the heal's (its instance map).
+    #[test]
+    fn names_a_shape_heal_derives_in_parallel_tasks_are_all_recorded() {
+        use rayon::prelude::*;
+        let f = ImportFile::new(occt("box_ap214.stp"));
+        let i = import(&f, Some(("part 2", "part 2")), 0);
+        let opened = opened(&f).unwrap();
+        let k = select(&id("i"), &i, &opened).unwrap();
+        let run = crate::rebuild::Run::none();
+        let heal = |key: ryukei::name::OpKey| {
+            let mut h = heal_solid(&id("i"), &i, &opened, k, &run, key)?;
+            let names: Vec<Name> = (0..64u128)
+                .into_par_iter()
+                .map(|n| {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    Name::derive(key, ryukei::name::Role::NewFace, &[Name::from_u128(n)])
+                })
+                .collect();
+            for (n, name) in names.into_iter().enumerate() {
+                h.instances.insert(name, n as u64);
+            }
+            Ok(h)
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        for _ in 0..3 {
+            let (h, complete) = pool.install(|| shape_heal(heal, shape_key(&i))).unwrap();
+            assert!(
+                complete,
+                "a name derived in a parallel task wasn't recorded"
+            );
+            for n in 0..64u128 {
+                let name = Name::derive(
+                    shape_key(&i),
+                    ryukei::name::Role::NewFace,
+                    &[Name::from_u128(n)],
+                );
+                assert!(h.derived.has(name), "{n}");
+                assert!(h.instances.contains_key(&name));
+            }
+        }
+    }
+
+    /// #955's review: a reference of two face groups (healed by a task
+    /// each, `Meter::par_map`), flattened twice, rebuilds cold to the same
+    /// bodies on 1 thread and 8, its two copies sharing one shape on each.
+    #[test]
+    fn a_shape_heal_of_many_tasks_is_alike_on_any_thread_count() {
+        use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+        use ryukei::geom::{Rigid, Vector3};
+        // Eight spheres and cylinders apart, one body: eight face groups,
+        // each with seams and poles its task names again (unseam).
+        let block = |n: u32| {
+            let at = Rigid::translation(Vector3::new(0.05 * f64::from(n), 0.0, 0.0));
+            let key = ryukei::name::OpKey(3 + u128::from(n));
+            let r = 0.01 + 0.001 * f64::from(n);
+            if n.is_multiple_of(2) {
+                ryukei::primitive::sphere(key, r, &at).unwrap().0
+            } else {
+                ryukei::primitive::cylinder(key, r, 0.02, &at).unwrap().0
+            }
+        };
+        let first = block(0);
+        let rest: Vec<ryukei::topo::Body> = (1..8).map(block).collect();
+        let tools: Vec<Tool> = rest
+            .iter()
+            .enumerate()
+            .map(|(n, body)| Tool {
+                key: ToolKey(n as u128 + 1),
+                body,
+                place: Rigid::IDENTITY,
+            })
+            .collect();
+        let two = boolean(ryukei::name::OpKey(99), BooleanOp::Unite, &first, &tools)
+            .unwrap()
+            .0;
+        let products = vec![
+            ryustep::Product {
+                id: "two".into(),
+                name: "two".into(),
+                bodies: vec![two],
+                ..Default::default()
+            },
+            ryustep::Product {
+                id: "root".into(),
+                name: "root".into(),
+                children: (0..2)
+                    .map(|n| ryustep::Child {
+                        product: 0,
+                        place: Rigid::translation(Vector3::new(0.0, 0.1 * n as f64, 0.0)),
+                        id: String::new(),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        ];
+        let bytes = ryustep::write(
+            &ryustep::WriteModel { products },
+            &ryustep::WriteOptions {
+                time_stamp: "2026-11-17T00:00:00".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("two.step");
+        std::fs::write(&file, &bytes).unwrap();
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                forget_healed();
+                let (_dir, mut s) = crate::testing::fresh();
+                crate::testing::call(
+                    &mut s,
+                    "import",
+                    json!({"path": file, "flatten": true, "part": "board"}),
+                )
+                .unwrap();
+                let board = Id::parse("board", "part").unwrap();
+                let r = s.rebuilt(&board).unwrap().clone();
+                assert_eq!(r.failed(), 0);
+                r.features
+                    .iter()
+                    .flat_map(|(_, o)| o.as_ref().unwrap().solids().to_vec())
+                    .map(|(_, b)| {
+                        let m = b.moved.as_ref().expect("moved");
+                        (b.hash.clone(), m.source.hash.clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Every name a shape heal makes is recorded, wherever its tasks
+        // ran: twenty heals on eight threads.
+        let f = ImportFile::new(bytes.clone());
+        let opened = opened(&f).unwrap();
+        let i = Import {
+            file: FileRef {
+                path: "imports/f.step".into(),
+                blake3: f.blake3.clone(),
+            },
+            product: Some(ProductRef {
+                id: "two".into(),
+                name: "two".into(),
+                ordinal: 0,
+            }),
+            body: 0,
+            mode: None,
+            place: None,
+        };
+        let kk = select(&id("i"), &i, &opened).unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        for _ in 0..20 {
+            let none = crate::rebuild::Run::none();
+            let (h, complete) = pool
+                .install(|| {
+                    shape_heal(
+                        |key| heal_reference(&id("i"), &i, &opened, kk, &none, key),
+                        shape_key(&i),
+                    )
+                })
+                .unwrap();
+            assert!(h.body.faces().count() >= 8, "eight pieces");
+            assert!(complete, "a name derived out of the recording's sight");
+        }
+        let one = run(1);
+        assert_eq!(one.len(), 2);
+        assert_eq!(one[0].1, one[1].1, "one shape, 1 thread");
+        for _ in 0..4 {
+            assert_eq!(run(8), one, "8 threads");
+        }
+    }
+
+    #[test]
+    fn a_shape_hash_ignores_names() {
+        let (_, a) = crate::mesh::tests::sphere_built("10 mm", "s");
+        let (_, b) = crate::mesh::tests::sphere_built("10 mm", "t");
+        assert_ne!(a.hash, b.hash, "named by their features");
+        assert_eq!(shape_hash(&a.body), shape_hash(&b.body));
+        let (_, c) = crate::mesh::tests::sphere_built("11 mm", "s");
+        assert_ne!(shape_hash(&a.body), shape_hash(&c.body));
+    }
+
     /// #800: a flattened import whose file starts a line 499.8 m away
     /// (inside the size box) is placed 0.3 m further that way: the line's
     /// origin leaves the box, the body doesn't, and the body stands there,
@@ -2707,6 +3480,59 @@ pub(crate) mod tests {
         let plain = hash(&crate::rebuild::Run::none());
         assert_ne!(plain, hash(&run));
         assert_eq!(plain, hash(&crate::rebuild::Run::with_job(&job)));
+    }
+
+    /// #813's review: a placed import healed once at the default budget
+    /// (kept by shape for the process) still fails at a budget of 1 in
+    /// the same process, as a fresh one does: the heal is kept by budget.
+    #[test]
+    fn a_placed_import_healed_at_the_default_still_fails_past_its_budget() {
+        use crate::doc::import::{Place, Via};
+        let bytes = occt("box_ap214.stp");
+        let (_dir, s) = with_import(&bytes, Some(("part 2", "part 2")));
+        let mut part = s
+            .project()
+            .part(&Id::parse("p", "part").unwrap())
+            .unwrap()
+            .clone();
+        let fid = id("i");
+        let f = ImportFile::new(bytes.clone());
+        let i = Import {
+            place: Some(Place {
+                pose: crate::doc::assembly::Pose {
+                    origin_m: [0.25, 0.0, 0.0],
+                    ..crate::doc::assembly::Pose::IDENTITY
+                },
+                via: vec![Via {
+                    usage: "u1".into(),
+                    product: ProductRef {
+                        id: "part 2".into(),
+                        name: "part 2".into(),
+                        ordinal: 0,
+                    },
+                    ordinal: 0,
+                }],
+            }),
+            ..import(&f, Some(("part 2", "part 2")), 0)
+        };
+        part.features.insert(
+            fid.clone(),
+            Ok(crate::doc::files::Feature::Import(i.clone())),
+        );
+        // Healed, and kept, at the default.
+        let (b, _) = build(&part, &fid, &i, &crate::rebuild::Run::none()).unwrap();
+        assert!(b.moved.is_some());
+        let job = ryu_session::job::Job::default();
+        let run = crate::rebuild::Run {
+            job: &job,
+            heal_budget: 1,
+            edit_budget: crate::tweak::DEFAULT_EDIT_BUDGET,
+        };
+        let e = build(&part, &fid, &i, &run).unwrap_err();
+        assert_eq!(e.code, Code::ImportBudgetExceeded, "{e:?}");
+        // And the default still finds what it kept.
+        let (again, _) = build(&part, &fid, &i, &crate::rebuild::Run::none()).unwrap();
+        assert_eq!(again.hash, b.hash);
     }
 
     #[test]

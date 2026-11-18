@@ -787,6 +787,17 @@ pub enum Request {
     /// A board's counts: parts placed, nets routed and open, findings.
     #[serde(rename = "board.status")]
     BoardStatus { board: String },
+    /// The fabrication package (design 732): Gerber X2 per layer,
+    /// Excellon drills, the BOM and pick and place (and both in the
+    /// preset's assembly form) and `manifest.json`, each file's `text` in
+    /// the answer. `drc_failed` while the board has a DRC error, unless
+    /// `allow_errors`.
+    #[serde(rename = "board.export")]
+    BoardExport {
+        board: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_errors: bool,
+    },
     /// A functional block, its ID random unless given.
     #[serde(rename = "block.create")]
     BlockCreate {

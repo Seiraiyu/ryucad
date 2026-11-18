@@ -8,6 +8,9 @@
 #[path = "../../src/bench/scripted.rs"]
 pub mod scripted;
 
+// #813's seeded board of repeated components, as STEP.
+pub mod board;
+
 use ryucad::proto::Request;
 use ryucad::server::handle;
 use ryucad::session::Session;

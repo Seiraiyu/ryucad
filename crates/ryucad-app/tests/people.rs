@@ -113,3 +113,46 @@ fn ryucad_open_asks_the_window_forward() {
     assert_eq!(v["result"]["opened"], "existing", "{v}");
     assert!(ws.wait_until(WAIT, |ws| ws.raised));
 }
+
+/// `ryucad follow` (#812): an agent asks the window to follow it; the
+/// window follows, the strip's Follow and Stop write through the session,
+/// and a hand on the camera ends it with a toast.
+#[test]
+fn an_agent_asks_the_window_to_follow_it() {
+    let p = Project::new().with_part();
+    let mut ws = open(&p, "Dana");
+    p.ok(&["camera", "--view", "front"]);
+    let r = p.ok(&["follow"]);
+    assert_eq!(r["participant"], ws.me());
+    let agent = r["following"].as_str().unwrap().to_owned();
+    assert!(ws.wait_until(WAIT, |ws| ws.session.following.as_deref()
+        == Some(agent.as_str())));
+    assert!(ws.followed_camera().is_some());
+    let following_of = |p: &Project, me: &str| {
+        p.ok(&["participants"])["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == me)
+            .unwrap()["following"]
+            .clone()
+    };
+    // The person's own move ends it, and says so.
+    ws.hand_moved();
+    assert_eq!(ws.session.following, None);
+    assert_eq!(
+        ws.toasts.shown().last().unwrap().text,
+        "Following agent: your move stopped it"
+    );
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    let me = ws.me().to_owned();
+    assert_eq!(following_of(&p, &me), serde_json::Value::Null);
+    // The strip's Follow and Stop are the session's too.
+    ws.follow(Some(agent.clone()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    assert_eq!(following_of(&p, &me), serde_json::json!(agent));
+    ws.follow(None);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    assert_eq!(following_of(&p, &me), serde_json::Value::Null);
+    assert_eq!(ws.session.following, None);
+}

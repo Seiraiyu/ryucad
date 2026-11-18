@@ -4892,6 +4892,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-gerber"
+version = "0.0.0"
+dependencies = [
+ "ryu-board",
+ "ryu-gerber",
+]
+
+[[package]]
 name = "ryu-git"
 version = "0.0.0"
 dependencies = [
@@ -5079,6 +5087,7 @@ dependencies = [
  "gix",
  "mimalloc",
  "pdf-writer",
+ "png",
  "proptest",
  "rayon",
  "resvg",
@@ -5086,6 +5095,7 @@ dependencies = [
  "ryu-copper",
  "ryu-doc",
  "ryu-draw",
+ "ryu-gerber",
  "ryu-git",
  "ryu-math",
  "ryu-part21",
