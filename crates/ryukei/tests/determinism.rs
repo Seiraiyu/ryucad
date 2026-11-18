@@ -3831,6 +3831,31 @@ fn ruled_pin_section(golden: &mut Golden) {
     }
 }
 
+/// ryukei 23.A's released pins (design 919): the released_pin twin
+/// (`ryukei_testkit::released_pin`), the slot's far end deleted. In rung
+/// 3's narrowed build the walk fails at the pinned start plane; built
+/// again with the plane released, its walk fails there too (census VIII,
+/// #658), so the delete refuses. The result's body, created names and
+/// mesh, or the refusal's bytes; then the units spent, which hold the
+/// released build.
+fn released_pin_section(golden: &mut Golden) {
+    use ryukei::tweak::delete_faces_with;
+    use ryukei::work::Work;
+    use ryukei_testkit::released_pin::{slotted, spec};
+    let mut s = golden.section("released_pin");
+    let b = slotted();
+    let w = Work::unlimited();
+    match delete_faces_with(OpKey(0x23a5), &b, &spec(&b), &w) {
+        Ok((o, j)) => hash_body(&mut s, &o, &j),
+        Err(e) => {
+            for byte in format!("{e:?}").bytes() {
+                s.u64(u64::from(byte));
+            }
+        }
+    }
+    s.u64(w.spent());
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3934,6 +3959,7 @@ sections! {
     near_room => near_room_section,
     slit_seeds => slit_seeds_section,
     ruled_pin => ruled_pin_section,
+    released_pin => released_pin_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline
