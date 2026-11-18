@@ -9,6 +9,7 @@ pub use ryu_doc::{canonical, error, id, source, units};
 
 pub mod activity;
 pub mod bom;
+pub mod bom_diff;
 pub mod aml;
 pub mod catalogue;
 pub mod check;

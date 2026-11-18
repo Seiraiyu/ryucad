@@ -191,6 +191,17 @@ enum BomCmd {
         #[arg(long = "in", value_name = "DIR")]
         within: Vec<String>,
     },
+    /// What changed in BOMs between two revisions: HEAD and the working
+    /// files by default; every item, or ITEM's.
+    Diff {
+        item: Option<String>,
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+    },
     /// A new own line: CHILD (an ID, a number, or <catalogue>:<ID>) and
     /// its QUANTITY in the child's unit.
     Add {
@@ -537,6 +548,20 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 item: item.clone(),
                 rev: rev.clone(),
                 depth: *depth,
+                within: absolute(here, within),
+            },
+        ),
+        Command::Bom(BomCmd::Diff {
+            item,
+            from,
+            to,
+            within,
+        }) => (
+            root()?,
+            Request::BomDiff {
+                item: item.clone(),
+                from: from.clone(),
+                to: to.clone(),
                 within: absolute(here, within),
             },
         ),

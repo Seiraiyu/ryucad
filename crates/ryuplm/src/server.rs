@@ -225,6 +225,18 @@ fn dispatch(
             depth,
             within,
         } => crate::bom::show(session, &item, rev.as_deref(), depth, &within)?,
+        Request::BomDiff {
+            item,
+            from,
+            to,
+            within,
+        } => crate::bom_diff::diff(
+            session,
+            item.as_deref(),
+            from.as_deref(),
+            to.as_deref(),
+            &within,
+        )?,
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,

@@ -156,6 +156,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         within: Vec<String>,
     },
+    #[serde(rename = "bom.diff")]
+    BomDiff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]
