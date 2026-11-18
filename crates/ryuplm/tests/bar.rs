@@ -30,25 +30,15 @@ fn within(what: &str, took: Duration, limit: Duration) {
 }
 
 /// `n` items written to `root` as a catalogue: `ryuplm init`'s manifest,
-/// then each seeded item's file, a number seen before given a suffix. The
-/// seeded catalogue shares thirteen numbers out among three in seven items
-/// (for the golden's duplicates), and each `part_number_duplicate` lists
-/// every other item holding its number: at 100,000 items that is 43,000
-/// faults of 3,300 IDs each, gigabytes no real catalogue has.
+/// then each seeded item's file as it is. The seed shares thirteen numbers
+/// out among three in seven items, so at 100,000 items about 43,000 of
+/// them sit in groups of 3,300: each `part_number_duplicate` names ten of
+/// its group and counts the rest (#989), which `check` must judge too.
 fn write_catalogue(root: &Path, seed: &str, n: usize) {
     ryuplm::server::init(root, None).unwrap();
-    let files = ryuplm::testing::catalogue(seed, n);
-    let mut seen = std::collections::BTreeSet::new();
-    for (p, mut b) in files {
+    for (p, b) in ryuplm::testing::catalogue(seed, n) {
         if p == ryuplm::catalogue::MANIFEST {
             continue; // keep init's own project ID
-        }
-        if let Some(id) = ryuplm::ids::item_of(&p) {
-            let mut item = ryuplm::item::Item::read(&id, &b).unwrap();
-            if !seen.insert(item.number.clone()) {
-                item.number = format!("{}-{id}", item.number);
-                b = item.to_text().into_bytes();
-            }
         }
         let at = root.join(&p);
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
