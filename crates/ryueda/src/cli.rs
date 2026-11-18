@@ -1540,7 +1540,8 @@ enum BoardCmd {
         /// The design, by ID or name.
         #[arg(long)]
         design: String,
-        /// A rectangle W,H at the origin (lengths; bare numbers in the project's unit).
+        /// A rectangle W,H, its lower left corner at the origin: x right, y up
+        /// (lengths; bare numbers in the project's unit).
         #[arg(long, value_name = "W,H", conflicts_with = "outline")]
         rect: Option<String>,
         /// The outline as JSON: {start: [x, y], edges: [{type: line, to: [x, y]} |
@@ -1574,6 +1575,10 @@ enum BoardCmd {
         expect: Expect,
     },
     /// Place parts: REF --at X,Y [--rotation A], or --ops for several (all or nothing).
+    ///
+    /// The board's frame is the outline's: x right, y up (a --rect board's
+    /// lower left corner at 0,0). A placement puts the footprint's origin at
+    /// X,Y and turns it counterclockwise about it.
     Place {
         board: String,
         /// An occurrence reference (s1/u1) or a designator.
@@ -1692,7 +1697,8 @@ enum TrackCmd {
         #[arg(long)]
         width: Option<String>,
         /// Two or more points: X,Y (lengths), or a pad (R1/1) or via (via/<id>) for its centre.
-        /// A point with a negative coordinate goes through --ops.
+        /// A point with a negative coordinate goes through --ops. A point on
+        /// another track joins it: copper that touches is connected.
         #[arg(long, num_args = 2.., value_name = "P")]
         path: Vec<String>,
         #[arg(long)]

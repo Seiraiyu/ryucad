@@ -4515,6 +4515,19 @@ fn board_ops_help_says_how_numbers_read() {
     assert!(help.contains("millidegrees"), "{help}");
 }
 
+/// The board's frame (x right, y up, `--rect` from the origin) and that a
+/// track ending on another track's segment joins it are in the help
+/// (round 5.D worked both out by trying).
+#[test]
+fn board_help_says_the_frame_and_track_joins() {
+    let create = board_help(&["create"]);
+    assert!(create.contains("y up"), "{create}");
+    let place = board_help(&["place"]);
+    assert!(place.contains("y up"), "{place}");
+    let add = board_help(&["track", "add"]);
+    assert!(add.contains("joins it"), "{add}");
+}
+
 #[test]
 fn bom_answers_lines_and_writes_csv_to_out() {
     let p = Pair::breakout();
