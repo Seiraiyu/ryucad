@@ -3,7 +3,8 @@
 //! rasterizes each, and each raster matches `ryu-board`'s raster of the
 //! shapes that went into the file: at most `MAX_SHARE` of the ink pixels
 //! differ, every one within `EDGE_REACH` pixels of an edge in either
-//! picture. Both slot forms are read too, and the one `export::SLOTS`
+//! picture, under the closer of two registrations (both cut to their
+//! ink, or both over one window gerbv is given too; see `check`). Both slot forms are read too, and the one `export::SLOTS`
 //! names must pass. gerbv is GPL C, installed in the devcontainer only:
 //! verification, never a dependency.
 //!
@@ -15,6 +16,8 @@
 mod board_gen;
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/breakout_board.rs"]
+mod breakout_board;
 #[path = "support/draw.rs"]
 mod draw;
 
@@ -119,12 +122,34 @@ fn decode(bytes: &[u8]) -> Raster {
     Raster { w, h, ink }
 }
 
-/// gerbv's raster of `file` at `dpi`, and whatever it printed.
-fn gerbv_raster(file: &Path, dpi: u32, dir: &Path) -> (Raster, String) {
+/// gerbv's raster of `file` at `dpi`, and whatever it printed: over the
+/// box gerbv chooses, or over `window` (its lower left corner and its
+/// size in pixels), so gerbv's pixels are ours.
+fn gerbv_raster(
+    file: &Path,
+    dpi: u32,
+    window: Option<(Rect, usize, usize)>,
+    dir: &Path,
+) -> (Raster, String) {
     let out = dir.join(format!(
-        "{}.png",
-        file.file_name().unwrap().to_string_lossy()
+        "{}{}.png",
+        file.file_name().unwrap().to_string_lossy(),
+        if window.is_some() { ".window" } else { "" }
     ));
+    let at = window.map(|(r, w, h)| {
+        // The origin is a whole number of 254 nm (1e-5 inch), so five
+        // decimals write it exactly: gerbv refuses an --origin longer than
+        // 20 characters. The size goes in inches, since gerbv caps
+        // --window at 2000 pixels a side; half a pixel more, as gerbv
+        // truncates it. The size only bounds the picture: the grid is the
+        // origin's and the dpi's.
+        let inch = |nm: i64| nm as f64 / 25_400_000.0;
+        let px = |n: usize| (n as f64 + 0.5) / f64::from(dpi);
+        [
+            format!("--origin={:.5}x{:.5}", inch(r.min.x), inch(r.min.y)),
+            format!("--window_inch={:.6}x{:.6}", px(w), px(h)),
+        ]
+    });
     let o = gerbv()
         .args([
             "-x",
@@ -134,6 +159,7 @@ fn gerbv_raster(file: &Path, dpi: u32, dir: &Path) -> (Raster, String) {
             "--foreground=#FFFFFFFF",
         ])
         .arg(format!("--dpi={dpi}"))
+        .args(at.into_iter().flatten())
         .arg("-o")
         .arg(&out)
         .arg(file)
@@ -219,7 +245,7 @@ fn check(file: &Path, shapes: &[&Shape], dir: &Path) {
         let long = (b.max.x - b.min.x).max(b.max.y - b.min.y) as f64 / 25_400_000.0;
         (LONG_SIDE / long).clamp(50.0, 4000.0) as u32
     });
-    let (theirs, said) = gerbv_raster(file, dpi, dir);
+    let (theirs, said) = gerbv_raster(file, dpi, None, dir);
     let notes = said.lines().filter(|l| x2_attribute_note(l)).count();
     let rest: Vec<&str> = said
         .lines()
@@ -245,61 +271,91 @@ fn check(file: &Path, shapes: &[&Shape], dir: &Path) {
     }
     // Ours at exactly gerbv's scale: the shapes' box grown to a whole
     // number of pixels at `dpi`, so the view's scale is `dpi` on both
-    // axes. Both pictures are then cut to their ink; the closest of the
-    // nine alignments within a pixel is the one judged, since either may
-    // ink a fraction of a pixel at an outermost edge that the other
-    // doesn't.
-    let theirs = theirs.cropped().expect("checked above");
+    // axes. Two registrations of the pictures are tried, and the closer
+    // judged: both cut to their ink, and both over one window that gerbv
+    // is given too. Cutting to ink registers them only to a whole pixel
+    // (either may ink a fraction of a pixel at an outermost edge that the
+    // other doesn't), so stroke text, nearly all edge, differed by up to
+    // half a pixel along every stroke (5.D: the breakout's designators,
+    // 3.4 %); the shared window doesn't register gerbv's outlines at every
+    // dpi (the profile at 3,892 dpi, 3.7 %). Within each, the closest of
+    // the nine alignments within a pixel is the one judged.
     let b = bounds.expect("gerbv drew something");
     let per_px = 25_400_000.0 / f64::from(dpi);
-    let whole = |span: i64| (span as f64 / per_px).ceil().max(1.0);
-    let (pw, ph) = (whole(b.max.x - b.min.x), whole(b.max.y - b.min.y));
-    let window = Rect::new(
-        b.min,
-        ryu_board::geom::Point::new(
-            b.min.x + (pw * per_px).round() as i64,
-            b.min.y + (ph * per_px).round() as i64,
-        ),
+    let window = |origin: ryu_board::geom::Point| {
+        let whole = |span: i64| (span as f64 / per_px).ceil().max(1.0);
+        let (pw, ph) = (whole(b.max.x - origin.x), whole(b.max.y - origin.y));
+        let r = Rect::new(
+            origin,
+            ryu_board::geom::Point::new(
+                origin.x + (pw * per_px).round() as i64,
+                origin.y + (ph * per_px).round() as i64,
+            ),
+        );
+        (r, pw as usize, ph as usize)
+    };
+    let (r, pw, ph) = window(b.min);
+    let cut = (
+        ours(shapes, r, pw, ph)
+            .cropped()
+            .expect("ours has ink where gerbv's has"),
+        theirs.cropped().expect("checked above"),
     );
-    let mine = ours(shapes, window, pw as usize, ph as usize)
-        .cropped()
-        .expect("ours has ink where gerbv's has");
-    let (w, h) = (
-        mine.w.max(theirs.w) as i64 + 1,
-        mine.h.max(theirs.h) as i64 + 1,
-    );
-    let compare = |dx: i64, dy: i64| {
-        let (mut diff, mut ink, mut far) = (0usize, 0usize, None);
-        for y in 0..h {
-            for x in 0..w {
-                let a = mine.at(x + dx, y + dy).unwrap_or(false);
-                let b = theirs.at(x, y).unwrap_or(false);
-                if a || b {
-                    ink += 1;
-                }
-                if a != b {
-                    diff += 1;
-                    if far.is_none() && !(mine.near_edge(x + dx, y + dy) || theirs.near_edge(x, y))
-                    {
-                        far = Some((x, y));
+    let shared = window(ryu_board::geom::Point::new(
+        b.min.x.div_euclid(254) * 254,
+        b.min.y.div_euclid(254) * 254,
+    ));
+    let (theirs_there, said_there) = gerbv_raster(file, dpi, Some(shared), dir);
+    assert!(!warned(&said_there), "{name}: gerbv said: {said_there}");
+    let there = (ours(shapes, shared.0, shared.1, shared.2), theirs_there);
+    let judged = |(mine, theirs): &(Raster, Raster)| {
+        let (w, h) = (
+            mine.w.max(theirs.w) as i64 + 1,
+            mine.h.max(theirs.h) as i64 + 1,
+        );
+        let compare = |dx: i64, dy: i64| {
+            let (mut diff, mut ink, mut far) = (0usize, 0usize, None);
+            for y in 0..h {
+                for x in 0..w {
+                    let a = mine.at(x + dx, y + dy).unwrap_or(false);
+                    let b = theirs.at(x, y).unwrap_or(false);
+                    if a || b {
+                        ink += 1;
+                    }
+                    if a != b {
+                        diff += 1;
+                        if far.is_none()
+                            && !(mine.near_edge(x + dx, y + dy) || theirs.near_edge(x, y))
+                        {
+                            far = Some((x, y));
+                        }
                     }
                 }
             }
-        }
-        (diff, ink, far, (dx, dy))
+            (diff, ink, far, (dx, dy))
+        };
+        let best = (-1..=1)
+            .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+            .map(|(dx, dy)| compare(dx, dy))
+            .min_by_key(|c| c.0)
+            .unwrap();
+        (best, w, h)
     };
-    let (diff, ink, far, shift) = (-1..=1)
-        .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
-        .map(|(dx, dy)| compare(dx, dy))
-        .min_by_key(|c| c.0)
-        .unwrap();
+    let (one, two) = (judged(&cut), judged(&there));
+    type Judged = ((usize, usize, Option<(i64, i64)>, (i64, i64)), i64, i64);
+    let share = |j: &Judged| j.0.0 as f64 / j.0.1.max(1) as f64;
+    let ((diff, ink, far, shift), w, h, (mine, theirs), how) = if share(&two) < share(&one) {
+        (two.0, two.1, two.2, &there, "the shared window")
+    } else {
+        (one.0, one.1, one.2, &cut, "cut to ink")
+    };
     assert!(
         far.is_none(),
         "{name}: pixel {far:?} differs away from any edge (ours shifted {shift:?})"
     );
     let share = diff as f64 / ink.max(1) as f64;
     println!(
-        "{name}: {diff} of {ink} ink pixels differ ({:.3} %)",
+        "{name}: {diff} of {ink} ink pixels differ ({:.3} %, {how})",
         share * 100.0
     );
     // Both pictures as PBM, to look at a layer that differs.
@@ -364,9 +420,12 @@ fn ryueda(dir: &Path, args: &[&str]) -> serde_json::Value {
     v["result"].clone()
 }
 
+/// The breakout placed by hand, one net routed, a via and an unplated
+/// hole, exported with `--allow-errors`: `npth.drl` and the via's paths,
+/// whatever the round drew.
 #[test]
 #[ignore = "needs gerbv: the devcontainer, full.yml"]
-fn gerbv_reads_the_breakouts_package() {
+fn gerbv_reads_a_partly_routed_breakouts_package() {
     if !have_gerbv() {
         return;
     }
@@ -517,4 +576,33 @@ fn gerbv_reads_slots_in_the_chosen_form() {
             );
         }
     }
+}
+
+/// The breakout as agent round 5.D laid it out: clean, so exported
+/// without `--allow-errors`, every file read by gerbv.
+#[test]
+#[ignore = "needs gerbv: the devcontainer, full.yml"]
+fn gerbv_reads_the_breakouts_package() {
+    if !have_gerbv() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("board");
+    std::fs::create_dir_all(&root).unwrap();
+    ryueda(&root, &["init"]);
+    for (path, text) in breakout::footprints() {
+        let at = root.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+    for args in breakout::script()
+        .into_iter()
+        .chain(breakout_board::script())
+    {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        ryueda(&root, &args);
+    }
+    let id = breakout_board::BOARD;
+    ryueda(&root, &["board", "export", id, "--out", "fab"]);
+    check_package(&root, id, &root.join("fab"));
 }

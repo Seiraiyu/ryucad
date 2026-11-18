@@ -4,8 +4,8 @@
 # small design (rails, a block, three resistors wired between them, a
 # net of its own), its netlist, ERC and check, a library component
 # released (PDM) in a repository of its own, undo and redo through the
-# daemon, the activity log, the daemon's status and stop, and a run in
-# process.
+# daemon, the activity log, a board placed, routed, checked, rendered and
+# exported, the daemon's status and stop, and a run in process.
 #
 #   scripts/smoke-ryueda.sh path/to/ryueda [path/to/kicad] [path/to/ryueda-app]
 #
@@ -73,7 +73,8 @@ run component add top --of ryu_test_r --id r1
 run component add top --of ryu_test_r --id r2 --value 10k
 run component add top --of ryu_test_r --id r3
 run connect top/r1/1 rail:VIN
-run connect top/r1/2 OUT --new
+run net add top OUT --id out
+run connect top/r1/2 OUT
 run connect top/r2/1 OUT
 run connect top/r2/2 rail:GND
 run connect top/r3/1 rail:VIN
@@ -112,6 +113,30 @@ run undo
 run redo
 [ -f designs/d.json ] || { echo "FAIL redo didn't bring the design back" && exit 1; }
 run history
+# A board (design 732): the three resistors in a row, their three nets
+# routed on the top side, nothing found, rendered and exported. R_0402's
+# pads sit 0.51 mm either side of its origin.
+run board create Main --design d --rect 9,9 --id main
+run board place main R1 --at 3,3
+run board place main R2 --at 6,3
+run board place main R3 --at 4.5,6
+run board show main --pads
+has '"net":"out"' "R1/2 and R2/1 are on OUT"
+run board track add main --net out --layer top --path R1/2 R2/1 --id t1
+run board track add main --net rail:vin --layer top --path R1/1 2.49,6 R3/1 --id t2
+run board track add main --net rail:gnd --layer top --path R2/2 6.51,6 R3/2 --id t3
+run board status main
+has '"open":0' "every net is routed"
+run board drc main
+has '"findings":[]' "DRC finds nothing"
+run board render main --out board.png
+[ -s board.png ] || { echo "FAIL board render wrote nothing" && exit 1; }
+run board export main --out fab
+has '"allow_errors":false' "a clean board exports without --allow-errors"
+n=$(find fab -type f | wc -l | tr -d ' ')
+# Nine Gerber layers, two BOMs, two pick and place files, the manifest;
+# no drill file, since nothing is drilled.
+[ "$n" = 14 ] || { echo "FAIL the package has $n files, not 14: $(find fab -type f)" && exit 1; }
 if [ -n "$app" ]; then
     out=$("$app" --smoke "$work/project") || true
     case "$out" in

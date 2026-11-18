@@ -1333,6 +1333,7 @@ enum LibcompCmd {
         #[arg(long)]
         library: Option<String>,
     },
+    /// Delete a library component.
     Delete {
         libcomp: String,
         #[command(flatten)]
@@ -1438,6 +1439,7 @@ enum BlockCmd {
 
 #[derive(Subcommand)]
 enum RailCmd {
+    /// A rail, its ID random unless given.
     Add {
         name: String,
         #[arg(long)]
@@ -1447,6 +1449,7 @@ enum RailCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Change a rail's name or intent.
     Edit {
         /// By ID or name.
         rail: String,
@@ -1468,6 +1471,7 @@ enum RailCmd {
 
 #[derive(Subcommand)]
 enum ClassCmd {
+    /// A net class, its ID random unless given.
     Add {
         name: String,
         #[arg(long)]
@@ -1477,6 +1481,7 @@ enum ClassCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Change a net class's name or description.
     Edit {
         class: String,
         #[arg(long)]
@@ -1497,6 +1502,7 @@ enum ClassCmd {
 
 #[derive(Subcommand)]
 enum DesignCmd {
+    /// A design over a root block, its ID random unless given.
     Create {
         name: String,
         /// The root block.
@@ -1507,6 +1513,7 @@ enum DesignCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Change a design's name or root block.
     Edit {
         design: String,
         #[arg(long)]
@@ -1516,6 +1523,7 @@ enum DesignCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete a design.
     Delete {
         design: String,
         #[command(flatten)]
@@ -1532,7 +1540,8 @@ enum BoardCmd {
         /// The design, by ID or name.
         #[arg(long)]
         design: String,
-        /// A rectangle W,H at the origin (lengths; bare numbers in the project's unit).
+        /// A rectangle W,H, its lower left corner at the origin: x right, y up
+        /// (lengths; bare numbers in the project's unit).
         #[arg(long, value_name = "W,H", conflicts_with = "outline")]
         rect: Option<String>,
         /// The outline as JSON: {start: [x, y], edges: [{type: line, to: [x, y]} |
@@ -1566,6 +1575,10 @@ enum BoardCmd {
         expect: Expect,
     },
     /// Place parts: REF --at X,Y [--rotation A], or --ops for several (all or nothing).
+    ///
+    /// The board's frame is the outline's: x right, y up (a --rect board's
+    /// lower left corner at 0,0). A placement puts the footprint's origin at
+    /// X,Y and turns it counterclockwise about it.
     Place {
         board: String,
         /// An occurrence reference (s1/u1) or a designator.
@@ -1582,7 +1595,8 @@ enum BoardCmd {
         /// Degrees counterclockwise.
         #[arg(long, allow_hyphen_values = true)]
         rotation: Option<String>,
-        /// JSON: [{ref, at: [x, y], rotation?}].
+        /// JSON: [{ref, at: [x, y], rotation?}]; integers are nanometres (a
+        /// rotation millidegrees), strings lengths (a rotation degrees): "90", not 90.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation"])]
         ops: Option<String>,
         #[command(flatten)]
@@ -1657,6 +1671,9 @@ enum BoardCmd {
     /// drills, the BOM and pick and place, and manifest.json. Refused
     /// (drc_failed) while the board has a DRC error, unless
     /// --allow-errors, which the manifest records.
+    ///
+    /// Pick and place rotations are the placements' own: no fabricator's
+    /// per-package offsets are applied, so confirm them in its preview.
     Export {
         board: String,
         /// A new or empty folder, or one an earlier export wrote (its
@@ -1683,12 +1700,14 @@ enum TrackCmd {
         #[arg(long)]
         width: Option<String>,
         /// Two or more points: X,Y (lengths), or a pad (R1/1) or via (via/<id>) for its centre.
-        /// A point with a negative coordinate goes through --ops.
+        /// A point with a negative coordinate goes through --ops. A point on
+        /// another track joins it: copper that touches is connected.
         #[arg(long, num_args = 2.., value_name = "P")]
         path: Vec<String>,
         #[arg(long)]
         id: Option<String>,
-        /// JSON: [{net, layer, width?, path: [[x, y] | "R1/1", ...], id?}].
+        /// JSON: [{net, layer, width?, path: [[x, y] | "R1/1", ...], id?}]; integers
+        /// are nanometres, strings lengths.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "layer", "width", "path", "id"])]
         ops: Option<String>,
         #[command(flatten)]
@@ -1707,7 +1726,8 @@ enum TrackCmd {
         #[arg(long, num_args = 2.., value_name = "P")]
         path: Vec<String>,
         /// JSON: {net?, layer?, width?, path?: [["x", "y"] | "R1/1", ...]}, for
-        /// points with a negative coordinate.
+        /// points with a negative coordinate; integers are nanometres, strings
+        /// lengths.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "layer", "width", "path"])]
         ops: Option<String>,
         #[command(flatten)]
@@ -1739,12 +1759,14 @@ enum ViaCmd {
         diameter: Option<String>,
         #[arg(long)]
         id: Option<String>,
-        /// JSON: [{net, at, drill?, diameter?, id?}].
+        /// JSON: [{net, at, drill?, diameter?, id?}]; integers are nanometres,
+        /// strings lengths.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "at", "drill", "diameter", "id"])]
         ops: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete vias by ID.
     Delete {
         board: String,
         #[arg(required = true)]
@@ -1765,12 +1787,13 @@ enum HoleCmd {
         drill: Option<String>,
         #[arg(long)]
         id: Option<String>,
-        /// JSON: [{at, drill, id?}].
+        /// JSON: [{at, drill, id?}]; integers are nanometres, strings lengths.
         #[arg(long, value_name = "OPS", conflicts_with_all = ["at", "drill", "id"])]
         ops: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete holes by ID.
     Delete {
         board: String,
         #[arg(required = true)]
@@ -1926,6 +1949,7 @@ enum ComponentCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete a component.
     Delete {
         component: String,
         #[command(flatten)]
@@ -1941,6 +1965,7 @@ enum ComponentCmd {
 
 #[derive(Subcommand)]
 enum NetCmd {
+    /// A net in a block, its ID random unless given.
     Add {
         block: String,
         name: String,
@@ -1968,6 +1993,7 @@ enum NetCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Rename a net.
     Rename {
         net: String,
         name: String,
@@ -2254,6 +2280,7 @@ enum InstanceCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete an instance.
     Delete {
         instance: String,
         #[command(flatten)]
@@ -4258,57 +4285,76 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
 
 /// Writes an export's files into `dir` (made when missing), each
 /// atomically, and drops their `text` from the printed answer. A folder
-/// holding files but no manifest is refused; one an earlier export wrote
-/// has that export's files (its manifest's) removed first, so nothing
-/// stale stays beside the new package.
+/// holding files but no manifest is refused. The manifest is written
+/// last, once every other file is in place, and only then are an
+/// earlier export's files this one didn't write removed. So an export
+/// that fails partway leaves the earlier manifest, and the folder is
+/// taken again (5.C's review: it was refused as `invalid_param` until
+/// someone cleared it by hand).
 fn write_package(dir: &std::path::Path, result: &mut Value) -> Result<()> {
-    let manifest = dir.join(ryueda::board::export::MANIFEST);
+    use ryueda::board::export::MANIFEST;
+    let mut earlier: Vec<String> = Vec::new();
     if dir.exists() {
         let any = std::fs::read_dir(dir)
             .map_err(|e| Error::io(dir, &e))?
             .next()
             .is_some();
         if any {
-            let old: Value = std::fs::read_to_string(&manifest)
+            let old: Value = std::fs::read_to_string(dir.join(MANIFEST))
                 .ok()
                 .and_then(|t| serde_json::from_str(&t).ok())
                 .ok_or_else(|| {
                     Error::new(
                         Code::InvalidParam,
                         format!(
-                            "{} holds files and no {}: give a new or empty folder",
-                            dir.display(),
-                            ryueda::board::export::MANIFEST
+                            "{} holds files and no {MANIFEST}: give a new or empty folder",
+                            dir.display()
                         ),
                     )
                     .with("param", "out")
                 })?;
-            for f in old["files"].as_array().into_iter().flatten() {
-                if let Some(n) = f["name"].as_str()
-                    && !n.contains(['/', '\\'])
-                    && !n.starts_with('.')
-                {
-                    let _ = std::fs::remove_file(dir.join(n));
-                }
-            }
-            let _ = std::fs::remove_file(&manifest);
+            earlier = old["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f["name"].as_str())
+                .filter(|n| !n.contains(['/', '\\']) && !n.starts_with('.') && *n != MANIFEST)
+                .map(str::to_owned)
+                .collect();
         }
     }
     std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
+    let mut files: Vec<(String, String)> = result["files"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .map(|f| {
+            let name = f["name"].as_str().unwrap_or_default().to_owned();
+            let text = f
+                .as_object_mut()
+                .and_then(|o| o.remove("text"))
+                .and_then(|t| t.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            (name, text)
+        })
+        .collect();
+    // The manifest last; a stable sort keeps the others' order.
+    files.sort_by_key(|(name, _)| name == MANIFEST);
     // Every file renamed into place first and synced together after, so
     // the package waits on the file system's journal once, not once a
-    // file (#270); all are synced before the answer is printed.
+    // file (#270). All are synced before the answer is printed, a failed
+    // export's too.
     ryueda::source::defer_syncs();
-    for f in result["files"].as_array_mut().into_iter().flatten() {
-        let name = f["name"].as_str().unwrap_or_default().to_owned();
-        let text = f
-            .as_object_mut()
-            .and_then(|o| o.remove("text"))
-            .and_then(|t| t.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        ryueda::source::write_atomic(&dir.join(&name), text.as_bytes())?;
-    }
+    let written = files.iter().try_for_each(|(name, text)| {
+        ryueda::source::write_atomic(&dir.join(name), text.as_bytes())
+    });
     ryueda::source::flush_syncs();
+    written?;
+    for name in earlier {
+        if !files.iter().any(|(n, _)| *n == name) {
+            let _ = std::fs::remove_file(dir.join(&name));
+        }
+    }
     Ok(())
 }
 
@@ -4535,4 +4581,37 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
         s.expect("JSON values always serialize")
     );
     ExitCode::from(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// No subcommand's summary is a flattened group's: a command with no
+    /// doc comment of its own takes its first group's (`board via
+    /// delete` read "The revision a write is guarded by…", round 5.D).
+    #[test]
+    fn no_subcommand_borrows_a_groups_summary() {
+        let groups: Vec<String> = [
+            <Expect as clap::Args>::augment_args(clap::Command::new("g")),
+            <Rev as clap::Args>::augment_args(clap::Command::new("g")),
+        ]
+        .iter()
+        .filter_map(|g| g.get_about().map(ToString::to_string))
+        .collect();
+        fn walk(c: &clap::Command, path: &str, groups: &[String], bad: &mut Vec<String>) {
+            for s in c.get_subcommands() {
+                let here = format!("{path} {}", s.get_name());
+                let about = s.get_about().map(ToString::to_string).unwrap_or_default();
+                if groups.contains(&about) {
+                    bad.push(here.clone());
+                }
+                walk(s, &here, groups, bad);
+            }
+        }
+        let mut bad = Vec::new();
+        walk(&Cli::command(), "ryueda", &groups, &mut bad);
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
 }

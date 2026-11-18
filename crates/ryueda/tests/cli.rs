@@ -6,6 +6,8 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/breakout_board.rs"]
+mod breakout_board;
 #[path = "support/draw.rs"]
 mod draw;
 
@@ -4475,6 +4477,68 @@ fn place_help_lists_every_form() {
     }
 }
 
+/// A board command's help, its words joined by single spaces.
+fn board_help(args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ryueda(&dir.path().join("run"))
+        .arg("board")
+        .args(args)
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "board {args:?} --help");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Every board `--ops` says how its numbers read: integers nanometres
+/// (and millidegrees), strings lengths (and degrees). Round 5.D placed
+/// with `"rotation": 180` and got 0.18 degrees.
+#[test]
+fn board_ops_help_says_how_numbers_read() {
+    for args in [
+        &["place"][..],
+        &["track", "add"],
+        &["track", "edit"],
+        &["via", "add"],
+        &["hole", "add"],
+        &["create"],
+    ] {
+        let help = board_help(args);
+        assert!(
+            help.contains("integers are nanometres"),
+            "board {args:?}: {help}"
+        );
+    }
+    let help = board_help(&["place"]);
+    assert!(help.contains("millidegrees"), "{help}");
+}
+
+/// The board's frame (x right, y up, `--rect` from the origin) and that a
+/// track ending on another track's segment joins it are in the help
+/// (round 5.D worked both out by trying).
+#[test]
+fn board_help_says_the_frame_and_track_joins() {
+    let create = board_help(&["create"]);
+    assert!(create.contains("y up"), "{create}");
+    let place = board_help(&["place"]);
+    assert!(place.contains("y up"), "{place}");
+    let add = board_help(&["track", "add"]);
+    assert!(add.contains("joins it"), "{add}");
+}
+
+/// The export's help says pick and place rotations are the placements'
+/// own, with no fabricator's per-package offsets (design 732; round 5.D
+/// couldn't tell).
+#[test]
+fn board_export_help_says_rotations_carry_no_offsets() {
+    let help = board_help(&["export"]);
+    assert!(help.contains("per-package"), "{help}");
+}
+
 #[test]
 fn bom_answers_lines_and_writes_csv_to_out() {
     let p = Pair::breakout();
@@ -5188,6 +5252,9 @@ fn a_board_exports_its_fabrication_package() {
         assert!(gtl.contains("%TF.FileFunction,Copper,L1,Top*%"));
         assert!(gtl.contains("%TO.P,R1,1*%"), "{gtl}");
         assert!(!gtl.contains("CreationDate"));
+        // The footprints' reference fields, drawn in the stroke font.
+        let gto = fs::read_to_string(dir.join("main-silk-top.gto")).unwrap();
+        assert!(gto.contains("D01*"), "designators on the silk: {gto}");
         let pos = fs::read_to_string(dir.join("main-pos.csv")).unwrap();
         assert!(pos.starts_with("Designator,Value,Footprint,X,Y,Rotation,Side\n"));
         let left = m["left_out"].as_array().unwrap().len();
@@ -5221,6 +5288,98 @@ fn a_board_exports_its_fabrication_package() {
         "board_not_found",
         1,
     );
+}
+
+/// The breakout's board as agent round 5.D laid it out
+/// (`support/breakout_board.rs`), replayed both ways: every part placed,
+/// every net routed, nothing found, `check`'s boards section clean, and
+/// the package written without `--allow-errors`.
+#[test]
+fn the_breakout_board_is_clean_and_exports() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let s = p.ok(&["board", "status", id]);
+    assert_eq!(s["unplaced"], 0, "{s}");
+    assert_eq!(s["nets"]["open"], 0, "{s}");
+    assert_eq!(
+        (&s["errors"], &s["warnings"]),
+        (&json!(0), &json!(0)),
+        "{s}"
+    );
+    let d = p.ok(&["board", "drc", id]);
+    assert_eq!(d["findings"], json!([]), "{d}");
+    assert_eq!(d["incomplete"], false, "{d}");
+    let (_, v) = p.both_in("board", &["check"]);
+    let report = if v["ok"] == true {
+        &v["result"]
+    } else {
+        &v["error"]["details"]["report"]
+    };
+    let ours = report["boards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["board"] == format!("board/{id}"))
+        .unwrap();
+    assert_eq!(ours["findings"], json!([]), "{ours}");
+    let r = p.ok(&["board", "export", id, "--out", "fab"]);
+    assert_eq!(r["allow_errors"], false, "{r}");
+    for top in [&p.direct, &p.daemon] {
+        let dir = top.join("board/fab");
+        let m: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(m["allow_errors"], false, "{m}");
+        assert_eq!(m["left_out"], json!([]), "{m}");
+        assert!(m["files"].as_array().unwrap().len() >= 14, "{m}");
+    }
+}
+
+/// An export that fails partway (here a file it writes can't be put in
+/// place: a folder holding something stands at its name) keeps the
+/// earlier export's manifest. Once the obstacle goes, the next export
+/// takes the folder again (5.C's review: it was refused as
+/// `invalid_param` until someone cleared it by hand).
+#[test]
+fn an_export_that_fails_partway_leaves_its_folder_reusable() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "26,20", "--id", "main",
+    ]);
+    for (r, xy, rot) in BREAKOUT_PLACES {
+        p.ok(&["board", "place", "main", r, "--at", xy, "--rotation", rot]);
+    }
+    let export = ["board", "export", "main", "--out", "fab", "--allow-errors"];
+    p.ok(&export);
+    for top in [&p.direct, &p.daemon] {
+        let fab = top.join("board/fab");
+        fs::remove_file(fab.join("main-pos.csv")).unwrap();
+        fs::create_dir_all(fab.join("main-pos.csv")).unwrap();
+        fs::write(fab.join("main-pos.csv/in-the-way"), "x").unwrap();
+        // The message names the folder, which differs between the two
+        // tops, so each is run on its own.
+        let (code, v) = p.run_in(top, "board", &export);
+        assert_ne!(code, 0, "{v}");
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(
+            fab.join("manifest.json").is_file(),
+            "the earlier manifest stays"
+        );
+        fs::remove_dir_all(fab.join("main-pos.csv")).unwrap();
+    }
+    p.ok(&export);
+    for top in [&p.direct, &p.daemon] {
+        let fab = top.join("board/fab");
+        assert!(fab.join("main-pos.csv").is_file());
+        let m: Value =
+            serde_json::from_str(&fs::read_to_string(fab.join("manifest.json")).unwrap()).unwrap();
+        for f in m["files"].as_array().unwrap() {
+            assert!(fab.join(f["name"].as_str().unwrap()).is_file(), "{f}");
+        }
+    }
 }
 
 #[test]
