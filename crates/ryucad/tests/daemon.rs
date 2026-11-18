@@ -1314,8 +1314,10 @@ fn a_burst_of_writes_is_told_in_a_few_notifications() {
     assert_eq!(of("activity.appended").len(), 40);
     let changed = of("model.changed");
     assert!(!changed.is_empty());
-    // One per max_ms of the burst, the last, and the first at once (a
-    // lone change isn't held, #960).
+    // `secs` whole seconds of burst: one publish per publish_max_ms (1 s)
+    // of it, rounded up (+1 for the part second), the last once quiet
+    // (+1), and since #962 the burst's first change, lone and published at
+    // once rather than held for the quiet window (+1, #960).
     assert!(
         changed.len() <= secs as usize + 3,
         "{} in {secs:.1} s",
