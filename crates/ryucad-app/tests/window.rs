@@ -139,7 +139,8 @@ fn show_tab(h: &mut Harness<'static, App>, id: &str) {
     h.run_steps(2);
 }
 
-/// Runs frames until `done` holds.
+/// Runs frames until `done` holds. A timeout names the line that waited.
+#[track_caller]
 fn frames(h: &mut Harness<'static, App>, done: impl Fn(&App) -> bool) {
     let t = Instant::now();
     loop {
@@ -1091,7 +1092,8 @@ fn preferences_change_the_window_whoever_sets_them() {
     );
     // The shared cache: a server, and a token kept apart from the
     // preferences.
-    let url = "https://cache.example.com";
+    // A server that refuses at once: no name to look up, no network (#971).
+    let url = "http://127.0.0.1:1";
     type_into(&mut h, "Shared cache server", url);
     h.key_press(egui::Key::Enter);
     frames(&mut h, |a| {
