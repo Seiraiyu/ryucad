@@ -196,6 +196,8 @@ pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
 /// doubling. `near` gives a face's near box before any adjustment. `None`
 /// where none of their near boxes would grow (each already the rung's
 /// box `x`): that build would repeat the last.
+/// `None` too where any of them is kept off a pin (a face is adjusted
+/// one way only).
 pub(crate) fn room(
     body: &Body,
     working: &BTreeSet<FaceId>,
@@ -219,8 +221,10 @@ pub(crate) fn room(
     for g in faces {
         let k = match adjusts.get(&g) {
             Some(Adjust::Room(k)) => *k,
-            // Task 5: a face is adjusted one way only.
-            Some(Adjust::Off(_)) | None => 0,
+            // A face is adjusted one way only (design 724): room asked
+            // for a face kept off a pin ends the adjustments.
+            Some(Adjust::Off(_)) => return None,
+            None => 0,
         };
         let n = near(g);
         let now = adjusted(&n, x, adjusts.get(&g).copied());
@@ -284,7 +288,7 @@ pub(crate) fn cut_short(n: &Box3, sheet: &Box3, must: &Box3, pin: &Box3, gap: f6
 /// Working face `f` kept off a pin (design 724, plan 22.B): `adjusts`
 /// with `f`'s near box, `now` as adjusted so far, cut back by
 /// [`cut_short`] (`sheet`, `must`, `pin` and `gap` as there). `None`
-/// where no side can be cut.
+/// where no side can be cut. `None` too where `f` was given room.
 #[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
 pub(crate) fn kept_off(
     f: FaceId,
@@ -295,6 +299,10 @@ pub(crate) fn kept_off(
     gap: f64,
     adjusts: &Adjusts,
 ) -> Option<Adjusts> {
+    // A face is adjusted one way only (design 724).
+    if matches!(adjusts.get(&f), Some(Adjust::Room(_))) {
+        return None;
+    }
     let cut = cut_short(now, sheet, must, pin, gap)?;
     let mut out = adjusts.clone();
     out.insert(f, Adjust::off(&cut));
@@ -714,6 +722,40 @@ pub(crate) mod tests {
             kept_off(f, &n, &n, &must, &inside, gap, &Adjusts::new()),
             None
         );
+    }
+
+    /// Design 724: a face is adjusted one way only. Room asked for a face
+    /// kept off a pin, or for one of its working neighbours kept off one,
+    /// ends the adjustments; so does a cut asked for a face given room.
+    #[test]
+    fn a_face_is_adjusted_one_way_only() {
+        let (r, low, _) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low]),
+            ..Default::default()
+        };
+        let region = region(&r, &BTreeSet::from([low]));
+        let x = rung_box(&r, &changes, &region);
+        let working: BTreeSet<FaceId> =
+            region.faces.iter().copied().filter(|&f| f != low).collect();
+        let near = |g: FaceId| near_box(&r, &changes, &region, g, &x, 0);
+        let f = *working.iter().next().unwrap();
+        let clipped = BTreeSet::from([f]);
+        assert!(room(&r, &working, &clipped, &x, &Adjusts::new(), &near).is_some());
+        let off = Adjusts::from([(f, Adjust::off(&near(f)))]);
+        assert_eq!(room(&r, &working, &clipped, &x, &off, &near), None);
+        let g = face_vertices(&r, f)
+            .into_iter()
+            .flat_map(|v| super::super::region::vertex_faces(&r, v))
+            .find(|g| *g != f && working.contains(g))
+            .expect("a working neighbour");
+        let off = Adjusts::from([(g, Adjust::off(&near(g)))]);
+        assert_eq!(room(&r, &working, &clipped, &x, &off, &near), None);
+        let n = cube([0.0; 3], [1.0; 3]);
+        let must = cube([0.1; 3], [0.4, 0.5, 0.5]);
+        let pin = cube([0.7, 0.2, 0.9], [1.2, 0.4, 1.2]);
+        let roomy = Adjusts::from([(f, Adjust::Room(1))]);
+        assert_eq!(kept_off(f, &n, &n, &must, &pin, 1e-6, &roomy), None);
     }
 
     /// The rounded block's low ball deleted, its region grown by a ring

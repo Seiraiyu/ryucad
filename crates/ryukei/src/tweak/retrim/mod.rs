@@ -707,7 +707,10 @@ fn attempt_adjusted(
     // cut it: its piece holding its old interior reached its own clipped
     // side, and the walk closed round it (design 724, plan 22.A: a slot's
     // floor dropped while its walls, given room, ran down to the bottom).
-    // It doesn't answer; it asks room for those faces too.
+    // It doesn't answer; it asks room for those faces too. A dropped face
+    // kept off a pin asks room, which ends the adjustments (one way only,
+    // plan 22.B). The guard may hide wins, where a right answer drops a
+    // face left as it is (22.A's review): kept, and counted by census VII.
     if !adjusts.is_empty() {
         let gone: std::collections::BTreeSet<Name> = journal
             .events()
