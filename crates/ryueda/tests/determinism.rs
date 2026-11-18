@@ -8,6 +8,8 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/breakout_board.rs"]
+mod breakout_board;
 #[path = "support/buck.rs"]
 mod buck;
 #[path = "support/draw.rs"]
@@ -285,19 +287,10 @@ fn breakout_at(board: &Path) {
     }
 }
 
-/// Boards (5.A): the breakout placed on a fixed grid, its pads and
-/// renders, alike on one thread and eight.
+/// Boards (5.A to 5.D): the breakout as agent round 5.D laid it out
+/// (`support/breakout_board.rs`): its pads, renders, DRC (clean), copper
+/// and fabrication package, alike on one thread and eight.
 fn boards(golden: &mut Golden, at: &Path) {
-    let placed = [
-        ("U1", "8,10", "0"),
-        ("C1", "8,14", "90"),
-        ("U2", "18,10", "0"),
-        ("C2", "15,6", "0"),
-        ("C3", "21,6", "0"),
-        ("R1", "12,15", "90"),
-        ("R2", "14,15", "90"),
-        ("J1", "3,10", "0"),
-    ];
     type Got = (
         Value,
         String,
@@ -307,27 +300,18 @@ fn boards(golden: &mut Golden, at: &Path) {
         Value,
         BTreeMap<String, String>,
     );
+    let id = breakout_board::BOARD;
     let mut first: Option<Got> = None;
     for threads in [1, 8] {
         let board = at.join(format!("t{threads}")).join("board");
         std::fs::create_dir_all(&board).unwrap();
         ryueda(&board, 1, &["init"]);
         breakout_at(&board);
-        ryueda(
-            &board,
-            threads,
-            &[
-                "board", "create", "Main", "--design", "board", "--rect", "26,20", "--id", "main",
-            ],
-        );
-        for (r, xy, rot) in placed {
-            ryueda(
-                &board,
-                threads,
-                &["board", "place", "main", r, "--at", xy, "--rotation", rot],
-            );
+        for args in breakout_board::script() {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            ryueda(&board, threads, &args);
         }
-        let mut show = ryueda(&board, threads, &["board", "show", "main", "--pads"]);
+        let mut show = ryueda(&board, threads, &["board", "show", id, "--pads"]);
         assert_eq!(show["unplaced"], 0, "{show}");
         assert_eq!(show["notices"], serde_json::json!([]), "{show}");
         // The golden is of what is drawn: revisions hash file bytes.
@@ -338,7 +322,7 @@ fn boards(golden: &mut Golden, at: &Path) {
         ryueda(
             &board,
             threads,
-            &["board", "render", "main", "--out", "top.png"],
+            &["board", "render", id, "--out", "top.png"],
         );
         ryueda(
             &board,
@@ -346,7 +330,7 @@ fn boards(golden: &mut Golden, at: &Path) {
             &[
                 "board",
                 "render",
-                "main",
+                id,
                 "--out",
                 "bottom.svg",
                 "--side",
@@ -356,42 +340,13 @@ fn boards(golden: &mut Golden, at: &Path) {
         let hash = |name: &str| {
             blake3::hash(&std::fs::read(board.join(name)).unwrap()).to_hex()[..32].to_owned()
         };
-        let pads = show["pads"].as_array().unwrap().clone();
-        let net = |r: &str| {
-            pads.iter().find(|x| x["reference"] == r).unwrap()["net"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        };
-        let v33 = net("main:R1/2");
-        for args in [
-            vec![
-                "board", "track", "add", "main", "--net", &v33, "--layer", "top", "--path", "R1/2",
-                "R2/2", "--id", "t1",
-            ],
-            vec![
-                "board", "via", "add", "main", "--net", &v33, "--at", "13,17", "--id", "v1",
-            ],
-            vec![
-                "board", "track", "add", "main", "--net", &v33, "--layer", "bottom", "--path",
-                "via/v1", "13,18.5", "--id", "t2",
-            ],
-            vec![
-                "board", "hole", "add", "main", "--at", "23,17", "--drill", "3.2", "--id", "h1",
-            ],
-        ] {
-            ryueda(&board, threads, &args);
-        }
-        let mut drc = ryueda_out(&board, threads, &["board", "drc", "main"], &[]);
-        let mut drc = drc["error"]["details"]["report"].take();
+        // Clean, so `board drc` answers rather than refusing.
+        let mut drc = ryueda(&board, threads, &["board", "drc", id]);
+        assert_eq!(drc["findings"], serde_json::json!([]), "{drc}");
         if let Some(o) = drc.as_object_mut() {
             o.remove("revision");
         }
-        ryueda(
-            &board,
-            threads,
-            &["board", "export", "main", "--out", "fab", "--allow-errors"],
-        );
+        ryueda(&board, threads, &["board", "export", id, "--out", "fab"]);
         let mut exported = BTreeMap::new();
         for e in std::fs::read_dir(board.join("fab")).unwrap().flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
@@ -402,12 +357,12 @@ fn boards(golden: &mut Golden, at: &Path) {
         }
         assert!(exported.len() >= 14, "{exported:?}");
         let p = ryueda::project::Project::load(&board).unwrap();
-        let id = ryueda::id::Id::parse("main", "board").unwrap();
+        let bid = ryueda::id::Id::parse(id, "board").unwrap();
         let c = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap()
-            .install(|| ryueda::board::drc::check(&p, &p.boards[&id]).unwrap());
+            .install(|| ryueda::board::drc::check(&p, &p.boards[&bid]).unwrap());
         let layout = serde_json::json!({
             "items": c.conn.built.layout.items.iter().map(|(k, it)| serde_json::json!([c.conn.built.reference(k), it.layer, it.net])).collect::<Vec<_>>(),
             "holes": c.conn.built.layout.holes.iter().map(|(k, h)| serde_json::json!([c.conn.built.reference(k), h.plated])).collect::<Vec<_>>(),
