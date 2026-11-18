@@ -86,3 +86,33 @@ fn structure_answers_the_same_everywhere() {
     }
     g.finish();
 }
+
+#[test]
+fn imports_answer_the_same_everywhere() {
+    use ryuplm::import::{mapping::Mapping, records, rows::Table, run};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut g = Golden::new(dir.join("tests/golden/imports.txt"));
+    // SAFETY: the golden reads one seed.
+    unsafe { std::env::set_var(ryuplm::ids::SEED_VAR, "golden") };
+    let (mut files, m, csv1, csv2) = ryuplm::testing::import_source("golden", 400);
+    let config = ryupdm::config::Config::read_in(&files, "ryuplm").unwrap();
+    for (k, csv) in [csv1, csv2].iter().enumerate() {
+        let table = Table::from_raw(ryuplm::import::csv::parse(csv, ',').unwrap(), 1).unwrap();
+        let cat = Catalogue::load(&files).unwrap();
+        let (rows, refusals) =
+            records::map(&table, &m, &config, cat.manifest.default_unit).unwrap();
+        g.section("refusals")
+            .str(&serde_json::to_string(&refusals).unwrap());
+        let out = run::plan(&files, &cat, &config, &m, &rows, None, 50).unwrap();
+        g.section(&format!("report{k}"))
+            .str(&serde_json::to_string(&out.report).unwrap());
+        for (id, it) in &out.items {
+            let text = it.to_text();
+            g.section(&format!("items{k}")).str(id.as_str()).str(&text);
+            files.insert(ryuplm::ids::item_path(id), text.into_bytes());
+        }
+    }
+    let m2: Mapping = m.clone();
+    g.section("mapping").str(&m2.to_text());
+    g.finish();
+}

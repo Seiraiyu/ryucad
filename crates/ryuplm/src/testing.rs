@@ -174,6 +174,124 @@ pub fn structure(seed: &str, n: usize) -> (BTreeMap<String, Vec<u8>>, crate::rep
     (f, reps)
 }
 
+/// A seeded import (the golden's and the fuzz target's): a catalogue's
+/// files (two classes, a `mech` scheme, `thread` and `length` declared,
+/// and a third of `n` items made by hand with numbers the source also has,
+/// so a first import adopts them, some with other descriptions so it
+/// reports conflicts), the mapping (numbers kept, class rules, a regex, a
+/// value table, a unit, an AML group, a parent column), a first CSV of `n`
+/// rows (every sixth past the tenth a line of an earlier row), and a second
+/// in which every fifth row's description changes, every seventh line's
+/// quantity changes, every eleventh row that is no parent is gone, and
+/// twenty new rows appear.
+pub fn import_source(
+    seed: &str,
+    n: usize,
+) -> (
+    BTreeMap<String, Vec<u8>>,
+    crate::import::mapping::Mapping,
+    String,
+    String,
+) {
+    let mut f = BTreeMap::new();
+    let mut m = Manifest::new(ProjectId::from_bytes([9; 16]), Unit::Mm);
+    for c in ["fastener", "machined"] {
+        m.classes.insert(c.into(), Class { properties: None });
+    }
+    f.insert(MANIFEST.to_owned(), m.to_text().into_bytes());
+    let config = json!({"format": 5, "kind": "ryupdm.config",
+        "part_number": {"schemes": [
+            {"name": "mech", "pattern": "MECH-\\d{5}", "next": "MECH-{seq:5}"},
+            {"name": "plain", "pattern": "P-\\d{5}"}]},
+        "properties": {"thread": {"type": "string"}, "length": {"type": "quantity", "dim": "length"}}});
+    f.insert(
+        "ryupdm.json".to_owned(),
+        crate::canonical::to_string(&config).into_bytes(),
+    );
+    let mut ids = std::collections::BTreeSet::new();
+    for k in (0..n).filter(|k| k % 3 == 1) {
+        let id = crate::ids::random_from(Some(seed), |s| ids.contains(s)).unwrap();
+        ids.insert(id.as_str().to_owned());
+        let mut item = Item::new(&format!("P-{k:05}"));
+        item.description = Some(if k % 2 == 0 {
+            format!("Hand {k}")
+        } else {
+            desc(k)
+        });
+        f.insert(crate::ids::item_path(&id), item.to_text().into_bytes());
+    }
+    let mapping = crate::import::mapping::Mapping::from_json(
+        "seeded",
+        &json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "ID",
+            "fields": {
+                "number": {"from": "PN", "trim": true},
+                "description": {"from": "Desc", "trim": true},
+                "properties.thread": {"from": "Desc", "regex": "\\b(M\\d+)\\b"},
+                "properties.length": {"from": "Len", "unit": "mm"},
+                "make_buy": {"from": "Src", "values": {"M": "make", "P": "buy"}},
+                "aml.0.manufacturer": {"from": "Mfr"},
+                "aml.0.mpn": {"from": "MPN"}},
+            "class": [{"when": {"Kind": "S"}, "class": "fastener"}, {"class": "machined"}],
+            "bom": {"parent": "Parent", "quantity": "Qty"}}),
+    )
+    .expect("the seeded mapping reads");
+    fn desc(k: usize) -> String {
+        if k % 3 == 0 {
+            format!("Screw M{} x {}", 3 + k % 5, 4 + k % 9)
+        } else {
+            format!("Part {k}")
+        }
+    }
+    let row = |k: usize, second: bool| -> String {
+        let mut d = desc(k);
+        if second && k % 5 == 0 {
+            d += " rev B";
+        }
+        let parent = (k > 10 && k % 6 == 0).then(|| k / 10 + 1);
+        let mut qty = 1 + k % 3;
+        if second && k % 7 == 0 {
+            qty += 1;
+        }
+        let (mfr, mpn) = if k % 4 == 1 {
+            (format!("Maker {}", k % 6), format!("MP-{k}"))
+        } else {
+            (String::new(), String::new())
+        };
+        format!(
+            "{},P-{k:05},{d},{},{},{mfr},{mpn},{},{},{},n{}\n",
+            k + 1,
+            if k % 2 == 0 { "P" } else { "M" },
+            if k % 4 == 0 {
+                String::new()
+            } else {
+                (k % 50).to_string()
+            },
+            if k % 3 == 0 { "S" } else { "" },
+            parent.map(|p| p.to_string()).unwrap_or_default(),
+            if parent.is_some() {
+                qty.to_string()
+            } else {
+                String::new()
+            },
+            k % 7,
+        )
+    };
+    let header = "ID,PN,Desc,Src,Len,Mfr,MPN,Kind,Parent,Qty,Note\n";
+    let mut first = header.to_owned();
+    let mut second = header.to_owned();
+    for k in 0..n {
+        first += &row(k, false);
+        // Rows up to n / 10 are parents: they stay.
+        if !(k % 11 == 0 && k > n / 10 + 1) {
+            second += &row(k, true);
+        }
+    }
+    for k in n..n + 20 {
+        second += &row(k, true);
+    }
+    (f, mapping, first, second)
+}
+
 /// A cell for [`xlsx`]: a shared string, an inline string, a number as
 /// written, a boolean, or no cell at all (the next one keeps its column).
 #[derive(Clone, Copy, Debug)]
