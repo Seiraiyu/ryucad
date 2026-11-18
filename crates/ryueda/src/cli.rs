@@ -1671,6 +1671,9 @@ enum BoardCmd {
     /// drills, the BOM and pick and place, and manifest.json. Refused
     /// (drc_failed) while the board has a DRC error, unless
     /// --allow-errors, which the manifest records.
+    ///
+    /// Pick and place rotations are the placements' own: no fabricator's
+    /// per-package offsets are applied, so confirm them in its preview.
     Export {
         board: String,
         /// A new or empty folder, or one an earlier export wrote (its

@@ -4528,6 +4528,15 @@ fn board_help_says_the_frame_and_track_joins() {
     assert!(add.contains("joins it"), "{add}");
 }
 
+/// The export's help says pick and place rotations are the placements'
+/// own, with no fabricator's per-package offsets (design 732; round 5.D
+/// couldn't tell).
+#[test]
+fn board_export_help_says_rotations_carry_no_offsets() {
+    let help = board_help(&["export"]);
+    assert!(help.contains("per-package"), "{help}");
+}
+
 #[test]
 fn bom_answers_lines_and_writes_csv_to_out() {
     let p = Pair::breakout();
