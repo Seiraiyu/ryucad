@@ -748,6 +748,11 @@ pub(crate) fn ruled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn free() -> Meter<'static> {
+        // unmetered: unit tests of a closed form.
+        Meter::free()
+    }
     use crate::geom::{Cone, Cylinder};
 
     fn frame(o: (f64, f64, f64), z: (f64, f64, f64), x: (f64, f64, f64)) -> Frame {
@@ -847,7 +852,7 @@ mod tests {
             Point3::new(-10.0, -10.0, -10.0),
             Point3::new(10.0, 10.0, 10.0),
         );
-        let turn = turn(charts(&rl, &region).unwrap(), &Meter::free())
+        let turn = turn(charts(&rl, &region).unwrap(), &free())
             .unwrap()
             .unwrap();
         assert_ne!(turn.start, -FRAC_PI_2, "the seams turned");
@@ -961,7 +966,7 @@ mod tests {
             );
             assert!(d.length().is_finite());
         }
-        let curve = hermite(&|phi| rl.on_loop(arc, phi), &Meter::free())
+        let curve = hermite(&|phi| rl.on_loop(arc, phi), &free())
             .unwrap()
             .unwrap();
         let c = Curve::Nurbs(Arc::new(curve));
@@ -977,9 +982,7 @@ mod tests {
             Quadric::of(&wall).unwrap(),
         );
         for side in [1.0, -1.0] {
-            let curve = hermite(&|th| rl.round(side, th), &Meter::free())
-                .unwrap()
-                .unwrap();
+            let curve = hermite(&|th| rl.round(side, th), &free()).unwrap().unwrap();
             let c = Curve::Nurbs(Arc::new(curve));
             for k in 0..=1024 {
                 let p = c.point(TAU * f64::from(k) / 1024.0);
@@ -1018,7 +1021,7 @@ mod tests {
     /// a pair of planes and cones, is not its.
     #[test]
     fn ruled_takes_cylinders_with_cones_or_cylinders_only() {
-        let m = Meter::free();
+        let m = free();
         let pin = cylinder((0.0, 0.0, 0.3), (1.0, 0.0, 0.0), 0.5);
         let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 2.0, 5f64.to_radians());
         let one = ruled(&pin, &bore, &region(), &m).unwrap().unwrap();
@@ -1089,7 +1092,7 @@ mod tests {
     /// Every branch within 2e-8 of both surfaces at 1,024 points; every
     /// sampled crossing within 1e-6 of a branch; and the branch count.
     fn agrees(cyl: &Surface, other: &Surface, branches: usize) {
-        let (raws, points) = ruled(cyl, other, &region(), &Meter::free())
+        let (raws, points) = ruled(cyl, other, &region(), &free())
             .unwrap()
             .expect("a closed form");
         assert!(points.is_empty(), "{points:?}");
@@ -1152,8 +1155,8 @@ mod tests {
         agrees(&through, &big, 2);
         // Either way round, the smaller one is ruled.
         assert_eq!(
-            ruled(&big, &through, &region(), &Meter::free()),
-            ruled(&through, &big, &region(), &Meter::free())
+            ruled(&big, &through, &region(), &free()),
+            ruled(&through, &big, &region(), &free())
         );
         // Partly: an axis 0.8 off, the rulings on its far side miss.
         let partly = cylinder((0.0, 0.8, 0.0), (1.0, 0.0, 0.3), 0.4);
@@ -1196,7 +1199,7 @@ mod tests {
     #[test]
     fn an_outside_graze_is_a_touch() {
         let (cyl, bore) = grazing(1.0, 0.0);
-        let (raws, points) = ruled(&cyl, &bore, &region(), &Meter::free())
+        let (raws, points) = ruled(&cyl, &bore, &region(), &free())
             .unwrap()
             .expect("a touch");
         assert!(raws.is_empty(), "{raws:?}");
@@ -1212,7 +1215,7 @@ mod tests {
     fn a_pair_kept_apart_meets_nowhere() {
         let (cyl, bore) = grazing(1.0, 0.1);
         assert_eq!(
-            ruled(&cyl, &bore, &region(), &Meter::free()),
+            ruled(&cyl, &bore, &region(), &free()),
             Ok(Some((vec![], vec![])))
         );
     }
@@ -1222,7 +1225,7 @@ mod tests {
     #[test]
     fn a_near_miss_within_the_resolution_is_never_nothing() {
         let (cyl, bore) = grazing(1.0, 5e-9);
-        match ruled(&cyl, &bore, &region(), &Meter::free()).unwrap() {
+        match ruled(&cyl, &bore, &region(), &free()).unwrap() {
             None => {}
             Some((raws, points)) => {
                 assert!(raws.is_empty());
@@ -1236,7 +1239,7 @@ mod tests {
     #[test]
     fn an_inside_graze_is_a_pinch_and_refused() {
         let (cyl, bore) = grazing(-1.0, 0.0);
-        assert_eq!(ruled(&cyl, &bore, &region(), &Meter::free()), Ok(None));
+        assert_eq!(ruled(&cyl, &bore, &region(), &free()), Ok(None));
     }
 
     /// `A = 0`: the cylinder's axis along one of the cone's rulings, or
@@ -1247,7 +1250,7 @@ mod tests {
         let (s, c) = math::sin_cos(a);
         let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, a);
         let along = cylinder((3.0, 0.0, 0.0), (s, 0.0, c), 0.2);
-        assert_eq!(ruled(&along, &bore, &region(), &Meter::free()), Ok(None));
+        assert_eq!(ruled(&along, &bore, &region(), &free()), Ok(None));
         // At 45° the axis along a ruling makes `A` round to 5.6e-17,
         // whose sign isn't certified: the charts refuse at once, before
         // anything later could (plan 22.D's M8).
@@ -1262,10 +1265,10 @@ mod tests {
             Quadric::of(&steep).unwrap(),
         );
         assert!(charts(&rl, &region()).is_none());
-        assert_eq!(ruled(&along, &steep, &region(), &Meter::free()), Ok(None));
+        assert_eq!(ruled(&along, &steep, &region(), &free()), Ok(None));
         let one = cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0);
         let two = cylinder((0.5, 0.0, 0.0), (0.0, 0.0, 1.0), 0.3);
-        assert_eq!(ruled(&two, &one, &region(), &Meter::free()), Ok(None));
+        assert_eq!(ruled(&two, &one, &region(), &free()), Ok(None));
     }
 
     /// Below the apex the rulings cross only the other nappe, which the
@@ -1276,14 +1279,14 @@ mod tests {
         let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, FRAC_PI_4);
         let below = cylinder((0.0, 0.0, -3.0), (1.0, 0.0, 0.0), 0.3);
         assert_eq!(
-            ruled(&below, &bore, &region(), &Meter::free()),
+            ruled(&below, &bore, &region(), &free()),
             Ok(Some((vec![], vec![])))
         );
         let above = cylinder((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), 0.3);
         agrees(&above, &bore, 2);
         // Through the apex: not this form's.
         let apex = cylinder((0.0, 0.3, -1.0), (1.0, 0.0, 0.0), 0.3);
-        assert_eq!(ruled(&apex, &bore, &region(), &Meter::free()), Ok(None));
+        assert_eq!(ruled(&apex, &bore, &region(), &free()), Ok(None));
         // Refused by the apex's own check, not only by what follows it
         // (plan 22.D's M10); and the cylinders above and below are off it.
         let off = |c: &Surface| {
