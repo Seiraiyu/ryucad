@@ -540,7 +540,9 @@ pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
     let rule = preset.mask_trace_clearance_nm;
     let opts = BodyOptions::default();
     let mut out = Vec::new();
-    for side in 0..2usize {
+    let n = s.n();
+    // The mask's two sides over the outer copper layers.
+    for (side, layer) in [(0usize, 0usize), (1, n - 1)] {
         let masks: Vec<(usize, Body)> = s
             .pads
             .iter()
@@ -558,7 +560,7 @@ pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
         let found: Vec<Finding> = s
             .tracks
             .par_iter()
-            .filter(|t| t.layer.index(2) == Some(side)) // Task 6
+            .filter(|t| t.layer.index(n) == Some(layer))
             .flat_map_iter(|t| {
                 let body = Body::of_shape(&t.shape, &opts);
                 let tk = Key::Track(t.id.to_string());
@@ -568,7 +570,7 @@ pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
                     let pk = Key::Pad {
                         occ: pd.occurrence.clone(),
                         pad: pd.pad.clone(),
-                        layer: side as u8,
+                        layer: layer as u8,
                     };
                     if same_island(c, &tk, &pk) {
                         continue;
@@ -589,7 +591,7 @@ pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
                             t.id, pd.reference
                         ),
                         json!({
-                            "layer": c.built.layer_name(side),
+                            "layer": c.built.layer_name(layer),
                             "distance_nm": d.map(|d| d.nm),
                             "uncertain": v == Verdict::Uncertain,
                             "rule_nm": rule,
@@ -999,6 +1001,35 @@ impl BoardCheck {
     }
 }
 
+/// Blind and buried vias where the preset makes only through vias.
+pub fn via_spans(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
+    if preset.blind_vias {
+        return Vec::new();
+    }
+    let n = s.n();
+    let name = |l: usize| super::file::CopperLayer::at(l, n).short();
+    s.vias
+        .iter()
+        .filter(|v| (v.from, v.to) != (0, n - 1))
+        .map(|v| {
+            finding(
+                Code::DrcViaSpan,
+                Severity::Error,
+                board,
+                vec![format!("{board}:via/{}", v.id)],
+                format!(
+                    "via {} runs from {} to {}; preset {} makes only through vias",
+                    v.id,
+                    name(v.from),
+                    name(v.to),
+                    preset.name
+                ),
+                json!({"from": name(v.from), "to": name(v.to)}),
+            )
+        })
+        .collect()
+}
+
 /// What every rule reads.
 struct Ctx<'a> {
     board: &'a str,
@@ -1012,13 +1043,14 @@ struct Ctx<'a> {
 
 type Rule = fn(&Ctx) -> Vec<Finding>;
 
-const RULES: [Rule; 10] = [
+const RULES: [Rule; 11] = [
     |c| placements(c.board, c.files, c.occs, c.shapes),
     |c| copper(c.conn, c.incomplete),
     |c| clearance(c.conn, c.preset),
     |c| mask_clearance(c.conn, c.shapes, c.preset),
     |c| widths(c.shapes, c.board, c.preset),
     |c| drills(c.shapes, c.board, c.preset),
+    |c| via_spans(c.shapes, c.board, c.preset),
     |c| rings(c.conn, c.shapes, c.preset),
     |c| hole_spacing(c.shapes, c.board, c.preset),
     |c| edges(c.conn, c.shapes, c.preset),
@@ -1136,6 +1168,70 @@ mod tests {
 
     fn codes(f: &[Finding]) -> Vec<Code> {
         f.iter().map(|x| x.code).collect()
+    }
+
+    #[test]
+    fn a_blind_via_is_a_span_finding_where_the_preset_makes_none() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.layers(4)
+            .via("v0", "a", (5 * MM, 5 * MM), 300 * UM, 600 * UM)
+            .blind("v1", "a", (10 * MM, 5 * MM), 300 * UM, 600 * UM, (0, 1))
+            .blind("v2", "a", (15 * MM, 5 * MM), 300 * UM, 600 * UM, (1, 2));
+        s.layers(4); // v0 through all four; the blind ones set their spans after
+        s.vias[1].from = 0;
+        s.vias[1].to = 1;
+        s.holes[1].span = (0, 1);
+        s.vias[2].from = 1;
+        s.vias[2].to = 2;
+        s.holes[2].span = (1, 2);
+        let f = via_spans(&s, "b", &preset::JLC_2L);
+        let refs: Vec<&str> = f.iter().map(|x| x.refs[0].as_str()).collect();
+        assert_eq!(refs, ["b:via/v1", "b:via/v2"]);
+        assert!(f.iter().all(|x| x.code == Code::DrcViaSpan && x.is_error()));
+        assert_eq!(f[0].details["from"], "top");
+        assert_eq!(f[0].details["to"], "in1");
+        let open = Preset {
+            blind_vias: true,
+            ..preset::JLC_2L
+        };
+        assert!(via_spans(&s, "b", &open).is_empty());
+    }
+
+    #[test]
+    fn mask_clearance_is_judged_on_the_outer_layers_of_four() {
+        // A bottom track beside a through pad's bottom mask opening, on four
+        // layers: the bottom is layer 3, not 1.
+        let mut s = board(20 * MM, 10 * MM);
+        s.through(
+            "j1",
+            "1",
+            (10 * MM, 5 * MM),
+            1700 * UM,
+            1000 * UM,
+            Some("a"),
+        )
+        .layers(4)
+        .track(
+            "t1",
+            "b",
+            CopperLayer::Bottom,
+            250 * UM,
+            &[
+                (2 * MM, 5 * MM + 850 * UM + 125 * UM + 50 * UM),
+                (18 * MM, 5 * MM + 850 * UM + 125 * UM + 50 * UM),
+            ],
+        )
+        .track(
+            "t2",
+            "b",
+            CopperLayer::Inner(1),
+            250 * UM,
+            &[(2 * MM, 1 * MM), (18 * MM, 1 * MM)],
+        );
+        let conn = connect::connect("b", &s);
+        let f = mask_clearance(&conn, &s, &preset::JLC_2L);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].details["layer"], "copper.bottom");
     }
 
     #[test]
