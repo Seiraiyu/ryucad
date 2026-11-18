@@ -231,9 +231,9 @@ const RUNG: u64 = 1 << 24;
 /// main `ede45371`: largest 9,871,261 units, the bent rod's rim of plan
 /// 19.A, whose rung-0 first build spends 9,606,924 refusing `Uncertain`
 /// before its narrowed retry builds). Every refused set spent less: up to
-/// 27,459,995 (linkrods #11). A work bound, not a tolerance. The figure
-/// waits on the owner's choice (design 919's margin of four against the
-/// census).
+/// 27,459,995 (linkrods #11), so today the gap refuses nothing sooner:
+/// the owner chose the rule's figure (2026-11-18) over a margin under
+/// four. A work bound, not a tolerance.
 const GAP: u64 = 1 << 26;
 
 static FREE: Work<'static> = Work::unlimited();
