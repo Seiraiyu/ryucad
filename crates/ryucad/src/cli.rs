@@ -1005,6 +1005,13 @@ enum Command {
     Review(ReviewCmd),
     /// Print the ryucad, ryukei and protocol versions.
     Version,
+    /// Every error code with its exit code, title and the detail keys it
+    /// declares, or one code's: answered by this build, with no project or
+    /// daemon.
+    Errors {
+        /// One code, such as not_found.
+        code: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4805,6 +4812,7 @@ fn request(cmd: &Command) -> Option<Request> {
     Some(match cmd {
         Command::Init { .. }
         | Command::Version
+        | Command::Errors { .. }
         | Command::Daemon(_)
         | Command::Session { .. }
         | Command::Git(_)
@@ -6401,6 +6409,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     let here = here(cli)?;
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Errors { code } => ryucad::error::details::listing(code.as_deref()),
         // `main` serves a session before `run`.
         Command::Session { .. } => Err(Error::new(Code::Internal, "a session isn't a command")),
         Command::Init { unit } => {
