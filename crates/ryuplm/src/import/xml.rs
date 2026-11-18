@@ -145,15 +145,56 @@ pub fn read(bytes: &[u8], records: &str, children: Option<&str>) -> Result<Vec<L
     let kids: Option<Vec<&str>> = children.map(|c| c.split('/').collect());
     let depth = records.trim_start_matches('/').split('/').count();
     let mut out = Vec::new();
+    let mut at = Cursor::new(doc.input_text());
     for n in records_at(&doc, records)? {
-        record(&doc, n, kids.as_deref(), 0, depth, &mut out)?;
+        record(&mut at, n, kids.as_deref(), 0, depth, &mut out)?;
     }
     Ok(out)
 }
 
+/// Line and column (1-based, the column in characters, as roxmltree's
+/// `text_pos_at` counts them) of byte offsets taken in increasing order,
+/// each counted on from the last: records come in document order, so a
+/// read is linear where `text_pos_at`, counting from the start of the
+/// document each time, made 100,000 records take over a minute.
+struct Cursor<'t> {
+    text: &'t str,
+    at: usize,
+    row: u64,
+    col: u64,
+}
+
+impl<'t> Cursor<'t> {
+    fn new(text: &'t str) -> Cursor<'t> {
+        Cursor {
+            text,
+            at: 0,
+            row: 1,
+            col: 1,
+        }
+    }
+
+    /// The place of byte `to`: `line L, column C`.
+    fn place(&mut self, to: usize) -> String {
+        if to < self.at {
+            *self = Cursor::new(self.text);
+        }
+        for c in self.text[self.at..to].chars() {
+            if c == '\n' {
+                self.row += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
+        }
+        self.at = to;
+        format!("line {}, column {}", self.row, self.col)
+    }
+}
+
 /// Record `n`, pushed before its children so rows come in document order.
 fn record<'a, 'i>(
-    doc: &'a Document<'i>,
+    at: &mut Cursor<'_>,
     n: Node<'a, 'i>,
     kids: Option<&[&str]>,
     level: usize,
@@ -161,8 +202,7 @@ fn record<'a, 'i>(
     out: &mut Vec<Leaves>,
 ) -> Result<(), Refusal> {
     let p = out.len();
-    let pos = doc.text_pos_at(n.range().start);
-    let place = format!("line {}, column {}", pos.row, pos.col);
+    let place = at.place(n.range().start);
     out.push(Leaves {
         place: place.clone(),
         cells: Vec::new(),
@@ -177,7 +217,7 @@ fn record<'a, 'i>(
     out[p].cells = cells;
     let step = kids.map_or(0, <[&str]>::len);
     for c in below {
-        record(doc, c, kids, level + 1, depth + step, out)?;
+        record(at, c, kids, level + 1, depth + step, out)?;
     }
     Ok(())
 }
@@ -469,5 +509,26 @@ mod tests {
             ("/Export/Meta/Tag".to_owned(), None)
         );
         assert!(survey(b"<A><B/></A>", None).is_err());
+    }
+
+    #[test]
+    fn places_count_on_as_roxmltree_counts_them() {
+        let x = "<A>\n  <B/><B/>\n<B>ø</B> <B/>\r\n\t<B><C/></B></A>";
+        let doc = parse(x).unwrap();
+        let mut at = Cursor::new(x);
+        let bs: Vec<Node<'_, '_>> = doc.descendants().filter(|n| n.is_element()).collect();
+        for n in &bs {
+            let p = doc.text_pos_at(n.range().start);
+            assert_eq!(
+                at.place(n.range().start),
+                format!("line {}, column {}", p.row, p.col)
+            );
+        }
+        // An earlier offset counts again from the start.
+        let p = doc.text_pos_at(bs[1].range().start);
+        assert_eq!(
+            at.place(bs[1].range().start),
+            format!("line {}, column {}", p.row, p.col)
+        );
     }
 }
