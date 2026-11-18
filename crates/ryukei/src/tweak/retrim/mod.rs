@@ -145,25 +145,48 @@ pub(crate) fn climb(
 /// work bound, not a tolerance. Each costs at most a rung's cap.
 pub(crate) const ADJUSTS: usize = 3;
 
-/// A narrowed rung's answer (design 724, plan 22.A). `first` is its first
-/// narrowed build and what that build asks: `Some` adjustments where its
-/// walk failed `Clipped` at a working face with room to give, or it
-/// refused `Uncertain` at a working face and a pin it shares nothing with
-/// (plan 22.B). The rung is built again by `again` with what each build
-/// asks, at most [`ADJUSTS`] times. The first adjusted build that builds
-/// (closes and checks clean) answers, and so does one after which the
-/// meter is stopped (a cancel or a halt answers at once). Otherwise the first answer stands, so
-/// refusals keep their names and a failed walk climbs as before.
+/// How many released builds a narrowed rung may make (design 919, plan
+/// 23.A), apart from [`ADJUSTS`]: a work bound, not a tolerance. Each
+/// costs at most a rung's cap. CTC 02 with PMI spends two room builds
+/// before it asks one.
+pub(crate) const RELEASES: usize = 2;
+
+/// A narrowed rung's answer (design 724, plans 22.A and 22.B; design
+/// 919, plan 23.A). `first` is its first narrowed build and what that
+/// build asks: `Some` adjustments where its walk failed `Clipped` at a
+/// working face with room to give, or it refused `Uncertain` at a working
+/// face and a pin it shares nothing with, or (room asking nothing) its
+/// walk failed at a pin, which it asks released. The rung is built again
+/// by `again` with what each build asks: an ask that releases more faces
+/// than the build that asked it is a released build, at most
+/// [`RELEASES`]; any other is an adjusted build, at most [`ADJUSTS`].
+/// The first such build that builds (closes and checks clean) answers,
+/// and so does one after which the meter is stopped (a cancel or a halt
+/// answers at once). Otherwise the first answer stands, so refusals keep
+/// their names and a failed walk climbs as before.
 pub(crate) fn adjusting(
     first: (Rung, Option<near::Adjusts>),
     stopped: &dyn Fn() -> bool,
     mut again: impl FnMut(&near::Adjusts) -> (Rung, Option<near::Adjusts>),
 ) -> Rung {
     let (first, mut ask) = first;
-    for _ in 0..ADJUSTS {
-        let Some(adjusts) = ask.take() else {
-            break;
-        };
+    let (mut adjusted, mut released) = (0, 0);
+    // How many faces the build that asked had released.
+    let mut had = 0;
+    while let Some(adjusts) = ask.take() {
+        let now = near::released(&adjusts).len();
+        if now > had {
+            if released == RELEASES {
+                break;
+            }
+            released += 1;
+        } else {
+            if adjusted == ADJUSTS {
+                break;
+            }
+            adjusted += 1;
+        }
+        had = now;
         let (r, next) = again(&adjusts);
         if matches!(&r, Rung::Done(d) if d.is_ok()) || stopped() {
             return r;
@@ -203,7 +226,11 @@ pub(crate) fn retrim(
 /// refuses `Uncertain` at a working face and a pin it shares no edge or
 /// vertex with is built again with that face's near box cut back short
 /// of the pin; at most `ADJUSTS` times in all, a face adjusted one way
-/// only ([`adjusting`], design 724).
+/// only ([`adjusting`], design 724). A narrowed build whose walk fails
+/// `Open`, `Ambiguous` or `Clipped` at a pinned face, where room asks
+/// nothing, is built again with that pin released, a working face carried
+/// over its own and its working neighbours' near boxes, at most
+/// `RELEASES` times apart from `ADJUSTS` (design 919, plan 23.A).
 pub(crate) fn retrim_with(
     key: OpKey,
     body: &Body,
@@ -255,21 +282,42 @@ pub(crate) fn retrim_with(
                 m.first_build(|| attempt(key, body, changes, &region, &bx, rung, which, m))
             }));
         }
-        // A narrowed build, then its adjusted builds while each asks
-        // (design 724, plan 22.A), each under its own cap: a cap taken
-        // inside another shares it.
-        let once = |adjusts: &near::Adjusts| {
-            m.capped(crate::work::Scope::Rung, || {
-                let mut ask = None;
-                let r = attempt_adjusted(
-                    key, body, changes, &region, &bx, rung, which, None, adjusts, &mut ask, m,
-                );
-                (r, ask)
-            })
-        };
-        let first = once(&near::Adjusts::new());
-        Some(adjusting(first, &|| m.poll().is_err(), once))
+        // A narrowed build, then its adjusted and released builds while
+        // each asks (designs 724 and 919).
+        Some(narrowed_rung(
+            key, body, changes, &region, &bx, rung, which, None, m,
+        ))
     })
+}
+
+/// A rung's narrowed build, then its adjusted and released builds while
+/// each asks ([`adjusting`]; design 724, plans 22.A and 22.B; design 919,
+/// plan 23.A), each under its own `Scope::Rung` cap: a cap taken inside
+/// another shares it. `forced` pins as [`attempt_with`]'s do (the tests
+/// only); `retrim_with` passes `None`.
+#[allow(clippy::too_many_arguments)]
+fn narrowed_rung(
+    key: OpKey,
+    body: &Body,
+    changes: &Changes,
+    region: &Region,
+    bx: &crate::geom::Box3,
+    rung: usize,
+    which: Build,
+    forced: Option<&std::collections::BTreeSet<FaceId>>,
+    m: &Meter,
+) -> Rung {
+    let once = |adjusts: &near::Adjusts| {
+        m.capped(crate::work::Scope::Rung, || {
+            let mut ask = None;
+            let r = attempt_adjusted(
+                key, body, changes, region, bx, rung, which, forced, adjusts, &mut ask, m,
+            );
+            (r, ask)
+        })
+    };
+    let first = once(&near::Adjusts::new());
+    adjusting(first, &|| m.poll().is_err(), once)
 }
 
 /// How far a changed face's vertex moves, at most, and at least ten
@@ -378,7 +426,9 @@ fn attempt_with(
 
 /// [`attempt_with`] with each working face's near box adjusted by
 /// `adjusts` (design 724, plan 22.A); `ask` is set to what a failed walk
-/// asks for an adjusted build ([`ask_room`]), and left `None` otherwise.
+/// asks for an adjusted build ([`ask_room`]) and, where room asks
+/// nothing, the release of the pins a failed walk lies at
+/// ([`ask_release`]), and left `None` otherwise.
 #[allow(clippy::too_many_arguments)]
 fn attempt_adjusted(
     key: OpKey,
@@ -413,18 +463,26 @@ fn attempt_adjusted(
     // are and touching no change, built as their input faces with the
     // faces outside. None in a first build. The working body is built
     // over the region less them.
+    // Released faces (design 919, plan 23.A) are never pinned; nor is a
+    // pin round a pinch their release opens.
+    let released = near::released(adjusts);
     let pins = match forced {
-        Some(p) => p.clone(),
-        None => near::pins(body, region, &still, &absorbing, which),
+        Some(p) if released.is_empty() => p.clone(),
+        Some(p) => near::unpinched(body, region, p.difference(&released).copied().collect()),
+        None => near::pins(body, region, &still, &absorbing, which, &released),
     };
     let rest = region.without(body, &pins);
     // Whether a narrowed build narrowed anything; a pin does.
     let mut narrowing = !pins.is_empty();
-    for &f in region
+    // The faces carried: the region's, less deleted, absorbed and pinned
+    // faces, in face order.
+    let carried: std::collections::BTreeSet<FaceId> = region
         .faces
         .iter()
+        .copied()
         .filter(|f| !changes.deleted.contains(f) && !absorbed.contains_key(f) && !pins.contains(f))
-    {
+        .collect();
+    for &f in &carried {
         if m.poll().is_err() {
             return done(Err(Error::Cancelled));
         }
@@ -474,13 +532,10 @@ fn attempt_adjusted(
             // ends can't move (design 642), iso stops first and plane
             // stops where none applied.
             let before = w.surface.clone();
-            // Adjusted after a narrowed build failed (design 724): as
-            // before where `adjusts` names nothing.
-            let near = near::adjusted(
-                &near::near_box(body, changes, region, f, bx, rung),
-                bx,
-                adjusts.get(&f).copied(),
-            );
+            // Adjusted after a narrowed build failed (design 724), or
+            // released (design 919): as before where `adjusts` names
+            // nothing.
+            let near = near::near_of(body, changes, region, f, bx, rung, adjusts, &carried);
             if near != *bx {
                 w = match over(&near) {
                     Ok(w) => w,
@@ -518,6 +573,9 @@ fn attempt_adjusted(
     // The working-body faces whose clipped sides the failing piece
     // reached (design 724, plan 22.A): an ask's room goes to them too.
     let clip_owners: Mutex<std::collections::BTreeSet<FaceId>> = Mutex::new(Default::default());
+    // The pins the failing piece lies at (design 919, plan 23.A): a
+    // release asks for them where room asks nothing.
+    let failed_at: Mutex<std::collections::BTreeSet<FaceId>> = Mutex::new(Default::default());
     let select = |_: &[Body], table: &Table, pieces: &[Piece], _: &[usize], m: &Meter| {
         let arr = seeds::arrangement(&w, table, pieces);
         let outside = seeds::outside_seeds(&w, pieces);
@@ -617,6 +675,14 @@ fn attempt_adjusted(
                 | WalkError::Ambiguous { piece }
                 | WalkError::Clipped { piece }
                 | WalkError::Halted { piece }) = e;
+                *failed_at.lock().expect("unpoisoned") = pins_at(
+                    &w.pinned,
+                    pieces[piece].face.face,
+                    arr.pieces[piece]
+                        .1
+                        .iter()
+                        .flat_map(|&(g, _)| table.edges[g].pcurves.keys().map(|r| r.face)),
+                );
                 if let WalkError::Clipped { piece } = e {
                     *clip_owners.lock().expect("unpoisoned") = arr.pieces[piece]
                         .1
@@ -660,14 +726,17 @@ fn attempt_adjusted(
         }
         (_, Some((e, f))) => {
             // A narrowed clip at a working face asks room for it and its
-            // working neighbours (design 724, plan 22.A).
+            // working neighbours (design 724, plan 22.A); where room asks
+            // nothing, a failure at a pin asks it released (design 919,
+            // plan 23.A).
             let owners = clip_owners.lock().expect("unpoisoned").clone();
+            let at = failed_at.lock().expect("unpoisoned").clone();
             *ask = ask_room(&w, e, f, &owners, which, |clipped| {
-                let working: std::collections::BTreeSet<FaceId> = ws.keys().copied().collect();
-                near::room(body, &working, clipped, bx, adjusts, &|g| {
+                near::room(body, &carried, clipped, bx, adjusts, &|g| {
                     near::near_box(body, changes, region, g, bx, rung)
                 })
-            });
+            })
+            .or_else(|| ask_release(&w, e, &at, which, adjusts));
             return Rung::Walked(walk_error(&w, e, f));
         }
         (Ok(Some(r)), None) => r,
@@ -697,7 +766,9 @@ fn attempt_adjusted(
             // that face kept off the pin, its near box cut back by the
             // sheet's overshoot too (design 724, plan 22.B).
             *ask = ask_off_pin(body, &w, a.face, b.face, which, |wf, pf| {
-                off_pin(body, changes, region, bx, rung, &w, adjusts, wf, pf)
+                off_pin(
+                    body, changes, region, bx, rung, &w, adjusts, &carried, wf, pf,
+                )
             });
             return done(Err(e));
         }
@@ -737,8 +808,7 @@ fn attempt_adjusted(
             .filter(|&f| still(f) && gone.contains(&body.faces[f].name))
             .collect();
         if let Some(&f) = dropped.first() {
-            let working: std::collections::BTreeSet<FaceId> = ws.keys().copied().collect();
-            *ask = near::room(body, &working, &dropped, bx, adjusts, &|g| {
+            *ask = near::room(body, &carried, &dropped, bx, adjusts, &|g| {
                 near::near_box(body, changes, region, g, bx, rung)
             });
             return Rung::Walked(
@@ -927,6 +997,44 @@ fn ask_room(
     room(&clipped)
 }
 
+/// The pins a walk's failure lies at (design 919, plan 23.A), as
+/// working-body faces: the failing piece's own face `own` where it is
+/// pinned; else every pinned face among `lies_in`, the faces the piece's
+/// arcs bound or lie in (each table edge's pcurves). The walk names a
+/// piece, not the arc it couldn't partner, so every arc is read.
+fn pins_at(
+    pinned: &std::collections::BTreeSet<FaceId>,
+    own: FaceId,
+    lies_in: impl IntoIterator<Item = FaceId>,
+) -> std::collections::BTreeSet<FaceId> {
+    if pinned.contains(&own) {
+        return std::collections::BTreeSet::from([own]);
+    }
+    lies_in.into_iter().filter(|f| pinned.contains(f)).collect()
+}
+
+/// What a build whose walk failed with `e` at the pins `at` (working-body
+/// faces, [`pins_at`]) asks when room asks nothing (design 919, plan
+/// 23.A): where the build is narrowed and `e` is `Open`, `Ambiguous` or
+/// `Clipped`, `adjusts` with each of their input faces released. A first
+/// build, a halt, or no pin asks nothing.
+fn ask_release(
+    w: &WorkBody,
+    e: WalkError,
+    at: &std::collections::BTreeSet<FaceId>,
+    which: Build,
+    adjusts: &near::Adjusts,
+) -> Option<near::Adjusts> {
+    if !which.narrowed() || matches!(e, WalkError::Halted { .. }) || at.is_empty() {
+        return None;
+    }
+    let mut out = adjusts.clone();
+    for p in at {
+        out.insert(w.origin[p], near::Adjust::Released);
+    }
+    Some(out)
+}
+
 /// What a narrowed build that refused `Uncertain` at table pair `a`, `b`
 /// (working-body faces) asks (design 724, plan 22.B): `off(working,
 /// pinned)` where one is a working face and the other is pinned, and
@@ -962,7 +1070,7 @@ fn ask_off_pin(
 
 /// Working face `wf` of `w` kept off pin `pf` (design 724, plan 22.B):
 /// [`near::kept_off`] for its input face, from its near box at `rung` as
-/// `adjusts` already leave it, with the sheet the build that failed
+/// `adjusts` leave it (`near::near_of`), with the sheet the build that failed
 /// carried (its box in `w`), its [`near::own_box`] to keep, the pin's box
 /// in `w`, and the gap `WorkBody::pairs` grows the pair by (each face's
 /// `max_tolerance`, summed).
@@ -975,15 +1083,12 @@ fn off_pin(
     rung: usize,
     w: &WorkBody,
     adjusts: &near::Adjusts,
+    carried: &std::collections::BTreeSet<FaceId>,
     wf: FaceId,
     pf: FaceId,
 ) -> Option<near::Adjusts> {
     let i = w.origin[&wf];
-    let now = near::adjusted(
-        &near::near_box(body, changes, region, i, bx, rung),
-        bx,
-        adjusts.get(&i).copied(),
-    );
+    let now = near::near_of(body, changes, region, i, bx, rung, adjusts, carried);
     let gap = crate::intersect::max_tolerance((&w.body, wf))
         + crate::intersect::max_tolerance((&w.body, pf));
     near::kept_off(

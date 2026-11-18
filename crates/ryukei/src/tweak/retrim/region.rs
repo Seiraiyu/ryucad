@@ -46,6 +46,18 @@ pub(crate) fn face_vertices(body: &Body, f: FaceId) -> BTreeSet<VertexId> {
     out
 }
 
+/// The faces sharing an edge with face `f`, `f` itself left out.
+pub(crate) fn edge_neighbours(body: &Body, f: FaceId) -> BTreeSet<FaceId> {
+    let mut out = BTreeSet::new();
+    for l in body.face_loops(f) {
+        for fin in body.loop_fins(l) {
+            out.extend(edge_faces(body, body.fins[fin].edge));
+        }
+    }
+    out.remove(&f);
+    out
+}
+
 /// The region of `changed`: with every face sharing a vertex with a
 /// changed face (an edge's faces share its vertices), grown at each pinch
 /// until the frontier is rings: each vertex on it ends exactly two of its

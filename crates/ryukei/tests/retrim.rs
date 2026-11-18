@@ -698,3 +698,44 @@ fn the_slit_seeds_twins_ball_is_deleted() {
     let want = run_out_volume();
     assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
 }
+
+/// ryukei 23.A's twin (design 919): `pinned_faces`' block with its blind
+/// slot ending farther before the round; twelve faces, the slot's start
+/// plane apart from its far end.
+#[test]
+fn the_released_pin_twin_is_rounded_and_slotted() {
+    use ryukei_testkit::released_pin::{far_end, slotted, start_end};
+    let s = slotted();
+    assert_eq!(s.counts().faces, 12);
+    assert_eq!(check(&s), []);
+    assert_ne!(far_end(&s), start_end(&s));
+}
+
+/// The twin's wrong pin (#658, CTC 02 with PMI's shape): the slot's far
+/// end deleted. In rung 3's narrowed build the walk fails at the pinned
+/// start plane; plan 23.A builds the rung again with the plane released,
+/// whose walk fails at the plane too (census VIII), so the delete refuses
+/// `HealAmbiguous` at the start plane, as main does, one capped build
+/// later. The units are the release's guard: without the released build
+/// they are main's, `MAIN_UNITS`. Update both deliberately, as a golden.
+/// Run in debug, as CI runs it.
+#[test]
+fn the_released_pin_twin_asks_its_start_plane_released() {
+    use ryukei::work::Work;
+    use ryukei_testkit::released_pin::{slotted, spec, start_end};
+    /// Spent on main (the release never asked): census VIII.
+    const MAIN_UNITS: u64 = 70_462;
+    /// Spent with the start plane released once.
+    const UNITS: u64 = 71_126;
+    let s = slotted();
+    let start = s.face(start_end(&s)).unwrap().name;
+    let w = Work::unlimited();
+    let r = ryukei::tweak::delete_faces_with(OpKey(0x23a5), &s, &spec(&s), &w);
+    println!("released_pin twin: {r:?}, {} units", w.spent());
+    assert!(
+        matches!(r, Err(Error::InvalidTweak(TweakError::HealAmbiguous { face })) if face == start),
+        "{r:?}"
+    );
+    assert_ne!(w.spent(), MAIN_UNITS, "the release wasn't built");
+    assert_eq!(w.spent(), UNITS);
+}

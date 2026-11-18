@@ -698,6 +698,170 @@ fn adjusted_builds_answer_only_when_they_build() {
     assert!(matches!(&r, Rung::Done(d) if matches!(**d, Err(crate::Error::Cancelled))));
 }
 
+/// An ask that releases the block's bottom, on top of `asks()`'s room.
+fn releases() -> Option<super::near::Adjusts> {
+    let b = block();
+    let mut a = asks().unwrap();
+    a.insert(face_of(&b, FaceRole::MinusZ), super::near::Adjust::Released);
+    Some(a)
+}
+
+/// Design 919, plan 23.A: released builds have their own budget, apart
+/// from `ADJUSTS`. An ask releasing a face is built; one that builds
+/// answers; at most `RELEASES` are made, after any number of room builds
+/// up to `ADJUSTS`; where none builds, the first answer stands; a stopped
+/// meter answers at once.
+#[test]
+fn released_builds_have_their_own_budget() {
+    use super::near::{Adjust, Adjusts, released};
+    use super::{ADJUSTS, RELEASES, Rung, adjusting};
+    // A release asked first is built, and answers when it builds.
+    let mut n = 0;
+    let r = adjusting((walked_rung(), releases()), &|| false, |a: &Adjusts| {
+        assert_eq!(Some(a.clone()), releases());
+        n += 1;
+        (built_rung(), None)
+    });
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()) && n == 1);
+    // Room until `ADJUSTS`, then releases until `RELEASES`, each failing:
+    // every build is made, and the first answer stands.
+    let b = block();
+    let (mut rooms, mut frees) = (0, 0);
+    let r = adjusting((walked_rung(), asks()), &|| false, |a: &Adjusts| {
+        let k = released(a).len();
+        if k == 0 {
+            rooms += 1;
+        } else {
+            frees += 1;
+        }
+        // Room again until `ADJUSTS` rooms, then one more face released each time.
+        let mut next = a.clone();
+        if rooms < ADJUSTS {
+            next.insert(face_of(&b, FaceRole::PlusX), Adjust::Room(rooms as u32 + 1));
+        } else {
+            let more = [
+                FaceRole::MinusZ,
+                FaceRole::MinusX,
+                FaceRole::PlusY,
+                FaceRole::MinusY,
+            ];
+            next.insert(face_of(&b, more[k]), Adjust::Released);
+        }
+        (refused_rung(), Some(next))
+    });
+    assert!(matches!(r, Rung::Walked(_)), "the first answer stands");
+    assert_eq!((rooms, frees), (ADJUSTS, RELEASES));
+    // Releases first spend none of `ADJUSTS`: room asked after a release is still built.
+    let (mut rooms, mut frees) = (0, 0);
+    let r = adjusting((walked_rung(), releases()), &|| false, |a: &Adjusts| {
+        if released(a).len() == 1 && frees == 0 {
+            frees += 1;
+            let mut next = a.clone();
+            next.insert(face_of(&b, FaceRole::PlusX), Adjust::Room(2));
+            return (refused_rung(), Some(next));
+        }
+        rooms += 1;
+        (built_rung(), None)
+    });
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()));
+    assert_eq!((rooms, frees), (1, 1));
+    // A stopped meter answers at once.
+    let r = adjusting((walked_rung(), releases()), &|| true, |_: &Adjusts| {
+        (super::done(Err(crate::Error::Cancelled)), releases())
+    });
+    assert!(matches!(&r, Rung::Done(d) if matches!(**d, Err(crate::Error::Cancelled))));
+}
+
+/// Design 919, plan 23.A (Decision 1): a failure lies at the failing
+/// piece's own face where that is pinned; else at every pinned face one
+/// of its arcs bounds or lies in; else at none.
+#[test]
+fn a_failure_lies_at_its_pieces_pin_or_the_pins_its_arcs_lie_on() {
+    use super::pins_at;
+    use crate::topo::Id;
+    use std::collections::BTreeSet;
+    let f = |i: usize| <FaceId as Id>::from_index(i);
+    let pinned = BTreeSet::from([f(1), f(2)]);
+    assert_eq!(pins_at(&pinned, f(1), [f(2), f(3)]), BTreeSet::from([f(1)]));
+    assert_eq!(
+        pins_at(&pinned, f(3), [f(3), f(2), f(4), f(2)]),
+        BTreeSet::from([f(2)])
+    );
+    assert_eq!(
+        pins_at(&pinned, f(3), [f(2), f(1)]),
+        BTreeSet::from([f(1), f(2)])
+    );
+    assert!(pins_at(&pinned, f(3), [f(4), f(3)]).is_empty());
+    assert!(pins_at(&BTreeSet::new(), f(1), [f(1)]).is_empty());
+}
+
+/// Design 919, plan 23.A: only a narrowed build whose walk failed `Open`,
+/// `Ambiguous` or `Clipped` at a pin asks its release, by its input face,
+/// keeping what the build had; a first build, a halt, or no pin asks
+/// nothing.
+#[test]
+fn only_a_narrowed_walk_failing_at_a_pin_asks_its_release() {
+    use super::walk::WalkError;
+    use super::{Build, ask_release, near};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let bottom = face_of(&b, FaceRole::MinusZ);
+    let pins = BTreeSet::from([bottom]);
+    let rest = whole.without(&b, &pins);
+    let ws: BTreeMap<FaceId, super::working::Working> = rest
+        .faces
+        .iter()
+        .map(|&f| {
+            let w = super::working::working(
+                &b,
+                f,
+                changes.surface.get(&f),
+                b.faces[f].sense,
+                true,
+                &bx,
+            );
+            (f, w.unwrap())
+        })
+        .collect();
+    // unmetered: a unit test.
+    let w = super::body::work_body(K, &b, &rest, &ws, &crate::work::Meter::free())
+        .unwrap()
+        .pinning(&pins);
+    let pin = *w.pinned.iter().next().expect("the bottom, pinned");
+    assert_eq!(w.origin[&pin], bottom);
+    let at = BTreeSet::from([pin]);
+    let had = near::Adjusts::from([(face_of(&b, FaceRole::PlusX), near::Adjust::Room(2))]);
+    let mut want = had.clone();
+    want.insert(bottom, near::Adjust::Released);
+    for e in [
+        WalkError::Open { piece: 0 },
+        WalkError::Ambiguous { piece: 0 },
+        WalkError::Clipped { piece: 0 },
+    ] {
+        for which in [Build::Retry, Build::Only] {
+            assert_eq!(
+                ask_release(&w, e, &at, which, &had),
+                Some(want.clone()),
+                "{e:?} {which:?}"
+            );
+        }
+        assert_eq!(ask_release(&w, e, &at, Build::First, &had), None, "{e:?}");
+        assert_eq!(
+            ask_release(&w, e, &BTreeSet::new(), Build::Only, &had),
+            None,
+            "{e:?}"
+        );
+    }
+    assert_eq!(
+        ask_release(&w, WalkError::Halted { piece: 0 }, &at, Build::Only, &had),
+        None
+    );
+}
+
 /// Design 724: only a narrowed build's clip asks room, for the input faces
 /// of the face clipped and of the faces whose clipped sides it reached,
 /// those working and not fixed.
@@ -879,6 +1043,8 @@ fn a_pins_cut_is_its_near_box_as_adjusted_cut_short_of_it() {
         .pinning(&pins);
     let back: BTreeMap<FaceId, FaceId> = w.origin.iter().map(|(&wf, &i)| (i, wf)).collect();
     let (wt, wb) = (back[&top], back[&bottom]);
+    // The faces the build carries, as `attempt_adjusted` has them.
+    let carried: BTreeSet<FaceId> = ws.keys().copied().collect();
     let now = near::near_box(&b, &changes, &whole, top, &bx, 2);
     let sheet = crate::intersect::face_box(&w.body, wt);
     let own = near::own_box(&b, &whole, top);
@@ -887,7 +1053,18 @@ fn a_pins_cut_is_its_near_box_as_adjusted_cut_short_of_it() {
     let gap = crate::intersect::max_tolerance((&w.body, wt))
         + crate::intersect::max_tolerance((&w.body, wb));
     let cut = near::cut_short(&now, &sheet, &own, &pin, gap).expect("a side to cut");
-    let once = off_pin(&b, &changes, &whole, &bx, 2, &w, &Adjusts::new(), wt, wb);
+    let once = off_pin(
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        &w,
+        &Adjusts::new(),
+        &carried,
+        wt,
+        wb,
+    );
     assert_eq!(once, Some(Adjusts::from([(top, Adjust::off(&cut))])));
     let once = once.unwrap();
     // The cut ends above the bottom by the gap; the top's own box stays.
@@ -896,13 +1073,13 @@ fn a_pins_cut_is_its_near_box_as_adjusted_cut_short_of_it() {
     // Asked again from the cut, nothing is left to cut; from the uncut
     // near box (`adjusts` ignored) the same cut would be asked again.
     assert_eq!(
-        off_pin(&b, &changes, &whole, &bx, 2, &w, &once, wt, wb),
+        off_pin(&b, &changes, &whole, &bx, 2, &w, &once, &carried, wt, wb),
         None
     );
     // A face given room is never kept off (one way only).
     let roomy = Adjusts::from([(top, Adjust::Room(1))]);
     assert_eq!(
-        off_pin(&b, &changes, &whole, &bx, 2, &w, &roomy, wt, wb),
+        off_pin(&b, &changes, &whole, &bx, 2, &w, &roomy, &carried, wt, wb),
         None
     );
     let mut ask = None;
@@ -1518,6 +1695,94 @@ fn a_pin_that_must_grow_fails_its_walk() {
         Rung::Unchanged => "unchanged".into(),
     };
     assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)), "{what}");
+}
+
+/// Design 919, plan 23.A: a wrong pin released. The raised block with its
+/// +y side pinned (21.A's wrong pin, on the side census VIII found the
+/// failing piece's arcs lie on): the narrowed build's walk fails
+/// `Clipped` at a working face and asks room first (Decision 3), never a
+/// release; built with the pin released, alone or with the room asked,
+/// the build builds the taller box, the side keeping its name. Here room
+/// never runs out (a flat face's near box doubles on its thin axis), so
+/// the narrowed rung answers as its first build did: the release through
+/// `narrowed_rung` is the twin's (`tests/retrim.rs`) and the
+/// `released_pin` golden's. In debug, as CI runs it.
+#[test]
+fn a_wrong_pin_released_builds_the_taller_box() {
+    use super::near::{Adjust, Adjusts};
+    use super::{Build, Rung, attempt_adjusted, narrowed_rung};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let side = face_of(&b, FaceRole::PlusY);
+    let forced = BTreeSet::from([side]);
+    let build = |adjusts: &Adjusts| {
+        let mut ask = None;
+        let r = attempt_adjusted(
+            K,
+            &b,
+            &changes,
+            &whole,
+            &bx,
+            2,
+            Build::Only,
+            Some(&forced),
+            adjusts,
+            &mut ask,
+            &m,
+        );
+        (r, ask)
+    };
+    // The narrowed build alone: its walk fails, and room is asked first.
+    let (r, ask) = build(&Adjusts::new());
+    assert!(matches!(r, Rung::Walked(_)), "{}", what(&r));
+    let room = ask.expect("room asked");
+    assert!(!room.is_empty());
+    assert!(
+        room.values().all(|a| matches!(a, Adjust::Room(1))),
+        "{room:?}"
+    );
+    // Released alone, and released with the room asked kept: the build
+    // builds the taller box, and the side keeps its name.
+    let mut roomy = room.clone();
+    roomy.insert(side, Adjust::Released);
+    for adjusts in [Adjusts::from([(side, Adjust::Released)]), roomy] {
+        let (r, again) = build(&adjusts);
+        let Rung::Done(d) = r else {
+            panic!("{adjusts:?}: {}", what(&r));
+        };
+        let (o, _) = (*d).unwrap_or_else(|e| panic!("{adjusts:?}: {e:?}"));
+        assert!(again.is_none());
+        assert_eq!(crate::check::check(&o), []);
+        assert_eq!(crate::check::check_intersections(&o), []);
+        assert!(
+            (volume(&o) - 1.0 * 0.6 * 0.6).abs() < 1e-9,
+            "{}",
+            volume(&o)
+        );
+        assert!(
+            o.by_name(b.faces[side].name).is_some(),
+            "the side keeps its name"
+        );
+    }
+    // Room never runs out here: the narrowed rung's first answer stands.
+    let r = narrowed_rung(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        Some(&forced),
+        &m,
+    );
+    assert!(matches!(r, Rung::Walked(_)), "{}", what(&r));
 }
 
 /// Plan 21.C: a walk that fails with no seed set in conflict reports its
