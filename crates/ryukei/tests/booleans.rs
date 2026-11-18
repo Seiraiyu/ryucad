@@ -1123,3 +1123,38 @@ fn profile_804() {
         );
     }
 }
+
+/// ryukei 22.D's boolean twin (design 724): a pin subtracted from a
+/// conical bore whose wall it grazes, and from one it crosses. Each
+/// result checks clean, and 2,000 seeded points away from every surface
+/// fall where the block, the bore and the pin say they should.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_pin_grazing_or_crossing_a_conical_bore_is_cut() {
+    use ryukei::intersect::{Inclusion, point_in_body};
+    use ryukei_testkit::ruled_pin::{BITE, CROSSING, bored, cut, expected, pin};
+    for bite in [BITE, CROSSING] {
+        let b = bored(bite);
+        let (r, _) = cut(&b, &pin()).unwrap_or_else(|e| panic!("bite {bite:e}: {e:?}"));
+        assert_eq!(check(&r), [], "bite {bite:e}");
+        assert_eq!(check_intersections(&r), [], "bite {bite:e}");
+        let mut rng = ryukei_testkit::Lcg::new(0x22d);
+        let mut seen = 0;
+        while seen < 2000 {
+            let p = Point3::new(
+                rng.next_f64(0.0, 0.04),
+                rng.next_f64(0.0, 0.04),
+                rng.next_f64(0.0, 0.03),
+            );
+            let Some(want) = expected(bite, p, 1e-5) else {
+                continue;
+            };
+            seen += 1;
+            let got = point_in_body(&r, p).unwrap();
+            assert_eq!(got == Inclusion::Inside, want, "bite {bite:e} at {p:?}");
+        }
+    }
+}

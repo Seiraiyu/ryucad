@@ -216,6 +216,7 @@ pub mod pinned_faces;
 pub mod projection;
 pub mod race;
 pub mod rings;
+pub mod ruled_pin;
 pub mod sheet_bytes;
 pub mod sheet_metal;
 pub mod sheet_metal_bytes;
