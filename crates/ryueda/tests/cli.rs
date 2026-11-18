@@ -6,6 +6,8 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/breakout_board.rs"]
+mod breakout_board;
 #[path = "support/draw.rs"]
 mod draw;
 
@@ -5286,6 +5288,54 @@ fn a_board_exports_its_fabrication_package() {
         "board_not_found",
         1,
     );
+}
+
+/// The breakout's board as agent round 5.D laid it out
+/// (`support/breakout_board.rs`), replayed both ways: every part placed,
+/// every net routed, nothing found, `check`'s boards section clean, and
+/// the package written without `--allow-errors`.
+#[test]
+fn the_breakout_board_is_clean_and_exports() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let s = p.ok(&["board", "status", id]);
+    assert_eq!(s["unplaced"], 0, "{s}");
+    assert_eq!(s["nets"]["open"], 0, "{s}");
+    assert_eq!(
+        (&s["errors"], &s["warnings"]),
+        (&json!(0), &json!(0)),
+        "{s}"
+    );
+    let d = p.ok(&["board", "drc", id]);
+    assert_eq!(d["findings"], json!([]), "{d}");
+    assert_eq!(d["incomplete"], false, "{d}");
+    let (_, v) = p.both_in("board", &["check"]);
+    let report = if v["ok"] == true {
+        &v["result"]
+    } else {
+        &v["error"]["details"]["report"]
+    };
+    let ours = report["boards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["board"] == format!("board/{id}"))
+        .unwrap();
+    assert_eq!(ours["findings"], json!([]), "{ours}");
+    let r = p.ok(&["board", "export", id, "--out", "fab"]);
+    assert_eq!(r["allow_errors"], false, "{r}");
+    for top in [&p.direct, &p.daemon] {
+        let dir = top.join("board/fab");
+        let m: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(m["allow_errors"], false, "{m}");
+        assert_eq!(m["left_out"], json!([]), "{m}");
+        assert!(m["files"].as_array().unwrap().len() >= 14, "{m}");
+    }
 }
 
 /// An export that fails partway (here a file it writes can't be put in
