@@ -329,7 +329,7 @@ fn connect_layout() -> Layout<u32> {
 
 fn connect_sections(golden: &mut Golden, threads: usize) {
     let l = connect_layout();
-    let (islands, doubts, report, gaps, contacts) = rayon::ThreadPoolBuilder::new()
+    let (islands, doubts, report, gaps, contacts, walls) = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
         .unwrap()
@@ -341,7 +341,10 @@ fn connect_sections(golden: &mut Golden, threads: usize) {
                 .collect();
             let islands = c.islands();
             let contacts: Vec<_> = islands.iter().flat_map(|i| c.point_contacts(i)).collect();
-            (islands, c.uncertain(), report, gaps, contacts)
+            let walls: Vec<_> = (0..l.layers.len())
+                .flat_map(|layer| c.hole_clearance(layer, 400_000))
+                .collect();
+            (islands, c.uncertain(), report, gaps, contacts, walls)
         });
     let mut s = golden.section(&format!("connect.islands.{threads}"));
     for i in &islands {
@@ -444,6 +447,26 @@ fn connect_sections(golden: &mut Golden, threads: usize) {
         s.i64(pc.layer as i64);
         s.i64(pc.a.into());
         s.i64(pc.b.into());
+    }
+    let mut s = golden.section(&format!("connect.hole_clearance.{threads}"));
+    for g in &walls {
+        for v in [
+            g.layer as i64,
+            g.hole.into(),
+            g.piece.0.into(),
+            g.piece.1.into(),
+            g.joined.map_or(-1, |j| j.0.into()),
+        ] {
+            s.i64(v);
+        }
+        s.i64(g.distance.nm);
+        s.i64(g.distance.bound);
+        s.str(if g.distance.exact { "=" } else { "~" });
+        s.str(match g.verdict {
+            Verdict::Yes => "y",
+            Verdict::Uncertain => "?",
+            Verdict::No => "n",
+        });
     }
 }
 
