@@ -126,6 +126,16 @@ pub trait Product: ryu_git::Layout {
         let _ = v;
         None
     }
+
+    /// The label `part`'s first release takes (design 935): the scheme's
+    /// first by default. ryuplm continues an item's legacy label, so its
+    /// first release follows its last legacy revision. The next label of
+    /// a part with no records ([`crate::state::of_for`]) and
+    /// `release_sequence`'s expected first label read it.
+    fn first_label(src: &dyn Source, part: &Id, scheme: crate::config::Scheme) -> String {
+        let _ = (src, part);
+        crate::label::first(scheme)
+    }
 }
 
 /// The project's parts' IDs alone ([`Product::parts`]).

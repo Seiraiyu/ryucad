@@ -213,7 +213,12 @@ fn faults<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fa
             .filter_map(|e| Some((e, e.record.as_ref().ok()?)))
             .collect();
         let others = join(RELEASES, part.as_str());
-        for f in sequence(&config, &part, &entries) {
+        for f in sequence(
+            &config,
+            &part,
+            &P::first_label(src, &part, config.revisions),
+            &entries,
+        ) {
             let path = f.details["path"].as_str().unwrap_or_default().to_owned();
             let label = f.label.clone().unwrap_or_default();
             out.insert(
