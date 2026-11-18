@@ -1146,6 +1146,17 @@ pub enum Code {
     /// `details.report`); fix them, or export with `--allow-errors`,
     /// which the manifest records.
     DrcFailed,
+    /// No item of that ID or part number in the catalogue (ryuplm 0).
+    ItemNotFound,
+    /// An item's `class` isn't one `ryuplm.json` declares (an error).
+    ItemClassUnknown,
+    /// ryuplm check finding (a warning): an item's number matches none of
+    /// the numbering schemes that apply to it. Legacy numbers are kept as
+    /// written; a `legacy` scheme silences it.
+    PartNumberUnschemed,
+    /// ryuplm check finding (a warning): another catalogue this clone can
+    /// see has an item with the same number.
+    PartNumberDuplicateElsewhere,
 }
 
 impl Code {
@@ -1535,6 +1546,10 @@ impl Code {
         Code::DrcCourtyardOverlap,
         Code::DrcCourtyardOpen,
         Code::DrcFailed,
+        Code::ItemNotFound,
+        Code::ItemClassUnknown,
+        Code::PartNumberUnschemed,
+        Code::PartNumberDuplicateElsewhere,
     ];
 
     /// The CLI's exit code: 1 the agent can fix it, 2 usage, 3 not a
@@ -1624,6 +1639,23 @@ mod tests {
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);
+        }
+    }
+
+    #[test]
+    fn catalogue_codes() {
+        for (c, s) in [
+            (Code::ItemNotFound, "item_not_found"),
+            (Code::ItemClassUnknown, "item_class_unknown"),
+            (Code::PartNumberUnschemed, "part_number_unschemed"),
+            (
+                Code::PartNumberDuplicateElsewhere,
+                "part_number_duplicate_elsewhere",
+            ),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
         }
     }
 

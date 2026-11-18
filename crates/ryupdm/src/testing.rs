@@ -119,6 +119,62 @@ impl Product for Toy {
     }
 }
 
+/// A toy whose parts hold their own properties, as ryuplm's items do:
+/// `things/<id>.json` is `{"format": 1, "kind": "toy.thing", "number": …,
+/// "props": {…}}`, read through [`Product::properties_from`].
+pub(crate) struct Inline;
+
+impl ryu_git::Layout for Inline {
+    const NAME: &'static str = "inline";
+    const MANIFEST: &'static str = "toy.json";
+    const ROOT_FILES: &'static [&'static str] = Toy::ROOT_FILES;
+    const FOLDERS: &'static [&'static str] = Toy::FOLDERS;
+    fn project_file(rel: &str) -> bool {
+        Toy::project_file(rel)
+    }
+}
+
+impl Product for Inline {
+    const PART_FOLDERS: &'static [&'static str] = &["things"];
+    fn parts(src: &dyn Source) -> Result<Vec<(Id, crate::product::PartKind)>> {
+        Ok(Toy::parts(src)?
+            .into_iter()
+            .map(|(id, _)| (id, crate::product::PartKind::Item))
+            .collect())
+    }
+    fn properties_path(part: &Id) -> String {
+        format!("things/{part}.json")
+    }
+    fn part_files(part: &Id) -> PartFiles {
+        PartFiles {
+            files: vec![Self::properties_path(part)],
+            folders: Vec::new(),
+        }
+    }
+    fn part_of(path: &str) -> Option<Id> {
+        file_id(path)
+    }
+    fn content(src: &dyn Source, part: &Id) -> Result<String> {
+        Toy::content(src, part)
+    }
+    fn identity(manifest: &Value) -> Option<Identity> {
+        Toy::identity(manifest)
+    }
+    fn properties_from(v: &Value) -> Option<Result<crate::props::Properties>> {
+        if v["kind"] != "toy.thing" {
+            return None;
+        }
+        let mut values = BTreeMap::new();
+        if let Some(n) = v.get("number") {
+            values.insert("number".to_owned(), n.clone());
+        }
+        if let Some(Value::Object(p)) = v.get("props") {
+            values.extend(p.iter().map(|(k, x)| (k.clone(), x.clone())));
+        }
+        Some(Ok(crate::props::Properties { values }))
+    }
+}
+
 /// The project in the folder `dir`, as a source.
 pub(crate) fn folder(dir: &std::path::Path) -> ryu_doc::source::Folder<'_> {
     ryu_doc::source::Folder(dir)
@@ -167,6 +223,43 @@ mod tests {
     use super::*;
     use crate::product::Product;
     use ryu_git::Layout;
+
+    #[test]
+    fn a_product_may_keep_properties_in_its_part_files() {
+        let mut f: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for (id, n) in [("a", "100-0001"), ("b", "100-0001"), ("c", "100-0002")] {
+            f.insert(
+                format!("things/{id}.json"),
+                canonical::to_string(&json!({
+                    "format": 1, "kind": "toy.thing", "number": n,
+                    "props": {"name": format!("thing {id}")}
+                }))
+                .into_bytes(),
+            );
+        }
+        let p = crate::props::read_for::<Inline>(&f, &Id::parse("a", "part").unwrap()).unwrap();
+        assert_eq!(p.number(), Some("100-0001"));
+        assert_eq!(p.values["name"], "thing a");
+        let pdm = crate::props::Pdm::of_for::<Inline>(
+            &f,
+            crate::product::part_ids::<Inline>(&f).unwrap(),
+            Unit::Mm,
+        );
+        let dup: Vec<_> = pdm
+            .faults()
+            .into_iter()
+            .map(|e| (e.code, e.details["part"].clone()))
+            .collect();
+        assert_eq!(
+            dup,
+            [
+                (Code::PartNumberDuplicate, json!("a")),
+                (Code::PartNumberDuplicate, json!("b"))
+            ]
+        );
+        // Toy keeps reading `ryupdm.properties` files: the default is None.
+        assert!(Toy::properties_from(&json!({"kind": "toy.thing"})).is_none());
+    }
 
     #[test]
     fn a_toys_parts_are_its_things() {
