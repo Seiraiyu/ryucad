@@ -921,6 +921,81 @@ fn the_front_ends_op_amps_are_the_template() {
     }
 }
 
+/// #862: after C10 and TP4 are added (as the issue's round did), an idiom
+/// fix the lint still offers adds no sheet, and `idiom U1 buck` puts at
+/// most one new sheet in the block, never one a part, and says so. Not
+/// reproduced on main since ryueda 5.D (ryueda-release 1.A: no idiom fix
+/// is offered, and `idiom U1 buck` keeps the buck on its one sheet, with
+/// C10 on any of the buck's nets): kept as the guard.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn an_idiom_suggestion_adds_no_sheets() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "buck");
+    ryueda(&board, 1, &["layout"]);
+    for args in [
+        &["component", "add", "buck", "--of", "c_0_1uf", "--id", "c10"][..],
+        &["connect", "buck/c10/1", "rail:+3V3"][..],
+        &["connect", "buck/c10/2", "rail:GND"][..],
+        &["component", "add", "buck", "--of", "tp_gnd", "--id", "tp4"][..],
+        &["connect", "buck/tp4/1", "rail:GND"][..],
+    ] {
+        ryueda(&board, 1, args);
+    }
+    ryueda(&board, 1, &["layout"]);
+    let before = layout_of(&board, "buck")["sheets"]
+        .as_object()
+        .unwrap()
+        .len();
+    let d = ryueda(&board, 1, &["describe", "--block", "buck"]);
+    let fixes: Vec<Vec<String>> = d["blocks"][0]["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["findings"].as_array().cloned().unwrap_or_default())
+        .flat_map(|f| f["fixes"].as_array().cloned().unwrap_or_default())
+        .map(|fix| {
+            fix.as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .filter(|fix| fix.iter().any(|t| t.starts_with("idiom")))
+        .collect();
+    let sheets_after = |texts: &[&str]| {
+        let mut args = vec!["place", "buck"];
+        args.extend(texts);
+        args.push("--dry-run");
+        let v = ryueda(&board, 1, &args);
+        let n = v["description"]["blocks"][0]["sheets"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{v}"))
+            .len();
+        (n, v)
+    };
+    for fix in &fixes {
+        let texts: Vec<&str> = fix.iter().map(String::as_str).collect();
+        let (n, v) = sheets_after(&texts);
+        assert_eq!(n, before, "{fix:?}: {}", v["notes"]);
+    }
+    let (n, v) = sheets_after(&["idiom U1 buck"]);
+    assert!(
+        n <= before + 1,
+        "at most one new sheet, never one a part: {n} from {before}"
+    );
+    if n > before {
+        assert!(
+            v["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["code"] == "move_costly"),
+            "{v}"
+        );
+    }
+}
+
 /// A move brings only the idioms anchored on the part it moves: moving one
 /// op-amp unit beside the other moves no part of the other unit's stage
 /// (round 1, F5: any move of U11:2 scattered baldiff).
