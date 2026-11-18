@@ -196,6 +196,43 @@ fn a_hundred_thousand_row_import() {
     debug_assertions,
     ignore = "release only: the bars time a release build"
 )]
+fn a_bom_of_two_hundred_thousand_children() {
+    // One top record holding every line, as a nested BOM exported from one
+    // assembly is (design 935): twice the flat records, read within their
+    // 2 s. A reader that is quadratic in a parent's children takes about
+    // 7 s here.
+    use ryuplm::import::mapping::Mapping;
+    let mut xml = String::from("<Bom><Item pn=\"TOP\"><Uses>");
+    for k in 0..200_000 {
+        xml += &format!(
+            "<Item pn=\"P-{k:06}\" qty=\"{}\"><Name>Part {k}</Name></Item>",
+            1 + k % 3
+        );
+    }
+    xml += "</Uses></Item></Bom>";
+    let m = Mapping::from_json(
+        "bom",
+        &json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "xml", "records": "/Bom/Item", "children": "Uses/Item"},
+            "key": "@pn", "fields": {"number": {"from": "@pn"}, "name": {"from": "Name"}},
+            "bom": {"level": "#level", "quantity": "@qty"}}),
+    )
+    .unwrap();
+    let t = Instant::now();
+    let table = ryuplm::import::read_table(xml.as_bytes(), &m.reader).unwrap();
+    within(
+        "a BOM of 200,000 xml children read",
+        t.elapsed(),
+        Duration::from_secs(2),
+    );
+    assert_eq!(table.rows.len(), 200_001);
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: the bars time a release build"
+)]
 fn a_hundred_thousand_tree_records() {
     use ryuplm::import::mapping::{Mapping, ReaderKind};
     // Unseeded, as the CSV import's bar is.

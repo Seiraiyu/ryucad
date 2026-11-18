@@ -6,8 +6,8 @@
 
 use super::rows::{Leaves, Refusal};
 use super::text::{self, Encoding};
-use roxmltree::{Document, Node};
-use std::collections::{BTreeMap, BTreeSet};
+use roxmltree::{Document, Node, NodeId};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// The deepest element nesting read: deeper is refused, which bounds the
 /// recursion too.
@@ -212,7 +212,10 @@ fn record<'a, 'i>(
     if kids.is_some() {
         cells.push(("#level".to_owned(), level.to_string()));
     }
-    flatten(n, "", &below, depth, &mut cells)
+    // Looked up, never iterated: a set, so a record holding N child
+    // records costs N lookups, not N².
+    let skip: HashSet<NodeId> = below.iter().map(Node::id).collect();
+    flatten(n, "", &skip, depth, &mut cells)
         .map_err(|m| Refusal::at(p as u64 + 1, None, m).placed(Some(place.as_str())))?;
     out[p].cells = cells;
     let step = kids.map_or(0, <[&str]>::len);
@@ -228,7 +231,7 @@ fn record<'a, 'i>(
 fn flatten(
     n: Node<'_, '_>,
     prefix: &str,
-    skip: &[Node<'_, '_>],
+    skip: &HashSet<NodeId>,
     depth: usize,
     cells: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
@@ -257,7 +260,7 @@ fn flatten(
     }
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
     for c in n.children().filter(|c| c.is_element()) {
-        if skip.contains(&c) {
+        if skip.contains(&c.id()) {
             continue;
         }
         let name = c.tag_name().name();
@@ -467,6 +470,15 @@ mod tests {
                 vec![("#level", "0"), ("@pn", "E")],
             ]
         );
+    }
+
+    #[test]
+    fn attributes_sharing_a_local_name_are_refused() {
+        let x = br#"<A xmlns:x="urn:x"><B id="1"/><B x:id="2" id="3"/></A>"#;
+        let r = read(x, "/A/B", None).unwrap();
+        let e = super::super::rows::Table::from_records(r).unwrap_err();
+        assert_eq!((e.row, e.place.as_deref()), (2, Some("line 1, column 31")));
+        assert!(e.message.contains("@id"), "{}", e.message);
     }
 
     #[test]

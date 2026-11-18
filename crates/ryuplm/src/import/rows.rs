@@ -176,6 +176,10 @@ impl Table {
         let mut columns: Vec<String> = Vec::new();
         let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut rows = Vec::with_capacity(records.len());
+        // The last row each column was given in: a path twice in one
+        // record (two XML attributes sharing a local name) is refused, not
+        // kept as whichever came last.
+        let mut given: Vec<u64> = Vec::new();
         for (i, rec) in records.into_iter().enumerate() {
             let at = i as u64 + 1;
             let mut cells = vec![String::new(); columns.len()];
@@ -190,9 +194,22 @@ impl Table {
                         index.insert(path.clone(), columns.len());
                         columns.push(path);
                         cells.push(String::new());
+                        given.push(0);
                         columns.len() - 1
                     }
                 };
+                if given[c] == at {
+                    return Err(Refusal::at(
+                        at,
+                        Some(columns[c].as_str()),
+                        format!(
+                            "{} is in this record twice (names are local: two attributes sharing a local name?)",
+                            columns[c]
+                        ),
+                    )
+                    .placed(Some(rec.place.as_str())));
+                }
+                given[c] = at;
                 cells[c] = value;
             }
             rows.push(Row {
