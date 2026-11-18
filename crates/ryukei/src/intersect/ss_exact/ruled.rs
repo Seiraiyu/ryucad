@@ -531,6 +531,120 @@ fn crossings(t: &Turn) -> Option<Crossings> {
     Some(out)
 }
 
+/// Hermite spans a curve starts with (a power of two, so `π` is a break).
+const START_SPANS: usize = 32;
+/// The most spans a curve may take.
+const MAX_SPANS: usize = 1 << 12;
+
+impl Rulings {
+    /// The loop over arc `[t0, t1]` at `φ` (`θ = θm + h cos φ`, the `+`
+    /// branch for `φ` in `(0, π)`): its point and tangent. At `φ = 0` and
+    /// `π`, the arc's ends, `√Δ`'s factor `|sin φ|` is taken to its limit.
+    fn on_loop(&self, [t0, t1]: [f64; 2], phi: f64) -> (Point3, Vector3) {
+        let (mid, h) = ((t0 + t1) / 2.0, (t1 - t0) / 2.0);
+        let (sp, cp) = math::sin_cos(phi);
+        let th = mid + h * cp;
+        let dth = -h * sp;
+        let (b, db) = self.b(th);
+        let (d, dd) = self.delta(th);
+        let (s, ds) = if phi == 0.0 {
+            (0.0, math::sqrt((-dd * h / 2.0).max(0.0)))
+        } else if phi == PI {
+            (0.0, -math::sqrt((dd * h / 2.0).max(0.0)))
+        } else {
+            let root = math::sqrt(d.max(0.0));
+            let side = if sp > 0.0 { 1.0 } else { -1.0 };
+            let ds = if root > 0.0 {
+                side * dd * dth / (2.0 * root)
+            } else {
+                0.0
+            };
+            (side * root, ds)
+        };
+        let a = self.a();
+        let (t, dt) = ((-b + s) / a, (-db * dth + ds) / a);
+        (
+            self.point(th, t),
+            self.along(th) * dth + self.cyl.z().get() * dt,
+        )
+    }
+
+    /// The curve round the cylinder on side `side` (±1) at `θ`, where
+    /// every ruling crosses.
+    fn round(&self, side: f64, th: f64) -> (Point3, Vector3) {
+        let (b, db) = self.b(th);
+        let (d, dd) = self.delta(th);
+        let root = math::sqrt(d.max(0.0));
+        let ds = if root > 0.0 {
+            side * dd / (2.0 * root)
+        } else {
+            0.0
+        };
+        let a = self.a();
+        let (t, dt) = ((-b + side * root) / a, (-db + ds) / a);
+        (self.point(th, t), self.along(th) + self.cyl.z().get() * dt)
+    }
+}
+
+/// A closed curve through `at`'s points and tangents over `[0, 2π]`, as
+/// cubic Hermite spans: [`START_SPANS`] to begin, each halved until the
+/// cubic's middle is within a quarter resolution of `at`'s point there
+/// (a check, not a certificate: `ss::with_pcurves` certifies). Its last
+/// point is its first, bit for bit. `None` past [`MAX_SPANS`]. A unit a
+/// span tried.
+fn hermite(
+    at: &dyn Fn(f64) -> (Point3, Vector3),
+    m: &Meter,
+) -> Result<Option<NurbsCurve>, Failure> {
+    let step = TAU / START_SPANS as f64;
+    let mut todo: Vec<[f64; 2]> = (0..START_SPANS)
+        .rev()
+        .map(|k| [step * k as f64, step * (k + 1) as f64])
+        .collect();
+    let first = at(0.0);
+    let mut breaks = vec![0.0];
+    let mut ends = Vec::new();
+    let mut tried = 0;
+    while let Some([a, b]) = todo.pop() {
+        m.charge(1)?;
+        tried += 1;
+        if breaks.len() > MAX_SPANS || tried > 4 * MAX_SPANS {
+            return Ok(None);
+        }
+        let pa = if a == 0.0 { first } else { at(a) };
+        let pb = if b == TAU { first } else { at(b) };
+        let w = b - a;
+        let mid = pa.0 + (pb.0 - pa.0) * 0.5 + (pa.1 - pb.1) * (w / 8.0);
+        let c = (a + b) / 2.0;
+        if mid.distance(at(c).0) > LINEAR_RESOLUTION / 4.0 {
+            if c <= a || c >= b {
+                return Ok(None);
+            }
+            todo.push([c, b]);
+            todo.push([a, c]);
+            continue;
+        }
+        breaks.push(b);
+        ends.push((pa, pb));
+    }
+    let spans = ends.len();
+    let mut points = Vec::with_capacity(3 * spans + 1);
+    points.push(first.0);
+    for (i, ((pa, da), (pb, db))) in ends.into_iter().enumerate() {
+        let w = breaks[i + 1] - breaks[i];
+        points.push(pa + da * (w / 3.0));
+        points.push(pb - db * (w / 3.0));
+        points.push(pb);
+    }
+    let mut mults = vec![3; spans + 1];
+    mults[0] = 4;
+    mults[spans] = 4;
+    let Ok(knots) = KnotVector::clamped(3, &breaks, &mults) else {
+        return Ok(None);
+    };
+    Ok(NurbsCurve::new(knots, points, None).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +797,60 @@ mod tests {
             [-1.0; 3],
         );
         assert_eq!(crossings(&close), None);
+    }
+
+    /// A loop's points lie on both surfaces, its ends at the arc's ends,
+    /// and the Hermite fit closes on itself.
+    #[test]
+    fn a_loop_runs_both_branches_and_closes() {
+        let wall = Surface::Cylinder(
+            Cylinder::new(
+                frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+                1.0,
+            )
+            .unwrap(),
+        );
+        let rl = Rulings::new(
+            frame((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+            0.5,
+            Quadric::of(&wall).unwrap(),
+        );
+        let arc = [FRAC_PI_2, 3.0 * FRAC_PI_2];
+        let pipe = Surface::Cylinder(Cylinder::new(rl.cyl, 0.5).unwrap());
+        for k in 0..=256 {
+            let phi = TAU * f64::from(k) / 256.0;
+            let (p, d) = rl.on_loop(arc, phi);
+            assert!(
+                wall.distance(p) < 1e-12 && pipe.distance(p) < 1e-12,
+                "{phi}: {p:?}"
+            );
+            assert!(d.length().is_finite());
+        }
+        let curve = hermite(&|phi| rl.on_loop(arc, phi), &Meter::free())
+            .unwrap()
+            .unwrap();
+        let c = Curve::Nurbs(Arc::new(curve));
+        assert_eq!(c.point(0.0), c.point(TAU));
+        for k in 0..=1024 {
+            let p = c.point(TAU * f64::from(k) / 1024.0);
+            assert!(wall.distance(p) < 2e-8 && pipe.distance(p) < 2e-8);
+        }
+        // Round: a pipe of radius 0.5 along x through the axis of the wall.
+        let rl = Rulings::new(
+            frame((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+            0.5,
+            Quadric::of(&wall).unwrap(),
+        );
+        for side in [1.0, -1.0] {
+            let curve = hermite(&|th| rl.round(side, th), &Meter::free())
+                .unwrap()
+                .unwrap();
+            let c = Curve::Nurbs(Arc::new(curve));
+            for k in 0..=1024 {
+                let p = c.point(TAU * f64::from(k) / 1024.0);
+                assert!(wall.distance(p) < 2e-8);
+                assert_eq!(p.x > 0.0, side > 0.0, "{p:?}");
+            }
+        }
     }
 }
