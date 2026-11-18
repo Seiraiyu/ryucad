@@ -415,7 +415,14 @@ fn attempt_adjusted(
     // over the region less them.
     let pins = match forced {
         Some(p) => p.clone(),
-        None => near::pins(body, region, &still, &absorbing, which),
+        None => near::pins(
+            body,
+            region,
+            &still,
+            &absorbing,
+            which,
+            &std::collections::BTreeSet::new(),
+        ),
     };
     let rest = region.without(body, &pins);
     // Whether a narrowed build narrowed anything; a pin does.
