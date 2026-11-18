@@ -20,6 +20,7 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
     };
     if kind == crate::item::KIND {
         keyed(&mut v);
+        revision_lines(&mut v);
     }
     let Some(o) = v.as_object() else {
         return bytes.to_vec();
@@ -84,6 +85,42 @@ pub fn keyed(v: &mut serde_json::Value) {
         }
         o.insert(list.to_owned(), serde_json::Value::Object(m));
     }
+    // A history's revisions by label (design 935), in every import's
+    // provenance.
+    if let Some(serde_json::Value::Object(src)) = o.get_mut("source") {
+        for p in src.values_mut() {
+            let Some(po) = p.as_object_mut() else {
+                continue;
+            };
+            let Some(serde_json::Value::Array(revs)) = po.remove("revisions") else {
+                continue;
+            };
+            let mut m = serde_json::Map::new();
+            for mut e in revs {
+                let k = e
+                    .as_object_mut()
+                    .and_then(|x| x.remove("label"))
+                    .and_then(|x| x.as_str().map(str::to_owned));
+                m.insert(k.unwrap_or_else(|| format!("#{}", m.len())), e);
+            }
+            po.insert("revisions".to_owned(), serde_json::Value::Object(m));
+        }
+    }
+}
+
+/// Each keyed revision as one line, its fields as compact JSON: a legacy
+/// revision is one line of a diff (design 935).
+fn revision_lines(v: &mut Value) {
+    let Some(Value::Object(src)) = v.get_mut("source") else {
+        return;
+    };
+    for p in src.values_mut() {
+        if let Some(Value::Object(revs)) = p.get_mut("revisions") {
+            for r in revs.values_mut() {
+                *r = Value::String(serde_json::to_string(&*r).unwrap_or_default());
+            }
+        }
+    }
 }
 
 /// A value on one line: strings bare, arrays of scalars joined by `, `,
@@ -137,5 +174,26 @@ mod tests {
              number = A-1\n"
         );
         assert_eq!(super::textconv(b"not json"), b"not json");
+    }
+
+    #[test]
+    fn a_legacy_revision_is_one_line() {
+        let v = json!({"format": 1, "kind": "ryuplm.item", "number": "A-1",
+            "source": {"hist": {"key": "A-1", "digest": "ff", "values": {"number": "A-1"}, "carried": "B",
+                "revisions": [{"label": "A", "date": "2019-03-07", "values": {"number": "A-1"}},
+                              {"label": "B", "values": {}}]}}});
+        let out =
+            String::from_utf8(super::textconv(crate::canonical::to_string(&v).as_bytes())).unwrap();
+        assert_eq!(
+            out,
+            "ryuplm.item format 1\n\
+             number = A-1\n\
+             source.hist.carried = B\n\
+             source.hist.digest = ff\n\
+             source.hist.key = A-1\n\
+             source.hist.revisions.A = {\"date\":\"2019-03-07\",\"values\":{\"number\":\"A-1\"}}\n\
+             source.hist.revisions.B = {\"values\":{}}\n\
+             source.hist.values.number = A-1\n"
+        );
     }
 }

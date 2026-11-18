@@ -78,6 +78,50 @@ fn unkeyed(v: &mut Value, ours: &Value, theirs: &Value) {
             o.insert(list.to_owned(), Value::Array(out));
         }
     }
+    // Revisions back as arrays (design 935): ours' order, then theirs'
+    // new ones, each its label again.
+    let labels = |side: &Value, name: &str| -> Vec<String> {
+        side.get("source")
+            .and_then(|s| s.get(name))
+            .and_then(|p| p.get("revisions"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e["label"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let Some(Value::Object(src)) = o.get_mut("source") else {
+        return;
+    };
+    for (name, p) in src.iter_mut() {
+        let Some(po) = p.as_object_mut() else {
+            continue;
+        };
+        let Some(Value::Object(m)) = po.remove("revisions") else {
+            continue;
+        };
+        let mut keys = labels(ours, name);
+        for k in labels(theirs, name).into_iter().chain(m.keys().cloned()) {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        let mut out = Vec::new();
+        for k in keys {
+            let Some(mut e) = m.get(&k).cloned() else {
+                continue;
+            };
+            if let Some(x) = e.as_object_mut() {
+                x.insert("label".into(), Value::from(k.clone()));
+            }
+            out.push(e);
+        }
+        if !out.is_empty() {
+            po.insert("revisions".into(), Value::Array(out));
+        }
+    }
 }
 
 pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
@@ -273,5 +317,23 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["conflicts"]["/number"]["ours"], "A-2");
         assert_eq!(v["conflicts"]["/number"]["theirs"], "A-3");
+    }
+
+    #[test]
+    fn revisions_merge_by_label() {
+        let item = |revs: serde_json::Value| {
+            json!({"format": 1, "kind": "ryuplm.item", "number": "A-1",
+                "source": {"hist": {"key": "A-1", "digest": "ff", "values": {}, "revisions": revs}}})
+        };
+        let base = item(json!([{"label": "A", "values": {}}]));
+        let ours = item(json!([{"label": "A", "state": "Released", "values": {}}]));
+        let theirs = item(json!([{"label": "A", "values": {}}, {"label": "B", "values": {}}]));
+        let (out, outcome) = bytes(&text(base), &text(ours), &text(theirs));
+        assert_eq!(outcome, Outcome::Clean);
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v["source"]["hist"]["revisions"],
+            json!([{"label": "A", "state": "Released", "values": {}}, {"label": "B", "values": {}}])
+        );
     }
 }
