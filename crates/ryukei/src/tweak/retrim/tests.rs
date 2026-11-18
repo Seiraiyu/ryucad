@@ -805,6 +805,64 @@ fn a_retrim_within_its_gap_builds_and_past_it_refuses_at_the_least_face() {
     );
 }
 
+/// Plan 23.B: a narrowed rung past its gap starts no more builds. The
+/// raised block with its +y side forced pinned (23.A's wrong pin): its
+/// narrowed build walks short and asks room. With the gap spent after
+/// that build, no adjusted build runs and the rung answers `Unchanged`
+/// (which `climb_within` discards); never spent, it answers as before.
+#[test]
+fn a_narrowed_rung_past_its_gap_starts_no_more_builds() {
+    use super::{Build, Rung, narrowed_rung};
+    use std::cell::Cell;
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let forced = BTreeSet::from([face_of(&b, FaceRole::PlusY)]);
+    // The gap is spent once the first build has run: `spent` is asked
+    // before it (false), then before the adjusted build (true).
+    let asked = Cell::new(0);
+    let spent = || {
+        asked.set(asked.get() + 1);
+        asked.get() > 1
+    };
+    let w = crate::work::Work::unlimited();
+    let m = crate::work::Meter::new(&w);
+    let r = narrowed_rung(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        Some(&forced),
+        &spent,
+        &m,
+    );
+    assert!(matches!(r, Rung::Unchanged), "{}", what(&r));
+    let one = m.spent();
+    // Never spent: the adjusted builds run, and cost more.
+    let w = crate::work::Work::unlimited();
+    let m = crate::work::Meter::new(&w);
+    let r = narrowed_rung(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        Some(&forced),
+        &|| false,
+        &m,
+    );
+    assert!(matches!(r, Rung::Walked(_)), "{}", what(&r));
+    assert!(m.spent() > one, "{} against {one}", m.spent());
+}
+
 /// Design 724's adjusted builds: a narrowed build that asks nothing
 /// answers alone; one that asks is built again with what it asks; the
 /// first adjusted build that builds answers; at most `ADJUSTS` are made;

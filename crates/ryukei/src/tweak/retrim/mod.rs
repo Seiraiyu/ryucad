@@ -364,8 +364,8 @@ pub(crate) fn retrim_within(
 /// each asks ([`adjusting`]; design 724, plans 22.A and 22.B; design 919,
 /// plan 23.A), each under its own `Scope::Rung` cap: a cap taken inside
 /// another shares it. `forced` pins as [`attempt_with`]'s do (the tests
-/// only); `retrim_with` passes `None`. `spent` stops the adjusted and
-/// released builds once a gap is spent (plan 23.B).
+/// only); `retrim_with` passes `None`. Once `spent` says a gap is spent
+/// no build starts, and the rung answers `Unchanged` (plan 23.B).
 #[allow(clippy::too_many_arguments)]
 fn narrowed_rung(
     key: OpKey,
@@ -380,6 +380,11 @@ fn narrowed_rung(
     m: &Meter,
 ) -> Rung {
     let once = |adjusts: &near::Adjusts| {
+        // Past a gap no build starts (plan 23.B); `climb_within` discards
+        // the rung's answer.
+        if spent() {
+            return (Rung::Unchanged, None);
+        }
         m.capped(crate::work::Scope::Rung, || {
             let mut ask = None;
             let r = attempt_adjusted(
