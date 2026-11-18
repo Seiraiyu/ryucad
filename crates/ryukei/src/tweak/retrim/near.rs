@@ -64,6 +64,8 @@ pub(crate) fn touched(body: &Body, region: &Region, f: FaceId) -> BTreeSet<FaceI
 /// that touches no change ([`touched`] is empty). A pin round a vertex
 /// where the region less the pins would pinch stays working, until none
 /// does: the input region has none, so each new one is at a pin's vertex.
+/// [`pinned_but`] releasing nothing; the builds use that.
+#[cfg(test)]
 pub(crate) fn pinned(
     body: &Body,
     region: &Region,

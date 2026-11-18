@@ -1043,6 +1043,8 @@ fn a_pins_cut_is_its_near_box_as_adjusted_cut_short_of_it() {
         .pinning(&pins);
     let back: BTreeMap<FaceId, FaceId> = w.origin.iter().map(|(&wf, &i)| (i, wf)).collect();
     let (wt, wb) = (back[&top], back[&bottom]);
+    // The faces the build carries, as `attempt_adjusted` has them.
+    let carried: BTreeSet<FaceId> = ws.keys().copied().collect();
     let now = near::near_box(&b, &changes, &whole, top, &bx, 2);
     let sheet = crate::intersect::face_box(&w.body, wt);
     let own = near::own_box(&b, &whole, top);
@@ -1051,7 +1053,18 @@ fn a_pins_cut_is_its_near_box_as_adjusted_cut_short_of_it() {
     let gap = crate::intersect::max_tolerance((&w.body, wt))
         + crate::intersect::max_tolerance((&w.body, wb));
     let cut = near::cut_short(&now, &sheet, &own, &pin, gap).expect("a side to cut");
-    let once = off_pin(&b, &changes, &whole, &bx, 2, &w, &Adjusts::new(), wt, wb);
+    let once = off_pin(
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        &w,
+        &Adjusts::new(),
+        &carried,
+        wt,
+        wb,
+    );
     assert_eq!(once, Some(Adjusts::from([(top, Adjust::off(&cut))])));
     let once = once.unwrap();
     // The cut ends above the bottom by the gap; the top's own box stays.
@@ -1060,13 +1073,13 @@ fn a_pins_cut_is_its_near_box_as_adjusted_cut_short_of_it() {
     // Asked again from the cut, nothing is left to cut; from the uncut
     // near box (`adjusts` ignored) the same cut would be asked again.
     assert_eq!(
-        off_pin(&b, &changes, &whole, &bx, 2, &w, &once, wt, wb),
+        off_pin(&b, &changes, &whole, &bx, 2, &w, &once, &carried, wt, wb),
         None
     );
     // A face given room is never kept off (one way only).
     let roomy = Adjusts::from([(top, Adjust::Room(1))]);
     assert_eq!(
-        off_pin(&b, &changes, &whole, &bx, 2, &w, &roomy, wt, wb),
+        off_pin(&b, &changes, &whole, &bx, 2, &w, &roomy, &carried, wt, wb),
         None
     );
     let mut ask = None;
