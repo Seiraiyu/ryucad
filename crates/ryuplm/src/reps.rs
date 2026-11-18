@@ -309,6 +309,162 @@ pub fn eda_lines_with(
     eda_answer(&out.stdout, own)
 }
 
+/// The direct children of ryucad's `part` (in `src`, loaded as if at
+/// `root`) as lines: ryupdm's indented BOM one level deep, each row its
+/// part, project (`own` for the project's own parts), instance count and
+/// item number. A plain part has none.
+#[cfg(feature = "cad")]
+pub fn cad_lines(src: &dyn Source, root: &Path, own: &ProjectId, part: &Id) -> Result<Vec<RepLine>> {
+    use ryucad_doc::doc::assembly::Rev;
+    let project = ryucad_doc::doc::project::Project::load_from(root, src)?;
+    let mut cache = ryupdm::structure::Cache::new();
+    let mut reader = ryupdm::structure::Reader::new(src, &project, None, None, &mut cache);
+    let tree = ryupdm::bom::tree(&mut reader, part, &Rev::Working, Some(1))?;
+    Ok(tree
+        .children
+        .iter()
+        .map(|c| RepLine {
+            key: c.key().to_string(),
+            project: Some(c.project().cloned().unwrap_or_else(|| own.clone())),
+            part: c.part.clone(),
+            quantity: c.count,
+            find: c.item.map(|n| n.to_string()),
+            refdes: None,
+        })
+        .collect())
+}
+
+/// The commit `rev` names in `repo`, in hex (ryupdm's own rule).
+pub fn commit_hex(repo: &gix::Repository, rev: &str) -> Result<String> {
+    let id = repo.rev_parse_single(rev).map_err(|e| {
+        Error::new(Code::RevNotFound, format!("no revision {rev}: {e}")).with("rev", rev)
+    })?;
+    Ok(id
+        .object()
+        .map_err(ryupdm::history::git_error)?
+        .peel_to_commit()
+        .map_err(ryupdm::history::git_error)?
+        .id
+        .to_string())
+}
+
+/// Representation lines read from disk: projects found by an [`Index`],
+/// ryucad's in process, ryueda's through its executable, each link and
+/// revision read once.
+pub struct Disk {
+    pub index: Index,
+    /// The catalogue's repository and work tree: a representation inside
+    /// it is read at the catalogue's commit (ryucad's, behind `cad`;
+    /// ryueda's through `--rev`).
+    #[cfg_attr(not(feature = "cad"), allow(dead_code))]
+    repo: Option<gix::Repository>,
+    workdir: Option<PathBuf>,
+    memo: BTreeMap<(String, ProjectId, Id, At), std::result::Result<Read, Error>>,
+}
+
+impl Disk {
+    /// A reader over `index` for the catalogue at `here`.
+    pub fn new(index: Index, here: &Path) -> Disk {
+        let repo = gix::discover(here).ok();
+        let workdir = repo
+            .as_ref()
+            .and_then(|r| r.workdir().map(Path::to_path_buf))
+            .map(|w| w.canonicalize().unwrap_or(w));
+        Disk {
+            index,
+            repo,
+            workdir,
+            memo: BTreeMap::new(),
+        }
+    }
+
+    /// `dir`'s place in the catalogue's repository (`/`-separated, ending
+    /// in `/` unless the root), when it lies in its work tree.
+    fn prefix(&self, dir: &Path) -> Option<String> {
+        let rel = dir.strip_prefix(self.workdir.as_ref()?).ok()?;
+        let parts: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        Some(if parts.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", parts.join("/"))
+        })
+    }
+
+    fn read(&self, link: &crate::item::Link, at: &At) -> Result<Read> {
+        let dir = self
+            .index
+            .dir(&link.product, &link.project)
+            .ok_or_else(|| {
+                unresolved(link, "no folder searched holds the project")
+                    .with("searched", &self.index.searched)
+            })?
+            .to_path_buf();
+        // Decision 3: at the catalogue's commit inside its work tree, else
+        // the working files, and the lines say which.
+        let commit = match at {
+            At::Commit(c) if self.prefix(&dir).is_some() => Some(c.clone()),
+            _ => None,
+        };
+        let lines = match link.product.as_str() {
+            "ryueda" => {
+                // Only a design has a BOM; a library component is a leaf.
+                let design = format!("designs/{}.json", link.part);
+                if crate::source::Folder(&dir).read(&design)?.is_none() {
+                    Vec::new()
+                } else {
+                    eda_lines_with(&ryueda_exe(), &dir, &link.project, &link.part, commit.as_deref())?
+                }
+            }
+            "ryucad" => self.cad(&dir, link, commit.as_deref())?,
+            other => return Err(unresolved(link, &format!("{other} isn't a product links read"))),
+        };
+        Ok(Read {
+            lines,
+            rev: commit.unwrap_or_else(|| "working".to_owned()),
+        })
+    }
+
+    #[cfg(feature = "cad")]
+    fn cad(&self, dir: &Path, link: &crate::item::Link, commit: Option<&str>) -> Result<Vec<RepLine>> {
+        match (commit, &self.repo) {
+            (Some(c), Some(repo)) => {
+                let prefix = self.prefix(dir).unwrap_or_default();
+                let files = ryupdm::history::files_for::<ryupdm::cad::Cad>(repo, c, &prefix)?;
+                cad_lines(&files, Path::new(""), &link.project, &link.part)
+            }
+            _ => cad_lines(&crate::source::Folder(dir), dir, &link.project, &link.part),
+        }
+    }
+
+    #[cfg(not(feature = "cad"))]
+    fn cad(&self, _dir: &Path, link: &crate::item::Link, _commit: Option<&str>) -> Result<Vec<RepLine>> {
+        Err(unresolved(
+            link,
+            "this ryuplm was built without ryucad's reader (feature cad)",
+        ))
+    }
+}
+
+impl Reps for Disk {
+    fn lines(&mut self, link: &crate::item::Link, at: &At) -> Result<Read> {
+        let key = (
+            link.product.clone(),
+            link.project.clone(),
+            link.part.clone(),
+            at.clone(),
+        );
+        if let Some(r) = self.memo.get(&key) {
+            return r.clone();
+        }
+        let r = self.read(link, at);
+        self.memo.insert(key, r.clone());
+        r
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -492,5 +648,60 @@ pub(crate) mod tests {
         .unwrap_err();
         assert_eq!(e.code, Code::ItemLinkUnresolved);
         assert!(e.message.contains("RYUEDA_EXE"), "{}", e.message);
+    }
+
+    #[cfg(feature = "cad")]
+    #[test]
+    fn ryucad_lines_are_the_assemblys_children() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        cad_project(
+            &top.join("mech"),
+            &pid(3),
+            &["bolt", "plate"],
+            &[("frame", &[("bolt", 4), ("plate", 1)])],
+        );
+        let src = crate::source::Folder(&top.join("mech"));
+        let id = |s: &str| Id::parse(s, "part").unwrap();
+        let lines = cad_lines(&src, &top.join("mech"), &pid(3), &id("frame")).unwrap();
+        let got: Vec<(String, Option<ProjectId>, u64)> = lines
+            .iter()
+            .map(|l| (l.part.to_string(), l.project.clone(), l.quantity))
+            .collect();
+        assert_eq!(
+            got,
+            [("bolt".into(), Some(pid(3)), 4), ("plate".into(), Some(pid(3)), 1)]
+        );
+        // A plain part has no lines.
+        assert!(cad_lines(&src, &top.join("mech"), &pid(3), &id("bolt")).unwrap().is_empty());
+        // Through the disk reader, found by the index, read once.
+        let mut disk = Disk::new(Index::scan(&[top.clone()]), &top);
+        let link = crate::item::Link { product: "ryucad".into(), project: pid(3), part: id("frame") };
+        let r = disk.lines(&link, &At::Working).unwrap();
+        assert_eq!((r.lines.len(), r.rev.as_str()), (2, "working"));
+        let gone = crate::item::Link { product: "ryucad".into(), project: pid(9), part: id("frame") };
+        assert_eq!(disk.lines(&gone, &At::Working).unwrap_err().code, Code::ItemLinkUnresolved);
+        // A ryueda component (no designs/<id>.json) is a leaf: no executable run.
+        std::fs::create_dir_all(top.join("lib")).unwrap();
+        std::fs::write(top.join("lib/ryueda.json"), format!(r#"{{"project":"{}"}}"#, pid(6))).unwrap();
+        let mut disk = Disk::new(Index::scan(&[top.clone()]), &top);
+        let comp = crate::item::Link { product: "ryueda".into(), project: pid(6), part: id("r10k") };
+        assert!(disk.lines(&comp, &At::Working).unwrap().lines.is_empty());
+    }
+
+    #[cfg(not(feature = "cad"))]
+    #[test]
+    fn without_cad_ryucad_links_are_unresolved() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        cad_project(&top.join("mech"), &pid(3), &["bolt"], &[("frame", &[("bolt", 1)])]);
+        let mut disk = Disk::new(Index::scan(&[top.clone()]), &top);
+        let link = crate::item::Link {
+            product: "ryucad".into(),
+            project: pid(3),
+            part: Id::parse("frame", "part").unwrap(),
+        };
+        let e = disk.lines(&link, &At::Working).unwrap_err();
+        assert!(e.message.contains("feature cad"), "{}", e.message);
     }
 }
