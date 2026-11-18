@@ -37,6 +37,7 @@ pub mod settings;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod textconv;
+pub mod where_used;
 pub mod write;
 
 /// ryuplm, as ryupdm, ryu-git and ryu-session know it.
