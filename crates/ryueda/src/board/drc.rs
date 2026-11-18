@@ -558,7 +558,7 @@ pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
         let found: Vec<Finding> = s
             .tracks
             .par_iter()
-            .filter(|t| t.layer.index() == side)
+            .filter(|t| t.layer.index(2) == Some(side)) // Task 6
             .flat_map_iter(|t| {
                 let body = Body::of_shape(&t.shape, &opts);
                 let tk = Key::Track(t.id.to_string());

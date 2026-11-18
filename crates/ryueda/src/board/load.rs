@@ -129,7 +129,7 @@ fn load_one(
                     let bytes = read(src, &at)?;
                     piece(&mut h, join(PLACEMENTS, &file).as_bytes());
                     piece(&mut h, &bytes);
-                    let loaded = match doc::read::<Placement>(&bytes, &at, PLACEMENT_KIND, FORMAT) {
+                    let loaded = match doc::read::<Placement>(&bytes, &at, PLACEMENT_KIND, NEWEST) {
                         Ok(p) => Loaded {
                             faults: placement_faults(&p)
                                 .into_iter()
@@ -229,7 +229,9 @@ fn routes<T: serde::de::DeserializeOwned>(
         let bytes = read(src, &at)?;
         piece(h, join(folder, &file).as_bytes());
         piece(h, &bytes);
-        let loaded = match doc::read::<T>(&bytes, &at, kind, FORMAT) {
+        // Holes have no format 2.
+        let newest = if kind == HOLE_KIND { FORMAT } else { NEWEST };
+        let loaded = match doc::read::<T>(&bytes, &at, kind, newest) {
             Ok(x) => Loaded {
                 faults: check(&x).into_iter().map(|f| f.with("path", &at)).collect(),
                 item: Ok(x),

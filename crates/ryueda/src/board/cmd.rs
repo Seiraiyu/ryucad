@@ -96,7 +96,7 @@ pub fn answer(p: &Project, id: &Id) -> Value {
         "faults": fault::list(&b.faults()),
     });
     match &b.board.item {
-        Ok(board) => v["board"] = crate::doc::to_value(board, BOARD_KIND, FORMAT),
+        Ok(board) => v["board"] = super::file::value(board, BOARD_KIND),
         Err(e) => v["error"] = json!(e),
     }
     v

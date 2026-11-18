@@ -441,7 +441,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         };
         let shape = track_shape(track);
         out.layers
-            .entry(track.layer.name().to_owned())
+            .entry(track.layer.name())
             .or_default()
             .push((format!("{board}:track/{tid}"), shape.clone()));
         out.tracks.push(TrackInfo {

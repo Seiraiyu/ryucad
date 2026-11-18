@@ -187,7 +187,7 @@ pub fn track_add(
             points,
         };
         w.put(route_path(&id, TRACKS, &tid), &t, TRACK_KIND);
-        made.push(json!({"id": tid, "reference": format!("{id}:track/{tid}"), "track": crate::doc::to_value(&t, TRACK_KIND, FORMAT)}));
+        made.push(json!({"id": tid, "reference": format!("{id}:track/{tid}"), "track": super::file::value(&t, TRACK_KIND)}));
     }
     commit(session, &format!("board {id} track"), w)?;
     Ok(answer(session, &id, json!({"tracks": made}), before))
@@ -244,7 +244,7 @@ pub fn track_edit(
     let mut w = Writes::default();
     w.put(route_path(&id, TRACKS, &tid), &t, TRACK_KIND);
     commit(session, &format!("board {id} track {tid}"), w)?;
-    let made = json!({"tracks": [{"id": tid, "reference": format!("{id}:track/{tid}"), "track": crate::doc::to_value(&t, TRACK_KIND, FORMAT)}]});
+    let made = json!({"tracks": [{"id": tid, "reference": format!("{id}:track/{tid}"), "track": super::file::value(&t, TRACK_KIND)}]});
     Ok(answer(session, &id, made, before))
 }
 
@@ -370,7 +370,7 @@ pub fn via_add(
             diameter_nm: diameter,
         };
         w.put(route_path(&id, VIAS, &vid), &v, VIA_KIND);
-        made.push(json!({"id": vid, "reference": format!("{id}:via/{vid}"), "via": crate::doc::to_value(&v, VIA_KIND, FORMAT)}));
+        made.push(json!({"id": vid, "reference": format!("{id}:via/{vid}"), "via": super::file::value(&v, VIA_KIND)}));
     }
     commit(session, &format!("board {id} via"), w)?;
     Ok(answer(session, &id, json!({"vias": made}), before))
@@ -412,7 +412,7 @@ pub fn hole_add(
             drill_nm: drill,
         };
         w.put(route_path(&id, HOLES, &hid), &h, HOLE_KIND);
-        made.push(json!({"id": hid, "reference": format!("{id}:hole/{hid}"), "hole": crate::doc::to_value(&h, HOLE_KIND, FORMAT)}));
+        made.push(json!({"id": hid, "reference": format!("{id}:hole/{hid}"), "hole": super::file::value(&h, HOLE_KIND)}));
     }
     commit(session, &format!("board {id} hole"), w)?;
     Ok(answer(session, &id, json!({"holes": made}), before))

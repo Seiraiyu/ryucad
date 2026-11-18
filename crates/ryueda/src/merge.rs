@@ -352,8 +352,8 @@ pub fn newest(kind: &str) -> Option<u64> {
         crate::board::BOARD_KIND
         | crate::board::PLACEMENT_KIND
         | crate::board::TRACK_KIND
-        | crate::board::VIA_KIND
-        | crate::board::HOLE_KIND => crate::board::FORMAT,
+        | crate::board::VIA_KIND => crate::board::file::NEWEST,
+        crate::board::HOLE_KIND => crate::board::FORMAT,
         _ => return None,
     })
 }

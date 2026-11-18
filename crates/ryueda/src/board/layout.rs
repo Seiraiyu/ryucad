@@ -109,7 +109,7 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
         layout.items.insert(
             Key::Track(t.id.to_string()),
             Item {
-                layer: t.layer.index(),
+                layer: t.layer.index(2).unwrap_or(0), // Task 6
                 shape: t.shape.clone(),
                 net: Some(t.net.clone()),
             },
