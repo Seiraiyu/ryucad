@@ -254,6 +254,28 @@ fn dispatch(
         Request::ImportCheck { name, file, limit } => {
             crate::import::preview::check(session, &name, std::path::Path::new(&file), limit)?
         }
+        Request::ImportRun {
+            name,
+            file,
+            dry_run,
+            prefer,
+            limit,
+            expected_revision,
+        } => {
+            let prefer = prefer
+                .as_deref()
+                .map(crate::import::run::Prefer::parse)
+                .transpose()?;
+            crate::import::run::run(
+                session,
+                &name,
+                std::path::Path::new(&file),
+                dry_run,
+                prefer,
+                limit,
+                expected_revision.as_deref(),
+            )?
+        }
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,

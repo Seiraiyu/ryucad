@@ -72,11 +72,16 @@ fn faults(files: &Files, cat: &Catalogue) -> Vec<Fault> {
     judge::all(files, cat, &Context::default())
 }
 
-pub fn commit(session: &mut Session, what: &str, writes: Writes) -> Result<()> {
-    let after_files = proposed(session, &writes);
+/// The error faults `writes` would add: what `commit` refuses.
+pub fn would_add(session: &Session, writes: &Writes) -> Result<Vec<Fault>> {
+    let after_files = proposed(session, writes);
     let after = Catalogue::load(&after_files)?;
     let before = faults(&session.snapshot(), session.catalogue());
-    let added = added_errors(&before, &faults(&after_files, &after));
+    Ok(added_errors(&before, &faults(&after_files, &after)))
+}
+
+pub fn commit(session: &mut Session, what: &str, writes: Writes) -> Result<()> {
+    let added = would_add(session, &writes)?;
     if !added.is_empty() {
         return Err(refused(what, &added));
     }

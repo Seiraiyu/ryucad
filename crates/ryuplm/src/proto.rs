@@ -185,6 +185,20 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
+    #[serde(rename = "import.run")]
+    ImportRun {
+        name: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        /// `source` or `catalogue`: how a conflict is settled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]
@@ -319,6 +333,7 @@ impl Request {
                 | Request::BomEdit { .. }
                 | Request::BomRemove { .. }
                 | Request::SettingsEdit { .. }
+                | Request::ImportRun { .. }
                 | Request::ReleasePropose { .. }
                 | Request::ReleaseObsolete { .. }
                 | Request::Undo { .. }
