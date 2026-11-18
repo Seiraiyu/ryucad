@@ -20,7 +20,7 @@ board.breakout.islands 86841a7d6c106e2a7574b1bb22d7764f
 board.breakout.layout b753237f8cb1d9b51844a8e9f0001dc1
 board.breakout.show ecdb884f7ae1e48bcbe38f13df247b30
 board.breakout.top.png 4009257dba170de0785a1d8d0a7cfa0d
-board.four.drc 8ae3a3d277afead54e024140a603bb33
+board.four.drc 1d364924f058cbfc1a796826f4b8990f
 board.four.export.manifest.json 58298dd726ea062ee38f046b4ba5a6e7
 board.four.export.q7smdsgi6u-bom-jlc.csv 95a34369b6d5ee1764a169c8406eed50
 board.four.export.q7smdsgi6u-bom.csv 4945c2859f6f0d99ddb29a40404b044c

@@ -81,6 +81,17 @@ pub struct Preset {
 }
 
 impl Preset {
+    /// ryueda 7.A's rules (via spans and hole clearances), as `board drc`
+    /// answers them for a board with a stackup of its own.
+    pub fn layer_rules_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "blind_vias": self.blind_vias,
+            "via_hole_clearance_nm": self.via_hole_clearance_nm,
+            "pth_hole_clearance_nm": self.pth_hole_clearance_nm,
+            "npth_hole_clearance_nm": self.npth_hole_clearance_nm,
+        })
+    }
+
     /// The rules as `board drc` answers them.
     pub fn rules_json(&self) -> serde_json::Value {
         serde_json::json!({

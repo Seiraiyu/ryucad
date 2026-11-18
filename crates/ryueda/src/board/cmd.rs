@@ -301,7 +301,7 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
         .collect();
     let errors = findings.iter().filter(|f| f.is_error()).count();
     let owned: Vec<super::drc::Finding> = findings.iter().map(|f| (*f).clone()).collect();
-    let v = json!({
+    let mut v = json!({
         "board": format!("board/{id}"),
         "revision": session.project().boards[&id].revision,
         "rules": c.preset.rules_json(),
@@ -311,6 +311,11 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
         "warnings": owned.len() - errors,
         "incomplete": c.incomplete,
     });
+    // ryueda 7.A's rules, shown for boards with a stackup of their own:
+    // added to `rules` they would move every stage 5 answer.
+    if board_of(&session.project().boards[&id]).is_ok_and(|f| f.stackup.is_some()) {
+        v["layer_rules"] = c.preset.layer_rules_json();
+    }
     if errors > 0 {
         return Err(Error::new(
             Code::CheckFailed,

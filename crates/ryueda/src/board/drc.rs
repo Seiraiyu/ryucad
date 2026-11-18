@@ -1005,6 +1005,107 @@ impl BoardCheck {
     }
 }
 
+/// Copper closer to a hole's wall than the preset's rule for that kind of
+/// hole (a via's, a plated pad's, an unplated hole's), on a layer where
+/// the hole doesn't join it: once per hole and item, the closest layer
+/// named and every layer listed. A hole's own pad or via is never a
+/// finding; nor, for a plated hole, is copper of the hole's own single
+/// net (two islands of one net: its `net_open`).
+pub fn hole_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding> {
+    let board = c.built.board.as_str();
+    let plated_pad = |occ: &str, pad: &str| {
+        s.holes.iter().any(|h| {
+            h.plated
+                && matches!(&h.of, super::shapes::HoleOf::Pad { occ: o, pad: p } if o == occ && p == pad)
+        })
+    };
+    let rule_of = |k: &Key| match k {
+        Key::ViaDrill(_) => preset.via_hole_clearance_nm,
+        Key::PadDrill { occ, pad } if plated_pad(occ, pad) => preset.pth_hole_clearance_nm,
+        _ => preset.npth_hole_clearance_nm,
+    };
+    let own = |hole: &Key, item: &Key| match (hole, item) {
+        (Key::ViaDrill(a), Key::Via(b, _)) => a == b,
+        (Key::PadDrill { occ: a, pad: b }, Key::Pad { occ: x, pad: y, .. }) => a == x && b == y,
+        _ => false,
+    };
+    let mut rules = vec![
+        preset.via_hole_clearance_nm,
+        preset.pth_hole_clearance_nm,
+        preset.npth_hole_clearance_nm,
+    ];
+    rules.sort_unstable();
+    rules.dedup();
+    let nets = island_nets(c);
+    type Best = (ryu_copper::connect::HoleGap<Key>, Nm);
+    let mut best: BTreeMap<(String, String), Best> = BTreeMap::new();
+    let mut layers: BTreeMap<(String, String), BTreeSet<usize>> = BTreeMap::new();
+    for layer in 0..c.built.layout.layers.len() {
+        // Each rule judged at its own distance: every gap the engine
+        // returns for `r` is under `r`, or uncertain.
+        for &r in &rules {
+            for g in c.copper.hole_clearance(layer, r) {
+                if rule_of(&g.hole) != r || own(&g.hole, &g.piece.0) {
+                    continue;
+                }
+                if let Some(j) = &g.joined
+                    && let (Some(x), Some(y)) = (nets.get(j), nets.get(&g.island))
+                    && x.len() == 1
+                    && x == y
+                {
+                    continue;
+                }
+                let key = (
+                    format!("{}#hole", c.built.reference(&g.hole)),
+                    c.built.reference(&g.piece.0),
+                );
+                layers.entry(key.clone()).or_default().insert(layer);
+                if best
+                    .get(&key)
+                    .is_none_or(|(x, _)| g.distance.nm < x.distance.nm)
+                {
+                    best.insert(key, (g, r));
+                }
+            }
+        }
+    }
+    best.into_iter()
+        .map(|((hole, item), (g, rule))| {
+            let on: Vec<&str> = layers[&(hole.clone(), item.clone())]
+                .iter()
+                .map(|l| c.built.layer_name(*l))
+                .collect();
+            let owner = hole.trim_end_matches("#hole");
+            let plated = s
+                .holes
+                .iter()
+                .find(|h| h.owner == owner)
+                .is_some_and(|h| h.plated);
+            finding(
+                Code::DrcHoleClearance,
+                Severity::Error,
+                board,
+                vec![hole.clone(), item.clone()],
+                format!(
+                    "{item} is {} nm from {owner}'s hole wall on {}, under the {rule} nm hole clearance",
+                    g.distance.nm,
+                    c.built.layer_name(g.layer)
+                ),
+                json!({
+                    "layer": c.built.layer_name(g.layer),
+                    "layers": on,
+                    "distance_nm": g.distance.nm,
+                    "exact": g.distance.exact,
+                    "bound_nm": g.distance.bound,
+                    "uncertain": g.verdict == Verdict::Uncertain,
+                    "plated": plated,
+                    "rule_nm": rule,
+                }),
+            )
+        })
+        .collect()
+}
+
 /// Blind and buried vias where the preset makes only through vias.
 pub fn via_spans(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
     if preset.blind_vias {
@@ -1047,7 +1148,7 @@ struct Ctx<'a> {
 
 type Rule = fn(&Ctx) -> Vec<Finding>;
 
-const RULES: [Rule; 11] = [
+const RULES: [Rule; 12] = [
     |c| placements(c.board, c.files, c.occs, c.shapes),
     |c| copper(c.conn, c.incomplete),
     |c| clearance(c.conn, c.preset),
@@ -1057,6 +1158,7 @@ const RULES: [Rule; 11] = [
     |c| via_spans(c.shapes, c.board, c.preset),
     |c| rings(c.conn, c.shapes, c.preset),
     |c| hole_spacing(c.shapes, c.board, c.preset),
+    |c| hole_clearance(c.conn, c.shapes, c.preset),
     |c| edges(c.conn, c.shapes, c.preset),
     |c| courtyards(c.shapes, c.board),
 ];
@@ -1248,6 +1350,76 @@ mod tests {
         assert!(courtyards(&s, "b").is_empty());
         s.courtyards[0].bottom = true;
         assert_eq!(courtyards(&s, "b").len(), 1);
+    }
+
+    #[test]
+    fn copper_near_a_hole_it_isnt_joined_to() {
+        let p = preset::JLC_2L;
+        let run = |s: &BoardShapes| hole_clearance(&connect::connect("b", s), s, &p);
+        // A track of another net passing a via's barrel on an inner layer,
+        // a nanometre inside the rule and exactly at it.
+        for (gap, found) in [
+            (p.via_hole_clearance_nm - 1, 1),
+            (p.via_hole_clearance_nm, 0),
+        ] {
+            let mut s = board(20 * MM, 10 * MM);
+            s.layers(4);
+            s.blind("v1", "a", (10 * MM, 5 * MM), 300 * UM, 600 * UM, (0, 1));
+            // Layer in2 is outside the via's span: nothing there. Layer in1 is inside
+            // it, but the via has its own disc there: keep the track clear of the disc
+            // by using a via whose ring is narrower than the rule.
+            let y = 5 * MM + 150 * UM + gap + 125 * UM;
+            s.track(
+                "t1",
+                "b",
+                CopperLayer::Inner(1),
+                250 * UM,
+                &[(2 * MM, y), (18 * MM, y)],
+            );
+            s.vias[0].diameter_nm = 320 * UM;
+            s.vias[0].shape =
+                crate::board::shapes::disc(ryu_board::geom::Point::new(10 * MM, 5 * MM), 320 * UM);
+            let f = run(&s);
+            assert_eq!(f.len(), found, "gap {gap}: {f:?}");
+            if found == 1 {
+                assert_eq!(f[0].code, Code::DrcHoleClearance);
+                assert_eq!(f[0].refs, ["b:track/t1", "b:via/v1#hole"]);
+                assert_eq!(f[0].details["layer"], "copper.in1");
+                assert_eq!(f[0].details["distance_nm"], gap);
+                assert_eq!(f[0].details["rule_nm"], p.via_hole_clearance_nm);
+            }
+        }
+        // An unplated hole beside a top track: the NPTH rule.
+        let mut s = board(20 * MM, 10 * MM);
+        let y = 5 * MM + 500 * UM + p.npth_hole_clearance_nm - 1 + 125 * UM;
+        s.hole("h1", (10 * MM, 5 * MM), 1000 * UM).track(
+            "t1",
+            "b",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, y), (18 * MM, y)],
+        );
+        let f = run(&s);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].details["rule_nm"], p.npth_hole_clearance_nm);
+        // A through pad's own copper, and a track of its own net touching it, are not findings.
+        let mut s = board(20 * MM, 10 * MM);
+        s.through(
+            "j1",
+            "1",
+            (10 * MM, 5 * MM),
+            1700 * UM,
+            1000 * UM,
+            Some("a"),
+        )
+        .track(
+            "t1",
+            "a",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, 5 * MM), (10 * MM, 5 * MM)],
+        );
+        assert!(run(&s).is_empty(), "{:?}", run(&s));
     }
 
     #[test]
