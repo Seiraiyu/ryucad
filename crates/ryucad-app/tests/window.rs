@@ -142,23 +142,13 @@ fn show_tab(h: &mut Harness<'static, App>, id: &str) {
 /// Runs frames until `done` holds. A timeout names the line that waited.
 #[track_caller]
 fn frames(h: &mut Harness<'static, App>, done: impl Fn(&App) -> bool) {
-    frames_for(h, 30, done);
-}
-
-/// [`frames`] with a bound of `secs`: for a wait on work that grows with
-/// what the tests before it left (the shared disk cache, #971).
-#[track_caller]
-fn frames_for(h: &mut Harness<'static, App>, secs: u64, done: impl Fn(&App) -> bool) {
     let t = Instant::now();
     loop {
         h.step();
         if done(h.state()) {
             return;
         }
-        assert!(
-            t.elapsed() < Duration::from_secs(secs),
-            "timed out after {secs} s"
-        );
+        assert!(t.elapsed() < Duration::from_secs(30), "timed out");
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -1078,15 +1068,17 @@ fn preferences_change_the_window_whoever_sets_them() {
     h.step();
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear cache")
         .click();
-    // The cache is every earlier window test's (one folder for the test
-    // binary), so clearing it on a small runner can take a while.
-    frames_for(&mut h, 120, |a| {
+    // Cleared: the clear's answer says what it removed, but the dialog
+    // reads the cache again every two seconds and a read queued behind the
+    // clear replaces that answer at once, so its entries at 0 count too
+    // (#971: the wait timed out for good, 120 s or 30).
+    frames(&mut h, |a| {
         a.opened()
             .ws
             .session
             .cache
             .as_ref()
-            .is_some_and(|c| c["removed"].is_object())
+            .is_some_and(|c| c["removed"].is_object() || c["entries"] == 0)
     });
     assert_eq!(p.ok(&["cache", "stats"])["entries"], 0);
     let edges = h.state().opened().view.edges;
