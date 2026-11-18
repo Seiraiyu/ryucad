@@ -829,7 +829,13 @@ fn the_window_follows_agents_work_and_an_agent_s_ask() {
     let mut h = window(&p);
     frames(&mut h, loaded);
     h.run_steps(2);
-    assert!(!h.state().opened().ws.follows_work(), "off by default");
+    // Off to start with, whatever an earlier test of this binary left in
+    // the preferences it shares (its default is `config.rs`' test).
+    p.ok(&["config", "set", "view.follow_work", "false"]);
+    frames(&mut h, |a| {
+        a.opened().ws.session.settings.get("view.follow_work") == Some(&serde_json::json!(false))
+    });
+    assert!(!h.state().opened().ws.follows_work());
     menu(&mut h, "View", "Follow agents' work");
     frames(&mut h, |a| a.opened().ws.follows_work());
     // The agent builds far from the view: the view takes it in.

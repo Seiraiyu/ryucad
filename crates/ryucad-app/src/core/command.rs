@@ -326,8 +326,6 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.nav_cube", "Navigation cube", View).toggle(),
     cmd("view.triad", "Axis triad", View).toggle(),
     cmd("view.origin", "Origin", View).toggle(),
-    // #812: keep what agents change in frame (`view.follow_work`).
-    cmd("view.follow_work", "Follow agents' work", View).toggle(),
     cmd("view.show", "Show", View).choices(),
     // Every row of the tree opened or closed by hand (#540): in the Edit
     // menu beside Find in tree, listed here for the rows' menus' order.
@@ -476,6 +474,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("measure.clearance", "Clearance", Tools).icon("arrows-left-right"),
     cmd("annotations.show", "Annotations", Tools).icon("chat-circle-text"),
     cmd("view.annotations", "Annotations' pins", View).toggle(),
+    // #812: keep what agents change in frame (`view.follow_work`).
+    cmd("view.follow_work", "Follow agents' work", View).toggle(),
     cmd("annotation.add", "Annotate…", Edit)
         .icon("chat-circle-text")
         .context(&ANNOTATABLE)

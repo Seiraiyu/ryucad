@@ -36,19 +36,25 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
             followable: p.camera.is_some(),
         })
         .collect();
-    ui.horizontal(|ui| {
-        if let Some(f) = ryu_app::people::strip(ui, &lines, ws.session.following.as_deref()) {
-            ws.follow(f);
-        }
-        // View > Follow agents' work, where the people are (#812).
-        let on = ws.follows_work();
-        let r = ui
-            .selectable_label(on, "Follow work")
-            .on_hover_text("Keep what agents change in frame (View > Follow agents' work)");
-        if r.clicked() {
-            ws.set_config("view.follow_work", serde_json::json!(!on));
-        }
-    });
+    // Drawn in the toolbar's right-to-left run: the strip at the right,
+    // then View > Follow agents' work, where the people are (#812).
+    if let Some(f) = ryu_app::people::strip(ui, &lines, ws.session.following.as_deref()) {
+        ws.follow(f);
+    }
+    // An icon, so the toolbar keeps its room at 1000 points.
+    let on = ws.follows_work();
+    let r = crate::ui::icon::button(
+        ui,
+        crate::ui::icon::Icon::ROBOT,
+        crate::ui::toolbar::ICON,
+        "Follow work",
+        "Follow agents' work: keep what agents change in frame",
+        on,
+        Ok(()),
+    );
+    if r.clicked() {
+        ws.set_config("view.follow_work", serde_json::json!(!on));
+    }
 }
 
 /// A compare: the revision, what differs and the colours that say so,
