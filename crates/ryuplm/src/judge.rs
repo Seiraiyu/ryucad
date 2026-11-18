@@ -44,6 +44,11 @@ pub fn all(src: &dyn Source, cat: &Catalogue, cx: &Context) -> Vec<Fault> {
             None
         }
     };
+    out.extend(
+        crate::import::judge(src, cat, config.as_ref())
+            .into_iter()
+            .map(err),
+    );
     for (id, item) in &cat.items {
         out.extend(crate::aml::judge(id, &item.aml).into_iter().map(err));
         out.extend(class(cat, id).into_iter().map(err));

@@ -17,6 +17,10 @@ pub mod transform;
 pub mod xlsx;
 
 use crate::error::{Code, Error, Result};
+use crate::load::Catalogue;
+use crate::source::{Kind, Source};
+use mapping::Mapping;
+use ryupdm::config::Config;
 use std::path::Path;
 
 /// The folder of mapping files, below the catalogue.
@@ -69,4 +73,112 @@ pub fn read_table(
         mapping::ReaderKind::Xlsx => xlsx::read(bytes, reader.sheet.as_deref())?,
     };
     rows::Table::from_raw(raw, reader.header_row)
+}
+
+/// Mapping `name` from `src`, or `not_found` naming the mappings there are.
+pub fn load(src: &dyn Source, name: &str) -> Result<Mapping> {
+    let path = mapping_path(name);
+    let bytes = if mapping::name_ok(name) {
+        src.read(&path)?
+    } else {
+        None
+    };
+    match bytes {
+        Some(b) => Mapping::read(name, &b),
+        None => {
+            let there: Vec<String> = src
+                .list(IMPORTS)?
+                .into_iter()
+                .filter_map(|(n, _)| n.strip_suffix(".json").map(str::to_owned))
+                .collect();
+            Err(Error::new(
+                Code::NotFound,
+                format!("no mapping {path}; the mappings are: {}", there.join(", ")),
+            )
+            .with("import", name)
+            .with("imports", there))
+        }
+    }
+}
+
+/// `import_mapping_invalid` for each file under `imports/` that isn't a
+/// mapping, doesn't read, or names what the catalogue doesn't declare.
+pub fn judge(src: &dyn Source, cat: &Catalogue, config: Option<&Config>) -> Vec<Error> {
+    let mut out = Vec::new();
+    for (file, kind) in src.list(IMPORTS).unwrap_or_default() {
+        let path = format!("{IMPORTS}/{file}");
+        let name = match (kind, name_of(&path)) {
+            (Kind::File, Some(n)) => n.to_owned(),
+            _ => {
+                out.push(Error::new(Code::ImportMappingInvalid, format!("{path} isn't a mapping file: imports/<name>.json, the name 1 to 63 of a-z, 0-9, _ and -")).with("path", &path));
+                continue;
+            }
+        };
+        match src
+            .read(&path)
+            .ok()
+            .flatten()
+            .map(|b| Mapping::read(&name, &b))
+        {
+            Some(Ok(m)) => {
+                if let Some(c) = config {
+                    out.extend(m.validate(c, &cat.manifest));
+                }
+            }
+            Some(Err(e)) => out.push(e),
+            None => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::proto::Request;
+    use crate::server::tests::{ask, catalogue};
+    use serde_json::json;
+
+    #[test]
+    fn a_bad_mapping_fails_check_and_a_good_one_is_tracked() {
+        let (_d, root) = catalogue();
+        std::fs::create_dir_all(root.join("imports")).unwrap();
+        let good = crate::import::mapping::tests::erp();
+        // erp() names class "fastener" and "machined": declare them.
+        for c in ["fastener", "machined"] {
+            ask(
+                &root,
+                Request::SettingsEdit {
+                    change: serde_json::from_value(json!({"class": c})).unwrap(),
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+        }
+        ask(
+            &root,
+            Request::SettingsEdit {
+                change: serde_json::from_value(
+                    json!({"property": "thread", "declaration": {"type": "string"}}),
+                )
+                .unwrap(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("imports/erp.json"),
+            crate::canonical::to_string(&good),
+        )
+        .unwrap();
+        let ok = ask(&root, Request::Check { within: vec![] }).unwrap();
+        assert_eq!(ok["errors"], 0, "{ok}");
+        let info = ask(&root, Request::ProjectInfo {}).unwrap();
+        std::fs::write(root.join("imports/bad.json"), "{\"format\": 1}").unwrap();
+        let info2 = ask(&root, Request::ProjectInfo {}).unwrap();
+        assert_ne!(info["revision"], info2["revision"], "imports/ is tracked");
+        let e = ask(&root, Request::Check { within: vec![] }).unwrap_err();
+        let r = &e.details["report"];
+        assert_eq!(r["faults"][0]["code"], "import_mapping_invalid");
+        assert_eq!(r["faults"][0]["details"]["path"], "imports/bad.json");
+    }
 }

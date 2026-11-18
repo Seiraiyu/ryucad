@@ -71,6 +71,8 @@ pub fn tracked(root: &Path) -> Vec<(String, std::fs::Metadata)> {
             out.extend(files(&format!("{top}/{d}")));
         }
     }
+    // Mapping files (`imports/<name>.json`): one level, no shards.
+    out.extend(files(crate::import::IMPORTS));
     out
 }
 
