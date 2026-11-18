@@ -319,6 +319,11 @@ pub fn answer(
             sheets = json!(super::xlsx::sheets(&bytes).map_err(Error::from)?);
         }
         ReaderKind::Json => {
+            if lines && records.is_some() {
+                return Err(usage(
+                    "--records is for JSON and XML documents; JSON Lines' records are its lines",
+                ));
+            }
             let (r, c) =
                 super::json::survey(&bytes, lines, records.as_deref()).map_err(Error::from)?;
             reader.records = (!lines).then_some(r);
@@ -326,6 +331,13 @@ pub fn answer(
             reader.lines = lines;
         }
         ReaderKind::Xml => {
+            if let Some(r) = &records
+                && !super::xml::path_ok(r, true)
+            {
+                return Err(usage(
+                    "--records for XML is the elements' path from the root by local name: /Export/Items/Item",
+                ));
+            }
             let (r, c) = super::xml::survey(&bytes, records.as_deref()).map_err(Error::from)?;
             reader.records = Some(r);
             reader.children = c;
@@ -594,5 +606,10 @@ mod tests {
         let c = root.join("items.csv");
         std::fs::write(&c, "ID,PN\n1,A\n").unwrap();
         assert_eq!(guess(&c, Some("/x"), None).unwrap_err().code, Code::Usage);
+        // XML records are an absolute path, as the saved mapping must say,
+        // and JSON Lines' records are its lines.
+        let e = guess(&x, Some("E/I"), None).unwrap_err();
+        assert_eq!(e.code, Code::Usage, "{e:?}");
+        assert_eq!(guess(&l, Some("/x"), None).unwrap_err().code, Code::Usage);
     }
 }
