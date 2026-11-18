@@ -1839,6 +1839,53 @@ fn edits_to_the_corpus_change_only_what_they_name() {
                 "{name}: {args:?}: {:?}",
                 laid.invalid
             );
+            // #863: the capacitor added, then connected, stands by what it
+            // hangs on: within 25 grid steps of a pin on its net, on that
+            // pin's sheet (10 to 23 on cox-worker-5, the ethernet's dense
+            // VDDCR the furthest; left where `component add` put it, the
+            // breakout's stood 36 off).
+            if args[0] == "connect" && args[1].ends_with("/c99/1") {
+                use ryusch::geom::{GRID, Place};
+                use ryusch::shape::Shape;
+                let input = &laid.built.input;
+                let l = ryueda::schem::read_layout(
+                    &std::fs::read(board.join(format!("blocks/{block}/layout.json"))).unwrap(),
+                    "layout.json",
+                )
+                .unwrap();
+                let end = |p: usize, pin: usize| {
+                    let x = &l.placed[&input.parts[p].key];
+                    let e = Shape::of(&input.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins
+                        [pin]
+                        .end;
+                    (x.sheet.clone(), e)
+                };
+                let c = input.part("c99").expect("c99 placed");
+                let net = input.parts[c].pins[0].net.expect("c99/1 connected");
+                let (sheet, a) = end(c, 0);
+                let nearest = input
+                    .parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(q, _)| *q != c)
+                    .flat_map(|(q, part)| {
+                        part.pins
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, x)| x.net == Some(net))
+                            .map(move |(i, _)| (q, i))
+                    })
+                    .filter(|(q, _)| l.placed.contains_key(&input.parts[*q].key))
+                    .map(|(q, i)| end(q, i))
+                    .filter(|(s, _)| *s == sheet)
+                    .map(|(_, b)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs())
+                    .min();
+                assert!(
+                    nearest.is_some_and(|d| d <= 25 * GRID),
+                    "{name}: c99 is {:?} steps from its net's nearest pin",
+                    nearest.map(|d| d / GRID)
+                );
+            }
         }
     }
 }

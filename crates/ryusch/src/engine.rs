@@ -757,6 +757,50 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     }
     // Whatever else resolve counts as moved (anything named by a move).
     unkeep.extend(r.moved.iter().filter(|p| !soft.contains(p)));
+    // A part laid out alone before it was joined to anything (#863:
+    // `component add`, then `connect`) goes again once it is: alone in a
+    // region of its own, named by no instruction, nothing drawn on its
+    // pins, and now on a net. Once drawn there, it stays.
+    if let Some(prev) = prev {
+        let named: BTreeSet<usize> = block
+            .instructions
+            .values()
+            .flat_map(|i| i.parts().iter().flat_map(|s| instr::parts_named(block, s)))
+            .collect();
+        for g in prev.regions.values().filter(|g| g.parts.len() == 1) {
+            let Some(p) = block.part(&g.parts[0]) else {
+                continue;
+            };
+            let part = &block.parts[p];
+            if named.contains(&p) || part.pins.iter().all(|x| x.nets().is_empty()) {
+                continue;
+            }
+            let Some(was) = prev.placed.get(&part.key) else {
+                continue;
+            };
+            let prefix = format!("{}/", part.key);
+            let labelled = prev
+                .labels
+                .values()
+                .flatten()
+                .any(|l| l.on.starts_with(&prefix));
+            let ends: Vec<Point> = Shape::of(part, Place::new(was.at, was.rotation, was.mirror))
+                .pins
+                .iter()
+                .map(|x| x.end)
+                .collect();
+            let wired = prev
+                .routes
+                .values()
+                .filter_map(|by_sheet| by_sheet.get(&was.sheet))
+                .flatten()
+                .flatten()
+                .any(|pt| ends.contains(pt));
+            if !labelled && !wired {
+                unkeep.insert(p);
+            }
+        }
+    }
     if let Some(prev) = prev {
         for ins in block.instructions.values() {
             let tried = prev.instructions.values().any(|x| x == ins);
@@ -6671,11 +6715,8 @@ mod tests {
         assert!(why.starts_with("R3 is on sheet Second"), "{why}");
     }
 
-    /// A part added over a previous layout goes beside its host, where
-    /// cross-cluster placement would put it from nothing, and nothing kept
-    /// moves (an agent's added termination lands by the connector).
-    #[test]
-    fn a_new_part_is_inserted_beside_its_host() {
+    /// A PHY, its connector and a termination resistor on the TD pair.
+    fn phy_block() -> Block {
         use crate::input::{Net, PinKind};
         use crate::testing::{connector, ic, net, resistor};
         let nets: Vec<Net> = vec![
@@ -6686,7 +6727,7 @@ mod tests {
             net("rdp", "RD+", NetKind::Signal),
             net("rdn", "RD-", NetKind::Signal),
         ];
-        let block = Block {
+        Block {
             parts: vec![
                 ic(
                     "u1",
@@ -6713,7 +6754,50 @@ mod tests {
             nets,
             sheet: [400_000_000, 277_000_000],
             ..Block::default()
+        }
+    }
+
+    /// #863: a part added with no connections, then connected, goes to
+    /// what it connects to; laid out again, it stays.
+    #[test]
+    fn a_part_connected_after_it_was_added_joins_its_neighbours() {
+        use crate::testing::resistor;
+        let block = phy_block();
+        let before = lay(&block).layout;
+        let mut added = block.clone();
+        added.parts.push(resistor("r2", "R2", "100", [None, None]));
+        added.previous = Some(before.clone());
+        let alone = lay(&added).layout;
+        let mut joined = added.clone();
+        let r2 = joined.parts.iter().position(|x| x.key == "r2").unwrap();
+        joined.parts[r2] = resistor("r2", "R2", "100", [Some(4), Some(5)]);
+        joined.previous = Some(alone.clone());
+        let out = lay(&joined);
+        assert!(crate::rules::check(&joined, &out.layout).is_empty());
+        for (k, x) in &before.placed {
+            assert_eq!(out.layout.placed.get(k), Some(x), "{k} moved");
+        }
+        let end = |l: &Layout, key: &str, pin: usize| {
+            let p = joined.parts.iter().position(|x| x.key == key).unwrap();
+            let x = &l.placed[key];
+            Shape::of(&joined.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
         };
+        let (a, c) = (end(&out.layout, "r2", 0), end(&out.layout, "j1", 2));
+        let d = (a[0] - c[0]).abs() + (a[1] - c[1]).abs();
+        assert!(d <= 20 * GRID, "R2 is {} steps from J1", d / GRID);
+        // Laid out again over itself, it stays.
+        let mut again = joined.clone();
+        again.previous = Some(out.layout.clone());
+        assert_eq!(lay(&again).layout.placed["r2"], out.layout.placed["r2"]);
+    }
+
+    /// A part added over a previous layout goes beside its host, where
+    /// cross-cluster placement would put it from nothing, and nothing kept
+    /// moves (an agent's added termination lands by the connector).
+    #[test]
+    fn a_new_part_is_inserted_beside_its_host() {
+        use crate::testing::resistor;
+        let block = phy_block();
         let before = lay(&block).layout;
         let mut b = block.clone();
         b.parts
