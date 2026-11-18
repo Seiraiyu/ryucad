@@ -1901,3 +1901,39 @@ fn ftc_07s_nurbs_reaches_its_pin() {
         include_str!("../../../tests/data/nist_ftc_07_pin.txt"),
     );
 }
+
+/// FTC 07 rd (#652, census VII): working NURBS `33b57350` can't be kept
+/// off pin `f19ffa9e` (plan 22.B): they share a vertex, so the pin's box
+/// touches the NURBS' own box on every axis, and no side of its near box
+/// can be cut short of the pin and still hold its own box and its
+/// changes' (`cut_short`: no side valid, census VII's INSIDE). The cause
+/// is recorded on #652 and moves to ryukei 23.
+#[test]
+fn ftc_07s_nurbs_cannot_be_kept_off_its_pin() {
+    use super::near::{Adjusts, cut_short, kept_off, own_box};
+    let (c, region, _) = reaches_its_pin(
+        include_bytes!("../../../tests/data/nist_ftc_07_pin.body"),
+        include_str!("../../../tests/data/nist_ftc_07_pin.txt"),
+    );
+    let pin = crate::intersect::face_box(&c.body, c.pin);
+    let tp = crate::intersect::max_tolerance((&c.body, c.pin));
+    let (sheet, tw) = sheet_over(&c.body, c.working, &c.near);
+    let must = own_box(&c.body, &region, c.working);
+    assert!(must.intersects(&pin), "{must:?} apart from {pin:?}");
+    // Neither the sheet's overshoot nor the gap matters: with neither, no
+    // side is valid either.
+    assert_eq!(cut_short(&c.near, &sheet, &must, &pin, tw + tp), None);
+    assert_eq!(cut_short(&c.near, &c.near, &must, &pin, 0.0), None);
+    assert_eq!(
+        kept_off(
+            c.working,
+            &c.near,
+            &sheet,
+            &must,
+            &pin,
+            tw + tp,
+            &Adjusts::new()
+        ),
+        None
+    );
+}
