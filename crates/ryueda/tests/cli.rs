@@ -5332,3 +5332,32 @@ fn a_track_edit_takes_negative_points_through_ops() {
         1,
     );
 }
+
+#[test]
+fn errors_lists_every_code_and_its_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |no_daemon: bool, args: &[&str]| {
+        let mut cmd = ryueda(&dir.path().join("run"));
+        cmd.current_dir(dir.path()).args(args);
+        if no_daemon {
+            cmd.env("RYUEDA_NO_DAEMON", "1");
+        }
+        parse(cmd.output().unwrap(), dir.path())
+    };
+    let (code, v) = run(false, &["errors"]);
+    assert_eq!(run(true, &["errors"]), (code, v.clone()));
+    assert_eq!(code, 0, "{v}");
+    let codes = v["result"]["codes"].as_array().unwrap();
+    let drc = codes.iter().find(|c| c["code"] == "drc_failed").unwrap();
+    assert_eq!(
+        (&drc["declared"], &drc["keys"][0]["name"]),
+        (&json!(true), &json!("report"))
+    );
+    let (code, one) = run(false, &["errors", "not_found"]);
+    assert_eq!(
+        (code, one["result"]["codes"].as_array().unwrap().len()),
+        (0, 1)
+    );
+    let (code, bad) = run(false, &["errors", "nope"]);
+    assert_eq!((code, &bad["error"]["code"]), (1, &json!("invalid_param")));
+}

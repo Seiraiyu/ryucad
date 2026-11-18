@@ -61,6 +61,13 @@ struct Rev {
 enum Command {
     /// This build's version.
     Version,
+    /// Every error code with its exit code, title and the detail keys it
+    /// declares, or one code's: answered by this build, with no project or
+    /// daemon.
+    Errors {
+        /// One code, such as not_found.
+        code: Option<String>,
+    },
     /// Open a project (this folder by default) in the desktop app,
     /// ryueda-app; RYUEDA_APP names another.
     Open {
@@ -3961,6 +3968,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             repairs: repairs.clone(),
         },
         Command::Version
+        | Command::Errors { .. }
         | Command::Open { .. }
         | Command::Init { .. }
         | Command::Watch { .. }
@@ -3993,6 +4001,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Errors { code } => ryueda::error::details::listing(code.as_deref()),
         Command::Open { dir } => {
             let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
             let dir = ryueda::source::plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
