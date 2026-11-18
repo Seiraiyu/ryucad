@@ -287,14 +287,20 @@ mod tests {
             },
             Leaves {
                 place: "/items/1".into(),
-                cells: vec![("/mfr/name".into(), "Acme".into()), ("/pn".into(), "B".into())],
+                cells: vec![
+                    ("/mfr/name".into(), "Acme".into()),
+                    ("/pn".into(), "B".into()),
+                ],
             },
         ])
         .unwrap();
         assert_eq!(t.columns, ["/pn", "/qty", "/mfr/name"]);
         assert_eq!(t.rows[0].cells, ["A", "2", ""]);
         assert_eq!(t.rows[1].cells, ["B", "", "Acme"]);
-        assert_eq!((t.rows[1].at, t.rows[1].place.as_deref()), (2, Some("/items/1")));
+        assert_eq!(
+            (t.rows[1].at, t.rows[1].place.as_deref()),
+            (2, Some("/items/1"))
+        );
         let mut r = vec![Refusal::at(2, Some("/pn"), "bad"), Refusal::file("whole")];
         t.place(&mut r);
         assert_eq!(r[0].place.as_deref(), Some("/items/1"));
@@ -309,5 +315,4 @@ mod tests {
             r#"{"row":2,"message":"m"}"#
         );
     }
-
 }

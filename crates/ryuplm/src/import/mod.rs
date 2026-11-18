@@ -16,6 +16,7 @@ pub mod run;
 pub mod text;
 pub mod transform;
 pub mod xlsx;
+pub mod xml;
 
 use crate::error::{Code, Error, Result};
 use crate::load::Catalogue;
@@ -72,6 +73,9 @@ pub fn read_table(
             csv::parse(&s, d)?
         }
         mapping::ReaderKind::Xlsx => xlsx::read(bytes, reader.sheet.as_deref())?,
+        mapping::ReaderKind::Json | mapping::ReaderKind::Xml => {
+            return Err(rows::Refusal::file("tree readers come in plan 8.A's Task 5"));
+        }
     };
     rows::Table::from_raw(raw, reader.header_row)
 }

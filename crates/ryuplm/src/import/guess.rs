@@ -251,6 +251,9 @@ pub fn answer(
         delimiter: None,
         sheet,
         header_row: 1,
+        records: None,
+        children: None,
+        lines: false,
     };
     let mut sheets = Value::Null;
     if kind == ReaderKind::Csv {
@@ -337,6 +340,9 @@ mod tests {
             delimiter: Some(','),
             sheet: None,
             header_row: 1,
+            records: None,
+            children: None,
+            lines: false,
         }
     }
 

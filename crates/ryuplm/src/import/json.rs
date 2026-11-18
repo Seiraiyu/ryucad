@@ -573,7 +573,13 @@ mod tests {
             scalar(r#""a\"b\\c\/\nø😀""#).unwrap().unwrap(),
             "a\"b\\c/\nø😀"
         );
-        for bad in [r#""\ud83d""#, r#""\ude00x""#, "\"a\nb\"", r#""\x""#, "\"open"] {
+        for bad in [
+            r#""\ud83d""#,
+            r#""\ude00x""#,
+            "\"a\nb\"",
+            r#""\x""#,
+            "\"open",
+        ] {
             assert!(scalar(bad).is_err(), "{bad}");
         }
     }
@@ -643,7 +649,10 @@ mod tests {
 
     #[test]
     fn pointers_parse_and_escape() {
-        assert_eq!(tokens("/a~1b/~0c"), Some(vec!["a/b".to_owned(), "~c".to_owned()]));
+        assert_eq!(
+            tokens("/a~1b/~0c"),
+            Some(vec!["a/b".to_owned(), "~c".to_owned()])
+        );
         assert_eq!(tokens(""), Some(vec![]));
         assert_eq!(tokens("a"), None);
         assert_eq!(escape("a/b~c"), "a~1b~0c");
@@ -691,7 +700,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!((r[0].place.as_str(), cells(&r[0])), ("/0", vec![("/pn", "A")]));
+        assert_eq!(
+            (r[0].place.as_str(), cells(&r[0])),
+            ("/0", vec![("/pn", "A")])
+        );
     }
 
     #[test]
@@ -710,7 +722,10 @@ mod tests {
             vec![
                 ("/bom/0", vec![("#level", "0"), ("/pn", "A")]),
                 ("/bom/0/parts/0", vec![("#level", "1"), ("/pn", "B")]),
-                ("/bom/0/parts/0/parts/0", vec![("#level", "2"), ("/pn", "C")]),
+                (
+                    "/bom/0/parts/0/parts/0",
+                    vec![("#level", "2"), ("/pn", "C")]
+                ),
                 ("/bom/0/parts/1", vec![("#level", "1"), ("/pn", "D")]),
                 ("/bom/1", vec![("#level", "0"), ("/pn", "E")]),
             ]
@@ -739,10 +754,21 @@ mod tests {
         assert!(msg(r#"{"items": []}"#, "/data", None).contains("no value at"));
         assert!(msg(r#"{"items": {}}"#, "/items", None).contains("isn't an array"));
         assert!(msg(r#"{"items": []}"#, "/items", None).contains("no records"));
-        assert!(msg(r#"{"items": [{"pn": "A", "parts": 3}]}"#, "/items", Some("/parts"))
-            .contains("aren't an array"));
-        let e = read_str(r#"{"items": [{"pn": "A"}, {"pn": "B", "pn": "C"}]}"#, "/items", None, false)
-            .unwrap_err();
+        assert!(
+            msg(
+                r#"{"items": [{"pn": "A", "parts": 3}]}"#,
+                "/items",
+                Some("/parts")
+            )
+            .contains("aren't an array")
+        );
+        let e = read_str(
+            r#"{"items": [{"pn": "A"}, {"pn": "B", "pn": "C"}]}"#,
+            "/items",
+            None,
+            false,
+        )
+        .unwrap_err();
         assert_eq!((e.row, e.place.as_deref()), (2, Some("/items/1")));
         assert!(e.message.contains("twice"));
         let e = read(
