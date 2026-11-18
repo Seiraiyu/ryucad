@@ -1,0 +1,33 @@
+{
+  "fields": {
+    "number": {
+      "from": "Part Number",
+      "trim": true
+    }
+  },
+  "format": 2,
+  "history": {
+    "author": "Released By",
+    "change": "ECO",
+    "date": {
+      "date": [
+        "DD/MM/YYYY",
+        "YYYY-MM-DD"
+      ],
+      "from": "Released"
+    },
+    "released": {
+      "Lifecycle": "Released"
+    },
+    "revision": "Rev",
+    "state": "Lifecycle"
+  },
+  "key": "Part Number",
+  "kind": "ryuplm.import",
+  "numbers": "keep",
+  "reader": {
+    "delimiter": ",",
+    "file": "history*.csv",
+    "type": "csv"
+  }
+}

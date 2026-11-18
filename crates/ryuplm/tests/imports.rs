@@ -2,7 +2,9 @@
 //! and a KiCad-shaped BOM, an indented BOM, an item master workbook with
 //! legacy numbers in three schemes and its parent/child structure, a
 //! Latin-1 spreadsheet, a PLM's JSON item export, a JSON Lines dump and a
-//! nested XML BOM in windows-1252, each read through a mapping written for
+//! nested XML BOM in windows-1252, and a revision history for the item
+//! master (dates in two patterns, released and in-work revisions, labels in
+//! and out of the letters scheme), each read through a mapping written for
 //! it. Written by us, nothing from a customer or vendor.
 //! `UPDATE_FIXTURES=1` writes them.
 
@@ -93,6 +95,18 @@ fn cp1252(s: &str) -> Vec<u8> {
         })
         .collect()
 }
+
+/// The item master's revision history, exported apart from it as legacy
+/// systems do: dates in two patterns, an in-work revision, and labels in
+/// the letters scheme (`A`-`D`) and out of it (`01`, `X3`).
+const HISTORY: &str = "Part Number,Rev,Released,Lifecycle,ECO,Released By,Notes\n\
+MECH-00012,A,07/03/2019,Released,ECO-0101,J. Smith,first article\n\
+MECH-00012,B,2020-11-02,Released,ECO-0144,J. Smith,\n\
+MECH-00012,C,15/06/2022,Released,ECO-0210,A. Jones,thicker flange\n\
+MECH-00012,D,,In Work,ECO-0301,A. Jones,\n\
+100-0042,01,2018-01-15,Released,,K. Lee,\n\
+100-0042,02,2021-04-30,Released,ECO-0188,K. Lee,\n\
+AB123456,X3,12/12/2017,Released,,,legacy label\n";
 
 /// The item master: legacy numbers in three schemes (`MECH-00012`,
 /// `100-0042`, `AB123456`), and its structure in the same sheet, as an
@@ -236,6 +250,18 @@ fn mappings() -> Vec<(&'static str, Value)> {
             "class": "machined", "numbers": "keep",
             "bom": {"level": "#level", "quantity": "@qty", "find": "@find"}}),
         ),
+        (
+            "history",
+            json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "csv", "file": "history*.csv", "delimiter": ","},
+            "key": "Part Number",
+            "fields": {"number": {"from": "Part Number", "trim": true}},
+            "numbers": "keep",
+            "history": {"revision": "Rev",
+                "date": {"from": "Released", "date": ["DD/MM/YYYY", "YYYY-MM-DD"]},
+                "state": "Lifecycle", "change": "ECO", "author": "Released By",
+                "released": {"Lifecycle": "Released"}}}),
+        ),
     ]
 }
 
@@ -249,6 +275,7 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
         ("plm-items.json".to_owned(), PLM_ITEMS.as_bytes().to_vec()),
         ("dump.jsonl".to_owned(), DUMP.as_bytes().to_vec()),
         ("nested-bom.xml".to_owned(), cp1252(NESTED)),
+        ("history.csv".to_owned(), HISTORY.as_bytes().to_vec()),
     ];
     for (n, m) in mappings() {
         f.push((
@@ -493,4 +520,49 @@ fn each_tree_fixture_imports_through_its_mapping_and_again_writes_nothing() {
         "windows-1252"
     );
     assert_eq!(show("PRT-2120")["description"], "Schraube M4 × 10");
+}
+
+#[test]
+fn a_history_imports_onto_the_master_and_continues_its_labels() {
+    let (_d, root) = catalogue();
+    let show = |item: &str| ask(&root, Request::ItemShow { item: item.into() }).unwrap();
+    run(&root, "master", "item-master.xlsx");
+    let h = run(&root, "history", "history.csv");
+    assert_eq!(
+        (h["adopted"]["count"].clone(), h["created"]["count"].clone()),
+        (json!(3), json!(0)),
+        "{h}"
+    );
+    let b = show("MECH-00012");
+    let labels: Vec<&str> = b["legacy"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["A", "B", "C", "D"]);
+    assert_eq!(b["legacy"][0]["date"], "2019-03-07");
+    assert_eq!(b["legacy"][1]["date"], "2020-11-02");
+    assert_eq!(b["legacy"][2]["carried"], true);
+    assert_eq!(b["legacy"][3]["state"], "In Work");
+    assert_eq!(b["legacy"][3].get("date"), None);
+    assert_eq!(
+        b["item"]["extra"]["history"],
+        json!({"Notes": "thicker flange"})
+    );
+    assert_eq!(b["state"]["next"], "D");
+    assert!(show("MECH-00013").get("legacy").is_none());
+    let codes = |n: &str| -> Vec<String> {
+        show(n)["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let foreign = "item_history_label_foreign".to_owned();
+    assert!(codes("100-0042").contains(&foreign));
+    assert!(codes("AB123456").contains(&foreign));
+    assert!(!codes("MECH-00012").contains(&foreign));
+    assert_eq!(show("100-0042")["state"]["next"], "A");
 }
