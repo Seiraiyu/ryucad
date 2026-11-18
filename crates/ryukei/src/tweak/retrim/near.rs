@@ -20,6 +20,12 @@
 //! walk fails `Clipped` at a working face, the rung may be built again
 //! with that face's near box and its working neighbours' doubled
 //! (`room`, `adjusted`). First builds are never adjusted.
+//!
+//! Faces kept off pins (design 724, plan 22.B): after a narrowed build
+//! refuses `Uncertain` at a working face and a pin it shares no edge or
+//! vertex with, the rung may be built again with the working face's near
+//! box cut back short of the pin (`kept_off`, `cut_short`). A face is
+//! adjusted one way only.
 
 use super::region::{Region, face_vertices};
 use crate::geom::Box3;
@@ -134,12 +140,32 @@ pub(crate) fn near_box(
 }
 
 /// A working face's near box changed after a narrowed build failed
-/// (design 724). Plan 22.B adds keeping a face off a pin.
+/// (design 724).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Adjust {
     /// Room (plan 22.A): the near box doubled about its middle this many
     /// times, each inside the rung's box.
     Room(u32),
+    /// Kept off a pin (plan 22.B): the near box cut back to this box, its
+    /// corners as bits (low x, y, z, then high), so it compares exactly.
+    #[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
+    Off([u64; 6]),
+}
+
+impl Adjust {
+    /// `Off` for box `b`.
+    #[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
+    pub(crate) fn off(b: &Box3) -> Adjust {
+        let (l, h) = (b.min(), b.max());
+        Adjust::Off([l.x, l.y, l.z, h.x, h.y, h.z].map(f64::to_bits))
+    }
+}
+
+/// The box an `Off` holds.
+fn unbits(c: &[u64; 6]) -> Box3 {
+    use crate::geom::Point3;
+    let v = c.map(f64::from_bits);
+    Box3::new(Point3::new(v[0], v[1], v[2]), Point3::new(v[3], v[4], v[5]))
 }
 
 /// Each working face's adjustment in an adjusted build; empty in a
@@ -149,13 +175,17 @@ pub(crate) type Adjusts = BTreeMap<FaceId, Adjust>;
 /// Near box `n`, inside the rung's box `x`, as `adjust` leaves it: as it
 /// is with none; with `Room(k)`, doubled about its middle and kept inside
 /// `x`, `k` times (`body::doubled`, then [`within`], as rung 1 does for
-/// every face).
+/// every face); with `Off`, the stored box kept inside `x`.
 pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
     match adjust {
         None => *n,
         Some(Adjust::Room(k)) => (0..k).fold(*n, |b, _| {
             within(&super::body::doubled(&b), x).unwrap_or(*x)
         }),
+        Some(Adjust::Off(c)) => {
+            let b = unbits(&c);
+            within(&b, x).unwrap_or(b)
+        }
     }
 }
 
@@ -189,7 +219,8 @@ pub(crate) fn room(
     for g in faces {
         let k = match adjusts.get(&g) {
             Some(Adjust::Room(k)) => *k,
-            None => 0,
+            // Task 5: a face is adjusted one way only.
+            Some(Adjust::Off(_)) | None => 0,
         };
         let n = near(g);
         let now = adjusted(&n, x, adjusts.get(&g).copied());
@@ -197,6 +228,77 @@ pub(crate) fn room(
         out.insert(g, Adjust::Room(k + 1));
     }
     grows.then_some(out)
+}
+
+/// One coordinate of `p`: x, y or z for `k` 0, 1 or 2.
+#[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
+fn axis(p: crate::geom::Point3, k: usize) -> f64 {
+    [p.x, p.y, p.z][k]
+}
+
+/// `p` with its `k` coordinate set to `v`.
+#[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
+fn with_axis(p: crate::geom::Point3, k: usize, v: f64) -> crate::geom::Point3 {
+    let mut c = [p.x, p.y, p.z];
+    c[k] = v;
+    crate::geom::Point3::new(c[0], c[1], c[2])
+}
+
+/// Near box `n` cut back on one side so the sheet carried over it ends
+/// short of pin box `pin` by `gap` (design 724, plan 22.B). `sheet` is
+/// the box of the sheet carried over `n` in the build that failed: a
+/// sheet's parameter rect is grown past its near box's corners, so each
+/// side is also cut back by that side's overshoot. A side is valid where
+/// the cut leaves `must` (the face's [`own_box`]) inside and the box not
+/// empty. Of the valid sides, the one removing the least length along
+/// its own axis; the first on a tie, in the order x low, x high, y low,
+/// y high, z low, z high. `None` where no side is valid: the pin's box
+/// lies within what the face must keep on every axis.
+#[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
+pub(crate) fn cut_short(n: &Box3, sheet: &Box3, must: &Box3, pin: &Box3, gap: f64) -> Option<Box3> {
+    let mut best: Option<(f64, Box3)> = None;
+    let mut take = |loss: f64, b: Box3| {
+        if best.as_ref().is_none_or(|(l, _)| loss < *l) {
+            best = Some((loss, b));
+        }
+    };
+    for k in 0..3 {
+        let (nl, nh) = (axis(n.min(), k), axis(n.max(), k));
+        let (sl, sh) = (axis(sheet.min(), k), axis(sheet.max(), k));
+        let (ml, mh) = (axis(must.min(), k), axis(must.max(), k));
+        let (pl, ph) = (axis(pin.min(), k), axis(pin.max(), k));
+        // The low side raised past the pin's high side.
+        let lo = ph + gap + (nl - sl).max(0.0);
+        if lo > nl && lo <= ml && lo < nh {
+            take(lo - nl, Box3::new(with_axis(n.min(), k, lo), n.max()));
+        }
+        // The high side lowered short of the pin's low side.
+        let hi = pl - gap - (sh - nh).max(0.0);
+        if hi < nh && hi >= mh && hi > nl {
+            take(nh - hi, Box3::new(n.min(), with_axis(n.max(), k, hi)));
+        }
+    }
+    best.map(|(_, b)| b)
+}
+
+/// Working face `f` kept off a pin (design 724, plan 22.B): `adjusts`
+/// with `f`'s near box, `now` as adjusted so far, cut back by
+/// [`cut_short`] (`sheet`, `must`, `pin` and `gap` as there). `None`
+/// where no side can be cut.
+#[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
+pub(crate) fn kept_off(
+    f: FaceId,
+    now: &Box3,
+    sheet: &Box3,
+    must: &Box3,
+    pin: &Box3,
+    gap: f64,
+    adjusts: &Adjusts,
+) -> Option<Adjusts> {
+    let cut = cut_short(now, sheet, must, pin, gap)?;
+    let mut out = adjusts.clone();
+    out.insert(f, Adjust::off(&cut));
+    Some(out)
 }
 
 /// Where boxes `a` and `x` overlap, or `None`.
@@ -527,6 +629,89 @@ pub(crate) mod tests {
                 &Adjusts::new(),
                 &|_| x
             ),
+            None
+        );
+    }
+
+    fn cube(l: [f64; 3], h: [f64; 3]) -> Box3 {
+        Box3::new(
+            crate::geom::Point3::new(l[0], l[1], l[2]),
+            crate::geom::Point3::new(h[0], h[1], h[2]),
+        )
+    }
+
+    /// Plan 22.B: a near box is cut back short of a pin, by the gap, on
+    /// the side losing least (the first on a tie: x low, x high, y low,
+    /// …), and keeps what the face must keep.
+    #[test]
+    fn a_near_box_is_cut_short_of_a_pin_on_the_side_losing_least() {
+        let n = cube([0.0; 3], [1.0; 3]);
+        let must = cube([0.1; 3], [0.4, 0.5, 0.5]);
+        let gap = 1e-6;
+        // Over the high x and high z ends: z high loses 0.1, x high 0.3.
+        let pin = cube([0.7, 0.2, 0.9], [1.2, 0.4, 1.2]);
+        let c = cut_short(&n, &n, &must, &pin, gap).expect("a cut");
+        assert_eq!(c, cube([0.0; 3], [1.0, 1.0, 0.9 - gap]));
+        assert!(holds(&n, &c) && holds(&c, &must));
+        // Below the low y end: y low is raised past it.
+        let below = cube([0.6, -0.5, 0.6], [0.9, 0.05, 0.9]);
+        let c = cut_short(&n, &n, &must, &below, gap).expect("a cut");
+        assert_eq!(c, cube([0.0, 0.05 + gap, 0.0], [1.0; 3]));
+        // Over the high x and high y ends equally: x first.
+        let corner = cube([0.8, 0.8, 0.0], [1.5, 1.5, 0.2]);
+        let c = cut_short(&n, &n, &must, &corner, gap).expect("a cut");
+        assert_eq!(c, cube([0.0; 3], [0.8 - gap, 1.0, 1.0]));
+    }
+
+    /// Plan 22.B: a sheet carried past its near box is cut back by that
+    /// overshoot too; a pin inside what the face must keep gets no cut.
+    #[test]
+    fn a_cut_takes_the_sheets_overshoot_and_never_what_the_face_keeps() {
+        let n = cube([0.0; 3], [1.0; 3]);
+        let must = cube([0.1; 3], [0.4, 0.5, 0.5]);
+        let gap = 1e-6;
+        let pin = cube([0.7, 0.2, 0.9], [1.2, 0.4, 1.2]);
+        let sheet = cube([-0.05; 3], [1.0, 1.0, 1.02]);
+        let c = cut_short(&n, &sheet, &must, &pin, gap).expect("a cut");
+        assert_eq!(c.max().z, 0.9 - gap - (1.02 - 1.0));
+        assert!(holds(&c, &must));
+        // Inside what it keeps: no side is valid.
+        let inside = cube([0.2; 3], [0.3; 3]);
+        assert_eq!(cut_short(&n, &n, &must, &inside, gap), None);
+        // Over the whole near box: no side is valid either.
+        let over = cube([-1.0; 3], [2.0; 3]);
+        assert_eq!(cut_short(&n, &n, &must, &over, gap), None);
+    }
+
+    /// Plan 22.B: a face kept off a pin has its near box cut to the stored
+    /// box; a second pin, kept off from that box, tightens it.
+    #[test]
+    fn a_face_kept_off_a_pin_is_cut_and_a_second_pin_tightens_it() {
+        let b = block();
+        let f = b.faces().next().unwrap();
+        let n = cube([0.0; 3], [1.0; 3]);
+        let must = cube([0.1; 3], [0.4, 0.5, 0.5]);
+        let gap = 1e-6;
+        let pin = cube([0.7, 0.2, 0.9], [1.2, 0.4, 1.2]);
+        let once = kept_off(f, &n, &n, &must, &pin, gap, &Adjusts::new()).expect("a cut");
+        let c = cut_short(&n, &n, &must, &pin, gap).unwrap();
+        assert_eq!(once, Adjusts::from([(f, Adjust::off(&c))]));
+        assert_eq!(adjusted(&n, &n, once.get(&f).copied()), c);
+        // Within a smaller rung's box, inside it.
+        let x = cube([0.0; 3], [0.95; 3]);
+        assert_eq!(
+            adjusted(&n, &x, once.get(&f).copied()),
+            within(&c, &x).unwrap()
+        );
+        let second = cube([0.8, 0.1, 0.1], [1.5, 0.3, 0.3]);
+        let twice = kept_off(f, &c, &c, &must, &second, gap, &once).expect("tighter");
+        let t = adjusted(&n, &n, twice.get(&f).copied());
+        assert_eq!(t, cube([0.0; 3], [0.8 - gap, 1.0, 0.9 - gap]));
+        assert!(holds(&c, &t) && t != c);
+        // Nothing to cut: no ask.
+        let inside = cube([0.2; 3], [0.3; 3]);
+        assert_eq!(
+            kept_off(f, &n, &n, &must, &inside, gap, &Adjusts::new()),
             None
         );
     }
