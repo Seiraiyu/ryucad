@@ -446,3 +446,57 @@ fn links_boms_and_where_used_from_the_cli() {
     assert_eq!(via, ["ryucad"], "{used}");
     p.ok(&["item", "unlink", "GLUE-1", "ryueda"]);
 }
+
+#[test]
+fn imports_from_the_cli() {
+    let p = Pair::project();
+    p.ok(&["settings", "edit", "--class", "machined"]);
+    let csv = "Item ID,Part No.,Descripton\n1,100-0001,Bracket\n2,100-0002,Screw\n";
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join("p/items.csv"), csv).unwrap();
+    }
+    let g = p.ok(&["import", "guess", "items.csv", "--save", "erp"]);
+    assert_eq!(g["saved"], "imports/erp.json");
+    assert_eq!(g["mapping"]["key"], "Item ID");
+    assert_eq!(g["mapping"]["fields"]["description"]["from"], "Descripton");
+    p.fails(
+        &["import", "guess", "items.csv", "--save", "erp"],
+        "conflict",
+        1,
+    );
+    let c = p.ok(&["import", "check", "erp", "items.csv"]);
+    assert_eq!(c["rows"], 2);
+    let dry = p.ok(&["import", "run", "erp", "items.csv", "--dry-run"]);
+    assert_eq!(
+        (dry["created"]["count"].clone(), dry["written"].clone()),
+        (json!(2), json!(0))
+    );
+    let r = p.ok(&["import", "run", "erp", "items.csv"]);
+    assert_eq!(r["written"], 2);
+    let again = p.ok(&["import", "run", "erp", "items.csv"]);
+    assert_eq!(
+        (again["unchanged"].clone(), again["written"].clone()),
+        (json!(2), json!(0))
+    );
+    let l = p.ok(&["import", "list"]);
+    assert_eq!(l["imports"][0]["items"], 2);
+    p.fails(&["import", "run", "nope", "items.csv"], "not_found", 1);
+    p.fails(
+        &["import", "run", "erp", "items.csv", "--prefer", "both"],
+        "usage",
+        2,
+    );
+    assert_eq!(p.files(&p.direct), p.files(&p.daemon));
+    // A quantity column alone: a BOM with no parent, level or root. The
+    // proposal says what to finish, and refuses to be saved unfinished.
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join("p/bom.csv"), "MPN,Qty\nX-1,2\n").unwrap();
+    }
+    let g = p.ok(&["import", "guess", "bom.csv"]);
+    assert_eq!(g["todo"].as_array().unwrap().len(), 1);
+    p.fails(
+        &["import", "guess", "bom.csv", "--save", "bom"],
+        "invalid_param",
+        1,
+    );
+}
