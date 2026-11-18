@@ -1,0 +1,291 @@
+common
+  hint str What to do about it: a command to run or a sentence.
+  commit str The commit the request read or wrote.
+  pointer str A JSON pointer to the value at fault, in the request or the file.
+  path str The file or folder at fault.
+  op num In a batch, the index of the op that failed.
+  method str In a batch, the method of the op that failed.
+
+invalid_document exit 1 "Invalid document"
+  entity str The entity at fault.
+  reason str Why, as a word agents branch on (`shadows_builtin`).
+  known arr The names accepted.
+
+invalid_param exit 1 "Invalid param"
+  param str The parameter at fault, by its name in the request or the file.
+  parameter str An older spelling of `param`, carried beside it.
+  field str An older spelling of `param`, carried beside it.
+  value any The value given.
+  reason str Why, as a word agents branch on (`not_drawn`, `thread_from_needed`).
+  wanted any What would have been accepted.
+  expected any An older spelling of `wanted`, carried beside it.
+  known arr The names accepted.
+  feature str The feature at fault.
+  part str The part at fault.
+  solid str The solid at fault.
+  solids any The solids there were to choose from.
+  entity str The entity reference at fault.
+  reference str A reference at fault, as text.
+  ref str An older spelling of `reference`, carried beside it.
+  file str An older spelling of `path`, carried beside it.
+  first str Where the clashing value was first given.
+  rev str The revision asked for.
+  annotation str The annotation at fault.
+  participant str The participant at fault.
+  role str The role the value plays in its feature (`axis`, `on`).
+  seed any The reference's seed.
+  fraction num The fraction given.
+  face str The face at fault.
+  flag str The command-line flag at fault.
+  rules arr The rule codes accepted.
+  codes arr The codes accepted.
+  classes arr The classes accepted.
+  templates arr The templates accepted.
+  catalogues arr The catalogues accepted.
+  distributors arr The distributors accepted.
+  sources any The sources accepted.
+  keys arr The keys there are.
+  boards arr The boards there are.
+  designs any The designs it could mean.
+  pins any The pins it could mean.
+  products arr The products there are.
+  roots arr The root assemblies there are.
+  bends arr The bends there are.
+  fields any The fields at fault.
+  columns any The columns read.
+  areas any The areas there are.
+  pulls any The pull requests it could mean.
+  loops any The loops at fault.
+  expected_revisions any The revisions given to expect.
+  key str The key at fault.
+  kind str The kind at fault.
+  type str The type at fault.
+  name str The name given.
+  layer str The layer at fault.
+  board str The board at fault.
+  block str The block at fault.
+  choice any The choice at fault.
+  conflict any The conflict the choice is for.
+  latest str The latest label.
+  token str The token at fault.
+  topic str The topic at fault.
+  source str The source at fault.
+  library str The library at fault.
+  condition str The condition at fault.
+  instruction str The instruction at fault.
+  form str The form at fault.
+  index num The index at fault.
+  text str The text at fault.
+  move num The move at fault, by its index.
+  pattern str The pattern at fault.
+  colour str The colour at fault.
+  plane str The plane at fault.
+  progress any The progress value given.
+  explode str The exploded view at fault.
+  motion str The motion at fault.
+  planes num How many planes there are.
+  origin_m arr The origin, in metres.
+  on str The feature it is on.
+  length_m num The length, in metres.
+  instance any The instance at fault.
+  tolerance any The tolerance given.
+  of str What it is of.
+  frames num How many frames.
+  below any The limit it is below.
+  status any The status at fault.
+  by any Who or what it is by.
+  repair str The repair at fault.
+  opacity num The opacity given.
+  unset any What was unset.
+  git any The Git command that failed.
+  stderr str What the command printed.
+  view str The view at fault.
+  fit any The fit at fault.
+  bend str The bend at fault.
+  place str The place at fault.
+  depth num The greatest depth allowed.
+  position any The position at fault.
+  standard str The standard at fault.
+  size any The size at fault.
+  missing any What is missing.
+  entry any The entry at fault.
+
+duplicate_id exit 1 "Duplicate ID"
+  id str The ID already taken.
+  part str The part it is in, or the part ID taken.
+  feature str The feature ID taken.
+  param str The parameter name taken, or the request parameter.
+  parameter str An older spelling of `param`, carried beside it.
+  reference str The reference already taken.
+  pin str The pin taken.
+  alias str The dependency alias taken.
+  drawing str The drawing ID taken.
+  class str The class taken.
+  board str The board taken.
+  dependency str The dependency taken.
+  project str The project ID taken.
+  view str The view taken.
+
+not_found exit 1 "Not found"
+  part str The part asked for.
+  feature str The feature asked for.
+  solid str The solid asked for.
+  solids any The solids there are.
+  reference str The reference that resolved to nothing, as text.
+  ref str An older spelling of `reference`, carried beside it.
+  entity str The entity reference asked for.
+  param str The parameter asked for, or the request parameter that named it.
+  parameter str An older spelling of `param`, carried beside it.
+  sketch str The sketch asked for.
+  block str The block asked for.
+  sheet str The sheet asked for.
+  sheets arr The sheets there are.
+  net str The net asked for.
+  layer str The layer asked for.
+  layers arr The layers there are.
+  board str The board asked for.
+  boards arr The boards there are.
+  after str The feature to insert after.
+  before str The feature to insert before.
+  finding str The finding asked for.
+  mpn str The manufacturer part number asked for.
+  design str The design asked for.
+  index num The index asked for.
+  property str The property asked for.
+  folder str The folder asked for.
+  project str The project asked for.
+  dependency str The dependency asked for.
+  dependencies arr The dependencies there are.
+  instance str The instance asked for.
+  occurrence any The occurrence asked for.
+  role str The role the reference plays.
+  graphic str The graphic asked for.
+  class str The class asked for.
+  regions any The regions there are.
+  rail str The rail asked for.
+  alias str The dependency alias asked for.
+  component str The library component asked for.
+  footprint str The footprint asked for.
+  codes arr The codes there are.
+  text str The text asked for.
+  point str The point asked for.
+  track any The track asked for.
+  extends str The template it extends.
+  entry any The activity entry asked for.
+  participant str The participant asked for.
+  island str The island asked for.
+  step any The step asked for.
+  steps arr The steps there are.
+  standard str The standard asked for.
+  rev str The revision asked for.
+  material str The material asked for.
+  input str The input asked for.
+  of str What it was looked for in.
+  removed_by str The feature that took it away.
+  insert str The insert asked for.
+  id str The ID asked for.
+  unresolved any What didn't resolve.
+  errors any Why each place looked failed.
+  hole str The hole asked for.
+  reason str Why, as a word agents branch on (`no_hole`).
+  seed any The reference's seed.
+  axis any The axis asked for.
+
+rebuild_failed exit 1 "Rebuild failed"
+  feature str The feature that failed.
+  kernel str What ryukei said, as text.
+  point str The point at fault.
+  place str The place at fault.
+  seed any The seed at fault.
+  instance any The instance at fault.
+  parts arr Every part's report, failures and all: `rebuild`'s answer.
+  placed arr The assemblies' placed parts that failed.
+  warnings arr The rebuild's warnings.
+
+internal exit 4 "Internal error"
+  kernel str What ryukei said, as text.
+  feature str The feature being built.
+  panic str The panic's message.
+  part str The part being built.
+  tag str The tag at fault.
+  created any What was created.
+  moved any What was moved.
+  faults arr The faults found, as text.
+  layer str The layer at fault.
+  file str An older spelling of `path`, carried beside it.
+
+profile_invalid exit 1 "Profile invalid"
+  entities arr The sketch entities at fault.
+  reason str Why, as a word agents branch on (`branches`, `open_profile`).
+  kernel str What ryukei said, as text.
+  feature str The feature whose profile it is.
+  points any The points at fault.
+  role str The role the profile plays.
+  face str The face used as the profile.
+
+invalid_extent exit 1 "Invalid extent"
+  feature str The feature whose extent it is.
+  role str The role at fault (`axis`).
+  reference str The reference it extends to.
+  kernel str What ryukei said, as text.
+
+reference_wrong_kind exit 1 "Reference wrong kind"
+  feature str The feature whose reference it is.
+  role str The role the reference plays (`axis`, `on`).
+  reference str The reference, as text.
+  entity str The entity it resolved to.
+  wanted arr The kinds the role takes.
+  got str The kind it is.
+  kind str The kind of entity it resolved to.
+  seed any The reference's seed.
+  sketch str The sketch it is in.
+  part str The part it is in.
+  param str The parameter that holds it.
+  names any The names it could take.
+  axis any The axis given.
+
+dependency_failed exit 1 "Dependency failed"
+  feature str The feature that couldn't be built.
+  dependency str What it depends on that failed.
+  cause str The failed dependency's own code.
+  entity str The entity it reads.
+  solid str The solid it reads.
+  view str The view it reads.
+
+property_invalid exit 1 "Property invalid"
+  property str The property at fault.
+  part str The part it is on.
+  value any The value given.
+  missing any What is missing.
+
+operation_no_effect exit 1 "Operation no effect"
+  feature str The feature that would change nothing.
+  tool str The tool that touches nothing.
+  target str The target left unchanged.
+  side str The side kept.
+  point str The point at fault.
+  annotation str The annotation that would change nothing.
+
+wrong_part_kind exit 1 "Wrong part kind"
+  part str The part of the wrong kind.
+  feature str The feature that needs another kind.
+  kind str The kind it is (`assembly`).
+  type str The feature type that needs another kind.
+
+label_not_found exit 1 "Label not found"
+  part str The part whose label is missing.
+  label str The label asked for.
+  project str The project ID the label was looked for in.
+  alias str The dependency alias the reference went through.
+  component str The library component whose label is missing (ryueda).
+  param str The request parameter that named the label.
+
+dependency_project_mismatch exit 1 "Dependency project mismatch"
+  project str The project ID locked or expected.
+  got str The project ID found there.
+  found str An older spelling of `got`, carried beside it.
+  url str The dependency's URL.
+  alias str The dependency's alias.
+
+drc_failed exit 1 "DRC failed"
+  report obj The board's DRC report: `board`, `findings` and `drc`.

@@ -441,6 +441,7 @@ const WORDS: &[(&str, &str)] = &[
     ("git", "Git"),
     ("github", "GitHub"),
     ("erc", "ERC"),
+    ("drc", "DRC"),
     ("nc", "No-connect"),
     ("refdes", "Reference designator"),
     ("demorgan", "De Morgan"),
@@ -712,6 +713,34 @@ pub fn listing(code: Option<&str>) -> super::Result<Value> {
         "codes": codes.into_iter().map(code_json).collect::<Vec<_>>(),
         "common": common,
     }))
+}
+
+/// The table as `tests/golden/details.txt` holds it: the common keys, then
+/// each declared code in `Code::ALL`'s order with its exit code and title,
+/// and its keys one a line (`name kind about`).
+pub fn golden() -> String {
+    let mut out = String::from("common\n");
+    for k in COMMON {
+        out.push_str(&format!("  {} {} {}\n", k.name, k.kind.name(), about(k)));
+    }
+    for &code in Code::ALL {
+        let Some(own) = keys(code) else { continue };
+        out.push_str(&format!(
+            "\n{} exit {} \"{}\"\n",
+            name(code),
+            code.exit_code(),
+            title(code)
+        ));
+        for k in own {
+            out.push_str(&format!(
+                "  {} {} {}\n",
+                k.name,
+                kind(code, k).name(),
+                about(k)
+            ));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
