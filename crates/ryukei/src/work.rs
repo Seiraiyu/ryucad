@@ -147,17 +147,21 @@ pub(crate) enum Scope {
     /// One rung of the local re-trim's ladder: its working body, table,
     /// walk and checks (#647, #659).
     Rung,
+    /// One deleted set's whole re-trim ladder (design 919, plan 23.B):
+    /// every rung and build of it, their own caps nested inside.
+    Gap,
 }
 
 impl Scope {
     #[cfg_attr(not(feature = "work-stats"), allow(dead_code))]
-    pub(crate) const ALL: [Scope; 6] = [
+    pub(crate) const ALL: [Scope; 7] = [
         Scope::Trace,
         Scope::Search,
         Scope::Fit,
         Scope::Beside,
         Scope::Union,
         Scope::Rung,
+        Scope::Gap,
     ];
 
     pub(crate) fn limit(self) -> u64 {
@@ -168,6 +172,7 @@ impl Scope {
             Scope::Beside => BESIDE,
             Scope::Union => UNION,
             Scope::Rung => RUNG,
+            Scope::Gap => GAP,
         }
     }
 
@@ -180,6 +185,7 @@ impl Scope {
             Scope::Beside => "beside",
             Scope::Union => "union",
             Scope::Rung => "rung",
+            Scope::Gap => "gap",
         }
     }
 }
@@ -218,6 +224,17 @@ const UNION: u64 = 1 << 24;
 /// 95,573,843. Under design 669's ordered sum it bounds the rung's
 /// parallel pairs together, not each alone.
 const RUNG: u64 = 1 << 24;
+/// One deleted set's ladder (design 919, plan 23.B): four times the
+/// largest ladder that builds across ryukei's suites, `edit_props`,
+/// ryustep's committed and pinned corpora and ryucad's `direct_edits`,
+/// rounded up to a power of two (census VIII on cox-worker-2, 2026-11-18,
+/// main `ede45371`: largest 9,871,261 units, the bent rod's rim of plan
+/// 19.A, whose rung-0 first build spends 9,606,924 refusing `Uncertain`
+/// before its narrowed retry builds). Every refused set spent less: up to
+/// 27,459,995 (linkrods #11). A work bound, not a tolerance. The figure
+/// waits on the owner's choice (design 919's margin of four against the
+/// census).
+const GAP: u64 = 1 << 26;
 
 static FREE: Work<'static> = Work::unlimited();
 
@@ -282,6 +299,13 @@ impl<'a> Meter<'a> {
         self.halted.get()
     }
 
+    /// Whether the innermost cap is spent: charges now answer
+    /// [`Halt::Capped`] (plan 23.B: a ladder reads it between builds,
+    /// where the innermost cap is its gap's). Never under no cap.
+    pub(crate) fn exhausted(&self) -> bool {
+        self.spent.get() > self.cap.get()
+    }
+
     /// Spends `units`. Halts past the budget or once cancelled (and from
     /// then on), and answers `Capped` past the innermost cap.
     #[inline]
@@ -336,9 +360,15 @@ impl<'a> Meter<'a> {
     /// Runs `f` under `scope`'s cap: once it has spent the scope's units,
     /// charges answer `Capped` until it returns.
     pub(crate) fn capped<R>(&self, scope: Scope, f: impl FnOnce() -> R) -> R {
+        self.capped_with(scope, scope.limit(), f)
+    }
+
+    /// [`Meter::capped`] at `units` rather than the scope's own limit:
+    /// the tests' small gaps, and `delete::grow`'s `GAP`.
+    pub(crate) fn capped_with<R>(&self, scope: Scope, units: u64, f: impl FnOnce() -> R) -> R {
         let before = self.spent.get();
         let outer = self.scope.replace(Some(scope));
-        let r = self.capped_by(scope.limit(), f);
+        let r = self.capped_by(units, f);
         self.scope.set(outer);
         stats::seen(scope, self.spent.get() - before);
         r
@@ -891,5 +921,69 @@ mod tests {
             })
         });
         assert_eq!(r.iter().filter(|x| x.is_ok()).count(), 10);
+    }
+
+    /// Design 919, plan 23.B: a deleted set's ladder is a scope of its
+    /// own, `GAP` units, and the rungs inside it share it: a rung's cap
+    /// never reaches past the gap's.
+    #[test]
+    fn a_gap_is_a_scope_its_rungs_share() {
+        assert!(Scope::ALL.contains(&Scope::Gap));
+        assert_eq!(Scope::Gap.name(), "gap");
+        assert_eq!(Scope::Gap.limit(), GAP);
+        assert!(GAP.is_power_of_two() && GAP >= 4 * 9_871_261, "{GAP}");
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        // A gap of 10 units: two rungs of 6 each get 10 between them.
+        let r = m.capped_with(Scope::Gap, 10, || {
+            let a = m.capped(Scope::Rung, || {
+                (0..6).map(|_| m.charge(1)).collect::<Vec<_>>()
+            });
+            let b = m.capped(Scope::Rung, || {
+                (0..6).map(|_| m.charge(1)).collect::<Vec<_>>()
+            });
+            (a, b)
+        });
+        assert!(r.0.iter().all(Result::is_ok));
+        assert_eq!(r.1.iter().filter(|x| x.is_ok()).count(), 4);
+        assert_eq!(r.1[4], Err(Halt::Capped));
+        // Outside it, charges go on: a cap is never the caller's budget.
+        assert_eq!(m.charge(1), Ok(()));
+        assert!(!m.halted());
+        // `capped` is `capped_with` at the scope's own limit.
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        let n = m.capped(Scope::Fit, || {
+            m.charge(FIT).unwrap();
+            m.charge(1)
+        });
+        assert_eq!(n, Err(Halt::Capped));
+    }
+
+    /// Plan 23.B: a meter is exhausted once its innermost cap is spent,
+    /// never by its budget alone or under no cap, and no longer once the
+    /// cap's scope has returned.
+    #[test]
+    fn a_meter_is_exhausted_past_its_innermost_cap_only() {
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        assert!(!m.exhausted());
+        m.charge(1_000).unwrap();
+        assert!(!m.exhausted(), "no cap: never exhausted");
+        let inside = m.capped_with(Scope::Gap, 3, || {
+            let a = m.exhausted();
+            let _ = m.charge(3);
+            let b = m.exhausted();
+            let _ = m.charge(1);
+            (a, b, m.exhausted())
+        });
+        // At the cap it is spent but not past it; one more is past.
+        assert_eq!(inside, (false, false, true));
+        assert!(!m.exhausted(), "the scope returned");
+        // A budget's halt is not a cap.
+        let w = Work::unlimited().with_budget(2);
+        let m = Meter::new(&w);
+        let _ = m.charge(5);
+        assert!(m.halted() && !m.exhausted());
     }
 }
