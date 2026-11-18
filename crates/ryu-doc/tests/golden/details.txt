@@ -304,3 +304,37 @@ part_number_unschemed exit 1 "Part number unschemed"
 part_number_duplicate_elsewhere exit 1 "Part number duplicate elsewhere"
   item str The item whose number is taken elsewhere.
   value str The number.
+
+item_link_duplicate exit 1 "Item link duplicate"
+  item str The item whose link it is.
+  product str The product the link is to (`ryucad`, `ryueda`).
+  other str The item that already links the representation.
+
+item_link_unresolved exit 1 "Item link unresolved"
+  item str The item whose link it is.
+  product str The product the link is to.
+  project str The project ID the link names.
+  part str The part the link names.
+  searched arr The folders searched for the project.
+  folder str The folder that holds the project.
+  exe str The program that couldn't be run.
+
+item_number_mismatch exit 1 "Item number mismatch"
+  item str The item whose number it is.
+  product str The product of the representation.
+  project str The project ID of the representation.
+  part str The representation's part.
+  number str The number the representation says.
+
+bom_unlinked exit 1 "BOM unlinked"
+  item str The item whose BOM it is.
+  unlinked arr The representation's lines no item links.
+
+bom_line_twice exit 1 "BOM line twice"
+  item str The item whose BOM it is.
+  line str The line that names the child.
+  child str The item its representation places too.
+
+bom_cycle exit 1 "BOM cycle"
+  item str The first item of the cycle.
+  cycle arr The items of the cycle, in order.

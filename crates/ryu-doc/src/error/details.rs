@@ -440,6 +440,40 @@ details! {
         key("item", Str, "The item whose number is taken elsewhere."),
         key("value", Str, "The number."),
     ],
+    ItemLinkDuplicate => [
+        key("item", Str, "The item whose link it is."),
+        key("product", Str, "The product the link is to (`ryucad`, `ryueda`)."),
+        key("other", Str, "The item that already links the representation."),
+    ],
+    ItemLinkUnresolved => [
+        key("item", Str, "The item whose link it is."),
+        key("product", Str, "The product the link is to."),
+        key("project", Str, "The project ID the link names."),
+        key("part", Str, "The part the link names."),
+        key("searched", Arr, "The folders searched for the project."),
+        key("folder", Str, "The folder that holds the project."),
+        key("exe", Str, "The program that couldn't be run."),
+    ],
+    ItemNumberMismatch => [
+        key("item", Str, "The item whose number it is."),
+        key("product", Str, "The product of the representation."),
+        key("project", Str, "The project ID of the representation."),
+        key("part", Str, "The representation's part."),
+        key("number", Str, "The number the representation says."),
+    ],
+    BomUnlinked => [
+        key("item", Str, "The item whose BOM it is."),
+        key("unlinked", Arr, "The representation's lines no item links."),
+    ],
+    BomLineTwice => [
+        key("item", Str, "The item whose BOM it is."),
+        key("line", Str, "The line that names the child."),
+        key("child", Str, "The item its representation places too."),
+    ],
+    BomCycle => [
+        key("item", Str, "The first item of the cycle."),
+        key("cycle", Arr, "The items of the cycle, in order."),
+    ],
 }
 
 /// Words written their own way in titles.
@@ -911,6 +945,12 @@ mod tests {
             Code::ItemClassUnknown,
             Code::PartNumberUnschemed,
             Code::PartNumberDuplicateElsewhere,
+            Code::ItemLinkDuplicate,
+            Code::ItemLinkUnresolved,
+            Code::ItemNumberMismatch,
+            Code::BomUnlinked,
+            Code::BomLineTwice,
+            Code::BomCycle,
         ] {
             assert!(keys(c).is_some(), "{c:?}");
         }
