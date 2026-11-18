@@ -5338,6 +5338,98 @@ fn the_breakout_board_is_clean_and_exports() {
     }
 }
 
+/// Boards of four copper layers from the CLI (ryueda 7.A): a stackup
+/// written only when asked for, tracks on inner layers, vias with spans,
+/// and layers a board lacks refused by name.
+#[test]
+fn four_layer_boards_from_the_cli() {
+    let p = Pair::breakout();
+    let b = p.ok(&[
+        "board", "create", "Four", "--design", "board", "--rect", "30,20", "--layers", "4", "--id",
+        "four",
+    ]);
+    assert_eq!(b["board"]["format"], 2, "{b}");
+    assert_eq!(
+        b["board"]["stackup"]["layers"].as_array().unwrap().len(),
+        7,
+        "{b}"
+    );
+    let two = p.ok(&[
+        "board", "create", "Two", "--design", "board", "--rect", "30,20", "--id", "two",
+    ]);
+    assert_eq!(two["board"]["format"], 1, "{two}");
+    assert!(two["board"].get("stackup").is_none(), "{two}");
+    let net = "rail:gnd";
+    let t = p.ok(&[
+        "board", "track", "add", "four", "--net", net, "--layer", "in1", "--path", "1,1", "5,1",
+        "--id", "t1",
+    ]);
+    assert_eq!(t["tracks"][0]["track"]["layer"], "in1", "{t}");
+    assert_eq!(t["tracks"][0]["track"]["format"], 2, "{t}");
+    let v = p.ok(&[
+        "board", "via", "add", "four", "--net", net, "--at", "5,1", "--to", "in1", "--id", "v1",
+    ]);
+    assert_eq!(v["vias"][0]["via"]["to"], "in1", "{v}");
+    assert!(
+        v["drc"]["added"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "drc_via_span"),
+        "{v}"
+    );
+    // Layers the board lacks are refused, naming the ones it has.
+    let e = p.fails(
+        &[
+            "board", "track", "add", "four", "--net", net, "--layer", "in3", "--path", "1,2", "5,2",
+        ],
+        "board_layer_not_found",
+        1,
+    );
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("top, in1, in2, bottom"),
+        "{e}"
+    );
+    p.fails(
+        &[
+            "board", "track", "add", "two", "--net", net, "--layer", "in1", "--path", "1,2", "5,2",
+        ],
+        "board_layer_not_found",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "via", "add", "four", "--net", net, "--at", "9,9", "--from", "in2", "--to",
+            "in1",
+        ],
+        "invalid_param",
+        1,
+    );
+    // Shrinking the stackup under a route is refused: the route's fault.
+    p.fails(
+        &["board", "edit", "four", "--layers", "2"],
+        "board_layer_not_found",
+        1,
+    );
+    let s = p.ok(&["board", "show", "four"]);
+    assert_eq!(s["layers"], json!(["top", "in1", "in2", "bottom"]), "{s}");
+    let s = p.ok(&["board", "show", "two"]);
+    assert!(
+        s.get("layers").is_none(),
+        "a board without a stackup shows as before: {s}"
+    );
+    // An explicit stackup, lengths read as lengths.
+    let st = r#"{"layers":[{"kind":"copper","thickness_nm":"35 um"},{"kind":"dielectric","thickness_nm":"1.53 mm","material":"FR-4","er_ppm":4500000},{"kind":"copper","thickness_nm":35000}]}"#;
+    let b = p.ok(&["board", "edit", "two", "--stackup", st]);
+    assert_eq!(
+        b["board"]["stackup"]["layers"][0]["thickness_nm"], 35000,
+        "{b}"
+    );
+}
+
 /// An export that fails partway (here a file it writes can't be put in
 /// place: a folder holding something stands at its name) keeps the
 /// earlier export's manifest. Once the obstacle goes, the next export
@@ -5490,4 +5582,61 @@ fn a_track_edit_takes_negative_points_through_ops() {
         "invalid_param",
         1,
     );
+}
+
+/// The round's board made four layers (ryueda 7.A): a track on `in1`
+/// between two of its through vias, still clean, exported a copper file
+/// per layer; undone, it is two layers again.
+#[test]
+fn a_four_layer_board_exports_layer_by_layer() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    p.ok(&["board", "edit", id, "--layers", "4"]);
+    p.ok(&[
+        "board", "track", "add", id, "--net", "rail:gnd", "--layer", "in1", "--path", "via/g_u2",
+        "via/g_c3", "--id", "gnd_in1",
+    ]);
+    let d = p.ok(&["board", "drc", id]);
+    assert_eq!(d["errors"], 0, "{d}");
+    let r = p.ok(&["board", "export", id, "--out", "fab4"]);
+    let names: Vec<&str> = r["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&format!("{id}-copper-in1.g2").as_str()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&format!("{id}-copper-in2.g3").as_str()),
+        "{names:?}"
+    );
+    assert!(names.len() >= 16, "{names:?}");
+    for top in [&p.direct, &p.daemon] {
+        let m: Value = serde_json::from_str(
+            &fs::read_to_string(top.join("board/fab4/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(m["copper_layers"], 4, "{m}");
+    }
+    // Through the daemon (in process there is no log), undoing the track
+    // and then the stackup leaves the board as the round made it: two
+    // layers, no stackup.
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    for _ in 0..2 {
+        let (code, u) = run(&["undo"]);
+        assert_eq!(code, 0, "{u}");
+    }
+    let (code, s) = run(&["board", "show", id]);
+    assert_eq!(code, 0, "{s}");
+    let s = &s["result"];
+    assert!(s.get("layers").is_none(), "{s}");
+    assert!(s["board"].get("stackup").is_none(), "{s}");
+    assert_eq!(s["board"]["format"], 1, "{s}");
 }

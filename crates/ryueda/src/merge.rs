@@ -67,6 +67,11 @@ fn footprint_atom(at: &str) -> bool {
     )
 }
 
+/// A board's stackup is one value: two stackups never interleave.
+fn board_atom(at: &str) -> bool {
+    matches!(segs(at).as_slice(), ["stackup"])
+}
+
 fn libcomp_atom(at: &str) -> bool {
     matches!(
         segs(at).as_slice(),
@@ -89,6 +94,7 @@ fn atoms(kind: &str) -> fn(&str) -> bool {
         crate::symbol::KIND => symbol_atom,
         crate::footprint::KIND => footprint_atom,
         crate::libcomp::KIND => libcomp_atom,
+        crate::board::BOARD_KIND => board_atom,
         crate::project::LOCK_KIND => ryupdm::git::lock_atom,
         _ => no_atom,
     }
@@ -490,18 +496,15 @@ mod tests {
 
     #[test]
     fn a_newer_board_merges_as_text() {
-        assert_eq!(newest(crate::board::BOARD_KIND), Some(crate::board::FORMAT));
-        assert_eq!(
-            newest(crate::board::PLACEMENT_KIND),
-            Some(crate::board::FORMAT)
-        );
         for k in [
+            crate::board::BOARD_KIND,
+            crate::board::PLACEMENT_KIND,
             crate::board::TRACK_KIND,
             crate::board::VIA_KIND,
-            crate::board::HOLE_KIND,
         ] {
-            assert_eq!(newest(k), Some(crate::board::FORMAT), "{k}");
+            assert_eq!(newest(k), Some(crate::board::file::NEWEST), "{k}");
         }
+        assert_eq!(newest(crate::board::HOLE_KIND), Some(crate::board::FORMAT));
     }
 
     #[test]
