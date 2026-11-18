@@ -6,7 +6,8 @@
 //! and a joined BOM judged; an import mapping that reads writes
 //! canonically and reads back; the CSV and XLSX readers on any bytes never
 //! panic, nor does a small source planned through the seeded import, nor
-//! the JSON and XML readers and their surveys.
+//! the JSON and XML readers and their surveys, nor a seeded history
+//! planned from any bytes, nor a date read by any pattern.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -15,7 +16,7 @@ use std::collections::BTreeMap;
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else { return };
     let id = ryuplm::id::Id::parse("k3v9q2m8x4c1p", "item").unwrap();
-    match mode % 12 {
+    match mode % 13 {
         0 => {
             if let Ok(item) = ryuplm::item::Item::read(&id, rest) {
                 let text = item.to_text();
@@ -120,12 +121,34 @@ fuzz_target!(|data: &[u8]| {
             let _ = json::survey(rest, false, None);
             let _ = json::survey(rest, true, None);
         }
-        _ => {
+        11 => {
             // The XML reader on any bytes, with children, and its survey.
             if let Ok(r) = ryuplm::import::xml::read(rest, "/a/b", Some("c/d")) {
                 let _ = ryuplm::import::rows::Table::from_records(r);
             }
             let _ = ryuplm::import::xml::survey(rest, None);
+        }
+        _ => {
+            // A seeded history planned from any bytes, and any first line
+            // read as a date pattern over the rest: never a panic.
+            use ryuplm::import::transform::{DatePattern, Dates, read_date};
+            let Ok(s) = std::str::from_utf8(rest) else { return };
+            let (files, m, _) = ryuplm::testing::history_source("fuzz", 8);
+            if let Ok(raw) = ryuplm::import::csv::parse(s, ',')
+                && let Ok(t) = ryuplm::import::rows::Table::from_raw(raw, 1)
+                && let Ok(cat) = ryuplm::load::Catalogue::load(&files)
+                && let Ok(config) = ryupdm::config::Config::read_in(&files, "ryuplm")
+                && let Ok((rows, _)) =
+                    ryuplm::import::records::map(&t, &m, &config, cat.manifest.default_unit)
+            {
+                let _ = ryuplm::import::run::plan(&files, &cat, &config, &m, &rows, None, 10);
+            }
+            let (pattern, value) = s.split_once('\n').unwrap_or((s, ""));
+            if let Ok(p) = DatePattern::parse(pattern) {
+                for d in [Dates::S1900, Dates::S1904] {
+                    let _ = read_date(value, std::slice::from_ref(&p), d);
+                }
+            }
         }
     }
 });
