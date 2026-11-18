@@ -409,4 +409,57 @@ mod tests {
         .unwrap_err();
         assert_eq!(again.code, crate::error::Code::InvalidParam);
     }
+
+    #[test]
+    fn a_missing_part_is_one_unresolved_link_in_check() {
+        use crate::proto::Request;
+        use crate::server::tests::{ask, catalogue};
+        let (_d, root) = catalogue();
+        crate::reps::tests::cad_project(&root.join("mech"), &pid(3), &["frame"], &[]);
+        ask(
+            &root,
+            Request::ItemCreate {
+                fields: Default::default(),
+                number: Some("A-1".into()),
+                next: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        ask(
+            &root,
+            Request::ItemLink {
+                item: "A-1".into(),
+                product: "ryucad".into(),
+                project: pid(3).to_string(),
+                part: "nut".into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let v = ask(&root, Request::Check { within: vec![] }).unwrap();
+        let codes: Vec<&str> = v["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap())
+            .collect();
+        // Once, by link resolution: the reader's own not-found isn't
+        // reported again under its code (nor under ours).
+        assert_eq!(codes, ["item_link_unresolved"], "{v}");
+        let shown = ask(
+            &root,
+            Request::BomGet {
+                item: "A-1".into(),
+                rev: None,
+                depth: None,
+                within: vec![],
+            },
+        )
+        .unwrap();
+        let f = &shown["findings"][0];
+        assert_eq!(f["code"], "item_link_unresolved", "{shown}");
+        assert_eq!(f["details"]["product"], "ryucad", "{shown}");
+        assert!(f["details"]["cause"]["code"].is_string(), "{shown}");
+    }
 }

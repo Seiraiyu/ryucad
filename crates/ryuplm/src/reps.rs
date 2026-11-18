@@ -372,7 +372,6 @@ pub struct Disk {
     /// The catalogue's repository and work tree: a representation inside
     /// it is read at the catalogue's commit (ryucad's, behind `cad`;
     /// ryueda's through `--rev`).
-    #[cfg_attr(not(feature = "cad"), allow(dead_code))]
     repo: Option<gix::Repository>,
     workdir: Option<PathBuf>,
     memo: BTreeMap<(String, ProjectId, Id, At), std::result::Result<Read, Error>>,
@@ -424,34 +423,52 @@ impl Disk {
             At::Commit(c) if self.prefix(&dir).is_some() => Some(c.clone()),
             _ => None,
         };
-        let lines = match link.product.as_str() {
-            "ryueda" => {
-                // Only a design has a BOM; a library component is a leaf.
-                let design = format!("designs/{}.json", link.part);
-                if crate::source::Folder(&dir).read(&design)?.is_none() {
-                    Vec::new()
-                } else {
-                    eda_lines_with(
-                        &ryueda_exe(),
-                        &dir,
-                        &link.project,
-                        &link.part,
-                        commit.as_deref(),
-                    )?
-                }
-            }
-            "ryucad" => self.cad(&dir, link, commit.as_deref())?,
-            other => {
-                return Err(unresolved(
-                    link,
-                    &format!("{other} isn't a product links read"),
-                ));
-            }
-        };
+        // Whatever a product's reader refuses with (its own not-found, a
+        // file that doesn't read, ryueda's answer) is this link's
+        // `item_link_unresolved`, the reader's error kept as its cause.
+        let lines = self
+            .product_lines(&dir, link, commit.as_deref())
+            .map_err(|e| unresolved(link, &e.message).with("cause", &e))?;
         Ok(Read {
             lines,
             rev: commit.unwrap_or_else(|| "working".to_owned()),
         })
+    }
+
+    /// The lines of `link`'s representation in `dir`, at `commit` when
+    /// given (the catalogue's commit, the representation being in its work
+    /// tree), else its working files.
+    fn product_lines(
+        &self,
+        dir: &Path,
+        link: &crate::item::Link,
+        commit: Option<&str>,
+    ) -> Result<Vec<RepLine>> {
+        match link.product.as_str() {
+            "ryueda" => {
+                // Only a design has a BOM; a library component is a leaf.
+                // Looked for at the revision read, so a design added or
+                // deleted since is judged as it was.
+                let design = format!("designs/{}.json", link.part);
+                let there = match (commit, &self.repo) {
+                    (Some(c), Some(repo)) => {
+                        let prefix = self.prefix(dir).unwrap_or_default();
+                        ryupdm::history::file_at(repo, c, &prefix, &design)?.is_some()
+                    }
+                    _ => crate::source::Folder(dir).read(&design)?.is_some(),
+                };
+                if there {
+                    eda_lines_with(&ryueda_exe(), dir, &link.project, &link.part, commit)
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            "ryucad" => self.cad(dir, link, commit),
+            other => Err(Error::new(
+                Code::InvalidParam,
+                format!("{other} isn't a product links read"),
+            )),
+        }
     }
 
     #[cfg(feature = "cad")]
@@ -475,11 +492,11 @@ impl Disk {
     fn cad(
         &self,
         _dir: &Path,
-        link: &crate::item::Link,
+        _link: &crate::item::Link,
         _commit: Option<&str>,
     ) -> Result<Vec<RepLine>> {
-        Err(unresolved(
-            link,
+        Err(Error::new(
+            Code::ItemLinkUnresolved,
             "this ryuplm was built without ryucad's reader (feature cad)",
         ))
     }
@@ -774,5 +791,50 @@ pub(crate) mod tests {
         };
         let e = disk.lines(&link, &At::Working).unwrap_err();
         assert!(e.message.contains("feature cad"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_ryueda_design_is_looked_for_at_the_commit_read() {
+        // A design committed, then deleted from the work tree: read at the
+        // commit, it has a BOM (so the executable is run, and here fails:
+        // unresolved), never the working tree's "no design, a leaf".
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let eda = top.join("eda");
+        fs::create_dir_all(eda.join("designs")).unwrap();
+        fs::write(
+            eda.join("ryueda.json"),
+            format!(r#"{{"project":"{}"}}"#, pid(4)),
+        )
+        .unwrap();
+        fs::write(eda.join("designs/main.json"), "{}").unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .current_dir(&top)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "a design"]);
+        let repo = gix::discover(&top).unwrap();
+        let commit = commit_hex(&repo, "HEAD").unwrap();
+        fs::remove_file(eda.join("designs/main.json")).unwrap();
+        // SAFETY: no other test reads RYUEDA_EXE.
+        unsafe { std::env::set_var(RYUEDA_EXE, "/no/such/ryueda") };
+        let link = crate::item::Link {
+            product: "ryueda".into(),
+            project: pid(4),
+            part: Id::parse("main", "part").unwrap(),
+        };
+        let mut disk = Disk::new(Index::scan(std::slice::from_ref(&top)), &top);
+        assert!(disk.lines(&link, &At::Working).unwrap().lines.is_empty());
+        let e = disk.lines(&link, &At::Commit(commit)).unwrap_err();
+        assert_eq!(e.code, Code::ItemLinkUnresolved);
+        assert_eq!(e.details["product"], "ryueda");
     }
 }
