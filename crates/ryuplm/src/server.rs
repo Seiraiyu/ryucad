@@ -176,6 +176,25 @@ fn dispatch(
             item,
             expected_revision,
         } => items::delete(session, &item, expected_revision.as_deref())?,
+        Request::ItemLink {
+            item,
+            product,
+            project,
+            part,
+            expected_revision,
+        } => crate::links::link(
+            session,
+            &item,
+            &product,
+            &project,
+            &part,
+            expected_revision.as_deref(),
+        )?,
+        Request::ItemUnlink {
+            item,
+            product,
+            expected_revision,
+        } => crate::links::unlink(session, &item, &product, expected_revision.as_deref())?,
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,

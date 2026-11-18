@@ -5,7 +5,13 @@
 //! refuses ([`judge`]) reads only the catalogue; what reads other folders
 //! ([`resolve`]) is `check`'s.
 
-use crate::error::{Code, Error};
+use crate::error::{Code, Error, Result};
+use crate::ids::item_path;
+use crate::item::Link;
+use crate::session::Session;
+use crate::write::{Writes, commit};
+use serde_json::Value;
+use std::path::Path;
 use crate::fault::{Fault, Severity};
 use crate::reps::{self, Index};
 use crate::id::{Id, ProjectId};
@@ -147,6 +153,87 @@ pub fn resolve(cat: &Catalogue, index: &Index) -> Vec<Fault> {
     out
 }
 
+/// The project `project` names for `product`: a project ID, or the folder
+/// of one (relative to `root`), whose manifest gives its ID.
+fn project_of(root: &Path, product: &str, project: &str) -> Result<ProjectId> {
+    if let Ok(p) = ProjectId::parse(project) {
+        return Ok(p);
+    }
+    let manifest = reps::manifest_of(product).expect("product checked");
+    let dir = root.join(project);
+    reps::project_id(&crate::source::Folder(&dir), manifest).ok_or_else(|| {
+        Error::new(
+            Code::InvalidParam,
+            format!(
+                "{project:?} is neither a project ID nor the folder of a {product} project with one ({manifest} with a project)"
+            ),
+        )
+        .with("param", "project")
+    })
+}
+
+/// `item.link`: the item's link of `product` set to `project` and `part`
+/// (replacing any it had), links in product order.
+pub fn link(
+    session: &mut Session,
+    item: &str,
+    product: &str,
+    project: &str,
+    part: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    if reps::manifest_of(product).is_none() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("product is ryucad or ryueda, not {product:?}"),
+        )
+        .with("param", "product"));
+    }
+    let project = project_of(session.root(), product, project)?;
+    let part = Id::parse(part, "part")?;
+    let (id, mut it) = crate::items::current(session, item, expected)?;
+    it.links.retain(|l| l.product != product);
+    it.links.push(Link {
+        product: product.to_owned(),
+        project: project.clone(),
+        part: part.clone(),
+    });
+    it.links.sort_by(|a, b| a.product.cmp(&b.product));
+    let text = crate::items::text_of(&id, &it)?;
+    commit(
+        session,
+        &format!("linking item {id} to {product} {project}:{part}"),
+        Writes(vec![(item_path(&id), Some(text))]),
+    )?;
+    Ok(crate::items::shown(session, &id))
+}
+
+/// `item.unlink`: the item's link of `product` removed.
+pub fn unlink(
+    session: &mut Session,
+    item: &str,
+    product: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let (id, mut it) = crate::items::current(session, item, expected)?;
+    let before = it.links.len();
+    it.links.retain(|l| l.product != product);
+    if it.links.len() == before {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("item {id} has no {product} link"),
+        )
+        .with("param", "product"));
+    }
+    let text = crate::items::text_of(&id, &it)?;
+    commit(
+        session,
+        &format!("unlinking item {id} from {product}"),
+        Writes(vec![(item_path(&id), Some(text))]),
+    )?;
+    Ok(crate::items::shown(session, &id))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::catalogue::tests::pid;
@@ -235,5 +322,75 @@ mod tests {
                 ("item_link_unresolved".into(), false, "0000000000003".into()),
             ]
         );
+    }
+
+    #[test]
+    fn linking_replaces_the_products_link_and_unlinking_removes_it() {
+        use crate::proto::Request;
+        use crate::server::tests::{ask, catalogue};
+        let (_d, root) = catalogue();
+        crate::reps::tests::cad_project(&root.join("mech"), &pid(3), &["frame"], &[]);
+        let made = ask(
+            &root,
+            Request::ItemCreate {
+                fields: Default::default(),
+                number: Some("A-1".into()),
+                next: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let id = made["item"]["id"].as_str().unwrap().to_owned();
+        let link = |project: &str, part: &str| Request::ItemLink {
+            item: "A-1".into(),
+            product: "ryucad".into(),
+            project: project.into(),
+            part: part.into(),
+            expected_revision: None,
+        };
+        // By the project's folder: its manifest gives the ID.
+        let v = ask(&root, link(root.join("mech").to_str().unwrap(), "frame")).unwrap();
+        assert_eq!(
+            v["item"]["links"],
+            serde_json::json!([{"product": "ryucad", "project": pid(3), "part": "frame"}])
+        );
+        // By ID, replacing the ryucad link.
+        let v = ask(&root, link(pid(3).as_str(), "other")).unwrap();
+        assert_eq!(v["item"]["links"][0]["part"], "other");
+        assert_eq!(v["item"]["links"].as_array().unwrap().len(), 1);
+        let bad = ask(
+            &root,
+            Request::ItemLink {
+                item: id.clone(),
+                product: "ryudfm".into(),
+                project: pid(3).to_string(),
+                part: "p".into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(bad.code, crate::error::Code::InvalidParam);
+        let nowhere = ask(&root, link("no/such/folder", "frame")).unwrap_err();
+        assert_eq!(nowhere.code, crate::error::Code::InvalidParam);
+        let v = ask(
+            &root,
+            Request::ItemUnlink {
+                item: id.clone(),
+                product: "ryucad".into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert!(v["item"].get("links").is_none(), "{v}");
+        let again = ask(
+            &root,
+            Request::ItemUnlink {
+                item: id,
+                product: "ryucad".into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(again.code, crate::error::Code::InvalidParam);
     }
 }

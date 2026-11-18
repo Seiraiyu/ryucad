@@ -100,6 +100,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    #[serde(rename = "item.link")]
+    ItemLink {
+        item: String,
+        product: String,
+        /// A project ID, or the project's folder (absolute, or relative
+        /// to the catalogue).
+        project: String,
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "item.unlink")]
+    ItemUnlink {
+        item: String,
+        product: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]
@@ -228,6 +246,8 @@ impl Request {
                 | Request::ItemEdit { .. }
                 | Request::ItemRenumber { .. }
                 | Request::ItemDelete { .. }
+                | Request::ItemLink { .. }
+                | Request::ItemUnlink { .. }
                 | Request::SettingsEdit { .. }
                 | Request::ReleasePropose { .. }
                 | Request::ReleaseObsolete { .. }
@@ -294,6 +314,13 @@ mod tests {
                 all: false,
                 dry_run: true,
                 note: None,
+                expected_revision: None,
+            },
+            Request::ItemLink {
+                item: "A-1".into(),
+                product: "ryucad".into(),
+                project: "p".into(),
+                part: "x".into(),
                 expected_revision: None,
             },
             Request::Undo { entry: None },

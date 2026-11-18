@@ -221,6 +221,23 @@ enum ItemCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Link the item to its ryucad or ryueda representation (one per
+    /// product): PROJECT is a project ID or the project's folder.
+    Link {
+        item: String,
+        product: String,
+        project: String,
+        part: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Remove the item's link of PRODUCT.
+    Unlink {
+        item: String,
+        product: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 /// Parsed once per run: the size of a variant doesn't matter.
@@ -397,6 +414,38 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             root()?,
             Request::ItemDelete {
                 item: item.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Item(ItemCmd::Link {
+            item,
+            product,
+            project,
+            part,
+            expect,
+        }) => (
+            root()?,
+            Request::ItemLink {
+                item: item.clone(),
+                product: product.clone(),
+                // A folder is sent absolute: the daemon runs elsewhere.
+                project: match here.join(project) {
+                    d if d.is_dir() => d.canonicalize().unwrap_or(d).display().to_string(),
+                    _ => project.clone(),
+                },
+                part: part.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Item(ItemCmd::Unlink {
+            item,
+            product,
+            expect,
+        }) => (
+            root()?,
+            Request::ItemUnlink {
+                item: item.clone(),
+                product: product.clone(),
                 expected_revision: exp(expect),
             },
         ),
