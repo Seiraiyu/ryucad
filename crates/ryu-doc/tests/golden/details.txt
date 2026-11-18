@@ -289,3 +289,18 @@ dependency_project_mismatch exit 1 "Dependency project mismatch"
 
 drc_failed exit 1 "DRC failed"
   report obj The board's DRC report: `board`, `findings` and `drc`.
+
+item_not_found exit 1 "Item not found"
+  item str The item ID or part number asked for.
+
+item_class_unknown exit 1 "Item class unknown"
+  item str The item whose class it is.
+  class str The class `ryuplm.json` doesn't declare.
+
+part_number_unschemed exit 1 "Part number unschemed"
+  item str The item whose number matches no scheme.
+  value str The number.
+
+part_number_duplicate_elsewhere exit 1 "Part number duplicate elsewhere"
+  item str The item whose number is taken elsewhere.
+  value str The number.

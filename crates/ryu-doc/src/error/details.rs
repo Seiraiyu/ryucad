@@ -425,6 +425,21 @@ details! {
     DrcFailed => [
         key("report", Obj, "The board's DRC report: `board`, `findings` and `drc`."),
     ],
+    ItemNotFound => [
+        key("item", Str, "The item ID or part number asked for."),
+    ],
+    ItemClassUnknown => [
+        key("item", Str, "The item whose class it is."),
+        key("class", Str, "The class `ryuplm.json` doesn't declare."),
+    ],
+    PartNumberUnschemed => [
+        key("item", Str, "The item whose number matches no scheme."),
+        key("value", Str, "The number."),
+    ],
+    PartNumberDuplicateElsewhere => [
+        key("item", Str, "The item whose number is taken elsewhere."),
+        key("value", Str, "The number."),
+    ],
 }
 
 /// Words written their own way in titles.
@@ -892,6 +907,10 @@ mod tests {
             Code::OperationNoEffect,
             Code::LabelNotFound,
             Code::DrcFailed,
+            Code::ItemNotFound,
+            Code::ItemClassUnknown,
+            Code::PartNumberUnschemed,
+            Code::PartNumberDuplicateElsewhere,
         ] {
             assert!(keys(c).is_some(), "{c:?}");
         }
