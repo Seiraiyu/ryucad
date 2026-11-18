@@ -75,11 +75,27 @@ pub(crate) fn conflicts(arr: &Arrangement, seeds: &[usize]) -> BTreeSet<usize> {
         .collect()
 }
 
+/// Whether piece `s` is a slit piece (design 724, plan 22.C): it uses
+/// every edge it uses exactly once each way round (a slit, or a tree of
+/// arcs walked round), so it bounds nothing on its face. Read from its
+/// arcs alone. A piece with no arcs is no slit.
+pub(crate) fn is_slit(arr: &Arrangement, s: usize) -> bool {
+    // Per edge: uses reversed, uses forward.
+    let mut uses: BTreeMap<usize, [usize; 2]> = BTreeMap::new();
+    for &(g, sense) in &arr.pieces[s].1 {
+        uses.entry(g).or_default()[usize::from(sense == Sense::Forward)] += 1;
+    }
+    !uses.is_empty() && uses.values().all(|&[r, f]| r == 1 && f == 1)
+}
+
 /// `seeds` less the seeds rule 3's shortcut alone chose (in `shortcut`)
-/// that use an edge the set is in conflict over ([`conflicts`]) and whose
-/// inner point doesn't lie inside their old face (`holds_old`, asked only
-/// of those): the weakest seeds yield (design 683, question 983). `None`
-/// where the set is in no conflict or no seed yields.
+/// that use an edge the set is in conflict over ([`conflicts`]) and either
+/// are slit pieces ([`is_slit`], design 724, plan 22.C) or have an inner
+/// point that doesn't lie inside their old face (`holds_old`, asked only
+/// of the others): the weakest seeds yield (design 683, question 983). A
+/// slit piece is its face's whole working sheet, so holding its old face
+/// says nothing about it. `None` where the set is in no conflict or no
+/// seed yields.
 pub(crate) fn yielded(
     arr: &Arrangement,
     seeds: &[usize],
@@ -95,7 +111,9 @@ pub(crate) fn yielded(
         if drop.contains(&s) || !shortcut.contains(&s) {
             continue;
         }
-        if arr.pieces[s].1.iter().any(|(g, _)| bad.contains(g)) && !holds_old(s) {
+        if arr.pieces[s].1.iter().any(|(g, _)| bad.contains(g))
+            && (is_slit(arr, s) || !holds_old(s))
+        {
             drop.insert(s);
         }
     }
@@ -113,7 +131,7 @@ pub(crate) fn yielded(
 
 /// After every try of `tries` failed: the first try from which a seed
 /// yields ([`yielded`]) walked once more without it (design 683, plan
-/// 21.C). Its seeds and answer where that walk closes or the meter halts
+/// 21.C). A slit piece's seed yields too (design 724, plan 22.C). Its seeds and answer where that walk closes or the meter halts
 /// it; `None` otherwise, where the first try's failure stands. A seed
 /// only says where the walk starts: a yielded seed's piece is kept only
 /// if the one closure reaches it.
@@ -421,6 +439,31 @@ mod tests {
         assert!(conflicts(&a, &[0, 2]).is_empty());
     }
 
+    /// Plan 22.C: a slit piece uses every edge it uses once each way
+    /// round, a single slit or a tree of arcs walked round; a piece with
+    /// a boundary arc, one using an edge one way only or twice the same
+    /// way, or with no arcs, isn't one.
+    #[test]
+    fn a_piece_using_each_of_its_edges_once_each_way_is_a_slit() {
+        let a = Arrangement {
+            pieces: vec![
+                (0, vec![(0, F), (0, R)]),
+                (1, vec![(1, F), (2, R), (2, F), (1, R)]),
+                (2, vec![(0, F), (0, R), (3, F)]),
+                (3, vec![(4, F)]),
+                (4, vec![]),
+                (5, vec![(5, F), (5, F), (5, R), (5, R)]),
+            ],
+            ..Arrangement::default()
+        };
+        assert!(is_slit(&a, 0));
+        assert!(is_slit(&a, 1));
+        assert!(!is_slit(&a, 2));
+        assert!(!is_slit(&a, 3));
+        assert!(!is_slit(&a, 4));
+        assert!(!is_slit(&a, 5));
+    }
+
     use super::super::walk::walk;
 
     fn free() -> Meter<'static> {
@@ -492,6 +535,87 @@ mod tests {
         let mut holds = |_: usize| false;
         let (fewer, _) = walk_again(&a, &tries, &BTreeSet::from([2]), &mut holds, &free()).unwrap();
         assert_eq!(fewer, vec![0]);
+    }
+
+    /// FTC 10's slit, alone (plan 22.C): the ball's piece B (face 0) is
+    /// only its seam, edge 0, both ways round; the NURBS's quad Q, on
+    /// face 1, uses the seam reversed and its edge 1 forward; the NURBS's own
+    /// piece N across the seam (face 1 again, the face running on) uses
+    /// the seam forward and edge 1 back. B and Q together use the seam
+    /// three times.
+    fn pure_slit() -> Arrangement {
+        Arrangement {
+            pieces: vec![
+                (0, vec![(0, F), (0, R)]),
+                (1, vec![(0, R), (1, F)]),
+                (1, vec![(0, F), (1, R)]),
+            ],
+            ..Arrangement::default()
+        }
+    }
+
+    #[test]
+    fn a_slit_shortcut_seed_yields_though_it_holds_its_old_face() {
+        let a = pure_slit();
+        let tries = vec![vec![0, 1]];
+        assert!(matches!(
+            walk(&a, &tries[0], &free()),
+            Err(WalkError::Ambiguous { .. })
+        ));
+        // B came by the shortcut and holds its old face: under 21.C's
+        // rule alone it would never yield.
+        let shortcut = BTreeSet::from([0]);
+        let mut holds = |_: usize| true;
+        assert_eq!(yielded(&a, &tries[0], &shortcut, &mut holds), Some(vec![1]));
+        let (fewer, r) = walk_again(&a, &tries, &shortcut, &mut holds, &free()).unwrap();
+        assert_eq!(fewer, vec![1]);
+        // The quad and the NURBS running on across the seam are kept; the
+        // ball is not reached.
+        assert_eq!(r.unwrap(), vec![None, Some(false), Some(false)]);
+    }
+
+    #[test]
+    fn a_slit_piece_with_no_conflict_or_by_rule_3_proper_never_yields() {
+        let a = pure_slit();
+        let mut holds = |_: usize| true;
+        // The slit alone uses its seam once each way: no conflict.
+        assert_eq!(yielded(&a, &[0], &BTreeSet::from([0]), &mut holds), None);
+        // In conflict, but seeded by rule 3 proper.
+        assert_eq!(yielded(&a, &[0, 1], &BTreeSet::new(), &mut holds), None);
+        // In conflict, but only the quad came by the shortcut, and it is
+        // no slit and holds its old face.
+        assert_eq!(yielded(&a, &[0, 1], &BTreeSet::from([1]), &mut holds), None);
+    }
+
+    #[test]
+    fn a_slit_piece_is_never_asked_whether_it_holds_its_old_face() {
+        let a = pure_slit();
+        let mut asked = Vec::new();
+        {
+            let mut holds = |i: usize| {
+                asked.push(i);
+                true
+            };
+            assert_eq!(
+                yielded(&a, &[0, 1], &BTreeSet::from([0]), &mut holds),
+                Some(vec![1])
+            );
+        }
+        assert!(asked.is_empty(), "{asked:?}");
+    }
+
+    #[test]
+    fn a_slit_seed_yields_with_the_weak_seeds_of_its_set() {
+        // 21.C's `slit`: N (piece 2) a shortcut seed not holding its old
+        // face still yields beside a slit one.
+        let mut a = slit();
+        // Make B (piece 0) a slit piece by dropping its edge 1, and C
+        // (piece 1) use nothing.
+        a.pieces[0].1 = vec![(0, F), (0, R)];
+        a.pieces[1].1.clear();
+        let shortcut = BTreeSet::from([0, 2]);
+        let mut holds = |i: usize| i == 0;
+        assert_eq!(yielded(&a, &[0, 2], &shortcut, &mut holds), Some(vec![]));
     }
 
     /// Plan 21.C: a deleting face's one unclipped piece is a shortcut
@@ -635,23 +759,40 @@ mod tests {
         assert!(c.arr.pieces[NURBS].1.contains(&(g, R)));
     }
 
-    /// Plan 21.C: FTC 10's conflict has no seed to yield. The ball's seed
-    /// came by the shortcut but holds its old face, and the NURBS's quad
-    /// was seeded by rule 3 proper: the rule doesn't settle FTC 10
-    /// (recorded on #652, moved to ryukei 22).
+    /// Plan 22.C: FTC 10's ball is a slit piece, so its shortcut seed
+    /// yields though it holds its old face; the NURBS's quad, seeded by
+    /// rule 3 proper, never does, and only slit pieces yield here (the
+    /// ball's and the other kept ball's, piece 312). The walk without them
+    /// still fails (census VII, #652): its search runs past [`CHOICES`]
+    /// and is called ambiguous at its first seed, and with no cap it ends
+    /// with no closure at all. So the retry answers nothing and the first
+    /// try's failure stands.
+    ///
+    /// [`CHOICES`]: super::super::walk::CHOICES
     #[test]
-    fn ftc_10s_slit_has_no_seed_to_yield() {
+    fn ftc_10s_slit_ball_yields() {
         let c = ftc_10_slit();
+        assert!(is_slit(&c.arr, BALL));
+        assert!(!is_slit(&c.arr, NURBS));
         assert!(c.shortcut.contains(&BALL) && c.holds.contains(&BALL));
         assert!(!c.shortcut.contains(&NURBS));
         let mut holds = |i: usize| c.holds.contains(&i);
-        assert_eq!(yielded(&c.arr, &c.tries[0], &c.shortcut, &mut holds), None);
-        assert!(walk_again(&c.arr, &c.tries, &c.shortcut, &mut holds, &free()).is_none());
-        // Were the ball's seed weaker, it would yield, and the walk still
-        // fails: the seam's third use is the NURBS's own.
-        let mut never = |_: usize| false;
-        let fewer = yielded(&c.arr, &c.tries[0], &c.shortcut, &mut never).unwrap();
+        let fewer = yielded(&c.arr, &c.tries[0], &c.shortcut, &mut holds).unwrap();
         assert!(!fewer.contains(&BALL));
-        assert!(walk(&c.arr, &fewer, &free()).is_err());
+        assert!(fewer.contains(&NURBS));
+        let gone: Vec<usize> = c.tries[0]
+            .iter()
+            .copied()
+            .filter(|s| !fewer.contains(s))
+            .collect();
+        assert_eq!(gone, vec![312, BALL]);
+        for s in &gone {
+            assert!(is_slit(&c.arr, *s), "piece {s} yielded and is no slit");
+        }
+        assert!(walk_again(&c.arr, &c.tries, &c.shortcut, &mut holds, &free()).is_none());
+        assert_eq!(
+            walk(&c.arr, &fewer, &free()),
+            Err(WalkError::Ambiguous { piece: fewer[0] })
+        );
     }
 }
