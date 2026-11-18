@@ -1333,6 +1333,7 @@ enum LibcompCmd {
         #[arg(long)]
         library: Option<String>,
     },
+    /// Delete a library component.
     Delete {
         libcomp: String,
         #[command(flatten)]
@@ -1438,6 +1439,7 @@ enum BlockCmd {
 
 #[derive(Subcommand)]
 enum RailCmd {
+    /// A rail, its ID random unless given.
     Add {
         name: String,
         #[arg(long)]
@@ -1447,6 +1449,7 @@ enum RailCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Change a rail's name or intent.
     Edit {
         /// By ID or name.
         rail: String,
@@ -1468,6 +1471,7 @@ enum RailCmd {
 
 #[derive(Subcommand)]
 enum ClassCmd {
+    /// A net class, its ID random unless given.
     Add {
         name: String,
         #[arg(long)]
@@ -1477,6 +1481,7 @@ enum ClassCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Change a net class's name or description.
     Edit {
         class: String,
         #[arg(long)]
@@ -1497,6 +1502,7 @@ enum ClassCmd {
 
 #[derive(Subcommand)]
 enum DesignCmd {
+    /// A design over a root block, its ID random unless given.
     Create {
         name: String,
         /// The root block.
@@ -1507,6 +1513,7 @@ enum DesignCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Change a design's name or root block.
     Edit {
         design: String,
         #[arg(long)]
@@ -1516,6 +1523,7 @@ enum DesignCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete a design.
     Delete {
         design: String,
         #[command(flatten)]
@@ -1745,6 +1753,7 @@ enum ViaCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete vias by ID.
     Delete {
         board: String,
         #[arg(required = true)]
@@ -1771,6 +1780,7 @@ enum HoleCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete holes by ID.
     Delete {
         board: String,
         #[arg(required = true)]
@@ -1926,6 +1936,7 @@ enum ComponentCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete a component.
     Delete {
         component: String,
         #[command(flatten)]
@@ -1941,6 +1952,7 @@ enum ComponentCmd {
 
 #[derive(Subcommand)]
 enum NetCmd {
+    /// A net in a block, its ID random unless given.
     Add {
         block: String,
         name: String,
@@ -1968,6 +1980,7 @@ enum NetCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Rename a net.
     Rename {
         net: String,
         name: String,
@@ -2254,6 +2267,7 @@ enum InstanceCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete an instance.
     Delete {
         instance: String,
         #[command(flatten)]
@@ -4554,4 +4568,37 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
         s.expect("JSON values always serialize")
     );
     ExitCode::from(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// No subcommand's summary is a flattened group's: a command with no
+    /// doc comment of its own takes its first group's (`board via
+    /// delete` read "The revision a write is guarded by…", round 5.D).
+    #[test]
+    fn no_subcommand_borrows_a_groups_summary() {
+        let groups: Vec<String> = [
+            <Expect as clap::Args>::augment_args(clap::Command::new("g")),
+            <Rev as clap::Args>::augment_args(clap::Command::new("g")),
+        ]
+        .iter()
+        .filter_map(|g| g.get_about().map(ToString::to_string))
+        .collect();
+        fn walk(c: &clap::Command, path: &str, groups: &[String], bad: &mut Vec<String>) {
+            for s in c.get_subcommands() {
+                let here = format!("{path} {}", s.get_name());
+                let about = s.get_about().map(ToString::to_string).unwrap_or_default();
+                if groups.contains(&about) {
+                    bad.push(here.clone());
+                }
+                walk(s, &here, groups, bad);
+            }
+        }
+        let mut bad = Vec::new();
+        walk(&Cli::command(), "ryueda", &groups, &mut bad);
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
 }
