@@ -173,3 +173,137 @@ pub fn structure(seed: &str, n: usize) -> (BTreeMap<String, Vec<u8>>, crate::rep
     }
     (f, reps)
 }
+
+/// A cell for [`xlsx`]: a shared string, an inline string, a number as
+/// written, a boolean, or no cell at all (the next one keeps its column).
+#[derive(Clone, Copy, Debug)]
+pub enum Cell<'a> {
+    Str(&'a str),
+    Inline(&'a str),
+    Num(&'a str),
+    Bool(bool),
+    Skip,
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn column(mut c: usize) -> String {
+    let mut s = Vec::new();
+    loop {
+        s.push(b'A' + (c % 26) as u8);
+        if c < 26 {
+            break;
+        }
+        c = c / 26 - 1;
+    }
+    s.reverse();
+    String::from_utf8(s).expect("ASCII")
+}
+
+/// An XLSX workbook of `sheets`, as a spreadsheet program writes one:
+/// shared strings with one rich-text run in every other, `r` references,
+/// an empty row left out. Written by us, for tests and the fixtures.
+pub fn xlsx(sheets: &[(&str, Vec<Vec<Cell>>)]) -> Vec<u8> {
+    const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let mut shared: Vec<String> = Vec::new();
+    let mut parts: Vec<(String, String)> = Vec::new();
+    for (k, (_, rows)) in sheets.iter().enumerate() {
+        let mut x = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<worksheet xmlns=\"{NS}\"><sheetData>"
+        );
+        for (i, row) in rows.iter().enumerate() {
+            if row.is_empty() {
+                continue;
+            }
+            x += &format!("<row r=\"{}\">", i + 1);
+            for (j, c) in row.iter().enumerate() {
+                let r = format!("{}{}", column(j), i + 1);
+                match c {
+                    Cell::Skip => {}
+                    Cell::Str(s) => {
+                        let at = shared.iter().position(|x| x == s).unwrap_or_else(|| {
+                            shared.push((*s).to_owned());
+                            shared.len() - 1
+                        });
+                        x += &format!("<c r=\"{r}\" t=\"s\"><v>{at}</v></c>");
+                    }
+                    Cell::Inline(s) => {
+                        x += &format!(
+                            "<c r=\"{r}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
+                            escape(s)
+                        )
+                    }
+                    Cell::Num(n) => x += &format!("<c r=\"{r}\"><v>{n}</v></c>"),
+                    Cell::Bool(b) => {
+                        x += &format!("<c r=\"{r}\" t=\"b\"><v>{}</v></c>", u8::from(*b))
+                    }
+                }
+            }
+            x += "</row>";
+        }
+        x += "</sheetData></worksheet>";
+        parts.push((format!("xl/worksheets/sheet{}.xml", k + 1), x));
+    }
+    let mut sst = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<sst xmlns=\"{NS}\" count=\"{0}\" uniqueCount=\"{0}\">",
+        shared.len()
+    );
+    for (i, s) in shared.iter().enumerate() {
+        sst += &if i % 2 == 1 {
+            format!(
+                "<si><r><t xml:space=\"preserve\">{}</t></r></si>",
+                escape(s)
+            )
+        } else {
+            format!("<si><t>{}</t></si>", escape(s))
+        };
+    }
+    sst += "</sst>";
+    let mut wb = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<workbook xmlns=\"{NS}\" xmlns:r=\"{R}\"><sheets>"
+    );
+    let mut rels = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+    );
+    for (k, (name, _)) in sheets.iter().enumerate() {
+        wb += &format!(
+            "<sheet name=\"{}\" sheetId=\"{}\" r:id=\"rId{}\"/>",
+            escape(name),
+            k + 1,
+            k + 1
+        );
+        rels += &format!(
+            "<Relationship Id=\"rId{}\" Type=\"{R}/worksheet\" Target=\"worksheets/sheet{}.xml\"/>",
+            k + 1,
+            k + 1
+        );
+    }
+    wb += "</sheets></workbook>";
+    rels += &format!(
+        "<Relationship Id=\"rId{}\" Type=\"{R}/sharedStrings\" Target=\"sharedStrings.xml\"/></Relationships>",
+        sheets.len() + 1
+    );
+    let types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/></Types>".to_owned();
+    let root_rels = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"{R}/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"
+    );
+    let mut all: Vec<(String, String)> = vec![
+        ("[Content_Types].xml".into(), types),
+        ("_rels/.rels".into(), root_rels),
+        ("xl/workbook.xml".into(), wb),
+        ("xl/_rels/workbook.xml.rels".into(), rels),
+        ("xl/sharedStrings.xml".into(), sst),
+    ];
+    all.extend(parts);
+    let entries: Vec<(&str, &[u8])> = all
+        .iter()
+        .map(|(n, t)| (n.as_str(), t.as_bytes()))
+        .collect();
+    ryupdm::package::zip::write(&entries).expect("a small workbook fits a zip")
+}
