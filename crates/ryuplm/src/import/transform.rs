@@ -296,6 +296,18 @@ pub fn apply(f: &Field, cell: &str) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
+/// [`apply`], then the field's date patterns: `Err` with why when the
+/// value isn't a date they read (refused at its cell).
+pub fn apply_in(f: &Field, cell: &str, dates: Dates) -> Result<Option<String>, String> {
+    let Some(v) = apply(f, cell) else {
+        return Ok(None);
+    };
+    match &f.date {
+        None => Ok(Some(v)),
+        Some(p) => read_date(&v, p, dates).map(Some),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +421,27 @@ mod tests {
         for bad in ["-1", "1e3", "4353 1", "12345678", "43531.", ".5"] {
             assert!(read(bad, Dates::S1900).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_date_reads_after_the_other_transforms() {
+        let mut f = Field::from("c");
+        f.trim = true;
+        f.values.insert("n/a".into(), String::new());
+        f.date = Some(vec![DatePattern::parse("DD/MM/YYYY").unwrap()]);
+        assert_eq!(
+            apply_in(&f, " 07/03/2019 ", Dates::S1900),
+            Ok(Some("2019-03-07".into()))
+        );
+        assert_eq!(
+            apply_in(&f, "n/a", Dates::S1900),
+            Ok(None),
+            "the table empties it first"
+        );
+        assert!(apply_in(&f, "March", Dates::S1900).is_err());
+        assert_eq!(
+            apply_in(&Field::from("c"), "x", Dates::S1900),
+            Ok(Some("x".into()))
+        );
     }
 }

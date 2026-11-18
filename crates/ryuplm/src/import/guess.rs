@@ -237,6 +237,7 @@ pub fn propose(
         fields,
         class: Vec::new(),
         bom,
+        history: None,
         numbers,
     };
     (m, verdicts)
